@@ -81,6 +81,13 @@ if(UNIX AND NOT APPLE)
     target_include_directories(chisel PRIVATE external/xinput2)
 endif()
 
+# Windows pen tablet (src/tablet.cpp): WinTab headers are vendored under
+# external/wintab and Wintab32.dll is LoadLibrary'd at runtime, so there is no
+# build/link dependency (user32/gdi32 for the message window are default).
+if(WIN32)
+    target_include_directories(chisel PRIVATE external/wintab)
+endif()
+
 option(CHISEL_DEBUG_MULTIRES "Run post-projection cascade-to-L_max truth check" OFF)
 if(CHISEL_DEBUG_MULTIRES)
     target_compile_definitions(chisel PRIVATE CHISEL_DEBUG_MULTIRES)

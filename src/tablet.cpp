@@ -216,7 +216,152 @@ void Tablet::shutdown() {
     impl = nullptr;
 }
 
-#else  // ---- non-Linux / tablet disabled: no-op stub ----
+#elif defined(_WIN32) && !defined(CHISEL_NO_TABLET)
+
+// ---- Windows: pen pressure via WinTab (Wintab32.dll) ----
+//
+// Mirrors the Linux design: the entry points are GetProcAddress'd from the
+// runtime DLL (no link against wintab32.lib, no build dependency — the DLL ships
+// with every tablet driver), and a self-contained HWND_MESSAGE window owns the
+// context, the Windows analogue of the Linux branch's private Display connection.
+// Missing DLL / driver / device ⇒ clean no-op, identical to the stub below.
+//
+// Unlike X11, WinTab packets keep flowing while the mouse button is down, so the
+// Linux stroke-grab workaround has no equivalent: poll() ignores stroke_active.
+
+#include <windows.h>
+#include "wintab.h"
+
+// PACKET = pen cursor id + normalized pressure, in ascending PK-bit order.
+#define PACKETDATA (PK_CURSOR | PK_NORMAL_PRESSURE)
+#define PACKETMODE 0
+#include "pktdef.h"
+
+namespace {
+typedef UINT (*PFN_WTInfoA)(UINT, UINT, LPVOID);
+typedef HCTX (*PFN_WTOpenA)(HWND, LPLOGCONTEXTA, BOOL);
+typedef BOOL (*PFN_WTClose)(HCTX);
+typedef int  (*PFN_WTPacketsGet)(HCTX, int, LPVOID);
+typedef BOOL (*PFN_WTEnable)(HCTX, BOOL);
+
+const wchar_t* kMsgWinClass = L"ChiselTabletMsgWin";
+}
+
+struct Tablet::Impl {
+    HMODULE wintab  = nullptr;
+    HWND    msg_win = nullptr;   // own HWND_MESSAGE window (isolated from GLFW's)
+    HCTX    ctx     = nullptr;
+
+    PFN_WTInfoA       WTInfo       = nullptr;
+    PFN_WTOpenA       WTOpen       = nullptr;
+    PFN_WTClose       WTCloseFn    = nullptr;
+    PFN_WTPacketsGet  WTPacketsGet = nullptr;
+    PFN_WTEnable      WTEnableFn   = nullptr;
+
+    double press_min = 0.0, press_max = 1.0;   // pressure axis range, from the driver
+    bool   has_device    = false;
+    float  last_pressure = 0.0f;
+};
+
+Tablet::Tablet() {}
+Tablet::~Tablet() { shutdown(); }
+
+bool Tablet::init() {
+    shutdown();
+    Impl* m = new Impl();
+
+    m->wintab = LoadLibraryA("Wintab32.dll");
+    if (!m->wintab) { delete m; return false; }
+
+    m->WTInfo       = (PFN_WTInfoA)      GetProcAddress(m->wintab, "WTInfoA");
+    m->WTOpen       = (PFN_WTOpenA)      GetProcAddress(m->wintab, "WTOpenA");
+    m->WTCloseFn    = (PFN_WTClose)      GetProcAddress(m->wintab, "WTClose");
+    m->WTPacketsGet = (PFN_WTPacketsGet) GetProcAddress(m->wintab, "WTPacketsGet");
+    m->WTEnableFn   = (PFN_WTEnable)     GetProcAddress(m->wintab, "WTEnable");
+    if (!m->WTInfo || !m->WTOpen || !m->WTCloseFn || !m->WTPacketsGet) {
+        FreeLibrary(m->wintab); delete m; return false;
+    }
+
+    // Availability probe + pressure axis range (guard a degenerate range, as the
+    // Linux branch guards a degenerate valuator range).
+    if (m->WTInfo(0, 0, nullptr) == 0) { FreeLibrary(m->wintab); delete m; return false; }
+    AXIS press = {};
+    if (m->WTInfo(WTI_DEVICES, DVC_NPRESSURE, &press) == 0) {
+        FreeLibrary(m->wintab); delete m; return false;   // no pressure-capable device
+    }
+    m->press_min = (double)press.axMin;
+    m->press_max = (double)press.axMax;
+    if (m->press_max <= m->press_min) m->press_max = m->press_min + 1.0;
+
+    // Message-only window to own the context (no UI, isolated from GLFW's window).
+    WNDCLASSEXW wc = {};
+    wc.cbSize        = sizeof(wc);
+    wc.lpfnWndProc   = DefWindowProcW;
+    wc.hInstance     = GetModuleHandleW(nullptr);
+    wc.lpszClassName = kMsgWinClass;
+    RegisterClassExW(&wc);   // benign if already registered
+    m->msg_win = CreateWindowExW(0, kMsgWinClass, L"", 0, 0, 0, 0, 0,
+                                 HWND_MESSAGE, nullptr, wc.hInstance, nullptr);
+    if (!m->msg_win) { FreeLibrary(m->wintab); delete m; return false; }
+
+    // Open a context that delivers cursor id + normal pressure.
+    LOGCONTEXTA lc = {};
+    if (m->WTInfo(WTI_DEFSYSCTX, 0, &lc) == 0) {
+        DestroyWindow(m->msg_win); FreeLibrary(m->wintab); delete m; return false;
+    }
+    lc.lcOptions |= CXO_MESSAGES;
+    lc.lcPktData  = PACKETDATA;
+    lc.lcPktMode  = PACKETMODE;
+    lc.lcMoveMask = PACKETDATA;
+    lc.lcBtnUpMask = lc.lcBtnDnMask;
+    m->ctx = m->WTOpen(m->msg_win, &lc, TRUE);
+
+    m->has_device = (m->ctx != nullptr);
+    impl = m;                 // keep the lib loaded even with no context (cheap)
+    return m->has_device;
+}
+
+void Tablet::poll(bool /*stroke_active*/) {
+    if (!impl) return;
+    Impl* m = impl;
+    if (!m->ctx) return;
+
+    // Service our hidden window so the driver fills the context queue.
+    MSG msg;
+    while (PeekMessageW(&msg, m->msg_win, 0, 0, PM_REMOVE)) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+
+    // Drain queued packets; keep the most recent pressure sample.
+    PACKET pkts[32];
+    int n = m->WTPacketsGet(m->ctx, 32, pkts);
+    if (n > 0) {
+        double norm = ((double)pkts[n - 1].pkNormalPressure - m->press_min)
+                    / (m->press_max - m->press_min);
+        norm = norm < 0.0 ? 0.0 : (norm > 1.0 ? 1.0 : norm);
+        m->last_pressure = (float)norm;
+    }
+}
+
+float Tablet::pressure() const {
+    return (impl && impl->has_device) ? impl->last_pressure : 1.0f;
+}
+
+bool Tablet::available() const {
+    return impl && impl->has_device;
+}
+
+void Tablet::shutdown() {
+    if (!impl) return;
+    if (impl->ctx)     impl->WTCloseFn(impl->ctx);
+    if (impl->msg_win) DestroyWindow(impl->msg_win);
+    if (impl->wintab)  FreeLibrary(impl->wintab);
+    delete impl;
+    impl = nullptr;
+}
+
+#else  // ---- other platforms / tablet disabled: no-op stub ----
 
 Tablet::Tablet() {}
 Tablet::~Tablet() {}
