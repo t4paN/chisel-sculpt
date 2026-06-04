@@ -26,6 +26,7 @@ jobs:
           apt-get update
           apt-get install -y build-essential cmake git wget file \
             libglfw3-dev libgl-dev libglx-dev libegl-dev \
+            libx11-dev libxfixes-dev \
             python3 libfuse2 patchelf
 
       - name: Configure
