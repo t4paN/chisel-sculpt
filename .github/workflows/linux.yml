@@ -1,0 +1,121 @@
+name: Linux Build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    container: ubuntu:20.04
+
+    env:
+      DEBIAN_FRONTEND: noninteractive
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools and dependencies
+        run: |
+          apt-get update
+          apt-get install -y build-essential cmake git wget file \
+            libglfw3-dev libgl-dev libglx-dev libegl-dev \
+            python3 libfuse2 patchelf
+
+      - name: Configure
+        run: cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build -j$(nproc)
+
+      - name: Prepare AppDir
+        run: |
+          mkdir -p AppDir/usr/bin AppDir/usr/lib
+          cp build/chisel AppDir/usr/bin/
+
+          mkdir -p AppDir/usr/share/applications
+          cat > AppDir/usr/share/applications/chisel.desktop << 'EOF'
+          [Desktop Entry]
+          Name=Chisel
+          Exec=chisel
+          Icon=chisel
+          Type=Application
+          Categories=Graphics;3DGraphics;
+          EOF
+
+          mkdir -p AppDir/usr/share/icons/hicolor/256x256/apps
+          python3 -c "
+          import struct, zlib
+          W=H=256
+          raw=b''
+          for y in range(H):
+            raw+=b'\x00'
+            for x in range(W):
+              cx,cy=x-W//2,y-H//2
+              if cx*cx+cy*cy<(W//3)*(W//3):
+                raw+=b'\xe0\xe0\xe0\xff'
+              else:
+                raw+=b'\x2a\x2a\x2a\xff'
+          def chunk(t,d):
+            c=t+d
+            return struct.pack('>I',len(d))+c+struct.pack('>I',zlib.crc32(c)&0xffffffff)
+          with open('AppDir/usr/share/icons/hicolor/256x256/apps/chisel.png','wb') as f:
+            f.write(b'\x89PNG\r\n\x1a\n')
+            f.write(chunk(b'IHDR',struct.pack('>IIBBBBB',W,H,8,6,0,0,0)))
+            f.write(chunk(b'IDAT',zlib.compress(raw)))
+            f.write(chunk(b'IEND',b''))
+          "
+
+      - name: Bundle shared libraries
+        run: |
+          cd AppDir
+          for lib in $(ldd usr/bin/chisel | grep '=> /' | awk '{print $3}'); do
+            case "$lib" in
+              */libGL.so*|*/libEGL.so*|*/libGLX.so*|*/libGLdispatch.so*|*/libX11.so*|*/libxcb*.so*|*/libXext.so*|*/libXrandr.so*|*/libXinerama.so*|*/libXcursor.so*|*/libXi.so*|*/libXfixes.so*|*/libXrender.so*|*/libXau.so*|*/libXdmcp.so*)
+                ;;
+              */libc.so*|*/libpthread.so*|*/libdl.so*|*/librt.so*|*/libm.so*|*/ld-linux*)
+                ;;
+              *)
+                cp -v "$lib" usr/lib/
+                ;;
+            esac
+          done
+
+      - name: Create AppRun
+        run: |
+          cat > AppDir/AppRun << 'APPRUN'
+          #!/bin/bash
+          HERE="$(dirname "$(readlink -f "$0")")"
+          export LD_LIBRARY_PATH="$HERE/usr/lib:${LD_LIBRARY_PATH}"
+          exec "$HERE/usr/bin/chisel" "$@"
+          APPRUN
+          chmod +x AppDir/AppRun
+          cp AppDir/usr/share/applications/chisel.desktop AppDir/
+          cp AppDir/usr/share/icons/hicolor/256x256/apps/chisel.png AppDir/chisel.png
+
+      - name: Download appimagetool
+        run: |
+          wget -q https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool-x86_64.AppImage
+
+      - name: Build AppImage
+        run: |
+          ARCH=x86_64 ./appimagetool-x86_64.AppImage --appimage-extract-and-run AppDir Chisel-x86_64.AppImage
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: chisel-linux-x64
+          path: Chisel-x86_64.AppImage
+
+      - name: Upload to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Chisel-x86_64.AppImage

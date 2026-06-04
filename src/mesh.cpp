@@ -1,0 +1,549 @@
+#include "mesh.h"
+#include <cstdio>
+#include <cstring>
+#include <algorithm>
+#include <unordered_map>
+#include <cassert>
+
+void Mesh::recompute_normals() {
+    uint32_t vc = vertex_count();
+    uint32_t tc = tri_count();
+
+    // Zero normals
+    std::memset(norm_x.data(), 0, vc * sizeof(float));
+    std::memset(norm_y.data(), 0, vc * sizeof(float));
+    std::memset(norm_z.data(), 0, vc * sizeof(float));
+
+    // Accumulate face normals (area-weighted by cross product magnitude)
+    for (uint32_t t = 0; t < tc; t++) {
+        uint32_t i0 = indices[t*3+0];
+        uint32_t i1 = indices[t*3+1];
+        uint32_t i2 = indices[t*3+2];
+
+        Vec3 v0 = get_pos(i0);
+        Vec3 v1 = get_pos(i1);
+        Vec3 v2 = get_pos(i2);
+
+        Vec3 e1 = v1 - v0;
+        Vec3 e2 = v2 - v0;
+        Vec3 fn = e1.cross(e2); // not normalized = area weighted
+
+        norm_x[i0] += fn.x; norm_y[i0] += fn.y; norm_z[i0] += fn.z;
+        norm_x[i1] += fn.x; norm_y[i1] += fn.y; norm_z[i1] += fn.z;
+        norm_x[i2] += fn.x; norm_y[i2] += fn.y; norm_z[i2] += fn.z;
+    }
+
+    // Normalize
+    for (uint32_t i = 0; i < vc; i++) {
+        Vec3 n = {norm_x[i], norm_y[i], norm_z[i]};
+        n = n.normalized();
+        norm_x[i] = n.x;
+        norm_y[i] = n.y;
+        norm_z[i] = n.z;
+    }
+}
+
+void Mesh::compute_bounding_sphere(Vec3& center, float& radius) const {
+    uint32_t vc = vertex_count();
+    if (vc == 0) { center = {0,0,0}; radius = 1.0f; return; }
+
+    // Compute centroid
+    float cx = 0, cy = 0, cz = 0;
+    for (uint32_t i = 0; i < vc; i++) {
+        cx += pos_x[i]; cy += pos_y[i]; cz += pos_z[i];
+    }
+    float inv = 1.0f / vc;
+    center = {cx*inv, cy*inv, cz*inv};
+
+    // Find max distance from center
+    radius = 0;
+    for (uint32_t i = 0; i < vc; i++) {
+        Vec3 d = get_pos(i) - center;
+        float dist = d.length();
+        if (dist > radius) radius = dist;
+    }
+}
+
+void build_mirror_spatial(const Mesh& m, std::vector<uint32_t>& out) {
+    uint32_t vc = m.vertex_count();
+    out.resize(vc);
+    for (uint32_t i = 0; i < vc; i++) out[i] = i;
+
+    // Adaptive tolerance from mean edge length
+    float edge_sum = 0.0f;
+    uint32_t edge_count = 0;
+    uint32_t tc = m.tri_count();
+    for (uint32_t t = 0; t < tc; t++) {
+        uint32_t i0 = m.indices[t*3+0], i1 = m.indices[t*3+1], i2 = m.indices[t*3+2];
+        float dx, dy, dz;
+        dx = m.pos_x[i1]-m.pos_x[i0]; dy = m.pos_y[i1]-m.pos_y[i0]; dz = m.pos_z[i1]-m.pos_z[i0];
+        edge_sum += std::sqrt(dx*dx+dy*dy+dz*dz);
+        dx = m.pos_x[i2]-m.pos_x[i1]; dy = m.pos_y[i2]-m.pos_y[i1]; dz = m.pos_z[i2]-m.pos_z[i1];
+        edge_sum += std::sqrt(dx*dx+dy*dy+dz*dz);
+        dx = m.pos_x[i0]-m.pos_x[i2]; dy = m.pos_y[i0]-m.pos_y[i2]; dz = m.pos_z[i0]-m.pos_z[i2];
+        edge_sum += std::sqrt(dx*dx+dy*dy+dz*dz);
+        edge_count += 3;
+    }
+    float mean_edge = (edge_count > 0) ? edge_sum / (float)edge_count : 1e-3f;
+    float tol = mean_edge * 0.5f;
+    float tol_sq = tol * tol;
+    float seam_tol = std::max(1e-5f, mean_edge * 0.01f);
+
+    // Split vertices into +x, -x, and seam buckets
+    std::vector<uint32_t> pos_side, neg_side;
+    pos_side.reserve(vc / 2);
+    neg_side.reserve(vc / 2);
+    for (uint32_t i = 0; i < vc; i++) {
+        if (std::fabs(m.pos_x[i]) < seam_tol) { out[i] = i; continue; }
+        if (m.pos_x[i] > 0.0f) pos_side.push_back(i);
+        else neg_side.push_back(i);
+    }
+
+    // Spatial grid for fast nearest-neighbor search. Grid cell size = 2*tol
+    // covers search radius with some overlap. Vertices binned by (y, z) since
+    // we're matching symmetrically across x.
+    float grid_size = 2.0f * tol;
+    if (grid_size < 1e-6f) grid_size = 1e-3f;
+    float inv_grid = 1.0f / grid_size;
+
+    // Build grid for neg_side
+    std::unordered_map<uint64_t, std::vector<uint32_t>> neg_grid;
+    auto grid_key = [](int gy, int gz) -> uint64_t {
+        return ((uint64_t)(uint32_t)gy << 32) | (uint32_t)gz;
+    };
+    for (uint32_t ni = 0; ni < neg_side.size(); ni++) {
+        uint32_t j = neg_side[ni];
+        int gy = (int)std::floor(m.pos_y[j] * inv_grid);
+        int gz = (int)std::floor(m.pos_z[j] * inv_grid);
+        neg_grid[grid_key(gy, gz)].push_back(j);
+    }
+
+    // For each +x vertex, find nearest -x match via grid
+    std::vector<uint32_t> pos_best(pos_side.size());
+    for (uint32_t pi = 0; pi < pos_side.size(); pi++) {
+        uint32_t i = pos_side[pi];
+        float mx = -m.pos_x[i], my = m.pos_y[i], mz = m.pos_z[i];
+        int gy = (int)std::floor(my * inv_grid);
+        int gz = (int)std::floor(mz * inv_grid);
+
+        float best_sq = tol_sq;
+        uint32_t best = i;
+
+        // Search 3x3x3 grid neighborhood
+        for (int dgy = -1; dgy <= 1; dgy++) {
+            for (int dgz = -1; dgz <= 1; dgz++) {
+                auto it = neg_grid.find(grid_key(gy + dgy, gz + dgz));
+                if (it == neg_grid.end()) continue;
+                for (uint32_t j : it->second) {
+                    float dx = m.pos_x[j]-mx, dy = m.pos_y[j]-my, dz = m.pos_z[j]-mz;
+                    float d2 = dx*dx + dy*dy + dz*dz;
+                    if (d2 < best_sq) { best_sq = d2; best = j; }
+                }
+            }
+        }
+        pos_best[pi] = best;
+    }
+
+    // Build grid for pos_side
+    std::unordered_map<uint64_t, std::vector<uint32_t>> pos_grid;
+    for (uint32_t pi = 0; pi < pos_side.size(); pi++) {
+        uint32_t i = pos_side[pi];
+        int gy = (int)std::floor(m.pos_y[i] * inv_grid);
+        int gz = (int)std::floor(m.pos_z[i] * inv_grid);
+        pos_grid[grid_key(gy, gz)].push_back(i);
+    }
+
+    // For each -x vertex, find nearest +x match via grid
+    std::vector<uint32_t> neg_best(neg_side.size());
+    for (uint32_t ni = 0; ni < neg_side.size(); ni++) {
+        uint32_t j = neg_side[ni];
+        float mx = -m.pos_x[j], my = m.pos_y[j], mz = m.pos_z[j];
+        int gy = (int)std::floor(my * inv_grid);
+        int gz = (int)std::floor(mz * inv_grid);
+
+        float best_sq = tol_sq;
+        uint32_t best = j;
+
+        // Search 3x3x3 grid neighborhood
+        for (int dgy = -1; dgy <= 1; dgy++) {
+            for (int dgz = -1; dgz <= 1; dgz++) {
+                auto it = pos_grid.find(grid_key(gy + dgy, gz + dgz));
+                if (it == pos_grid.end()) continue;
+                for (uint32_t i : it->second) {
+                    float dx = m.pos_x[i]-mx, dy = m.pos_y[i]-my, dz = m.pos_z[i]-mz;
+                    float d2 = dx*dx + dy*dy + dz*dz;
+                    if (d2 < best_sq) { best_sq = d2; best = i; }
+                }
+            }
+        }
+        neg_best[ni] = best;
+    }
+
+    // Only commit mutual pairs: A→B and B→A
+    // Build reverse lookup: neg vertex index → its position in neg_side
+    std::unordered_map<uint32_t, uint32_t> neg_idx_map;
+    neg_idx_map.reserve(neg_side.size());
+    for (uint32_t ni = 0; ni < neg_side.size(); ni++)
+        neg_idx_map[neg_side[ni]] = ni;
+
+    for (uint32_t pi = 0; pi < pos_side.size(); pi++) {
+        uint32_t i = pos_side[pi];
+        uint32_t j = pos_best[pi];
+        if (j == i) continue;
+        auto it = neg_idx_map.find(j);
+        if (it == neg_idx_map.end()) continue;
+        if (neg_best[it->second] == i) {
+            out[i] = j;
+            out[j] = i;
+        }
+    }
+
+    uint32_t paired = 0, seam = 0, unpaired = 0;
+    for (uint32_t i = 0; i < vc; i++) {
+        if (out[i] == i) {
+            if (std::fabs(m.pos_x[i]) < seam_tol) seam++;
+            else unpaired++;
+        } else paired++;
+    }
+    std::printf("[mirror] spatial rebuild: %u paired, %u seam, %u unpaired (tol=%.4f, edge=%.4f, "
+                "+x=%zu, -x=%zu)\n",
+                paired, seam, unpaired, tol, mean_edge,
+                pos_side.size(), neg_side.size());
+}
+
+void Mesh::build_mirror_x_map() {
+    build_mirror_spatial(*this, mirror_x_map);
+}
+
+void Mesh::build_adjacency() {
+    uint32_t vc = vertex_count();
+    uint32_t tc = tri_count();
+
+    // Count triangles per vertex
+    vert_tri_offset.assign(vc + 1, 0);
+    for (uint32_t t = 0; t < tc; t++) {
+        vert_tri_offset[indices[t*3+0] + 1]++;
+        vert_tri_offset[indices[t*3+1] + 1]++;
+        vert_tri_offset[indices[t*3+2] + 1]++;
+    }
+
+    // Prefix sum to get offsets
+    for (uint32_t i = 1; i <= vc; i++) {
+        vert_tri_offset[i] += vert_tri_offset[i-1];
+    }
+
+    // Fill adjacency list
+    vert_tri_list.resize(vert_tri_offset[vc]);
+    std::vector<uint32_t> cursor(vc, 0);
+    for (uint32_t t = 0; t < tc; t++) {
+        for (int k = 0; k < 3; k++) {
+            uint32_t v = indices[t*3+k];
+            vert_tri_list[vert_tri_offset[v] + cursor[v]] = t;
+            cursor[v]++;
+        }
+    }
+}
+
+void Mesh::expand_dirty_to_affected(const std::vector<uint32_t>& dirty_verts,
+                                     std::vector<uint32_t>& affected_out) {
+    if (vert_tri_offset.empty()) return;
+
+    uint32_t vc = vertex_count();
+    uint32_t tc = tri_count();
+
+    static std::vector<bool> tri_flag;
+    static std::vector<bool> vert_flag;
+    static std::vector<uint32_t> affected_tri_list;
+
+    if (tri_flag.size() < tc) tri_flag.resize(tc, false);
+    if (vert_flag.size() < vc) vert_flag.resize(vc, false);
+    affected_tri_list.clear();
+    affected_out.clear();
+
+    for (uint32_t v : dirty_verts) {
+        if (v >= vc) {
+            std::printf("[CRASH-GUARD] expand_dirty v=%u >= vc=%u\n", v, vc);
+            continue;
+        }
+        uint32_t start = vert_tri_offset[v];
+        uint32_t end = vert_tri_offset[v + 1];
+        for (uint32_t j = start; j < end; j++) {
+            uint32_t t = vert_tri_list[j];
+            if (!tri_flag[t]) {
+                tri_flag[t] = true;
+                affected_tri_list.push_back(t);
+            }
+        }
+    }
+
+    for (uint32_t t : affected_tri_list) {
+        uint32_t i0 = indices[t*3+0];
+        uint32_t i1 = indices[t*3+1];
+        uint32_t i2 = indices[t*3+2];
+        if (!vert_flag[i0]) { vert_flag[i0] = true; affected_out.push_back(i0); }
+        if (!vert_flag[i1]) { vert_flag[i1] = true; affected_out.push_back(i1); }
+        if (!vert_flag[i2]) { vert_flag[i2] = true; affected_out.push_back(i2); }
+    }
+
+    for (uint32_t t : affected_tri_list) tri_flag[t] = false;
+    for (uint32_t v : affected_out) vert_flag[v] = false;
+}
+
+void Mesh::recompute_normals_partial(const std::vector<uint32_t>& dirty_verts,
+                                     std::vector<uint32_t>* affected_verts_out) {
+    if (vert_tri_offset.empty()) {
+        // Fallback if adjacency not built
+        recompute_normals();
+        return;
+    }
+
+    // Collect all triangles touching any dirty vertex, and all vertices of those triangles
+    // We need to recompute normals for all vertices of affected triangles,
+    // not just the dirty ones, because a face normal change affects all 3 verts
+
+    uint32_t vc = vertex_count();
+    uint32_t tc = tri_count();
+
+    // Static flat flag arrays — persist across calls, no heap churn
+    static std::vector<bool> tri_flag;
+    static std::vector<bool> vert_flag;
+    static std::vector<bool> recompute_tri_flag;
+    static std::vector<uint32_t> affected_tri_list;
+    static std::vector<uint32_t> affected_vert_list;
+    static std::vector<uint32_t> recompute_tri_list;
+
+    if (tri_flag.size() < tc) tri_flag.resize(tc, false);
+    if (vert_flag.size() < vc) vert_flag.resize(vc, false);
+    if (recompute_tri_flag.size() < tc) recompute_tri_flag.resize(tc, false);
+    affected_tri_list.clear();
+    affected_vert_list.clear();
+    recompute_tri_list.clear();
+
+    // Collect all triangles touching any dirty vertex
+    for (uint32_t v : dirty_verts) {
+        uint32_t start = vert_tri_offset[v];
+        uint32_t end = vert_tri_offset[v + 1];
+        for (uint32_t j = start; j < end; j++) {
+            uint32_t t = vert_tri_list[j];
+            if (!tri_flag[t]) {
+                tri_flag[t] = true;
+                affected_tri_list.push_back(t);
+            }
+        }
+    }
+
+    // Collect all vertices of affected triangles
+    for (uint32_t t : affected_tri_list) {
+        uint32_t i0 = indices[t*3+0];
+        uint32_t i1 = indices[t*3+1];
+        uint32_t i2 = indices[t*3+2];
+        if (!vert_flag[i0]) { vert_flag[i0] = true; affected_vert_list.push_back(i0); }
+        if (!vert_flag[i1]) { vert_flag[i1] = true; affected_vert_list.push_back(i1); }
+        if (!vert_flag[i2]) { vert_flag[i2] = true; affected_vert_list.push_back(i2); }
+    }
+
+    // Zero normals for affected verts
+    for (uint32_t v : affected_vert_list) {
+        norm_x[v] = 0.0f;
+        norm_y[v] = 0.0f;
+        norm_z[v] = 0.0f;
+    }
+
+    // Collect all triangles touching affected verts (superset for boundary correctness)
+    for (uint32_t v : affected_vert_list) {
+        uint32_t start = vert_tri_offset[v];
+        uint32_t end = vert_tri_offset[v + 1];
+        for (uint32_t j = start; j < end; j++) {
+            uint32_t t = vert_tri_list[j];
+            if (!recompute_tri_flag[t]) {
+                recompute_tri_flag[t] = true;
+                recompute_tri_list.push_back(t);
+            }
+        }
+    }
+
+    for (uint32_t t : recompute_tri_list) {
+        uint32_t i0 = indices[t*3+0];
+        uint32_t i1 = indices[t*3+1];
+        uint32_t i2 = indices[t*3+2];
+
+        Vec3 v0 = get_pos(i0);
+        Vec3 v1 = get_pos(i1);
+        Vec3 v2 = get_pos(i2);
+
+        Vec3 e1 = v1 - v0;
+        Vec3 e2 = v2 - v0;
+        Vec3 fn = e1.cross(e2);
+
+        if (vert_flag[i0]) {
+            norm_x[i0] += fn.x; norm_y[i0] += fn.y; norm_z[i0] += fn.z;
+        }
+        if (vert_flag[i1]) {
+            norm_x[i1] += fn.x; norm_y[i1] += fn.y; norm_z[i1] += fn.z;
+        }
+        if (vert_flag[i2]) {
+            norm_x[i2] += fn.x; norm_y[i2] += fn.y; norm_z[i2] += fn.z;
+        }
+    }
+
+    // Normalize
+    for (uint32_t v : affected_vert_list) {
+        Vec3 n = {norm_x[v], norm_y[v], norm_z[v]};
+        n = n.normalized();
+        norm_x[v] = n.x;
+        norm_y[v] = n.y;
+        norm_z[v] = n.z;
+    }
+
+    // Output
+    if (affected_verts_out) {
+        *affected_verts_out = affected_vert_list;
+    }
+
+    // Clean up flags (only touch entries we set)
+    for (uint32_t t : affected_tri_list) tri_flag[t] = false;
+    for (uint32_t v : affected_vert_list) vert_flag[v] = false;
+    for (uint32_t t : recompute_tri_list) recompute_tri_flag[t] = false;
+}
+
+bool Mesh::export_obj(const char* filename) const {
+    FILE* f = std::fopen(filename, "w");
+    if (!f) return false;
+
+    std::fprintf(f, "# OBJ export from Chisel\n");
+    std::fprintf(f, "# vertices: %u\n", vertex_count());
+    std::fprintf(f, "# triangles: %u\n", tri_count());
+
+    for (uint32_t i = 0; i < vertex_count(); i++) {
+        std::fprintf(f, "v %f %f %f\n", pos_x[i], pos_y[i], pos_z[i]);
+    }
+
+    for (uint32_t i = 0; i < vertex_count(); i++) {
+        std::fprintf(f, "vn %f %f %f\n", norm_x[i], norm_y[i], norm_z[i]);
+    }
+
+    for (uint32_t t = 0; t < tri_count(); t++) {
+        uint32_t i0 = indices[t*3+0];
+        uint32_t i1 = indices[t*3+1];
+        uint32_t i2 = indices[t*3+2];
+        std::fprintf(f, "f %u//%u %u//%u %u//%u\n",
+                    i0+1, i0+1,
+                    i1+1, i1+1,
+                    i2+1, i2+1);
+    }
+
+    std::fclose(f);
+    return true;
+}
+
+bool Mesh::export_stl(const char* filename, float scale) const {
+    FILE* f = std::fopen(filename, "wb");
+    if (!f) return false;
+
+    // 80-byte header (must NOT begin with "solid" or parsers read it as ASCII).
+    char header[80];
+    std::memset(header, 0, sizeof(header));
+    std::snprintf(header, sizeof(header), "Chisel binary STL");
+    std::fwrite(header, 1, sizeof(header), f);
+
+    uint32_t nt = tri_count();
+    std::fwrite(&nt, sizeof(uint32_t), 1, f);
+
+    const uint16_t attr = 0;
+    for (uint32_t t = 0; t < nt; t++) {
+        uint32_t i0 = indices[t*3+0], i1 = indices[t*3+1], i2 = indices[t*3+2];
+        Vec3 a = get_pos(i0) * scale;
+        Vec3 b = get_pos(i1) * scale;
+        Vec3 c = get_pos(i2) * scale;
+        Vec3 n = (b - a).cross(c - a).normalized();   // per-tri facet normal
+        float rec[12] = {
+            n.x, n.y, n.z,
+            a.x, a.y, a.z,
+            b.x, b.y, b.z,
+            c.x, c.y, c.z,
+        };
+        std::fwrite(rec, sizeof(float), 12, f);
+        std::fwrite(&attr, sizeof(uint16_t), 1, f);
+    }
+
+    std::fclose(f);
+    return true;
+}
+
+bool Mesh::import_obj(const char* filename, Mesh& out) {
+    FILE* f = std::fopen(filename, "r");
+    if (!f) return false;
+
+    std::vector<float> vx, vy, vz;
+    std::vector<float> nx, ny, nz;
+    std::vector<uint32_t> idxs;
+
+    char line[512];
+    while (std::fgets(line, sizeof(line), f)) {
+        if (line[0] == 'v' && line[1] == ' ') {
+            float x, y, z;
+            if (std::sscanf(line + 2, "%f %f %f", &x, &y, &z) == 3) {
+                vx.push_back(x); vy.push_back(y); vz.push_back(z);
+            }
+        } else if (line[0] == 'v' && line[1] == 'n' && line[2] == ' ') {
+            float x, y, z;
+            if (std::sscanf(line + 3, "%f %f %f", &x, &y, &z) == 3) {
+                nx.push_back(x); ny.push_back(y); nz.push_back(z);
+            }
+        } else if (line[0] == 'f' && line[1] == ' ') {
+            const char* p = line + 2;
+            uint32_t face_verts[16];
+            int count = 0;
+            while (*p && *p != '\n' && *p != '\r' && count < 16) {
+                while (*p == ' ') p++;
+                if (!*p || *p == '\n' || *p == '\r') break;
+                int vi = 0;
+                while (*p >= '0' && *p <= '9') { vi = vi * 10 + (*p - '0'); p++; }
+                face_verts[count++] = (uint32_t)(vi - 1);
+                if (*p == '/') {
+                    p++;
+                    while (*p >= '0' && *p <= '9') p++;
+                    if (*p == '/') {
+                        p++;
+                        while (*p >= '0' && *p <= '9') p++;
+                    }
+                }
+            }
+            for (int i = 1; i + 1 < count; i++) {
+                idxs.push_back(face_verts[0]);
+                idxs.push_back(face_verts[i]);
+                idxs.push_back(face_verts[i + 1]);
+            }
+        }
+    }
+    std::fclose(f);
+
+    if (vx.empty() || idxs.empty()) return false;
+
+    out.pos_x = std::move(vx);
+    out.pos_y = std::move(vy);
+    out.pos_z = std::move(vz);
+    out.indices = std::move(idxs);
+    out.norm_x.clear(); out.norm_y.clear(); out.norm_z.clear();
+    out.mirror_x_map.clear();
+    out.vert_tri_offset.clear();
+    out.vert_tri_list.clear();
+
+    uint32_t nv = out.vertex_count();
+    if (nx.size() == nv) {
+        out.norm_x = std::move(nx);
+        out.norm_y = std::move(ny);
+        out.norm_z = std::move(nz);
+    } else {
+        out.norm_x.resize(nv, 0.0f);
+        out.norm_y.resize(nv, 0.0f);
+        out.norm_z.resize(nv, 1.0f);
+        out.recompute_normals();
+    }
+
+    out.build_adjacency();
+
+    std::printf("[import] loaded %u verts, %u tris from %s\n",
+                out.vertex_count(), out.tri_count(), filename);
+    return true;
+}

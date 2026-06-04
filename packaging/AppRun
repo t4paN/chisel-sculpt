@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+APPDIR="$(dirname "$(readlink -f "$0")")"
+ICON_SRC="$APPDIR/chisel.png"
+DESKTOP_SRC="$APPDIR/chisel.desktop"
+ICON_DEST="$HOME/.local/share/icons/hicolor/256x256/apps/chisel.png"
+DESKTOP_DEST="$HOME/.local/share/applications/chisel.desktop"
+
+case "${1:-}" in
+    --install)
+        mkdir -p "$(dirname "$ICON_DEST")"
+        mkdir -p "$(dirname "$DESKTOP_DEST")"
+        cp "$ICON_SRC" "$ICON_DEST"
+        APPIMAGE_PATH="$(readlink -f "${APPIMAGE:-$0}")"
+        sed "s|^Exec=.*|Exec=$APPIMAGE_PATH|" "$DESKTOP_SRC" > "$DESKTOP_DEST"
+        echo "Chisel installed to desktop. Icon and launcher added."
+        echo "  Desktop: $DESKTOP_DEST"
+        echo "  Icon:    $ICON_DEST"
+        exit 0
+        ;;
+    --uninstall)
+        rm -f "$ICON_DEST" "$DESKTOP_DEST"
+        echo "Chisel desktop entry and icon removed."
+        exit 0
+        ;;
+esac
+
+exec "$APPDIR/usr/bin/chisel" "$@"

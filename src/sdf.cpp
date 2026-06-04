@@ -1,0 +1,619 @@
+#include "sdf.h"
+#include "scene.h"
+#include "mesh_entity.h"
+#include "compute.h"
+#include "mc_tables.h"
+#include <glad/glad.h>
+#include <cstdio>
+#include <cstring>
+#include <cmath>
+#include <chrono>
+#include <vector>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
+#include <functional>
+#include <algorithm>
+
+// ============================================================================
+//  SDF voxel-merge — GPU-native pooled-soup + generalized winding number.
+//
+//  Three compute dispatches over flat SSBOs:
+//    1. distance splat   (one thread per triangle → unsigned band distance)
+//    2. winding sign     (one thread per corner → signed marching-cubes field)
+//    3. marching cubes   (one thread per cell → triangle soup, atomic-appended)
+//  The only CPU touch is a hash-weld on readback into an indexed Mesh, which is
+//  unavoidable because the result must land as a Mesh for scene/undo/export.
+//
+//  Everything here is one-shot and user-paced (like perform_remesh): allocation
+//  and a single readback are fine; the hot-path zero-alloc rules do not apply.
+//  All GL resources are created at the top of voxel_merge_selected and freed at
+//  the bottom — nothing persists in ComputeState.
+// ============================================================================
+
+namespace {
+
+constexpr int   BAND_DILATE = 2;        // splat AABB dilation in cells (band thickness)
+constexpr float BAND_FAR     = 1e18f;   // sentinel for off-band corners (atomicMin floor)
+constexpr int   GRID_PAD     = 4;       // cells of empty margin so the surface never touches the wall
+
+// ---- Soup gather ----------------------------------------------------------
+// Concatenate world-space triangles of every selected entity into one soup.
+// Entities are baked in world space (twins are real tris), so no transform.
+// Returns the number of entities gathered.
+uint32_t gather_soup(const Scene& scene,
+                     std::vector<float>&    pos,
+                     std::vector<uint32_t>& idx)
+{
+    uint32_t n_ent = 0;
+    for (uint32_t id : scene.selected_ids()) {
+        const MeshEntity* e = scene.find_entity(id);
+        if (!e) continue;
+        const Mesh& m = e->mesh;
+        if (m.vertex_count() == 0 || m.indices.empty()) continue;
+
+        uint32_t base = (uint32_t)(pos.size() / 3);
+        pos.reserve(pos.size() + m.vertex_count() * 3);
+        for (uint32_t v = 0; v < m.vertex_count(); v++) {
+            pos.push_back(m.pos_x[v]);
+            pos.push_back(m.pos_y[v]);
+            pos.push_back(m.pos_z[v]);
+        }
+        idx.reserve(idx.size() + m.indices.size());
+        for (uint32_t i : m.indices) idx.push_back(base + i);
+        n_ent++;
+    }
+    return n_ent;
+}
+
+// ---- Shader sources -------------------------------------------------------
+
+// Ericson closest-point-on-triangle, returns Euclidean distance. Degenerate
+// (zero-area) tris are filtered before the splat, so the face denom is safe.
+const char* PT_TRI_DIST = R"(
+float pt_tri_dist(vec3 p, vec3 a, vec3 b, vec3 c) {
+    vec3 ab = b - a, ac = c - a, ap = p - a;
+    float d1 = dot(ab, ap), d2 = dot(ac, ap);
+    if (d1 <= 0.0 && d2 <= 0.0) return length(ap);
+    vec3 bp = p - b;
+    float d3 = dot(ab, bp), d4 = dot(ac, bp);
+    if (d3 >= 0.0 && d4 <= d3) return length(bp);
+    float vc = d1*d4 - d3*d2;
+    if (vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0) {
+        float v = d1 / (d1 - d3);
+        return length(p - (a + v*ab));
+    }
+    vec3 cp = p - c;
+    float d5 = dot(ab, cp), d6 = dot(ac, cp);
+    if (d6 >= 0.0 && d5 <= d6) return length(cp);
+    float vb = d5*d2 - d1*d6;
+    if (vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0) {
+        float w = d2 / (d2 - d6);
+        return length(p - (a + w*ac));
+    }
+    float va = d3*d6 - d5*d4;
+    if (va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0) {
+        float w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        return length(p - (b + w*(c - b)));
+    }
+    float denom = 1.0 / (va + vb + vc);
+    float v = vb * denom, w = vc * denom;
+    return length(p - (a + ab*v + ac*w));
+}
+)";
+
+const char* SPLAT_SRC = R"(
+#version 430
+layout(local_size_x = 64) in;
+layout(std430, binding = 21) readonly buffer Pos { float p[]; };
+layout(std430, binding = 22) readonly buffer Idx { uint  ix[]; };
+layout(std430, binding = 23)          buffer Dist{ uint  d[]; };
+uniform vec3  u_origin;  uniform float u_voxel;  uniform int u_R;
+uniform int   u_band;    uniform uint  u_triCount;
+)" /* pt_tri_dist injected here */ R"(
+void main() {
+    uint t = gl_GlobalInvocationID.x;
+    if (t >= u_triCount) return;
+    vec3 a = vec3(p[3u*ix[3u*t  ]], p[3u*ix[3u*t  ]+1u], p[3u*ix[3u*t  ]+2u]);
+    vec3 b = vec3(p[3u*ix[3u*t+1u]], p[3u*ix[3u*t+1u]+1u], p[3u*ix[3u*t+1u]+2u]);
+    vec3 c = vec3(p[3u*ix[3u*t+2u]], p[3u*ix[3u*t+2u]+1u], p[3u*ix[3u*t+2u]+2u]);
+    if (length(cross(b - a, c - a)) < 1e-20) return;   // skip degenerate tris
+    vec3 lo = min(min(a,b),c), hi = max(max(a,b),c);
+    ivec3 g0 = ivec3(floor((lo - u_origin)/u_voxel)) - u_band;
+    ivec3 g1 = ivec3(ceil ((hi - u_origin)/u_voxel)) + u_band;
+    g0 = clamp(g0, ivec3(0), ivec3(u_R));
+    g1 = clamp(g1, ivec3(0), ivec3(u_R));
+    int R1 = u_R + 1;
+    for (int k=g0.z;k<=g1.z;k++)
+    for (int j=g0.y;j<=g1.y;j++)
+    for (int i=g0.x;i<=g1.x;i++) {
+        vec3 q = u_origin + u_voxel*vec3(i,j,k);
+        float dd = pt_tri_dist(q, a, b, c);
+        uint  ci = uint(i + R1*(j + R1*k));
+        atomicMin(d[ci], floatBitsToUint(dd));   // monotonic for dd >= 0
+    }
+}
+)";
+
+// Winding sign — evaluated ONLY at band corners (the surface shell, ~O(R^2)).
+// Off-band corners are deferred: marked with |f| == u_bandFar so the CPU flood
+// fill can assign their inside/outside sign. This is the spec's spartan
+// optimisation: the O(corners*tris) brute force is infeasible on weak GPUs, but
+// MC only interpolates band-to-band edges, so off-band corners just need a
+// consistent sign — never a winding number. (sdf-remesh-spec.md gotcha 3.)
+const char* SIGN_SRC = R"(
+#version 430
+layout(local_size_x = 64) in;
+layout(std430, binding = 21) readonly buffer Pos  { float p[]; };
+layout(std430, binding = 22) readonly buffer Idx  { uint  ix[]; };
+layout(std430, binding = 23) readonly buffer Dist { uint  d[]; };
+layout(std430, binding = 24)          buffer Field{ float f[]; };
+uniform vec3 u_origin; uniform float u_voxel; uniform int u_R;
+uniform uint u_triCount; uniform uint u_cornerCount; uniform float u_bandFar;
+const float FOUR_PI = 12.566370614359172;
+
+void main() {
+    uint ci = gl_GlobalInvocationID.x;
+    if (ci >= u_cornerCount) return;
+    float dist = uintBitsToFloat(d[ci]);
+    if (dist >= u_bandFar) { f[ci] = u_bandFar; return; }   // off-band → CPU flood
+
+    int R1 = u_R + 1;
+    int i =  int(ci) % R1;
+    int j = (int(ci) / R1) % R1;
+    int k =  int(ci) / (R1*R1);
+    vec3 q = u_origin + u_voxel*vec3(i,j,k);
+
+    float omega = 0.0;
+    for (uint t = 0u; t < u_triCount; t++) {
+        vec3 A = vec3(p[3u*ix[3u*t  ]], p[3u*ix[3u*t  ]+1u], p[3u*ix[3u*t  ]+2u]) - q;
+        vec3 B = vec3(p[3u*ix[3u*t+1u]], p[3u*ix[3u*t+1u]+1u], p[3u*ix[3u*t+1u]+2u]) - q;
+        vec3 C = vec3(p[3u*ix[3u*t+2u]], p[3u*ix[3u*t+2u]+1u], p[3u*ix[3u*t+2u]+2u]) - q;
+        float la=length(A), lb=length(B), lc=length(C);
+        float num = dot(A, cross(B,C));
+        float den = la*lb*lc + dot(A,B)*lc + dot(B,C)*la + dot(C,A)*lb;
+        omega += 2.0 * atan(num, den);
+    }
+    float w = omega / FOUR_PI;
+    f[ci] = (w > 0.5 ? -1.0 : 1.0) * dist;          // signed real distance (band)
+}
+)";
+
+const char* MC_SRC = R"(
+#version 430
+layout(local_size_x = 64) in;
+layout(std430, binding = 24) readonly buffer Field { float f[]; };
+layout(std430, binding = 25)          buffer McOut { float o[]; };   // 18 floats / tri
+layout(std430, binding = 26)          buffer McCnt { uint  cnt[]; };
+layout(std430, binding = 27) readonly buffer TriTb { int   tri[]; }; // 256*16
+uniform vec3 u_origin; uniform float u_voxel; uniform int u_R;
+uniform uint u_cellCount; uniform int u_count_only; uniform uint u_cap;
+
+const ivec3 CORNER[8] = ivec3[8](
+    ivec3(0,0,0), ivec3(1,0,0), ivec3(1,1,0), ivec3(0,1,0),
+    ivec3(0,0,1), ivec3(1,0,1), ivec3(1,1,1), ivec3(0,1,1));
+const ivec2 EDGE[12] = ivec2[12](
+    ivec2(0,1), ivec2(1,2), ivec2(2,3), ivec2(3,0),
+    ivec2(4,5), ivec2(5,6), ivec2(6,7), ivec2(7,4),
+    ivec2(0,4), ivec2(1,5), ivec2(2,6), ivec2(3,7));
+
+int g_R1;
+float fld(ivec3 c) {
+    c = clamp(c, ivec3(0), ivec3(u_R));
+    return f[c.x + g_R1*(c.y + g_R1*c.z)];
+}
+vec3 grad(ivec3 c) {
+    return vec3(fld(c+ivec3(1,0,0)) - fld(c-ivec3(1,0,0)),
+                fld(c+ivec3(0,1,0)) - fld(c-ivec3(0,1,0)),
+                fld(c+ivec3(0,0,1)) - fld(c-ivec3(0,0,1)));
+}
+
+void main() {
+    uint cell = gl_GlobalInvocationID.x;
+    if (cell >= u_cellCount) return;
+    g_R1 = u_R + 1;
+    int cx =  int(cell) % u_R;
+    int cy = (int(cell) / u_R) % u_R;
+    int cz =  int(cell) / (u_R*u_R);
+    ivec3 base = ivec3(cx, cy, cz);
+
+    float val[8];
+    int cubeindex = 0;
+    for (int s = 0; s < 8; s++) {
+        ivec3 c = base + CORNER[s];
+        val[s] = f[c.x + g_R1*(c.y + g_R1*c.z)];
+        if (val[s] < 0.0) cubeindex |= (1 << s);
+    }
+    if (cubeindex == 0 || cubeindex == 255) return;
+
+    vec3 vpos[12];
+    vec3 vnrm[12];
+    for (int e = 0; e < 12; e++) {
+        int a = EDGE[e].x, b = EDGE[e].y;
+        float fa = val[a], fb = val[b];
+        if ((fa < 0.0) == (fb < 0.0)) continue;   // edge not crossed
+        ivec3 ca = base + CORNER[a];
+        ivec3 cb = base + CORNER[b];
+        float tt = fa / (fa - fb);
+        vpos[e] = u_origin + u_voxel * (vec3(ca) + tt * vec3(cb - ca));
+        vec3 nn = mix(grad(ca), grad(cb), tt);
+        vnrm[e] = (dot(nn,nn) > 0.0) ? normalize(nn) : vec3(0.0, 0.0, 1.0);
+    }
+
+    int row = cubeindex * 16;
+    for (int i = 0; i < 15 && tri[row+i] != -1; i += 3) {
+        int e0 = tri[row+i], e1 = tri[row+i+1], e2 = tri[row+i+2];
+
+        if (u_count_only == 1) { atomicAdd(cnt[0], 1u); continue; }
+
+        vec3 p0 = vpos[e0], p1 = vpos[e1], p2 = vpos[e2];
+        vec3 n0 = vnrm[e0], n1 = vnrm[e1], n2 = vnrm[e2];
+        // Orient so face winding matches the field gradient (outward).
+        if (dot(cross(p1 - p0, p2 - p0), n0 + n1 + n2) < 0.0) {
+            vec3 tp = p1; p1 = p2; p2 = tp;
+            vec3 tn = n1; n1 = n2; n2 = tn;
+        }
+        uint slot = atomicAdd(cnt[0], 1u);
+        if (slot >= u_cap) continue;   // overflow guard (exact in practice)
+        uint b0 = slot * 18u;
+        o[b0+0u]=p0.x;  o[b0+1u]=p0.y;  o[b0+2u]=p0.z;  o[b0+3u]=n0.x;  o[b0+4u]=n0.y;  o[b0+5u]=n0.z;
+        o[b0+6u]=p1.x;  o[b0+7u]=p1.y;  o[b0+8u]=p1.z;  o[b0+9u]=n1.x;  o[b0+10u]=n1.y; o[b0+11u]=n1.z;
+        o[b0+12u]=p2.x; o[b0+13u]=p2.y; o[b0+14u]=p2.z; o[b0+15u]=n2.x; o[b0+16u]=n2.y; o[b0+17u]=n2.z;
+    }
+}
+)";
+
+// ---- Hash-weld ------------------------------------------------------------
+// Snap each soup vertex to a voxel*1e-3 lattice, dedup by quantized key →
+// shared vertices ⇒ watertight indexed mesh. Single CPU touch, O(verts).
+struct QKey {
+    int64_t x, y, z;
+    bool operator==(const QKey& o) const { return x==o.x && y==o.y && z==o.z; }
+};
+struct QKeyHash {
+    size_t operator()(const QKey& k) const {
+        // 64-bit splitmix-ish mix of the three lattice coords.
+        uint64_t h = 1469598103934665603ull;
+        auto mix = [&](int64_t v){ h ^= (uint64_t)v; h *= 1099511628211ull; };
+        mix(k.x); mix(k.y); mix(k.z);
+        return (size_t)h;
+    }
+};
+
+void hash_weld(const std::vector<float>& soup,  // 18 floats per tri (pos+nrm x3)
+               uint32_t out_tris, float snap, Mesh& out)
+{
+    out.pos_x.clear(); out.pos_y.clear(); out.pos_z.clear();
+    out.norm_x.clear(); out.norm_y.clear(); out.norm_z.clear();
+    out.indices.clear();
+    out.mask.clear();
+    out.indices.reserve(out_tris * 3);
+
+    float inv = 1.0f / snap;
+    std::unordered_map<QKey, uint32_t, QKeyHash> table;
+    table.reserve(out_tris * 2);
+
+    for (uint32_t t = 0; t < out_tris; t++) {
+        for (int v = 0; v < 3; v++) {
+            const float* p = &soup[(t * 3 + v) * 6];
+            QKey key{ (int64_t)std::llround(p[0]*inv),
+                      (int64_t)std::llround(p[1]*inv),
+                      (int64_t)std::llround(p[2]*inv) };
+            auto it = table.find(key);
+            uint32_t vi;
+            if (it == table.end()) {
+                vi = (uint32_t)out.pos_x.size();
+                table.emplace(key, vi);
+                out.pos_x.push_back(p[0]);
+                out.pos_y.push_back(p[1]);
+                out.pos_z.push_back(p[2]);
+                out.norm_x.push_back(p[3]);
+                out.norm_y.push_back(p[4]);
+                out.norm_z.push_back(p[5]);
+            } else {
+                vi = it->second;
+            }
+            out.indices.push_back(vi);
+        }
+    }
+}
+
+// ---- Manifold / watertight report ------------------------------------------
+// Surfaced after merge so a bad result is visible before printing. A clean
+// watertight result has 0 boundary edges, 0 non-manifold edges, 1 component.
+void manifold_report(const Mesh& m, uint32_t& boundary,
+                     uint32_t& nonmanifold, uint32_t& components)
+{
+    boundary = nonmanifold = components = 0;
+    uint32_t nt = m.tri_count(), nv = m.vertex_count();
+    if (nt == 0 || nv == 0) return;
+
+    auto ekey = [](uint32_t a, uint32_t b) -> uint64_t {
+        if (a > b) std::swap(a, b);
+        return ((uint64_t)a << 32) | (uint64_t)b;
+    };
+    std::unordered_map<uint64_t, uint32_t> edge_count;
+    edge_count.reserve(nt * 3);
+
+    // Union-find over vertices (path-halving + union by size omitted for brevity).
+    std::vector<uint32_t> parent(nv);
+    for (uint32_t v = 0; v < nv; v++) parent[v] = v;
+    std::function<uint32_t(uint32_t)> find = [&](uint32_t x) {
+        while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; }
+        return x;
+    };
+    auto unite = [&](uint32_t a, uint32_t b) { parent[find(a)] = find(b); };
+
+    for (uint32_t t = 0; t < nt; t++) {
+        uint32_t i0 = m.indices[t*3+0], i1 = m.indices[t*3+1], i2 = m.indices[t*3+2];
+        edge_count[ekey(i0, i1)]++;
+        edge_count[ekey(i1, i2)]++;
+        edge_count[ekey(i2, i0)]++;
+        unite(i0, i1); unite(i1, i2);
+    }
+    for (auto& kv : edge_count) {
+        if (kv.second == 1)      boundary++;
+        else if (kv.second > 2)  nonmanifold++;
+    }
+
+    std::unordered_set<uint32_t> roots;
+    std::vector<char> used(nv, 0);
+    for (uint32_t i : m.indices) used[i] = 1;
+    for (uint32_t v = 0; v < nv; v++) if (used[v]) roots.insert(find(v));
+    components = (uint32_t)roots.size();
+}
+
+// ---- Off-band sign flood fill --------------------------------------------
+// The winding pass signs only band corners (|f| < band_far) with ±dist; off-band
+// corners come back marked |f| == band_far. Each connected off-band region
+// touches the band on exactly one side, so its sign is well-defined: multi-source
+// BFS from the signed band corners propagates the inside/outside bit into the
+// bulk. Off-band corners become ±band_far with the correct sign, so MC never
+// produces a false crossing at the band boundary. O(corners).
+void flood_fill_sign(std::vector<float>& field, uint32_t R, float band_far) {
+    int R1 = (int)R + 1;
+    int64_t N = (int64_t)R1 * R1 * R1;
+    const float known_thresh = band_far * 0.5f;  // band corners are |f| << band_far
+
+    std::vector<uint8_t> known((size_t)N, 0);
+    std::vector<int32_t> work;
+    work.reserve((size_t)N / 4 + 16);
+    for (int64_t c = 0; c < N; c++) {
+        if (std::fabs(field[c]) < known_thresh) { known[c] = 1; work.push_back((int32_t)c); }
+    }
+
+    auto decode = [&](int64_t c, int& i, int& j, int& k) {
+        i = (int)(c % R1); j = (int)((c / R1) % R1); k = (int)(c / ((int64_t)R1 * R1));
+    };
+    // Index-based worklist (BFS order irrelevant: each region is sign-uniform).
+    for (size_t head = 0; head < work.size(); head++) {
+        int64_t c = work[head];
+        float s = (field[c] < 0.0f) ? -band_far : band_far;
+        int i, j, k; decode(c, i, j, k);
+        const int di[6] = {1,-1,0,0,0,0};
+        const int dj[6] = {0,0,1,-1,0,0};
+        const int dk[6] = {0,0,0,0,1,-1};
+        for (int n = 0; n < 6; n++) {
+            int ni = i+di[n], nj = j+dj[n], nk = k+dk[n];
+            if (ni<0||ni>=R1||nj<0||nj>=R1||nk<0||nk>=R1) continue;
+            int64_t nc = ni + (int64_t)R1*(nj + (int64_t)R1*nk);
+            if (known[nc]) continue;
+            known[nc] = 1;
+            field[nc] = s;                 // inherit the touching band side's sign
+            work.push_back((int32_t)nc);
+        }
+    }
+    // Any region never reached (no band neighbour at all) defaults to outside.
+    for (int64_t c = 0; c < N; c++)
+        if (!known[c]) field[c] = band_far;
+}
+
+// Small RAII for the throwaway GL objects.
+struct GlBuf {
+    GLuint id = 0;
+    void gen() { if (!id) glGenBuffers(1, &id); }
+    ~GlBuf() { if (id) glDeleteBuffers(1, &id); }
+};
+struct GlProg {
+    GLuint id = 0;
+    ~GlProg() { if (id) glDeleteProgram(id); }
+};
+
+void set_grid_uniforms(GLuint prog, const SdfGrid& g) {
+    glUniform3f(glGetUniformLocation(prog, "u_origin"), g.origin.x, g.origin.y, g.origin.z);
+    glUniform1f(glGetUniformLocation(prog, "u_voxel"), g.voxel);
+    glUniform1i(glGetUniformLocation(prog, "u_R"), (int)g.R);
+}
+
+} // namespace
+
+// ============================================================================
+
+VoxelMergeResult voxel_merge_selected(Scene& scene, ComputeState& cs, int resolution) {
+    VoxelMergeResult res;
+    if (!cs.supported) { res.error = "GPU compute unavailable"; return res; }
+
+    auto t0 = std::chrono::high_resolution_clock::now();
+
+    // ---- 1. Gather soup ----
+    std::vector<float>    pos;
+    std::vector<uint32_t> idx;
+    res.in_entities = gather_soup(scene, pos, idx);
+    res.in_tris     = (uint32_t)(idx.size() / 3);
+    if (idx.empty()) { res.error = "selection has no triangles"; return res; }
+    uint32_t tri_count = res.in_tris;
+
+    // ---- 2. Grid (cubic, padded so the surface never touches the wall) ----
+    Vec3 lo( pos[0], pos[1], pos[2]);
+    Vec3 hi = lo;
+    for (size_t i = 0; i < pos.size(); i += 3) {
+        lo.x = std::min(lo.x, pos[i  ]); hi.x = std::max(hi.x, pos[i  ]);
+        lo.y = std::min(lo.y, pos[i+1]); hi.y = std::max(hi.y, pos[i+1]);
+        lo.z = std::min(lo.z, pos[i+2]); hi.z = std::max(hi.z, pos[i+2]);
+    }
+    int R = std::max(16, std::min(resolution, 256));
+    float ext = std::max(hi.x - lo.x, std::max(hi.y - lo.y, hi.z - lo.z));
+    if (!(ext > 0.0f)) { res.error = "degenerate selection bounds"; return res; }
+
+    SdfGrid grid;
+    grid.R     = (uint32_t)R;
+    grid.voxel = ext / (float)(R - 2 * GRID_PAD);     // R-2*PAD cells span the AABB
+    grid.origin = lo - Vec3(grid.voxel, grid.voxel, grid.voxel) * (float)GRID_PAD;
+    res.R = grid.R;
+
+    uint32_t corner_count = grid.corners();
+    uint32_t cell_count   = grid.cells();
+
+    // ---- 3. Allocate SSBOs + upload soup ----
+    GlBuf soup_pos, soup_idx, dist, field, mc_out, mc_cnt, tritab;
+    soup_pos.gen(); soup_idx.gen(); dist.gen(); field.gen();
+    mc_out.gen();   mc_cnt.gen();   tritab.gen();
+
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, soup_pos.id);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, pos.size()*sizeof(float), pos.data(), GL_STATIC_DRAW);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, soup_idx.id);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, idx.size()*sizeof(uint32_t), idx.data(), GL_STATIC_DRAW);
+
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, dist.id);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, (GLsizeiptr)corner_count*sizeof(uint32_t), nullptr, GL_DYNAMIC_COPY);
+    uint32_t far_bits;
+    { float bf = BAND_FAR; std::memcpy(&far_bits, &bf, sizeof(float)); }
+    glClearBufferData(GL_SHADER_STORAGE_BUFFER, GL_R32UI, GL_RED_INTEGER, GL_UNSIGNED_INT, &far_bits);
+
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, field.id);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, (GLsizeiptr)corner_count*sizeof(float), nullptr, GL_DYNAMIC_COPY);
+
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, mc_cnt.id);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(uint32_t), nullptr, GL_DYNAMIC_COPY);
+    uint32_t zero = 0;
+    glClearBufferData(GL_SHADER_STORAGE_BUFFER, GL_R32UI, GL_RED_INTEGER, GL_UNSIGNED_INT, &zero);
+
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, mc_out.id);   // tiny placeholder; resized after count pass
+    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(float)*18, nullptr, GL_DYNAMIC_COPY);
+
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, tritab.id);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(MC_TRI_TABLE), MC_TRI_TABLE, GL_STATIC_DRAW);
+
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+
+    // ---- Compile programs ----
+    std::string splat_full = std::string(SPLAT_SRC);
+    {   // inject the Ericson helper just before main()
+        size_t mpos = splat_full.find("void main()");
+        splat_full.insert(mpos, PT_TRI_DIST);
+    }
+    GlProg splat_prog, sign_prog, mc_prog;
+    splat_prog.id = cs.compile_program(splat_full.c_str());
+    sign_prog.id  = cs.compile_program(SIGN_SRC);
+    mc_prog.id    = cs.compile_program(MC_SRC);
+    if (!splat_prog.id || !sign_prog.id || !mc_prog.id) {
+        res.error = "SDF shader compile failed (see stderr)";
+        return res;
+    }
+
+    // ---- Dispatch 1: distance splat (one thread per triangle) ----
+    glUseProgram(splat_prog.id);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_SDF_SOUP_POS, soup_pos.id);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_SDF_SOUP_IDX, soup_idx.id);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_SDF_DIST,     dist.id);
+    set_grid_uniforms(splat_prog.id, grid);
+    glUniform1i (glGetUniformLocation(splat_prog.id, "u_band"),     BAND_DILATE);
+    glUniform1ui(glGetUniformLocation(splat_prog.id, "u_triCount"), tri_count);
+    glDispatchCompute((tri_count + 63u) / 64u, 1, 1);
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+
+    // ---- Dispatch 2: winding sign + field (one thread per corner) ----
+    glUseProgram(sign_prog.id);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_SDF_SOUP_POS, soup_pos.id);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_SDF_SOUP_IDX, soup_idx.id);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_SDF_DIST,     dist.id);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_SDF_FIELD,    field.id);
+    set_grid_uniforms(sign_prog.id, grid);
+    glUniform1ui(glGetUniformLocation(sign_prog.id, "u_triCount"),    tri_count);
+    glUniform1ui(glGetUniformLocation(sign_prog.id, "u_cornerCount"), corner_count);
+    glUniform1f (glGetUniformLocation(sign_prog.id, "u_bandFar"),     BAND_FAR);
+    glDispatchCompute((corner_count + 63u) / 64u, 1, 1);
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
+
+    // ---- Off-band sign flood (CPU): the winding pass only signed band corners;
+    //      propagate the inside/outside bit into the off-band bulk so MC never
+    //      sees a false crossing at the band boundary. One readback + one upload. ----
+    std::vector<float> field_cpu(corner_count);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, field.id);
+    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
+                       (GLsizeiptr)corner_count*sizeof(float), field_cpu.data());
+    flood_fill_sign(field_cpu, grid.R, BAND_FAR);
+    glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
+                    (GLsizeiptr)corner_count*sizeof(float), field_cpu.data());
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+
+    // ---- Dispatch 3a: marching cubes — count pass ----
+    glUseProgram(mc_prog.id);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_SDF_FIELD,    field.id);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_SDF_MC_OUT,   mc_out.id);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_SDF_MC_COUNT, mc_cnt.id);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_SDF_TRITABLE, tritab.id);
+    set_grid_uniforms(mc_prog.id, grid);
+    glUniform1ui(glGetUniformLocation(mc_prog.id, "u_cellCount"),  cell_count);
+    glUniform1i (glGetUniformLocation(mc_prog.id, "u_count_only"), 1);
+    glUniform1ui(glGetUniformLocation(mc_prog.id, "u_cap"),        0u);
+    glDispatchCompute((cell_count + 63u) / 64u, 1, 1);
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
+
+    uint32_t out_tris = 0;
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, mc_cnt.id);
+    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(uint32_t), &out_tris);
+    if (out_tris == 0) {
+        res.error = "merge produced no geometry (raise resolution?)";
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+        return res;
+    }
+
+    // ---- Size MC_OUT exactly, reset counter ----
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, mc_out.id);
+    glBufferData(GL_SHADER_STORAGE_BUFFER,
+                 (GLsizeiptr)out_tris * 18 * sizeof(float), nullptr, GL_DYNAMIC_COPY);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, mc_cnt.id);
+    glClearBufferData(GL_SHADER_STORAGE_BUFFER, GL_R32UI, GL_RED_INTEGER, GL_UNSIGNED_INT, &zero);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+
+    // ---- Dispatch 3b: marching cubes — write pass ----
+    glUseProgram(mc_prog.id);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_SDF_FIELD,    field.id);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_SDF_MC_OUT,   mc_out.id);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_SDF_MC_COUNT, mc_cnt.id);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_SDF_TRITABLE, tritab.id);
+    glUniform1i (glGetUniformLocation(mc_prog.id, "u_count_only"), 0);
+    glUniform1ui(glGetUniformLocation(mc_prog.id, "u_cap"),        out_tris);
+    glDispatchCompute((cell_count + 63u) / 64u, 1, 1);
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
+
+    // ---- Readback (the only readback) ----
+    std::vector<float> soup(out_tris * 18);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, mc_out.id);
+    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
+                       (GLsizeiptr)soup.size()*sizeof(float), soup.data());
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    glUseProgram(0);
+
+    // ---- Hash-weld → watertight indexed Mesh ----
+    Mesh welded;
+    hash_weld(soup, out_tris, grid.voxel * 1e-3f, welded);
+    welded.build_adjacency();
+    welded.recompute_normals();   // clean per-vertex normals (GPU normals were for orientation only)
+
+    res.out_tris  = welded.tri_count();
+    res.out_verts = welded.vertex_count();
+
+    // ---- Manifold report (surfaced so a bad merge is visible before print) ----
+    manifold_report(welded, res.boundary_edges, res.nonmanifold_edges, res.components);
+
+    // ---- Splice into the scene as the merged entity ----
+    uint32_t merged_id = scene.merge_selected_into(welded, 0);
+    if (merged_id == 0) { res.error = "scene splice failed"; return res; }
+
+    auto t1 = std::chrono::high_resolution_clock::now();
+    res.elapsed_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    res.success = true;
+    return res;
+}

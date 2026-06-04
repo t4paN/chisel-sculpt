@@ -1,0 +1,9 @@
+build*/
+*.o
+*.d
+external/instant-meshes/
+*.png
+!packaging/*.png
+packaging/out/
+packaging/tools/
+

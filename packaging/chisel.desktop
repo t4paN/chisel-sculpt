@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Chisel
+Comment=High-performance sculpting app
+Exec=chisel
+Icon=chisel
+Categories=Graphics;3DGraphics;
+Terminal=false

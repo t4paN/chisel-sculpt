@@ -1,0 +1,90 @@
+#pragma once
+#include "mesh.h"
+#include "multires_stack.h"
+#include <cstdint>
+#include <deque>
+#include <vector>
+
+class Scene;
+struct MeshEntity;
+
+struct UndoEntry {
+    enum class Kind { STROKE, PROJECTION, MASK, LEVEL };
+    Kind kind = Kind::STROKE;
+
+    // --- STROKE fields ---
+    // verts holds LOCAL vertex indices relative to entity_id's mesh.
+    std::vector<uint32_t> verts;
+    std::vector<float> old_x, old_y, old_z;
+    std::vector<float> new_x, new_y, new_z;
+
+    // --- MASK fields ---
+    std::vector<float> old_mask, new_mask;
+
+    // Which storage layer this entry modifies
+    int  level        = 0;
+    bool targets_base = true;
+    int  disp_index   = -1;   // -1 if targets_base, else level - base_level - 1
+
+    // --- PROJECTION fields ---
+    // Pre-projection snapshot of the affected storage. On undo, restore this.
+    // On redo, re-run project_down_to_level(target_level).
+    int              target_level = 0;
+    MultiresSnapshot before;
+
+    // --- LEVEL fields (multires view-level change; D / Shift-D) ---
+    // The view moved from_level -> to_level. `before` (above) is populated only
+    // for a descend that auto-projected; empty for a non-destructive ascend.
+    int from_level = 0;
+    int to_level   = 0;
+};
+
+class UndoStack {
+public:
+    static constexpr size_t MAX_BYTES = 1024ull * 1024ull * 1024ull; // 1 GB
+
+    void push(UndoEntry&& e);
+    bool can_undo() const { return !undo_stack.empty(); }
+    bool can_redo() const { return !redo_stack.empty(); }
+
+    // Undo/redo act on the entity that owns this stack (always the active one).
+    // Returns true (needs_cascade) when the reverted layer sits below the
+    // entity's current view level (entry.level < current_level) — the caller
+    // must cascade_to_level(current_level) on `ent` then re-sync. Otherwise the
+    // view is updated in place via scene.sync_partial_entity (entry.level ==
+    // current_level) or left alone (entry.level > current_level).
+    bool undo(MeshEntity& ent, Scene& scene);
+    bool redo(MeshEntity& ent, Scene& scene);
+
+    void clear();
+
+    size_t bytes_used() const { return total_bytes; }
+    size_t undo_depth() const { return undo_stack.size(); }
+    const UndoEntry* peek_undo() const { return undo_stack.empty() ? nullptr : &undo_stack.back(); }
+    const UndoEntry* peek_redo() const { return redo_stack.empty() ? nullptr : &redo_stack.back(); }
+
+private:
+    std::deque<UndoEntry> undo_stack;
+    std::deque<UndoEntry> redo_stack;
+    size_t total_bytes = 0;
+    std::vector<uint32_t> scratch_dirty;
+    std::vector<uint32_t> scratch_gpu;
+
+    static size_t entry_bytes(const UndoEntry& e) {
+        size_t b;
+        if (e.kind == UndoEntry::Kind::PROJECTION ||
+            e.kind == UndoEntry::Kind::LEVEL) {
+            b = e.before.bytes();
+        } else if (e.kind == UndoEntry::Kind::MASK) {
+            b = e.verts.size() * (sizeof(uint32_t) + 2 * sizeof(float));
+        } else {
+            b = e.verts.size() * (sizeof(uint32_t) + 6 * sizeof(float));
+        }
+        return b;
+    }
+    void evict_to_budget();
+    // apply() reverts/replays the entry on the active entity `ent`.
+    bool apply(const UndoEntry& e, MeshEntity& ent, Scene& scene, bool forward);
+    bool apply_projection(const UndoEntry& e, MeshEntity& ent, bool forward);
+    bool apply_level(const UndoEntry& e, MeshEntity& ent, bool forward);
+};
