@@ -4,6 +4,7 @@
 #include <memory>
 #include "mesh.h"
 #include "mesh_entity.h"
+#include "entity_record.h"
 
 class Renderer;
 struct ComputeState;
@@ -60,6 +61,7 @@ public:
 
     bool toggle_selected(uint32_t entity_id);
     const std::vector<uint32_t>& selected_ids() const { return selected_ids_; }
+    uint32_t next_id() const { return next_id_; }
 
     uint32_t preview_mesh_id() const { return preview_id_; }
 
@@ -74,6 +76,21 @@ public:
     // display VAOs) into the screen FBO, each writing its id. Read back with
     // renderer.read_id_region. Used by select and insert raycast.
     void render_pick(const Camera& cam, int w, int h);
+
+    // ---- Project load (multimesh) ----
+    // Replace the entire scene with the given saved entities. Tears down every
+    // current entity (and its GPU display VAO), recreates each record with its
+    // saved id/subdiv_level/mesh/multires, rebuilds adjacency + normals + mirror
+    // map per entity (cascading any locked multires stack up to its
+    // current_level, preserving the saved mask), and restores
+    // active/selected/next-id bookkeeping. Per-entity undo histories start
+    // empty. Selection is sanitized against the loaded ids. Records are moved
+    // from. Does NOT call sync() — caller refreshes the active mirror map + syncs
+    // after, exactly like reset_to_single_mesh.
+    void load_entities(std::vector<EntityRecord>& records,
+                       uint32_t active_id,
+                       const std::vector<uint32_t>& selected,
+                       uint32_t next_id);
 
     // ---- Reset ----
     // Replace scene with a single mesh (e.g. after remesh/load).

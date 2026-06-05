@@ -1,21 +1,27 @@
 #include "project_file.h"
+#include "project_file_v1.h"
 #include <fstream>
 #include <cstring>
 #include <vector>
+#include <algorithm>
 
+// Current on-disk format. Bump VERSION whenever the v2 layout below changes;
+// older versions are handled by their own decoupled reader modules (see
+// project_file_v1.*) so legacy support can be deleted cleanly later.
 static constexpr uint32_t MAGIC   = 0x4C534843; // "CHSL" little-endian
-static constexpr uint32_t VERSION = 1;
+static constexpr uint32_t VERSION = 2;
 
 struct ChunkHeader {
     char     tag[4];
     uint32_t size;
 };
 
+// ------------------------------------------------------------------ writing --
+
 static bool write_raw(std::ofstream& f, const void* data, size_t n) {
     f.write(reinterpret_cast<const char*>(data), (std::streamsize)n);
     return f.good();
 }
-
 static bool write_u32(std::ofstream& f, uint32_t v) { return write_raw(f, &v, 4); }
 static bool write_i32(std::ofstream& f, int32_t v)  { return write_raw(f, &v, 4); }
 static bool write_u8(std::ofstream& f, uint8_t v)   { return write_raw(f, &v, 1); }
@@ -29,7 +35,6 @@ static void write_chunk_begin(std::ofstream& f, const char tag[4], std::streampo
     uint32_t placeholder = 0;
     f.write(reinterpret_cast<const char*>(&placeholder), 4);
 }
-
 static void write_chunk_end(std::ofstream& f, std::streampos size_pos) {
     auto end = f.tellp();
     uint32_t size = (uint32_t)(end - size_pos - 4);
@@ -38,9 +43,10 @@ static void write_chunk_end(std::ofstream& f, std::streampos size_pos) {
     f.seekp(end);
 }
 
-static void write_mesh_chunk(std::ofstream& f, const Mesh& m) {
-    std::streampos sp;
-    write_chunk_begin(f, "MESH", sp);
+// Mesh / multires *bodies*: the raw field layout with no chunk header, so they
+// can be inlined inside an ENTY payload (and reused field-for-field by the v1
+// reader's expectations).
+static void write_mesh_body(std::ofstream& f, const Mesh& m) {
     write_u32(f, m.vertex_count());
     write_u32(f, m.tri_count());
     write_floats(f, m.pos_x.data(), m.vertex_count());
@@ -50,7 +56,27 @@ static void write_mesh_chunk(std::ofstream& f, const Mesh& m) {
     uint32_t mc = (uint32_t)m.mask.size();
     write_u32(f, mc);
     if (mc > 0) write_floats(f, m.mask.data(), mc);
-    write_chunk_end(f, sp);
+}
+
+static void write_multires_body(std::ofstream& f, const MultiresStack& s) {
+    write_u8(f, s.locked ? 1 : 0);
+    if (!s.locked) return;
+    write_i32(f, s.base_level);
+    write_i32(f, s.current_level);
+    write_u32(f, s.base.vertex_count());
+    write_u32(f, s.base.tri_count());
+    write_floats(f, s.base.pos_x.data(), s.base.vertex_count());
+    write_floats(f, s.base.pos_y.data(), s.base.vertex_count());
+    write_floats(f, s.base.pos_z.data(), s.base.vertex_count());
+    write_raw(f, s.base.indices.data(), s.base.indices.size() * sizeof(uint32_t));
+    uint32_t num_layers = (uint32_t)s.disp.size();
+    write_u32(f, num_layers);
+    for (uint32_t k = 0; k < num_layers; k++) {
+        uint32_t nv = (uint32_t)s.disp[k].size();
+        write_u32(f, nv);
+        if (nv > 0)
+            write_raw(f, s.disp[k].data(), nv * sizeof(Vec3));
+    }
 }
 
 static void write_camr_chunk(std::ofstream& f, const Camera& c) {
@@ -70,27 +96,24 @@ static void write_opts_chunk(std::ofstream& f, bool mirror_x, int subdiv_level) 
     write_chunk_end(f, sp);
 }
 
-static void write_mres_chunk(std::ofstream& f, const MultiresStack& s) {
-    if (!s.locked) return;
+static void write_scen_chunk(std::ofstream& f, const ProjectData& d) {
     std::streampos sp;
-    write_chunk_begin(f, "MRES", sp);
-    write_u8(f, 1);
-    write_i32(f, s.base_level);
-    write_i32(f, s.current_level);
-    write_u32(f, s.base.vertex_count());
-    write_u32(f, s.base.tri_count());
-    write_floats(f, s.base.pos_x.data(), s.base.vertex_count());
-    write_floats(f, s.base.pos_y.data(), s.base.vertex_count());
-    write_floats(f, s.base.pos_z.data(), s.base.vertex_count());
-    write_raw(f, s.base.indices.data(), s.base.indices.size() * sizeof(uint32_t));
-    uint32_t num_layers = (uint32_t)s.disp.size();
-    write_u32(f, num_layers);
-    for (uint32_t k = 0; k < num_layers; k++) {
-        uint32_t nv = (uint32_t)s.disp[k].size();
-        write_u32(f, nv);
-        if (nv > 0)
-            write_raw(f, s.disp[k].data(), nv * sizeof(Vec3));
-    }
+    write_chunk_begin(f, "SCEN", sp);
+    write_u32(f, d.active_id);
+    write_u32(f, d.next_id);
+    write_u8(f, d.mirror_use_topology ? 1 : 0);
+    write_u32(f, (uint32_t)d.selected_ids.size());
+    for (uint32_t id : d.selected_ids) write_u32(f, id);
+    write_chunk_end(f, sp);
+}
+
+static void write_enty_chunk(std::ofstream& f, const EntityRecord& e) {
+    std::streampos sp;
+    write_chunk_begin(f, "ENTY", sp);
+    write_u32(f, e.id);
+    write_u32(f, e.subdiv_level);
+    write_mesh_body(f, e.mesh);
+    write_multires_body(f, e.multires);
     write_chunk_end(f, sp);
 }
 
@@ -101,16 +124,17 @@ SaveResult save_project(const char* path, const ProjectData& data) {
     write_raw(f, &MAGIC, 4);
     write_raw(f, &VERSION, 4);
 
-    write_mesh_chunk(f, data.mesh);
     write_camr_chunk(f, data.camera);
     write_opts_chunk(f, data.mirror_x, data.subdiv_level);
-    write_mres_chunk(f, data.multires);
+    write_scen_chunk(f, data);
+    for (const EntityRecord& e : data.entities)
+        write_enty_chunk(f, e);
 
     if (!f.good()) return SaveResult::ERR_WRITE;
     return SaveResult::OK;
 }
 
-// --- Loading ---
+// ------------------------------------------------------------------ reading --
 
 class ChunkReader {
     const char* p;
@@ -141,7 +165,7 @@ public:
     }
 };
 
-static bool read_mesh_chunk(ChunkReader& r, Mesh& m) {
+static bool read_mesh_body(ChunkReader& r, Mesh& m) {
     uint32_t vc, tc;
     if (!r.read_u32(vc) || !r.read_u32(tc)) return false;
     if (!r.read_float_vec(m.pos_x, vc)) return false;
@@ -161,30 +185,11 @@ static bool read_mesh_chunk(ChunkReader& r, Mesh& m) {
     return true;
 }
 
-static bool read_camr_chunk(ChunkReader& r, Camera& c) {
-    float buf[7];
-    if (!r.read_raw(buf, sizeof(buf))) return false;
-    c.target = { buf[0], buf[1], buf[2] };
-    c.distance = buf[3];
-    c.yaw   = buf[4];
-    c.pitch = buf[5];
-    c.fov   = buf[6];
-    return true;
-}
-
-static bool read_opts_chunk(ChunkReader& r, bool& mirror_x, int& subdiv_level) {
-    uint8_t mx;
-    int32_t sl;
-    if (!r.read_u8(mx) || !r.read_i32(sl)) return false;
-    mirror_x = (mx != 0);
-    subdiv_level = sl;
-    return true;
-}
-
-static bool read_mres_chunk(ChunkReader& r, MultiresStack& s) {
+static bool read_multires_body(ChunkReader& r, MultiresStack& s) {
     uint8_t locked_byte;
     if (!r.read_u8(locked_byte)) return false;
     s.locked = (locked_byte != 0);
+    if (!s.locked) return true;
 
     int32_t bl, cl;
     if (!r.read_i32(bl) || !r.read_i32(cl)) return false;
@@ -219,23 +224,57 @@ static bool read_mres_chunk(ChunkReader& r, MultiresStack& s) {
     return true;
 }
 
-LoadResult load_project(const char* path, ProjectData& data) {
-    std::ifstream f(path, std::ios::binary | std::ios::ate);
-    if (!f.is_open()) return LoadResult::ERR_OPEN;
+static bool read_camr_chunk(ChunkReader& r, Camera& c) {
+    float buf[7];
+    if (!r.read_raw(buf, sizeof(buf))) return false;
+    c.target = { buf[0], buf[1], buf[2] };
+    c.distance = buf[3];
+    c.yaw   = buf[4];
+    c.pitch = buf[5];
+    c.fov   = buf[6];
+    return true;
+}
 
-    auto file_size = f.tellg();
-    if (file_size < 8) return LoadResult::ERR_CORRUPT;
-    f.seekg(0);
+static bool read_opts_chunk(ChunkReader& r, bool& mirror_x, int& subdiv_level) {
+    uint8_t mx;
+    int32_t sl;
+    if (!r.read_u8(mx) || !r.read_i32(sl)) return false;
+    mirror_x = (mx != 0);
+    subdiv_level = sl;
+    return true;
+}
 
-    uint32_t magic, version;
-    f.read(reinterpret_cast<char*>(&magic), 4);
-    f.read(reinterpret_cast<char*>(&version), 4);
-    if (magic != MAGIC) return LoadResult::ERR_MAGIC;
-    if (version != VERSION) return LoadResult::ERR_VERSION;
+static bool read_scen_chunk(ChunkReader& r, ProjectData& d) {
+    uint8_t topo;
+    uint32_t nsel;
+    if (!r.read_u32(d.active_id) || !r.read_u32(d.next_id) ||
+        !r.read_u8(topo) || !r.read_u32(nsel))
+        return false;
+    d.mirror_use_topology = (topo != 0);
+    d.selected_ids.clear();
+    d.selected_ids.reserve(nsel);
+    for (uint32_t i = 0; i < nsel; i++) {
+        uint32_t id;
+        if (!r.read_u32(id)) return false;
+        d.selected_ids.push_back(id);
+    }
+    return true;
+}
 
-    bool has_mesh = false, has_camr = false, has_opts = false, has_mres = false;
+static bool read_enty_chunk(ChunkReader& r, EntityRecord& e) {
+    if (!r.read_u32(e.id) || !r.read_u32(e.subdiv_level)) return false;
+    if (!read_mesh_body(r, e.mesh)) return false;
+    if (!read_multires_body(r, e.multires)) return false;
+    return true;
+}
 
-    while (f.tellg() < file_size) {
+// v2 reader: file already validated (magic ok, version == VERSION) and `f`
+// positioned just past the 8-byte header.
+static LoadResult load_project_v2(std::ifstream& f, std::streamoff file_size,
+                                  ProjectData& data) {
+    bool has_scen = false;
+
+    while ((std::streamoff)f.tellg() < file_size) {
         ChunkHeader hdr;
         f.read(reinterpret_cast<char*>(&hdr), sizeof(hdr));
         if (!f.good()) break;
@@ -248,29 +287,59 @@ LoadResult load_project(const char* path, ProjectData& data) {
             f.read(payload.data(), hdr.size);
             if (!f.good()) return LoadResult::ERR_READ;
         }
-
         ChunkReader cr(payload);
 
-        if (std::memcmp(hdr.tag, "MESH", 4) == 0) {
-            if (!read_mesh_chunk(cr, data.mesh)) return LoadResult::ERR_CORRUPT;
-            has_mesh = true;
+        if (std::memcmp(hdr.tag, "ENTY", 4) == 0) {
+            EntityRecord e;
+            if (!read_enty_chunk(cr, e)) return LoadResult::ERR_CORRUPT;
+            data.entities.push_back(std::move(e));
+        } else if (std::memcmp(hdr.tag, "SCEN", 4) == 0) {
+            if (!read_scen_chunk(cr, data)) return LoadResult::ERR_CORRUPT;
+            has_scen = true;
         } else if (std::memcmp(hdr.tag, "CAMR", 4) == 0) {
             if (!read_camr_chunk(cr, data.camera)) return LoadResult::ERR_CORRUPT;
-            has_camr = true;
         } else if (std::memcmp(hdr.tag, "OPTS", 4) == 0) {
             if (!read_opts_chunk(cr, data.mirror_x, data.subdiv_level)) return LoadResult::ERR_CORRUPT;
-            has_opts = true;
-        } else if (std::memcmp(hdr.tag, "MRES", 4) == 0) {
-            if (!read_mres_chunk(cr, data.multires)) return LoadResult::ERR_CORRUPT;
-            has_mres = true;
         }
-        // Unknown chunks: silently skipped
+        // Unknown chunks: silently skipped.
     }
 
-    if (!has_mesh) return LoadResult::ERR_CORRUPT;
-    (void)has_camr; (void)has_opts; (void)has_mres;
+    if (data.entities.empty()) return LoadResult::ERR_CORRUPT;
+
+    // SCEN is optional defensively: fall back to a sane selection if missing.
+    if (!has_scen) {
+        data.active_id = data.entities.front().id;
+        data.selected_ids = { data.active_id };
+        uint32_t mx = 0;
+        for (const EntityRecord& e : data.entities) mx = std::max(mx, e.id);
+        data.next_id = mx + 1;
+    }
     return LoadResult::OK;
 }
+
+LoadResult load_project(const char* path, ProjectData& data) {
+    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    if (!f.is_open()) return LoadResult::ERR_OPEN;
+
+    auto file_size = f.tellg();
+    if (file_size < 8) return LoadResult::ERR_CORRUPT;
+    f.seekg(0);
+
+    uint32_t magic, version;
+    f.read(reinterpret_cast<char*>(&magic), 4);
+    f.read(reinterpret_cast<char*>(&version), 4);
+    if (magic != MAGIC) return LoadResult::ERR_MAGIC;
+
+    // Legacy versions live in their own removable modules. Delete the branch +
+    // the module together when support is dropped.
+    if (version == 1)
+        return load_project_v1(path, data);
+
+    if (version != VERSION) return LoadResult::ERR_VERSION;
+    return load_project_v2(f, (std::streamoff)file_size, data);
+}
+
+// ------------------------------------------------------------------ strings --
 
 const char* result_string(SaveResult r) {
     switch (r) {

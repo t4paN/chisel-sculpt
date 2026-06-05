@@ -291,6 +291,70 @@ void Scene::render_pick(const Camera& cam, int w, int h) {
     renderer_.pick_end();
 }
 
+// ---- Project load (multimesh) ----
+
+void Scene::load_entities(std::vector<EntityRecord>& records,
+                          uint32_t active_id,
+                          const std::vector<uint32_t>& selected,
+                          uint32_t next_id) {
+    // Tear down the current scene, releasing each entity's display VAO.
+    for (auto& up : entities_)
+        if (up) renderer_.free_display(up->gpu);
+    entities_.clear();
+    bound_active_id_ = 0;
+    preview_id_      = 0;
+
+    for (EntityRecord& rec : records) {
+        auto up = std::make_unique<MeshEntity>();
+        up->id           = rec.id;
+        up->subdiv_level = rec.subdiv_level;
+        up->alive        = true;
+        up->preview      = false;
+        up->mesh         = std::move(rec.mesh);
+        up->multires     = std::move(rec.multires);
+
+        // A locked stack stores base + displacement layers; the on-disk mesh is
+        // only the cached current-level surface. Regenerate it from the stack
+        // (matching the legacy single-mesh load), preserving the saved mask.
+        if (up->multires.locked) {
+            auto saved_mask = std::move(up->mesh.mask);
+            cascade_to_level(up->multires, up->mesh, up->multires.current_level);
+            if (!saved_mask.empty() && saved_mask.size() == up->mesh.vertex_count())
+                up->mesh.mask = std::move(saved_mask);
+        }
+        up->mesh.recompute_normals();
+        up->mesh.build_adjacency();
+        // Per-entity mirror map so any entity is ready to symmetrize when it
+        // becomes active (bind_active_ re-uploads it). The active entity's map
+        // is refreshed/cached again by the caller's refresh_mirror_map.
+        up->mesh.build_mirror_x_map();
+
+        entities_.push_back(std::move(up));
+    }
+
+    // Restore bookkeeping, then sanitize selection against what actually loaded.
+    auto exists = [&](uint32_t id) {
+        for (auto& up : entities_) if (up && up->id == id) return true;
+        return false;
+    };
+
+    active_id_ = active_id;
+    if (!exists(active_id_) && !entities_.empty())
+        active_id_ = entities_.front()->id;
+
+    selected_ids_.clear();
+    for (uint32_t id : selected)
+        if (exists(id)) selected_ids_.push_back(id);
+    if (selected_ids_.empty() && active_id_ != 0)
+        selected_ids_.push_back(active_id_);
+
+    // Never hand back a next_id that could collide with a loaded entity.
+    next_id_ = next_id;
+    for (auto& up : entities_)
+        if (up && up->id >= next_id_) next_id_ = up->id + 1;
+    // caller must sync()
+}
+
 // ---- Reset ----
 
 uint32_t Scene::reset_to_single_mesh(uint32_t subdiv_level) {

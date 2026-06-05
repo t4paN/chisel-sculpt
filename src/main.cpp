@@ -519,9 +519,14 @@ int main(int argc, char* argv[]) {
 
             if (result.success) {
                 mesh->mask.clear();
+                // perform_remesh rebuilt the ACTIVE entity's mesh + multires base
+                // in place. Leave every other entity untouched — only the active
+                // one was remeshed. Its topology is fresh (base level 0), so reset
+                // its subdiv level, refresh its mirror map, and re-sync the working
+                // set. Spatial mirror mode: destructive remesh breaks topology mirror.
                 scene.set_mirror_topology(false);
+                scene.active_entity().subdiv_level = 0;
                 scene.refresh_mirror_map();
-                scene.reset_to_single_mesh(0);
                 scene.sync();
                 mesh = &scene.active_mesh();
                 multires = &scene.active_multires();
@@ -1224,40 +1229,36 @@ int main(int argc, char* argv[]) {
                 if (ext == "chisel") {
                     ProjectData proj;
                     LoadResult lr = load_project(path.c_str(), proj);
-                    if (lr == LoadResult::OK) {
-                        *mesh = std::move(proj.mesh);
-                        *multires = std::move(proj.multires);
+                    if (lr == LoadResult::OK && !proj.entities.empty()) {
                         camera = proj.camera;
                         input.mirror_x = proj.mirror_x;
                         input.subdiv_level = proj.subdiv_level;
                         input.mesh_locked = true;
                         current_project_path = path;
 
-                        if (multires->locked) {
-                            auto saved_mask = std::move(mesh->mask);
-                            cascade_to_level(*multires, *mesh, multires->current_level);
-                            if (!saved_mask.empty() && saved_mask.size() == mesh->vertex_count())
-                                mesh->mask = std::move(saved_mask);
-                        }
-                        mesh->recompute_normals();
-                        scene.set_mirror_topology(multires->locked);
+                        // Rebuild the whole multimesh scene. load_entities does
+                        // per-entity cascade/adjacency/normals/mirror and restores
+                        // the saved selection; the active entity's mirror map is
+                        // (re)cached by refresh_mirror_map before sync.
+                        scene.set_mirror_topology(proj.mirror_use_topology);
+                        scene.load_entities(proj.entities, proj.active_id,
+                                            proj.selected_ids, proj.next_id);
                         scene.refresh_mirror_map(input.subdiv_level);
-                        mesh->build_adjacency();
-
-                        scene.reset_to_single_mesh(input.subdiv_level);
                         scene.sync();
+
                         mesh = &scene.active_mesh();
                         multires = &scene.active_multires();
                         mesh->compute_bounding_sphere(mesh_center, mesh_radius);
-                        scene.active_undo().clear();
                         brush_stroke.vertex_count = 0;
                         brush_stroke.phase = StrokePhase::NONE;
                         app_state = AppState::IDLE;
                         screen_buffers_dirty = true;
 
                         std::snprintf(input.notification, sizeof(input.notification),
-                                      "Loaded: %.400s (%u v, %u t)",
-                                      path.c_str(), mesh->vertex_count(), mesh->tri_count());
+                                      "Loaded: %.400s (%zu mesh%s, active %u v, %u t)",
+                                      path.c_str(), proj.entities.size(),
+                                      proj.entities.size() == 1 ? "" : "es",
+                                      mesh->vertex_count(), mesh->tri_count());
                         input.notification_timer = 3.0f;
                     } else {
                         error_popup_msg = std::string("Load failed: ") + result_string(lr) + "\n" + path;
@@ -1309,10 +1310,23 @@ int main(int argc, char* argv[]) {
         // ---- Save project (.chisel) ----
         auto do_save_project = [&](const std::string& path) {
             ProjectData proj;
-            proj.mesh = *mesh;
-            proj.camera = camera;
-            proj.multires = *multires;
-            proj.mirror_x = input.mirror_x;
+            // Persist the whole multimesh scene: every alive, committed entity
+            // (skip transient INSERT previews) with its own mesh + multires.
+            for (auto& up : scene.entities()) {
+                if (!up || !up->alive || up->preview) continue;
+                EntityRecord rec;
+                rec.id           = up->id;
+                rec.subdiv_level = up->subdiv_level;
+                rec.mesh         = up->mesh;
+                rec.multires     = up->multires;
+                proj.entities.push_back(std::move(rec));
+            }
+            proj.active_id           = scene.active_mesh_id();
+            proj.selected_ids        = scene.selected_ids();
+            proj.next_id             = scene.next_id();
+            proj.mirror_use_topology = scene.mirror_topology();
+            proj.camera       = camera;
+            proj.mirror_x     = input.mirror_x;
             proj.subdiv_level = input.subdiv_level;
             SaveResult sr = save_project(path.c_str(), proj);
             if (sr == SaveResult::OK) {
