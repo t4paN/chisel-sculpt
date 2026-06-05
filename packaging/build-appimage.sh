@@ -24,7 +24,7 @@ cp -r "$BUILD_DIR/assets" "$APPDIR/usr/bin/assets"
 cp "$SCRIPT_DIR/chisel.desktop" "$APPDIR/usr/share/applications/chisel.desktop"
 cp "$SCRIPT_DIR/chisel.desktop" "$APPDIR/chisel.desktop"
 
-ICON_SRC="$PROJECT_DIR/../chisel-ico.png"
+ICON_SRC="$PROJECT_DIR/assets/chisel-icon.png"
 cp "$ICON_SRC" "$APPDIR/usr/share/icons/hicolor/256x256/apps/chisel.png"
 cp "$ICON_SRC" "$APPDIR/chisel.png"
 

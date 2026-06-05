@@ -48,10 +48,11 @@ add_executable(chisel
     src/ui_overlay.cpp
     src/project_file.cpp
     src/project_file_v1.cpp
+    src/window_icon.cpp
     src/tablet.cpp
 )
 
-target_include_directories(chisel PRIVATE include)
+target_include_directories(chisel PRIVATE include external)
 
 execute_process(
     COMMAND git describe --tags --always

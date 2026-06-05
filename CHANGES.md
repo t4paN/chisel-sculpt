@@ -2,6 +2,11 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-05 — App/window icon
+
+- **The chisel icon now shows on the running window, not just the launcher** — added `glfwSetWindowIcon` at startup (`src/window_icon.cpp`, called from `main` right after window creation). The PNG is baked into the binary as a byte array (`include/icon_data.h`, generated via `xxd -i` from `assets/chisel-icon.png`) and decoded once from memory with stb_image (`stbi_load_from_memory`, forced RGBA) — no runtime file lookup, so the AppImage/exe stays self-contained. stb_image is vendored single-header at `external/stb/stb_image.h` (matches the existing `#include "stb/stb_image.h"` convention) and its ~280KB implementation is isolated to `window_icon.cpp` (`STB_IMAGE_IMPLEMENTATION`) so it never bloats the hot files. Missing/garbage icon decode is non-fatal (window just gets the default).
+- **Fixed the AppImage icon source path** — `packaging/build-appimage.sh` sourced the icon from `$PROJECT_DIR/../chisel-ico.png`, a file that lived *outside* the repo (working root only), so a clean CI checkout would have had no icon. The icon is now committed in-repo at `assets/chisel-icon.png` and the script points there. (Window icon = embedded bytes; launcher/desktop icon = this file — two consumers, one source PNG.)
+
 ## 2026-06-05 — Remesh: don't destroy unselected meshes
 
 - **Remesh now edits only the active entity, leaving every other mesh intact** — like the save pipeline, the remesh trigger predated multimesh and ended with `scene.reset_to_single_mesh(0)`, which tore down every non-active entity (a bust's separate eyes vanished on remesh). But `perform_remesh(*mesh, *multires)` already rebuilds the **active** entity's mesh + multires base entirely in place (adjacency, normals, mirror map, fresh level-0 stack). The scene collapse was pure collateral. Dropped the `reset_to_single_mesh` call; the one bit it still did that we need — resetting the active entity's `subdiv_level` to 0 — is now an explicit `scene.active_entity().subdiv_level = 0`. `refresh_mirror_map()` + `sync()` both scope to the active entity (inactive display VAOs only re-upload when dirty), so unselected meshes keep their geometry, multires, and undo history untouched. Active entity's undo is still cleared (its topology changed).

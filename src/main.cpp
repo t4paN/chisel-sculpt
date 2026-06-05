@@ -43,6 +43,9 @@ static constexpr float PRESSURE_GAMMA      = 1.0f;
 extern float input_consume_scroll();
 void setup_char_callback(GLFWwindow* window);
 
+// From window_icon.cpp — sets the GLFW window icon from the embedded PNG.
+void set_window_icon(GLFWwindow* window);
+
 enum class AppState { IDLE, SCULPTING };
 
 // Wrap cursor at screen edges. Returns true if cursor was wrapped.
@@ -104,6 +107,7 @@ int main(int argc, char* argv[]) {
         glfwTerminate();
         return 1;
     }
+    set_window_icon(window);
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1); // vsync
 
