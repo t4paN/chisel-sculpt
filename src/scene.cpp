@@ -227,6 +227,12 @@ void Scene::set_active(uint32_t entity_id) {
     if (entity_id != 0) bind_active_(entity_id);
 }
 
+void Scene::collapse_selection_to_active() {
+    selected_ids_.clear();
+    if (active_id_  != 0) selected_ids_.push_back(active_id_);
+    if (preview_id_ != 0) selected_ids_.push_back(preview_id_);
+}
+
 bool Scene::toggle_selected(uint32_t entity_id) {
     if (entity_id == 0) return false;
     if (entity_id == active_id_) return false;
@@ -267,12 +273,20 @@ bool Scene::select(uint32_t entity_id) {
 }
 
 void Scene::refresh_for_edit_mode() {
-    if (alive_count() > 1) {
-        MeshEntity* e = selected();
-        if (e) set_active(e->id);
-    } else {
-        set_active(0);
+    // Make the active entity authoritative for editing. The old code did
+    // set_active(0) for the single-mesh case, but entity ids start at 1 — id 0
+    // means "no active entity", so that stranded active_id_ and the next
+    // active_mesh() aborted. It only stayed latent because a lone *original*
+    // mesh is rarely re-entered via SELECT; a merge (which collapses to one
+    // entity with a nonzero id) then remesh, then EDIT, hit it every time.
+    // Resolve to a live entity: the current active if it survived, else the
+    // first alive entity (e.g. the lone survivor of a merge).
+    MeshEntity* e = active_entity_();
+    if (!e) {
+        for (auto& up : entities_)
+            if (up && up->alive) { e = up.get(); break; }
     }
+    if (e) set_active(e->id);
 }
 
 void Scene::render_pick(const Camera& cam, int w, int h) {

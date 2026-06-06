@@ -535,6 +535,11 @@ int main(int argc, char* argv[]) {
                 // set. Spatial mirror mode: destructive remesh breaks topology mirror.
                 scene.set_mirror_topology(false);
                 scene.active_entity().subdiv_level = 0;
+                // Remesh is single-entity: it only rebuilt the active mesh, so a
+                // leftover multi-selection is stale. Collapse it to the active
+                // entity now — clears the deselected tint and keeps downstream
+                // ops (edit-mode entry, merge) from acting on a mixed set.
+                scene.collapse_selection_to_active();
                 scene.refresh_mirror_map();
                 scene.sync();
                 mesh = &scene.active_mesh();

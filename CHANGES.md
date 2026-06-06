@@ -2,6 +2,11 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-06 — Fix: edit-mode crash after merge/remesh on a single entity
+
+- **`active_mesh(): Assertion 'e && "no active entity"'` abort fixed** — `refresh_for_edit_mode` called `set_active(0)` in the `alive_count() <= 1` branch, but entity ids start at 1 (`next_id_` inits to 1), so id 0 means "no active entity": that stranded `active_id_` and the next `active_mesh()` aborted. Latent for a lone original mesh (rarely re-entered via SELECT), but a **merge** (collapses the selection to one entity with a nonzero id) → remesh → switch to EDIT hit it every time. The pre-crash frame where "only the mirrored half renders" is the same `active_id_ = 0` state — the render loop has no active entity to draw from the working VAO. Now `refresh_for_edit_mode` resolves to a live entity (current active if it survived, else the first alive one) instead of zeroing.
+- **Remesh now collapses a stale multi-selection** — remesh only rebuilds the active entity, so a leftover multi-selection (and its deselected tint) was stale afterward; `collapse_selection_to_active()` drops it back to the remeshed entity.
+
 ## 2026-06-06 — Polish: real version in the HUD, menu icon shows up
 
 - **Release builds now show the actual version, not "dev"** — the version HUD read `CHISEL_VERSION`, set from `git describe --tags --always` at configure time. In the CI container that git call errored (workspace owned by another uid → dubious-ownership, plus a shallow checkout with no tags fetched) → empty → the `"dev"` fallback shipped in every release. Fix is two-sided: CMake now honors a pre-set `-DCHISEL_VERSION` (only falling back to git describe, then `"dev"`), and both workflows inject the tag on tag builds (`-DCHISEL_VERSION=$GITHUB_REF_NAME`), `fetch-depth: 0` so describe works on `main` too, and `safe.directory` for the container. Local tagless trees still read `"dev"`.

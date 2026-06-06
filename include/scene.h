@@ -60,6 +60,10 @@ public:
     uint32_t active_mesh_id()  const { return active_id_; }
 
     bool toggle_selected(uint32_t entity_id);
+    // Collapse a multi-selection down to just the active entity (+ live preview),
+    // without touching GPU buffers. Use after a destructive single-entity op
+    // (remesh) so the stale selection set — and its deselected tint — clears.
+    void collapse_selection_to_active();
     const std::vector<uint32_t>& selected_ids() const { return selected_ids_; }
     uint32_t next_id() const { return next_id_; }
 
