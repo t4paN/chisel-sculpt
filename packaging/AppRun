@@ -41,4 +41,7 @@ if [ -n "${APPIMAGE:-}" ]; then
     install_entry
 fi
 
+# Prefer libs bundled into the AppImage (CI bundles into usr/lib; a local build
+# may not, in which case this dir simply doesn't exist and is a harmless no-op).
+export LD_LIBRARY_PATH="$APPDIR/usr/lib:${LD_LIBRARY_PATH}"
 exec "$APPDIR/usr/bin/chisel" "$@"

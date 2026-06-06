@@ -2,6 +2,10 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-06 — CI: build the AppImage from packaging/, not an inline stub
+
+- **The release AppImage now actually contains our AppRun, desktop file, and icon** — `linux.yml` was hand-rolling its own AppDir: a stub `AppRun` (just `LD_LIBRARY_PATH` + `exec`, so the start-menu auto-register never shipped), an inline `.desktop` missing `StartupWMClass`, and a *Python-generated placeholder* icon (a gray circle) instead of the real one. Every CI build/release silently discarded `packaging/`. Now CI copies `packaging/AppRun`, `packaging/chisel.desktop`, and `assets/chisel-icon.png` — same sources the local `build-appimage.sh` already used. Added `LD_LIBRARY_PATH=$APPDIR/usr/lib` to `packaging/AppRun` (CI bundles libs there; harmless no-op for local builds that don't) so the unified AppRun keeps bundled libs working. Verified the auto-register branch end-to-end into a sandbox HOME: correct rewritten `Exec=`, `StartupWMClass`, real icon.
+
 ## 2026-06-06 — Remesh: fix NaN-shredding bug, tighten the band, thin the seam
 
 - **Fixed a NaN that silently destroyed meshes on remesh** — the GPU tangential-smooth shader did `normalize()` on the raw vertex normal. A momentarily-degenerate (zero-length) normal — far more common under heavy split/collapse load — makes that `0/0 = NaN`, which leaks into `out_pos.y/z` (the `x` slot is masked by the seam `sign()/max()` clamp, so it stays finite). A single NaN coordinate poisons `build_mirror_spatial`'s mean-edge sum → `tol=NaN` → 0 paired vertices → the whole mirror is unpaired and the model shreds. Now guard the normalize: a zero-length normal has no tangent plane, so leave the vertex put (`compute_remesh.cpp`). Fingerprint was `[mirror] spatial rebuild: 0 paired … tol=-nan, edge=-nan` with finite, balanced +x/-x.

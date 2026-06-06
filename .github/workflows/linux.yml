@@ -41,37 +41,10 @@ jobs:
           cp build/chisel AppDir/usr/bin/
 
           mkdir -p AppDir/usr/share/applications
-          cat > AppDir/usr/share/applications/chisel.desktop << 'EOF'
-          [Desktop Entry]
-          Name=Chisel
-          Exec=chisel
-          Icon=chisel
-          Type=Application
-          Categories=Graphics;3DGraphics;
-          EOF
+          cp packaging/chisel.desktop AppDir/usr/share/applications/chisel.desktop
 
           mkdir -p AppDir/usr/share/icons/hicolor/256x256/apps
-          python3 -c "
-          import struct, zlib
-          W=H=256
-          raw=b''
-          for y in range(H):
-            raw+=b'\x00'
-            for x in range(W):
-              cx,cy=x-W//2,y-H//2
-              if cx*cx+cy*cy<(W//3)*(W//3):
-                raw+=b'\xe0\xe0\xe0\xff'
-              else:
-                raw+=b'\x2a\x2a\x2a\xff'
-          def chunk(t,d):
-            c=t+d
-            return struct.pack('>I',len(d))+c+struct.pack('>I',zlib.crc32(c)&0xffffffff)
-          with open('AppDir/usr/share/icons/hicolor/256x256/apps/chisel.png','wb') as f:
-            f.write(b'\x89PNG\r\n\x1a\n')
-            f.write(chunk(b'IHDR',struct.pack('>IIBBBBB',W,H,8,6,0,0,0)))
-            f.write(chunk(b'IDAT',zlib.compress(raw)))
-            f.write(chunk(b'IEND',b''))
-          "
+          cp assets/chisel-icon.png AppDir/usr/share/icons/hicolor/256x256/apps/chisel.png
 
       - name: Bundle shared libraries
         run: |
@@ -90,12 +63,7 @@ jobs:
 
       - name: Create AppRun
         run: |
-          cat > AppDir/AppRun << 'APPRUN'
-          #!/bin/bash
-          HERE="$(dirname "$(readlink -f "$0")")"
-          export LD_LIBRARY_PATH="$HERE/usr/lib:${LD_LIBRARY_PATH}"
-          exec "$HERE/usr/bin/chisel" "$@"
-          APPRUN
+          cp packaging/AppRun AppDir/AppRun
           chmod +x AppDir/AppRun
           cp AppDir/usr/share/applications/chisel.desktop AppDir/
           cp AppDir/usr/share/icons/hicolor/256x256/apps/chisel.png AppDir/chisel.png
