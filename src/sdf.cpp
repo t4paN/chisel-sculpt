@@ -425,6 +425,91 @@ void set_grid_uniforms(GLuint prog, const SdfGrid& g) {
     glUniform1i(glGetUniformLocation(prog, "u_R"), (int)g.R);
 }
 
+// ---- Tangential relaxation toward the iso-surface --------------------------
+// Trilinearly sample the signed MC field (read back to CPU) at a world point.
+// Corner (i,j,k) index = i + S*(j + S*k), S = R+1 — matches the MC shader.
+float sample_field(const std::vector<float>& f, const SdfGrid& g, Vec3 p) {
+    float gx = (p.x - g.origin.x) / g.voxel;
+    float gy = (p.y - g.origin.y) / g.voxel;
+    float gz = (p.z - g.origin.z) / g.voxel;
+    float maxc = (float)g.R - 1e-4f;          // keep i+1 in [0, R]
+    gx = std::min(std::max(gx, 0.0f), maxc);
+    gy = std::min(std::max(gy, 0.0f), maxc);
+    gz = std::min(std::max(gz, 0.0f), maxc);
+    uint32_t i = (uint32_t)gx, j = (uint32_t)gy, k = (uint32_t)gz;
+    float fx = gx - i, fy = gy - j, fz = gz - k;
+    uint32_t S = g.R + 1;
+    auto C = [&](uint32_t ii, uint32_t jj, uint32_t kk) { return f[ii + S*(jj + S*kk)]; };
+    float c00 = C(i,j,  k  )*(1-fx) + C(i+1,j,  k  )*fx;
+    float c10 = C(i,j+1,k  )*(1-fx) + C(i+1,j+1,k  )*fx;
+    float c01 = C(i,j,  k+1)*(1-fx) + C(i+1,j,  k+1)*fx;
+    float c11 = C(i,j+1,k+1)*(1-fx) + C(i+1,j+1,k+1)*fx;
+    float c0 = c00*(1-fy) + c10*fy;
+    float c1 = c01*(1-fy) + c11*fy;
+    return c0*(1-fz) + c1*fz;
+}
+
+// Even out the marching-cubes triangulation WITHOUT losing shape. Each pass
+// moves a vertex toward its 1-ring centroid but only in the tangent plane (the
+// normal component, taken from the SDF gradient, is stripped), then snaps the
+// residual back onto the field's zero level set. Plain (Laplacian) smoothing
+// deflates the form because it moves vertices off-surface; constraining to the
+// tangent plane + reprojecting keeps every vertex exactly on the merged surface
+// while the triangles spread to uniform spacing. Self-contained — reuses the
+// field we already built; no perform_remesh (which would mirror-symmetrise).
+void relax_to_field(Mesh& m, const std::vector<float>& field,
+                    const SdfGrid& grid, int iters, float lambda) {
+    uint32_t nv = m.vertex_count();
+    if (nv == 0 || m.indices.empty() || iters <= 0) return;
+
+    // Unique 1-ring neighbours from the triangle list.
+    std::vector<std::vector<uint32_t>> nbr(nv);
+    {
+        std::vector<std::unordered_set<uint32_t>> sets(nv);
+        for (size_t t = 0; t + 2 < m.indices.size(); t += 3) {
+            uint32_t a = m.indices[t], b = m.indices[t+1], c = m.indices[t+2];
+            sets[a].insert(b); sets[a].insert(c);
+            sets[b].insert(a); sets[b].insert(c);
+            sets[c].insert(a); sets[c].insert(b);
+        }
+        for (uint32_t v = 0; v < nv; v++) nbr[v].assign(sets[v].begin(), sets[v].end());
+    }
+
+    float h = 0.5f * grid.voxel;              // central-difference step for the gradient
+    std::vector<float> nx(nv), ny(nv), nz(nv);
+
+    for (int it = 0; it < iters; it++) {
+        for (uint32_t v = 0; v < nv; v++) {
+            const std::vector<uint32_t>& N = nbr[v];
+            Vec3 p(m.pos_x[v], m.pos_y[v], m.pos_z[v]);
+            if (N.empty()) { nx[v]=p.x; ny[v]=p.y; nz[v]=p.z; continue; }
+
+            Vec3 c(0,0,0);
+            for (uint32_t u : N) c += Vec3(m.pos_x[u], m.pos_y[u], m.pos_z[u]);
+            c = c * (1.0f / (float)N.size());
+            Vec3 d = c - p;                    // umbrella (uniform-Laplacian) vector
+
+            // Surface normal from the SDF gradient (central differences).
+            Vec3 grad(
+                sample_field(field,grid,Vec3(p.x+h,p.y,p.z)) - sample_field(field,grid,Vec3(p.x-h,p.y,p.z)),
+                sample_field(field,grid,Vec3(p.x,p.y+h,p.z)) - sample_field(field,grid,Vec3(p.x,p.y-h,p.z)),
+                sample_field(field,grid,Vec3(p.x,p.y,p.z+h)) - sample_field(field,grid,Vec3(p.x,p.y,p.z-h)));
+            float gl = grad.length();
+            Vec3 pn;
+            if (gl > 1e-12f) {
+                Vec3 n = grad * (1.0f / gl);
+                Vec3 dt = d - n * d.dot(n);     // tangential component only
+                pn = p + dt * lambda;
+                pn = pn - n * sample_field(field, grid, pn);  // reproject onto zero level set
+            } else {
+                pn = p + d * lambda;            // no usable gradient — fall back to plain move
+            }
+            nx[v]=pn.x; ny[v]=pn.y; nz[v]=pn.z;
+        }
+        m.pos_x = nx; m.pos_y = ny; m.pos_z = nz;   // Jacobi update (all verts move together)
+    }
+}
+
 } // namespace
 
 // ============================================================================
@@ -599,6 +684,20 @@ VoxelMergeResult voxel_merge_selected(Scene& scene, ComputeState& cs, int resolu
     // ---- Hash-weld → watertight indexed Mesh ----
     Mesh welded;
     hash_weld(soup, out_tris, grid.voxel * 1e-3f, welded);
+
+    // ---- Read back the signed field, relax the MC triangulation onto it ----
+    // Spreads the blocky/uneven MC tris (and dissolves the cell-corner slivers)
+    // to uniform spacing while holding the silhouette exactly. Second readback,
+    // one-shot like the soup above — the no-readback rule is stroke-only.
+    {
+        std::vector<float> field_cpu(corner_count);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, field.id);
+        glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
+                           (GLsizeiptr)field_cpu.size()*sizeof(float), field_cpu.data());
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+        relax_to_field(welded, field_cpu, grid, /*iters=*/8, /*lambda=*/0.5f);
+    }
+
     welded.build_adjacency();
     welded.recompute_normals();   // clean per-vertex normals (GPU normals were for orientation only)
 
