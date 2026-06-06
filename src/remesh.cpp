@@ -251,7 +251,7 @@ static uint32_t split_long_edges(Mesh& m, EdgeTable& et,
 
                 uint64_t k = edge_key(va, vb);
                 if (edge_map.count(k)) continue;
-                if (edge_length(m, va, vb) <= high * 1.1f) continue;
+                if (edge_length(m, va, vb) <= high) continue;  // was high*1.1 (1.54t) — left tris large
 
                 // Find the (up to two) triangles sharing this edge.
                 uint32_t tri_a = INVALID, tri_b = INVALID;
@@ -533,24 +533,32 @@ static uint32_t collapse_short_edges(Mesh& m, EdgeTable& et,
 
             if (consumed_verts.count(va) || consumed_verts.count(vb)) continue;
 
-            // Block collapse of edges whose adjacent tris stitch the selection
-            // boundary — at least one vert in the tri is pinned AND at least one
-            // is interior. Collapsing these breaks connectivity to the protected
-            // (masked) region and leaves holes at the mask border.
+            // Block collapse of edges whose adjacent tris stitch a PROTECTED
+            // boundary — an off-seam pin (mask / grown-selection border) together
+            // with an interior vert. Collapsing those breaks connectivity to the
+            // protected region and leaves holes at the border.
+            //
+            // Mirror-seam pins (|x| < seam_tol) are deliberately NOT counted as a
+            // boundary pin here: seam verts are pinned for the whole loop, so the
+            // center line otherwise stays frozen at input density while the interior
+            // re-spaces to target — a visibly finer seam band. Letting a pure seam
+            // edge [seam, seam, interior] collapse (pinned-pinned, snapped to x=0
+            // below) decimates the seam to target spacing. A true mask border
+            // [off-seam-pin, interior, interior] still trips the guard and is blocked.
             {
                 bool boundary_edge = false;
                 uint32_t adj_tris[2] = { e.tri_a, e.tri_b };
                 for (uint32_t tri : adj_tris) {
                     if (tri == INVALID) continue;
-                    bool has_pinned = false, has_interior = false;
+                    bool has_border_pin = false, has_interior = false;
                     for (int k = 0; k < 3; k++) {
                         uint32_t tv = m.indices[tri*3+k];
-                        if (tv < (uint32_t)pinned.size() && pinned[tv])
-                            has_pinned = true;
-                        else
-                            has_interior = true;
+                        bool is_pinned = (tv < (uint32_t)pinned.size() && pinned[tv]);
+                        bool on_seam   = (std::fabs(m.pos_x[tv]) < seam_tol);
+                        if (is_pinned && !on_seam) has_border_pin = true;
+                        else if (!is_pinned)       has_interior   = true;
                     }
-                    if (has_pinned && has_interior) { boundary_edge = true; break; }
+                    if (has_border_pin && has_interior) { boundary_edge = true; break; }
                 }
                 if (boundary_edge) continue;
             }
@@ -1562,7 +1570,7 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
         target_edge_length = compute_mean_edge_length(mesh);
 
     float high = 1.4f * target_edge_length;
-    float low  = 0.6f * target_edge_length;
+    float low  = 0.8f * target_edge_length;   // canonical 4/3:4/5 band (was 0.6 — too wide, left fine tris)
     float seam_tol = std::max(1e-5f, target_edge_length * 0.01f);
 
     // Repair brush-induced flipped tris before the edge ops can amplify them.

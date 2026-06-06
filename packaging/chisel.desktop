@@ -6,3 +6,4 @@ Exec=chisel
 Icon=chisel
 Categories=Graphics;3DGraphics;
 Terminal=false
+StartupWMClass=Chisel

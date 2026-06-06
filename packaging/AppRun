@@ -5,13 +5,21 @@ DESKTOP_SRC="$APPDIR/chisel.desktop"
 ICON_DEST="$HOME/.local/share/icons/hicolor/256x256/apps/chisel.png"
 DESKTOP_DEST="$HOME/.local/share/applications/chisel.desktop"
 
+# Install (or refresh) the menu entry + icon, pointing Exec at the real .AppImage
+# path. Idempotent; safe to call on every launch. update-desktop-database nudges
+# DEs that don't watch the dir.
+install_entry() {
+    mkdir -p "$(dirname "$ICON_DEST")" "$(dirname "$DESKTOP_DEST")"
+    cp -f "$ICON_SRC" "$ICON_DEST"
+    APPIMAGE_PATH="$(readlink -f "${APPIMAGE:-$0}")"
+    sed "s|^Exec=.*|Exec=\"$APPIMAGE_PATH\"|" "$DESKTOP_SRC" > "$DESKTOP_DEST"
+    command -v update-desktop-database >/dev/null 2>&1 \
+        && update-desktop-database "$(dirname "$DESKTOP_DEST")" >/dev/null 2>&1 || true
+}
+
 case "${1:-}" in
     --install)
-        mkdir -p "$(dirname "$ICON_DEST")"
-        mkdir -p "$(dirname "$DESKTOP_DEST")"
-        cp "$ICON_SRC" "$ICON_DEST"
-        APPIMAGE_PATH="$(readlink -f "${APPIMAGE:-$0}")"
-        sed "s|^Exec=.*|Exec=$APPIMAGE_PATH|" "$DESKTOP_SRC" > "$DESKTOP_DEST"
+        install_entry
         echo "Chisel installed to desktop. Icon and launcher added."
         echo "  Desktop: $DESKTOP_DEST"
         echo "  Icon:    $ICON_DEST"
@@ -19,9 +27,18 @@ case "${1:-}" in
         ;;
     --uninstall)
         rm -f "$ICON_DEST" "$DESKTOP_DEST"
+        command -v update-desktop-database >/dev/null 2>&1 \
+            && update-desktop-database "$(dirname "$DESKTOP_DEST")" >/dev/null 2>&1 || true
         echo "Chisel desktop entry and icon removed."
         exit 0
         ;;
 esac
+
+# Auto-register on a normal launch so the app appears in the start menu without
+# an explicit --install. Guarded on $APPIMAGE so running the raw AppDir during
+# dev (no .AppImage path) doesn't write a stale Exec pointing inside the AppDir.
+if [ -n "${APPIMAGE:-}" ]; then
+    install_entry
+fi
 
 exec "$APPDIR/usr/bin/chisel" "$@"

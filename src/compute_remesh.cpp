@@ -318,7 +318,20 @@ void main() {
     nbr_centroid /= float(nbr_count);
 
     vec3 pos = vec3(in_pos[v*3u+0u], in_pos[v*3u+1u], in_pos[v*3u+2u]);
-    vec3 nrm = normalize(vec3(normals[v*3u+0u], normals[v*3u+1u], normals[v*3u+2u]));
+    // A degenerate (zero-length) vertex normal has no tangent plane to project
+    // onto. normalize() of a zero vector is 0/0 -> NaN in GLSL, which then leaks
+    // into out_pos.y/z (the x slot is masked by the sign()/max() seam clamp) and
+    // poisons mean-edge -> the post-remesh mirror rebuild goes tol=NaN, 0 paired,
+    // shredding the model. Bail out leaving the vertex put when that happens.
+    vec3 nrm_raw = vec3(normals[v*3u+0u], normals[v*3u+1u], normals[v*3u+2u]);
+    float nrm_len = length(nrm_raw);
+    if (nrm_len < 1e-12) {
+        out_pos[v*3u+0u] = pos.x;
+        out_pos[v*3u+1u] = pos.y;
+        out_pos[v*3u+2u] = pos.z;
+        return;
+    }
+    vec3 nrm = nrm_raw / nrm_len;
     vec3 d   = nbr_centroid - pos;
     vec3 td  = d - nrm * dot(d, nrm);
 

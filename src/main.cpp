@@ -95,6 +95,11 @@ int main(int argc, char* argv[]) {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 
+    // WM_CLASS must match StartupWMClass=Chisel in chisel.desktop so the running
+    // window groups under the launcher entry in the taskbar/dock (X11).
+    glfwWindowHintString(GLFW_X11_CLASS_NAME, "Chisel");
+    glfwWindowHintString(GLFW_X11_INSTANCE_NAME, "Chisel");
+
     // Get primary monitor for fullscreen
     GLFWmonitor* monitor = glfwGetPrimaryMonitor();
     const GLFWvidmode* mode = glfwGetVideoMode(monitor);
