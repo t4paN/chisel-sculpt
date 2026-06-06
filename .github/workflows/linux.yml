@@ -20,6 +20,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install build tools and dependencies
         run: |
@@ -30,7 +32,11 @@ jobs:
             python3 libfuse2 patchelf
 
       - name: Configure
-        run: cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE" || true
+          VERSION=""
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then VERSION="$GITHUB_REF_NAME"; fi
+          cmake -B build -S . -DCMAKE_BUILD_TYPE=Release ${VERSION:+-DCHISEL_VERSION="$VERSION"}
 
       - name: Build
         run: cmake --build build -j$(nproc)

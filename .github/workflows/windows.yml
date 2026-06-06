@@ -16,6 +16,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Bootstrap vcpkg
         run: |
@@ -26,12 +28,16 @@ jobs:
         run: C:\vcpkg\vcpkg.exe install glfw3:x64-windows-static
 
       - name: Configure
-        run: >
-          cmake -B build -S .
-          -DCMAKE_BUILD_TYPE=Release
-          -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake
-          -DVCPKG_TARGET_TRIPLET=x64-windows-static
-          -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+        run: |
+          $cmakeArgs = @(
+            "-B","build","-S",".",
+            "-DCMAKE_BUILD_TYPE=Release",
+            "-DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake",
+            "-DVCPKG_TARGET_TRIPLET=x64-windows-static",
+            "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded"
+          )
+          if ($env:GITHUB_REF_TYPE -eq "tag") { $cmakeArgs += "-DCHISEL_VERSION=$env:GITHUB_REF_NAME" }
+          cmake @cmakeArgs
 
       - name: Build
         run: cmake --build build --config Release

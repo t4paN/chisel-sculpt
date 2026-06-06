@@ -54,16 +54,21 @@ add_executable(chisel
 
 target_include_directories(chisel PRIVATE include external)
 
-execute_process(
-    COMMAND git describe --tags --always
-    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-    OUTPUT_VARIABLE CHISEL_VERSION
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-    ERROR_QUIET
-)
+# Version: an explicit -DCHISEL_VERSION (CI injects the tag) wins; otherwise
+# derive from git; "dev" only as a last resort for a tagless local tree.
+if(NOT CHISEL_VERSION)
+    execute_process(
+        COMMAND git describe --tags --always
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        OUTPUT_VARIABLE CHISEL_VERSION
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+endif()
 if(NOT CHISEL_VERSION)
     set(CHISEL_VERSION "dev")
 endif()
+message(STATUS "Chisel version: ${CHISEL_VERSION}")
 target_compile_definitions(chisel PRIVATE CHISEL_VERSION="${CHISEL_VERSION}")
 
 target_link_libraries(chisel PRIVATE glad OpenGL::GL glfw imgui)
