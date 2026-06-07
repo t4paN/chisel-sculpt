@@ -12,7 +12,7 @@ Chisel runs the entire sculpt pipeline on the GPU — brush operations, mesh upd
 - **Subdivision levels** — step up for detail, step down to edit forms, carry displacement between levels
 - **Isotropic remesh** — respects masks and mirror symmetry
 - **X-axis mirror** — real-time symmetric sculpting
-- **Voxel merge** — weld a selection of meshes into one watertight manifold, ready for 3D printing
+- **Voxel merge** — weld a selection of meshes into one watertight manifold, ready for 3D printing; optionally mirror-symmetric so the result stays editable under X-mirror
 - **Undo / redo** — delta-based, per-stroke, per-object
 - **Import / export** — OBJ in and out
 - **Save / load** — native project files (.chisel)
@@ -22,7 +22,7 @@ Chisel runs the entire sculpt pipeline on the GPU — brush operations, mesh upd
 ## Known limitations / TODO
 
 - Pen pressure is X11/XInput2 only (Wacom et al.); no Wayland tablet support yet
-- Voxel merge is solid on clean meshes; heavily sculpted input and merge-output topology still need work
+- Voxel merge output is now evened out (tangential relaxation onto the iso-surface) and can be made mirror-symmetric; heavily sculpted, non-watertight input can still need a resolution bump
 - Brush feel could use more polish (falloff curves, stroke interpolation)
 - No texture painting
 - Linux-only dev, Windows builds via CI (not battle-tested)
@@ -87,7 +87,7 @@ If you do plug in a graphics tablet on X11, pen pressure is picked up automatica
 | Ctrl + D | Subdivision level up |
 | Shift + D | Subdivision level down |
 | / | Remesh (confirm with Y) |
-| J | Voxel merge selection (confirm with Y; [ / ] adjust resolution) |
+| J | Voxel merge selection — Y faithful merge, M mirror-symmetric merge, N / Esc cancel; [ / ] adjust resolution |
 | P | Project displacement |
 | Ctrl + I | Invert mask |
 | Ctrl + A | Clear mask |
@@ -136,11 +136,11 @@ The goal is simple: stay fast at high polygon counts and don't make the artist w
 
 ### Windows
 
-Download `chisel-windows-x64.zip` from the [latest release](https://github.com/t4paN/chisel/releases), extract, and run `chisel.exe`. No installer, no dependencies.
+Download `chisel-windows-x64.zip` from the [latest release](https://github.com/t4paN/chisel-sculpt/releases), extract, and run `chisel.exe`. No installer, no dependencies.
 
 ### Linux (AppImage)
 
-Download the AppImage from the [latest release](https://github.com/t4paN/chisel/releases), make it executable, and run:
+Download the AppImage from the [latest release](https://github.com/t4paN/chisel-sculpt/releases), make it executable, and run:
 
 ```bash
 chmod +x Chisel-x86_64.AppImage
@@ -152,11 +152,24 @@ chmod +x Chisel-x86_64.AppImage
 Requires: `libglfw3-dev`, `libgl-dev`, `libglx-dev`, `libegl-dev`
 
 ```bash
-cd chisel
-mkdir -p build && cd build
-cmake .. && make -j$(nproc)
-./chisel
+cd chisel-sculpt
+cmake -B build && cmake --build build -j$(nproc)
+./build/chisel
 ```
+
+## Acknowledgments
+
+Chisel was vibecoded with Anthropic's Claude — the models did the lifting:
+
+| Model | Commits | What it built |
+|---|---:|---|
+| **Claude Opus 4.6** | 91 | The core architecture: the multimesh scene (selection, insert mode, mirror logic), cross-entity twin/mirror brushes, the ImGui interface, and the CI / AppImage release pipeline. |
+| **Claude Opus 4.7** | 35 | The remesher's heavy polish (GPU selection, tangential smoothing, seam discipline, convergence), GPU brush mirror-seam fixes, per-entity undo, and OBJ import. |
+| **Claude Haiku 4.5** | 30 | "lil' haiku" — the Big GPU Refactor that moved every brush onto compute shaders (draw, crease, pinch, move, mirrored sculpting), and brought the iso remesher home — symmetry, seam pinning, and tuning — at a point when Opus 4.6 was hamstrung by compute constraints. |
+| **Claude Sonnet 4.6** | 28 | The multires displacement stack, the icosphere / Loop-subdivision base, and the per-entity refactor (MeshEntity, per-object undo, per-entity compute dispatch). |
+| **Claude Opus 4.8** | 15 | The SDF mirror-symmetric voxel-merge, plus a final polish pass across brushes, rendering, and the merge/remesh pipeline. |
+
+Early testing by **Ariadne**.
 
 ## License
 
