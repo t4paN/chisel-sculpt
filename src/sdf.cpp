@@ -485,7 +485,27 @@ void relax_to_field(Mesh& m, const std::vector<float>& field,
         for (uint32_t v = 0; v < nv; v++) {
             const std::vector<uint32_t>& N = nbr[v];
             Vec3 p(m.pos_x[v], m.pos_y[v], m.pos_z[v]);
-            if ((pinned && (*pinned)[v]) || N.empty()) { nx[v]=p.x; ny[v]=p.y; nz[v]=p.z; continue; }
+            if (N.empty()) { nx[v]=p.x; ny[v]=p.y; nz[v]=p.z; continue; }
+
+            // Seam vert (mirror path): relax it as a 1D curve in the x=0 plane —
+            // average only its seam neighbours, force x=0, reproject onto the
+            // surface using the in-plane (x-stripped) gradient. Evens the seam
+            // spacing so the first interior row isn't pulled into slivers, while
+            // staying exactly on the mirror plane (self-mapped partner preserved).
+            if (pinned && (*pinned)[v]) {
+                Vec3 c(0,0,0); int cnt = 0;
+                for (uint32_t u : N) if ((*pinned)[u]) { c += Vec3(m.pos_x[u],m.pos_y[u],m.pos_z[u]); cnt++; }
+                if (cnt == 0) { nx[v]=p.x; ny[v]=p.y; nz[v]=p.z; continue; }
+                Vec3 pn = p + (c * (1.0f/(float)cnt) - p) * lambda;
+                pn.x = 0.0f;
+                Vec3 g(0.0f,
+                    sample_field(field,grid,Vec3(pn.x,pn.y+h,pn.z)) - sample_field(field,grid,Vec3(pn.x,pn.y-h,pn.z)),
+                    sample_field(field,grid,Vec3(pn.x,pn.y,pn.z+h)) - sample_field(field,grid,Vec3(pn.x,pn.y,pn.z-h)));
+                float gl = g.length();
+                if (gl > 1e-12f) { Vec3 n = g*(1.0f/gl); pn = pn - n*sample_field(field,grid,pn); pn.x = 0.0f; }
+                nx[v]=pn.x; ny[v]=pn.y; nz[v]=pn.z;
+                continue;
+            }
 
             Vec3 c(0,0,0);
             for (uint32_t u : N) c += Vec3(m.pos_x[u], m.pos_y[u], m.pos_z[u]);
@@ -584,6 +604,78 @@ void reflect_across_x(Mesh& m, const std::vector<uint8_t>& seam) {
         m.indices.push_back(refl[m.indices[t+2]]);
         m.indices.push_back(refl[m.indices[t+1]]);
     }
+}
+
+// Drop verts no tri references; carry the parallel seam mask through the remap.
+void compact_with_seam(Mesh& m, std::vector<uint8_t>& seam) {
+    uint32_t vc = m.vertex_count();
+    std::vector<uint32_t> remap(vc, 0xFFFFFFFFu);
+    uint32_t nv = 0;
+    for (uint32_t idx : m.indices)
+        if (remap[idx] == 0xFFFFFFFFu) remap[idx] = nv++;
+
+    std::vector<float> px(nv), py(nv), pz(nv), nxx(nv), nyy(nv), nzz(nv);
+    std::vector<uint8_t> sm(nv, 0);
+    for (uint32_t v = 0; v < vc; v++) {
+        uint32_t r = remap[v];
+        if (r == 0xFFFFFFFFu) continue;
+        px[r]=m.pos_x[v]; py[r]=m.pos_y[v]; pz[r]=m.pos_z[v];
+        nxx[r]=m.norm_x[v]; nyy[r]=m.norm_y[v]; nzz[r]=m.norm_z[v];
+        sm[r]=seam[v];
+    }
+    m.pos_x.swap(px); m.pos_y.swap(py); m.pos_z.swap(pz);
+    m.norm_x.swap(nxx); m.norm_y.swap(nyy); m.norm_z.swap(nzz);
+    seam.swap(sm);
+    for (uint32_t& idx : m.indices) idx = remap[idx];
+}
+
+// Kill the seam sliver column: a corner-aligned grid puts the first +x vertex on
+// a seam→interior edge at x=voxel·t, and when the iso-crossing sits near the seam
+// corner (t→0) that vert is ~coincident with its seam vert → a near-zero-width
+// tri. Weld each such near-seam +x vert onto the closest seam vert in its 1-ring
+// (short edge only), then drop the tris that collapse to a line and compact.
+// Runs on the +x half before reflection, so symmetry is preserved for free.
+void weld_near_seam(Mesh& m, float voxel, std::vector<uint8_t>& seam) {
+    float band     = voxel * 0.30f;          // x-distance that counts as "on the seam"
+    float merge_sq = (voxel * 0.50f) * (voxel * 0.50f);  // only weld genuinely short P–S edges
+    m.build_adjacency();
+    uint32_t vc = m.vertex_count();
+
+    std::vector<uint32_t> remap(vc);
+    for (uint32_t v = 0; v < vc; v++) remap[v] = v;
+
+    uint32_t welded = 0;
+    for (uint32_t v = 0; v < vc; v++) {
+        if (seam[v] || m.pos_x[v] >= band) continue;
+        uint32_t best = 0xFFFFFFFFu; float best_sq = merge_sq;
+        uint32_t s = m.vert_tri_offset[v], e = m.vert_tri_offset[v + 1];
+        for (uint32_t j = s; j < e; j++) {
+            uint32_t tri = m.vert_tri_list[j];
+            for (int k = 0; k < 3; k++) {
+                uint32_t nv = m.indices[tri*3+k];
+                if (nv == v || !seam[nv]) continue;
+                float dx=m.pos_x[v]-m.pos_x[nv], dy=m.pos_y[v]-m.pos_y[nv], dz=m.pos_z[v]-m.pos_z[nv];
+                float d = dx*dx+dy*dy+dz*dz;
+                if (d < best_sq) { best_sq = d; best = nv; }
+            }
+        }
+        if (best != 0xFFFFFFFFu) { remap[v] = best; welded++; }
+    }
+    if (welded == 0) return;
+
+    for (uint32_t& idx : m.indices) idx = remap[idx];
+
+    // Drop tris that collapsed to a line/point (a welded edge).
+    std::vector<uint32_t> keep;
+    keep.reserve(m.indices.size());
+    for (size_t t = 0; t + 2 < m.indices.size(); t += 3) {
+        uint32_t a=m.indices[t], b=m.indices[t+1], c=m.indices[t+2];
+        if (a==b || b==c || a==c) continue;
+        keep.push_back(a); keep.push_back(b); keep.push_back(c);
+    }
+    m.indices.swap(keep);
+    compact_with_seam(m, seam);
+    std::printf("[sdf-mirror] welded %u near-seam slivers\n", welded);
 }
 
 } // namespace
@@ -793,7 +885,8 @@ VoxelMergeResult voxel_merge_selected(Scene& scene, ComputeState& cs,
             // sides end up identical → exact partner map, no smooth seam fight.
             std::vector<uint8_t> seam;
             clip_to_plus_x(welded, grid.voxel, seam);
-            relax_to_field(welded, field_cpu, grid, /*iters=*/8, /*lambda=*/0.5f, &seam);
+            weld_near_seam(welded, grid.voxel, seam);   // B: collapse the seam sliver column
+            relax_to_field(welded, field_cpu, grid, /*iters=*/8, /*lambda=*/0.5f, &seam);  // A: 1D seam relax
             reflect_across_x(welded, seam);
         } else {
             relax_to_field(welded, field_cpu, grid, /*iters=*/8, /*lambda=*/0.5f);
