@@ -80,8 +80,8 @@ void draw_voxel_merge_confirm(TextOverlay& text, int resolution, int n_selected,
     std::snprintf(line, sizeof(line), "Resolution: %d   ( [ - / + ] )", resolution);
     text.draw_text(line, cx - 360.0f, cy + 4.0f, scale, win_w, win_h, CGA(light_cyan), 1.0f);
 
-    text.draw_text("Y / N / ESC", cx - 360.0f, cy + 40.0f, scale,
-                  win_w, win_h, CGA(yellow), 1.0f);
+    text.draw_text("Y merge   M mirror-merge   N / ESC cancel", cx - 360.0f, cy + 40.0f,
+                  scale, win_w, win_h, CGA(yellow), 1.0f);
 }
 
 void draw_voxel_merge_progress(TextOverlay& text, int win_w, int win_h) {

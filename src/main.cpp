@@ -576,10 +576,13 @@ int main(int argc, char* argv[]) {
                 input.notification_timer = 4.0f;
             } else {
                 VoxelMergeResult vm = voxel_merge_selected(scene, compute,
-                                                           input.voxel_merge_resolution);
+                                                           input.voxel_merge_resolution,
+                                                           input.voxel_merge_mirror);
                 if (vm.success) {
-                    // Merge changes topology entirely: spatial mirror, fresh mesh.
-                    scene.set_mirror_topology(false);
+                    // Mirror merge yields a tessellation-symmetric mesh → topology
+                    // mirror gives an exact partner map. Faithful merge is generic
+                    // geometry → spatial mirror. Either way refresh from the fresh mesh.
+                    scene.set_mirror_topology(input.voxel_merge_mirror);
                     scene.refresh_mirror_map();
                     scene.sync();
                     mesh = &scene.active_mesh();

@@ -53,6 +53,7 @@ InputState::InputState()
     , voxel_merge_requested(false)
     , voxel_merge_in_progress(false)
     , voxel_merge_confirm_pending(false)
+    , voxel_merge_mirror(false)
     , voxel_merge_resolution(128)
     , mask_invert_requested(false)
     , mask_clear_requested(false)
@@ -287,9 +288,12 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
         // The voxel-merge dialog also takes [ / ] to nudge the resolution.
         bool res_keys = g_input->voxel_merge_confirm_pending
                      && (key == GLFW_KEY_LEFT_BRACKET || key == GLFW_KEY_RIGHT_BRACKET);
+        // The voxel-merge dialog also takes M (mirror-symmetric merge).
+        bool merge_mirror_key = g_input->voxel_merge_confirm_pending
+                             && key == GLFW_KEY_M;
         bool allow = (key == GLFW_KEY_ESCAPE)
                   || (is_yn_dialog && (key == GLFW_KEY_Y || key == GLFW_KEY_N))
-                  || res_keys;
+                  || res_keys || merge_mirror_key;
         if (!allow) return;
     }
 
@@ -320,6 +324,12 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
                 break;
 
             case GLFW_KEY_M:
+                if (g_input->voxel_merge_confirm_pending) {
+                    g_input->voxel_merge_confirm_pending = false;
+                    g_input->voxel_merge_mirror = true;   // mirror-symmetric merge
+                    g_input->voxel_merge_requested = true;
+                    break;
+                }
                 g_input->clear_smooth_lock();
                 g_input->switch_brush(BrushType::MASK);
                 g_input->subtract_locked = false;
@@ -553,6 +563,7 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
             case GLFW_KEY_Y:
                 if (g_input->voxel_merge_confirm_pending) {
                     g_input->voxel_merge_confirm_pending = false;
+                    g_input->voxel_merge_mirror = false;   // faithful (asymmetric) merge
                     g_input->voxel_merge_requested = true;
                 } else if (g_input->remesh_confirm_pending) {
                     g_input->remesh_confirm_pending = false;

@@ -457,8 +457,11 @@ float sample_field(const std::vector<float>& f, const SdfGrid& g, Vec3 p) {
 // tangent plane + reprojecting keeps every vertex exactly on the merged surface
 // while the triangles spread to uniform spacing. Self-contained — reuses the
 // field we already built; no perform_remesh (which would mirror-symmetrise).
+// `pinned` (optional): verts flagged 1 are held fixed across every pass. Used by
+// the mirror path to lock the x=0 seam loop so the two halves stay weldable.
 void relax_to_field(Mesh& m, const std::vector<float>& field,
-                    const SdfGrid& grid, int iters, float lambda) {
+                    const SdfGrid& grid, int iters, float lambda,
+                    const std::vector<uint8_t>* pinned = nullptr) {
     uint32_t nv = m.vertex_count();
     if (nv == 0 || m.indices.empty() || iters <= 0) return;
 
@@ -482,7 +485,7 @@ void relax_to_field(Mesh& m, const std::vector<float>& field,
         for (uint32_t v = 0; v < nv; v++) {
             const std::vector<uint32_t>& N = nbr[v];
             Vec3 p(m.pos_x[v], m.pos_y[v], m.pos_z[v]);
-            if (N.empty()) { nx[v]=p.x; ny[v]=p.y; nz[v]=p.z; continue; }
+            if ((pinned && (*pinned)[v]) || N.empty()) { nx[v]=p.x; ny[v]=p.y; nz[v]=p.z; continue; }
 
             Vec3 c(0,0,0);
             for (uint32_t u : N) c += Vec3(m.pos_x[u], m.pos_y[u], m.pos_z[u]);
@@ -510,11 +513,85 @@ void relax_to_field(Mesh& m, const std::vector<float>& field,
     }
 }
 
+// ---- Mirror-symmetric extraction -------------------------------------------
+// The MC case table bakes a fixed grid-space diagonal per ambiguous face, so a
+// +x feature and its -x twin tessellate the SAME world direction — geometry can
+// be symmetric while topology is not, which defeats the vertex partner map. Fix:
+// keep ONLY the +x half (the grid is aligned so x=0 is a corner layer, hence no
+// straddling cells — every +x tri has all verts at x>=0, seam verts exactly 0),
+// relax it, then reflect it to -x with swapped winding. Symmetric by construction.
+
+// Drop -x tris, compact, and report the x=0 seam vert set (post-compaction).
+void clip_to_plus_x(Mesh& m, float voxel, std::vector<uint8_t>& seam_out) {
+    float seam_tol = voxel * 1e-4f;
+    uint32_t vc = m.vertex_count();
+
+    for (uint32_t v = 0; v < vc; v++)
+        if (std::fabs(m.pos_x[v]) < seam_tol) m.pos_x[v] = 0.0f;   // snap to the plane
+
+    std::vector<uint32_t> keep;
+    keep.reserve(m.indices.size());
+    for (size_t t = 0; t + 2 < m.indices.size(); t += 3) {
+        uint32_t a = m.indices[t], b = m.indices[t+1], c = m.indices[t+2];
+        if (m.pos_x[a] < -seam_tol || m.pos_x[b] < -seam_tol || m.pos_x[c] < -seam_tol)
+            continue;   // belongs to a -x cell
+        if (m.pos_x[a] == 0.0f && m.pos_x[b] == 0.0f && m.pos_x[c] == 0.0f)
+            continue;   // degenerate planar sail lying in the seam
+        keep.push_back(a); keep.push_back(b); keep.push_back(c);
+    }
+    m.indices.swap(keep);
+
+    // Compact away verts no kept tri references.
+    std::vector<uint32_t> remap(vc, 0xFFFFFFFFu);
+    uint32_t nv = 0;
+    for (uint32_t idx : m.indices)
+        if (remap[idx] == 0xFFFFFFFFu) remap[idx] = nv++;
+
+    std::vector<float> px(nv), py(nv), pz(nv), nxx(nv), nyy(nv), nzz(nv);
+    for (uint32_t v = 0; v < vc; v++) {
+        uint32_t r = remap[v];
+        if (r == 0xFFFFFFFFu) continue;
+        px[r]=m.pos_x[v]; py[r]=m.pos_y[v]; pz[r]=m.pos_z[v];
+        nxx[r]=m.norm_x[v]; nyy[r]=m.norm_y[v]; nzz[r]=m.norm_z[v];
+    }
+    m.pos_x.swap(px); m.pos_y.swap(py); m.pos_z.swap(pz);
+    m.norm_x.swap(nxx); m.norm_y.swap(nyy); m.norm_z.swap(nzz);
+    for (uint32_t& idx : m.indices) idx = remap[idx];
+
+    seam_out.assign(nv, 0);
+    for (uint32_t v = 0; v < nv; v++)
+        if (m.pos_x[v] == 0.0f) seam_out[v] = 1;
+}
+
+// Append the -x reflection: X-negated copies of non-seam verts (seam verts are
+// shared), mirrored tris with 2nd/3rd index swapped so they face outward.
+void reflect_across_x(Mesh& m, const std::vector<uint8_t>& seam) {
+    uint32_t vc = m.vertex_count();
+    uint32_t tn = (uint32_t)m.indices.size();
+    std::vector<uint32_t> refl(vc);
+    for (uint32_t v = 0; v < vc; v++) {
+        if (seam[v]) { refl[v] = v; continue; }
+        refl[v] = m.vertex_count();
+        m.pos_x.push_back(-m.pos_x[v]);
+        m.pos_y.push_back( m.pos_y[v]);
+        m.pos_z.push_back( m.pos_z[v]);
+        m.norm_x.push_back(-m.norm_x[v]);
+        m.norm_y.push_back( m.norm_y[v]);
+        m.norm_z.push_back( m.norm_z[v]);
+    }
+    for (uint32_t t = 0; t < tn; t += 3) {
+        m.indices.push_back(refl[m.indices[t  ]]);
+        m.indices.push_back(refl[m.indices[t+2]]);
+        m.indices.push_back(refl[m.indices[t+1]]);
+    }
+}
+
 } // namespace
 
 // ============================================================================
 
-VoxelMergeResult voxel_merge_selected(Scene& scene, ComputeState& cs, int resolution) {
+VoxelMergeResult voxel_merge_selected(Scene& scene, ComputeState& cs,
+                                      int resolution, bool mirror) {
     VoxelMergeResult res;
     if (!cs.supported) { res.error = "GPU compute unavailable"; return res; }
 
@@ -536,6 +613,13 @@ VoxelMergeResult voxel_merge_selected(Scene& scene, ComputeState& cs, int resolu
         lo.y = std::min(lo.y, pos[i+1]); hi.y = std::max(hi.y, pos[i+1]);
         lo.z = std::min(lo.z, pos[i+2]); hi.z = std::max(hi.z, pos[i+2]);
     }
+    // Mirror mode symmetrises about the app's mirror plane (world x=0): widen the
+    // x window to [-X, +X] so the kept +x half spans the whole result.
+    if (mirror) {
+        float X = std::max(std::fabs(lo.x), std::fabs(hi.x));
+        lo.x = -X; hi.x = X;
+    }
+
     int R = std::max(16, std::min(resolution, 256));
     float ext = std::max(hi.x - lo.x, std::max(hi.y - lo.y, hi.z - lo.z));
     if (!(ext > 0.0f)) { res.error = "degenerate selection bounds"; return res; }
@@ -545,6 +629,14 @@ VoxelMergeResult voxel_merge_selected(Scene& scene, ComputeState& cs, int resolu
     grid.voxel = ext / (float)(R - 2 * GRID_PAD);     // R-2*PAD cells span the AABB
     grid.origin = lo - Vec3(grid.voxel, grid.voxel, grid.voxel) * (float)GRID_PAD;
     res.R = grid.R;
+
+    // Snap the x origin so a corner layer lands exactly on x=0 (shift < ½ voxel).
+    // Then every cell sits wholly on one side — clip_to_plus_x gives a clean seam.
+    if (mirror) {
+        int seam_i = (int)std::lround(-grid.origin.x / grid.voxel);
+        seam_i = std::max(0, std::min(seam_i, (int)grid.R));
+        grid.origin.x = -(float)seam_i * grid.voxel;
+    }
 
     uint32_t corner_count = grid.corners();
     uint32_t cell_count   = grid.cells();
@@ -695,7 +787,17 @@ VoxelMergeResult voxel_merge_selected(Scene& scene, ComputeState& cs, int resolu
         glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
                            (GLsizeiptr)field_cpu.size()*sizeof(float), field_cpu.data());
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
-        relax_to_field(welded, field_cpu, grid, /*iters=*/8, /*lambda=*/0.5f);
+
+        if (mirror) {
+            // Keep +x, relax that half alone (seam pinned), then mirror it. Both
+            // sides end up identical → exact partner map, no smooth seam fight.
+            std::vector<uint8_t> seam;
+            clip_to_plus_x(welded, grid.voxel, seam);
+            relax_to_field(welded, field_cpu, grid, /*iters=*/8, /*lambda=*/0.5f, &seam);
+            reflect_across_x(welded, seam);
+        } else {
+            relax_to_field(welded, field_cpu, grid, /*iters=*/8, /*lambda=*/0.5f);
+        }
     }
 
     welded.build_adjacency();

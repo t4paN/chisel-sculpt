@@ -37,4 +37,9 @@ struct VoxelMergeResult {
 // consumes the selection; unselected entities are preserved). Caller is
 // responsible for the post-merge mirror refresh + scene.sync().
 // `resolution` = target cells along the longest AABB axis (clamped to [16,256]).
-VoxelMergeResult voxel_merge_selected(Scene& scene, ComputeState& cs, int resolution);
+// `mirror` = extract only the +x half and reflect it across x=0 (swapped winding)
+// so the result is tessellation-symmetric about the app's mirror plane — exact
+// vertex partner map, mirror-editable. Default (false) keeps the faithful,
+// possibly-asymmetric union (correct for a pure print export).
+VoxelMergeResult voxel_merge_selected(Scene& scene, ComputeState& cs,
+                                      int resolution, bool mirror = false);
