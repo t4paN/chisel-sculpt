@@ -42,6 +42,7 @@ If you do plug in a graphics tablet on X11, pen pressure is picked up automatica
 | 1 | Edit (sculpt) |
 | 2 | Insert (spawn a sphere) |
 | 3 | Select (pick / move / delete objects) |
+| 4 | Paint (vertex colour) |
 
 ### Sculpting
 
@@ -57,8 +58,12 @@ If you do plug in a graphics tablet on X11, pen pressure is picked up automatica
 | V | Pinch brush |
 | G | Move brush |
 | M | Mask brush |
+| 4 | Paint brush (vertex colour) |
+| RMB (Paint) | Colour picker at cursor |
 | Q / E | Cycle brush backward / forward |
 | B | Toggle autosmooth |
+
+Mask shields verts from paint as well as sculpt. The `[ ]` toggle by the Paint icon hides vertex colour while sculpting (the paint brush always shows it).
 
 ### Brush sliders (hold + drag left/right)
 

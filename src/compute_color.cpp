@@ -16,6 +16,7 @@ layout(local_size_x = 256) in;
 
 layout(std430, binding = 0)  readonly buffer PosBuf { float positions[]; };
 layout(std430, binding = 28) buffer ColorBuf { uint color_buf[]; };
+layout(std430, binding = 12) readonly buffer MaskBuf { float mask_buf[]; };
 layout(std430, binding = 6)  buffer DirtyBuf { uint dirty_count; uint dirty_ids[]; };
 
 uniform vec3  u_anchor_a;
@@ -41,6 +42,11 @@ void try_paint(uint v, vec3 anchor, vec3 vp) {
     float dist = length(vp - anchor);
     if (dist >= u_world_radius) return;
     float w = brush_falloff(dist, u_world_radius);
+    if (w <= 0.0) return;
+
+    // Sculpt mask protects the surface from paint too: masked verts (1) are
+    // fully shielded, partial mask attenuates proportionally.
+    w *= (1.0 - clamp(mask_buf[v], 0.0, 1.0));
     if (w <= 0.0) return;
 
     float a = clamp(u_paint_strength * w, 0.0, 1.0);
@@ -81,7 +87,7 @@ bool ComputeState::init_color() {
 }
 
 void ComputeState::dispatch_color_paint(const ColorPaintParams& p, GLuint pos_vbo) {
-    if (!color_paint_program || !color_ssbo) return;
+    if (!color_paint_program || !color_ssbo || !mask_ssbo) return;
 
     ensure_smooth_dirty_buffer(p.vertex_count);
     uint32_t zero = 0;
@@ -93,6 +99,7 @@ void ComputeState::dispatch_color_paint(const ColorPaintParams& p, GLuint pos_vb
 
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_POSITIONS, pos_vbo);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_COLOR, color_ssbo);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_MASK, mask_ssbo);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_DIRTY_VERTS, smooth_dirty_ssbo);
 
     glUniform3f(glGetUniformLocation(color_paint_program, "u_anchor_a"),

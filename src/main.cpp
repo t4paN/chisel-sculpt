@@ -468,17 +468,6 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // Click on empty canvas: recenter the orbit pivot on the model.
-        // Zoom (distance) is left untouched so starting an orbit doesn't
-        // snap the camera back to a full-model framing.
-        if (input.mouse1_just_pressed && !input.on_model && !input.alt_held
-                && input.slider_mode == InputState::SliderMode::NONE
-                && input.interaction_mode != InputState::InteractionMode::INSERT) {
-            mesh->compute_bounding_sphere(mesh_center, mesh_radius);
-            camera.set_target(mesh_center);
-            screen_buffers_dirty = true;
-        }
-
         // Handle focus request (F key)
         if (input.focus_requested) {
             input.focus_requested = false;
@@ -1134,6 +1123,11 @@ int main(int argc, char* argv[]) {
 
         // Background gradient
         renderer.draw_background(win_w, win_h);
+
+        // Paint stays visible while the paint brush is active regardless of the
+        // toggle, so you can always see what you're laying down.
+        renderer.paint_visible =
+            (input.paint_visible || input.current_brush == BrushType::PAINT) ? 1.0f : 0.0f;
 
         // Mesh: N draws. The active entity is drawn from the working VAO; every
         // other alive entity from its static display VAO. Depth test composes them.

@@ -42,8 +42,11 @@ struct InputState {
     float brush_spacing;    // fraction of brush radius between dabs (0.05..1.0)
     BrushSettings per_brush[(int)BrushType::COUNT];
 
-    // Paint brush albedo (RGB, [0,1]), edited via the toolbar swatch.
+    // Paint brush albedo (RGB, [0,1]), edited via the right-click swatch.
     float paint_color[3];
+    // Show vertex paint in the viewport. Toggle (next to the Paint icon) lets you
+    // hide albedo while sculpting; the paint brush always forces it visible.
+    bool paint_visible;
 
     // Slider drag mode (S/W/A/O key held + dragging)
     enum class SliderMode { NONE, SIZE, STRENGTH, HARDNESS, SPACING };

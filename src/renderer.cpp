@@ -61,6 +61,8 @@ out vec4 fragColor;
 uniform float uFacingThreshold;
 // Per-draw object tint: 0 = selected/active (no tint), 1 = deselected (muted).
 uniform float uObjMask;
+// Vertex-paint visibility: 1 = show albedo, 0 = ignore (plain matcap).
+uniform float uPaintVisible;
 
 void main() {
     vec3 n = normalize(vNormView);
@@ -75,7 +77,8 @@ void main() {
     val *= mix(1.0, 0.4, vMask);
 
     // Lit albedo: white (default) == matcap grey exactly; paint tints it.
-    vec3 col = vec3(val) * vColor.rgb;
+    // uPaintVisible folds the albedo out to white when paint is hidden.
+    vec3 col = vec3(val) * mix(vec3(1.0), vColor.rgb, uPaintVisible);
 
     // Object selection mask: deselected objects get dark muted tint
     if (uObjMask > 0.0) {
@@ -833,6 +836,7 @@ void Renderer::draw_mesh(const Camera& cam, int w, int h, uint32_t index_count,
     glUniformMatrix4fv(glGetUniformLocation(matcap_program, "uProj"), 1, GL_FALSE, proj);
     glUniform1f(glGetUniformLocation(matcap_program, "uFacingThreshold"), facing_threshold);
     glUniform1f(glGetUniformLocation(matcap_program, "uObjMask"), selected ? 0.0f : 1.0f);
+    glUniform1f(glGetUniformLocation(matcap_program, "uPaintVisible"), paint_visible);
 
     glBindVertexArray(vao);
     glDrawElements(GL_TRIANGLES, index_count, GL_UNSIGNED_INT, nullptr);
@@ -917,6 +921,7 @@ void Renderer::draw_display(const Camera& cam, EntityGpu& g, int w, int h,
     glUniformMatrix4fv(glGetUniformLocation(matcap_program, "uProj"), 1, GL_FALSE, proj);
     glUniform1f(glGetUniformLocation(matcap_program, "uFacingThreshold"), facing_threshold);
     glUniform1f(glGetUniformLocation(matcap_program, "uObjMask"), selected ? 0.0f : 1.0f);
+    glUniform1f(glGetUniformLocation(matcap_program, "uPaintVisible"), paint_visible);
 
     glBindVertexArray(g.vao);
     glDrawElements(GL_TRIANGLES, g.index_count, GL_UNSIGNED_INT, nullptr);

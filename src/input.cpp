@@ -73,6 +73,7 @@ InputState::InputState()
     per_brush[(int)BrushType::PAINT].hardness = 0.5f;
 
     paint_color[0] = 0.85f; paint_color[1] = 0.25f; paint_color[2] = 0.30f;  // default warm red
+    paint_visible = true;
 }
 
 void InputState::switch_brush(BrushType to) {
@@ -612,6 +613,11 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
 
             case GLFW_KEY_1:
                 g_input->interaction_mode = InputState::InteractionMode::EDIT;
+                // Leaving paint: drop back to the draw brush so 1 sculpts, not paints.
+                if (g_input->current_brush == BrushType::PAINT) {
+                    g_input->clear_smooth_lock();
+                    g_input->switch_brush(BrushType::DRAW);
+                }
                 snprintf(g_input->notification, sizeof(g_input->notification), "Edit");
                 g_input->notification_timer = 1.0f;
                 break;
@@ -623,6 +629,15 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
             case GLFW_KEY_3:
                 g_input->interaction_mode = InputState::InteractionMode::SELECT;
                 snprintf(g_input->notification, sizeof(g_input->notification), "Select");
+                g_input->notification_timer = 1.0f;
+                break;
+            case GLFW_KEY_4:
+                // Paint mode: sculpt-style interaction (EDIT) with the paint brush.
+                g_input->interaction_mode = InputState::InteractionMode::EDIT;
+                g_input->clear_smooth_lock();
+                g_input->switch_brush(BrushType::PAINT);
+                g_input->subtract_locked = false;
+                snprintf(g_input->notification, sizeof(g_input->notification), "Paint");
                 g_input->notification_timer = 1.0f;
                 break;
             case GLFW_KEY_DELETE:

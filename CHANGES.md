@@ -2,6 +2,14 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-07 — Paint mode: UI, mask-shielding, swatch popup, visibility toggle
+
+- **Key `4` enters paint** (alongside 1 edit / 2 insert / 3 select). Internally it's the edit interaction with the Paint brush forced on; pressing `1` while painting drops back to the Draw brush. The toolbar brush column is reordered `Draw · Crease · Pinch · Move · Smooth · Mask · Paint` (Smooth moved up, Paint at the bottom), and clicking any brush button now snaps you into edit mode.
+- **Mask shields paint.** The paint compute kernel reads the sculpt mask and weights each dab by `(1 − mask)` — fully masked verts are protected from colour, partial mask attenuates, exactly like sculpt protection.
+- **Colour picker on right-click.** Removed the always-on toolbar swatch; RMB on the canvas while the paint brush is active pops an ImGui colour picker at the cursor (ctrl+RMB still zooms).
+- **Paint visibility toggle.** A `[ ]` button beside the Paint icon hides/shows vertex colour in the viewport (new `uPaintVisible` matcap uniform). The paint brush always forces colour visible so you never paint blind — the toggle only matters while sculpting.
+- **LMB on empty space no longer recenters the view.** Clicking off the model used to snap the orbit pivot to the model; that's gone. Only `F` reframes now (onto the last-edited point if available, else model centre).
+
 ## 2026-06-07 — Paint mode: per-vertex albedo brush (vpaint core)
 
 - **New Paint brush** lays per-vertex colour onto the model — the 0.1.4 north-star item. Reachable from the toolbar Paint button (Q/E to cycle); an ImGui colour swatch sets the brush albedo. GPU dab kernel, mirror-aware, full undo/redo, multi-entity correct.

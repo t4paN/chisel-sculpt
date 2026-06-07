@@ -18,6 +18,9 @@ struct Renderer {
     // Matcap shader
     GLuint matcap_program;
 
+    // Vertex-paint visibility (1 = show albedo, 0 = plain matcap). Set per frame.
+    float paint_visible = 1.0f;
+
     // Entity-id pick shader (writes linear depth + entity id into the screen FBO,
     // reusing the depth attachment and the triid attachment as an id buffer).
     GLuint pick_program = 0;

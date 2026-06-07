@@ -388,6 +388,9 @@ void draw_button_islands(InputState& input, int win_w, int win_h) {
     ImGui::Dummy(ImVec2(0, row_gap));
 
     // === Brush column: single vertical column ===
+    // Order: Draw, Crease, Pinch, Move, Smooth, Mask, Paint. Smooth is a lock
+    // toggle (not a switch_brush), handled specially in-place. Paint sits at the
+    // bottom with a visibility toggle beside it.
     BrushType current = input.current_brush;
     bool smooth_on = input.is_smooth_active();
 
@@ -399,40 +402,66 @@ void draw_button_islands(InputState& input, int win_w, int win_h) {
         {"Crease", "Crease", "Shortcut: C",                    BrushType::CREASE},
         {"Pinch",  "Pinch",  "Shortcut: V",                    BrushType::PINCH},
         {"Move",   "Move",   "Shortcut: G",                    BrushType::MOVE},
+        {"Smooth", "Smooth", "Shortcut: double-press Shift",   BrushType::SMOOTH},
         {"Mask",   "Mask",   "Shortcut: M",                    BrushType::MASK},
-        {"Paint",  "Paint",  "Vertex paint (albedo)",          BrushType::PAINT},
+        {"Paint",  "Paint",  "Paint mode (Shortcut: 4)",       BrushType::PAINT},
     };
 
-    for (int i = 0; i < 6; i++) {
+    for (int i = 0; i < 7; i++) {
+        if (brushes[i].type == BrushType::SMOOTH) {
+            if (squircle_button(brushes[i].id, brushes[i].display, brushes[i].tooltip,
+                                ImVec2(brush_w, btn_h), smooth_on)) {
+                if (!input.smooth_locked) {
+                    input.per_brush[(int)input.current_brush].strength = input.brush_strength;
+                    input.per_brush[(int)input.current_brush].hardness = input.brush_hardness;
+                    input.brush_strength = input.per_brush[(int)BrushType::SMOOTH].strength;
+                    input.brush_hardness = input.per_brush[(int)BrushType::SMOOTH].hardness;
+                    input.smooth_locked = true;
+                } else {
+                    input.clear_smooth_lock();
+                }
+            }
+            continue;
+        }
+
         bool sel = (current == brushes[i].type) && !smooth_on;
         if (squircle_button(brushes[i].id, brushes[i].display, brushes[i].tooltip,
                             ImVec2(brush_w, btn_h), sel)) {
             input.clear_smooth_lock();
             input.switch_brush(brushes[i].type);
             input.subtract_locked = false;
+            // Picking a brush implies the sculpt/paint workspace, not insert/select.
+            input.interaction_mode = InputState::InteractionMode::EDIT;
         }
-    }
 
-    // Paint color swatch: only meaningful for the paint brush, so surface it when
-    // paint is the active brush. Drives input.paint_color (RGB, linear [0,1]).
-    if (current == BrushType::PAINT && !smooth_on) {
-        ImGui::ColorEdit3("##paintcolor", input.paint_color,
-                          ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel);
-    }
-
-    {
-        if (squircle_button("Smooth", "Smooth", "Shortcut: double-press Shift",
-                            ImVec2(brush_w, btn_h), smooth_on)) {
-            if (!input.smooth_locked) {
-                input.per_brush[(int)input.current_brush].strength = input.brush_strength;
-                input.per_brush[(int)input.current_brush].hardness = input.brush_hardness;
-                input.brush_strength = input.per_brush[(int)BrushType::SMOOTH].strength;
-                input.brush_hardness = input.per_brush[(int)BrushType::SMOOTH].hardness;
-                input.smooth_locked = true;
-            } else {
-                input.clear_smooth_lock();
+        // Paint-visibility toggle sits beside the Paint icon. Lets you hide albedo
+        // while sculpting (the paint brush itself always forces it visible).
+        if (brushes[i].type == BrushType::PAINT) {
+            ImGui::SameLine();
+            if (squircle_button("PaintVis", input.paint_visible ? "[o]" : "[ ]",
+                                input.paint_visible ? "Paint visible (click to hide)"
+                                                    : "Paint hidden (click to show)",
+                                ImVec2(btn_h, btn_h), input.paint_visible)) {
+                input.paint_visible = !input.paint_visible;
             }
         }
+    }
+
+    // Paint color swatch: right-click anywhere on the canvas while the paint brush
+    // is active to pop a colour picker at the cursor. Drives input.paint_color.
+    static bool prev_rmb = false;
+    bool rmb_edge = input.mouse2_down && !prev_rmb;
+    prev_rmb = input.mouse2_down;
+    if (current == BrushType::PAINT && !smooth_on && rmb_edge && !input.ctrl_held) {
+        ImGui::SetNextWindowPos(ImVec2((float)input.mouse_x, (float)input.mouse_y));
+        ImGui::OpenPopup("##paintswatch");
+    }
+    if (ImGui::BeginPopup("##paintswatch")) {
+        ImGui::ColorPicker3("##paintpick", input.paint_color,
+                            ImGuiColorEditFlags_NoSidePreview |
+                            ImGuiColorEditFlags_NoInputs |
+                            ImGuiColorEditFlags_NoLabel);
+        ImGui::EndPopup();
     }
 
     ImGui::End();
