@@ -34,6 +34,7 @@ enum ComputeBinding : GLuint {
     BIND_SDF_MC_OUT   = 25,  // float  MC output soup (pos+normal interleaved)
     BIND_SDF_MC_COUNT = 26,  // uint   MC output triangle counter (atomic)
     BIND_SDF_TRITABLE = 27,  // int    MC 256x16 triangle table
+    BIND_COLOR        = 28,  // uint   per-vertex packed RGBA8 albedo (paint)
 };
 
 struct DrawAccumParams {
@@ -108,6 +109,17 @@ struct MaskPaintParams {
     uint32_t vertex_count;
 };
 
+struct ColorPaintParams {
+    float anchor_a_x, anchor_a_y, anchor_a_z;
+    float anchor_b_x, anchor_b_y, anchor_b_z;
+    int   use_b;
+    float world_radius;
+    float hardness;
+    float paint_strength;       // lerp factor toward paint_color (0..1, * falloff)
+    float paint_r, paint_g, paint_b;  // brush albedo, linear [0,1]
+    uint32_t vertex_count;
+};
+
 struct MoveCaptureParams {
     float anchor_x, anchor_y, anchor_z;
     float world_radius;
@@ -178,6 +190,9 @@ struct ComputeState {
     // Mask brush compute shader (writes directly to mask VBO/SSBO)
     GLuint mask_paint_program;
 
+    // Paint brush compute shader (writes directly to color VBO/SSBO)
+    GLuint color_paint_program;
+
     // Move brush compute shaders (stateful: capture-once weights + per-dab apply)
     GLuint move_capture_program;        // brute-force per-vertex world-distance gate: sets weight, init pos, appends affected
     GLuint move_weight_smooth_program;  // ping-pong Laplacian over affected list
@@ -207,6 +222,10 @@ struct ComputeState {
     // mask brush keeps mesh.mask authoritative and uploads via vbo_mask, so this
     // GPU view is always in sync with what the user painted.
     GLuint mask_ssbo;
+
+    // Color SSBO: alias of renderer.vbo_color. Set once after renderer init so
+    // the paint shader writes packed RGBA8 directly into the display VBO.
+    GLuint color_ssbo;
 
     // Dirty vertex list SSBO (uploaded per dispatch, used by compute_normals)
     GLuint dirty_verts_ssbo;
@@ -362,11 +381,13 @@ struct ComputeState {
 
     // Compile the mask brush compute shader. Called once at init.
     bool init_mask();
+    bool init_color();
 
     // Dispatch the mask paint shader: per-vertex distance check, writes mask VBO
     // directly. Uses smooth_dirty_ssbo for the compact dirty list. Caller reads
     // back dirty list via readback_smooth_dirty.
     void dispatch_mask_paint(const MaskPaintParams& params, GLuint pos_vbo);
+    void dispatch_color_paint(const ColorPaintParams& params, GLuint pos_vbo);
 
     // Compile the four move-brush compute shaders. Called once at init.
     bool init_move();

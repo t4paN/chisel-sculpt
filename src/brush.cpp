@@ -64,6 +64,17 @@ void MaskState::clear() {
     snap_list.clear();
 }
 
+void ColorState::reset() {
+    snap.clear();
+    snap_flag.clear();
+    snap_list.clear();
+}
+void ColorState::clear() {
+    snap.clear();
+    snap_flag.clear();
+    snap_list.clear();
+}
+
 template<typename P>
 static void set_area_normal(P& p, float ax, float ay, float az) {
     p.anchor_normal_a_x =  ax;  p.anchor_normal_a_y = ay;  p.anchor_normal_a_z = az;
@@ -146,6 +157,7 @@ BrushStroke::BrushStroke()
     , gpu_normals_deferred(false)
     , gpu_positions_deferred(false)
     , gpu_mask_deferred(false)
+    , gpu_color_deferred(false)
     , phase(StrokePhase::NONE), needs_mesh_update(false), vertex_count(0)
 {}
 
@@ -251,6 +263,7 @@ void BrushStroke::begin(Renderer& renderer, const Camera& cam,
     snap_list.clear();
 
     mask.reset();
+    color.reset();
 
     renderer.render_screen_buffers(cam, screen_w, screen_h);
 
@@ -681,6 +694,55 @@ void BrushStroke::apply_mask_gpu(DabContext& ctx, float dab_x, float dab_y,
     needs_mesh_update = true;
 }
 
+void BrushStroke::apply_color_gpu(DabContext& ctx, float dab_x, float dab_y,
+                                  float strength, float hardness, bool erase) {
+    if (!is_active()) return;
+    if (!ctx.compute.supported || !ctx.compute.color_paint_program) return;
+
+    set_anchor(ctx.mesh, ctx.cam, dab_x, dab_y, ctx.eff_brush_size, ctx.win_h, ctx.renderer);
+    if (!anchor_valid) return;
+
+    ColorPaintParams p{};
+    p.anchor_a_x = anchor_pos.x;
+    p.anchor_a_y = anchor_pos.y;
+    p.anchor_a_z = anchor_pos.z;
+    p.anchor_b_x = -anchor_pos.x;
+    p.anchor_b_y =  anchor_pos.y;
+    p.anchor_b_z =  anchor_pos.z;
+    p.use_b = ctx.input.mirror_x ? 1 : 0;
+    p.world_radius = anchor_world_radius;
+    p.hardness = hardness;
+    p.paint_strength = strength;
+    if (erase) {
+        p.paint_r = p.paint_g = p.paint_b = 1.0f;   // erase = lerp toward white
+    } else {
+        p.paint_r = ctx.input.paint_color[0];
+        p.paint_g = ctx.input.paint_color[1];
+        p.paint_b = ctx.input.paint_color[2];
+    }
+    p.vertex_count = ctx.mesh.vertex_count();
+
+    ctx.compute.dispatch_color_paint(p, ctx.renderer.vbo_pos);
+
+    std::vector<uint32_t> dirty;
+    ctx.compute.readback_smooth_dirty(dirty);
+
+    if (color.snap_flag.empty()) {
+        color.snap_flag.assign(vertex_count, false);
+        color.snap.assign(vertex_count, 0xFFFFFFFFu);
+    }
+    for (uint32_t v : dirty) {
+        if (!color.snap_flag[v]) {
+            color.snap_flag[v] = true;
+            color.snap[v] = (v < (uint32_t)ctx.mesh.color.size()) ? ctx.mesh.color[v] : 0xFFFFFFFFu;
+            color.snap_list.push_back(v);
+        }
+    }
+
+    gpu_color_deferred = true;
+    needs_mesh_update = true;
+}
+
 void BrushStroke::apply_mask(Renderer& renderer, const Camera& cam,
                               const Mesh& mesh,
                               float screen_x, float screen_y,
@@ -765,6 +827,25 @@ void BrushStroke::commit_mask_undo(const Mesh& mesh, UndoStack& stack) {
         e.new_mask.push_back(new_val);
     }
 
+    stack.push(std::move(e));
+}
+
+void BrushStroke::commit_color_undo(const Mesh& mesh, UndoStack& stack) {
+    if (color.snap_list.empty()) return;
+
+    UndoEntry e;
+    e.kind = UndoEntry::Kind::PAINT;
+
+    for (uint32_t v : color.snap_list) {
+        uint32_t old_val = color.snap[v];
+        uint32_t new_val = (v < (uint32_t)mesh.color.size()) ? mesh.color[v] : 0xFFFFFFFFu;
+        if (old_val == new_val) continue;
+        e.verts.push_back(v);
+        e.old_color.push_back(old_val);
+        e.new_color.push_back(new_val);
+    }
+
+    if (e.verts.empty()) return;
     stack.push(std::move(e));
 }
 
@@ -909,8 +990,34 @@ bool BrushStroke::finalize(Mesh& mesh, UndoStack& stack, MultiresStack& multires
         gpu_mask_deferred = false;
     }
 
+    if (gpu_color_deferred && !color.snap_list.empty()) {
+        if (mesh.color.empty()) mesh.color.assign(mesh.vertex_count(), 0xFFFFFFFFu);
+        else if (mesh.color.size() < mesh.vertex_count())
+            mesh.color.resize(mesh.vertex_count(), 0xFFFFFFFFu);
+        uint32_t min_v = color.snap_list[0], max_v = color.snap_list[0];
+        for (uint32_t v : color.snap_list) {
+            if (v < min_v) min_v = v;
+            if (v > max_v) max_v = v;
+        }
+        uint32_t range = max_v - min_v + 1;
+        static std::vector<uint32_t> color_readback;
+        color_readback.resize(range);
+        glBindBuffer(GL_ARRAY_BUFFER, renderer.vbo_color);
+        glGetBufferSubData(GL_ARRAY_BUFFER,
+            min_v * sizeof(uint32_t),
+            range * sizeof(uint32_t),
+            color_readback.data());
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        for (uint32_t v : color.snap_list) {
+            mesh.color[v] = color_readback[v - min_v];
+        }
+        gpu_color_deferred = false;
+    }
+
     if (brush_type == BrushType::MASK) {
         commit_mask_undo(mesh, stack);
+    } else if (brush_type == BrushType::PAINT) {
+        commit_color_undo(mesh, stack);
     } else {
         for (int fi = stroke_disp_index + 1; fi < (int)multires.frames.size(); fi++)
             multires.frames[fi].clear();
@@ -968,4 +1075,5 @@ void BrushStroke::end() {
     snap_z.clear();
     snap_list.clear();
     mask.clear();
+    color.clear();
 }

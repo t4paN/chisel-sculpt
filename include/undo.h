@@ -9,7 +9,7 @@ class Scene;
 struct MeshEntity;
 
 struct UndoEntry {
-    enum class Kind { STROKE, PROJECTION, MASK, LEVEL };
+    enum class Kind { STROKE, PROJECTION, MASK, LEVEL, PAINT };
     Kind kind = Kind::STROKE;
 
     // --- STROKE fields ---
@@ -20,6 +20,9 @@ struct UndoEntry {
 
     // --- MASK fields ---
     std::vector<float> old_mask, new_mask;
+
+    // --- PAINT fields --- (packed RGBA8, parallel to verts; level-agnostic like mask)
+    std::vector<uint32_t> old_color, new_color;
 
     // Which storage layer this entry modifies
     int  level        = 0;
@@ -77,6 +80,8 @@ private:
             b = e.before.bytes();
         } else if (e.kind == UndoEntry::Kind::MASK) {
             b = e.verts.size() * (sizeof(uint32_t) + 2 * sizeof(float));
+        } else if (e.kind == UndoEntry::Kind::PAINT) {
+            b = e.verts.size() * (sizeof(uint32_t) + 2 * sizeof(uint32_t));
         } else {
             b = e.verts.size() * (sizeof(uint32_t) + 6 * sizeof(float));
         }

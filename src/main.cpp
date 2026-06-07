@@ -139,6 +139,7 @@ int main(int argc, char* argv[]) {
         compute.init_pinch();
         compute.init_move();
         compute.init_mask();
+        compute.init_color();
         compute.init_compute_normals();
         compute.init_remesh_select();
         compute.init_remesh_grow_selection();
@@ -178,6 +179,8 @@ int main(int argc, char* argv[]) {
     // GPU sculpt shaders read the mask buffer to gate locked vertices.
     // vbo_mask is generated once in renderer.init() and persists for the run.
     compute.mask_ssbo = renderer.vbo_mask;
+    // Paint shader writes packed RGBA8 directly into the working color VBO.
+    compute.color_ssbo = renderer.vbo_color;
 
     TextOverlay text;
     text.init();
@@ -1077,13 +1080,22 @@ int main(int argc, char* argv[]) {
                                 renderer.update_mask_partial(*mesh, mask_dirty);
                             }
                         }
+                    } else if (input.current_brush == BrushType::PAINT) {
+                        if (compute.supported && compute.color_paint_program) {
+                            brush_stroke.apply_color_gpu(ctx, dab_x, dab_y,
+                                                         eff_strength, eff_hardness,
+                                                         input.is_subtract_active());
+                        }
                     } else if (input.current_brush == BrushType::DRAW) {
                         brush_stroke.apply_draw(ctx, dab_x, dab_y, eff_strength, eff_hardness,
                                                 input.is_subtract_active());
                     }
 
-                    bool is_mask = input.current_brush == BrushType::MASK;
-                    if (!is_mask) {
+                    // Mask and paint write straight to their own VBO and never move
+                    // geometry, so they skip the position/normal post-dab sync.
+                    bool is_nongeo = input.current_brush == BrushType::MASK
+                                  || input.current_brush == BrushType::PAINT;
+                    if (!is_nongeo) {
                         brush_stroke.post_dab(ctx);
                     }
                 }

@@ -5,6 +5,7 @@
 void UndoStack::push(UndoEntry&& e) {
     if (e.kind == UndoEntry::Kind::STROKE && e.verts.empty()) return;
     if (e.kind == UndoEntry::Kind::MASK && e.verts.empty()) return;
+    if (e.kind == UndoEntry::Kind::PAINT && e.verts.empty()) return;
     if (e.kind == UndoEntry::Kind::PROJECTION && e.before.empty()) return;
     for (const auto& r : redo_stack) total_bytes -= entry_bytes(r);
     redo_stack.clear();
@@ -83,6 +84,19 @@ bool UndoStack::apply(const UndoEntry& e, MeshEntity& ent, Scene& scene, bool fo
             if (v < (uint32_t)mesh.mask.size()) mesh.mask[v] = target[k];
         }
         scene.sync_mask_partial_entity(ent.id, e.verts);
+        return false;
+    }
+
+    if (e.kind == UndoEntry::Kind::PAINT) {
+        const std::vector<uint32_t>& target = forward ? e.new_color : e.old_color;
+        if (mesh.color.empty()) mesh.color.assign(mesh.vertex_count(), 0xFFFFFFFFu);
+        else if (mesh.color.size() < mesh.vertex_count())
+            mesh.color.resize(mesh.vertex_count(), 0xFFFFFFFFu);
+        for (size_t k = 0; k < e.verts.size(); ++k) {
+            uint32_t v = e.verts[k];
+            if (v < (uint32_t)mesh.color.size()) mesh.color[v] = target[k];
+        }
+        scene.sync_color_partial_entity(ent.id, e.verts);
         return false;
     }
 

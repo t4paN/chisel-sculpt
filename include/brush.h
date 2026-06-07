@@ -66,6 +66,17 @@ struct MaskState {
     void clear();
 };
 
+// Paint snapshot: packed RGBA8 pre-stroke color per first-touched vertex, so the
+// pen-up readback knows which verts to pull and undo can diff old vs new.
+struct ColorState {
+    std::vector<uint32_t> snap;        // pre-stroke packed color, indexed by vert
+    std::vector<bool>     snap_flag;
+    std::vector<uint32_t> snap_list;   // first-touch order
+
+    void reset();
+    void clear();
+};
+
 struct BrushStroke {
     // Screen-space brush region (bounding box around brush circle)
     int region_x, region_y, region_w, region_h;
@@ -111,6 +122,7 @@ struct BrushStroke {
     // Move and Mask sub-structs
     MoveState move;
     MaskState mask;
+    ColorState color;
 
     // RETAINED: Adjacency flood for Move capture + Mask (delete when both get GPU shaders)
 
@@ -138,6 +150,10 @@ struct BrushStroke {
     // Set true when GPU mask shader wrote to vbo_mask directly. mesh.mask is stale
     // until finalize reads back the changed values for undo commit.
     bool gpu_mask_deferred;
+
+    // Set true when GPU paint shader wrote to vbo_color directly. mesh.color is
+    // stale until finalize reads back the changed values (display VAO + undo).
+    bool gpu_color_deferred;
 
     StrokePhase phase = StrokePhase::NONE;
     bool needs_mesh_update = false;
@@ -189,6 +205,11 @@ struct BrushStroke {
     void apply_mask_gpu(DabContext& ctx, float dab_x, float dab_y,
                         float strength, float hardness, bool invert);
 
+    // GPU paint brush: compute shader lerps vertex albedo in the color VBO.
+    // erase = paint toward white instead of the brush color.
+    void apply_color_gpu(DabContext& ctx, float dab_x, float dab_y,
+                         float strength, float hardness, bool erase);
+
     // Back-project depth changes to mesh vertices.
     // Finalize stroke: commit undo, readback deferred normals, clear state.
     // When autosmooth is true and brush_type == DRAW, runs a light Laplacian
@@ -207,6 +228,9 @@ struct BrushStroke {
 
     // Commit mask stroke as an undo entry. Call before end().
     void commit_mask_undo(const Mesh& mesh, UndoStack& stack);
+
+    // Commit paint stroke as an undo entry. Call before end().
+    void commit_color_undo(const Mesh& mesh, UndoStack& stack);
 
     // Apply accumulated mask changes to the mesh, return list of dirty vertices
     void apply_mask_changes(Mesh& mesh, std::vector<uint32_t>& dirty_verts_out);

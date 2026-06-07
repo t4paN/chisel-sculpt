@@ -43,6 +43,7 @@ add_executable(chisel
     src/compute_crease_pinch.cpp
     src/compute_move.cpp
     src/compute_mask.cpp
+    src/compute_color.cpp
     src/compute_remesh.cpp
     src/sdf.cpp
     src/ui_overlay.cpp

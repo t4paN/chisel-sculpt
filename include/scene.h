@@ -55,6 +55,10 @@ public:
     void sync_mask_partial_entity(uint32_t entity_id,
                                   const std::vector<uint32_t>& local_dirty);
 
+    // Partial color sync: active → patch working color buffer; inactive → display.
+    void sync_color_partial_entity(uint32_t entity_id,
+                                   const std::vector<uint32_t>& local_dirty);
+
     // ---- Selection / active ----
     void     set_active(uint32_t entity_id);
     uint32_t active_mesh_id()  const { return active_id_; }

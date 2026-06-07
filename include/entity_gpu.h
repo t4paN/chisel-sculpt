@@ -12,6 +12,7 @@ struct EntityGpu {
     GLuint vbo_pos    = 0;
     GLuint vbo_norm   = 0;
     GLuint vbo_mask   = 0;
+    GLuint vbo_color  = 0;
     GLuint ebo        = 0;
     uint32_t index_count = 0;
     bool dirty = true;       // needs re-upload from entity->mesh

@@ -42,6 +42,12 @@ struct Mesh {
     // Mask: per-vertex mask values (0..1), sparse storage
     std::vector<float> mask;
 
+    // Vertex paint: per-vertex albedo, packed RGBA8 (one uint32 per vertex,
+    // little-endian r|g<<8|b<<16|a<<24). Empty = unpainted (renders as white).
+    // Persists across subdivide/remesh (carried by interpolation); unlike mask
+    // it is creative work, not a transient selection. 0xFFFFFFFF = white.
+    std::vector<uint32_t> color;
+
     uint32_t vertex_count() const { return (uint32_t)pos_x.size(); }
     uint32_t tri_count() const { return (uint32_t)(indices.size() / 3); }
 

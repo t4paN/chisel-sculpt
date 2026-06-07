@@ -215,6 +215,17 @@ void Scene::sync_mask_partial_entity(uint32_t eid,
         renderer_.upload_display(e->gpu, e->mesh);
 }
 
+void Scene::sync_color_partial_entity(uint32_t eid,
+                                      const std::vector<uint32_t>& local_dirty) {
+    MeshEntity* e = find_entity(eid);
+    if (!e || local_dirty.empty()) return;
+
+    if (eid == active_id_)
+        renderer_.update_color_verts(e->mesh, local_dirty);
+    else
+        renderer_.upload_display(e->gpu, e->mesh);
+}
+
 // ---- Selection ----
 
 void Scene::set_active(uint32_t entity_id) {

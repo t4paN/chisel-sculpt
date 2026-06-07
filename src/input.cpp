@@ -69,6 +69,10 @@ InputState::InputState()
     }
     per_brush[(int)BrushType::MASK].strength = 1.0f;      // 100% strength
     per_brush[(int)BrushType::MASK].hardness = 0.64f;     // 64% hardness
+    per_brush[(int)BrushType::PAINT].strength = 0.5f;     // soft build-up by default
+    per_brush[(int)BrushType::PAINT].hardness = 0.5f;
+
+    paint_color[0] = 0.85f; paint_color[1] = 0.25f; paint_color[2] = 0.30f;  // default warm red
 }
 
 void InputState::switch_brush(BrushType to) {
@@ -121,6 +125,7 @@ const char* InputState::brush_name() const {
         case BrushType::MOVE:   return "Move";
         case BrushType::SMOOTH: return "Smooth";
         case BrushType::MASK:   return "Mask";
+        case BrushType::PAINT:  return "Paint";
         default: return "Unknown";
     }
 }

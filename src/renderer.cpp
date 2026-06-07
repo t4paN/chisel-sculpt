@@ -34,17 +34,20 @@ static const char* matcap_vert_src = R"(
 layout(location=0) in vec3 aPos;
 layout(location=1) in vec3 aNorm;
 layout(location=2) in float aMask;
+layout(location=4) in vec4 aColor;   // RGBA8 normalized -> [0,1]; white = unpainted
 
 uniform mat4 uView;
 uniform mat4 uProj;
 
 out vec3 vNormView;
 out float vMask;
+out vec4 vColor;
 
 void main() {
     mat3 normalMat = mat3(uView);
     vNormView = normalize(normalMat * aNorm);
     vMask = aMask;
+    vColor = aColor;
     gl_Position = uProj * uView * vec4(aPos, 1.0);
 }
 )";
@@ -53,6 +56,7 @@ static const char* matcap_frag_src = R"(
 #version 330 core
 in vec3 vNormView;
 in float vMask;
+in vec4 vColor;
 out vec4 fragColor;
 uniform float uFacingThreshold;
 // Per-draw object tint: 0 = selected/active (no tint), 1 = deselected (muted).
@@ -70,7 +74,8 @@ void main() {
     // Sculpt mask: unmasked (0) = normal, masked (1) = dark
     val *= mix(1.0, 0.4, vMask);
 
-    vec3 col = vec3(val);
+    // Lit albedo: white (default) == matcap grey exactly; paint tints it.
+    vec3 col = vec3(val) * vColor.rgb;
 
     // Object selection mask: deselected objects get dark muted tint
     if (uObjMask > 0.0) {
@@ -444,7 +449,7 @@ GLuint link_program(GLuint vert, GLuint frag) {
 // ---- Renderer ----
 
 Renderer::Renderer()
-    : vao(0), vbo_pos(0), vbo_norm(0), vbo_mask(0), vbo_tri_id(0), vbo_bary(0), ebo(0)
+    : vao(0), vbo_pos(0), vbo_norm(0), vbo_mask(0), vbo_color(0), vbo_tri_id(0), vbo_bary(0), ebo(0)
     , matcap_program(0), bg_program(0), bg_vao(0)
     , cursor_program(0), cursor_shadow_program(0), crosshair_program(0)
     , debug_vert_program(0), debug_edge_program(0)
@@ -464,6 +469,7 @@ Renderer::~Renderer() {
     if (vbo_pos) glDeleteBuffers(1, &vbo_pos);
     if (vbo_norm) glDeleteBuffers(1, &vbo_norm);
     if (vbo_mask) glDeleteBuffers(1, &vbo_mask);
+    if (vbo_color) glDeleteBuffers(1, &vbo_color);
     if (ebo) glDeleteBuffers(1, &ebo);
     if (bg_vao) glDeleteVertexArrays(1, &bg_vao);
     if (matcap_program) glDeleteProgram(matcap_program);
@@ -526,6 +532,7 @@ void Renderer::init() {
     glGenBuffers(1, &vbo_pos);
     glGenBuffers(1, &vbo_norm);
     glGenBuffers(1, &vbo_mask);
+    glGenBuffers(1, &vbo_color);
     glGenBuffers(1, &ebo);
 
     // Cursor shader
@@ -583,10 +590,13 @@ void Renderer::upload_mesh(const Mesh& mesh) {
 
     // Interleave SoA → AoS for VBO upload
     std::vector<float> pos(vc * 3), norm(vc * 3), mask_buf(vc);
+    std::vector<uint32_t> col_buf(vc);
+    bool has_color = !mesh.color.empty();
     for (uint32_t i = 0; i < vc; i++) {
         pos[i*3+0] = mesh.pos_x[i]; pos[i*3+1] = mesh.pos_y[i]; pos[i*3+2] = mesh.pos_z[i];
         norm[i*3+0] = mesh.norm_x[i]; norm[i*3+1] = mesh.norm_y[i]; norm[i*3+2] = mesh.norm_z[i];
         mask_buf[i] = (i < mesh.mask.size()) ? mesh.mask[i] : 0.0f;
+        col_buf[i] = (has_color && i < mesh.color.size()) ? mesh.color[i] : 0xFFFFFFFFu;
     }
 
     glBindVertexArray(vao);
@@ -605,6 +615,11 @@ void Renderer::upload_mesh(const Mesh& mesh) {
     glBufferData(GL_ARRAY_BUFFER, mask_buf.size()*sizeof(float), mask_buf.data(), GL_DYNAMIC_DRAW);
     glEnableVertexAttribArray(2);
     glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, 0, nullptr);
+
+    glBindBuffer(GL_ARRAY_BUFFER, vbo_color);
+    glBufferData(GL_ARRAY_BUFFER, col_buf.size()*sizeof(uint32_t), col_buf.data(), GL_DYNAMIC_DRAW);
+    glEnableVertexAttribArray(4);
+    glVertexAttribPointer(4, 4, GL_UNSIGNED_BYTE, GL_TRUE, 0, nullptr);
 
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
     glBufferData(GL_ELEMENT_ARRAY_BUFFER,
@@ -735,6 +750,68 @@ void Renderer::update_mask_verts(const Mesh& mesh, const std::vector<uint32_t>& 
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 }
 
+// Packed RGBA8 color, mirror of the mask uploaders. Missing entries default to
+// white (0xFFFFFFFF) so an unpainted vertex renders byte-identical to today.
+void Renderer::update_color(const Mesh& mesh) {
+    uint32_t vc = mesh.vertex_count();
+    std::vector<uint32_t> buf(vc);
+    bool has = !mesh.color.empty();
+    for (uint32_t i = 0; i < vc; i++)
+        buf[i] = (has && i < mesh.color.size()) ? mesh.color[i] : 0xFFFFFFFFu;
+    glBindBuffer(GL_ARRAY_BUFFER, vbo_color);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, vc * sizeof(uint32_t), buf.data());
+}
+
+void Renderer::update_color_partial(const Mesh& mesh, const std::vector<uint32_t>& dirty_verts) {
+    if (dirty_verts.empty()) return;
+
+    uint32_t min_idx = dirty_verts[0], max_idx = dirty_verts[0];
+    for (uint32_t v : dirty_verts) {
+        if (v < min_idx) min_idx = v;
+        if (v > max_idx) max_idx = v;
+    }
+
+    uint32_t range = max_idx - min_idx + 1;
+    std::vector<uint32_t> buf(range);
+    bool has = !mesh.color.empty();
+    for (uint32_t i = 0; i < range; i++) {
+        uint32_t v = min_idx + i;
+        buf[i] = (has && v < mesh.color.size()) ? mesh.color[v] : 0xFFFFFFFFu;
+    }
+
+    glBindBuffer(GL_ARRAY_BUFFER, vbo_color);
+    glBufferSubData(GL_ARRAY_BUFFER, min_idx * sizeof(uint32_t), range * sizeof(uint32_t), buf.data());
+}
+
+void Renderer::update_color_verts(const Mesh& mesh, const std::vector<uint32_t>& verts) {
+    if (verts.empty()) return;
+
+    static std::vector<uint32_t> sorted;
+    sorted = verts;
+    std::sort(sorted.begin(), sorted.end());
+    sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
+
+    static std::vector<uint32_t> buf;
+    bool has = !mesh.color.empty();
+    size_t i = 0, n = sorted.size();
+    glBindBuffer(GL_ARRAY_BUFFER, vbo_color);
+    while (i < n) {
+        uint32_t start = sorted[i], end = start;
+        size_t j = i + 1;
+        while (j < n && sorted[j] == end + 1) { end = sorted[j]; ++j; }
+        uint32_t run = end - start + 1;
+
+        buf.resize(run);
+        for (uint32_t k = 0; k < run; k++) {
+            uint32_t v = start + k;
+            buf[k] = (has && v < mesh.color.size()) ? mesh.color[v] : 0xFFFFFFFFu;
+        }
+        glBufferSubData(GL_ARRAY_BUFFER, start * sizeof(uint32_t), run * sizeof(uint32_t), buf.data());
+        i = j;
+    }
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+}
+
 void Renderer::draw_background(int w, int h) {
     glDisable(GL_DEPTH_TEST);
     glUseProgram(bg_program);
@@ -771,14 +848,18 @@ void Renderer::upload_display(EntityGpu& g, const Mesh& mesh) {
         glGenBuffers(1, &g.vbo_pos);
         glGenBuffers(1, &g.vbo_norm);
         glGenBuffers(1, &g.vbo_mask);
+        glGenBuffers(1, &g.vbo_color);
         glGenBuffers(1, &g.ebo);
     }
 
     std::vector<float> pos(vc * 3), norm(vc * 3), mask_buf(vc);
+    std::vector<uint32_t> col_buf(vc);
+    bool has_color = !mesh.color.empty();
     for (uint32_t i = 0; i < vc; i++) {
         pos[i*3+0] = mesh.pos_x[i]; pos[i*3+1] = mesh.pos_y[i]; pos[i*3+2] = mesh.pos_z[i];
         norm[i*3+0] = mesh.norm_x[i]; norm[i*3+1] = mesh.norm_y[i]; norm[i*3+2] = mesh.norm_z[i];
         mask_buf[i] = (i < mesh.mask.size()) ? mesh.mask[i] : 0.0f;
+        col_buf[i] = (has_color && i < mesh.color.size()) ? mesh.color[i] : 0xFFFFFFFFu;
     }
 
     glBindVertexArray(g.vao);
@@ -798,6 +879,11 @@ void Renderer::upload_display(EntityGpu& g, const Mesh& mesh) {
     glEnableVertexAttribArray(2);
     glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, 0, nullptr);
 
+    glBindBuffer(GL_ARRAY_BUFFER, g.vbo_color);
+    glBufferData(GL_ARRAY_BUFFER, col_buf.size()*sizeof(uint32_t), col_buf.data(), GL_DYNAMIC_DRAW);
+    glEnableVertexAttribArray(4);
+    glVertexAttribPointer(4, 4, GL_UNSIGNED_BYTE, GL_TRUE, 0, nullptr);
+
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g.ebo);
     glBufferData(GL_ELEMENT_ARRAY_BUFFER, mesh.indices.size()*sizeof(uint32_t),
                  mesh.indices.data(), GL_STATIC_DRAW);
@@ -812,6 +898,7 @@ void Renderer::free_display(EntityGpu& g) {
     if (g.vbo_pos)     glDeleteBuffers(1, &g.vbo_pos);
     if (g.vbo_norm)    glDeleteBuffers(1, &g.vbo_norm);
     if (g.vbo_mask)    glDeleteBuffers(1, &g.vbo_mask);
+    if (g.vbo_color)   glDeleteBuffers(1, &g.vbo_color);
     if (g.ebo)         glDeleteBuffers(1, &g.ebo);
     g = EntityGpu();
 }

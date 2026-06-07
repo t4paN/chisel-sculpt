@@ -8,6 +8,7 @@ enum class BrushType {
     MOVE,
     SMOOTH,
     MASK,
+    PAINT,
     COUNT
 };
 
@@ -40,6 +41,9 @@ struct InputState {
     float brush_hardness;   // 0..1 (per-brush, synced via switch_brush)
     float brush_spacing;    // fraction of brush radius between dabs (0.05..1.0)
     BrushSettings per_brush[(int)BrushType::COUNT];
+
+    // Paint brush albedo (RGB, [0,1]), edited via the toolbar swatch.
+    float paint_color[3];
 
     // Slider drag mode (S/W/A/O key held + dragging)
     enum class SliderMode { NONE, SIZE, STRENGTH, HARDNESS, SPACING };

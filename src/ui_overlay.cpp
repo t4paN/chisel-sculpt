@@ -400,9 +400,10 @@ void draw_button_islands(InputState& input, int win_w, int win_h) {
         {"Pinch",  "Pinch",  "Shortcut: V",                    BrushType::PINCH},
         {"Move",   "Move",   "Shortcut: G",                    BrushType::MOVE},
         {"Mask",   "Mask",   "Shortcut: M",                    BrushType::MASK},
+        {"Paint",  "Paint",  "Vertex paint (albedo)",          BrushType::PAINT},
     };
 
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < 6; i++) {
         bool sel = (current == brushes[i].type) && !smooth_on;
         if (squircle_button(brushes[i].id, brushes[i].display, brushes[i].tooltip,
                             ImVec2(brush_w, btn_h), sel)) {
@@ -410,6 +411,13 @@ void draw_button_islands(InputState& input, int win_w, int win_h) {
             input.switch_brush(brushes[i].type);
             input.subtract_locked = false;
         }
+    }
+
+    // Paint color swatch: only meaningful for the paint brush, so surface it when
+    // paint is the active brush. Drives input.paint_color (RGB, linear [0,1]).
+    if (current == BrushType::PAINT && !smooth_on) {
+        ImGui::ColorEdit3("##paintcolor", input.paint_color,
+                          ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel);
     }
 
     {

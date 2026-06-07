@@ -2,6 +2,12 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-07 — Paint mode: per-vertex albedo brush (vpaint core)
+
+- **New Paint brush** lays per-vertex colour onto the model — the 0.1.4 north-star item. Reachable from the toolbar Paint button (Q/E to cycle); an ImGui colour swatch sets the brush albedo. GPU dab kernel, mirror-aware, full undo/redo, multi-entity correct.
+- **How it works:** vpaint is the mask system with packed RGBA8 instead of a scalar. Storage is `mesh.color` (`vector<uint32_t>`, `r|g<<8|b<<16|a<<24`, `0xFFFFFFFF`=white=unpainted → renders byte-identical to an unpainted model). Rendered as a `GL_UNSIGNED_BYTE` normalized vertex attribute (loc 4) wired on **both** the working VAO and per-entity display VAOs; matcap frag multiplies shade by `vColor.rgb`. The compute kernel (`compute_color.cpp`, binding 28) **lerps** old→brush colour (`mix`, not mask's additive accumulate) so dabs converge to the target; erase lerps toward white. Pen-up reads the dirty colours back into `mesh.color` for a `Kind::PAINT` undo entry (per-entity, level-agnostic).
+- **Known gaps (next):** paint does **not** yet survive subdivide / remesh (silently dropped), and is not written to `.chisel` save or OBJ export. Persistence is the next chunk.
+
 ## 2026-06-07 — SDF: optional mirror-symmetric voxel-merge (Y / M / N)
 
 - **The voxel-merge confirm dialog now offers a mirror-symmetric merge.** `Y` = faithful merge (the existing, possibly-asymmetric union — correct for a pure print export); `M` = mirror-merge (symmetric about the app's mirror plane x=0, mirror-editable); `N`/`ESC` cancel; `[`/`]` still nudge resolution. Mirror is **not** the default — a join-for-print may legitimately need asymmetry.

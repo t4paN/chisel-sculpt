@@ -10,6 +10,7 @@ struct Renderer {
     GLuint vbo_pos;
     GLuint vbo_norm;
     GLuint vbo_mask;      // per-vertex sculpt mask values (0..1)
+    GLuint vbo_color;     // per-vertex albedo, packed RGBA8 (paint)
     GLuint vbo_tri_id;    // per-vertex triangle ID (flat, 3 verts per tri)
     GLuint vbo_bary;     // per-vertex barycentric coord
     GLuint ebo;
@@ -70,6 +71,8 @@ struct Renderer {
     void upload_mesh(const Mesh& mesh);
     void update_mask(const Mesh& mesh);
     void update_mask_partial(const Mesh& mesh, const std::vector<uint32_t>& dirty_verts);
+    void update_color(const Mesh& mesh);
+    void update_color_partial(const Mesh& mesh, const std::vector<uint32_t>& dirty_verts);
 
     // Partial update: sync dirty vertex positions+normals from CPU mesh to VBOs
     void update_mesh_partial(const Mesh& mesh, const std::vector<uint32_t>& dirty_verts);
@@ -80,6 +83,7 @@ struct Renderer {
     // GPU-computed normals — untouched.
     void update_mesh_verts(const Mesh& mesh, const std::vector<uint32_t>& verts);
     void update_mask_verts(const Mesh& mesh, const std::vector<uint32_t>& verts);
+    void update_color_verts(const Mesh& mesh, const std::vector<uint32_t>& verts);
 
     // Screen buffer FBO management
     void create_screen_buffers(int w, int h);
