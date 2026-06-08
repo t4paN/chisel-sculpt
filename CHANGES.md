@@ -2,6 +2,13 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-08 — Inflate brush + paint UI: mode row, dual colour, Q/E swap
+
+- **New Inflate brush (`I`).** Swells the surface outward — every vert in the dab pushes along **its own** normal (vs Draw, which pushes the whole dab along the cursor's single surface normal). Reuses the entire draw pipeline through one `u_inflate` shader branch (`dir = vn` vs `anchor_n`); symmetrize / mirror / mask / undo / normals all ride along unchanged. ctrl+drag deflates. Sits in the brush column after Draw.
+  - Inflate skips Draw's view-facing cull so the swell is volumetric in all directions, not just the cap facing the camera (which read as the surface being dragged toward the cursor). It also snapshots its own per-vertex stroke normals at pen-down like Draw/Crease/Pinch, so it works on the first stroke of a freshly loaded model instead of needing a Draw stroke to prime the normal buffer.
+- **Mode-button row.** A new toolbar row under the ops row: Edit / Insert / Select / Paint, matching keys 1–4 with live highlight. Paint moved out of the brush column to here; the paint-visibility `[ ]` toggle sits beside it. Brush column is now `Draw · Inflate · Crease · Pinch · Move · Smooth · Mask`.
+- **Paint: colour box returned + an alternate.** Two colour swatches show in paint mode — the active colour plus a stashed alternate. **Q / E swap** active↔alt while the Paint brush is selected (Q/E still cycle brushes otherwise). RMB cursor picker and the downstream paint kernel are untouched — they still read the active colour.
+
 ## 2026-06-07 — Paint mode: UI, mask-shielding, swatch popup, visibility toggle
 
 - **Key `4` enters paint** (alongside 1 edit / 2 insert / 3 select). Internally it's the edit interaction with the Paint brush forced on; pressing `1` while painting drops back to the Draw brush. The toolbar brush column is reordered `Draw · Crease · Pinch · Move · Smooth · Mask · Paint` (Smooth moved up, Paint at the bottom), and clicking any brush button now snaps you into edit mode.

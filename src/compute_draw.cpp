@@ -25,6 +25,7 @@ uniform vec3  u_view_a;
 uniform vec3  u_view_b;
 uniform vec3  u_anchor_normal_a;
 uniform vec3  u_anchor_normal_b;
+uniform int   u_inflate;          // 1 = push along each vert's own normal
 uniform uint  u_vertex_count;
 
 void atomicAddFloat(uint idx, float val) {
@@ -49,11 +50,19 @@ float brush_falloff(float dist, float radius) {
 void deposit(uint v, vec3 anchor, vec3 view, vec3 anchor_n, vec3 vp, vec3 vn) {
     float dist = length(vp - anchor);
     if (dist >= u_world_radius) return;
-    float facing = -dot(vn, view);
-    if (facing < u_facing_threshold) return;
+    // Draw only deposits on verts facing the viewer (one-sided bump). Inflate is
+    // a volumetric swell: every vert in the dab sphere pushes along its OWN
+    // normal regardless of facing, so the surface explodes outward in all
+    // directions instead of being dragged toward the cursor's view.
+    if (u_inflate == 0) {
+        float facing = -dot(vn, view);
+        if (facing < u_facing_threshold) return;
+    }
     float w = brush_falloff(dist, u_world_radius);
     if (w <= 0.0) return;
-    vec3 dir = anchor_n;
+    // Draw pushes the whole dab along the cursor's surface normal; inflate pushes
+    // each vert along its own normal so the surface swells outward locally.
+    vec3 dir = (u_inflate != 0) ? vn : anchor_n;
     vec3 d = dir * (u_disp_amount * w);
     uint base = v * 4u;
     atomicAddFloat(base + 0u, d.x);
@@ -310,6 +319,7 @@ void ComputeState::dispatch_draw_accum(const DrawAccumParams& p, GLuint pos_vbo)
                 p.anchor_normal_a_x, p.anchor_normal_a_y, p.anchor_normal_a_z);
     glUniform3f(glGetUniformLocation(draw_accum_program, "u_anchor_normal_b"),
                 p.anchor_normal_b_x, p.anchor_normal_b_y, p.anchor_normal_b_z);
+    glUniform1i(glGetUniformLocation(draw_accum_program, "u_inflate"), p.inflate);
     glUniform1ui(glGetUniformLocation(draw_accum_program, "u_vertex_count"), p.vertex_count);
 
     int groups = (int)((p.vertex_count + 255u) / 256u);

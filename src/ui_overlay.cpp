@@ -387,24 +387,82 @@ void draw_button_islands(InputState& input, int win_w, int win_h) {
 
     ImGui::Dummy(ImVec2(0, row_gap));
 
-    // === Brush column: single vertical column ===
-    // Order: Draw, Crease, Pinch, Move, Smooth, Mask, Paint. Smooth is a lock
-    // toggle (not a switch_brush), handled specially in-place. Paint sits at the
-    // bottom with a visibility toggle beside it.
     BrushType current = input.current_brush;
     bool smooth_on = input.is_smooth_active();
+    bool paint_on  = (current == BrushType::PAINT) && !smooth_on;
+    InputState::InteractionMode mode = input.interaction_mode;
 
-    float brush_w = calc_btn_w("Smooth");
+    // === Mode row: Edit / Insert / Select / Paint (keys 1-4) ===
+    {
+        bool edit_sel = (mode == InputState::InteractionMode::EDIT) && !paint_on;
+        if (squircle_button("Edit", "Edit", "Sculpt (Shortcut: 1)",
+                            ImVec2(calc_btn_w("Edit"), btn_h), edit_sel)) {
+            input.interaction_mode = InputState::InteractionMode::EDIT;
+            if (current == BrushType::PAINT) {
+                input.clear_smooth_lock();
+                input.switch_brush(BrushType::DRAW);
+            }
+        }
+        ImGui::SameLine();
+        if (squircle_button("Insert", "Insert", "Spawn a sphere (Shortcut: 2)",
+                            ImVec2(calc_btn_w("Insert"), btn_h),
+                            mode == InputState::InteractionMode::INSERT)) {
+            input.interaction_mode = InputState::InteractionMode::INSERT;
+        }
+        ImGui::SameLine();
+        if (squircle_button("Select", "Select", "Pick / move objects (Shortcut: 3)",
+                            ImVec2(calc_btn_w("Select"), btn_h),
+                            mode == InputState::InteractionMode::SELECT)) {
+            input.interaction_mode = InputState::InteractionMode::SELECT;
+        }
+        ImGui::SameLine();
+        if (squircle_button("PaintMode", "Paint", "Vertex paint (Shortcut: 4)",
+                            ImVec2(calc_btn_w("Paint"), btn_h), paint_on)) {
+            input.interaction_mode = InputState::InteractionMode::EDIT;
+            input.clear_smooth_lock();
+            input.switch_brush(BrushType::PAINT);
+            input.subtract_locked = false;
+        }
+        // Paint-visibility toggle beside the Paint mode button. Hides albedo while
+        // sculpting (the paint brush itself always forces it visible).
+        ImGui::SameLine();
+        if (squircle_button("PaintVis", input.paint_visible ? "[o]" : "[ ]",
+                            input.paint_visible ? "Paint visible (click to hide)"
+                                                : "Paint hidden (click to show)",
+                            ImVec2(btn_h, btn_h), input.paint_visible)) {
+            input.paint_visible = !input.paint_visible;
+        }
+    }
+
+    // Paint colour boxes: active (left) + alternate (right). Q/E swap them. Only
+    // shown in paint mode. Drives input.paint_color / paint_color_alt.
+    if (paint_on) {
+        ImGui::ColorEdit3("##paintA", input.paint_color,
+                          ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel);
+        ImGui::SameLine();
+        ImGui::ColorEdit3("##paintB", input.paint_color_alt,
+                          ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel);
+        ImGui::SameLine();
+        ImGui::TextUnformatted("Q/E swap");
+    }
+
+    ImGui::Dummy(ImVec2(0, row_gap));
+
+    // === Brush column: single vertical column ===
+    // Order: Draw, Inflate, Crease, Pinch, Move, Smooth, Mask. Smooth is a lock
+    // toggle (not a switch_brush), handled specially in-place. Paint lives in the
+    // mode row above, not here.
+    float brush_w = calc_btn_w("Inflate");
 
     struct BrushBtn { const char* id; const char* display; const char* tooltip; BrushType type; };
     BrushBtn brushes[] = {
-        {"Draw",   "Draw",   "Shortcut: D",                    BrushType::DRAW},
-        {"Crease", "Crease", "Shortcut: C",                    BrushType::CREASE},
-        {"Pinch",  "Pinch",  "Shortcut: V",                    BrushType::PINCH},
-        {"Move",   "Move",   "Shortcut: G",                    BrushType::MOVE},
-        {"Smooth", "Smooth", "Shortcut: double-press Shift",   BrushType::SMOOTH},
-        {"Mask",   "Mask",   "Shortcut: M",                    BrushType::MASK},
-        {"Paint",  "Paint",  "Paint mode (Shortcut: 4)",       BrushType::PAINT},
+        {"Draw",    "Draw",    "Shortcut: D",                    BrushType::DRAW},
+        {"Inflate", "Inflate", "Shortcut: I",                    BrushType::INFLATE},
+        {"Crease",  "Crease",  "Shortcut: C",                    BrushType::CREASE},
+        {"Pinch",   "Pinch",   "Shortcut: V",                    BrushType::PINCH},
+        {"Move",    "Move",    "Shortcut: G",                    BrushType::MOVE},
+        {"Smooth",  "Smooth",  "Shortcut: double-press Shift",   BrushType::SMOOTH},
+        {"Mask",    "Mask",    "Shortcut: M",                    BrushType::MASK},
     };
 
     for (int i = 0; i < 7; i++) {
@@ -430,20 +488,8 @@ void draw_button_islands(InputState& input, int win_w, int win_h) {
             input.clear_smooth_lock();
             input.switch_brush(brushes[i].type);
             input.subtract_locked = false;
-            // Picking a brush implies the sculpt/paint workspace, not insert/select.
+            // Picking a brush implies the sculpt workspace, not insert/select.
             input.interaction_mode = InputState::InteractionMode::EDIT;
-        }
-
-        // Paint-visibility toggle sits beside the Paint icon. Lets you hide albedo
-        // while sculpting (the paint brush itself always forces it visible).
-        if (brushes[i].type == BrushType::PAINT) {
-            ImGui::SameLine();
-            if (squircle_button("PaintVis", input.paint_visible ? "[o]" : "[ ]",
-                                input.paint_visible ? "Paint visible (click to hide)"
-                                                    : "Paint hidden (click to show)",
-                                ImVec2(btn_h, btn_h), input.paint_visible)) {
-                input.paint_visible = !input.paint_visible;
-            }
         }
     }
 

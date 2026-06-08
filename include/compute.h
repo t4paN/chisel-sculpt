@@ -53,6 +53,7 @@ struct DrawAccumParams {
     float anchor_normal_a_x, anchor_normal_a_y, anchor_normal_a_z;
     float anchor_normal_b_x, anchor_normal_b_y, anchor_normal_b_z;
     uint32_t vertex_count;
+    int inflate;  // 0 = draw (push along cursor normal), 1 = inflate (per-vertex normal)
 };
 
 struct SmoothAccumParams {

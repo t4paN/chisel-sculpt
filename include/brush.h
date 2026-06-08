@@ -184,8 +184,12 @@ struct BrushStroke {
     void apply_pinch(DabContext& ctx, float dab_x, float dab_y,
                      float strength, float hardness, bool subtract = false);
 
+    // inflate=false: push the dab along the cursor's surface normal (Draw).
+    // inflate=true:  push each vert along its own normal (Inflate) — reuses the
+    // entire draw accum/symmetrize/apply/mirror/mask/undo pipeline.
     void apply_draw(DabContext& ctx, float dab_x, float dab_y,
-                    float strength, float hardness, bool subtract);
+                    float strength, float hardness, bool subtract,
+                    bool inflate = false);
 
     void apply_move_gpu(DabContext& ctx, float cursor_dx, float cursor_dy,
                         float strength, float hardness);

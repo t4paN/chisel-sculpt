@@ -274,6 +274,7 @@ void BrushStroke::begin(Renderer& renderer, const Camera& cam,
     // on long strokes near silhouettes.
     if (compute && compute->supported
         && (brush_type == BrushType::DRAW
+            || brush_type == BrushType::INFLATE
             || brush_type == BrushType::CREASE
             || brush_type == BrushType::PINCH)) {
         compute->snapshot_stroke_normals(renderer.vbo_norm, vert_count);
@@ -486,7 +487,8 @@ void BrushStroke::apply_pinch(DabContext& ctx, float dab_x, float dab_y,
 }
 
 void BrushStroke::apply_draw(DabContext& ctx, float dab_x, float dab_y,
-                              float strength, float hardness, bool subtract) {
+                              float strength, float hardness, bool subtract,
+                              bool inflate) {
     dirty_verts.clear();
 
     set_anchor(ctx.mesh, ctx.cam, dab_x, dab_y, ctx.eff_brush_size, ctx.win_h, ctx.renderer);
@@ -524,6 +526,7 @@ void BrushStroke::apply_draw(DabContext& ctx, float dab_x, float dab_y,
     params.view_b_z =  view_dir.z;
     set_area_normal(params, cyl_axis_x, cyl_axis_y, cyl_axis_z);
     params.vertex_count = ctx.mesh.vertex_count();
+    params.inflate = inflate ? 1 : 0;
 
     ctx.compute.dispatch_draw_accum(params, ctx.renderer.vbo_pos);
 

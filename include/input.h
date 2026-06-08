@@ -3,6 +3,7 @@
 
 enum class BrushType {
     DRAW,
+    INFLATE,
     CREASE,
     PINCH,
     MOVE,
@@ -42,8 +43,11 @@ struct InputState {
     float brush_spacing;    // fraction of brush radius between dabs (0.05..1.0)
     BrushSettings per_brush[(int)BrushType::COUNT];
 
-    // Paint brush albedo (RGB, [0,1]), edited via the right-click swatch.
+    // Paint brush albedo (RGB, [0,1]). paint_color is the active colour used by
+    // the brush; paint_color_alt is a stashed second colour. Q/E swap them while
+    // the paint brush is active. RMB swatch / toolbar boxes edit both.
     float paint_color[3];
+    float paint_color_alt[3];
     // Show vertex paint in the viewport. Toggle (next to the Paint icon) lets you
     // hide albedo while sculpting; the paint brush always forces it visible.
     bool paint_visible;

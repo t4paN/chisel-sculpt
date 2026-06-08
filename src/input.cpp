@@ -72,7 +72,8 @@ InputState::InputState()
     per_brush[(int)BrushType::PAINT].strength = 0.5f;     // soft build-up by default
     per_brush[(int)BrushType::PAINT].hardness = 0.5f;
 
-    paint_color[0] = 0.85f; paint_color[1] = 0.25f; paint_color[2] = 0.30f;  // default warm red
+    paint_color[0] = 0.85f; paint_color[1] = 0.25f; paint_color[2] = 0.30f;      // warm red
+    paint_color_alt[0] = 0.25f; paint_color_alt[1] = 0.45f; paint_color_alt[2] = 0.85f; // cool blue
     paint_visible = true;
 }
 
@@ -121,6 +122,7 @@ const char* InputState::brush_name() const {
     if (is_smooth_active()) return "Smooth";
     switch (current_brush) {
         case BrushType::DRAW:   return is_subtract_active() ? "Draw (-)"   : "Draw";
+        case BrushType::INFLATE:return is_subtract_active() ? "Inflate (-)": "Inflate";
         case BrushType::CREASE: return is_subtract_active() ? "Crease (-)" : "Crease";
         case BrushType::PINCH:  return is_subtract_active() ? "Pinch (-)"  : "Pinch";
         case BrushType::MOVE:   return "Move";
@@ -342,8 +344,12 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
                 break;
 
             case GLFW_KEY_Q:
-                // Cycle brush backward
-                {
+                if (g_input->current_brush == BrushType::PAINT) {
+                    // In paint mode Q/E swap the active colour with the alternate.
+                    for (int c = 0; c < 3; c++)
+                        std::swap(g_input->paint_color[c], g_input->paint_color_alt[c]);
+                } else {
+                    // Cycle brush backward
                     g_input->clear_smooth_lock();
                     int b = (int)g_input->current_brush - 1;
                     if (b < 0) b = (int)BrushType::COUNT - 1;
@@ -355,6 +361,10 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
                 if (g_input->ctrl_held) {
                     g_input->export_dialog_active = true;
                     g_input->quit_requested = false;
+                } else if (g_input->current_brush == BrushType::PAINT) {
+                    // In paint mode Q/E swap the active colour with the alternate.
+                    for (int c = 0; c < 3; c++)
+                        std::swap(g_input->paint_color[c], g_input->paint_color_alt[c]);
                 } else {
                     // E: Cycle brush forward
                     g_input->clear_smooth_lock();
@@ -550,6 +560,11 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
                 if (g_input->ctrl_held && !g_input->shift_held) {
                     // Ctrl+I: invert mask
                     g_input->mask_invert_requested = true;
+                } else if (!g_input->ctrl_held && !g_input->shift_held && !g_input->alt_held) {
+                    // I: inflate brush
+                    g_input->clear_smooth_lock();
+                    g_input->switch_brush(BrushType::INFLATE);
+                    g_input->subtract_locked = false;
                 }
                 break;
 

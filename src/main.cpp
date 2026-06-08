@@ -1078,6 +1078,9 @@ int main(int argc, char* argv[]) {
                     } else if (input.current_brush == BrushType::DRAW) {
                         brush_stroke.apply_draw(ctx, dab_x, dab_y, eff_strength, eff_hardness,
                                                 input.is_subtract_active());
+                    } else if (input.current_brush == BrushType::INFLATE) {
+                        brush_stroke.apply_draw(ctx, dab_x, dab_y, eff_strength, eff_hardness,
+                                                input.is_subtract_active(), true);
                     }
 
                     // Mask and paint write straight to their own VBO and never move

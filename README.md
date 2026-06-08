@@ -54,13 +54,14 @@ If you do plug in a graphics tablet on X11, pen pressure is picked up automatica
 | Double-tap Shift | Lock smooth mode (tap again to unlock) |
 | Double-tap Ctrl | Lock subtract mode |
 | D | Draw brush |
+| I | Inflate brush (swell along local normals) |
 | C | Crease brush |
 | V | Pinch brush |
 | G | Move brush |
 | M | Mask brush |
 | 4 | Paint brush (vertex colour) |
 | RMB (Paint) | Colour picker at cursor |
-| Q / E | Cycle brush backward / forward |
+| Q / E | Cycle brush backward / forward (Paint: swap active / alternate colour) |
 | B | Toggle autosmooth |
 
 Mask shields verts from paint as well as sculpt. The `[ ]` toggle by the Paint icon hides vertex colour while sculpting (the paint brush always shows it).
