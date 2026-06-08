@@ -194,6 +194,12 @@ struct BrushStroke {
     void apply_move_gpu(DabContext& ctx, float cursor_dx, float cursor_dy,
                         float strength, float hardness);
 
+    // Limb (snakehook): sticky-capture grab (move) + incremental drag + per-dab
+    // tangential redistribution. hardness controls capture falloff; strength
+    // scales the drag (and the relax amount rides along).
+    void apply_limb_gpu(DabContext& ctx, float cursor_dx, float cursor_dy,
+                        float strength, float hardness);
+
     // Post-dispatch methods
     void post_dab(DabContext& ctx);
     void post_frame(DabContext& ctx);

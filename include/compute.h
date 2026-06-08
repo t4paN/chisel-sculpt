@@ -35,6 +35,7 @@ enum ComputeBinding : GLuint {
     BIND_SDF_MC_COUNT = 26,  // uint   MC output triangle counter (atomic)
     BIND_SDF_TRITABLE = 27,  // int    MC 256x16 triangle table
     BIND_COLOR        = 28,  // uint   per-vertex packed RGBA8 albedo (paint)
+    BIND_LIMB_POS_SRC = 29,  // float3 read-side position snapshot for limb relax ping-pong
 };
 
 struct DrawAccumParams {
@@ -135,6 +136,15 @@ struct MoveApplyParams {
     uint32_t vertex_count;  // for safety bounds (unused inside shader, kept for symmetry)
 };
 
+// Limb (snakehook) brush. Reuses the move capture (BIND_MOVE_WEIGHTS / affected /
+// mask). drag is INCREMENTAL (pos += this-dab delta * w) rather than move's
+// absolute init+total, so the per-dab tangential relax persists and accumulates.
+struct LimbDragParams {
+    float dx, dy, dz;       // this dab's world-space drag increment
+    bool mirror_x;
+    uint32_t vertex_count;
+};
+
 struct ComputeState {
     bool supported;
     bool has_native_float_atomics;  // GL_NV_shader_atomic_float
@@ -205,6 +215,13 @@ struct ComputeState {
     GLuint move_weights_pong_ssbo;   // vec2 per vertex (ping-pong scratch)
     GLuint move_init_ssbo;           // 3 floats per vertex (snapshotted at capture)
     uint32_t move_buffers_capacity;
+
+    // Limb (snakehook) brush: incremental drag + tangential redistribution.
+    // Shares the move capture (weights/affected/init); adds a relax pass.
+    GLuint limb_drag_program;        // per-dab: pos += (delta*w.x + mirror_delta*w.y)*(1-mask)
+    GLuint limb_relax_program;       // tangential (normal-stripped) Laplacian over the captured set
+    GLuint limb_pos_scratch_ssbo;    // 3 floats per vertex: read-side snapshot for relax ping-pong
+    uint32_t limb_scratch_capacity;
 
     // Compute normals shader
     GLuint compute_normals_program;
@@ -410,6 +427,17 @@ struct ComputeState {
 
     // Readback affected list. Returns count; fills out[].
     uint32_t readback_move_affected(std::vector<uint32_t>& out);
+
+    // Limb (snakehook) brush. Reuses the move capture/weights/affected/mask.
+    bool init_limb();
+    void ensure_limb_buffers(uint32_t vertex_count);
+    // Incremental drag: positions[v] += this-dab world delta * w (mirror summed).
+    void dispatch_limb_drag(const LimbDragParams& params, GLuint pos_vbo);
+    // Tangential redistribution: N Laplacian iterations over the captured set,
+    // normal component stripped so it evens spacing without deflating the form.
+    void dispatch_limb_relax(uint32_t vertex_count, int iterations, float lambda,
+                             float tip_dx, float tip_dy, float tip_dz, float tip_bias,
+                             GLuint pos_vbo, GLuint norm_vbo, GLuint index_ebo);
 
     // Compile the compute normals shader. Called once at init.
     bool init_compute_normals();

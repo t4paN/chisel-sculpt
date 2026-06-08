@@ -58,6 +58,7 @@ If you do plug in a graphics tablet on X11, pen pressure is picked up automatica
 | C | Crease brush |
 | V | Pinch brush |
 | G | Move brush |
+| H | Limb brush (snakehook: pull a tube that redistributes + densifies its tip) |
 | M | Mask brush |
 | 4 | Paint brush (vertex colour) |
 | RMB (Paint) | Colour picker at cursor |

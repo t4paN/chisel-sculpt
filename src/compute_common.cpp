@@ -33,6 +33,10 @@ ComputeState::ComputeState()
     , move_weights_pong_ssbo(0)
     , move_init_ssbo(0)
     , move_buffers_capacity(0)
+    , limb_drag_program(0)
+    , limb_relax_program(0)
+    , limb_pos_scratch_ssbo(0)
+    , limb_scratch_capacity(0)
     , compute_normals_program(0)
     , adjacency_offset_ssbo(0)
     , adjacency_list_ssbo(0)
@@ -240,6 +244,9 @@ void ComputeState::cleanup() {
     if (move_weights_ssbo)          { glDeleteBuffers(1, &move_weights_ssbo);      move_weights_ssbo          = 0; }
     if (move_weights_pong_ssbo)     { glDeleteBuffers(1, &move_weights_pong_ssbo); move_weights_pong_ssbo     = 0; }
     if (move_init_ssbo)             { glDeleteBuffers(1, &move_init_ssbo);         move_init_ssbo             = 0; }
+    if (limb_drag_program)          { glDeleteProgram(limb_drag_program);         limb_drag_program          = 0; }
+    if (limb_relax_program)         { glDeleteProgram(limb_relax_program);        limb_relax_program         = 0; }
+    if (limb_pos_scratch_ssbo)      { glDeleteBuffers(1, &limb_pos_scratch_ssbo); limb_pos_scratch_ssbo      = 0; }
     move_buffers_capacity = 0;
     if (compute_normals_program) { glDeleteProgram(compute_normals_program); compute_normals_program = 0; }
     if (adjacency_offset_ssbo) { glDeleteBuffers(1, &adjacency_offset_ssbo); adjacency_offset_ssbo = 0; }

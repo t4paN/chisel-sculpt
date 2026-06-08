@@ -138,6 +138,7 @@ int main(int argc, char* argv[]) {
         compute.init_crease();
         compute.init_pinch();
         compute.init_move();
+        compute.init_limb();
         compute.init_mask();
         compute.init_color();
         compute.init_compute_normals();
@@ -942,6 +943,10 @@ int main(int argc, char* argv[]) {
                 bool is_smooth = input.is_smooth_active() ||
                                  input.current_brush == BrushType::SMOOTH;
                 bool is_move = input.current_brush == BrushType::MOVE;
+                bool is_limb = input.current_brush == BrushType::LIMB;
+                // Both grab brushes capture once and drive per-frame: one dab at the
+                // live cursor, no spline interpolation, no dab-spacing advance.
+                bool is_grab = is_move || is_limb;
 
                 const BrushSettings& eff = is_smooth
                     ? input.per_brush[(int)BrushType::SMOOTH]
@@ -980,7 +985,7 @@ int main(int argc, char* argv[]) {
                 float spacing = input.brush_size * input.brush_spacing;
 
                 int dab_count = 0;
-                if (is_move || brush_stroke.phase == StrokePhase::BEGIN) {
+                if (is_grab || brush_stroke.phase == StrokePhase::BEGIN) {
                     dab_count = 1;
                 } else if (dab_dist >= spacing) {
                     dab_count = (int)(dab_dist / spacing);
@@ -990,7 +995,7 @@ int main(int argc, char* argv[]) {
                 if (brush_stroke.phase == StrokePhase::BEGIN)
                     brush_stroke.phase = StrokePhase::ACTIVE;
 
-                bool use_spline = !is_move && dab_count > 1
+                bool use_spline = !is_grab && dab_count > 1
                     && brush_stroke.cursor_hist_count >= 3;
 
                 float p0x, p0y, p1x, p1y, p2x, p2y, p3x, p3y;
@@ -1007,7 +1012,7 @@ int main(int argc, char* argv[]) {
                 }
 
                 float step_x = 0.0f, step_y = 0.0f;
-                if (!is_move && dab_count > 0 && dab_dist > 1e-6f) {
+                if (!is_grab && dab_count > 0 && dab_dist > 1e-6f) {
                     step_x = dab_dx / dab_dist * spacing;
                     step_y = dab_dy / dab_dist * spacing;
                 }
@@ -1016,7 +1021,7 @@ int main(int argc, char* argv[]) {
 
                 for (int dab_i = 0; dab_i < dab_count; dab_i++) {
                     float dab_x, dab_y;
-                    if (is_move || dab_count == 1) {
+                    if (is_grab || dab_count == 1) {
                         dab_x = cur_x;
                         dab_y = cur_y;
                     } else if (use_spline) {
@@ -1043,6 +1048,8 @@ int main(int argc, char* argv[]) {
                         brush_stroke.apply_smooth(ctx, dab_x, dab_y, eff_strength, eff_hardness);
                     } else if (is_move) {
                         brush_stroke.apply_move_gpu(ctx, dx, dy, eff_strength, eff_hardness);
+                    } else if (is_limb) {
+                        brush_stroke.apply_limb_gpu(ctx, dx, dy, eff_strength, eff_hardness);
                     } else if (input.current_brush == BrushType::CREASE) {
                         brush_stroke.apply_crease(ctx, dab_x, dab_y, eff_strength, eff_hardness,
                                                   input.is_subtract_active());
@@ -1092,7 +1099,7 @@ int main(int argc, char* argv[]) {
                     }
                 }
 
-                if (!is_move) {
+                if (!is_grab) {
                     if (use_spline) {
                         brush_stroke.last_dab_x = cur_x;
                         brush_stroke.last_dab_y = cur_y;

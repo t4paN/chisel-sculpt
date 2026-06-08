@@ -301,18 +301,21 @@ void BrushStroke::begin(Renderer& renderer, const Camera& cam,
     cached_w = screen_w;
     cached_h = screen_h;
 
-    // Move-only allocation
+    // Move-only CPU fallback buffers
     if (brush_type == BrushType::MOVE) {
         disp_x.assign(vert_count, 0.0f);
         disp_y.assign(vert_count, 0.0f);
         disp_z.assign(vert_count, 0.0f);
         disp_weight.assign(vert_count, 0.0f);
-        move.reset(vert_count);
     } else {
         disp_x.clear();
         disp_y.clear();
         disp_z.clear();
         disp_weight.clear();
+    }
+    // Both grab brushes capture-once; clear the sticky state at stroke start.
+    if (brush_type == BrushType::MOVE || brush_type == BrushType::LIMB) {
+        move.reset(vert_count);
     }
 }
 
@@ -620,6 +623,94 @@ void BrushStroke::apply_move_gpu(DabContext& ctx, float cursor_dx, float cursor_
     ap.mirror_x = ctx.input.mirror_x;
     ap.vertex_count = ctx.vertex_count;
     ctx.compute.dispatch_move_apply(ap, ctx.renderer.vbo_pos);
+
+    dirty_verts = move.affected_list;
+    snap_and_mirror_dirty(*this, ctx);
+
+    gpu_positions_deferred = true;
+}
+
+void BrushStroke::apply_limb_gpu(DabContext& ctx, float cursor_dx, float cursor_dy,
+                                  float strength, float hardness) {
+    // Tangential redistribution per dab. Fixed for now; cheap (a few sweeps over
+    // the captured set). lambda = per-iter step, iters = sweeps.
+    const float LIMB_RELAX_LAMBDA = 0.5f;
+    const int   LIMB_RELAX_ITERS  = 6;
+    // Tip bias: up-weights tipward neighbours in the relax centroid so the vertex
+    // distribution drifts toward the leading end → a denser cap ("top-heavy" limb).
+    // 0 = old symmetric relax. Tuning knob; "slightly more tris at the tip".
+    const float LIMB_TIP_BIAS     = 0.5f;
+
+    dirty_verts.clear();
+    if (!is_active()) return;
+
+    float dab_x = (float)ctx.input.mouse_x;
+    float dab_y = (float)ctx.input.mouse_y;
+
+    // Capture once at pen-down — identical to the move brush (sticky set + falloff
+    // weights + mirror decomposition). This is what lets the pulled limb keep
+    // being driven no matter how far it travels from the anchor.
+    if (!move.captured) {
+        set_anchor(ctx.mesh, ctx.cam, dab_x, dab_y, ctx.eff_brush_size, ctx.win_h, ctx.renderer);
+        if (!anchor_valid) return;
+
+        uint32_t vc = ctx.mesh.vertex_count();
+        ctx.compute.ensure_move_buffers(ctx.vertex_count);
+        ctx.compute.ensure_limb_buffers(ctx.vertex_count);
+
+        MoveCaptureParams cp;
+        cp.anchor_x = anchor_pos.x;
+        cp.anchor_y = anchor_pos.y;
+        cp.anchor_z = anchor_pos.z;
+        cp.world_radius = anchor_world_radius;
+        cp.hardness = hardness;
+        cp.mirror_x = ctx.input.mirror_x;
+        cp.vertex_count = vc;
+        ctx.compute.dispatch_move_capture(cp, ctx.renderer.vbo_pos);
+        ctx.compute.dispatch_move_weight_smooth(vc, 3, ctx.renderer.ebo);
+        ctx.compute.readback_move_affected(move.affected_list);
+
+        move.captured = true;
+    }
+
+    if (move.affected_list.empty()) return;
+
+    // This dab's world-space drag increment (screen delta → view plane). Unlike
+    // move this is applied incrementally so the relax accumulates frame to frame.
+    float fov_rad = ctx.cam.fov * 3.14159265358979323846f / 180.0f;
+    float view_plane_h = 2.0f * ctx.cam.distance * std::tan(fov_rad * 0.5f);
+    float scale = view_plane_h / (float)ctx.win_h;
+
+    Vec3 pos = ctx.cam.get_position();
+    Vec3 fwd = (ctx.cam.target - pos).normalized();
+    Vec3 world_up = {0, 1, 0};
+    Vec3 right = fwd.cross(world_up).normalized();
+    Vec3 up = right.cross(fwd).normalized();
+
+    float wdx = cursor_dx * scale * strength;
+    float wdy = -cursor_dy * scale * strength;
+
+    LimbDragParams dp;
+    dp.dx = right.x * wdx + up.x * wdy;
+    dp.dy = right.y * wdx + up.y * wdy;
+    dp.dz = right.z * wdx + up.z * wdy;
+    dp.mirror_x = ctx.input.mirror_x;
+    dp.vertex_count = ctx.vertex_count;
+    ctx.compute.dispatch_limb_drag(dp, ctx.renderer.vbo_pos);
+
+    // Accumulate the world drag → stable tip direction (the leading end the limb has
+    // been pulled toward). total_d* is reset by move.reset() at pen-down (begin()).
+    move.total_dx += dp.dx;
+    move.total_dy += dp.dy;
+    move.total_dz += dp.dz;
+    float tlen = std::sqrt(move.total_dx*move.total_dx + move.total_dy*move.total_dy +
+                           move.total_dz*move.total_dz);
+    float tx = 0.0f, ty = 0.0f, tz = 0.0f;
+    if (tlen > 1e-8f) { tx = move.total_dx/tlen; ty = move.total_dy/tlen; tz = move.total_dz/tlen; }
+
+    ctx.compute.dispatch_limb_relax(ctx.vertex_count, LIMB_RELAX_ITERS, LIMB_RELAX_LAMBDA,
+                                    tx, ty, tz, LIMB_TIP_BIAS,
+                                    ctx.renderer.vbo_pos, ctx.renderer.vbo_norm, ctx.renderer.ebo);
 
     dirty_verts = move.affected_list;
     snap_and_mirror_dirty(*this, ctx);

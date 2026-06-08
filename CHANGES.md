@@ -2,6 +2,12 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-08 — Limb (snakehook) brush + toolbar cursor fix
+
+- **New Limb brush (`H`).** A snakehook that pulls a tube out of the surface and redistributes its triangles up the shaft as it grows — built on the Move brush's sticky-capture spine (`compute_limb.cpp`). Pen-down captures the affected set + falloff weights + mirror decomposition once; each dab does an **incremental** drag (`pos += dab-delta · w`, so the redistribution accumulates) followed by a few **tangential, normal-stripped Laplacian** relax sweeps over the captured set (verts flow up from the dense base to fill the stretching shaft, holding the silhouette). Mirror-aware via the same dual-lobe weights as Move; full undo. No dynamic topology — resolution is whatever was captured.
+- **Top-heavy tip.** The relax centroid is tip-biased: neighbours toward the leading end are up-weighted, so the vertex distribution drifts up-shaft and the cap stays denser instead of going sparse/faceted as the limb elongates. Stays a bounded redistribution (target is still a convex combination of the 1-ring), and the mirror lobe biases toward the X-flipped pull so symmetric strokes redistribute symmetrically.
+- **Toolbar no longer eats the brush cursor.** The button cluster was one ImGui window whose mouse-capture rect was the bounding box of an L-shaped layout (wide ops row + tall brush column), so the enclosed bottom-right — empty over the viewport — silently captured the mouse and hid the brush ring (the "dead square" over pulled geometry). Split into three independent auto-resizing island windows (ops / modes / brushes), each hugging its own buttons, so the gaps and the former dead zone pass clicks through to the canvas.
+
 ## 2026-06-08 — Inflate brush + paint UI: mode row, dual colour, Q/E swap
 
 - **New Inflate brush (`I`).** Swells the surface outward — every vert in the dab pushes along **its own** normal (vs Draw, which pushes the whole dab along the cursor's single surface normal). Reuses the entire draw pipeline through one `u_inflate` shader branch (`dir = vn` vs `anchor_n`); symmetrize / mirror / mask / undo / normals all ride along unchanged. ctrl+drag deflates. Sits in the brush column after Draw.

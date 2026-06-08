@@ -126,6 +126,7 @@ const char* InputState::brush_name() const {
         case BrushType::CREASE: return is_subtract_active() ? "Crease (-)" : "Crease";
         case BrushType::PINCH:  return is_subtract_active() ? "Pinch (-)"  : "Pinch";
         case BrushType::MOVE:   return "Move";
+        case BrushType::LIMB:   return "Limb";
         case BrushType::SMOOTH: return "Smooth";
         case BrushType::MASK:   return "Mask";
         case BrushType::PAINT:  return "Paint";
@@ -571,6 +572,13 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
             case GLFW_KEY_G:
                 g_input->clear_smooth_lock();
                 g_input->switch_brush(BrushType::MOVE);
+                g_input->subtract_locked = false;
+                break;
+
+            case GLFW_KEY_H:
+                // Limb (snakehook): pull + tangential redistribute
+                g_input->clear_smooth_lock();
+                g_input->switch_brush(BrushType::LIMB);
                 g_input->subtract_locked = false;
                 break;
 

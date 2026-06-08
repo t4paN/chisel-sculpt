@@ -7,6 +7,7 @@ enum class BrushType {
     CREASE,
     PINCH,
     MOVE,
+    LIMB,
     SMOOTH,
     MASK,
     PAINT,

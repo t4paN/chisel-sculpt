@@ -340,20 +340,36 @@ void draw_button_islands(InputState& input, int win_w, int win_h) {
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(btn_gap, btn_gap));
     ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0));
 
-    ImGui::SetNextWindowPos(ImVec2(margin, margin), ImGuiCond_Always);
-    ImGui::SetNextWindowSize(ImVec2(0, 0));
-    ImGui::Begin("##ButtonIslands", nullptr,
+    const ImGuiWindowFlags island_flags =
         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
         ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoBackground |
         ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
-        ImGuiWindowFlags_NoBringToFrontOnFocus);
+        ImGuiWindowFlags_NoBringToFrontOnFocus;
 
     auto calc_btn_w = [&](const char* text) -> float {
         return ImGui::CalcTextSize(text).x + pad_x * 2.0f;
     };
 
-    // === Top row: Ops ===
+    BrushType current = input.current_brush;
+    bool smooth_on = input.is_smooth_active();
+    bool paint_on  = (current == BrushType::PAINT) && !smooth_on;
+    InputState::InteractionMode mode = input.interaction_mode;
+
+    // Each island is its OWN auto-resizing window so its mouse-capture rect hugs its
+    // own buttons. A single combined window spans the L-shaped bounding box (wide ops
+    // row across the top, narrow brush column down the left) and captures the empty
+    // viewport enclosed in the bottom-right — the "dead square" that swallowed the
+    // brush cursor over pulled tris. Heights are remembered frame-to-frame to stack
+    // the islands vertically; with auto-resize a toggled row only lags one frame.
+    static float ops_h  = btn_h;
+    static float mode_h = btn_h;
+    float y = margin;
+
+    // === Island 1 — Ops row ===
+    ImGui::SetNextWindowPos(ImVec2(margin, y), ImGuiCond_Always);
+    ImGui::Begin("##IslandOps", nullptr, island_flags);
+
     struct OpsBtn { const char* id; const char* display; const char* tooltip; };
     OpsBtn ops[] = {
         {"MresDown", "Subdiv -",  "Shortcut: Shift+D"},
@@ -385,14 +401,13 @@ void draw_button_islands(InputState& input, int win_w, int win_h) {
         }
     }
 
-    ImGui::Dummy(ImVec2(0, row_gap));
+    ops_h = ImGui::GetWindowSize().y;
+    ImGui::End();
+    y += ops_h + row_gap;
 
-    BrushType current = input.current_brush;
-    bool smooth_on = input.is_smooth_active();
-    bool paint_on  = (current == BrushType::PAINT) && !smooth_on;
-    InputState::InteractionMode mode = input.interaction_mode;
-
-    // === Mode row: Edit / Insert / Select / Paint (keys 1-4) ===
+    // === Island 2 — Mode row: Edit / Insert / Select / Paint (keys 1-4) ===
+    ImGui::SetNextWindowPos(ImVec2(margin, y), ImGuiCond_Always);
+    ImGui::Begin("##IslandModes", nullptr, island_flags);
     {
         bool edit_sel = (mode == InputState::InteractionMode::EDIT) && !paint_on;
         if (squircle_button("Edit", "Edit", "Sculpt (Shortcut: 1)",
@@ -446,12 +461,17 @@ void draw_button_islands(InputState& input, int win_w, int win_h) {
         ImGui::TextUnformatted("Q/E swap");
     }
 
-    ImGui::Dummy(ImVec2(0, row_gap));
+    mode_h = ImGui::GetWindowSize().y;
+    ImGui::End();
+    y += mode_h + row_gap;
 
-    // === Brush column: single vertical column ===
-    // Order: Draw, Inflate, Crease, Pinch, Move, Smooth, Mask. Smooth is a lock
+    // === Island 3 — Brush column: single vertical column ===
+    // Order: Draw, Inflate, Crease, Pinch, Move, Limb, Smooth, Mask. Smooth is a lock
     // toggle (not a switch_brush), handled specially in-place. Paint lives in the
     // mode row above, not here.
+    ImGui::SetNextWindowPos(ImVec2(margin, y), ImGuiCond_Always);
+    ImGui::Begin("##IslandBrushes", nullptr, island_flags);
+
     float brush_w = calc_btn_w("Inflate");
 
     struct BrushBtn { const char* id; const char* display; const char* tooltip; BrushType type; };
@@ -461,11 +481,12 @@ void draw_button_islands(InputState& input, int win_w, int win_h) {
         {"Crease",  "Crease",  "Shortcut: C",                    BrushType::CREASE},
         {"Pinch",   "Pinch",   "Shortcut: V",                    BrushType::PINCH},
         {"Move",    "Move",    "Shortcut: G",                    BrushType::MOVE},
+        {"Limb",    "Limb",    "Snakehook: pull + redistribute. Shortcut: H", BrushType::LIMB},
         {"Smooth",  "Smooth",  "Shortcut: double-press Shift",   BrushType::SMOOTH},
         {"Mask",    "Mask",    "Shortcut: M",                    BrushType::MASK},
     };
 
-    for (int i = 0; i < 7; i++) {
+    for (int i = 0; i < 8; i++) {
         if (brushes[i].type == BrushType::SMOOTH) {
             if (squircle_button(brushes[i].id, brushes[i].display, brushes[i].tooltip,
                                 ImVec2(brush_w, btn_h), smooth_on)) {
