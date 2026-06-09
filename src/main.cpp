@@ -1251,7 +1251,7 @@ int main(int argc, char* argv[]) {
             IGFD::FileDialogConfig cfg;
             cfg.path = default_browse_path;
             cfg.flags = ImGuiFileDialogFlags_None;
-            fd->OpenDialog("ImportKey", "Open File", ".chisel,.obj", cfg);
+            fd->OpenDialog("ImportKey", "Open File", ".chisel,.obj,.ply", cfg);
         }
 
         if (fd->Display("ExportKey", ImGuiWindowFlags_NoCollapse, ImVec2(600, 400))) {
@@ -1324,7 +1324,9 @@ int main(int argc, char* argv[]) {
                     }
                 } else {
                     Mesh loaded;
-                    if (Mesh::import_obj(path.c_str(), loaded)) {
+                    bool imported = (ext == "ply") ? Mesh::import_ply(path.c_str(), loaded)
+                                                   : Mesh::import_obj(path.c_str(), loaded);
+                    if (imported) {
                         *mesh = std::move(loaded);
                         mesh->mask.clear();
 

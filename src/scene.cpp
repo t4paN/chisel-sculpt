@@ -342,10 +342,13 @@ void Scene::load_entities(std::vector<EntityRecord>& records,
         // only the cached current-level surface. Regenerate it from the stack
         // (matching the legacy single-mesh load), preserving the saved mask.
         if (up->multires.locked) {
-            auto saved_mask = std::move(up->mesh.mask);
+            auto saved_mask  = std::move(up->mesh.mask);
+            auto saved_color = std::move(up->mesh.color);
             cascade_to_level(up->multires, up->mesh, up->multires.current_level);
             if (!saved_mask.empty() && saved_mask.size() == up->mesh.vertex_count())
                 up->mesh.mask = std::move(saved_mask);
+            if (!saved_color.empty() && saved_color.size() == up->mesh.vertex_count())
+                up->mesh.color = std::move(saved_color);
         }
         up->mesh.recompute_normals();
         up->mesh.build_adjacency();

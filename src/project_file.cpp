@@ -9,7 +9,9 @@
 // older versions are handled by their own decoupled reader modules (see
 // project_file_v1.*) so legacy support can be deleted cleanly later.
 static constexpr uint32_t MAGIC   = 0x4C534843; // "CHSL" little-endian
-static constexpr uint32_t VERSION = 2;
+// v3 adds per-vertex paint colour after the mask in every mesh body (working +
+// multires base). v2 files are still read by the same loader with has_color=false.
+static constexpr uint32_t VERSION = 3;
 
 struct ChunkHeader {
     char     tag[4];
@@ -56,6 +58,10 @@ static void write_mesh_body(std::ofstream& f, const Mesh& m) {
     uint32_t mc = (uint32_t)m.mask.size();
     write_u32(f, mc);
     if (mc > 0) write_floats(f, m.mask.data(), mc);
+    // v3: packed-RGBA8 paint colour (count then data, empty when unpainted).
+    uint32_t cc = (uint32_t)m.color.size();
+    write_u32(f, cc);
+    if (cc > 0) write_raw(f, m.color.data(), cc * sizeof(uint32_t));
 }
 
 static void write_multires_body(std::ofstream& f, const MultiresStack& s) {
@@ -69,6 +75,11 @@ static void write_multires_body(std::ofstream& f, const MultiresStack& s) {
     write_floats(f, s.base.pos_y.data(), s.base.vertex_count());
     write_floats(f, s.base.pos_z.data(), s.base.vertex_count());
     write_raw(f, s.base.indices.data(), s.base.indices.size() * sizeof(uint32_t));
+    // v3: base-cage paint colour (count then data), so level switches after a
+    // load re-derive painted colour up the cascade. Empty when unpainted.
+    uint32_t bcc = (uint32_t)s.base.color.size();
+    write_u32(f, bcc);
+    if (bcc > 0) write_raw(f, s.base.color.data(), bcc * sizeof(uint32_t));
     uint32_t num_layers = (uint32_t)s.disp.size();
     write_u32(f, num_layers);
     for (uint32_t k = 0; k < num_layers; k++) {
@@ -165,7 +176,7 @@ public:
     }
 };
 
-static bool read_mesh_body(ChunkReader& r, Mesh& m) {
+static bool read_mesh_body(ChunkReader& r, Mesh& m, bool has_color) {
     uint32_t vc, tc;
     if (!r.read_u32(vc) || !r.read_u32(tc)) return false;
     if (!r.read_float_vec(m.pos_x, vc)) return false;
@@ -179,13 +190,19 @@ static bool read_mesh_body(ChunkReader& r, Mesh& m) {
     } else {
         m.mask.clear();
     }
+    m.color.clear();
+    if (has_color) {
+        uint32_t cc;
+        if (!r.read_u32(cc)) return false;
+        if (cc > 0 && !r.read_u32_vec(m.color, cc)) return false;
+    }
     m.norm_x.resize(vc, 0.0f); m.norm_y.resize(vc, 0.0f); m.norm_z.resize(vc, 0.0f);
     m.mirror_x_map.clear();
     m.vert_tri_offset.clear(); m.vert_tri_list.clear();
     return true;
 }
 
-static bool read_multires_body(ChunkReader& r, MultiresStack& s) {
+static bool read_multires_body(ChunkReader& r, MultiresStack& s, bool has_color) {
     uint8_t locked_byte;
     if (!r.read_u8(locked_byte)) return false;
     s.locked = (locked_byte != 0);
@@ -202,6 +219,12 @@ static bool read_multires_body(ChunkReader& r, MultiresStack& s) {
     if (!r.read_float_vec(s.base.pos_y, bvc)) return false;
     if (!r.read_float_vec(s.base.pos_z, bvc)) return false;
     if (!r.read_u32_vec(s.base.indices, (size_t)btc * 3)) return false;
+    s.base.color.clear();
+    if (has_color) {
+        uint32_t bcc;
+        if (!r.read_u32(bcc)) return false;
+        if (bcc > 0 && !r.read_u32_vec(s.base.color, bcc)) return false;
+    }
     s.base.norm_x.resize(bvc, 0.0f); s.base.norm_y.resize(bvc, 0.0f); s.base.norm_z.resize(bvc, 0.0f);
     s.base.mask.clear();
     s.base.mirror_x_map.clear();
@@ -261,17 +284,18 @@ static bool read_scen_chunk(ChunkReader& r, ProjectData& d) {
     return true;
 }
 
-static bool read_enty_chunk(ChunkReader& r, EntityRecord& e) {
+static bool read_enty_chunk(ChunkReader& r, EntityRecord& e, bool has_color) {
     if (!r.read_u32(e.id) || !r.read_u32(e.subdiv_level)) return false;
-    if (!read_mesh_body(r, e.mesh)) return false;
-    if (!read_multires_body(r, e.multires)) return false;
+    if (!read_mesh_body(r, e.mesh, has_color)) return false;
+    if (!read_multires_body(r, e.multires, has_color)) return false;
     return true;
 }
 
-// v2 reader: file already validated (magic ok, version == VERSION) and `f`
-// positioned just past the 8-byte header.
+// v2/v3 reader: file already validated (magic ok, version 2 or 3) and `f`
+// positioned just past the 8-byte header. The only difference is v3 carries
+// per-vertex paint colour in each mesh body, gated by has_color.
 static LoadResult load_project_v2(std::ifstream& f, std::streamoff file_size,
-                                  ProjectData& data) {
+                                  ProjectData& data, bool has_color) {
     bool has_scen = false;
 
     while ((std::streamoff)f.tellg() < file_size) {
@@ -291,7 +315,7 @@ static LoadResult load_project_v2(std::ifstream& f, std::streamoff file_size,
 
         if (std::memcmp(hdr.tag, "ENTY", 4) == 0) {
             EntityRecord e;
-            if (!read_enty_chunk(cr, e)) return LoadResult::ERR_CORRUPT;
+            if (!read_enty_chunk(cr, e, has_color)) return LoadResult::ERR_CORRUPT;
             data.entities.push_back(std::move(e));
         } else if (std::memcmp(hdr.tag, "SCEN", 4) == 0) {
             if (!read_scen_chunk(cr, data)) return LoadResult::ERR_CORRUPT;
@@ -335,8 +359,8 @@ LoadResult load_project(const char* path, ProjectData& data) {
     if (version == 1)
         return load_project_v1(path, data);
 
-    if (version != VERSION) return LoadResult::ERR_VERSION;
-    return load_project_v2(f, (std::streamoff)file_size, data);
+    if (version != 2 && version != 3) return LoadResult::ERR_VERSION;
+    return load_project_v2(f, (std::streamoff)file_size, data, version >= 3);
 }
 
 // ------------------------------------------------------------------ strings --

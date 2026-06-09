@@ -2,6 +2,11 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-10 — Paint persists in projects (.chisel) + PLY import
+
+- **`.chisel` carries vertex paint.** Project format bumped to v3: every mesh body (working + multires base) now stores per-vertex packed-RGBA8 colour after the mask. v2 files still load via the same reader (colour cleared) — one `has_color` flag, no module fork. Fixed a load bug where a subdivided (multires-locked) entity dropped its paint because the post-load cascade rebuilds the working mesh from the stack and only `mask` was being carried across — `color` now rides along the same way.
+- **PLY import.** `Mesh::import_ply` reads ASCII and binary-little-endian PLY: position (required), normal (recomputed if absent), and `red/green/blue` (or `r/g/b`, uchar 0–255 or float 0–1) into packed colour. Header parsed generically so extra properties are tolerated; polygon faces fan-triangulated; an all-white file imports as unpainted. `.ply` added to the Open dialog.
+
 ## 2026-06-09 — PLY export (carries vertex paint)
 
 - **PLY export.** New `.ply` option in the export dialog writes ASCII PLY with per-vertex position, normal, and RGB unpacked from the packed paint colour (unpainted verts export white). It's the only export format that carries paint — OBJ/STL are unchanged (no vertex colour). Verified round-trip in Blender (Solid shading → Color: Attribute). Exports the active entity's working mesh, same as OBJ/STL. First half of the §8.2 gate; `.chisel` colour field still to come.

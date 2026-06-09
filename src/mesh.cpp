@@ -1,6 +1,8 @@
 #include "mesh.h"
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
+#include <string>
 #include <algorithm>
 #include <unordered_map>
 #include <cassert>
@@ -586,5 +588,190 @@ bool Mesh::import_obj(const char* filename, Mesh& out) {
 
     std::printf("[import] loaded %u verts, %u tris from %s\n",
                 out.vertex_count(), out.tri_count(), filename);
+    return true;
+}
+
+bool Mesh::import_ply(const char* filename, Mesh& out) {
+    FILE* f = std::fopen(filename, "rb");
+    if (!f) return false;
+
+    auto type_size = [](const std::string& t) -> int {
+        if (t=="char"||t=="uchar"||t=="int8"||t=="uint8") return 1;
+        if (t=="short"||t=="ushort"||t=="int16"||t=="uint16") return 2;
+        if (t=="int"||t=="uint"||t=="int32"||t=="uint32"||t=="float"||t=="float32") return 4;
+        if (t=="double"||t=="float64") return 8;
+        return 0;
+    };
+    auto is_float_type = [](const std::string& t) {
+        return t=="float"||t=="float32"||t=="double"||t=="float64";
+    };
+
+    struct Prop { std::string name; int size; bool is_float; };
+    std::vector<Prop> vprops;
+    uint32_t n_vert = 0, n_face = 0;
+    int format = -1;                 // 0 ascii, 1 binary_le
+    int face_count_size = 1, face_idx_size = 4;
+    enum { EL_NONE, EL_VERTEX, EL_FACE } cur = EL_NONE;
+
+    char line[512];
+    if (!std::fgets(line, sizeof(line), f) || std::strncmp(line, "ply", 3) != 0) {
+        std::fclose(f); return false;
+    }
+    while (std::fgets(line, sizeof(line), f)) {
+        char a[64], b[64], c[64];
+        if (std::sscanf(line, "%63s", a) != 1) continue;
+        if (std::strcmp(a, "end_header") == 0) break;
+        if (std::strcmp(a, "format") == 0) {
+            std::sscanf(line, "format %63s", b);
+            if      (std::strcmp(b, "ascii") == 0)                format = 0;
+            else if (std::strcmp(b, "binary_little_endian") == 0) format = 1;
+            // binary_big_endian intentionally unsupported (format stays -1).
+        } else if (std::strcmp(a, "element") == 0) {
+            unsigned long n = 0;
+            if (std::sscanf(line, "element %63s %lu", b, &n) == 2) {
+                if      (std::strcmp(b, "vertex") == 0) { cur = EL_VERTEX; n_vert = (uint32_t)n; }
+                else if (std::strcmp(b, "face")   == 0) { cur = EL_FACE;   n_face = (uint32_t)n; }
+                else cur = EL_NONE;
+            }
+        } else if (std::strcmp(a, "property") == 0) {
+            if (cur == EL_VERTEX && std::sscanf(line, "property %63s %63s", b, c) == 2) {
+                vprops.push_back({ c, type_size(b), is_float_type(b) });
+            } else if (cur == EL_FACE && std::sscanf(line, "property list %63s %63s %63s", a, b, c) == 3) {
+                face_count_size = type_size(a);
+                face_idx_size   = type_size(b);
+            }
+        }
+    }
+    if (format < 0 || n_vert == 0) { std::fclose(f); return false; }
+
+    // Locate the properties we care about and their byte offsets within a record.
+    int ix=-1,iy=-1,iz=-1, inx=-1,iny=-1,inz=-1, ir=-1,ig=-1,ib=-1;
+    std::vector<int> off(vprops.size());
+    int stride = 0;
+    for (size_t i = 0; i < vprops.size(); i++) {
+        off[i] = stride; stride += vprops[i].size;
+        const std::string& nm = vprops[i].name;
+        if      (nm=="x")  ix=(int)i;  else if (nm=="y")  iy=(int)i;  else if (nm=="z")  iz=(int)i;
+        else if (nm=="nx") inx=(int)i; else if (nm=="ny") iny=(int)i; else if (nm=="nz") inz=(int)i;
+        else if (nm=="red"||nm=="r") ir=(int)i;
+        else if (nm=="green"||nm=="g") ig=(int)i;
+        else if (nm=="blue"||nm=="b") ib=(int)i;
+    }
+    if (ix<0 || iy<0 || iz<0) { std::fclose(f); return false; }
+    bool have_n = (inx>=0 && iny>=0 && inz>=0);
+    bool have_c = (ir>=0  && ig>=0  && ib>=0);
+
+    std::vector<float> px(n_vert), py(n_vert), pz(n_vert), nx, ny, nz;
+    std::vector<uint32_t> col;
+    if (have_n) { nx.resize(n_vert); ny.resize(n_vert); nz.resize(n_vert); }
+    if (have_c) col.resize(n_vert);
+
+    // Reads property `pidx` from an in-memory record as a double (ints are
+    // unsigned little-endian; floats as stored).
+    auto rd = [&](const unsigned char* base, int pidx) -> double {
+        const unsigned char* q = base + off[pidx];
+        const Prop& pr = vprops[pidx];
+        if (pr.is_float) {
+            if (pr.size == 8) { double d; std::memcpy(&d, q, 8); return d; }
+            float fv; std::memcpy(&fv, q, 4); return fv;
+        }
+        uint64_t u = 0;
+        for (int k = 0; k < pr.size; k++) u |= (uint64_t)q[k] << (8*k);
+        return (double)u;
+    };
+    auto to_byte = [&](double val, int pidx) -> uint32_t {
+        double s = vprops[pidx].is_float ? val * 255.0 : val;   // float colour is 0..1
+        if (s < 0) s = 0; if (s > 255) s = 255;
+        return (uint32_t)(s + 0.5);
+    };
+
+    std::vector<unsigned char> rec(stride);
+    for (uint32_t v = 0; v < n_vert; v++) {
+        if (format == 0) {
+            if (!std::fgets(line, sizeof(line), f)) { std::fclose(f); return false; }
+            // Tokenize the line into the record buffer is overkill; read doubles
+            // directly in property order, then pick out the ones we need.
+            double vals[64]; char* p = line; int got = 0;
+            while (got < (int)vprops.size()) {
+                while (*p==' '||*p=='\t') p++;
+                if (*p=='\0'||*p=='\n'||*p=='\r') break;
+                vals[got++] = std::strtod(p, &p);
+            }
+            if (got < (int)vprops.size()) { std::fclose(f); return false; }
+            px[v]=(float)vals[ix]; py[v]=(float)vals[iy]; pz[v]=(float)vals[iz];
+            if (have_n) { nx[v]=(float)vals[inx]; ny[v]=(float)vals[iny]; nz[v]=(float)vals[inz]; }
+            if (have_c) {
+                uint32_t r=to_byte(vals[ir],ir), g=to_byte(vals[ig],ig), b=to_byte(vals[ib],ib);
+                col[v] = r | (g<<8) | (b<<16) | (0xFFu<<24);
+            }
+        } else {
+            if (std::fread(rec.data(), 1, stride, f) != (size_t)stride) { std::fclose(f); return false; }
+            px[v]=(float)rd(rec.data(),ix); py[v]=(float)rd(rec.data(),iy); pz[v]=(float)rd(rec.data(),iz);
+            if (have_n) { nx[v]=(float)rd(rec.data(),inx); ny[v]=(float)rd(rec.data(),iny); nz[v]=(float)rd(rec.data(),inz); }
+            if (have_c) {
+                uint32_t r=to_byte(rd(rec.data(),ir),ir), g=to_byte(rd(rec.data(),ig),ig), b=to_byte(rd(rec.data(),ib),ib);
+                col[v] = r | (g<<8) | (b<<16) | (0xFFu<<24);
+            }
+        }
+    }
+
+    std::vector<uint32_t> idxs;
+    for (uint32_t fc = 0; fc < n_face; fc++) {
+        uint32_t fv[32]; int got = 0;
+        if (format == 0) {
+            if (!std::fgets(line, sizeof(line), f)) break;
+            char* p = line;
+            long cnt = std::strtol(p, &p, 10);
+            for (long k = 0; k < cnt; k++) {
+                uint32_t idx = (uint32_t)std::strtol(p, &p, 10);
+                if (got < 32) fv[got++] = idx;
+            }
+        } else {
+            unsigned char cb[8] = {0};
+            if (std::fread(cb, 1, face_count_size, f) != (size_t)face_count_size) break;
+            uint64_t cnt = 0;
+            for (int k = 0; k < face_count_size; k++) cnt |= (uint64_t)cb[k] << (8*k);
+            for (uint64_t k = 0; k < cnt; k++) {
+                unsigned char ibuf[8] = {0};
+                if (std::fread(ibuf, 1, face_idx_size, f) != (size_t)face_idx_size) { std::fclose(f); return false; }
+                uint64_t idx = 0;
+                for (int b = 0; b < face_idx_size; b++) idx |= (uint64_t)ibuf[b] << (8*b);
+                if (got < 32) fv[got++] = (uint32_t)idx;
+            }
+        }
+        for (int k = 1; k + 1 < got; k++) {            // fan-triangulate
+            idxs.push_back(fv[0]); idxs.push_back(fv[k]); idxs.push_back(fv[k+1]);
+        }
+    }
+    std::fclose(f);
+    if (idxs.empty()) return false;
+
+    out.pos_x = std::move(px); out.pos_y = std::move(py); out.pos_z = std::move(pz);
+    out.indices = std::move(idxs);
+    out.mirror_x_map.clear();
+    out.vert_tri_offset.clear(); out.vert_tri_list.clear();
+    out.mask.clear();
+
+    uint32_t nv = out.vertex_count();
+    if (have_n && nx.size() == nv) {
+        out.norm_x = std::move(nx); out.norm_y = std::move(ny); out.norm_z = std::move(nz);
+    } else {
+        out.norm_x.assign(nv, 0.0f); out.norm_y.assign(nv, 0.0f); out.norm_z.assign(nv, 1.0f);
+        out.recompute_normals();
+    }
+
+    // Keep colour only if something is actually painted; an all-white import is
+    // "unpainted" (matches the internal empty-means-unpainted convention).
+    out.color.clear();
+    if (have_c && col.size() == nv) {
+        bool any = false;
+        for (uint32_t c : col) if (c != 0xFFFFFFFFu) { any = true; break; }
+        if (any) out.color = std::move(col);
+    }
+
+    out.build_adjacency();
+    std::printf("[import] loaded %u verts, %u tris%s from %s\n",
+                out.vertex_count(), out.tri_count(),
+                out.color.empty() ? "" : " (+paint)", filename);
     return true;
 }

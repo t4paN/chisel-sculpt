@@ -75,6 +75,9 @@ struct Mesh {
     // PLY is the only export carrying paint; unpainted verts write white.
     bool export_ply(const char* filename) const;
     static bool import_obj(const char* filename, Mesh& out);
+    // ASCII or binary-little-endian PLY in. Reads position (required), normal
+    // (recomputed if absent), and per-vertex RGB into packed `color` if present.
+    static bool import_ply(const char* filename, Mesh& out);
 };
 
 // Spatial-hash mirror builder — same logic as Mesh::build_mirror_x_map but

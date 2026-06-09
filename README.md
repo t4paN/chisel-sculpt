@@ -14,7 +14,7 @@ Chisel runs the entire sculpt pipeline on the GPU — brush operations, mesh upd
 - **X-axis mirror** — real-time symmetric sculpting
 - **Voxel merge** — weld a selection of meshes into one watertight manifold, ready for 3D printing; optionally mirror-symmetric so the result stays editable under X-mirror
 - **Undo / redo** — delta-based, per-stroke, per-object
-- **Import / export** — OBJ in and out; STL and PLY export (PLY carries vertex paint)
+- **Import / export** — OBJ and PLY in; OBJ, STL, and PLY out (PLY carries vertex paint)
 - **Save / load** — native project files (.chisel)
 - **Matcap shading** — one draw call per object
 - **Runs on a potato** — as long as the potato supports OpenGL 4.3 (compute shaders are non-negotiable)
