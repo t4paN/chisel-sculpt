@@ -71,6 +71,9 @@ struct Mesh {
     // uint32 count. `scale` multiplies every coordinate so the print lands at
     // real-world size (e.g. mm). Winding order is preserved from the mesh.
     bool export_stl(const char* filename, float scale = 1.0f) const;
+    // ASCII PLY with per-vertex position, normal, and RGB (from packed `color`).
+    // PLY is the only export carrying paint; unpainted verts write white.
+    bool export_ply(const char* filename) const;
     static bool import_obj(const char* filename, Mesh& out);
 };
 

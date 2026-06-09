@@ -1245,7 +1245,7 @@ int main(int argc, char* argv[]) {
             IGFD::FileDialogConfig cfg;
             cfg.path = default_browse_path;
             cfg.flags = ImGuiFileDialogFlags_ConfirmOverwrite;
-            fd->OpenDialog("ExportKey", "Export Mesh", ".obj,.stl", cfg);
+            fd->OpenDialog("ExportKey", "Export Mesh", ".obj,.stl,.ply", cfg);
         }
         if (input.import_dialog_active && !fd->IsOpened("ImportKey")) {
             IGFD::FileDialogConfig cfg;
@@ -1261,6 +1261,7 @@ int main(int argc, char* argv[]) {
                 std::string ext = (dot != std::string::npos) ? path.substr(dot + 1) : "";
                 for (char& ch : ext) ch = (char)std::tolower((unsigned char)ch);
                 bool ok = (ext == "stl") ? mesh->export_stl(path.c_str())
+                        : (ext == "ply") ? mesh->export_ply(path.c_str())
                                          : mesh->export_obj(path.c_str());
                 if (ok) {
                     std::snprintf(input.notification, sizeof(input.notification),

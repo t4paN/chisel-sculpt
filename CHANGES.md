@@ -2,6 +2,10 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-09 — PLY export (carries vertex paint)
+
+- **PLY export.** New `.ply` option in the export dialog writes ASCII PLY with per-vertex position, normal, and RGB unpacked from the packed paint colour (unpainted verts export white). It's the only export format that carries paint — OBJ/STL are unchanged (no vertex colour). Verified round-trip in Blender (Solid shading → Color: Attribute). Exports the active entity's working mesh, same as OBJ/STL. First half of the §8.2 gate; `.chisel` colour field still to come.
+
 ## 2026-06-09 — Paint persistence (subdivide / remesh / SDF) + paint-smooth
 
 - **Paint survives subdivide & remesh.** Vertex colour is now carried through every topology change instead of being dropped. Loop subdivision keeps original verts' colour and gives each edge-midpoint the average of its two endpoints; remesh shadows its `mask` handling for colour at all four vertex-minting sites (split midpoint, mirror-split lerp, mirror duplication, `compact_mesh` remap). Packed RGBA8 blends via new `color_lerp`/`color_avg` helpers (alpha forced opaque).

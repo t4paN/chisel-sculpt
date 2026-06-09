@@ -470,6 +470,47 @@ bool Mesh::export_stl(const char* filename, float scale) const {
     return true;
 }
 
+bool Mesh::export_ply(const char* filename) const {
+    FILE* f = std::fopen(filename, "w");
+    if (!f) return false;
+
+    uint32_t nv = vertex_count(), nt = tri_count();
+    bool have_color = (color.size() == nv);
+
+    std::fprintf(f, "ply\n");
+    std::fprintf(f, "format ascii 1.0\n");
+    std::fprintf(f, "comment Chisel PLY export\n");
+    std::fprintf(f, "element vertex %u\n", nv);
+    std::fprintf(f, "property float x\n");
+    std::fprintf(f, "property float y\n");
+    std::fprintf(f, "property float z\n");
+    std::fprintf(f, "property float nx\n");
+    std::fprintf(f, "property float ny\n");
+    std::fprintf(f, "property float nz\n");
+    std::fprintf(f, "property uchar red\n");
+    std::fprintf(f, "property uchar green\n");
+    std::fprintf(f, "property uchar blue\n");
+    std::fprintf(f, "element face %u\n", nt);
+    std::fprintf(f, "property list uchar uint vertex_indices\n");
+    std::fprintf(f, "end_header\n");
+
+    for (uint32_t i = 0; i < nv; i++) {
+        uint32_t c = have_color ? color[i] : 0xFFFFFFFFu;
+        unsigned r = c & 0xFF, g = (c >> 8) & 0xFF, b = (c >> 16) & 0xFF;
+        std::fprintf(f, "%f %f %f %f %f %f %u %u %u\n",
+                     pos_x[i], pos_y[i], pos_z[i],
+                     norm_x[i], norm_y[i], norm_z[i], r, g, b);
+    }
+
+    for (uint32_t t = 0; t < nt; t++) {
+        std::fprintf(f, "3 %u %u %u\n",
+                     indices[t*3+0], indices[t*3+1], indices[t*3+2]);
+    }
+
+    std::fclose(f);
+    return true;
+}
+
 bool Mesh::import_obj(const char* filename, Mesh& out) {
     FILE* f = std::fopen(filename, "r");
     if (!f) return false;
