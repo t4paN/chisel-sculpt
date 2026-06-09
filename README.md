@@ -50,7 +50,7 @@ If you do plug in a graphics tablet on X11, pen pressure is picked up automatica
 |---|---|
 | LMB on mesh | Active brush stroke |
 | Ctrl + LMB | Subtract mode |
-| Shift + LMB | Smooth |
+| Shift + LMB | Smooth (blends colours instead of geometry in paint mode) |
 | Double-tap Shift | Lock smooth mode (tap again to unlock) |
 | Double-tap Ctrl | Lock subtract mode |
 | D | Draw brush |

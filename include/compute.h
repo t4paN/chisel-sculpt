@@ -203,6 +203,9 @@ struct ComputeState {
 
     // Paint brush compute shader (writes directly to color VBO/SSBO)
     GLuint color_paint_program;
+    // Paint-smooth: blends each vertex colour toward its neighbour average
+    // (the smooth gesture while painting). Same buffers as color_paint.
+    GLuint color_smooth_program;
 
     // Move brush compute shaders (stateful: capture-once weights + per-dab apply)
     GLuint move_capture_program;        // brute-force per-vertex world-distance gate: sets weight, init pos, appends affected
@@ -406,6 +409,9 @@ struct ComputeState {
     // back dirty list via readback_smooth_dirty.
     void dispatch_mask_paint(const MaskPaintParams& params, GLuint pos_vbo);
     void dispatch_color_paint(const ColorPaintParams& params, GLuint pos_vbo);
+    // Paint-smooth: reuses ColorPaintParams (paint_strength = blend amount,
+    // paint_r/g/b ignored). Averages neighbour colours via CSR adjacency.
+    void dispatch_color_smooth(const ColorPaintParams& params, GLuint pos_vbo, GLuint index_ebo);
 
     // Compile the four move-brush compute shaders. Called once at init.
     bool init_move();

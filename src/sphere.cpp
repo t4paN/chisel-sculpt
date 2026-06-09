@@ -47,6 +47,15 @@ Mesh loop_subdivide(const Mesh& input) {
     out.norm_x.resize(outV, 0.0f); out.norm_y.resize(outV, 0.0f); out.norm_z.resize(outV, 0.0f);
     out.indices.resize(outF * 3);
 
+    // Carry vertex paint across the subdivision: original verts keep their
+    // colour (Loop preserves them as the [0,V) prefix), edge midpoints take the
+    // average of their two endpoints. Empty when unpainted (renders white).
+    const bool has_color = !input.color.empty();
+    if (has_color) {
+        out.color.resize(outV, 0xFFFFFFFFu);
+        for (uint32_t i = 0; i < V; i++) out.color[i] = input.color[i];
+    }
+
     // Pass 2: assign indices and positions to edge-midpoint vertices
     uint32_t next_vert = V;
     for (auto& [key, d] : edge_map) {
@@ -64,6 +73,7 @@ Mesh loop_subdivide(const Mesh& input) {
             pos = (p0 + p1) * 0.5f;
         }
         out.set_pos(d.new_vert, pos);
+        if (has_color) out.color[d.new_vert] = color_avg(input.color[v0], input.color[v1]);
     }
 
     // Pass 3: move original vertices with Loop weights

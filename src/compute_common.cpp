@@ -25,6 +25,7 @@ ComputeState::ComputeState()
     , pinch_accum_program(0)
     , mask_paint_program(0)
     , color_paint_program(0)
+    , color_smooth_program(0)
     , move_capture_program(0)
     , move_weight_smooth_program(0)
     , move_apply_program(0)
@@ -237,6 +238,7 @@ void ComputeState::cleanup() {
     if (pinch_accum_program) { glDeleteProgram(pinch_accum_program); pinch_accum_program = 0; }
     if (mask_paint_program) { glDeleteProgram(mask_paint_program); mask_paint_program = 0; }
     if (color_paint_program) { glDeleteProgram(color_paint_program); color_paint_program = 0; }
+    if (color_smooth_program) { glDeleteProgram(color_smooth_program); color_smooth_program = 0; }
     if (move_capture_program)       { glDeleteProgram(move_capture_program);       move_capture_program       = 0; }
     if (move_weight_smooth_program) { glDeleteProgram(move_weight_smooth_program); move_weight_smooth_program = 0; }
     if (move_apply_program)         { glDeleteProgram(move_apply_program);         move_apply_program         = 0; }

@@ -81,3 +81,16 @@ void build_mirror_spatial(const Mesh& m, std::vector<uint32_t>& out);
 Mesh loop_subdivide(const Mesh& input);
 Mesh icosahedron();
 Mesh icosphere(int subdivisions);
+
+// Packed-RGBA8 vertex-colour blending used to carry paint across topology
+// changes (subdivide / remesh). Alpha is forced to 0xFF — the paint model
+// keeps alpha at 1.0, and unpainted verts are white 0xFFFFFFFF.
+inline uint32_t color_lerp(uint32_t a, uint32_t b, float t) {
+    float ar = (float)( a        & 0xFF), ag = (float)((a >> 8) & 0xFF), ab = (float)((a >> 16) & 0xFF);
+    float br = (float)( b        & 0xFF), bg = (float)((b >> 8) & 0xFF), bb = (float)((b >> 16) & 0xFF);
+    uint32_t r  = (uint32_t)(ar + t * (br - ar) + 0.5f);
+    uint32_t g  = (uint32_t)(ag + t * (bg - ag) + 0.5f);
+    uint32_t bl = (uint32_t)(ab + t * (bb - ab) + 0.5f);
+    return r | (g << 8) | (bl << 16) | (0xFFu << 24);
+}
+inline uint32_t color_avg(uint32_t a, uint32_t b) { return color_lerp(a, b, 0.5f); }

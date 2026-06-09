@@ -14,6 +14,8 @@
 #include <utility>
 #include <functional>
 #include <algorithm>
+#include <limits>
+#include <cstdlib>
 
 // ============================================================================
 //  SDF voxel-merge — GPU-native pooled-soup + generalized winding number.
@@ -43,21 +45,29 @@ constexpr int   GRID_PAD     = 4;       // cells of empty margin so the surface 
 // Returns the number of entities gathered.
 uint32_t gather_soup(const Scene& scene,
                      std::vector<float>&    pos,
-                     std::vector<uint32_t>& idx)
+                     std::vector<uint32_t>& idx,
+                     std::vector<uint32_t>& vcol,  // per-source-vertex colour (white if unpainted)
+                     bool&                  any_paint)
 {
     uint32_t n_ent = 0;
+    any_paint = false;
     for (uint32_t id : scene.selected_ids()) {
         const MeshEntity* e = scene.find_entity(id);
         if (!e) continue;
         const Mesh& m = e->mesh;
         if (m.vertex_count() == 0 || m.indices.empty()) continue;
 
+        const bool painted = !m.color.empty();
+        if (painted) any_paint = true;
+
         uint32_t base = (uint32_t)(pos.size() / 3);
         pos.reserve(pos.size() + m.vertex_count() * 3);
+        vcol.reserve(vcol.size() + m.vertex_count());
         for (uint32_t v = 0; v < m.vertex_count(); v++) {
             pos.push_back(m.pos_x[v]);
             pos.push_back(m.pos_y[v]);
             pos.push_back(m.pos_z[v]);
+            vcol.push_back((painted && v < m.color.size()) ? m.color[v] : 0xFFFFFFFFu);
         }
         idx.reserve(idx.size() + m.indices.size());
         for (uint32_t i : m.indices) idx.push_back(base + i);
@@ -682,6 +692,77 @@ void weld_near_seam(Mesh& m, float voxel, std::vector<uint8_t>& seam) {
 
 // ============================================================================
 
+// ---- Vertex-paint transfer (world-space nearest source vertex) ------------
+// The voxel merge mints brand-new MC topology with no correspondence to the
+// source meshes, so paint can't ride along an index map the way it does through
+// remesh. Instead we reproject it: each output vertex copies the colour of the
+// nearest SOURCE vertex in world space. A uniform grid (cell = voxel) over the
+// source verts keeps it near-linear; the expanding Chebyshev-ring search stops
+// once no unscanned cell can hold a closer vertex. One-shot op — heavier CPU is
+// allowed (the no-readback / zero-alloc rules are stroke-only).
+static void transfer_colors_world(Mesh& out,
+                                  const std::vector<float>&    src_pos,  // 3 per vert
+                                  const std::vector<uint32_t>& src_col,
+                                  Vec3 origin, float cell, uint32_t R) {
+    const uint32_t ns = (uint32_t)src_col.size();
+    const uint32_t vc = out.vertex_count();
+    out.color.assign(vc, 0xFFFFFFFFu);
+    if (ns == 0 || cell <= 0.0f) return;
+
+    const float inv = 1.0f / cell;
+    auto cell_of = [&](float x, float y, float z, int& i, int& j, int& k) {
+        i = (int)std::floor((x - origin.x) * inv);
+        j = (int)std::floor((y - origin.y) * inv);
+        k = (int)std::floor((z - origin.z) * inv);
+    };
+    // Grid spans the padded AABB plus slop for source verts outside it; bias keeps
+    // the packed key positive across the whole range (R <= 256, pad small).
+    auto key = [](int i, int j, int k) -> int64_t {
+        return (int64_t)(uint32_t)(i + 4096)
+             | ((int64_t)(uint32_t)(j + 4096) << 21)
+             | ((int64_t)(uint32_t)(k + 4096) << 42);
+    };
+
+    std::unordered_map<int64_t, std::vector<uint32_t>> grid;
+    grid.reserve(ns);
+    for (uint32_t s = 0; s < ns; s++) {
+        int i, j, k; cell_of(src_pos[s*3], src_pos[s*3+1], src_pos[s*3+2], i, j, k);
+        grid[key(i, j, k)].push_back(s);
+    }
+
+    const int RMAX = (int)R + 4;
+    for (uint32_t v = 0; v < vc; v++) {
+        const float px = out.pos_x[v], py = out.pos_y[v], pz = out.pos_z[v];
+        int ci, cj, ck; cell_of(px, py, pz, ci, cj, ck);
+        float    best     = std::numeric_limits<float>::max();
+        uint32_t best_col = 0xFFFFFFFFu;
+        for (int r = 0; r <= RMAX; r++) {
+            for (int dk = -r; dk <= r; dk++)
+            for (int dj = -r; dj <= r; dj++)
+            for (int di = -r; di <= r; di++) {
+                // Chebyshev shell only — interior cells were scanned at smaller r.
+                if (std::abs(di) != r && std::abs(dj) != r && std::abs(dk) != r) continue;
+                auto it = grid.find(key(ci + di, cj + dj, ck + dk));
+                if (it == grid.end()) continue;
+                for (uint32_t s : it->second) {
+                    const float dx = px - src_pos[s*3],
+                                dy = py - src_pos[s*3+1],
+                                dz = pz - src_pos[s*3+2];
+                    const float d2 = dx*dx + dy*dy + dz*dz;
+                    if (d2 < best) { best = d2; best_col = src_col[s]; }
+                }
+            }
+            // The nearest point of any cell at Chebyshev radius r+1 is >= r*cell
+            // away, so once best <= (r*cell)^2 no farther shell can improve it.
+            if (best < std::numeric_limits<float>::max()) {
+                const float reach = (float)r * cell;
+                if (reach * reach >= best) break;
+            }
+        }
+        out.color[v] = best_col;
+    }
+}
+
 VoxelMergeResult voxel_merge_selected(Scene& scene, ComputeState& cs,
                                       int resolution, bool mirror) {
     VoxelMergeResult res;
@@ -692,7 +773,9 @@ VoxelMergeResult voxel_merge_selected(Scene& scene, ComputeState& cs,
     // ---- 1. Gather soup ----
     std::vector<float>    pos;
     std::vector<uint32_t> idx;
-    res.in_entities = gather_soup(scene, pos, idx);
+    std::vector<uint32_t> vcol;          // per-source-vertex paint, for world-space transfer
+    bool                  any_paint = false;
+    res.in_entities = gather_soup(scene, pos, idx, vcol, any_paint);
     res.in_tris     = (uint32_t)(idx.size() / 3);
     if (idx.empty()) { res.error = "selection has no triangles"; return res; }
     uint32_t tri_count = res.in_tris;
@@ -895,6 +978,13 @@ VoxelMergeResult voxel_merge_selected(Scene& scene, ComputeState& cs,
 
     welded.build_adjacency();
     welded.recompute_normals();   // clean per-vertex normals (GPU normals were for orientation only)
+
+    // Reproject vertex paint from the source meshes onto the merged surface.
+    // Skipped entirely when nothing in the selection was painted (result stays
+    // unpainted → renders white, no cost). World-space nearest-vertex transfer
+    // is symmetric for free when the source paint is symmetric.
+    if (any_paint)
+        transfer_colors_world(welded, pos, vcol, grid.origin, grid.voxel, grid.R);
 
     res.out_tris  = welded.tri_count();
     res.out_verts = welded.vertex_count();

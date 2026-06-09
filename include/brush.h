@@ -220,6 +220,12 @@ struct BrushStroke {
     void apply_color_gpu(DabContext& ctx, float dab_x, float dab_y,
                          float strength, float hardness, bool erase);
 
+    // GPU paint-smooth: the smooth gesture (shift / double-shift) while a paint
+    // brush is active — blends vertex colours toward their neighbour average
+    // instead of smoothing geometry. Shares the paint undo-snap path.
+    void apply_color_smooth_gpu(DabContext& ctx, float dab_x, float dab_y,
+                                float strength, float hardness);
+
     // Back-project depth changes to mesh vertices.
     // Finalize stroke: commit undo, readback deferred normals, clear state.
     // When autosmooth is true and brush_type == DRAW, runs a light Laplacian

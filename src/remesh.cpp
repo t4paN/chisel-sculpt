@@ -344,6 +344,11 @@ static uint32_t split_long_edges(Mesh& m, EdgeTable& et,
                 float mb = (vb < (uint32_t)m.mask.size()) ? m.mask[vb] : 0.0f;
                 m.mask.push_back((ma + mb) * 0.5f);
             }
+            if (!m.color.empty()) {
+                uint32_t ca = (va < (uint32_t)m.color.size()) ? m.color[va] : 0xFFFFFFFFu;
+                uint32_t cb = (vb < (uint32_t)m.color.size()) ? m.color[vb] : 0xFFFFFFFFu;
+                m.color.push_back(color_avg(ca, cb));
+            }
 
             uint32_t tris_to_split[2] = { se.tri_a, se.tri_b };
             for (uint32_t tri : tris_to_split) {
@@ -919,6 +924,15 @@ static void compact_mesh(Mesh& m) {
         }
         m.mask = std::move(new_mask);
     }
+
+    if (!m.color.empty()) {
+        std::vector<uint32_t> new_color(new_count, 0xFFFFFFFFu);
+        for (uint32_t i = 0; i < vc && i < (uint32_t)m.color.size(); i++) {
+            if (remap[i] == INVALID) continue;
+            new_color[remap[i]] = m.color[i];
+        }
+        m.color = std::move(new_color);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1134,6 +1148,11 @@ static void mirror_positive_half(Mesh& m, float seam_tol, float target_edge, Com
                 float ma = (a < (uint32_t)m.mask.size()) ? m.mask[a] : 0.0f;
                 float mb = (b < (uint32_t)m.mask.size()) ? m.mask[b] : 0.0f;
                 m.mask.push_back(ma + t * (mb - ma));
+            }
+            if (!m.color.empty()) {
+                uint32_t ca = (a < (uint32_t)m.color.size()) ? m.color[a] : 0xFFFFFFFFu;
+                uint32_t cb = (b < (uint32_t)m.color.size()) ? m.color[b] : 0xFFFFFFFFu;
+                m.color.push_back(color_lerp(ca, cb, t));
             }
 
             split_cache[k] = nv;
@@ -1351,6 +1370,16 @@ static void mirror_positive_half(Mesh& m, float seam_tol, float target_edge, Com
             if (side[v] == 1 && vert_mirror[v] != INVALID &&
                 vert_mirror[v] >= vc && v < (uint32_t)m.mask.size())
                 m.mask[vert_mirror[v]] = m.mask[v];
+        }
+    }
+
+    // Mirror vertex paint onto the newly created mirror verts (white fill).
+    if (!m.color.empty()) {
+        m.color.resize(m.vertex_count(), 0xFFFFFFFFu);
+        for (uint32_t v = 0; v < vc; v++) {
+            if (side[v] == 1 && vert_mirror[v] != INVALID &&
+                vert_mirror[v] >= vc && v < (uint32_t)m.color.size())
+                m.color[vert_mirror[v]] = m.color[v];
         }
     }
 

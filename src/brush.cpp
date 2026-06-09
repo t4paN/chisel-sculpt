@@ -837,6 +837,48 @@ void BrushStroke::apply_color_gpu(DabContext& ctx, float dab_x, float dab_y,
     needs_mesh_update = true;
 }
 
+void BrushStroke::apply_color_smooth_gpu(DabContext& ctx, float dab_x, float dab_y,
+                                         float strength, float hardness) {
+    if (!is_active()) return;
+    if (!ctx.compute.supported || !ctx.compute.color_smooth_program) return;
+
+    set_anchor(ctx.mesh, ctx.cam, dab_x, dab_y, ctx.eff_brush_size, ctx.win_h, ctx.renderer);
+    if (!anchor_valid) return;
+
+    ColorPaintParams p{};
+    p.anchor_a_x = anchor_pos.x;
+    p.anchor_a_y = anchor_pos.y;
+    p.anchor_a_z = anchor_pos.z;
+    p.anchor_b_x = -anchor_pos.x;
+    p.anchor_b_y =  anchor_pos.y;
+    p.anchor_b_z =  anchor_pos.z;
+    p.use_b = ctx.input.mirror_x ? 1 : 0;
+    p.world_radius = anchor_world_radius;
+    p.hardness = hardness;
+    p.paint_strength = strength;        // blend amount toward neighbour average
+    p.vertex_count = ctx.mesh.vertex_count();
+
+    ctx.compute.dispatch_color_smooth(p, ctx.renderer.vbo_pos, ctx.renderer.ebo);
+
+    std::vector<uint32_t> dirty;
+    ctx.compute.readback_smooth_dirty(dirty);
+
+    if (color.snap_flag.empty()) {
+        color.snap_flag.assign(vertex_count, false);
+        color.snap.assign(vertex_count, 0xFFFFFFFFu);
+    }
+    for (uint32_t v : dirty) {
+        if (!color.snap_flag[v]) {
+            color.snap_flag[v] = true;
+            color.snap[v] = (v < (uint32_t)ctx.mesh.color.size()) ? ctx.mesh.color[v] : 0xFFFFFFFFu;
+            color.snap_list.push_back(v);
+        }
+    }
+
+    gpu_color_deferred = true;
+    needs_mesh_update = true;
+}
+
 void BrushStroke::apply_mask(Renderer& renderer, const Camera& cam,
                               const Mesh& mesh,
                               float screen_x, float screen_y,

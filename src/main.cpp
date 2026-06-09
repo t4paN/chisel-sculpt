@@ -244,6 +244,21 @@ int main(int argc, char* argv[]) {
     glfwGetWindowPos(window, &windowed_x, &windowed_y);
     glfwGetWindowSize(window, &windowed_w, &windowed_h);
 
+    // Fold the working mesh's vertex paint into the multires base before a
+    // cascade. cascade_to_level rebuilds the surface from stack.base, so paint
+    // only survives a level change if base.color carries it. Loop keeps the
+    // original verts as the [0, base.vcount) prefix at every level, so the
+    // prefix of the working colour IS the base colour (model B: single array,
+    // interpolate up — fine-level midpoint paint blurs to base on round-trip).
+    auto sync_color_to_base = [](const Mesh& working, MultiresStack& stk) {
+        if (working.color.empty()) return;
+        uint32_t vb = stk.base.vertex_count();
+        stk.base.color.assign(
+            working.color.begin(),
+            working.color.begin() + std::min<size_t>(vb, working.color.size()));
+        stk.base.color.resize(vb, 0xFFFFFFFFu);
+    };
+
     // Main loop
     while (!glfwWindowShouldClose(window)) {
         input.begin_frame();
@@ -448,6 +463,7 @@ int main(int argc, char* argv[]) {
                 }
                 scene.active_undo().push(std::move(lvl_e));
                 multires->current_level = target;
+                sync_color_to_base(*mesh, *multires);
                 if (scene.alive_count() <= 1) {
                     auto saved_mask = std::move(mesh->mask);
                     cascade_to_level(*multires, *mesh, target);
@@ -858,6 +874,7 @@ int main(int argc, char* argv[]) {
             auto cascade_active = [&](bool needs_cascade) {
                 if (!needs_cascade) return;
                 MeshEntity& ent = scene.active_entity();
+                sync_color_to_base(ent.mesh, ent.multires);
                 auto saved_mask = std::move(ent.mesh.mask);
                 Mesh solo;
                 cascade_to_level(ent.multires, solo, ent.multires.current_level);
@@ -918,6 +935,7 @@ int main(int argc, char* argv[]) {
                     scene.active_undo().push(std::move(e));
                     print_undo_top("project");
 
+                    sync_color_to_base(*mesh, *multires);
                     if (scene.alive_count() <= 1) {
                         auto saved_mask = std::move(mesh->mask);
                         cascade_to_level(*multires, *mesh, multires->current_level);
@@ -1045,7 +1063,13 @@ int main(int argc, char* argv[]) {
                                      brush_stroke.vertex_count, eff_brush_size };
 
                     if (is_smooth) {
-                        brush_stroke.apply_smooth(ctx, dab_x, dab_y, eff_strength, eff_hardness);
+                        // Smooth gesture while painting blends colours, not geometry.
+                        if (input.current_brush == BrushType::PAINT &&
+                            compute.supported && compute.color_smooth_program) {
+                            brush_stroke.apply_color_smooth_gpu(ctx, dab_x, dab_y, eff_strength, eff_hardness);
+                        } else {
+                            brush_stroke.apply_smooth(ctx, dab_x, dab_y, eff_strength, eff_hardness);
+                        }
                     } else if (is_move) {
                         brush_stroke.apply_move_gpu(ctx, dx, dy, eff_strength, eff_hardness);
                     } else if (is_limb) {
