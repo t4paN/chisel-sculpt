@@ -2,6 +2,10 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-10 — Banded pen-up readback (positions/mask/color/normals)
+
+- **Pen-up GPU→CPU sync now reads coalesced runs, not one giant span.** The four deferred readbacks in `BrushStroke::finalize` (positions, mask, paint colour, normals) each issued a single contiguous `glGetBufferSubData` over `[min_v, max_v]` of `snap_list`, but `snap_list` is unsorted/sparse — mirror twins land in a far index cluster, so a symmetric stroke spanned the gulf between clusters and dragged the whole gap across the bus (worst case: the entire VBO, ~60 MB blocking, to recover a few KB of useful verts). New `coalesce_snap_runs` sorts the touched indices and splits them into contiguous runs (holes ≤ `READBACK_RUN_GAP`=256 bridged, since reading a few KB of filler beats an extra blocking round-trip); each run is read one at a time. Behaviour-identical: gap verts inside a bridged run are untouched this stroke (VBO == mesh), so re-applying their value is a no-op (base: same; disp: delta 0; mask/color/normals: same). Also bounds the `static` readback scratch to the largest single run instead of growing to the largest `max-min` ever seen and never shrinking. Pure perf, decoupled from entity routing. Fix #1 of `checked5jun-gpu-undo-groundwork.md`.
+
 ## 2026-06-10 — Paint persists in projects (.chisel) + PLY import
 
 - **`.chisel` carries vertex paint.** Project format bumped to v3: every mesh body (working + multires base) now stores per-vertex packed-RGBA8 colour after the mask. v2 files still load via the same reader (colour cleared) — one `has_color` flag, no module fork. Fixed a load bug where a subdivided (multires-locked) entity dropped its paint because the post-load cascade rebuilds the working mesh from the stack and only `mask` was being carried across — `color` now rides along the same way.

@@ -11,6 +11,42 @@
 int BrushStroke::debug_stride_override = 0;
 int BrushStroke::debug_test_vertex     = -1;
 
+// --- Banded pen-up readback ---
+// snap_list / mask.snap_list / color.snap_list are deduped but UNSORTED and
+// sparse in index space: mirror twins land in a far index cluster, and remesh
+// scatters spatially-adjacent verts across wide index spans. A single
+// glGetBufferSubData over [min,max] therefore drags the gaps across the bus for
+// a handful of useful verts (worst case: the whole VBO for one mirrored stroke).
+// Coalesce the touched indices into contiguous runs and read one run at a time.
+// Verts inside a bridged gap are untouched this stroke, so VBO == mesh for them
+// and re-applying their value is a no-op (base: same value; disp: delta 0;
+// mask/color/normals: same value) — hence we can iterate runs, not the list.
+struct ReadRun { uint32_t first, count; };
+
+// Merge runs whose index gap is <= this. Reading ~GAP filler verts (a few KB)
+// is far cheaper than an extra blocking GL round-trip, so bridge small holes.
+static constexpr uint32_t READBACK_RUN_GAP = 256;
+
+static void coalesce_snap_runs(const std::vector<uint32_t>& verts,
+                               std::vector<ReadRun>& runs_out) {
+    runs_out.clear();
+    if (verts.empty()) return;
+    static std::vector<uint32_t> sorted;
+    sorted.assign(verts.begin(), verts.end());
+    std::sort(sorted.begin(), sorted.end());
+    uint32_t first = sorted[0], last = sorted[0];
+    for (size_t i = 1; i < sorted.size(); i++) {
+        uint32_t v = sorted[i];
+        if (v == last) continue;                 // already deduped; cheap guard
+        if (v - last > READBACK_RUN_GAP) {
+            runs_out.push_back({first, last - first + 1});
+            first = v;
+        }
+        last = v;
+    }
+    runs_out.push_back({first, last - first + 1});
+}
+
 // --- Shared helpers ---
 
 BrushRegion compute_brush_region(float dab_x, float dab_y,
@@ -1056,73 +1092,74 @@ bool BrushStroke::finalize(Mesh& mesh, UndoStack& stack, MultiresStack& multires
     // Sync mesh.pos_* and multires at pen-up before commit_undo. The active
     // entity is the working buffer, so vert index == VBO offset (offset 0).
     if (gpu_positions_deferred && !snap_list.empty()) {
-        uint32_t min_v = snap_list[0], max_v = snap_list[0];
-        for (uint32_t v : snap_list) {
-            if (v < min_v) min_v = v;
-            if (v > max_v) max_v = v;
-        }
-        uint32_t range_count = max_v - min_v + 1;
+        static std::vector<ReadRun> runs;
+        coalesce_snap_runs(snap_list, runs);
         static std::vector<float> pos_readback;
-        pos_readback.resize(range_count * 3);
         glBindBuffer(GL_ARRAY_BUFFER, renderer.vbo_pos);
-        glGetBufferSubData(GL_ARRAY_BUFFER,
-            min_v * 3 * sizeof(float),
-            range_count * 3 * sizeof(float),
-            pos_readback.data());
-        glBindBuffer(GL_ARRAY_BUFFER, 0);
-
         if (stroke_writes_to_base) {
-            for (uint32_t v : snap_list) {
-                uint32_t ri = (v - min_v) * 3;
-                mesh.pos_x[v] = pos_readback[ri + 0];
-                mesh.pos_y[v] = pos_readback[ri + 1];
-                mesh.pos_z[v] = pos_readback[ri + 2];
-                multires.base.pos_x[v] = mesh.pos_x[v];
-                multires.base.pos_y[v] = mesh.pos_y[v];
-                multires.base.pos_z[v] = mesh.pos_z[v];
+            for (const ReadRun& r : runs) {
+                pos_readback.resize(r.count * 3);
+                glGetBufferSubData(GL_ARRAY_BUFFER,
+                    (GLintptr)r.first * 3 * sizeof(float),
+                    (GLsizeiptr)r.count * 3 * sizeof(float),
+                    pos_readback.data());
+                for (uint32_t v = r.first; v < r.first + r.count; v++) {
+                    uint32_t ri = (v - r.first) * 3;
+                    mesh.pos_x[v] = pos_readback[ri + 0];
+                    mesh.pos_y[v] = pos_readback[ri + 1];
+                    mesh.pos_z[v] = pos_readback[ri + 2];
+                    multires.base.pos_x[v] = mesh.pos_x[v];
+                    multires.base.pos_y[v] = mesh.pos_y[v];
+                    multires.base.pos_z[v] = mesh.pos_z[v];
+                }
             }
         } else {
             const auto& frames = multires.frames[stroke_disp_index];
             auto& disp = multires.disp[stroke_disp_index];
-            for (uint32_t v : snap_list) {
-                uint32_t ri = (v - min_v) * 3;
-                float new_x = pos_readback[ri + 0];
-                float new_y = pos_readback[ri + 1];
-                float new_z = pos_readback[ri + 2];
-                float dx = new_x - mesh.pos_x[v];
-                float dy = new_y - mesh.pos_y[v];
-                float dz = new_z - mesh.pos_z[v];
-                const Frame& f = frames[v];
-                disp[v].x += f.t.x*dx + f.t.y*dy + f.t.z*dz;
-                disp[v].y += f.b.x*dx + f.b.y*dy + f.b.z*dz;
-                disp[v].z += f.n.x*dx + f.n.y*dy + f.n.z*dz;
-                mesh.pos_x[v] = new_x;
-                mesh.pos_y[v] = new_y;
-                mesh.pos_z[v] = new_z;
+            for (const ReadRun& r : runs) {
+                pos_readback.resize(r.count * 3);
+                glGetBufferSubData(GL_ARRAY_BUFFER,
+                    (GLintptr)r.first * 3 * sizeof(float),
+                    (GLsizeiptr)r.count * 3 * sizeof(float),
+                    pos_readback.data());
+                for (uint32_t v = r.first; v < r.first + r.count; v++) {
+                    uint32_t ri = (v - r.first) * 3;
+                    float new_x = pos_readback[ri + 0];
+                    float new_y = pos_readback[ri + 1];
+                    float new_z = pos_readback[ri + 2];
+                    float dx = new_x - mesh.pos_x[v];
+                    float dy = new_y - mesh.pos_y[v];
+                    float dz = new_z - mesh.pos_z[v];
+                    const Frame& f = frames[v];
+                    disp[v].x += f.t.x*dx + f.t.y*dy + f.t.z*dz;
+                    disp[v].y += f.b.x*dx + f.b.y*dy + f.b.z*dz;
+                    disp[v].z += f.n.x*dx + f.n.y*dy + f.n.z*dz;
+                    mesh.pos_x[v] = new_x;
+                    mesh.pos_y[v] = new_y;
+                    mesh.pos_z[v] = new_z;
+                }
             }
         }
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
         gpu_positions_deferred = false;
     }
 
     if (gpu_mask_deferred && !mask.snap_list.empty()) {
         if (mesh.mask.empty()) mesh.mask.assign(mesh.vertex_count(), 0.0f);
-        uint32_t min_v = mask.snap_list[0], max_v = mask.snap_list[0];
-        for (uint32_t v : mask.snap_list) {
-            if (v < min_v) min_v = v;
-            if (v > max_v) max_v = v;
-        }
-        uint32_t range = max_v - min_v + 1;
+        static std::vector<ReadRun> runs;
+        coalesce_snap_runs(mask.snap_list, runs);
         static std::vector<float> mask_readback;
-        mask_readback.resize(range);
         glBindBuffer(GL_ARRAY_BUFFER, renderer.vbo_mask);
-        glGetBufferSubData(GL_ARRAY_BUFFER,
-            min_v * sizeof(float),
-            range * sizeof(float),
-            mask_readback.data());
-        glBindBuffer(GL_ARRAY_BUFFER, 0);
-        for (uint32_t v : mask.snap_list) {
-            mesh.mask[v] = mask_readback[v - min_v];
+        for (const ReadRun& r : runs) {
+            mask_readback.resize(r.count);
+            glGetBufferSubData(GL_ARRAY_BUFFER,
+                (GLintptr)r.first * sizeof(float),
+                (GLsizeiptr)r.count * sizeof(float),
+                mask_readback.data());
+            for (uint32_t v = r.first; v < r.first + r.count; v++)
+                mesh.mask[v] = mask_readback[v - r.first];
         }
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
         gpu_mask_deferred = false;
     }
 
@@ -1130,23 +1167,20 @@ bool BrushStroke::finalize(Mesh& mesh, UndoStack& stack, MultiresStack& multires
         if (mesh.color.empty()) mesh.color.assign(mesh.vertex_count(), 0xFFFFFFFFu);
         else if (mesh.color.size() < mesh.vertex_count())
             mesh.color.resize(mesh.vertex_count(), 0xFFFFFFFFu);
-        uint32_t min_v = color.snap_list[0], max_v = color.snap_list[0];
-        for (uint32_t v : color.snap_list) {
-            if (v < min_v) min_v = v;
-            if (v > max_v) max_v = v;
-        }
-        uint32_t range = max_v - min_v + 1;
+        static std::vector<ReadRun> runs;
+        coalesce_snap_runs(color.snap_list, runs);
         static std::vector<uint32_t> color_readback;
-        color_readback.resize(range);
         glBindBuffer(GL_ARRAY_BUFFER, renderer.vbo_color);
-        glGetBufferSubData(GL_ARRAY_BUFFER,
-            min_v * sizeof(uint32_t),
-            range * sizeof(uint32_t),
-            color_readback.data());
-        glBindBuffer(GL_ARRAY_BUFFER, 0);
-        for (uint32_t v : color.snap_list) {
-            mesh.color[v] = color_readback[v - min_v];
+        for (const ReadRun& r : runs) {
+            color_readback.resize(r.count);
+            glGetBufferSubData(GL_ARRAY_BUFFER,
+                (GLintptr)r.first * sizeof(uint32_t),
+                (GLsizeiptr)r.count * sizeof(uint32_t),
+                color_readback.data());
+            for (uint32_t v = r.first; v < r.first + r.count; v++)
+                mesh.color[v] = color_readback[v - r.first];
         }
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
         gpu_color_deferred = false;
     }
 
@@ -1162,26 +1196,24 @@ bool BrushStroke::finalize(Mesh& mesh, UndoStack& stack, MultiresStack& multires
 
     if (gpu_normals_deferred) {
         if (!snap_list.empty()) {
-            uint32_t min_v = snap_list[0], max_v = snap_list[0];
-            for (uint32_t v : snap_list) {
-                if (v < min_v) min_v = v;
-                if (v > max_v) max_v = v;
-            }
-            uint32_t count = max_v - min_v + 1;
+            static std::vector<ReadRun> runs;
+            coalesce_snap_runs(snap_list, runs);
             static std::vector<float> norm_readback;
-            norm_readback.resize(count * 3);
             glBindBuffer(GL_ARRAY_BUFFER, renderer.vbo_norm);
-            glGetBufferSubData(GL_ARRAY_BUFFER,
-                min_v * 3 * sizeof(float),
-                count * 3 * sizeof(float),
-                norm_readback.data());
-            glBindBuffer(GL_ARRAY_BUFFER, 0);
-            for (uint32_t v : snap_list) {
-                uint32_t ri = (v - min_v) * 3;
-                mesh.norm_x[v] = norm_readback[ri + 0];
-                mesh.norm_y[v] = norm_readback[ri + 1];
-                mesh.norm_z[v] = norm_readback[ri + 2];
+            for (const ReadRun& r : runs) {
+                norm_readback.resize(r.count * 3);
+                glGetBufferSubData(GL_ARRAY_BUFFER,
+                    (GLintptr)r.first * 3 * sizeof(float),
+                    (GLsizeiptr)r.count * 3 * sizeof(float),
+                    norm_readback.data());
+                for (uint32_t v = r.first; v < r.first + r.count; v++) {
+                    uint32_t ri = (v - r.first) * 3;
+                    mesh.norm_x[v] = norm_readback[ri + 0];
+                    mesh.norm_y[v] = norm_readback[ri + 1];
+                    mesh.norm_z[v] = norm_readback[ri + 2];
+                }
             }
+            glBindBuffer(GL_ARRAY_BUFFER, 0);
         }
         gpu_normals_deferred = false;
     }
