@@ -639,6 +639,47 @@ void compact_with_seam(Mesh& m, std::vector<uint8_t>& seam) {
     for (uint32_t& idx : m.indices) idx = remap[idx];
 }
 
+// 1-ring vertex neighbours of v via the vert→tri adjacency (must be built).
+static void ring_neighbors(const Mesh& m, uint32_t v, std::unordered_set<uint32_t>& out) {
+    out.clear();
+    uint32_t s = m.vert_tri_offset[v], e = m.vert_tri_offset[v + 1];
+    for (uint32_t j = s; j < e; j++) {
+        uint32_t tri = m.vert_tri_list[j];
+        for (int k = 0; k < 3; k++) {
+            uint32_t w = m.indices[tri*3 + k];
+            if (w != v) out.insert(w);
+        }
+    }
+}
+
+// H-C: is a P→S near-seam collapse topology-safe? `weld_near_seam` used to weld
+// purely on distance, which could fold a vertex umbrella and leave an edge in 3+
+// tris after reflection — the `nonmf` failures the H-D gate now catches. Two
+// guards (same idea as the remesher's collapse link-condition in remesh.cpp):
+//   (1) Link condition — P and S must share EXACTLY 2 ring-neighbours (the two
+//       verts opposite the P–S edge). More shared ⇒ the collapse is non-manifold.
+//   (2) Seam-degree — P may only touch S and S's existing seam-loop neighbours;
+//       a sliver bridging to a further seam vert would hand S a third seam edge,
+//       branching the reflected seam loop (also non-manifold).
+// Evaluated against the pre-remap adjacency, so it's order-independent.
+static bool collapse_is_seam_safe(const Mesh& m, const std::vector<uint8_t>& seam,
+                                  uint32_t P, uint32_t S) {
+    std::unordered_set<uint32_t> nP, nS;
+    ring_neighbors(m, P, nP);
+    ring_neighbors(m, S, nS);
+
+    int shared = 0;
+    for (uint32_t w : nP)
+        if (w != S && nS.count(w)) shared++;
+    if (shared != 2) return false;                 // (1) link condition
+
+    for (uint32_t w : nP) {                         // (2) seam-degree
+        if (w == S || !seam[w]) continue;
+        if (!nS.count(w)) return false;             // seam vert adjacent to P but not S
+    }
+    return true;
+}
+
 // Kill the seam sliver column: a corner-aligned grid puts the first +x vertex on
 // a seam→interior edge at x=voxel·t, and when the iso-crossing sits near the seam
 // corner (t→0) that vert is ~coincident with its seam vert → a near-zero-width
@@ -669,7 +710,11 @@ void weld_near_seam(Mesh& m, float voxel, std::vector<uint8_t>& seam) {
                 if (d < best_sq) { best_sq = d; best = nv; }
             }
         }
-        if (best != 0xFFFFFFFFu) { remap[v] = best; welded++; }
+        // H-C: only collapse when it stays manifold + keeps the seam loop intact;
+        // an unsafe sliver is left for the post-reflect band weld / H-D gate.
+        if (best != 0xFFFFFFFFu && collapse_is_seam_safe(m, seam, v, best)) {
+            remap[v] = best; welded++;
+        }
     }
     if (welded == 0) return;
 
@@ -991,6 +1036,24 @@ VoxelMergeResult voxel_merge_selected(Scene& scene, ComputeState& cs,
 
     // ---- Manifold report (surfaced so a bad merge is visible before print) ----
     manifold_report(welded, res.boundary_edges, res.nonmanifold_edges, res.components);
+
+    // ---- H-D: gate the splice on the report (mirror path) ----
+    // A closed mirror-merged mesh MUST be watertight by construction (the +x half
+    // reflected across x=0). So in mirror mode any boundary or non-manifold edge
+    // means the seam failed to close — corrupt topology that crashes/garbles the
+    // next remesh or voxel-merge (the remesher's EdgeTable mangles such input).
+    // Until the seam-repair passes (H-A/H-B) land, refuse-and-surface rather than
+    // let it into the scene to detonate downstream. The scene is untouched until
+    // the splice below, so returning here leaves the selection intact.
+    if (mirror && (res.boundary_edges != 0 || res.nonmanifold_edges != 0)) {
+        char buf[160];
+        std::snprintf(buf, sizeof(buf),
+                      "mirror seam did not close (%u bnd, %u nonmf) — merge refused "
+                      "to avoid corrupt topology",
+                      res.boundary_edges, res.nonmanifold_edges);
+        res.error = buf;
+        return res;
+    }
 
     // ---- Splice into the scene as the merged entity ----
     uint32_t merged_id = scene.merge_selected_into(welded, 0);
