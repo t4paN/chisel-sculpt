@@ -794,6 +794,53 @@ void weld_near_seam(Mesh& m, float voxel, std::vector<uint8_t>& seam) {
     std::printf("[sdf-mirror] welded %u near-seam slivers\n", welded);
 }
 
+// H-B: validate (and lightly repair) the seam loop on the clipped +x half BEFORE
+// reflection. The +x half is an open surface whose ONLY boundary may be the seam
+// loop at x=0 — i.e. every boundary edge (an edge used by exactly 1 tri) must have
+// both endpoints flagged `seam`. An escapee endpoint still physically on the plane
+// (|x|<band) is snapped+flagged here, so reflect_across_x shares it and the seam
+// closes by construction — caught earlier/cleaner than the post-reflect H-A band
+// weld. A boundary endpoint genuinely off the plane is a real hole in the +x half:
+// snapping can't fix it, so it's logged and left for the H-D gate to refuse.
+// Acceptance: every boundary edge ends up with both endpoints `seam`.
+// One-shot op — allocation is fine here (zero-alloc rule is stroke-only).
+static void validate_seam_loop(Mesh& m, float voxel, std::vector<uint8_t>& seam) {
+    const float band = voxel * 1e-3f;
+
+    // Edge → incident-tri count (undirected, endpoints packed low/high into key).
+    std::unordered_map<int64_t, uint32_t> ecount;
+    ecount.reserve(m.indices.size());
+    auto key = [](uint32_t a, uint32_t b) -> int64_t {
+        if (a > b) std::swap(a, b);
+        return ((int64_t)a << 32) | (int64_t)b;
+    };
+    for (size_t t = 0; t + 2 < m.indices.size(); t += 3) {
+        uint32_t a=m.indices[t], b=m.indices[t+1], c=m.indices[t+2];
+        ecount[key(a,b)]++; ecount[key(b,c)]++; ecount[key(c,a)]++;
+    }
+
+    uint32_t snapped = 0;
+    std::unordered_set<uint32_t> off_plane;
+    for (auto& kv : ecount) {
+        if (kv.second != 1) continue;                       // not a boundary edge
+        uint32_t ends[2] = { (uint32_t)(kv.first >> 32),
+                             (uint32_t)(kv.first & 0xffffffffu) };
+        for (uint32_t v : ends) {
+            if (seam[v]) continue;                          // already on the loop
+            if (std::fabs(m.pos_x[v]) < band) {             // escapee still on plane
+                m.pos_x[v] = 0.0f; seam[v] = 1; snapped++;
+            } else {
+                off_plane.insert(v);                        // boundary vert off x=0
+            }
+        }
+    }
+    if (snapped)
+        std::printf("[sdf-mirror] seam validate: %u escapee boundary vert(s) snapped+flagged\n", snapped);
+    if (!off_plane.empty())
+        std::printf("[sdf-mirror] seam validate: WARNING %zu boundary vert(s) off the plane — genuine hole in +x half (H-D will refuse)\n",
+                    off_plane.size());
+}
+
 } // namespace
 
 // ============================================================================
@@ -1076,6 +1123,7 @@ VoxelMergeResult voxel_merge_selected(Scene& scene, ComputeState& cs,
             clip_to_plus_x(welded, grid.voxel, seam);
             weld_near_seam(welded, grid.voxel, seam);   // B: collapse the seam sliver column
             relax_to_field(welded, field_cpu, grid, /*iters=*/8, /*lambda=*/0.5f, &seam);  // A: 1D seam relax
+            validate_seam_loop(welded, grid.voxel, seam);  // H-B: close seam escapees before reflecting
             reflect_across_x(welded, seam);
             weld_seam_band(welded, grid.voxel);   // H-A: weld any unflagged ±ε escapees onto x=0
         } else {
