@@ -639,6 +639,67 @@ void compact_with_seam(Mesh& m, std::vector<uint8_t>& seam) {
     for (uint32_t& idx : m.indices) idx = remap[idx];
 }
 
+// H-A: post-reflect seam-band weld. reflect_across_x shares only the FLAGGED
+// seam verts; any boundary vert that belonged on the plane but slipped the flag
+// got a fresh ±ε twin instead → a hairline seam down x=0. Mop those up
+// independently of the flag: snap every vert in the |x|<band slab onto x=0, then
+// weld verts that coincide in (y,z) — a reflection pair shares (y,z) exactly, so
+// the ±ε twins collapse to one self-symmetric seam vert. Catches whatever clip /
+// classify / H-C leaked. Runs after reflection; normals are rebuilt downstream.
+// One-shot op — allocation is fine here (zero-alloc rule is stroke-only).
+static void weld_seam_band(Mesh& m, float voxel) {
+    const float band = voxel * 1e-3f;
+    if (band <= 0.0f) return;
+    const uint32_t vc = m.vertex_count();
+
+    // Key packs the (y,z) cell with no aliasing: cell_y in the high 32 bits,
+    // cell_z in the low 32, so distinct cells never collide. Identical (y,z) (the
+    // twins) map to the same cell; real verts are ~voxel apart ≫ band, so they
+    // never share one. Representative = first vert seen in the cell.
+    std::unordered_map<int64_t, uint32_t> rep;
+    std::vector<uint32_t> remap(vc);
+    for (uint32_t v = 0; v < vc; v++) remap[v] = v;
+    auto cell = [&](float a) -> int64_t { return (int64_t)std::llround(a / band); };
+
+    uint32_t merged = 0;
+    for (uint32_t v = 0; v < vc; v++) {
+        if (std::fabs(m.pos_x[v]) >= band) continue;
+        m.pos_x[v] = 0.0f;                                       // snap onto x=0
+        int64_t k = (cell(m.pos_y[v]) << 32) ^ (cell(m.pos_z[v]) & 0xffffffffLL);
+        auto it = rep.find(k);
+        if (it == rep.end()) rep.emplace(k, v);
+        else { remap[v] = it->second; merged++; }
+    }
+    if (merged == 0) return;
+
+    for (uint32_t& idx : m.indices) idx = remap[idx];
+
+    // Drop tris that collapsed onto the seam.
+    std::vector<uint32_t> keep; keep.reserve(m.indices.size());
+    for (size_t t = 0; t + 2 < m.indices.size(); t += 3) {
+        uint32_t a=m.indices[t], b=m.indices[t+1], c=m.indices[t+2];
+        if (a==b || b==c || a==c) continue;
+        keep.push_back(a); keep.push_back(b); keep.push_back(c);
+    }
+    m.indices.swap(keep);
+
+    // Compact orphaned verts (pos+norm; mask/colour are built downstream).
+    std::vector<uint32_t> vm(vc, 0xFFFFFFFFu);
+    uint32_t nv = 0;
+    for (uint32_t idx : m.indices) if (vm[idx] == 0xFFFFFFFFu) vm[idx] = nv++;
+    std::vector<float> px(nv),py(nv),pz(nv),nx(nv),ny(nv),nz(nv);
+    for (uint32_t v = 0; v < vc; v++) {
+        uint32_t r = vm[v]; if (r == 0xFFFFFFFFu) continue;
+        px[r]=m.pos_x[v]; py[r]=m.pos_y[v]; pz[r]=m.pos_z[v];
+        nx[r]=m.norm_x[v]; ny[r]=m.norm_y[v]; nz[r]=m.norm_z[v];
+    }
+    m.pos_x.swap(px); m.pos_y.swap(py); m.pos_z.swap(pz);
+    m.norm_x.swap(nx); m.norm_y.swap(ny); m.norm_z.swap(nz);
+    for (uint32_t& idx : m.indices) idx = vm[idx];
+
+    std::printf("[sdf-mirror] seam-band weld: %u escapee vert(s) merged\n", merged);
+}
+
 // 1-ring vertex neighbours of v via the vert→tri adjacency (must be built).
 static void ring_neighbors(const Mesh& m, uint32_t v, std::unordered_set<uint32_t>& out) {
     out.clear();
@@ -1016,6 +1077,7 @@ VoxelMergeResult voxel_merge_selected(Scene& scene, ComputeState& cs,
             weld_near_seam(welded, grid.voxel, seam);   // B: collapse the seam sliver column
             relax_to_field(welded, field_cpu, grid, /*iters=*/8, /*lambda=*/0.5f, &seam);  // A: 1D seam relax
             reflect_across_x(welded, seam);
+            weld_seam_band(welded, grid.voxel);   // H-A: weld any unflagged ±ε escapees onto x=0
         } else {
             relax_to_field(welded, field_cpu, grid, /*iters=*/8, /*lambda=*/0.5f);
         }
