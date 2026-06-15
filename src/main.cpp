@@ -777,7 +777,11 @@ int main(int argc, char* argv[]) {
                 Vec3 world_up = {0, 1, 0};
                 Vec3 right = fwd.cross(world_up).normalized();
                 Vec3 up = right.cross(fwd).normalized();
-                Vec3 delta = right * (-dx * scale) + up * (dy * scale);
+                // Signs chosen so the mesh tracks the cursor 1:1: +dx (cursor right)
+                // moves right; -dy (GLFW y grows downward, so cursor up is dy<0) moves
+                // up. Both selectmove specs agree on this; the X-symmetry question
+                // (Bug 2) is still undecided — see chisel-current-state.md.
+                Vec3 delta = right * (dx * scale) + up * (-dy * scale);
 
                 if (delta.x != 0.0f || delta.y != 0.0f || delta.z != 0.0f) {
                     for (uint32_t sel_id : scene.selected_ids()) {

@@ -2,6 +2,10 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-16 — Select-mode object move: fix inverted drag
+
+- **Object-move now tracks the cursor 1:1.** The `MOVE_OBJECT` view-plane drag was sign-inverted on both screen axes (cursor up → mesh down, cursor right → mesh left — a "lever" feel) because the delta negated `dx` and used raw `dy` despite GLFW's y-grows-downward. Flipped to `right*(dx*scale) + up*(-dy*scale)` so the mesh follows the cursor on both axes from any camera orientation. The X-symmetry behavior for centered/mirror entities (Bug 2) is a separate, still-undecided design choice — see `chisel-current-state.md`.
+
 ## 2026-06-16 — SDF mirror-merge: seam hardening (H-D gate + H-C manifold-safe weld + H-A band weld + H-B pre-reflect seam validate)
 
 - **H-B — validate (and lightly repair) the seam loop before reflecting.** New `validate_seam_loop` runs on the clipped +x half after relax and before `reflect_across_x`: it builds an edge→tri-count map, finds every boundary edge (used by exactly 1 tri), and for each endpoint not already flagged `seam` either snaps+flags it (still on the plane, `|x| < voxel*1e-3`) so reflection shares it and the loop closes by construction — caught earlier/cleaner than the post-reflect H-A band weld — or, if it's genuinely off-plane, logs it as a real hole in the +x half and leaves it for the H-D gate to refuse. Acceptance: every boundary edge ends with both endpoints `seam`. Completes the literal coverage of `sdf-mirror-hardening-spec.md` (H-A/H-B/H-C/H-D). Not yet exercised on a model that actually trips it — the rest of the chain is confirmed clean.
