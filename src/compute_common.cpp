@@ -43,6 +43,10 @@ ComputeState::ComputeState()
     , multires_apply_program(0)
     , multires_stage_ssbo(0)
     , multires_stage_capacity(0)
+    , undo_ring_ssbo(0)
+    , undo_ring_cap_bytes(1024ull * 1024ull * 1024ull)
+    , undo_ring_bytes(0)
+    , undo_ring_head(0)
     , adjacency_offset_ssbo(0)
     , adjacency_list_ssbo(0)
     , adjacency_vertex_count(0)
@@ -259,6 +263,9 @@ void ComputeState::cleanup() {
     if (multires_apply_program) { glDeleteProgram(multires_apply_program); multires_apply_program = 0; }
     if (multires_stage_ssbo)    { glDeleteBuffers(1, &multires_stage_ssbo); multires_stage_ssbo   = 0; }
     multires_stage_capacity = 0;
+    if (undo_ring_ssbo)         { glDeleteBuffers(1, &undo_ring_ssbo);       undo_ring_ssbo        = 0; }
+    undo_ring_bytes = 0;
+    undo_ring_head  = 0;
     if (adjacency_offset_ssbo) { glDeleteBuffers(1, &adjacency_offset_ssbo); adjacency_offset_ssbo = 0; }
     if (adjacency_list_ssbo) { glDeleteBuffers(1, &adjacency_list_ssbo); adjacency_list_ssbo = 0; }
     if (dirty_verts_ssbo) { glDeleteBuffers(1, &dirty_verts_ssbo); dirty_verts_ssbo = 0; }

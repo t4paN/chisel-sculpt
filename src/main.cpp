@@ -149,6 +149,8 @@ int main(int argc, char* argv[]) {
         compute.init_compute_normals();
         compute.init_multires_diff();
         compute.init_multires_apply();
+        compute.undo_ring_set_budget(UndoStack::max_bytes);  // blood-moon 3b-ii
+        compute.undo_ring_selftest();                        // no-op in release
         compute.init_remesh_select();
         compute.init_remesh_grow_selection();
         compute.init_remesh_mirror_selection();

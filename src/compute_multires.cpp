@@ -1,6 +1,8 @@
 #include "compute.h"
 #include <algorithm>
 #include <cstdio>
+#include <cstdint>
+#include <cmath>
 
 // GPU-resident undo, Phase 2b: pen-up multires diff.
 //
@@ -238,4 +240,97 @@ void ComputeState::dispatch_multires_apply(GLuint pos_vbo, GLuint disp_ssbo,
     int groups = (int)((count + 255u) / 256u);
     glDispatchCompute(groups, 1, 1);
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
+}
+
+// ===========================================================================
+// GPU-resident undo ring (blood-moon 3b-ii)
+//
+// Persistent history of per-vert (old,new) STROKE deltas, bump-allocated into one
+// grow-only SSBO. No stroke-path consumer yet — append/read/reset + a debug
+// round-trip self-test. The pen-up capture (3b-iii) and the readback-dropping flip
+// (3b-iv, where wrap/FIFO-eviction lands) build on this.
+// ===========================================================================
+
+void ComputeState::undo_ring_set_budget(size_t cap_bytes) {
+    // Clamp to something sane; the ring never allocates this eagerly — it grows
+    // toward the cap as history accumulates.
+    if (cap_bytes < (16ull << 20)) cap_bytes = (16ull << 20);
+    undo_ring_cap_bytes = cap_bytes;
+}
+
+void ComputeState::undo_ring_reset() {
+    undo_ring_head = 0;   // drop history; keep the allocated buffer for reuse
+}
+
+size_t ComputeState::undo_ring_append(const float* data, size_t float_count) {
+    if (!supported || float_count == 0) return SIZE_MAX;
+
+    const size_t bytes  = float_count * sizeof(float);
+    const size_t offset = undo_ring_head;
+    if (offset + bytes > undo_ring_cap_bytes) return SIZE_MAX;  // 3b-ii: no wrap yet
+
+    // Grow (copy-preserving) if the bump won't fit the current allocation.
+    if (!undo_ring_ssbo || offset + bytes > undo_ring_bytes) {
+        size_t newcap = undo_ring_bytes ? undo_ring_bytes : (16ull << 20);
+        while (newcap < offset + bytes) newcap <<= 1;
+        if (newcap > undo_ring_cap_bytes) newcap = undo_ring_cap_bytes;
+        if (offset + bytes > newcap) return SIZE_MAX;  // can't grow far enough
+
+        GLuint nb = 0;
+        glGenBuffers(1, &nb);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, nb);
+        glBufferData(GL_SHADER_STORAGE_BUFFER, (GLsizeiptr)newcap, nullptr, GL_DYNAMIC_COPY);
+        if (undo_ring_ssbo && undo_ring_head) {
+            glBindBuffer(GL_COPY_READ_BUFFER,  undo_ring_ssbo);
+            glBindBuffer(GL_COPY_WRITE_BUFFER, nb);
+            glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, 0, 0,
+                                (GLsizeiptr)undo_ring_head);
+            glBindBuffer(GL_COPY_READ_BUFFER,  0);
+            glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
+        }
+        if (undo_ring_ssbo) glDeleteBuffers(1, &undo_ring_ssbo);
+        undo_ring_ssbo  = nb;
+        undo_ring_bytes = newcap;
+    }
+
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, undo_ring_ssbo);
+    glBufferSubData(GL_SHADER_STORAGE_BUFFER, (GLintptr)offset, (GLsizeiptr)bytes, data);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    undo_ring_head = offset + bytes;
+    return offset;
+}
+
+void ComputeState::undo_ring_read(size_t byte_offset, size_t float_count, float* out) {
+    if (!supported || !undo_ring_ssbo || float_count == 0) return;
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, undo_ring_ssbo);
+    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, (GLintptr)byte_offset,
+                       (GLsizeiptr)(float_count * sizeof(float)), out);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+}
+
+void ComputeState::undo_ring_selftest() {
+#ifdef CHISEL_DEBUG_MULTIRES
+    if (!supported) return;
+    // Two appends of distinct patterns, read both back, confirm offsets + contents.
+    float a[6] = { 1.0f, 2.0f, 3.0f, -4.0f, -5.0f, -6.0f };
+    float b[3] = { 7.5f, 8.5f, 9.5f };
+    size_t head0 = undo_ring_head;
+    size_t oa = undo_ring_append(a, 6);
+    size_t ob = undo_ring_append(b, 3);
+    bool offsets_ok = (oa == head0) && (ob == head0 + 6 * sizeof(float));
+
+    float ra[6] = {0}, rb[3] = {0};
+    undo_ring_read(oa, 6, ra);
+    undo_ring_read(ob, 3, rb);
+    double maxe = 0.0;
+    for (int i = 0; i < 6; i++) maxe = std::max(maxe, (double)std::fabs(ra[i] - a[i]));
+    for (int i = 0; i < 3; i++) maxe = std::max(maxe, (double)std::fabs(rb[i] - b[i]));
+
+    std::printf("[undo-ring][debug] selftest offsets_ok=%d max|err|=%.3e "
+                "(head=%zu cap=%zuMB alloc=%zuMB)\n",
+                offsets_ok ? 1 : 0, maxe, undo_ring_head,
+                undo_ring_cap_bytes >> 20, undo_ring_bytes >> 20);
+
+    undo_ring_head = head0;   // rewind — selftest leaves no history behind
+#endif
 }

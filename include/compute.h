@@ -252,6 +252,18 @@ struct ComputeState {
     GLuint multires_stage_ssbo;          // float6 * V scratch (target+source), grow-only
     uint32_t multires_stage_capacity;
 
+    // GPU-resident undo ring (blood-moon 3b-ii). PERSISTENT history of per-vert
+    // (old,new) STROKE deltas — float6 per recorded vert — so pen-up can capture
+    // undo data on the GPU without a CPU readback. Bump-allocated, grow-only
+    // (copy-preserving resize) up to undo_ring_cap_bytes (set from
+    // UndoStack::max_bytes / --toaster). Wrap + FIFO eviction land in 3b-iv when a
+    // consumer exists to validate against; 3b-ii is append/read/reset + selftest,
+    // no stroke-path consumer. Distinct from multires_stage_ssbo (transient scratch).
+    GLuint undo_ring_ssbo;       // persistent float6-per-vert history buffer
+    size_t undo_ring_cap_bytes;  // hard ceiling (from UndoStack::max_bytes)
+    size_t undo_ring_bytes;      // currently allocated buffer size
+    size_t undo_ring_head;       // next free byte offset (bump allocator)
+
     // Adjacency CSR SSBOs (uploaded once at mesh init)
     GLuint adjacency_offset_ssbo;
     GLuint adjacency_list_ssbo;
@@ -496,6 +508,21 @@ struct ComputeState {
     void dispatch_multires_apply(GLuint pos_vbo, GLuint disp_ssbo, GLuint frames_ssbo,
                                  GLuint base_ssbo, const uint32_t* verts,
                                  const float* stage, uint32_t count, bool targets_base);
+
+    // ---- GPU-resident undo ring (blood-moon 3b-ii) ----------------------------
+    // Set the ring's hard ceiling. Call once at startup from UndoStack::max_bytes.
+    void undo_ring_set_budget(size_t cap_bytes);
+    // Drop all history (keep the buffer). Call on project load / undo clear.
+    void undo_ring_reset();
+    // Append float_count floats to the ring, growing (copy-preserving) up to the
+    // cap as needed. Returns the byte offset of the appended span, or SIZE_MAX if
+    // it would exceed the cap (no wrap yet — 3b-iv adds FIFO eviction).
+    size_t undo_ring_append(const float* data, size_t float_count);
+    // Read float_count floats back from byte_offset into out (spill / validation).
+    void undo_ring_read(size_t byte_offset, size_t float_count, float* out);
+    // CHISEL_DEBUG_MULTIRES round-trip self-test (append → read → compare). No-op
+    // in release. Prints [undo-ring][debug].
+    void undo_ring_selftest();
 
     // Upload adjacency CSR to GPU. Call at mesh init and after remesh.
     void upload_adjacency(const uint32_t* offsets, uint32_t offset_count,
