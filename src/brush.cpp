@@ -1055,7 +1055,8 @@ void BrushStroke::apply_mask_changes(Mesh& mesh, std::vector<uint32_t>& dirty_ve
 }
 
 bool BrushStroke::finalize(Mesh& mesh, UndoStack& stack, MultiresStack& multires,
-                           Renderer& renderer, BrushType brush_type, bool autosmooth) {
+                           MultiresGPU& mgpu, Renderer& renderer,
+                           BrushType brush_type, bool autosmooth) {
     // Autosmooth: one Laplacian pass over the stroke's affected verts before
     // we read positions back. The smoothed positions become the "after" state
     // recorded in the undo entry. Draw-only — other brushes have their own
@@ -1142,6 +1143,11 @@ bool BrushStroke::finalize(Mesh& mesh, UndoStack& stack, MultiresStack& multires
         }
         glBindBuffer(GL_ARRAY_BUFFER, 0);
         gpu_positions_deferred = false;
+
+        // Phase 1: keep the GPU residency mirror in sync with the disp/base
+        // edit we just wrote to CPU storage. Active entity is offset 0, so vert
+        // index == SSBO index. Stroke edits the current view level.
+        mgpu.upload_disp_partial(multires, stroke_level, snap_list);
     }
 
     if (gpu_mask_deferred && !mask.snap_list.empty()) {

@@ -194,6 +194,12 @@ int main(int argc, char* argv[]) {
     scene.sync();
     input.mesh_locked = true;
 
+    // Phase 1 GPU residency: mirror the startup entity's locked level. Later
+    // mutations refresh via refresh_active_gpu_residency() inside the loop.
+    scene.active_entity().multires_gpu.supported = compute.supported;
+    scene.active_entity().multires_gpu.upload_level(scene.active_multires(),
+                                                    scene.active_multires().current_level);
+
     Mesh* mesh = &scene.active_mesh();
     MultiresStack* multires = &scene.active_multires();
 
@@ -439,6 +445,15 @@ int main(int argc, char* argv[]) {
             }
         };
 
+        // Phase 1 GPU residency: full re-upload of the active entity's mirrored
+        // level after any wholesale CPU mutation (lock, level switch, projection,
+        // cascade). Cheap no-op until the stack is locked / compute supported.
+        auto refresh_active_gpu_residency = [&]() {
+            MeshEntity& ent = scene.active_entity();
+            ent.multires_gpu.supported = compute.supported;
+            ent.multires_gpu.upload_level(ent.multires, ent.multires.current_level);
+        };
+
         // Multires level switch (D / Shift-D post-lock). Recorded on the undo
         // timeline as a LEVEL entry so Ctrl-Z retraces the literal action sequence
         // (…draw, subd-up, draw, subd-down…) with the view level following along.
@@ -477,6 +492,7 @@ int main(int argc, char* argv[]) {
                     scene.splice_active(solo);  // splice_active marks topo dirty
                     scene.refresh_mirror_map();
                 }
+                refresh_active_gpu_residency();
                 mesh->compute_bounding_sphere(mesh_center, mesh_radius);
                 screen_buffers_dirty = true;
                 std::printf("[multires] switched to level %d (%u verts, %u tris)\n",
@@ -741,6 +757,7 @@ int main(int argc, char* argv[]) {
         // SCULPTING → IDLE (pen-up)
         if (app_state == AppState::SCULPTING && input.drag_mode != InputState::DragMode::SCULPT) {
             bool had_update = brush_stroke.finalize(*mesh, scene.active_undo(), *multires,
+                                                     scene.active_entity().multires_gpu,
                                                      renderer, input.current_brush,
                                                      input.autosmooth);
             print_undo_top("stroke-commit");
@@ -910,6 +927,7 @@ int main(int argc, char* argv[]) {
                 mesh     = &scene.active_mesh();
                 multires = &scene.active_multires();
                 scene.refresh_mirror_map();
+                refresh_active_gpu_residency();
             };
             if (input.undo_requested) {
                 input.undo_requested = false;
@@ -975,6 +993,7 @@ int main(int argc, char* argv[]) {
                         scene.splice_active(solo);
                         scene.refresh_mirror_map();
                     }
+                    refresh_active_gpu_residency();
                     screen_buffers_dirty = true;
                 }
             }
@@ -1332,6 +1351,7 @@ int main(int argc, char* argv[]) {
 
                         mesh = &scene.active_mesh();
                         multires = &scene.active_multires();
+                        refresh_active_gpu_residency();
                         mesh->compute_bounding_sphere(mesh_center, mesh_radius);
                         brush_stroke.vertex_count = 0;
                         brush_stroke.phase = StrokePhase::NONE;
@@ -1366,6 +1386,7 @@ int main(int argc, char* argv[]) {
                         scene.sync();
                         mesh = &scene.active_mesh();
                         multires = &scene.active_multires();
+                        refresh_active_gpu_residency();
                         mesh->compute_bounding_sphere(mesh_center, mesh_radius);
                         camera.set_target(mesh_center);
                         camera.distance = mesh_radius * 2.5f;

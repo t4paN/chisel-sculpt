@@ -12,6 +12,7 @@
 
 struct MeshEntity;
 struct Scene;
+struct MultiresGPU;
 
 enum class StrokePhase { NONE, BEGIN, ACTIVE, END };
 
@@ -233,7 +234,8 @@ struct BrushStroke {
     // result is what gets committed to the undo stack.
     // Returns true if geometry was modified (caller should update_screen_positions).
     bool finalize(Mesh& mesh, UndoStack& stack, MultiresStack& multires,
-                  Renderer& renderer, BrushType brush_type, bool autosmooth);
+                  MultiresGPU& mgpu, Renderer& renderer, BrushType brush_type,
+                  bool autosmooth);
 
     // Clear stroke buffers (called by finalize)
     void end();

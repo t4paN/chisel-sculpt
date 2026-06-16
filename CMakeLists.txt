@@ -36,6 +36,7 @@ add_executable(chisel
     src/brush.cpp
     src/undo.cpp
     src/multires_stack.cpp
+    src/multires_gpu.cpp
     src/remesh.cpp
     src/compute_common.cpp
     src/compute_draw.cpp

@@ -125,6 +125,11 @@ bool UndoStack::apply(const UndoEntry& e, MeshEntity& ent, Scene& scene, bool fo
         }
     }
 
+    // Phase 1 GPU residency: mirror the storage edit. No-ops unless e.level is the
+    // currently mirrored layer (the common in-place case); the cascade paths below
+    // refresh the whole level via refresh_active_gpu_residency() in main.
+    ent.multires_gpu.upload_disp_partial(multires, e.level, e.verts);
+
     // 2) Update view and invalidate frame caches based on view relationship.
     const int cur = multires.current_level;
 

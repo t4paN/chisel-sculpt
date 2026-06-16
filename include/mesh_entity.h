@@ -1,6 +1,7 @@
 #pragma once
 #include "mesh.h"
 #include "multires_stack.h"
+#include "multires_gpu.h"
 #include "undo.h"
 #include "entity_gpu.h"
 
@@ -18,6 +19,11 @@ struct MeshEntity {
 
     Mesh          mesh;
     MultiresStack multires;
+
+    // GPU residency mirror of the active editing level (Phase 1 of GPU-resident
+    // undo). CPU `multires` stays authoritative; this is a read-side SSBO copy
+    // kept in sync at each CPU mutation. Inert unless compute is supported.
+    MultiresGPU   multires_gpu;
 
     // Per-model undo/redo history. Rides with the entity: set aside when the
     // entity stops being active, resumed when it is reselected. Undo always
