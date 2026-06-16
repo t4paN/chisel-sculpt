@@ -47,6 +47,7 @@ add_executable(chisel
     src/compute_mask.cpp
     src/compute_color.cpp
     src/compute_remesh.cpp
+    src/compute_multires.cpp
     src/sdf.cpp
     src/ui_overlay.cpp
     src/project_file.cpp

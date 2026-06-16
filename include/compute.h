@@ -36,6 +36,11 @@ enum ComputeBinding : GLuint {
     BIND_SDF_TRITABLE = 27,  // int    MC 256x16 triangle table
     BIND_COLOR        = 28,  // uint   per-vertex packed RGBA8 albedo (paint)
     BIND_LIMB_POS_SRC = 29,  // float3 read-side position snapshot for limb relax ping-pong
+    // GPU-resident undo: pen-up multires diff (see multires_gpu.h, Phase 2b).
+    BIND_MULTIRES_DISP     = 30, // float3 disp layer of the active level (in: snap, out: new)
+    BIND_MULTIRES_FRAMES   = 31, // float9 tangent frame (t,b,n) per vert of the active level
+    BIND_MULTIRES_SNAP_POS = 32, // float3 pen-down world position snapshot
+    BIND_MULTIRES_BASE     = 33, // float3 base positions (out, base-level strokes)
 };
 
 struct DrawAccumParams {
@@ -228,6 +233,13 @@ struct ComputeState {
 
     // Compute normals shader
     GLuint compute_normals_program;
+
+    // GPU-resident undo (Phase 2b): pen-up multires diff. Reprojects the
+    // world-space stroke delta (live VBO - pen-down snapshot) into the active
+    // level's tangent frames and accumulates onto the resident disp layer — the
+    // GPU twin of the CPU readback loop in brush.cpp finalize(). Base-level
+    // strokes write the live position straight into the base buffer.
+    GLuint multires_diff_program;
 
     // Adjacency CSR SSBOs (uploaded once at mesh init)
     GLuint adjacency_offset_ssbo;
@@ -447,6 +459,20 @@ struct ComputeState {
 
     // Compile the compute normals shader. Called once at init.
     bool init_compute_normals();
+
+    // Compile the pen-up multires diff shader. Called once at init.
+    bool init_multires_diff();
+
+    // Dispatch the multires diff over the stroke's touched verts (`verts`/`count`).
+    // disp/frames/snap_pos/base are the MultiresGPU SSBOs for the active level;
+    // pos_vbo is the live working VBO at pen-up. When writes_to_base, the live
+    // position is written to base_ssbo; otherwise the world delta is reprojected
+    // into the frames and accumulated onto disp_ssbo (which holds the pen-down
+    // disp). Issues a buffer-update barrier so a debug readback sees the result.
+    void dispatch_multires_diff(GLuint pos_vbo, GLuint disp_ssbo, GLuint frames_ssbo,
+                                GLuint snap_pos_ssbo, GLuint base_ssbo,
+                                const uint32_t* verts, uint32_t count,
+                                bool writes_to_base);
 
     // Upload adjacency CSR to GPU. Call at mesh init and after remesh.
     void upload_adjacency(const uint32_t* offsets, uint32_t offset_count,

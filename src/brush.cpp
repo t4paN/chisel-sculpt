@@ -1103,6 +1103,39 @@ bool BrushStroke::finalize(Mesh& mesh, UndoStack& stack, MultiresStack& multires
     // Sync mesh.pos_* and multires at pen-up before commit_undo. The active
     // entity is the working buffer, so vert index == VBO offset (offset 0).
     if (gpu_positions_deferred && !snap_list.empty()) {
+        // Phase 2b (GPU-resident undo): reproject the stroke delta into the
+        // resident disp/base layer on the GPU, from the pen-down snapshots. This
+        // is the twin of the CPU readback loop below. The CPU path stays
+        // authoritative in 2b (it re-syncs disp_ssbo via upload_disp_partial at
+        // the end); under CHISEL_DEBUG_MULTIRES we snapshot the GPU result here
+        // and compare it to the CPU result before that re-sync overwrites it.
+        bool gpu_diff_ran = false;
+        if (compute && compute->supported && mgpu.supported
+            && mgpu.level == stroke_level) {
+            compute->dispatch_multires_diff(renderer.vbo_pos, mgpu.disp_ssbo,
+                                            mgpu.frames_ssbo, mgpu.snap_pos_ssbo,
+                                            mgpu.base_ssbo,
+                                            snap_list.data(), (uint32_t)snap_list.size(),
+                                            stroke_writes_to_base);
+            gpu_diff_ran = true;
+        }
+#ifdef CHISEL_DEBUG_MULTIRES
+        static std::vector<float> gpu_diff_chk;   // 3 floats per snap_list entry
+        if (gpu_diff_ran) {
+            gpu_diff_chk.resize(snap_list.size() * 3);
+            GLuint src = stroke_writes_to_base ? mgpu.base_ssbo : mgpu.disp_ssbo;
+            glBindBuffer(GL_SHADER_STORAGE_BUFFER, src);
+            for (size_t i = 0; i < snap_list.size(); i++) {
+                glGetBufferSubData(GL_SHADER_STORAGE_BUFFER,
+                    (GLintptr)snap_list[i] * 3 * sizeof(float),
+                    (GLsizeiptr)3 * sizeof(float), &gpu_diff_chk[i * 3]);
+            }
+            glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+        }
+#else
+        (void)gpu_diff_ran;
+#endif
+
         static std::vector<ReadRun> runs;
         coalesce_snap_runs(snap_list, runs);
         static std::vector<float> pos_readback;
@@ -1153,6 +1186,35 @@ bool BrushStroke::finalize(Mesh& mesh, UndoStack& stack, MultiresStack& multires
         }
         glBindBuffer(GL_ARRAY_BUFFER, 0);
         gpu_positions_deferred = false;
+
+#ifdef CHISEL_DEBUG_MULTIRES
+        // Phase 2b validation: GPU diff (snapshotted above) vs the CPU result we
+        // just computed. Both should agree to float noise. Runs before the
+        // upload_disp_partial re-sync below clobbers the GPU diff with CPU truth.
+        if (gpu_diff_ran) {
+            double maxe = 0.0;
+            if (stroke_writes_to_base) {
+                for (size_t i = 0; i < snap_list.size(); i++) {
+                    uint32_t v = snap_list[i];
+                    maxe = std::max(maxe, (double)std::fabs(gpu_diff_chk[i*3+0] - multires.base.pos_x[v]));
+                    maxe = std::max(maxe, (double)std::fabs(gpu_diff_chk[i*3+1] - multires.base.pos_y[v]));
+                    maxe = std::max(maxe, (double)std::fabs(gpu_diff_chk[i*3+2] - multires.base.pos_z[v]));
+                }
+            } else if (stroke_disp_index >= 0
+                       && stroke_disp_index < (int)multires.disp.size()) {
+                const auto& disp = multires.disp[stroke_disp_index];
+                for (size_t i = 0; i < snap_list.size(); i++) {
+                    uint32_t v = snap_list[i];
+                    maxe = std::max(maxe, (double)std::fabs(gpu_diff_chk[i*3+0] - disp[v].x));
+                    maxe = std::max(maxe, (double)std::fabs(gpu_diff_chk[i*3+1] - disp[v].y));
+                    maxe = std::max(maxe, (double)std::fabs(gpu_diff_chk[i*3+2] - disp[v].z));
+                }
+            }
+            std::printf("[mgpu][debug] multires_diff L%d %s max|err|=%.3e (%zu verts)\n",
+                        stroke_level, stroke_writes_to_base ? "base" : "disp",
+                        maxe, snap_list.size());
+        }
+#endif
 
         // Phase 1: keep the GPU residency mirror in sync with the disp/base
         // edit we just wrote to CPU storage. Active entity is offset 0, so vert

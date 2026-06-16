@@ -2,6 +2,10 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-16 — GPU-resident undo Phase 2b: pen-up multires diff shader (validated, WIP)
+
+- **New `multires_diff` compute shader (`compute_multires.cpp`) reprojects the stroke on the GPU at pen-up.** For each touched vert it forms the world delta `live_vbo_pos − snap_pos` and either writes it straight to `base_ssbo` (base-level stroke) or projects it into the resident tangent frames and accumulates onto `disp_ssbo` (which still holds the pen-down disp) — the GPU twin of the CPU readback loop in `brush.cpp` finalize. Reads the Phase-1 (`disp`/`frames`) + Phase-2a (`snap_pos`) resident snapshots plus the live working VBO; dispatched over the stroke's `snap_list`. **CPU readback stays authoritative in 2b** (it re-syncs `disp_ssbo` via `upload_disp_partial` right after), so this is behavior-neutral; under `-DCHISEL_DEBUG_MULTIRES` the GPU result is snapshotted before that re-sync and compared to the CPU result (`[mgpu][debug] multires_diff … max|err|=…`, expect ~float noise). New SSBO bindings 30–33; `init_multires_diff()` wired in `main.cpp`. **WIP / untested interactively** — the actual win lands in 2d (drop the CPU position readback).
+
 ## 2026-06-16 — GPU-resident undo Phase 2a: pen-down position snapshot (capture infra, WIP)
 
 - **`MultiresGPU` gains `snap_pos_ssbo` + `snapshot_positions()`** — a pen-down GPU→GPU copy of the working VBO positions, taken in `BrushStroke::begin` for geometry brushes (all but MASK/PAINT), gated on compute support. The GPU brush overwrites the VBO in place during a stroke, so the pre-stroke world position is gone by pen-up; this captures it so the Phase-2b pen-up diff shader can reproject world deltas into disp/base on the GPU (alongside the already-resident `disp_ssbo` snapshot and `frames_ssbo`). **Pure capture — no consumer yet, behavior-neutral.** Also closed a Phase-1 gap: the voxel-merge path now calls `refresh_active_gpu_residency()` so the disp/base mirror tracks the freshly merged active entity. `begin()` signature gains `MultiresGPU&`. **WIP / untested interactively** — bisectable checkpoint in the GPU-undo chain.
