@@ -1,6 +1,11 @@
 #include "undo.h"
 #include "scene.h"
 #include "mesh_entity.h"
+#include "renderer.h"
+#include "compute.h"
+#include <cmath>
+#include <cstdio>
+#include <algorithm>
 
 void UndoStack::push(UndoEntry&& e) {
     if (e.kind == UndoEntry::Kind::STROKE && e.verts.empty()) return;
@@ -148,6 +153,49 @@ bool UndoStack::apply(const UndoEntry& e, MeshEntity& ent, Scene& scene, bool fo
 
     if (e.level == cur) {
         // View equals the reverted layer. Partial-recompute mesh in place.
+
+        // Phase 2c (GPU-resident undo): run the revert on the GPU too — scatter the
+        // target disp into disp_ssbo and reproject the storage delta into the
+        // working VBO (the twin of the CPU loop just below) + compute_normals.
+        // CPU stays authoritative in 2c: it recomputes mesh.pos and re-syncs the
+        // VBO at the end of this block, overwriting the GPU result, so this is
+        // behavior-neutral. Under CHISEL_DEBUG_MULTIRES we snapshot the GPU VBO
+        // here and compare to the CPU mesh.pos before that re-sync. Active entity
+        // only (its mesh occupies the working set at offset 0).
+        bool gpu_apply_ran = false;
+        if (scene.compute().supported && ent.multires_gpu.supported
+            && ent.multires_gpu.level == e.level
+            && scene.active_mesh_id() == ent.id) {
+            static std::vector<float> stage;   // 6 floats/vert: target xyz, source xyz
+            stage.resize(e.verts.size() * 6);
+            for (size_t k = 0; k < e.verts.size(); ++k) {
+                stage[k*6+0] = tx[k]; stage[k*6+1] = ty[k]; stage[k*6+2] = tz[k];
+                stage[k*6+3] = sx[k]; stage[k*6+4] = sy[k]; stage[k*6+5] = sz[k];
+            }
+            Renderer&     r = scene.renderer();
+            ComputeState& c = scene.compute();
+            c.dispatch_multires_apply(r.vbo_pos, ent.multires_gpu.disp_ssbo,
+                                      ent.multires_gpu.frames_ssbo,
+                                      ent.multires_gpu.base_ssbo,
+                                      e.verts.data(), stage.data(),
+                                      (uint32_t)e.verts.size(), e.targets_base);
+            c.dispatch_compute_normals(e.verts.data(), (uint32_t)e.verts.size(),
+                                       r.vbo_pos, r.vbo_norm, r.ebo);
+            gpu_apply_ran = true;
+        }
+#ifdef CHISEL_DEBUG_MULTIRES
+        static std::vector<float> gpu_apply_chk;
+        if (gpu_apply_ran) {
+            gpu_apply_chk.resize(e.verts.size() * 3);
+            glBindBuffer(GL_ARRAY_BUFFER, scene.renderer().vbo_pos);
+            for (size_t k = 0; k < e.verts.size(); ++k) {
+                glGetBufferSubData(GL_ARRAY_BUFFER,
+                    (GLintptr)e.verts[k] * 3 * sizeof(float),
+                    (GLsizeiptr)3 * sizeof(float), &gpu_apply_chk[k*3]);
+            }
+            glBindBuffer(GL_ARRAY_BUFFER, 0);
+        }
+#endif
         if (e.targets_base) {
             // cur == base_level here: mesh surface == base cage directly.
             for (size_t k = 0; k < e.verts.size(); ++k) {
@@ -176,6 +224,22 @@ bool UndoStack::apply(const UndoEntry& e, MeshEntity& ent, Scene& scene, bool fo
             for (int i = e.disp_index + 1; i < (int)multires.frames.size(); i++)
                 multires.frames[i].clear();
         }
+#ifdef CHISEL_DEBUG_MULTIRES
+        // Phase 2c validation: GPU-applied VBO (snapshotted above) vs the CPU
+        // mesh.pos we just recomputed. Both should agree to float noise. Runs
+        // before sync_partial_entity re-uploads CPU positions over the GPU result.
+        if (gpu_apply_ran) {
+            double maxe = 0.0;
+            for (size_t k = 0; k < e.verts.size(); ++k) {
+                uint32_t v = e.verts[k];
+                maxe = std::max(maxe, (double)std::fabs(gpu_apply_chk[k*3+0] - mesh.pos_x[v]));
+                maxe = std::max(maxe, (double)std::fabs(gpu_apply_chk[k*3+1] - mesh.pos_y[v]));
+                maxe = std::max(maxe, (double)std::fabs(gpu_apply_chk[k*3+2] - mesh.pos_z[v]));
+            }
+            std::printf("[mgpu][debug] multires_apply L%d %s max|err|=%.3e (%zu verts)\n",
+                        e.level, e.targets_base ? "base" : "disp", maxe, e.verts.size());
+        }
+#endif
         scratch_dirty = e.verts;
         scratch_gpu.clear();
         mesh.recompute_normals_partial(scratch_dirty, &scratch_gpu);

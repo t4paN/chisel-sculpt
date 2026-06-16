@@ -143,6 +143,7 @@ int main(int argc, char* argv[]) {
         compute.init_color();
         compute.init_compute_normals();
         compute.init_multires_diff();
+        compute.init_multires_apply();
         compute.init_remesh_select();
         compute.init_remesh_grow_selection();
         compute.init_remesh_mirror_selection();

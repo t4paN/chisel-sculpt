@@ -41,6 +41,7 @@ enum ComputeBinding : GLuint {
     BIND_MULTIRES_FRAMES   = 31, // float9 tangent frame (t,b,n) per vert of the active level
     BIND_MULTIRES_SNAP_POS = 32, // float3 pen-down world position snapshot
     BIND_MULTIRES_BASE     = 33, // float3 base positions (out, base-level strokes)
+    BIND_MULTIRES_STAGE    = 34, // float6 per touched vert: target(3) + source(3) disp (undo apply ring)
 };
 
 struct DrawAccumParams {
@@ -240,6 +241,16 @@ struct ComputeState {
     // GPU twin of the CPU readback loop in brush.cpp finalize(). Base-level
     // strokes write the live position straight into the base buffer.
     GLuint multires_diff_program;
+
+    // GPU-resident undo (Phase 2c): undo/redo apply. Scatters a per-vert (target,
+    // source) disp pair from a staging buffer into the resident disp layer and
+    // reprojects the (target - source) delta through the tangent frames into the
+    // working VBO — the GPU twin of the CPU revert loop in undo.cpp apply()
+    // (same-level STROKE). Base-level strokes write the absolute target straight
+    // into the base buffer and the VBO. Caller follows with compute_normals.
+    GLuint multires_apply_program;
+    GLuint multires_stage_ssbo;          // float6 * V scratch (target+source), grow-only
+    uint32_t multires_stage_capacity;
 
     // Adjacency CSR SSBOs (uploaded once at mesh init)
     GLuint adjacency_offset_ssbo;
@@ -473,6 +484,18 @@ struct ComputeState {
                                 GLuint snap_pos_ssbo, GLuint base_ssbo,
                                 const uint32_t* verts, uint32_t count,
                                 bool writes_to_base);
+
+    // Compile the undo/redo multires apply shader. Called once at init.
+    bool init_multires_apply();
+
+    // Dispatch the multires apply over `verts`/`count`. `stage` is count*6 floats
+    // (target xyz, source xyz per vert). For a disp-level revert it scatters target
+    // into disp_ssbo and adds frame*(target-source) to pos_vbo; for a base revert
+    // it writes the absolute target into base_ssbo and pos_vbo. Caller must run
+    // compute_normals afterward. Issues a buffer-update barrier for a debug readback.
+    void dispatch_multires_apply(GLuint pos_vbo, GLuint disp_ssbo, GLuint frames_ssbo,
+                                 GLuint base_ssbo, const uint32_t* verts,
+                                 const float* stage, uint32_t count, bool targets_base);
 
     // Upload adjacency CSR to GPU. Call at mesh init and after remesh.
     void upload_adjacency(const uint32_t* offsets, uint32_t offset_count,

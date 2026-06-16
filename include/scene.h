@@ -146,6 +146,13 @@ public:
     // Legacy alias — prefer find_entity().
     MeshEntity* find(uint32_t id) { return find_entity(id); }
 
+    // GPU spine accessors. Scoped for the GPU-resident-undo path (undo.cpp), which
+    // is already coupled to Scene's per-entity GPU sync: the active entity's
+    // working buffers live in the renderer, and the multires apply shader runs on
+    // ComputeState. Both are valid only for the active entity (working set offset 0).
+    Renderer&     renderer() { return renderer_; }
+    ComputeState& compute()  { return compute_; }
+
 private:
     Renderer&     renderer_;
     ComputeState& compute_;
