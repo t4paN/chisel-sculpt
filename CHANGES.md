@@ -2,6 +2,10 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-16 — GPU-resident undo Phase 2a: pen-down position snapshot (capture infra, WIP)
+
+- **`MultiresGPU` gains `snap_pos_ssbo` + `snapshot_positions()`** — a pen-down GPU→GPU copy of the working VBO positions, taken in `BrushStroke::begin` for geometry brushes (all but MASK/PAINT), gated on compute support. The GPU brush overwrites the VBO in place during a stroke, so the pre-stroke world position is gone by pen-up; this captures it so the Phase-2b pen-up diff shader can reproject world deltas into disp/base on the GPU (alongside the already-resident `disp_ssbo` snapshot and `frames_ssbo`). **Pure capture — no consumer yet, behavior-neutral.** Also closed a Phase-1 gap: the voxel-merge path now calls `refresh_active_gpu_residency()` so the disp/base mirror tracks the freshly merged active entity. `begin()` signature gains `MultiresGPU&`. **WIP / untested interactively** — bisectable checkpoint in the GPU-undo chain.
+
 ## 2026-06-16 — Select-mode object move: mirror twins on X (symmetry-gated) / lock-X
 
 - **Dragging a centered (symmetric) piece sideways now mirrors its motion across x=0 — its two lobes (the mesh and its −x twin) spread/converge symmetrically — when X-symmetry is on; with symmetry off the piece locks X and stays centered.** Resolves the long-undecided "Bug 2" from `selectmove.md` / `chisel-current-state.md`: the per-lobe move math lives inside the single welded symmetric entity (`+x` verts get `+delta.x`, `−x` verts `−delta.x`, seam pinned at 0), so symmetry is exact by construction with no `mirror_x_map` walk, no map rebuild, and no resurrection of the deleted twin-entity layer. Gated on the existing `input.mirror_x` toggle (`centered = |bounding-centre.x| < 1e-3·radius`); off-centre entities still translate freely on all axes; the multires base shifts the same way. **Subject to change** — the spread-on-X feel is on trial and may not stay the default (could move behind a modifier or its own toggle); not yet undoable. `main.cpp` `MOVE_OBJECT` handler only.

@@ -612,6 +612,10 @@ int main(int argc, char* argv[]) {
                     scene.sync();
                     mesh = &scene.active_mesh();
                     multires = &scene.active_multires();
+                    // The merge replaces the active entity wholesale; resync the
+                    // GPU-residency mirror to the fresh mesh's current level so the
+                    // Phase-2 diff/apply shaders read a valid disp/base layer.
+                    refresh_active_gpu_residency();
                     mesh->compute_bounding_sphere(mesh_center, mesh_radius);
                     screen_buffers_dirty = true;
                     brush_stroke.vertex_count = 0;
@@ -747,7 +751,8 @@ int main(int argc, char* argv[]) {
                                (float)input.mouse_x, (float)input.mouse_y,
                                input.brush_size,
                                win_w, win_h, mesh->vertex_count(), *multires,
-                               input.current_brush, scene.active_mesh_id());
+                               input.current_brush, scene.active_mesh_id(),
+                               scene.active_entity().multires_gpu);
             brush_stroke.cursor_hist_count = 1;
             brush_stroke.cursor_hist_x[0] = (float)input.mouse_x;
             brush_stroke.cursor_hist_y[0] = (float)input.mouse_y;

@@ -169,10 +169,35 @@ void MultiresGPU::upload_disp_partial(const MultiresStack& stack, int abs_level,
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 }
 
+void MultiresGPU::snapshot_positions(GLuint pos_vbo, uint32_t vertex_count) {
+    if (!supported || vertex_count == 0) return;
+
+    // Lazy grow-only resize, then a GPU→GPU copy of the active entity's working
+    // VBO range. Mirrors ComputeState::snapshot_stroke_normals.
+    if (snap_pos_capacity < vertex_count || !snap_pos_ssbo) {
+        if (snap_pos_ssbo) { glDeleteBuffers(1, &snap_pos_ssbo); snap_pos_ssbo = 0; }
+        glGenBuffers(1, &snap_pos_ssbo);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, snap_pos_ssbo);
+        glBufferData(GL_SHADER_STORAGE_BUFFER,
+                     (GLsizeiptr)vertex_count * 3 * sizeof(float),
+                     nullptr, GL_DYNAMIC_COPY);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+        snap_pos_capacity = vertex_count;
+    }
+
+    GLsizeiptr byte_size = (GLsizeiptr)vertex_count * 3 * sizeof(float);
+    glBindBuffer(GL_COPY_READ_BUFFER,  pos_vbo);
+    glBindBuffer(GL_COPY_WRITE_BUFFER, snap_pos_ssbo);
+    glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, 0, 0, byte_size);
+    glBindBuffer(GL_COPY_READ_BUFFER,  0);
+    glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
+}
+
 void MultiresGPU::cleanup() {
-    if (disp_ssbo)   { glDeleteBuffers(1, &disp_ssbo);   disp_ssbo = 0; }
-    if (frames_ssbo) { glDeleteBuffers(1, &frames_ssbo); frames_ssbo = 0; }
-    if (base_ssbo)   { glDeleteBuffers(1, &base_ssbo);   base_ssbo = 0; }
-    capacity = base_capacity = 0;
+    if (disp_ssbo)     { glDeleteBuffers(1, &disp_ssbo);     disp_ssbo = 0; }
+    if (frames_ssbo)   { glDeleteBuffers(1, &frames_ssbo);   frames_ssbo = 0; }
+    if (base_ssbo)     { glDeleteBuffers(1, &base_ssbo);     base_ssbo = 0; }
+    if (snap_pos_ssbo) { glDeleteBuffers(1, &snap_pos_ssbo); snap_pos_ssbo = 0; }
+    capacity = base_capacity = snap_pos_capacity = 0;
     level = -1;
 }

@@ -271,7 +271,7 @@ void BrushStroke::begin(Renderer& renderer, const Camera& cam,
                         float screen_x, float screen_y, float brush_radius,
                         int screen_w_in, int screen_h_in, uint32_t vert_count,
                         const MultiresStack& multires, BrushType brush_type,
-                        uint32_t entity_id) {
+                        uint32_t entity_id, MultiresGPU& mgpu) {
     phase = StrokePhase::BEGIN;
     needs_mesh_update = false;
     vertex_count = vert_count;
@@ -314,6 +314,16 @@ void BrushStroke::begin(Renderer& renderer, const Camera& cam,
             || brush_type == BrushType::CREASE
             || brush_type == BrushType::PINCH)) {
         compute->snapshot_stroke_normals(renderer.vbo_norm, vert_count);
+    }
+
+    // Phase 2a (GPU-resident undo): snapshot the pen-down VBO positions so the
+    // pen-up diff shader can reproject world deltas into disp/base on the GPU.
+    // Geometry brushes only — MASK/PAINT don't touch positions. Pure capture for
+    // now (no consumer yet), gated on compute support so it's behavior-neutral.
+    if (compute && compute->supported && mgpu.supported
+        && brush_type != BrushType::MASK
+        && brush_type != BrushType::PAINT) {
+        mgpu.snapshot_positions(renderer.vbo_pos, vert_count);
     }
 
     // Only the CPU mask fallback (apply_mask → walk_brush_region) ever reads these

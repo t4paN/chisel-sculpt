@@ -173,7 +173,7 @@ struct BrushStroke {
                float screen_x, float screen_y, float brush_radius,
                int screen_w, int screen_h, uint32_t vert_count,
                const MultiresStack& multires, BrushType brush_type,
-               uint32_t entity_id);
+               uint32_t entity_id, MultiresGPU& mgpu);
 
     // GPU dispatch methods (absorb code from main.cpp)
     void apply_smooth(DabContext& ctx, float dab_x, float dab_y,

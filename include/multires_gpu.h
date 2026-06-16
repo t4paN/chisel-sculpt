@@ -30,6 +30,14 @@ struct MultiresGPU {
     uint32_t capacity  = 0;   // verts the disp/frames buffers can hold
     uint32_t base_capacity = 0;
 
+    // Phase 2: pen-down snapshot of the working VBO positions (world space). The
+    // GPU brush overwrites the VBO in place during the stroke, so the pre-stroke
+    // world pos is gone by pen-up unless captured here. The pen-up diff shader
+    // reads this + frames_ssbo + disp_ssbo (the latter already holds the pen-down
+    // disp, since Phase 1 only re-syncs it at pen-up) to reproject into disp/base.
+    GLuint snap_pos_ssbo   = 0;   // float3 * V, snapshot at pen-down
+    uint32_t snap_pos_capacity = 0;
+
     // Allocate/resize buffers to hold `vertex_count` (active level) and
     // `base_vertex_count` verts. Grow-only; no-op if already large enough.
     void ensure(uint32_t vertex_count, uint32_t base_vertex_count);
@@ -44,6 +52,11 @@ struct MultiresGPU {
     // in brush.cpp). No-op unless `abs_level == level` (the mirrored layer).
     void upload_disp_partial(const MultiresStack& stack, int abs_level,
                              const std::vector<uint32_t>& verts);
+
+    // Snapshot the working VBO positions [0, vertex_count) into snap_pos_ssbo at
+    // pen-down. GPU→GPU copy (glCopyBufferSubData), grow-only, one-shot per stroke.
+    // No behavior dependence yet — consumed by the Phase-2 pen-up diff shader.
+    void snapshot_positions(GLuint pos_vbo, uint32_t vertex_count);
 
     void cleanup();
 };
