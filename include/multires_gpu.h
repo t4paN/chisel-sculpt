@@ -58,5 +58,31 @@ struct MultiresGPU {
     // No behavior dependence yet — consumed by the Phase-2 pen-up diff shader.
     void snapshot_positions(GLuint pos_vbo, uint32_t vertex_count);
 
+    // ---- Phase 3 (deferred CPU writeback) -------------------------------------
+    // From 3b on, the pen-up diff shader writes disp/base on the GPU and the CPU
+    // copy is NOT refreshed inline. Instead the GPU is the source of truth and the
+    // CPU `stack.disp[k]`/`stack.base` go stale; the affected verts accumulate here.
+    // Every CPU consumer of disp/base (cascade, projection, save) must call
+    // materialize_cpu() first to pull the GPU truth back down. Until 3b nothing
+    // calls mark_cpu_dirty(), so materialize_cpu() is always a no-op early-return —
+    // i.e. this machinery is inert and behavior-neutral when introduced in 3a.
+    //
+    // NOTE: this syncs the *storage* layer (disp/base) only — the surface
+    // `mesh.pos` is regenerated from it by the cascade. Choke points that read the
+    // live surface directly (remesh, sdf, insert) get a vbo_pos→mesh.pos sync wired
+    // separately in 3b/3c.
+    bool cpu_dirty = false;
+    std::vector<uint32_t> dirty_verts;   // active-level verts whose CPU disp/base is stale
+
+    // Accumulate verts whose GPU disp/base now diverges from the CPU copy. Cheap;
+    // no readback. Called at pen-up (and undo/redo) in place of the CPU writeback.
+    void mark_cpu_dirty(const std::vector<uint32_t>& verts);
+
+    // Pull the GPU disp/base for the dirty verts of the mirrored level back into
+    // CPU `stack` storage (banded readback, inverse of upload_disp_partial), then
+    // clear the dirty set. No-op unless cpu_dirty. Call before any CPU read of the
+    // active level's disp/base.
+    void materialize_cpu(MultiresStack& stack);
+
     void cleanup();
 };

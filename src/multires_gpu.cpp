@@ -193,6 +193,59 @@ void MultiresGPU::snapshot_positions(GLuint pos_vbo, uint32_t vertex_count) {
     glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
 }
 
+void MultiresGPU::mark_cpu_dirty(const std::vector<uint32_t>& verts) {
+    if (!supported || verts.empty()) return;
+    cpu_dirty = true;
+    dirty_verts.insert(dirty_verts.end(), verts.begin(), verts.end());
+}
+
+void MultiresGPU::materialize_cpu(MultiresStack& stack) {
+    if (!supported || !cpu_dirty) return;
+
+    // Inverse of upload_disp_partial: read the mirrored level's GPU storage back
+    // into CPU disp/base for the dirty verts, in coalesced runs. After this the CPU
+    // copy matches the GPU again, so cascade/projection/save can read CPU truth.
+    static std::vector<Run> runs;
+    coalesce(dirty_verts, runs);
+
+    if (level == stack.base_level) {
+        static std::vector<float> scratch;
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, base_ssbo);
+        for (const Run& r : runs) {
+            if (r.first + r.count > stack.base.vertex_count()) continue;
+            scratch.resize((size_t)r.count * 3);
+            glGetBufferSubData(GL_SHADER_STORAGE_BUFFER,
+                               (GLintptr)r.first * 3 * sizeof(float),
+                               (GLsizeiptr)r.count * 3 * sizeof(float), scratch.data());
+            for (uint32_t i = 0; i < r.count; i++) {
+                uint32_t v = r.first + i;
+                stack.base.pos_x[v] = scratch[i*3+0];
+                stack.base.pos_y[v] = scratch[i*3+1];
+                stack.base.pos_z[v] = scratch[i*3+2];
+            }
+        }
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    } else {
+        int k = level - stack.base_level - 1;
+        if (k >= 0 && k < (int)stack.disp.size()) {
+            std::vector<Vec3>& disp = stack.disp[k];
+            glBindBuffer(GL_SHADER_STORAGE_BUFFER, disp_ssbo);
+            for (const Run& r : runs) {
+                if (r.first + r.count > disp.size()) continue;
+                // Vec3 is 3 contiguous floats; &disp[first] is a float3*count span
+                // (mirrors upload_disp_partial's write side).
+                glGetBufferSubData(GL_SHADER_STORAGE_BUFFER,
+                                   (GLintptr)r.first * 3 * sizeof(float),
+                                   (GLsizeiptr)r.count * 3 * sizeof(float), &disp[r.first]);
+            }
+            glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+        }
+    }
+
+    cpu_dirty = false;
+    dirty_verts.clear();
+}
+
 void MultiresGPU::cleanup() {
     if (disp_ssbo)     { glDeleteBuffers(1, &disp_ssbo);     disp_ssbo = 0; }
     if (frames_ssbo)   { glDeleteBuffers(1, &frames_ssbo);   frames_ssbo = 0; }
@@ -200,4 +253,6 @@ void MultiresGPU::cleanup() {
     if (snap_pos_ssbo) { glDeleteBuffers(1, &snap_pos_ssbo); snap_pos_ssbo = 0; }
     capacity = base_capacity = snap_pos_capacity = 0;
     level = -1;
+    cpu_dirty = false;
+    dirty_verts.clear();
 }
