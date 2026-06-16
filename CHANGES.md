@@ -2,6 +2,10 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-16 — Select-mode object move: mirror twins on X (symmetry-gated) / lock-X
+
+- **Dragging a centered (symmetric) piece sideways now mirrors its motion across x=0 — its two lobes (the mesh and its −x twin) spread/converge symmetrically — when X-symmetry is on; with symmetry off the piece locks X and stays centered.** Resolves the long-undecided "Bug 2" from `selectmove.md` / `chisel-current-state.md`: the per-lobe move math lives inside the single welded symmetric entity (`+x` verts get `+delta.x`, `−x` verts `−delta.x`, seam pinned at 0), so symmetry is exact by construction with no `mirror_x_map` walk, no map rebuild, and no resurrection of the deleted twin-entity layer. Gated on the existing `input.mirror_x` toggle (`centered = |bounding-centre.x| < 1e-3·radius`); off-centre entities still translate freely on all axes; the multires base shifts the same way. **Subject to change** — the spread-on-X feel is on trial and may not stay the default (could move behind a modifier or its own toggle); not yet undoable. `main.cpp` `MOVE_OBJECT` handler only.
+
 ## 2026-06-16 — Select-mode object move: fix inverted drag
 
 - **Object-move now tracks the cursor 1:1.** The `MOVE_OBJECT` view-plane drag was sign-inverted on both screen axes (cursor up → mesh down, cursor right → mesh left — a "lever" feel) because the delta negated `dx` and used raw `dy` despite GLFW's y-grows-downward. Flipped to `right*(dx*scale) + up*(-dy*scale)` so the mesh follows the cursor on both axes from any camera orientation. The X-symmetry behavior for centered/mirror entities (Bug 2) is a separate, still-undecided design choice — see `chisel-current-state.md`.

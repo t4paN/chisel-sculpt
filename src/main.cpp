@@ -779,8 +779,7 @@ int main(int argc, char* argv[]) {
                 Vec3 up = right.cross(fwd).normalized();
                 // Signs chosen so the mesh tracks the cursor 1:1: +dx (cursor right)
                 // moves right; -dy (GLFW y grows downward, so cursor up is dy<0) moves
-                // up. Both selectmove specs agree on this; the X-symmetry question
-                // (Bug 2) is still undecided — see chisel-current-state.md.
+                // up. Both selectmove specs agree on this.
                 Vec3 delta = right * (dx * scale) + up * (-dy * scale);
 
                 if (delta.x != 0.0f || delta.y != 0.0f || delta.z != 0.0f) {
@@ -788,19 +787,42 @@ int main(int argc, char* argv[]) {
                         MeshEntity* e = scene.find_entity(sel_id);
                         if (!e) continue;
                         uint32_t vc = e->mesh.vertex_count();
-                        for (uint32_t v = 0; v < vc; v++) {
-                            e->mesh.pos_x[v] += delta.x;
-                            e->mesh.pos_y[v] += delta.y;
-                            e->mesh.pos_z[v] += delta.z;
-                        }
-                        // Also shift multires base if this is the active entity
-                        if (sel_id == scene.active_mesh_id() && multires->locked) {
-                            for (uint32_t v = 0; v < multires->base.vertex_count(); v++) {
-                                multires->base.pos_x[v] += delta.x;
-                                multires->base.pos_y[v] += delta.y;
-                                multires->base.pos_z[v] += delta.z;
+
+                        // X-axis behaviour for a *centered* (symmetric) piece — its
+                        // bounding centre sits on the mirror plane. With symmetry on,
+                        // mirror the motion per-lobe: +x verts move +delta.x, -x verts
+                        // -delta.x, seam pinned at 0 -> the lobes (the mesh and its
+                        // -x twin) spread/converge as exact mirrors, stays symmetric.
+                        // With symmetry off, lock X so the piece stays centered.
+                        // Off-centre pieces always translate freely on all axes.
+                        Vec3 c; float r;
+                        e->mesh.compute_bounding_sphere(c, r);
+                        float rr = (r > 0.0f) ? r : 1.0f;
+                        bool centered = std::fabs(c.x) < 1e-3f * rr;
+                        bool mirror_lobes = centered && input.mirror_x;
+                        bool lock_x = centered && !input.mirror_x;
+                        float seam_eps = 1e-4f * rr;
+
+                        auto move_mesh = [&](Mesh& m) {
+                            uint32_t n = m.vertex_count();
+                            for (uint32_t v = 0; v < n; v++) {
+                                float sx = delta.x;
+                                if (lock_x) sx = 0.0f;
+                                else if (mirror_lobes) {
+                                    float x = m.pos_x[v];
+                                    sx = (x >  seam_eps) ?  delta.x
+                                       : (x < -seam_eps) ? -delta.x : 0.0f;
+                                }
+                                m.pos_x[v] += sx;
+                                m.pos_y[v] += delta.y;
+                                m.pos_z[v] += delta.z;
                             }
-                        }
+                        };
+                        move_mesh(e->mesh);
+                        // Also shift multires base if this is the active entity
+                        if (sel_id == scene.active_mesh_id() && multires->locked)
+                            move_mesh(multires->base);
+
                         std::vector<uint32_t> local_dirty(vc);
                         for (uint32_t i = 0; i < vc; i++) local_dirty[i] = i;
                         scene.sync_partial_entity(sel_id, local_dirty);
