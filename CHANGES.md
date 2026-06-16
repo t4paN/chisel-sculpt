@@ -2,6 +2,10 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-17 — Undo budget: runtime-configurable + `--toaster` CLI flag (blood-moon 3b-i)
+
+- **`UndoStack`'s 1 GB history budget is now a runtime value, and `--toaster` drops it to 256 MB.** `UndoStack::max_bytes` changed from a compile-time `constexpr` to a settable static (default 1 GB); the `--toaster` command-line flag (low-VRAM / thermally-limited machines) caps it at 256 MB. Startup logs `[undo] history budget: N MB`. No UI — CLI only for now. Foundation for the GPU-resident undo ring (blood-moon 3b), which will size itself from the same budget so the GPU-side history honors `--toaster` too.
+
 ## 2026-06-17 — GPU-resident undo Phase 3a: materialize_cpu primitive (groundwork, WIP)
 
 - **`MultiresGPU` gains `mark_cpu_dirty()` / `materialize_cpu()` + `cpu_dirty`/`dirty_verts` state** — the deferred-CPU-writeback groundwork. `materialize_cpu()` is the inverse of `upload_disp_partial`: a banded `glGetBufferSubData` that pulls the GPU-resident `disp`/`base` for the dirty verts back down into CPU `stack` storage (coalesced contiguous runs, same idiom as the upload side), then clears the dirty set; `mark_cpu_dirty()` cheaply accumulates touched verts with no readback. **Inert scaffolding — no call sites yet**, so `materialize_cpu()` always early-returns on `!cpu_dirty` and the build is behavior-neutral (the 2a/2b/2c debug `max|err|` output is unchanged). Wired in the next pass. Committed `de675e5`.
