@@ -42,6 +42,7 @@ enum ComputeBinding : GLuint {
     BIND_MULTIRES_SNAP_POS = 32, // float3 pen-down world position snapshot
     BIND_MULTIRES_BASE     = 33, // float3 base positions (out, base-level strokes)
     BIND_MULTIRES_STAGE    = 34, // float6 per touched vert: target(3) + source(3) disp (undo apply ring)
+    BIND_UNDO_RING         = 35, // float6 per touched vert: old(3) + new(3) — persistent undo history (3b-iii)
 };
 
 struct DrawAccumParams {
@@ -492,10 +493,14 @@ struct ComputeState {
     // position is written to base_ssbo; otherwise the world delta is reprojected
     // into the frames and accumulated onto disp_ssbo (which holds the pen-down
     // disp). Issues a buffer-update barrier so a debug readback sees the result.
+    // `ring_ssbo`/`ring_base_floats`: when ring_ssbo != 0, the shader also writes
+    // (old,new) deltas for each touched vert into the undo ring at ring_base_floats
+    // + di*6 (3b-iii capture). Pass ring_ssbo=0 to skip (compute/ring unavailable).
     void dispatch_multires_diff(GLuint pos_vbo, GLuint disp_ssbo, GLuint frames_ssbo,
                                 GLuint snap_pos_ssbo, GLuint base_ssbo,
                                 const uint32_t* verts, uint32_t count,
-                                bool writes_to_base);
+                                bool writes_to_base,
+                                GLuint ring_ssbo, uint32_t ring_base_floats);
 
     // Compile the undo/redo multires apply shader. Called once at init.
     bool init_multires_apply();
@@ -518,6 +523,11 @@ struct ComputeState {
     // cap as needed. Returns the byte offset of the appended span, or SIZE_MAX if
     // it would exceed the cap (no wrap yet — 3b-iv adds FIFO eviction).
     size_t undo_ring_append(const float* data, size_t float_count);
+    // Reserve float_count floats WITHOUT uploading (a compute shader fills them).
+    // Grows copy-preserving up to the cap; bumps head. Returns the FLOAT offset of
+    // the reserved span, or SIZE_MAX on cap overflow. Used by the pen-up diff
+    // shader (3b-iii) to write (old,new) deltas straight into the ring.
+    size_t undo_ring_reserve(size_t float_count);
     // Read float_count floats back from byte_offset into out (spill / validation).
     void undo_ring_read(size_t byte_offset, size_t float_count, float* out);
     // CHISEL_DEBUG_MULTIRES round-trip self-test (append → read → compare). No-op

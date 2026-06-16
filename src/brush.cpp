@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cassert>
+#include <cstdint>
 
 int BrushStroke::debug_stride_override = 0;
 int BrushStroke::debug_test_vertex     = -1;
@@ -1110,13 +1111,21 @@ bool BrushStroke::finalize(Mesh& mesh, UndoStack& stack, MultiresStack& multires
         // the end); under CHISEL_DEBUG_MULTIRES we snapshot the GPU result here
         // and compare it to the CPU result before that re-sync overwrites it.
         bool gpu_diff_ran = false;
+        size_t ring_base = SIZE_MAX;   // float offset of this stroke's span in the undo ring (3b-iii)
         if (compute && compute->supported && mgpu.supported
             && mgpu.level == stroke_level) {
+            // Reserve float6 per touched vert; the diff shader fills (old,new). On
+            // cap overflow reserve returns SIZE_MAX and we skip ring capture (the
+            // CPU path stays authoritative — dual-bookkeeping in 3b-iii).
+            ring_base = compute->undo_ring_reserve(snap_list.size() * 6);
+            GLuint ring_ssbo = (ring_base != SIZE_MAX) ? compute->undo_ring_ssbo : 0;
             compute->dispatch_multires_diff(renderer.vbo_pos, mgpu.disp_ssbo,
                                             mgpu.frames_ssbo, mgpu.snap_pos_ssbo,
                                             mgpu.base_ssbo,
                                             snap_list.data(), (uint32_t)snap_list.size(),
-                                            stroke_writes_to_base);
+                                            stroke_writes_to_base,
+                                            ring_ssbo,
+                                            (uint32_t)(ring_base == SIZE_MAX ? 0 : ring_base));
             gpu_diff_ran = true;
         }
 #ifdef CHISEL_DEBUG_MULTIRES
@@ -1213,6 +1222,39 @@ bool BrushStroke::finalize(Mesh& mesh, UndoStack& stack, MultiresStack& multires
             std::printf("[mgpu][debug] multires_diff L%d %s max|err|=%.3e (%zu verts)\n",
                         stroke_level, stroke_writes_to_base ? "base" : "disp",
                         maxe, snap_list.size());
+        }
+
+        // Phase 3b-iii validation: the (old,new) the diff shader wrote into the undo
+        // ring vs the CPU truth — old should match the pen-down snapshot (snap_*),
+        // new should match the post-readback CPU disp/pos. Runs after the CPU
+        // readback above has materialized the new values. Confirms the GPU ring
+        // capture is faithful before 3b-iv trusts it (and drops the CPU readback).
+        if (gpu_diff_ran && ring_base != SIZE_MAX) {
+            static std::vector<float> ring_chk;   // 6 floats/vert: old(3) + new(3)
+            ring_chk.resize(snap_list.size() * 6);
+            compute->undo_ring_read(ring_base * sizeof(float),
+                                    snap_list.size() * 6, ring_chk.data());
+            double maxe_old = 0.0, maxe_new = 0.0;
+            for (size_t i = 0; i < snap_list.size(); i++) {
+                uint32_t v = snap_list[i];
+                maxe_old = std::max(maxe_old, (double)std::fabs(ring_chk[i*6+0] - snap_x[v]));
+                maxe_old = std::max(maxe_old, (double)std::fabs(ring_chk[i*6+1] - snap_y[v]));
+                maxe_old = std::max(maxe_old, (double)std::fabs(ring_chk[i*6+2] - snap_z[v]));
+                float nx, ny, nz;
+                if (stroke_writes_to_base) {
+                    nx = mesh.pos_x[v]; ny = mesh.pos_y[v]; nz = mesh.pos_z[v];
+                } else {
+                    nx = multires.disp[stroke_disp_index][v].x;
+                    ny = multires.disp[stroke_disp_index][v].y;
+                    nz = multires.disp[stroke_disp_index][v].z;
+                }
+                maxe_new = std::max(maxe_new, (double)std::fabs(ring_chk[i*6+3] - nx));
+                maxe_new = std::max(maxe_new, (double)std::fabs(ring_chk[i*6+4] - ny));
+                maxe_new = std::max(maxe_new, (double)std::fabs(ring_chk[i*6+5] - nz));
+            }
+            std::printf("[undo-ring][debug] capture L%d %s old|err|=%.3e new|err|=%.3e (%zu verts)\n",
+                        stroke_level, stroke_writes_to_base ? "base" : "disp",
+                        maxe_old, maxe_new, snap_list.size());
         }
 #endif
 

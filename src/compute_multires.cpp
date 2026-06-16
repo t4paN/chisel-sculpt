@@ -30,9 +30,12 @@ layout(std430, binding = 30)          buffer DispBuf  { float disp[]; };      //
 layout(std430, binding = 31) readonly buffer FrameBuf { float frames[]; };
 layout(std430, binding = 32) readonly buffer SnapBuf  { float snap_pos[]; };
 layout(std430, binding = 33)          buffer BaseBuf  { float base_pos[]; };
+layout(std430, binding = 35)          buffer RingBuf  { float ring[]; };      // float6/vert: old(3)+new(3)
 
 uniform uint u_count;
 uniform int  u_writes_to_base;
+uniform uint u_ring_base;   // float offset of this stroke's span in the undo ring
+uniform int  u_ring_on;     // write (old,new) into the ring when != 0
 
 void main() {
     uint di = gl_GlobalInvocationID.x;
@@ -42,21 +45,37 @@ void main() {
     vec3 lp = vec3(live_pos[v*3u], live_pos[v*3u+1u], live_pos[v*3u+2u]);
     vec3 sp = vec3(snap_pos[v*3u], snap_pos[v*3u+1u], snap_pos[v*3u+2u]);
 
+    vec3 old_v, new_v;
+
     if (u_writes_to_base != 0) {
+        // Base-level stroke: the surface IS the base cage, so old = pen-down world
+        // pos (snap), new = live pos.
+        old_v = sp;
+        new_v = lp;
         base_pos[v*3u]      = lp.x;
         base_pos[v*3u+1u]   = lp.y;
         base_pos[v*3u+2u]   = lp.z;
-        return;
+    } else {
+        vec3 d = lp - sp;
+        vec3 t = vec3(frames[v*9u],      frames[v*9u+1u], frames[v*9u+2u]);
+        vec3 b = vec3(frames[v*9u+3u],   frames[v*9u+4u], frames[v*9u+5u]);
+        vec3 n = vec3(frames[v*9u+6u],   frames[v*9u+7u], frames[v*9u+8u]);
+
+        // disp[] still holds the pen-down disp on entry — that's old.
+        old_v = vec3(disp[v*3u], disp[v*3u+1u], disp[v*3u+2u]);
+        new_v = old_v + vec3(dot(t, d), dot(b, d), dot(n, d));
+        disp[v*3u]      = new_v.x;
+        disp[v*3u+1u]   = new_v.y;
+        disp[v*3u+2u]   = new_v.z;
     }
 
-    vec3 d = lp - sp;
-    vec3 t = vec3(frames[v*9u],      frames[v*9u+1u], frames[v*9u+2u]);
-    vec3 b = vec3(frames[v*9u+3u],   frames[v*9u+4u], frames[v*9u+5u]);
-    vec3 n = vec3(frames[v*9u+6u],   frames[v*9u+7u], frames[v*9u+8u]);
-
-    disp[v*3u]      += dot(t, d);
-    disp[v*3u+1u]   += dot(b, d);
-    disp[v*3u+2u]   += dot(n, d);
+    if (u_ring_on != 0) {
+        // Pack (old,new) at this stroke's reserved span, indexed by local di so the
+        // ring is densely packed per stroke (3b-iii undo capture).
+        uint ro = u_ring_base + di * 6u;
+        ring[ro]      = old_v.x;  ring[ro+1u] = old_v.y;  ring[ro+2u] = old_v.z;
+        ring[ro+3u]   = new_v.x;  ring[ro+4u] = new_v.y;  ring[ro+5u] = new_v.z;
+    }
 }
 )";
 
@@ -75,7 +94,8 @@ void ComputeState::dispatch_multires_diff(GLuint pos_vbo, GLuint disp_ssbo,
                                           GLuint frames_ssbo, GLuint snap_pos_ssbo,
                                           GLuint base_ssbo,
                                           const uint32_t* verts, uint32_t count,
-                                          bool writes_to_base) {
+                                          bool writes_to_base,
+                                          GLuint ring_ssbo, uint32_t ring_base_floats) {
     if (!multires_diff_program || count == 0) return;
     if (!pos_vbo || !snap_pos_ssbo) return;
     if (!writes_to_base && (!disp_ssbo || !frames_ssbo)) return;
@@ -106,10 +126,17 @@ void ComputeState::dispatch_multires_diff(GLuint pos_vbo, GLuint disp_ssbo,
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_MULTIRES_FRAMES,  frames_ssbo);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_MULTIRES_SNAP_POS, snap_pos_ssbo);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_MULTIRES_BASE,    base_ssbo);
+    // Undo-ring capture (3b-iii): bind the ring so the shader writes (old,new). A
+    // valid binding is required even when off (some drivers demand it), so fall
+    // back to the disp buffer as a harmless bind target when ring_ssbo == 0.
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_UNDO_RING,
+                     ring_ssbo ? ring_ssbo : disp_ssbo);
 
     glUniform1ui(glGetUniformLocation(multires_diff_program, "u_count"), count);
     glUniform1i(glGetUniformLocation(multires_diff_program, "u_writes_to_base"),
                 writes_to_base ? 1 : 0);
+    glUniform1ui(glGetUniformLocation(multires_diff_program, "u_ring_base"), ring_base_floats);
+    glUniform1i(glGetUniformLocation(multires_diff_program, "u_ring_on"), ring_ssbo ? 1 : 0);
 
     int groups = (int)((count + 255u) / 256u);
     glDispatchCompute(groups, 1, 1);
@@ -298,6 +325,40 @@ size_t ComputeState::undo_ring_append(const float* data, size_t float_count) {
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
     undo_ring_head = offset + bytes;
     return offset;
+}
+
+size_t ComputeState::undo_ring_reserve(size_t float_count) {
+    if (!supported || float_count == 0) return SIZE_MAX;
+
+    const size_t bytes  = float_count * sizeof(float);
+    const size_t offset = undo_ring_head;
+    if (offset + bytes > undo_ring_cap_bytes) return SIZE_MAX;  // 3b-iii: no wrap yet
+
+    if (!undo_ring_ssbo || offset + bytes > undo_ring_bytes) {
+        size_t newcap = undo_ring_bytes ? undo_ring_bytes : (16ull << 20);
+        while (newcap < offset + bytes) newcap <<= 1;
+        if (newcap > undo_ring_cap_bytes) newcap = undo_ring_cap_bytes;
+        if (offset + bytes > newcap) return SIZE_MAX;
+
+        GLuint nb = 0;
+        glGenBuffers(1, &nb);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, nb);
+        glBufferData(GL_SHADER_STORAGE_BUFFER, (GLsizeiptr)newcap, nullptr, GL_DYNAMIC_COPY);
+        if (undo_ring_ssbo && undo_ring_head) {
+            glBindBuffer(GL_COPY_READ_BUFFER,  undo_ring_ssbo);
+            glBindBuffer(GL_COPY_WRITE_BUFFER, nb);
+            glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, 0, 0,
+                                (GLsizeiptr)undo_ring_head);
+            glBindBuffer(GL_COPY_READ_BUFFER,  0);
+            glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
+        }
+        if (undo_ring_ssbo) glDeleteBuffers(1, &undo_ring_ssbo);
+        undo_ring_ssbo  = nb;
+        undo_ring_bytes = newcap;
+    }
+
+    undo_ring_head = offset + bytes;
+    return offset / sizeof(float);   // FLOAT offset for the shader uniform
 }
 
 void ComputeState::undo_ring_read(size_t byte_offset, size_t float_count, float* out) {
