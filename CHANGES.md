@@ -2,6 +2,10 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-17 — GPU undo ring buffer (blood-moon 3b-ii, WIP)
+
+- **New persistent GPU-resident undo ring on `ComputeState` — the history buffer for pure-GPU undo capture.** A single grow-only SSBO bump-allocates per-vert `(old,new)` STROKE deltas (float6/vert); it resizes copy-preserving (GPU→GPU `glCopyBufferSubData` of the live region into the bigger buffer) up to a cap taken from `UndoStack::max_bytes`, so `--toaster` shrinks the GPU history too. API: `undo_ring_set_budget` / `undo_ring_reset` / `undo_ring_append` (returns the byte offset, or `SIZE_MAX` on cap overflow — no wrap/eviction yet, that lands in 3b-iv) / `undo_ring_read` / `undo_ring_selftest`. Budget + self-test wired at compute init. Distinct from the transient `multires_stage_ssbo` (per-apply scratch). **No stroke-path consumer yet — behavior-neutral.** Debug self-test validated live: `offsets_ok=1 max|err|=0.000e+00 (cap=1024MB, alloc=16MB)` (and `cap=256MB` under `--toaster`); the 2a/2b/2c chain runs clean alongside it up to L7/327k tris. Next: 3b-iii wires the pen-up diff shader to write real stroke deltas into the ring.
+
 ## 2026-06-17 — Undo budget: runtime-configurable + `--toaster` CLI flag (blood-moon 3b-i)
 
 - **`UndoStack`'s 1 GB history budget is now a runtime value, and `--toaster` drops it to 256 MB.** `UndoStack::max_bytes` changed from a compile-time `constexpr` to a settable static (default 1 GB); the `--toaster` command-line flag (low-VRAM / thermally-limited machines) caps it at 256 MB. Startup logs `[undo] history budget: N MB`. No UI — CLI only for now. Foundation for the GPU-resident undo ring (blood-moon 3b), which will size itself from the same budget so the GPU-side history honors `--toaster` too.
