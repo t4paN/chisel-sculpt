@@ -7,6 +7,9 @@
 #include <cstdio>
 #include <algorithm>
 
+// Default undo budget: 1 GB. Overridden at startup by --toaster (256 MB).
+size_t UndoStack::max_bytes = 1024ull * 1024ull * 1024ull;
+
 void UndoStack::push(UndoEntry&& e) {
     if (e.kind == UndoEntry::Kind::STROKE && e.verts.empty()) return;
     if (e.kind == UndoEntry::Kind::MASK && e.verts.empty()) return;
@@ -20,7 +23,7 @@ void UndoStack::push(UndoEntry&& e) {
 }
 
 void UndoStack::evict_to_budget() {
-    while (total_bytes > MAX_BYTES && undo_stack.size() > 1) {
+    while (total_bytes > max_bytes && undo_stack.size() > 1) {
         total_bytes -= entry_bytes(undo_stack.front());
         undo_stack.pop_front();
     }

@@ -44,7 +44,11 @@ struct UndoEntry {
 
 class UndoStack {
 public:
-    static constexpr size_t MAX_BYTES = 1024ull * 1024ull * 1024ull; // 1 GB
+    // Total undo-history budget (oldest entries evicted past this). Runtime-
+    // configurable: defaults to 1 GB, dropped to 256 MB by the --toaster CLI flag
+    // for low-VRAM / thermally-limited machines. The GPU-resident undo ring
+    // (blood-moon Phase 3b) sizes itself from the same budget.
+    static size_t max_bytes;
 
     void push(UndoEntry&& e);
     bool can_undo() const { return !undo_stack.empty(); }

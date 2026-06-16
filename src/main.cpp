@@ -81,9 +81,14 @@ int main(int argc, char* argv[]) {
     for (int i = 1; i < argc; i++) {
         if (std::strcmp(argv[i], "--mirror=spatial") == 0)
             cli_use_topology = false;
+        else if (std::strcmp(argv[i], "--toaster") == 0)
+            UndoStack::max_bytes = 256ull * 1024ull * 1024ull;  // low-VRAM / thermal cap
     }
     if (!cli_use_topology)
         std::printf("[mirror] using spatial-hash fallback (--mirror=spatial)\n");
+    std::printf("[undo] history budget: %zu MB%s\n",
+                UndoStack::max_bytes / (1024 * 1024),
+                UndoStack::max_bytes < 1024ull * 1024ull * 1024ull ? " (--toaster)" : "");
 
     // Init GLFW
     if (!glfwInit()) {
