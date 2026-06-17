@@ -163,16 +163,34 @@ layout(std430, binding = 30)          buffer DispBuf  { float disp[]; };
 layout(std430, binding = 31) readonly buffer FrameBuf { float frames[]; };
 layout(std430, binding = 33)          buffer BaseBuf  { float base_pos[]; };
 layout(std430, binding = 34) readonly buffer StageBuf { float stage[]; };  // 6/vert: target,source
+layout(std430, binding = 35) readonly buffer RingBuf  { float ring[]; };   // 6/vert: old,new
 
 uniform uint u_count;
 uniform int  u_targets_base;
+// Source the (target,source) pair from the persistent undo ring instead of the
+// transient CPU stage (3b-iv). The ring stores (old,new); undo wants target=old,
+// redo target=new — u_forward picks the direction. ring_base is the FLOAT offset
+// of this entry's span; slot index == di (verts aligned to the unfiltered capture).
+uniform int  u_ring_mode;
+uniform uint u_ring_base;
+uniform int  u_forward;
 
 void main() {
     uint di = gl_GlobalInvocationID.x;
     if (di >= u_count) return;
     uint v = dirty[di];
 
-    vec3 tgt = vec3(stage[di*6u], stage[di*6u+1u], stage[di*6u+2u]);
+    vec3 tgt, src;
+    if (u_ring_mode != 0) {
+        uint ro = u_ring_base + di * 6u;
+        vec3 old_v = vec3(ring[ro],      ring[ro+1u], ring[ro+2u]);
+        vec3 new_v = vec3(ring[ro+3u],   ring[ro+4u], ring[ro+5u]);
+        tgt = (u_forward != 0) ? new_v : old_v;
+        src = (u_forward != 0) ? old_v : new_v;
+    } else {
+        tgt = vec3(stage[di*6u],      stage[di*6u+1u], stage[di*6u+2u]);
+        src = vec3(stage[di*6u+3u],   stage[di*6u+4u], stage[di*6u+5u]);
+    }
 
     if (u_targets_base != 0) {
         base_pos[v*3u]    = tgt.x;
@@ -184,7 +202,6 @@ void main() {
         return;
     }
 
-    vec3 src = vec3(stage[di*6u+3u], stage[di*6u+4u], stage[di*6u+5u]);
     vec3 d   = tgt - src;
 
     disp[v*3u]    = tgt.x;
@@ -215,11 +232,17 @@ bool ComputeState::init_multires_apply() {
 void ComputeState::dispatch_multires_apply(GLuint pos_vbo, GLuint disp_ssbo,
                                            GLuint frames_ssbo, GLuint base_ssbo,
                                            const uint32_t* verts, const float* stage,
-                                           uint32_t count, bool targets_base) {
+                                           uint32_t count, bool targets_base,
+                                           GLuint ring_ssbo, uint32_t ring_base_floats,
+                                           bool forward) {
     if (!multires_apply_program || count == 0) return;
     if (!pos_vbo) return;
     if (targets_base && !base_ssbo) return;
     if (!targets_base && (!disp_ssbo || !frames_ssbo)) return;
+
+    // Ring mode (3b-iv): read (old,new) straight from the persistent undo ring, no
+    // CPU stage upload. Stage mode: upload the (target,source) pairs as before.
+    const bool ring_mode = (ring_ssbo != 0);
 
     // Upload the touched-vert list (reuse dirty_verts_ssbo, as the diff does).
     GLsizeiptr verts_bytes = (GLsizeiptr)count * sizeof(uint32_t);
@@ -236,21 +259,31 @@ void ComputeState::dispatch_multires_apply(GLuint pos_vbo, GLuint disp_ssbo,
     }
     glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, verts_bytes, verts);
 
-    // Upload the (target, source) staging pairs.
-    GLsizeiptr stage_bytes = (GLsizeiptr)count * 6 * sizeof(float);
-    if (!multires_stage_ssbo || count > multires_stage_capacity) {
-        if (multires_stage_ssbo) glDeleteBuffers(1, &multires_stage_ssbo);
-        glGenBuffers(1, &multires_stage_ssbo);
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, multires_stage_ssbo);
-        uint32_t alloc_count = std::max(count, 4096u);
-        glBufferData(GL_SHADER_STORAGE_BUFFER, (GLsizeiptr)alloc_count * 6 * sizeof(float),
-                     nullptr, GL_DYNAMIC_DRAW);
-        multires_stage_capacity = alloc_count;
-    } else {
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, multires_stage_ssbo);
+    // Upload the (target, source) staging pairs (stage mode only).
+    if (!ring_mode && stage) {
+        GLsizeiptr stage_bytes = (GLsizeiptr)count * 6 * sizeof(float);
+        if (!multires_stage_ssbo || count > multires_stage_capacity) {
+            if (multires_stage_ssbo) glDeleteBuffers(1, &multires_stage_ssbo);
+            glGenBuffers(1, &multires_stage_ssbo);
+            glBindBuffer(GL_SHADER_STORAGE_BUFFER, multires_stage_ssbo);
+            uint32_t alloc_count = std::max(count, 4096u);
+            glBufferData(GL_SHADER_STORAGE_BUFFER, (GLsizeiptr)alloc_count * 6 * sizeof(float),
+                         nullptr, GL_DYNAMIC_DRAW);
+            multires_stage_capacity = alloc_count;
+        } else {
+            glBindBuffer(GL_SHADER_STORAGE_BUFFER, multires_stage_ssbo);
+        }
+        glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, stage_bytes, stage);
     }
-    glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, stage_bytes, stage);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+
+    // Every declared SSBO binding must point at a live buffer (some drivers fault on
+    // an unbound slot even if the shader never reads it). In ring mode the stage slot
+    // is unused; in stage mode the ring slot is. Fall back to disp_ssbo as a harmless
+    // filler for whichever is idle.
+    GLuint filler    = disp_ssbo ? disp_ssbo : base_ssbo;
+    GLuint stage_bind = (!ring_mode && multires_stage_ssbo) ? multires_stage_ssbo : filler;
+    GLuint ring_bind  = ring_mode ? ring_ssbo : filler;
 
     glUseProgram(multires_apply_program);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_POSITIONS,       pos_vbo);
@@ -258,11 +291,18 @@ void ComputeState::dispatch_multires_apply(GLuint pos_vbo, GLuint disp_ssbo,
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_MULTIRES_DISP,   disp_ssbo);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_MULTIRES_FRAMES, frames_ssbo);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_MULTIRES_BASE,   base_ssbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_MULTIRES_STAGE,  multires_stage_ssbo);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_MULTIRES_STAGE,  stage_bind);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_UNDO_RING,       ring_bind);
 
     glUniform1ui(glGetUniformLocation(multires_apply_program, "u_count"), count);
     glUniform1i(glGetUniformLocation(multires_apply_program, "u_targets_base"),
                 targets_base ? 1 : 0);
+    glUniform1i(glGetUniformLocation(multires_apply_program, "u_ring_mode"),
+                ring_mode ? 1 : 0);
+    glUniform1ui(glGetUniformLocation(multires_apply_program, "u_ring_base"),
+                 ring_mode ? ring_base_floats : 0u);
+    glUniform1i(glGetUniformLocation(multires_apply_program, "u_forward"),
+                forward ? 1 : 0);
 
     int groups = (int)((count + 255u) / 256u);
     glDispatchCompute(groups, 1, 1);

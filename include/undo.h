@@ -29,6 +29,16 @@ struct UndoEntry {
     bool targets_base = true;
     int  disp_index   = -1;   // -1 if targets_base, else level - base_level - 1
 
+    // --- GPU undo ring (blood-moon 3b-iv) ---
+    // When this STROKE's (old,new) deltas were captured into the GPU undo ring at
+    // pen-up, ring_offset is the FLOAT offset of its span and ring_vcount the vert
+    // count (== verts.size(), since ring capture records the unfiltered snap_list so
+    // ring slot k aligns with verts[k]). SIZE_MAX => not in the ring; apply falls
+    // back to the CPU old_*/new_* arrays. Part 1 keeps the CPU arrays authoritative;
+    // they're the spill target once Part 2 drops the pen-up readback.
+    size_t   ring_offset = SIZE_MAX;
+    uint32_t ring_vcount = 0;
+
     // --- PROJECTION fields ---
     // Pre-projection snapshot of the affected storage. On undo, restore this.
     // On redo, re-run project_down_to_level(target_level).

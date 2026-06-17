@@ -166,22 +166,40 @@ bool UndoStack::apply(const UndoEntry& e, MeshEntity& ent, Scene& scene, bool fo
         // here and compare to the CPU mesh.pos before that re-sync. Active entity
         // only (its mesh occupies the working set at offset 0).
         bool gpu_apply_ran = false;
+        bool gpu_apply_used_ring = false;
         if (scene.compute().supported && ent.multires_gpu.supported
             && ent.multires_gpu.level == e.level
             && scene.active_mesh_id() == ent.id) {
-            static std::vector<float> stage;   // 6 floats/vert: target xyz, source xyz
-            stage.resize(e.verts.size() * 6);
-            for (size_t k = 0; k < e.verts.size(); ++k) {
-                stage[k*6+0] = tx[k]; stage[k*6+1] = ty[k]; stage[k*6+2] = tz[k];
-                stage[k*6+3] = sx[k]; stage[k*6+4] = sy[k]; stage[k*6+5] = sz[k];
-            }
             Renderer&     r = scene.renderer();
             ComputeState& c = scene.compute();
-            c.dispatch_multires_apply(r.vbo_pos, ent.multires_gpu.disp_ssbo,
-                                      ent.multires_gpu.frames_ssbo,
-                                      ent.multires_gpu.base_ssbo,
-                                      e.verts.data(), stage.data(),
-                                      (uint32_t)e.verts.size(), e.targets_base);
+            // 3b-iv: if this stroke's (old,new) is still resident in the GPU undo
+            // ring, the apply shader reads it straight from there — no CPU stage
+            // build. Else fall back to the transient stage (2c path). The vcount
+            // guard catches any verts/ring-slot misalignment (e.g. a filtered entry).
+            bool use_ring = e.ring_offset != SIZE_MAX && c.undo_ring_ssbo
+                            && e.ring_vcount == (uint32_t)e.verts.size();
+            gpu_apply_used_ring = use_ring;
+            if (use_ring) {
+                c.dispatch_multires_apply(r.vbo_pos, ent.multires_gpu.disp_ssbo,
+                                          ent.multires_gpu.frames_ssbo,
+                                          ent.multires_gpu.base_ssbo,
+                                          e.verts.data(), nullptr,
+                                          (uint32_t)e.verts.size(), e.targets_base,
+                                          c.undo_ring_ssbo,
+                                          (uint32_t)e.ring_offset, forward);
+            } else {
+                static std::vector<float> stage;   // 6 floats/vert: target xyz, source xyz
+                stage.resize(e.verts.size() * 6);
+                for (size_t k = 0; k < e.verts.size(); ++k) {
+                    stage[k*6+0] = tx[k]; stage[k*6+1] = ty[k]; stage[k*6+2] = tz[k];
+                    stage[k*6+3] = sx[k]; stage[k*6+4] = sy[k]; stage[k*6+5] = sz[k];
+                }
+                c.dispatch_multires_apply(r.vbo_pos, ent.multires_gpu.disp_ssbo,
+                                          ent.multires_gpu.frames_ssbo,
+                                          ent.multires_gpu.base_ssbo,
+                                          e.verts.data(), stage.data(),
+                                          (uint32_t)e.verts.size(), e.targets_base);
+            }
             c.dispatch_compute_normals(e.verts.data(), (uint32_t)e.verts.size(),
                                        r.vbo_pos, r.vbo_norm, r.ebo);
             gpu_apply_ran = true;
@@ -239,8 +257,9 @@ bool UndoStack::apply(const UndoEntry& e, MeshEntity& ent, Scene& scene, bool fo
                 maxe = std::max(maxe, (double)std::fabs(gpu_apply_chk[k*3+1] - mesh.pos_y[v]));
                 maxe = std::max(maxe, (double)std::fabs(gpu_apply_chk[k*3+2] - mesh.pos_z[v]));
             }
-            std::printf("[mgpu][debug] multires_apply L%d %s max|err|=%.3e (%zu verts)\n",
-                        e.level, e.targets_base ? "base" : "disp", maxe, e.verts.size());
+            std::printf("[mgpu][debug] multires_apply L%d %s %s max|err|=%.3e (%zu verts)\n",
+                        e.level, e.targets_base ? "base" : "disp",
+                        gpu_apply_used_ring ? "ring" : "stage", maxe, e.verts.size());
         }
 #endif
         scratch_dirty = e.verts;

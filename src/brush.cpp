@@ -976,6 +976,11 @@ void BrushStroke::commit_undo(const Mesh& mesh, UndoStack& stack, const Multires
     e.old_x.reserve(n); e.old_y.reserve(n); e.old_z.reserve(n);
     e.new_x.reserve(n); e.new_y.reserve(n); e.new_z.reserve(n);
 
+    // When the pen-up diff captured (old,new) into the GPU undo ring, the ring is
+    // packed densely by snap_list index. Record the unfiltered snap_list so verts[k]
+    // aligns with ring slot k (3b-iv); otherwise drop verts the stroke left untouched.
+    const bool ring = (stroke_ring_base != SIZE_MAX);
+
     for (uint32_t v : snap_list) {
         float ox = snap_x[v], oy = snap_y[v], oz = snap_z[v];
         float nx, ny, nz;
@@ -986,10 +991,15 @@ void BrushStroke::commit_undo(const Mesh& mesh, UndoStack& stack, const Multires
             ny = multires.disp[stroke_disp_index][v].y;
             nz = multires.disp[stroke_disp_index][v].z;
         }
-        if (ox == nx && oy == ny && oz == nz) continue;
+        if (!ring && ox == nx && oy == ny && oz == nz) continue;
         e.verts.push_back(v);
         e.old_x.push_back(ox); e.old_y.push_back(oy); e.old_z.push_back(oz);
         e.new_x.push_back(nx); e.new_y.push_back(ny); e.new_z.push_back(nz);
+    }
+
+    if (ring) {
+        e.ring_offset = stroke_ring_base;
+        e.ring_vcount = (uint32_t)e.verts.size();   // == snap_list.size() (no filter applied)
     }
 
     stack.push(std::move(e));
@@ -1068,6 +1078,7 @@ void BrushStroke::apply_mask_changes(Mesh& mesh, std::vector<uint32_t>& dirty_ve
 bool BrushStroke::finalize(Mesh& mesh, UndoStack& stack, MultiresStack& multires,
                            MultiresGPU& mgpu, Renderer& renderer,
                            BrushType brush_type, bool autosmooth) {
+    stroke_ring_base = SIZE_MAX;   // set below iff the pen-up diff captured into the ring (3b-iv)
     // Autosmooth: one Laplacian pass over the stroke's affected verts before
     // we read positions back. The smoothed positions become the "after" state
     // recorded in the undo entry. Draw-only — other brushes have their own
@@ -1118,6 +1129,7 @@ bool BrushStroke::finalize(Mesh& mesh, UndoStack& stack, MultiresStack& multires
             // cap overflow reserve returns SIZE_MAX and we skip ring capture (the
             // CPU path stays authoritative — dual-bookkeeping in 3b-iii).
             ring_base = compute->undo_ring_reserve(snap_list.size() * 6);
+            stroke_ring_base = ring_base;   // recorded on the UndoEntry by commit_undo (3b-iv)
             GLuint ring_ssbo = (ring_base != SIZE_MAX) ? compute->undo_ring_ssbo : 0;
             compute->dispatch_multires_diff(renderer.vbo_pos, mgpu.disp_ssbo,
                                             mgpu.frames_ssbo, mgpu.snap_pos_ssbo,

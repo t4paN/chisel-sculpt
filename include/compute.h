@@ -510,9 +510,15 @@ struct ComputeState {
     // into disp_ssbo and adds frame*(target-source) to pos_vbo; for a base revert
     // it writes the absolute target into base_ssbo and pos_vbo. Caller must run
     // compute_normals afterward. Issues a buffer-update barrier for a debug readback.
+    // `ring_ssbo`/`ring_base_floats`/`forward` (3b-iv): when ring_ssbo != 0 the (old,
+    // new) pair is read from the persistent undo ring at ring_base_floats + di*6
+    // instead of from `stage` (which may be null), with target=new on redo (forward),
+    // target=old on undo. Pass ring_ssbo=0 to use the CPU stage.
     void dispatch_multires_apply(GLuint pos_vbo, GLuint disp_ssbo, GLuint frames_ssbo,
                                  GLuint base_ssbo, const uint32_t* verts,
-                                 const float* stage, uint32_t count, bool targets_base);
+                                 const float* stage, uint32_t count, bool targets_base,
+                                 GLuint ring_ssbo = 0, uint32_t ring_base_floats = 0,
+                                 bool forward = false);
 
     // ---- GPU-resident undo ring (blood-moon 3b-ii) ----------------------------
     // Set the ring's hard ceiling. Call once at startup from UndoStack::max_bytes.

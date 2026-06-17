@@ -137,6 +137,7 @@ struct BrushStroke {
     int  stroke_disp_index;     // -1 if writing to base, else level - base_level - 1
     bool stroke_writes_to_base;
     int  stroke_sign;           // +1 or -1: locked from first displacement, prevents sign flips at silhouette edges
+    size_t stroke_ring_base = SIZE_MAX;  // float offset of this stroke's undo-ring span (3b-iv); SIZE_MAX if not captured
 
     // Compute shader state (nullptr = CPU-only fallback)
     ComputeState* compute;
