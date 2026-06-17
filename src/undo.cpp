@@ -73,10 +73,30 @@ void UndoStack::evict_to_budget() {
     }
 }
 
-void UndoStack::clear() {
+void UndoStack::clear(ComputeState* c) {
     undo_stack.clear();
     redo_stack.clear();
     total_bytes = 0;
+    // Active-entity clear → the ring's contents are this entity's history, now gone.
+    // Reset it so the (still-active) entity starts capturing from head 0. Guarded:
+    // callers pass nullptr when clearing a non-active stack (don't wipe the live ring).
+    if (c) c->undo_ring_reset();
+}
+
+void UndoStack::ring_park_all(ComputeState& c) {
+    // Mark every resident STROKE entry non-resident so a future apply uses the CPU
+    // stage (the entries stay in this entity's history; the ring is just their cache).
+    // 2c-iii spills (old,new) from the ring into the CPU arrays here first; pre-flip
+    // the CPU arrays are already authoritative, so this is behavior-neutral.
+    auto park = [](UndoEntry& e) {
+        if (e.kind == UndoEntry::Kind::STROKE && e.ring_offset != SIZE_MAX) {
+            e.ring_offset = SIZE_MAX;
+            e.ring_vcount = 0;
+        }
+    };
+    for (auto& e : undo_stack) park(e);
+    for (auto& e : redo_stack) park(e);
+    c.undo_ring_reset();
 }
 
 // Applies the entry to its storage layer (base or disp[k]), then updates the view

@@ -78,12 +78,22 @@ static bool read_depth_at(int x, int y, int screen_h, float* depth) {
 
 int main(int argc, char* argv[]) {
     bool cli_use_topology = true;
+#ifdef CHISEL_DEBUG_MULTIRES
+    // Debug builds default to a tiny GPU undo ring so the wrap/evict path gets
+    // exercised in a few big strokes (no flags needed). --toaster/--ring-mb still override.
+    UndoStack::ring_max_bytes = 4ull * 1024ull * 1024ull;
+#endif
     for (int i = 1; i < argc; i++) {
         if (std::strcmp(argv[i], "--mirror=spatial") == 0)
             cli_use_topology = false;
         else if (std::strcmp(argv[i], "--toaster") == 0) {
             UndoStack::max_bytes      = 256ull * 1024ull * 1024ull;  // CPU history cap
             UndoStack::ring_max_bytes =  64ull * 1024ull * 1024ull;  // GPU ring cap
+        }
+        else if (std::strncmp(argv[i], "--ring-mb=", 10) == 0) {
+            // debug/test: shrink the GPU undo ring to force a wrap+evict quickly
+            unsigned long mb = std::strtoul(argv[i] + 10, nullptr, 10);
+            if (mb > 0) UndoStack::ring_max_bytes = (size_t)mb * 1024ull * 1024ull;
         }
     }
     if (!cli_use_topology)
@@ -475,6 +485,7 @@ int main(int argc, char* argv[]) {
             const int from   = multires->current_level;
             const int target = from + delta;
             if (target >= multires->base_level && target <= MULTIRES_MAX_LEVEL) {
+                scene.materialize_active_cpu();  // 2b: projection/cascade read disp/base
                 UndoEntry lvl_e;
                 lvl_e.kind       = UndoEntry::Kind::LEVEL;
                 lvl_e.from_level = from;
@@ -558,6 +569,7 @@ int main(int argc, char* argv[]) {
             input.remesh_requested = false;
             input.remesh_in_progress = true;
 
+            scene.materialize_active_cpu();  // 2b: remesh reads the live surface (mesh.pos)
             // Destructive remesh breaks topology mirror — switch to spatial
             // mode afterward. Mirror setting (input.mirror_x) is preserved.
             auto result = perform_remesh(*mesh, *multires, 0.0f, 10,
@@ -585,7 +597,7 @@ int main(int argc, char* argv[]) {
                 brush_stroke.vertex_count = 0;
                 brush_stroke.phase = StrokePhase::NONE;
                 app_state = AppState::IDLE;
-                if (result.selected_tris > 0) scene.active_undo().clear();
+                if (result.selected_tris > 0) scene.active_undo().clear(&compute);
                 std::snprintf(input.notification, sizeof(input.notification),
                               "Remesh: %u sel, %u/%u -> %u/%u v/t (spatial mirror)",
                               result.selected_tris,
@@ -612,6 +624,7 @@ int main(int argc, char* argv[]) {
                               "Voxel merge needs GPU compute (unavailable)");
                 input.notification_timer = 4.0f;
             } else {
+                scene.materialize_active_cpu();  // 2b: merge reads the live surface (mesh.pos)
                 VoxelMergeResult vm = voxel_merge_selected(scene, compute,
                                                            input.voxel_merge_resolution,
                                                            input.voxel_merge_mirror);
@@ -1409,7 +1422,7 @@ int main(int argc, char* argv[]) {
                         camera.distance = mesh_radius * 2.5f;
                         current_project_path.clear();
 
-                        scene.active_undo().clear();
+                        scene.active_undo().clear(&compute);
                         brush_stroke.vertex_count = 0;
                         brush_stroke.phase = StrokePhase::NONE;
                         app_state = AppState::IDLE;
@@ -1433,6 +1446,7 @@ int main(int argc, char* argv[]) {
 
         // ---- Save project (.chisel) ----
         auto do_save_project = [&](const std::string& path) {
+            scene.materialize_active_cpu();  // 2b: copies the active entity's mesh + multires to disk
             ProjectData proj;
             // Persist the whole multimesh scene: every alive, committed entity
             // (skip transient INSERT previews) with its own mesh + multires.

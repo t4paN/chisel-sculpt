@@ -199,7 +199,7 @@ void MultiresGPU::mark_cpu_dirty(const std::vector<uint32_t>& verts) {
     dirty_verts.insert(dirty_verts.end(), verts.begin(), verts.end());
 }
 
-void MultiresGPU::materialize_cpu(MultiresStack& stack) {
+void MultiresGPU::materialize_cpu(MultiresStack& stack, Mesh& mesh, GLuint vbo_pos) {
     if (!supported || !cpu_dirty) return;
 
     // Inverse of upload_disp_partial: read the mirrored level's GPU storage back
@@ -207,6 +207,30 @@ void MultiresGPU::materialize_cpu(MultiresStack& stack) {
     // copy matches the GPU again, so cascade/projection/save can read CPU truth.
     static std::vector<Run> runs;
     coalesce(dirty_verts, runs);
+
+    // Surface sync (2c-i): pull the working VBO positions back into mesh.pos for the
+    // same runs — the GPU brush wrote the VBO in place and the pen-up readback no
+    // longer copies it down (2c-iv), so the live surface readers need it here.
+    // mesh.pos is SOA, the VBO is interleaved float3, so de-interleave per run.
+    if (vbo_pos) {
+        static std::vector<float> pos_scratch;
+        glBindBuffer(GL_ARRAY_BUFFER, vbo_pos);
+        uint32_t vcount = mesh.vertex_count();
+        for (const Run& r : runs) {
+            if (r.first + r.count > vcount) continue;
+            pos_scratch.resize((size_t)r.count * 3);
+            glGetBufferSubData(GL_ARRAY_BUFFER,
+                               (GLintptr)r.first * 3 * sizeof(float),
+                               (GLsizeiptr)r.count * 3 * sizeof(float), pos_scratch.data());
+            for (uint32_t i = 0; i < r.count; i++) {
+                uint32_t v = r.first + i;
+                mesh.pos_x[v] = pos_scratch[i*3+0];
+                mesh.pos_y[v] = pos_scratch[i*3+1];
+                mesh.pos_z[v] = pos_scratch[i*3+2];
+            }
+        }
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+    }
 
     if (level == stack.base_level) {
         static std::vector<float> scratch;

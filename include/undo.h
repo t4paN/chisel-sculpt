@@ -80,7 +80,10 @@ public:
     bool undo(MeshEntity& ent, Scene& scene);
     bool redo(MeshEntity& ent, Scene& scene);
 
-    void clear();
+    // Pass the ComputeState to also reset the GPU undo ring (blood-moon 3b-iv 2c) —
+    // ONLY when clearing the ACTIVE entity's stack, since the ring caches the active
+    // entity. A non-active clear must pass nullptr so it doesn't wipe the live ring.
+    void clear(ComputeState* c = nullptr);
 
     // GPU undo ring (blood-moon 3b-iv part 2). Called from brush finalize right
     // after a new stroke's ring span [byte_off, byte_off+byte_len) is reserved and
@@ -90,6 +93,14 @@ public:
     // circular ring honest — an entry either points at its own live data or is
     // marked non-resident (ring_offset == SIZE_MAX).
     void ring_evict_overlap(size_t byte_off, size_t byte_len, ComputeState& c);
+
+    // Park the GPU undo ring on active-entity switch (blood-moon 3b-iv 2c): mark
+    // every resident STROKE entry non-resident (→ CPU stage on a future apply) and
+    // reset the ring to head 0 so the incoming active entity starts fresh — the ring
+    // is a hot cache for the active entity only. From 2c-iii on, spills each resident
+    // entry's (old,new) from the ring into its CPU arrays first (the entries are this
+    // entity's history and must survive the switch).
+    void ring_park_all(ComputeState& c);
 
     size_t bytes_used() const { return total_bytes; }
     size_t undo_depth() const { return undo_stack.size(); }

@@ -4,6 +4,7 @@
 #include <vector>
 
 struct MultiresStack;
+struct Mesh;
 
 // GPU residency mirror for the *active editing level* of a MultiresStack.
 //
@@ -67,22 +68,25 @@ struct MultiresGPU {
     // calls mark_cpu_dirty(), so materialize_cpu() is always a no-op early-return —
     // i.e. this machinery is inert and behavior-neutral when introduced in 3a.
     //
-    // NOTE: this syncs the *storage* layer (disp/base) only — the surface
-    // `mesh.pos` is regenerated from it by the cascade. Choke points that read the
-    // live surface directly (remesh, sdf, insert) get a vbo_pos→mesh.pos sync wired
-    // separately in 3b/3c.
+    // This syncs BOTH the *storage* layer (disp/base from the SSBOs) and the live
+    // surface `mesh.pos` (from the working VBO) for the dirty verts — the surface
+    // readers (remesh, sdf, mirror, bounding sphere) need the latter, the storage
+    // readers (save, cascade, projection) the former. Same dirty set covers both
+    // (a stroke makes the surface and its storage layer stale together). 2c-i added
+    // the `mesh`/`vbo_pos` arms; still inert until 2c-iv starts marking dirty.
     bool cpu_dirty = false;
-    std::vector<uint32_t> dirty_verts;   // active-level verts whose CPU disp/base is stale
+    std::vector<uint32_t> dirty_verts;   // active-level verts whose CPU disp/base/pos is stale
 
-    // Accumulate verts whose GPU disp/base now diverges from the CPU copy. Cheap;
+    // Accumulate verts whose GPU disp/base/pos now diverges from the CPU copy. Cheap;
     // no readback. Called at pen-up (and undo/redo) in place of the CPU writeback.
     void mark_cpu_dirty(const std::vector<uint32_t>& verts);
 
-    // Pull the GPU disp/base for the dirty verts of the mirrored level back into
-    // CPU `stack` storage (banded readback, inverse of upload_disp_partial), then
-    // clear the dirty set. No-op unless cpu_dirty. Call before any CPU read of the
-    // active level's disp/base.
-    void materialize_cpu(MultiresStack& stack);
+    // Pull the GPU disp/base (from the SSBOs) AND mesh.pos (from `vbo_pos`, the active
+    // working VBO) for the dirty verts of the mirrored level back into CPU storage
+    // (banded readback, inverse of upload_disp_partial), then clear the dirty set.
+    // No-op unless cpu_dirty. Call before any CPU read of the active level's
+    // disp/base/pos. `vbo_pos` is the active entity's working position VBO (offset 0).
+    void materialize_cpu(MultiresStack& stack, Mesh& mesh, GLuint vbo_pos);
 
     void cleanup();
 };

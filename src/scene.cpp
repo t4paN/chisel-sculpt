@@ -101,9 +101,23 @@ UndoStack& Scene::active_undo() {
 
 // ---- Mirror map ----
 
+void Scene::materialize_active_cpu() {
+    // blood-moon 3b-iv part 2b: choke point ahead of every CPU read of the active
+    // entity's disp/base/pos. No-op until 2c marks the CPU copy dirty (the pen-up
+    // readback still keeps it fresh today), so behavior-neutral. 2c extends this to
+    // also pull renderer_.vbo_pos back into mesh.pos for the surface readers.
+    MeshEntity* e = active_entity_();
+    if (!e) return;
+    // Active entity is the working set (offset 0), so its surface lives in the
+    // renderer's working position VBO. 2c-i syncs both storage (disp/base) and
+    // surface (mesh.pos) from the GPU.
+    e->multires_gpu.materialize_cpu(e->multires, e->mesh, renderer_.vbo_pos);
+}
+
 void Scene::refresh_mirror_map(int icosphere_level) {
     MeshEntity* e = active_entity_();
     if (!e) return;
+    materialize_active_cpu();  // 2b: build_mirror_x_map reads mesh.pos
     Mesh& m = e->mesh;
 
     if (mirror_use_topology_) {
@@ -145,7 +159,16 @@ void Scene::bind_active_(uint32_t id) {
     //    authoritative (finalize reads back pos+normals at pen-up).
     if (bound_active_id_ && bound_active_id_ != id) {
         MeshEntity* out = find_entity(bound_active_id_);
-        if (out) renderer_.upload_display(out->gpu, out->mesh);
+        if (out) {
+            // 2c: the working VBO (which holds `out`'s surface) is about to be
+            // overwritten by the incoming entity. Pull `out`'s GPU-resident edits
+            // back to CPU first (no-op until 2c-iii flips), then park its undo ring
+            // so the incoming entity captures from a fresh ring — the ring is a hot
+            // cache for the active entity only.
+            out->multires_gpu.materialize_cpu(out->multires, out->mesh, renderer_.vbo_pos);
+            out->undo.ring_park_all(compute_);
+            renderer_.upload_display(out->gpu, out->mesh);
+        }
     }
 
     MeshEntity* in = find_entity(id);
@@ -440,7 +463,7 @@ uint32_t Scene::merge_selected_into(const Mesh& welded, uint32_t subdiv_level) {
     multires_stack_init_from_lock(keep->multires, keep->mesh, (int)subdiv_level);
     keep->subdiv_level = subdiv_level;
     keep->preview      = false;
-    keep->undo.clear();
+    keep->undo.clear(&compute_);  // keep becomes active; reset the ring for the fresh topology
 
     active_id_    = keep_id;
     selected_ids_ = { keep_id };

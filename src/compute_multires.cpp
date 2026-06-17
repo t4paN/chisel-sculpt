@@ -326,7 +326,7 @@ void ComputeState::dispatch_multires_apply(GLuint pos_vbo, GLuint disp_ssbo,
 void ComputeState::undo_ring_set_budget(size_t cap_bytes) {
     // Clamp to something sane; the ring never allocates this eagerly — it grows
     // toward the cap as history accumulates.
-    if (cap_bytes < (16ull << 20)) cap_bytes = (16ull << 20);
+    if (cap_bytes < (1ull << 20)) cap_bytes = (1ull << 20);  // 1 MB floor (debug --ring-mb can go small)
     undo_ring_cap_bytes = cap_bytes;
 }
 

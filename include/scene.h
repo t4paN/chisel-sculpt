@@ -38,6 +38,17 @@ public:
     void refresh_mirror_map(int icosphere_level = -1);
     void sync_mirror_map();
 
+    // ---- GPU-resident undo: deferred CPU writeback (blood-moon 3b-iv part 2b) ----
+    // Pull the active entity's GPU-resident truth back into its CPU arrays before a
+    // CPU consumer reads them. The single choke point for every disp/base/pos reader
+    // (save, projection/cascade, remesh, voxel-merge, mirror rebuild). Currently
+    // syncs the multires *storage* (disp/base) via MultiresGPU::materialize_cpu();
+    // both that and the eventual working-VBO→mesh.pos readback (part 2c, via
+    // renderer_) are no-ops until 2c starts marking the CPU copy dirty — so this is
+    // behavior-neutral groundwork: the call sites are placed now, the pos body lands
+    // with 2c without touching any consumer again.
+    void materialize_active_cpu();
+
     // ---- GPU sync ----
     // Bind the active entity into the working set (bind_active_) and refresh any
     // dirty inactive entity's display VAO. Called only at user-paced boundaries
