@@ -207,32 +207,44 @@ void BrushStroke::set_anchor(const Mesh& mesh, const Camera& cam,
     if (cx < 0 || cx >= screen_w || cy < 0 || cy >= screen_h) return;
 
     uint32_t tid;
-    float bu, bv, bw;
     float nx, ny, nz;
 
     renderer.read_triid_region(cx, cy, 1, 1, &tid);
-    float bary_pixel[2];
-    renderer.read_bary_region(cx, cy, 1, 1, bary_pixel);
-    bu = bary_pixel[0];
-    bv = bary_pixel[1];
     float norm_pixel[3];
     renderer.read_normal_region(cx, cy, 1, 1, norm_pixel);
     nx = norm_pixel[0];
     ny = norm_pixel[1];
     nz = norm_pixel[2];
 
-    // Active entity's tris start at 0 in the pick FBO.
+    // Active entity's tris start at 0 in the pick FBO. tid is just the on-model hit test.
     if (tid == 0xFFFFFFFF || tid >= mesh.tri_count()) return;
-    uint32_t local_tid = tid;
 
-    bw = 1.0f - bu - bv;
-    uint32_t i0 = mesh.indices[local_tid*3+0];
-    uint32_t i1 = mesh.indices[local_tid*3+1];
-    uint32_t i2 = mesh.indices[local_tid*3+2];
-
-    anchor_pos.x = mesh.pos_x[i0]*bu + mesh.pos_x[i1]*bv + mesh.pos_x[i2]*bw;
-    anchor_pos.y = mesh.pos_y[i0]*bu + mesh.pos_y[i1]*bv + mesh.pos_y[i2]*bw;
-    anchor_pos.z = mesh.pos_z[i0]*bu + mesh.pos_z[i1]*bv + mesh.pos_z[i2]*bw;
+    // Anchor world position from the FRESH GPU depth at the cursor pixel, unprojected
+    // through the camera (same reconstruction as insert_controller's on-model hit).
+    // Sourcing this from the pick FBO instead of interpolating CPU mesh.pos keeps the
+    // anchor correct once the pen-up readback is deferred and mesh.pos goes stale
+    // (blood-moon 3b-iv 2c): the depth buffer is rendered from the live VBO every
+    // pen-down, so it tracks the GPU surface; mesh.pos no longer will. Behavior-neutral
+    // while mesh.pos is still fresh — depth and mesh.pos describe the same surface point.
+    //
+    // NOTE: this camera is ORTHOGRAPHIC (see Camera::get_projection_matrix /
+    // world_to_screen) — the lateral screen scale is fixed by the orbit `distance`, NOT
+    // by the per-pixel depth. So the in-plane offset uses `distance`; `hit_depth` only
+    // places the point along the view axis. (linear depth = fwd · (world − cam_pos).)
+    float hit_depth = 0.0f;
+    renderer.read_depth_region(cx, cy, 1, 1, &hit_depth);
+    float ndc_x  = 2.0f * (float)cx / (float)screen_w - 1.0f;
+    float ndc_y  = 1.0f - 2.0f * (float)cy / (float)screen_h;
+    float aspect = (float)screen_w / (float)screen_h;
+    Vec3 fwd      = cam.get_view_direction();
+    Vec3 world_up = {0.0f, 1.0f, 0.0f};
+    Vec3 right    = fwd.cross(world_up).normalized();
+    Vec3 up       = right.cross(fwd).normalized();
+    float half_h  = cam.distance * std::tan(cam.fov * 3.14159265358979323846f / 360.0f);
+    float half_w  = half_h * aspect;
+    Vec3 cam_pos  = cam.get_position();
+    anchor_pos = cam_pos + fwd * hit_depth
+               + right * (ndc_x * half_w) + up * (ndc_y * half_h);
 
     float nlen = std::sqrt(nx*nx + ny*ny + nz*nz);
     if (nlen > 1e-6f) {
