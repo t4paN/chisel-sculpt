@@ -521,18 +521,19 @@ struct ComputeState {
                                  bool forward = false);
 
     // ---- GPU-resident undo ring (blood-moon 3b-ii) ----------------------------
-    // Set the ring's hard ceiling. Call once at startup from UndoStack::max_bytes.
+    // Set the ring's hard ceiling. Call once at startup from UndoStack::ring_max_bytes.
     void undo_ring_set_budget(size_t cap_bytes);
     // Drop all history (keep the buffer). Call on project load / undo clear.
     void undo_ring_reset();
-    // Append float_count floats to the ring, growing (copy-preserving) up to the
-    // cap as needed. Returns the byte offset of the appended span, or SIZE_MAX if
-    // it would exceed the cap (no wrap yet — 3b-iv adds FIFO eviction).
+    // Append float_count floats to the ring (reserve + upload). Returns the BYTE
+    // offset of the appended span, or SIZE_MAX if the span is larger than the whole
+    // ring. Wraps circularly at the cap (3b-iv part 2).
     size_t undo_ring_append(const float* data, size_t float_count);
     // Reserve float_count floats WITHOUT uploading (a compute shader fills them).
-    // Grows copy-preserving up to the cap; bumps head. Returns the FLOAT offset of
-    // the reserved span, or SIZE_MAX on cap overflow. Used by the pen-up diff
-    // shader (3b-iii) to write (old,new) deltas straight into the ring.
+    // Grows copy-preserving toward the cap, then wraps circularly. Returns the
+    // FLOAT offset of the reserved span, or SIZE_MAX if it can't fit even an empty
+    // ring. Used by the pen-up diff shader (3b-iii) to write (old,new) deltas; the
+    // consumer must invalidate overlapped entries (UndoStack::ring_evict_overlap).
     size_t undo_ring_reserve(size_t float_count);
     // Read float_count floats back from byte_offset into out (spill / validation).
     void undo_ring_read(size_t byte_offset, size_t float_count, float* out);

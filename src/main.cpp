@@ -81,13 +81,16 @@ int main(int argc, char* argv[]) {
     for (int i = 1; i < argc; i++) {
         if (std::strcmp(argv[i], "--mirror=spatial") == 0)
             cli_use_topology = false;
-        else if (std::strcmp(argv[i], "--toaster") == 0)
-            UndoStack::max_bytes = 256ull * 1024ull * 1024ull;  // low-VRAM / thermal cap
+        else if (std::strcmp(argv[i], "--toaster") == 0) {
+            UndoStack::max_bytes      = 256ull * 1024ull * 1024ull;  // CPU history cap
+            UndoStack::ring_max_bytes =  64ull * 1024ull * 1024ull;  // GPU ring cap
+        }
     }
     if (!cli_use_topology)
         std::printf("[mirror] using spatial-hash fallback (--mirror=spatial)\n");
-    std::printf("[undo] history budget: %zu MB%s\n",
+    std::printf("[undo] history budget: %zu MB CPU / %zu MB GPU ring%s\n",
                 UndoStack::max_bytes / (1024 * 1024),
+                UndoStack::ring_max_bytes / (1024 * 1024),
                 UndoStack::max_bytes < 1024ull * 1024ull * 1024ull ? " (--toaster)" : "");
 
     // Init GLFW
@@ -149,7 +152,7 @@ int main(int argc, char* argv[]) {
         compute.init_compute_normals();
         compute.init_multires_diff();
         compute.init_multires_apply();
-        compute.undo_ring_set_budget(UndoStack::max_bytes);  // blood-moon 3b-ii
+        compute.undo_ring_set_budget(UndoStack::ring_max_bytes);  // blood-moon 3b-iv (decoupled)
         compute.undo_ring_selftest();                        // no-op in release
         compute.init_remesh_select();
         compute.init_remesh_grow_selection();

@@ -1130,6 +1130,12 @@ bool BrushStroke::finalize(Mesh& mesh, UndoStack& stack, MultiresStack& multires
             // CPU path stays authoritative — dual-bookkeeping in 3b-iii).
             ring_base = compute->undo_ring_reserve(snap_list.size() * 6);
             stroke_ring_base = ring_base;   // recorded on the UndoEntry by commit_undo (3b-iv)
+            // Circular ring (3b-iv part 2): the span we just reserved may overwrite
+            // older entries' bytes. Invalidate them (→ CPU-stage fallback) before the
+            // diff fills the span. No-op until the ring wraps at the cap.
+            if (ring_base != SIZE_MAX)
+                stack.ring_evict_overlap(ring_base * sizeof(float),
+                                         snap_list.size() * 6 * sizeof(float), *compute);
             GLuint ring_ssbo = (ring_base != SIZE_MAX) ? compute->undo_ring_ssbo : 0;
             compute->dispatch_multires_diff(renderer.vbo_pos, mgpu.disp_ssbo,
                                             mgpu.frames_ssbo, mgpu.snap_pos_ssbo,

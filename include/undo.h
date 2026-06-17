@@ -7,6 +7,7 @@
 
 class Scene;
 struct MeshEntity;
+struct ComputeState;
 
 struct UndoEntry {
     enum class Kind { STROKE, PROJECTION, MASK, LEVEL, PAINT };
@@ -54,11 +55,17 @@ struct UndoEntry {
 
 class UndoStack {
 public:
-    // Total undo-history budget (oldest entries evicted past this). Runtime-
-    // configurable: defaults to 1 GB, dropped to 256 MB by the --toaster CLI flag
-    // for low-VRAM / thermally-limited machines. The GPU-resident undo ring
-    // (blood-moon Phase 3b) sizes itself from the same budget.
+    // Total CPU undo-history budget in RAM (oldest entries evicted past this).
+    // Runtime-configurable: defaults to 1 GB, dropped to 256 MB by --toaster. This
+    // is the per-entity deep-history bound; the GPU ring below is a smaller hot
+    // cache layered on top of it.
     static size_t max_bytes;
+
+    // GPU-resident undo ring budget in VRAM (blood-moon 3b). Decoupled from
+    // max_bytes (3b-iv part 2): the ring only caches the *active* entity's recent
+    // strokes for zero-readback undo, so it's deliberately small. 256 MB default,
+    // 64 MB with --toaster. Deep history beyond the ring lives in CPU RAM.
+    static size_t ring_max_bytes;
 
     void push(UndoEntry&& e);
     bool can_undo() const { return !undo_stack.empty(); }
@@ -74,6 +81,15 @@ public:
     bool redo(MeshEntity& ent, Scene& scene);
 
     void clear();
+
+    // GPU undo ring (blood-moon 3b-iv part 2). Called from brush finalize right
+    // after a new stroke's ring span [byte_off, byte_off+byte_len) is reserved and
+    // before the diff shader fills it: invalidate (and, under debug, spill-validate
+    // against the CPU arrays) any older STROKE entry whose ring bytes that write
+    // overwrites, so it falls back to the CPU stage on a future apply. Keeps the
+    // circular ring honest — an entry either points at its own live data or is
+    // marked non-resident (ring_offset == SIZE_MAX).
+    void ring_evict_overlap(size_t byte_off, size_t byte_len, ComputeState& c);
 
     size_t bytes_used() const { return total_bytes; }
     size_t undo_depth() const { return undo_stack.size(); }

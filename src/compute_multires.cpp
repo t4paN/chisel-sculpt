@@ -310,12 +310,17 @@ void ComputeState::dispatch_multires_apply(GLuint pos_vbo, GLuint disp_ssbo,
 }
 
 // ===========================================================================
-// GPU-resident undo ring (blood-moon 3b-ii)
+// GPU-resident undo ring (blood-moon 3b-ii → 3b-iv)
 //
-// Persistent history of per-vert (old,new) STROKE deltas, bump-allocated into one
-// grow-only SSBO. No stroke-path consumer yet — append/read/reset + a debug
-// round-trip self-test. The pen-up capture (3b-iii) and the readback-dropping flip
-// (3b-iv, where wrap/FIFO-eviction lands) build on this.
+// Persistent history of per-vert (old,new) STROKE deltas in one SSBO. It grows
+// (copy-preserving, doubling) toward the cap while there's headroom, then becomes
+// a true circular buffer: once the buffer has reached the cap the bump cursor
+// wraps to 0 instead of failing. Spans never straddle the end — a reserve that
+// won't fit before the end wraps first, leaving a little dead padding. Eviction is
+// driven from the consumer side: when a new span is written, UndoStack::
+// ring_evict_overlap invalidates any older entry whose bytes it overwrites (the
+// CPU arrays remain the spill target). The pen-up capture (3b-iii) writes (old,new)
+// into a reserved span; the apply (3b-iv part 1) reads them back.
 // ===========================================================================
 
 void ComputeState::undo_ring_set_budget(size_t cap_bytes) {
@@ -329,56 +334,19 @@ void ComputeState::undo_ring_reset() {
     undo_ring_head = 0;   // drop history; keep the allocated buffer for reuse
 }
 
-size_t ComputeState::undo_ring_append(const float* data, size_t float_count) {
-    if (!supported || float_count == 0) return SIZE_MAX;
-
-    const size_t bytes  = float_count * sizeof(float);
-    const size_t offset = undo_ring_head;
-    if (offset + bytes > undo_ring_cap_bytes) return SIZE_MAX;  // 3b-ii: no wrap yet
-
-    // Grow (copy-preserving) if the bump won't fit the current allocation.
-    if (!undo_ring_ssbo || offset + bytes > undo_ring_bytes) {
-        size_t newcap = undo_ring_bytes ? undo_ring_bytes : (16ull << 20);
-        while (newcap < offset + bytes) newcap <<= 1;
-        if (newcap > undo_ring_cap_bytes) newcap = undo_ring_cap_bytes;
-        if (offset + bytes > newcap) return SIZE_MAX;  // can't grow far enough
-
-        GLuint nb = 0;
-        glGenBuffers(1, &nb);
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, nb);
-        glBufferData(GL_SHADER_STORAGE_BUFFER, (GLsizeiptr)newcap, nullptr, GL_DYNAMIC_COPY);
-        if (undo_ring_ssbo && undo_ring_head) {
-            glBindBuffer(GL_COPY_READ_BUFFER,  undo_ring_ssbo);
-            glBindBuffer(GL_COPY_WRITE_BUFFER, nb);
-            glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, 0, 0,
-                                (GLsizeiptr)undo_ring_head);
-            glBindBuffer(GL_COPY_READ_BUFFER,  0);
-            glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
-        }
-        if (undo_ring_ssbo) glDeleteBuffers(1, &undo_ring_ssbo);
-        undo_ring_ssbo  = nb;
-        undo_ring_bytes = newcap;
-    }
-
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, undo_ring_ssbo);
-    glBufferSubData(GL_SHADER_STORAGE_BUFFER, (GLintptr)offset, (GLsizeiptr)bytes, data);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
-    undo_ring_head = offset + bytes;
-    return offset;
-}
-
 size_t ComputeState::undo_ring_reserve(size_t float_count) {
     if (!supported || float_count == 0) return SIZE_MAX;
 
-    const size_t bytes  = float_count * sizeof(float);
-    const size_t offset = undo_ring_head;
-    if (offset + bytes > undo_ring_cap_bytes) return SIZE_MAX;  // 3b-iii: no wrap yet
+    const size_t bytes = float_count * sizeof(float);
+    if (bytes > undo_ring_cap_bytes) return SIZE_MAX;   // span larger than the whole ring
 
-    if (!undo_ring_ssbo || offset + bytes > undo_ring_bytes) {
+    // Grow (copy-preserving, doubling) toward the cap while there's headroom. Once
+    // the buffer has reached the cap, the wrap below recycles space instead.
+    if ((!undo_ring_ssbo || undo_ring_head + bytes > undo_ring_bytes)
+        && undo_ring_bytes < undo_ring_cap_bytes) {
         size_t newcap = undo_ring_bytes ? undo_ring_bytes : (16ull << 20);
-        while (newcap < offset + bytes) newcap <<= 1;
+        while (newcap < undo_ring_head + bytes && newcap < undo_ring_cap_bytes) newcap <<= 1;
         if (newcap > undo_ring_cap_bytes) newcap = undo_ring_cap_bytes;
-        if (offset + bytes > newcap) return SIZE_MAX;
 
         GLuint nb = 0;
         glGenBuffers(1, &nb);
@@ -397,8 +365,28 @@ size_t ComputeState::undo_ring_reserve(size_t float_count) {
         undo_ring_bytes = newcap;
     }
 
+    // At the cap (or the span won't fit before the end): wrap the cursor to 0 so
+    // the span stays contiguous. The leftover tail bytes become dead padding; the
+    // consumer (ring_evict_overlap) invalidates whatever live entries the new write
+    // lands on.
+    if (undo_ring_head + bytes > undo_ring_bytes) undo_ring_head = 0;
+
+    const size_t offset = undo_ring_head;
     undo_ring_head = offset + bytes;
     return offset / sizeof(float);   // FLOAT offset for the shader uniform
+}
+
+size_t ComputeState::undo_ring_append(const float* data, size_t float_count) {
+    // Reserve a span (handles grow + wrap) then upload into it. Returns the BYTE
+    // offset of the span (the self-test checks byte offsets), or SIZE_MAX on fail.
+    const size_t off_floats = undo_ring_reserve(float_count);
+    if (off_floats == SIZE_MAX) return SIZE_MAX;
+    const size_t byte_off = off_floats * sizeof(float);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, undo_ring_ssbo);
+    glBufferSubData(GL_SHADER_STORAGE_BUFFER, (GLintptr)byte_off,
+                    (GLsizeiptr)(float_count * sizeof(float)), data);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    return byte_off;
 }
 
 void ComputeState::undo_ring_read(size_t byte_offset, size_t float_count, float* out) {

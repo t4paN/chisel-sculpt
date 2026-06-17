@@ -7,8 +7,52 @@
 #include <cstdio>
 #include <algorithm>
 
-// Default undo budget: 1 GB. Overridden at startup by --toaster (256 MB).
+// Default CPU undo budget: 1 GB. Overridden at startup by --toaster (256 MB).
 size_t UndoStack::max_bytes = 1024ull * 1024ull * 1024ull;
+// GPU undo ring budget: 256 MB. Overridden at startup by --toaster (64 MB).
+size_t UndoStack::ring_max_bytes = 256ull * 1024ull * 1024ull;
+
+void UndoStack::ring_evict_overlap(size_t byte_off, size_t byte_len, ComputeState& c) {
+    if (byte_len == 0) return;
+
+    auto evict = [&](UndoEntry& e) {
+        if (e.kind != UndoEntry::Kind::STROKE || e.ring_offset == SIZE_MAX) return;
+        const size_t so = e.ring_offset * sizeof(float);
+        const size_t sl = (size_t)e.ring_vcount * 6 * sizeof(float);
+        // Half-open interval intersection in the circular ring's byte space. Spans
+        // never straddle the end (reserve wraps to 0 first), so this is a plain test.
+        if (!(so < byte_off + byte_len && byte_off < so + sl)) return;
+#ifdef CHISEL_DEBUG_MULTIRES
+        // Spill-validate: the (old,new) about to be clobbered must still match the
+        // CPU arrays (authoritative in part 1/P2a). P2c flips this read into a WRITE
+        // back into old_*/new_* — the one amortized readback on eviction.
+        if (e.ring_vcount == (uint32_t)e.verts.size()
+            && e.old_x.size() == e.ring_vcount && e.new_x.size() == e.ring_vcount) {
+            static std::vector<float> sp;
+            sp.resize((size_t)e.ring_vcount * 6);
+            c.undo_ring_read(e.ring_offset * sizeof(float), sp.size(), sp.data());
+            double eo = 0.0, en = 0.0;
+            for (uint32_t k = 0; k < e.ring_vcount; ++k) {
+                eo = std::max(eo, (double)std::fabs(sp[k*6+0] - e.old_x[k]));
+                eo = std::max(eo, (double)std::fabs(sp[k*6+1] - e.old_y[k]));
+                eo = std::max(eo, (double)std::fabs(sp[k*6+2] - e.old_z[k]));
+                en = std::max(en, (double)std::fabs(sp[k*6+3] - e.new_x[k]));
+                en = std::max(en, (double)std::fabs(sp[k*6+4] - e.new_y[k]));
+                en = std::max(en, (double)std::fabs(sp[k*6+5] - e.new_z[k]));
+            }
+            std::printf("[undo-ring][debug] evict old|err|=%.3e new|err|=%.3e (%u verts)\n",
+                        eo, en, e.ring_vcount);
+        }
+#else
+        (void)c;
+#endif
+        e.ring_offset = SIZE_MAX;   // fall back to the CPU stage on a future apply
+        e.ring_vcount = 0;
+    };
+
+    for (auto& e : undo_stack) evict(e);
+    for (auto& e : redo_stack) evict(e);
+}
 
 void UndoStack::push(UndoEntry&& e) {
     if (e.kind == UndoEntry::Kind::STROKE && e.verts.empty()) return;
