@@ -984,34 +984,41 @@ void BrushStroke::commit_undo(const Mesh& mesh, UndoStack& stack, const Multires
     e.disp_index   = stroke_disp_index;
 
     size_t n = snap_list.size();
-    e.verts.reserve(n);
-    e.old_x.reserve(n); e.old_y.reserve(n); e.old_z.reserve(n);
-    e.new_x.reserve(n); e.new_y.reserve(n); e.new_z.reserve(n);
 
     // When the pen-up diff captured (old,new) into the GPU undo ring, the ring is
-    // packed densely by snap_list index. Record the unfiltered snap_list so verts[k]
-    // aligns with ring slot k (3b-iv); otherwise drop verts the stroke left untouched.
+    // packed densely by snap_list index and now OWNS the (old,new) values (2c-iii).
     const bool ring = (stroke_ring_base != SIZE_MAX);
 
-    for (uint32_t v : snap_list) {
-        float ox = snap_x[v], oy = snap_y[v], oz = snap_z[v];
-        float nx, ny, nz;
-        if (stroke_writes_to_base) {
-            nx = mesh.pos_x[v]; ny = mesh.pos_y[v]; nz = mesh.pos_z[v];
-        } else {
-            nx = multires.disp[stroke_disp_index][v].x;
-            ny = multires.disp[stroke_disp_index][v].y;
-            nz = multires.disp[stroke_disp_index][v].z;
-        }
-        if (!ring && ox == nx && oy == ny && oz == nz) continue;
-        e.verts.push_back(v);
-        e.old_x.push_back(ox); e.old_y.push_back(oy); e.old_z.push_back(oz);
-        e.new_x.push_back(nx); e.new_y.push_back(ny); e.new_z.push_back(nz);
-    }
-
     if (ring) {
+        // The flip dropped the pen-up readback, so mesh.pos/disp are stale here — do
+        // NOT read them. Record the unfiltered snap_list (verts[k] aligns with ring
+        // slot k) and SIZE old_*/new_* to vcount as placeholders so entry_bytes counts
+        // them; the evict/park/cross-level spill writes the real values from the ring.
+        e.verts = snap_list;
+        e.old_x.assign(n, 0.0f); e.old_y.assign(n, 0.0f); e.old_z.assign(n, 0.0f);
+        e.new_x.assign(n, 0.0f); e.new_y.assign(n, 0.0f); e.new_z.assign(n, 0.0f);
         e.ring_offset = stroke_ring_base;
-        e.ring_vcount = (uint32_t)e.verts.size();   // == snap_list.size() (no filter applied)
+        e.ring_vcount = (uint32_t)n;
+    } else {
+        // Degrade path (no ring capture): the readback ran, mesh.pos/disp are fresh.
+        e.verts.reserve(n);
+        e.old_x.reserve(n); e.old_y.reserve(n); e.old_z.reserve(n);
+        e.new_x.reserve(n); e.new_y.reserve(n); e.new_z.reserve(n);
+        for (uint32_t v : snap_list) {
+            float ox = snap_x[v], oy = snap_y[v], oz = snap_z[v];
+            float nx, ny, nz;
+            if (stroke_writes_to_base) {
+                nx = mesh.pos_x[v]; ny = mesh.pos_y[v]; nz = mesh.pos_z[v];
+            } else {
+                nx = multires.disp[stroke_disp_index][v].x;
+                ny = multires.disp[stroke_disp_index][v].y;
+                nz = multires.disp[stroke_disp_index][v].z;
+            }
+            if (ox == nx && oy == ny && oz == nz) continue;
+            e.verts.push_back(v);
+            e.old_x.push_back(ox); e.old_y.push_back(oy); e.old_z.push_back(oz);
+            e.new_x.push_back(nx); e.new_y.push_back(ny); e.new_z.push_back(nz);
+        }
     }
 
     stack.push(std::move(e));
@@ -1175,55 +1182,82 @@ bool BrushStroke::finalize(Mesh& mesh, UndoStack& stack, MultiresStack& multires
         (void)gpu_diff_ran;
 #endif
 
-        static std::vector<ReadRun> runs;
-        coalesce_snap_runs(snap_list, runs);
-        static std::vector<float> pos_readback;
-        glBindBuffer(GL_ARRAY_BUFFER, renderer.vbo_pos);
-        if (stroke_writes_to_base) {
-            for (const ReadRun& r : runs) {
-                pos_readback.resize(r.count * 3);
-                glGetBufferSubData(GL_ARRAY_BUFFER,
-                    (GLintptr)r.first * 3 * sizeof(float),
-                    (GLsizeiptr)r.count * 3 * sizeof(float),
-                    pos_readback.data());
-                for (uint32_t v = r.first; v < r.first + r.count; v++) {
-                    uint32_t ri = (v - r.first) * 3;
-                    mesh.pos_x[v] = pos_readback[ri + 0];
-                    mesh.pos_y[v] = pos_readback[ri + 1];
-                    mesh.pos_z[v] = pos_readback[ri + 2];
-                    multires.base.pos_x[v] = mesh.pos_x[v];
-                    multires.base.pos_y[v] = mesh.pos_y[v];
-                    multires.base.pos_z[v] = mesh.pos_z[v];
+        // THE FLIP (2c-iii): when the pen-up diff captured (old,new) into the GPU undo
+        // ring, the GPU now owns this stroke — the working VBO holds the new surface and
+        // disp_ssbo/base_ssbo the new storage. Drop the CPU position readback; just mark
+        // the CPU copy dirty so the next CPU reader (save/cascade/remesh/mirror) pulls it
+        // down through the Scene materialize choke. The degrade path (ring overflow OR no
+        // compute / level mismatch → ring_captured false) keeps the authoritative readback:
+        // those cases have no GPU truth (architecture rule: always degrade gracefully).
+        const bool ring_captured = (ring_base != SIZE_MAX);
+        if (!ring_captured) {
+            // Invariant: this baseline (mesh.pos) is the pre-stroke surface. Staleness
+            // only ever comes from a prior flipped stroke, and the flip requires
+            // compute — so the only reachable !ring_captured case is !compute->supported
+            // (or a never-flipped session), where no prior stroke went stale. Hence
+            // mesh.pos is fresh here. (A single stroke can't exceed the ring cap on any
+            // real mesh, so the overflow branch of reserve is unreachable in practice.)
+            static std::vector<ReadRun> runs;
+            coalesce_snap_runs(snap_list, runs);
+            static std::vector<float> pos_readback;
+            glBindBuffer(GL_ARRAY_BUFFER, renderer.vbo_pos);
+            if (stroke_writes_to_base) {
+                for (const ReadRun& r : runs) {
+                    pos_readback.resize(r.count * 3);
+                    glGetBufferSubData(GL_ARRAY_BUFFER,
+                        (GLintptr)r.first * 3 * sizeof(float),
+                        (GLsizeiptr)r.count * 3 * sizeof(float),
+                        pos_readback.data());
+                    for (uint32_t v = r.first; v < r.first + r.count; v++) {
+                        uint32_t ri = (v - r.first) * 3;
+                        mesh.pos_x[v] = pos_readback[ri + 0];
+                        mesh.pos_y[v] = pos_readback[ri + 1];
+                        mesh.pos_z[v] = pos_readback[ri + 2];
+                        multires.base.pos_x[v] = mesh.pos_x[v];
+                        multires.base.pos_y[v] = mesh.pos_y[v];
+                        multires.base.pos_z[v] = mesh.pos_z[v];
+                    }
+                }
+            } else {
+                const auto& frames = multires.frames[stroke_disp_index];
+                auto& disp = multires.disp[stroke_disp_index];
+                for (const ReadRun& r : runs) {
+                    pos_readback.resize(r.count * 3);
+                    glGetBufferSubData(GL_ARRAY_BUFFER,
+                        (GLintptr)r.first * 3 * sizeof(float),
+                        (GLsizeiptr)r.count * 3 * sizeof(float),
+                        pos_readback.data());
+                    for (uint32_t v = r.first; v < r.first + r.count; v++) {
+                        uint32_t ri = (v - r.first) * 3;
+                        float new_x = pos_readback[ri + 0];
+                        float new_y = pos_readback[ri + 1];
+                        float new_z = pos_readback[ri + 2];
+                        float dx = new_x - mesh.pos_x[v];
+                        float dy = new_y - mesh.pos_y[v];
+                        float dz = new_z - mesh.pos_z[v];
+                        const Frame& f = frames[v];
+                        disp[v].x += f.t.x*dx + f.t.y*dy + f.t.z*dz;
+                        disp[v].y += f.b.x*dx + f.b.y*dy + f.b.z*dz;
+                        disp[v].z += f.n.x*dx + f.n.y*dy + f.n.z*dz;
+                        mesh.pos_x[v] = new_x;
+                        mesh.pos_y[v] = new_y;
+                        mesh.pos_z[v] = new_z;
+                    }
                 }
             }
+            glBindBuffer(GL_ARRAY_BUFFER, 0);
         } else {
-            const auto& frames = multires.frames[stroke_disp_index];
-            auto& disp = multires.disp[stroke_disp_index];
-            for (const ReadRun& r : runs) {
-                pos_readback.resize(r.count * 3);
-                glGetBufferSubData(GL_ARRAY_BUFFER,
-                    (GLintptr)r.first * 3 * sizeof(float),
-                    (GLsizeiptr)r.count * 3 * sizeof(float),
-                    pos_readback.data());
-                for (uint32_t v = r.first; v < r.first + r.count; v++) {
-                    uint32_t ri = (v - r.first) * 3;
-                    float new_x = pos_readback[ri + 0];
-                    float new_y = pos_readback[ri + 1];
-                    float new_z = pos_readback[ri + 2];
-                    float dx = new_x - mesh.pos_x[v];
-                    float dy = new_y - mesh.pos_y[v];
-                    float dz = new_z - mesh.pos_z[v];
-                    const Frame& f = frames[v];
-                    disp[v].x += f.t.x*dx + f.t.y*dy + f.t.z*dz;
-                    disp[v].y += f.b.x*dx + f.b.y*dy + f.b.z*dz;
-                    disp[v].z += f.n.x*dx + f.n.y*dy + f.n.z*dz;
-                    mesh.pos_x[v] = new_x;
-                    mesh.pos_y[v] = new_y;
-                    mesh.pos_z[v] = new_z;
-                }
-            }
+            // mesh.pos + disp/base now hold stale (pen-down) values; the ring holds
+            // (old,new) and the VBO/SSBO hold the new state. Defer the sync.
+            mgpu.mark_cpu_dirty(snap_list);
+#ifdef CHISEL_DEBUG_MULTIRES
+            // Truth-check build: exercise the real flip, then immediately materialize
+            // through the same choke a CPU reader would use, so the diff/capture
+            // err-compares below read freshly-materialized mesh.pos/disp (validates the
+            // materialize indexing + the ring capture together). Release stays lazy.
+            mgpu.materialize_cpu(multires, mesh, renderer.vbo_pos);
+#endif
         }
-        glBindBuffer(GL_ARRAY_BUFFER, 0);
         gpu_positions_deferred = false;
 
 #ifdef CHISEL_DEBUG_MULTIRES
@@ -1288,10 +1322,13 @@ bool BrushStroke::finalize(Mesh& mesh, UndoStack& stack, MultiresStack& multires
         }
 #endif
 
-        // Phase 1: keep the GPU residency mirror in sync with the disp/base
-        // edit we just wrote to CPU storage. Active entity is offset 0, so vert
-        // index == SSBO index. Stroke edits the current view level.
-        mgpu.upload_disp_partial(multires, stroke_level, snap_list);
+        // Phase 1: keep the GPU residency mirror in sync with the disp/base edit we
+        // just wrote to CPU storage. Active entity is offset 0, so vert index == SSBO
+        // index. In the flipped ring path the diff shader already wrote disp_ssbo/
+        // base_ssbo and CPU storage is stale, so re-uploading would clobber the GPU
+        // truth — skip it (the SSBO is already current there).
+        if (!ring_captured)
+            mgpu.upload_disp_partial(multires, stroke_level, snap_list);
     }
 
     if (gpu_mask_deferred && !mask.snap_list.empty()) {

@@ -129,8 +129,10 @@ private:
         return b;
     }
     void evict_to_budget();
-    // apply() reverts/replays the entry on the active entity `ent`.
-    bool apply(const UndoEntry& e, MeshEntity& ent, Scene& scene, bool forward);
+    // apply() reverts/replays the entry on the active entity `ent`. Non-const: a
+    // cross-level apply of a still-ring-resident entry spills its (old,new) out of
+    // the ring into the entry's CPU arrays (2c-iii) before reading them.
+    bool apply(UndoEntry& e, MeshEntity& ent, Scene& scene, bool forward);
     bool apply_projection(const UndoEntry& e, MeshEntity& ent, bool forward);
     bool apply_level(const UndoEntry& e, MeshEntity& ent, bool forward);
 };

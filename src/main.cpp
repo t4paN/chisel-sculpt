@@ -830,6 +830,10 @@ int main(int argc, char* argv[]) {
                 Vec3 delta = right * (dx * scale) + up * (-dy * scale);
 
                 if (delta.x != 0.0f || delta.y != 0.0f || delta.z != 0.0f) {
+                    // 2c-iii: if the active entity was left stale by the flipped
+                    // pen-up path, its mesh.pos must be fresh before move_mesh /
+                    // compute_bounding_sphere read it (no-op when not dirty).
+                    scene.materialize_active_cpu();
                     for (uint32_t sel_id : scene.selected_ids()) {
                         MeshEntity* e = scene.find_entity(sel_id);
                         if (!e) continue;
