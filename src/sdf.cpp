@@ -914,6 +914,7 @@ static void validate_seam_loop(Mesh& m, float voxel, std::vector<uint8_t>& seam)
 
     uint32_t snapped = 0;
     std::unordered_set<uint32_t> off_plane;
+    float off_min = 1e30f, off_max = 0.0f;                   // |x|/voxel range of escapees
     for (auto& kv : ecount) {
         if (kv.second != 1) continue;                       // not a boundary edge
         uint32_t ends[2] = { (uint32_t)(kv.first >> 32),
@@ -924,14 +925,17 @@ static void validate_seam_loop(Mesh& m, float voxel, std::vector<uint8_t>& seam)
                 m.pos_x[v] = 0.0f; seam[v] = 1; snapped++;
             } else {
                 off_plane.insert(v);                        // boundary vert off x=0
+                float d = std::fabs(m.pos_x[v]) / voxel;
+                off_min = std::min(off_min, d); off_max = std::max(off_max, d);
             }
         }
     }
     if (snapped)
         std::printf("[sdf-mirror] seam validate: %u escapee boundary vert(s) snapped+flagged\n", snapped);
     if (!off_plane.empty())
-        std::printf("[sdf-mirror] seam validate: WARNING %zu boundary vert(s) off the plane — genuine hole in +x half (H-D will refuse)\n",
-                    off_plane.size());
+        std::printf("[sdf-mirror] seam validate: WARNING %zu boundary vert(s) off the plane "
+                    "(|x| = %.4f..%.4f voxel; band=%.0e voxel) — genuine hole in +x half (H-D will refuse)\n",
+                    off_plane.size(), off_min, off_max, band / voxel);
 }
 
 } // namespace
@@ -1335,6 +1339,17 @@ VoxelMergeResult voxel_merge_selected(Scene& scene, ComputeState& cs,
     // ---- Hash-weld → watertight indexed Mesh ----
     Mesh welded;
     hash_weld(soup, out_tris, grid.voxel * 1e-3f, welded);
+
+#ifdef CHISEL_DEBUG
+    // Is the raw MC weld watertight, BEFORE any mirror clip/relax? Isolates whether a
+    // hole originates in MC/field/flood (here) or in the seam pipeline (downstream).
+    {
+        uint32_t b=0, nm=0, comp=0;
+        manifold_report(welded, b, nm, comp);
+        std::printf("[sdf][dbg] raw MC weld: %u tris, %u verts | boundary_edges=%u nonmanifold=%u components=%u\n",
+                    welded.tri_count(), welded.vertex_count(), b, nm, comp);
+    }
+#endif
 
     // ---- Read back the signed field, relax the MC triangulation onto it ----
     // Spreads the blocky/uneven MC tris (and dissolves the cell-corner slivers)
