@@ -9,7 +9,7 @@ void draw_remesh_confirm(TextOverlay& text, int win_w, int win_h);
 void draw_remesh_progress(TextOverlay& text, int win_w, int win_h);
 void draw_voxel_merge_confirm(TextOverlay& text, int resolution, int n_selected,
                              int win_w, int win_h);
-void draw_voxel_merge_progress(TextOverlay& text, int win_w, int win_h);
+void draw_voxel_merge_progress(TextOverlay& text, int win_w, int win_h, float progress);
 void draw_toolbar(TextOverlay& text, const InputState& input,
                   uint32_t tri_count, uint32_t vert_count, int win_w, int win_h);
 void draw_slider(TextOverlay& text, const InputState& input, int win_w, int win_h);

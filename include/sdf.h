@@ -41,5 +41,41 @@ struct VoxelMergeResult {
 // so the result is tessellation-symmetric about the app's mirror plane — exact
 // vertex partner map, mirror-editable. Default (false) keeps the faithful,
 // possibly-asymmetric union (correct for a pure print export).
+//
+// Synchronous convenience: drives the tick-based job below to completion in one
+// call (blocks for the whole merge). Still used by any caller that wants the old
+// one-shot behaviour; the interactive path uses the begin/tick split instead.
 VoxelMergeResult voxel_merge_selected(Scene& scene, ComputeState& cs,
                                       int resolution, bool mirror = false);
+
+// ---- Tick-driven (multi-frame) merge --------------------------------------
+// The merge is a multi-second GPU job (the winding-sign pass alone is seconds at
+// R≥128). Running it in one frame freezes the window and, unsliced, trips the GPU
+// watchdog. So it is structured as an enqueue (`begin`) + per-frame advance
+// (`tick`) job: the dominant winding-sign pass is budgeted across frames so the
+// window keeps pumping events and the progress HUD animates. This split is also
+// the structural prerequisite for the WebGPU port, where the readbacks become
+// async `mapAsync` promises and the merge MUST span frames regardless.
+struct VoxelMergeJob;   // opaque; defined in sdf.cpp (owns the cross-frame GL state)
+
+enum class VoxelMergeStatus { Working, Done, Failed };
+
+// Gather the soup, build the grid, allocate SSBOs and compile the programs, then
+// return a heap-owned job (never null). Setup failures don't throw — the job's
+// first `tick` reports Failed with the error in the result, so all error handling
+// funnels through one path. Caller owns the job; free it with voxel_merge_destroy.
+VoxelMergeJob* voxel_merge_begin(Scene& scene, ComputeState& cs,
+                                 int resolution, bool mirror);
+
+// Advance one budgeted step. Returns Working until the job completes; on the final
+// step it runs the CPU tail (weld → relax → mirror seam → manifold gate → scene
+// splice) and fills `out`. Returns Done (out.success true) or Failed (out.error).
+// On Done/Failed the caller should run its post-merge refresh and then destroy the
+// job. GL state is fully re-established each tick (the render loop clobbers it).
+VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
+                                  VoxelMergeJob& job, VoxelMergeResult& out);
+
+// Progress in [0,1] for the HUD.
+float voxel_merge_progress(const VoxelMergeJob& job);
+
+void voxel_merge_destroy(VoxelMergeJob* job);

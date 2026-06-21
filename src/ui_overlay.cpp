@@ -84,11 +84,14 @@ void draw_voxel_merge_confirm(TextOverlay& text, int resolution, int n_selected,
                   scale, win_w, win_h, CGA(yellow), 1.0f);
 }
 
-void draw_voxel_merge_progress(TextOverlay& text, int win_w, int win_h) {
+void draw_voxel_merge_progress(TextOverlay& text, int win_w, int win_h, float progress) {
     float msg_scale = 3.0f;
     float msg_x = (float)win_w * 0.5f - 200.0f;
     float msg_y = (float)win_h * 0.5f - 20.0f;
-    text.draw_text("Voxel-merging...", msg_x, msg_y, msg_scale,
+    char buf[48];
+    std::snprintf(buf, sizeof(buf), "Voxel-merging... %d%%",
+                  (int)(progress * 100.0f + 0.5f));
+    text.draw_text(buf, msg_x, msg_y, msg_scale,
                   win_w, win_h, CGA(light_green), 1.0f);
 }
 

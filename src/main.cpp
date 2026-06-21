@@ -251,6 +251,10 @@ int main(int argc, char* argv[]) {
     Mesh* mesh = &scene.active_mesh();
     MultiresStack* multires = &scene.active_multires();
 
+    // Tick-driven voxel merge: non-null while a merge job is in flight (advanced one
+    // budgeted step per frame so the window stays responsive). See sdf.h / CHANGES.
+    VoxelMergeJob* vmerge_job = nullptr;
+
     Vec3 mesh_center;
     float mesh_radius;
     mesh->compute_bounding_sphere(mesh_center, mesh_radius);
@@ -641,20 +645,35 @@ int main(int argc, char* argv[]) {
         }
 
         // ---- Voxel merge execution (SDF join-for-print) ----
+        // Kick off a merge: build the job (gather/grid/alloc/compile), then let the
+        // per-frame advance below tick it to completion. The merge spans frames so the
+        // window stays responsive and the progress HUD animates (the winding-sign pass
+        // alone is seconds at R>=128).
         if (input.voxel_merge_requested) {
             input.voxel_merge_requested = false;
-            input.voxel_merge_in_progress = true;
-
             if (!compute.supported) {
                 std::snprintf(input.notification, sizeof(input.notification),
                               "Voxel merge needs GPU compute (unavailable)");
                 input.notification_timer = 4.0f;
-            } else {
+            } else if (!vmerge_job) {
                 scene.materialize_active_cpu();  // 2b: merge reads the live surface (mesh.pos)
-                VoxelMergeResult vm = voxel_merge_selected(scene, compute,
-                                                           input.voxel_merge_resolution,
-                                                           input.voxel_merge_mirror);
-                if (vm.success) {
+                vmerge_job = voxel_merge_begin(scene, compute,
+                                               input.voxel_merge_resolution,
+                                               input.voxel_merge_mirror);
+                input.voxel_merge_in_progress = true;
+            }
+        }
+
+        // Advance an in-flight merge by one budgeted step.
+        if (vmerge_job) {
+            VoxelMergeResult vm;
+            VoxelMergeStatus st = voxel_merge_tick(scene, compute, *vmerge_job, vm);
+            if (st != VoxelMergeStatus::Working) {
+                voxel_merge_destroy(vmerge_job);
+                vmerge_job = nullptr;
+                input.voxel_merge_in_progress = false;
+
+                if (st == VoxelMergeStatus::Done && vm.success) {
                     // Mirror merge yields a tessellation-symmetric mesh → topology
                     // mirror gives an exact partner map. Faithful merge is generic
                     // geometry → spatial mirror. Either way refresh from the fresh mesh.
@@ -687,8 +706,6 @@ int main(int argc, char* argv[]) {
                     input.notification_timer = 4.0f;
                 }
             }
-
-            input.voxel_merge_in_progress = false;
         }
 
         // Mouse delta (shared by camera and sculpt)
@@ -1330,7 +1347,8 @@ int main(int argc, char* argv[]) {
         if (input.remesh_in_progress)
             draw_remesh_progress(text, win_w, win_h);
         if (input.voxel_merge_in_progress)
-            draw_voxel_merge_progress(text, win_w, win_h);
+            draw_voxel_merge_progress(text, win_w, win_h,
+                                      vmerge_job ? voxel_merge_progress(*vmerge_job) : 0.0f);
         if (input.toolbar_visible)
             draw_toolbar(text, input, mesh->tri_count(), mesh->vertex_count(), win_w, win_h);
         if (input.slider_mode != InputState::SliderMode::NONE)
