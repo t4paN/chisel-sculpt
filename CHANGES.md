@@ -2,7 +2,15 @@
 
 Short, chronological log of notable changes. Newest on top.
 
-## 2026-06-17 — GPU-resident undo: THE FLIP — drop the pen-up readback (blood-moon 3b-iv 2c-iii) ⚠️ UNTESTED, validate first
+## 2026-06-18 — GPU-resident undo: THE FLIP validated end-to-end ✅ (blood-moon 3b-iv 2c-iii)
+
+- **The 2c-iii flip (`00dce01`) passed the debug smoke test** (`build-dbg`, `CHISEL_DEBUG_MULTIRES=ON`). Sculpted L6/L7/L8, undo/redo within the ring, and walked the full undo stack back to a perfect base sphere. Every `multires_apply` reported `max|err| = 0.000e+00` — the undo round-trip is bit-exact — across the in-place **ring** path *and* the CPU **stage** path, and across the cross-level boundaries (L6→L7, L7→L8 with projection).
+- **The CPU-stage apply path (Case 2) is now exercised:** at L8 a single stroke (~326k verts) overflows the small debug ring, so finalize falls back to the stage apply — which came back `err = 0.000e+00`. (In release the 256 MB ring holds an ~8 MB L8 stroke, so this overflow→stage is a debug-ring artifact, not the release path.)
+- **Only float-noise on the diff capture at L8:** `multires_diff` reports `max|err| = 2.384e-07` (= 2⁻²², 1 ULP of float32 at the model's coordinate scale) — a CPU-vs-GPU recompute order difference, non-accumulating (identical value across strokes) and absent from every apply. Benign.
+- **Debug oracle stays in the tree, compile-gated `OFF` in release** (`build/`), so the per-vertex `glGetBufferSubData` truth-check costs the shipping binary nothing — kept as the regression harness for future work on this path.
+- Net: the GPU-resident undo arc (blood-moon 3b) is **validated and at the push checkpoint**. Corner not separately triggered this run: the ring `ring_evict_overlap` overwrite at a wrapped offset (the dedicated eviction-overlap spill) — covered by code review + the L8 non-ring stage validation; force with `--ring-mb=1` if a belt-and-suspenders check is ever wanted.
+
+## 2026-06-17 — GPU-resident undo: THE FLIP — drop the pen-up readback (blood-moon 3b-iv 2c-iii) ✅ validated 2026-06-18
 
 - **The pen-up CPU position readback is gone on the fast path.** When the diff shader captured a stroke's `(old,new)` into the GPU undo ring, `brush.cpp` finalize now just `mark_cpu_dirty(snap_list)` and leaves `mesh.pos` / `disp` / `base` stale — the working VBO and `disp_ssbo`/`base_ssbo` hold the truth, materialized lazily through `Scene::materialize_active_cpu()` only when a real CPU consumer (save / level-switch / remesh / merge / mirror / cross-level-undo / object-move) needs it. The authoritative readback is kept verbatim for the graceful-degrade case (`!ring_captured` → `!compute->supported` or a never-flipped session); `upload_disp_partial` is skipped in the flipped path so it can't clobber the GPU SSBO with stale CPU storage.
 - **`commit_undo` no longer reads stale CPU storage in ring mode** — it records the unfiltered `snap_list` and sizes `old_*/new_*` to `ring_vcount` as zero placeholders (so `entry_bytes` still counts them); the real values are spilled in from the ring on eviction/park/cross-level-apply.
