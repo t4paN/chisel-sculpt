@@ -43,6 +43,8 @@ enum ComputeBinding : GLuint {
     BIND_MULTIRES_BASE     = 33, // float3 base positions (out, base-level strokes)
     BIND_MULTIRES_STAGE    = 34, // float6 per touched vert: target(3) + source(3) disp (undo apply ring)
     BIND_UNDO_RING         = 35, // float6 per touched vert: old(3) + new(3) — persistent undo history (3b-iii)
+    BIND_SDF_SPLAT_BOX     = 36, // uint6 per-tri voxel box: g0.xyz + span.xyz (SDF splat Pass A→C)
+    BIND_SDF_SPLAT_OFFSET  = 37, // uint exclusive scan of footprint (SDF splat Pass C: owner search)
 };
 
 struct DrawAccumParams {

@@ -3,6 +3,7 @@
 #include "mesh_entity.h"
 #include "compute.h"
 #include "mc_tables.h"
+#include "chisel_debug.h"
 #include <glad/glad.h>
 #include <cstdio>
 #include <cstring>
@@ -112,36 +113,118 @@ float pt_tri_dist(vec3 p, vec3 a, vec3 b, vec3 c) {
 }
 )";
 
-const char* SPLAT_SRC = R"(
+// Degenerate-triangle predicate + soup vertex fetch. Injected into the count,
+// expand AND winding shaders so a degenerate tri (zero area / non-finite vertex)
+// reaches neither distance nor winding evaluation. Needs only p[]/ix[] (Pos/Idx).
+const char* SDF_DEGEN_SRC = R"(
+bool nonfinite(vec3 v) { return any(isnan(v)) || any(isinf(v)); }
+// Zero-area (covers fully-collapsed edges) or any non-finite vertex.
+bool tri_degenerate(vec3 a, vec3 b, vec3 c) {
+    if (nonfinite(a) || nonfinite(b) || nonfinite(c)) return true;
+    return length(cross(b - a, c - a)) < 1e-20;
+}
+vec3 tri_vert(uint t, uint k) {           // vertex k (0..2) of triangle t, world space
+    uint v = ix[3u*t + k];
+    return vec3(p[3u*v], p[3u*v+1u], p[3u*v+2u]);
+}
+)";
+
+// Clamped, band-dilated corner-index AABB [g0,g1] (inclusive) for a triangle.
+// Injected into BOTH the count (Pass A) and expand (Pass C) shaders so they agree
+// bit-for-bit on the per-triangle voxel footprint. If they disagreed, the expand
+// pass would unravel a work-item to the wrong voxel and write out of bounds
+// (load-balancing spec, invariant 1). Needs u_origin/u_voxel/u_R/u_band.
+const char* SDF_AABB_SRC = R"(
+void tri_band_aabb(vec3 a, vec3 b, vec3 c, out ivec3 g0, out ivec3 g1) {
+    vec3 lo = min(min(a,b),c), hi = max(max(a,b),c);
+    g0 = ivec3(floor((lo - u_origin)/u_voxel)) - u_band;
+    g1 = ivec3(ceil ((hi - u_origin)/u_voxel)) + u_band;
+    g0 = clamp(g0, ivec3(0), ivec3(u_R));
+    g1 = clamp(g1, ivec3(0), ivec3(u_R));
+}
+)";
+
+// Linear work index across a 2D workgroup grid. All SDF passes dispatch through
+// dispatch_linear() on the host, which splits the group count into X*Y when it
+// exceeds the 65535 per-dimension GL_MAX_COMPUTE_WORK_GROUP_COUNT limit (hit at
+// R=128+ for the expanded splat, and R=256 for the per-corner/per-cell passes).
+const char* SDF_GID_SRC = R"(
+uint linear_gid() {
+    return gl_GlobalInvocationID.x
+         + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+}
+)";
+
+// Pass A — count: one thread per triangle. Compute the clamped band-AABB ONCE and
+// store it (g0.xyz + span.xyz) into box[] so Pass C can reuse the exact integers
+// instead of recomputing the float math — if the two passes recomputed and a 1-ULP
+// rounding difference flipped a floor() at a voxel boundary, Pass C would unravel a
+// work item out of the counted box and write dist[] out of bounds (load-balancing
+// spec, invariant 1 → the non-deterministic crash). Degenerate tris store span 0 →
+// zero work items, skipped by the expand + winding passes.
+const char* COUNT_SRC = R"(
+#version 430
+layout(local_size_x = 64) in;
+layout(std430, binding = 21) readonly  buffer Pos { float p[]; };
+layout(std430, binding = 22) readonly  buffer Idx { uint  ix[]; };
+layout(std430, binding = 36) writeonly buffer Box { uint  box[]; };  // 6 per tri
+uniform vec3  u_origin;  uniform float u_voxel;  uniform int u_R;
+uniform int   u_band;    uniform uint  u_triCount;
+)" /* SDF_DEGEN_SRC + SDF_AABB_SRC injected here */ R"(
+void main() {
+    uint t = linear_gid();
+    if (t >= u_triCount) return;
+    uint o = 6u*t;
+    vec3 a = tri_vert(t,0u), b = tri_vert(t,1u), c = tri_vert(t,2u);
+    if (tri_degenerate(a,b,c)) {
+        box[o]=0u; box[o+1u]=0u; box[o+2u]=0u; box[o+3u]=0u; box[o+4u]=0u; box[o+5u]=0u;
+        return;
+    }
+    ivec3 g0, g1; tri_band_aabb(a,b,c,g0,g1);
+    uvec3 span = uvec3(g1 - g0 + ivec3(1));      // g0 clamped to [0,R] ⇒ non-negative
+    box[o]=uint(g0.x); box[o+1u]=uint(g0.y); box[o+2u]=uint(g0.z);
+    box[o+3u]=span.x;  box[o+4u]=span.y;     box[o+5u]=span.z;
+}
+)";
+
+// Pass C — expand + splat: one thread per work item. Binary-search the owner
+// triangle in the exclusive scan off[], read its stored box, unravel the local
+// index into a voxel, evaluate one distance, atomic-min into the field. Writes
+// every AABB cell (no per-voxel band predicate) to stay bit-identical to the old
+// thread-per-triangle splat — the band is decided downstream in the winding pass
+// via the BAND_FAR sentinel, exactly as before.
+const char* EXPAND_SRC = R"(
 #version 430
 layout(local_size_x = 64) in;
 layout(std430, binding = 21) readonly buffer Pos { float p[]; };
 layout(std430, binding = 22) readonly buffer Idx { uint  ix[]; };
 layout(std430, binding = 23)          buffer Dist{ uint  d[]; };
+layout(std430, binding = 36) readonly buffer Box { uint  box[]; };
+layout(std430, binding = 37) readonly buffer Off { uint  off[]; };
 uniform vec3  u_origin;  uniform float u_voxel;  uniform int u_R;
-uniform int   u_band;    uniform uint  u_triCount;
-)" /* pt_tri_dist injected here */ R"(
+uniform uint  u_triCount;  uniform uint u_workCount;
+)" /* SDF_DEGEN_SRC + pt_tri_dist injected here */ R"(
 void main() {
-    uint t = gl_GlobalInvocationID.x;
-    if (t >= u_triCount) return;
-    vec3 a = vec3(p[3u*ix[3u*t  ]], p[3u*ix[3u*t  ]+1u], p[3u*ix[3u*t  ]+2u]);
-    vec3 b = vec3(p[3u*ix[3u*t+1u]], p[3u*ix[3u*t+1u]+1u], p[3u*ix[3u*t+1u]+2u]);
-    vec3 c = vec3(p[3u*ix[3u*t+2u]], p[3u*ix[3u*t+2u]+1u], p[3u*ix[3u*t+2u]+2u]);
-    if (length(cross(b - a, c - a)) < 1e-20) return;   // skip degenerate tris
-    vec3 lo = min(min(a,b),c), hi = max(max(a,b),c);
-    ivec3 g0 = ivec3(floor((lo - u_origin)/u_voxel)) - u_band;
-    ivec3 g1 = ivec3(ceil ((hi - u_origin)/u_voxel)) + u_band;
-    g0 = clamp(g0, ivec3(0), ivec3(u_R));
-    g1 = clamp(g1, ivec3(0), ivec3(u_R));
+    uint gid = linear_gid();
+    if (gid >= u_workCount) return;
+    // Owner = upper_bound(off, gid) - 1 over [0, u_triCount): first i with off[i] > gid.
+    uint lo = 0u, hi = u_triCount;
+    while (lo < hi) { uint mid = (lo + hi) >> 1u; if (off[mid] <= gid) lo = mid + 1u; else hi = mid; }
+    uint t = lo - 1u;
+    uint j = gid - off[t];                      // local work index within triangle t
+    uint o = 6u*t;
+    ivec3 g0   = ivec3(int(box[o]), int(box[o+1u]), int(box[o+2u]));
+    uvec3 span = uvec3(box[o+3u], box[o+4u], box[o+5u]);
+    uint dx =  j % span.x;
+    uint dy = (j / span.x) % span.y;
+    uint dz =  j / (span.x * span.y);
+    int gi = g0.x + int(dx), gj = g0.y + int(dy), gk = g0.z + int(dz);
+    vec3 a = tri_vert(t,0u), b = tri_vert(t,1u), c = tri_vert(t,2u);
+    vec3 q = u_origin + u_voxel*vec3(gi,gj,gk);
+    float dd = pt_tri_dist(q, a, b, c);
     int R1 = u_R + 1;
-    for (int k=g0.z;k<=g1.z;k++)
-    for (int j=g0.y;j<=g1.y;j++)
-    for (int i=g0.x;i<=g1.x;i++) {
-        vec3 q = u_origin + u_voxel*vec3(i,j,k);
-        float dd = pt_tri_dist(q, a, b, c);
-        uint  ci = uint(i + R1*(j + R1*k));
-        atomicMin(d[ci], floatBitsToUint(dd));   // monotonic for dd >= 0
-    }
+    uint ci = uint(gi + R1*(gj + R1*gk));
+    atomicMin(d[ci], floatBitsToUint(dd));       // monotonic for dd >= 0
 }
 )";
 
@@ -160,10 +243,11 @@ layout(std430, binding = 23) readonly buffer Dist { uint  d[]; };
 layout(std430, binding = 24)          buffer Field{ float f[]; };
 uniform vec3 u_origin; uniform float u_voxel; uniform int u_R;
 uniform uint u_triCount; uniform uint u_cornerCount; uniform float u_bandFar;
+uniform uint u_cornerOffset;   // chunked dispatch: base corner index of this slice
 const float FOUR_PI = 12.566370614359172;
-
+)" /* SDF_DEGEN_SRC injected here */ R"(
 void main() {
-    uint ci = gl_GlobalInvocationID.x;
+    uint ci = linear_gid() + u_cornerOffset;
     if (ci >= u_cornerCount) return;
     float dist = uintBitsToFloat(d[ci]);
     if (dist >= u_bandFar) { f[ci] = u_bandFar; return; }   // off-band → CPU flood
@@ -176,9 +260,9 @@ void main() {
 
     float omega = 0.0;
     for (uint t = 0u; t < u_triCount; t++) {
-        vec3 A = vec3(p[3u*ix[3u*t  ]], p[3u*ix[3u*t  ]+1u], p[3u*ix[3u*t  ]+2u]) - q;
-        vec3 B = vec3(p[3u*ix[3u*t+1u]], p[3u*ix[3u*t+1u]+1u], p[3u*ix[3u*t+1u]+2u]) - q;
-        vec3 C = vec3(p[3u*ix[3u*t+2u]], p[3u*ix[3u*t+2u]+1u], p[3u*ix[3u*t+2u]+2u]) - q;
+        vec3 va = tri_vert(t,0u), vb = tri_vert(t,1u), vc = tri_vert(t,2u);
+        if (tri_degenerate(va,vb,vc)) continue;   // keep degenerates out of the sign sum
+        vec3 A = va - q, B = vb - q, C = vc - q;
         float la=length(A), lb=length(B), lc=length(C);
         float num = dot(A, cross(B,C));
         float den = la*lb*lc + dot(A,B)*lc + dot(B,C)*la + dot(C,A)*lb;
@@ -207,21 +291,20 @@ const ivec2 EDGE[12] = ivec2[12](
     ivec2(4,5), ivec2(5,6), ivec2(6,7), ivec2(7,4),
     ivec2(0,4), ivec2(1,5), ivec2(2,6), ivec2(3,7));
 
-int g_R1;
-float fld(ivec3 c) {
+float fld(ivec3 c, int R1) {
     c = clamp(c, ivec3(0), ivec3(u_R));
-    return f[c.x + g_R1*(c.y + g_R1*c.z)];
+    return f[c.x + R1*(c.y + R1*c.z)];
 }
-vec3 grad(ivec3 c) {
-    return vec3(fld(c+ivec3(1,0,0)) - fld(c-ivec3(1,0,0)),
-                fld(c+ivec3(0,1,0)) - fld(c-ivec3(0,1,0)),
-                fld(c+ivec3(0,0,1)) - fld(c-ivec3(0,0,1)));
+vec3 grad(ivec3 c, int R1) {
+    return vec3(fld(c+ivec3(1,0,0),R1) - fld(c-ivec3(1,0,0),R1),
+                fld(c+ivec3(0,1,0),R1) - fld(c-ivec3(0,1,0),R1),
+                fld(c+ivec3(0,0,1),R1) - fld(c-ivec3(0,0,1),R1));
 }
 
 void main() {
-    uint cell = gl_GlobalInvocationID.x;
+    uint cell = linear_gid();
     if (cell >= u_cellCount) return;
-    g_R1 = u_R + 1;
+    int R1 = u_R + 1;
     int cx =  int(cell) % u_R;
     int cy = (int(cell) / u_R) % u_R;
     int cz =  int(cell) / (u_R*u_R);
@@ -231,10 +314,24 @@ void main() {
     int cubeindex = 0;
     for (int s = 0; s < 8; s++) {
         ivec3 c = base + CORNER[s];
-        val[s] = f[c.x + g_R1*(c.y + g_R1*c.z)];
+        val[s] = f[c.x + R1*(c.y + R1*c.z)];
         if (val[s] < 0.0) cubeindex |= (1 << s);
     }
     if (cubeindex == 0 || cubeindex == 255) return;
+
+    int row = cubeindex * 16;
+
+    // Count pass: the triangle count is fully determined by the case table — no need
+    // to interpolate edge positions/normals (the expensive grad() field reads) just
+    // to throw them away, and no need to hit the global counter once per triangle.
+    // Tally locally, reserve once. Halves the count pass's field traffic and collapses
+    // millions of single-address atomics into one per active cell — the R=256 TDR fix.
+    if (u_count_only == 1) {
+        uint ntri = 0u;
+        for (int i = 0; i < 15 && tri[row+i] != -1; i += 3) ntri++;
+        if (ntri > 0u) atomicAdd(cnt[0], ntri);
+        return;
+    }
 
     vec3 vpos[12];
     vec3 vnrm[12];
@@ -246,16 +343,12 @@ void main() {
         ivec3 cb = base + CORNER[b];
         float tt = fa / (fa - fb);
         vpos[e] = u_origin + u_voxel * (vec3(ca) + tt * vec3(cb - ca));
-        vec3 nn = mix(grad(ca), grad(cb), tt);
+        vec3 nn = mix(grad(ca, R1), grad(cb, R1), tt);
         vnrm[e] = (dot(nn,nn) > 0.0) ? normalize(nn) : vec3(0.0, 0.0, 1.0);
     }
 
-    int row = cubeindex * 16;
     for (int i = 0; i < 15 && tri[row+i] != -1; i += 3) {
         int e0 = tri[row+i], e1 = tri[row+i+1], e2 = tri[row+i+2];
-
-        if (u_count_only == 1) { atomicAdd(cnt[0], 1u); continue; }
-
         vec3 p0 = vpos[e0], p1 = vpos[e1], p2 = vpos[e2];
         vec3 n0 = vnrm[e0], n1 = vnrm[e1], n2 = vnrm[e2];
         // Orient so face winding matches the field gradient (outward).
@@ -970,14 +1063,23 @@ VoxelMergeResult voxel_merge_selected(Scene& scene, ComputeState& cs,
     uint32_t cell_count   = grid.cells();
 
     // ---- 3. Allocate SSBOs + upload soup ----
-    GlBuf soup_pos, soup_idx, dist, field, mc_out, mc_cnt, tritab;
+    GlBuf soup_pos, soup_idx, dist, field, mc_out, mc_cnt, tritab, splat_box, splat_off;
     soup_pos.gen(); soup_idx.gen(); dist.gen(); field.gen();
     mc_out.gen();   mc_cnt.gen();   tritab.gen();
+    splat_box.gen(); splat_off.gen();
 
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, soup_pos.id);
     glBufferData(GL_SHADER_STORAGE_BUFFER, pos.size()*sizeof(float), pos.data(), GL_STATIC_DRAW);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, soup_idx.id);
     glBufferData(GL_SHADER_STORAGE_BUFFER, idx.size()*sizeof(uint32_t), idx.data(), GL_STATIC_DRAW);
+
+    // Load-balanced splat scratch: per-tri voxel box (6 uints: g0.xyz+span.xyz) +
+    // the exclusive scan of footprints (offset). box is GPU-written then read back
+    // for a CPU scan; offset is uploaded back for the expand pass's owner search.
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, splat_box.id);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, (GLsizeiptr)tri_count*6*sizeof(uint32_t), nullptr, GL_DYNAMIC_READ);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, splat_off.id);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, (GLsizeiptr)tri_count*sizeof(uint32_t), nullptr, GL_DYNAMIC_DRAW);
 
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, dist.id);
     glBufferData(GL_SHADER_STORAGE_BUFFER, (GLsizeiptr)corner_count*sizeof(uint32_t), nullptr, GL_DYNAMIC_COPY);
@@ -1002,30 +1104,143 @@ VoxelMergeResult voxel_merge_selected(Scene& scene, ComputeState& cs,
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 
     // ---- Compile programs ----
-    std::string splat_full = std::string(SPLAT_SRC);
-    {   // inject the Ericson helper just before main()
-        size_t mpos = splat_full.find("void main()");
-        splat_full.insert(mpos, PT_TRI_DIST);
-    }
-    GlProg splat_prog, sign_prog, mc_prog;
-    splat_prog.id = cs.compile_program(splat_full.c_str());
-    sign_prog.id  = cs.compile_program(SIGN_SRC);
-    mc_prog.id    = cs.compile_program(MC_SRC);
-    if (!splat_prog.id || !sign_prog.id || !mc_prog.id) {
+    // Helper: build a program from a base source, injecting the given includes
+    // just before main(). Mirrors the original Ericson-helper injection.
+    auto build_prog = [&](const char* base, std::initializer_list<const char*> includes) -> GLuint {
+        std::string src(base);
+        size_t mpos = src.find("void main()");
+        for (const char* inc : includes) { src.insert(mpos, inc); mpos += std::strlen(inc); }
+        return cs.compile_program(src.c_str());
+    };
+    GlProg count_prog, expand_prog, sign_prog, mc_prog;
+    count_prog.id  = build_prog(COUNT_SRC,  { SDF_GID_SRC, SDF_DEGEN_SRC, SDF_AABB_SRC });
+    expand_prog.id = build_prog(EXPAND_SRC, { SDF_GID_SRC, SDF_DEGEN_SRC, PT_TRI_DIST });
+    sign_prog.id   = build_prog(SIGN_SRC,   { SDF_GID_SRC, SDF_DEGEN_SRC });
+    mc_prog.id     = build_prog(MC_SRC,     { SDF_GID_SRC });
+    if (!count_prog.id || !expand_prog.id || !sign_prog.id || !mc_prog.id) {
         res.error = "SDF shader compile failed (see stderr)";
         return res;
     }
 
-    // ---- Dispatch 1: distance splat (one thread per triangle) ----
-    glUseProgram(splat_prog.id);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_SDF_SOUP_POS, soup_pos.id);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_SDF_SOUP_IDX, soup_idx.id);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_SDF_DIST,     dist.id);
-    set_grid_uniforms(splat_prog.id, grid);
-    glUniform1i (glGetUniformLocation(splat_prog.id, "u_band"),     BAND_DILATE);
-    glUniform1ui(glGetUniformLocation(splat_prog.id, "u_triCount"), tri_count);
-    glDispatchCompute((tri_count + 63u) / 64u, 1, 1);
-    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+    // All SDF passes dispatch through this: 1D logical thread count, split into a
+    // 2D workgroup grid when it would exceed the 65535 per-dim workgroup limit.
+    // Shaders recover the linear index via linear_gid() (SDF_GID_SRC).
+    auto dispatch_linear = [](uint32_t threads) {
+        uint32_t groups = (threads + 63u) / 64u;
+        uint32_t gx = groups, gy = 1u;
+        const uint32_t MAXG = 65535u;
+        if (groups > MAXG) { gx = MAXG; gy = (groups + MAXG - 1u) / MAXG; }
+        glDispatchCompute(gx, gy, 1u);
+    };
+
+    // One-shot diagnostic: drain + report GL errors after a stage. The merge is a
+    // modal op (not a stroke), so the implicit sync from glGetError costs nothing.
+    // In debug, glFinish() first so a GPU hang/TDR is attributed to THIS dispatch
+    // (otherwise the async queue surfaces the context loss several calls later) —
+    // the last "stage OK" printed before a crash names the dispatch that hung.
+    auto gl_check = [](const char* stage) {
+#ifdef CHISEL_DEBUG
+        auto t0 = std::chrono::steady_clock::now();
+        glFinish();
+        double ms = std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - t0).count();
+#endif
+        GLenum e;
+        while ((e = glGetError()) != GL_NO_ERROR)
+            std::printf("[sdf] GL error 0x%04x after %s\n", (unsigned)e, stage);
+#ifdef CHISEL_DEBUG
+        std::printf("[sdf][dbg] stage OK: %s (%.1f ms)\n", stage, ms);
+        std::fflush(stdout);
+#endif
+    };
+    gl_check("pre-merge (stale)");   // drain anything inherited so attribution is clean
+
+    // ---- Dispatch 1: load-balanced distance splat ----
+    // Pass A (count): compute + store each triangle's voxel box, degenerates → 0.
+    glUseProgram(count_prog.id);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_SDF_SOUP_POS,  soup_pos.id);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_SDF_SOUP_IDX,  soup_idx.id);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_SDF_SPLAT_BOX, splat_box.id);
+    set_grid_uniforms(count_prog.id, grid);
+    glUniform1i (glGetUniformLocation(count_prog.id, "u_band"),     BAND_DILATE);
+    glUniform1ui(glGetUniformLocation(count_prog.id, "u_triCount"), tri_count);
+    dispatch_linear(tri_count);
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
+    gl_check("count dispatch");
+
+    // Pass B (exclusive scan, CPU): read the boxes, scan footprints (span product)
+    // to offsets, get total work items. The merge already reads back (it's one-shot,
+    // not a stroke), so a CPU scan is in budget; the WebGPU port swaps this for a
+    // GPU scan + mapAsync.
+    std::vector<uint32_t> box_cpu((size_t)tri_count*6), off_cpu(tri_count);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, splat_box.id);
+    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
+                       (GLsizeiptr)tri_count*6*sizeof(uint32_t), box_cpu.data());
+    uint64_t acc = 0;
+    for (uint32_t t = 0; t < tri_count; t++) {
+        uint64_t footprint = (uint64_t)box_cpu[6*t+3] * box_cpu[6*t+4] * box_cpu[6*t+5];
+        off_cpu[t] = (uint32_t)acc;
+        acc += footprint;
+    }
+    uint32_t work_count = (uint32_t)acc;          // total voxel-touches across all tris
+
+    // Hard guard (permanent, not debug-only): the expand pass's owner search needs
+    // off[] strictly monotonic. A uint32 work-count overflow wraps off[] mid-scan →
+    // a work item resolves to a garbage owner triangle → out-of-bounds atomicMin into
+    // dist[]. That's the non-deterministic crash. Bail cleanly before touching the GPU.
+    if (acc > 0xFFFFFFFFull) {
+        char ebuf[176];
+        std::snprintf(ebuf, sizeof(ebuf),
+            "SDF splat overflow: %llu voxel-touches > 2^32 (tris=%u R=%d) — lower merge resolution",
+            (unsigned long long)acc, tri_count, grid.R);
+        res.error = ebuf;
+        std::printf("[sdf] %s\n", ebuf);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+        return res;
+    }
+#ifdef CHISEL_DEBUG
+    {
+        // Validate every counted box stays inside the corner grid [0,R]^3 — a box that
+        // exceeds R makes the expand pass index dist[] out of bounds. Free: box_cpu is
+        // already on the CPU. (sx==0 ⇒ degenerate / zero-footprint, contributes no work.)
+        uint32_t bad_box = 0, max_idx = 0;
+        for (uint32_t t = 0; t < tri_count; t++) {
+            uint32_t sx = box_cpu[6*t+3];
+            if (sx == 0) continue;
+            uint32_t hi_i = box_cpu[6*t  ] + sx            - 1;
+            uint32_t hi_j = box_cpu[6*t+1] + box_cpu[6*t+4] - 1;
+            uint32_t hi_k = box_cpu[6*t+2] + box_cpu[6*t+5] - 1;
+            if (hi_i > (uint32_t)grid.R || hi_j > (uint32_t)grid.R || hi_k > (uint32_t)grid.R) bad_box++;
+            uint32_t m = std::max(hi_i, std::max(hi_j, hi_k));
+            if (m > max_idx) max_idx = m;
+        }
+        std::printf("[sdf][dbg] tris=%u corners=%u cells=%u R=%d | work=%u acc=%llu | box max-axis-idx=%u out-of-range=%u\n",
+                    tri_count, corner_count, cell_count, grid.R,
+                    work_count, (unsigned long long)acc, max_idx, bad_box);
+        if (bad_box)
+            std::printf("[sdf][dbg] WARNING %u boxes exceed [0,R] — expand pass writes OOB into dist[]\n", bad_box);
+    }
+#endif
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, splat_off.id);
+    glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
+                    (GLsizeiptr)tri_count*sizeof(uint32_t), off_cpu.data());
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+
+    // Pass C (expand + splat): one thread per work item → uniform per-thread load.
+    if (work_count > 0u) {
+        glUseProgram(expand_prog.id);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_SDF_SOUP_POS,     soup_pos.id);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_SDF_SOUP_IDX,     soup_idx.id);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_SDF_DIST,         dist.id);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_SDF_SPLAT_BOX,    splat_box.id);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_SDF_SPLAT_OFFSET, splat_off.id);
+        set_grid_uniforms(expand_prog.id, grid);
+        glUniform1ui(glGetUniformLocation(expand_prog.id, "u_triCount"),  tri_count);
+        glUniform1ui(glGetUniformLocation(expand_prog.id, "u_workCount"), work_count);
+        dispatch_linear(work_count);
+        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+        gl_check("expand dispatch");
+    }
 
     // ---- Dispatch 2: winding sign + field (one thread per corner) ----
     glUseProgram(sign_prog.id);
@@ -1037,8 +1252,22 @@ VoxelMergeResult voxel_merge_selected(Scene& scene, ComputeState& cs,
     glUniform1ui(glGetUniformLocation(sign_prog.id, "u_triCount"),    tri_count);
     glUniform1ui(glGetUniformLocation(sign_prog.id, "u_cornerCount"), corner_count);
     glUniform1f (glGetUniformLocation(sign_prog.id, "u_bandFar"),     BAND_FAR);
-    glDispatchCompute((corner_count + 63u) / 64u, 1, 1);
+    // The winding sign is O(band_corners * tris) — the single heaviest pass. As one
+    // dispatch it ran ~10s at R=128 and tripped the GPU watchdog (ring gfx timeout →
+    // soft recovery → context lost; the soft-recovered glFinish then falsely reported
+    // the *next* dispatch as the culprit). Split it into corner slices, each its own
+    // ring submission via glFlush, so no single GPU job exceeds the watchdog. Total
+    // work / wall time is unchanged; only the submission granularity changes.
+    GLint sign_off_loc = glGetUniformLocation(sign_prog.id, "u_cornerOffset");
+    const uint32_t SIGN_SLICE = 32768u;   // worst-case all-band slice ≈ <1s on Vega 8
+    for (uint32_t off = 0; off < corner_count; off += SIGN_SLICE) {
+        uint32_t n = std::min(SIGN_SLICE, corner_count - off);
+        glUniform1ui(sign_off_loc, off);
+        dispatch_linear(n);
+        glFlush();   // force a separate ring submission per slice (own watchdog window)
+    }
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
+    gl_check("sign dispatch (chunked)");
 
     // ---- Off-band sign flood (CPU): the winding pass only signed band corners;
     //      propagate the inside/outside bit into the off-band bulk so MC never
@@ -1062,8 +1291,9 @@ VoxelMergeResult voxel_merge_selected(Scene& scene, ComputeState& cs,
     glUniform1ui(glGetUniformLocation(mc_prog.id, "u_cellCount"),  cell_count);
     glUniform1i (glGetUniformLocation(mc_prog.id, "u_count_only"), 1);
     glUniform1ui(glGetUniformLocation(mc_prog.id, "u_cap"),        0u);
-    glDispatchCompute((cell_count + 63u) / 64u, 1, 1);
+    dispatch_linear(cell_count);
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
+    gl_check("mc-count dispatch");
 
     uint32_t out_tris = 0;
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, mc_cnt.id);
@@ -1090,8 +1320,9 @@ VoxelMergeResult voxel_merge_selected(Scene& scene, ComputeState& cs,
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_SDF_TRITABLE, tritab.id);
     glUniform1i (glGetUniformLocation(mc_prog.id, "u_count_only"), 0);
     glUniform1ui(glGetUniformLocation(mc_prog.id, "u_cap"),        out_tris);
-    glDispatchCompute((cell_count + 63u) / 64u, 1, 1);
+    dispatch_linear(cell_count);
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
+    gl_check("mc-write dispatch");
 
     // ---- Readback (the only readback) ----
     std::vector<float> soup(out_tris * 18);

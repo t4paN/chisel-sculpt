@@ -18,6 +18,7 @@
 #include "multires_stack.h"
 #include "remesh.h"
 #include "compute.h"
+#include "chisel_debug.h"
 #include "scene.h"
 #include "sdf.h"
 #include "insert_controller.h"
@@ -143,6 +144,8 @@ int main(int argc, char* argv[]) {
     std::printf("Chisel v0.1\n");
     std::printf("OpenGL %s\n", glGetString(GL_VERSION));
     std::printf("Renderer: %s\n", glGetString(GL_RENDERER));
+
+    chisel_init_gl_debug();   // synchronous KHR_debug output (CHISEL_DEBUG builds only)
 
     ComputeState compute;
     compute.init();

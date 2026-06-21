@@ -104,6 +104,11 @@ if(CHISEL_DEBUG_MULTIRES)
     target_compile_definitions(chisel PRIVATE CHISEL_DEBUG_MULTIRES)
 endif()
 
+option(CHISEL_DEBUG "Enable Chisel debug asserts + synchronous GL debug output" OFF)
+if(CHISEL_DEBUG)
+    target_compile_definitions(chisel PRIVATE CHISEL_DEBUG)
+endif()
+
 # Copy assets next to the executable (works for both single- and multi-config generators)
 if(EXISTS ${CMAKE_SOURCE_DIR}/assets)
     file(COPY assets DESTINATION ${CMAKE_BINARY_DIR})
