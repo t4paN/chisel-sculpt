@@ -2,10 +2,13 @@
 #include <GLFW/glfw3.h>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 #include <cmath>
 #include <climits>
 #include <cctype>
 #include <algorithm>
+#include <string>
+#include <sys/stat.h>
 
 #include "mesh.h"
 #include "camera.h"
@@ -183,6 +186,26 @@ int main(int argc, char* argv[]) {
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
+    // Persist imgui.ini in the user's config dir (XDG) rather than the CWD, so the
+    // window layout survives regardless of where the app is launched from and works
+    // under a read-only AppImage mount. Static so the backing string outlives the
+    // context — ImGui keeps the pointer and re-reads it on every settings save.
+    static std::string imgui_ini;
+    {
+        const char* xdg  = std::getenv("XDG_CONFIG_HOME");
+        const char* home = std::getenv("HOME");
+        std::string base = (xdg && *xdg)   ? std::string(xdg)
+                         : (home && *home) ? std::string(home) + "/.config"
+                         :                   std::string();
+        if (!base.empty()) {
+            std::string dir = base + "/chisel";
+            mkdir(base.c_str(), 0755);   // harmless if it already exists
+            mkdir(dir.c_str(),  0755);
+            imgui_ini = dir + "/imgui.ini";
+            ImGui::GetIO().IniFilename = imgui_ini.c_str();
+        }
+        // else (no HOME/XDG): leave ImGui's default ("imgui.ini" in the CWD).
+    }
     ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
     ImGui::GetStyle().HoverDelayNormal = 0.0f;
     ImGui::GetStyle().HoverDelayShort  = 0.0f;
