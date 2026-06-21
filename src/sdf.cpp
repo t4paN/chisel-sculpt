@@ -1358,7 +1358,10 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
         glUniform1f (glGetUniformLocation(j.sign_prog.id, "u_bandFar"),     BAND_FAR);
         GLint sign_off_loc = glGetUniformLocation(j.sign_prog.id, "u_cornerOffset");
         const uint32_t SIGN_SLICE      = 32768u;  // worst-case all-band slice ~ <1s on Vega 8
-        const uint32_t SLICES_PER_TICK = 4u;      // tune: responsiveness vs. ticks-to-finish
+        const uint32_t SLICES_PER_TICK = 2u;      // tune: smaller = smoother window, more ticks.
+                                                  // Leaning small on purpose — user prefers a
+                                                  // responsive low-FPS window over a multi-second
+                                                  // freeze; never let one tick block for seconds.
         for (uint32_t s = 0; s < SLICES_PER_TICK && j.sign_off < j.corner_count; s++) {
             uint32_t n = std::min(SIGN_SLICE, j.corner_count - j.sign_off);
             glUniform1ui(sign_off_loc, j.sign_off);
