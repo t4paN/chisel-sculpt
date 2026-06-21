@@ -2,6 +2,10 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-21 — SDF voxel-merge: `sample_field` off-band sentinel guard (relax robustness)
+
+- **`sample_field` (`sdf.cpp`) no longer lets the `±BAND_FAR` (1e18) off-band sentinel leak into the trilinear blend.** The field's off-band corners are marked with the ±1e18 sentinel by `flood_fill_sign`; MC is unaffected (it only interpolates band-to-band edges), but `relax_to_field` calls `sample_field` at arbitrary points — gradient central-differences and the `pn - n·sample_field(pn)` reprojection — where a single sentinel corner in the 8-corner stencil swamps the blend with a ~1e18 value and flings the relaxed vertex off toward infinity. The function now gathers the 8 corners, replaces each sentinel with a finite **sign-preserving** stand-in (the largest genuine \|distance\| in the same stencil, or a 1-voxel floor if the whole cell is off-band), then blends. **Bit-identical to the old code whenever no sentinel is present** — i.e. on every path the working R=128/R=256 merges actually hit today — so it's a pure robustness guard, not a behavior change. Step 1 of the SDF + WebGPU-portability plan. Builds clean (release, -j2). _Interactive merge re-confirmation pending (behavior-neutral by construction on the in-band path)._
+
 ## 2026-06-21 — SDF voxel-merge: R=256 is now watertight (the merge completes) ✅
 
 - **R=256 voxel-merge now produces a watertight raw MC weld (`boundary_edges=0 nonmanifold=0`) and the mirror merge completes** — previously it ran (post crash-fix) but the H-D seam gate refused it because the raw MC surface had 40 holes + 122 non-manifold edges. Root causes were two resolution-relative tolerances that shrank below what thin features need at the finer grid; both are now fixed at the source.

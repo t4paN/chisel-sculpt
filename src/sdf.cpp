@@ -554,11 +554,34 @@ float sample_field(const std::vector<float>& f, const SdfGrid& g, Vec3 p) {
     uint32_t i = (uint32_t)gx, j = (uint32_t)gy, k = (uint32_t)gz;
     float fx = gx - i, fy = gy - j, fz = gz - k;
     uint32_t S = g.R + 1;
-    auto C = [&](uint32_t ii, uint32_t jj, uint32_t kk) { return f[ii + S*(jj + S*kk)]; };
-    float c00 = C(i,j,  k  )*(1-fx) + C(i+1,j,  k  )*fx;
-    float c10 = C(i,j+1,k  )*(1-fx) + C(i+1,j+1,k  )*fx;
-    float c01 = C(i,j,  k+1)*(1-fx) + C(i+1,j,  k+1)*fx;
-    float c11 = C(i,j+1,k+1)*(1-fx) + C(i+1,j+1,k+1)*fx;
+
+    // Gather the 8 cell corners. Off-band corners carry the ±BAND_FAR sentinel
+    // (set by flood_fill_sign). Left raw, one such corner would swamp the
+    // trilinear blend with a ~1e18 value and fling the relax reprojection off to
+    // infinity. Replace each sentinel with a finite, sign-preserving stand-in —
+    // the largest genuine |distance| in this stencil (a real band value), or a
+    // 1-voxel floor if the whole cell is off-band — so the sample stays bounded
+    // and the inside/outside sign is still correct. In-band corners (all MC and
+    // the normal relax case ever touch) pass through unchanged, so the blend is
+    // bit-identical to before whenever no sentinel is present.
+    float c[8] = {
+        f[ i   + S*( j    + S* k   )], f[(i+1) + S*( j    + S* k   )],
+        f[ i   + S*((j+1) + S* k   )], f[(i+1) + S*((j+1) + S* k   )],
+        f[ i   + S*( j    + S*(k+1))], f[(i+1) + S*( j    + S*(k+1))],
+        f[ i   + S*((j+1) + S*(k+1))], f[(i+1) + S*((j+1) + S*(k+1))],
+    };
+    const float SENTINEL = BAND_FAR * 0.5f;
+    float maxmag = 0.0f;
+    for (float v : c) if (std::fabs(v) < SENTINEL) maxmag = std::max(maxmag, std::fabs(v));
+    float fill = (maxmag > 0.0f) ? maxmag : g.voxel;   // floor: cell is wholly off-band
+    for (float& v : c) if (std::fabs(v) >= SENTINEL) v = (v < 0.0f ? -fill : fill);
+
+    // c[idx], idx = ii + 2*jj + 4*kk  (ii/jj/kk ∈ {0,1} select corner+0/+1 on x/y/z)
+    auto CC = [&](int ii, int jj, int kk) { return c[ii + 2*jj + 4*kk]; };
+    float c00 = CC(0,0,0)*(1-fx) + CC(1,0,0)*fx;
+    float c10 = CC(0,1,0)*(1-fx) + CC(1,1,0)*fx;
+    float c01 = CC(0,0,1)*(1-fx) + CC(1,0,1)*fx;
+    float c11 = CC(0,1,1)*(1-fx) + CC(1,1,1)*fx;
     float c0 = c00*(1-fy) + c10*fy;
     float c1 = c01*(1-fy) + c11*fy;
     return c0*(1-fz) + c1*fz;
