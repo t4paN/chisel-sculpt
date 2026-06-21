@@ -2,6 +2,14 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-21 — SDF voxel-merge: R=256 is now watertight (the merge completes) ✅
+
+- **R=256 voxel-merge now produces a watertight raw MC weld (`boundary_edges=0 nonmanifold=0`) and the mirror merge completes** — previously it ran (post crash-fix) but the H-D seam gate refused it because the raw MC surface had 40 holes + 122 non-manifold edges. Root causes were two resolution-relative tolerances that shrank below what thin features need at the finer grid; both are now fixed at the source.
+- **MC iso-edge canonicalization (`MC_SRC`, the real fix for the holes).** A shared edge is reached by its two adjacent cells with *opposite* endpoint order; `fa/(fa-fb)` vs `fb/(fb-fa)` are equal in exact arithmetic but not bit-identical in float, and the large integer corner coords (up to R) amplified the drift to **~1e-5 voxel** — enough to split one shared vertex into two and leave a crack. Now the edge is canonicalized by global corner coords before interpolation, so both cells emit a **bit-identical** vertex. This is what un-welding revealed: tightening the weld alone took non-manifold to 0 but exploded boundary edges to 1642 (the split shares), proving the verts were never actually coincident.
+- **`hash_weld` snap `voxel*1e-3 → 1e-5`.** Safe now that shares are bit-identical: it welds the real shares at an essentially exact key while no longer false-fusing a distinct nearby sheet onto a welded pair (which was the source of the 122 non-manifold edges).
+- **Sign band scaled to constant ABSOLUTE thickness.** `BAND_DILATE` (2 voxels) is the value that works at R=128; the winding-sign band is the closed separating shell the CPU flood-fill relies on, and at a fixed voxel count it thins in world units as R grows until the inside/outside sign leaks through a thin feature. Band is now `round(BAND_DILATE·(R−2·PAD)/(128−2·PAD))`, floored at `BAND_DILATE` (R=128→2, R=256→4). Thicker is only slower (the sign pass is chunked, so any duration is watchdog-safe), never wrong.
+- **Validated:** R=256 raw weld `0/0`, merge completes (204,832-vert weld → 204,808-vert mirror result). R=128 unchanged (`0/0`, `band=2`, merges clean). Diagnostics extended: `band=N` added to the `[sdf][dbg] tris=…` line.
+
 ## 2026-06-21 — SDF voxel-merge: fix the GPU-watchdog crash (chunked winding-sign pass) ✅
 
 - **The voxel merge no longer crashes the GPU.** Root cause: the winding-sign pass (`SIGN_SRC`, one thread per band corner, each summing the solid angle over all ~20k triangles — `O(band_corners × tris)`) ran as a *single* compute dispatch that took **~10 s at R=128**. That exceeds the amdgpu gfx-ring `lockup_timeout` (~10 s) → `ring gfx timeout, but soft recovered` → context lost → `Aborted (core dumped)`. Machine was idle/cold (43 °C) throughout, so never thermal — the work was simply one ring submission too long.

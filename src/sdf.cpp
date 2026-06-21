@@ -341,6 +341,18 @@ void main() {
         if ((fa < 0.0) == (fb < 0.0)) continue;   // edge not crossed
         ivec3 ca = base + CORNER[a];
         ivec3 cb = base + CORNER[b];
+        // Canonicalize the edge by its GLOBAL corner coords so both cells sharing this
+        // edge interpolate from the identical endpoint order. fa/(fa-fb) and fb/(fb-fa)
+        // are equal in real arithmetic but NOT bit-identical in float, and the large
+        // integer corner coords (up to R) amplify the difference to ~1e-5 voxel — enough
+        // to split the shared vertex into two and leave a crack the weld can't close at a
+        // tight snap. Sorting the endpoints makes the vertex bit-identical from both cells.
+        if (ca.x != cb.x ? ca.x > cb.x
+          : ca.y != cb.y ? ca.y > cb.y
+          :                ca.z > cb.z) {
+            ivec3 tc = ca; ca = cb; cb = tc;
+            float tf = fa; fa = fb; fb = tf;
+        }
         float tt = fa / (fa - fb);
         vpos[e] = u_origin + u_voxel * (vec3(ca) + tt * vec3(cb - ca));
         vec3 nn = mix(grad(ca, R1), grad(cb, R1), tt);
@@ -1055,6 +1067,19 @@ VoxelMergeResult voxel_merge_selected(Scene& scene, ComputeState& cs,
     grid.origin = lo - Vec3(grid.voxel, grid.voxel, grid.voxel) * (float)GRID_PAD;
     res.R = grid.R;
 
+    // Sign band thickness must be a constant ABSOLUTE width, not a constant voxel
+    // count. The winding-sign winding number is only evaluated at band corners; off-band
+    // corners get their sign by flood fill, which assumes the band is a closed separating
+    // shell between inside and outside. At a fixed BAND_DILATE voxel count the band shrinks
+    // in world units as R grows, so at high R it no longer separates the two surfaces of a
+    // thin feature → the flood fill leaks → torn iso-surface (boundary_edges>0). Anchor the
+    // absolute thickness to the value that works at R=128 (BAND_DILATE voxels there) and
+    // scale the voxel count with resolution. Floor at BAND_DILATE: thicker is only slower
+    // (the sign pass is chunked, so any duration is watchdog-safe), never wrong; thinner
+    // would risk leaks at lower R too.
+    const int band = std::max(BAND_DILATE,
+        (int)std::lround((double)BAND_DILATE * (R - 2 * GRID_PAD) / (128 - 2 * GRID_PAD)));
+
     // Snap the x origin so a corner layer lands exactly on x=0 (shift < ½ voxel).
     // Then every cell sits wholly on one side — clip_to_plus_x gives a clean seam.
     if (mirror) {
@@ -1166,7 +1191,7 @@ VoxelMergeResult voxel_merge_selected(Scene& scene, ComputeState& cs,
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_SDF_SOUP_IDX,  soup_idx.id);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_SDF_SPLAT_BOX, splat_box.id);
     set_grid_uniforms(count_prog.id, grid);
-    glUniform1i (glGetUniformLocation(count_prog.id, "u_band"),     BAND_DILATE);
+    glUniform1i (glGetUniformLocation(count_prog.id, "u_band"),     band);
     glUniform1ui(glGetUniformLocation(count_prog.id, "u_triCount"), tri_count);
     dispatch_linear(tri_count);
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
@@ -1218,8 +1243,8 @@ VoxelMergeResult voxel_merge_selected(Scene& scene, ComputeState& cs,
             uint32_t m = std::max(hi_i, std::max(hi_j, hi_k));
             if (m > max_idx) max_idx = m;
         }
-        std::printf("[sdf][dbg] tris=%u corners=%u cells=%u R=%d | work=%u acc=%llu | box max-axis-idx=%u out-of-range=%u\n",
-                    tri_count, corner_count, cell_count, grid.R,
+        std::printf("[sdf][dbg] tris=%u corners=%u cells=%u R=%d band=%d | work=%u acc=%llu | box max-axis-idx=%u out-of-range=%u\n",
+                    tri_count, corner_count, cell_count, grid.R, band,
                     work_count, (unsigned long long)acc, max_idx, bad_box);
         if (bad_box)
             std::printf("[sdf][dbg] WARNING %u boxes exceed [0,R] — expand pass writes OOB into dist[]\n", bad_box);
@@ -1338,7 +1363,13 @@ VoxelMergeResult voxel_merge_selected(Scene& scene, ComputeState& cs,
 
     // ---- Hash-weld → watertight indexed Mesh ----
     Mesh welded;
-    hash_weld(soup, out_tris, grid.voxel * 1e-3f, welded);
+    // Tight snap (voxel*1e-5, was 1e-3): now that the MC shader canonicalizes edge
+    // orientation, a shared edge produces a bit-identical vertex from both adjacent cells,
+    // so legit shared verts weld at an essentially exact key. The old 1e-3 tolerance only
+    // added risk of FALSE fusion — pulling a distinct nearby sheet onto a welded pair into
+    // a non-manifold edge (shared by >2 tris). 1e-5 is far below any real feature spacing
+    // yet far above float noise, so it welds the real shares and fuses nothing spurious.
+    hash_weld(soup, out_tris, grid.voxel * 1e-5f, welded);
 
 #ifdef CHISEL_DEBUG
     // Is the raw MC weld watertight, BEFORE any mirror clip/relax? Isolates whether a
