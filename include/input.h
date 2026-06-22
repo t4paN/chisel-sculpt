@@ -153,6 +153,7 @@ struct InputState {
     bool voxel_merge_in_progress;
     bool voxel_merge_confirm_pending;
     bool voxel_merge_mirror;       // M (vs Y): symmetrise the result about x=0
+    bool voxel_merge_surface_nets; // S toggles: Surface Nets vs Marching Cubes extractor
     int  voxel_merge_resolution;   // target cells along longest axis (64..256)
 
     // Mask operations

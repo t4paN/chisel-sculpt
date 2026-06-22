@@ -45,8 +45,12 @@ struct VoxelMergeResult {
 // Synchronous convenience: drives the tick-based job below to completion in one
 // call (blocks for the whole merge). Still used by any caller that wants the old
 // one-shot behaviour; the interactive path uses the begin/tick split instead.
+// `surface_nets` = extract with Surface Nets (smoother, more uniform, quad-dominant,
+// fewer slivers) instead of the default Marching Cubes. MC stays the default because
+// the naive Surface Nets vertex-per-cell can be non-manifold on thin/ambiguous cells.
 VoxelMergeResult voxel_merge_selected(Scene& scene, ComputeState& cs,
-                                      int resolution, bool mirror = false);
+                                      int resolution, bool mirror = false,
+                                      bool surface_nets = false);
 
 // ---- Tick-driven (multi-frame) merge --------------------------------------
 // The merge is a multi-second GPU job (the winding-sign pass alone is seconds at
@@ -65,7 +69,7 @@ enum class VoxelMergeStatus { Working, Done, Failed };
 // first `tick` reports Failed with the error in the result, so all error handling
 // funnels through one path. Caller owns the job; free it with voxel_merge_destroy.
 VoxelMergeJob* voxel_merge_begin(Scene& scene, ComputeState& cs,
-                                 int resolution, bool mirror);
+                                 int resolution, bool mirror, bool surface_nets);
 
 // Advance one budgeted step. Returns Working until the job completes; on the final
 // step it runs the CPU tail (weld → relax → mirror seam → manifold gate → scene

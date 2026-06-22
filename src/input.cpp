@@ -54,6 +54,7 @@ InputState::InputState()
     , voxel_merge_in_progress(false)
     , voxel_merge_confirm_pending(false)
     , voxel_merge_mirror(false)
+    , voxel_merge_surface_nets(false)
     , voxel_merge_resolution(128)
     , mask_invert_requested(false)
     , mask_clear_requested(false)
@@ -300,9 +301,12 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
         // The voxel-merge dialog also takes M (mirror-symmetric merge).
         bool merge_mirror_key = g_input->voxel_merge_confirm_pending
                              && key == GLFW_KEY_M;
+        // ...and S to toggle the extractor (Surface Nets vs Marching Cubes).
+        bool merge_nets_key = g_input->voxel_merge_confirm_pending
+                           && key == GLFW_KEY_S;
         bool allow = (key == GLFW_KEY_ESCAPE)
                   || (is_yn_dialog && (key == GLFW_KEY_Y || key == GLFW_KEY_N))
-                  || res_keys || merge_mirror_key;
+                  || res_keys || merge_mirror_key || merge_nets_key;
         if (!allow) return;
     }
 
@@ -376,7 +380,10 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
                 break;
 
             case GLFW_KEY_S:
-                if (g_input->ctrl_held && g_input->shift_held) {
+                if (g_input->voxel_merge_confirm_pending) {
+                    // In the merge dialog, S flips the extractor (Surface Nets / MC).
+                    g_input->voxel_merge_surface_nets = !g_input->voxel_merge_surface_nets;
+                } else if (g_input->ctrl_held && g_input->shift_held) {
                     g_input->save_as_requested = true;
                 } else if (g_input->ctrl_held) {
                     g_input->save_requested = true;

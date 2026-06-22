@@ -378,6 +378,158 @@ void main() {
 }
 )";
 
+// ---- Surface Nets (naive dual contouring) ---------------------------------
+// Drop-in alternative to MC: same interface (Field in, McOut 18-floats/tri soup,
+// McCnt atomic counter, same u_count_only/u_cap two-pass protocol) so the whole
+// downstream path (hash-weld → relax → mirror → splice) is untouched — only the
+// program bound to mc_prog changes.
+//
+// MC places verts ON grid edges and triangulates per a fixed case table, which
+// bevels sharp features and emits slivers. Surface Nets instead places ONE dual
+// vertex per active cell, at the average of that cell's edge crossings, and
+// connects the four cells around each sign-changing grid edge into a quad. The
+// result is smoother, more uniform, quad-dominant, with far fewer slivers — so
+// the relax pass has much less to do. Cost: the basic ("naive") variant pinches
+// a cell that holds two surface sheets into one vertex, which can be non-manifold
+// on thin/ambiguous configs — hence MC stays the default and the H-D mirror gate
+// still guards the watertight path.
+//
+// Soup-weld determinism: a dual vertex is a pure function of its cell's eight
+// corners, computed identically by every one of the (up to four) edge-quads that
+// reference that cell, so the emitted copies are bit-identical and hash_weld
+// reshares them into the same indexed vertex MC's canonicalized edges would.
+const char* NETS_SRC = R"(
+#version 430
+layout(local_size_x = 64) in;
+layout(std430, binding = 24) readonly buffer Field { float f[]; };
+layout(std430, binding = 25)          buffer McOut { float o[]; };   // 18 floats / tri
+layout(std430, binding = 26)          buffer McCnt { uint  cnt[]; };
+uniform vec3 u_origin; uniform float u_voxel; uniform int u_R;
+uniform uint u_cellCount; uniform int u_count_only; uniform uint u_cap;
+
+const ivec3 CORNER[8] = ivec3[8](
+    ivec3(0,0,0), ivec3(1,0,0), ivec3(1,1,0), ivec3(0,1,0),
+    ivec3(0,0,1), ivec3(1,0,1), ivec3(1,1,1), ivec3(0,1,1));
+const ivec2 EDGE[12] = ivec2[12](
+    ivec2(0,1), ivec2(1,2), ivec2(2,3), ivec2(3,0),
+    ivec2(4,5), ivec2(5,6), ivec2(6,7), ivec2(7,4),
+    ivec2(0,4), ivec2(1,5), ivec2(2,6), ivec2(3,7));
+
+float fld(ivec3 c, int R1) {
+    c = clamp(c, ivec3(0), ivec3(u_R));
+    return f[c.x + R1*(c.y + R1*c.z)];
+}
+vec3 grad(ivec3 c, int R1) {
+    return vec3(fld(c+ivec3(1,0,0),R1) - fld(c-ivec3(1,0,0),R1),
+                fld(c+ivec3(0,1,0),R1) - fld(c-ivec3(0,1,0),R1),
+                fld(c+ivec3(0,0,1),R1) - fld(c-ivec3(0,0,1),R1));
+}
+
+// Dual vertex of cell `base`: world position + an orientation normal. The cell is
+// always active here (every cell touching a sign-changing edge has that crossing
+// among its own 12 edges), so `n` >= 1. Edges in a FIXED order so the average is
+// recomputed bit-identically from every referencing thread (see weld note above).
+void cell_vertex(ivec3 base, int R1, out vec3 wpos, out vec3 nrm) {
+    float val[8];
+    for (int s = 0; s < 8; s++) {
+        ivec3 c = base + CORNER[s];
+        val[s] = f[c.x + R1*(c.y + R1*c.z)];
+    }
+    vec3 sum = vec3(0.0);
+    int n = 0;
+    for (int e = 0; e < 12; e++) {
+        int a = EDGE[e].x, b = EDGE[e].y;
+        float fa = val[a], fb = val[b];
+        if ((fa < 0.0) == (fb < 0.0)) continue;     // edge not crossed
+        float tt = fa / (fa - fb);
+        sum += mix(vec3(base + CORNER[a]), vec3(base + CORNER[b]), tt);
+        n++;
+    }
+    wpos = u_origin + u_voxel * (sum / float(max(n, 1)));
+    vec3 g = grad(base, R1);                          // outward (off-band side is +/-FAR)
+    nrm = (dot(g,g) > 0.0) ? normalize(g) : vec3(0.0, 0.0, 1.0);
+}
+
+// Emit one triangle with an explicit, caller-decided winding flip (so both tris
+// of a quad share the SAME orientation — no intra-quad fold).
+void put_tri(vec3 p0, vec3 p1, vec3 p2, vec3 n0, vec3 n1, vec3 n2, bool flip) {
+    if (flip) {
+        vec3 tp = p1; p1 = p2; p2 = tp;
+        vec3 tn = n1; n1 = n2; n2 = tn;
+    }
+    uint slot = atomicAdd(cnt[0], 1u);
+    if (slot >= u_cap) return;                        // overflow guard (exact in practice)
+    uint b0 = slot * 18u;
+    o[b0+0u]=p0.x;  o[b0+1u]=p0.y;  o[b0+2u]=p0.z;  o[b0+3u]=n0.x;  o[b0+4u]=n0.y;  o[b0+5u]=n0.z;
+    o[b0+6u]=p1.x;  o[b0+7u]=p1.y;  o[b0+8u]=p1.z;  o[b0+9u]=n1.x;  o[b0+10u]=n1.y; o[b0+11u]=n1.z;
+    o[b0+12u]=p2.x; o[b0+13u]=p2.y; o[b0+14u]=p2.z; o[b0+15u]=n2.x; o[b0+16u]=n2.y; o[b0+17u]=n2.z;
+}
+
+// Quad over the four cells around one sign-changing grid edge (cyclic order),
+// split into two tris. Each cell's dual vertex is recomputed here (4x work vs a
+// stored-vertex pass, but keeps the soup pipeline + welds for free).
+//
+// Two quality rules vs a naive split:
+//  - SHORTEST DIAGONAL: a sheared quad (the surface running diagonally to the grid)
+//    sliced on its long diagonal degenerates into slivers ("lines"); the short
+//    diagonal keeps both halves well-shaped. This is the standard SN/DC fix.
+//  - PER-QUAD WINDING: decide the flip ONCE from the quad normal vs the averaged
+//    field normal, then apply it to both tris — so a sheared quad can't fold.
+void emit_quad(ivec3 c0, ivec3 c1, ivec3 c2, ivec3 c3, int R1) {
+    vec3 p0,p1,p2,p3, n0,n1,n2,n3;
+    cell_vertex(c0,R1,p0,n0); cell_vertex(c1,R1,p1,n1);
+    cell_vertex(c2,R1,p2,n2); cell_vertex(c3,R1,p3,n3);
+
+    // Orientation: quad normal from the two diagonals (independent of which split
+    // we pick), flipped to face the averaged outward field normal of the corners.
+    bool flip = dot(cross(p2 - p0, p3 - p1), n0 + n1 + n2 + n3) < 0.0;
+
+    if (dot(p2 - p0, p2 - p0) <= dot(p3 - p1, p3 - p1)) {   // split on p0-p2
+        put_tri(p0,p1,p2, n0,n1,n2, flip);
+        put_tri(p0,p2,p3, n0,n2,n3, flip);
+    } else {                                                // split on p1-p3
+        put_tri(p1,p2,p3, n1,n2,n3, flip);
+        put_tri(p1,p3,p0, n1,n3,n0, flip);
+    }
+}
+
+void main() {
+    uint cell = linear_gid();
+    if (cell >= u_cellCount) return;
+    int R1 = u_R + 1;
+    int cx =  int(cell) % u_R;
+    int cy = (int(cell) / u_R) % u_R;
+    int cz =  int(cell) / (u_R*u_R);
+
+    // The surface is built from the three grid edges leaving this cell's min-corner
+    // (cx,cy,cz) toward +x/+y/+z. An edge is active when its endpoints differ in
+    // sign AND all four cells sharing it exist (interior only — the grid is padded
+    // empty, so no surface ever reaches the outermost shell we skip). Each active
+    // edge contributes one quad = 2 tris; ownership-by-min-corner means every grid
+    // edge is emitted exactly once.
+    bool sc = (f[cx     + R1*(cy     + R1* cz   )] < 0.0);     // sign at the min corner
+    bool active_x = (sc != (f[(cx+1) + R1*(cy + R1*cz)] < 0.0)) && cy >= 1 && cz >= 1;
+    bool active_y = (sc != (f[cx + R1*((cy+1) + R1*cz)] < 0.0)) && cx >= 1 && cz >= 1;
+    bool active_z = (sc != (f[cx + R1*(cy + R1*(cz+1))] < 0.0)) && cx >= 1 && cy >= 1;
+
+    if (u_count_only == 1) {
+        uint ntri = 0u;
+        if (active_x) ntri += 2u;
+        if (active_y) ntri += 2u;
+        if (active_z) ntri += 2u;
+        if (ntri > 0u) atomicAdd(cnt[0], ntri);
+        return;
+    }
+
+    if (active_x) emit_quad(ivec3(cx,cy-1,cz-1), ivec3(cx,cy,cz-1),
+                            ivec3(cx,cy,cz),     ivec3(cx,cy-1,cz),   R1);
+    if (active_y) emit_quad(ivec3(cx-1,cy,cz-1), ivec3(cx,cy,cz-1),
+                            ivec3(cx,cy,cz),     ivec3(cx-1,cy,cz),   R1);
+    if (active_z) emit_quad(ivec3(cx-1,cy-1,cz), ivec3(cx,cy-1,cz),
+                            ivec3(cx,cy,cz),     ivec3(cx-1,cy,cz),   R1);
+}
+)";
+
 // ---- Hash-weld ------------------------------------------------------------
 // Snap each soup vertex to a voxel*1e-3 lattice, dedup by quantized key →
 // shared vertices ⇒ watertight indexed mesh. Single CPU touch, O(verts).
@@ -1114,7 +1266,7 @@ struct VoxelMergeJob {
 };
 
 VoxelMergeJob* voxel_merge_begin(Scene& scene, ComputeState& cs,
-                                 int resolution, bool mirror) {
+                                 int resolution, bool mirror, bool surface_nets) {
     VoxelMergeJob* job = new VoxelMergeJob();
     job->mirror = mirror;
     job->t0 = std::chrono::high_resolution_clock::now();
@@ -1229,7 +1381,15 @@ VoxelMergeJob* voxel_merge_begin(Scene& scene, ComputeState& cs,
     job->count_prog.id  = build_prog(COUNT_SRC,  { SDF_GID_SRC, SDF_DEGEN_SRC, SDF_AABB_SRC });
     job->expand_prog.id = build_prog(EXPAND_SRC, { SDF_GID_SRC, SDF_DEGEN_SRC, PT_TRI_DIST });
     job->sign_prog.id   = build_prog(SIGN_SRC,   { SDF_GID_SRC, SDF_DEGEN_SRC });
-    job->mc_prog.id     = build_prog(MC_SRC,     { SDF_GID_SRC });
+    // Iso-surface extractor: Surface Nets (smoother, quad-dominant) or MC (default,
+    // manifold-robust). Either way it drives the same mc_prog two-pass dispatch in
+    // the Mesh phase, so nothing downstream of here cares which one was compiled.
+    // Mirror mode forces MC: the seam machinery (clip_to_plus_x / reflect / H-D gate)
+    // relies on MC landing vertices exactly on the x=0 corner layer, whereas Surface
+    // Nets puts them at cell centres — no vertex sits on the plane, so the seam can't
+    // close. Surface Nets is therefore a faithful-merge-only option.
+    const bool use_nets = surface_nets && !mirror;
+    job->mc_prog.id     = build_prog(use_nets ? NETS_SRC : MC_SRC, { SDF_GID_SRC });
     if (!job->count_prog.id || !job->expand_prog.id || !job->sign_prog.id || !job->mc_prog.id)
         return fail("SDF shader compile failed (see stderr)");
 
@@ -1537,8 +1697,8 @@ void voxel_merge_destroy(VoxelMergeJob* job) { delete job; }
 
 // Synchronous convenience: drive the tick job to completion in one (blocking) call.
 VoxelMergeResult voxel_merge_selected(Scene& scene, ComputeState& cs,
-                                      int resolution, bool mirror) {
-    VoxelMergeJob* job = voxel_merge_begin(scene, cs, resolution, mirror);
+                                      int resolution, bool mirror, bool surface_nets) {
+    VoxelMergeJob* job = voxel_merge_begin(scene, cs, resolution, mirror, surface_nets);
     VoxelMergeResult out;
     while (voxel_merge_tick(scene, cs, *job, out) == VoxelMergeStatus::Working) {}
     voxel_merge_destroy(job);

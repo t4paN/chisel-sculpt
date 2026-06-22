@@ -60,7 +60,7 @@ void draw_remesh_progress(TextOverlay& text, int win_w, int win_h) {
 }
 
 void draw_voxel_merge_confirm(TextOverlay& text, int resolution, int n_selected,
-                             int win_w, int win_h) {
+                             bool surface_nets, int win_w, int win_h) {
     text.draw_panel(0, 0, (float)win_w, (float)win_h,
                    win_w, win_h, 0.0f, 0.0f, 0.0f, 0.5f);
 
@@ -80,7 +80,11 @@ void draw_voxel_merge_confirm(TextOverlay& text, int resolution, int n_selected,
     std::snprintf(line, sizeof(line), "Resolution: %d   ( [ - / + ] )", resolution);
     text.draw_text(line, cx - 360.0f, cy + 4.0f, scale, win_w, win_h, CGA(light_cyan), 1.0f);
 
-    text.draw_text("Y merge   M mirror-merge   N / ESC cancel", cx - 360.0f, cy + 40.0f,
+    std::snprintf(line, sizeof(line), "Extractor: %s   ( S toggles )",
+                  surface_nets ? "Surface Nets (Y merge only)" : "Marching Cubes");
+    text.draw_text(line, cx - 360.0f, cy + 34.0f, scale, win_w, win_h, CGA(light_cyan), 1.0f);
+
+    text.draw_text("Y merge   M mirror-merge   N / ESC cancel", cx - 360.0f, cy + 70.0f,
                   scale, win_w, win_h, CGA(yellow), 1.0f);
 }
 

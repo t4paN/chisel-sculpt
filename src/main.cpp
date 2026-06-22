@@ -659,7 +659,8 @@ int main(int argc, char* argv[]) {
                 scene.materialize_active_cpu();  // 2b: merge reads the live surface (mesh.pos)
                 vmerge_job = voxel_merge_begin(scene, compute,
                                                input.voxel_merge_resolution,
-                                               input.voxel_merge_mirror);
+                                               input.voxel_merge_mirror,
+                                               input.voxel_merge_surface_nets);
                 input.voxel_merge_in_progress = true;
             }
         }
@@ -1343,7 +1344,8 @@ int main(int argc, char* argv[]) {
             draw_remesh_confirm(text, win_w, win_h);
         if (input.voxel_merge_confirm_pending)
             draw_voxel_merge_confirm(text, input.voxel_merge_resolution,
-                                     (int)scene.selected_ids().size(), win_w, win_h);
+                                     (int)scene.selected_ids().size(),
+                                     input.voxel_merge_surface_nets, win_w, win_h);
         if (input.remesh_in_progress)
             draw_remesh_progress(text, win_w, win_h);
         if (input.voxel_merge_in_progress)
