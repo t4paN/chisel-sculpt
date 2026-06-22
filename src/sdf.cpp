@@ -1242,6 +1242,7 @@ struct VoxelMergeJob {
     Phase phase = Phase::Splat;
 
     bool     mirror = false;
+    bool     use_nets = false;     // Surface Nets extractor chosen (vs Marching Cubes)
     SdfGrid  grid;
     int      band = 0;
     uint32_t tri_count    = 0;
@@ -1264,6 +1265,26 @@ struct VoxelMergeJob {
     std::chrono::high_resolution_clock::time_point t0;
     VoxelMergeResult res;
 };
+
+// Mirror the signed field about the x=0 corner layer by copying the kept +x half
+// onto the -x half, so an extractor reads an EXACTLY symmetric field. Used by the
+// Surface-Nets mirror path: SN has no vertices on the plane to seam (unlike MC), so
+// instead of clip/reflect surgery we symmetrise the field and extract the whole
+// surface — its vertices come out in exact mirror pairs, continuous through x=0.
+// (The grid origin was already snapped so x=0 is a corner layer, hence seam is an
+// integer corner index and the mirror is index-exact.)
+static void symmetrise_field_x(std::vector<float>& field, const SdfGrid& grid) {
+    const int R1   = (int)grid.R + 1;
+    const int seam = (int)std::lround(-grid.origin.x / grid.voxel);  // x=0 corner index
+    if (seam <= 0 || seam >= (int)grid.R) return;                    // plane off-grid: nothing to do
+    for (int k = 0; k < R1; k++)
+    for (int j = 0; j < R1; j++)
+        for (int i = 0; i < seam; i++) {            // -x corner <- mirrored +x corner
+            const int src = 2 * seam - i;
+            if (src > (int)grid.R) continue;
+            field[i + R1 * (j + R1 * k)] = field[src + R1 * (j + R1 * k)];
+        }
+}
 
 VoxelMergeJob* voxel_merge_begin(Scene& scene, ComputeState& cs,
                                  int resolution, bool mirror, bool surface_nets) {
@@ -1384,11 +1405,15 @@ VoxelMergeJob* voxel_merge_begin(Scene& scene, ComputeState& cs,
     // Iso-surface extractor: Surface Nets (smoother, quad-dominant) or MC (default,
     // manifold-robust). Either way it drives the same mc_prog two-pass dispatch in
     // the Mesh phase, so nothing downstream of here cares which one was compiled.
-    // Mirror mode forces MC: the seam machinery (clip_to_plus_x / reflect / H-D gate)
-    // relies on MC landing vertices exactly on the x=0 corner layer, whereas Surface
-    // Nets puts them at cell centres — no vertex sits on the plane, so the seam can't
-    // close. Surface Nets is therefore a faithful-merge-only option.
-    const bool use_nets = surface_nets && !mirror;
+    // Mirror handling differs by extractor. MC lands vertices exactly on the x=0
+    // corner layer, so the mirror path keeps the +x half and reflects it (the
+    // clip_to_plus_x / reflect / H-D seam machinery). Surface Nets puts vertices at
+    // cell centres — none sit on the plane — so that surgery can't seam it. Instead
+    // the SN mirror path symmetrises the FIELD about x=0 in the Mesh phase and
+    // extracts the whole thing: vertices come out in exact mirror pairs, continuous
+    // through the plane, no seam to close. (Handled in Mesh/Finish via use_nets.)
+    const bool use_nets = surface_nets;
+    job->use_nets       = use_nets;
     job->mc_prog.id     = build_prog(use_nets ? NETS_SRC : MC_SRC, { SDF_GID_SRC });
     if (!job->count_prog.id || !job->expand_prog.id || !job->sign_prog.id || !job->mc_prog.id)
         return fail("SDF shader compile failed (see stderr)");
@@ -1547,6 +1572,11 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
         glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
                            (GLsizeiptr)j.corner_count*sizeof(float), j.field_cpu.data());
         flood_fill_sign(j.field_cpu, grid.R, BAND_FAR);
+        // Surface-Nets mirror: make the field exactly symmetric here, so the SN
+        // dispatch below extracts a continuous mirror-paired surface (no seam to
+        // close). MC's mirror path leaves the field as-is and seams at extraction.
+        if (j.mirror && j.use_nets)
+            symmetrise_field_x(j.field_cpu, grid);
         glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
                         (GLsizeiptr)j.corner_count*sizeof(float), j.field_cpu.data());
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
@@ -1623,9 +1653,9 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
         // ---- Relax the MC triangulation onto the (already read-back) signed field ----
         // Spreads the blocky/uneven MC tris to uniform spacing while holding the
         // silhouette. Reuses j.field_cpu from the Mesh phase (no second readback).
-        if (j.mirror) {
-            // Keep +x, relax that half alone (seam pinned), then mirror it -> both
-            // sides identical, exact partner map, no smooth seam fight.
+        if (j.mirror && !j.use_nets) {
+            // MC keep-+x-and-reflect: relax that half alone (seam pinned), then
+            // mirror it -> both sides identical, exact partner map, no seam fight.
             std::vector<uint8_t> seam;
             clip_to_plus_x(welded, grid.voxel, seam);
             weld_near_seam(welded, grid.voxel, seam);   // B: collapse the seam sliver column
@@ -1634,6 +1664,10 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
             reflect_across_x(welded, seam);
             weld_seam_band(welded, grid.voxel);   // H-A: weld any unflagged escapees onto x=0
         } else {
+            // Faithful merge, OR the SN mirror path: the field was already made
+            // symmetric (Mesh phase) so the full extracted surface is mirror-paired
+            // and continuous — a plain relax keeps that symmetry (Jacobi + symmetric
+            // field => mirror-paired verts move identically). No seam surgery.
             relax_to_field(welded, j.field_cpu, grid, /*iters=*/8, /*lambda=*/0.5f);
         }
 
@@ -1650,10 +1684,12 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
         // ---- Manifold report (surfaced so a bad merge is visible before print) ----
         manifold_report(welded, j.res.boundary_edges, j.res.nonmanifold_edges, j.res.components);
 
-        // ---- H-D: gate the splice on the report (mirror path). A closed mirror merge
-        //      MUST be watertight by construction; any boundary/non-manifold edge means
-        //      the seam failed to close -> refuse rather than detonate downstream. ----
-        if (j.mirror && (j.res.boundary_edges != 0 || j.res.nonmanifold_edges != 0)) {
+        // ---- H-D: gate the splice on the report (MC mirror path only). A reflected
+        //      MC merge MUST be watertight by construction; any boundary/non-manifold
+        //      edge means the seam failed to close -> refuse rather than detonate
+        //      downstream. SN is exempt: like the faithful path it tolerates the
+        //      naive-SN two-sheet non-manifold edges (MC remains the print default). ----
+        if (j.mirror && !j.use_nets && (j.res.boundary_edges != 0 || j.res.nonmanifold_edges != 0)) {
             char buf[160];
             std::snprintf(buf, sizeof(buf),
                           "mirror seam did not close (%u bnd, %u nonmf) - merge refused "

@@ -48,6 +48,9 @@ struct VoxelMergeResult {
 // `surface_nets` = extract with Surface Nets (smoother, more uniform, quad-dominant,
 // fewer slivers) instead of the default Marching Cubes. MC stays the default because
 // the naive Surface Nets vertex-per-cell can be non-manifold on thin/ambiguous cells.
+// Works with mirror too: rather than MC's keep-+x-and-reflect seam (SN has no vertex
+// on the plane), the SN mirror path symmetrises the field about x=0 and extracts the
+// whole surface, yielding exact mirror-paired verts continuous through the plane.
 VoxelMergeResult voxel_merge_selected(Scene& scene, ComputeState& cs,
                                       int resolution, bool mirror = false,
                                       bool surface_nets = false);

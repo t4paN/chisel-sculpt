@@ -24,6 +24,7 @@ Chisel runs the entire sculpt pipeline on the GPU — brush operations, mesh upd
 - Pen pressure is X11/XInput2 only (Wacom et al.); no Wayland tablet support yet
 - Voxel merge output is now evened out (tangential relaxation onto the iso-surface) and can be made mirror-symmetric; heavily sculpted, non-watertight input can still need a resolution bump
 - Brush feel could use more polish (falloff curves, stroke interpolation)
+- After a *full* undo of inward/carve ("negative") strokes, normals where those strokes overlapped can look slightly off (only seen on carve strokes, not additive ones) — purely cosmetic, and a quick pass of the smooth brush fixes it
 - No texture painting
 - Linux-only dev, Windows builds via CI (not battle-tested)
 

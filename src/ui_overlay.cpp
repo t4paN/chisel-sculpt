@@ -81,7 +81,7 @@ void draw_voxel_merge_confirm(TextOverlay& text, int resolution, int n_selected,
     text.draw_text(line, cx - 360.0f, cy + 4.0f, scale, win_w, win_h, CGA(light_cyan), 1.0f);
 
     std::snprintf(line, sizeof(line), "Extractor: %s   ( S toggles )",
-                  surface_nets ? "Surface Nets (Y merge only)" : "Marching Cubes");
+                  surface_nets ? "Surface Nets" : "Marching Cubes");
     text.draw_text(line, cx - 360.0f, cy + 34.0f, scale, win_w, win_h, CGA(light_cyan), 1.0f);
 
     text.draw_text("Y merge   M mirror-merge   N / ESC cancel", cx - 360.0f, cy + 70.0f,
