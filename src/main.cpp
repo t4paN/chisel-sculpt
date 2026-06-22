@@ -8,7 +8,6 @@
 #include <cctype>
 #include <algorithm>
 #include <string>
-#include <sys/stat.h>
 
 #include "mesh.h"
 #include "camera.h"
@@ -197,14 +196,21 @@ int main(int argc, char* argv[]) {
         std::string base = (xdg && *xdg)   ? std::string(xdg)
                          : (home && *home) ? std::string(home) + "/.config"
                          :                   std::string();
+#ifdef _WIN32
+        // Windows has neither XDG_CONFIG_HOME nor HOME — use %APPDATA%.
+        if (base.empty()) {
+            const char* appdata = std::getenv("APPDATA");
+            if (appdata && *appdata) base = appdata;
+        }
+#endif
         if (!base.empty()) {
             std::string dir = base + "/chisel";
-            mkdir(base.c_str(), 0755);   // harmless if it already exists
-            mkdir(dir.c_str(),  0755);
+            std::error_code ec;
+            std::filesystem::create_directories(dir, ec);  // harmless if it already exists
             imgui_ini = dir + "/imgui.ini";
             ImGui::GetIO().IniFilename = imgui_ini.c_str();
         }
-        // else (no HOME/XDG): leave ImGui's default ("imgui.ini" in the CWD).
+        // else (no config dir resolvable): leave ImGui's default ("imgui.ini" in the CWD).
     }
     ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
     ImGui::GetStyle().HoverDelayNormal = 0.0f;
