@@ -1,9 +1,11 @@
-// Stage 3 probe: GLFW window -> WGPUSurface (X11) -> device -> configure ->
+// Stage 3+4 probe: GLFW window -> WGPUSurface (X11) -> device -> configure ->
 // render a real mesh (icosphere from the gl tree's sphere.cpp) transformed by a
 // Camera UBO, depth-tested, with the procedural matcap-grey shading ported from
-// renderer.cpp. Proves the vertex-buffer + index-buffer + uniform-bind-group +
-// depth path on wgpu-native v29. Matcap *texture*, cursor/shadow and ImGui come
-// in later sub-steps.
+// renderer.cpp, plus line/disc overlays and a full Dear ImGui pass (Stage 3).
+// Stage 4 adds the picking FBO: an offscreen MRT pass writing {linear depth,
+// world normal, triangle-id} (renderer.cpp's screen_buf_* shaders) and an async
+// MAP_READ readback of the center pixel's triangle id at the end of each frame —
+// the groundwork every brush stage needs to seed a stroke at pen-down.
 //
 // Run live (window stays open until closed) for a screenshot, or set
 // CHISEL_PROBE_FRAMES=N to auto-exit after N presented frames (CI/headless-ish).
@@ -11,6 +13,7 @@
 #include <GLFW/glfw3.h>
 #include <GLFW/glfw3native.h>
 #include <webgpu/webgpu.h>
+#include <webgpu/wgpu.h>   // wgpu-native extensions: wgpuDevicePoll for the readback pump
 
 #include "mesh.h"
 #include "camera.h"
@@ -95,6 +98,69 @@ fn fs_disc(in: VOut) -> @location(0) vec4<f32> {
     return vec4<f32>(0.95, 0.55, 0.15, a);  // Chisel orange, straight alpha
 }
 )";
+
+// Stage 4: picking-FBO MRT shader. Ports renderer.cpp's screen_buf_{vert,frag}:
+// writes linear depth (@loc0, R32F), WORLD normal (@loc1, RGBA16F — not view-space,
+// the brush back-projection wants world dirs), and the flat per-triangle id
+// (@loc2, R32U). Camera UBO is the same {view, proj} bind group as the mesh pass.
+// Bary (renderer's @loc3) is deferred until the mask brush needs it.
+static const char* kPickWGSL = R"(
+struct Camera { view: mat4x4<f32>, proj: mat4x4<f32> };
+@group(0) @binding(0) var<uniform> cam: Camera;
+
+struct VSOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) nrmWorld: vec3<f32>,
+    @location(1) depth: f32,
+    @location(2) @interpolate(flat) triid: u32,
+};
+
+@vertex
+fn vs_pick(@location(0) aPos: vec3<f32>, @location(1) aNorm: vec3<f32>,
+           @location(2) aTriID: u32) -> VSOut {
+    var o: VSOut;
+    let viewPos = cam.view * vec4<f32>(aPos, 1.0);
+    o.nrmWorld = normalize(aNorm);   // world-space, do NOT transform by view
+    o.depth = -viewPos.z;            // linear depth, positive into screen
+    o.triid = aTriID;
+    o.pos = cam.proj * viewPos;
+    return o;
+}
+
+struct FSOut {
+    @location(0) depth: f32,
+    @location(1) nrm: vec4<f32>,
+    @location(2) triid: u32,
+};
+
+@fragment
+fn fs_pick(in: VSOut) -> FSOut {
+    var o: FSOut;
+    o.depth = in.depth;
+    o.nrm = vec4<f32>(normalize(in.nrmWorld), 1.0);
+    o.triid = in.triid;
+    return o;
+}
+)";
+
+// De-index the SOA mesh into a flat per-triangle-vertex layout (3 unique verts per
+// triangle), each carrying its triangle index — exactly what renderer.cpp's
+// screen_expand compute kernel builds so the flat triid attribute is well-defined
+// (a shared indexed vertex can't carry one triangle's id). pos/norm xyz + u32 triid.
+static void buildExpanded(const Mesh& mesh,
+                          std::vector<float>& pos, std::vector<float>& nrm,
+                          std::vector<uint32_t>& triid) {
+    const uint32_t flatVc = (uint32_t)mesh.indices.size();
+    pos.resize(flatVc * 3);
+    nrm.resize(flatVc * 3);
+    triid.resize(flatVc);
+    for (uint32_t k = 0; k < flatVc; ++k) {
+        uint32_t v = mesh.indices[k];
+        pos[k*3+0] = mesh.pos_x[v]; pos[k*3+1] = mesh.pos_y[v]; pos[k*3+2] = mesh.pos_z[v];
+        nrm[k*3+0] = mesh.norm_x[v]; nrm[k*3+1] = mesh.norm_y[v]; nrm[k*3+2] = mesh.norm_z[v];
+        triid[k] = k / 3;
+    }
+}
 
 // ---- column-major 4x4 multiply: out = a * b (m[col*4 + row]) ----
 static void mat_mul(float* out, const float* a, const float* b) {
@@ -223,6 +289,64 @@ static void makeDepth(WGPUDevice device, int w, int h,
     *view = wgpuTextureCreateView(*tex, nullptr);
 }
 
+// Stage 4 picking FBO: the GL screen-buffer MRT set. Three color targets matching
+// renderer.cpp's create_screen_buffers (depth R32F / normal RGBA16F / triid R32U,
+// usage RenderAttachment|CopySrc so we can read them back) plus a private depth
+// buffer for z-testing the pick pass. Recreated on resize like the main depth.
+static const WGPUTextureFormat kPickDepthFmt  = WGPUTextureFormat_R32Float;
+static const WGPUTextureFormat kPickNormalFmt = WGPUTextureFormat_RGBA16Float;
+static const WGPUTextureFormat kPickTriidFmt  = WGPUTextureFormat_R32Uint;
+
+struct PickTargets {
+    WGPUTexture depthTex = nullptr, normalTex = nullptr, triidTex = nullptr, zTex = nullptr;
+    WGPUTextureView depthView = nullptr, normalView = nullptr, triidView = nullptr, zView = nullptr;
+};
+
+static void makePickTargets(WGPUDevice device, int w, int h, PickTargets* p) {
+    WGPUTextureView* views[4] = { &p->depthView, &p->normalView, &p->triidView, &p->zView };
+    WGPUTexture*     texs[4]  = { &p->depthTex,  &p->normalTex,  &p->triidTex,  &p->zTex  };
+    for (int i = 0; i < 4; ++i) {
+        if (*views[i]) { wgpuTextureViewRelease(*views[i]); *views[i] = nullptr; }
+        if (*texs[i])  { wgpuTextureRelease(*texs[i]);       *texs[i]  = nullptr; }
+    }
+    auto make = [&](WGPUTextureFormat fmt, WGPUTextureUsage usage,
+                    WGPUTexture* tex, WGPUTextureView* view) {
+        WGPUTextureDescriptor td = {};
+        td.usage = usage;
+        td.dimension = WGPUTextureDimension_2D;
+        td.size = { (uint32_t)w, (uint32_t)h, 1 };
+        td.format = fmt;
+        td.mipLevelCount = 1;
+        td.sampleCount = 1;
+        *tex  = wgpuDeviceCreateTexture(device, &td);
+        *view = wgpuTextureCreateView(*tex, nullptr);
+    };
+    WGPUTextureUsage colorUsage =
+        (WGPUTextureUsage)(WGPUTextureUsage_RenderAttachment | WGPUTextureUsage_CopySrc);
+    make(kPickDepthFmt,  colorUsage, &p->depthTex,  &p->depthView);
+    make(kPickNormalFmt, colorUsage, &p->normalTex, &p->normalView);
+    make(kPickTriidFmt,  colorUsage, &p->triidTex,  &p->triidView);
+    make(kDepthFormat,   WGPUTextureUsage_RenderAttachment, &p->zTex, &p->zView);
+}
+
+static void releasePickTargets(PickTargets* p) {
+    WGPUTextureView views[4] = { p->depthView, p->normalView, p->triidView, p->zView };
+    WGPUTexture     texs[4]  = { p->depthTex,  p->normalTex,  p->triidTex,  p->zTex  };
+    for (int i = 0; i < 4; ++i) {
+        if (views[i]) wgpuTextureViewRelease(views[i]);
+        if (texs[i])  wgpuTextureRelease(texs[i]);
+    }
+    *p = PickTargets{};
+}
+
+// One-shot readback state: the map callback flips done/status. Legal here because
+// the probe (like the real app) only reads back at a discrete moment, never mid-stroke.
+struct MapResult { bool done = false; WGPUMapAsyncStatus status = WGPUMapAsyncStatus_Error; };
+static void onMap(WGPUMapAsyncStatus status, WGPUStringView, void* ud1, void*) {
+    auto* r = static_cast<MapResult*>(ud1);
+    r->done = true; r->status = status;
+}
+
 int main() {
     if (!glfwInit()) { std::printf("[win] glfwInit failed\n"); return 1; }
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);  // no GL context — WebGPU owns the surface
@@ -285,6 +409,10 @@ int main() {
     WGPUTexture depthTex = nullptr; WGPUTextureView depthView = nullptr;
     makeDepth(device, g_fbw, g_fbh, &depthTex, &depthView);
 
+    // ---- Stage 4 pick FBO targets (MRT) ----
+    PickTargets pick;
+    makePickTargets(device, g_fbw, g_fbh, &pick);
+
     // ---- mesh: icosphere from the gl tree's sphere.cpp; normals via mesh.cpp ----
     Mesh mesh = icosphere(4);            // 4 subdivisions ~ 2562 verts / 5120 tris
     mesh.build_adjacency();
@@ -312,6 +440,15 @@ int main() {
     WGPUBuffer posVB = makeBuf(posBuf.data(), posBuf.size()*sizeof(float), WGPUBufferUsage_Vertex);
     WGPUBuffer nrmVB = makeBuf(nrmBuf.data(), nrmBuf.size()*sizeof(float), WGPUBufferUsage_Vertex);
     WGPUBuffer idxB  = makeBuf(mesh.indices.data(), icount*sizeof(uint32_t), WGPUBufferUsage_Index);
+
+    // Stage 4: de-indexed mesh for the pick pass (flat per-triangle id needs unique
+    // verts). 3 buffers: pos @loc0, norm @loc1, triid @loc2 (Uint32).
+    std::vector<float> exPos, exNrm; std::vector<uint32_t> exTriid;
+    buildExpanded(mesh, exPos, exNrm, exTriid);
+    const uint32_t exVcount = (uint32_t)exTriid.size();
+    WGPUBuffer pickPosVB   = makeBuf(exPos.data(),   exPos.size()*sizeof(float),     WGPUBufferUsage_Vertex);
+    WGPUBuffer pickNrmVB   = makeBuf(exNrm.data(),   exNrm.size()*sizeof(float),     WGPUBufferUsage_Vertex);
+    WGPUBuffer pickTriidVB = makeBuf(exTriid.data(), exTriid.size()*sizeof(uint32_t), WGPUBufferUsage_Vertex);
 
     // ---- camera UBO: { mat4 view; mat4 proj; } = 128 bytes ----
     Camera cam;
@@ -507,6 +644,63 @@ int main() {
     if (!discPipeline) { std::printf("[win] disc pipeline failed\n"); return 2; }
     std::printf("[win] overlay pipelines ready (lines + blended disc)\n");
 
+    // ==================== Stage 4: pick MRT pipeline ====================
+    WGPUShaderSourceWGSL pickWgsl = {};
+    pickWgsl.chain.sType = WGPUSType_ShaderSourceWGSL;
+    pickWgsl.code = sv(kPickWGSL);
+    WGPUShaderModuleDescriptor pickSm = {}; pickSm.nextInChain = &pickWgsl.chain;
+    WGPUShaderModule pickModule = wgpuDeviceCreateShaderModule(device, &pickSm);
+    if (!pickModule) { std::printf("[win] pick shader module failed\n"); return 2; }
+
+    WGPUVertexAttribute pPosAttr = {};
+    pPosAttr.format = WGPUVertexFormat_Float32x3; pPosAttr.shaderLocation = 0;
+    WGPUVertexAttribute pNrmAttr = {};
+    pNrmAttr.format = WGPUVertexFormat_Float32x3; pNrmAttr.shaderLocation = 1;
+    WGPUVertexAttribute pIdAttr = {};
+    pIdAttr.format = WGPUVertexFormat_Uint32; pIdAttr.shaderLocation = 2;
+    WGPUVertexBufferLayout pickVbl[3] = {};
+    pickVbl[0].arrayStride = 3 * sizeof(float); pickVbl[0].attributeCount = 1; pickVbl[0].attributes = &pPosAttr;
+    pickVbl[1].arrayStride = 3 * sizeof(float); pickVbl[1].attributeCount = 1; pickVbl[1].attributes = &pNrmAttr;
+    pickVbl[2].arrayStride = sizeof(uint32_t);  pickVbl[2].attributeCount = 1; pickVbl[2].attributes = &pIdAttr;
+
+    // three color targets, no blending (depth/normal/id are data, not composited)
+    WGPUColorTargetState pickTargets[3] = {};
+    pickTargets[0].format = kPickDepthFmt;  pickTargets[0].writeMask = WGPUColorWriteMask_All;
+    pickTargets[1].format = kPickNormalFmt; pickTargets[1].writeMask = WGPUColorWriteMask_All;
+    pickTargets[2].format = kPickTriidFmt;  pickTargets[2].writeMask = WGPUColorWriteMask_All;
+    WGPUFragmentState pickFrag = {};
+    pickFrag.module = pickModule; pickFrag.entryPoint = sv("fs_pick");
+    pickFrag.targetCount = 3; pickFrag.targets = pickTargets;
+
+    WGPUDepthStencilState pickDepth = {};
+    pickDepth.format = kDepthFormat;
+    pickDepth.depthWriteEnabled = WGPUOptionalBool_True;
+    pickDepth.depthCompare = WGPUCompareFunction_Less;
+    pickDepth.stencilFront.compare = WGPUCompareFunction_Always;
+    pickDepth.stencilBack.compare  = WGPUCompareFunction_Always;
+
+    WGPURenderPipelineDescriptor ppd = {};
+    ppd.layout = pipelineLayout;             // same camera bind-group layout
+    ppd.vertex.module = pickModule; ppd.vertex.entryPoint = sv("vs_pick");
+    ppd.vertex.bufferCount = 3; ppd.vertex.buffers = pickVbl;
+    ppd.primitive.topology = WGPUPrimitiveTopology_TriangleList;
+    ppd.primitive.frontFace = WGPUFrontFace_CCW;
+    ppd.primitive.cullMode = WGPUCullMode_None;
+    ppd.depthStencil = &pickDepth;
+    ppd.multisample.count = 1; ppd.multisample.mask = 0xFFFFFFFFu;
+    ppd.fragment = &pickFrag;
+    WGPURenderPipeline pickPipeline = wgpuDeviceCreateRenderPipeline(device, &ppd);
+    if (!pickPipeline) { std::printf("[win] pick pipeline failed\n"); return 2; }
+
+    // Readback staging buffer: one R32U pixel, but bytesPerRow must be 256-aligned,
+    // so the staging row is 256 bytes (the id sits in the first 4).
+    const uint32_t kReadbackBytes = 256;
+    WGPUBufferDescriptor sbd = {};
+    sbd.usage = (WGPUBufferUsage)(WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst);
+    sbd.size  = kReadbackBytes;
+    WGPUBuffer readbackBuf = wgpuDeviceCreateBuffer(device, &sbd);
+    std::printf("[win] pick pipeline ready (MRT depth/normal/triid + readback buffer)\n");
+
     // ---- Dear ImGui (GLFW platform + WebGPU renderer) ----
     // GLFW callbacks were installed above; InitForOther chains to them. The UI is
     // drawn in its own loadOp=Load pass with no depth attachment, so the renderer
@@ -533,6 +727,7 @@ int main() {
         if (g_resized) {
             configureSurface(surface, device, format, g_fbw, g_fbh);
             makeDepth(device, g_fbw, g_fbh, &depthTex, &depthView);
+            makePickTargets(device, g_fbw, g_fbh, &pick);
             // disc is aspect-corrected in NDC -> rebuild on resize
             discVerts = buildDisc(g_fbw, g_fbh);
             wgpuQueueWriteBuffer(queue, discVB, 0, discVerts.data(), discVerts.size()*sizeof(float));
@@ -596,6 +791,56 @@ int main() {
         rp.depthStencilAttachment = &depthAtt;
 
         WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(device, nullptr);
+
+        // ============ Stage 4: pick MRT pass (offscreen) + center-pixel copy ============
+        // Render the mesh into {depth, normal, triid}, then stage the center pixel's
+        // triangle id for an async readback after submit. Mirrors how the real app
+        // seeds a stroke at pen-down (the only legal readback moment).
+        WGPURenderPassColorAttachment pickAtt[3] = {};
+        pickAtt[0].view = pick.depthView;  pickAtt[0].depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
+        pickAtt[0].loadOp = WGPULoadOp_Clear; pickAtt[0].storeOp = WGPUStoreOp_Store;
+        pickAtt[0].clearValue = WGPUColor{0,0,0,0};
+        pickAtt[1].view = pick.normalView; pickAtt[1].depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
+        pickAtt[1].loadOp = WGPULoadOp_Clear; pickAtt[1].storeOp = WGPUStoreOp_Store;
+        pickAtt[1].clearValue = WGPUColor{0,0,0,0};
+        pickAtt[2].view = pick.triidView; pickAtt[2].depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
+        pickAtt[2].loadOp = WGPULoadOp_Clear; pickAtt[2].storeOp = WGPUStoreOp_Store;
+        pickAtt[2].clearValue = WGPUColor{4294967295.0,0,0,0};  // 0xFFFFFFFF = "no triangle"
+
+        WGPURenderPassDepthStencilAttachment pickZ = {};
+        pickZ.view = pick.zView;
+        pickZ.depthLoadOp = WGPULoadOp_Clear; pickZ.depthStoreOp = WGPUStoreOp_Store;
+        pickZ.depthClearValue = 1.0f;
+
+        WGPURenderPassDescriptor pickRp = {};
+        pickRp.colorAttachmentCount = 3; pickRp.colorAttachments = pickAtt;
+        pickRp.depthStencilAttachment = &pickZ;
+
+        WGPURenderPassEncoder pickPass = wgpuCommandEncoderBeginRenderPass(enc, &pickRp);
+        wgpuRenderPassEncoderSetPipeline(pickPass, pickPipeline);
+        wgpuRenderPassEncoderSetBindGroup(pickPass, 0, bindGroup, 0, nullptr);
+        wgpuRenderPassEncoderSetVertexBuffer(pickPass, 0, pickPosVB, 0, WGPU_WHOLE_SIZE);
+        wgpuRenderPassEncoderSetVertexBuffer(pickPass, 1, pickNrmVB, 0, WGPU_WHOLE_SIZE);
+        wgpuRenderPassEncoderSetVertexBuffer(pickPass, 2, pickTriidVB, 0, WGPU_WHOLE_SIZE);
+        wgpuRenderPassEncoderDraw(pickPass, exVcount, 1, 0, 0);
+        wgpuRenderPassEncoderEnd(pickPass);
+        wgpuRenderPassEncoderRelease(pickPass);
+
+        // copy the center pixel's triangle id into the staging buffer (256-aligned row)
+        uint32_t cx = (uint32_t)(g_fbw / 2), cy = (uint32_t)(g_fbh / 2);
+        WGPUTexelCopyTextureInfo copySrc = {};
+        copySrc.texture = pick.triidTex;
+        copySrc.mipLevel = 0;
+        copySrc.origin = { cx, cy, 0 };
+        copySrc.aspect = WGPUTextureAspect_All;
+        WGPUTexelCopyBufferInfo copyDst = {};
+        copyDst.buffer = readbackBuf;
+        copyDst.layout.offset = 0;
+        copyDst.layout.bytesPerRow = kReadbackBytes;   // 256, satisfies alignment
+        copyDst.layout.rowsPerImage = 1;
+        WGPUExtent3D copyExtent = { 1, 1, 1 };
+        wgpuCommandEncoderCopyTextureToBuffer(enc, &copySrc, &copyDst, &copyExtent);
+
         WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(enc, &rp);
         wgpuRenderPassEncoderSetPipeline(pass, pipeline);
         wgpuRenderPassEncoderSetBindGroup(pass, 0, bindGroup, 0, nullptr);
@@ -634,6 +879,34 @@ int main() {
 
         WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(enc, nullptr);
         wgpuQueueSubmit(queue, 1, &cmd);
+
+        // ---- Stage 4: async one-shot readback of the staged center-pixel triangle id ----
+        // wgpu-native fires the map callback from wgpuDevicePoll; wait=true blocks until
+        // the submitted work (incl. the copy) is done, so this is a synchronous one-shot.
+        MapResult mr;
+        WGPUBufferMapCallbackInfo mcb = {};
+        mcb.mode = WGPUCallbackMode_AllowProcessEvents;
+        mcb.callback = onMap;
+        mcb.userdata1 = &mr;
+        wgpuBufferMapAsync(readbackBuf, WGPUMapMode_Read, 0, kReadbackBytes, mcb);
+        while (!mr.done) wgpuDevicePoll(device, true, nullptr);
+        if (mr.status == WGPUMapAsyncStatus_Success) {
+            const uint32_t* mp =
+                (const uint32_t*)wgpuBufferGetMappedRange(readbackBuf, 0, kReadbackBytes);
+            uint32_t centerId = mp ? mp[0] : 0xFFFFFFFFu;
+            wgpuBufferUnmap(readbackBuf);
+            if (frame < 8) {
+                if (centerId == 0xFFFFFFFFu)
+                    std::printf("[win] frame %ld center triid = (background)\n", frame);
+                else
+                    std::printf("[win] frame %ld center triid = %u  (of %u tris)\n",
+                                frame, centerId, icount / 3);
+            }
+        } else {
+            std::printf("[win] readback map failed: status=%d\n", (int)mr.status);
+            wgpuBufferUnmap(readbackBuf);
+        }
+
         wgpuSurfacePresent(surface);
 
         wgpuCommandBufferRelease(cmd);
@@ -649,6 +922,13 @@ int main() {
     ImGui_ImplWGPU_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();
+    wgpuBufferRelease(readbackBuf);
+    wgpuRenderPipelineRelease(pickPipeline);
+    wgpuShaderModuleRelease(pickModule);
+    wgpuBufferRelease(pickTriidVB);
+    wgpuBufferRelease(pickNrmVB);
+    wgpuBufferRelease(pickPosVB);
+    releasePickTargets(&pick);
     wgpuRenderPipelineRelease(discPipeline);
     wgpuShaderModuleRelease(discModule);
     wgpuBufferRelease(discVB);

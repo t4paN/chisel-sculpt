@@ -2,6 +2,24 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-23 — WebGPU port, Stage 4: picking FBO (MRT + async readback)
+
+- **`chisel-wgpu-window` now runs the pick-FBO render path** — an offscreen MRT pass that ports
+  renderer.cpp's `screen_buf_*` shaders: three color targets `{linear depth R32Float, world normal
+  RGBA16Float, triangle-id R32Uint}` plus a private `Depth24Plus` z-buffer. The mesh is de-indexed
+  into a flat per-triangle-vertex layout (3 unique verts/tri, each carrying its triangle index, via
+  `buildExpanded` — the same data renderer.cpp's `screen_expand` compute kernel produces) so the flat
+  `triid` attribute is well-defined. Reuses the existing camera bind group.
+- **Async `MAP_READ` readback proven.** After submit, `wgpuCommandEncoderCopyTextureToBuffer` stages
+  the center pixel's triangle id (256-byte `bytesPerRow` alignment honored) into a `MapRead|CopyDst`
+  buffer, then `wgpuBufferMapAsync` + a `wgpuDevicePoll(device, true, …)` busy-wait fires the map
+  callback — a synchronous one-shot, legal because (like the real app) the probe only reads back at a
+  discrete moment, never mid-stroke. Triangle-id target clears to `0xFFFFFFFF` ("no triangle").
+- **Verified:** `CHISEL_PROBE_FRAMES=8 ./build-wgpu/chisel-wgpu-window` → pick pipeline ready, each
+  frame reads back the center-pixel triangle id (settles to **1442** of 5120 — a real front-facing
+  triangle, not the background sentinel), 8 frames presented, exit 0, no validation errors. **Stage 4
+  is complete.** Next: Stage 5 brushes, starting with mask end-to-end.
+
 ## 2026-06-23 — WebGPU port, Stage 3 (finale): Dear ImGui via imgui_impl_wgpu
 
 - **`chisel-wgpu-window` now renders a full Dear ImGui frame over the 3D scene.** Vendored
