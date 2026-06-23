@@ -230,6 +230,15 @@ void MultiresGPU::materialize_cpu(MultiresStack& stack, Mesh& mesh, GLuint vbo_p
             }
         }
         glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+        // Normals must track the positions we just pulled. The flip leaves
+        // mesh.norm_* covering only the moved (snap_list) verts and skips the
+        // 1-ring, so a later upload_mesh / upload_display (both read mesh.norm_*
+        // directly, renderer.cpp) would shade the surface with stale normals.
+        // Recompute the affected (1-ring) normals from the fresh CPU positions so
+        // this choke hands back a fully self-consistent mesh. Partial + no heap
+        // churn, matching the no-full-iterate rule.
+        mesh.recompute_normals_partial(dirty_verts);
     }
 
     if (level == stack.base_level) {

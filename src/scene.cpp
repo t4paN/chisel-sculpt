@@ -174,6 +174,18 @@ void Scene::bind_active_(uint32_t id) {
     MeshEntity* in = find_entity(id);
     if (!in) return;
 
+    // Same-id rebind (e.g. sync() right after add_preview, where the active entity
+    // is unchanged): the working VBO already holds this entity's surface, and a
+    // flipped GPU stroke may have left its edits resident on the GPU with mesh.pos
+    // still stale (mark_cpu_dirty, brush.cpp). Pull them back to CPU *before*
+    // upload_mesh re-reads the CPU mesh — otherwise the re-upload overwrites the
+    // working buffer with pre-stroke geometry and the strokes vanish until undo.
+    // No-op when the CPU copy is already authoritative (materialize_cpu self-guards
+    // on cpu_dirty), so the splice/cascade paths that legitimately push CPU→GPU are
+    // untouched.
+    if (id == bound_active_id_)
+        in->multires_gpu.materialize_cpu(in->multires, in->mesh, renderer_.vbo_pos);
+
     // Working VBOs hold the incoming entity at offset 0.
     renderer_.upload_mesh(in->mesh);
     // Brush/pick FBO mesh.
