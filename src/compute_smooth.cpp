@@ -64,6 +64,8 @@ layout(std430, binding = 12) readonly buffer MaskBuf { float mask[]; };
 uniform uint u_vertex_count;
 uniform float u_strength;
 uniform int u_iteration;
+uniform int u_mirror_x;
+uniform float u_seam_band;
 
 void main() {
     uint v = gl_GlobalInvocationID.x;
@@ -75,11 +77,10 @@ void main() {
     float mscale = 1.0 - mask[v];
     if (mscale <= 0.0) return;
 
-    float cur_x = positions[v * 3u];
-    float cur_y = positions[v * 3u + 1u];
-    float cur_z = positions[v * 3u + 2u];
+    vec3 cur = vec3(positions[v*3u], positions[v*3u+1u], positions[v*3u+2u]);
 
-    float sum_x = 0.0, sum_y = 0.0, sum_z = 0.0;
+    vec3 sum = vec3(0.0);
+    vec3 nrm = vec3(0.0);   // area-weighted vertex normal, accumulated inline
     float count = 0.0;
 
     uint start = adj_offset[v];
@@ -90,29 +91,50 @@ void main() {
         uint i1 = indices[t * 3u + 1u];
         uint i2 = indices[t * 3u + 2u];
 
-        if (v == i0) {
-            sum_x += positions[i1*3u] + positions[i2*3u];
-            sum_y += positions[i1*3u+1u] + positions[i2*3u+1u];
-            sum_z += positions[i1*3u+2u] + positions[i2*3u+2u];
-        } else if (v == i1) {
-            sum_x += positions[i0*3u] + positions[i2*3u];
-            sum_y += positions[i0*3u+1u] + positions[i2*3u+1u];
-            sum_z += positions[i0*3u+2u] + positions[i2*3u+2u];
-        } else {
-            sum_x += positions[i0*3u] + positions[i1*3u];
-            sum_y += positions[i0*3u+1u] + positions[i1*3u+1u];
-            sum_z += positions[i0*3u+2u] + positions[i1*3u+2u];
-        }
+        vec3 p0 = vec3(positions[i0*3u], positions[i0*3u+1u], positions[i0*3u+2u]);
+        vec3 p1 = vec3(positions[i1*3u], positions[i1*3u+1u], positions[i1*3u+2u]);
+        vec3 p2 = vec3(positions[i2*3u], positions[i2*3u+1u], positions[i2*3u+2u]);
+
+        // un-normalized cross = 2*area*unit_normal → summing gives an
+        // area-weighted vertex normal for free from the 1-ring we already walk
+        nrm += cross(p1 - p0, p2 - p0);
+
+        if (v == i0)      sum += p1 + p2;
+        else if (v == i1) sum += p0 + p2;
+        else              sum += p0 + p1;
         count += 2.0;
     }
 
     if (count <= 0.0) return;
 
-    float inv_c = 1.0 / count;
+    vec3 move = sum * (1.0 / count) - cur;
+
+    // Keep only the normal component of the Laplacian move in the bulk. The
+    // tangential part slides verts along the surface toward denser neighbourhoods
+    // — a directional drift on irregular meshes — so discarding it removes the
+    // drift while keeping the curvature-flattening that is the point of smoothing.
+    //
+    // BUT that same tangential component is exactly what relaxes the x=0 mirror
+    // seam and keeps it from creasing; stripping it everywhere pinches the seam.
+    // So inside a band around the plane we fade back to the full uniform Laplacian
+    // (tangential restored), which is the behaviour validated as pinch-free. The
+    // two requirements live in different regions, so we satisfy both:
+    //   abs(x) >= u_seam_band  -> t=1  -> normal-only (no drift)
+    //   abs(x) == 0            -> t=0  -> full Laplacian (seam relaxes, no pinch)
+    // Mirror-exact either way: each twin's normal is the reflection of the other's
+    // and the seam reflection is re-imposed every iteration in dispatch_smooth.
+    float nlen = length(nrm);
+    if (nlen > 1e-12) {
+        vec3 n = nrm / nlen;
+        vec3 move_n = dot(move, n) * n;
+        float t = (u_mirror_x != 0) ? smoothstep(0.0, u_seam_band, abs(cur.x)) : 1.0;
+        move = mix(move, move_n, t);
+    }
+
     float blend = w * u_strength * mscale;
-    positions[v * 3u]     += (sum_x * inv_c - cur_x) * blend;
-    positions[v * 3u + 1u] += (sum_y * inv_c - cur_y) * blend;
-    positions[v * 3u + 2u] += (sum_z * inv_c - cur_z) * blend;
+    positions[v*3u]      += move.x * blend;
+    positions[v*3u + 1u] += move.y * blend;
+    positions[v*3u + 2u] += move.z * blend;
 }
 )";
 
@@ -276,6 +298,10 @@ void main() {
     }
     if (count <= 0.0) return;
 
+    // Pen-up autosmooth keeps the plain uniform Laplacian: it's a single mild pass
+    // (twins ride in snap_list so it's already symmetric) and was validated
+    // pinch-free. The normal-projection directionality fix lives on the interactive
+    // smooth brush, which has a brush radius to size the seam band from.
     float inv_c = 1.0 / count;
     float blend = u_strength * mscale;
     positions[v * 3u]     += (sum_x * inv_c - cur_x) * blend;
@@ -372,6 +398,11 @@ void ComputeState::dispatch_smooth(const SmoothAccumParams& p,
 
     glUniform1ui(glGetUniformLocation(smooth_apply_program, "u_vertex_count"), p.vertex_count);
     glUniform1f(glGetUniformLocation(smooth_apply_program, "u_strength"), p.strength);
+    // Region-blend seam band: within this distance of x=0 the kernel fades back to
+    // the full uniform Laplacian so the seam relaxes instead of pinching. Half the
+    // brush radius is a starting point; tune by feel.
+    glUniform1i(glGetUniformLocation(smooth_apply_program, "u_mirror_x"), p.mirror_x ? 1 : 0);
+    glUniform1f(glGetUniformLocation(smooth_apply_program, "u_seam_band"), p.world_radius * 0.5f);
 
     groups = (int)((p.vertex_count + 255u) / 256u);
 
