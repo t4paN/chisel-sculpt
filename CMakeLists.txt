@@ -63,7 +63,18 @@ if(CHISEL_GPU_BACKEND STREQUAL "webgpu")
     target_link_libraries(chisel-wgpu-probe PRIVATE wgpu)
     set_target_properties(chisel-wgpu-probe PROPERTIES BUILD_RPATH "${wgpu_native_SOURCE_DIR}/lib")
 
-    message(STATUS "WebGPU backend: built bring-up probe 'chisel-wgpu-probe' (full app port in progress)")
+    # Stage 2 Step 2: on-screen cleared frame. Needs a windowing system (GLFW with
+    # GLFW_NO_API) and, for the X11 surface source, the native X11 handles.
+    find_package(glfw3 3.3 REQUIRED)
+    add_executable(chisel-wgpu-window src/gpu/wgpu_window.cpp)
+    target_link_libraries(chisel-wgpu-window PRIVATE wgpu glfw)
+    set_target_properties(chisel-wgpu-window PROPERTIES BUILD_RPATH "${wgpu_native_SOURCE_DIR}/lib")
+    if(UNIX AND NOT APPLE)
+        find_package(X11 REQUIRED)
+        target_link_libraries(chisel-wgpu-window PRIVATE ${X11_LIBRARIES})
+    endif()
+
+    message(STATUS "WebGPU backend: built bring-up probes 'chisel-wgpu-probe', 'chisel-wgpu-window' (full app port in progress)")
     return()
 endif()
 

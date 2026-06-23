@@ -2,6 +2,21 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-23 — WebGPU port, Stage 2 (Step 2): first on-screen cleared frame
+
+- **`chisel-wgpu-window` probe presents a cleared swapchain frame.** GLFW window
+  (`GLFW_NO_API`) → `WGPUSurface` from the X11 window (`WGPUSurfaceSourceXlibWindow`) →
+  surface-compatible adapter → device + queue → format from `wgpuSurfaceGetCapabilities` →
+  `wgpuSurfaceConfigure` (RenderAttachment, Fifo) → per-frame render pass `loadOp=Clear`
+  (Chisel teal) / `Store` → `wgpuSurfacePresent`. Framebuffer-resize reconfigures the surface;
+  Outdated/Lost current-texture is handled by reconfigure-and-skip. New CMake target in the
+  `webgpu` branch links glfw + X11; the `gl` build stays untouched.
+- **Verified on this box:** `CHISEL_PROBE_FRAMES=5 ./build-wgpu/chisel-wgpu-window` → surface
+  created, device+queue ready, surface format selected, 5 frames presented, exit 0. Written
+  against the real v29 `webgpu.h` (Surface/SurfaceTexture/RenderPass C API).
+- Next: Stage 3 — render path (first triangle via a RenderPipeline + WGSL vert/frag, then the
+  matcap mesh + camera UBO; ImGui via `imgui_impl_wgpu`, still to vendor).
+
 ## 2026-06-23 — WebGPU port, Stage 2 (Step 1): wgpu-native toolchain proven
 
 - **`CHISEL_GPU_BACKEND=webgpu` now builds + runs.** CMake fetches the wgpu-native v29.0.0.0 prebuilt
