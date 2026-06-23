@@ -2,6 +2,31 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-24 — WebGPU port, Stage 5 (draw): first deforming brush end-to-end
+
+- **Draw/inflate brush running on WebGPU** — the first brush that mutates geometry. Three new WGSL
+  kernels ported 1:1 from `src/compute_draw.cpp` / `compute_smooth.cpp`: `draw_accum.wgsl`,
+  `draw_apply.wgsl`, `compute_normals.wgsl`. The dab is one compute pass of three sequential
+  dispatches (accum → apply → normals); WebGPU serializes the storage deps between dispatches, so
+  no explicit barriers (per `shaders/wgsl/CONVENTIONS.md`).
+- **Portable float-atomic accumulation proven.** WGSL has no float atomics, so `draw_accum` deposits
+  displacement via the uint-bits + `atomicCompareExchangeWeak` CAS loop (the GL
+  `!has_native_float_atomics` path) into a 4-u32-per-vertex accum buffer `{disp.xyz, weight}`;
+  `draw_apply` bitcasts it back, scales by `(1 - mask)`, adds to the position SSBO, and appends to the
+  dirty list. `DrawAccumParamsGPU` is a 112-byte std140 UBO (static_assert-guarded).
+- **Position writeback + renormalize visible next frame.** `posVB` doubles as the compute positions
+  SSBO (`Vertex|Storage|CopySrc`); `compute_normals` recomputes vertex normals over CSR
+  vertex→triangle adjacency (uploaded from `mesh.vert_tri_*`) so the deformed cap shades correctly.
+  Draw reads its push direction from a **frozen** stroke-normal snapshot (separate from the live
+  normals `compute_normals` overwrites), avoiding the GL feedback loop. The probe recomputes all
+  normals each painting dab (identity dirty list); the partial-list path the `.wgsl` already supports
+  is a later step.
+- **Brush is toggleable in the UI** (Draw default / Mask radio). Headless auto-paints center with the
+  selected mode. Mask path unchanged.
+- **Verified:** `CHISEL_PROBE_FRAMES=8` (Draw) → accum+apply+normals pipelines ready; per-dab
+  ~117–131 verts touched; final one-shot position readback = **148/2562 verts displaced, max 0.4407
+  world units** (proves the GPU writeback persisted), exit 0, no validation errors.
+
 ## 2026-06-24 — WebGPU port, Stage 5 (start): mask brush end-to-end
 
 - **First compute brush running on WebGPU.** `chisel-wgpu-window` now drives the mask-paint kernel

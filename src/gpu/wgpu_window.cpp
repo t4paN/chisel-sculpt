@@ -10,6 +10,11 @@
 // (shaders/wgsl/mask_paint.wgsl) dispatched against a mask SSBO that doubles as the
 // mesh's @loc2 tint attribute. Pick triid -> centroid anchor -> compute dab ->
 // visible mask tint, all on WebGPU. Headless auto-paints center; LMB paints live.
+// Stage 5 (draw) adds the first DEFORMING brush: draw_accum (portable float-atomic
+// CAS deposit) -> draw_apply (position writeback + dirty list) -> compute_normals
+// (CSR-adjacency renormalize, so the deformed surface shades correctly). The mesh's
+// position VBO doubles as the compute positions SSBO, so the bump is visible on the
+// next draw with no copy. Brush is toggleable (Draw default / Mask) in the UI panel.
 //
 // Run live (window stays open until closed) for a screenshot, or set
 // CHISEL_PROBE_FRAMES=N to auto-exit after N presented frames (CI/headless-ish).
@@ -407,10 +412,35 @@ struct MaskParamsGPU {
 };
 static_assert(sizeof(MaskParamsGPU) == 48, "Params UBO must be 48 bytes to match WGSL");
 
+// Draw-accum Params UBO — byte-identical to draw_accum.wgsl's Params (std140:
+// each vec3 fills a 16-byte slot, a trailing scalar packs into it). 112 bytes.
+struct DrawAccumParamsGPU {
+    float anchor_a[3];          //   0..11
+    float world_radius;         //  12
+    float anchor_b[3];          //  16..27
+    float disp_amount;          //  28
+    float view_a[3];            //  32..43
+    float hardness;             //  44
+    float view_b[3];            //  48..59
+    float facing_threshold;     //  60
+    float anchor_normal_a[3];   //  64..75
+    uint32_t use_b;             //  76
+    float anchor_normal_b[3];   //  80..91
+    uint32_t inflate;           //  92
+    uint32_t vertex_count;      //  96
+    uint32_t _pad0, _pad1, _pad2; // 100..111
+};
+static_assert(sizeof(DrawAccumParamsGPU) == 112, "draw_accum Params UBO must be 112 bytes");
+
+// Tiny single-u32 Params UBOs (padded to 16) shared by draw_apply (vertex_count)
+// and compute_normals (dirty_count).
+struct CountParamsGPU { uint32_t count; uint32_t _pad0, _pad1, _pad2; };
+static_assert(sizeof(CountParamsGPU) == 16, "count Params UBO must be 16 bytes");
+
 int main() {
     if (!glfwInit()) { std::printf("[win] glfwInit failed\n"); return 1; }
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);  // no GL context — WebGPU owns the surface
-    GLFWwindow* win = glfwCreateWindow(g_fbw, g_fbh, "Chisel WebGPU — Stage 5 mask brush", nullptr, nullptr);
+    GLFWwindow* win = glfwCreateWindow(g_fbw, g_fbh, "Chisel WebGPU — Stage 5 draw + mask brushes", nullptr, nullptr);
     if (!win) { std::printf("[win] glfwCreateWindow failed\n"); glfwTerminate(); return 1; }
     glfwGetFramebufferSize(win, &g_fbw, &g_fbh);
     glfwSetFramebufferSizeCallback(win, onFramebufferSize);
@@ -498,10 +528,17 @@ int main() {
         return b;
     };
     // posVB doubles as the mask kernel's positions SSBO (binding 0) → needs Storage.
+    // posVB: Vertex (draw) + Storage (compute pos SSBO) + CopySrc (final draw readback).
     WGPUBuffer posVB = makeBuf(posBuf.data(), posBuf.size()*sizeof(float),
+                               (WGPUBufferUsage)(WGPUBufferUsage_Vertex | WGPUBufferUsage_Storage
+                                                 | WGPUBufferUsage_CopySrc));
+    // nrmVB is the LIVE normal buffer: compute_normals writes it (Storage), the mesh
+    // shader reads it (Vertex). idxB doubles as the index buffer and compute_normals'
+    // indices SSBO (Storage), so a draw stroke can renormalize from the same topology.
+    WGPUBuffer nrmVB = makeBuf(nrmBuf.data(), nrmBuf.size()*sizeof(float),
                                (WGPUBufferUsage)(WGPUBufferUsage_Vertex | WGPUBufferUsage_Storage));
-    WGPUBuffer nrmVB = makeBuf(nrmBuf.data(), nrmBuf.size()*sizeof(float), WGPUBufferUsage_Vertex);
-    WGPUBuffer idxB  = makeBuf(mesh.indices.data(), icount*sizeof(uint32_t), WGPUBufferUsage_Index);
+    WGPUBuffer idxB  = makeBuf(mesh.indices.data(), icount*sizeof(uint32_t),
+                               (WGPUBufferUsage)(WGPUBufferUsage_Index | WGPUBufferUsage_Storage));
 
     // ---- Stage 5 mask brush buffers (indexed, one entry per mesh vertex) ----
     // mask SSBO doubles as the mesh's @loc2 vertex attribute (Storage write + Vertex read),
@@ -524,6 +561,47 @@ int main() {
     dsbd.usage = (WGPUBufferUsage)(WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst);
     dsbd.size  = 256;
     WGPUBuffer dirtyStaging = wgpuDeviceCreateBuffer(device, &dsbd);
+
+    // ---- Stage 5: draw-brush buffers ----
+    // accum: 4 u32 per vertex { disp.x, disp.y, disp.z, weight } (float-bits). Zeroed
+    // per dab via writeBuffer. draw_accum writes it (atomic), draw_apply reads it.
+    std::vector<uint32_t> zeroAccum(vcount * 4, 0u);
+    WGPUBuffer accumBuf = makeBuf(zeroAccum.data(), zeroAccum.size()*sizeof(uint32_t),
+                                  WGPUBufferUsage_Storage);
+    // Frozen stroke normals: draw_accum reads the deposit direction / facing from this
+    // snapshot (the live nrmVB is recomputed each dab, which would feed back). Init =
+    // the icosphere's normals; for the probe the stroke never re-seeds, so freeze once.
+    WGPUBuffer strokeNrmBuf = makeBuf(nrmBuf.data(), nrmBuf.size()*sizeof(float),
+                                      WGPUBufferUsage_Storage);
+    // CSR vertex→triangle adjacency for compute_normals (binding 4 offsets / 5 list).
+    WGPUBuffer adjOffsetBuf = makeBuf(mesh.vert_tri_offset.data(),
+                                      mesh.vert_tri_offset.size()*sizeof(uint32_t),
+                                      WGPUBufferUsage_Storage);
+    WGPUBuffer adjListBuf   = makeBuf(mesh.vert_tri_list.data(),
+                                      mesh.vert_tri_list.size()*sizeof(uint32_t),
+                                      WGPUBufferUsage_Storage);
+    // Identity dirty list [0..vcount) feeding compute_normals: the probe recomputes
+    // every normal each painting frame (the partial dirty-list path is a later step;
+    // the .wgsl already supports it — the real app will pass a compact list).
+    std::vector<uint32_t> identityDirty(vcount);
+    for (uint32_t i = 0; i < vcount; ++i) identityDirty[i] = i;
+    WGPUBuffer identityDirtyBuf = makeBuf(identityDirty.data(), vcount*sizeof(uint32_t),
+                                          WGPUBufferUsage_Storage);
+    // Per-dab Params UBOs.
+    auto makeUBO = [&](size_t bytes) {
+        WGPUBufferDescriptor bd = {};
+        bd.usage = WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst;
+        bd.size  = bytes;
+        return wgpuDeviceCreateBuffer(device, &bd);
+    };
+    WGPUBuffer drawAccumParamsUBO = makeUBO(sizeof(DrawAccumParamsGPU));
+    WGPUBuffer drawApplyParamsUBO = makeUBO(sizeof(CountParamsGPU));
+    WGPUBuffer normalsParamsUBO   = makeUBO(sizeof(CountParamsGPU));
+    // Final one-shot readback of positions: proves the draw writes persisted on GPU.
+    WGPUBufferDescriptor psbd = {};
+    psbd.usage = (WGPUBufferUsage)(WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst);
+    psbd.size  = (uint64_t)vcount * 3 * sizeof(float);
+    WGPUBuffer posStaging = wgpuDeviceCreateBuffer(device, &psbd);
 
     // Stage 4: de-indexed mesh for the pick pass (flat per-triangle id needs unique
     // verts). 3 buffers: pos @loc0, norm @loc1, triid @loc2 (Uint32).
@@ -834,6 +912,121 @@ int main() {
     if (!maskPipeline) { std::printf("[win] mask compute pipeline failed\n"); return 2; }
     std::printf("[win] mask compute pipeline ready\n");
 
+    // ==================== Stage 5: draw-brush compute pipelines ====================
+    // Helpers to build a compute pipeline + bind group from a .wgsl file. Each kernel
+    // gets its own bind-group layout (binding numbers mirror ComputeBinding).
+    struct BglEnt { uint32_t binding; WGPUBufferBindingType type; uint64_t minSize; };
+    auto makeComputeBgl = [&](const BglEnt* ents, uint32_t n) {
+        std::vector<WGPUBindGroupLayoutEntry> e(n);
+        for (uint32_t i = 0; i < n; ++i) {
+            e[i] = {};
+            e[i].binding = ents[i].binding;
+            e[i].visibility = WGPUShaderStage_Compute;
+            e[i].buffer.type = ents[i].type;
+            e[i].buffer.minBindingSize = ents[i].minSize;
+        }
+        WGPUBindGroupLayoutDescriptor d = {}; d.entryCount = n; d.entries = e.data();
+        return wgpuDeviceCreateBindGroupLayout(device, &d);
+    };
+    auto makeComputePipeline = [&](WGPUShaderModule mod, WGPUBindGroupLayout bgl) {
+        WGPUPipelineLayoutDescriptor pld = {}; pld.bindGroupLayoutCount = 1; pld.bindGroupLayouts = &bgl;
+        WGPUPipelineLayout pl = wgpuDeviceCreatePipelineLayout(device, &pld);
+        WGPUComputePipelineDescriptor cpd = {};
+        cpd.layout = pl; cpd.compute.module = mod; cpd.compute.entryPoint = sv("main");
+        WGPUComputePipeline p = wgpuDeviceCreateComputePipeline(device, &cpd);
+        wgpuPipelineLayoutRelease(pl);
+        return p;
+    };
+    auto loadComputeModule = [&](const char* name, std::string& keep) -> WGPUShaderModule {
+        keep = loadWgsl(name);
+        if (keep.empty()) return nullptr;
+        WGPUShaderSourceWGSL w = {}; w.chain.sType = WGPUSType_ShaderSourceWGSL; w.code = sv(keep.c_str());
+        WGPUShaderModuleDescriptor d = {}; d.nextInChain = &w.chain;
+        return wgpuDeviceCreateShaderModule(device, &d);
+    };
+
+    const uint64_t kPosBytes   = (uint64_t)posBuf.size()*sizeof(float);
+    const uint64_t kNrmBytes   = (uint64_t)nrmBuf.size()*sizeof(float);
+    const uint64_t kAccumBytes = (uint64_t)vcount*4*sizeof(uint32_t);
+    const uint64_t kMaskBytes  = (uint64_t)vcount*sizeof(float);
+    const uint64_t kDirtyBytes = (uint64_t)(vcount+1)*sizeof(uint32_t);
+
+    // -- draw_accum --
+    std::string drawAccumSrc;
+    WGPUShaderModule drawAccumModule = loadComputeModule("draw_accum.wgsl", drawAccumSrc);
+    if (!drawAccumModule) { std::printf("[win] draw_accum wgsl/module failed\n"); return 2; }
+    BglEnt aEnt[] = {
+        { 0,  WGPUBufferBindingType_ReadOnlyStorage, kPosBytes },
+        { 1,  WGPUBufferBindingType_ReadOnlyStorage, kNrmBytes },
+        { 3,  WGPUBufferBindingType_Storage,         kAccumBytes },
+        { 63, WGPUBufferBindingType_Uniform,         sizeof(DrawAccumParamsGPU) },
+    };
+    WGPUBindGroupLayout drawAccumBgl = makeComputeBgl(aEnt, 4);
+    WGPUComputePipeline drawAccumPipeline = makeComputePipeline(drawAccumModule, drawAccumBgl);
+    if (!drawAccumPipeline) { std::printf("[win] draw_accum pipeline failed\n"); return 2; }
+    WGPUBindGroupEntry abe[4] = {};
+    abe[0].binding = 0;  abe[0].buffer = posVB;             abe[0].size = kPosBytes;
+    abe[1].binding = 1;  abe[1].buffer = strokeNrmBuf;      abe[1].size = kNrmBytes;
+    abe[2].binding = 3;  abe[2].buffer = accumBuf;          abe[2].size = kAccumBytes;
+    abe[3].binding = 63; abe[3].buffer = drawAccumParamsUBO; abe[3].size = sizeof(DrawAccumParamsGPU);
+    WGPUBindGroupDescriptor abgd = {}; abgd.layout = drawAccumBgl; abgd.entryCount = 4; abgd.entries = abe;
+    WGPUBindGroup drawAccumBindGroup = wgpuDeviceCreateBindGroup(device, &abgd);
+
+    // -- draw_apply --
+    std::string drawApplySrc;
+    WGPUShaderModule drawApplyModule = loadComputeModule("draw_apply.wgsl", drawApplySrc);
+    if (!drawApplyModule) { std::printf("[win] draw_apply wgsl/module failed\n"); return 2; }
+    BglEnt apEnt[] = {
+        { 0,  WGPUBufferBindingType_Storage,         kPosBytes },
+        { 3,  WGPUBufferBindingType_ReadOnlyStorage, kAccumBytes },
+        { 6,  WGPUBufferBindingType_Storage,         kDirtyBytes },
+        { 12, WGPUBufferBindingType_ReadOnlyStorage, kMaskBytes },
+        { 63, WGPUBufferBindingType_Uniform,         sizeof(CountParamsGPU) },
+    };
+    WGPUBindGroupLayout drawApplyBgl = makeComputeBgl(apEnt, 5);
+    WGPUComputePipeline drawApplyPipeline = makeComputePipeline(drawApplyModule, drawApplyBgl);
+    if (!drawApplyPipeline) { std::printf("[win] draw_apply pipeline failed\n"); return 2; }
+    WGPUBindGroupEntry apbe[5] = {};
+    apbe[0].binding = 0;  apbe[0].buffer = posVB;             apbe[0].size = kPosBytes;
+    apbe[1].binding = 3;  apbe[1].buffer = accumBuf;          apbe[1].size = kAccumBytes;
+    apbe[2].binding = 6;  apbe[2].buffer = dirtyBuf;          apbe[2].size = kDirtyBytes;
+    apbe[3].binding = 12; apbe[3].buffer = maskBuf;           apbe[3].size = kMaskBytes;
+    apbe[4].binding = 63; apbe[4].buffer = drawApplyParamsUBO; apbe[4].size = sizeof(CountParamsGPU);
+    WGPUBindGroupDescriptor apbgd = {}; apbgd.layout = drawApplyBgl; apbgd.entryCount = 5; apbgd.entries = apbe;
+    WGPUBindGroup drawApplyBindGroup = wgpuDeviceCreateBindGroup(device, &apbgd);
+
+    // -- compute_normals --
+    std::string normalsSrc;
+    WGPUShaderModule normalsModule = loadComputeModule("compute_normals.wgsl", normalsSrc);
+    if (!normalsModule) { std::printf("[win] compute_normals wgsl/module failed\n"); return 2; }
+    const uint64_t kIdxBytes      = (uint64_t)icount*sizeof(uint32_t);
+    const uint64_t kAdjOffBytes   = (uint64_t)mesh.vert_tri_offset.size()*sizeof(uint32_t);
+    const uint64_t kAdjListBytes  = (uint64_t)mesh.vert_tri_list.size()*sizeof(uint32_t);
+    const uint64_t kIdentityBytes = (uint64_t)vcount*sizeof(uint32_t);
+    BglEnt nEnt[] = {
+        { 0,  WGPUBufferBindingType_ReadOnlyStorage, kPosBytes },
+        { 1,  WGPUBufferBindingType_Storage,         kNrmBytes },
+        { 2,  WGPUBufferBindingType_ReadOnlyStorage, kIdxBytes },
+        { 4,  WGPUBufferBindingType_ReadOnlyStorage, kAdjOffBytes },
+        { 5,  WGPUBufferBindingType_ReadOnlyStorage, kAdjListBytes },
+        { 6,  WGPUBufferBindingType_ReadOnlyStorage, kIdentityBytes },
+        { 63, WGPUBufferBindingType_Uniform,         sizeof(CountParamsGPU) },
+    };
+    WGPUBindGroupLayout normalsBgl = makeComputeBgl(nEnt, 7);
+    WGPUComputePipeline normalsPipeline = makeComputePipeline(normalsModule, normalsBgl);
+    if (!normalsPipeline) { std::printf("[win] compute_normals pipeline failed\n"); return 2; }
+    WGPUBindGroupEntry nbe[7] = {};
+    nbe[0].binding = 0;  nbe[0].buffer = posVB;            nbe[0].size = kPosBytes;
+    nbe[1].binding = 1;  nbe[1].buffer = nrmVB;            nbe[1].size = kNrmBytes;
+    nbe[2].binding = 2;  nbe[2].buffer = idxB;             nbe[2].size = kIdxBytes;
+    nbe[3].binding = 4;  nbe[3].buffer = adjOffsetBuf;     nbe[3].size = kAdjOffBytes;
+    nbe[4].binding = 5;  nbe[4].buffer = adjListBuf;       nbe[4].size = kAdjListBytes;
+    nbe[5].binding = 6;  nbe[5].buffer = identityDirtyBuf; nbe[5].size = kIdentityBytes;
+    nbe[6].binding = 63; nbe[6].buffer = normalsParamsUBO; nbe[6].size = sizeof(CountParamsGPU);
+    WGPUBindGroupDescriptor nbgd = {}; nbgd.layout = normalsBgl; nbgd.entryCount = 7; nbgd.entries = nbe;
+    WGPUBindGroup normalsBindGroup = wgpuDeviceCreateBindGroup(device, &nbgd);
+    std::printf("[win] draw-brush compute pipelines ready (accum + apply + normals)\n");
+
     // Brush tuning + CPU-side anchor reconstruction. The icosphere is ~unit radius,
     // so a 0.45 world radius paints a generous cap. Anchor = picked triangle's
     // centroid (exact world-space, no depth unprojection needed).
@@ -843,6 +1036,17 @@ int main() {
         out[0] = (mesh.pos_x[i0] + mesh.pos_x[i1] + mesh.pos_x[i2]) / 3.0f;
         out[1] = (mesh.pos_y[i0] + mesh.pos_y[i1] + mesh.pos_y[i2]) / 3.0f;
         out[2] = (mesh.pos_z[i0] + mesh.pos_z[i1] + mesh.pos_z[i2]) / 3.0f;
+    };
+    // Cursor "area normal" for the draw push direction: average the picked triangle's
+    // vertex normals (the live nrmVB) and normalize. Stands in for set_area_normal.
+    auto triNormal = [&](uint32_t t, float* out) {
+        uint32_t i0 = mesh.indices[t*3+0], i1 = mesh.indices[t*3+1], i2 = mesh.indices[t*3+2];
+        float nx = mesh.norm_x[i0] + mesh.norm_x[i1] + mesh.norm_x[i2];
+        float ny = mesh.norm_y[i0] + mesh.norm_y[i1] + mesh.norm_y[i2];
+        float nz = mesh.norm_z[i0] + mesh.norm_z[i1] + mesh.norm_z[i2];
+        float len = std::sqrt(nx*nx + ny*ny + nz*nz);
+        if (len > 1e-8f) { nx /= len; ny /= len; nz /= len; }
+        out[0] = nx; out[1] = ny; out[2] = nz;
     };
 
     // ---- Dear ImGui (GLFW platform + WebGPU renderer) ----
@@ -883,18 +1087,21 @@ int main() {
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
         static uint32_t uiTriid = 0xFFFFFFFFu;
-        static uint32_t uiMasked = 0;
+        static uint32_t uiMoved = 0;        // verts touched by the last dab (draw or mask)
+        static int brushMode = 0;           // 0 = Draw, 1 = Mask
         bool clearMask = false;
         {
             ImGui::Begin("Chisel WebGPU");
-            ImGui::Text("Stage 5: mask brush (compute) — hold LMB to paint");
+            ImGui::Text("Stage 5: draw + mask brushes (compute) — hold LMB to paint");
             ImGui::Text("backend: wgpu-native v29  (%s)", IMGUI_VERSION);
             ImGui::Text("icosphere: %u verts / %u tris", vcount, icount / 3);
             ImGui::Text("%.1f FPS", (double)ImGui::GetIO().Framerate);
             ImGui::Separator();
+            ImGui::RadioButton("Draw", &brushMode, 0); ImGui::SameLine();
+            ImGui::RadioButton("Mask", &brushMode, 1);
             if (uiTriid == 0xFFFFFFFFu) ImGui::Text("under cursor: (background)");
             else                        ImGui::Text("under cursor: tri %u", uiTriid);
-            ImGui::Text("last dab masked %u verts", uiMasked);
+            ImGui::Text("last dab touched %u verts", uiMoved);
             clearMask = ImGui::Button("Clear mask");
             ImGui::SliderFloat("orbit pitch", &cam.pitch, -1.5f, 1.5f);
             ImGui::End();
@@ -992,9 +1199,65 @@ int main() {
         readU32(device, readbackBuf, 1, &triid);
         uiTriid = triid;
 
-        // ========== one mask dab: dispatch mask_paint over all verts ==========
-        uint32_t masked = 0;
-        if (painting && triid != 0xFFFFFFFFu && triid < (icount / 3)) {
+        // ========== one brush dab ==========
+        // The dirty buffer's count (index 0) tallies the verts each dab touched, read
+        // back exactly like the mask brush — the numeric proof the dispatch did work.
+        const uint32_t kGroups = (vcount + 255u) / 256u;
+        uint32_t touched = 0;
+        const bool dabValid = painting && triid != 0xFFFFFFFFu && triid < (icount / 3);
+
+        if (dabValid && brushMode == 0) {
+            // ---- DRAW: accum (float-atomic deposit) → apply (writeback + dirty) →
+            //      compute_normals (renormalize so the deformation shades right). ----
+            float anchor[3]; triCentroid(triid, anchor);
+            float anrm[3];   triNormal(triid, anrm);
+            Vec3 vdir = cam.get_view_direction();
+
+            DrawAccumParamsGPU dp = {};
+            dp.anchor_a[0] = anchor[0]; dp.anchor_a[1] = anchor[1]; dp.anchor_a[2] = anchor[2];
+            dp.world_radius     = kBrushRadius;
+            dp.disp_amount      = kBrushRadius * 1.0f * 1.0f * 0.5f;  // radius*strength*sign*0.5
+            dp.view_a[0] = vdir.x; dp.view_a[1] = vdir.y; dp.view_a[2] = vdir.z;
+            dp.hardness         = 0.5f;
+            dp.facing_threshold = 0.0f;
+            dp.anchor_normal_a[0] = anrm[0]; dp.anchor_normal_a[1] = anrm[1]; dp.anchor_normal_a[2] = anrm[2];
+            dp.use_b            = 0u;
+            dp.inflate          = 0u;
+            dp.vertex_count     = vcount;
+            wgpuQueueWriteBuffer(queue, drawAccumParamsUBO, 0, &dp, sizeof(dp));
+
+            CountParamsGPU vcp = { vcount, 0, 0, 0 };
+            wgpuQueueWriteBuffer(queue, drawApplyParamsUBO, 0, &vcp, sizeof(vcp));
+            CountParamsGPU ncp = { vcount, 0, 0, 0 };   // identity dirty list = all verts
+            wgpuQueueWriteBuffer(queue, normalsParamsUBO, 0, &ncp, sizeof(ncp));
+            wgpuQueueWriteBuffer(queue, accumBuf, 0, zeroAccum.data(), kAccumBytes);  // clear accum
+            uint32_t zero = 0;
+            wgpuQueueWriteBuffer(queue, dirtyBuf, 0, &zero, sizeof(zero));            // reset dirty count
+
+            WGPUCommandEncoder cenc = wgpuDeviceCreateCommandEncoder(device, nullptr);
+            WGPUComputePassEncoder cpass = wgpuCommandEncoderBeginComputePass(cenc, nullptr);
+            // accum → apply → normals: WebGPU serializes storage deps between dispatches
+            // in one pass, so no explicit barrier needed (CONVENTIONS.md).
+            wgpuComputePassEncoderSetPipeline(cpass, drawAccumPipeline);
+            wgpuComputePassEncoderSetBindGroup(cpass, 0, drawAccumBindGroup, 0, nullptr);
+            wgpuComputePassEncoderDispatchWorkgroups(cpass, kGroups, 1, 1);
+            wgpuComputePassEncoderSetPipeline(cpass, drawApplyPipeline);
+            wgpuComputePassEncoderSetBindGroup(cpass, 0, drawApplyBindGroup, 0, nullptr);
+            wgpuComputePassEncoderDispatchWorkgroups(cpass, kGroups, 1, 1);
+            wgpuComputePassEncoderSetPipeline(cpass, normalsPipeline);
+            wgpuComputePassEncoderSetBindGroup(cpass, 0, normalsBindGroup, 0, nullptr);
+            wgpuComputePassEncoderDispatchWorkgroups(cpass, kGroups, 1, 1);
+            wgpuComputePassEncoderEnd(cpass);
+            wgpuComputePassEncoderRelease(cpass);
+            wgpuCommandEncoderCopyBufferToBuffer(cenc, dirtyBuf, 0, dirtyStaging, 0, 4);
+            WGPUCommandBuffer ccmd = wgpuCommandEncoderFinish(cenc, nullptr);
+            wgpuQueueSubmit(queue, 1, &ccmd);
+            wgpuCommandBufferRelease(ccmd);
+            wgpuCommandEncoderRelease(cenc);
+            readU32(device, dirtyStaging, 1, &touched);
+            uiMoved = touched;
+        } else if (dabValid && brushMode == 1) {
+            // ---- MASK: dispatch mask_paint over all verts (Stage 5 start). ----
             float anchor[3]; triCentroid(triid, anchor);
             MaskParamsGPU mp = {};
             mp.anchor_a[0] = anchor[0]; mp.anchor_a[1] = anchor[1]; mp.anchor_a[2] = anchor[2];
@@ -1011,7 +1274,7 @@ int main() {
             WGPUComputePassEncoder cpass = wgpuCommandEncoderBeginComputePass(cenc, nullptr);
             wgpuComputePassEncoderSetPipeline(cpass, maskPipeline);
             wgpuComputePassEncoderSetBindGroup(cpass, 0, maskBindGroup, 0, nullptr);
-            wgpuComputePassEncoderDispatchWorkgroups(cpass, (vcount + 255u) / 256u, 1, 1);
+            wgpuComputePassEncoderDispatchWorkgroups(cpass, kGroups, 1, 1);
             wgpuComputePassEncoderEnd(cpass);
             wgpuComputePassEncoderRelease(cpass);
             wgpuCommandEncoderCopyBufferToBuffer(cenc, dirtyBuf, 0, dirtyStaging, 0, 4);
@@ -1019,16 +1282,17 @@ int main() {
             wgpuQueueSubmit(queue, 1, &ccmd);
             wgpuCommandBufferRelease(ccmd);
             wgpuCommandEncoderRelease(cenc);
-            readU32(device, dirtyStaging, 1, &masked);
-            uiMasked = masked;
+            readU32(device, dirtyStaging, 1, &touched);
+            uiMoved = touched;
         }
 
         if (frame < 8) {
+            const char* mode = (brushMode == 0) ? "draw" : "mask";
             if (triid == 0xFFFFFFFFu)
                 std::printf("[win] frame %ld brush@(%u,%u): (background)\n", frame, bx, by);
             else
-                std::printf("[win] frame %ld brush@(%u,%u): tri %u, masked %u verts this dab\n",
-                            frame, bx, by, triid, masked);
+                std::printf("[win] frame %ld brush@(%u,%u): tri %u, %s touched %u verts this dab\n",
+                            frame, bx, by, triid, mode, touched);
         }
 
         // ===================== visible frame: mesh (with mask tint) + overlays + UI =====================
@@ -1145,9 +1409,66 @@ int main() {
         wgpuBufferRelease(maskStaging);
     }
 
+    // Final one-shot position readback (draw brush): compare against the icosphere's
+    // original positions to prove the draw_accum/apply writeback persisted on the GPU.
+    {
+        WGPUCommandEncoder penc = wgpuDeviceCreateCommandEncoder(device, nullptr);
+        wgpuCommandEncoderCopyBufferToBuffer(penc, posVB, 0, posStaging, 0, psbd.size);
+        WGPUCommandBuffer pcmd = wgpuCommandEncoderFinish(penc, nullptr);
+        wgpuQueueSubmit(queue, 1, &pcmd);
+        wgpuCommandBufferRelease(pcmd);
+        wgpuCommandEncoderRelease(penc);
+
+        MapResult mr;
+        WGPUBufferMapCallbackInfo mcb = {};
+        mcb.mode = WGPUCallbackMode_AllowProcessEvents; mcb.callback = onMap; mcb.userdata1 = &mr;
+        wgpuBufferMapAsync(posStaging, WGPUMapMode_Read, 0, psbd.size, mcb);
+        while (!mr.done) wgpuDevicePoll(device, true, nullptr);
+        if (mr.status == WGPUMapAsyncStatus_Success) {
+            const float* p = (const float*)wgpuBufferGetMappedRange(posStaging, 0, psbd.size);
+            uint32_t nMoved = 0; float maxDisp = 0.0f;
+            for (uint32_t i = 0; i < vcount; ++i) {
+                float dx = p[i*3+0] - posBuf[i*3+0];
+                float dy = p[i*3+1] - posBuf[i*3+1];
+                float dz = p[i*3+2] - posBuf[i*3+2];
+                float d = std::sqrt(dx*dx + dy*dy + dz*dz);
+                if (d > 1e-5f) ++nMoved;
+                if (d > maxDisp) maxDisp = d;
+            }
+            std::printf("[win] final draw: %u / %u verts displaced (max %.4f world units)\n",
+                        nMoved, vcount, maxDisp);
+            wgpuBufferUnmap(posStaging);
+        } else {
+            wgpuBufferUnmap(posStaging);
+        }
+    }
+
     ImGui_ImplWGPU_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();
+    // draw-brush resources
+    wgpuComputePipelineRelease(drawAccumPipeline);
+    wgpuComputePipelineRelease(drawApplyPipeline);
+    wgpuComputePipelineRelease(normalsPipeline);
+    wgpuBindGroupRelease(drawAccumBindGroup);
+    wgpuBindGroupRelease(drawApplyBindGroup);
+    wgpuBindGroupRelease(normalsBindGroup);
+    wgpuBindGroupLayoutRelease(drawAccumBgl);
+    wgpuBindGroupLayoutRelease(drawApplyBgl);
+    wgpuBindGroupLayoutRelease(normalsBgl);
+    wgpuShaderModuleRelease(drawAccumModule);
+    wgpuShaderModuleRelease(drawApplyModule);
+    wgpuShaderModuleRelease(normalsModule);
+    wgpuBufferRelease(accumBuf);
+    wgpuBufferRelease(strokeNrmBuf);
+    wgpuBufferRelease(adjOffsetBuf);
+    wgpuBufferRelease(adjListBuf);
+    wgpuBufferRelease(identityDirtyBuf);
+    wgpuBufferRelease(drawAccumParamsUBO);
+    wgpuBufferRelease(drawApplyParamsUBO);
+    wgpuBufferRelease(normalsParamsUBO);
+    wgpuBufferRelease(posStaging);
+
     wgpuComputePipelineRelease(maskPipeline);
     wgpuPipelineLayoutRelease(maskPL);
     wgpuBindGroupRelease(maskBindGroup);
