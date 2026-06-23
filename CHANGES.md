@@ -2,6 +2,30 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-23 — WebGPU port, Stage 3 (finale): Dear ImGui via imgui_impl_wgpu
+
+- **`chisel-wgpu-window` now renders a full Dear ImGui frame over the 3D scene.** Vendored
+  `imgui_impl_wgpu.{h,cpp}` from the matching ImGui **1.92.8** tag into `external/imgui/`. New CMake
+  `imgui_wgpu` static lib (core + GLFW platform backend + WGPU renderer backend) — sources listed
+  explicitly, **not** globbed, so `imgui_impl_opengl3.cpp` (needs a GL loader) is excluded. Compiled
+  with `IMGUI_IMPL_WEBGPU_BACKEND_WGPU`.
+- **UI drawn in its own `loadOp=Load` pass with no depth attachment** (the renderer pipeline carries
+  `DepthStencilFormat=Undefined`), composited after the 3D pass in the same command encoder — the
+  clean UI-last order the app will use. Platform init is `ImGui_ImplGlfw_InitForOther` (chains to the
+  pre-installed framebuffer-resize callback). Demo window + a small Chisel panel (FPS, mesh stats, a
+  pitch slider bound to the camera) exercise the font-atlas texture, scissor, and dynamic vtx/idx
+  buffers.
+- **Patched the vendored backend for wgpu-native v29 (3 spots, each marked `// CHISEL PATCH`).** v29
+  ships the *unified* webgpu-headers, which the stock `_WGPU` path doesn't yet assume: (1)
+  `WGPUProgrammableStageDescriptor` → `WGPUComputeState` alias now also applied on `_WGPU`; (2)
+  `WGPUVertexAttribute` gained a leading `nextInChain`, so use the DAWN-style initializers; (3)
+  surface-status `_OutOfMemory`/`_DeviceLost` → `_Error`/`_Lost`. In every case the backend's DAWN
+  branch already matched v29; the patches just route `_WGPU` to it.
+- **Verified:** `CHISEL_PROBE_FRAMES=8 ./build-wgpu/chisel-wgpu-window` → ImGui ready, 8 frames
+  presented, exit 0, no wgpu-native validation errors. **Stage 3 (render path) is complete.**
+- Next: Stage 4 — picking FBO (MRT depth/normal/triangle-id + async `MAP_READ` readback at
+  pen-down/up), the groundwork the brush stages depend on.
+
 ## 2026-06-23 — WebGPU port, Stage 3 (sub-step 2): real mesh, camera UBO, overlay passes
 
 - **`chisel-wgpu-window` now renders a real, camera-transformed mesh.** Pulls the GL-free CPU

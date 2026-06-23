@@ -66,6 +66,24 @@ if(CHISEL_GPU_BACKEND STREQUAL "webgpu")
     # Stage 2 Step 2: on-screen cleared frame. Needs a windowing system (GLFW with
     # GLFW_NO_API) and, for the X11 surface source, the native X11 handles.
     find_package(glfw3 3.3 REQUIRED)
+
+    # Dear ImGui for the webgpu build: core + GLFW platform backend + WebGPU
+    # renderer backend. Do NOT glob external/imgui/*.cpp — that pulls in
+    # imgui_impl_opengl3.cpp (needs a GL loader). List sources explicitly. The
+    # WGPU renderer needs IMGUI_IMPL_WEBGPU_BACKEND_WGPU (the wgpu-native flavor;
+    # it includes <webgpu/wgpu.h>, which the prebuilt ships alongside webgpu.h).
+    add_library(imgui_wgpu STATIC
+        external/imgui/imgui.cpp
+        external/imgui/imgui_draw.cpp
+        external/imgui/imgui_tables.cpp
+        external/imgui/imgui_widgets.cpp
+        external/imgui/imgui_demo.cpp
+        external/imgui/imgui_impl_glfw.cpp
+        external/imgui/imgui_impl_wgpu.cpp)
+    target_include_directories(imgui_wgpu PUBLIC external/imgui)
+    target_compile_definitions(imgui_wgpu PUBLIC IMGUI_IMPL_WEBGPU_BACKEND_WGPU)
+    target_link_libraries(imgui_wgpu PUBLIC wgpu glfw)  # wgpu propagates the webgpu headers
+
     # Stage 3 mesh+camera: pull in the GL-free CPU sources from the reference tree
     # (icosphere generation, mesh normals/adjacency, camera math). None of these
     # touch OpenGL, so they compile clean into the webgpu probe.
@@ -75,7 +93,7 @@ if(CHISEL_GPU_BACKEND STREQUAL "webgpu")
         src/mesh.cpp
         src/camera.cpp)
     target_include_directories(chisel-wgpu-window PRIVATE include)
-    target_link_libraries(chisel-wgpu-window PRIVATE wgpu glfw)
+    target_link_libraries(chisel-wgpu-window PRIVATE wgpu glfw imgui_wgpu)
     set_target_properties(chisel-wgpu-window PROPERTIES BUILD_RPATH "${wgpu_native_SOURCE_DIR}/lib")
     if(UNIX AND NOT APPLE)
         find_package(X11 REQUIRED)

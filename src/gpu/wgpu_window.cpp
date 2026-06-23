@@ -15,6 +15,10 @@
 #include "mesh.h"
 #include "camera.h"
 
+#include "imgui.h"
+#include "imgui_impl_glfw.h"
+#include "imgui_impl_wgpu.h"
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -503,6 +507,22 @@ int main() {
     if (!discPipeline) { std::printf("[win] disc pipeline failed\n"); return 2; }
     std::printf("[win] overlay pipelines ready (lines + blended disc)\n");
 
+    // ---- Dear ImGui (GLFW platform + WebGPU renderer) ----
+    // GLFW callbacks were installed above; InitForOther chains to them. The UI is
+    // drawn in its own loadOp=Load pass with no depth attachment, so the renderer
+    // pipeline carries no depth-stencil state (DepthStencilFormat = Undefined).
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGui::StyleColorsDark();
+    ImGui_ImplGlfw_InitForOther(win, true);
+    ImGui_ImplWGPU_InitInfo imguiInit = {};
+    imguiInit.Device = device;
+    imguiInit.NumFramesInFlight = 3;
+    imguiInit.RenderTargetFormat = format;
+    imguiInit.DepthStencilFormat = WGPUTextureFormat_Undefined;
+    if (!ImGui_ImplWGPU_Init(&imguiInit)) { std::printf("[win] ImGui_ImplWGPU_Init failed\n"); return 2; }
+    std::printf("[win] ImGui ready\n");
+
     // ---- frame loop ----
     const char* framesEnv = std::getenv("CHISEL_PROBE_FRAMES");
     const long maxFrames = framesEnv ? std::atol(framesEnv) : -1;  // -1 = run until closed
@@ -518,6 +538,23 @@ int main() {
             wgpuQueueWriteBuffer(queue, discVB, 0, discVerts.data(), discVerts.size()*sizeof(float));
             g_resized = false;
         }
+
+        // ---- ImGui frame ----
+        ImGui_ImplWGPU_NewFrame();
+        ImGui_ImplGlfw_NewFrame();
+        ImGui::NewFrame();
+        {
+            ImGui::Begin("Chisel WebGPU");
+            ImGui::Text("Stage 3 finale: ImGui via imgui_impl_wgpu");
+            ImGui::Text("backend: wgpu-native v29  (%s)", IMGUI_VERSION);
+            ImGui::Text("icosphere: %u verts / %u tris", vcount, icount / 3);
+            ImGui::Text("%.1f FPS", (double)ImGui::GetIO().Framerate);
+            ImGui::Separator();
+            ImGui::SliderFloat("orbit pitch", &cam.pitch, -1.5f, 1.5f);
+            ImGui::End();
+            ImGui::ShowDemoWindow();  // exercises tables/scissor/font atlas
+        }
+        ImGui::Render();
 
         // slow orbit so a screenshot reads as a 3D sphere, not a flat disc
         cam.yaw += 0.01f;
@@ -580,6 +617,21 @@ int main() {
 
         wgpuRenderPassEncoderEnd(pass);
         wgpuRenderPassEncoderRelease(pass);
+
+        // ---- UI pass: load the rendered scene, draw ImGui on top, no depth ----
+        WGPURenderPassColorAttachment uiColor = {};
+        uiColor.view       = view0;
+        uiColor.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
+        uiColor.loadOp     = WGPULoadOp_Load;   // keep the 3D scene already drawn
+        uiColor.storeOp    = WGPUStoreOp_Store;
+        WGPURenderPassDescriptor uiRp = {};
+        uiRp.colorAttachmentCount = 1;
+        uiRp.colorAttachments = &uiColor;
+        WGPURenderPassEncoder uiPass = wgpuCommandEncoderBeginRenderPass(enc, &uiRp);
+        ImGui_ImplWGPU_RenderDrawData(ImGui::GetDrawData(), uiPass);
+        wgpuRenderPassEncoderEnd(uiPass);
+        wgpuRenderPassEncoderRelease(uiPass);
+
         WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(enc, nullptr);
         wgpuQueueSubmit(queue, 1, &cmd);
         wgpuSurfacePresent(surface);
@@ -594,6 +646,9 @@ int main() {
     }
     std::printf("[win] presented %ld frame(s)\n", frame);
 
+    ImGui_ImplWGPU_Shutdown();
+    ImGui_ImplGlfw_Shutdown();
+    ImGui::DestroyContext();
     wgpuRenderPipelineRelease(discPipeline);
     wgpuShaderModuleRelease(discModule);
     wgpuBufferRelease(discVB);
