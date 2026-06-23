@@ -2,6 +2,11 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-23 — Smooth brush: no more pinch/crease across the mirror plane
+
+- **Smoothing across the mirror plane no longer leaves a pinch/crease at x=0.** The smooth brush's accum pass only weights the anchor-side lobe (mirror gate), so the opposite lobe stayed frozen through all 3 Laplacian iterations and was only reflected onto its twin once, at the end of the dab. A vert whose 1-ring crosses x=0 was therefore averaging against that stale, un-smoothed wall every pass → the seam band under-relaxed relative to its surroundings and stood proud as a symmetric crease ("smooths fewer tris near the x plane").
+- **Fix: re-impose the mirror reflection after _each_ smoothing iteration, not just once at the end** (`dispatch_smooth` loop in `compute_smooth.cpp`). Now the cross-seam neighbours are the fresh mirror of the just-smoothed lobe, so the seam band relaxes in lockstep with the rest of the patch. Symmetry stays byte-exact (each side is still a literal reflection). Cost is 2 extra trivial full-buffer reflection dispatches per dab. The redundant end-of-dab `dispatch_smooth_mirror_apply` call in `brush.cpp::apply_smooth` is removed. Covers the dedicated smooth brush + the shift-to-smooth gesture; pen-up autosmooth was already symmetric (twins ride in `snap_list`) and is untouched. **Validated in-app** (user): seam pinch gone, mirror-off path unchanged.
+
 ## 2026-06-22 — SDF voxel-merge: optional Surface Nets extractor (smoother output)
 
 - **The merge confirm dialog now has an extractor toggle (`S`): Marching Cubes (default) or Surface Nets.** Surface Nets places one dual vertex per active cell (at the average of that cell's edge crossings) and stitches the four cells around each sign-changing grid edge into a quad — smoother, more uniform, quad-dominant, far fewer slivers than MC. It's a true drop-in: it emits the same 18-float soup and reuses MC's two-pass count/cap protocol, so the tick machine's Mesh phase is unchanged and the deterministic hash-weld reshares its (bit-identical, recomputed-per-cell) vertices for free. New `NETS_SRC` shader in `sdf.cpp`; `voxel_merge_begin`/`voxel_merge_selected` gained a `surface_nets` arg; `S` toggles `input.voxel_merge_surface_nets` while the confirm dialog is up.

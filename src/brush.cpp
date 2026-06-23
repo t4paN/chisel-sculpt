@@ -420,11 +420,9 @@ void BrushStroke::apply_smooth(DabContext& ctx, float dab_x, float dab_y,
 
     ctx.compute.readback_smooth_dirty(dirty_verts);
 
-    if (ctx.input.mirror_x && ctx.compute.smooth_mirror_apply_program
-        && ctx.compute.mirror_map_vertex_count == ctx.vertex_count) {
-        ctx.compute.dispatch_smooth_mirror_apply(ctx.renderer.vbo_pos, ctx.mesh.vertex_count(),
-                                                  anchor_pos.x);
-    }
+    // Mirror reflection is now re-imposed after every smoothing iteration inside
+    // dispatch_smooth (so the seam band relaxes in lockstep), making a separate
+    // end-of-dab dispatch_smooth_mirror_apply redundant.
 
     snap_and_mirror_dirty(*this, ctx);
 

@@ -374,10 +374,27 @@ void ComputeState::dispatch_smooth(const SmoothAccumParams& p,
     glUniform1f(glGetUniformLocation(smooth_apply_program, "u_strength"), p.strength);
 
     groups = (int)((p.vertex_count + 255u) / 256u);
+
+    // Re-impose the mirror reflection after *each* Laplacian iteration, not just
+    // once at the end. The accum pass only weights the anchor-side lobe (mirror
+    // gate), so without this the opposite lobe stays frozen and a vert whose
+    // 1-ring crosses x=0 averages against a stale, un-smoothed wall every pass —
+    // the seam band under-relaxes and stands proud as a symmetric crease. By
+    // reflecting after every iteration, the cross-seam neighbours are the fresh
+    // mirror of the just-smoothed lobe and the seam relaxes in lockstep. Each
+    // side stays a byte-exact reflection of the other.
+    bool do_mirror = p.mirror_x && smooth_mirror_apply_program
+                     && mirror_map_vertex_count == p.vertex_count;
+    GLint iter_loc = glGetUniformLocation(smooth_apply_program, "u_iteration");
     for (int iter = 0; iter < p.iterations; iter++) {
-        glUniform1i(glGetUniformLocation(smooth_apply_program, "u_iteration"), iter);
+        glUseProgram(smooth_apply_program);
+        glUniform1i(iter_loc, iter);
         glDispatchCompute(groups, 1, 1);
         glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+
+        if (do_mirror) {
+            dispatch_smooth_mirror_apply(pos_vbo, p.vertex_count, p.anchor_x);
+        }
     }
 
     glMemoryBarrier(GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT | GL_SHADER_STORAGE_BARRIER_BIT);
