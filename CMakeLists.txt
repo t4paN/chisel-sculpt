@@ -93,6 +93,11 @@ if(CHISEL_GPU_BACKEND STREQUAL "webgpu")
         src/mesh.cpp
         src/camera.cpp)
     target_include_directories(chisel-wgpu-window PRIVATE include)
+    # Canonical WGSL kernels are loaded from disk at runtime (no drift vs the .wgsl
+    # reference files). Build-time embedding lands with the gpu:: seam; until then
+    # the probe reads them from the source tree via this absolute path.
+    target_compile_definitions(chisel-wgpu-window PRIVATE
+        CHISEL_WGSL_DIR="${CMAKE_CURRENT_SOURCE_DIR}/shaders/wgsl")
     target_link_libraries(chisel-wgpu-window PRIVATE wgpu glfw imgui_wgpu)
     set_target_properties(chisel-wgpu-window PROPERTIES BUILD_RPATH "${wgpu_native_SOURCE_DIR}/lib")
     if(UNIX AND NOT APPLE)

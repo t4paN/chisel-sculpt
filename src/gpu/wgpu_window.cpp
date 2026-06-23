@@ -4,8 +4,12 @@
 // renderer.cpp, plus line/disc overlays and a full Dear ImGui pass (Stage 3).
 // Stage 4 adds the picking FBO: an offscreen MRT pass writing {linear depth,
 // world normal, triangle-id} (renderer.cpp's screen_buf_* shaders) and an async
-// MAP_READ readback of the center pixel's triangle id at the end of each frame —
-// the groundwork every brush stage needs to seed a stroke at pen-down.
+// MAP_READ readback of the brush-point triangle id — the groundwork every brush
+// stage needs to seed a stroke at pen-down.
+// Stage 5 (start) adds the first compute brush: the mask-paint kernel
+// (shaders/wgsl/mask_paint.wgsl) dispatched against a mask SSBO that doubles as the
+// mesh's @loc2 tint attribute. Pick triid -> centroid anchor -> compute dab ->
+// visible mask tint, all on WebGPU. Headless auto-paints center; LMB paints live.
 //
 // Run live (window stays open until closed) for a screenshot, or set
 // CHISEL_PROBE_FRAMES=N to auto-exit after N presented frames (CI/headless-ish).
@@ -25,10 +29,26 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cmath>
 #include <vector>
+#include <string>
+#include <fstream>
 
 // WGSL string -> WGPUStringView (explicit length; wgpu-native v29 wants a sized view).
 static WGPUStringView sv(const char* s) { return WGPUStringView{ s, s ? std::strlen(s) : 0 }; }
+
+// Load a canonical .wgsl kernel from the source tree (CHISEL_WGSL_DIR is injected by
+// CMake). Keeps the compute kernels as the single-source .wgsl files — no inlined
+// copy to drift. Returns "" on failure (caller checks).
+#ifndef CHISEL_WGSL_DIR
+#define CHISEL_WGSL_DIR "shaders/wgsl"
+#endif
+static std::string loadWgsl(const char* name) {
+    std::string path = std::string(CHISEL_WGSL_DIR) + "/" + name;
+    std::ifstream f(path, std::ios::binary);
+    if (!f) { std::printf("[win] failed to open wgsl: %s\n", path.c_str()); return ""; }
+    return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+}
 
 // Procedural matcap-grey + camera, ported 1:1 from renderer.cpp's matcap shader.
 // The "matcap" is view-space-normal shading (no texture), so it reproduces exactly.
@@ -41,14 +61,17 @@ struct Camera { view: mat4x4<f32>, proj: mat4x4<f32> };
 struct VSOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) nrm: vec3<f32>,
+    @location(1) mask: f32,
 };
 
 @vertex
-fn vs_main(@location(0) aPos: vec3<f32>, @location(1) aNorm: vec3<f32>) -> VSOut {
+fn vs_main(@location(0) aPos: vec3<f32>, @location(1) aNorm: vec3<f32>,
+           @location(2) aMask: f32) -> VSOut {
     var o: VSOut;
     // view-space normal: upper-left 3x3 of the (column-major) view matrix
     let nm = mat3x3<f32>(cam.view[0].xyz, cam.view[1].xyz, cam.view[2].xyz);
     o.nrm = normalize(nm * aNorm);
+    o.mask = aMask;
     o.pos = cam.proj * cam.view * vec4<f32>(aPos, 1.0);
     return o;
 }
@@ -60,7 +83,9 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let top = n.y * 0.5 + 0.5;
     let base = 0.35 + 0.45 * top + 0.15 * (1.0 - rim * rim);
     let cavity = 1.0 - rim * rim * 0.3;
-    let val = base * cavity;
+    var val = base * cavity;
+    // Sculpt mask: unmasked (0) = normal, masked (1) = darkened — same as renderer.cpp.
+    val = val * mix(1.0, 0.4, clamp(in.mask, 0.0, 1.0));
     return vec4<f32>(vec3<f32>(val), 1.0);
 }
 )";
@@ -347,10 +372,45 @@ static void onMap(WGPUMapAsyncStatus status, WGPUStringView, void* ud1, void*) {
     r->done = true; r->status = status;
 }
 
+// Synchronous one-shot: map a MAP_READ staging buffer, busy-wait the poll until the
+// callback fires, copy `count` u32s out, unmap. Legal only at the discrete readback
+// points (pen-down/up/one-shot) the architecture already restricts us to.
+static void readU32(WGPUDevice device, WGPUBuffer staging, uint32_t count, uint32_t* out) {
+    const uint32_t bytes = count * 4;
+    MapResult mr;
+    WGPUBufferMapCallbackInfo mcb = {};
+    mcb.mode = WGPUCallbackMode_AllowProcessEvents;
+    mcb.callback = onMap; mcb.userdata1 = &mr;
+    wgpuBufferMapAsync(staging, WGPUMapMode_Read, 0, bytes, mcb);
+    while (!mr.done) wgpuDevicePoll(device, true, nullptr);
+    if (mr.status == WGPUMapAsyncStatus_Success) {
+        const uint32_t* p = (const uint32_t*)wgpuBufferGetMappedRange(staging, 0, bytes);
+        if (p) std::memcpy(out, p, bytes); else for (uint32_t i=0;i<count;++i) out[i]=0xFFFFFFFFu;
+        wgpuBufferUnmap(staging);
+    } else {
+        for (uint32_t i=0;i<count;++i) out[i]=0xFFFFFFFFu;
+        wgpuBufferUnmap(staging);
+    }
+}
+
+// Mask-paint Params UBO — byte-identical to mask_paint.wgsl's Params (std140/uniform:
+// vec3 occupies 16 bytes, a trailing f32 packs into its slot). 48 bytes total.
+struct MaskParamsGPU {
+    float anchor_a[3];      // 0..11
+    float world_radius;     // 12  (rides in anchor_a's 16-byte slot)
+    float anchor_b[3];      // 16..27
+    float hardness;         // 28
+    float paint_strength;   // 32
+    uint32_t use_b;         // 36
+    uint32_t vertex_count;  // 40
+    uint32_t _pad0;         // 44  (rounds to 48)
+};
+static_assert(sizeof(MaskParamsGPU) == 48, "Params UBO must be 48 bytes to match WGSL");
+
 int main() {
     if (!glfwInit()) { std::printf("[win] glfwInit failed\n"); return 1; }
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);  // no GL context — WebGPU owns the surface
-    GLFWwindow* win = glfwCreateWindow(g_fbw, g_fbh, "Chisel WebGPU — Stage 3 mesh+camera", nullptr, nullptr);
+    GLFWwindow* win = glfwCreateWindow(g_fbw, g_fbh, "Chisel WebGPU — Stage 5 mask brush", nullptr, nullptr);
     if (!win) { std::printf("[win] glfwCreateWindow failed\n"); glfwTerminate(); return 1; }
     glfwGetFramebufferSize(win, &g_fbw, &g_fbh);
     glfwSetFramebufferSizeCallback(win, onFramebufferSize);
@@ -437,9 +497,33 @@ int main() {
         wgpuQueueWriteBuffer(queue, b, 0, data, bytes);
         return b;
     };
-    WGPUBuffer posVB = makeBuf(posBuf.data(), posBuf.size()*sizeof(float), WGPUBufferUsage_Vertex);
+    // posVB doubles as the mask kernel's positions SSBO (binding 0) → needs Storage.
+    WGPUBuffer posVB = makeBuf(posBuf.data(), posBuf.size()*sizeof(float),
+                               (WGPUBufferUsage)(WGPUBufferUsage_Vertex | WGPUBufferUsage_Storage));
     WGPUBuffer nrmVB = makeBuf(nrmBuf.data(), nrmBuf.size()*sizeof(float), WGPUBufferUsage_Vertex);
     WGPUBuffer idxB  = makeBuf(mesh.indices.data(), icount*sizeof(uint32_t), WGPUBufferUsage_Index);
+
+    // ---- Stage 5 mask brush buffers (indexed, one entry per mesh vertex) ----
+    // mask SSBO doubles as the mesh's @loc2 vertex attribute (Storage write + Vertex read),
+    // so a paint dab is visible on the very next draw with no copy.
+    std::vector<float> zeroMask(vcount, 0.0f);
+    WGPUBuffer maskBuf = makeBuf(zeroMask.data(), vcount*sizeof(float),
+                                 (WGPUBufferUsage)(WGPUBufferUsage_Vertex | WGPUBufferUsage_Storage
+                                                   | WGPUBufferUsage_CopySrc));  // CopySrc: final mask readback
+    // dirty list: { u32 count; u32 ids[vcount] }. CopySrc so we can read the count back.
+    std::vector<uint32_t> zeroDirty(vcount + 1, 0u);
+    WGPUBuffer dirtyBuf = makeBuf(zeroDirty.data(), (vcount+1)*sizeof(uint32_t),
+                                  (WGPUBufferUsage)(WGPUBufferUsage_Storage | WGPUBufferUsage_CopySrc));
+    // Params UBO (binding 63), uploaded per dab.
+    WGPUBufferDescriptor mpd = {};
+    mpd.usage = WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst;
+    mpd.size  = sizeof(MaskParamsGPU);
+    WGPUBuffer maskParamsUBO = wgpuDeviceCreateBuffer(device, &mpd);
+    // staging buffers for the dirty-count readback and the final whole-mask readback.
+    WGPUBufferDescriptor dsbd = {};
+    dsbd.usage = (WGPUBufferUsage)(WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst);
+    dsbd.size  = 256;
+    WGPUBuffer dirtyStaging = wgpuDeviceCreateBuffer(device, &dsbd);
 
     // Stage 4: de-indexed mesh for the pick pass (flat per-triangle id needs unique
     // verts). 3 buffers: pos @loc0, norm @loc1, triid @loc2 (Uint32).
@@ -505,7 +589,11 @@ int main() {
     nrmAttr.format = WGPUVertexFormat_Float32x3;
     nrmAttr.offset = 0;
     nrmAttr.shaderLocation = 1;
-    WGPUVertexBufferLayout vbl[2] = {};
+    WGPUVertexAttribute maskAttr = {};
+    maskAttr.format = WGPUVertexFormat_Float32;   // per-vertex sculpt mask @loc2
+    maskAttr.offset = 0;
+    maskAttr.shaderLocation = 2;
+    WGPUVertexBufferLayout vbl[3] = {};
     vbl[0].arrayStride = 3 * sizeof(float);
     vbl[0].stepMode = WGPUVertexStepMode_Vertex;
     vbl[0].attributeCount = 1;
@@ -514,6 +602,10 @@ int main() {
     vbl[1].stepMode = WGPUVertexStepMode_Vertex;
     vbl[1].attributeCount = 1;
     vbl[1].attributes = &nrmAttr;
+    vbl[2].arrayStride = sizeof(float);
+    vbl[2].stepMode = WGPUVertexStepMode_Vertex;
+    vbl[2].attributeCount = 1;
+    vbl[2].attributes = &maskAttr;
 
     WGPUColorTargetState colorTarget = {};
     colorTarget.format    = format;
@@ -535,7 +627,7 @@ int main() {
     pd.layout = pipelineLayout;
     pd.vertex.module = module;
     pd.vertex.entryPoint = sv("vs_main");
-    pd.vertex.bufferCount = 2;
+    pd.vertex.bufferCount = 3;
     pd.vertex.buffers = vbl;
     pd.primitive.topology = WGPUPrimitiveTopology_TriangleList;
     pd.primitive.frontFace = WGPUFrontFace_CCW;
@@ -701,6 +793,58 @@ int main() {
     WGPUBuffer readbackBuf = wgpuDeviceCreateBuffer(device, &sbd);
     std::printf("[win] pick pipeline ready (MRT depth/normal/triid + readback buffer)\n");
 
+    // ==================== Stage 5: mask-paint compute pipeline ====================
+    std::string maskSrc = loadWgsl("mask_paint.wgsl");
+    if (maskSrc.empty()) { std::printf("[win] mask wgsl missing\n"); return 2; }
+    WGPUShaderSourceWGSL maskWgsl = {};
+    maskWgsl.chain.sType = WGPUSType_ShaderSourceWGSL;
+    maskWgsl.code = sv(maskSrc.c_str());
+    WGPUShaderModuleDescriptor maskSm = {}; maskSm.nextInChain = &maskWgsl.chain;
+    WGPUShaderModule maskModule = wgpuDeviceCreateShaderModule(device, &maskSm);
+    if (!maskModule) { std::printf("[win] mask shader module failed\n"); return 2; }
+
+    // bindings mirror the ComputeBinding enum: positions(0,ro), mask(12,rw),
+    // dirty(6,rw), params(63,uniform) — all @group(0), all compute-visible.
+    WGPUBindGroupLayoutEntry me[4] = {};
+    me[0].binding = 0;  me[0].visibility = WGPUShaderStage_Compute; me[0].buffer.type = WGPUBufferBindingType_ReadOnlyStorage;
+    me[1].binding = 12; me[1].visibility = WGPUShaderStage_Compute; me[1].buffer.type = WGPUBufferBindingType_Storage;
+    me[2].binding = 6;  me[2].visibility = WGPUShaderStage_Compute; me[2].buffer.type = WGPUBufferBindingType_Storage;
+    me[3].binding = 63; me[3].visibility = WGPUShaderStage_Compute; me[3].buffer.type = WGPUBufferBindingType_Uniform;
+    me[3].buffer.minBindingSize = sizeof(MaskParamsGPU);
+    WGPUBindGroupLayoutDescriptor mbgld = {}; mbgld.entryCount = 4; mbgld.entries = me;
+    WGPUBindGroupLayout maskBgl = wgpuDeviceCreateBindGroupLayout(device, &mbgld);
+
+    WGPUPipelineLayoutDescriptor mpld = {};
+    mpld.bindGroupLayoutCount = 1; mpld.bindGroupLayouts = &maskBgl;
+    WGPUPipelineLayout maskPL = wgpuDeviceCreatePipelineLayout(device, &mpld);
+
+    WGPUBindGroupEntry mbe[4] = {};
+    mbe[0].binding = 0;  mbe[0].buffer = posVB;         mbe[0].size = posBuf.size()*sizeof(float);
+    mbe[1].binding = 12; mbe[1].buffer = maskBuf;       mbe[1].size = (uint64_t)vcount*sizeof(float);
+    mbe[2].binding = 6;  mbe[2].buffer = dirtyBuf;      mbe[2].size = (uint64_t)(vcount+1)*sizeof(uint32_t);
+    mbe[3].binding = 63; mbe[3].buffer = maskParamsUBO; mbe[3].size = sizeof(MaskParamsGPU);
+    WGPUBindGroupDescriptor mbgd = {}; mbgd.layout = maskBgl; mbgd.entryCount = 4; mbgd.entries = mbe;
+    WGPUBindGroup maskBindGroup = wgpuDeviceCreateBindGroup(device, &mbgd);
+
+    WGPUComputePipelineDescriptor mcpd = {};
+    mcpd.layout = maskPL;
+    mcpd.compute.module = maskModule;
+    mcpd.compute.entryPoint = sv("main");
+    WGPUComputePipeline maskPipeline = wgpuDeviceCreateComputePipeline(device, &mcpd);
+    if (!maskPipeline) { std::printf("[win] mask compute pipeline failed\n"); return 2; }
+    std::printf("[win] mask compute pipeline ready\n");
+
+    // Brush tuning + CPU-side anchor reconstruction. The icosphere is ~unit radius,
+    // so a 0.45 world radius paints a generous cap. Anchor = picked triangle's
+    // centroid (exact world-space, no depth unprojection needed).
+    const float kBrushRadius = 0.45f;
+    auto triCentroid = [&](uint32_t t, float* out) {
+        uint32_t i0 = mesh.indices[t*3+0], i1 = mesh.indices[t*3+1], i2 = mesh.indices[t*3+2];
+        out[0] = (mesh.pos_x[i0] + mesh.pos_x[i1] + mesh.pos_x[i2]) / 3.0f;
+        out[1] = (mesh.pos_y[i0] + mesh.pos_y[i1] + mesh.pos_y[i2]) / 3.0f;
+        out[2] = (mesh.pos_z[i0] + mesh.pos_z[i1] + mesh.pos_z[i2]) / 3.0f;
+    };
+
     // ---- Dear ImGui (GLFW platform + WebGPU renderer) ----
     // GLFW callbacks were installed above; InitForOther chains to them. The UI is
     // drawn in its own loadOp=Load pass with no depth attachment, so the renderer
@@ -738,18 +882,25 @@ int main() {
         ImGui_ImplWGPU_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
+        static uint32_t uiTriid = 0xFFFFFFFFu;
+        static uint32_t uiMasked = 0;
+        bool clearMask = false;
         {
             ImGui::Begin("Chisel WebGPU");
-            ImGui::Text("Stage 3 finale: ImGui via imgui_impl_wgpu");
+            ImGui::Text("Stage 5: mask brush (compute) — hold LMB to paint");
             ImGui::Text("backend: wgpu-native v29  (%s)", IMGUI_VERSION);
             ImGui::Text("icosphere: %u verts / %u tris", vcount, icount / 3);
             ImGui::Text("%.1f FPS", (double)ImGui::GetIO().Framerate);
             ImGui::Separator();
+            if (uiTriid == 0xFFFFFFFFu) ImGui::Text("under cursor: (background)");
+            else                        ImGui::Text("under cursor: tri %u", uiTriid);
+            ImGui::Text("last dab masked %u verts", uiMasked);
+            clearMask = ImGui::Button("Clear mask");
             ImGui::SliderFloat("orbit pitch", &cam.pitch, -1.5f, 1.5f);
             ImGui::End();
-            ImGui::ShowDemoWindow();  // exercises tables/scissor/font atlas
         }
         ImGui::Render();
+        ImGuiIO& io = ImGui::GetIO();
 
         // slow orbit so a screenshot reads as a 3D sphere, not a flat disc
         cam.yaw += 0.01f;
@@ -760,6 +911,127 @@ int main() {
         wgpuQueueWriteBuffer(queue, cameraUBO, 0,   view, 64);
         wgpuQueueWriteBuffer(queue, cameraUBO, 64,  proj, 64);
 
+        if (clearMask) {
+            std::vector<float> z(vcount, 0.0f);
+            wgpuQueueWriteBuffer(queue, maskBuf, 0, z.data(), vcount * sizeof(float));
+        }
+
+        // ---- brush point: screen center for the headless auto-paint, else the cursor ----
+        const bool headless = (maxFrames > 0);
+        bool painting = false;
+        uint32_t bx = (uint32_t)(g_fbw / 2), by = (uint32_t)(g_fbh / 2);
+        if (headless) {
+            painting = true;  // auto-paint the center each frame (verifiable without input)
+        } else if (glfwGetMouseButton(win, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS
+                   && !io.WantCaptureMouse) {
+            int ww = 1, wh = 1; glfwGetWindowSize(win, &ww, &wh);
+            double mxp = 0, myp = 0; glfwGetCursorPos(win, &mxp, &myp);
+            if (ww > 0 && wh > 0) {
+                long ix = (long)(mxp * g_fbw / ww), iy = (long)(myp * g_fbh / wh);
+                ix = ix < 0 ? 0 : (ix > g_fbw - 1 ? g_fbw - 1 : ix);
+                iy = iy < 0 ? 0 : (iy > g_fbh - 1 ? g_fbh - 1 : iy);
+                bx = (uint32_t)ix; by = (uint32_t)iy;
+                painting = true;
+            }
+        }
+
+        // ========== pen-down seed: pick MRT pass + brush-point triid readback ==========
+        // Render {depth, normal, triid} offscreen, copy the triangle id under the brush
+        // point, read it back synchronously — exactly how the app seeds a stroke. Its own
+        // submit so the CPU has the id before the mask dispatch below.
+        {
+            WGPUCommandEncoder penc = wgpuDeviceCreateCommandEncoder(device, nullptr);
+            WGPURenderPassColorAttachment pickAtt[3] = {};
+            pickAtt[0].view = pick.depthView;  pickAtt[0].depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
+            pickAtt[0].loadOp = WGPULoadOp_Clear; pickAtt[0].storeOp = WGPUStoreOp_Store;
+            pickAtt[0].clearValue = WGPUColor{0,0,0,0};
+            pickAtt[1].view = pick.normalView; pickAtt[1].depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
+            pickAtt[1].loadOp = WGPULoadOp_Clear; pickAtt[1].storeOp = WGPUStoreOp_Store;
+            pickAtt[1].clearValue = WGPUColor{0,0,0,0};
+            pickAtt[2].view = pick.triidView; pickAtt[2].depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
+            pickAtt[2].loadOp = WGPULoadOp_Clear; pickAtt[2].storeOp = WGPUStoreOp_Store;
+            pickAtt[2].clearValue = WGPUColor{4294967295.0,0,0,0};  // 0xFFFFFFFF = "no triangle"
+
+            WGPURenderPassDepthStencilAttachment pickZ = {};
+            pickZ.view = pick.zView;
+            pickZ.depthLoadOp = WGPULoadOp_Clear; pickZ.depthStoreOp = WGPUStoreOp_Store;
+            pickZ.depthClearValue = 1.0f;
+
+            WGPURenderPassDescriptor pickRp = {};
+            pickRp.colorAttachmentCount = 3; pickRp.colorAttachments = pickAtt;
+            pickRp.depthStencilAttachment = &pickZ;
+
+            WGPURenderPassEncoder pickPass = wgpuCommandEncoderBeginRenderPass(penc, &pickRp);
+            wgpuRenderPassEncoderSetPipeline(pickPass, pickPipeline);
+            wgpuRenderPassEncoderSetBindGroup(pickPass, 0, bindGroup, 0, nullptr);
+            wgpuRenderPassEncoderSetVertexBuffer(pickPass, 0, pickPosVB, 0, WGPU_WHOLE_SIZE);
+            wgpuRenderPassEncoderSetVertexBuffer(pickPass, 1, pickNrmVB, 0, WGPU_WHOLE_SIZE);
+            wgpuRenderPassEncoderSetVertexBuffer(pickPass, 2, pickTriidVB, 0, WGPU_WHOLE_SIZE);
+            wgpuRenderPassEncoderDraw(pickPass, exVcount, 1, 0, 0);
+            wgpuRenderPassEncoderEnd(pickPass);
+            wgpuRenderPassEncoderRelease(pickPass);
+
+            // copy the brush-point pixel's triangle id into the staging buffer (256-aligned)
+            WGPUTexelCopyTextureInfo copySrc = {};
+            copySrc.texture = pick.triidTex; copySrc.mipLevel = 0;
+            copySrc.origin = { bx, by, 0 }; copySrc.aspect = WGPUTextureAspect_All;
+            WGPUTexelCopyBufferInfo copyDst = {};
+            copyDst.buffer = readbackBuf;
+            copyDst.layout.offset = 0;
+            copyDst.layout.bytesPerRow = kReadbackBytes;
+            copyDst.layout.rowsPerImage = 1;
+            WGPUExtent3D copyExtent = { 1, 1, 1 };
+            wgpuCommandEncoderCopyTextureToBuffer(penc, &copySrc, &copyDst, &copyExtent);
+
+            WGPUCommandBuffer pcmd = wgpuCommandEncoderFinish(penc, nullptr);
+            wgpuQueueSubmit(queue, 1, &pcmd);
+            wgpuCommandBufferRelease(pcmd);
+            wgpuCommandEncoderRelease(penc);
+        }
+        uint32_t triid = 0xFFFFFFFFu;
+        readU32(device, readbackBuf, 1, &triid);
+        uiTriid = triid;
+
+        // ========== one mask dab: dispatch mask_paint over all verts ==========
+        uint32_t masked = 0;
+        if (painting && triid != 0xFFFFFFFFu && triid < (icount / 3)) {
+            float anchor[3]; triCentroid(triid, anchor);
+            MaskParamsGPU mp = {};
+            mp.anchor_a[0] = anchor[0]; mp.anchor_a[1] = anchor[1]; mp.anchor_a[2] = anchor[2];
+            mp.world_radius   = kBrushRadius;
+            mp.hardness       = 0.5f;
+            mp.paint_strength = 1.0f;
+            mp.use_b          = 0u;
+            mp.vertex_count   = vcount;
+            wgpuQueueWriteBuffer(queue, maskParamsUBO, 0, &mp, sizeof(mp));
+            uint32_t zero = 0;
+            wgpuQueueWriteBuffer(queue, dirtyBuf, 0, &zero, sizeof(zero));  // reset dirty count
+
+            WGPUCommandEncoder cenc = wgpuDeviceCreateCommandEncoder(device, nullptr);
+            WGPUComputePassEncoder cpass = wgpuCommandEncoderBeginComputePass(cenc, nullptr);
+            wgpuComputePassEncoderSetPipeline(cpass, maskPipeline);
+            wgpuComputePassEncoderSetBindGroup(cpass, 0, maskBindGroup, 0, nullptr);
+            wgpuComputePassEncoderDispatchWorkgroups(cpass, (vcount + 255u) / 256u, 1, 1);
+            wgpuComputePassEncoderEnd(cpass);
+            wgpuComputePassEncoderRelease(cpass);
+            wgpuCommandEncoderCopyBufferToBuffer(cenc, dirtyBuf, 0, dirtyStaging, 0, 4);
+            WGPUCommandBuffer ccmd = wgpuCommandEncoderFinish(cenc, nullptr);
+            wgpuQueueSubmit(queue, 1, &ccmd);
+            wgpuCommandBufferRelease(ccmd);
+            wgpuCommandEncoderRelease(cenc);
+            readU32(device, dirtyStaging, 1, &masked);
+            uiMasked = masked;
+        }
+
+        if (frame < 8) {
+            if (triid == 0xFFFFFFFFu)
+                std::printf("[win] frame %ld brush@(%u,%u): (background)\n", frame, bx, by);
+            else
+                std::printf("[win] frame %ld brush@(%u,%u): tri %u, masked %u verts this dab\n",
+                            frame, bx, by, triid, masked);
+        }
+
+        // ===================== visible frame: mesh (with mask tint) + overlays + UI =====================
         WGPUSurfaceTexture st = {};
         wgpuSurfaceGetCurrentTexture(surface, &st);
         if (st.status != WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal
@@ -791,61 +1063,12 @@ int main() {
         rp.depthStencilAttachment = &depthAtt;
 
         WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(device, nullptr);
-
-        // ============ Stage 4: pick MRT pass (offscreen) + center-pixel copy ============
-        // Render the mesh into {depth, normal, triid}, then stage the center pixel's
-        // triangle id for an async readback after submit. Mirrors how the real app
-        // seeds a stroke at pen-down (the only legal readback moment).
-        WGPURenderPassColorAttachment pickAtt[3] = {};
-        pickAtt[0].view = pick.depthView;  pickAtt[0].depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
-        pickAtt[0].loadOp = WGPULoadOp_Clear; pickAtt[0].storeOp = WGPUStoreOp_Store;
-        pickAtt[0].clearValue = WGPUColor{0,0,0,0};
-        pickAtt[1].view = pick.normalView; pickAtt[1].depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
-        pickAtt[1].loadOp = WGPULoadOp_Clear; pickAtt[1].storeOp = WGPUStoreOp_Store;
-        pickAtt[1].clearValue = WGPUColor{0,0,0,0};
-        pickAtt[2].view = pick.triidView; pickAtt[2].depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
-        pickAtt[2].loadOp = WGPULoadOp_Clear; pickAtt[2].storeOp = WGPUStoreOp_Store;
-        pickAtt[2].clearValue = WGPUColor{4294967295.0,0,0,0};  // 0xFFFFFFFF = "no triangle"
-
-        WGPURenderPassDepthStencilAttachment pickZ = {};
-        pickZ.view = pick.zView;
-        pickZ.depthLoadOp = WGPULoadOp_Clear; pickZ.depthStoreOp = WGPUStoreOp_Store;
-        pickZ.depthClearValue = 1.0f;
-
-        WGPURenderPassDescriptor pickRp = {};
-        pickRp.colorAttachmentCount = 3; pickRp.colorAttachments = pickAtt;
-        pickRp.depthStencilAttachment = &pickZ;
-
-        WGPURenderPassEncoder pickPass = wgpuCommandEncoderBeginRenderPass(enc, &pickRp);
-        wgpuRenderPassEncoderSetPipeline(pickPass, pickPipeline);
-        wgpuRenderPassEncoderSetBindGroup(pickPass, 0, bindGroup, 0, nullptr);
-        wgpuRenderPassEncoderSetVertexBuffer(pickPass, 0, pickPosVB, 0, WGPU_WHOLE_SIZE);
-        wgpuRenderPassEncoderSetVertexBuffer(pickPass, 1, pickNrmVB, 0, WGPU_WHOLE_SIZE);
-        wgpuRenderPassEncoderSetVertexBuffer(pickPass, 2, pickTriidVB, 0, WGPU_WHOLE_SIZE);
-        wgpuRenderPassEncoderDraw(pickPass, exVcount, 1, 0, 0);
-        wgpuRenderPassEncoderEnd(pickPass);
-        wgpuRenderPassEncoderRelease(pickPass);
-
-        // copy the center pixel's triangle id into the staging buffer (256-aligned row)
-        uint32_t cx = (uint32_t)(g_fbw / 2), cy = (uint32_t)(g_fbh / 2);
-        WGPUTexelCopyTextureInfo copySrc = {};
-        copySrc.texture = pick.triidTex;
-        copySrc.mipLevel = 0;
-        copySrc.origin = { cx, cy, 0 };
-        copySrc.aspect = WGPUTextureAspect_All;
-        WGPUTexelCopyBufferInfo copyDst = {};
-        copyDst.buffer = readbackBuf;
-        copyDst.layout.offset = 0;
-        copyDst.layout.bytesPerRow = kReadbackBytes;   // 256, satisfies alignment
-        copyDst.layout.rowsPerImage = 1;
-        WGPUExtent3D copyExtent = { 1, 1, 1 };
-        wgpuCommandEncoderCopyTextureToBuffer(enc, &copySrc, &copyDst, &copyExtent);
-
         WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(enc, &rp);
         wgpuRenderPassEncoderSetPipeline(pass, pipeline);
         wgpuRenderPassEncoderSetBindGroup(pass, 0, bindGroup, 0, nullptr);
         wgpuRenderPassEncoderSetVertexBuffer(pass, 0, posVB, 0, WGPU_WHOLE_SIZE);
         wgpuRenderPassEncoderSetVertexBuffer(pass, 1, nrmVB, 0, WGPU_WHOLE_SIZE);
+        wgpuRenderPassEncoderSetVertexBuffer(pass, 2, maskBuf, 0, WGPU_WHOLE_SIZE);  // mask tint @loc2
         wgpuRenderPassEncoderSetIndexBuffer(pass, idxB, WGPUIndexFormat_Uint32, 0, WGPU_WHOLE_SIZE);
         wgpuRenderPassEncoderDrawIndexed(pass, icount, 1, 0, 0, 0);
 
@@ -879,34 +1102,6 @@ int main() {
 
         WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(enc, nullptr);
         wgpuQueueSubmit(queue, 1, &cmd);
-
-        // ---- Stage 4: async one-shot readback of the staged center-pixel triangle id ----
-        // wgpu-native fires the map callback from wgpuDevicePoll; wait=true blocks until
-        // the submitted work (incl. the copy) is done, so this is a synchronous one-shot.
-        MapResult mr;
-        WGPUBufferMapCallbackInfo mcb = {};
-        mcb.mode = WGPUCallbackMode_AllowProcessEvents;
-        mcb.callback = onMap;
-        mcb.userdata1 = &mr;
-        wgpuBufferMapAsync(readbackBuf, WGPUMapMode_Read, 0, kReadbackBytes, mcb);
-        while (!mr.done) wgpuDevicePoll(device, true, nullptr);
-        if (mr.status == WGPUMapAsyncStatus_Success) {
-            const uint32_t* mp =
-                (const uint32_t*)wgpuBufferGetMappedRange(readbackBuf, 0, kReadbackBytes);
-            uint32_t centerId = mp ? mp[0] : 0xFFFFFFFFu;
-            wgpuBufferUnmap(readbackBuf);
-            if (frame < 8) {
-                if (centerId == 0xFFFFFFFFu)
-                    std::printf("[win] frame %ld center triid = (background)\n", frame);
-                else
-                    std::printf("[win] frame %ld center triid = %u  (of %u tris)\n",
-                                frame, centerId, icount / 3);
-            }
-        } else {
-            std::printf("[win] readback map failed: status=%d\n", (int)mr.status);
-            wgpuBufferUnmap(readbackBuf);
-        }
-
         wgpuSurfacePresent(surface);
 
         wgpuCommandBufferRelease(cmd);
@@ -919,9 +1114,49 @@ int main() {
     }
     std::printf("[win] presented %ld frame(s)\n", frame);
 
+    // Final whole-mask readback (one-shot): count how many vertices ended up masked.
+    // Proves the compute writes persisted in the SSBO end-to-end, not just per-dab.
+    {
+        WGPUBufferDescriptor msbd = {};
+        msbd.usage = (WGPUBufferUsage)(WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst);
+        msbd.size  = (uint64_t)vcount * sizeof(float);
+        WGPUBuffer maskStaging = wgpuDeviceCreateBuffer(device, &msbd);
+        WGPUCommandEncoder menc = wgpuDeviceCreateCommandEncoder(device, nullptr);
+        wgpuCommandEncoderCopyBufferToBuffer(menc, maskBuf, 0, maskStaging, 0, msbd.size);
+        WGPUCommandBuffer mcmd = wgpuCommandEncoderFinish(menc, nullptr);
+        wgpuQueueSubmit(queue, 1, &mcmd);
+        wgpuCommandBufferRelease(mcmd);
+        wgpuCommandEncoderRelease(menc);
+
+        MapResult mr;
+        WGPUBufferMapCallbackInfo mcb = {};
+        mcb.mode = WGPUCallbackMode_AllowProcessEvents; mcb.callback = onMap; mcb.userdata1 = &mr;
+        wgpuBufferMapAsync(maskStaging, WGPUMapMode_Read, 0, msbd.size, mcb);
+        while (!mr.done) wgpuDevicePoll(device, true, nullptr);
+        if (mr.status == WGPUMapAsyncStatus_Success) {
+            const float* m = (const float*)wgpuBufferGetMappedRange(maskStaging, 0, msbd.size);
+            uint32_t nMasked = 0; float maxv = 0.0f;
+            for (uint32_t i = 0; i < vcount; ++i) { if (m[i] > 0.5f) ++nMasked; if (m[i] > maxv) maxv = m[i]; }
+            std::printf("[win] final mask: %u / %u verts masked (max value %.3f)\n", nMasked, vcount, maxv);
+            wgpuBufferUnmap(maskStaging);
+        } else {
+            wgpuBufferUnmap(maskStaging);
+        }
+        wgpuBufferRelease(maskStaging);
+    }
+
     ImGui_ImplWGPU_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();
+    wgpuComputePipelineRelease(maskPipeline);
+    wgpuPipelineLayoutRelease(maskPL);
+    wgpuBindGroupRelease(maskBindGroup);
+    wgpuBindGroupLayoutRelease(maskBgl);
+    wgpuShaderModuleRelease(maskModule);
+    wgpuBufferRelease(dirtyStaging);
+    wgpuBufferRelease(maskParamsUBO);
+    wgpuBufferRelease(dirtyBuf);
+    wgpuBufferRelease(maskBuf);
     wgpuBufferRelease(readbackBuf);
     wgpuRenderPipelineRelease(pickPipeline);
     wgpuShaderModuleRelease(pickModule);

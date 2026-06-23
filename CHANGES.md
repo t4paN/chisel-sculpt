@@ -2,6 +2,28 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-24 — WebGPU port, Stage 5 (start): mask brush end-to-end
+
+- **First compute brush running on WebGPU.** `chisel-wgpu-window` now drives the mask-paint kernel
+  (`shaders/wgsl/mask_paint.wgsl`, the already-translated reference) as a real compute pipeline:
+  bind group `{positions(0,ro), mask(12,rw), dirty(6,rw), params UBO(63)}`, dispatched
+  `ceil(vcount/256)` workgroups. Params UBO is a 48-byte `MaskParamsGPU` laid out byte-identical to
+  the WGSL std140 `Params` (static_assert guards the size).
+- **Pick FBO (Stage 4) feeds the brush.** Each frame the pick pass renders triid; the brush point's
+  triangle id is read back, and its **centroid** (CPU, from the mesh) becomes the world-space anchor —
+  no depth unprojection needed. Headless (`CHISEL_PROBE_FRAMES`) auto-paints screen-center; interactive
+  paints under the cursor on LMB (gated by `io.WantCaptureMouse`).
+- **Mask doubles as storage + vertex attribute.** The mask SSBO has `Storage|Vertex|CopySrc` usage, so
+  a compute dab is visible on the very next mesh draw with no copy: the matcap fragment now reads
+  `@loc2` mask and applies the GL tint `val *= mix(1.0, 0.4, mask)`. ImGui panel shows under-cursor
+  triangle, last-dab masked count, and a Clear-mask button.
+- **WGSL loaded from the canonical `.wgsl` file at runtime** (CMake injects `CHISEL_WGSL_DIR`) — no
+  inlined copy to drift. Build-time embedding lands with the gpu:: seam.
+- **Verified:** `CHISEL_PROBE_FRAMES=8` → mask pipeline ready; per-dab masked count decays
+  128→34 as the center cap saturates (kernel's no-op early-out); final whole-mask readback =
+  **108/2562 verts masked, max 1.000**; 8 frames, exit 0, no validation errors. The one-brush
+  milestone is met — the remaining ~29 kernels follow this same pattern.
+
 ## 2026-06-23 — WebGPU port, Stage 4: picking FBO (MRT + async readback)
 
 - **`chisel-wgpu-window` now runs the pick-FBO render path** — an offscreen MRT pass that ports
