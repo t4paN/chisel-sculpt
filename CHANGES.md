@@ -2,6 +2,19 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-23 — WebGPU port, Stage 3 (sub-step 1): first triangle
+
+- **`chisel-wgpu-window` now draws a triangle, not just a clear.** Added a `RenderPipeline` from one
+  inline WGSL module (`vs_main`/`fs_main`), with the color target format matched to the surface
+  format and `writeMask=All`, `multisample.count=1`, `TriangleList`. Frame loop does
+  `SetPipeline` + `Draw(3,1,0,0)` inside the existing clear pass — Chisel-orange triangle on the
+  teal clear. Vertices are baked in the shader via `@builtin(vertex_index)` (no vertex buffer yet).
+- **Verified:** `CHISEL_PROBE_FRAMES=5 ./build-wgpu/chisel-wgpu-window` → pipeline ready, 5 frames
+  presented, exit 0, no wgpu-native validation errors. Proves the pipeline/shader-module/draw path
+  independently of mesh + buffer plumbing.
+- Next (Stage 3 sub-step 2): vertex-buffer layout + one MeshEntity's SOA buffers + camera UBO
+  (std140), then the matcap fragment, then ImGui via `imgui_impl_wgpu`.
+
 ## 2026-06-23 — WebGPU port, Stage 2 (Step 2): first on-screen cleared frame
 
 - **`chisel-wgpu-window` probe presents a cleared swapchain frame.** GLFW window

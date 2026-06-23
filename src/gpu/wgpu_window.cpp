@@ -11,6 +11,27 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+
+// WGSL string -> WGPUStringView (explicit length; wgpu-native v29 wants a sized view).
+static WGPUStringView sv(const char* s) { return WGPUStringView{ s, s ? std::strlen(s) : 0 }; }
+
+// Stage 3 first sub-step: one triangle, vertices baked in the shader (no vertex
+// buffer yet — that + the real SOA mesh + camera UBO is the next sub-step).
+static const char* kTriWGSL = R"(
+@vertex
+fn vs_main(@builtin(vertex_index) vid: u32) -> @builtin(position) vec4<f32> {
+    var p = array<vec2<f32>, 3>(
+        vec2<f32>( 0.0,  0.6),
+        vec2<f32>(-0.6, -0.6),
+        vec2<f32>( 0.6, -0.6));
+    return vec4<f32>(p[vid], 0.0, 1.0);
+}
+@fragment
+fn fs_main() -> @location(0) vec4<f32> {
+    return vec4<f32>(0.95, 0.55, 0.15, 1.0);  // Chisel orange
+}
+)";
 
 // ---- async adapter/device request, same pump pattern as the Step 1 probe ----
 struct AdapterResult { WGPUAdapter adapter = nullptr; bool done = false; bool ok = false; };
@@ -111,6 +132,35 @@ int main() {
     wgpuSurfaceCapabilitiesFreeMembers(caps);
     configureSurface(surface, device, format, g_fbw, g_fbh);
 
+    // ---- render pipeline (one WGSL module, vert+frag; no vertex buffer) ----
+    WGPUShaderSourceWGSL wgsl = {};
+    wgsl.chain.sType = WGPUSType_ShaderSourceWGSL;
+    wgsl.code = sv(kTriWGSL);
+    WGPUShaderModuleDescriptor smDesc = {};
+    smDesc.nextInChain = &wgsl.chain;
+    WGPUShaderModule module = wgpuDeviceCreateShaderModule(device, &smDesc);
+    if (!module) { std::printf("[win] shader module failed\n"); return 2; }
+
+    WGPUColorTargetState colorTarget = {};
+    colorTarget.format    = format;            // must match the surface format
+    colorTarget.writeMask = WGPUColorWriteMask_All;  // zero-init would write nothing
+    WGPUFragmentState frag = {};
+    frag.module = module;
+    frag.entryPoint = sv("fs_main");
+    frag.targetCount = 1;
+    frag.targets = &colorTarget;
+
+    WGPURenderPipelineDescriptor pd = {};
+    pd.vertex.module = module;
+    pd.vertex.entryPoint = sv("vs_main");
+    pd.primitive.topology = WGPUPrimitiveTopology_TriangleList;
+    pd.multisample.count = 1;                  // zero is invalid
+    pd.multisample.mask = 0xFFFFFFFFu;
+    pd.fragment = &frag;
+    WGPURenderPipeline pipeline = wgpuDeviceCreateRenderPipeline(device, &pd);
+    if (!pipeline) { std::printf("[win] render pipeline failed\n"); return 2; }
+    std::printf("[win] render pipeline ready\n");
+
     // ---- frame loop ----
     const char* framesEnv = std::getenv("CHISEL_PROBE_FRAMES");
     const long maxFrames = framesEnv ? std::atol(framesEnv) : -1;  // -1 = run until closed
@@ -145,6 +195,8 @@ int main() {
 
         WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(device, nullptr);
         WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(enc, &rp);
+        wgpuRenderPassEncoderSetPipeline(pass, pipeline);
+        wgpuRenderPassEncoderDraw(pass, 3, 1, 0, 0);  // one triangle
         wgpuRenderPassEncoderEnd(pass);
         wgpuRenderPassEncoderRelease(pass);
         WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(enc, nullptr);
@@ -161,6 +213,8 @@ int main() {
     }
     std::printf("[win] presented %ld frame(s)\n", frame);
 
+    wgpuRenderPipelineRelease(pipeline);
+    wgpuShaderModuleRelease(module);
     wgpuQueueRelease(queue);
     wgpuSurfaceRelease(surface);
     wgpuAdapterRelease(ar.adapter);
