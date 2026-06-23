@@ -66,7 +66,15 @@ if(CHISEL_GPU_BACKEND STREQUAL "webgpu")
     # Stage 2 Step 2: on-screen cleared frame. Needs a windowing system (GLFW with
     # GLFW_NO_API) and, for the X11 surface source, the native X11 handles.
     find_package(glfw3 3.3 REQUIRED)
-    add_executable(chisel-wgpu-window src/gpu/wgpu_window.cpp)
+    # Stage 3 mesh+camera: pull in the GL-free CPU sources from the reference tree
+    # (icosphere generation, mesh normals/adjacency, camera math). None of these
+    # touch OpenGL, so they compile clean into the webgpu probe.
+    add_executable(chisel-wgpu-window
+        src/gpu/wgpu_window.cpp
+        src/sphere.cpp
+        src/mesh.cpp
+        src/camera.cpp)
+    target_include_directories(chisel-wgpu-window PRIVATE include)
     target_link_libraries(chisel-wgpu-window PRIVATE wgpu glfw)
     set_target_properties(chisel-wgpu-window PROPERTIES BUILD_RPATH "${wgpu_native_SOURCE_DIR}/lib")
     if(UNIX AND NOT APPLE)

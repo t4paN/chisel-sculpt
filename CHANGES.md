@@ -2,6 +2,32 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-23 — WebGPU port, Stage 3 (sub-step 2): real mesh, camera UBO, overlay passes
+
+- **`chisel-wgpu-window` now renders a real, camera-transformed mesh.** Pulls the GL-free CPU
+  sources (`sphere.cpp`, `mesh.cpp`, `camera.cpp`) into the probe target and builds an icosphere
+  (4 subdivisions, 2562 verts / 5120 tris), `build_adjacency` + `recompute_normals`. SOA is
+  repacked into **two separate vertex buffers** (position `@location 0`, normal `@location 1` —
+  closest mapping to `mesh.h`'s SOA layout) plus a `Uint32` index buffer → `DrawIndexed`.
+- **Camera UBO** `{ mat4 view; mat4 proj; }` driven by `camera.cpp`. A GL→WebGPU **z-clip
+  correction** (`[-1,1] → [0,1]`) is pre-multiplied into the projection (`makeProjCorrected`), so
+  the reference camera math is reused untouched and the NDC-z difference is absorbed in one matrix.
+  Bind-group-layout / pipeline-layout / bind-group wired; depth buffer (`Depth24Plus`, `Less`),
+  recreated on resize.
+- **Matcap fragment ported 1:1.** The GL "matcap" is *procedural* (view-space-normal shading, no
+  texture), so it carries over verbatim — there is no matcap texture to load. The handoff's "load
+  matcap texture" item was therefore moot.
+- **Two overlay pipelines composed in the same render pass:** a world-space wireframe cube via
+  **line-list topology** (reuses the camera bind group, depth-tested / no depth-write → front edges
+  show, back edges occluded by the mesh) and a screen-space **alpha-blended disc** (the brush
+  "shadow" footprint; own blend state, depth-ignored). Proves blend state, line topology, and
+  multi-pipeline depth compositing — the primitives the cursor/shadow and ImGui passes will need.
+- **Verified:** `CHISEL_PROBE_FRAMES=5 ./build-wgpu/chisel-wgpu-window` → mesh + overlay pipelines
+  ready, 5 frames presented, exit 0, no wgpu-native validation errors. (No XWD→PNG tooling on this
+  box, so no screenshot — headless frame-count is the proof, same as prior steps.)
+- Next (Stage 3 finale): ImGui via `imgui_impl_wgpu` (must vendor — only glfw+gl3 backends are in
+  `external/imgui/` now), then Stage 4 picking FBO (MRT + async readback).
+
 ## 2026-06-23 — WebGPU port, Stage 3 (sub-step 1): first triangle
 
 - **`chisel-wgpu-window` now draws a triangle, not just a clear.** Added a `RenderPipeline` from one
