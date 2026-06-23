@@ -2,6 +2,26 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-24 — WebGPU port, Seam Step 2a: gpu:: GL backend (seam is now dual-backend)
+
+- **The seam now has two backends.** New `src/gpu/gl_backend.cpp` implements the `gpu::` compute RHI
+  on OpenGL 4.3 (immediate-mode: dispatch/copy run on the spot, `glMemoryBarrier` between dependent
+  steps stands in for WebGPU's automatic inter-pass sync). Backend is a build-time choice —
+  `CHISEL_BACKEND_GL` vs `CHISEL_BACKEND_WEBGPU`; the header stores GL handles as plain `unsigned int`
+  so it never pulls in glad.
+- **Per-backend shader sources.** `create_compute_pipeline` now takes a `gpu::ShaderSources{ wgsl, glsl }`;
+  each backend compiles its own. Added `shaders/glsl/mask_paint.comp` — the GLSL 430 sibling of
+  `mask_paint.wgsl`, same ComputeBinding bindings + the same std140 Params UBO at binding 63 (the GL
+  kernels move from loose uniforms to the UBO so both backends share the `*ParamsGPU` upload structs).
+- **GL backend proven independently** by `chisel-gl-compute-test` (the native sibling of the WebGPU
+  probe's compute check): runs the mask kernel through `gpu::` on a real headless GL 4.3 context and
+  compares against a CPU reference of the same kernel — **GPU touched 135 / masked 74 / max 1.000 ==
+  CPU**, PASS, exit 0. WebGPU probe unchanged (draw 148/2562 max 0.4407, no validation errors).
+- This is the chosen **dual-backend** model: native + web will run the *same* `gpu::`-based
+  `ComputeState` through different backends (one codebase, no drift).
+- **Next: Seam Step 2b** — rewrite the real `ComputeState` compute dispatches onto `gpu::`, kernel by
+  kernel (each gets a `.comp` + `.wgsl` lockstep pair and a Params UBO), native `gl` build staying green.
+
 ## 2026-06-24 — WebGPU port, Seam Step 1: gpu:: compute RHI + probe routed through it
 
 - **The GPU seam exists.** New `include/gpu/gpu.h` (interface) + `src/gpu/webgpu_backend.cpp`

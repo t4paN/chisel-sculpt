@@ -60,14 +60,15 @@ void release_buffer(Buffer& b) {
     b.size = 0;
 }
 
-ComputePipeline create_compute_pipeline(Device& dev, const char* wgsl_src,
+ComputePipeline create_compute_pipeline(Device& dev, const ShaderSources& src,
                                         const BindEntry* entries, uint32_t n,
                                         const char* entry_point) {
     ComputePipeline p;
+    if (!src.wgsl) { std::printf("[gpu] no WGSL source for compute pipeline\n"); return p; }
 
     WGPUShaderSourceWGSL wgsl = {};
     wgsl.chain.sType = WGPUSType_ShaderSourceWGSL;
-    wgsl.code = sv(wgsl_src);
+    wgsl.code = sv(src.wgsl);
     WGPUShaderModuleDescriptor smd = {};
     smd.nextInChain = &wgsl.chain;
     p.module = wgpuDeviceCreateShaderModule(dev.device, &smd);

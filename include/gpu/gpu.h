@@ -16,6 +16,8 @@
 #if defined(CHISEL_BACKEND_WEBGPU)
 #include <webgpu/webgpu.h>
 #endif
+// GL backend stores handles as plain unsigned int (== GLuint) so this header does
+// not need to pull in glad — only src/gpu/gl_backend.cpp includes the GL loader.
 
 namespace gpu {
 
@@ -39,7 +41,9 @@ inline bool   has(Usage set, Usage bit)   { return ((uint32_t)set & (uint32_t)bi
 enum class Bind : uint32_t { StorageRead, StorageReadWrite, Uniform };
 
 // ---- Device: wraps an already-created backend device + queue. Surface/adapter/
-// device creation stays in the windowing code (Stage 2); the seam owns resources. ----
+// device creation stays in the windowing code (Stage 2); the seam owns resources.
+// (GL has no device object — gl_device() returns an empty handle; a current GL
+// context must already exist.) ----
 struct Device {
 #if defined(CHISEL_BACKEND_WEBGPU)
     WGPUDevice device = nullptr;
@@ -48,12 +52,16 @@ struct Device {
 };
 #if defined(CHISEL_BACKEND_WEBGPU)
 Device device_from_webgpu(WGPUDevice, WGPUQueue);
+#elif defined(CHISEL_BACKEND_GL)
+Device gl_device();
 #endif
 
 struct Buffer {
     uint64_t size = 0;
 #if defined(CHISEL_BACKEND_WEBGPU)
     WGPUBuffer handle = nullptr;   // exposed so the still-raw render path can bind it
+#elif defined(CHISEL_BACKEND_GL)
+    unsigned int handle = 0;       // GLuint
 #endif
 };
 
@@ -67,17 +75,33 @@ void   release_buffer(Buffer&);
 // ComputeBinding enum; min_size guards the bound range.
 struct BindEntry { uint32_t binding; Bind type; uint64_t min_size; };
 
+// Per-backend shader sources for one kernel. The WebGPU backend compiles `wgsl`,
+// the GL backend compiles `glsl` (#version 430 compute). A dual-backend kernel
+// supplies both; each backend ignores the other. (The two must agree on the same
+// ComputeBinding bindings + the std140 Params UBO at binding 63.)
+struct ShaderSources {
+    const char* wgsl = nullptr;
+    const char* glsl = nullptr;
+};
+
+static const uint32_t kMaxBindings = 16;
+
 struct ComputePipeline {
 #if defined(CHISEL_BACKEND_WEBGPU)
     WGPUComputePipeline handle = nullptr;
     WGPUBindGroupLayout  bgl    = nullptr;
     WGPUPipelineLayout   pl     = nullptr;
     WGPUShaderModule     module = nullptr;
+#elif defined(CHISEL_BACKEND_GL)
+    unsigned int handle = 0;                 // GL program (0 = failed)
+    uint32_t  binding_count = 0;             // bind-layout cache (GL has no BGL object):
+    uint32_t  binding_id[kMaxBindings] = {}; //   binding number ...
+    Bind      binding_type[kMaxBindings] = {};//   ... and its access type
 #endif
 };
-// Compile a compute pipeline from WGSL source + its bind-group layout. Returns a
-// pipeline with handle==null on failure (caller checks).
-ComputePipeline create_compute_pipeline(Device&, const char* wgsl_src,
+// Compile a compute pipeline from the backend's shader source + its bind-group
+// layout. Returns a pipeline with handle==null/0 on failure (caller checks).
+ComputePipeline create_compute_pipeline(Device&, const ShaderSources&,
                                         const BindEntry* entries, uint32_t entry_count,
                                         const char* entry_point = "main");
 void release_compute_pipeline(ComputePipeline&);
@@ -88,6 +112,13 @@ struct BindBufferEntry { uint32_t binding; const Buffer* buffer; uint64_t size; 
 struct BindGroup {
 #if defined(CHISEL_BACKEND_WEBGPU)
     WGPUBindGroup handle = nullptr;
+#elif defined(CHISEL_BACKEND_GL)
+    // GL has no bind-group object: remember each binding's GL target + buffer and
+    // re-bind at dispatch. Targets resolved from the pipeline layout at create time.
+    uint32_t     count = 0;
+    unsigned int target[kMaxBindings] = {};  // GL_SHADER_STORAGE_BUFFER / GL_UNIFORM_BUFFER
+    uint32_t     binding[kMaxBindings] = {};
+    unsigned int buffer[kMaxBindings]  = {};
 #endif
 };
 BindGroup create_bind_group(Device&, ComputePipeline&,
@@ -103,6 +134,8 @@ struct ComputeBatch {
     WGPUCommandEncoder     enc  = nullptr;
     WGPUComputePassEncoder pass = nullptr;
 #endif
+    // GL needs no encoder — dispatch/copy execute immediately (with glMemoryBarrier
+    // between dependent steps); begin/end-pass/submit are barrier bookkeeping.
 };
 ComputeBatch begin_compute(Device&);
 void dispatch(ComputeBatch&, ComputePipeline&, BindGroup&, uint32_t groups_x);

@@ -883,7 +883,7 @@ int main() {
         { 6,  gpu::Bind::StorageReadWrite, kDirtyBytes },
         { 63, gpu::Bind::Uniform,          sizeof(MaskParamsGPU) },
     };
-    gpu::ComputePipeline maskPipeline = gpu::create_compute_pipeline(gdev, maskSrc.c_str(), maskLayout, 4);
+    gpu::ComputePipeline maskPipeline = gpu::create_compute_pipeline(gdev, gpu::ShaderSources{ maskSrc.c_str(), nullptr }, maskLayout, 4);
     if (!maskPipeline.handle) { std::printf("[win] mask pipeline failed\n"); return 2; }
     gpu::BindBufferEntry maskBg[] = {
         { 0,  &posVB,        kPosBytes },
@@ -900,7 +900,7 @@ int main() {
         { 3,  gpu::Bind::StorageReadWrite, kAccumBytes },
         { 63, gpu::Bind::Uniform,          sizeof(DrawAccumParamsGPU) },
     };
-    gpu::ComputePipeline drawAccumPipeline = gpu::create_compute_pipeline(gdev, drawAccumSrc.c_str(), drawAccumLayout, 4);
+    gpu::ComputePipeline drawAccumPipeline = gpu::create_compute_pipeline(gdev, gpu::ShaderSources{ drawAccumSrc.c_str(), nullptr }, drawAccumLayout, 4);
     if (!drawAccumPipeline.handle) { std::printf("[win] draw_accum pipeline failed\n"); return 2; }
     gpu::BindBufferEntry drawAccumBg[] = {
         { 0,  &posVB,            kPosBytes },
@@ -918,7 +918,7 @@ int main() {
         { 12, gpu::Bind::StorageRead,      kMaskBytes },
         { 63, gpu::Bind::Uniform,          sizeof(CountParamsGPU) },
     };
-    gpu::ComputePipeline drawApplyPipeline = gpu::create_compute_pipeline(gdev, drawApplySrc.c_str(), drawApplyLayout, 5);
+    gpu::ComputePipeline drawApplyPipeline = gpu::create_compute_pipeline(gdev, gpu::ShaderSources{ drawApplySrc.c_str(), nullptr }, drawApplyLayout, 5);
     if (!drawApplyPipeline.handle) { std::printf("[win] draw_apply pipeline failed\n"); return 2; }
     gpu::BindBufferEntry drawApplyBg[] = {
         { 0,  &posVB,            kPosBytes },
@@ -939,7 +939,7 @@ int main() {
         { 6,  gpu::Bind::StorageRead,      kIdentityBytes },
         { 63, gpu::Bind::Uniform,          sizeof(CountParamsGPU) },
     };
-    gpu::ComputePipeline normalsPipeline = gpu::create_compute_pipeline(gdev, normalsSrc.c_str(), normalsLayout, 7);
+    gpu::ComputePipeline normalsPipeline = gpu::create_compute_pipeline(gdev, gpu::ShaderSources{ normalsSrc.c_str(), nullptr }, normalsLayout, 7);
     if (!normalsPipeline.handle) { std::printf("[win] compute_normals pipeline failed\n"); return 2; }
     gpu::BindBufferEntry normalsBg[] = {
         { 0,  &posVB,            kPosBytes },

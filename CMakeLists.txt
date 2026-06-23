@@ -206,6 +206,23 @@ if(WIN32)
     target_include_directories(chisel PRIVATE external/wintab)
 endif()
 
+# GPU seam — GL backend test (Seam Step 2a). Headless GL 4.3 compute check that the
+# gpu:: seam's GL backend reproduces the mask kernel (CPU-referenced). The full app
+# moves onto gpu:: in Step 2b; for now only this test exercises the GL backend.
+add_executable(chisel-gl-compute-test
+    src/gpu/gl_compute_test.cpp
+    src/gpu/gl_backend.cpp
+    src/sphere.cpp
+    src/mesh.cpp)
+target_include_directories(chisel-gl-compute-test PRIVATE include)
+target_compile_definitions(chisel-gl-compute-test PRIVATE
+    CHISEL_BACKEND_GL
+    CHISEL_GLSL_DIR="${CMAKE_CURRENT_SOURCE_DIR}/shaders/glsl")
+target_link_libraries(chisel-gl-compute-test PRIVATE glad OpenGL::GL glfw)
+if(UNIX AND NOT WIN32)
+    target_link_libraries(chisel-gl-compute-test PRIVATE m dl)
+endif()
+
 option(CHISEL_DEBUG_MULTIRES "Run post-projection cascade-to-L_max truth check" OFF)
 if(CHISEL_DEBUG_MULTIRES)
     target_compile_definitions(chisel PRIVATE CHISEL_DEBUG_MULTIRES)

@@ -1,0 +1,57 @@
+// mask_paint.comp — GLSL 430 sibling of shaders/wgsl/mask_paint.wgsl.
+// Same kernel, same ComputeBinding bindings, same std140 Params UBO at binding 63
+// (byte-identical to MaskParamsGPU). The dual-backend gpu:: seam compiles this on
+// the GL backend and the .wgsl on WebGPU; the two must stay in lockstep.
+#version 430
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0)  readonly buffer PosBuf  { float positions[]; };
+layout(std430, binding = 12)          buffer MaskBuf { float mask_buf[]; };
+layout(std430, binding = 6)           buffer DirtyBuf { uint count; uint ids[]; } dirty;
+
+// std140 UBO — matches mask_paint.wgsl's Params and the C++ MaskParamsGPU (48 bytes).
+layout(std140, binding = 63) uniform Params {
+    vec3  anchor_a;        // 0..11
+    float world_radius;    // 12
+    vec3  anchor_b;        // 16..27
+    float hardness;        // 28
+    float paint_strength;  // 32
+    uint  use_b;           // 36
+    uint  vertex_count;    // 40
+    uint  _pad0;           // 44
+} P;
+
+float brush_falloff(float dist, float radius) {
+    float t = dist / radius;
+    float inner = 0.15 + P.hardness * 0.55;
+    if (t <= inner) return 1.0;
+    float blend = (t - inner) / (1.0 - inner + 1e-6);
+    blend = blend * blend * (3.0 - 2.0 * blend);
+    return 1.0 - blend;
+}
+
+void try_paint(uint v, vec3 anchor, vec3 vp) {
+    if (P.use_b != 0u && anchor.x * vp.x < 0.0) return;
+    float dist = length(vp - anchor);
+    if (dist >= P.world_radius) return;
+    float w = brush_falloff(dist, P.world_radius);
+    if (w <= 0.0) return;
+
+    float delta = P.paint_strength * w;
+    float old_val = mask_buf[v];
+    float new_val = clamp(old_val + delta, 0.0, 1.0);
+    if (new_val == old_val) return;
+
+    mask_buf[v] = new_val;
+    uint idx = atomicAdd(dirty.count, 1u);
+    dirty.ids[idx] = v;
+}
+
+void main() {
+    uint v = gl_GlobalInvocationID.x;
+    if (v >= P.vertex_count) return;
+
+    vec3 vp = vec3(positions[v*3u], positions[v*3u + 1u], positions[v*3u + 2u]);
+    try_paint(v, P.anchor_a, vp);
+    if (P.use_b != 0u) try_paint(v, P.anchor_b, vp);
+}
