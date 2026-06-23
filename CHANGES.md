@@ -2,6 +2,29 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-24 — WebGPU port, Seam Step 1: gpu:: compute RHI + probe routed through it
+
+- **The GPU seam exists.** New `include/gpu/gpu.h` (interface) + `src/gpu/webgpu_backend.cpp`
+  (wgpu-native impl) introduce the thin `gpu::` RHI from the port plan, sized to exactly what
+  Chisel's compute path does: `Buffer` (create/write/release), `ComputePipeline` (WGSL + bind-layout
+  keyed on the ComputeBinding enum), `BindGroup`, `ComputeBatch` (begin → dispatch* → copy → submit),
+  and a one-shot `map_read`. Backend is chosen at **build time** (`CHISEL_BACKEND_WEBGPU` from CMake)
+  — no runtime polymorphism; each type holds raw backend handles guarded by the backend macro.
+- **The probe's whole compute path now goes through the seam.** `chisel-wgpu-window` creates its
+  brush buffers, the mask + draw_accum/apply/compute_normals pipelines, bind groups, per-dab
+  dispatches and readbacks via `gpu::` instead of raw `wgpu*`. Shared mesh buffers (pos/nrm/idx/mask)
+  are `gpu::Buffer`; the still-raw render/pick path binds them via `.handle` (the documented Stage-3
+  bridge). ~200 lines of inline pipeline/bindgroup/encoder boilerplate collapsed into seam calls.
+- **First consumer validates the abstraction against known-good numbers.** Headless output is
+  byte-identical to the pre-seam runs: **Draw** → per-dab ~117–131 touched, final 148/2562 displaced
+  max 0.4407; **Mask** (`CHISEL_PROBE_BRUSH=mask`) → per-dab 128→34, final 108/2562 max 1.000. Both
+  exit 0, no validation errors. (X11's `glfw3native.h` `#define None` forced dropping the enum's
+  `None` member — noted in the header.)
+- **Deferred (not blocking):** dual-backend question (whether native GL `ComputeState` also rewrites
+  onto the seam, or the seam stays WebGPU-only) — decided when Seam Step 2 wires the real `ComputeState`.
+- **Next: Seam Step 2** — port the real `ComputeState` compute path onto `gpu::` under
+  `CHISEL_GPU_BACKEND=webgpu`, reusing the canonical `.wgsl` kernels.
+
 ## 2026-06-24 — WebGPU port, Stage 5 (draw): first deforming brush end-to-end
 
 - **Draw/inflate brush running on WebGPU** — the first brush that mutates geometry. Three new WGSL

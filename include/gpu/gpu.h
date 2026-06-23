@@ -1,0 +1,120 @@
+// include/gpu/gpu.h
+// The Chisel GPU seam (RHI). A thin backend-agnostic layer sized to *exactly* what
+// Chisel does — not a general abstraction (see webgpu-port-plan.md §"The seam").
+// The backend is chosen at BUILD time (CMake CHISEL_GPU_BACKEND → one of the
+// CHISEL_BACKEND_* macros), so there is no runtime polymorphism: each gpu:: type
+// holds raw backend handles as members (guarded by the backend macro) and its
+// methods are compiled from the matching src/gpu/<backend>_backend.cpp.
+//
+// Seam Step 1 covers the COMPUTE path only (buffers, compute pipelines, bind
+// groups, a compute batch, readback) — enough to route the probe's mask + draw
+// brushes through the seam. Render-side primitives land with Stage 3's render port.
+#pragma once
+#include <cstdint>
+#include <cstddef>
+
+#if defined(CHISEL_BACKEND_WEBGPU)
+#include <webgpu/webgpu.h>
+#endif
+
+namespace gpu {
+
+// Buffer usage bit-flags, mapped to the backend's native flags by create_buffer.
+// CopyDst is always added by the backend (every buffer can be written), matching
+// the probe's makeBuf convention.
+// (no "None" member — X11's glfw3native.h #defines None, which would clobber the token)
+enum class Usage : uint32_t {
+    Vertex  = 1u << 0,
+    Index   = 1u << 1,
+    Storage = 1u << 2,
+    Uniform = 1u << 3,
+    CopySrc = 1u << 4,
+    MapRead = 1u << 5,
+};
+inline Usage  operator|(Usage a, Usage b) { return (Usage)((uint32_t)a | (uint32_t)b); }
+inline bool   has(Usage set, Usage bit)   { return ((uint32_t)set & (uint32_t)bit) != 0; }
+
+// How a buffer is seen by a compute bind-group slot. Mirrors the std430 access in
+// the WGSL: readonly storage, read_write storage, or a uniform block.
+enum class Bind : uint32_t { StorageRead, StorageReadWrite, Uniform };
+
+// ---- Device: wraps an already-created backend device + queue. Surface/adapter/
+// device creation stays in the windowing code (Stage 2); the seam owns resources. ----
+struct Device {
+#if defined(CHISEL_BACKEND_WEBGPU)
+    WGPUDevice device = nullptr;
+    WGPUQueue  queue  = nullptr;
+#endif
+};
+#if defined(CHISEL_BACKEND_WEBGPU)
+Device device_from_webgpu(WGPUDevice, WGPUQueue);
+#endif
+
+struct Buffer {
+    uint64_t size = 0;
+#if defined(CHISEL_BACKEND_WEBGPU)
+    WGPUBuffer handle = nullptr;   // exposed so the still-raw render path can bind it
+#endif
+};
+
+// Create a buffer of `size` bytes with `usage` (+ CopyDst). If `data` is non-null it
+// is uploaded immediately. release_buffer frees the backend handle.
+Buffer create_buffer(Device&, const void* data, uint64_t size, Usage usage);
+void   write_buffer(Device&, Buffer&, uint64_t offset, const void* data, uint64_t size);
+void   release_buffer(Buffer&);
+
+// One compute bind-group slot's declaration (layout) — binding number mirrors the
+// ComputeBinding enum; min_size guards the bound range.
+struct BindEntry { uint32_t binding; Bind type; uint64_t min_size; };
+
+struct ComputePipeline {
+#if defined(CHISEL_BACKEND_WEBGPU)
+    WGPUComputePipeline handle = nullptr;
+    WGPUBindGroupLayout  bgl    = nullptr;
+    WGPUPipelineLayout   pl     = nullptr;
+    WGPUShaderModule     module = nullptr;
+#endif
+};
+// Compile a compute pipeline from WGSL source + its bind-group layout. Returns a
+// pipeline with handle==null on failure (caller checks).
+ComputePipeline create_compute_pipeline(Device&, const char* wgsl_src,
+                                        const BindEntry* entries, uint32_t entry_count,
+                                        const char* entry_point = "main");
+void release_compute_pipeline(ComputePipeline&);
+
+// One filled bind-group slot: the buffer bound at `binding` for `size` bytes.
+struct BindBufferEntry { uint32_t binding; const Buffer* buffer; uint64_t size; };
+
+struct BindGroup {
+#if defined(CHISEL_BACKEND_WEBGPU)
+    WGPUBindGroup handle = nullptr;
+#endif
+};
+BindGroup create_bind_group(Device&, ComputePipeline&,
+                            const BindBufferEntry* entries, uint32_t entry_count);
+void release_bind_group(BindGroup&);
+
+// ---- Compute batch: record dispatches into one compute pass, optionally end the
+// pass and append buffer copies, then submit. Maps 1:1 to a WebGPU encoder; a GL
+// backend implements begin/end-pass as no-ops and dispatch/copy immediately. ----
+struct ComputeBatch {
+    Device* dev = nullptr;
+#if defined(CHISEL_BACKEND_WEBGPU)
+    WGPUCommandEncoder     enc  = nullptr;
+    WGPUComputePassEncoder pass = nullptr;
+#endif
+};
+ComputeBatch begin_compute(Device&);
+void dispatch(ComputeBatch&, ComputePipeline&, BindGroup&, uint32_t groups_x);
+void end_compute_pass(ComputeBatch&);                       // call before copy_buffer
+void copy_buffer(ComputeBatch&, const Buffer& src, uint64_t src_off,
+                 const Buffer& dst, uint64_t dst_off, uint64_t size);
+void submit(ComputeBatch&);                                  // finish + submit + release
+
+// Synchronous read of a MapRead staging buffer that has already been populated
+// (e.g. via copy_buffer in a submitted batch). Busy-waits the backend until the map
+// resolves, copies `size` bytes into `out`. Legal only at the discrete readback
+// points (pen-down/up/one-shot) the architecture restricts us to — never mid-stroke.
+void map_read(Device&, const Buffer& staging, uint64_t size, void* out);
+
+} // namespace gpu
