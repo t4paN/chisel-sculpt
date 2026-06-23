@@ -5,6 +5,68 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# ---------------------------------------------------------------------------
+# GPU backend selection (WebGPU port — see ../webgpu-port-plan.md).
+#   gl     : OpenGL 4.3 compute — the reference backend, builds today.
+#   webgpu : Dawn (native) / Emscripten (web) WebGPU backend — under construction.
+# Default stays `gl` so the native reference build is never broken during the port.
+# ---------------------------------------------------------------------------
+set(CHISEL_GPU_BACKEND "gl" CACHE STRING "GPU backend: gl | webgpu")
+set_property(CACHE CHISEL_GPU_BACKEND PROPERTY STRINGS gl webgpu)
+message(STATUS "Chisel GPU backend: ${CHISEL_GPU_BACKEND}")
+
+if(NOT CHISEL_GPU_BACKEND STREQUAL "gl" AND NOT CHISEL_GPU_BACKEND STREQUAL "webgpu")
+    message(FATAL_ERROR "CHISEL_GPU_BACKEND must be 'gl' or 'webgpu', got '${CHISEL_GPU_BACKEND}'")
+endif()
+
+# ---------------------------------------------------------------------------
+# WebGPU backend (Stage 2 bring-up). Fetches the wgpu-native prebuilt and builds
+# the bring-up probe targets. The full chisel app is NOT portable to webgpu until
+# the gpu:: seam lands, so this backend currently builds only the probes; the GL
+# build below is skipped entirely (return). Native dev impl = wgpu-native; the web
+# build (Emscripten -sUSE_WEBGPU) is wired in a later stage. See ../webgpu-port-plan.md.
+# ---------------------------------------------------------------------------
+if(CHISEL_GPU_BACKEND STREQUAL "webgpu")
+    include(FetchContent)
+    set(WGPU_NATIVE_VERSION "v29.0.0.0" CACHE STRING "wgpu-native release tag")
+    set(_wgpu_base "https://github.com/gfx-rs/wgpu-native/releases/download/${WGPU_NATIVE_VERSION}")
+    if(WIN32)
+        set(_wgpu_url "${_wgpu_base}/wgpu-windows-x86_64-msvc-release.zip")
+    elseif(APPLE)
+        set(_wgpu_url "${_wgpu_base}/wgpu-macos-x86_64-release.zip")
+    else()
+        set(_wgpu_url "${_wgpu_base}/wgpu-linux-x86_64-release.zip")
+    endif()
+    message(STATUS "Fetching wgpu-native prebuilt: ${_wgpu_url}")
+    FetchContent_Declare(wgpu_native URL "${_wgpu_url}")
+    FetchContent_MakeAvailable(wgpu_native)
+
+    add_library(wgpu SHARED IMPORTED GLOBAL)
+    if(WIN32)
+        # win/apple paths are best-effort (linux-only dev box here) — verified on Linux.
+        set_target_properties(wgpu PROPERTIES
+            IMPORTED_LOCATION "${wgpu_native_SOURCE_DIR}/lib/wgpu_native.dll"
+            IMPORTED_IMPLIB   "${wgpu_native_SOURCE_DIR}/lib/wgpu_native.dll.lib"
+            INTERFACE_INCLUDE_DIRECTORIES "${wgpu_native_SOURCE_DIR}/include")
+    else()
+        # The prebuilt .so ships without a SONAME; without this CMake records the
+        # (relative) link-line path as DT_NEEDED and the loader can't find it from
+        # another cwd. IMPORTED_NO_SONAME makes NEEDED the bare filename, resolved
+        # via RUNPATH (BUILD_RPATH below).
+        set_target_properties(wgpu PROPERTIES
+            IMPORTED_LOCATION "${wgpu_native_SOURCE_DIR}/lib/libwgpu_native.so"
+            IMPORTED_NO_SONAME TRUE
+            INTERFACE_INCLUDE_DIRECTORIES "${wgpu_native_SOURCE_DIR}/include")
+    endif()
+
+    add_executable(chisel-wgpu-probe src/gpu/wgpu_probe.cpp)
+    target_link_libraries(chisel-wgpu-probe PRIVATE wgpu)
+    set_target_properties(chisel-wgpu-probe PROPERTIES BUILD_RPATH "${wgpu_native_SOURCE_DIR}/lib")
+
+    message(STATUS "WebGPU backend: built bring-up probe 'chisel-wgpu-probe' (full app port in progress)")
+    return()
+endif()
+
 # Find packages
 find_package(OpenGL REQUIRED)
 find_package(glfw3 3.3 REQUIRED)

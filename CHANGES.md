@@ -2,6 +2,36 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-23 — WebGPU port, Stage 2 (Step 1): wgpu-native toolchain proven
+
+- **`CHISEL_GPU_BACKEND=webgpu` now builds + runs.** CMake fetches the wgpu-native v29.0.0.0 prebuilt
+  (FetchContent, platform-selected URL, into `build*/_deps` — gitignored) and builds the bring-up
+  probe `chisel-wgpu-probe` (`src/gpu/wgpu_probe.cpp`); the `gl` build is skipped via `return()` and
+  is byte-for-byte unchanged. `IMPORTED_NO_SONAME` on the SONAME-less prebuilt so the probe runs from
+  any cwd.
+- **Verified on this box:** probe creates a WGPUInstance, requests an adapter, and reaches the real
+  GPU — *AMD Radeon Vega 8 (RADV RAVEN), Mesa, Vulkan backend, integrated*. Native WebGPU dev is
+  therefore fully buildable+runnable locally (only the browser/Emscripten target needs a separate
+  setup). Probe written against the real v29 `webgpu.h` (Future/callback-info API), not a guess.
+- Next: Stage 2 Step 2 — GLFW window + WGPUSurface + swapchain + clear frame.
+
+## 2026-06-23 — WebGPU port, Stage 1: foundation
+
+- **CMake `CHISEL_GPU_BACKEND` option (`gl` | `webgpu`), default `gl`.** Inert scaffold: the `gl`
+  reference backend configures exactly as before (verified); selecting `webgpu` fails loudly
+  ("not buildable yet, Stage 2") rather than silently producing a GL build under a webgpu label.
+- **`shaders/wgsl/` established with the reference translation.** Ported the mask brush kernel
+  (`compute_mask.cpp` GLSL 430 → `mask_paint.wgsl`) as the worked example, plus `CONVENTIONS.md`
+  codifying the GLSL→WGSL rules: keep the `ComputeBinding` enum as `@group(0) @binding(N)`, loose
+  uniforms → a `Params` UBO at reserved binding 63 (std140 layout), drop `glMemoryBarrier`, keep the
+  uint-bits+CAS accum path (no WGSL float atomics), async readback only at pen-down/pen-up/one-shot.
+- Full staged plan tracked in `../webgpu-port-plan.md` (Stages 1–9). Native build untouched.
+
+## 2026-06-23 — Fork: WebGPU edition (chisel-webgpu)
+
+- **Forked `chisel-public-src` → `chisel-webgpu`** to start the WebGPU/itch.io port. Git history kept; `origin` renamed to `native-upstream` so the WebGPU tree can't accidentally push to the native repo.
+- **README rewritten for the WebGPU edition.** Reframed as browser-first (Dawn-backed WebGPU, one C++ codebase → native + web), browser-only itch.io distribution, browser-appropriate file I/O / pen-pressure / fullscreen notes, and a WIP status banner. Native OpenGL 4.3 build remains the reference implementation upstream.
+
 ## 2026-06-23 — Multimesh sync: stop stale CPU mesh from clobbering live GPU edits
 
 - **Inserting a mesh after a GPU brush stroke no longer makes the previous entity's strokes vanish, switching to paint no longer breaks its normals, and a full undo no longer breaks normals.** All three were the same bug. Since the blood-moon GPU-resident "flip", a stroke deliberately leaves the active entity's CPU mesh stale (`mark_cpu_dirty`) — the truth lives in the working VBO + disp/base SSBOs, reconciled lazily by `MultiresGPU::materialize_cpu`. Two readers acted on the stale CPU copy without reconciling first.

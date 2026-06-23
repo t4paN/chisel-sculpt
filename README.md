@@ -1,8 +1,10 @@
-# Chisel
+# Chisel (WebGPU)
 
-Shader-based 3D sculpting. C++ / OpenGL 4.3.
+Shader-based 3D sculpting, in your browser. C++ / WebGPU (Dawn).
 
-Chisel runs the entire sculpt pipeline on the GPU — brush operations, mesh updates, selection, and remeshing all execute as compute shaders. The CPU orchestrates; the GPU does the work. The result is a lightweight, responsive sculpting tool that stays out of your way.
+Chisel runs the entire sculpt pipeline on the GPU — brush operations, mesh updates, selection, and remeshing all execute as compute shaders. The CPU orchestrates; the GPU does the work. This is the **WebGPU edition**: the same engine, retargeted from OpenGL compute to WebGPU so it runs natively *and* in the browser, with nothing to install.
+
+> **Status: work in progress.** This is the WebGPU fork of [Chisel](https://github.com/t4paN/chisel-sculpt). The native OpenGL 4.3 build is the source of truth; this tree is porting the GPU backend from GL compute to WebGPU (WGSL) via [Dawn](https://dawn.googlesource.com/dawn), with a browser build as the shipping target on itch.io. Sections below describe the goal — not everything is wired up yet.
 
 ## Features
 
@@ -17,22 +19,23 @@ Chisel runs the entire sculpt pipeline on the GPU — brush operations, mesh upd
 - **Import / export** — OBJ and PLY in; OBJ, STL, and PLY out (PLY carries vertex paint)
 - **Save / load** — native project files (.chisel)
 - **Matcap shading** — one draw call per object
-- **Runs on a potato** — as long as the potato supports OpenGL 4.3 (compute shaders are non-negotiable)
+- **Runs in the browser** — no install, no download; just a WebGPU-capable browser
 
 ## Known limitations / TODO
 
-- Pen pressure is X11/XInput2 only (Wacom et al.); no Wayland tablet support yet
-- Voxel merge output is now evened out (tangential relaxation onto the iso-surface) and can be made mirror-symmetric; heavily sculpted, non-watertight input can still need a resolution bump
+- **WebGPU port is in flight** — the GL 4.3 compute kernels are being translated to WGSL; some brushes/operations may lag the native build during the port
+- File and project I/O in the browser goes through the browser's file picker / download (no direct filesystem access)
+- Pen pressure in the browser rides the Pointer Events API rather than XInput2; pressure-curve support depends on the browser
+- Voxel merge output is evened out (tangential relaxation onto the iso-surface) and can be made mirror-symmetric; heavily sculpted, non-watertight input can still need a resolution bump
 - Brush feel could use more polish (falloff curves, stroke interpolation)
-- After a *full* undo of inward/carve ("negative") strokes, normals where those strokes overlapped can look slightly off (only seen on carve strokes, not additive ones) — purely cosmetic, and a quick pass of the smooth brush fixes it
+- After a *full* undo of inward/carve ("negative") strokes, normals where those strokes overlapped can look slightly off (cosmetic; a quick pass of the smooth brush fixes it)
 - No texture painting
-- Linux-only dev, Windows builds via CI (not battle-tested)
 
 ## No tablet required
 
 Chisel is designed to work well with a mouse. Hold a key and drag to adjust brush size, strength, hardness, or spacing in real time — no menus, no panels, no digging through settings. A tablet is nice to have, but not necessary.
 
-If you do plug in a graphics tablet on X11, pen pressure is picked up automatically (via XInput2 — the same source Krita uses, including any pressure curve you've set there) and drives both brush strength and size. Toggle it with **K**.
+If you do plug in a graphics tablet, pen pressure is picked up automatically and drives both brush strength and size. Toggle it with **K**. (In the browser this uses the Pointer Events pressure channel; on native Linux it uses XInput2 — the same source Krita uses.)
 
 ## Controls
 
@@ -115,10 +118,10 @@ Mask shields verts from paint as well as sculpt. The `[ ]` toggle by the Paint i
 
 | Key | Action |
 |---|---|
-| Ctrl + S | Save |
+| Ctrl + S | Save project (downloads in the browser) |
 | Ctrl + Shift + S | Save as |
-| Ctrl + O | Import OBJ |
-| Ctrl + E | Export OBJ |
+| Ctrl + O | Import OBJ (browser file picker) |
+| Ctrl + E | Export OBJ (downloads in the browser) |
 
 ### Other
 
@@ -126,44 +129,38 @@ Mask shields verts from paint as well as sculpt. The `[ ]` toggle by the Paint i
 |---|---|
 | Ctrl + Z | Undo |
 | Ctrl + Shift + Z | Redo |
-| Space | Toggle borderless fullscreen |
+| Space | Toggle fullscreen |
 | N | Toggle fast normals |
 | K | Toggle pen pressure (tablet) |
 | Y | Toggle debug mesh view |
-| Esc | Quit (confirm with Y) |
+| Esc | Quit / leave (native only) |
 
 ## How it works
 
-Chisel keeps the mesh GPU-resident. Brush strokes, normal recomputation, selection growth, mask painting, and remesh smoothing all run as compute shaders — the CPU never reads vertex data back during a stroke. An FBO snapshot at pen-down gives the CPU a screen-space depth + normal + triangle ID buffer to pick vertices against, so there's zero GPU sync until the stroke ends.
+Chisel keeps the mesh GPU-resident. Brush strokes, normal recomputation, selection growth, mask painting, and remesh smoothing all run as compute shaders — the CPU never reads vertex data back during a stroke. A render-target snapshot at pen-down gives the CPU a screen-space depth + normal + triangle ID buffer to pick vertices against, so there's zero GPU sync until the stroke ends.
 
 The mesh uses a flat SOA layout with CSR adjacency — no half-edge structures, no linked lists. Normals are recomputed partially (dirty vertices only). GPU upload is partial (dirty range only). The brush hot path allocates zero heap memory.
 
-The goal is simple: stay fast at high polygon counts and don't make the artist wait.
+For the WebGPU edition, the GPU layer goes through [Dawn](https://dawn.googlesource.com/dawn), so the same C++ engine drives WebGPU compute (WGSL) on the desktop and compiles to a browser build with the same shaders. The GL 4.3 compute kernels are being translated to WGSL one operation at a time.
 
-## Install
+The goal is simple: stay fast at high polygon counts and don't make the artist wait — in the browser too.
 
-### Windows
+## Play
 
-Download `chisel-windows-x64.zip` from the [latest release](https://github.com/t4paN/chisel-sculpt/releases), extract, and run `chisel.exe`. No installer, no dependencies.
+Chisel (WebGPU) runs in the browser on **itch.io** — *(page link coming once the first build is up)*. No install, no download. You'll need a browser with WebGPU enabled: recent Chrome/Edge (113+), or Firefox/Safari with the WebGPU flag turned on.
 
-### Linux (AppImage)
+## Build from source
 
-Download the AppImage from the [latest release](https://github.com/t4paN/chisel-sculpt/releases), make it executable, and run:
+> The Dawn/WebGPU build is being set up; these steps will firm up as the toolchain lands.
 
-```bash
-chmod +x Chisel-x86_64.AppImage
-./Chisel-x86_64.AppImage
-```
-
-### Build from source (Linux)
-
-Requires: `libglfw3-dev`, `libgl-dev`, `libglx-dev`, `libegl-dev`
+Chisel (WebGPU) builds from a single C++17 codebase via CMake, with Dawn supplying the WebGPU backend for both native and web (Emscripten) targets.
 
 ```bash
-cd chisel-sculpt
 cmake -B build && cmake --build build -j$(nproc)
-./build/chisel
+./build/chisel        # native WebGPU (Dawn) build
 ```
+
+The native OpenGL 4.3 build still lives upstream at [t4paN/chisel-sculpt](https://github.com/t4paN/chisel-sculpt) and remains the reference implementation during the port.
 
 ## Acknowledgments
 
@@ -175,7 +172,7 @@ Chisel was vibecoded with Anthropic's Claude — the models did the lifting:
 | **Claude Opus 4.7** | 35 | The remesher's heavy polish (GPU selection, tangential smoothing, seam discipline, convergence), GPU brush mirror-seam fixes, per-entity undo, and OBJ import. |
 | **Claude Haiku 4.5** | 30 | "lil' haiku" — the Big GPU Refactor that moved every brush onto compute shaders (draw, crease, pinch, move, mirrored sculpting), and brought the iso remesher home — symmetry, seam pinning, and tuning — at a point when Opus 4.6 was hamstrung by compute constraints. |
 | **Claude Sonnet 4.6** | 28 | The multires displacement stack, the icosphere / Loop-subdivision base, and the per-entity refactor (MeshEntity, per-object undo, per-entity compute dispatch). |
-| **Claude Opus 4.8** | 15 | The SDF mirror-symmetric voxel-merge, plus a final polish pass across brushes, rendering, and the merge/remesh pipeline. |
+| **Claude Opus 4.8** | 15 | The SDF mirror-symmetric voxel-merge, a final polish pass across brushes, rendering, and the merge/remesh pipeline — and the WebGPU port. |
 
 Early testing by **Ariadne**.
 
