@@ -1116,7 +1116,7 @@ bool BrushStroke::finalize(Mesh& mesh, UndoStack& stack, MultiresStack& multires
         }
         // Refresh normals for the smoothed verts so the deferred normal
         // readback below picks up post-smoothing values.
-        if (compute->compute_normals_program) {
+        if (compute->has_normals()) {
             compute->dispatch_compute_normals(snap_list.data(),
                                                (uint32_t)snap_list.size(),
                                                renderer.vbo_pos, renderer.vbo_norm,

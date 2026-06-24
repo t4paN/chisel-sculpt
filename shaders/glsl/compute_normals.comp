@@ -1,0 +1,72 @@
+// compute_normals.comp — GLSL 430 sibling of shaders/wgsl/compute_normals.wgsl.
+// After a deforming brush moves positions, recompute the vertex normals for the
+// touched vertices so the matcap shading tracks the new surface. One thread per dirty
+// vertex: sum the (area-weighted) face normals of its adjacent triangles via CSR
+// adjacency, then normalize. 16-byte std140 Params UBO at binding 63.
+//
+// binding 6 here is the plain id list (no count header) — the count rides in the
+// Params UBO, exactly like the old u_dirty_count uniform.
+#version 430
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer PosBuf     { float positions[]; };
+layout(std430, binding = 1) writeonly buffer NormBuf   { float normals[]; };
+layout(std430, binding = 2) readonly buffer IdxBuf     { uint indices[]; };
+layout(std430, binding = 4) readonly buffer AdjOffset  { uint adj_offset[]; };
+layout(std430, binding = 5) readonly buffer AdjList    { uint adj_list[]; };
+layout(std430, binding = 6) readonly buffer DirtyVerts { uint dirty_verts[]; };
+
+layout(std140, binding = 63) uniform Params {
+    uint dirty_count;   // 0
+    uint _pad0;
+    uint _pad1;
+    uint _pad2;         // struct rounds to 16
+} P;
+
+void main() {
+    uint di = gl_GlobalInvocationID.x;
+    if (di >= P.dirty_count) return;
+
+    uint v = dirty_verts[di];
+
+    float nx = 0.0, ny = 0.0, nz = 0.0;
+
+    uint start = adj_offset[v];
+    uint end = adj_offset[v + 1u];
+
+    for (uint j = start; j < end; j++) {
+        uint t = adj_list[j];
+        uint i0 = indices[t * 3u];
+        uint i1 = indices[t * 3u + 1u];
+        uint i2 = indices[t * 3u + 2u];
+
+        vec3 p0 = vec3(positions[i0*3u], positions[i0*3u+1u], positions[i0*3u+2u]);
+        vec3 p1 = vec3(positions[i1*3u], positions[i1*3u+1u], positions[i1*3u+2u]);
+        vec3 p2 = vec3(positions[i2*3u], positions[i2*3u+1u], positions[i2*3u+2u]);
+
+        vec3 e1 = p1 - p0;
+        vec3 e2 = p2 - p0;
+        vec3 fn = cross(e1, e2);
+        float area2 = length(fn);
+        if (area2 < 1e-7) continue;
+
+        nx += fn.x;
+        ny += fn.y;
+        nz += fn.z;
+    }
+
+    float len = sqrt(nx*nx + ny*ny + nz*nz);
+    if (len > 1e-8) {
+        float inv = 1.0 / len;
+        nx *= inv;
+        ny *= inv;
+        nz *= inv;
+    } else {
+        nx = 0.0; ny = 0.0; nz = 0.0;
+    }
+
+    uint base = v * 3u;
+    normals[base]     = nx;
+    normals[base + 1u] = ny;
+    normals[base + 2u] = nz;
+}

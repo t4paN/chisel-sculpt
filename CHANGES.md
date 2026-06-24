@@ -2,6 +2,20 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-24 — WebGPU port, Seam Step 2b: compute_normals on the gpu:: seam
+
+- **Shared per-stroke normal recompute ported onto the seam** — `compute_normals` (one thread per
+  dirty vertex, area-weighted 1-ring face normals) now dispatches through `gpu::`. The `u_dirty_count`
+  uniform → a 16-byte std140 Params UBO; truthiness checks go through new `has_normals()` (call sites
+  in scene.cpp + brush.cpp updated). First **non-brush** kernel on the seam, and the most-exercised
+  one — it runs after every deforming brush (and on undo/redo), so all brush shading now routes the
+  normal recompute through the seam.
+- **New `.comp` sibling** `compute_normals.comp` (the `.wgsl` already existed from a Stage-3 probe;
+  now a real lockstep pair, embedded at build time).
+- The dirty-vert id list (`dirty_verts_ssbo`, shared with `stroke_smooth`) stays GL-owned — upload
+  stays raw GL; only the dispatch moved.
+- **Verified:** gl build green; pipeline compiles at runtime; exercised after every brush stroke.
+
 ## 2026-06-24 — WebGPU port, Seam Step 2b: paint (color) on the gpu:: seam
 
 - **Paint ported onto the seam** — both kernels now dispatch through `gpu::`: `color_paint`

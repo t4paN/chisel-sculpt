@@ -195,7 +195,7 @@ void Scene::bind_active_(uint32_t id) {
     // mirror map live on the entity's own mesh; re-uploaded on every bind so a
     // re-selection (or post-cascade sync) reflects the entity's current topology.
     if (compute_.supported) {
-        if (compute_.compute_normals_program && !in->mesh.vert_tri_offset.empty())
+        if (compute_.has_normals() && !in->mesh.vert_tri_offset.empty())
             compute_.upload_adjacency(in->mesh.vert_tri_offset.data(),
                                       (uint32_t)in->mesh.vert_tri_offset.size(),
                                       in->mesh.vert_tri_list.data(),

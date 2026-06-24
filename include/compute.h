@@ -271,8 +271,13 @@ struct ComputeState {
     GLuint limb_pos_scratch_ssbo;    // 3 floats per vertex: read-side snapshot for relax ping-pong
     uint32_t limb_scratch_capacity;
 
-    // Compute normals shader
-    GLuint compute_normals_program;
+    // Compute normals — ported onto the gpu:: seam (Seam Step 2b). Shared per-stroke
+    // recompute: one thread per dirty vertex, area-weighted 1-ring face normals. The
+    // dirty-vert id list (dirty_verts_ssbo) stays GL-owned (uploaded raw GL, shared
+    // with stroke_smooth); the count rides in a 16-byte Params UBO. has_normals() reports
+    // readiness.
+    gpu::ComputePipeline compute_normals_pipeline;
+    gpu::Buffer          compute_normals_ubo;   // 16-byte {dirty_count} block
 
     // GPU-resident undo (Phase 2b): pen-up multires diff. Reprojects the
     // world-space stroke delta (live VBO - pen-down snapshot) into the active
@@ -501,6 +506,9 @@ struct ComputeState {
     // Paint readiness (replaces color_paint_program / color_smooth_program checks).
     bool has_color() const { return color_paint_pipeline.handle != 0; }
     bool has_color_smooth() const { return color_smooth_pipeline.handle != 0; }
+
+    // Compute-normals readiness (replaces compute_normals_program truthiness checks).
+    bool has_normals() const { return compute_normals_pipeline.handle != 0; }
 
     // Dispatch the mask paint shader: per-vertex distance check, writes mask VBO
     // directly. Uses smooth_dirty_ssbo for the compact dirty list. Caller reads

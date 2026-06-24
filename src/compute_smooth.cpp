@@ -406,14 +406,33 @@ uint32_t ComputeState::readback_accum_dirty(uint32_t vertex_count, std::vector<u
 // Compute normals methods
 // ---------------------------------------------------------------------------
 
+namespace {
+// 16-byte std140 block, byte-identical to compute_normals.{comp,wgsl}'s Params.
+struct ComputeNormalsParamsGPU {
+    uint32_t dirty_count; uint32_t _pad0; uint32_t _pad1; uint32_t _pad2;
+};
+static_assert(sizeof(ComputeNormalsParamsGPU) == 16, "compute_normals Params UBO must be 16 bytes");
+}
+
 bool ComputeState::init_compute_normals() {
     if (!supported) return false;
-    compute_normals_program = compile_program(compute_normals_src);
-    if (!compute_normals_program) {
-        std::printf("[compute] compute_normals shader failed to compile\n");
+    const gpu::BindEntry layout[] = {
+        { BIND_POSITIONS,        gpu::Bind::StorageRead,      0 },
+        { BIND_NORMALS,          gpu::Bind::StorageReadWrite, 0 },
+        { BIND_INDICES,          gpu::Bind::StorageRead,      0 },
+        { BIND_ADJACENCY_OFFSET, gpu::Bind::StorageRead,      0 },
+        { BIND_ADJACENCY_LIST,   gpu::Bind::StorageRead,      0 },
+        { BIND_DIRTY_VERTS,      gpu::Bind::StorageRead,      0 },
+        { BIND_PARAMS,           gpu::Bind::Uniform,          sizeof(ComputeNormalsParamsGPU) },
+    };
+    compute_normals_pipeline = gpu::create_compute_pipeline(gpu_dev,
+                                   gpu::embedded_shader("compute_normals"), layout, 7);
+    if (!compute_normals_pipeline.handle) {
+        std::printf("[compute] compute_normals pipeline failed to compile\n");
         return false;
     }
-    std::printf("[compute] compute_normals shader compiled\n");
+    compute_normals_ubo = gpu::create_buffer(gpu_dev, nullptr, sizeof(ComputeNormalsParamsGPU), gpu::Usage::Uniform);
+    std::printf("[compute] compute_normals pipeline compiled (gpu:: seam)\n");
     return true;
 }
 
@@ -436,8 +455,10 @@ void ComputeState::upload_adjacency(const uint32_t* offsets, uint32_t offset_cou
 
 void ComputeState::dispatch_compute_normals(const uint32_t* dirty_verts, uint32_t dirty_count,
                                              GLuint pos_vbo, GLuint norm_vbo, GLuint index_ebo) {
-    if (!compute_normals_program || dirty_count == 0) return;
+    if (!has_normals() || dirty_count == 0) return;
 
+    // Upload the dirty-vert id list — GL-owned buffer (shared with stroke_smooth),
+    // stays raw GL (alloc + glBufferSubData).
     GLsizeiptr needed = (GLsizeiptr)dirty_count * sizeof(uint32_t);
     if (!dirty_verts_ssbo || dirty_count > dirty_verts_capacity) {
         if (dirty_verts_ssbo) glDeleteBuffers(1, &dirty_verts_ssbo);
@@ -452,21 +473,33 @@ void ComputeState::dispatch_compute_normals(const uint32_t* dirty_verts, uint32_
     glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, needed, dirty_verts);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 
-    glUseProgram(compute_normals_program);
+    ComputeNormalsParamsGPU u = {};
+    u.dirty_count = dirty_count;
+    gpu::write_buffer(gpu_dev, compute_normals_ubo, 0, &u, sizeof(u));
 
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_POSITIONS, pos_vbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_NORMALS, norm_vbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_INDICES, index_ebo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_ADJACENCY_OFFSET, adjacency_offset_ssbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_ADJACENCY_LIST, adjacency_list_ssbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_DIRTY_VERTS, dirty_verts_ssbo);
+    // pos/norm/index/adjacency sizes are unknown here (and unused on the GL backend —
+    // whole-buffer bind); 0 = unguarded. dirty list sized to its capacity.
+    gpu::Buffer posView{   0,                                        pos_vbo };
+    gpu::Buffer normView{  0,                                        norm_vbo };
+    gpu::Buffer idxView{   0,                                        index_ebo };
+    gpu::Buffer offView{   0,                                        adjacency_offset_ssbo };
+    gpu::Buffer listView{  0,                                        adjacency_list_ssbo };
+    gpu::Buffer dirtyView{ (uint64_t)dirty_verts_capacity * sizeof(uint32_t), dirty_verts_ssbo };
+    const gpu::BindBufferEntry bg[] = {
+        { BIND_POSITIONS,        &posView,   posView.size },
+        { BIND_NORMALS,          &normView,  normView.size },
+        { BIND_INDICES,          &idxView,   idxView.size },
+        { BIND_ADJACENCY_OFFSET, &offView,   offView.size },
+        { BIND_ADJACENCY_LIST,   &listView,  listView.size },
+        { BIND_DIRTY_VERTS,      &dirtyView, dirtyView.size },
+        { BIND_PARAMS,           &compute_normals_ubo, sizeof(ComputeNormalsParamsGPU) },
+    };
+    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, compute_normals_pipeline, bg, 7);
 
-    glUniform1ui(glGetUniformLocation(compute_normals_program, "u_dirty_count"), dirty_count);
-
-    int groups = (dirty_count + 255) / 256;
-    glDispatchCompute(groups, 1, 1);
-
-    glMemoryBarrier(GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT | GL_SHADER_STORAGE_BARRIER_BIT);
+    gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
+    gpu::dispatch(b, compute_normals_pipeline, grp, (dirty_count + 255u) / 256u);
+    gpu::submit(b);
+    gpu::release_bind_group(grp);
 }
 
 // ---------------------------------------------------------------------------
