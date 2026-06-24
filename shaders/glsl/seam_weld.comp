@@ -1,0 +1,49 @@
+// seam_weld.comp — GLSL 430 sibling of shaders/wgsl/seam_weld.wgsl.
+// Post-remesh seam weld: for each vert sitting exactly on the seam (x==0), find the
+// lowest-index seam vert within weld_tol in the (y,z) plane and record it as the merge
+// target; otherwise the vert maps to itself. The host then chases merge chains to roots.
+// Fully-masked verts are skipped. 16-byte std140 Params UBO at binding 63.
+#version 430
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 13) readonly buffer PosBuf      { float pos[];       };
+layout(std430, binding = 12) readonly buffer MaskBuf     { float mask[];      };
+layout(std430, binding = 19)          buffer MergeMapBuf { uint  merge_map[]; };
+
+layout(std140, binding = 63) uniform Params {
+    uint  vertex_count;   // 0
+    uint  mask_size;      // 4
+    float weld_tol;       // 8
+    uint  _pad0;          // 12
+} P;
+
+void main() {
+    uint v = gl_GlobalInvocationID.x;
+    if (v >= P.vertex_count) return;
+
+    merge_map[v] = v;
+
+    // Only process verts sitting on seam (x == 0)
+    if (pos[v * 3u] != 0.0) return;
+
+    // Skip fully masked
+    if (P.mask_size > 0u && v < P.mask_size && mask[v] >= 1.0)
+        return;
+
+    float py = pos[v * 3u + 1u];
+    float pz = pos[v * 3u + 2u];
+    float weld_sq = P.weld_tol * P.weld_tol;
+
+    uint best = v;
+    for (uint u = 0u; u < v; u++) {
+        if (pos[u * 3u] != 0.0) continue;
+        if (P.mask_size > 0u && u < P.mask_size && mask[u] >= 1.0)
+            continue;
+        float dy = pos[u * 3u + 1u] - py;
+        float dz = pos[u * 3u + 2u] - pz;
+        float d2 = dy * dy + dz * dz;
+        if (d2 < weld_sq && u < best)
+            best = u;
+    }
+    merge_map[v] = best;
+}

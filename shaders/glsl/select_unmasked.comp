@@ -1,0 +1,32 @@
+// select_unmasked.comp — GLSL 430 sibling of shaders/wgsl/select_unmasked.wgsl.
+// Remesh per-tri selection: flags triangles whose three verts are all unmasked
+// (mask < 0.5, or out of mask range, or no mask) — those are free to be remeshed.
+// Writes 0/1 into the per-tri selection buffer. 16-byte std140 Params UBO.
+#version 430
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 14) readonly buffer MaskBuf   { float mask[];    };
+layout(std430, binding = 2)  readonly buffer IdxBuf    { uint  indices[]; };
+layout(std430, binding = 16)          buffer TriSelBuf { uint  tri_sel[]; };
+
+layout(std140, binding = 63) uniform Params {
+    uint tri_count;   // 0
+    uint mask_size;   // 4
+    uint _pad0;       // 8
+    uint _pad1;       // 12
+} P;
+
+void main() {
+    uint t = gl_GlobalInvocationID.x;
+    if (t >= P.tri_count) return;
+
+    uint i0 = indices[t*3u+0u];
+    uint i1 = indices[t*3u+1u];
+    uint i2 = indices[t*3u+2u];
+
+    bool u0 = (P.mask_size == 0u || i0 >= P.mask_size || mask[i0] < 0.5);
+    bool u1 = (P.mask_size == 0u || i1 >= P.mask_size || mask[i1] < 0.5);
+    bool u2 = (P.mask_size == 0u || i2 >= P.mask_size || mask[i2] < 0.5);
+
+    tri_sel[t] = (u0 && u1 && u2) ? 1u : 0u;
+}

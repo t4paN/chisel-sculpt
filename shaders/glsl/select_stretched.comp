@@ -1,0 +1,56 @@
+// select_stretched.comp — GLSL 430 sibling of shaders/wgsl/select_stretched.wgsl.
+// Remesh per-tri selection: flags triangles that are over-long, high edge-ratio, or
+// sliver (smallest angle below ~15°) so the remesher targets them. Writes 0/1 into
+// the per-tri selection buffer. 16-byte std140 Params UBO at binding 63.
+#version 430
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 13) readonly buffer InPosBuf  { float pos[];     };
+layout(std430, binding = 2)  readonly buffer IdxBuf    { uint  indices[]; };
+layout(std430, binding = 16)          buffer TriSelBuf { uint  tri_sel[]; };
+
+layout(std140, binding = 63) uniform Params {
+    float target_len;   // 0
+    uint  tri_count;    // 4
+    uint  _pad0;        // 8
+    uint  _pad1;        // 12
+} P;
+
+void main() {
+    uint t = gl_GlobalInvocationID.x;
+    if (t >= P.tri_count) return;
+
+    uint i0 = indices[t*3u+0u];
+    uint i1 = indices[t*3u+1u];
+    uint i2 = indices[t*3u+2u];
+
+    vec3 p0 = vec3(pos[i0*3u], pos[i0*3u+1u], pos[i0*3u+2u]);
+    vec3 p1 = vec3(pos[i1*3u], pos[i1*3u+1u], pos[i1*3u+2u]);
+    vec3 p2 = vec3(pos[i2*3u], pos[i2*3u+1u], pos[i2*3u+2u]);
+
+    float e01 = length(p1 - p0);
+    float e12 = length(p2 - p1);
+    float e20 = length(p0 - p2);
+
+    float longest  = max(max(e01, e12), e20);
+    float shortest = min(min(e01, e12), e20);
+
+    // Sliver test: smallest angle below ~15° (cos > 0.966). Law of cosines on all
+    // three corners; clamp guards against float drift past ±1. The length-ratio test
+    // alone catches most slivers but misses tris where all three edges fall under
+    // target_len yet the shape is still degenerate.
+    bool sliver = false;
+    if (shortest > 1e-8) {
+        float e01_2 = e01*e01, e12_2 = e12*e12, e20_2 = e20*e20;
+        float c0 = clamp((e12_2 + e20_2 - e01_2) / (2.0 * e12 * e20), -1.0, 1.0);
+        float c1 = clamp((e01_2 + e20_2 - e12_2) / (2.0 * e01 * e20), -1.0, 1.0);
+        float c2 = clamp((e01_2 + e12_2 - e20_2) / (2.0 * e01 * e12), -1.0, 1.0);
+        float max_cos = max(max(c0, c1), c2);
+        sliver = max_cos > 0.966;  // cos(15°)
+    }
+
+    bool sel = longest > 1.2 * P.target_len ||
+               (shortest > 1e-8 && longest / shortest > 1.5) ||
+               sliver;
+    tri_sel[t] = sel ? 1u : 0u;
+}

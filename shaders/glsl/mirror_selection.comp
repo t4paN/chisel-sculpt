@@ -1,0 +1,42 @@
+// mirror_selection.comp — GLSL 430 sibling of shaders/wgsl/mirror_selection.wgsl.
+// Remesh per-tri mirror-spread: each selected tri ORs the vertex-adjacent tris of its
+// verts' mirror twins into the selection, so a one-sided selection becomes symmetric.
+// Reads the snapshot in_sel(18), atomic-ORs into out_sel(16). 16-byte std140 Params UBO.
+#version 430
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 18) readonly buffer InSelBuf  { uint in_sel[];   };
+layout(std430, binding = 16)          buffer OutSelBuf { uint out_sel[];  };
+layout(std430, binding = 2)  readonly buffer IdxBuf    { uint indices[];  };
+layout(std430, binding = 4)  readonly buffer AdjOffBuf { uint adj_off[];  };
+layout(std430, binding = 5)  readonly buffer AdjListBuf{ uint adj_list[]; };
+layout(std430, binding = 7)  readonly buffer MirrorBuf { uint mirror[];   };
+
+layout(std140, binding = 63) uniform Params {
+    uint tri_count;     // 0
+    uint vertex_count;  // 4
+    uint _pad0;         // 8
+    uint _pad1;         // 12
+} P;
+
+void main() {
+    uint t = gl_GlobalInvocationID.x;
+    if (t >= P.tri_count) return;
+    if (in_sel[t] == 0u) return;        // only selected tris seed mirror spread
+
+    uint v0 = indices[t*3u + 0u];
+    uint v1 = indices[t*3u + 1u];
+    uint v2 = indices[t*3u + 2u];
+    uint vs[3] = uint[3](v0, v1, v2);
+    for (int i = 0; i < 3; i++) {
+        uint v = vs[i];
+        if (v >= P.vertex_count) continue;
+        uint mv = mirror[v];
+        if (mv == v || mv >= P.vertex_count) continue;
+        uint s = adj_off[mv];
+        uint e = adj_off[mv + 1u];
+        for (uint j = s; j < e; j++) {
+            atomicOr(out_sel[adj_list[j]], 1u);
+        }
+    }
+}

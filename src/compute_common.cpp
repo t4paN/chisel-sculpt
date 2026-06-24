@@ -39,15 +39,9 @@ ComputeState::ComputeState()
     , smooth_dirty_capacity(0)
     , mask_ssbo(0)
     , color_ssbo(0)
-    , remesh_select_stretched_program(0)
-    , remesh_select_unmasked_program(0)
-    , remesh_grow_selection_program(0)
-    , remesh_mirror_selection_program(0)
-    , remesh_find_pinned_program(0)
-    , remesh_smooth_weights_program(0)
     , remesh_core_sel_ssbo(0)
     , remesh_trisel_pong_ssbo(0)
-    , remesh_smooth_program(0)
+    , seam_weld_map_ssbo(0)
     , remesh_ping_ssbo(0)
     , remesh_pong_ssbo(0)
     , remesh_norm_ssbo(0)
@@ -55,9 +49,6 @@ ComputeState::ComputeState()
     , remesh_pinned_ssbo(0)
     , remesh_trisel_ssbo(0)
     , remesh_indices_ssbo(0)
-    , remesh_seam_snap_program(0)
-    , remesh_seam_weld_program(0)
-    , seam_weld_map_ssbo(0)
     , remesh_vert_capacity(0)
     , remesh_tri_capacity(0)
 {}
@@ -271,18 +262,27 @@ void ComputeState::cleanup() {
     if (adjacency_list_ssbo) { glDeleteBuffers(1, &adjacency_list_ssbo); adjacency_list_ssbo = 0; }
     if (dirty_verts_ssbo) { glDeleteBuffers(1, &dirty_verts_ssbo); dirty_verts_ssbo = 0; }
     if (smooth_dirty_ssbo) { glDeleteBuffers(1, &smooth_dirty_ssbo); smooth_dirty_ssbo = 0; }
-    if (remesh_select_stretched_program) { glDeleteProgram(remesh_select_stretched_program); remesh_select_stretched_program = 0; }
-    if (remesh_select_unmasked_program)  { glDeleteProgram(remesh_select_unmasked_program);  remesh_select_unmasked_program  = 0; }
-    if (remesh_grow_selection_program)   { glDeleteProgram(remesh_grow_selection_program);   remesh_grow_selection_program   = 0; }
-    if (remesh_mirror_selection_program) { glDeleteProgram(remesh_mirror_selection_program); remesh_mirror_selection_program = 0; }
-    if (remesh_find_pinned_program)      { glDeleteProgram(remesh_find_pinned_program);      remesh_find_pinned_program      = 0; }
-    if (remesh_smooth_weights_program)   { glDeleteProgram(remesh_smooth_weights_program);   remesh_smooth_weights_program   = 0; }
+    gpu::release_compute_pipeline(remesh_select_stretched_pipeline);
+    gpu::release_compute_pipeline(remesh_select_unmasked_pipeline);
+    gpu::release_compute_pipeline(remesh_grow_selection_pipeline);
+    gpu::release_compute_pipeline(remesh_mirror_selection_pipeline);
+    gpu::release_compute_pipeline(remesh_find_pinned_pipeline);
+    gpu::release_compute_pipeline(remesh_smooth_weights_pipeline);
+    gpu::release_compute_pipeline(remesh_seam_snap_pipeline);
+    gpu::release_compute_pipeline(remesh_seam_weld_pipeline);
+    gpu::release_compute_pipeline(remesh_smooth_pipeline);
+    gpu::release_buffer(remesh_select_stretched_ubo);
+    gpu::release_buffer(remesh_select_unmasked_ubo);
+    gpu::release_buffer(remesh_grow_selection_ubo);
+    gpu::release_buffer(remesh_mirror_selection_ubo);
+    gpu::release_buffer(remesh_find_pinned_ubo);
+    gpu::release_buffer(remesh_smooth_weights_ubo);
+    gpu::release_buffer(remesh_seam_snap_ubo);
+    gpu::release_buffer(remesh_seam_weld_ubo);
+    gpu::release_buffer(remesh_smooth_ubo);
     if (remesh_core_sel_ssbo)            { glDeleteBuffers(1, &remesh_core_sel_ssbo);         remesh_core_sel_ssbo            = 0; }
     if (remesh_trisel_pong_ssbo)         { glDeleteBuffers(1, &remesh_trisel_pong_ssbo);     remesh_trisel_pong_ssbo         = 0; }
-    if (remesh_seam_snap_program) { glDeleteProgram(remesh_seam_snap_program); remesh_seam_snap_program = 0; }
-    if (remesh_seam_weld_program) { glDeleteProgram(remesh_seam_weld_program); remesh_seam_weld_program = 0; }
     if (seam_weld_map_ssbo)       { glDeleteBuffers(1, &seam_weld_map_ssbo);  seam_weld_map_ssbo       = 0; }
-    if (remesh_smooth_program) { glDeleteProgram(remesh_smooth_program); remesh_smooth_program = 0; }
     if (remesh_ping_ssbo)     { glDeleteBuffers(1, &remesh_ping_ssbo);     remesh_ping_ssbo     = 0; }
     if (remesh_pong_ssbo)     { glDeleteBuffers(1, &remesh_pong_ssbo);     remesh_pong_ssbo     = 0; }
     if (remesh_norm_ssbo)     { glDeleteBuffers(1, &remesh_norm_ssbo);     remesh_norm_ssbo     = 0; }

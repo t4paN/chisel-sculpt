@@ -1,0 +1,48 @@
+// smooth_weights.comp — GLSL 430 sibling of shaders/wgsl/smooth_weights.wgsl.
+// Remesh per-vertex smooth weight: 0 if pinned or no adjacent tri is in the full
+// selection; 1 if every adjacent tri is in the core (pre-grow) selection; otherwise a
+// ring-falloff (1 ring out if it touches the core, else 2) over support_rings+1.
+// 16-byte std140 Params UBO at binding 63.
+#version 430
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 4)  readonly buffer AdjOffBuf  { uint  adj_off[];  };
+layout(std430, binding = 5)  readonly buffer AdjListBuf { uint  adj_list[]; };
+layout(std430, binding = 14)          buffer WeightBuf  { float weights[];  };
+layout(std430, binding = 15) readonly buffer PinnedBuf  { uint  pinned[];   };
+layout(std430, binding = 16) readonly buffer FullSelBuf { uint  full_sel[]; };
+layout(std430, binding = 17) readonly buffer CoreSelBuf { uint  core_sel[]; };
+
+layout(std140, binding = 63) uniform Params {
+    uint vertex_count;   // 0
+    int  support_rings;  // 4
+    uint _pad0;          // 8
+    uint _pad1;          // 12
+} P;
+
+void main() {
+    uint v = gl_GlobalInvocationID.x;
+    if (v >= P.vertex_count) return;
+
+    if (pinned[v] != 0u) { weights[v] = 0.0; return; }
+
+    uint t_start = adj_off[v];
+    uint t_end   = adj_off[v + 1u];
+
+    bool any_full = false, all_core = true, any_core = false;
+    for (uint j = t_start; j < t_end; j++) {
+        uint t = adj_list[j];
+        if (full_sel[t] != 0u) any_full  = true;
+        if (core_sel[t] != 0u) any_core  = true;
+        else                   all_core  = false;
+    }
+
+    if (!any_full) { weights[v] = 0.0; return; }
+
+    if (all_core) {
+        weights[v] = 1.0;
+    } else {
+        float ring = any_core ? 1.0 : 2.0;
+        weights[v] = max(0.0, 1.0 - ring / float(P.support_rings + 1));
+    }
+}

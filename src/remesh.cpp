@@ -1781,7 +1781,7 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
         uint32_t n_flip = flip_edges(mesh, et, tri_selected, pinned);
         rebuild_after_flip();
 
-        if (cs->remesh_smooth_program) {
+        if (cs->has_remesh_smooth()) {
             cs->dispatch_remesh_smooth(
                 mesh.vertex_count(), mesh.tri_count(),
                 mesh.indices.data(),

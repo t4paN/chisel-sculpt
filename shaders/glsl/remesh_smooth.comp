@@ -1,0 +1,97 @@
+// remesh_smooth.comp — GLSL 430 sibling of shaders/wgsl/remesh_smooth.wgsl.
+// Remesh tangential Laplacian (GPU ping-pong): each in-region, non-pinned, weighted
+// vertex moves toward its 1-ring centroid with the normal component stripped (tangential
+// only — a full Laplacian shrinks the form). Seam x is clamped so non-pinned verts can't
+// drift into / across the seam band. Pinned / out-of-region / weightless / degenerate-
+// normal verts pass through. 16-byte std140 Params UBO at binding 63.
+#version 430
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0)           buffer OutPosBuf  { float out_pos[]; };
+layout(std430, binding = 1)  readonly buffer NormBuf    { float normals[]; };
+layout(std430, binding = 2)  readonly buffer IdxBuf     { uint  indices[]; };
+layout(std430, binding = 4)  readonly buffer AdjOffBuf  { uint  adj_off[];  };
+layout(std430, binding = 5)  readonly buffer AdjListBuf { uint  adj_list[]; };
+layout(std430, binding = 13) readonly buffer InPosBuf   { float in_pos[];   };
+layout(std430, binding = 14) readonly buffer WeightBuf  { float weights[];  };
+layout(std430, binding = 15) readonly buffer PinnedBuf  { uint  pinned[];   };
+layout(std430, binding = 16) readonly buffer TriSelBuf  { uint  tri_sel[];  };
+
+layout(std140, binding = 63) uniform Params {
+    float lambda;        // 0
+    float seam_tol;      // 4
+    uint  vertex_count;  // 8
+    uint  _pad0;         // 12
+} P;
+
+void main() {
+    uint v = gl_GlobalInvocationID.x;
+    if (v >= P.vertex_count) return;
+
+    out_pos[v*3u+0u] = in_pos[v*3u+0u];
+    out_pos[v*3u+1u] = in_pos[v*3u+1u];
+    out_pos[v*3u+2u] = in_pos[v*3u+2u];
+
+    if (pinned[v] != 0u) return;
+
+    float w = weights[v];
+    if (w < 1e-6) return;
+
+    uint t_start = adj_off[v];
+    uint t_end   = adj_off[v + 1u];
+
+    bool in_region = false;
+    for (uint j = t_start; j < t_end; j++) {
+        if (tri_sel[adj_list[j]] != 0u) { in_region = true; break; }
+    }
+    if (!in_region) return;
+
+    uint nbrs[48];
+    uint nbr_count = 0u;
+    for (uint j = t_start; j < t_end; j++) {
+        uint t = adj_list[j];
+        for (int k = 0; k < 3; k++) {
+            uint n = indices[t*3u + uint(k)];
+            if (n == v) continue;
+            bool found = false;
+            for (uint l = 0u; l < nbr_count; l++) {
+                if (nbrs[l] == n) { found = true; break; }
+            }
+            if (!found && nbr_count < 48u) nbrs[nbr_count++] = n;
+        }
+    }
+    if (nbr_count == 0u) return;
+
+    vec3 nbr_centroid = vec3(0.0);
+    for (uint l = 0u; l < nbr_count; l++) {
+        nbr_centroid.x += in_pos[nbrs[l]*3u+0u];
+        nbr_centroid.y += in_pos[nbrs[l]*3u+1u];
+        nbr_centroid.z += in_pos[nbrs[l]*3u+2u];
+    }
+    nbr_centroid /= float(nbr_count);
+
+    vec3 pos = vec3(in_pos[v*3u+0u], in_pos[v*3u+1u], in_pos[v*3u+2u]);
+    // A degenerate (zero-length) vertex normal has no tangent plane to project onto.
+    // normalize() of a zero vector is 0/0 -> NaN, which leaks into out_pos and poisons
+    // the post-remesh mirror rebuild. Bail out leaving the vertex put when that happens.
+    vec3 nrm_raw = vec3(normals[v*3u+0u], normals[v*3u+1u], normals[v*3u+2u]);
+    float nrm_len = length(nrm_raw);
+    if (nrm_len < 1e-12) {
+        out_pos[v*3u+0u] = pos.x;
+        out_pos[v*3u+1u] = pos.y;
+        out_pos[v*3u+2u] = pos.z;
+        return;
+    }
+    vec3 nrm = nrm_raw / nrm_len;
+    vec3 d   = nbr_centroid - pos;
+    vec3 td  = d - nrm * dot(d, nrm);
+
+    float new_x = pos.x + td.x * (P.lambda * w);
+    // Non-pinned verts are outside the seam band by construction. Keep them there:
+    // don't allow smoothing to drift |x| into the band or flip sides.
+    new_x = sign(pos.x) * max(P.seam_tol, abs(new_x));
+
+    out_pos[v*3u+0u] = new_x;
+    out_pos[v*3u+1u] = pos.y + td.y * (P.lambda * w);
+    out_pos[v*3u+2u] = pos.z + td.z * (P.lambda * w);
+}

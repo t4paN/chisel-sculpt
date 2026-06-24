@@ -340,26 +340,35 @@ struct ComputeState {
     GLuint smooth_dirty_ssbo;
     uint32_t smooth_dirty_capacity;  // max vertex IDs (excludes counter slot)
 
-    // Remesh per-tri selection GPU passes
-    GLuint remesh_select_stretched_program;
-    GLuint remesh_select_unmasked_program;
-    // Remesh per-tri grow + mirror selection (keeps tri_sel GPU-resident)
-    GLuint remesh_grow_selection_program;
-    GLuint remesh_mirror_selection_program;
-    // Remesh per-vertex pinned-boundary detection
-    GLuint remesh_find_pinned_program;
-    // Remesh per-vertex smooth weight computation
-    GLuint remesh_smooth_weights_program;
+    // Remesh GPU passes — ported onto the gpu:: seam (Seam Step 2b). One-shot /
+    // user-paced ops (not strokes), so CPU readback is allowed. The remesh-specific
+    // SSBOs below stay GL-owned (wrapped in views at dispatch; uploads/copies/readback
+    // stay raw GL). Each kernel's loose uniforms → a std140 Params UBO at binding 63.
+    // has_remesh_smooth() reports the smooth kernel's availability (gates the CPU path).
+    gpu::ComputePipeline remesh_select_stretched_pipeline;
+    gpu::ComputePipeline remesh_select_unmasked_pipeline;
+    gpu::ComputePipeline remesh_grow_selection_pipeline;
+    gpu::ComputePipeline remesh_mirror_selection_pipeline;
+    gpu::ComputePipeline remesh_find_pinned_pipeline;
+    gpu::ComputePipeline remesh_smooth_weights_pipeline;
+    gpu::ComputePipeline remesh_seam_snap_pipeline;
+    gpu::ComputePipeline remesh_seam_weld_pipeline;
+    gpu::ComputePipeline remesh_smooth_pipeline;
+    gpu::Buffer remesh_select_stretched_ubo;   // 16-byte {target_len, tri_count}
+    gpu::Buffer remesh_select_unmasked_ubo;    // 16-byte {tri_count, mask_size}
+    gpu::Buffer remesh_grow_selection_ubo;     // 16-byte {tri_count}
+    gpu::Buffer remesh_mirror_selection_ubo;   // 16-byte {tri_count, vertex_count}
+    gpu::Buffer remesh_find_pinned_ubo;        // 16-byte {vertex_count, seam_tol}
+    gpu::Buffer remesh_smooth_weights_ubo;     // 16-byte {vertex_count, support_rings}
+    gpu::Buffer remesh_seam_snap_ubo;          // 16-byte {vertex_count, mask_size, seam_tol, snap_tol}
+    gpu::Buffer remesh_seam_weld_ubo;          // 16-byte {vertex_count, mask_size, weld_tol}
+    gpu::Buffer remesh_smooth_ubo;             // 16-byte {lambda, seam_tol, vertex_count}
+
     GLuint remesh_core_sel_ssbo;    // uint[T] — core (pre-grow) tri selection
     GLuint remesh_trisel_pong_ssbo; // uint[T] — input snapshot for grow/mirror
-
-    // Remesh seam snap + weld GPU passes
-    GLuint remesh_seam_snap_program;
-    GLuint remesh_seam_weld_program;
     GLuint seam_weld_map_ssbo;       // uint[V] — merge target per vert (v or lower match)
 
-    // Remesh tangential smooth GPU pass (ping-pong, no hot-path allocation)
-    GLuint remesh_smooth_program;
+    // Remesh GL-owned scratch SSBOs (uploads/copies/readback stay raw GL):
     GLuint remesh_ping_ssbo;       // float[V*3] SOA — positions input
     GLuint remesh_pong_ssbo;       // float[V*3] SOA — positions output
     GLuint remesh_norm_ssbo;       // float[V*3] SOA — normals
@@ -518,6 +527,9 @@ struct ComputeState {
 
     // Compute-normals readiness (replaces compute_normals_program truthiness checks).
     bool has_normals() const { return compute_normals_pipeline.handle != 0; }
+
+    // Remesh tangential-smooth readiness (replaces remesh_smooth_program checks).
+    bool has_remesh_smooth() const { return remesh_smooth_pipeline.handle != 0; }
 
     // Stroke-autosmooth readiness (replaces stroke_smooth_apply_program checks).
     bool has_stroke_smooth() const { return stroke_smooth_apply_pipeline.handle != 0; }

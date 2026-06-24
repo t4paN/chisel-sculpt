@@ -2,6 +2,27 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-24 — WebGPU port, Seam Step 2b: remesh subsystem on the gpu:: seam
+
+- **All 9 remesh GPU helper kernels ported onto the seam** — the first heavy subsystem.
+  `select_stretched`, `select_unmasked`, `grow_selection`, `mirror_selection` (atomicOr),
+  `find_pinned`, `smooth_weights`, `remesh_smooth` (tangential ping-pong, 9 storage buffers),
+  `seam_snap`, `seam_weld` now dispatch through `gpu::`. The CPU edge split/collapse/flip ops
+  (remesh.cpp) are untouched; these run around them. Remesh is one-shot / user-paced, so the CPU
+  readbacks are kept (the no-readback rule is stroke-only).
+- `remesh_*_program` GLuints → `gpu::ComputePipeline` + per-kernel 16-byte std140 Params UBOs;
+  the external guard in remesh.cpp goes through new `has_remesh_smooth()`. The remesh scratch SSBOs
+  stay GL-owned (wrapped in views at dispatch); uploads/copies (grow/mirror snapshots, core-sel)/
+  readbacks stay raw GL, with the pre-dispatch barriers after each raw-GL copy kept explicit (the
+  seam only barriers after dispatch). Ping-pong (grow rings, remesh_smooth 3-step) = two bind groups
+  swapping the in/out slots, matching the move/limb pattern.
+- **18 new lockstep shader pairs** in shaders/{glsl,wgsl}/, embedded at build time. `remesh_smooth`
+  binds 9 storage buffers — at the default WebGPU `maxStorageBuffersPerShaderStage`; if a browser
+  caps lower it'll need a group(1)/group(2) split (noted in CONVENTIONS.md).
+- **Verified:** gl build green; gl-compute-test PASS; all 9 remesh pipelines compile at runtime
+  (20 seam pipeline groups total). In-app remesh correctness pending (user-driven).
+- **First heavy subsystem done.** Remaining raw GL: multires/undo · SDF.
+
 ## 2026-06-24 — WebGPU port, Seam Step 2b: limb (snakehook) brush on the gpu:: seam
 
 - **Limb drag + relax ported onto the seam** — the last brush-adjacent kernels. `limb_drag`

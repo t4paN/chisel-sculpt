@@ -1,525 +1,213 @@
 #include "compute.h"
+#include "gpu_shaders_generated.h"   // gpu::embedded_shader("select_stretched" / ...)
 #include <cstdio>
 #include <algorithm>
 
 // ---------------------------------------------------------------------------
-// Remesh per-tri selection shaders
+// Remesh GPU helper kernels — ported onto the gpu:: seam (Seam Step 2b).
+//
+// These are the isotropic-remesh support passes (per-tri selection, ring grow,
+// mirror spread, pinned-boundary detection, smooth weights, the tangential smooth
+// ping-pong, and the post-remesh seam snap/weld). The actual edge split/collapse/flip
+// topology ops are CPU (remesh.cpp); these run around them. Unlike the brushes these
+// are one-shot / user-paced, so CPU readback is allowed (the no-readback rule is
+// stroke-only).
+//
+// Kernel logic lives in the canonical shaders/{glsl,wgsl}/<stem>.* (embedded at build
+// time). Each kernel's loose uniforms became a std140 Params UBO at binding 63. The
+// remesh-specific scratch SSBOs stay GL-owned (wrapped in gpu::Buffer views at
+// dispatch); their alloc/upload/copy/readback stay raw GL.
 // ---------------------------------------------------------------------------
 
-static const char* select_stretched_src = R"(
-#version 430
-layout(local_size_x = 256) in;
-
-layout(std430, binding = 13) readonly buffer InPosBuf { float pos[];     };
-layout(std430, binding = 2)  readonly buffer IdxBuf   { uint  indices[]; };
-layout(std430, binding = 16) buffer TriSelBuf { uint tri_sel[]; };
-
-uniform float u_target_len;
-uniform uint  u_tri_count;
-
-void main() {
-    uint t = gl_GlobalInvocationID.x;
-    if (t >= u_tri_count) return;
-
-    uint i0 = indices[t*3u+0u];
-    uint i1 = indices[t*3u+1u];
-    uint i2 = indices[t*3u+2u];
-
-    vec3 p0 = vec3(pos[i0*3u], pos[i0*3u+1u], pos[i0*3u+2u]);
-    vec3 p1 = vec3(pos[i1*3u], pos[i1*3u+1u], pos[i1*3u+2u]);
-    vec3 p2 = vec3(pos[i2*3u], pos[i2*3u+1u], pos[i2*3u+2u]);
-
-    float e01 = length(p1 - p0);
-    float e12 = length(p2 - p1);
-    float e20 = length(p0 - p2);
-
-    float longest  = max(max(e01, e12), e20);
-    float shortest = min(min(e01, e12), e20);
-
-    // Sliver test: smallest angle below ~15° (cos > 0.966). Law of cosines on
-    // all three corners; clamp guards against float drift past ±1. The
-    // length-ratio test alone catches most slivers but misses tris where all
-    // three edges fall under target_len yet the shape is still degenerate
-    // (e.g. one corner almost-collinear in a dense region).
-    bool sliver = false;
-    if (shortest > 1e-8) {
-        float e01_2 = e01*e01, e12_2 = e12*e12, e20_2 = e20*e20;
-        float c0 = clamp((e12_2 + e20_2 - e01_2) / (2.0 * e12 * e20), -1.0, 1.0);
-        float c1 = clamp((e01_2 + e20_2 - e12_2) / (2.0 * e01 * e20), -1.0, 1.0);
-        float c2 = clamp((e01_2 + e12_2 - e20_2) / (2.0 * e01 * e12), -1.0, 1.0);
-        float max_cos = max(max(c0, c1), c2);
-        sliver = max_cos > 0.966;  // cos(15°)
-    }
-
-    bool sel = longest > 1.2 * u_target_len ||
-               (shortest > 1e-8 && longest / shortest > 1.5) ||
-               sliver;
-    tri_sel[t] = sel ? 1u : 0u;
+namespace {
+// All Params blocks are padded to 16 bytes (std140 uniform-block min alignment).
+struct SelectStretchedParamsGPU { float target_len; uint32_t tri_count; uint32_t _p0, _p1; };
+struct SelectUnmaskedParamsGPU  { uint32_t tri_count, mask_size, _p0, _p1; };
+struct GrowSelectionParamsGPU   { uint32_t tri_count, _p0, _p1, _p2; };
+struct MirrorSelectionParamsGPU { uint32_t tri_count, vertex_count, _p0, _p1; };
+struct FindPinnedParamsGPU      { uint32_t vertex_count; float seam_tol; uint32_t _p0, _p1; };
+struct SmoothWeightsParamsGPU   { uint32_t vertex_count; int32_t support_rings; uint32_t _p0, _p1; };
+struct SeamSnapParamsGPU        { uint32_t vertex_count, mask_size; float seam_tol, snap_tol; };
+struct SeamWeldParamsGPU        { uint32_t vertex_count, mask_size; float weld_tol; uint32_t _p0; };
+struct RemeshSmoothParamsGPU    { float lambda, seam_tol; uint32_t vertex_count, _p0; };
+static_assert(sizeof(SelectStretchedParamsGPU) == 16, "");
+static_assert(sizeof(SelectUnmaskedParamsGPU)  == 16, "");
+static_assert(sizeof(GrowSelectionParamsGPU)   == 16, "");
+static_assert(sizeof(MirrorSelectionParamsGPU) == 16, "");
+static_assert(sizeof(FindPinnedParamsGPU)      == 16, "");
+static_assert(sizeof(SmoothWeightsParamsGPU)   == 16, "");
+static_assert(sizeof(SeamSnapParamsGPU)        == 16, "");
+static_assert(sizeof(SeamWeldParamsGPU)        == 16, "");
+static_assert(sizeof(RemeshSmoothParamsGPU)    == 16, "");
 }
-)";
-
-static const char* select_unmasked_src = R"(
-#version 430
-layout(local_size_x = 256) in;
-
-layout(std430, binding = 14) readonly buffer MaskBuf { float mask[];    };
-layout(std430, binding = 2)  readonly buffer IdxBuf  { uint  indices[]; };
-layout(std430, binding = 16) buffer TriSelBuf { uint tri_sel[]; };
-
-uniform uint u_tri_count;
-uniform uint u_mask_size;
-
-void main() {
-    uint t = gl_GlobalInvocationID.x;
-    if (t >= u_tri_count) return;
-
-    uint i0 = indices[t*3u+0u];
-    uint i1 = indices[t*3u+1u];
-    uint i2 = indices[t*3u+2u];
-
-    bool u0 = (u_mask_size == 0u || i0 >= u_mask_size || mask[i0] < 0.5);
-    bool u1 = (u_mask_size == 0u || i1 >= u_mask_size || mask[i1] < 0.5);
-    bool u2 = (u_mask_size == 0u || i2 >= u_mask_size || mask[i2] < 0.5);
-
-    tri_sel[t] = (u0 && u1 && u2) ? 1u : 0u;
-}
-)";
 
 // ---------------------------------------------------------------------------
-// Remesh per-tri ring-grow selection (BFS by shared vertex, one ring/dispatch)
-// ---------------------------------------------------------------------------
-
-static const char* grow_selection_src = R"(
-#version 430
-layout(local_size_x = 256) in;
-
-layout(std430, binding = 18) readonly buffer InSelBuf  { uint in_sel[];  };
-layout(std430, binding = 16)          buffer OutSelBuf { uint out_sel[]; };
-layout(std430, binding = 2)  readonly buffer IdxBuf    { uint indices[]; };
-layout(std430, binding = 4)  readonly buffer AdjOffBuf { uint adj_off[]; };
-layout(std430, binding = 5)  readonly buffer AdjListBuf{ uint adj_list[];};
-
-uniform uint u_tri_count;
-
-void main() {
-    uint t = gl_GlobalInvocationID.x;
-    if (t >= u_tri_count) return;
-    if (in_sel[t] != 0u) return;        // already in selection, leave the copy
-
-    uint v0 = indices[t*3u + 0u];
-    uint v1 = indices[t*3u + 1u];
-    uint v2 = indices[t*3u + 2u];
-    uint vs[3] = uint[3](v0, v1, v2);
-    for (int i = 0; i < 3; i++) {
-        uint v = vs[i];
-        uint s = adj_off[v];
-        uint e = adj_off[v + 1u];
-        for (uint j = s; j < e; j++) {
-            if (in_sel[adj_list[j]] != 0u) {
-                out_sel[t] = 1u;
-                return;
-            }
-        }
-    }
-}
-)";
-
-// ---------------------------------------------------------------------------
-// Remesh per-tri mirror-selection spread (OR the symmetric tris in)
-// ---------------------------------------------------------------------------
-
-static const char* mirror_selection_src = R"(
-#version 430
-layout(local_size_x = 256) in;
-
-layout(std430, binding = 18) readonly buffer InSelBuf  { uint in_sel[];   };
-layout(std430, binding = 16)          buffer OutSelBuf { uint out_sel[];  };
-layout(std430, binding = 2)  readonly buffer IdxBuf    { uint indices[];  };
-layout(std430, binding = 4)  readonly buffer AdjOffBuf { uint adj_off[];  };
-layout(std430, binding = 5)  readonly buffer AdjListBuf{ uint adj_list[]; };
-layout(std430, binding = 7)  readonly buffer MirrorBuf { uint mirror[];   };
-
-uniform uint u_tri_count;
-uniform uint u_vertex_count;
-
-void main() {
-    uint t = gl_GlobalInvocationID.x;
-    if (t >= u_tri_count) return;
-    if (in_sel[t] == 0u) return;        // only selected tris seed mirror spread
-
-    uint v0 = indices[t*3u + 0u];
-    uint v1 = indices[t*3u + 1u];
-    uint v2 = indices[t*3u + 2u];
-    uint vs[3] = uint[3](v0, v1, v2);
-    for (int i = 0; i < 3; i++) {
-        uint v = vs[i];
-        if (v >= u_vertex_count) continue;
-        uint mv = mirror[v];
-        if (mv == v || mv >= u_vertex_count) continue;
-        uint s = adj_off[mv];
-        uint e = adj_off[mv + 1u];
-        for (uint j = s; j < e; j++) {
-            atomicOr(out_sel[adj_list[j]], 1u);
-        }
-    }
-}
-)";
-
-// ---------------------------------------------------------------------------
-// Remesh per-vertex pinned-boundary detection
-// ---------------------------------------------------------------------------
-
-static const char* find_pinned_src = R"(
-#version 430
-layout(local_size_x = 256) in;
-
-layout(std430, binding = 13) readonly buffer InPosBuf   { float pos[];     };
-layout(std430, binding = 4)  readonly buffer AdjOffBuf  { uint  adj_off[]; };
-layout(std430, binding = 5)  readonly buffer AdjListBuf { uint  adj_list[];};
-layout(std430, binding = 16) readonly buffer TriSelBuf  { uint  tri_sel[]; };
-layout(std430, binding = 15) buffer PinnedBuf { uint pinned[]; };
-
-uniform uint  u_vertex_count;
-uniform float u_seam_tol;
-
-void main() {
-    uint v = gl_GlobalInvocationID.x;
-    if (v >= u_vertex_count) return;
-
-    if (abs(pos[v*3u]) < u_seam_tol) {
-        pinned[v] = 1u;
-        return;
-    }
-
-    uint t_start = adj_off[v];
-    uint t_end   = adj_off[v + 1u];
-    bool has_sel = false, has_unsel = false;
-    for (uint j = t_start; j < t_end; j++) {
-        if (tri_sel[adj_list[j]] != 0u) has_sel   = true;
-        else                            has_unsel  = true;
-        if (has_sel && has_unsel) { pinned[v] = 1u; return; }
-    }
-    pinned[v] = 0u;
-}
-)";
-
-// ---------------------------------------------------------------------------
-// Remesh per-vertex smooth weight computation
-// ---------------------------------------------------------------------------
-
-static const char* smooth_weights_src = R"(
-#version 430
-layout(local_size_x = 256) in;
-
-layout(std430, binding = 4)  readonly buffer AdjOffBuf  { uint  adj_off[];  };
-layout(std430, binding = 5)  readonly buffer AdjListBuf { uint  adj_list[]; };
-layout(std430, binding = 14) buffer          WeightBuf  { float weights[];  };
-layout(std430, binding = 15) readonly buffer PinnedBuf  { uint  pinned[];   };
-layout(std430, binding = 16) readonly buffer FullSelBuf { uint  full_sel[]; };
-layout(std430, binding = 17) readonly buffer CoreSelBuf { uint  core_sel[]; };
-
-uniform uint u_vertex_count;
-uniform int  u_support_rings;
-
-void main() {
-    uint v = gl_GlobalInvocationID.x;
-    if (v >= u_vertex_count) return;
-
-    if (pinned[v] != 0u) { weights[v] = 0.0; return; }
-
-    uint t_start = adj_off[v];
-    uint t_end   = adj_off[v + 1u];
-
-    bool any_full = false, all_core = true, any_core = false;
-    for (uint j = t_start; j < t_end; j++) {
-        uint t = adj_list[j];
-        if (full_sel[t] != 0u) any_full  = true;
-        if (core_sel[t] != 0u) any_core  = true;
-        else                   all_core  = false;
-    }
-
-    if (!any_full) { weights[v] = 0.0; return; }
-
-    if (all_core) {
-        weights[v] = 1.0;
-    } else {
-        float ring = any_core ? 1.0 : 2.0;
-        weights[v] = max(0.0, 1.0 - ring / float(u_support_rings + 1));
-    }
-}
-)";
-
-// ---------------------------------------------------------------------------
-// Remesh tangential smooth (GPU ping-pong)
-// ---------------------------------------------------------------------------
-
-static const char* remesh_smooth_src = R"(
-#version 430
-layout(local_size_x = 256) in;
-
-layout(std430, binding = 0)  buffer    OutPosBuf  { float out_pos[];  };
-layout(std430, binding = 1)  readonly buffer NormBuf    { float normals[]; };
-layout(std430, binding = 2)  readonly buffer IdxBuf     { uint  indices[]; };
-layout(std430, binding = 4)  readonly buffer AdjOffBuf  { uint  adj_off[];  };
-layout(std430, binding = 5)  readonly buffer AdjListBuf { uint  adj_list[]; };
-layout(std430, binding = 13) readonly buffer InPosBuf   { float in_pos[];   };
-layout(std430, binding = 14) readonly buffer WeightBuf  { float weights[];  };
-layout(std430, binding = 15) readonly buffer PinnedBuf  { uint  pinned[];   };
-layout(std430, binding = 16) readonly buffer TriSelBuf  { uint  tri_sel[];  };
-
-uniform float u_lambda;
-uniform float u_seam_tol;
-uniform uint  u_vertex_count;
-
-void main() {
-    uint v = gl_GlobalInvocationID.x;
-    if (v >= u_vertex_count) return;
-
-    out_pos[v*3u+0u] = in_pos[v*3u+0u];
-    out_pos[v*3u+1u] = in_pos[v*3u+1u];
-    out_pos[v*3u+2u] = in_pos[v*3u+2u];
-
-    if (pinned[v] != 0u) return;
-
-    float w = weights[v];
-    if (w < 1e-6) return;
-
-    uint t_start = adj_off[v];
-    uint t_end   = adj_off[v + 1u];
-
-    bool in_region = false;
-    for (uint j = t_start; j < t_end; j++) {
-        if (tri_sel[adj_list[j]] != 0u) { in_region = true; break; }
-    }
-    if (!in_region) return;
-
-    uint nbrs[48];
-    uint nbr_count = 0u;
-    for (uint j = t_start; j < t_end; j++) {
-        uint t = adj_list[j];
-        for (int k = 0; k < 3; k++) {
-            uint n = indices[t*3u + uint(k)];
-            if (n == v) continue;
-            bool found = false;
-            for (uint l = 0u; l < nbr_count; l++) {
-                if (nbrs[l] == n) { found = true; break; }
-            }
-            if (!found && nbr_count < 48u) nbrs[nbr_count++] = n;
-        }
-    }
-    if (nbr_count == 0u) return;
-
-    vec3 nbr_centroid = vec3(0.0);
-    for (uint l = 0u; l < nbr_count; l++) {
-        nbr_centroid.x += in_pos[nbrs[l]*3u+0u];
-        nbr_centroid.y += in_pos[nbrs[l]*3u+1u];
-        nbr_centroid.z += in_pos[nbrs[l]*3u+2u];
-    }
-    nbr_centroid /= float(nbr_count);
-
-    vec3 pos = vec3(in_pos[v*3u+0u], in_pos[v*3u+1u], in_pos[v*3u+2u]);
-    // A degenerate (zero-length) vertex normal has no tangent plane to project
-    // onto. normalize() of a zero vector is 0/0 -> NaN in GLSL, which then leaks
-    // into out_pos.y/z (the x slot is masked by the sign()/max() seam clamp) and
-    // poisons mean-edge -> the post-remesh mirror rebuild goes tol=NaN, 0 paired,
-    // shredding the model. Bail out leaving the vertex put when that happens.
-    vec3 nrm_raw = vec3(normals[v*3u+0u], normals[v*3u+1u], normals[v*3u+2u]);
-    float nrm_len = length(nrm_raw);
-    if (nrm_len < 1e-12) {
-        out_pos[v*3u+0u] = pos.x;
-        out_pos[v*3u+1u] = pos.y;
-        out_pos[v*3u+2u] = pos.z;
-        return;
-    }
-    vec3 nrm = nrm_raw / nrm_len;
-    vec3 d   = nbr_centroid - pos;
-    vec3 td  = d - nrm * dot(d, nrm);
-
-    float new_x = pos.x + td.x * (u_lambda * w);
-    // Non-pinned verts are outside the seam band by construction (find_pinned
-    // pins everything with |x| < seam_tol). Keep them there: don't allow
-    // smoothing to drift |x| into the band or flip sides. Otherwise a vert
-    // can wander across x=0 over multiple iters and leave a one-sided seam.
-    new_x = sign(pos.x) * max(u_seam_tol, abs(new_x));
-
-    out_pos[v*3u+0u] = new_x;
-    out_pos[v*3u+1u] = pos.y + td.y * (u_lambda * w);
-    out_pos[v*3u+2u] = pos.z + td.z * (u_lambda * w);
-}
-)";
-
-// ---------------------------------------------------------------------------
-// Post-remesh seam snap: snap near-x=0 verts using topological detection
-// ---------------------------------------------------------------------------
-
-static const char* seam_snap_src = R"(
-#version 430
-layout(local_size_x = 256) in;
-
-layout(std430, binding = 13) buffer PosBuf     { float pos[];     };
-layout(std430, binding = 4)  readonly buffer AdjOffBuf  { uint  adj_off[]; };
-layout(std430, binding = 5)  readonly buffer AdjListBuf { uint  adj_list[];};
-layout(std430, binding = 2)  readonly buffer IdxBuf     { uint  indices[]; };
-layout(std430, binding = 12) readonly buffer MaskBuf    { float mask[];    };
-
-uniform uint  u_vertex_count;
-uniform uint  u_mask_size;
-uniform float u_seam_tol;
-uniform float u_snap_tol;
-
-void main() {
-    uint v = gl_GlobalInvocationID.x;
-    if (v >= u_vertex_count) return;
-
-    // Skip fully masked
-    if (u_mask_size > 0u && v < u_mask_size && mask[v] >= 1.0)
-        return;
-
-    float ax = abs(pos[v * 3u]);
-
-    // Tight snap: already within seam_tol
-    if (ax < u_seam_tol) {
-        pos[v * 3u] = 0.0;
-        return;
-    }
-
-    // Outside snap zone
-    if (ax >= u_snap_tol) return;
-
-    // Topological test: neighbors on both +x and -x sides
-    bool has_pos = false, has_neg = false;
-    uint t_start = adj_off[v];
-    uint t_end   = adj_off[v + 1u];
-    for (uint j = t_start; j < t_end && !(has_pos && has_neg); j++) {
-        uint tri = adj_list[j];
-        for (uint k = 0u; k < 3u; k++) {
-            uint nv = indices[tri * 3u + k];
-            if (nv == v) continue;
-            float nx = pos[nv * 3u];
-            if (nx > u_seam_tol) has_pos = true;
-            else if (nx < -u_seam_tol) has_neg = true;
-        }
-    }
-
-    if (has_pos && has_neg)
-        pos[v * 3u] = 0.0;
-}
-)";
-
-// ---------------------------------------------------------------------------
-// Post-remesh seam weld: merge spatially-close verts at x=0
-// ---------------------------------------------------------------------------
-
-static const char* seam_weld_src = R"(
-#version 430
-layout(local_size_x = 256) in;
-
-layout(std430, binding = 13) readonly buffer PosBuf  { float pos[];       };
-layout(std430, binding = 12) readonly buffer MaskBuf { float mask[];      };
-layout(std430, binding = 19) buffer MergeMapBuf      { uint  merge_map[]; };
-
-uniform uint  u_vertex_count;
-uniform uint  u_mask_size;
-uniform float u_weld_tol;
-
-void main() {
-    uint v = gl_GlobalInvocationID.x;
-    if (v >= u_vertex_count) return;
-
-    merge_map[v] = v;
-
-    // Only process verts sitting on seam (x == 0)
-    if (pos[v * 3u] != 0.0) return;
-
-    // Skip fully masked
-    if (u_mask_size > 0u && v < u_mask_size && mask[v] >= 1.0)
-        return;
-
-    float py = pos[v * 3u + 1u];
-    float pz = pos[v * 3u + 2u];
-    float weld_sq = u_weld_tol * u_weld_tol;
-
-    uint best = v;
-    for (uint u = 0u; u < v; u++) {
-        if (pos[u * 3u] != 0.0) continue;
-        if (u_mask_size > 0u && u < u_mask_size && mask[u] >= 1.0)
-            continue;
-        float dy = pos[u * 3u + 1u] - py;
-        float dz = pos[u * 3u + 2u] - pz;
-        float d2 = dy * dy + dz * dz;
-        if (d2 < weld_sq && u < best)
-            best = u;
-    }
-    merge_map[v] = best;
-}
-)";
-
-// ---------------------------------------------------------------------------
-// Remesh methods
+// Init — compile each pipeline + allocate its Params UBO.
 // ---------------------------------------------------------------------------
 
 bool ComputeState::init_remesh_select() {
-    remesh_select_stretched_program = compile_program(select_stretched_src);
-    remesh_select_unmasked_program  = compile_program(select_unmasked_src);
-    if (!remesh_select_stretched_program || !remesh_select_unmasked_program) {
+    const gpu::BindEntry stretched_layout[] = {
+        { BIND_REMESH_IN_POS, gpu::Bind::StorageRead,      0 },
+        { BIND_INDICES,       gpu::Bind::StorageRead,      0 },
+        { BIND_REMESH_TRISEL, gpu::Bind::StorageReadWrite, 0 },
+        { BIND_PARAMS,        gpu::Bind::Uniform,          sizeof(SelectStretchedParamsGPU) },
+    };
+    remesh_select_stretched_pipeline = gpu::create_compute_pipeline(gpu_dev,
+        gpu::embedded_shader("select_stretched"), stretched_layout, 4);
+
+    const gpu::BindEntry unmasked_layout[] = {
+        { BIND_REMESH_WEIGHTS, gpu::Bind::StorageRead,      0 },
+        { BIND_INDICES,        gpu::Bind::StorageRead,      0 },
+        { BIND_REMESH_TRISEL,  gpu::Bind::StorageReadWrite, 0 },
+        { BIND_PARAMS,         gpu::Bind::Uniform,          sizeof(SelectUnmaskedParamsGPU) },
+    };
+    remesh_select_unmasked_pipeline = gpu::create_compute_pipeline(gpu_dev,
+        gpu::embedded_shader("select_unmasked"), unmasked_layout, 4);
+
+    if (!remesh_select_stretched_pipeline.handle || !remesh_select_unmasked_pipeline.handle) {
         std::fprintf(stderr, "[compute] remesh select shaders failed\n");
         return false;
     }
+    remesh_select_stretched_ubo = gpu::create_buffer(gpu_dev, nullptr, sizeof(SelectStretchedParamsGPU), gpu::Usage::Uniform);
+    remesh_select_unmasked_ubo  = gpu::create_buffer(gpu_dev, nullptr, sizeof(SelectUnmaskedParamsGPU),  gpu::Usage::Uniform);
+    std::printf("[compute] remesh select pipelines compiled (gpu:: seam)\n");
     return true;
 }
 
 bool ComputeState::init_remesh_grow_selection() {
-    remesh_grow_selection_program = compile_program(grow_selection_src);
-    if (!remesh_grow_selection_program) {
+    const gpu::BindEntry layout[] = {
+        { BIND_REMESH_TRISEL_PONG, gpu::Bind::StorageRead,      0 },
+        { BIND_REMESH_TRISEL,      gpu::Bind::StorageReadWrite, 0 },
+        { BIND_INDICES,            gpu::Bind::StorageRead,      0 },
+        { BIND_ADJACENCY_OFFSET,   gpu::Bind::StorageRead,      0 },
+        { BIND_ADJACENCY_LIST,     gpu::Bind::StorageRead,      0 },
+        { BIND_PARAMS,             gpu::Bind::Uniform,          sizeof(GrowSelectionParamsGPU) },
+    };
+    remesh_grow_selection_pipeline = gpu::create_compute_pipeline(gpu_dev,
+        gpu::embedded_shader("grow_selection"), layout, 6);
+    if (!remesh_grow_selection_pipeline.handle) {
         std::fprintf(stderr, "[compute] remesh grow_selection shader failed\n");
         return false;
     }
+    remesh_grow_selection_ubo = gpu::create_buffer(gpu_dev, nullptr, sizeof(GrowSelectionParamsGPU), gpu::Usage::Uniform);
+    std::printf("[compute] remesh grow_selection pipeline compiled (gpu:: seam)\n");
     return true;
 }
 
 bool ComputeState::init_remesh_mirror_selection() {
-    remesh_mirror_selection_program = compile_program(mirror_selection_src);
-    if (!remesh_mirror_selection_program) {
+    const gpu::BindEntry layout[] = {
+        { BIND_REMESH_TRISEL_PONG, gpu::Bind::StorageRead,      0 },
+        { BIND_REMESH_TRISEL,      gpu::Bind::StorageReadWrite, 0 },
+        { BIND_INDICES,            gpu::Bind::StorageRead,      0 },
+        { BIND_ADJACENCY_OFFSET,   gpu::Bind::StorageRead,      0 },
+        { BIND_ADJACENCY_LIST,     gpu::Bind::StorageRead,      0 },
+        { BIND_MIRROR_MAP,         gpu::Bind::StorageRead,      0 },
+        { BIND_PARAMS,             gpu::Bind::Uniform,          sizeof(MirrorSelectionParamsGPU) },
+    };
+    remesh_mirror_selection_pipeline = gpu::create_compute_pipeline(gpu_dev,
+        gpu::embedded_shader("mirror_selection"), layout, 7);
+    if (!remesh_mirror_selection_pipeline.handle) {
         std::fprintf(stderr, "[compute] remesh mirror_selection shader failed\n");
         return false;
     }
+    remesh_mirror_selection_ubo = gpu::create_buffer(gpu_dev, nullptr, sizeof(MirrorSelectionParamsGPU), gpu::Usage::Uniform);
+    std::printf("[compute] remesh mirror_selection pipeline compiled (gpu:: seam)\n");
     return true;
 }
 
 bool ComputeState::init_remesh_find_pinned() {
-    remesh_find_pinned_program = compile_program(find_pinned_src);
-    if (!remesh_find_pinned_program) {
+    const gpu::BindEntry layout[] = {
+        { BIND_REMESH_IN_POS,    gpu::Bind::StorageRead,      0 },
+        { BIND_ADJACENCY_OFFSET, gpu::Bind::StorageRead,      0 },
+        { BIND_ADJACENCY_LIST,   gpu::Bind::StorageRead,      0 },
+        { BIND_REMESH_TRISEL,    gpu::Bind::StorageRead,      0 },
+        { BIND_REMESH_PINNED,    gpu::Bind::StorageReadWrite, 0 },
+        { BIND_PARAMS,           gpu::Bind::Uniform,          sizeof(FindPinnedParamsGPU) },
+    };
+    remesh_find_pinned_pipeline = gpu::create_compute_pipeline(gpu_dev,
+        gpu::embedded_shader("find_pinned"), layout, 6);
+    if (!remesh_find_pinned_pipeline.handle) {
         std::fprintf(stderr, "[compute] remesh find_pinned shader failed\n");
         return false;
     }
+    remesh_find_pinned_ubo = gpu::create_buffer(gpu_dev, nullptr, sizeof(FindPinnedParamsGPU), gpu::Usage::Uniform);
+    std::printf("[compute] remesh find_pinned pipeline compiled (gpu:: seam)\n");
     return true;
 }
 
 bool ComputeState::init_remesh_smooth_weights() {
-    remesh_smooth_weights_program = compile_program(smooth_weights_src);
-    if (!remesh_smooth_weights_program) {
+    const gpu::BindEntry layout[] = {
+        { BIND_ADJACENCY_OFFSET, gpu::Bind::StorageRead,      0 },
+        { BIND_ADJACENCY_LIST,   gpu::Bind::StorageRead,      0 },
+        { BIND_REMESH_WEIGHTS,   gpu::Bind::StorageReadWrite, 0 },
+        { BIND_REMESH_PINNED,    gpu::Bind::StorageRead,      0 },
+        { BIND_REMESH_TRISEL,    gpu::Bind::StorageRead,      0 },
+        { BIND_REMESH_CORE_SEL,  gpu::Bind::StorageRead,      0 },
+        { BIND_PARAMS,           gpu::Bind::Uniform,          sizeof(SmoothWeightsParamsGPU) },
+    };
+    remesh_smooth_weights_pipeline = gpu::create_compute_pipeline(gpu_dev,
+        gpu::embedded_shader("smooth_weights"), layout, 7);
+    if (!remesh_smooth_weights_pipeline.handle) {
         std::fprintf(stderr, "[compute] remesh smooth_weights shader failed\n");
         return false;
     }
+    remesh_smooth_weights_ubo = gpu::create_buffer(gpu_dev, nullptr, sizeof(SmoothWeightsParamsGPU), gpu::Usage::Uniform);
+    std::printf("[compute] remesh smooth_weights pipeline compiled (gpu:: seam)\n");
     return true;
 }
 
 bool ComputeState::init_remesh_smooth() {
-    remesh_smooth_program = compile_program(remesh_smooth_src);
-    if (!remesh_smooth_program) {
+    const gpu::BindEntry layout[] = {
+        { BIND_POSITIONS,        gpu::Bind::StorageReadWrite, 0 },
+        { BIND_NORMALS,          gpu::Bind::StorageRead,      0 },
+        { BIND_INDICES,          gpu::Bind::StorageRead,      0 },
+        { BIND_ADJACENCY_OFFSET, gpu::Bind::StorageRead,      0 },
+        { BIND_ADJACENCY_LIST,   gpu::Bind::StorageRead,      0 },
+        { BIND_REMESH_IN_POS,    gpu::Bind::StorageRead,      0 },
+        { BIND_REMESH_WEIGHTS,   gpu::Bind::StorageRead,      0 },
+        { BIND_REMESH_PINNED,    gpu::Bind::StorageRead,      0 },
+        { BIND_REMESH_TRISEL,    gpu::Bind::StorageRead,      0 },
+        { BIND_PARAMS,           gpu::Bind::Uniform,          sizeof(RemeshSmoothParamsGPU) },
+    };
+    remesh_smooth_pipeline = gpu::create_compute_pipeline(gpu_dev,
+        gpu::embedded_shader("remesh_smooth"), layout, 10);
+    if (!remesh_smooth_pipeline.handle) {
         std::fprintf(stderr, "[compute] remesh smooth shader failed\n");
         return false;
     }
+    remesh_smooth_ubo = gpu::create_buffer(gpu_dev, nullptr, sizeof(RemeshSmoothParamsGPU), gpu::Usage::Uniform);
+    std::printf("[compute] remesh smooth pipeline compiled (gpu:: seam)\n");
     return true;
 }
 
 bool ComputeState::init_remesh_seam_snap_weld() {
-    remesh_seam_snap_program = compile_program(seam_snap_src);
-    remesh_seam_weld_program = compile_program(seam_weld_src);
-    if (!remesh_seam_snap_program || !remesh_seam_weld_program) {
+    const gpu::BindEntry snap_layout[] = {
+        { BIND_REMESH_IN_POS,    gpu::Bind::StorageReadWrite, 0 },
+        { BIND_ADJACENCY_OFFSET, gpu::Bind::StorageRead,      0 },
+        { BIND_ADJACENCY_LIST,   gpu::Bind::StorageRead,      0 },
+        { BIND_INDICES,          gpu::Bind::StorageRead,      0 },
+        { BIND_MASK,             gpu::Bind::StorageRead,      0 },
+        { BIND_PARAMS,           gpu::Bind::Uniform,          sizeof(SeamSnapParamsGPU) },
+    };
+    remesh_seam_snap_pipeline = gpu::create_compute_pipeline(gpu_dev,
+        gpu::embedded_shader("seam_snap"), snap_layout, 6);
+
+    const gpu::BindEntry weld_layout[] = {
+        { BIND_REMESH_IN_POS,  gpu::Bind::StorageRead,      0 },
+        { BIND_MASK,           gpu::Bind::StorageRead,      0 },
+        { BIND_SEAM_WELD_MAP,  gpu::Bind::StorageReadWrite, 0 },
+        { BIND_PARAMS,         gpu::Bind::Uniform,          sizeof(SeamWeldParamsGPU) },
+    };
+    remesh_seam_weld_pipeline = gpu::create_compute_pipeline(gpu_dev,
+        gpu::embedded_shader("seam_weld"), weld_layout, 4);
+
+    if (!remesh_seam_snap_pipeline.handle || !remesh_seam_weld_pipeline.handle) {
         std::fprintf(stderr, "[compute] remesh seam snap/weld shaders failed\n");
         return false;
     }
+    remesh_seam_snap_ubo = gpu::create_buffer(gpu_dev, nullptr, sizeof(SeamSnapParamsGPU), gpu::Usage::Uniform);
+    remesh_seam_weld_ubo = gpu::create_buffer(gpu_dev, nullptr, sizeof(SeamWeldParamsGPU), gpu::Usage::Uniform);
+    std::printf("[compute] remesh seam snap/weld pipelines compiled (gpu:: seam)\n");
     return true;
 }
 
@@ -547,6 +235,13 @@ void ComputeState::ensure_remesh_smooth_buffers(uint32_t vc, uint32_t tc) {
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 }
 
+// ---------------------------------------------------------------------------
+// Dispatch — uploads/copies/readback stay raw GL; the compute step runs through
+// the seam. Wrap each GL-owned SSBO in a transient gpu::Buffer view at dispatch.
+// (sizes are best-effort for the WebGPU min-size guard later; the GL backend
+// whole-buffer-binds and ignores them. 0 = unguarded.)
+// ---------------------------------------------------------------------------
+
 void ComputeState::dispatch_select_stretched(
     uint32_t vertex_count, uint32_t tri_count,
     const uint32_t* mesh_indices,
@@ -563,21 +258,29 @@ void ComputeState::dispatch_select_stretched(
     }
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, remesh_ping_ssbo);
     glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, vertex_count*3*sizeof(float), readback_buf.data());
-
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, remesh_indices_ssbo);
     glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, tri_count*3*sizeof(uint32_t), mesh_indices);
-
-    glUseProgram(remesh_select_stretched_program);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_REMESH_IN_POS,  remesh_ping_ssbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_INDICES,        remesh_indices_ssbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_REMESH_TRISEL,  remesh_trisel_ssbo);
-
-    glUniform1f(glGetUniformLocation(remesh_select_stretched_program, "u_target_len"), target_len);
-    glUniform1ui(glGetUniformLocation(remesh_select_stretched_program, "u_tri_count"), tri_count);
-
-    glDispatchCompute((tri_count + 255u) / 256u, 1, 1);
-    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT | GL_SHADER_STORAGE_BARRIER_BIT);
+
+    SelectStretchedParamsGPU u = {};
+    u.target_len = target_len; u.tri_count = tri_count;
+    gpu::write_buffer(gpu_dev, remesh_select_stretched_ubo, 0, &u, sizeof(u));
+
+    gpu::Buffer posView{ (uint64_t)vertex_count*3u*sizeof(float),    remesh_ping_ssbo };
+    gpu::Buffer idxView{ (uint64_t)tri_count*3u*sizeof(uint32_t),    remesh_indices_ssbo };
+    gpu::Buffer selView{ (uint64_t)tri_count*sizeof(uint32_t),       remesh_trisel_ssbo };
+    const gpu::BindBufferEntry bg[] = {
+        { BIND_REMESH_IN_POS, &posView, posView.size },
+        { BIND_INDICES,       &idxView, idxView.size },
+        { BIND_REMESH_TRISEL, &selView, selView.size },
+        { BIND_PARAMS,        &remesh_select_stretched_ubo, sizeof(SelectStretchedParamsGPU) },
+    };
+    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, remesh_select_stretched_pipeline, bg, 4);
+    gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
+    gpu::dispatch(b, remesh_select_stretched_pipeline, grp, (tri_count + 255u) / 256u);
+    gpu::submit(b);
+    gpu::release_bind_group(grp);
 }
 
 void ComputeState::dispatch_select_unmasked(
@@ -589,59 +292,78 @@ void ComputeState::dispatch_select_unmasked(
 
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, remesh_indices_ssbo);
     glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, tri_count*3*sizeof(uint32_t), mesh_indices);
-
     if (mask && mask_size > 0) {
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, remesh_weights_ssbo);
         glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, mask_size*sizeof(float), mask);
     }
-
-    glUseProgram(remesh_select_unmasked_program);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_REMESH_WEIGHTS, remesh_weights_ssbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_INDICES,        remesh_indices_ssbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_REMESH_TRISEL,  remesh_trisel_ssbo);
-
-    glUniform1ui(glGetUniformLocation(remesh_select_unmasked_program, "u_tri_count"),  tri_count);
-    glUniform1ui(glGetUniformLocation(remesh_select_unmasked_program, "u_mask_size"),  mask_size);
-
-    glDispatchCompute((tri_count + 255u) / 256u, 1, 1);
-    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT | GL_SHADER_STORAGE_BARRIER_BIT);
+
+    SelectUnmaskedParamsGPU u = {};
+    u.tri_count = tri_count; u.mask_size = mask_size;
+    gpu::write_buffer(gpu_dev, remesh_select_unmasked_ubo, 0, &u, sizeof(u));
+
+    gpu::Buffer maskView{ (uint64_t)(mask_size ? mask_size : 1u)*sizeof(float), remesh_weights_ssbo };
+    gpu::Buffer idxView{  (uint64_t)tri_count*3u*sizeof(uint32_t),              remesh_indices_ssbo };
+    gpu::Buffer selView{  (uint64_t)tri_count*sizeof(uint32_t),                 remesh_trisel_ssbo };
+    const gpu::BindBufferEntry bg[] = {
+        { BIND_REMESH_WEIGHTS, &maskView, maskView.size },
+        { BIND_INDICES,        &idxView,  idxView.size },
+        { BIND_REMESH_TRISEL,  &selView,  selView.size },
+        { BIND_PARAMS,         &remesh_select_unmasked_ubo, sizeof(SelectUnmaskedParamsGPU) },
+    };
+    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, remesh_select_unmasked_pipeline, bg, 4);
+    gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
+    gpu::dispatch(b, remesh_select_unmasked_pipeline, grp, (tri_count + 255u) / 256u);
+    gpu::submit(b);
+    gpu::release_bind_group(grp);
 }
 
 void ComputeState::dispatch_grow_selection(
     uint32_t vertex_count, uint32_t tri_count, int rings)
 {
-    if (rings <= 0 || tri_count == 0 || !remesh_grow_selection_program) return;
+    if (rings <= 0 || tri_count == 0 || !remesh_grow_selection_pipeline.handle) return;
     ensure_remesh_smooth_buffers(vertex_count, tri_count);
 
-    glUseProgram(remesh_grow_selection_program);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_INDICES,             remesh_indices_ssbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_ADJACENCY_OFFSET,    adjacency_offset_ssbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_ADJACENCY_LIST,      adjacency_list_ssbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_REMESH_TRISEL,       remesh_trisel_ssbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_REMESH_TRISEL_PONG,  remesh_trisel_pong_ssbo);
-    glUniform1ui(glGetUniformLocation(remesh_grow_selection_program, "u_tri_count"), tri_count);
+    GrowSelectionParamsGPU u = {};
+    u.tri_count = tri_count;
+    gpu::write_buffer(gpu_dev, remesh_grow_selection_ubo, 0, &u, sizeof(u));
 
-    GLuint groups = (tri_count + 255u) / 256u;
+    gpu::Buffer pongView{ (uint64_t)tri_count*sizeof(uint32_t),     remesh_trisel_pong_ssbo };
+    gpu::Buffer selView{  (uint64_t)tri_count*sizeof(uint32_t),     remesh_trisel_ssbo };
+    gpu::Buffer idxView{  (uint64_t)tri_count*3u*sizeof(uint32_t),  remesh_indices_ssbo };
+    gpu::Buffer offView{  0, adjacency_offset_ssbo };
+    gpu::Buffer listView{ 0, adjacency_list_ssbo };
+    const gpu::BindBufferEntry bg[] = {
+        { BIND_REMESH_TRISEL_PONG, &pongView, pongView.size },
+        { BIND_REMESH_TRISEL,      &selView,  selView.size },
+        { BIND_INDICES,            &idxView,  idxView.size },
+        { BIND_ADJACENCY_OFFSET,   &offView,  offView.size },
+        { BIND_ADJACENCY_LIST,     &listView, listView.size },
+        { BIND_PARAMS,             &remesh_grow_selection_ubo, sizeof(GrowSelectionParamsGPU) },
+    };
+    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, remesh_grow_selection_pipeline, bg, 6);
+
     GLsizeiptr bytes = (GLsizeiptr)tri_count * sizeof(uint32_t);
-
     for (int r = 0; r < rings; r++) {
-        // Snapshot current selection into pong (the kernel's input).
+        // Snapshot current selection into pong (the kernel's input) — raw GL copy.
         glBindBuffer(GL_COPY_READ_BUFFER,  remesh_trisel_ssbo);
         glBindBuffer(GL_COPY_WRITE_BUFFER, remesh_trisel_pong_ssbo);
         glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, 0, 0, bytes);
         glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT | GL_SHADER_STORAGE_BARRIER_BIT);
 
-        glDispatchCompute(groups, 1, 1);
-        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+        gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
+        gpu::dispatch(b, remesh_grow_selection_pipeline, grp, (tri_count + 255u) / 256u);
+        gpu::submit(b);
     }
     glBindBuffer(GL_COPY_READ_BUFFER, 0);
     glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
+    gpu::release_bind_group(grp);
 }
 
 void ComputeState::dispatch_mirror_selection(uint32_t vertex_count, uint32_t tri_count)
 {
-    if (tri_count == 0 || !remesh_mirror_selection_program) return;
+    if (tri_count == 0 || !remesh_mirror_selection_pipeline.handle) return;
     if (mirror_map_vertex_count == 0 || !mirror_map_ssbo) return;
     ensure_remesh_smooth_buffers(vertex_count, tri_count);
 
@@ -649,23 +371,34 @@ void ComputeState::dispatch_mirror_selection(uint32_t vertex_count, uint32_t tri
     glBindBuffer(GL_COPY_READ_BUFFER,  remesh_trisel_ssbo);
     glBindBuffer(GL_COPY_WRITE_BUFFER, remesh_trisel_pong_ssbo);
     glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, 0, 0, bytes);
-    glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT | GL_SHADER_STORAGE_BARRIER_BIT);
-
-    glUseProgram(remesh_mirror_selection_program);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_INDICES,             remesh_indices_ssbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_ADJACENCY_OFFSET,    adjacency_offset_ssbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_ADJACENCY_LIST,      adjacency_list_ssbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_MIRROR_MAP,          mirror_map_ssbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_REMESH_TRISEL,       remesh_trisel_ssbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_REMESH_TRISEL_PONG,  remesh_trisel_pong_ssbo);
-    glUniform1ui(glGetUniformLocation(remesh_mirror_selection_program, "u_tri_count"),    tri_count);
-    glUniform1ui(glGetUniformLocation(remesh_mirror_selection_program, "u_vertex_count"), vertex_count);
-
-    glDispatchCompute((tri_count + 255u) / 256u, 1, 1);
-    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
-
     glBindBuffer(GL_COPY_READ_BUFFER, 0);
     glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
+    glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT | GL_SHADER_STORAGE_BARRIER_BIT);
+
+    MirrorSelectionParamsGPU u = {};
+    u.tri_count = tri_count; u.vertex_count = vertex_count;
+    gpu::write_buffer(gpu_dev, remesh_mirror_selection_ubo, 0, &u, sizeof(u));
+
+    gpu::Buffer pongView{   (uint64_t)tri_count*sizeof(uint32_t),    remesh_trisel_pong_ssbo };
+    gpu::Buffer selView{    (uint64_t)tri_count*sizeof(uint32_t),    remesh_trisel_ssbo };
+    gpu::Buffer idxView{    (uint64_t)tri_count*3u*sizeof(uint32_t), remesh_indices_ssbo };
+    gpu::Buffer offView{    0, adjacency_offset_ssbo };
+    gpu::Buffer listView{   0, adjacency_list_ssbo };
+    gpu::Buffer mirrorView{ 0, mirror_map_ssbo };
+    const gpu::BindBufferEntry bg[] = {
+        { BIND_REMESH_TRISEL_PONG, &pongView,   pongView.size },
+        { BIND_REMESH_TRISEL,      &selView,    selView.size },
+        { BIND_INDICES,            &idxView,    idxView.size },
+        { BIND_ADJACENCY_OFFSET,   &offView,    offView.size },
+        { BIND_ADJACENCY_LIST,     &listView,   listView.size },
+        { BIND_MIRROR_MAP,         &mirrorView, mirrorView.size },
+        { BIND_PARAMS,             &remesh_mirror_selection_ubo, sizeof(MirrorSelectionParamsGPU) },
+    };
+    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, remesh_mirror_selection_pipeline, bg, 7);
+    gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
+    gpu::dispatch(b, remesh_mirror_selection_pipeline, grp, (tri_count + 255u) / 256u);
+    gpu::submit(b);
+    gpu::release_bind_group(grp);
 }
 
 void ComputeState::snapshot_core_sel(uint32_t tri_count)
@@ -706,21 +439,34 @@ void ComputeState::dispatch_find_pinned(
     }
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, remesh_ping_ssbo);
     glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, vertex_count*3*sizeof(float), readback_buf.data());
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT | GL_SHADER_STORAGE_BARRIER_BIT);
 
-    glUseProgram(remesh_find_pinned_program);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_REMESH_IN_POS,         remesh_ping_ssbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_ADJACENCY_OFFSET,      adjacency_offset_ssbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_ADJACENCY_LIST,        adjacency_list_ssbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_REMESH_TRISEL,         remesh_trisel_ssbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_REMESH_PINNED,         remesh_pinned_ssbo);
+    FindPinnedParamsGPU u = {};
+    u.vertex_count = vertex_count; u.seam_tol = seam_tol;
+    gpu::write_buffer(gpu_dev, remesh_find_pinned_ubo, 0, &u, sizeof(u));
 
-    glUniform1ui(glGetUniformLocation(remesh_find_pinned_program, "u_vertex_count"), vertex_count);
-    glUniform1f(glGetUniformLocation(remesh_find_pinned_program,  "u_seam_tol"),     seam_tol);
-
-    glDispatchCompute((vertex_count + 255u) / 256u, 1, 1);
-    glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT);
+    gpu::Buffer posView{    (uint64_t)vertex_count*3u*sizeof(float), remesh_ping_ssbo };
+    gpu::Buffer offView{    0, adjacency_offset_ssbo };
+    gpu::Buffer listView{   0, adjacency_list_ssbo };
+    gpu::Buffer selView{    (uint64_t)tri_count*sizeof(uint32_t),    remesh_trisel_ssbo };
+    gpu::Buffer pinnedView{ (uint64_t)vertex_count*sizeof(uint32_t), remesh_pinned_ssbo };
+    const gpu::BindBufferEntry bg[] = {
+        { BIND_REMESH_IN_POS,    &posView,    posView.size },
+        { BIND_ADJACENCY_OFFSET, &offView,    offView.size },
+        { BIND_ADJACENCY_LIST,   &listView,   listView.size },
+        { BIND_REMESH_TRISEL,    &selView,    selView.size },
+        { BIND_REMESH_PINNED,    &pinnedView, pinnedView.size },
+        { BIND_PARAMS,           &remesh_find_pinned_ubo, sizeof(FindPinnedParamsGPU) },
+    };
+    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, remesh_find_pinned_pipeline, bg, 6);
+    gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
+    gpu::dispatch(b, remesh_find_pinned_pipeline, grp, (vertex_count + 255u) / 256u);
+    gpu::submit(b);
+    gpu::release_bind_group(grp);
 
     out_pinned.resize(vertex_count);
+    glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, remesh_pinned_ssbo);
     glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, vertex_count*sizeof(uint32_t), out_pinned.data());
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
@@ -732,19 +478,30 @@ void ComputeState::dispatch_compute_smooth_weights(
 {
     ensure_remesh_smooth_buffers(vertex_count, tri_count);
 
-    glUseProgram(remesh_smooth_weights_program);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_ADJACENCY_OFFSET,  adjacency_offset_ssbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_ADJACENCY_LIST,    adjacency_list_ssbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_REMESH_WEIGHTS,    remesh_weights_ssbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_REMESH_PINNED,     remesh_pinned_ssbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_REMESH_TRISEL,     remesh_trisel_ssbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_REMESH_CORE_SEL,   remesh_core_sel_ssbo);
+    SmoothWeightsParamsGPU u = {};
+    u.vertex_count = vertex_count; u.support_rings = support_rings;
+    gpu::write_buffer(gpu_dev, remesh_smooth_weights_ubo, 0, &u, sizeof(u));
 
-    glUniform1ui(glGetUniformLocation(remesh_smooth_weights_program, "u_vertex_count"), vertex_count);
-    glUniform1i (glGetUniformLocation(remesh_smooth_weights_program, "u_support_rings"), support_rings);
-
-    glDispatchCompute((vertex_count + 255u) / 256u, 1, 1);
-    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+    gpu::Buffer offView{     0, adjacency_offset_ssbo };
+    gpu::Buffer listView{    0, adjacency_list_ssbo };
+    gpu::Buffer weightView{  (uint64_t)vertex_count*sizeof(float),    remesh_weights_ssbo };
+    gpu::Buffer pinnedView{  (uint64_t)vertex_count*sizeof(uint32_t), remesh_pinned_ssbo };
+    gpu::Buffer fullSelView{ (uint64_t)tri_count*sizeof(uint32_t),    remesh_trisel_ssbo };
+    gpu::Buffer coreSelView{ (uint64_t)tri_count*sizeof(uint32_t),    remesh_core_sel_ssbo };
+    const gpu::BindBufferEntry bg[] = {
+        { BIND_ADJACENCY_OFFSET, &offView,     offView.size },
+        { BIND_ADJACENCY_LIST,   &listView,    listView.size },
+        { BIND_REMESH_WEIGHTS,   &weightView,  weightView.size },
+        { BIND_REMESH_PINNED,    &pinnedView,  pinnedView.size },
+        { BIND_REMESH_TRISEL,    &fullSelView, fullSelView.size },
+        { BIND_REMESH_CORE_SEL,  &coreSelView, coreSelView.size },
+        { BIND_PARAMS,           &remesh_smooth_weights_ubo, sizeof(SmoothWeightsParamsGPU) },
+    };
+    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, remesh_smooth_weights_pipeline, bg, 7);
+    gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
+    gpu::dispatch(b, remesh_smooth_weights_pipeline, grp, (vertex_count + 255u) / 256u);
+    gpu::submit(b);
+    gpu::release_bind_group(grp);
 }
 
 void ComputeState::dispatch_remesh_smooth(
@@ -762,7 +519,6 @@ void ComputeState::dispatch_remesh_smooth(
     ensure_remesh_smooth_buffers(vertex_count, tri_count);
 
     readback_buf.resize(vertex_count * 3);
-
     for (uint32_t i = 0; i < vertex_count; i++) {
         readback_buf[i*3+0] = pos_x[i];
         readback_buf[i*3+1] = pos_y[i];
@@ -799,39 +555,61 @@ void ComputeState::dispatch_remesh_smooth(
 
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, remesh_indices_ssbo);
     glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, tri_count*3*sizeof(uint32_t), mesh_indices);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT | GL_SHADER_STORAGE_BARRIER_BIT);
 
-    glUseProgram(remesh_smooth_program);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_NORMALS,       remesh_norm_ssbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_INDICES,       remesh_indices_ssbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_REMESH_WEIGHTS,remesh_weights_ssbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_REMESH_PINNED, remesh_pinned_ssbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_REMESH_TRISEL, remesh_trisel_ssbo);
+    RemeshSmoothParamsGPU u = {};
+    u.lambda = lambda; u.seam_tol = seam_tol; u.vertex_count = vertex_count;
+    gpu::write_buffer(gpu_dev, remesh_smooth_ubo, 0, &u, sizeof(u));
 
-    glUniform1f(glGetUniformLocation(remesh_smooth_program, "u_lambda"), lambda);
-    glUniform1f(glGetUniformLocation(remesh_smooth_program, "u_seam_tol"), seam_tol);
-    glUniform1ui(glGetUniformLocation(remesh_smooth_program, "u_vertex_count"), vertex_count);
+    // Constant inputs across the ping-pong (slots 0 / 13 swap between ping/pong).
+    gpu::Buffer normView{ (uint64_t)vertex_count*3u*sizeof(float), remesh_norm_ssbo };
+    gpu::Buffer idxView{  (uint64_t)tri_count*3u*sizeof(uint32_t), remesh_indices_ssbo };
+    gpu::Buffer offView{  0, adjacency_offset_ssbo };
+    gpu::Buffer listView{ 0, adjacency_list_ssbo };
+    gpu::Buffer wView{    (uint64_t)vertex_count*sizeof(float),    remesh_weights_ssbo };
+    gpu::Buffer pinView{  (uint64_t)vertex_count*sizeof(uint32_t), remesh_pinned_ssbo };
+    gpu::Buffer selView{  (uint64_t)tri_count*sizeof(uint32_t),    remesh_trisel_ssbo };
+    gpu::Buffer pingView{ (uint64_t)vertex_count*3u*sizeof(float), remesh_ping_ssbo };
+    gpu::Buffer pongView{ (uint64_t)vertex_count*3u*sizeof(float), remesh_pong_ssbo };
+
+    auto make_bg = [&](gpu::Buffer& inBuf, gpu::Buffer& outBuf) {
+        const gpu::BindBufferEntry bg[] = {
+            { BIND_POSITIONS,        &outBuf,  outBuf.size },   // out_pos (read_write)
+            { BIND_NORMALS,          &normView, normView.size },
+            { BIND_INDICES,          &idxView,  idxView.size },
+            { BIND_ADJACENCY_OFFSET, &offView,  offView.size },
+            { BIND_ADJACENCY_LIST,   &listView, listView.size },
+            { BIND_REMESH_IN_POS,    &inBuf,   inBuf.size },    // in_pos (read)
+            { BIND_REMESH_WEIGHTS,   &wView,    wView.size },
+            { BIND_REMESH_PINNED,    &pinView,  pinView.size },
+            { BIND_REMESH_TRISEL,    &selView,  selView.size },
+            { BIND_PARAMS,           &remesh_smooth_ubo, sizeof(RemeshSmoothParamsGPU) },
+        };
+        return gpu::create_bind_group(gpu_dev, remesh_smooth_pipeline, bg, 10);
+    };
+    gpu::BindGroup grp_a = make_bg(pingView, pongView);  // in=ping, out=pong
+    gpu::BindGroup grp_b = make_bg(pongView, pingView);  // in=pong, out=ping
 
     // Multi-step smoothing with ping-pong. The shader copies in_pos→out_pos for
-    // pinned / out-of-region / weightless verts, so swapping buffers between
-    // iterations is safe — every vertex is written each step. After the loop,
-    // `out_buf` holds the final result (single CPU readback below).
+    // pinned / out-of-region / weightless verts, so swapping is safe — every vertex
+    // is written each step. After the loop, `out_buf` holds the final result.
     static constexpr int NUM_SMOOTH_STEPS = 3;
     uint32_t groups = (vertex_count + 255u) / 256u;
-    GLuint in_buf  = remesh_ping_ssbo;
-    GLuint out_buf = remesh_pong_ssbo;
+    GLuint out_buf_gl = remesh_ping_ssbo;  // tracks which GL buffer holds the result
+    gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
     for (int step = 0; step < NUM_SMOOTH_STEPS; step++) {
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_REMESH_IN_POS, in_buf);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_POSITIONS,     out_buf);
-        glDispatchCompute(groups, 1, 1);
-        if (step + 1 < NUM_SMOOTH_STEPS) {
-            glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
-            std::swap(in_buf, out_buf);
-        }
+        // step even: in=ping → out=pong (grp_a); step odd: in=pong → out=ping (grp_b)
+        gpu::dispatch(b, remesh_smooth_pipeline, (step & 1) == 0 ? grp_a : grp_b, groups);
+        out_buf_gl = (step & 1) == 0 ? remesh_pong_ssbo : remesh_ping_ssbo;
     }
-    glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT);
+    gpu::submit(b);
+    gpu::release_bind_group(grp_a);
+    gpu::release_bind_group(grp_b);
 
     readback_buf.resize(vertex_count * 3);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, out_buf);
+    glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, out_buf_gl);
     glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, vertex_count*3*sizeof(float), readback_buf.data());
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 
@@ -859,56 +637,73 @@ void ComputeState::dispatch_seam_snap_weld(
         readback_buf[i*3+2] = pos_z[i];
     }
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, remesh_ping_ssbo);
-    glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
-                    vertex_count * 3 * sizeof(float), readback_buf.data());
+    glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, vertex_count * 3 * sizeof(float), readback_buf.data());
 
     // Upload mask (reuse remesh_weights_ssbo as scratch)
     if (mask_data && mask_size > 0) {
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, remesh_weights_ssbo);
-        glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
-                        mask_size * sizeof(float), mask_data);
+        glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, mask_size * sizeof(float), mask_data);
     }
 
     // Allocate weld merge map SSBO
     if (!seam_weld_map_ssbo) glGenBuffers(1, &seam_weld_map_ssbo);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, seam_weld_map_ssbo);
-    glBufferData(GL_SHADER_STORAGE_BUFFER,
-                 vertex_count * sizeof(uint32_t), nullptr, GL_DYNAMIC_COPY);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, vertex_count * sizeof(uint32_t), nullptr, GL_DYNAMIC_COPY);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT | GL_SHADER_STORAGE_BARRIER_BIT);
 
     uint32_t groups = (vertex_count + 255u) / 256u;
 
+    gpu::Buffer posView{    (uint64_t)vertex_count*3u*sizeof(float),               remesh_ping_ssbo };
+    gpu::Buffer maskView{   (uint64_t)(mask_size ? mask_size : 1u)*sizeof(float),  remesh_weights_ssbo };
+    gpu::Buffer offView{    0, adjacency_offset_ssbo };
+    gpu::Buffer listView{   0, adjacency_list_ssbo };
+    gpu::Buffer idxView{    0, remesh_indices_ssbo };
+    gpu::Buffer mergeView{  (uint64_t)vertex_count*sizeof(uint32_t), seam_weld_map_ssbo };
+
     // --- Pass 1: seam snap ---
-    glUseProgram(remesh_seam_snap_program);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_REMESH_IN_POS, remesh_ping_ssbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_ADJACENCY_OFFSET, adjacency_offset_ssbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_ADJACENCY_LIST,   adjacency_list_ssbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_INDICES, remesh_indices_ssbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_MASK, remesh_weights_ssbo);
+    SeamSnapParamsGPU su = {};
+    su.vertex_count = vertex_count; su.mask_size = mask_size;
+    su.seam_tol = seam_tol; su.snap_tol = snap_tol;
+    gpu::write_buffer(gpu_dev, remesh_seam_snap_ubo, 0, &su, sizeof(su));
+    const gpu::BindBufferEntry snap_bg[] = {
+        { BIND_REMESH_IN_POS,    &posView,  posView.size },
+        { BIND_ADJACENCY_OFFSET, &offView,  offView.size },
+        { BIND_ADJACENCY_LIST,   &listView, listView.size },
+        { BIND_INDICES,          &idxView,  idxView.size },
+        { BIND_MASK,             &maskView, maskView.size },
+        { BIND_PARAMS,           &remesh_seam_snap_ubo, sizeof(SeamSnapParamsGPU) },
+    };
+    gpu::BindGroup snap_grp = gpu::create_bind_group(gpu_dev, remesh_seam_snap_pipeline, snap_bg, 6);
+    {
+        gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
+        gpu::dispatch(b, remesh_seam_snap_pipeline, snap_grp, groups);
+        gpu::submit(b);
+    }
+    gpu::release_bind_group(snap_grp);
 
-    glUniform1ui(glGetUniformLocation(remesh_seam_snap_program, "u_vertex_count"), vertex_count);
-    glUniform1ui(glGetUniformLocation(remesh_seam_snap_program, "u_mask_size"), mask_size);
-    glUniform1f(glGetUniformLocation(remesh_seam_snap_program,  "u_seam_tol"), seam_tol);
-    glUniform1f(glGetUniformLocation(remesh_seam_snap_program,  "u_snap_tol"), snap_tol);
-    glDispatchCompute(groups, 1, 1);
-    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
-
-    // --- Pass 2: seam weld ---
-    glUseProgram(remesh_seam_weld_program);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_REMESH_IN_POS, remesh_ping_ssbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_MASK, remesh_weights_ssbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_SEAM_WELD_MAP, seam_weld_map_ssbo);
-
-    glUniform1ui(glGetUniformLocation(remesh_seam_weld_program, "u_vertex_count"), vertex_count);
-    glUniform1ui(glGetUniformLocation(remesh_seam_weld_program, "u_mask_size"), mask_size);
-    glUniform1f(glGetUniformLocation(remesh_seam_weld_program,  "u_weld_tol"), weld_tol);
-    glDispatchCompute(groups, 1, 1);
-    glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT);
+    // --- Pass 2: seam weld --- (reads the snapped positions)
+    SeamWeldParamsGPU wu = {};
+    wu.vertex_count = vertex_count; wu.mask_size = mask_size; wu.weld_tol = weld_tol;
+    gpu::write_buffer(gpu_dev, remesh_seam_weld_ubo, 0, &wu, sizeof(wu));
+    const gpu::BindBufferEntry weld_bg[] = {
+        { BIND_REMESH_IN_POS, &posView,   posView.size },
+        { BIND_MASK,          &maskView,  maskView.size },
+        { BIND_SEAM_WELD_MAP, &mergeView, mergeView.size },
+        { BIND_PARAMS,        &remesh_seam_weld_ubo, sizeof(SeamWeldParamsGPU) },
+    };
+    gpu::BindGroup weld_grp = gpu::create_bind_group(gpu_dev, remesh_seam_weld_pipeline, weld_bg, 4);
+    {
+        gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
+        gpu::dispatch(b, remesh_seam_weld_pipeline, weld_grp, groups);
+        gpu::submit(b);
+    }
+    gpu::release_bind_group(weld_grp);
 
     // Readback snapped positions and count how many changed
+    glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, remesh_ping_ssbo);
-    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
-                       vertex_count * 3 * sizeof(float), readback_buf.data());
+    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, vertex_count * 3 * sizeof(float), readback_buf.data());
     uint32_t n_snapped = 0;
     for (uint32_t i = 0; i < vertex_count; i++) {
         float new_x = readback_buf[i*3+0];
@@ -919,8 +714,7 @@ void ComputeState::dispatch_seam_snap_weld(
     // Readback merge map
     out_merge_map.resize(vertex_count);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, seam_weld_map_ssbo);
-    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
-                       vertex_count * sizeof(uint32_t), out_merge_map.data());
+    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, vertex_count * sizeof(uint32_t), out_merge_map.data());
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 
     // Chase merge chains to roots
