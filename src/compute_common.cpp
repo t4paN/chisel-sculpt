@@ -13,7 +13,6 @@ ComputeState::ComputeState()
     , accum_sym_ssbo(0)
     , stroke_norm_ssbo(0)
     , stroke_norm_capacity(0)
-    , stroke_smooth_apply_program(0)
     , move_affected_ssbo(0)
     , move_weights_ssbo(0)
     , move_weights_pong_ssbo(0)
@@ -234,7 +233,8 @@ void ComputeState::cleanup() {
     gpu::release_buffer(smooth_accum_ubo);
     gpu::release_buffer(smooth_apply_ubo);
     gpu::release_buffer(smooth_mirror_ubo);
-    if (stroke_smooth_apply_program) { glDeleteProgram(stroke_smooth_apply_program); stroke_smooth_apply_program = 0; }
+    gpu::release_compute_pipeline(stroke_smooth_apply_pipeline);
+    gpu::release_buffer(stroke_smooth_ubo);
     gpu::release_compute_pipeline(crease_accum_pipeline);
     gpu::release_compute_pipeline(pinch_accum_pipeline);
     gpu::release_buffer(crease_ubo);

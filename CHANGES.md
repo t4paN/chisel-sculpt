@@ -2,6 +2,17 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-24 — WebGPU port, Seam Step 2b: stroke_smooth (pen-up autosmooth) on the gpu:: seam
+
+- **Pen-up autosmooth ported onto the seam** — `stroke_smooth_apply` (single mild uniform Laplacian
+  over a dirty-vert id list, mask-shielded; no normal projection by design) now dispatches through
+  `gpu::`. `u_dirty_count`/`u_strength` uniforms → a 16-byte std140 Params UBO; checks go through new
+  `has_stroke_smooth()` (brush.cpp call site updated). Shares the `dirty_verts_ssbo` upload (raw GL)
+  with compute_normals.
+- **New lockstep pair** `stroke_smooth_apply.{comp,wgsl}`, embedded at build time.
+- **Verified:** gl build green; pipeline compiles at runtime (9 seam pipelines total).
+- All of `compute_smooth.cpp` is now on the seam (smooth brush + compute_normals + stroke_smooth).
+
 ## 2026-06-24 — WebGPU port, Seam Step 2b: compute_normals on the gpu:: seam
 
 - **Shared per-stroke normal recompute ported onto the seam** — `compute_normals` (one thread per

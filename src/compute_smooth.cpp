@@ -506,22 +506,43 @@ void ComputeState::dispatch_compute_normals(const uint32_t* dirty_verts, uint32_
 // Stroke autosmooth methods
 // ---------------------------------------------------------------------------
 
+namespace {
+// 16-byte std140 block, byte-identical to stroke_smooth_apply.{comp,wgsl}'s Params.
+struct StrokeSmoothParamsGPU {
+    uint32_t dirty_count; float strength; uint32_t _pad0; uint32_t _pad1;
+};
+static_assert(sizeof(StrokeSmoothParamsGPU) == 16, "stroke_smooth Params UBO must be 16 bytes");
+}
+
 bool ComputeState::init_stroke_smooth() {
     if (!supported) return false;
-    stroke_smooth_apply_program = compile_program(stroke_smooth_apply_src);
-    if (!stroke_smooth_apply_program) {
-        std::printf("[compute] stroke_smooth_apply shader failed to compile\n");
+    const gpu::BindEntry layout[] = {
+        { BIND_POSITIONS,        gpu::Bind::StorageReadWrite, 0 },
+        { BIND_INDICES,          gpu::Bind::StorageRead,      0 },
+        { BIND_ADJACENCY_OFFSET, gpu::Bind::StorageRead,      0 },
+        { BIND_ADJACENCY_LIST,   gpu::Bind::StorageRead,      0 },
+        { BIND_DIRTY_VERTS,      gpu::Bind::StorageRead,      0 },
+        { BIND_MASK,             gpu::Bind::StorageRead,      0 },
+        { BIND_PARAMS,           gpu::Bind::Uniform,          sizeof(StrokeSmoothParamsGPU) },
+    };
+    stroke_smooth_apply_pipeline = gpu::create_compute_pipeline(gpu_dev,
+                                       gpu::embedded_shader("stroke_smooth_apply"), layout, 7);
+    if (!stroke_smooth_apply_pipeline.handle) {
+        std::printf("[compute] stroke_smooth_apply pipeline failed to compile\n");
         return false;
     }
-    std::printf("[compute] stroke_smooth shader compiled\n");
+    stroke_smooth_ubo = gpu::create_buffer(gpu_dev, nullptr, sizeof(StrokeSmoothParamsGPU), gpu::Usage::Uniform);
+    std::printf("[compute] stroke_smooth pipeline compiled (gpu:: seam)\n");
     return true;
 }
 
 void ComputeState::dispatch_stroke_smooth_apply(const uint32_t* vert_ids, uint32_t count,
                                                  float strength,
                                                  GLuint pos_vbo, GLuint index_ebo) {
-    if (!stroke_smooth_apply_program || count == 0) return;
+    if (!stroke_smooth_apply_pipeline.handle || count == 0 || !mask_ssbo) return;
 
+    // Upload the dirty-vert id list — GL-owned buffer (shared with compute_normals),
+    // stays raw GL (alloc + glBufferSubData).
     GLsizeiptr needed = (GLsizeiptr)count * sizeof(uint32_t);
     if (!dirty_verts_ssbo || count > dirty_verts_capacity) {
         if (dirty_verts_ssbo) glDeleteBuffers(1, &dirty_verts_ssbo);
@@ -536,20 +557,33 @@ void ComputeState::dispatch_stroke_smooth_apply(const uint32_t* vert_ids, uint32
     glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, needed, vert_ids);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 
-    glUseProgram(stroke_smooth_apply_program);
+    StrokeSmoothParamsGPU u = {};
+    u.dirty_count = count;
+    u.strength = strength;
+    gpu::write_buffer(gpu_dev, stroke_smooth_ubo, 0, &u, sizeof(u));
 
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_POSITIONS, pos_vbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_INDICES, index_ebo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_ADJACENCY_OFFSET, adjacency_offset_ssbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_ADJACENCY_LIST, adjacency_list_ssbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_DIRTY_VERTS, dirty_verts_ssbo);
-    if (mask_ssbo) glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_MASK, mask_ssbo);
+    // pos/index/adjacency sizes unknown here (unused on GL — whole-buffer bind); 0 =
+    // unguarded. dirty list sized to its capacity; mask to dirty list's reach is unknown
+    // so leave 0 too (GL ignores).
+    gpu::Buffer posView{   0,                                                pos_vbo };
+    gpu::Buffer idxView{   0,                                                index_ebo };
+    gpu::Buffer offView{   0,                                                adjacency_offset_ssbo };
+    gpu::Buffer listView{  0,                                                adjacency_list_ssbo };
+    gpu::Buffer dirtyView{ (uint64_t)dirty_verts_capacity * sizeof(uint32_t), dirty_verts_ssbo };
+    gpu::Buffer maskView{  0,                                                mask_ssbo };
+    const gpu::BindBufferEntry bg[] = {
+        { BIND_POSITIONS,        &posView,   posView.size },
+        { BIND_INDICES,          &idxView,   idxView.size },
+        { BIND_ADJACENCY_OFFSET, &offView,   offView.size },
+        { BIND_ADJACENCY_LIST,   &listView,  listView.size },
+        { BIND_DIRTY_VERTS,      &dirtyView, dirtyView.size },
+        { BIND_MASK,             &maskView,  maskView.size },
+        { BIND_PARAMS,           &stroke_smooth_ubo, sizeof(StrokeSmoothParamsGPU) },
+    };
+    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, stroke_smooth_apply_pipeline, bg, 7);
 
-    glUniform1ui(glGetUniformLocation(stroke_smooth_apply_program, "u_dirty_count"), count);
-    glUniform1f(glGetUniformLocation(stroke_smooth_apply_program, "u_strength"), strength);
-
-    int groups = (count + 255) / 256;
-    glDispatchCompute(groups, 1, 1);
-
-    glMemoryBarrier(GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT | GL_SHADER_STORAGE_BARRIER_BIT);
+    gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
+    gpu::dispatch(b, stroke_smooth_apply_pipeline, grp, (count + 255u) / 256u);
+    gpu::submit(b);
+    gpu::release_bind_group(grp);
 }

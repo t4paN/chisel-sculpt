@@ -1106,7 +1106,7 @@ bool BrushStroke::finalize(Mesh& mesh, UndoStack& stack, MultiresStack& multires
         && brush_type == BrushType::DRAW
         && !snap_list.empty()
         && compute && compute->supported
-        && compute->stroke_smooth_apply_program
+        && compute->has_stroke_smooth()
         && compute->adjacency_vertex_count > 0) {
         for (int it = 0; it < AUTOSMOOTH_ITERATIONS; it++) {
             compute->dispatch_stroke_smooth_apply(snap_list.data(),

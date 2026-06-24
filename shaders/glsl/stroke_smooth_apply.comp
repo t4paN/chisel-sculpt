@@ -1,0 +1,67 @@
+// stroke_smooth_apply.comp — GLSL 430 sibling of shaders/wgsl/stroke_smooth_apply.wgsl.
+// Pen-up autosmooth: a single mild uniform (umbrella) Laplacian pass over a dirty-vert
+// id list, at a fixed strength, mask-shielded. Unlike the interactive smooth brush this
+// keeps the plain Laplacian (no normal projection) — it's one gentle pass and twins ride
+// in the snap_list so it's already symmetric. 16-byte std140 Params UBO at binding 63.
+#version 430
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0)  buffer PosBuf            { float positions[]; };
+layout(std430, binding = 2)  readonly buffer IdxBuf   { uint indices[]; };
+layout(std430, binding = 4)  readonly buffer AdjOffset{ uint adj_offset[]; };
+layout(std430, binding = 5)  readonly buffer AdjList  { uint adj_list[]; };
+layout(std430, binding = 6)  readonly buffer DirtyVerts { uint dirty_verts[]; };
+layout(std430, binding = 12) readonly buffer MaskBuf  { float mask[]; };
+
+layout(std140, binding = 63) uniform Params {
+    uint  dirty_count;   // 0
+    float strength;      // 4
+    uint  _pad0;         // 8
+    uint  _pad1;         // 12  (struct rounds to 16)
+} P;
+
+void main() {
+    uint di = gl_GlobalInvocationID.x;
+    if (di >= P.dirty_count) return;
+    uint v = dirty_verts[di];
+
+    float mscale = 1.0 - mask[v];
+    if (mscale <= 0.0) return;
+
+    float cur_x = positions[v * 3u];
+    float cur_y = positions[v * 3u + 1u];
+    float cur_z = positions[v * 3u + 2u];
+
+    float sum_x = 0.0, sum_y = 0.0, sum_z = 0.0;
+    float count = 0.0;
+
+    uint start = adj_offset[v];
+    uint end = adj_offset[v + 1u];
+    for (uint j = start; j < end; j++) {
+        uint t = adj_list[j];
+        uint i0 = indices[t * 3u];
+        uint i1 = indices[t * 3u + 1u];
+        uint i2 = indices[t * 3u + 2u];
+        if (v == i0) {
+            sum_x += positions[i1*3u] + positions[i2*3u];
+            sum_y += positions[i1*3u+1u] + positions[i2*3u+1u];
+            sum_z += positions[i1*3u+2u] + positions[i2*3u+2u];
+        } else if (v == i1) {
+            sum_x += positions[i0*3u] + positions[i2*3u];
+            sum_y += positions[i0*3u+1u] + positions[i2*3u+1u];
+            sum_z += positions[i0*3u+2u] + positions[i2*3u+2u];
+        } else {
+            sum_x += positions[i0*3u] + positions[i1*3u];
+            sum_y += positions[i0*3u+1u] + positions[i1*3u+1u];
+            sum_z += positions[i0*3u+2u] + positions[i1*3u+2u];
+        }
+        count += 2.0;
+    }
+    if (count <= 0.0) return;
+
+    float inv_c = 1.0 / count;
+    float blend = P.strength * mscale;
+    positions[v * 3u]     += (sum_x * inv_c - cur_x) * blend;
+    positions[v * 3u + 1u] += (sum_y * inv_c - cur_y) * blend;
+    positions[v * 3u + 2u] += (sum_z * inv_c - cur_z) * blend;
+}

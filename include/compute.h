@@ -220,7 +220,8 @@ struct ComputeState {
 
     // Stroke autosmooth: one-pass Laplacian over a vert-ID list at fixed strength.
     // Runs at pen-up over snap_list verts on draw strokes when autosmooth is enabled.
-    GLuint stroke_smooth_apply_program;
+    gpu::ComputePipeline stroke_smooth_apply_pipeline;
+    gpu::Buffer          stroke_smooth_ubo;   // 16-byte {dirty_count, strength} block
 
     // Crease + pinch brushes — ported onto the gpu:: seam (Seam Step 2b). Both are
     // accum-only kernels (deposit into the shared accum buffer); the apply side
@@ -509,6 +510,9 @@ struct ComputeState {
 
     // Compute-normals readiness (replaces compute_normals_program truthiness checks).
     bool has_normals() const { return compute_normals_pipeline.handle != 0; }
+
+    // Stroke-autosmooth readiness (replaces stroke_smooth_apply_program checks).
+    bool has_stroke_smooth() const { return stroke_smooth_apply_pipeline.handle != 0; }
 
     // Dispatch the mask paint shader: per-vertex distance check, writes mask VBO
     // directly. Uses smooth_dirty_ssbo for the compact dirty list. Caller reads
