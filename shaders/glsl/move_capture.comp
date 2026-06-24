@@ -1,0 +1,58 @@
+// move_capture.comp — GLSL 430 sibling of shaders/wgsl/move_capture.wgsl.
+// Pass 1 of the grab/move brush (capture, once at pen-down): brute-force per-vertex
+// world-distance gate. For each vertex inside the brush sphere (and its X-mirror
+// twin when mirror_x), write the falloff weights (primary, mirror), snapshot the
+// init position, and append the vertex id to the compact affected list.
+// 32-byte std140 Params UBO at binding 63.
+#version 430
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0)  readonly buffer PosBuf   { float positions[]; };
+layout(std430, binding = 8)  buffer AffectedBuf       { uint affected_count; uint affected_ids[]; };
+layout(std430, binding = 9)  buffer WBuf              { vec2 move_weights[]; };
+layout(std430, binding = 11) buffer InitBuf           { float move_init[]; };
+
+layout(std140, binding = 63) uniform Params {
+    vec3  anchor;          // 0   (world_radius packs into .w slot)
+    float world_radius;    // 12
+    float hardness;        // 16
+    uint  mirror_x;        // 20
+    uint  vertex_count;    // 24
+    uint  _pad0;           // 28  (struct rounds to 32)
+} P;
+
+float brush_falloff(float dist, float radius) {
+    float t = dist / radius;
+    float inner = 0.15 + P.hardness * 0.55;
+    if (t <= inner) return 1.0;
+    float blend = (t - inner) / (1.0 - inner + 1e-6);
+    blend = blend * blend * (3.0 - 2.0 * blend);
+    return 1.0 - blend;
+}
+
+void main() {
+    uint v = gl_GlobalInvocationID.x;
+    if (v >= P.vertex_count) return;
+
+    vec3 p = vec3(positions[v*3u], positions[v*3u+1u], positions[v*3u+2u]);
+
+    float d1 = distance(p, P.anchor);
+    float w1 = (d1 < P.world_radius) ? brush_falloff(d1, P.world_radius) : 0.0;
+
+    float w2 = 0.0;
+    if (P.mirror_x != 0u) {
+        vec3 ma = vec3(-P.anchor.x, P.anchor.y, P.anchor.z);
+        float d2 = distance(p, ma);
+        if (d2 < P.world_radius) w2 = brush_falloff(d2, P.world_radius);
+    }
+
+    if (w1 <= 0.0 && w2 <= 0.0) return;
+
+    move_weights[v]      = vec2(w1, w2);
+    move_init[v*3u]      = p.x;
+    move_init[v*3u + 1u] = p.y;
+    move_init[v*3u + 2u] = p.z;
+
+    uint idx = atomicAdd(affected_count, 1u);
+    affected_ids[idx] = v;
+}

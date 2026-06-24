@@ -13,15 +13,9 @@ ComputeState::ComputeState()
     , accum_sym_ssbo(0)
     , stroke_norm_ssbo(0)
     , stroke_norm_capacity(0)
-    , smooth_accum_program(0)
-    , smooth_apply_program(0)
-    , smooth_mirror_apply_program(0)
     , stroke_smooth_apply_program(0)
     , color_paint_program(0)
     , color_smooth_program(0)
-    , move_capture_program(0)
-    , move_weight_smooth_program(0)
-    , move_apply_program(0)
     , move_affected_ssbo(0)
     , move_weights_ssbo(0)
     , move_weights_pong_ssbo(0)
@@ -237,9 +231,12 @@ void ComputeState::cleanup() {
     gpu::release_buffer(draw_accum_ubo);
     gpu::release_buffer(draw_vcount_ubo);
     if (mirror_map_ssbo) { glDeleteBuffers(1, &mirror_map_ssbo); mirror_map_ssbo = 0; }
-    if (smooth_accum_program) { glDeleteProgram(smooth_accum_program); smooth_accum_program = 0; }
-    if (smooth_apply_program) { glDeleteProgram(smooth_apply_program); smooth_apply_program = 0; }
-    if (smooth_mirror_apply_program) { glDeleteProgram(smooth_mirror_apply_program); smooth_mirror_apply_program = 0; }
+    gpu::release_compute_pipeline(smooth_accum_pipeline);
+    gpu::release_compute_pipeline(smooth_apply_pipeline);
+    gpu::release_compute_pipeline(smooth_mirror_apply_pipeline);
+    gpu::release_buffer(smooth_accum_ubo);
+    gpu::release_buffer(smooth_apply_ubo);
+    gpu::release_buffer(smooth_mirror_ubo);
     if (stroke_smooth_apply_program) { glDeleteProgram(stroke_smooth_apply_program); stroke_smooth_apply_program = 0; }
     gpu::release_compute_pipeline(crease_accum_pipeline);
     gpu::release_compute_pipeline(pinch_accum_pipeline);
@@ -249,9 +246,11 @@ void ComputeState::cleanup() {
     gpu::release_buffer(mask_params_ubo);
     if (color_paint_program) { glDeleteProgram(color_paint_program); color_paint_program = 0; }
     if (color_smooth_program) { glDeleteProgram(color_smooth_program); color_smooth_program = 0; }
-    if (move_capture_program)       { glDeleteProgram(move_capture_program);       move_capture_program       = 0; }
-    if (move_weight_smooth_program) { glDeleteProgram(move_weight_smooth_program); move_weight_smooth_program = 0; }
-    if (move_apply_program)         { glDeleteProgram(move_apply_program);         move_apply_program         = 0; }
+    gpu::release_compute_pipeline(move_capture_pipeline);
+    gpu::release_compute_pipeline(move_weight_smooth_pipeline);
+    gpu::release_compute_pipeline(move_apply_pipeline);
+    gpu::release_buffer(move_capture_ubo);
+    gpu::release_buffer(move_apply_ubo);
     if (move_affected_ssbo)         { glDeleteBuffers(1, &move_affected_ssbo);     move_affected_ssbo         = 0; }
     if (move_weights_ssbo)          { glDeleteBuffers(1, &move_weights_ssbo);      move_weights_ssbo          = 0; }
     if (move_weights_pong_ssbo)     { glDeleteBuffers(1, &move_weights_pong_ssbo); move_weights_pong_ssbo     = 0; }

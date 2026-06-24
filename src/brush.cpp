@@ -385,7 +385,7 @@ void BrushStroke::apply_smooth(DabContext& ctx, float dab_x, float dab_y,
                                 float strength, float hardness) {
     dirty_verts.clear();
 
-    if (!ctx.compute.supported || !ctx.compute.smooth_accum_program
+    if (!ctx.compute.supported || !ctx.compute.has_smooth()
         || ctx.compute.adjacency_vertex_count == 0) {
         return;
     }

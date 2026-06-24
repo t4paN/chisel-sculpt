@@ -1,178 +1,41 @@
 #include "compute.h"
+#include "gpu_shaders_generated.h"   // gpu::embedded_shader("smooth_accum" / ...)
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
 
 // ---------------------------------------------------------------------------
-// Smooth brush shaders
+// Smooth brush — ported onto the gpu:: seam (Seam Step 2b). Three buffer-only
+// kernels: smooth_accum (world-distance gate → accum.w + dirty list), smooth_apply
+// (normal-projected Laplacian, looped), smooth_mirror_apply (re-impose the X mirror
+// after each iteration). It is buffer-only — the triid/bary pick read is CPU-side
+// back-projection in brush.cpp, NOT a compute input — so it needs no texture-bind
+// seam work. Kernel logic lives in shaders/{glsl,wgsl}/smooth_*.* (embedded at build
+// time). accum / dirty / mirror-map / mask buffers stay GL-owned (wrapped in views at
+// dispatch); the accum clear + dirty-counter reset stay raw GL.
 // ---------------------------------------------------------------------------
 
-static const char* smooth_accum_src = R"(
-#version 430
-layout(local_size_x = 256) in;
+namespace {
+// 32-byte std140 block, byte-identical to smooth_accum.{comp,wgsl}'s Params.
+struct SmoothAccumParamsGPU {
+    float    anchor[3];    float world_radius;   // 16
+    float    hardness;     uint32_t mirror_x;
+    uint32_t vertex_count; uint32_t _pad0;       // 16
+};
+static_assert(sizeof(SmoothAccumParamsGPU) == 32, "smooth accum Params UBO must be 32 bytes");
 
-layout(std430, binding = 0) readonly buffer PosBuf { float positions[]; };
-layout(std430, binding = 3) buffer AccumBuf { uint accum[]; };
-layout(std430, binding = 6) buffer DirtyBuf { uint dirty_count; uint dirty_ids[]; };
+// 16-byte std140 block, byte-identical to smooth_apply.{comp,wgsl}'s Params.
+struct SmoothApplyParamsGPU {
+    uint32_t vertex_count; float strength; uint32_t mirror_x; float seam_band;
+};
+static_assert(sizeof(SmoothApplyParamsGPU) == 16, "smooth apply Params UBO must be 16 bytes");
 
-uniform vec3  u_anchor_pos;
-uniform float u_world_radius;
-uniform float u_hardness;
-uniform int   u_mirror_x;
-uniform uint  u_vertex_count;
-
-float brush_falloff(float dist, float radius) {
-    float t = dist / radius;
-    float inner = 0.15 + u_hardness * 0.55;
-    if (t <= inner) return 1.0;
-    float blend = (t - inner) / (1.0 - inner + 1e-6);
-    blend = blend * blend * (3.0 - 2.0 * blend);
-    return 1.0 - blend;
+// 16-byte std140 block, byte-identical to smooth_mirror_apply.{comp,wgsl}'s Params.
+struct SmoothMirrorParamsGPU {
+    uint32_t vertex_count; float anchor_x; uint32_t _pad0; uint32_t _pad1;
+};
+static_assert(sizeof(SmoothMirrorParamsGPU) == 16, "smooth mirror Params UBO must be 16 bytes");
 }
-
-void main() {
-    uint v = gl_GlobalInvocationID.x;
-    if (v >= u_vertex_count) return;
-
-    vec3 p = vec3(positions[v*3u], positions[v*3u+1u], positions[v*3u+2u]);
-
-    if (u_mirror_x != 0 && u_anchor_pos.x * p.x < 0.0) return;
-
-    float d = distance(p, u_anchor_pos);
-    if (d >= u_world_radius) return;
-
-    float w = brush_falloff(d, u_world_radius);
-    if (w <= 0.0) return;
-
-    accum[v * 4u + 3u] = floatBitsToUint(w);
-    uint idx = atomicAdd(dirty_count, 1u);
-    dirty_ids[idx] = v;
-}
-)";
-
-static const char* smooth_apply_src = R"(
-#version 430
-layout(local_size_x = 256) in;
-
-layout(std430, binding = 0)  buffer PosBuf { float positions[]; };
-layout(std430, binding = 3)  buffer AccumBuf { uint accum[]; };
-layout(std430, binding = 2)  readonly buffer IdxBuf { uint indices[]; };
-layout(std430, binding = 4)  readonly buffer AdjOffset { uint adj_offset[]; };
-layout(std430, binding = 5)  readonly buffer AdjList { uint adj_list[]; };
-layout(std430, binding = 12) readonly buffer MaskBuf { float mask[]; };
-
-uniform uint u_vertex_count;
-uniform float u_strength;
-uniform int u_iteration;
-uniform int u_mirror_x;
-uniform float u_seam_band;
-
-void main() {
-    uint v = gl_GlobalInvocationID.x;
-    if (v >= u_vertex_count) return;
-
-    float w = uintBitsToFloat(accum[v * 4u + 3u]);
-    if (w <= 0.0) return;
-
-    float mscale = 1.0 - mask[v];
-    if (mscale <= 0.0) return;
-
-    vec3 cur = vec3(positions[v*3u], positions[v*3u+1u], positions[v*3u+2u]);
-
-    vec3 sum = vec3(0.0);
-    vec3 nrm = vec3(0.0);   // area-weighted vertex normal, accumulated inline
-    float count = 0.0;
-
-    uint start = adj_offset[v];
-    uint end = adj_offset[v + 1u];
-    for (uint j = start; j < end; j++) {
-        uint t = adj_list[j];
-        uint i0 = indices[t * 3u];
-        uint i1 = indices[t * 3u + 1u];
-        uint i2 = indices[t * 3u + 2u];
-
-        vec3 p0 = vec3(positions[i0*3u], positions[i0*3u+1u], positions[i0*3u+2u]);
-        vec3 p1 = vec3(positions[i1*3u], positions[i1*3u+1u], positions[i1*3u+2u]);
-        vec3 p2 = vec3(positions[i2*3u], positions[i2*3u+1u], positions[i2*3u+2u]);
-
-        // un-normalized cross = 2*area*unit_normal → summing gives an
-        // area-weighted vertex normal for free from the 1-ring we already walk
-        nrm += cross(p1 - p0, p2 - p0);
-
-        if (v == i0)      sum += p1 + p2;
-        else if (v == i1) sum += p0 + p2;
-        else              sum += p0 + p1;
-        count += 2.0;
-    }
-
-    if (count <= 0.0) return;
-
-    vec3 move = sum * (1.0 / count) - cur;
-
-    // Keep only the normal component of the Laplacian move in the bulk. The
-    // tangential part slides verts along the surface toward denser neighbourhoods
-    // — a directional drift on irregular meshes — so discarding it removes the
-    // drift while keeping the curvature-flattening that is the point of smoothing.
-    //
-    // BUT that same tangential component is exactly what relaxes the x=0 mirror
-    // seam and keeps it from creasing; stripping it everywhere pinches the seam.
-    // So inside a band around the plane we fade back to the full uniform Laplacian
-    // (tangential restored), which is the behaviour validated as pinch-free. The
-    // two requirements live in different regions, so we satisfy both:
-    //   abs(x) >= u_seam_band  -> t=1  -> normal-only (no drift)
-    //   abs(x) == 0            -> t=0  -> full Laplacian (seam relaxes, no pinch)
-    // Mirror-exact either way: each twin's normal is the reflection of the other's
-    // and the seam reflection is re-imposed every iteration in dispatch_smooth.
-    float nlen = length(nrm);
-    if (nlen > 1e-12) {
-        vec3 n = nrm / nlen;
-        vec3 move_n = dot(move, n) * n;
-        float t = (u_mirror_x != 0) ? smoothstep(0.0, u_seam_band, abs(cur.x)) : 1.0;
-        move = mix(move, move_n, t);
-    }
-
-    float blend = w * u_strength * mscale;
-    positions[v*3u]      += move.x * blend;
-    positions[v*3u + 1u] += move.y * blend;
-    positions[v*3u + 2u] += move.z * blend;
-}
-)";
-
-static const char* smooth_mirror_apply_src = R"(
-#version 430
-layout(local_size_x = 256) in;
-
-layout(std430, binding = 0)  buffer PosBuf { float positions[]; };
-layout(std430, binding = 3)  readonly buffer AccumBuf { uint accum[]; };
-layout(std430, binding = 7)  readonly buffer MirrorBuf { uint mirror_map[]; };
-layout(std430, binding = 12) readonly buffer MaskBuf { float mask[]; };
-
-uniform uint u_vertex_count;
-uniform float u_anchor_x;
-
-void main() {
-    uint v = gl_GlobalInvocationID.x;
-    if (v >= u_vertex_count) return;
-
-    float w = uintBitsToFloat(accum[v * 4u + 3u]);
-    if (w <= 0.0) return;
-
-    float vx = positions[v * 3u];
-    if (vx * u_anchor_x < 0.0) return;
-
-    uint mv = mirror_map[v];
-    if (mv == v) return;
-
-    float mscale = 1.0 - mask[mv];
-    if (mscale <= 0.0) return;
-
-    uint src = v * 3u;
-    uint dst = mv * 3u;
-    positions[dst + 0u] += (-positions[src + 0u] - positions[dst + 0u]) * mscale;
-    positions[dst + 1u] += ( positions[src + 1u] - positions[dst + 1u]) * mscale;
-    positions[dst + 2u] += ( positions[src + 2u] - positions[dst + 2u]) * mscale;
-}
-)";
 
 // ---------------------------------------------------------------------------
 // Compute normals shader
@@ -316,119 +179,172 @@ void main() {
 
 bool ComputeState::init_smooth() {
     if (!supported) return false;
-    smooth_accum_program = compile_program(smooth_accum_src);
-    if (!smooth_accum_program) {
-        std::printf("[compute] smooth_accum shader failed to compile\n");
+
+    const gpu::BindEntry accum_layout[] = {
+        { BIND_POSITIONS,   gpu::Bind::StorageRead,      0 },
+        { BIND_ACCUM,       gpu::Bind::StorageReadWrite, 0 },
+        { BIND_DIRTY_VERTS, gpu::Bind::StorageReadWrite, 0 },
+        { BIND_PARAMS,      gpu::Bind::Uniform,          sizeof(SmoothAccumParamsGPU) },
+    };
+    smooth_accum_pipeline = gpu::create_compute_pipeline(gpu_dev,
+                                gpu::embedded_shader("smooth_accum"), accum_layout, 4);
+    if (!smooth_accum_pipeline.handle) {
+        std::printf("[compute] smooth_accum pipeline failed to compile\n");
         return false;
     }
-    smooth_apply_program = compile_program(smooth_apply_src);
-    if (!smooth_apply_program) {
-        std::printf("[compute] smooth_apply shader failed to compile\n");
-        glDeleteProgram(smooth_accum_program);
-        smooth_accum_program = 0;
+
+    const gpu::BindEntry apply_layout[] = {
+        { BIND_POSITIONS,        gpu::Bind::StorageReadWrite, 0 },
+        { BIND_INDICES,          gpu::Bind::StorageRead,      0 },
+        { BIND_ACCUM,            gpu::Bind::StorageRead,      0 },
+        { BIND_ADJACENCY_OFFSET, gpu::Bind::StorageRead,      0 },
+        { BIND_ADJACENCY_LIST,   gpu::Bind::StorageRead,      0 },
+        { BIND_MASK,             gpu::Bind::StorageRead,      0 },
+        { BIND_PARAMS,           gpu::Bind::Uniform,          sizeof(SmoothApplyParamsGPU) },
+    };
+    smooth_apply_pipeline = gpu::create_compute_pipeline(gpu_dev,
+                                gpu::embedded_shader("smooth_apply"), apply_layout, 7);
+    if (!smooth_apply_pipeline.handle) {
+        std::printf("[compute] smooth_apply pipeline failed to compile\n");
+        gpu::release_compute_pipeline(smooth_accum_pipeline);
         return false;
     }
-    smooth_mirror_apply_program = compile_program(smooth_mirror_apply_src);
-    if (!smooth_mirror_apply_program) {
-        std::printf("[compute] smooth_mirror_apply shader failed to compile\n");
-        glDeleteProgram(smooth_accum_program); smooth_accum_program = 0;
-        glDeleteProgram(smooth_apply_program); smooth_apply_program = 0;
+
+    const gpu::BindEntry mirror_layout[] = {
+        { BIND_POSITIONS,  gpu::Bind::StorageReadWrite, 0 },
+        { BIND_ACCUM,      gpu::Bind::StorageRead,      0 },
+        { BIND_MIRROR_MAP, gpu::Bind::StorageRead,      0 },
+        { BIND_MASK,       gpu::Bind::StorageRead,      0 },
+        { BIND_PARAMS,     gpu::Bind::Uniform,          sizeof(SmoothMirrorParamsGPU) },
+    };
+    smooth_mirror_apply_pipeline = gpu::create_compute_pipeline(gpu_dev,
+                                       gpu::embedded_shader("smooth_mirror_apply"), mirror_layout, 5);
+    if (!smooth_mirror_apply_pipeline.handle) {
+        std::printf("[compute] smooth_mirror_apply pipeline failed to compile\n");
+        gpu::release_compute_pipeline(smooth_accum_pipeline);
+        gpu::release_compute_pipeline(smooth_apply_pipeline);
         return false;
     }
-    std::printf("[compute] smooth shaders compiled\n");
+
+    smooth_accum_ubo  = gpu::create_buffer(gpu_dev, nullptr, sizeof(SmoothAccumParamsGPU),  gpu::Usage::Uniform);
+    smooth_apply_ubo  = gpu::create_buffer(gpu_dev, nullptr, sizeof(SmoothApplyParamsGPU),  gpu::Usage::Uniform);
+    smooth_mirror_ubo = gpu::create_buffer(gpu_dev, nullptr, sizeof(SmoothMirrorParamsGPU), gpu::Usage::Uniform);
+    std::printf("[compute] smooth pipelines compiled (gpu:: seam)\n");
     return true;
 }
 
 void ComputeState::dispatch_smooth_mirror_apply(GLuint pos_vbo, uint32_t vertex_count, float anchor_x) {
-    if (!smooth_mirror_apply_program || mirror_map_vertex_count == 0) return;
+    if (!smooth_mirror_apply_pipeline.handle || mirror_map_vertex_count == 0 || !mask_ssbo) return;
+    const uint32_t vc = vertex_count;
 
-    glUseProgram(smooth_mirror_apply_program);
+    SmoothMirrorParamsGPU u = {};
+    u.vertex_count = vc;
+    u.anchor_x = anchor_x;
+    gpu::write_buffer(gpu_dev, smooth_mirror_ubo, 0, &u, sizeof(u));
 
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_POSITIONS, pos_vbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_ACCUM, accum_ssbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_MIRROR_MAP, mirror_map_ssbo);
-    if (mask_ssbo) glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_MASK, mask_ssbo);
+    gpu::Buffer posView{   (uint64_t)vc * 3u * sizeof(float),       pos_vbo };
+    gpu::Buffer accumView{ (uint64_t)vc * 4u * sizeof(uint32_t),    accum_ssbo };
+    gpu::Buffer mirrorView{(uint64_t)mirror_map_vertex_count * sizeof(uint32_t), mirror_map_ssbo };
+    gpu::Buffer maskView{  (uint64_t)vc * sizeof(float),            mask_ssbo };
+    const gpu::BindBufferEntry bg[] = {
+        { BIND_POSITIONS,  &posView,    posView.size },
+        { BIND_ACCUM,      &accumView,  accumView.size },
+        { BIND_MIRROR_MAP, &mirrorView, mirrorView.size },
+        { BIND_MASK,       &maskView,   maskView.size },
+        { BIND_PARAMS,     &smooth_mirror_ubo, sizeof(SmoothMirrorParamsGPU) },
+    };
+    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, smooth_mirror_apply_pipeline, bg, 5);
 
-    glUniform1ui(glGetUniformLocation(smooth_mirror_apply_program, "u_vertex_count"), vertex_count);
-    glUniform1f(glGetUniformLocation(smooth_mirror_apply_program, "u_anchor_x"), anchor_x);
-
-    int groups = (vertex_count + 255) / 256;
-    glDispatchCompute(groups, 1, 1);
-
-    glMemoryBarrier(GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT | GL_SHADER_STORAGE_BARRIER_BIT);
+    gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
+    gpu::dispatch(b, smooth_mirror_apply_pipeline, grp, (vc + 255u) / 256u);
+    gpu::submit(b);
+    gpu::release_bind_group(grp);
 }
 
 void ComputeState::dispatch_smooth(const SmoothAccumParams& p,
                                     GLuint /*triid_tex*/, GLuint /*bary_tex*/,
                                     GLuint pos_vbo, GLuint index_ebo) {
-    clear_accum_buffer();
+    if (!has_smooth() || !mask_ssbo) return;
+    const uint32_t vc = p.vertex_count;
 
-    ensure_smooth_dirty_buffer(p.vertex_count);
+    // accum clear + dirty-counter reset stay raw GL (GL-owned buffers).
+    clear_accum_buffer();
+    ensure_smooth_dirty_buffer(vc);
     uint32_t zero = 0;
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, smooth_dirty_ssbo);
     glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(uint32_t), &zero);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 
-    glUseProgram(smooth_accum_program);
+    // ---- Pass 1: accum (world-distance gate → accum.w + dirty list) ----
+    SmoothAccumParamsGPU ua = {};
+    ua.anchor[0] = p.anchor_x; ua.anchor[1] = p.anchor_y; ua.anchor[2] = p.anchor_z;
+    ua.world_radius = p.world_radius;
+    ua.hardness = p.hardness;
+    ua.mirror_x = p.mirror_x ? 1u : 0u;
+    ua.vertex_count = vc;
+    gpu::write_buffer(gpu_dev, smooth_accum_ubo, 0, &ua, sizeof(ua));
 
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_POSITIONS, pos_vbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_ACCUM, accum_ssbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_DIRTY_VERTS, smooth_dirty_ssbo);
+    gpu::Buffer posView{   (uint64_t)vc * 3u * sizeof(float),                pos_vbo };
+    gpu::Buffer accumView{ (uint64_t)vc * 4u * sizeof(uint32_t),            accum_ssbo };
+    gpu::Buffer dirtyView{ (uint64_t)(1u + smooth_dirty_capacity) * sizeof(uint32_t), smooth_dirty_ssbo };
+    {
+        const gpu::BindBufferEntry bg[] = {
+            { BIND_POSITIONS,   &posView,   posView.size },
+            { BIND_ACCUM,       &accumView, accumView.size },
+            { BIND_DIRTY_VERTS, &dirtyView, dirtyView.size },
+            { BIND_PARAMS,      &smooth_accum_ubo, sizeof(SmoothAccumParamsGPU) },
+        };
+        gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, smooth_accum_pipeline, bg, 4);
+        gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
+        gpu::dispatch(b, smooth_accum_pipeline, grp, (vc + 255u) / 256u);
+        gpu::submit(b);
+        gpu::release_bind_group(grp);
+    }
 
-    glUniform3f(glGetUniformLocation(smooth_accum_program, "u_anchor_pos"),
-                p.anchor_x, p.anchor_y, p.anchor_z);
-    glUniform1f(glGetUniformLocation(smooth_accum_program, "u_world_radius"), p.world_radius);
-    glUniform1f(glGetUniformLocation(smooth_accum_program, "u_hardness"), p.hardness);
-    glUniform1i(glGetUniformLocation(smooth_accum_program, "u_mirror_x"), p.mirror_x ? 1 : 0);
-    glUniform1ui(glGetUniformLocation(smooth_accum_program, "u_vertex_count"), p.vertex_count);
-
-    int groups = (int)((p.vertex_count + 255u) / 256u);
-    glDispatchCompute(groups, 1, 1);
-
-    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
-
-    glUseProgram(smooth_apply_program);
-
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_POSITIONS, pos_vbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_ACCUM, accum_ssbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_INDICES, index_ebo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_ADJACENCY_OFFSET, adjacency_offset_ssbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_ADJACENCY_LIST, adjacency_list_ssbo);
-    if (mask_ssbo) glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_MASK, mask_ssbo);
-
-    glUniform1ui(glGetUniformLocation(smooth_apply_program, "u_vertex_count"), p.vertex_count);
-    glUniform1f(glGetUniformLocation(smooth_apply_program, "u_strength"), p.strength);
+    // ---- Pass 2: apply (normal-projected Laplacian), looped ----
     // Region-blend seam band: within this distance of x=0 the kernel fades back to
     // the full uniform Laplacian so the seam relaxes instead of pinching. Half the
     // brush radius is a starting point; tune by feel.
-    glUniform1i(glGetUniformLocation(smooth_apply_program, "u_mirror_x"), p.mirror_x ? 1 : 0);
-    glUniform1f(glGetUniformLocation(smooth_apply_program, "u_seam_band"), p.world_radius * 0.5f);
+    SmoothApplyParamsGPU up = {};
+    up.vertex_count = vc;
+    up.strength = p.strength;
+    up.mirror_x = p.mirror_x ? 1u : 0u;
+    up.seam_band = p.world_radius * 0.5f;
+    gpu::write_buffer(gpu_dev, smooth_apply_ubo, 0, &up, sizeof(up));
 
-    groups = (int)((p.vertex_count + 255u) / 256u);
+    gpu::Buffer idxView{  0,                                    index_ebo };
+    gpu::Buffer offView{  0,                                    adjacency_offset_ssbo };
+    gpu::Buffer listView{ 0,                                    adjacency_list_ssbo };
+    gpu::Buffer maskView{ (uint64_t)vc * sizeof(float),         mask_ssbo };
+    const gpu::BindBufferEntry apply_bg[] = {
+        { BIND_POSITIONS,        &posView,   posView.size },
+        { BIND_INDICES,          &idxView,   idxView.size },
+        { BIND_ACCUM,            &accumView, accumView.size },
+        { BIND_ADJACENCY_OFFSET, &offView,   offView.size },
+        { BIND_ADJACENCY_LIST,   &listView,  listView.size },
+        { BIND_MASK,             &maskView,  maskView.size },
+        { BIND_PARAMS,           &smooth_apply_ubo, sizeof(SmoothApplyParamsGPU) },
+    };
+    gpu::BindGroup apply_grp = gpu::create_bind_group(gpu_dev, smooth_apply_pipeline, apply_bg, 7);
 
-    // Re-impose the mirror reflection after *each* Laplacian iteration, not just
-    // once at the end. The accum pass only weights the anchor-side lobe (mirror
-    // gate), so without this the opposite lobe stays frozen and a vert whose
-    // 1-ring crosses x=0 averages against a stale, un-smoothed wall every pass —
-    // the seam band under-relaxes and stands proud as a symmetric crease. By
-    // reflecting after every iteration, the cross-seam neighbours are the fresh
-    // mirror of the just-smoothed lobe and the seam relaxes in lockstep. Each
-    // side stays a byte-exact reflection of the other.
-    bool do_mirror = p.mirror_x && smooth_mirror_apply_program
-                     && mirror_map_vertex_count == p.vertex_count;
-    GLint iter_loc = glGetUniformLocation(smooth_apply_program, "u_iteration");
+    // Re-impose the mirror reflection after *each* Laplacian iteration (not just at
+    // the end): the accum pass only weights the anchor-side lobe, so without this a
+    // vert whose 1-ring crosses x=0 averages against a stale wall every pass and the
+    // seam stands proud as a symmetric crease. Reflecting each iteration keeps the
+    // cross-seam neighbours the fresh mirror of the just-smoothed lobe.
+    bool do_mirror = p.mirror_x && smooth_mirror_apply_pipeline.handle
+                     && mirror_map_vertex_count == vc;
+    const uint32_t groups = (vc + 255u) / 256u;
     for (int iter = 0; iter < p.iterations; iter++) {
-        glUseProgram(smooth_apply_program);
-        glUniform1i(iter_loc, iter);
-        glDispatchCompute(groups, 1, 1);
-        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+        gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
+        gpu::dispatch(b, smooth_apply_pipeline, apply_grp, groups);
+        gpu::submit(b);
 
         if (do_mirror) {
-            dispatch_smooth_mirror_apply(pos_vbo, p.vertex_count, p.anchor_x);
+            dispatch_smooth_mirror_apply(pos_vbo, vc, p.anchor_x);
         }
     }
-
-    glMemoryBarrier(GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT | GL_SHADER_STORAGE_BARRIER_BIT);
+    gpu::release_bind_group(apply_grp);
 }
 
 void ComputeState::ensure_smooth_dirty_buffer(uint32_t max_verts) {

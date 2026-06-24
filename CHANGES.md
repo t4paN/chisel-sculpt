@@ -2,6 +2,29 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-24 — WebGPU port, Seam Step 2b: grab/move + smooth on the gpu:: seam
+
+- **Grab/move ported onto the seam.** Three stateful kernels now dispatch through `gpu::`:
+  `move_capture` (32-byte std140 Params UBO), `move_weight_smooth` (no UBO — sized to the affected
+  set, ping-pong driven host-side by two bind groups), `move_apply` (16-byte UBO). Limb rides along
+  free — it reuses `move_capture` + `move_weight_smooth` + `readback_move_affected` verbatim. Loose
+  uniforms gone; checks go through new `has_move()`.
+- **Smooth ported onto the seam** — and it turned out **buffer-only**, contra the handoff: the
+  triid/bary pick read is CPU-side back-projection in `brush.cpp`, *not* a compute input, so no
+  texture-bind seam work was needed. Three kernels: `smooth_accum` (32-byte UBO), `smooth_apply`
+  (16-byte UBO; dropped the dead `u_iteration` uniform), `smooth_mirror_apply` (16-byte UBO). The
+  per-iteration mirror reflection (the seam-pinch fix) is preserved. Checks go through `has_smooth()`.
+- **New shader pairs:** `move_{capture,weight_smooth,apply}.{comp,wgsl}` and
+  `smooth_{accum,apply,mirror_apply}.{comp,wgsl}`, lockstep, embedded at build time.
+- Move/affected/weights/init and accum/dirty/mirror-map buffers stay GL-owned (wrapped in views at
+  dispatch); clears, counter resets, the odd-iteration weight copy-back stay raw GL.
+- **Verified:** gl build green; all pipelines compile at runtime ("pipeline compiled (gpu:: seam)");
+  grab confirmed sculpting in-app; smooth confirmed matching the untouched `chisel-public-src`
+  reference (incl. the known normal-projection distribution behavior over grabbed/stretched geometry).
+- Seam'd brushes so far: mask, draw, inflate, crease, pinch, grab/move, smooth. Remaining raw-GL:
+  limb's own kernels (drag/relax), color, plus `compute_normals` / `stroke_smooth` / remesh / multires
+  / SDF. Next: color or limb.
+
 ## 2026-06-24 — WebGPU port, Seam Step 2b: crease + pinch on the gpu:: seam
 
 - **Crease + pinch ported onto the seam.** Both are accum-only kernels — they deposit into the shared

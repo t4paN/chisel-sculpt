@@ -206,10 +206,17 @@ struct ComputeState {
     // Draw mirror apply compute shader (writes negated-X displacements to mirror twins)
     gpu::ComputePipeline draw_mirror_apply_pipeline;
 
-    // Smooth brush compute shaders
-    GLuint smooth_accum_program;
-    GLuint smooth_apply_program;
-    GLuint smooth_mirror_apply_program;
+    // Smooth brush compute shaders — ported onto the gpu:: seam (Seam Step 2b).
+    // Buffer-only (the triid/bary pick read is CPU-side back-projection in brush.cpp,
+    // NOT a compute input), so it fits the existing seam with no texture-bind work.
+    // accum carries a 32-byte Params block, apply a 16-byte one, mirror_apply a
+    // 16-byte one. has_smooth() reports readiness.
+    gpu::ComputePipeline smooth_accum_pipeline;
+    gpu::ComputePipeline smooth_apply_pipeline;
+    gpu::ComputePipeline smooth_mirror_apply_pipeline;
+    gpu::Buffer          smooth_accum_ubo;        // 32-byte SmoothAccumParams block
+    gpu::Buffer          smooth_apply_ubo;        // 16-byte {vcount, strength, mirror_x, seam_band}
+    gpu::Buffer          smooth_mirror_ubo;       // 16-byte {vcount, anchor_x}
 
     // Stroke autosmooth: one-pass Laplacian over a vert-ID list at fixed strength.
     // Runs at pen-up over snap_list verts on draw strokes when autosmooth is enabled.
@@ -236,10 +243,16 @@ struct ComputeState {
     // (the smooth gesture while painting). Same buffers as color_paint.
     GLuint color_smooth_program;
 
-    // Move brush compute shaders (stateful: capture-once weights + per-dab apply)
-    GLuint move_capture_program;        // brute-force per-vertex world-distance gate: sets weight, init pos, appends affected
-    GLuint move_weight_smooth_program;  // ping-pong Laplacian over affected list
-    GLuint move_apply_program;          // per-dab: pos = init + total*w.x + mirror_total*w.y (mirror summed in-place)
+    // Move brush compute shaders — ported onto the gpu:: seam (Seam Step 2b).
+    // Stateful: capture-once weights + per-dab apply. Capture carries a 32-byte
+    // std140 Params block, apply a 16-byte one; weight_smooth takes no UBO (it is
+    // sized to the affected set and gated on affected_count). The move buffers below
+    // stay GL-owned (wrapped in views at dispatch). has_move() reports availability.
+    gpu::ComputePipeline move_capture_pipeline;       // brute-force per-vertex world-distance gate: sets weight, init pos, appends affected
+    gpu::ComputePipeline move_weight_smooth_pipeline; // ping-pong Laplacian over affected list
+    gpu::ComputePipeline move_apply_pipeline;         // per-dab: pos = init + total*w.x + mirror_total*w.y (mirror summed in-place)
+    gpu::Buffer          move_capture_ubo;            // 32-byte MoveCaptureParams block
+    gpu::Buffer          move_apply_ubo;              // 16-byte {total} block
 
     // Move stroke buffers (allocated lazily, persist across strokes; resized as vertex_count grows)
     GLuint move_affected_ssbo;       // [count, v0, v1, ...]
@@ -475,6 +488,13 @@ struct ComputeState {
     bool has_crease() const { return crease_accum_pipeline.handle != 0; }
     bool has_pinch() const { return pinch_accum_pipeline.handle != 0; }
 
+    // Move/grab readiness (replaces move_*_program truthiness checks). Gates the
+    // whole grab path; limb reuses the capture/weight-smooth pieces.
+    bool has_move() const { return move_capture_pipeline.handle != 0; }
+
+    // Smooth readiness (replaces smooth_accum_program truthiness checks).
+    bool has_smooth() const { return smooth_accum_pipeline.handle != 0; }
+
     // Dispatch the mask paint shader: per-vertex distance check, writes mask VBO
     // directly. Uses smooth_dirty_ssbo for the compact dirty list. Caller reads
     // back dirty list via readback_smooth_dirty.
@@ -484,7 +504,8 @@ struct ComputeState {
     // paint_r/g/b ignored). Averages neighbour colours via CSR adjacency.
     void dispatch_color_smooth(const ColorPaintParams& params, GLuint pos_vbo, GLuint index_ebo);
 
-    // Compile the four move-brush compute shaders. Called once at init.
+    // Compile the three move-brush compute pipelines (capture / weight-smooth /
+    // apply) + their Params UBOs, through the gpu:: seam. Called once at init.
     bool init_move();
 
     // Allocate/resize move stroke buffers (weights, init pos, affected list).

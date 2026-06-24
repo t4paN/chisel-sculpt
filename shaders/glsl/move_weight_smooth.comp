@@ -1,0 +1,37 @@
+// move_weight_smooth.comp — GLSL 430 sibling of shaders/wgsl/move_weight_smooth.wgsl.
+// Pass 2 of the grab/move brush: ping-pong Laplacian over the captured affected set,
+// smoothing the (primary, mirror) falloff weights so the grab pulls a soft, blended
+// island instead of a hard-edged disc. Self-weighted x4 (matches the CPU path).
+// No Params UBO: the dispatch is sized to the affected set and gated on affected_count.
+#version 430
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 2)  readonly buffer IdxBuf      { uint indices[]; };
+layout(std430, binding = 4)  readonly buffer AdjOffset   { uint adj_offset[]; };
+layout(std430, binding = 5)  readonly buffer AdjList     { uint adj_list[]; };
+layout(std430, binding = 8)  readonly buffer AffectedBuf { uint affected_count; uint affected_ids[]; };
+layout(std430, binding = 9)  readonly buffer WInBuf      { vec2 w_in[]; };
+layout(std430, binding = 10) buffer WOutBuf              { vec2 w_out[]; };
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= affected_count) return;
+    uint v = affected_ids[idx];
+
+    vec2 sum = w_in[v] * 4.0;
+    uint count = 4u;
+
+    uint start = adj_offset[v];
+    uint end = adj_offset[v + 1u];
+    for (uint j = start; j < end; j++) {
+        uint t = adj_list[j];
+        uint i0 = indices[t * 3u];
+        uint i1 = indices[t * 3u + 1u];
+        uint i2 = indices[t * 3u + 2u];
+        if (i0 != v) { sum += w_in[i0]; count++; }
+        if (i1 != v) { sum += w_in[i1]; count++; }
+        if (i2 != v) { sum += w_in[i2]; count++; }
+    }
+
+    w_out[v] = sum / float(count);
+}

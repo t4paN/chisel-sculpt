@@ -1,0 +1,43 @@
+// smooth_mirror_apply.comp — GLSL 430 sibling of shaders/wgsl/smooth_mirror_apply.wgsl.
+// Re-imposes the X-mirror reflection after each smooth_apply iteration: each touched
+// anchor-side vertex writes its negated-X position onto its mirror twin so the two
+// lobes relax in lockstep and the seam stays a byte-exact reflection. Gated on accum
+// weight > 0 AND the vert sharing the anchor's x sign (straddle tris near the seam
+// don't overwrite anchor-side twins from the far side). 16-byte std140 Params UBO.
+#version 430
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0)  buffer PosBuf             { float positions[]; };
+layout(std430, binding = 3)  readonly buffer AccumBuf  { uint accum[]; };
+layout(std430, binding = 7)  readonly buffer MirrorBuf { uint mirror_map[]; };
+layout(std430, binding = 12) readonly buffer MaskBuf   { float mask[]; };
+
+layout(std140, binding = 63) uniform Params {
+    uint  vertex_count;   // 0
+    float anchor_x;       // 4
+    uint  _pad0;          // 8
+    uint  _pad1;          // 12  (struct rounds to 16)
+} P;
+
+void main() {
+    uint v = gl_GlobalInvocationID.x;
+    if (v >= P.vertex_count) return;
+
+    float w = uintBitsToFloat(accum[v * 4u + 3u]);
+    if (w <= 0.0) return;
+
+    float vx = positions[v * 3u];
+    if (vx * P.anchor_x < 0.0) return;
+
+    uint mv = mirror_map[v];
+    if (mv == v) return;
+
+    float mscale = 1.0 - mask[mv];
+    if (mscale <= 0.0) return;
+
+    uint src = v * 3u;
+    uint dst = mv * 3u;
+    positions[dst + 0u] += (-positions[src + 0u] - positions[dst + 0u]) * mscale;
+    positions[dst + 1u] += ( positions[src + 1u] - positions[dst + 1u]) * mscale;
+    positions[dst + 2u] += ( positions[src + 2u] - positions[dst + 2u]) * mscale;
+}
