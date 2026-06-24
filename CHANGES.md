@@ -2,6 +2,24 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-24 — WebGPU port, Seam Step 2b: limb (snakehook) brush on the gpu:: seam
+
+- **Limb drag + relax ported onto the seam** — the last brush-adjacent kernels. `limb_drag`
+  (per-dab incremental grab: `pos += (delta*w.x + mirror_delta*w.y)*(1-mask)`) and `limb_relax`
+  (ping-pong tangential normal-stripped Laplacian over the captured set, with the tip-bias drift)
+  now dispatch through `gpu::`. The capture side already rode on the seam via grab (move_capture /
+  move_weight_smooth / readback_move_affected).
+- Loose uniforms → std140 Params UBOs: drag 16 B `{delta}`, relax 32 B `{vertex_count, lambda,
+  tip_bias, tip_dir}`. `limb_*_program` GLuints → `gpu::ComputePipeline` + UBO `gpu::Buffer`; checks
+  go through new `has_limb()` (gates both kernels). The relax ping-pong is two bind groups swapping
+  slots 29 (src) / 0 (dst) each iteration — same shape as move_weight_smooth; the scratch snapshot
+  and even-iter copy-back stay raw GL (`glCopyBufferSubData`), buffers GL-owned, wrapped in views.
+- **New lockstep pairs** `limb_drag.{comp,wgsl}` + `limb_relax.{comp,wgsl}`, embedded at build time.
+  relax uses 8 storage buffers — at the default WebGPU `maxStorageBuffersPerShaderStage`, no split.
+- **Verified:** gl build green; gl-compute-test PASS; both limb pipelines compile at runtime
+  (11 seam pipelines total). In-app sculpt confirmation pending (user-driven).
+- **All brushes are now on the seam.** Remaining raw GL: remesh · multires/undo · SDF.
+
 ## 2026-06-24 — WebGPU port, Seam Step 2b: stroke_smooth (pen-up autosmooth) on the gpu:: seam
 
 - **Pen-up autosmooth ported onto the seam** — `stroke_smooth_apply` (single mild uniform Laplacian

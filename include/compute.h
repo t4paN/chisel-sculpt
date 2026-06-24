@@ -265,10 +265,14 @@ struct ComputeState {
     GLuint move_init_ssbo;           // 3 floats per vertex (snapshotted at capture)
     uint32_t move_buffers_capacity;
 
-    // Limb (snakehook) brush: incremental drag + tangential redistribution.
-    // Shares the move capture (weights/affected/init); adds a relax pass.
-    GLuint limb_drag_program;        // per-dab: pos += (delta*w.x + mirror_delta*w.y)*(1-mask)
-    GLuint limb_relax_program;       // tangential (normal-stripped) Laplacian over the captured set
+    // Limb (snakehook) brush — ported onto the gpu:: seam (Seam Step 2b). Incremental
+    // drag + tangential redistribution. Shares the move capture (weights/affected/init);
+    // adds a relax pass. has_limb() reports readiness. The scratch SSBO stays GL-owned
+    // (wrapped in a view at dispatch; the copy snapshot/copy-back stay raw GL).
+    gpu::ComputePipeline limb_drag_pipeline;   // per-dab: pos += (delta*w.x + mirror_delta*w.y)*(1-mask)
+    gpu::ComputePipeline limb_relax_pipeline;  // tangential (normal-stripped) Laplacian over the captured set
+    gpu::Buffer          limb_drag_ubo;        // 16-byte {delta} block
+    gpu::Buffer          limb_relax_ubo;       // 32-byte {vertex_count,lambda,tip_bias,tip_dir} block
     GLuint limb_pos_scratch_ssbo;    // 3 floats per vertex: read-side snapshot for relax ping-pong
     uint32_t limb_scratch_capacity;
 
@@ -500,6 +504,10 @@ struct ComputeState {
     // Move/grab readiness (replaces move_*_program truthiness checks). Gates the
     // whole grab path; limb reuses the capture/weight-smooth pieces.
     bool has_move() const { return move_capture_pipeline.handle != 0; }
+
+    // Limb (snakehook) readiness (replaces limb_*_program truthiness checks). Needs
+    // both its own kernels plus the move capture pieces it rides on (has_move()).
+    bool has_limb() const { return limb_drag_pipeline.handle != 0 && limb_relax_pipeline.handle != 0; }
 
     // Smooth readiness (replaces smooth_accum_program truthiness checks).
     bool has_smooth() const { return smooth_accum_pipeline.handle != 0; }

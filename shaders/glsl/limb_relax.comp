@@ -1,0 +1,87 @@
+// limb_relax.comp — GLSL 430 sibling of shaders/wgsl/limb_relax.wgsl.
+// Pass 2 of the limb brush: ping-pong tangential (normal-stripped) Laplacian over
+// the captured set. Evens vertex spacing along the stretching shaft without deflating
+// the form — a tip-biased centroid drifts verts up-shaft so the cap densifies as the
+// limb grows. Reads the src snapshot (BIND_LIMB_POS_SRC), writes the live positions;
+// the host swaps the two each iteration. Dispatched over the whole vertex range —
+// verts outside the captured set (w==0) pass through unchanged so both buffers stay
+// valid for the next iteration's neighbour reads. 32-byte std140 Params UBO.
+#version 430
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 29) readonly  buffer PosSrc    { float src[]; };
+layout(std430, binding = 0)  writeonly buffer PosDst    { float dst[]; };
+layout(std430, binding = 1)  readonly  buffer NormBuf   { float normals[]; };
+layout(std430, binding = 2)  readonly  buffer IdxBuf    { uint indices[]; };
+layout(std430, binding = 4)  readonly  buffer AdjOffset { uint adj_offset[]; };
+layout(std430, binding = 5)  readonly  buffer AdjList   { uint adj_list[]; };
+layout(std430, binding = 9)  readonly  buffer WBuf      { vec2 move_weights[]; };
+layout(std430, binding = 12) readonly  buffer MaskBuf   { float mask[]; };
+
+layout(std140, binding = 63) uniform Params {
+    uint  vertex_count;   // 0
+    float lambda;         // 4
+    float tip_bias;       // 8   >0 drifts verts up-shaft → denser cap
+    float _pad0;          // 12
+    vec3  tip_dir;        // 16  normalized world pull direction (struct rounds to 32)
+    float _pad1;          // 28
+} P;
+
+// Accumulate one neighbour into the (tip-biased) centroid. Neighbours toward the tip
+// are up-weighted, so each vert's relax target shifts up the shaft: the distribution
+// migrates toward the leading end, densifying the cap. The target stays a convex
+// combination of the 1-ring → a bounded redistribution, not an extra translation.
+void accum_neighbour(uint vi, vec3 p, vec3 tdir, inout vec3 sum, inout float wsum) {
+    vec3 q = vec3(src[vi*3u], src[vi*3u+1u], src[vi*3u+2u]);
+    vec3 e = q - p;
+    float el = length(e);
+    float b = 1.0;
+    if (el > 1e-8) b += P.tip_bias * max(0.0, dot(e / el, tdir));
+    sum  += q * b;
+    wsum += b;
+}
+
+void main() {
+    uint v = gl_GlobalInvocationID.x;
+    if (v >= P.vertex_count) return;
+
+    vec3 p = vec3(src[v*3u], src[v*3u+1u], src[v*3u+2u]);
+
+    vec2 w2 = move_weights[v];
+    float w = max(w2.x, w2.y);
+    if (w <= 0.0) {                       // outside the brush: pass through
+        dst[v*3u] = p.x; dst[v*3u+1u] = p.y; dst[v*3u+2u] = p.z;
+        return;
+    }
+
+    // Verts the mirror lobe owns (w.y dominant) drift toward the X-flipped pull,
+    // matching the drag's mdelta = (-dx, dy, dz) decomposition.
+    vec3 tdir = (w2.y > w2.x) ? vec3(-P.tip_dir.x, P.tip_dir.y, P.tip_dir.z) : P.tip_dir;
+
+    vec3 sum = vec3(0.0);
+    float wsum = 0.0;
+    uint start = adj_offset[v];
+    uint end   = adj_offset[v + 1u];
+    for (uint j = start; j < end; j++) {
+        uint t = adj_list[j];
+        uint i0 = indices[t*3u]; uint i1 = indices[t*3u+1u]; uint i2 = indices[t*3u+2u];
+        if (i0 != v) accum_neighbour(i0, p, tdir, sum, wsum);
+        if (i1 != v) accum_neighbour(i1, p, tdir, sum, wsum);
+        if (i2 != v) accum_neighbour(i2, p, tdir, sum, wsum);
+    }
+    if (wsum <= 0.0) {
+        dst[v*3u] = p.x; dst[v*3u+1u] = p.y; dst[v*3u+2u] = p.z;
+        return;
+    }
+
+    vec3 delta = sum / wsum - p;
+    // Strip the normal component → tangential move only (a full Laplacian would shrink
+    // the form, the same reason the smooth brush deflates).
+    vec3 n = vec3(normals[v*3u], normals[v*3u+1u], normals[v*3u+2u]);
+    float nl = length(n);
+    if (nl > 1e-8) { n /= nl; delta -= n * dot(delta, n); }
+
+    float mscale = 1.0 - mask[v];
+    vec3 np = p + P.lambda * w * mscale * delta;
+    dst[v*3u] = np.x; dst[v*3u+1u] = np.y; dst[v*3u+2u] = np.z;
+}

@@ -18,8 +18,6 @@ ComputeState::ComputeState()
     , move_weights_pong_ssbo(0)
     , move_init_ssbo(0)
     , move_buffers_capacity(0)
-    , limb_drag_program(0)
-    , limb_relax_program(0)
     , limb_pos_scratch_ssbo(0)
     , limb_scratch_capacity(0)
     , multires_diff_program(0)
@@ -254,8 +252,10 @@ void ComputeState::cleanup() {
     if (move_weights_ssbo)          { glDeleteBuffers(1, &move_weights_ssbo);      move_weights_ssbo          = 0; }
     if (move_weights_pong_ssbo)     { glDeleteBuffers(1, &move_weights_pong_ssbo); move_weights_pong_ssbo     = 0; }
     if (move_init_ssbo)             { glDeleteBuffers(1, &move_init_ssbo);         move_init_ssbo             = 0; }
-    if (limb_drag_program)          { glDeleteProgram(limb_drag_program);         limb_drag_program          = 0; }
-    if (limb_relax_program)         { glDeleteProgram(limb_relax_program);        limb_relax_program         = 0; }
+    gpu::release_compute_pipeline(limb_drag_pipeline);
+    gpu::release_compute_pipeline(limb_relax_pipeline);
+    gpu::release_buffer(limb_drag_ubo);
+    gpu::release_buffer(limb_relax_ubo);
     if (limb_pos_scratch_ssbo)      { glDeleteBuffers(1, &limb_pos_scratch_ssbo); limb_pos_scratch_ssbo      = 0; }
     move_buffers_capacity = 0;
     gpu::release_compute_pipeline(compute_normals_pipeline);
