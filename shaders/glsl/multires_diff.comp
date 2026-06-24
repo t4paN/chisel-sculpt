@@ -1,0 +1,70 @@
+// multires_diff.comp — GLSL 430 sibling of shaders/wgsl/multires_diff.wgsl.
+// GPU-resident undo, pen-up multires diff. The CPU twin lives in brush.cpp
+// finalize(): for each touched vert form the world-space stroke delta
+//   d = live_vbo_pos - pen_down_pos
+// and, for a displacement-level stroke, reproject it into the vert's tangent
+// frame, accumulating onto the pen-down disp:
+//   disp += vec3(dot(t,d), dot(b,d), dot(n,d))
+// For a base-level stroke just store the live position as the new base pos.
+// Optionally captures (old,new) into the persistent undo ring (3b-iii).
+//
+// binding 6 is the plain touched-vert id list (no count header) — count rides
+// in the 16-byte std140 Params UBO at binding 63, like the old loose uniforms.
+#version 430
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0)  readonly buffer PosBuf   { float live_pos[]; };
+layout(std430, binding = 6)  readonly buffer DirtyBuf { uint  dirty[]; };
+layout(std430, binding = 30)          buffer DispBuf  { float disp[]; };      // in: snap, out: new
+layout(std430, binding = 31) readonly buffer FrameBuf { float frames[]; };
+layout(std430, binding = 32) readonly buffer SnapBuf  { float snap_pos[]; };
+layout(std430, binding = 33)          buffer BaseBuf  { float base_pos[]; };
+layout(std430, binding = 35)          buffer RingBuf  { float ring[]; };      // float6/vert: old(3)+new(3)
+
+layout(std140, binding = 63) uniform Params {
+    uint count;          // 0
+    int  writes_to_base; // 4
+    uint ring_base;      // 8  — float offset of this stroke's span in the undo ring
+    int  ring_on;        // 12 — write (old,new) into the ring when != 0  (struct = 16)
+} P;
+
+void main() {
+    uint di = gl_GlobalInvocationID.x;
+    if (di >= P.count) return;
+    uint v = dirty[di];
+
+    vec3 lp = vec3(live_pos[v*3u], live_pos[v*3u+1u], live_pos[v*3u+2u]);
+    vec3 sp = vec3(snap_pos[v*3u], snap_pos[v*3u+1u], snap_pos[v*3u+2u]);
+
+    vec3 old_v, new_v;
+
+    if (P.writes_to_base != 0) {
+        // Base-level stroke: the surface IS the base cage, so old = pen-down world
+        // pos (snap), new = live pos.
+        old_v = sp;
+        new_v = lp;
+        base_pos[v*3u]      = lp.x;
+        base_pos[v*3u+1u]   = lp.y;
+        base_pos[v*3u+2u]   = lp.z;
+    } else {
+        vec3 d = lp - sp;
+        vec3 t = vec3(frames[v*9u],      frames[v*9u+1u], frames[v*9u+2u]);
+        vec3 b = vec3(frames[v*9u+3u],   frames[v*9u+4u], frames[v*9u+5u]);
+        vec3 n = vec3(frames[v*9u+6u],   frames[v*9u+7u], frames[v*9u+8u]);
+
+        // disp[] still holds the pen-down disp on entry — that's old.
+        old_v = vec3(disp[v*3u], disp[v*3u+1u], disp[v*3u+2u]);
+        new_v = old_v + vec3(dot(t, d), dot(b, d), dot(n, d));
+        disp[v*3u]      = new_v.x;
+        disp[v*3u+1u]   = new_v.y;
+        disp[v*3u+2u]   = new_v.z;
+    }
+
+    if (P.ring_on != 0) {
+        // Pack (old,new) at this stroke's reserved span, indexed by local di so the
+        // ring is densely packed per stroke (3b-iii undo capture).
+        uint ro = P.ring_base + di * 6u;
+        ring[ro]      = old_v.x;  ring[ro+1u] = old_v.y;  ring[ro+2u] = old_v.z;
+        ring[ro+3u]   = new_v.x;  ring[ro+4u] = new_v.y;  ring[ro+5u] = new_v.z;
+    }
+}

@@ -284,21 +284,26 @@ struct ComputeState {
     gpu::ComputePipeline compute_normals_pipeline;
     gpu::Buffer          compute_normals_ubo;   // 16-byte {dirty_count} block
 
-    // GPU-resident undo (Phase 2b): pen-up multires diff. Reprojects the
-    // world-space stroke delta (live VBO - pen-down snapshot) into the active
-    // level's tangent frames and accumulates onto the resident disp layer — the
-    // GPU twin of the CPU readback loop in brush.cpp finalize(). Base-level
-    // strokes write the live position straight into the base buffer.
-    GLuint multires_diff_program;
+    // GPU-resident undo (Phase 2b): pen-up multires diff — ported onto the gpu::
+    // seam (Seam Step 2b). Reprojects the world-space stroke delta (live VBO -
+    // pen-down snapshot) into the active level's tangent frames and accumulates
+    // onto the resident disp layer — the GPU twin of the CPU readback loop in
+    // brush.cpp finalize(). Base-level strokes write the live position straight
+    // into the base buffer; optionally captures (old,new) into the undo ring.
+    // has_multires_diff() reports readiness.
+    gpu::ComputePipeline multires_diff_pipeline;
+    gpu::Buffer          multires_diff_ubo;   // 16-byte {count,writes_to_base,ring_base,ring_on} block
 
-    // GPU-resident undo (Phase 2c): undo/redo apply. Scatters a per-vert (target,
-    // source) disp pair from a staging buffer into the resident disp layer and
-    // reprojects the (target - source) delta through the tangent frames into the
-    // working VBO — the GPU twin of the CPU revert loop in undo.cpp apply()
-    // (same-level STROKE). Base-level strokes write the absolute target straight
-    // into the base buffer and the VBO. Caller follows with compute_normals.
-    GLuint multires_apply_program;
-    GLuint multires_stage_ssbo;          // float6 * V scratch (target+source), grow-only
+    // GPU-resident undo (Phase 2c): undo/redo apply — on the gpu:: seam. Scatters a
+    // per-vert (target,source) disp pair from the stage buffer (or the undo ring in
+    // ring mode) into the resident disp layer and reprojects the (target - source)
+    // delta through the tangent frames into the working VBO — the GPU twin of the
+    // CPU revert loop in undo.cpp apply() (same-level STROKE). Base-level strokes
+    // write the absolute target straight into the base buffer and the VBO. Caller
+    // follows with compute_normals. has_multires_apply() reports readiness.
+    gpu::ComputePipeline multires_apply_pipeline;
+    gpu::Buffer          multires_apply_ubo;  // 32-byte {count,targets_base,ring_mode,ring_base,forward} block
+    GLuint multires_stage_ssbo;          // float6 * V scratch (target+source), grow-only — GL-owned
     uint32_t multires_stage_capacity;
 
     // GPU-resident undo ring (blood-moon 3b-ii). PERSISTENT history of per-vert
@@ -581,6 +586,7 @@ struct ComputeState {
 
     // Compile the pen-up multires diff shader. Called once at init.
     bool init_multires_diff();
+    bool has_multires_diff() const { return multires_diff_pipeline.handle != 0; }
 
     // Dispatch the multires diff over the stroke's touched verts (`verts`/`count`).
     // disp/frames/snap_pos/base are the MultiresGPU SSBOs for the active level;
@@ -599,6 +605,7 @@ struct ComputeState {
 
     // Compile the undo/redo multires apply shader. Called once at init.
     bool init_multires_apply();
+    bool has_multires_apply() const { return multires_apply_pipeline.handle != 0; }
 
     // Dispatch the multires apply over `verts`/`count`. `stage` is count*6 floats
     // (target xyz, source xyz per vert). For a disp-level revert it scatters target

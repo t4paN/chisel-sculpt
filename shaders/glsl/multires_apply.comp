@@ -1,0 +1,75 @@
+// multires_apply.comp — GLSL 430 sibling of shaders/wgsl/multires_apply.wgsl.
+// GPU-resident undo, undo/redo apply. The CPU twin is the same-level STROKE path
+// of undo.cpp apply(). For a disp layer it scatters the target disp into disp[]
+// and reprojects the storage delta (target - source) through the tangent frame
+// into the working VBO:  pos += dx*t + dy*b + dz*n. For the base cage the surface
+// IS the base, so it writes the absolute target into both base[] and the VBO.
+// The per-vert (target,source) pairs arrive either in the transient stage buffer
+// or, in ring mode (3b-iv), straight from the persistent undo ring (old,new) with
+// u_forward picking undo vs redo direction. Caller runs compute_normals after.
+//
+// binding 6 is the plain touched-vert id list; count + flags ride in the 32-byte
+// std140 Params UBO at binding 63.
+#version 430
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0)           buffer PosBuf   { float pos[]; };
+layout(std430, binding = 6)  readonly buffer DirtyBuf { uint dirty[]; };
+layout(std430, binding = 30)          buffer DispBuf  { float disp[]; };
+layout(std430, binding = 31) readonly buffer FrameBuf { float frames[]; };
+layout(std430, binding = 33)          buffer BaseBuf  { float base_pos[]; };
+layout(std430, binding = 34) readonly buffer StageBuf { float stage[]; };  // 6/vert: target,source
+layout(std430, binding = 35) readonly buffer RingBuf  { float ring[]; };   // 6/vert: old,new
+
+layout(std140, binding = 63) uniform Params {
+    uint count;        // 0
+    int  targets_base; // 4
+    int  ring_mode;    // 8  — source (target,source) from the ring instead of the stage
+    uint ring_base;    // 12 — FLOAT offset of this entry's span (struct slot fills to 16)
+    int  forward;      // 16 — ring (old,new): undo wants old, redo wants new
+    int  _pad0;        // 20
+    int  _pad1;        // 24
+    int  _pad2;        // 28  (struct = 32)
+} P;
+
+void main() {
+    uint di = gl_GlobalInvocationID.x;
+    if (di >= P.count) return;
+    uint v = dirty[di];
+
+    vec3 tgt, src;
+    if (P.ring_mode != 0) {
+        uint ro = P.ring_base + di * 6u;
+        vec3 old_v = vec3(ring[ro],      ring[ro+1u], ring[ro+2u]);
+        vec3 new_v = vec3(ring[ro+3u],   ring[ro+4u], ring[ro+5u]);
+        tgt = (P.forward != 0) ? new_v : old_v;
+        src = (P.forward != 0) ? old_v : new_v;
+    } else {
+        tgt = vec3(stage[di*6u],      stage[di*6u+1u], stage[di*6u+2u]);
+        src = vec3(stage[di*6u+3u],   stage[di*6u+4u], stage[di*6u+5u]);
+    }
+
+    if (P.targets_base != 0) {
+        base_pos[v*3u]    = tgt.x;
+        base_pos[v*3u+1u] = tgt.y;
+        base_pos[v*3u+2u] = tgt.z;
+        pos[v*3u]    = tgt.x;
+        pos[v*3u+1u] = tgt.y;
+        pos[v*3u+2u] = tgt.z;
+        return;
+    }
+
+    vec3 d = tgt - src;
+
+    disp[v*3u]    = tgt.x;
+    disp[v*3u+1u] = tgt.y;
+    disp[v*3u+2u] = tgt.z;
+
+    vec3 t = vec3(frames[v*9u],      frames[v*9u+1u], frames[v*9u+2u]);
+    vec3 b = vec3(frames[v*9u+3u],   frames[v*9u+4u], frames[v*9u+5u]);
+    vec3 n = vec3(frames[v*9u+6u],   frames[v*9u+7u], frames[v*9u+8u]);
+
+    pos[v*3u]    += d.x*t.x + d.y*b.x + d.z*n.x;
+    pos[v*3u+1u] += d.x*t.y + d.y*b.y + d.z*n.y;
+    pos[v*3u+2u] += d.x*t.z + d.y*b.z + d.z*n.z;
+}

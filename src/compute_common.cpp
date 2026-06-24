@@ -20,8 +20,6 @@ ComputeState::ComputeState()
     , move_buffers_capacity(0)
     , limb_pos_scratch_ssbo(0)
     , limb_scratch_capacity(0)
-    , multires_diff_program(0)
-    , multires_apply_program(0)
     , multires_stage_ssbo(0)
     , multires_stage_capacity(0)
     , undo_ring_ssbo(0)
@@ -251,8 +249,10 @@ void ComputeState::cleanup() {
     move_buffers_capacity = 0;
     gpu::release_compute_pipeline(compute_normals_pipeline);
     gpu::release_buffer(compute_normals_ubo);
-    if (multires_diff_program)  { glDeleteProgram(multires_diff_program);  multires_diff_program  = 0; }
-    if (multires_apply_program) { glDeleteProgram(multires_apply_program); multires_apply_program = 0; }
+    gpu::release_compute_pipeline(multires_diff_pipeline);
+    gpu::release_compute_pipeline(multires_apply_pipeline);
+    gpu::release_buffer(multires_diff_ubo);
+    gpu::release_buffer(multires_apply_ubo);
     if (multires_stage_ssbo)    { glDeleteBuffers(1, &multires_stage_ssbo); multires_stage_ssbo   = 0; }
     multires_stage_capacity = 0;
     if (undo_ring_ssbo)         { glDeleteBuffers(1, &undo_ring_ssbo);       undo_ring_ssbo        = 0; }

@@ -2,6 +2,28 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-24 — WebGPU port, Seam Step 2b: multires/undo on the gpu:: seam
+
+- **Both GPU-resident undo kernels ported onto the seam** — `multires_diff` (pen-up
+  diff: reproject the world stroke delta into the active level's tangent frames,
+  accumulate onto the resident disp; base-level strokes write the live pos; optional
+  (old,new) capture into the undo ring) and `multires_apply` (undo/redo: scatter the
+  (target,source) disp and reproject the delta into the working VBO; base strokes
+  write the absolute target). `multires_*_program` GLuints → `gpu::ComputePipeline`
+  + std140 Params UBOs (diff 16 B, apply 32 B); `has_multires_diff()`/
+  `has_multires_apply()` gate the dispatches.
+- **2 new lockstep shader pairs** (`multires_diff`, `multires_apply`), embedded at
+  build time. 7 storage + 1 uniform binding each — under the default WebGPU storage cap.
+- The persistent **undo ring** (`undo_ring_*`) stays raw GL buffer management — it
+  owns the SSBO the kernels read/write via a view at dispatch. Dirty-vert + stage
+  uploads stay raw GL; the seam barriers after dispatch cover the debug readback /
+  follow-up normals. Every declared binding is filled (pos_vbo as the harmless filler
+  for slots the current mode skips) so no slot is ever left unbound.
+- **Verified:** gl build green; gl-compute-test PASS; both pipelines compile at
+  runtime. In-app undo/redo correctness is user-driven.
+- **Multires/undo done — only SDF left** of the heavy subsystems. SDF is the last
+  raw-GL compute subsystem (most buffers; likely needs group(1)/group(2) splits).
+
 ## 2026-06-24 — WebGPU port, Seam Step 2b: remesh subsystem on the gpu:: seam
 
 - **All 9 remesh GPU helper kernels ported onto the seam** — the first heavy subsystem.
