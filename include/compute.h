@@ -1,5 +1,6 @@
 #pragma once
 #include <glad/glad.h>
+#include "gpu/gpu.h"      // the GPU seam (RHI); backend chosen at build time
 #include <cstdint>
 #include <vector>
 
@@ -45,6 +46,10 @@ enum ComputeBinding : GLuint {
     BIND_UNDO_RING         = 35, // float6 per touched vert: old(3) + new(3) — persistent undo history (3b-iii)
     BIND_SDF_SPLAT_BOX     = 36, // uint6 per-tri voxel box: g0.xyz + span.xyz (SDF splat Pass A→C)
     BIND_SDF_SPLAT_OFFSET  = 37, // uint exclusive scan of footprint (SDF splat Pass C: owner search)
+    // Reserved high slot for the per-dispatch std140 Params UBO that replaces loose
+    // GL uniforms on the gpu:: seam (see webgpu-port-plan.md / CONVENTIONS.md). Every
+    // ported kernel binds its *ParamsGPU block here.
+    BIND_PARAMS            = 63,
 };
 
 struct DrawAccumParams {
@@ -157,6 +162,11 @@ struct LimbDragParams {
 struct ComputeState {
     bool supported;
     bool has_native_float_atomics;  // GL_NV_shader_atomic_float
+
+    // GPU seam device handle. On the GL backend this is an empty handle (a current
+    // GL context must already exist); on WebGPU it carries the device+queue. Kernels
+    // ported onto gpu:: (Seam Step 2b, mask first) dispatch through this.
+    gpu::Device gpu_dev;
     int max_workgroup_size;
     int max_workgroup_invocations;
     int max_ssbo_bindings;
@@ -171,12 +181,16 @@ struct ComputeState {
     // mirrored displacements regardless of tessellation drift between twins.
     GLuint accum_sym_ssbo;
 
-    // Draw accumulate compute shader
-    GLuint draw_accum_program;
+    // Draw brush — ported onto the gpu:: seam (Seam Step 2b). draw_accum carries a
+    // 112-byte std140 Params block; apply/symmetrize/mirror only need vertex_count,
+    // so they share a 16-byte UBO. has_draw()/has_draw_symmetrize() report readiness.
+    gpu::ComputePipeline draw_accum_pipeline;
+    gpu::Buffer          draw_accum_ubo;       // 112-byte DrawAccumParams block
+    gpu::Buffer          draw_vcount_ubo;      // 16-byte {vertex_count} — shared by apply/sym/mirror
 
     // Draw symmetrize-accum compute shader: folds mirror twin's accum into v's
     // own accum so paired displacements are strictly X-mirror symmetric.
-    GLuint draw_accum_symmetrize_program;
+    gpu::ComputePipeline draw_symmetrize_pipeline;
 
     // Stroke-begin snapshot of vertex normals. Draw_accum reads displacement
     // direction from this frozen buffer so each dab moves verts along the
@@ -187,10 +201,10 @@ struct ComputeState {
     uint32_t stroke_norm_capacity;
 
     // Draw apply compute shader (normalizes accum → writes positions)
-    GLuint draw_apply_program;
+    gpu::ComputePipeline draw_apply_pipeline;
 
     // Draw mirror apply compute shader (writes negated-X displacements to mirror twins)
-    GLuint draw_mirror_apply_program;
+    gpu::ComputePipeline draw_mirror_apply_pipeline;
 
     // Smooth brush compute shaders
     GLuint smooth_accum_program;
@@ -201,14 +215,20 @@ struct ComputeState {
     // Runs at pen-up over snap_list verts on draw strokes when autosmooth is enabled.
     GLuint stroke_smooth_apply_program;
 
-    // Crease brush compute shader
-    GLuint crease_accum_program;
+    // Crease + pinch brushes — ported onto the gpu:: seam (Seam Step 2b). Both are
+    // accum-only kernels (deposit into the shared accum buffer); the apply side
+    // reuses draw_apply / symmetrize / mirror_apply. Crease carries a 112-byte Params
+    // block, pinch a 96-byte one.
+    gpu::ComputePipeline crease_accum_pipeline;
+    gpu::Buffer          crease_ubo;
+    gpu::ComputePipeline pinch_accum_pipeline;
+    gpu::Buffer          pinch_ubo;
 
-    // Pinch brush compute shader
-    GLuint pinch_accum_program;
-
-    // Mask brush compute shader (writes directly to mask VBO/SSBO)
-    GLuint mask_paint_program;
+    // Mask brush — ported onto the gpu:: seam (Seam Step 2b). Pipeline compiled from
+    // the embedded mask_paint kernel; the std140 Params block (binding 63) replaces
+    // the old loose uniforms and is uploaded per dab. has_mask() reports availability.
+    gpu::ComputePipeline mask_pipeline;
+    gpu::Buffer          mask_params_ubo;
 
     // Paint brush compute shader (writes directly to color VBO/SSBO)
     GLuint color_paint_program;
@@ -441,6 +461,19 @@ struct ComputeState {
     // Compile the mask brush compute shader. Called once at init.
     bool init_mask();
     bool init_color();
+
+    // Is the mask kernel compiled and ready? (replaces the old `mask_paint_program`
+    // truthiness check now that the program lives behind the gpu:: seam.)
+    bool has_mask() const { return mask_pipeline.handle != 0; }
+
+    // Draw-brush readiness (replaces draw_*_program truthiness checks). has_draw()
+    // gates the whole draw path; has_draw_symmetrize() gates the mirror-symmetry pass.
+    bool has_draw() const { return draw_accum_pipeline.handle != 0; }
+    bool has_draw_symmetrize() const { return draw_symmetrize_pipeline.handle != 0; }
+
+    // Crease / pinch readiness (replaces crease_accum_program / pinch_accum_program checks).
+    bool has_crease() const { return crease_accum_pipeline.handle != 0; }
+    bool has_pinch() const { return pinch_accum_pipeline.handle != 0; }
 
     // Dispatch the mask paint shader: per-vertex distance check, writes mask VBO
     // directly. Uses smooth_dirty_ssbo for the compact dirty list. Caller reads

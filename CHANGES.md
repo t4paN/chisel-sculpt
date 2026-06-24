@@ -2,6 +2,58 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-24 — WebGPU port, Seam Step 2b: crease + pinch on the gpu:: seam
+
+- **Crease + pinch ported onto the seam.** Both are accum-only kernels — they deposit into the shared
+  accum buffer and reuse the already-seamed `draw_apply` / `symmetrize` / `mirror_apply` for the apply
+  side, so only the two accumulate dispatches needed porting. Loose uniforms → std140 Params UBOs
+  (crease 112 B, pinch 96 B); checks go through new `has_crease()` / `has_pinch()`.
+- **New shader pairs** (neither had `.wgsl` before): `crease_accum.{comp,wgsl}` and
+  `pinch_accum.{comp,wgsl}`, lockstep, embedded at build time.
+- **Verified:** gl build green; both pipelines compile at runtime ("pipeline compiled (gpu:: seam)");
+  crease + pinch (incl. the negative/flatten pinch direction) confirmed sculpting in-app.
+- Seam'd brushes so far: mask, draw, inflate, crease, pinch. Remaining raw-GL: grab/move, smooth,
+  limb, color (+ remesh / multires / SDF). Next: smooth or grab.
+
+## 2026-06-24 — WebGPU port, Seam Step 2b: draw + inflate brush on the gpu:: seam
+
+- **Draw/inflate ported onto the seam** — all four kernels now dispatch through `gpu::`:
+  `draw_accum` (112-byte std140 Params UBO), `draw_apply`, `draw_accum_symmetrize` and
+  `draw_mirror_apply` (the latter three share a 16-byte vertex-count UBO). Inflate rides along —
+  it's the same `draw_accum` kernel with the `inflate` flag, not a separate shader. Loose uniforms
+  are gone; availability checks go through new `has_draw()` / `has_draw_symmetrize()` accessors.
+- **Wrote the missing WGSL siblings.** `draw_accum_symmetrize.wgsl` and `draw_mirror_apply.wgsl`
+  didn't exist; added both (lockstep with their new `.comp` files) so the WebGPU side has the whole
+  draw path. Plus the `.comp` siblings for `draw_accum` / `draw_apply` (which already had `.wgsl`).
+- Accum / stroke-normal / mirror-map buffers stay GL-owned for now (wrapped in `gpu::Buffer` views
+  at dispatch); they migrate to `gpu::Buffer` with the buffer-ownership pass. The seam's GL backend
+  issues a superset of the old `glMemoryBarrier` calls, so ordering is preserved.
+- **Verified:** gl build green; `chisel-gl-compute-test` still PASS; all four draw pipelines compile
+  at runtime ("pipeline compiled (gpu:: seam)"); draw + inflate + mirror-mode sculpting confirmed
+  in-app, and the untouched brushes (grab/crease/pinch/…) still behave (no regression from the
+  shared-`ComputeState` struct surgery).
+- Next: crease + pinch onto the seam (structurally closest to draw).
+
+## 2026-06-24 — WebGPU port, Seam Step 2b (start): mask kernel in the real app on the gpu:: seam
+
+- **First real `ComputeState` kernel ported onto the seam.** `init_mask` / `dispatch_mask_paint` no
+  longer touch raw GL — they build a `gpu::ComputePipeline` + bind group and dispatch through the
+  `gpu::` seam, so the *full chisel app* now runs the mask brush via the same RHI the WebGPU port
+  uses. Loose `glUniform`s are gone: a persistent std140 Params UBO (binding 63, `BIND_PARAMS`) is
+  uploaded per dab, byte-identical to the kernel's `Params` block. Hot path stays allocation-free on
+  GL (the transient bind group is a POD fill + `glBindBufferBase`).
+- **Shaders are embedded at build time now.** `cmake/embed_shaders.cmake` turns `shaders/{glsl,wgsl}/*`
+  into a generated `gpu_shaders_generated.h` exposing `gpu::embedded_shader(name)` — the app compiles
+  the canonical `mask_paint.comp` straight in (no runtime shader dir, no inline copy to drift). The
+  `chisel` target gains `CHISEL_BACKEND_GL` + links `gl_backend.cpp`.
+- **Verified:** gl build green (`chisel` + `chisel-gl-compute-test`); the compute test still matches
+  the CPU reference (touched 135 / masked 74 / max 1.000, PASS); the app launches and runs.
+- **Fixed a latent gl-build break:** the `imgui` static lib globbed `external/imgui/*.cpp`, which
+  swept in `imgui_impl_wgpu.cpp` (vendored in Stage 3) and failed for lack of webgpu headers — the GL
+  build just hadn't been recompiled since. The glob now excludes the WGPU backend.
+- Next: port the remaining brushes onto the seam one at a time (draw → smooth → crease/pinch → …),
+  each a lockstep `.comp`+`.wgsl` pair behind `gpu::embedded_shader`.
+
 ## 2026-06-24 — WebGPU port, Seam Step 2a: gpu:: GL backend (seam is now dual-backend)
 
 - **The seam now has two backends.** New `src/gpu/gl_backend.cpp` implements the `gpu::` compute RHI

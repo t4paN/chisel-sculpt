@@ -1,0 +1,43 @@
+// draw_apply.comp — GLSL 430 sibling of shaders/wgsl/draw_apply.wgsl.
+// Pass 2 of the draw/inflate brush: each thread reads its vertex's accumulated
+// displacement, scales by (1 - mask), adds it to the position, and appends the
+// vertex to the compact dirty list. 16-byte std140 Params UBO at binding 63.
+#version 430
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0)  buffer PosBuf   { float positions[]; };
+layout(std430, binding = 3)  readonly buffer AccumBuf { uint accum[]; };
+layout(std430, binding = 6)  buffer DirtyBuf { uint count; uint ids[]; } dirty;
+layout(std430, binding = 12) readonly buffer MaskBuf { float mask[]; };
+
+layout(std140, binding = 63) uniform Params {
+    uint vertex_count;  // 0
+    uint _pad0;
+    uint _pad1;
+    uint _pad2;         // struct rounds to 16
+} P;
+
+void main() {
+    uint v = gl_GlobalInvocationID.x;
+    if (v >= P.vertex_count) return;
+
+    uint base = v * 4u;
+    float w = uintBitsToFloat(accum[base + 3u]);
+    if (w <= 0.0) return;
+
+    float scale = 1.0 - mask[v];
+    if (scale <= 0.0) return;
+
+    uint idx = atomicAdd(dirty.count, 1u);
+    dirty.ids[idx] = v;
+
+    float inv_w = 1.0 / w;
+    float dx = uintBitsToFloat(accum[base + 0u]) * inv_w * scale;
+    float dy = uintBitsToFloat(accum[base + 1u]) * inv_w * scale;
+    float dz = uintBitsToFloat(accum[base + 2u]) * inv_w * scale;
+
+    uint pidx = v * 3u;
+    positions[pidx + 0u] += dx;
+    positions[pidx + 1u] += dy;
+    positions[pidx + 2u] += dz;
+}

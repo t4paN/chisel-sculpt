@@ -1,0 +1,107 @@
+// crease_accum.wgsl
+// Port of src/compute_crease_pinch.cpp (crease_accum_src). Crease brush accumulate
+// pass: like draw, but each deposit adds a tangential pull toward the anchor
+// (pinch_amount) on top of the normal displacement, folding a ridge/valley.
+// Deposits into the shared accum buffer; the apply side reuses draw_apply /
+// symmetrize / mirror_apply. Lockstep with crease_accum.comp. See CONVENTIONS.md.
+//
+// Bindings mirror the ComputeBinding enum:
+//   0 positions (read)   1 stroke normals (read)   3 accum (read_write)
+//   63 params UBO (BIND_PARAMS)
+
+// std140/uniform layout — every vec3 occupies a 16-byte slot, scalars pack into the
+// trailing space. The C++ upload struct MUST match this byte-for-byte (112 B).
+struct Params {
+    anchor_a         : vec3<f32>,   //   0..11
+    world_radius     : f32,         //  12
+    anchor_b         : vec3<f32>,   //  16..27
+    disp_amount      : f32,         //  28
+    view_a           : vec3<f32>,   //  32..43
+    pinch_amount     : f32,         //  44
+    view_b           : vec3<f32>,   //  48..59
+    hardness         : f32,         //  60
+    anchor_normal_a  : vec3<f32>,   //  64..75
+    facing_threshold : f32,         //  76
+    anchor_normal_b  : vec3<f32>,   //  80..91
+    use_b            : u32,         //  92
+    vertex_count     : u32,         //  96
+    _pad0            : u32,         // 100
+    _pad1            : u32,         // 104
+    _pad2            : u32,         // 108  (struct rounds to 112)
+};
+
+@group(0) @binding(0)  var<storage, read>       positions : array<f32>;
+@group(0) @binding(1)  var<storage, read>       normals   : array<f32>;
+@group(0) @binding(3)  var<storage, read_write> accum     : array<atomic<u32>>;
+@group(0) @binding(63) var<uniform>             P         : Params;
+
+fn atomicAddFloat(idx : u32, val : f32) {
+    var expected = atomicLoad(&accum[idx]);
+    for (var i = 0; i < 128; i = i + 1) {
+        let desired = bitcast<u32>(bitcast<f32>(expected) + val);
+        let res = atomicCompareExchangeWeak(&accum[idx], expected, desired);
+        if (res.exchanged) {
+            return;
+        }
+        expected = res.old_value;
+    }
+}
+
+fn brush_falloff(dist : f32, radius : f32) -> f32 {
+    let t = dist / radius;
+    let inner = 0.15 + P.hardness * 0.55;
+    if (t <= inner) {
+        return 1.0;
+    }
+    var blend = (t - inner) / (1.0 - inner + 1e-6);
+    blend = blend * blend * (3.0 - 2.0 * blend);
+    return 1.0 - blend;
+}
+
+fn deposit(v : u32, anchor : vec3<f32>, view : vec3<f32>, anchor_n : vec3<f32>,
+           vp : vec3<f32>, vn : vec3<f32>) {
+    let dist = length(vp - anchor);
+    if (dist >= P.world_radius) {
+        return;
+    }
+
+    let facing = -dot(vn, view);
+    if (facing < P.facing_threshold) {
+        return;
+    }
+
+    let w = brush_falloff(dist, P.world_radius);
+    if (w <= 0.0) {
+        return;
+    }
+
+    var d = anchor_n * (P.disp_amount * w);
+
+    if (dist > 1e-6) {
+        let to_anchor = anchor - vp;
+        let tangent = to_anchor - dot(to_anchor, anchor_n) * anchor_n;
+        d = d + tangent * (w * P.pinch_amount / P.world_radius);
+    }
+
+    let base = v * 4u;
+    atomicAddFloat(base + 0u, d.x);
+    atomicAddFloat(base + 1u, d.y);
+    atomicAddFloat(base + 2u, d.z);
+    atomicMax(&accum[base + 3u], bitcast<u32>(1.0));
+}
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
+    let v = gid.x;
+    if (v >= P.vertex_count) {
+        return;
+    }
+
+    let vp = vec3<f32>(positions[v * 3u], positions[v * 3u + 1u], positions[v * 3u + 2u]);
+    let vn = vec3<f32>(normals[v * 3u], normals[v * 3u + 1u], normals[v * 3u + 2u]);
+
+    deposit(v, P.anchor_a, P.view_a, P.anchor_normal_a, vp, vn);
+    if (P.use_b != 0u) {
+        deposit(v, P.anchor_b, P.view_b, P.anchor_normal_b, vp, vn);
+    }
+}

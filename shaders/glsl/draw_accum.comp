@@ -1,0 +1,80 @@
+// draw_accum.comp — GLSL 430 sibling of shaders/wgsl/draw_accum.wgsl.
+// Pass 1 of the draw/inflate brush: each thread owns one vertex, tests it against
+// the dab sphere, and deposits a displacement vector + unit weight into accum.
+// Same kernel, same ComputeBinding bindings, same 112-byte std140 Params UBO at
+// binding 63 (byte-identical to DrawAccumParamsGPU). Keep lockstep with the .wgsl.
+//
+// accum is 4 u32 per vertex { disp.x, disp.y, disp.z, weight } as float-bits. The
+// portable uint-bits + atomicCompSwap CAS path is used (the native float-atomics
+// fast path is dropped — WGSL has no float atomics).
+#version 430
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer PosBuf  { float positions[]; };
+layout(std430, binding = 1) readonly buffer NormBuf { float normals[];   };
+layout(std430, binding = 3)          buffer AccumBuf { uint accum[]; };
+
+layout(std140, binding = 63) uniform Params {
+    vec3  anchor_a;         //   0..11
+    float world_radius;     //  12
+    vec3  anchor_b;         //  16..27
+    float disp_amount;      //  28
+    vec3  view_a;           //  32..43
+    float hardness;         //  44
+    vec3  view_b;           //  48..59
+    float facing_threshold; //  60
+    vec3  anchor_normal_a;  //  64..75
+    uint  use_b;            //  76
+    vec3  anchor_normal_b;  //  80..91
+    uint  inflate;          //  92
+    uint  vertex_count;     //  96
+    uint  _pad0;            // 100
+    uint  _pad1;            // 104
+    uint  _pad2;            // 108  (struct rounds to 112)
+} P;
+
+void atomicAddFloat(uint idx, float val) {
+    uint expected = accum[idx];
+    for (int i = 0; i < 128; i++) {
+        uint desired = floatBitsToUint(uintBitsToFloat(expected) + val);
+        uint old = atomicCompSwap(accum[idx], expected, desired);
+        if (old == expected) return;
+        expected = old;
+    }
+}
+
+float brush_falloff(float dist, float radius) {
+    float t = dist / radius;
+    float inner = 0.15 + P.hardness * 0.55;
+    if (t <= inner) return 1.0;
+    float blend = (t - inner) / (1.0 - inner + 1e-6);
+    blend = blend * blend * (3.0 - 2.0 * blend);
+    return 1.0 - blend;
+}
+
+void deposit(uint v, vec3 anchor, vec3 view, vec3 anchor_n, vec3 vp, vec3 vn) {
+    float dist = length(vp - anchor);
+    if (dist >= P.world_radius) return;
+    if (P.inflate == 0u) {
+        float facing = -dot(vn, view);
+        if (facing < P.facing_threshold) return;
+    }
+    float w = brush_falloff(dist, P.world_radius);
+    if (w <= 0.0) return;
+    vec3 dir = (P.inflate != 0u) ? vn : anchor_n;
+    vec3 d = dir * (P.disp_amount * w);
+    uint base = v * 4u;
+    atomicAddFloat(base + 0u, d.x);
+    atomicAddFloat(base + 1u, d.y);
+    atomicAddFloat(base + 2u, d.z);
+    atomicMax(accum[base + 3u], floatBitsToUint(1.0));
+}
+
+void main() {
+    uint v = gl_GlobalInvocationID.x;
+    if (v >= P.vertex_count) return;
+    vec3 vp = vec3(positions[v*3u + 0u], positions[v*3u + 1u], positions[v*3u + 2u]);
+    vec3 vn = vec3(normals[v*3u + 0u],   normals[v*3u + 1u],   normals[v*3u + 2u]);
+    deposit(v, P.anchor_a, P.view_a, P.anchor_normal_a, vp, vn);
+    if (P.use_b != 0u) deposit(v, P.anchor_b, P.view_b, P.anchor_normal_b, vp, vn);
+}

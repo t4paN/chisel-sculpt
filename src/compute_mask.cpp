@@ -1,64 +1,26 @@
 #include "compute.h"
+#include "gpu_shaders_generated.h"   // gpu::embedded_shader("mask_paint")
 #include <cstdio>
 #include <cstring>
 
 // ---------------------------------------------------------------------------
-// Mask paint shader — per-vertex world-distance check, dual anchor (mirror),
-// writes directly to the mask VBO/SSBO and appends to a compact dirty list.
+// Mask paint — the first kernel ported onto the gpu:: seam (Seam Step 2b). The
+// kernel logic lives in the canonical shaders/{glsl,wgsl}/mask_paint.* (embedded
+// at build time); this file only drives the seam: pipeline, params UBO, bind
+// group, dispatch. Per-vertex world-distance check, dual anchor (mirror), writes
+// the mask buffer directly and appends touched vert ids to a compact dirty list.
 // ---------------------------------------------------------------------------
 
-static const char* mask_paint_src = R"(
-#version 430
-layout(local_size_x = 256) in;
-
-layout(std430, binding = 0)  readonly buffer PosBuf { float positions[]; };
-layout(std430, binding = 12) buffer MaskBuf { float mask_buf[]; };
-layout(std430, binding = 6)  buffer DirtyBuf { uint dirty_count; uint dirty_ids[]; };
-
-uniform vec3  u_anchor_a;
-uniform vec3  u_anchor_b;
-uniform int   u_use_b;
-uniform float u_world_radius;
-uniform float u_hardness;
-uniform float u_paint_strength;
-uniform uint  u_vertex_count;
-
-float brush_falloff(float dist, float radius) {
-    float t = dist / radius;
-    float inner = 0.15 + u_hardness * 0.55;
-    if (t <= inner) return 1.0;
-    float blend = (t - inner) / (1.0 - inner + 1e-6);
-    blend = blend * blend * (3.0 - 2.0 * blend);
-    return 1.0 - blend;
+namespace {
+// std140 Params block, byte-identical to mask_paint.{comp,wgsl}'s `Params` (48
+// bytes): a vec3 fills a 16-byte slot, so the trailing f32 packs into it.
+struct MaskParamsGPU {
+    float    anchor_a[3]; float world_radius;
+    float    anchor_b[3]; float hardness;
+    float    paint_strength; uint32_t use_b; uint32_t vertex_count; uint32_t _pad0;
+};
+static_assert(sizeof(MaskParamsGPU) == 48, "mask Params UBO must be 48 bytes (std140)");
 }
-
-void try_paint(uint v, vec3 anchor, vec3 vp) {
-    if (u_use_b != 0 && anchor.x * vp.x < 0.0) return;
-    float dist = length(vp - anchor);
-    if (dist >= u_world_radius) return;
-    float w = brush_falloff(dist, u_world_radius);
-    if (w <= 0.0) return;
-
-    float delta = u_paint_strength * w;
-    float old_val = mask_buf[v];
-    float new_val = clamp(old_val + delta, 0.0, 1.0);
-    if (new_val == old_val) return;
-
-    mask_buf[v] = new_val;
-    uint idx = atomicAdd(dirty_count, 1u);
-    dirty_ids[idx] = v;
-}
-
-void main() {
-    uint v = gl_GlobalInvocationID.x;
-    if (v >= u_vertex_count) return;
-
-    vec3 vp = vec3(positions[v*3u], positions[v*3u+1u], positions[v*3u+2u]);
-
-    try_paint(v, u_anchor_a, vp);
-    if (u_use_b != 0) try_paint(v, u_anchor_b, vp);
-}
-)";
 
 // ---------------------------------------------------------------------------
 // Methods
@@ -66,42 +28,65 @@ void main() {
 
 bool ComputeState::init_mask() {
     if (!supported) return false;
-    mask_paint_program = compile_program(mask_paint_src);
-    if (!mask_paint_program) {
-        std::printf("[compute] mask_paint shader failed to compile\n");
+
+    gpu::ShaderSources src = gpu::embedded_shader("mask_paint");
+    const gpu::BindEntry layout[] = {
+        { BIND_POSITIONS,   gpu::Bind::StorageRead,      0 },
+        { BIND_MASK,        gpu::Bind::StorageReadWrite, 0 },
+        { BIND_DIRTY_VERTS, gpu::Bind::StorageReadWrite, 0 },
+        { BIND_PARAMS,      gpu::Bind::Uniform,          sizeof(MaskParamsGPU) },
+    };
+    mask_pipeline = gpu::create_compute_pipeline(gpu_dev, src, layout, 4);
+    if (!mask_pipeline.handle) {
+        std::printf("[compute] mask_paint pipeline failed to compile\n");
         return false;
     }
-    std::printf("[compute] mask_paint shader compiled\n");
+    mask_params_ubo = gpu::create_buffer(gpu_dev, nullptr, sizeof(MaskParamsGPU),
+                                         gpu::Usage::Uniform);
+    std::printf("[compute] mask_paint pipeline compiled (gpu:: seam)\n");
     return true;
 }
 
 void ComputeState::dispatch_mask_paint(const MaskPaintParams& p, GLuint pos_vbo) {
-    if (!mask_paint_program || !mask_ssbo) return;
+    if (!has_mask() || !mask_ssbo) return;
 
     ensure_smooth_dirty_buffer(p.vertex_count);
+
+    const uint32_t vc = p.vertex_count;
+
+    // Buffer views over the GL-owned working buffers (renderer VBOs + the dirty
+    // list SSBO). On the GL backend a gpu::Buffer is just its handle; the seam binds
+    // them at dispatch. Sizes are advisory on GL, the bind range on WebGPU.
+    gpu::Buffer posView{   (uint64_t)vc * 3u * sizeof(float),    pos_vbo };
+    gpu::Buffer maskView{  (uint64_t)vc * sizeof(float),         mask_ssbo };
+    gpu::Buffer dirtyView{ (uint64_t)(vc + 1u) * sizeof(uint32_t), smooth_dirty_ssbo };
+
+    // Reset the dirty counter (slot 0), then upload this dab's params.
     uint32_t zero = 0;
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, smooth_dirty_ssbo);
-    glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(uint32_t), &zero);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    gpu::write_buffer(gpu_dev, dirtyView, 0, &zero, sizeof(zero));
 
-    glUseProgram(mask_paint_program);
+    MaskParamsGPU mp = {};
+    mp.anchor_a[0] = p.anchor_a_x; mp.anchor_a[1] = p.anchor_a_y; mp.anchor_a[2] = p.anchor_a_z;
+    mp.anchor_b[0] = p.anchor_b_x; mp.anchor_b[1] = p.anchor_b_y; mp.anchor_b[2] = p.anchor_b_z;
+    mp.world_radius   = p.world_radius;
+    mp.hardness       = p.hardness;
+    mp.paint_strength = p.paint_strength;
+    mp.use_b          = (uint32_t)p.use_b;
+    mp.vertex_count   = vc;
+    gpu::write_buffer(gpu_dev, mask_params_ubo, 0, &mp, sizeof(mp));
 
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_POSITIONS, pos_vbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_MASK, mask_ssbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_DIRTY_VERTS, smooth_dirty_ssbo);
+    const gpu::BindBufferEntry bg[] = {
+        { BIND_POSITIONS,   &posView,         posView.size },
+        { BIND_MASK,        &maskView,        maskView.size },
+        { BIND_DIRTY_VERTS, &dirtyView,       dirtyView.size },
+        { BIND_PARAMS,      &mask_params_ubo, sizeof(MaskParamsGPU) },
+    };
+    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, mask_pipeline, bg, 4);
 
-    glUniform3f(glGetUniformLocation(mask_paint_program, "u_anchor_a"),
-                p.anchor_a_x, p.anchor_a_y, p.anchor_a_z);
-    glUniform3f(glGetUniformLocation(mask_paint_program, "u_anchor_b"),
-                p.anchor_b_x, p.anchor_b_y, p.anchor_b_z);
-    glUniform1i(glGetUniformLocation(mask_paint_program, "u_use_b"), p.use_b);
-    glUniform1f(glGetUniformLocation(mask_paint_program, "u_world_radius"), p.world_radius);
-    glUniform1f(glGetUniformLocation(mask_paint_program, "u_hardness"), p.hardness);
-    glUniform1f(glGetUniformLocation(mask_paint_program, "u_paint_strength"), p.paint_strength);
-    glUniform1ui(glGetUniformLocation(mask_paint_program, "u_vertex_count"), p.vertex_count);
+    uint32_t groups = (vc + 255u) / 256u;
+    gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
+    gpu::dispatch(b, mask_pipeline, grp, groups);
+    gpu::submit(b);   // GL backend issues the storage+vertex-attrib barriers here
 
-    int groups = (int)((p.vertex_count + 255u) / 256u);
-    glDispatchCompute(groups, 1, 1);
-
-    glMemoryBarrier(GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT | GL_SHADER_STORAGE_BARRIER_BIT);
+    gpu::release_bind_group(grp);   // no-op on GL; frees the transient group on WebGPU
 }

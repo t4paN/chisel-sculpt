@@ -20,6 +20,28 @@ if(NOT CHISEL_GPU_BACKEND STREQUAL "gl" AND NOT CHISEL_GPU_BACKEND STREQUAL "web
 endif()
 
 # ---------------------------------------------------------------------------
+# Embedded compute shaders. A build-time generator (cmake/embed_shaders.cmake)
+# turns shaders/{glsl,wgsl}/* into one header exposing gpu::embedded_shader(name),
+# so the gpu:: seam compiles the canonical kernels straight in (no runtime shader
+# dir, no inline copy to drift). Regenerates when any shader changes.
+# ---------------------------------------------------------------------------
+set(CHISEL_GENERATED_DIR "${CMAKE_BINARY_DIR}/generated")
+set(CHISEL_SHADERS_HEADER "${CHISEL_GENERATED_DIR}/gpu_shaders_generated.h")
+file(GLOB _CHISEL_GLSL CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/glsl/*.comp")
+file(GLOB _CHISEL_WGSL CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/wgsl/*.wgsl")
+add_custom_command(
+    OUTPUT "${CHISEL_SHADERS_HEADER}"
+    COMMAND ${CMAKE_COMMAND}
+        -DGLSL_DIR=${CMAKE_CURRENT_SOURCE_DIR}/shaders/glsl
+        -DWGSL_DIR=${CMAKE_CURRENT_SOURCE_DIR}/shaders/wgsl
+        -DOUT=${CHISEL_SHADERS_HEADER}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_shaders.cmake
+    DEPENDS ${_CHISEL_GLSL} ${_CHISEL_WGSL} ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_shaders.cmake
+    COMMENT "Embedding compute shaders -> gpu_shaders_generated.h"
+    VERBATIM)
+add_custom_target(chisel_shaders DEPENDS "${CHISEL_SHADERS_HEADER}")
+
+# ---------------------------------------------------------------------------
 # WebGPU backend (Stage 2 bring-up). Fetches the wgpu-native prebuilt and builds
 # the bring-up probe targets. The full chisel app is NOT portable to webgpu until
 # the gpu:: seam lands, so this backend currently builds only the probes; the GL
@@ -120,8 +142,11 @@ find_package(glfw3 3.3 REQUIRED)
 add_library(glad STATIC src/glad.c)
 target_include_directories(glad PUBLIC include)
 
-# Dear ImGui (vendored)
+# Dear ImGui (vendored). Exclude imgui_impl_wgpu.cpp — that's the WebGPU renderer
+# backend (vendored for the webgpu build); it needs webgpu headers and must not be
+# compiled into the GL app, which uses imgui_impl_opengl3.cpp.
 file(GLOB IMGUI_SOURCES external/imgui/*.cpp)
+list(FILTER IMGUI_SOURCES EXCLUDE REGEX "imgui_impl_wgpu\\.cpp$")
 add_library(imgui STATIC ${IMGUI_SOURCES})
 target_include_directories(imgui PUBLIC external/imgui)
 target_link_libraries(imgui PRIVATE glfw)
@@ -145,6 +170,7 @@ add_executable(chisel
     src/multires_stack.cpp
     src/multires_gpu.cpp
     src/remesh.cpp
+    src/gpu/gl_backend.cpp
     src/compute_common.cpp
     src/compute_draw.cpp
     src/compute_smooth.cpp
@@ -163,7 +189,11 @@ add_executable(chisel
     src/tablet.cpp
 )
 
-target_include_directories(chisel PRIVATE include external)
+target_include_directories(chisel PRIVATE include external ${CHISEL_GENERATED_DIR})
+# Compute kernels run through the gpu:: seam's GL backend (Seam Step 2b). The seam
+# selects backend handle types at compile time via this macro (see include/gpu/gpu.h).
+target_compile_definitions(chisel PRIVATE CHISEL_BACKEND_GL)
+add_dependencies(chisel chisel_shaders)
 
 # Version: an explicit -DCHISEL_VERSION (CI injects the tag) wins; otherwise
 # derive from git; "dev" only as a last resort for a tagless local tree.

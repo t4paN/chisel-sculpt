@@ -345,7 +345,7 @@ void BrushStroke::begin(Renderer& renderer, const Camera& cam,
     // cached_triid/cached_bary. So gate the ~100MB blocking read to exactly the case
     // that uses it: MASK with no GPU mask program available. (matches main.cpp:958)
     bool need_fullscreen = (brush_type == BrushType::MASK)
-                           && !(compute && compute->supported && compute->mask_paint_program);
+                           && !(compute && compute->supported && compute->has_mask());
     if (need_fullscreen) {
         int total_pixels = screen_w * screen_h;
         cached_triid.resize(total_pixels);
@@ -434,7 +434,7 @@ void BrushStroke::apply_crease(DabContext& ctx, float dab_x, float dab_y,
     dirty_verts.clear();
 
     set_anchor(ctx.mesh, ctx.cam, dab_x, dab_y, ctx.eff_brush_size, ctx.win_h, ctx.renderer);
-    if (!ctx.compute.supported || !ctx.compute.crease_accum_program || !anchor_valid) {
+    if (!ctx.compute.supported || !ctx.compute.has_crease() || !anchor_valid) {
         return;
     }
 
@@ -473,7 +473,7 @@ void BrushStroke::apply_crease(DabContext& ctx, float dab_x, float dab_y,
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
 
     bool use_sym = ctx.input.mirror_x
-                   && ctx.compute.draw_accum_symmetrize_program
+                   && ctx.compute.has_draw_symmetrize()
                    && ctx.compute.mirror_map_vertex_count == ctx.vertex_count;
     if (use_sym) {
         ctx.compute.dispatch_draw_accum_symmetrize(ctx.mesh.vertex_count());
@@ -494,7 +494,7 @@ void BrushStroke::apply_pinch(DabContext& ctx, float dab_x, float dab_y,
     dirty_verts.clear();
 
     set_anchor(ctx.mesh, ctx.cam, dab_x, dab_y, ctx.eff_brush_size, ctx.win_h, ctx.renderer);
-    if (!ctx.compute.supported || !ctx.compute.pinch_accum_program || !anchor_valid) {
+    if (!ctx.compute.supported || !ctx.compute.has_pinch() || !anchor_valid) {
         return;
     }
 
@@ -530,7 +530,7 @@ void BrushStroke::apply_pinch(DabContext& ctx, float dab_x, float dab_y,
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
 
     bool use_sym = ctx.input.mirror_x
-                   && ctx.compute.draw_accum_symmetrize_program
+                   && ctx.compute.has_draw_symmetrize()
                    && ctx.compute.mirror_map_vertex_count == ctx.vertex_count;
     if (use_sym) {
         ctx.compute.dispatch_draw_accum_symmetrize(ctx.mesh.vertex_count());
@@ -552,7 +552,7 @@ void BrushStroke::apply_draw(DabContext& ctx, float dab_x, float dab_y,
     dirty_verts.clear();
 
     set_anchor(ctx.mesh, ctx.cam, dab_x, dab_y, ctx.eff_brush_size, ctx.win_h, ctx.renderer);
-    if (!ctx.compute.supported || !ctx.compute.draw_accum_program || !anchor_valid) {
+    if (!ctx.compute.supported || !ctx.compute.has_draw() || !anchor_valid) {
         return;
     }
 
@@ -597,7 +597,7 @@ void BrushStroke::apply_draw(DabContext& ctx, float dab_x, float dab_y,
     // X-mirror displacements regardless of small tessellation drift between
     // twins. Orphan/seam verts copy through unchanged.
     bool use_sym = ctx.input.mirror_x
-                   && ctx.compute.draw_accum_symmetrize_program
+                   && ctx.compute.has_draw_symmetrize()
                    && ctx.compute.mirror_map_vertex_count == ctx.vertex_count;
     if (use_sym) {
         ctx.compute.dispatch_draw_accum_symmetrize(ctx.mesh.vertex_count());
@@ -804,7 +804,7 @@ void BrushStroke::post_frame(DabContext& ctx) {
 void BrushStroke::apply_mask_gpu(DabContext& ctx, float dab_x, float dab_y,
                                  float strength, float hardness, bool invert) {
     if (!is_active()) return;
-    if (!ctx.compute.supported || !ctx.compute.mask_paint_program) return;
+    if (!ctx.compute.supported || !ctx.compute.has_mask()) return;
 
     set_anchor(ctx.mesh, ctx.cam, dab_x, dab_y, ctx.eff_brush_size, ctx.win_h, ctx.renderer);
     if (!anchor_valid) return;

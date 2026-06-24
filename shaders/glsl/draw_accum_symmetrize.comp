@@ -1,0 +1,48 @@
+// draw_accum_symmetrize.comp — GLSL 430 sibling of draw_accum_symmetrize.wgsl.
+// For each vertex v with mirror twin mv != v, fold the X-mirrored accum[mv] into
+// v's accum and write to a separate output buffer (accum_out @20), so out[mv] is
+// strictly the X-mirror of out[v]. Self-paired/seam verts (mv==v) and out-of-range
+// partners copy through unchanged. Reading and writing different buffers avoids the
+// read-after-write race an in-place version would have. 16-byte Params UBO @63.
+#version 430
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 3)  readonly  buffer AccumIn  { uint accum_in[]; };
+layout(std430, binding = 20) writeonly buffer AccumOut { uint accum_out[]; };
+layout(std430, binding = 7)  readonly  buffer MirrorBuf { uint mirror_map[]; };
+
+layout(std140, binding = 63) uniform Params {
+    uint vertex_count;
+    uint _pad0; uint _pad1; uint _pad2;
+} P;
+
+void main() {
+    uint v = gl_GlobalInvocationID.x;
+    if (v >= P.vertex_count) return;
+
+    uint base_v = v * 4u;
+    float vx = uintBitsToFloat(accum_in[base_v + 0u]);
+    float vy = uintBitsToFloat(accum_in[base_v + 1u]);
+    float vz = uintBitsToFloat(accum_in[base_v + 2u]);
+    float vw = uintBitsToFloat(accum_in[base_v + 3u]);
+
+    uint mv = mirror_map[v];
+    if (mv == v || mv >= P.vertex_count) {
+        accum_out[base_v + 0u] = floatBitsToUint(vx);
+        accum_out[base_v + 1u] = floatBitsToUint(vy);
+        accum_out[base_v + 2u] = floatBitsToUint(vz);
+        accum_out[base_v + 3u] = floatBitsToUint(vw);
+        return;
+    }
+
+    uint base_m = mv * 4u;
+    float mx = uintBitsToFloat(accum_in[base_m + 0u]);
+    float my = uintBitsToFloat(accum_in[base_m + 1u]);
+    float mz = uintBitsToFloat(accum_in[base_m + 2u]);
+    float mw = uintBitsToFloat(accum_in[base_m + 3u]);
+
+    accum_out[base_v + 0u] = floatBitsToUint(vx + (-mx));
+    accum_out[base_v + 1u] = floatBitsToUint(vy +  my);
+    accum_out[base_v + 2u] = floatBitsToUint(vz +  mz);
+    accum_out[base_v + 3u] = floatBitsToUint(vw +  mw);
+}

@@ -11,19 +11,12 @@ ComputeState::ComputeState()
     , accum_ssbo(0)
     , accum_vertex_count(0)
     , accum_sym_ssbo(0)
-    , draw_accum_program(0)
-    , draw_accum_symmetrize_program(0)
     , stroke_norm_ssbo(0)
     , stroke_norm_capacity(0)
-    , draw_apply_program(0)
-    , draw_mirror_apply_program(0)
     , smooth_accum_program(0)
     , smooth_apply_program(0)
     , smooth_mirror_apply_program(0)
     , stroke_smooth_apply_program(0)
-    , crease_accum_program(0)
-    , pinch_accum_program(0)
-    , mask_paint_program(0)
     , color_paint_program(0)
     , color_smooth_program(0)
     , move_capture_program(0)
@@ -104,6 +97,10 @@ bool ComputeState::init() {
     has_native_float_atomics = GLAD_GL_NV_shader_atomic_float != 0;
 
     supported = true;
+
+    // The gpu:: seam runs on the current GL context (no device object on GL); ported
+    // kernels (mask, Seam Step 2b) dispatch through this. WebGPU injects a real device.
+    gpu_dev = gpu::gl_device();
 
     std::printf("[compute] available: workgroup_size=%d invocations=%d ssbo_bindings=%d float_atomics=%s\n",
                 max_workgroup_size, max_workgroup_invocations, max_ssbo_bindings,
@@ -233,18 +230,23 @@ void ComputeState::cleanup() {
     if (accum_sym_ssbo) { glDeleteBuffers(1, &accum_sym_ssbo); accum_sym_ssbo = 0; }
     if (stroke_norm_ssbo) { glDeleteBuffers(1, &stroke_norm_ssbo); stroke_norm_ssbo = 0; }
     stroke_norm_capacity = 0;
-    if (draw_accum_program) { glDeleteProgram(draw_accum_program); draw_accum_program = 0; }
-    if (draw_accum_symmetrize_program) { glDeleteProgram(draw_accum_symmetrize_program); draw_accum_symmetrize_program = 0; }
-    if (draw_apply_program) { glDeleteProgram(draw_apply_program); draw_apply_program = 0; }
-    if (draw_mirror_apply_program) { glDeleteProgram(draw_mirror_apply_program); draw_mirror_apply_program = 0; }
+    gpu::release_compute_pipeline(draw_accum_pipeline);
+    gpu::release_compute_pipeline(draw_symmetrize_pipeline);
+    gpu::release_compute_pipeline(draw_apply_pipeline);
+    gpu::release_compute_pipeline(draw_mirror_apply_pipeline);
+    gpu::release_buffer(draw_accum_ubo);
+    gpu::release_buffer(draw_vcount_ubo);
     if (mirror_map_ssbo) { glDeleteBuffers(1, &mirror_map_ssbo); mirror_map_ssbo = 0; }
     if (smooth_accum_program) { glDeleteProgram(smooth_accum_program); smooth_accum_program = 0; }
     if (smooth_apply_program) { glDeleteProgram(smooth_apply_program); smooth_apply_program = 0; }
     if (smooth_mirror_apply_program) { glDeleteProgram(smooth_mirror_apply_program); smooth_mirror_apply_program = 0; }
     if (stroke_smooth_apply_program) { glDeleteProgram(stroke_smooth_apply_program); stroke_smooth_apply_program = 0; }
-    if (crease_accum_program) { glDeleteProgram(crease_accum_program); crease_accum_program = 0; }
-    if (pinch_accum_program) { glDeleteProgram(pinch_accum_program); pinch_accum_program = 0; }
-    if (mask_paint_program) { glDeleteProgram(mask_paint_program); mask_paint_program = 0; }
+    gpu::release_compute_pipeline(crease_accum_pipeline);
+    gpu::release_compute_pipeline(pinch_accum_pipeline);
+    gpu::release_buffer(crease_ubo);
+    gpu::release_buffer(pinch_ubo);
+    gpu::release_compute_pipeline(mask_pipeline);
+    gpu::release_buffer(mask_params_ubo);
     if (color_paint_program) { glDeleteProgram(color_paint_program); color_paint_program = 0; }
     if (color_smooth_program) { glDeleteProgram(color_smooth_program); color_smooth_program = 0; }
     if (move_capture_program)       { glDeleteProgram(move_capture_program);       move_capture_program       = 0; }

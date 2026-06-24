@@ -1210,7 +1210,7 @@ int main(int argc, char* argv[]) {
                         brush_stroke.apply_pinch(ctx, dab_x, dab_y, eff_strength, eff_hardness,
                                                   input.is_subtract_active());
                     } else if (input.current_brush == BrushType::MASK) {
-                        if (compute.supported && compute.mask_paint_program) {
+                        if (compute.supported && compute.has_mask()) {
                             brush_stroke.apply_mask_gpu(ctx, dab_x, dab_y,
                                                         eff_strength, eff_hardness,
                                                         input.is_subtract_active());
