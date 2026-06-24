@@ -14,8 +14,6 @@ ComputeState::ComputeState()
     , stroke_norm_ssbo(0)
     , stroke_norm_capacity(0)
     , stroke_smooth_apply_program(0)
-    , color_paint_program(0)
-    , color_smooth_program(0)
     , move_affected_ssbo(0)
     , move_weights_ssbo(0)
     , move_weights_pong_ssbo(0)
@@ -244,8 +242,10 @@ void ComputeState::cleanup() {
     gpu::release_buffer(pinch_ubo);
     gpu::release_compute_pipeline(mask_pipeline);
     gpu::release_buffer(mask_params_ubo);
-    if (color_paint_program) { glDeleteProgram(color_paint_program); color_paint_program = 0; }
-    if (color_smooth_program) { glDeleteProgram(color_smooth_program); color_smooth_program = 0; }
+    gpu::release_compute_pipeline(color_paint_pipeline);
+    gpu::release_compute_pipeline(color_smooth_pipeline);
+    gpu::release_buffer(color_paint_ubo);
+    gpu::release_buffer(color_smooth_ubo);
     gpu::release_compute_pipeline(move_capture_pipeline);
     gpu::release_compute_pipeline(move_weight_smooth_pipeline);
     gpu::release_compute_pipeline(move_apply_pipeline);

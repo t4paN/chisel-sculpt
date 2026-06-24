@@ -237,11 +237,14 @@ struct ComputeState {
     gpu::ComputePipeline mask_pipeline;
     gpu::Buffer          mask_params_ubo;
 
-    // Paint brush compute shader (writes directly to color VBO/SSBO)
-    GLuint color_paint_program;
-    // Paint-smooth: blends each vertex colour toward its neighbour average
-    // (the smooth gesture while painting). Same buffers as color_paint.
-    GLuint color_smooth_program;
+    // Paint brush — ported onto the gpu:: seam (Seam Step 2b). Buffer-only: writes the
+    // colour VBO/SSBO directly (lerp-to-colour) and the paint-smooth blends each vertex
+    // colour toward its 1-ring neighbour average. paint carries a 64-byte std140 Params
+    // block, smooth a 48-byte one. has_color()/has_color_smooth() report readiness.
+    gpu::ComputePipeline color_paint_pipeline;
+    gpu::ComputePipeline color_smooth_pipeline;
+    gpu::Buffer          color_paint_ubo;     // 64-byte ColorPaintParams block
+    gpu::Buffer          color_smooth_ubo;    // 48-byte ColorSmoothParams block
 
     // Move brush compute shaders — ported onto the gpu:: seam (Seam Step 2b).
     // Stateful: capture-once weights + per-dab apply. Capture carries a 32-byte
@@ -494,6 +497,10 @@ struct ComputeState {
 
     // Smooth readiness (replaces smooth_accum_program truthiness checks).
     bool has_smooth() const { return smooth_accum_pipeline.handle != 0; }
+
+    // Paint readiness (replaces color_paint_program / color_smooth_program checks).
+    bool has_color() const { return color_paint_pipeline.handle != 0; }
+    bool has_color_smooth() const { return color_smooth_pipeline.handle != 0; }
 
     // Dispatch the mask paint shader: per-vertex distance check, writes mask VBO
     // directly. Uses smooth_dirty_ssbo for the compact dirty list. Caller reads

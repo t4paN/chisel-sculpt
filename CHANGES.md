@@ -2,6 +2,22 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-24 — WebGPU port, Seam Step 2b: paint (color) on the gpu:: seam
+
+- **Paint ported onto the seam** — both kernels now dispatch through `gpu::`: `color_paint`
+  (per-dab world-distance gate, dual-anchor mirror, lerp-to-colour on the packed RGBA8 buffer +
+  dirty list; 64-byte std140 Params UBO) and `color_smooth` (paint-smooth gesture: blend each
+  colour toward its 1-ring neighbour average; 48-byte UBO, 7 storage buffers). Loose uniforms gone;
+  checks go through new `has_color()` / `has_color_smooth()` (4 call sites in brush.cpp/main.cpp).
+- **New shader pairs:** `color_{paint,smooth}.{comp,wgsl}`, lockstep, embedded at build time. WGSL
+  uses `pack4x8unorm`/`unpack4x8unorm` (the WGSL spelling of GLSL `packUnorm4x8`).
+- Colour / mask / dirty / adjacency buffers stay GL-owned (views at dispatch); dirty-counter reset
+  stays raw GL.
+- **Verified:** gl build green; both pipelines compile at runtime; paint + paint-smooth confirmed
+  in-app (incl. mirror + mask-shield).
+- **This clears the brush list** — every sculpt + paint brush now runs through the seam. Remaining
+  raw-GL is all non-brush: `compute_normals`, `stroke_smooth`, limb drag/relax, remesh, multires, SDF.
+
 ## 2026-06-24 — WebGPU port, Seam Step 2b: grab/move + smooth on the gpu:: seam
 
 - **Grab/move ported onto the seam.** Three stateful kernels now dispatch through `gpu::`:

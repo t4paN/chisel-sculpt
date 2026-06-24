@@ -848,7 +848,7 @@ void BrushStroke::apply_mask_gpu(DabContext& ctx, float dab_x, float dab_y,
 void BrushStroke::apply_color_gpu(DabContext& ctx, float dab_x, float dab_y,
                                   float strength, float hardness, bool erase) {
     if (!is_active()) return;
-    if (!ctx.compute.supported || !ctx.compute.color_paint_program) return;
+    if (!ctx.compute.supported || !ctx.compute.has_color()) return;
 
     set_anchor(ctx.mesh, ctx.cam, dab_x, dab_y, ctx.eff_brush_size, ctx.win_h, ctx.renderer);
     if (!anchor_valid) return;
@@ -897,7 +897,7 @@ void BrushStroke::apply_color_gpu(DabContext& ctx, float dab_x, float dab_y,
 void BrushStroke::apply_color_smooth_gpu(DabContext& ctx, float dab_x, float dab_y,
                                          float strength, float hardness) {
     if (!is_active()) return;
-    if (!ctx.compute.supported || !ctx.compute.color_smooth_program) return;
+    if (!ctx.compute.supported || !ctx.compute.has_color_smooth()) return;
 
     set_anchor(ctx.mesh, ctx.cam, dab_x, dab_y, ctx.eff_brush_size, ctx.win_h, ctx.renderer);
     if (!anchor_valid) return;

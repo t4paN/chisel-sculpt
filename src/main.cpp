@@ -1194,7 +1194,7 @@ int main(int argc, char* argv[]) {
                     if (is_smooth) {
                         // Smooth gesture while painting blends colours, not geometry.
                         if (input.current_brush == BrushType::PAINT &&
-                            compute.supported && compute.color_smooth_program) {
+                            compute.supported && compute.has_color_smooth()) {
                             brush_stroke.apply_color_smooth_gpu(ctx, dab_x, dab_y, eff_strength, eff_hardness);
                         } else {
                             brush_stroke.apply_smooth(ctx, dab_x, dab_y, eff_strength, eff_hardness);
@@ -1230,7 +1230,7 @@ int main(int argc, char* argv[]) {
                             }
                         }
                     } else if (input.current_brush == BrushType::PAINT) {
-                        if (compute.supported && compute.color_paint_program) {
+                        if (compute.supported && compute.has_color()) {
                             brush_stroke.apply_color_gpu(ctx, dab_x, dab_y,
                                                          eff_strength, eff_hardness,
                                                          input.is_subtract_active());
