@@ -161,6 +161,34 @@ int main() {
     bool pass = (gpuTouched == cpuTouched) && (gpuMasked == cpuMasked) && (std::fabs(gpuMax - cpuMax) < 1e-4f);
     std::printf("[gltest] %s — gpu:: GL backend reproduces the mask kernel\n", pass ? "PASS" : "FAIL");
 
+    // ---- SDF kernel compile smoke check (GLSL only) ----
+    // Validates that the 5 self-contained sdf_*.comp compile + link through the seam
+    // (the main porting risk: the inlined snippets + the anonymous Params UBO). Full
+    // numeric verification is a live in-app mirror-merge. Bind layouts mirror sdf.cpp.
+    {
+        using B = gpu::Bind;
+        struct Stem { const char* name; std::vector<gpu::BindEntry> layout; };
+        std::vector<Stem> stems = {
+            { "sdf_count",  { {21,B::StorageRead,0},{22,B::StorageRead,0},{36,B::StorageReadWrite,0},{63,B::Uniform,32} } },
+            { "sdf_expand", { {21,B::StorageRead,0},{22,B::StorageRead,0},{23,B::StorageReadWrite,0},{36,B::StorageRead,0},{37,B::StorageRead,0},{63,B::Uniform,32} } },
+            { "sdf_sign",   { {21,B::StorageRead,0},{22,B::StorageRead,0},{23,B::StorageRead,0},{24,B::StorageReadWrite,0},{63,B::Uniform,48} } },
+            { "sdf_mc",     { {24,B::StorageRead,0},{25,B::StorageReadWrite,0},{26,B::StorageReadWrite,0},{27,B::StorageRead,0},{63,B::Uniform,32} } },
+            { "sdf_nets",   { {24,B::StorageRead,0},{25,B::StorageReadWrite,0},{26,B::StorageReadWrite,0},{63,B::Uniform,32} } },
+        };
+        for (auto& s : stems) {
+            std::string src = loadGlsl((std::string(s.name) + ".comp").c_str());
+            bool ok = false;
+            if (!src.empty()) {
+                gpu::ComputePipeline p = gpu::create_compute_pipeline(
+                    dev, gpu::ShaderSources{ nullptr, src.c_str() }, s.layout.data(), (uint32_t)s.layout.size());
+                ok = (p.handle != 0);
+                gpu::release_compute_pipeline(p);
+            }
+            std::printf("[gltest] sdf shader %-10s %s\n", s.name, ok ? "compiled" : "FAILED");
+            pass = pass && ok;
+        }
+    }
+
     gpu::release_compute_pipeline(maskPipeline);
     gpu::release_bind_group(maskBindGroup);
     gpu::release_buffer(posVB); gpu::release_buffer(maskBuf); gpu::release_buffer(dirtyBuf);

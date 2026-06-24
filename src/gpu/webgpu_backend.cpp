@@ -138,10 +138,10 @@ ComputeBatch begin_compute(Device& dev) {
     return b;
 }
 
-void dispatch(ComputeBatch& b, ComputePipeline& pipe, BindGroup& group, uint32_t groups_x) {
+void dispatch(ComputeBatch& b, ComputePipeline& pipe, BindGroup& group, uint32_t groups_x, uint32_t groups_y) {
     wgpuComputePassEncoderSetPipeline(b.pass, pipe.handle);
     wgpuComputePassEncoderSetBindGroup(b.pass, 0, group.handle, 0, nullptr);
-    wgpuComputePassEncoderDispatchWorkgroups(b.pass, groups_x, 1, 1);
+    wgpuComputePassEncoderDispatchWorkgroups(b.pass, groups_x, groups_y, 1);
 }
 
 void end_compute_pass(ComputeBatch& b) {

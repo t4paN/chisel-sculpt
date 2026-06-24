@@ -2,6 +2,34 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-24 — WebGPU port, Seam Step 2b: SDF voxel-merge on the gpu:: seam (compute path complete)
+
+- **The whole SDF subsystem ported onto `gpu::`** — the last raw-GL compute subsystem.
+  Its 5 GL programs (`count` / `expand` / `sign` / `mc` | `nets`) become job-owned
+  `gpu::ComputePipeline`s + per-kernel std140 Params UBOs (binding 63: count 32 B,
+  expand 32 B, sign 48 B, mc/nets 32 B). All dispatches — count, expand, the chunked
+  winding-sign, and the two-pass MC-or-Nets extractor — now go through
+  `begin_compute`/`dispatch`/`submit`; the SDF SSBOs stay GL-owned and are wrapped in
+  transient `gpu::Buffer` views at dispatch. Readbacks/uploads stay raw GL (one-shot
+  op — the no-readback rule is stroke-only).
+- **10 new lockstep shaders** — `shaders/{glsl,wgsl}/sdf_{count,expand,sign,mc,nets}.*`.
+  The shared GLSL snippets that `sdf.cpp` used to string-concatenate (`pt_tri_dist` /
+  degenerate / band-AABB / `linear_gid`) are now **inlined into each stem** so each is
+  self-contained (the build-time embedder does no include injection). ~450 lines of
+  inline shader strings + `build_prog` + `set_grid_uniforms` deleted from `sdf.cpp`.
+- **Seam `dispatch` gained an optional `groups_y`** (default 1) in `gpu.h` + both
+  backends, so SDF's 2D workgroup split past the 65535 per-dim limit (R>=128) routes
+  through the seam. Transparent to every existing 1D caller.
+- **Myth busted:** SDF needs no group(1)/group(2) split — no single kernel binds more
+  than 5 storage buffers (`remesh_smooth`'s 9 stays the high-water mark). CONVENTIONS.md
+  corrected.
+- **Verified:** clean `-j2` build green; `chisel-gl-compute-test` extended with an SDF
+  compile smoke check — all 5 `sdf_*.comp` compile + link through the seam on a real GL
+  4.6 context, mask regression still PASS. **Live in-app mirror-merge (R=128/R=256, MC
+  + Surface Nets) is user-driven and still pending.**
+- **Seam Step 2b is now code-complete** (all brushes + shared helpers + limb + remesh +
+  multires/undo + SDF). Next stage: the render-seam port + buffer-ownership migration.
+
 ## 2026-06-24 — WebGPU port, Seam Step 2b: multires/undo on the gpu:: seam
 
 - **Both GPU-resident undo kernels ported onto the seam** — `multires_diff` (pen-up

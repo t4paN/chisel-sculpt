@@ -103,11 +103,11 @@ ComputeBatch begin_compute(Device& dev) {
     ComputeBatch b; b.dev = &dev; return b;
 }
 
-void dispatch(ComputeBatch&, ComputePipeline& pipe, BindGroup& group, uint32_t groups_x) {
+void dispatch(ComputeBatch&, ComputePipeline& pipe, BindGroup& group, uint32_t groups_x, uint32_t groups_y) {
     glUseProgram(pipe.handle);
     for (uint32_t i = 0; i < group.count; ++i)
         glBindBufferBase(group.target[i], group.binding[i], group.buffer[i]);
-    glDispatchCompute(groups_x, 1, 1);
+    glDispatchCompute(groups_x, groups_y, 1);
     // make this dispatch's storage writes visible to the next dispatch / copy in the
     // batch (WebGPU does this implicitly between passes; GL needs the barrier).
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);

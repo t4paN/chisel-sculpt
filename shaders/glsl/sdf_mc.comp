@@ -1,0 +1,114 @@
+// sdf_mc.comp — GLSL 430 sibling of shaders/wgsl/sdf_mc.wgsl.
+// SDF voxel-merge iso-surface extraction by Marching Cubes (default extractor). Two
+// passes driven by u_count_only: pass 1 tallies the triangle count (reserve once),
+// pass 2 emits the 18-floats/tri soup, guarded by u_cap. Shared edge vertices are
+// canonicalized by global corner coords so both cells emit a bit-identical vertex
+// (the hash-weld then fuses them). Output winding oriented to the field gradient.
+//
+// Self-contained: SDF_GID inlined; loose uniforms → anonymous std140 Params UBO 63.
+#version 430
+layout(local_size_x = 64) in;
+layout(std430, binding = 24) readonly buffer Field { float f[]; };
+layout(std430, binding = 25)          buffer McOut { float o[]; };   // 18 floats / tri
+layout(std430, binding = 26)          buffer McCnt { uint  cnt[]; };
+layout(std430, binding = 27) readonly buffer TriTb { int   tri[]; }; // 256*16
+layout(std140, binding = 63) uniform Params {
+    vec3  u_origin;     // 0
+    float u_voxel;      // 12
+    int   u_R;          // 16
+    uint  u_cellCount;  // 20
+    int   u_count_only; // 24
+    uint  u_cap;        // 28
+};
+
+uint linear_gid() {
+    return gl_GlobalInvocationID.x
+         + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+}
+
+const ivec3 CORNER[8] = ivec3[8](
+    ivec3(0,0,0), ivec3(1,0,0), ivec3(1,1,0), ivec3(0,1,0),
+    ivec3(0,0,1), ivec3(1,0,1), ivec3(1,1,1), ivec3(0,1,1));
+const ivec2 EDGE[12] = ivec2[12](
+    ivec2(0,1), ivec2(1,2), ivec2(2,3), ivec2(3,0),
+    ivec2(4,5), ivec2(5,6), ivec2(6,7), ivec2(7,4),
+    ivec2(0,4), ivec2(1,5), ivec2(2,6), ivec2(3,7));
+
+float fld(ivec3 c, int R1) {
+    c = clamp(c, ivec3(0), ivec3(u_R));
+    return f[c.x + R1*(c.y + R1*c.z)];
+}
+vec3 grad(ivec3 c, int R1) {
+    return vec3(fld(c+ivec3(1,0,0),R1) - fld(c-ivec3(1,0,0),R1),
+                fld(c+ivec3(0,1,0),R1) - fld(c-ivec3(0,1,0),R1),
+                fld(c+ivec3(0,0,1),R1) - fld(c-ivec3(0,0,1),R1));
+}
+
+void main() {
+    uint cell = linear_gid();
+    if (cell >= u_cellCount) return;
+    int R1 = u_R + 1;
+    int cx =  int(cell) % u_R;
+    int cy = (int(cell) / u_R) % u_R;
+    int cz =  int(cell) / (u_R*u_R);
+    ivec3 base = ivec3(cx, cy, cz);
+
+    float val[8];
+    int cubeindex = 0;
+    for (int s = 0; s < 8; s++) {
+        ivec3 c = base + CORNER[s];
+        val[s] = f[c.x + R1*(c.y + R1*c.z)];
+        if (val[s] < 0.0) cubeindex |= (1 << s);
+    }
+    if (cubeindex == 0 || cubeindex == 255) return;
+
+    int row = cubeindex * 16;
+
+    // Count pass: triangle count is fully determined by the case table — no edge
+    // interpolation, one atomic per active cell (the R=256 TDR fix).
+    if (u_count_only == 1) {
+        uint ntri = 0u;
+        for (int i = 0; i < 15 && tri[row+i] != -1; i += 3) ntri++;
+        if (ntri > 0u) atomicAdd(cnt[0], ntri);
+        return;
+    }
+
+    vec3 vpos[12];
+    vec3 vnrm[12];
+    for (int e = 0; e < 12; e++) {
+        int a = EDGE[e].x, b = EDGE[e].y;
+        float fa = val[a], fb = val[b];
+        if ((fa < 0.0) == (fb < 0.0)) continue;   // edge not crossed
+        ivec3 ca = base + CORNER[a];
+        ivec3 cb = base + CORNER[b];
+        // Canonicalize the edge by its GLOBAL corner coords so both cells sharing it
+        // interpolate from the identical endpoint order (bit-identical shared vertex).
+        if (ca.x != cb.x ? ca.x > cb.x
+          : ca.y != cb.y ? ca.y > cb.y
+          :                ca.z > cb.z) {
+            ivec3 tc = ca; ca = cb; cb = tc;
+            float tf = fa; fa = fb; fb = tf;
+        }
+        float tt = fa / (fa - fb);
+        vpos[e] = u_origin + u_voxel * (vec3(ca) + tt * vec3(cb - ca));
+        vec3 nn = mix(grad(ca, R1), grad(cb, R1), tt);
+        vnrm[e] = (dot(nn,nn) > 0.0) ? normalize(nn) : vec3(0.0, 0.0, 1.0);
+    }
+
+    for (int i = 0; i < 15 && tri[row+i] != -1; i += 3) {
+        int e0 = tri[row+i], e1 = tri[row+i+1], e2 = tri[row+i+2];
+        vec3 p0 = vpos[e0], p1 = vpos[e1], p2 = vpos[e2];
+        vec3 n0 = vnrm[e0], n1 = vnrm[e1], n2 = vnrm[e2];
+        // Orient so face winding matches the field gradient (outward).
+        if (dot(cross(p1 - p0, p2 - p0), n0 + n1 + n2) < 0.0) {
+            vec3 tp = p1; p1 = p2; p2 = tp;
+            vec3 tn = n1; n1 = n2; n2 = tn;
+        }
+        uint slot = atomicAdd(cnt[0], 1u);
+        if (slot >= u_cap) continue;   // overflow guard (exact in practice)
+        uint b0 = slot * 18u;
+        o[b0+0u]=p0.x;  o[b0+1u]=p0.y;  o[b0+2u]=p0.z;  o[b0+3u]=n0.x;  o[b0+4u]=n0.y;  o[b0+5u]=n0.z;
+        o[b0+6u]=p1.x;  o[b0+7u]=p1.y;  o[b0+8u]=p1.z;  o[b0+9u]=n1.x;  o[b0+10u]=n1.y; o[b0+11u]=n1.z;
+        o[b0+12u]=p2.x; o[b0+13u]=p2.y; o[b0+14u]=p2.z; o[b0+15u]=n2.x; o[b0+16u]=n2.y; o[b0+17u]=n2.z;
+    }
+}

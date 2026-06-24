@@ -12,8 +12,10 @@ make the translation mechanical.
   Nothing in the enum uses 63; keep it the params slot everywhere.
 - Everything sits in **`@group(0)`** for now. WebGPU guarantees only 4 bind groups but no hard cap
   on bindings per group within device limits; if a kernel exceeds `maxStorageBuffersPerShaderStage`
-  (commonly 8–10 on the browser), split by lifetime into group(1)/group(2). Watch this on the
-  remesh and SDF kernels (most buffers).
+  (commonly 8–10 on the browser), split by lifetime into group(1)/group(2). The high-water mark is
+  **`remesh_smooth` at 9 storage buffers** (right at the default cap) — watch it on a low-cap browser.
+  **SDF needs no split** (checked when porting it): its 9 distinct `BIND_SDF_*` slots are spread
+  across 5 kernels and never co-bound — no single SDF kernel binds more than 5 storage buffers.
 
 ## Storage buffers
 - `readonly buffer X { float a[]; }` → `@group(0) @binding(N) var<storage, read> a : array<f32>;`

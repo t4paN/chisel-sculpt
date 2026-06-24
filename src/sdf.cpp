@@ -2,6 +2,7 @@
 #include "scene.h"
 #include "mesh_entity.h"
 #include "compute.h"
+#include "gpu_shaders_generated.h"   // gpu::embedded_shader("sdf_count" / ...)
 #include "mc_tables.h"
 #include "chisel_debug.h"
 #include <glad/glad.h>
@@ -78,457 +79,12 @@ uint32_t gather_soup(const Scene& scene,
 }
 
 // ---- Shader sources -------------------------------------------------------
-
-// Ericson closest-point-on-triangle, returns Euclidean distance. Degenerate
-// (zero-area) tris are filtered before the splat, so the face denom is safe.
-const char* PT_TRI_DIST = R"(
-float pt_tri_dist(vec3 p, vec3 a, vec3 b, vec3 c) {
-    vec3 ab = b - a, ac = c - a, ap = p - a;
-    float d1 = dot(ab, ap), d2 = dot(ac, ap);
-    if (d1 <= 0.0 && d2 <= 0.0) return length(ap);
-    vec3 bp = p - b;
-    float d3 = dot(ab, bp), d4 = dot(ac, bp);
-    if (d3 >= 0.0 && d4 <= d3) return length(bp);
-    float vc = d1*d4 - d3*d2;
-    if (vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0) {
-        float v = d1 / (d1 - d3);
-        return length(p - (a + v*ab));
-    }
-    vec3 cp = p - c;
-    float d5 = dot(ab, cp), d6 = dot(ac, cp);
-    if (d6 >= 0.0 && d5 <= d6) return length(cp);
-    float vb = d5*d2 - d1*d6;
-    if (vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0) {
-        float w = d2 / (d2 - d6);
-        return length(p - (a + w*ac));
-    }
-    float va = d3*d6 - d5*d4;
-    if (va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0) {
-        float w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
-        return length(p - (b + w*(c - b)));
-    }
-    float denom = 1.0 / (va + vb + vc);
-    float v = vb * denom, w = vc * denom;
-    return length(p - (a + ab*v + ac*w));
-}
-)";
-
-// Degenerate-triangle predicate + soup vertex fetch. Injected into the count,
-// expand AND winding shaders so a degenerate tri (zero area / non-finite vertex)
-// reaches neither distance nor winding evaluation. Needs only p[]/ix[] (Pos/Idx).
-const char* SDF_DEGEN_SRC = R"(
-bool nonfinite(vec3 v) { return any(isnan(v)) || any(isinf(v)); }
-// Zero-area (covers fully-collapsed edges) or any non-finite vertex.
-bool tri_degenerate(vec3 a, vec3 b, vec3 c) {
-    if (nonfinite(a) || nonfinite(b) || nonfinite(c)) return true;
-    return length(cross(b - a, c - a)) < 1e-20;
-}
-vec3 tri_vert(uint t, uint k) {           // vertex k (0..2) of triangle t, world space
-    uint v = ix[3u*t + k];
-    return vec3(p[3u*v], p[3u*v+1u], p[3u*v+2u]);
-}
-)";
-
-// Clamped, band-dilated corner-index AABB [g0,g1] (inclusive) for a triangle.
-// Injected into BOTH the count (Pass A) and expand (Pass C) shaders so they agree
-// bit-for-bit on the per-triangle voxel footprint. If they disagreed, the expand
-// pass would unravel a work-item to the wrong voxel and write out of bounds
-// (load-balancing spec, invariant 1). Needs u_origin/u_voxel/u_R/u_band.
-const char* SDF_AABB_SRC = R"(
-void tri_band_aabb(vec3 a, vec3 b, vec3 c, out ivec3 g0, out ivec3 g1) {
-    vec3 lo = min(min(a,b),c), hi = max(max(a,b),c);
-    g0 = ivec3(floor((lo - u_origin)/u_voxel)) - u_band;
-    g1 = ivec3(ceil ((hi - u_origin)/u_voxel)) + u_band;
-    g0 = clamp(g0, ivec3(0), ivec3(u_R));
-    g1 = clamp(g1, ivec3(0), ivec3(u_R));
-}
-)";
-
-// Linear work index across a 2D workgroup grid. All SDF passes dispatch through
-// dispatch_linear() on the host, which splits the group count into X*Y when it
-// exceeds the 65535 per-dimension GL_MAX_COMPUTE_WORK_GROUP_COUNT limit (hit at
-// R=128+ for the expanded splat, and R=256 for the per-corner/per-cell passes).
-const char* SDF_GID_SRC = R"(
-uint linear_gid() {
-    return gl_GlobalInvocationID.x
-         + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
-}
-)";
-
-// Pass A — count: one thread per triangle. Compute the clamped band-AABB ONCE and
-// store it (g0.xyz + span.xyz) into box[] so Pass C can reuse the exact integers
-// instead of recomputing the float math — if the two passes recomputed and a 1-ULP
-// rounding difference flipped a floor() at a voxel boundary, Pass C would unravel a
-// work item out of the counted box and write dist[] out of bounds (load-balancing
-// spec, invariant 1 → the non-deterministic crash). Degenerate tris store span 0 →
-// zero work items, skipped by the expand + winding passes.
-const char* COUNT_SRC = R"(
-#version 430
-layout(local_size_x = 64) in;
-layout(std430, binding = 21) readonly  buffer Pos { float p[]; };
-layout(std430, binding = 22) readonly  buffer Idx { uint  ix[]; };
-layout(std430, binding = 36) writeonly buffer Box { uint  box[]; };  // 6 per tri
-uniform vec3  u_origin;  uniform float u_voxel;  uniform int u_R;
-uniform int   u_band;    uniform uint  u_triCount;
-)" /* SDF_DEGEN_SRC + SDF_AABB_SRC injected here */ R"(
-void main() {
-    uint t = linear_gid();
-    if (t >= u_triCount) return;
-    uint o = 6u*t;
-    vec3 a = tri_vert(t,0u), b = tri_vert(t,1u), c = tri_vert(t,2u);
-    if (tri_degenerate(a,b,c)) {
-        box[o]=0u; box[o+1u]=0u; box[o+2u]=0u; box[o+3u]=0u; box[o+4u]=0u; box[o+5u]=0u;
-        return;
-    }
-    ivec3 g0, g1; tri_band_aabb(a,b,c,g0,g1);
-    uvec3 span = uvec3(g1 - g0 + ivec3(1));      // g0 clamped to [0,R] ⇒ non-negative
-    box[o]=uint(g0.x); box[o+1u]=uint(g0.y); box[o+2u]=uint(g0.z);
-    box[o+3u]=span.x;  box[o+4u]=span.y;     box[o+5u]=span.z;
-}
-)";
-
-// Pass C — expand + splat: one thread per work item. Binary-search the owner
-// triangle in the exclusive scan off[], read its stored box, unravel the local
-// index into a voxel, evaluate one distance, atomic-min into the field. Writes
-// every AABB cell (no per-voxel band predicate) to stay bit-identical to the old
-// thread-per-triangle splat — the band is decided downstream in the winding pass
-// via the BAND_FAR sentinel, exactly as before.
-const char* EXPAND_SRC = R"(
-#version 430
-layout(local_size_x = 64) in;
-layout(std430, binding = 21) readonly buffer Pos { float p[]; };
-layout(std430, binding = 22) readonly buffer Idx { uint  ix[]; };
-layout(std430, binding = 23)          buffer Dist{ uint  d[]; };
-layout(std430, binding = 36) readonly buffer Box { uint  box[]; };
-layout(std430, binding = 37) readonly buffer Off { uint  off[]; };
-uniform vec3  u_origin;  uniform float u_voxel;  uniform int u_R;
-uniform uint  u_triCount;  uniform uint u_workCount;
-)" /* SDF_DEGEN_SRC + pt_tri_dist injected here */ R"(
-void main() {
-    uint gid = linear_gid();
-    if (gid >= u_workCount) return;
-    // Owner = upper_bound(off, gid) - 1 over [0, u_triCount): first i with off[i] > gid.
-    uint lo = 0u, hi = u_triCount;
-    while (lo < hi) { uint mid = (lo + hi) >> 1u; if (off[mid] <= gid) lo = mid + 1u; else hi = mid; }
-    uint t = lo - 1u;
-    uint j = gid - off[t];                      // local work index within triangle t
-    uint o = 6u*t;
-    ivec3 g0   = ivec3(int(box[o]), int(box[o+1u]), int(box[o+2u]));
-    uvec3 span = uvec3(box[o+3u], box[o+4u], box[o+5u]);
-    uint dx =  j % span.x;
-    uint dy = (j / span.x) % span.y;
-    uint dz =  j / (span.x * span.y);
-    int gi = g0.x + int(dx), gj = g0.y + int(dy), gk = g0.z + int(dz);
-    vec3 a = tri_vert(t,0u), b = tri_vert(t,1u), c = tri_vert(t,2u);
-    vec3 q = u_origin + u_voxel*vec3(gi,gj,gk);
-    float dd = pt_tri_dist(q, a, b, c);
-    int R1 = u_R + 1;
-    uint ci = uint(gi + R1*(gj + R1*gk));
-    atomicMin(d[ci], floatBitsToUint(dd));       // monotonic for dd >= 0
-}
-)";
-
-// Winding sign — evaluated ONLY at band corners (the surface shell, ~O(R^2)).
-// Off-band corners are deferred: marked with |f| == u_bandFar so the CPU flood
-// fill can assign their inside/outside sign. This is the spec's spartan
-// optimisation: the O(corners*tris) brute force is infeasible on weak GPUs, but
-// MC only interpolates band-to-band edges, so off-band corners just need a
-// consistent sign — never a winding number. (sdf-remesh-spec.md gotcha 3.)
-const char* SIGN_SRC = R"(
-#version 430
-layout(local_size_x = 64) in;
-layout(std430, binding = 21) readonly buffer Pos  { float p[]; };
-layout(std430, binding = 22) readonly buffer Idx  { uint  ix[]; };
-layout(std430, binding = 23) readonly buffer Dist { uint  d[]; };
-layout(std430, binding = 24)          buffer Field{ float f[]; };
-uniform vec3 u_origin; uniform float u_voxel; uniform int u_R;
-uniform uint u_triCount; uniform uint u_cornerCount; uniform float u_bandFar;
-uniform uint u_cornerOffset;   // chunked dispatch: base corner index of this slice
-const float FOUR_PI = 12.566370614359172;
-)" /* SDF_DEGEN_SRC injected here */ R"(
-void main() {
-    uint ci = linear_gid() + u_cornerOffset;
-    if (ci >= u_cornerCount) return;
-    float dist = uintBitsToFloat(d[ci]);
-    if (dist >= u_bandFar) { f[ci] = u_bandFar; return; }   // off-band → CPU flood
-
-    int R1 = u_R + 1;
-    int i =  int(ci) % R1;
-    int j = (int(ci) / R1) % R1;
-    int k =  int(ci) / (R1*R1);
-    vec3 q = u_origin + u_voxel*vec3(i,j,k);
-
-    float omega = 0.0;
-    for (uint t = 0u; t < u_triCount; t++) {
-        vec3 va = tri_vert(t,0u), vb = tri_vert(t,1u), vc = tri_vert(t,2u);
-        if (tri_degenerate(va,vb,vc)) continue;   // keep degenerates out of the sign sum
-        vec3 A = va - q, B = vb - q, C = vc - q;
-        float la=length(A), lb=length(B), lc=length(C);
-        float num = dot(A, cross(B,C));
-        float den = la*lb*lc + dot(A,B)*lc + dot(B,C)*la + dot(C,A)*lb;
-        omega += 2.0 * atan(num, den);
-    }
-    float w = omega / FOUR_PI;
-    f[ci] = (w > 0.5 ? -1.0 : 1.0) * dist;          // signed real distance (band)
-}
-)";
-
-const char* MC_SRC = R"(
-#version 430
-layout(local_size_x = 64) in;
-layout(std430, binding = 24) readonly buffer Field { float f[]; };
-layout(std430, binding = 25)          buffer McOut { float o[]; };   // 18 floats / tri
-layout(std430, binding = 26)          buffer McCnt { uint  cnt[]; };
-layout(std430, binding = 27) readonly buffer TriTb { int   tri[]; }; // 256*16
-uniform vec3 u_origin; uniform float u_voxel; uniform int u_R;
-uniform uint u_cellCount; uniform int u_count_only; uniform uint u_cap;
-
-const ivec3 CORNER[8] = ivec3[8](
-    ivec3(0,0,0), ivec3(1,0,0), ivec3(1,1,0), ivec3(0,1,0),
-    ivec3(0,0,1), ivec3(1,0,1), ivec3(1,1,1), ivec3(0,1,1));
-const ivec2 EDGE[12] = ivec2[12](
-    ivec2(0,1), ivec2(1,2), ivec2(2,3), ivec2(3,0),
-    ivec2(4,5), ivec2(5,6), ivec2(6,7), ivec2(7,4),
-    ivec2(0,4), ivec2(1,5), ivec2(2,6), ivec2(3,7));
-
-float fld(ivec3 c, int R1) {
-    c = clamp(c, ivec3(0), ivec3(u_R));
-    return f[c.x + R1*(c.y + R1*c.z)];
-}
-vec3 grad(ivec3 c, int R1) {
-    return vec3(fld(c+ivec3(1,0,0),R1) - fld(c-ivec3(1,0,0),R1),
-                fld(c+ivec3(0,1,0),R1) - fld(c-ivec3(0,1,0),R1),
-                fld(c+ivec3(0,0,1),R1) - fld(c-ivec3(0,0,1),R1));
-}
-
-void main() {
-    uint cell = linear_gid();
-    if (cell >= u_cellCount) return;
-    int R1 = u_R + 1;
-    int cx =  int(cell) % u_R;
-    int cy = (int(cell) / u_R) % u_R;
-    int cz =  int(cell) / (u_R*u_R);
-    ivec3 base = ivec3(cx, cy, cz);
-
-    float val[8];
-    int cubeindex = 0;
-    for (int s = 0; s < 8; s++) {
-        ivec3 c = base + CORNER[s];
-        val[s] = f[c.x + R1*(c.y + R1*c.z)];
-        if (val[s] < 0.0) cubeindex |= (1 << s);
-    }
-    if (cubeindex == 0 || cubeindex == 255) return;
-
-    int row = cubeindex * 16;
-
-    // Count pass: the triangle count is fully determined by the case table — no need
-    // to interpolate edge positions/normals (the expensive grad() field reads) just
-    // to throw them away, and no need to hit the global counter once per triangle.
-    // Tally locally, reserve once. Halves the count pass's field traffic and collapses
-    // millions of single-address atomics into one per active cell — the R=256 TDR fix.
-    if (u_count_only == 1) {
-        uint ntri = 0u;
-        for (int i = 0; i < 15 && tri[row+i] != -1; i += 3) ntri++;
-        if (ntri > 0u) atomicAdd(cnt[0], ntri);
-        return;
-    }
-
-    vec3 vpos[12];
-    vec3 vnrm[12];
-    for (int e = 0; e < 12; e++) {
-        int a = EDGE[e].x, b = EDGE[e].y;
-        float fa = val[a], fb = val[b];
-        if ((fa < 0.0) == (fb < 0.0)) continue;   // edge not crossed
-        ivec3 ca = base + CORNER[a];
-        ivec3 cb = base + CORNER[b];
-        // Canonicalize the edge by its GLOBAL corner coords so both cells sharing this
-        // edge interpolate from the identical endpoint order. fa/(fa-fb) and fb/(fb-fa)
-        // are equal in real arithmetic but NOT bit-identical in float, and the large
-        // integer corner coords (up to R) amplify the difference to ~1e-5 voxel — enough
-        // to split the shared vertex into two and leave a crack the weld can't close at a
-        // tight snap. Sorting the endpoints makes the vertex bit-identical from both cells.
-        if (ca.x != cb.x ? ca.x > cb.x
-          : ca.y != cb.y ? ca.y > cb.y
-          :                ca.z > cb.z) {
-            ivec3 tc = ca; ca = cb; cb = tc;
-            float tf = fa; fa = fb; fb = tf;
-        }
-        float tt = fa / (fa - fb);
-        vpos[e] = u_origin + u_voxel * (vec3(ca) + tt * vec3(cb - ca));
-        vec3 nn = mix(grad(ca, R1), grad(cb, R1), tt);
-        vnrm[e] = (dot(nn,nn) > 0.0) ? normalize(nn) : vec3(0.0, 0.0, 1.0);
-    }
-
-    for (int i = 0; i < 15 && tri[row+i] != -1; i += 3) {
-        int e0 = tri[row+i], e1 = tri[row+i+1], e2 = tri[row+i+2];
-        vec3 p0 = vpos[e0], p1 = vpos[e1], p2 = vpos[e2];
-        vec3 n0 = vnrm[e0], n1 = vnrm[e1], n2 = vnrm[e2];
-        // Orient so face winding matches the field gradient (outward).
-        if (dot(cross(p1 - p0, p2 - p0), n0 + n1 + n2) < 0.0) {
-            vec3 tp = p1; p1 = p2; p2 = tp;
-            vec3 tn = n1; n1 = n2; n2 = tn;
-        }
-        uint slot = atomicAdd(cnt[0], 1u);
-        if (slot >= u_cap) continue;   // overflow guard (exact in practice)
-        uint b0 = slot * 18u;
-        o[b0+0u]=p0.x;  o[b0+1u]=p0.y;  o[b0+2u]=p0.z;  o[b0+3u]=n0.x;  o[b0+4u]=n0.y;  o[b0+5u]=n0.z;
-        o[b0+6u]=p1.x;  o[b0+7u]=p1.y;  o[b0+8u]=p1.z;  o[b0+9u]=n1.x;  o[b0+10u]=n1.y; o[b0+11u]=n1.z;
-        o[b0+12u]=p2.x; o[b0+13u]=p2.y; o[b0+14u]=p2.z; o[b0+15u]=n2.x; o[b0+16u]=n2.y; o[b0+17u]=n2.z;
-    }
-}
-)";
-
-// ---- Surface Nets (naive dual contouring) ---------------------------------
-// Drop-in alternative to MC: same interface (Field in, McOut 18-floats/tri soup,
-// McCnt atomic counter, same u_count_only/u_cap two-pass protocol) so the whole
-// downstream path (hash-weld → relax → mirror → splice) is untouched — only the
-// program bound to mc_prog changes.
-//
-// MC places verts ON grid edges and triangulates per a fixed case table, which
-// bevels sharp features and emits slivers. Surface Nets instead places ONE dual
-// vertex per active cell, at the average of that cell's edge crossings, and
-// connects the four cells around each sign-changing grid edge into a quad. The
-// result is smoother, more uniform, quad-dominant, with far fewer slivers — so
-// the relax pass has much less to do. Cost: the basic ("naive") variant pinches
-// a cell that holds two surface sheets into one vertex, which can be non-manifold
-// on thin/ambiguous configs — hence MC stays the default and the H-D mirror gate
-// still guards the watertight path.
-//
-// Soup-weld determinism: a dual vertex is a pure function of its cell's eight
-// corners, computed identically by every one of the (up to four) edge-quads that
-// reference that cell, so the emitted copies are bit-identical and hash_weld
-// reshares them into the same indexed vertex MC's canonicalized edges would.
-const char* NETS_SRC = R"(
-#version 430
-layout(local_size_x = 64) in;
-layout(std430, binding = 24) readonly buffer Field { float f[]; };
-layout(std430, binding = 25)          buffer McOut { float o[]; };   // 18 floats / tri
-layout(std430, binding = 26)          buffer McCnt { uint  cnt[]; };
-uniform vec3 u_origin; uniform float u_voxel; uniform int u_R;
-uniform uint u_cellCount; uniform int u_count_only; uniform uint u_cap;
-
-const ivec3 CORNER[8] = ivec3[8](
-    ivec3(0,0,0), ivec3(1,0,0), ivec3(1,1,0), ivec3(0,1,0),
-    ivec3(0,0,1), ivec3(1,0,1), ivec3(1,1,1), ivec3(0,1,1));
-const ivec2 EDGE[12] = ivec2[12](
-    ivec2(0,1), ivec2(1,2), ivec2(2,3), ivec2(3,0),
-    ivec2(4,5), ivec2(5,6), ivec2(6,7), ivec2(7,4),
-    ivec2(0,4), ivec2(1,5), ivec2(2,6), ivec2(3,7));
-
-float fld(ivec3 c, int R1) {
-    c = clamp(c, ivec3(0), ivec3(u_R));
-    return f[c.x + R1*(c.y + R1*c.z)];
-}
-vec3 grad(ivec3 c, int R1) {
-    return vec3(fld(c+ivec3(1,0,0),R1) - fld(c-ivec3(1,0,0),R1),
-                fld(c+ivec3(0,1,0),R1) - fld(c-ivec3(0,1,0),R1),
-                fld(c+ivec3(0,0,1),R1) - fld(c-ivec3(0,0,1),R1));
-}
-
-// Dual vertex of cell `base`: world position + an orientation normal. The cell is
-// always active here (every cell touching a sign-changing edge has that crossing
-// among its own 12 edges), so `n` >= 1. Edges in a FIXED order so the average is
-// recomputed bit-identically from every referencing thread (see weld note above).
-void cell_vertex(ivec3 base, int R1, out vec3 wpos, out vec3 nrm) {
-    float val[8];
-    for (int s = 0; s < 8; s++) {
-        ivec3 c = base + CORNER[s];
-        val[s] = f[c.x + R1*(c.y + R1*c.z)];
-    }
-    vec3 sum = vec3(0.0);
-    int n = 0;
-    for (int e = 0; e < 12; e++) {
-        int a = EDGE[e].x, b = EDGE[e].y;
-        float fa = val[a], fb = val[b];
-        if ((fa < 0.0) == (fb < 0.0)) continue;     // edge not crossed
-        float tt = fa / (fa - fb);
-        sum += mix(vec3(base + CORNER[a]), vec3(base + CORNER[b]), tt);
-        n++;
-    }
-    wpos = u_origin + u_voxel * (sum / float(max(n, 1)));
-    vec3 g = grad(base, R1);                          // outward (off-band side is +/-FAR)
-    nrm = (dot(g,g) > 0.0) ? normalize(g) : vec3(0.0, 0.0, 1.0);
-}
-
-// Emit one triangle with an explicit, caller-decided winding flip (so both tris
-// of a quad share the SAME orientation — no intra-quad fold).
-void put_tri(vec3 p0, vec3 p1, vec3 p2, vec3 n0, vec3 n1, vec3 n2, bool flip) {
-    if (flip) {
-        vec3 tp = p1; p1 = p2; p2 = tp;
-        vec3 tn = n1; n1 = n2; n2 = tn;
-    }
-    uint slot = atomicAdd(cnt[0], 1u);
-    if (slot >= u_cap) return;                        // overflow guard (exact in practice)
-    uint b0 = slot * 18u;
-    o[b0+0u]=p0.x;  o[b0+1u]=p0.y;  o[b0+2u]=p0.z;  o[b0+3u]=n0.x;  o[b0+4u]=n0.y;  o[b0+5u]=n0.z;
-    o[b0+6u]=p1.x;  o[b0+7u]=p1.y;  o[b0+8u]=p1.z;  o[b0+9u]=n1.x;  o[b0+10u]=n1.y; o[b0+11u]=n1.z;
-    o[b0+12u]=p2.x; o[b0+13u]=p2.y; o[b0+14u]=p2.z; o[b0+15u]=n2.x; o[b0+16u]=n2.y; o[b0+17u]=n2.z;
-}
-
-// Quad over the four cells around one sign-changing grid edge (cyclic order),
-// split into two tris. Each cell's dual vertex is recomputed here (4x work vs a
-// stored-vertex pass, but keeps the soup pipeline + welds for free).
-//
-// Two quality rules vs a naive split:
-//  - SHORTEST DIAGONAL: a sheared quad (the surface running diagonally to the grid)
-//    sliced on its long diagonal degenerates into slivers ("lines"); the short
-//    diagonal keeps both halves well-shaped. This is the standard SN/DC fix.
-//  - PER-QUAD WINDING: decide the flip ONCE from the quad normal vs the averaged
-//    field normal, then apply it to both tris — so a sheared quad can't fold.
-void emit_quad(ivec3 c0, ivec3 c1, ivec3 c2, ivec3 c3, int R1) {
-    vec3 p0,p1,p2,p3, n0,n1,n2,n3;
-    cell_vertex(c0,R1,p0,n0); cell_vertex(c1,R1,p1,n1);
-    cell_vertex(c2,R1,p2,n2); cell_vertex(c3,R1,p3,n3);
-
-    // Orientation: quad normal from the two diagonals (independent of which split
-    // we pick), flipped to face the averaged outward field normal of the corners.
-    bool flip = dot(cross(p2 - p0, p3 - p1), n0 + n1 + n2 + n3) < 0.0;
-
-    if (dot(p2 - p0, p2 - p0) <= dot(p3 - p1, p3 - p1)) {   // split on p0-p2
-        put_tri(p0,p1,p2, n0,n1,n2, flip);
-        put_tri(p0,p2,p3, n0,n2,n3, flip);
-    } else {                                                // split on p1-p3
-        put_tri(p1,p2,p3, n1,n2,n3, flip);
-        put_tri(p1,p3,p0, n1,n3,n0, flip);
-    }
-}
-
-void main() {
-    uint cell = linear_gid();
-    if (cell >= u_cellCount) return;
-    int R1 = u_R + 1;
-    int cx =  int(cell) % u_R;
-    int cy = (int(cell) / u_R) % u_R;
-    int cz =  int(cell) / (u_R*u_R);
-
-    // The surface is built from the three grid edges leaving this cell's min-corner
-    // (cx,cy,cz) toward +x/+y/+z. An edge is active when its endpoints differ in
-    // sign AND all four cells sharing it exist (interior only — the grid is padded
-    // empty, so no surface ever reaches the outermost shell we skip). Each active
-    // edge contributes one quad = 2 tris; ownership-by-min-corner means every grid
-    // edge is emitted exactly once.
-    bool sc = (f[cx     + R1*(cy     + R1* cz   )] < 0.0);     // sign at the min corner
-    bool active_x = (sc != (f[(cx+1) + R1*(cy + R1*cz)] < 0.0)) && cy >= 1 && cz >= 1;
-    bool active_y = (sc != (f[cx + R1*((cy+1) + R1*cz)] < 0.0)) && cx >= 1 && cz >= 1;
-    bool active_z = (sc != (f[cx + R1*(cy + R1*(cz+1))] < 0.0)) && cx >= 1 && cy >= 1;
-
-    if (u_count_only == 1) {
-        uint ntri = 0u;
-        if (active_x) ntri += 2u;
-        if (active_y) ntri += 2u;
-        if (active_z) ntri += 2u;
-        if (ntri > 0u) atomicAdd(cnt[0], ntri);
-        return;
-    }
-
-    if (active_x) emit_quad(ivec3(cx,cy-1,cz-1), ivec3(cx,cy,cz-1),
-                            ivec3(cx,cy,cz),     ivec3(cx,cy-1,cz),   R1);
-    if (active_y) emit_quad(ivec3(cx-1,cy,cz-1), ivec3(cx,cy,cz-1),
-                            ivec3(cx,cy,cz),     ivec3(cx-1,cy,cz),   R1);
-    if (active_z) emit_quad(ivec3(cx-1,cy-1,cz), ivec3(cx,cy-1,cz),
-                            ivec3(cx,cy,cz),     ivec3(cx-1,cy,cz),   R1);
-}
-)";
+// The 5 SDF compute kernels now live as self-contained canonical shaders, embedded at
+// build time: shaders/{glsl,wgsl}/sdf_{count,expand,sign,mc,nets}.* — referenced by
+// gpu::embedded_shader("<stem>"). The shared GLSL snippets (pt_tri_dist / degenerate /
+// band-AABB / linear_gid) that used to be string-concatenated here are inlined into
+// each stem (the embedder does no include injection). Loose grid uniforms became an
+// anonymous std140 Params UBO at binding 63 (one struct per kernel, below).
 
 // ---- Hash-weld ------------------------------------------------------------
 // Snap each soup vertex to a voxel*1e-3 lattice, dedup by quantized key →
@@ -673,12 +229,6 @@ void flood_fill_sign(std::vector<float>& field, uint32_t R, float band_far) {
     // Any region never reached (no band neighbour at all) defaults to outside.
     for (int64_t c = 0; c < N; c++)
         if (!known[c]) field[c] = band_far;
-}
-
-void set_grid_uniforms(GLuint prog, const SdfGrid& g) {
-    glUniform3f(glGetUniformLocation(prog, "u_origin"), g.origin.x, g.origin.y, g.origin.z);
-    glUniform1f(glGetUniformLocation(prog, "u_voxel"), g.voxel);
-    glUniform1i(glGetUniformLocation(prog, "u_R"), (int)g.R);
 }
 
 // ---- Tangential relaxation toward the iso-surface --------------------------
@@ -1197,21 +747,48 @@ struct GlBuf {
     void gen() { if (!id) glGenBuffers(1, &id); }
     ~GlBuf() { if (id) glDeleteBuffers(1, &id); }
 };
-struct GlProg {
-    GLuint id = 0;
-    ~GlProg() { if (id) glDeleteProgram(id); }
-};
-
-// ---- Shared GL dispatch helpers (file scope: begin + tick both use them) ----
-// 1D logical thread count, split into a 2D workgroup grid when it exceeds the
-// 65535 per-dim limit. Shaders recover the linear index via linear_gid().
-static void sdf_dispatch_linear(uint32_t threads) {
+// ---- Shared dispatch helper (file scope: tick uses it) ----------------------
+// Dispatch `threads` logical invocations through the gpu:: seam, splitting the 1D
+// workgroup count into a 2D grid past the 65535 per-dim limit (the SDF passes hit it
+// at R>=128). The kernels recover their linear index from num_workgroups.x.
+static void sdf_dispatch_seam(gpu::ComputeBatch& b, gpu::ComputePipeline& pipe,
+                              gpu::BindGroup& grp, uint32_t threads) {
     uint32_t groups = (threads + 63u) / 64u;
     uint32_t gx = groups, gy = 1u;
     const uint32_t MAXG = 65535u;
     if (groups > MAXG) { gx = MAXG; gy = (groups + MAXG - 1u) / MAXG; }
-    glDispatchCompute(gx, gy, 1u);
+    gpu::dispatch(b, pipe, grp, gx, gy);
 }
+
+// ---- Per-kernel std140 Params UBO payloads (binding 63) ---------------------
+// Byte-identical to the anonymous Params block declared in each sdf_*.comp/.wgsl:
+// vec3 origin fills a 16-byte slot, the following float (voxel) packs into bytes
+// 12-15, and every block is padded to a 16-byte multiple.
+struct SdfCountParamsGPU {
+    float ox, oy, oz;     float voxel;       // origin.xyz (0,4,8), voxel (12)
+    int32_t R;            int32_t band;      // R (16), band (20)
+    uint32_t triCount;    uint32_t _pad0;    // triCount (24)
+};
+struct SdfExpandParamsGPU {
+    float ox, oy, oz;     float voxel;
+    int32_t R;            uint32_t triCount;
+    uint32_t workCount;   uint32_t _pad0;
+};
+struct SdfSignParamsGPU {
+    float ox, oy, oz;     float voxel;
+    int32_t R;            uint32_t triCount;
+    uint32_t cornerCount; float bandFar;
+    uint32_t cornerOffset; uint32_t _pad0, _pad1, _pad2;
+};
+struct SdfMeshParamsGPU {                    // shared by mc + nets (same uniforms)
+    float ox, oy, oz;     float voxel;
+    int32_t R;            uint32_t cellCount;
+    int32_t count_only;   uint32_t cap;
+};
+static_assert(sizeof(SdfCountParamsGPU)  == 32, "");
+static_assert(sizeof(SdfExpandParamsGPU) == 32, "");
+static_assert(sizeof(SdfSignParamsGPU)   == 48, "");
+static_assert(sizeof(SdfMeshParamsGPU)   == 32, "");
 
 // Drain + report GL errors after a stage. In CHISEL_DEBUG, glFinish() first so a
 // GPU hang/TDR is attributed to THIS dispatch (the last "stage OK" before a crash
@@ -1260,10 +837,27 @@ struct VoxelMergeJob {
     std::vector<float> soup;       // MC output triangle soup (read once in Mesh)
 
     GlBuf  soup_pos, soup_idx, dist, field, mc_out, mc_cnt, tritab, splat_box, splat_off;
-    GlProg count_prog, expand_prog, sign_prog, mc_prog;
+
+    // Compute pipelines + their Params UBOs, on the gpu:: seam (Seam Step 2b). The
+    // SSBOs above stay GL-owned (GlBuf RAII); wrapped in gpu::Buffer views at dispatch.
+    // mc_pipe is compiled from either sdf_mc or sdf_nets per use_nets. Pipelines/UBOs
+    // are POD handles → released in the destructor (the GlBufs free themselves).
+    gpu::ComputePipeline count_pipe, expand_pipe, sign_pipe, mc_pipe;
+    gpu::Buffer          count_ubo, expand_ubo, sign_ubo, mc_ubo;
 
     std::chrono::high_resolution_clock::time_point t0;
     VoxelMergeResult res;
+
+    ~VoxelMergeJob() {
+        gpu::release_compute_pipeline(count_pipe);
+        gpu::release_compute_pipeline(expand_pipe);
+        gpu::release_compute_pipeline(sign_pipe);
+        gpu::release_compute_pipeline(mc_pipe);
+        gpu::release_buffer(count_ubo);
+        gpu::release_buffer(expand_ubo);
+        gpu::release_buffer(sign_ubo);
+        gpu::release_buffer(mc_ubo);
+    }
 };
 
 // Mirror the signed field about the x=0 corner layer by copying the kept +x half
@@ -1392,18 +986,40 @@ VoxelMergeJob* voxel_merge_begin(Scene& scene, ComputeState& cs,
 
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 
-    // ---- Compile programs ----
-    auto build_prog = [&](const char* base, std::initializer_list<const char*> includes) -> GLuint {
-        std::string src(base);
-        size_t mpos = src.find("void main()");
-        for (const char* inc : includes) { src.insert(mpos, inc); mpos += std::strlen(inc); }
-        return cs.compile_program(src.c_str());
+    // ---- Compile pipelines (gpu:: seam) ----
+    using gpu::BindEntry; using gpu::Bind;
+    const BindEntry count_layout[] = {
+        { BIND_SDF_SOUP_POS,  Bind::StorageRead,      0 },
+        { BIND_SDF_SOUP_IDX,  Bind::StorageRead,      0 },
+        { BIND_SDF_SPLAT_BOX, Bind::StorageReadWrite, 0 },  // writeonly box[]
+        { BIND_PARAMS,        Bind::Uniform,          sizeof(SdfCountParamsGPU) },
     };
-    job->count_prog.id  = build_prog(COUNT_SRC,  { SDF_GID_SRC, SDF_DEGEN_SRC, SDF_AABB_SRC });
-    job->expand_prog.id = build_prog(EXPAND_SRC, { SDF_GID_SRC, SDF_DEGEN_SRC, PT_TRI_DIST });
-    job->sign_prog.id   = build_prog(SIGN_SRC,   { SDF_GID_SRC, SDF_DEGEN_SRC });
+    job->count_pipe = gpu::create_compute_pipeline(cs.gpu_dev,
+        gpu::embedded_shader("sdf_count"), count_layout, 4);
+
+    const BindEntry expand_layout[] = {
+        { BIND_SDF_SOUP_POS,     Bind::StorageRead,      0 },
+        { BIND_SDF_SOUP_IDX,     Bind::StorageRead,      0 },
+        { BIND_SDF_DIST,         Bind::StorageReadWrite, 0 },  // atomicMin
+        { BIND_SDF_SPLAT_BOX,    Bind::StorageRead,      0 },
+        { BIND_SDF_SPLAT_OFFSET, Bind::StorageRead,      0 },
+        { BIND_PARAMS,           Bind::Uniform,          sizeof(SdfExpandParamsGPU) },
+    };
+    job->expand_pipe = gpu::create_compute_pipeline(cs.gpu_dev,
+        gpu::embedded_shader("sdf_expand"), expand_layout, 6);
+
+    const BindEntry sign_layout[] = {
+        { BIND_SDF_SOUP_POS, Bind::StorageRead,      0 },
+        { BIND_SDF_SOUP_IDX, Bind::StorageRead,      0 },
+        { BIND_SDF_DIST,     Bind::StorageRead,      0 },  // read (written atomically in expand)
+        { BIND_SDF_FIELD,    Bind::StorageReadWrite, 0 },
+        { BIND_PARAMS,       Bind::Uniform,          sizeof(SdfSignParamsGPU) },
+    };
+    job->sign_pipe = gpu::create_compute_pipeline(cs.gpu_dev,
+        gpu::embedded_shader("sdf_sign"), sign_layout, 5);
+
     // Iso-surface extractor: Surface Nets (smoother, quad-dominant) or MC (default,
-    // manifold-robust). Either way it drives the same mc_prog two-pass dispatch in
+    // manifold-robust). Either way it drives the same mc_pipe two-pass dispatch in
     // the Mesh phase, so nothing downstream of here cares which one was compiled.
     // Mirror handling differs by extractor. MC lands vertices exactly on the x=0
     // corner layer, so the mirror path keeps the +x half and reflects it (the
@@ -1414,9 +1030,35 @@ VoxelMergeJob* voxel_merge_begin(Scene& scene, ComputeState& cs,
     // through the plane, no seam to close. (Handled in Mesh/Finish via use_nets.)
     const bool use_nets = surface_nets;
     job->use_nets       = use_nets;
-    job->mc_prog.id     = build_prog(use_nets ? NETS_SRC : MC_SRC, { SDF_GID_SRC });
-    if (!job->count_prog.id || !job->expand_prog.id || !job->sign_prog.id || !job->mc_prog.id)
+    if (use_nets) {
+        const BindEntry nets_layout[] = {
+            { BIND_SDF_FIELD,    Bind::StorageRead,      0 },
+            { BIND_SDF_MC_OUT,   Bind::StorageReadWrite, 0 },
+            { BIND_SDF_MC_COUNT, Bind::StorageReadWrite, 0 },  // atomic counter
+            { BIND_PARAMS,       Bind::Uniform,          sizeof(SdfMeshParamsGPU) },
+        };
+        job->mc_pipe = gpu::create_compute_pipeline(cs.gpu_dev,
+            gpu::embedded_shader("sdf_nets"), nets_layout, 4);
+    } else {
+        const BindEntry mc_layout[] = {
+            { BIND_SDF_FIELD,    Bind::StorageRead,      0 },
+            { BIND_SDF_MC_OUT,   Bind::StorageReadWrite, 0 },
+            { BIND_SDF_MC_COUNT, Bind::StorageReadWrite, 0 },  // atomic counter
+            { BIND_SDF_TRITABLE, Bind::StorageRead,      0 },
+            { BIND_PARAMS,       Bind::Uniform,          sizeof(SdfMeshParamsGPU) },
+        };
+        job->mc_pipe = gpu::create_compute_pipeline(cs.gpu_dev,
+            gpu::embedded_shader("sdf_mc"), mc_layout, 5);
+    }
+    if (!job->count_pipe.handle || !job->expand_pipe.handle ||
+        !job->sign_pipe.handle  || !job->mc_pipe.handle)
         return fail("SDF shader compile failed (see stderr)");
+
+    // Persistent Params UBOs (one per kernel; mc + nets share the SdfMeshParamsGPU layout).
+    job->count_ubo  = gpu::create_buffer(cs.gpu_dev, nullptr, sizeof(SdfCountParamsGPU),  gpu::Usage::Uniform);
+    job->expand_ubo = gpu::create_buffer(cs.gpu_dev, nullptr, sizeof(SdfExpandParamsGPU), gpu::Usage::Uniform);
+    job->sign_ubo   = gpu::create_buffer(cs.gpu_dev, nullptr, sizeof(SdfSignParamsGPU),   gpu::Usage::Uniform);
+    job->mc_ubo     = gpu::create_buffer(cs.gpu_dev, nullptr, sizeof(SdfMeshParamsGPU),   gpu::Usage::Uniform);
 
     sdf_gl_check("pre-merge (stale)");   // drain inherited errors so attribution is clean
     job->phase = VoxelMergeJob::Phase::Splat;
@@ -1425,7 +1067,7 @@ VoxelMergeJob* voxel_merge_begin(Scene& scene, ComputeState& cs,
 
 VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
                                   VoxelMergeJob& j, VoxelMergeResult& out) {
-    (void)cs;   // programs were compiled in begin; tick only dispatches
+    // Pipelines were compiled in begin; tick dispatches them through cs.gpu_dev.
     using Phase = VoxelMergeJob::Phase;
     const SdfGrid& grid = j.grid;
     const uint32_t zero = 0u;
@@ -1444,15 +1086,29 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
     case Phase::Splat: {
 
         // ---- Pass A (count): per-tri voxel box, degenerates -> 0 ----
-        glUseProgram(j.count_prog.id);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_SDF_SOUP_POS,  j.soup_pos.id);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_SDF_SOUP_IDX,  j.soup_idx.id);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_SDF_SPLAT_BOX, j.splat_box.id);
-        set_grid_uniforms(j.count_prog.id, grid);
-        glUniform1i (glGetUniformLocation(j.count_prog.id, "u_band"),     j.band);
-        glUniform1ui(glGetUniformLocation(j.count_prog.id, "u_triCount"), j.tri_count);
-        sdf_dispatch_linear(j.tri_count);
-        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
+        // GL-owned SSBOs wrapped in transient gpu::Buffer views; the seam's per-dispatch
+        // + submit barriers are a superset of the old explicit glMemoryBarrier.
+        SdfCountParamsGPU cu = {};
+        cu.ox = grid.origin.x; cu.oy = grid.origin.y; cu.oz = grid.origin.z;
+        cu.voxel = grid.voxel; cu.R = (int)grid.R; cu.band = j.band; cu.triCount = j.tri_count;
+        gpu::write_buffer(cs.gpu_dev, j.count_ubo, 0, &cu, sizeof(cu));
+
+        gpu::Buffer posView{ (uint64_t)j.pos.size()*sizeof(float),      j.soup_pos.id };
+        gpu::Buffer idxView{ (uint64_t)j.tri_count*3u*sizeof(uint32_t), j.soup_idx.id };
+        gpu::Buffer boxView{ (uint64_t)j.tri_count*6u*sizeof(uint32_t), j.splat_box.id };
+        const gpu::BindBufferEntry cbg[] = {
+            { BIND_SDF_SOUP_POS,  &posView, posView.size },
+            { BIND_SDF_SOUP_IDX,  &idxView, idxView.size },
+            { BIND_SDF_SPLAT_BOX, &boxView, boxView.size },
+            { BIND_PARAMS,        &j.count_ubo, sizeof(SdfCountParamsGPU) },
+        };
+        gpu::BindGroup cgrp = gpu::create_bind_group(cs.gpu_dev, j.count_pipe, cbg, 4);
+        {
+            gpu::ComputeBatch b = gpu::begin_compute(cs.gpu_dev);
+            sdf_dispatch_seam(b, j.count_pipe, cgrp, j.tri_count);
+            gpu::submit(b);
+        }
+        gpu::release_bind_group(cgrp);
         sdf_gl_check("count dispatch");
 
         // ---- Pass B (exclusive scan, CPU): read boxes, scan footprints to offsets,
@@ -1508,17 +1164,32 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
 
         // ---- Pass C (expand + splat): one thread per work item ----
         if (j.work_count > 0u) {
-            glUseProgram(j.expand_prog.id);
-            glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_SDF_SOUP_POS,     j.soup_pos.id);
-            glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_SDF_SOUP_IDX,     j.soup_idx.id);
-            glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_SDF_DIST,         j.dist.id);
-            glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_SDF_SPLAT_BOX,    j.splat_box.id);
-            glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_SDF_SPLAT_OFFSET, j.splat_off.id);
-            set_grid_uniforms(j.expand_prog.id, grid);
-            glUniform1ui(glGetUniformLocation(j.expand_prog.id, "u_triCount"),  j.tri_count);
-            glUniform1ui(glGetUniformLocation(j.expand_prog.id, "u_workCount"), j.work_count);
-            sdf_dispatch_linear(j.work_count);
-            glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+            SdfExpandParamsGPU eu = {};
+            eu.ox = grid.origin.x; eu.oy = grid.origin.y; eu.oz = grid.origin.z;
+            eu.voxel = grid.voxel; eu.R = (int)grid.R;
+            eu.triCount = j.tri_count; eu.workCount = j.work_count;
+            gpu::write_buffer(cs.gpu_dev, j.expand_ubo, 0, &eu, sizeof(eu));
+
+            gpu::Buffer ePosView{ (uint64_t)j.pos.size()*sizeof(float),      j.soup_pos.id };
+            gpu::Buffer eIdxView{ (uint64_t)j.tri_count*3u*sizeof(uint32_t), j.soup_idx.id };
+            gpu::Buffer eDistView{(uint64_t)j.corner_count*sizeof(uint32_t), j.dist.id };
+            gpu::Buffer eBoxView{ (uint64_t)j.tri_count*6u*sizeof(uint32_t), j.splat_box.id };
+            gpu::Buffer eOffView{ (uint64_t)j.tri_count*sizeof(uint32_t),    j.splat_off.id };
+            const gpu::BindBufferEntry ebg[] = {
+                { BIND_SDF_SOUP_POS,     &ePosView,  ePosView.size },
+                { BIND_SDF_SOUP_IDX,     &eIdxView,  eIdxView.size },
+                { BIND_SDF_DIST,         &eDistView, eDistView.size },
+                { BIND_SDF_SPLAT_BOX,    &eBoxView,  eBoxView.size },
+                { BIND_SDF_SPLAT_OFFSET, &eOffView,  eOffView.size },
+                { BIND_PARAMS,           &j.expand_ubo, sizeof(SdfExpandParamsGPU) },
+            };
+            gpu::BindGroup egrp = gpu::create_bind_group(cs.gpu_dev, j.expand_pipe, ebg, 6);
+            {
+                gpu::ComputeBatch b = gpu::begin_compute(cs.gpu_dev);
+                sdf_dispatch_seam(b, j.expand_pipe, egrp, j.work_count);
+                gpu::submit(b);
+            }
+            gpu::release_bind_group(egrp);
             sdf_gl_check("expand dispatch");
         }
 
@@ -1532,16 +1203,23 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
         // (O(band_corners * tris), seconds at R>=128) -> budgeted across frames, a
         // few 32k-corner slices per tick. Each slice is its own ring submission via
         // glFlush so no GPU job approaches the watchdog; the window keeps pumping.
-        glUseProgram(j.sign_prog.id);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_SDF_SOUP_POS, j.soup_pos.id);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_SDF_SOUP_IDX, j.soup_idx.id);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_SDF_DIST,     j.dist.id);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_SDF_FIELD,    j.field.id);
-        set_grid_uniforms(j.sign_prog.id, grid);
-        glUniform1ui(glGetUniformLocation(j.sign_prog.id, "u_triCount"),    j.tri_count);
-        glUniform1ui(glGetUniformLocation(j.sign_prog.id, "u_cornerCount"), j.corner_count);
-        glUniform1f (glGetUniformLocation(j.sign_prog.id, "u_bandFar"),     BAND_FAR);
-        GLint sign_off_loc = glGetUniformLocation(j.sign_prog.id, "u_cornerOffset");
+        SdfSignParamsGPU su = {};
+        su.ox = grid.origin.x; su.oy = grid.origin.y; su.oz = grid.origin.z;
+        su.voxel = grid.voxel; su.R = (int)grid.R;
+        su.triCount = j.tri_count; su.cornerCount = j.corner_count; su.bandFar = BAND_FAR;
+
+        gpu::Buffer sPosView{  (uint64_t)j.pos.size()*sizeof(float),      j.soup_pos.id };
+        gpu::Buffer sIdxView{  (uint64_t)j.tri_count*3u*sizeof(uint32_t), j.soup_idx.id };
+        gpu::Buffer sDistView{ (uint64_t)j.corner_count*sizeof(uint32_t), j.dist.id };
+        gpu::Buffer sFieldView{(uint64_t)j.corner_count*sizeof(float),    j.field.id };
+        const gpu::BindBufferEntry sbg[] = {
+            { BIND_SDF_SOUP_POS, &sPosView,   sPosView.size },
+            { BIND_SDF_SOUP_IDX, &sIdxView,   sIdxView.size },
+            { BIND_SDF_DIST,     &sDistView,  sDistView.size },
+            { BIND_SDF_FIELD,    &sFieldView, sFieldView.size },
+            { BIND_PARAMS,       &j.sign_ubo, sizeof(SdfSignParamsGPU) },
+        };
+        gpu::BindGroup sgrp = gpu::create_bind_group(cs.gpu_dev, j.sign_pipe, sbg, 5);
         const uint32_t SIGN_SLICE      = 32768u;  // worst-case all-band slice ~ <1s on Vega 8
         const uint32_t SLICES_PER_TICK = 2u;      // tune: smaller = smoother window, more ticks.
                                                   // Leaning small on purpose — user prefers a
@@ -1549,13 +1227,16 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
                                                   // freeze; never let one tick block for seconds.
         for (uint32_t s = 0; s < SLICES_PER_TICK && j.sign_off < j.corner_count; s++) {
             uint32_t n = std::min(SIGN_SLICE, j.corner_count - j.sign_off);
-            glUniform1ui(sign_off_loc, j.sign_off);
-            sdf_dispatch_linear(n);
+            su.cornerOffset = j.sign_off;       // only field that changes per slice
+            gpu::write_buffer(cs.gpu_dev, j.sign_ubo, 0, &su, sizeof(su));
+            gpu::ComputeBatch b = gpu::begin_compute(cs.gpu_dev);
+            sdf_dispatch_seam(b, j.sign_pipe, sgrp, n);
+            gpu::submit(b);
             glFlush();   // separate ring submission per slice (own watchdog window)
             j.sign_off += n;
         }
+        gpu::release_bind_group(sgrp);
         if (j.sign_off >= j.corner_count) {
-            glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
             sdf_gl_check("sign dispatch (chunked)");
             j.phase = Phase::Mesh;
         }
@@ -1581,27 +1262,55 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
                         (GLsizeiptr)j.corner_count*sizeof(float), j.field_cpu.data());
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 
-        // ---- Dispatch 3a: marching cubes - count pass ----
-        glUseProgram(j.mc_prog.id);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_SDF_FIELD,    j.field.id);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_SDF_MC_OUT,   j.mc_out.id);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_SDF_MC_COUNT, j.mc_cnt.id);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_SDF_TRITABLE, j.tritab.id);
-        set_grid_uniforms(j.mc_prog.id, grid);
-        glUniform1ui(glGetUniformLocation(j.mc_prog.id, "u_cellCount"),  j.cell_count);
-        glUniform1i (glGetUniformLocation(j.mc_prog.id, "u_count_only"), 1);
-        glUniform1ui(glGetUniformLocation(j.mc_prog.id, "u_cap"),        0u);
-        sdf_dispatch_linear(j.cell_count);
-        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
+        // ---- Extractor bind group (one, reused across both passes; mc_out is realloc'd
+        //      in place between them so its GL id — what the GL backend records — stays
+        //      valid). Surface Nets omits the tri-table binding. ----
+        SdfMeshParamsGPU mu = {};
+        mu.ox = grid.origin.x; mu.oy = grid.origin.y; mu.oz = grid.origin.z;
+        mu.voxel = grid.voxel; mu.R = (int)grid.R; mu.cellCount = j.cell_count;
+
+        gpu::Buffer mFieldView{ (uint64_t)j.corner_count*sizeof(float), j.field.id };
+        gpu::Buffer mOutView{   0, j.mc_out.id };   // size varies (placeholder→exact); GL ignores
+        gpu::Buffer mCntView{   (uint64_t)sizeof(uint32_t), j.mc_cnt.id };
+        gpu::Buffer mTriView{   (uint64_t)sizeof(MC_TRI_TABLE), j.tritab.id };
+        gpu::BindGroup mgrp;
+        if (j.use_nets) {
+            const gpu::BindBufferEntry mbg[] = {
+                { BIND_SDF_FIELD,    &mFieldView, mFieldView.size },
+                { BIND_SDF_MC_OUT,   &mOutView,   mOutView.size },
+                { BIND_SDF_MC_COUNT, &mCntView,   mCntView.size },
+                { BIND_PARAMS,       &j.mc_ubo,   sizeof(SdfMeshParamsGPU) },
+            };
+            mgrp = gpu::create_bind_group(cs.gpu_dev, j.mc_pipe, mbg, 4);
+        } else {
+            const gpu::BindBufferEntry mbg[] = {
+                { BIND_SDF_FIELD,    &mFieldView, mFieldView.size },
+                { BIND_SDF_MC_OUT,   &mOutView,   mOutView.size },
+                { BIND_SDF_MC_COUNT, &mCntView,   mCntView.size },
+                { BIND_SDF_TRITABLE, &mTriView,   mTriView.size },
+                { BIND_PARAMS,       &j.mc_ubo,   sizeof(SdfMeshParamsGPU) },
+            };
+            mgrp = gpu::create_bind_group(cs.gpu_dev, j.mc_pipe, mbg, 5);
+        }
+
+        // ---- Dispatch 3a: extractor count pass ----
+        mu.count_only = 1; mu.cap = 0u;
+        gpu::write_buffer(cs.gpu_dev, j.mc_ubo, 0, &mu, sizeof(mu));
+        {
+            gpu::ComputeBatch b = gpu::begin_compute(cs.gpu_dev);
+            sdf_dispatch_seam(b, j.mc_pipe, mgrp, j.cell_count);
+            gpu::submit(b);
+        }
         sdf_gl_check("mc-count dispatch");
 
         uint32_t out_tris = 0;
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, j.mc_cnt.id);
         glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(uint32_t), &out_tris);
-        if (out_tris == 0) return fail("merge produced no geometry (raise resolution?)");
+        if (out_tris == 0) { gpu::release_bind_group(mgrp); return fail("merge produced no geometry (raise resolution?)"); }
         j.out_tris = out_tris;
 
-        // ---- Size MC_OUT exactly, reset counter ----
+        // ---- Size MC_OUT exactly, reset counter (raw GL; mc_out's GL id is unchanged
+        //      by glBufferData, so the bind group above stays valid for the write pass) ----
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, j.mc_out.id);
         glBufferData(GL_SHADER_STORAGE_BUFFER,
                      (GLsizeiptr)out_tris * 18 * sizeof(float), nullptr, GL_DYNAMIC_COPY);
@@ -1609,16 +1318,15 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
         glClearBufferData(GL_SHADER_STORAGE_BUFFER, GL_R32UI, GL_RED_INTEGER, GL_UNSIGNED_INT, &zero);
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 
-        // ---- Dispatch 3b: marching cubes - write pass ----
-        glUseProgram(j.mc_prog.id);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_SDF_FIELD,    j.field.id);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_SDF_MC_OUT,   j.mc_out.id);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_SDF_MC_COUNT, j.mc_cnt.id);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BIND_SDF_TRITABLE, j.tritab.id);
-        glUniform1i (glGetUniformLocation(j.mc_prog.id, "u_count_only"), 0);
-        glUniform1ui(glGetUniformLocation(j.mc_prog.id, "u_cap"),        out_tris);
-        sdf_dispatch_linear(j.cell_count);
-        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
+        // ---- Dispatch 3b: extractor write pass ----
+        mu.count_only = 0; mu.cap = out_tris;
+        gpu::write_buffer(cs.gpu_dev, j.mc_ubo, 0, &mu, sizeof(mu));
+        {
+            gpu::ComputeBatch b = gpu::begin_compute(cs.gpu_dev);
+            sdf_dispatch_seam(b, j.mc_pipe, mgrp, j.cell_count);
+            gpu::submit(b);
+        }
+        gpu::release_bind_group(mgrp);
         sdf_gl_check("mc-write dispatch");
 
         // ---- Readback the MC soup (the only large readback). On WebGPU -> mapAsync. ----
@@ -1627,7 +1335,6 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
         glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
                            (GLsizeiptr)j.soup.size()*sizeof(float), j.soup.data());
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
-        glUseProgram(0);
 
         j.phase = Phase::Finish;
         return done(VoxelMergeStatus::Working);

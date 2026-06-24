@@ -1,0 +1,68 @@
+// sdf_sign.comp — GLSL 430 sibling of shaders/wgsl/sdf_sign.wgsl.
+// SDF voxel-merge winding sign — evaluated ONLY at band corners (the surface shell,
+// ~O(R^2)). Off-band corners are deferred: marked with |f| == u_bandFar so the CPU
+// flood fill can assign their inside/outside sign. MC only interpolates band-to-band
+// edges, so off-band corners just need a consistent sign — never a winding number.
+// Chunked via u_cornerOffset so the host can budget the dominant pass across frames.
+//
+// Self-contained: SDF_GID / SDF_DEGEN inlined; loose uniforms → anonymous UBO 63.
+#version 430
+layout(local_size_x = 64) in;
+layout(std430, binding = 21) readonly buffer Pos  { float p[]; };
+layout(std430, binding = 22) readonly buffer Idx  { uint  ix[]; };
+layout(std430, binding = 23) readonly buffer Dist { uint  d[]; };
+layout(std430, binding = 24)          buffer Field{ float f[]; };
+layout(std140, binding = 63) uniform Params {
+    vec3  u_origin;       // 0
+    float u_voxel;        // 12
+    int   u_R;            // 16
+    uint  u_triCount;     // 20
+    uint  u_cornerCount;  // 24
+    float u_bandFar;      // 28
+    uint  u_cornerOffset; // 32  chunked dispatch: base corner index of this slice
+    uint  _pad0;          // 36
+    uint  _pad1;          // 40
+    uint  _pad2;          // 44
+};
+const float FOUR_PI = 12.566370614359172;
+
+uint linear_gid() {
+    return gl_GlobalInvocationID.x
+         + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+}
+
+bool nonfinite(vec3 v) { return any(isnan(v)) || any(isinf(v)); }
+bool tri_degenerate(vec3 a, vec3 b, vec3 c) {
+    if (nonfinite(a) || nonfinite(b) || nonfinite(c)) return true;
+    return length(cross(b - a, c - a)) < 1e-20;
+}
+vec3 tri_vert(uint t, uint k) {
+    uint v = ix[3u*t + k];
+    return vec3(p[3u*v], p[3u*v+1u], p[3u*v+2u]);
+}
+
+void main() {
+    uint ci = linear_gid() + u_cornerOffset;
+    if (ci >= u_cornerCount) return;
+    float dist = uintBitsToFloat(d[ci]);
+    if (dist >= u_bandFar) { f[ci] = u_bandFar; return; }   // off-band → CPU flood
+
+    int R1 = u_R + 1;
+    int i =  int(ci) % R1;
+    int j = (int(ci) / R1) % R1;
+    int k =  int(ci) / (R1*R1);
+    vec3 q = u_origin + u_voxel*vec3(i,j,k);
+
+    float omega = 0.0;
+    for (uint t = 0u; t < u_triCount; t++) {
+        vec3 va = tri_vert(t,0u), vb = tri_vert(t,1u), vc = tri_vert(t,2u);
+        if (tri_degenerate(va,vb,vc)) continue;   // keep degenerates out of the sign sum
+        vec3 A = va - q, B = vb - q, C = vc - q;
+        float la=length(A), lb=length(B), lc=length(C);
+        float num = dot(A, cross(B,C));
+        float den = la*lb*lc + dot(A,B)*lc + dot(B,C)*la + dot(C,A)*lb;
+        omega += 2.0 * atan(num, den);
+    }
+    float w = omega / FOUR_PI;
+    f[ci] = (w > 0.5 ? -1.0 : 1.0) * dist;          // signed real distance (band)
+}

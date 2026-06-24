@@ -138,7 +138,10 @@ struct ComputeBatch {
     // between dependent steps); begin/end-pass/submit are barrier bookkeeping.
 };
 ComputeBatch begin_compute(Device&);
-void dispatch(ComputeBatch&, ComputePipeline&, BindGroup&, uint32_t groups_x);
+// groups_y defaults to 1 (the common 1D case). A 2D group grid is only needed when a
+// 1D count would exceed the backend's 65535 per-dimension limit (the SDF passes at
+// R>=128); the kernel recovers the linear index from num_workgroups.x itself.
+void dispatch(ComputeBatch&, ComputePipeline&, BindGroup&, uint32_t groups_x, uint32_t groups_y = 1);
 void end_compute_pass(ComputeBatch&);                       // call before copy_buffer
 void copy_buffer(ComputeBatch&, const Buffer& src, uint64_t src_off,
                  const Buffer& dst, uint64_t dst_off, uint64_t size);

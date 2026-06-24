@@ -1,0 +1,66 @@
+// sdf_count.comp — GLSL 430 sibling of shaders/wgsl/sdf_count.wgsl.
+// SDF voxel-merge Pass A (count): one thread per triangle. Compute the clamped
+// band-AABB once and store it (g0.xyz + span.xyz) into box[] so Pass C can reuse the
+// exact integers instead of recomputing the float math — a 1-ULP rounding diff that
+// flipped a floor() at a voxel boundary would unravel a work item out of the counted
+// box and write dist[] out of bounds (load-balancing spec, invariant 1). Degenerate
+// tris store span 0 → zero work items, skipped by the expand + winding passes.
+//
+// Self-contained: the SDF_GID / SDF_DEGEN / SDF_AABB helper snippets that sdf.cpp used
+// to string-concatenate are inlined here (the build-time embedder does no include
+// injection). Loose grid uniforms → anonymous std140 Params UBO at binding 63.
+#version 430
+layout(local_size_x = 64) in;
+layout(std430, binding = 21) readonly  buffer Pos { float p[]; };
+layout(std430, binding = 22) readonly  buffer Idx { uint  ix[]; };
+layout(std430, binding = 36) writeonly buffer Box { uint  box[]; };  // 6 per tri
+layout(std140, binding = 63) uniform Params {
+    vec3  u_origin;    // 0
+    float u_voxel;     // 12
+    int   u_R;         // 16
+    int   u_band;      // 20
+    uint  u_triCount;  // 24
+    uint  _pad0;       // 28
+};
+
+// SDF_GID: linear work index across a 2D workgroup grid (host splits group count into
+// X*Y past the 65535 per-dim limit; shaders recover the linear index here).
+uint linear_gid() {
+    return gl_GlobalInvocationID.x
+         + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+}
+
+// SDF_DEGEN: degenerate-triangle predicate + soup vertex fetch.
+bool nonfinite(vec3 v) { return any(isnan(v)) || any(isinf(v)); }
+bool tri_degenerate(vec3 a, vec3 b, vec3 c) {
+    if (nonfinite(a) || nonfinite(b) || nonfinite(c)) return true;
+    return length(cross(b - a, c - a)) < 1e-20;
+}
+vec3 tri_vert(uint t, uint k) {           // vertex k (0..2) of triangle t, world space
+    uint v = ix[3u*t + k];
+    return vec3(p[3u*v], p[3u*v+1u], p[3u*v+2u]);
+}
+
+// SDF_AABB: clamped, band-dilated corner-index AABB [g0,g1] (inclusive) for a tri.
+void tri_band_aabb(vec3 a, vec3 b, vec3 c, out ivec3 g0, out ivec3 g1) {
+    vec3 lo = min(min(a,b),c), hi = max(max(a,b),c);
+    g0 = ivec3(floor((lo - u_origin)/u_voxel)) - u_band;
+    g1 = ivec3(ceil ((hi - u_origin)/u_voxel)) + u_band;
+    g0 = clamp(g0, ivec3(0), ivec3(u_R));
+    g1 = clamp(g1, ivec3(0), ivec3(u_R));
+}
+
+void main() {
+    uint t = linear_gid();
+    if (t >= u_triCount) return;
+    uint o = 6u*t;
+    vec3 a = tri_vert(t,0u), b = tri_vert(t,1u), c = tri_vert(t,2u);
+    if (tri_degenerate(a,b,c)) {
+        box[o]=0u; box[o+1u]=0u; box[o+2u]=0u; box[o+3u]=0u; box[o+4u]=0u; box[o+5u]=0u;
+        return;
+    }
+    ivec3 g0, g1; tri_band_aabb(a,b,c,g0,g1);
+    uvec3 span = uvec3(g1 - g0 + ivec3(1));      // g0 clamped to [0,R] ⇒ non-negative
+    box[o]=uint(g0.x); box[o+1u]=uint(g0.y); box[o+2u]=uint(g0.z);
+    box[o+3u]=span.x;  box[o+4u]=span.y;     box[o+5u]=span.z;
+}

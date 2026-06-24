@@ -1,0 +1,94 @@
+// sdf_expand.comp — GLSL 430 sibling of shaders/wgsl/sdf_expand.wgsl.
+// SDF voxel-merge Pass C (expand + splat): one thread per work item. Binary-search
+// the owner triangle in the exclusive scan off[], read its stored box, unravel the
+// local index into a voxel, evaluate one distance, atomic-min into the field. Writes
+// every AABB cell (no per-voxel band predicate) to stay bit-identical to the old
+// thread-per-triangle splat — the band is decided downstream in the winding pass via
+// the BAND_FAR sentinel.
+//
+// Self-contained: SDF_GID / SDF_DEGEN / PT_TRI_DIST inlined; loose uniforms → UBO 63.
+#version 430
+layout(local_size_x = 64) in;
+layout(std430, binding = 21) readonly buffer Pos { float p[]; };
+layout(std430, binding = 22) readonly buffer Idx { uint  ix[]; };
+layout(std430, binding = 23)          buffer Dist{ uint  d[]; };
+layout(std430, binding = 36) readonly buffer Box { uint  box[]; };
+layout(std430, binding = 37) readonly buffer Off { uint  off[]; };
+layout(std140, binding = 63) uniform Params {
+    vec3  u_origin;    // 0
+    float u_voxel;     // 12
+    int   u_R;         // 16
+    uint  u_triCount;  // 20
+    uint  u_workCount; // 24
+    uint  _pad0;       // 28
+};
+
+uint linear_gid() {
+    return gl_GlobalInvocationID.x
+         + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+}
+
+bool nonfinite(vec3 v) { return any(isnan(v)) || any(isinf(v)); }
+bool tri_degenerate(vec3 a, vec3 b, vec3 c) {
+    if (nonfinite(a) || nonfinite(b) || nonfinite(c)) return true;
+    return length(cross(b - a, c - a)) < 1e-20;
+}
+vec3 tri_vert(uint t, uint k) {
+    uint v = ix[3u*t + k];
+    return vec3(p[3u*v], p[3u*v+1u], p[3u*v+2u]);
+}
+
+// PT_TRI_DIST: Ericson closest-point-on-triangle Euclidean distance (degenerates
+// filtered upstream, so the face denom is safe).
+float pt_tri_dist(vec3 pt, vec3 a, vec3 b, vec3 c) {
+    vec3 ab = b - a, ac = c - a, ap = pt - a;
+    float d1 = dot(ab, ap), d2 = dot(ac, ap);
+    if (d1 <= 0.0 && d2 <= 0.0) return length(ap);
+    vec3 bp = pt - b;
+    float d3 = dot(ab, bp), d4 = dot(ac, bp);
+    if (d3 >= 0.0 && d4 <= d3) return length(bp);
+    float vc = d1*d4 - d3*d2;
+    if (vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0) {
+        float v = d1 / (d1 - d3);
+        return length(pt - (a + v*ab));
+    }
+    vec3 cp = pt - c;
+    float d5 = dot(ab, cp), d6 = dot(ac, cp);
+    if (d6 >= 0.0 && d5 <= d6) return length(cp);
+    float vb = d5*d2 - d1*d6;
+    if (vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0) {
+        float w = d2 / (d2 - d6);
+        return length(pt - (a + w*ac));
+    }
+    float va = d3*d6 - d5*d4;
+    if (va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0) {
+        float w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        return length(pt - (b + w*(c - b)));
+    }
+    float denom = 1.0 / (va + vb + vc);
+    float v = vb * denom, w = vc * denom;
+    return length(pt - (a + ab*v + ac*w));
+}
+
+void main() {
+    uint gid = linear_gid();
+    if (gid >= u_workCount) return;
+    // Owner = upper_bound(off, gid) - 1 over [0, u_triCount): first i with off[i] > gid.
+    uint lo = 0u, hi = u_triCount;
+    while (lo < hi) { uint mid = (lo + hi) >> 1u; if (off[mid] <= gid) lo = mid + 1u; else hi = mid; }
+    uint t = lo - 1u;
+    uint j = gid - off[t];                      // local work index within triangle t
+    uint o = 6u*t;
+    ivec3 g0   = ivec3(int(box[o]), int(box[o+1u]), int(box[o+2u]));
+    uvec3 span = uvec3(box[o+3u], box[o+4u], box[o+5u]);
+    uint dx =  j % span.x;
+    uint dy = (j / span.x) % span.y;
+    uint dz =  j / (span.x * span.y);
+    int gi = g0.x + int(dx), gj = g0.y + int(dy), gk = g0.z + int(dz);
+    vec3 a = tri_vert(t,0u), b = tri_vert(t,1u), c = tri_vert(t,2u);
+    vec3 q = u_origin + u_voxel*vec3(gi,gj,gk);
+    float dd = pt_tri_dist(q, a, b, c);
+    int R1 = u_R + 1;
+    uint ci = uint(gi + R1*(gj + R1*gk));
+    atomicMin(d[ci], floatBitsToUint(dd));       // monotonic for dd >= 0
+}
