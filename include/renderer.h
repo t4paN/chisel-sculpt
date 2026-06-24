@@ -3,8 +3,14 @@
 #include "mesh.h"
 #include "camera.h"
 #include "entity_gpu.h"
+#include "gpu/gpu.h"
 
 struct Renderer {
+    // gpu:: seam device (== gpu::gl_device() on GL). Render programs migrate off
+    // raw GL onto the seam one at a time (mirrors the compute Seam 2b port); the
+    // still-raw programs below keep their GLuint members until ported.
+    gpu::Device gpu_dev;
+
     // Mesh GPU buffers
     GLuint vao;
     GLuint vbo_pos;
@@ -15,8 +21,10 @@ struct Renderer {
     GLuint vbo_bary;     // per-vertex barycentric coord
     GLuint ebo;
 
-    // Matcap shader
-    GLuint matcap_program;
+    // Matcap shader — on the gpu:: seam. Loose uniforms (uView/uProj/facing/
+    // objMask/paintVisible) become a std140 Params UBO uploaded per draw.
+    gpu::RenderPipeline matcap_pipeline;
+    gpu::Buffer         matcap_ubo;
 
     // Vertex-paint visibility (1 = show albedo, 0 = plain matcap). Set per frame.
     float paint_visible = 1.0f;
@@ -25,9 +33,9 @@ struct Renderer {
     // reusing the depth attachment and the triid attachment as an id buffer).
     GLuint pick_program = 0;
 
-    // Background shader (gradient)
-    GLuint bg_program;
-    GLuint bg_vao;
+    // Background shader (gradient) — on the gpu:: seam.
+    gpu::RenderPipeline bg_pipeline;
+    gpu::Buffer         bg_vbuf;
 
     // Brush cursor shader
     GLuint cursor_program;
@@ -107,6 +115,10 @@ struct Renderer {
     void read_bary_region(int x, int y, int w, int h, float* out);
 
     void draw_background(int w, int h);
+    // Fill + upload the matcap Params UBO (camera + per-draw flags); shared by
+    // draw_mesh and draw_display.
+    void upload_matcap_params(const Camera& cam, int w, int h,
+                              float facing_threshold, bool selected);
     void draw_mesh(const Camera& cam, int w, int h, uint32_t index_count,
                     float facing_threshold, bool selected);
 

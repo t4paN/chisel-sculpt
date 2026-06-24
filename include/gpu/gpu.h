@@ -153,4 +153,118 @@ void submit(ComputeBatch&);                                  // finish + submit 
 // points (pen-down/up/one-shot) the architecture restricts us to — never mid-stroke.
 void map_read(Device&, const Buffer& staging, uint64_t size, void* out);
 
+// ========================== Render-side seam ==============================
+// Added for the render-path port (renderer.cpp off raw GL). GL backend lands
+// first; the WebGPU render backend lands with the Emscripten web target (the
+// app isn't compiled under CHISEL_BACKEND_WEBGPU yet, so only the GL side is
+// implemented this stage — nothing references these under webgpu).
+//
+// KEY SIMPLIFIER: none of Chisel's render shaders SAMPLE a texture — matcap, the
+// background gradient and the cursor are procedural; the picking MRT textures are
+// written then read back to CPU, never sampled. So render bind groups stay
+// UBO-only and reuse the compute BindGroup / create_bind_group verbatim. Loose GL
+// uniforms become a std140 UBO (the same move the compute kernels made), so both
+// backends share one upload struct. (Sampled textures would need a seam extension;
+// they don't exist in this renderer, so we don't build one.)
+
+static const uint32_t kMaxVertexAttrs = 8;
+
+// How a vertex attribute's bytes are interpreted. Maps to a GL type+size+normalize
+// triple and to a WGPUVertexFormat.
+enum class VertexFormat : uint32_t {
+    F32, F32x2, F32x3, F32x4, // float[1..4]
+    U8x4_norm,                // RGBA8 -> [0,1] (packed vertex colour)
+};
+enum class Topology : uint32_t { Triangles, TriangleStrip, Lines, Points };
+
+// One vertex attribute: shader input `location`, read from vertex-buffer `slot`
+// at byte `offset`, decoded as `format`. The per-vertex stride lives on the slot.
+struct VertexAttr { uint32_t location; VertexFormat format; uint32_t slot; uint32_t offset; };
+struct VertexSlot { uint32_t stride; };  // bytes between consecutive vertices
+
+// Shader sources for a raster pipeline. GL compiles vert+frag GLSL; WebGPU one
+// WGSL module (entry points vs_main/fs_main). Mirrors ShaderSources for compute.
+struct RenderShaderSources {
+    const char* wgsl      = nullptr;  // WebGPU: one module (vs_main/fs_main)
+    const char* vert_glsl = nullptr;  // GL: #version 330 vertex stage
+    const char* frag_glsl = nullptr;  // GL: #version 330 fragment stage
+};
+
+struct RenderPipelineDesc {
+    RenderShaderSources shaders;
+    const VertexAttr* attrs = nullptr; uint32_t attr_count = 0;
+    const VertexSlot* slots = nullptr; uint32_t slot_count = 0;
+    const BindEntry*  binds = nullptr; uint32_t bind_count = 0; // UBO layout (e.g. binding 63)
+    Topology topology    = Topology::Triangles;
+    bool     depth_test  = false;
+    bool     depth_write = false;
+    bool     blend       = false;  // straight alpha: src_alpha / one_minus_src_alpha
+};
+
+struct RenderPipeline {
+#if defined(CHISEL_BACKEND_WEBGPU)
+    WGPURenderPipeline  handle = nullptr;
+    WGPUBindGroupLayout bgl    = nullptr;
+    WGPUPipelineLayout  pl     = nullptr;
+    WGPUShaderModule    module = nullptr;
+#elif defined(CHISEL_BACKEND_GL)
+    unsigned int handle = 0;                 // GL program (0 = failed)
+    unsigned int vao    = 0;                 // GL needs a VAO to draw; the pipeline owns one
+    // vertex layout cache (replayed onto `vao` at draw time from the bound buffers)
+    uint32_t   attr_count = 0;
+    VertexAttr attrs[kMaxVertexAttrs] = {};
+    uint32_t   slot_stride[kMaxVertexAttrs] = {};
+    // UBO bind layout (GL has no BGL object — resolve target at bind, like compute)
+    uint32_t binding_count = 0;
+    uint32_t binding_id[kMaxBindings]   = {};
+    Bind     binding_type[kMaxBindings] = {};
+    // pipeline render state, applied at set_pipeline
+    uint8_t topology = 0, depth_test = 0, depth_write = 0, blend = 0;
+#endif
+};
+RenderPipeline create_render_pipeline(Device&, const RenderPipelineDesc&);
+void release_render_pipeline(RenderPipeline&);
+
+// UBO bind group for a render pipeline (same BindGroup type as compute; resolves
+// each slot's GL target from the render pipeline's layout). Render groups are
+// UBO-only — see the texture note above.
+BindGroup create_bind_group(Device&, RenderPipeline&, const BindBufferEntry* entries, uint32_t entry_count);
+
+// A render target: the default framebuffer (swapchain) for now; offscreen MRT
+// (the picking FBO) grows this struct in the picking slice. `clear` clears colour
+// to `clear_color` at begin; otherwise the existing contents load.
+struct RenderTarget {
+    int   width = 0, height = 0;
+    bool  clear = false;
+    float clear_color[4] = {0, 0, 0, 1};
+#if defined(CHISEL_BACKEND_GL)
+    unsigned int fbo = 0;                 // 0 = default framebuffer
+#elif defined(CHISEL_BACKEND_WEBGPU)
+    WGPUTextureView color = nullptr;      // surface view, acquired per frame
+#endif
+};
+
+// One render pass = bind target + viewport, record draws, end. Maps 1:1 to a
+// WebGPU render pass encoder; the GL backend binds the FBO/viewport at begin and
+// the vertex/index buffers are recorded for replay at draw.
+struct RenderPass {
+    Device* dev = nullptr;
+#if defined(CHISEL_BACKEND_WEBGPU)
+    WGPUCommandEncoder      enc  = nullptr;
+    WGPURenderPassEncoder   pass = nullptr;
+#elif defined(CHISEL_BACKEND_GL)
+    unsigned int vbuf[kMaxVertexAttrs] = {}; // vertex buffer per slot (set_vertex_buffer)
+    unsigned int ibuf = 0;                   // index buffer (set_index_buffer)
+    RenderPipeline* pipe = nullptr;          // current pipeline (set_pipeline)
+#endif
+};
+RenderPass begin_render_pass(Device&, const RenderTarget&);
+void set_pipeline(RenderPass&, RenderPipeline&);
+void set_bind_group(RenderPass&, RenderPipeline&, BindGroup&);          // UBO group
+void set_vertex_buffer(RenderPass&, uint32_t slot, const Buffer&);
+void set_index_buffer(RenderPass&, const Buffer&);                       // 32-bit indices
+void draw(RenderPass&, uint32_t vertex_count, uint32_t first_vertex = 0);
+void draw_indexed(RenderPass&, uint32_t index_count);
+void end_render_pass(RenderPass&);
+
 } // namespace gpu

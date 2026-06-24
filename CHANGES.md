@@ -2,6 +2,31 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-25 — WebGPU port, render-seam: background + matcap on the gpu:: seam (render port started)
+
+- **Render-side primitives added to the `gpu::` seam** (`include/gpu/gpu.h`): `RenderPipeline`
+  / `RenderTarget` / `RenderPass` + vertex-layout descriptors (`VertexAttr` / `VertexSlot` /
+  `VertexFormat` / `Topology`) and the draw ops `begin_render_pass` → `set_pipeline` /
+  `set_vertex_buffer` / `set_index_buffer` / `set_bind_group` / `draw` / `draw_indexed` →
+  `end_render_pass`. Implemented on the GL backend (`src/gpu/gl_backend.cpp`); the WebGPU
+  render backend lands with the web target (the app isn't compiled under webgpu yet).
+- **Render bind groups are UBO-only** and reuse the compute `BindGroup` — confirmed *none*
+  of the renderer's shaders sample a texture (matcap/bg/cursor are procedural; the picking
+  MRT is written then read back, never sampled), so no texture-bind seam extension is needed.
+- **Background gradient on the seam** — `bg_program`/`bg_vao` → `gpu::RenderPipeline` +
+  `gpu::Buffer`; `draw_background` drives the seam.
+- **Matcap mesh draw on the seam** — `draw_mesh` + `draw_display`: `matcap_program` →
+  `gpu::RenderPipeline` with the pos/norm/mask/color vertex layout (locations 0/1/2/4),
+  depth-tested. The loose `glUniform`s (uView/uProj/facing/objMask/paintVisible) become a
+  std140 `Params` UBO at binding 63 (matcap shaders bumped to `#version 430`), uploaded per
+  draw via a shared `upload_matcap_params`. The still-raw working/display VBOs are wrapped in
+  transient `gpu::Buffer` views at draw, same pattern as the compute port.
+- **GL backend detail:** each render pipeline owns a VAO; its vertex layout is replayed onto
+  that VAO at draw time from the buffers bound on the pass — mirroring WebGPU's no-VAO model.
+- **Verified:** gl build green (`chisel` + `chisel-gl-compute-test`, compute test still PASS);
+  app launches, `[renderer] bg pipeline compiled` + `[renderer] matcap pipeline compiled`,
+  no GL errors / FBO-incomplete. Visual eyeball is the user step as always.
+
 ## 2026-06-24 — WebGPU port, Seam Step 2b: SDF voxel-merge on the gpu:: seam (compute path complete)
 
 - **The whole SDF subsystem ported onto `gpu::`** — the last raw-GL compute subsystem.

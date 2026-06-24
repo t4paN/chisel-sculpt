@@ -4,6 +4,23 @@
 #include <cmath>
 #include <algorithm>
 
+// Matcap Params UBO payload — byte-identical to the std140 `Params` block in the
+// matcap shaders (two mat4 = 128 B, then three floats + 4 B pad = 16 B).
+struct MatcapParamsGPU {
+    float view[16];
+    float proj[16];
+    float facing_threshold;
+    float obj_mask;
+    float paint_visible;
+    float _pad0;
+};
+static_assert(sizeof(MatcapParamsGPU) == 144, "matcap Params UBO must be 144 bytes (std140)");
+
+// Wrap a still-raw GL buffer handle as a transient gpu::Buffer view for binding
+// through the seam (size is unused by the GL vertex/index bind path). Same pattern
+// the compute kernels use for their GL-owned SSBOs during the staged port.
+static inline gpu::Buffer buf_view(GLuint h) { gpu::Buffer b; b.handle = h; return b; }
+
 // ---- Shader sources ----
 
 static const char* bg_vert_src = R"(
@@ -29,15 +46,23 @@ void main() {
 }
 )";
 
+// Matcap Params UBO (std140 at binding 63 — the same convention the compute
+// kernels adopted). Declared identically in both stages so the std140 offsets
+// agree; each stage uses only the members it needs. Mirrors MatcapParamsGPU.
 static const char* matcap_vert_src = R"(
-#version 330 core
+#version 430 core
 layout(location=0) in vec3 aPos;
 layout(location=1) in vec3 aNorm;
 layout(location=2) in float aMask;
 layout(location=4) in vec4 aColor;   // RGBA8 normalized -> [0,1]; white = unpainted
 
-uniform mat4 uView;
-uniform mat4 uProj;
+layout(std140, binding=63) uniform Params {
+    mat4 uView;
+    mat4 uProj;
+    float uFacingThreshold;
+    float uObjMask;
+    float uPaintVisible;
+};
 
 out vec3 vNormView;
 out float vMask;
@@ -53,16 +78,19 @@ void main() {
 )";
 
 static const char* matcap_frag_src = R"(
-#version 330 core
+#version 430 core
 in vec3 vNormView;
 in float vMask;
 in vec4 vColor;
 out vec4 fragColor;
-uniform float uFacingThreshold;
-// Per-draw object tint: 0 = selected/active (no tint), 1 = deselected (muted).
-uniform float uObjMask;
-// Vertex-paint visibility: 1 = show albedo, 0 = ignore (plain matcap).
-uniform float uPaintVisible;
+
+layout(std140, binding=63) uniform Params {
+    mat4 uView;
+    mat4 uProj;
+    float uFacingThreshold;
+    float uObjMask;
+    float uPaintVisible;
+};
 
 void main() {
     vec3 n = normalize(vNormView);
@@ -453,7 +481,6 @@ GLuint link_program(GLuint vert, GLuint frag) {
 
 Renderer::Renderer()
     : vao(0), vbo_pos(0), vbo_norm(0), vbo_mask(0), vbo_color(0), vbo_tri_id(0), vbo_bary(0), ebo(0)
-    , matcap_program(0), bg_program(0), bg_vao(0)
     , cursor_program(0), cursor_shadow_program(0), crosshair_program(0)
     , debug_vert_program(0), debug_edge_program(0)
     , debug_vert_vao(0), debug_edge_vao(0), debug_edge_vbo(0), debug_edge_count(0)
@@ -474,9 +501,10 @@ Renderer::~Renderer() {
     if (vbo_mask) glDeleteBuffers(1, &vbo_mask);
     if (vbo_color) glDeleteBuffers(1, &vbo_color);
     if (ebo) glDeleteBuffers(1, &ebo);
-    if (bg_vao) glDeleteVertexArrays(1, &bg_vao);
-    if (matcap_program) glDeleteProgram(matcap_program);
-    if (bg_program) glDeleteProgram(bg_program);
+    gpu::release_render_pipeline(bg_pipeline);
+    gpu::release_buffer(bg_vbuf);
+    gpu::release_render_pipeline(matcap_pipeline);
+    gpu::release_buffer(matcap_ubo);
     if (cursor_program) glDeleteProgram(cursor_program);
     if (cursor_shadow_program) glDeleteProgram(cursor_shadow_program);
     if (crosshair_program) glDeleteProgram(crosshair_program);
@@ -501,28 +529,59 @@ Renderer::~Renderer() {
 }
 
 void Renderer::init() {
-    // Background quad
-    bg_program = link_program(
-        compile_shader(GL_VERTEX_SHADER, bg_vert_src),
-        compile_shader(GL_FRAGMENT_SHADER, bg_frag_src)
-    );
+    gpu_dev = gpu::gl_device();
 
-    float quad[] = { -1,-1, 1,-1, -1,1, 1,1 };
-    GLuint bg_vbo;
-    glGenVertexArrays(1, &bg_vao);
-    glGenBuffers(1, &bg_vbo);
-    glBindVertexArray(bg_vao);
-    glBindBuffer(GL_ARRAY_BUFFER, bg_vbo);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_STATIC_DRAW);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
-    glBindVertexArray(0);
+    // Background gradient quad — first render program on the gpu:: seam.
+    {
+        gpu::VertexAttr attrs[] = {{ 0, gpu::VertexFormat::F32x2, 0, 0 }};
+        gpu::VertexSlot slots[] = {{ 2 * sizeof(float) }};
+        gpu::RenderPipelineDesc d;
+        d.shaders.vert_glsl = bg_vert_src;
+        d.shaders.frag_glsl = bg_frag_src;
+        d.attrs = attrs; d.attr_count = 1;
+        d.slots = slots; d.slot_count = 1;
+        d.topology = gpu::Topology::TriangleStrip;
+        // depth_test off (bg writes no depth), but depth_write=true so set_pipeline
+        // leaves GL's depthMask at its default TRUE for the still-raw draw_mesh that
+        // follows — those paths assume the default and never reset the mask.
+        d.depth_test = false; d.depth_write = true;
+        bg_pipeline = gpu::create_render_pipeline(gpu_dev, d);
+        if (!bg_pipeline.handle) std::fprintf(stderr, "[renderer] bg pipeline failed\n");
+        else std::printf("[renderer] bg pipeline compiled (gpu:: seam)\n");
 
-    // Matcap shader
-    matcap_program = link_program(
-        compile_shader(GL_VERTEX_SHADER, matcap_vert_src),
-        compile_shader(GL_FRAGMENT_SHADER, matcap_frag_src)
-    );
+        float quad[] = { -1,-1, 1,-1, -1,1, 1,1 };
+        bg_vbuf = gpu::create_buffer(gpu_dev, quad, sizeof(quad), gpu::Usage::Vertex);
+    }
+
+    // Matcap shader — on the gpu:: seam. Four separate tightly-packed vertex
+    // buffers (pos/norm/mask/color) at locations 0/1/2/4, a std140 Params UBO at
+    // binding 63, depth-tested. Shared by the active mesh (draw_mesh) and the
+    // inactive display entities (draw_display).
+    {
+        gpu::VertexAttr attrs[] = {
+            { 0, gpu::VertexFormat::F32x3,     0, 0 },  // aPos    <- slot 0
+            { 1, gpu::VertexFormat::F32x3,     1, 0 },  // aNorm   <- slot 1
+            { 2, gpu::VertexFormat::F32,       2, 0 },  // aMask   <- slot 2
+            { 4, gpu::VertexFormat::U8x4_norm, 3, 0 },  // aColor  <- slot 3
+        };
+        gpu::VertexSlot slots[] = {
+            { 3 * sizeof(float) }, { 3 * sizeof(float) },
+            { 1 * sizeof(float) }, { 4 },
+        };
+        gpu::BindEntry binds[] = {{ 63, gpu::Bind::Uniform, sizeof(MatcapParamsGPU) }};
+        gpu::RenderPipelineDesc d;
+        d.shaders.vert_glsl = matcap_vert_src;
+        d.shaders.frag_glsl = matcap_frag_src;
+        d.attrs = attrs; d.attr_count = 4;
+        d.slots = slots; d.slot_count = 4;
+        d.binds = binds; d.bind_count = 1;
+        d.topology = gpu::Topology::Triangles;
+        d.depth_test = true; d.depth_write = true;
+        matcap_pipeline = gpu::create_render_pipeline(gpu_dev, d);
+        if (!matcap_pipeline.handle) std::fprintf(stderr, "[renderer] matcap pipeline failed\n");
+        else std::printf("[renderer] matcap pipeline compiled (gpu:: seam)\n");
+        matcap_ubo = gpu::create_buffer(gpu_dev, nullptr, sizeof(MatcapParamsGPU), gpu::Usage::Uniform);
+    }
 
     // Entity-id pick shader
     pick_program = link_program(
@@ -816,31 +875,47 @@ void Renderer::update_color_verts(const Mesh& mesh, const std::vector<uint32_t>&
 }
 
 void Renderer::draw_background(int w, int h) {
-    glDisable(GL_DEPTH_TEST);
-    glUseProgram(bg_program);
-    glBindVertexArray(bg_vao);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    glBindVertexArray(0);
+    gpu::RenderTarget target;          // fbo 0 (default framebuffer), no clear
+    target.width = w; target.height = h;
+    gpu::RenderPass rp = gpu::begin_render_pass(gpu_dev, target);
+    gpu::set_pipeline(rp, bg_pipeline);
+    gpu::set_vertex_buffer(rp, 0, bg_vbuf);
+    gpu::draw(rp, 4);
+    gpu::end_render_pass(rp);
+}
+
+// Fill + upload the matcap Params UBO from the camera and per-draw flags. Shared
+// by draw_mesh (active entity) and draw_display (inactive entities).
+void Renderer::upload_matcap_params(const Camera& cam, int w, int h,
+                                    float facing_threshold, bool selected) {
+    MatcapParamsGPU p;
+    cam.get_view_matrix(p.view);
+    cam.get_projection_matrix(p.proj, (float)w / (float)h);
+    p.facing_threshold = facing_threshold;
+    p.obj_mask = selected ? 0.0f : 1.0f;
+    p.paint_visible = paint_visible;
+    p._pad0 = 0.0f;
+    gpu::write_buffer(gpu_dev, matcap_ubo, 0, &p, sizeof p);
 }
 
 void Renderer::draw_mesh(const Camera& cam, int w, int h, uint32_t index_count,
                           float facing_threshold, bool selected) {
-    glEnable(GL_DEPTH_TEST);
-    glUseProgram(matcap_program);
+    upload_matcap_params(cam, w, h, facing_threshold, selected);
 
-    float view[16], proj[16];
-    cam.get_view_matrix(view);
-    cam.get_projection_matrix(proj, (float)w / (float)h);
-
-    glUniformMatrix4fv(glGetUniformLocation(matcap_program, "uView"), 1, GL_FALSE, view);
-    glUniformMatrix4fv(glGetUniformLocation(matcap_program, "uProj"), 1, GL_FALSE, proj);
-    glUniform1f(glGetUniformLocation(matcap_program, "uFacingThreshold"), facing_threshold);
-    glUniform1f(glGetUniformLocation(matcap_program, "uObjMask"), selected ? 0.0f : 1.0f);
-    glUniform1f(glGetUniformLocation(matcap_program, "uPaintVisible"), paint_visible);
-
-    glBindVertexArray(vao);
-    glDrawElements(GL_TRIANGLES, index_count, GL_UNSIGNED_INT, nullptr);
-    glBindVertexArray(0);
+    gpu::RenderTarget target; target.width = w; target.height = h;
+    gpu::RenderPass rp = gpu::begin_render_pass(gpu_dev, target);
+    gpu::set_pipeline(rp, matcap_pipeline);
+    gpu::BindBufferEntry be[] = {{ 63, &matcap_ubo, sizeof(MatcapParamsGPU) }};
+    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, matcap_pipeline, be, 1);
+    gpu::set_bind_group(rp, matcap_pipeline, grp);
+    gpu::set_vertex_buffer(rp, 0, buf_view(vbo_pos));
+    gpu::set_vertex_buffer(rp, 1, buf_view(vbo_norm));
+    gpu::set_vertex_buffer(rp, 2, buf_view(vbo_mask));
+    gpu::set_vertex_buffer(rp, 3, buf_view(vbo_color));
+    gpu::set_index_buffer(rp, buf_view(ebo));
+    gpu::draw_indexed(rp, index_count);
+    gpu::end_render_pass(rp);
+    gpu::release_bind_group(grp);
 }
 
 // ---- Per-entity static display buffers ----
@@ -910,22 +985,22 @@ void Renderer::free_display(EntityGpu& g) {
 void Renderer::draw_display(const Camera& cam, EntityGpu& g, int w, int h,
                             float facing_threshold, bool selected) {
     if (!g.vao || g.index_count == 0) return;
-    glEnable(GL_DEPTH_TEST);
-    glUseProgram(matcap_program);
+    upload_matcap_params(cam, w, h, facing_threshold, selected);
 
-    float view[16], proj[16];
-    cam.get_view_matrix(view);
-    cam.get_projection_matrix(proj, (float)w / (float)h);
-
-    glUniformMatrix4fv(glGetUniformLocation(matcap_program, "uView"), 1, GL_FALSE, view);
-    glUniformMatrix4fv(glGetUniformLocation(matcap_program, "uProj"), 1, GL_FALSE, proj);
-    glUniform1f(glGetUniformLocation(matcap_program, "uFacingThreshold"), facing_threshold);
-    glUniform1f(glGetUniformLocation(matcap_program, "uObjMask"), selected ? 0.0f : 1.0f);
-    glUniform1f(glGetUniformLocation(matcap_program, "uPaintVisible"), paint_visible);
-
-    glBindVertexArray(g.vao);
-    glDrawElements(GL_TRIANGLES, g.index_count, GL_UNSIGNED_INT, nullptr);
-    glBindVertexArray(0);
+    gpu::RenderTarget target; target.width = w; target.height = h;
+    gpu::RenderPass rp = gpu::begin_render_pass(gpu_dev, target);
+    gpu::set_pipeline(rp, matcap_pipeline);
+    gpu::BindBufferEntry be[] = {{ 63, &matcap_ubo, sizeof(MatcapParamsGPU) }};
+    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, matcap_pipeline, be, 1);
+    gpu::set_bind_group(rp, matcap_pipeline, grp);
+    gpu::set_vertex_buffer(rp, 0, buf_view(g.vbo_pos));
+    gpu::set_vertex_buffer(rp, 1, buf_view(g.vbo_norm));
+    gpu::set_vertex_buffer(rp, 2, buf_view(g.vbo_mask));
+    gpu::set_vertex_buffer(rp, 3, buf_view(g.vbo_color));
+    gpu::set_index_buffer(rp, buf_view(g.ebo));
+    gpu::draw_indexed(rp, g.index_count);
+    gpu::end_render_pass(rp);
+    gpu::release_bind_group(grp);
 }
 
 // ---- Entity-id pick pass (reuses the screen FBO) ----
