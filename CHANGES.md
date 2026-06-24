@@ -2,6 +2,27 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-25 — WebGPU port, render-seam: brush cursor + debug wireframe on the gpu:: seam
+
+- **Brush-cursor overlay on the seam** (`draw_cursor`) — the ring, the footprint-shadow disc
+  and the centre crosshair become three `gpu::RenderPipeline`s, each with its loose `glUniform`s
+  folded into a std140 `Params` UBO at binding 63 (shaders bumped to `#version 430`). The overlay
+  geometry is camera-independent (unit ring / unit disc / fixed crosshair), so it is built **once
+  at init** into persistent `gpu::Buffer`s instead of regenerating VAOs/VBOs every frame as before.
+- **Footprint disc fan → triangle list** — WebGPU has no triangle-fan topology, so the disc is
+  emitted as an explicit `Triangles` list (centre, rim[i], rim[i+1] per segment); identical
+  coverage + winding to the old `GL_TRIANGLE_FAN`.
+- **Debug wireframe overlay on the seam** (`draw_debug_mesh`) — the edge-lines pass moves to a
+  `Lines` `gpu::RenderPipeline` with a view/proj std140 UBO; the GL-owned edge index buffer is
+  built lazily and bound through the seam. Depth-compare `LEQUAL` + polygon-offset (the seam
+  doesn't model depth-func / depth-bias yet) stay as raw GL around the seam draw, restored after.
+- **Dead points-path removed** — `debug_vert_program` / `debug_vert_vao` / `debug_vert_frag_src`
+  were created but never drawn; deleted while porting the edge path.
+- **Verified:** gl build green; `chisel-gl-compute-test` still PASS; app launches with all six
+  `[renderer] … pipeline compiled (gpu:: seam)` lines (bg, matcap, cursor, shadow, crosshair,
+  debug edge), no GL errors. Visual eyeball is the user step. **Remaining render slice: the
+  entity-id pick pass + the screen-buffer MRT** (offscreen `RenderTarget` + async readback).
+
 ## 2026-06-25 — WebGPU port, render-seam: background + matcap on the gpu:: seam (render port started)
 
 - **Render-side primitives added to the `gpu::` seam** (`include/gpu/gpu.h`): `RenderPipeline`

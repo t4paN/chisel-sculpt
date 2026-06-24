@@ -37,17 +37,25 @@ struct Renderer {
     gpu::RenderPipeline bg_pipeline;
     gpu::Buffer         bg_vbuf;
 
-    // Brush cursor shader
-    GLuint cursor_program;
-    GLuint cursor_shadow_program;
-    GLuint crosshair_program;
+    // Brush cursor overlay — on the gpu:: seam. Three render pipelines (ring /
+    // footprint disc / centre crosshair), each with static camera-independent
+    // geometry built once and a std140 Params UBO updated per draw.
+    gpu::RenderPipeline cursor_pipeline;
+    gpu::RenderPipeline shadow_pipeline;
+    gpu::RenderPipeline crosshair_pipeline;
+    gpu::Buffer cursor_vbuf;     // unit ring (TriangleStrip)
+    gpu::Buffer shadow_vbuf;     // unit disc (Triangles, fan converted to a list)
+    gpu::Buffer crosshair_vbuf;  // fixed centre X (Lines)
+    gpu::Buffer cursor_ubo;
+    gpu::Buffer shadow_ubo;
+    gpu::Buffer crosshair_ubo;
 
-    // Debug visualization
-    GLuint debug_vert_program;     // vertices as points
-    GLuint debug_edge_program;     // edges as lines
-    GLuint debug_vert_vao;
-    GLuint debug_edge_vao;
-    GLuint debug_edge_vbo;
+    // Debug visualization (wireframe edge overlay) — on the gpu:: seam. Lines
+    // pipeline + a std140 Params UBO (view/proj); the GL-owned edge index buffer
+    // is built lazily and bound through the seam.
+    gpu::RenderPipeline debug_edge_pipeline;
+    gpu::Buffer         debug_edge_ubo;
+    GLuint debug_edge_vbo;         // edge index buffer (GL-owned, built lazily)
     uint32_t debug_edge_count;
 
     // Screen buffer FBO for brush pipeline

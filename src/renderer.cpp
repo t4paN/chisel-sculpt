@@ -16,6 +16,51 @@ struct MatcapParamsGPU {
 };
 static_assert(sizeof(MatcapParamsGPU) == 144, "matcap Params UBO must be 144 bytes (std140)");
 
+// ---- Brush-cursor overlay Params UBOs (std140 at binding 63) ----
+// The cursor ring, the footprint shadow disc and the centre crosshair each ride a
+// std140 Params UBO on the gpu:: seam, exactly like matcap. Byte-identical to the
+// `Params` block declared in the matching shaders below; pads make the std140
+// offsets explicit. The overlay geometry itself is camera-independent (unit ring /
+// unit disc / fixed crosshair), so it is built ONCE at init and only these UBOs
+// change per frame.
+struct CursorParamsGPU {        // ring
+    float center[2];            // 0
+    float screenSize[2];        // 8   (fills 0..15)
+    float normal[3];   float radius;      // 16 (vec3 + scalar packed)
+    float camRight[3]; float baseThick;   // 32
+    float camUp[3];    float frontBoost;  // 48
+    float camFwd[3];   float _pad0;       // 64
+    float color[4];                       // 80
+};
+static_assert(sizeof(CursorParamsGPU) == 96, "cursor Params UBO must be 96 bytes (std140)");
+
+struct ShadowParamsGPU {        // footprint disc
+    float center[2];            // 0
+    float radius;               // 8
+    float _pad0;                // 12
+    float screenSize[2];        // 16
+    float _pad1[2];             // 24
+    float color[4];             // 32
+};
+static_assert(sizeof(ShadowParamsGPU) == 48, "shadow Params UBO must be 48 bytes (std140)");
+
+struct CrosshairParamsGPU {     // centre X
+    float center[2];            // 0
+    float screenSize[2];        // 8   (fills 0..15)
+    float color[4];             // 16
+};
+static_assert(sizeof(CrosshairParamsGPU) == 32, "crosshair Params UBO must be 32 bytes (std140)");
+
+// Debug-mesh edge overlay (wireframe) Params UBO — two mat4 (std140 at binding 63).
+struct DebugParamsGPU {
+    float view[16];
+    float proj[16];
+};
+static_assert(sizeof(DebugParamsGPU) == 128, "debug Params UBO must be 128 bytes (std140)");
+
+// Unit-ring segment count (shared by ring + footprint disc geometry, built once).
+static const int CURSOR_SEGS = 64;
+
 // Wrap a still-raw GL buffer handle as a transient gpu::Buffer view for binding
 // through the seam (size is unused by the GL vertex/index bind path). Same pattern
 // the compute kernels use for their GL-owned SSBOs during the staged port.
@@ -154,20 +199,25 @@ void main() {
 }
 )";
 
-static const char* cursor_vert_src = R"(
-#version 330 core
-layout(location=0) in vec2 aLocal;   // unit circle (cos, sin)
-layout(location=1) in float aOuter;  // 0 = inner rim vertex, 1 = outer
-uniform vec2 uCenter;
-uniform float uRadius;
-uniform vec2 uScreenSize;
-uniform vec3 uNormal;
-uniform vec3 uCamRight;
-uniform vec3 uCamUp;
-uniform vec3 uCamFwd;      // points from camera into scene
-uniform float uBaseThick;  // pixels; half-thickness back side / half front ≈ 1.8x
-uniform float uFrontBoost; // extra thickness on front (pixels)
+// std140 Params block (binding 63) — byte-identical to CursorParamsGPU. Declared
+// in both stages so the offsets agree; each stage uses only the members it needs.
+#define CURSOR_PARAMS_BLOCK \
+    "layout(std140, binding=63) uniform Params {\n" \
+    "    vec2 uCenter;\n" \
+    "    vec2 uScreenSize;\n" \
+    "    vec3 uNormal;   float uRadius;\n" \
+    "    vec3 uCamRight; float uBaseThick;\n" \
+    "    vec3 uCamUp;    float uFrontBoost;\n" \
+    "    vec3 uCamFwd;\n" \
+    "    vec4 uColor;\n" \
+    "};\n"
 
+static const char* cursor_vert_src =
+"#version 430 core\n"
+"layout(location=0) in vec2 aLocal;\n"   // unit circle (cos, sin)
+"layout(location=1) in float aOuter;\n"  // 0 = inner rim vertex, 1 = outer
+CURSOR_PARAMS_BLOCK
+R"(
 out float vFront;
 
 void main() {
@@ -240,10 +290,11 @@ void main() {
 }
 )";
 
-static const char* cursor_frag_src = R"(
-#version 330 core
+static const char* cursor_frag_src =
+"#version 430 core\n"
+CURSOR_PARAMS_BLOCK
+R"(
 in float vFront;
-uniform vec4 uColor;
 out vec4 fragColor;
 void main() {
     // vFront roughly in [-1, 1]. Darken back, keep front near full.
@@ -255,11 +306,19 @@ void main() {
 )";
 
 // ---- Crosshair (center X marker) ----
-static const char* crosshair_vert_src = R"(
-#version 330 core
-layout(location=0) in vec2 aPos;
-uniform vec2 uCenter;
-uniform vec2 uScreenSize;
+// std140 Params block (binding 63) — byte-identical to CrosshairParamsGPU.
+#define CROSSHAIR_PARAMS_BLOCK \
+    "layout(std140, binding=63) uniform Params {\n" \
+    "    vec2 uCenter;\n" \
+    "    vec2 uScreenSize;\n" \
+    "    vec4 uColor;\n" \
+    "};\n"
+
+static const char* crosshair_vert_src =
+"#version 430 core\n"
+"layout(location=0) in vec2 aPos;\n"
+CROSSHAIR_PARAMS_BLOCK
+R"(
 void main() {
     vec2 screen = uCenter + aPos;
     vec2 ndc = (screen / uScreenSize) * 2.0 - 1.0;
@@ -268,20 +327,29 @@ void main() {
 }
 )";
 
-static const char* crosshair_frag_src = R"(
-#version 330 core
-uniform vec4 uColor;
+static const char* crosshair_frag_src =
+"#version 430 core\n"
+CROSSHAIR_PARAMS_BLOCK
+R"(
 out vec4 fragColor;
 void main() { fragColor = uColor; }
 )";
 
 // ---- Brush shadow (screen-space filled disc = actual sculpt footprint) ----
-static const char* cursor_shadow_vert_src = R"(
-#version 330 core
-layout(location=0) in vec2 aPos;    // (0,0) for fan center, unit circle for rim
-uniform vec2 uCenter;
-uniform float uRadius;
-uniform vec2 uScreenSize;
+// std140 Params block (binding 63) — byte-identical to ShadowParamsGPU.
+#define SHADOW_PARAMS_BLOCK \
+    "layout(std140, binding=63) uniform Params {\n" \
+    "    vec2 uCenter;\n" \
+    "    float uRadius;\n" \
+    "    vec2 uScreenSize;\n" \
+    "    vec4 uColor;\n" \
+    "};\n"
+
+static const char* cursor_shadow_vert_src =
+"#version 430 core\n"
+"layout(location=0) in vec2 aPos;\n"   // unit-disc triangle-list vertex (centre or rim)
+SHADOW_PARAMS_BLOCK
+R"(
 out float vDist;
 void main() {
     vDist = length(aPos);  // 0 = center, 1 = rim
@@ -292,10 +360,11 @@ void main() {
 }
 )";
 
-static const char* cursor_shadow_frag_src = R"(
-#version 330 core
+static const char* cursor_shadow_frag_src =
+"#version 430 core\n"
+SHADOW_PARAMS_BLOCK
+R"(
 in float vDist;
-uniform vec4 uColor;
 out vec4 fragColor;
 void main() {
     // Soft falloff near the rim; slight dip in the center so the disc reads
@@ -418,26 +487,25 @@ static GLuint compile_compute_program(const char* src) {
     return program;
 }
 
-static const char* debug_vert_src = R"(
-#version 330 core
-layout(location=0) in vec3 aPos;
-uniform mat4 uView;
-uniform mat4 uProj;
+// std140 Params block (binding 63) — byte-identical to DebugParamsGPU (two mat4).
+#define DEBUG_PARAMS_BLOCK \
+    "layout(std140, binding=63) uniform Params {\n" \
+    "    mat4 uView;\n" \
+    "    mat4 uProj;\n" \
+    "};\n"
+
+static const char* debug_vert_src =
+"#version 430 core\n"
+"layout(location=0) in vec3 aPos;\n"
+DEBUG_PARAMS_BLOCK
+R"(
 void main() {
     gl_Position = uProj * uView * vec4(aPos, 1.0);
 }
 )";
 
-static const char* debug_vert_frag_src = R"(
-#version 330 core
-out vec4 fragColor;
-void main() {
-    fragColor = vec4(0.2, 1.0, 1.0, 1.0);
-}
-)";
-
 static const char* debug_edge_frag_src = R"(
-#version 330 core
+#version 430 core
 out vec4 fragColor;
 void main() {
     fragColor = vec4(0.15, 0.45, 0.15, 1.0);
@@ -481,9 +549,7 @@ GLuint link_program(GLuint vert, GLuint frag) {
 
 Renderer::Renderer()
     : vao(0), vbo_pos(0), vbo_norm(0), vbo_mask(0), vbo_color(0), vbo_tri_id(0), vbo_bary(0), ebo(0)
-    , cursor_program(0), cursor_shadow_program(0), crosshair_program(0)
-    , debug_vert_program(0), debug_edge_program(0)
-    , debug_vert_vao(0), debug_edge_vao(0), debug_edge_vbo(0), debug_edge_count(0)
+    , debug_edge_vbo(0), debug_edge_count(0)
     , screen_fbo(0), screen_depth_tex(0), screen_normal_tex(0)
     , screen_triid_tex(0), screen_bary_tex(0), screen_depth_rbo(0)
     , screen_buf_w(0), screen_buf_h(0)
@@ -505,13 +571,17 @@ Renderer::~Renderer() {
     gpu::release_buffer(bg_vbuf);
     gpu::release_render_pipeline(matcap_pipeline);
     gpu::release_buffer(matcap_ubo);
-    if (cursor_program) glDeleteProgram(cursor_program);
-    if (cursor_shadow_program) glDeleteProgram(cursor_shadow_program);
-    if (crosshair_program) glDeleteProgram(crosshair_program);
-    if (debug_vert_program) glDeleteProgram(debug_vert_program);
-    if (debug_edge_program) glDeleteProgram(debug_edge_program);
-    if (debug_vert_vao) glDeleteVertexArrays(1, &debug_vert_vao);
-    if (debug_edge_vao) glDeleteVertexArrays(1, &debug_edge_vao);
+    gpu::release_render_pipeline(cursor_pipeline);
+    gpu::release_render_pipeline(shadow_pipeline);
+    gpu::release_render_pipeline(crosshair_pipeline);
+    gpu::release_buffer(cursor_vbuf);
+    gpu::release_buffer(shadow_vbuf);
+    gpu::release_buffer(crosshair_vbuf);
+    gpu::release_buffer(cursor_ubo);
+    gpu::release_buffer(shadow_ubo);
+    gpu::release_buffer(crosshair_ubo);
+    gpu::release_render_pipeline(debug_edge_pipeline);
+    gpu::release_buffer(debug_edge_ubo);
     if (debug_edge_vbo) glDeleteBuffers(1, &debug_edge_vbo);
     if (screen_fbo) glDeleteFramebuffers(1, &screen_fbo);
     if (screen_depth_tex) glDeleteTextures(1, &screen_depth_tex);
@@ -597,19 +667,96 @@ void Renderer::init() {
     glGenBuffers(1, &vbo_color);
     glGenBuffers(1, &ebo);
 
-    // Cursor shader
-    cursor_program = link_program(
-        compile_shader(GL_VERTEX_SHADER, cursor_vert_src),
-        compile_shader(GL_FRAGMENT_SHADER, cursor_frag_src)
-    );
-    cursor_shadow_program = link_program(
-        compile_shader(GL_VERTEX_SHADER, cursor_shadow_vert_src),
-        compile_shader(GL_FRAGMENT_SHADER, cursor_shadow_frag_src)
-    );
-    crosshair_program = link_program(
-        compile_shader(GL_VERTEX_SHADER, crosshair_vert_src),
-        compile_shader(GL_FRAGMENT_SHADER, crosshair_frag_src)
-    );
+    // Brush-cursor overlays — on the gpu:: seam. Three pipelines, each with static
+    // camera-independent geometry (built once here) + a std140 Params UBO updated
+    // per draw. All blend, no depth test; depth_write=true keeps GL's depthMask at
+    // its default TRUE (same reasoning as bg_pipeline) — no depth is actually
+    // written since depth_test is off.
+    {
+        // Ring — unit-circle triangle strip: SEGS+1 (inner,outer) vertex pairs.
+        std::vector<float> ring; ring.reserve((CURSOR_SEGS + 1) * 2 * 3);
+        for (int i = 0; i <= CURSOR_SEGS; i++) {
+            float a = 2.0f * 3.14159265f * (float)i / (float)CURSOR_SEGS;
+            float cs = std::cos(a), sn = std::sin(a);
+            ring.push_back(cs); ring.push_back(sn); ring.push_back(0.0f); // inner rim
+            ring.push_back(cs); ring.push_back(sn); ring.push_back(1.0f); // outer rim
+        }
+        cursor_vbuf = gpu::create_buffer(gpu_dev, ring.data(),
+                                         ring.size() * sizeof(float), gpu::Usage::Vertex);
+        gpu::VertexAttr attrs[] = {
+            { 0, gpu::VertexFormat::F32x2, 0, 0 },              // aLocal (cos,sin)
+            { 1, gpu::VertexFormat::F32,   0, 2 * sizeof(float) }, // aOuter
+        };
+        gpu::VertexSlot slots[] = {{ 3 * sizeof(float) }};
+        gpu::BindEntry binds[] = {{ 63, gpu::Bind::Uniform, sizeof(CursorParamsGPU) }};
+        gpu::RenderPipelineDesc d;
+        d.shaders.vert_glsl = cursor_vert_src;
+        d.shaders.frag_glsl = cursor_frag_src;
+        d.attrs = attrs; d.attr_count = 2;
+        d.slots = slots; d.slot_count = 1;
+        d.binds = binds; d.bind_count = 1;
+        d.topology = gpu::Topology::TriangleStrip;
+        d.depth_test = false; d.depth_write = true; d.blend = true;
+        cursor_pipeline = gpu::create_render_pipeline(gpu_dev, d);
+        if (!cursor_pipeline.handle) std::fprintf(stderr, "[renderer] cursor pipeline failed\n");
+        else std::printf("[renderer] cursor pipeline compiled (gpu:: seam)\n");
+        cursor_ubo = gpu::create_buffer(gpu_dev, nullptr, sizeof(CursorParamsGPU), gpu::Usage::Uniform);
+    }
+    {
+        // Footprint disc — unit triangle LIST (fan converted: WebGPU has no fan).
+        // Per segment: (centre, rim[i], rim[i+1]).
+        std::vector<float> disc; disc.reserve(CURSOR_SEGS * 3 * 2);
+        for (int i = 0; i < CURSOR_SEGS; i++) {
+            float a0 = 2.0f * 3.14159265f * (float)i / (float)CURSOR_SEGS;
+            float a1 = 2.0f * 3.14159265f * (float)(i + 1) / (float)CURSOR_SEGS;
+            disc.push_back(0.0f);        disc.push_back(0.0f);
+            disc.push_back(std::cos(a0)); disc.push_back(std::sin(a0));
+            disc.push_back(std::cos(a1)); disc.push_back(std::sin(a1));
+        }
+        shadow_vbuf = gpu::create_buffer(gpu_dev, disc.data(),
+                                         disc.size() * sizeof(float), gpu::Usage::Vertex);
+        gpu::VertexAttr attrs[] = {{ 0, gpu::VertexFormat::F32x2, 0, 0 }};
+        gpu::VertexSlot slots[] = {{ 2 * sizeof(float) }};
+        gpu::BindEntry binds[] = {{ 63, gpu::Bind::Uniform, sizeof(ShadowParamsGPU) }};
+        gpu::RenderPipelineDesc d;
+        d.shaders.vert_glsl = cursor_shadow_vert_src;
+        d.shaders.frag_glsl = cursor_shadow_frag_src;
+        d.attrs = attrs; d.attr_count = 1;
+        d.slots = slots; d.slot_count = 1;
+        d.binds = binds; d.bind_count = 1;
+        d.topology = gpu::Topology::Triangles;
+        d.depth_test = false; d.depth_write = true; d.blend = true;
+        shadow_pipeline = gpu::create_render_pipeline(gpu_dev, d);
+        if (!shadow_pipeline.handle) std::fprintf(stderr, "[renderer] shadow pipeline failed\n");
+        else std::printf("[renderer] shadow pipeline compiled (gpu:: seam)\n");
+        shadow_ubo = gpu::create_buffer(gpu_dev, nullptr, sizeof(ShadowParamsGPU), gpu::Usage::Uniform);
+    }
+    {
+        // Crosshair — fixed centre X (8 line verts, screen-space offsets).
+        const float gap = 3.0f, arm = 8.0f;
+        float xh[] = {
+            -arm, -arm,  -gap, -gap,
+             gap,  gap,   arm,  arm,
+             arm, -arm,   gap, -gap,
+            -gap,  gap,  -arm,  arm,
+        };
+        crosshair_vbuf = gpu::create_buffer(gpu_dev, xh, sizeof(xh), gpu::Usage::Vertex);
+        gpu::VertexAttr attrs[] = {{ 0, gpu::VertexFormat::F32x2, 0, 0 }};
+        gpu::VertexSlot slots[] = {{ 2 * sizeof(float) }};
+        gpu::BindEntry binds[] = {{ 63, gpu::Bind::Uniform, sizeof(CrosshairParamsGPU) }};
+        gpu::RenderPipelineDesc d;
+        d.shaders.vert_glsl = crosshair_vert_src;
+        d.shaders.frag_glsl = crosshair_frag_src;
+        d.attrs = attrs; d.attr_count = 1;
+        d.slots = slots; d.slot_count = 1;
+        d.binds = binds; d.bind_count = 1;
+        d.topology = gpu::Topology::Lines;
+        d.depth_test = false; d.depth_write = true; d.blend = true;
+        crosshair_pipeline = gpu::create_render_pipeline(gpu_dev, d);
+        if (!crosshair_pipeline.handle) std::fprintf(stderr, "[renderer] crosshair pipeline failed\n");
+        else std::printf("[renderer] crosshair pipeline compiled (gpu:: seam)\n");
+        crosshair_ubo = gpu::create_buffer(gpu_dev, nullptr, sizeof(CrosshairParamsGPU), gpu::Usage::Uniform);
+    }
 
     // Screen buffer MRT shader
     screen_buf_program = link_program(
@@ -629,20 +776,27 @@ void Renderer::init() {
     if (!screen_expand_program)
         std::fprintf(stderr, "[renderer] screen_expand compute shader failed\n");
 
-    // Debug visualization shaders
-    debug_vert_program = link_program(
-        compile_shader(GL_VERTEX_SHADER, debug_vert_src),
-        compile_shader(GL_FRAGMENT_SHADER, debug_vert_frag_src)
-    );
-    debug_edge_program = link_program(
-        compile_shader(GL_VERTEX_SHADER, debug_vert_src),
-        compile_shader(GL_FRAGMENT_SHADER, debug_edge_frag_src)
-    );
-
-    // Debug VAOs (will be populated in draw_debug_mesh)
-    glGenVertexArrays(1, &debug_vert_vao);
-    glGenVertexArrays(1, &debug_edge_vao);
-    glGenBuffers(1, &debug_edge_vbo);
+    // Debug wireframe overlay — on the gpu:: seam. Lines pipeline reading mesh
+    // positions (slot 0) with a std140 view/proj UBO; the edge index buffer is
+    // built lazily in draw_debug_mesh.
+    {
+        gpu::VertexAttr attrs[] = {{ 0, gpu::VertexFormat::F32x3, 0, 0 }};
+        gpu::VertexSlot slots[] = {{ 3 * sizeof(float) }};
+        gpu::BindEntry binds[] = {{ 63, gpu::Bind::Uniform, sizeof(DebugParamsGPU) }};
+        gpu::RenderPipelineDesc d;
+        d.shaders.vert_glsl = debug_vert_src;
+        d.shaders.frag_glsl = debug_edge_frag_src;
+        d.attrs = attrs; d.attr_count = 1;
+        d.slots = slots; d.slot_count = 1;
+        d.binds = binds; d.bind_count = 1;
+        d.topology = gpu::Topology::Lines;
+        d.depth_test = true; d.depth_write = true; d.blend = true;
+        debug_edge_pipeline = gpu::create_render_pipeline(gpu_dev, d);
+        if (!debug_edge_pipeline.handle) std::fprintf(stderr, "[renderer] debug edge pipeline failed\n");
+        else std::printf("[renderer] debug edge pipeline compiled (gpu:: seam)\n");
+        debug_edge_ubo = gpu::create_buffer(gpu_dev, nullptr, sizeof(DebugParamsGPU), gpu::Usage::Uniform);
+    }
+    glGenBuffers(1, &debug_edge_vbo);  // edge index buffer, populated in draw_debug_mesh
 
     initialized = true;
 }
@@ -1055,51 +1209,6 @@ void Renderer::read_id_region(int x, int y, int w, int h, uint32_t* out) {
 void Renderer::draw_cursor(const Camera& cam, float cx, float cy, float radius,
                            float nx, float ny, float nz, float hardness,
                            int w, int h, bool on_model) {
-    // Triangle-strip ring: SEGS+1 pairs of (inner, outer) verts closing the loop.
-    const int SEGS = 64;
-    float verts[(SEGS + 1) * 2 * 3];
-    int k = 0;
-    for (int i = 0; i <= SEGS; i++) {
-        float a = 2.0f * 3.14159265f * (float)i / (float)SEGS;
-        float cs = std::cos(a), sn = std::sin(a);
-        // Inner then outer so triangle strip winds consistently.
-        verts[k++] = cs; verts[k++] = sn; verts[k++] = 0.0f;
-        verts[k++] = cs; verts[k++] = sn; verts[k++] = 1.0f;
-    }
-
-    GLuint cvao, cvbo;
-    glGenVertexArrays(1, &cvao);
-    glGenBuffers(1, &cvbo);
-    glBindVertexArray(cvao);
-    glBindBuffer(GL_ARRAY_BUFFER, cvbo);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STREAM_DRAW);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 1, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)(2 * sizeof(float)));
-
-    glDisable(GL_DEPTH_TEST);
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
-    // ---- Shadow disc: actual screen-space brush footprint ----
-    // Triangle fan: center + (SEGS+1) rim verts closing the loop.
-    float disc_verts[(SEGS + 2) * 2];
-    disc_verts[0] = 0.0f; disc_verts[1] = 0.0f;
-    for (int i = 0; i <= SEGS; i++) {
-        float a = 2.0f * 3.14159265f * (float)i / (float)SEGS;
-        disc_verts[2 + i*2 + 0] = std::cos(a);
-        disc_verts[2 + i*2 + 1] = std::sin(a);
-    }
-    GLuint dvao, dvbo;
-    glGenVertexArrays(1, &dvao);
-    glGenBuffers(1, &dvbo);
-    glBindVertexArray(dvao);
-    glBindBuffer(GL_ARRAY_BUFFER, dvbo);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(disc_verts), disc_verts, GL_STREAM_DRAW);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
-
     // Color: pale lime (soft) -> bright orange (mid) -> bluish purple (hard).
     float hh = std::max(0.0f, std::min(1.0f, hardness));
     float cr, cg, cb;
@@ -1116,15 +1225,6 @@ void Renderer::draw_cursor(const Camera& cam, float cx, float cy, float radius,
     }
     float ca = 0.75f + 0.15f * hh;
 
-    // Draw shadow first (under the ring). Tinted with brush color, muted.
-    glUseProgram(cursor_shadow_program);
-    glUniform2f(glGetUniformLocation(cursor_shadow_program, "uScreenSize"), (float)w, (float)h);
-    glUniform2f(glGetUniformLocation(cursor_shadow_program, "uCenter"), cx, cy);
-    glUniform1f(glGetUniformLocation(cursor_shadow_program, "uRadius"), radius);
-    glUniform4f(glGetUniformLocation(cursor_shadow_program, "uColor"),
-                cr * 0.5f, cg * 0.5f, cb * 0.5f, 0.22f);
-    glDrawArrays(GL_TRIANGLE_FAN, 0, SEGS + 2);
-
     // Camera basis in world space (matches brush.cpp apply_move derivation)
     Vec3 cam_pos = cam.get_position();
     Vec3 cam_fwd = (cam.target - cam_pos).normalized();
@@ -1132,66 +1232,79 @@ void Renderer::draw_cursor(const Camera& cam, float cx, float cy, float radius,
     Vec3 cam_right = cam_fwd.cross(world_up).normalized();
     Vec3 cam_up = cam_right.cross(cam_fwd).normalized();
 
-    // ---- Ring geometry (triangle strip) ----
-    glBindVertexArray(cvao);
-    glUseProgram(cursor_program);
-    glUniform2f(glGetUniformLocation(cursor_program, "uScreenSize"), (float)w, (float)h);
-    glUniform3f(glGetUniformLocation(cursor_program, "uNormal"), nx, ny, nz);
-    glUniform3f(glGetUniformLocation(cursor_program, "uCamRight"), cam_right.x, cam_right.y, cam_right.z);
-    glUniform3f(glGetUniformLocation(cursor_program, "uCamUp"),    cam_up.x,    cam_up.y,    cam_up.z);
-    glUniform3f(glGetUniformLocation(cursor_program, "uCamFwd"),   cam_fwd.x,   cam_fwd.y,   cam_fwd.z);
-    glUniform2f(glGetUniformLocation(cursor_program, "uCenter"), cx, cy);
-    glUniform4f(glGetUniformLocation(cursor_program, "uColor"), cr, cg, cb, ca);
-    glUniform1f(glGetUniformLocation(cursor_program, "uRadius"), radius);
-    glUniform1f(glGetUniformLocation(cursor_program, "uBaseThick"), 2.5f);
-    glUniform1f(glGetUniformLocation(cursor_program, "uFrontBoost"), 3.0f);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, (SEGS + 1) * 2);
+    gpu::RenderTarget target;          // fbo 0 (default framebuffer), no clear
+    target.width = w; target.height = h;
+    gpu::RenderPass rp = gpu::begin_render_pass(gpu_dev, target);
 
-    // Optional inner hardness ring — same 3D treatment, thinner.
-    if (hh > 0.5f) {
-        float inner_a = (hh - 0.5f) * 2.0f * ca;
-        float inner_r = std::max(3.0f, radius - 5.0f);
-        glUniform4f(glGetUniformLocation(cursor_program, "uColor"), cr, cg, cb, inner_a);
-        glUniform1f(glGetUniformLocation(cursor_program, "uRadius"), inner_r);
-        glUniform1f(glGetUniformLocation(cursor_program, "uBaseThick"), 1.5f);
-        glUniform1f(glGetUniformLocation(cursor_program, "uFrontBoost"), 1.5f);
-        glDrawArrays(GL_TRIANGLE_STRIP, 0, (SEGS + 1) * 2);
+    // ---- Shadow disc first (under the ring). Tinted with brush color, muted. ----
+    {
+        ShadowParamsGPU sp{};
+        sp.center[0] = cx; sp.center[1] = cy;
+        sp.radius = radius;
+        sp.screenSize[0] = (float)w; sp.screenSize[1] = (float)h;
+        sp.color[0] = cr * 0.5f; sp.color[1] = cg * 0.5f; sp.color[2] = cb * 0.5f; sp.color[3] = 0.22f;
+        gpu::write_buffer(gpu_dev, shadow_ubo, 0, &sp, sizeof sp);
+        gpu::set_pipeline(rp, shadow_pipeline);
+        gpu::BindBufferEntry be[] = {{ 63, &shadow_ubo, sizeof(ShadowParamsGPU) }};
+        gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, shadow_pipeline, be, 1);
+        gpu::set_bind_group(rp, shadow_pipeline, grp);
+        gpu::set_vertex_buffer(rp, 0, shadow_vbuf);
+        gpu::draw(rp, CURSOR_SEGS * 3);
+        gpu::release_bind_group(grp);
+    }
+
+    // ---- Ring (outer), plus an optional thinner inner hardness ring ----
+    {
+        gpu::set_pipeline(rp, cursor_pipeline);
+        gpu::BindBufferEntry be[] = {{ 63, &cursor_ubo, sizeof(CursorParamsGPU) }};
+        gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, cursor_pipeline, be, 1);
+        gpu::set_bind_group(rp, cursor_pipeline, grp);
+        gpu::set_vertex_buffer(rp, 0, cursor_vbuf);
+
+        CursorParamsGPU cp{};
+        cp.center[0] = cx; cp.center[1] = cy;
+        cp.screenSize[0] = (float)w; cp.screenSize[1] = (float)h;
+        cp.normal[0] = nx; cp.normal[1] = ny; cp.normal[2] = nz; cp.radius = radius;
+        cp.camRight[0] = cam_right.x; cp.camRight[1] = cam_right.y; cp.camRight[2] = cam_right.z;
+        cp.baseThick = 2.5f;
+        cp.camUp[0] = cam_up.x; cp.camUp[1] = cam_up.y; cp.camUp[2] = cam_up.z;
+        cp.frontBoost = 3.0f;
+        cp.camFwd[0] = cam_fwd.x; cp.camFwd[1] = cam_fwd.y; cp.camFwd[2] = cam_fwd.z;
+        cp.color[0] = cr; cp.color[1] = cg; cp.color[2] = cb; cp.color[3] = ca;
+        gpu::write_buffer(gpu_dev, cursor_ubo, 0, &cp, sizeof cp);
+        gpu::draw(rp, (CURSOR_SEGS + 1) * 2);
+
+        if (hh > 0.5f) {
+            // Re-upload the shared UBO mid-pass for the second draw. Fine on GL
+            // (immediate); the web backend will need a 2nd UBO / dynamic offset here.
+            cp.radius = std::max(3.0f, radius - 5.0f);
+            cp.baseThick = 1.5f; cp.frontBoost = 1.5f;
+            cp.color[3] = (hh - 0.5f) * 2.0f * ca;
+            gpu::write_buffer(gpu_dev, cursor_ubo, 0, &cp, sizeof cp);
+            gpu::draw(rp, (CURSOR_SEGS + 1) * 2);
+        }
+        gpu::release_bind_group(grp);
     }
 
     // ---- Crosshair (X at center, on-model only) ----
     if (on_model) {
-        const float gap = 3.0f, arm = 8.0f;
-        float xh[] = {
-            -arm, -arm,  -gap, -gap,
-             gap,  gap,   arm,  arm,
-             arm, -arm,   gap, -gap,
-            -gap,  gap,  -arm,  arm,
-        };
-        GLuint xvao, xvbo;
-        glGenVertexArrays(1, &xvao);
-        glGenBuffers(1, &xvbo);
-        glBindVertexArray(xvao);
-        glBindBuffer(GL_ARRAY_BUFFER, xvbo);
-        glBufferData(GL_ARRAY_BUFFER, sizeof(xh), xh, GL_STREAM_DRAW);
-        glEnableVertexAttribArray(0);
-        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, (void*)0);
-        glUseProgram(crosshair_program);
-        glUniform2f(glGetUniformLocation(crosshair_program, "uCenter"), cx, cy);
-        glUniform2f(glGetUniformLocation(crosshair_program, "uScreenSize"), (float)w, (float)h);
-        glUniform4f(glGetUniformLocation(crosshair_program, "uColor"), cr * 1.4f, cg * 1.4f, cb * 1.4f, 1.0f);
-        glLineWidth(3.0f);
-        glDrawArrays(GL_LINES, 0, 8);
+        CrosshairParamsGPU xp{};
+        xp.center[0] = cx; xp.center[1] = cy;
+        xp.screenSize[0] = (float)w; xp.screenSize[1] = (float)h;
+        xp.color[0] = cr * 1.4f; xp.color[1] = cg * 1.4f; xp.color[2] = cb * 1.4f; xp.color[3] = 1.0f;
+        gpu::write_buffer(gpu_dev, crosshair_ubo, 0, &xp, sizeof xp);
+        gpu::set_pipeline(rp, crosshair_pipeline);
+        gpu::BindBufferEntry be[] = {{ 63, &crosshair_ubo, sizeof(CrosshairParamsGPU) }};
+        gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, crosshair_pipeline, be, 1);
+        gpu::set_bind_group(rp, crosshair_pipeline, grp);
+        gpu::set_vertex_buffer(rp, 0, crosshair_vbuf);
+        glLineWidth(3.0f);                    // GL-only nicety (WebGPU ignores line width)
+        gpu::draw(rp, 8);
         glLineWidth(1.0f);
-        glDeleteBuffers(1, &xvbo);
-        glDeleteVertexArrays(1, &xvao);
+        gpu::release_bind_group(grp);
     }
 
-    glDisable(GL_BLEND);
-    glBindVertexArray(0);
-    glDeleteBuffers(1, &cvbo);
-    glDeleteVertexArrays(1, &cvao);
-    glDeleteBuffers(1, &dvbo);
-    glDeleteVertexArrays(1, &dvao);
+    gpu::end_render_pass(rp);
 }
 
 // ---- Screen Buffer FBO ----
@@ -1415,51 +1528,52 @@ void Renderer::read_bary_region(int x, int y, int w, int h, float* out) {
 void Renderer::draw_debug_mesh(const Camera& cam, const Mesh& mesh, int w, int h) {
     uint32_t tc = mesh.tri_count();
 
-    float view[16], proj[16];
-    cam.get_view_matrix(view);
-    cam.get_projection_matrix(proj, (float)w / (float)h);
-
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glEnable(GL_DEPTH_TEST);
-    glDepthFunc(GL_LEQUAL);
-    glEnable(GL_POLYGON_OFFSET_LINE);
-    glPolygonOffset(-1.0f, -1.0f);
-
-    // Build and draw edges
+    // Build the edge index buffer lazily (GL-owned; rebuilt after invalidate).
     if (debug_edge_count == 0) {
         std::vector<uint32_t> edges;
+        edges.reserve(tc * 6);
         for (uint32_t i = 0; i < tc; i++) {
             uint32_t i0 = mesh.indices[i*3+0];
             uint32_t i1 = mesh.indices[i*3+1];
             uint32_t i2 = mesh.indices[i*3+2];
-            edges.push_back(i0);
-            edges.push_back(i1);
-            edges.push_back(i1);
-            edges.push_back(i2);
-            edges.push_back(i2);
-            edges.push_back(i0);
+            edges.push_back(i0); edges.push_back(i1);
+            edges.push_back(i1); edges.push_back(i2);
+            edges.push_back(i2); edges.push_back(i0);
         }
         debug_edge_count = (uint32_t)edges.size();
-
         glBindBuffer(GL_ARRAY_BUFFER, debug_edge_vbo);
         glBufferData(GL_ARRAY_BUFFER, edges.size() * sizeof(uint32_t), edges.data(), GL_STATIC_DRAW);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
     }
 
-    glBindVertexArray(debug_edge_vao);
-    glBindBuffer(GL_ARRAY_BUFFER, vbo_pos);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, nullptr);
+    DebugParamsGPU p;
+    cam.get_view_matrix(p.view);
+    cam.get_projection_matrix(p.proj, (float)w / (float)h);
+    gpu::write_buffer(gpu_dev, debug_edge_ubo, 0, &p, sizeof p);
 
+    // Depth-compare LEQUAL + polygon offset pull the wires just in front of the
+    // surface (anti z-fight). The seam doesn't model depth-func / depth-bias yet,
+    // so these stay raw GL around the seam draw (they fold into RenderPipelineDesc
+    // when the WebGPU render backend lands). set_pipeline enables depth test + blend
+    // and leaves depth-func untouched, so restore GL_LESS afterwards.
+    glDepthFunc(GL_LEQUAL);
+    glEnable(GL_POLYGON_OFFSET_LINE);
+    glPolygonOffset(-1.0f, -1.0f);
     glLineWidth(1.0f);
-    glUseProgram(debug_edge_program);
-    glUniformMatrix4fv(glGetUniformLocation(debug_edge_program, "uView"), 1, GL_FALSE, view);
-    glUniformMatrix4fv(glGetUniformLocation(debug_edge_program, "uProj"), 1, GL_FALSE, proj);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, debug_edge_vbo);
-    glDrawElements(GL_LINES, debug_edge_count, GL_UNSIGNED_INT, nullptr);
+
+    gpu::RenderTarget target;          // fbo 0 (default framebuffer), no clear
+    target.width = w; target.height = h;
+    gpu::RenderPass rp = gpu::begin_render_pass(gpu_dev, target);
+    gpu::set_pipeline(rp, debug_edge_pipeline);
+    gpu::BindBufferEntry be[] = {{ 63, &debug_edge_ubo, sizeof(DebugParamsGPU) }};
+    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, debug_edge_pipeline, be, 1);
+    gpu::set_bind_group(rp, debug_edge_pipeline, grp);
+    gpu::set_vertex_buffer(rp, 0, buf_view(vbo_pos));
+    gpu::set_index_buffer(rp, buf_view(debug_edge_vbo));
+    gpu::draw_indexed(rp, debug_edge_count);
+    gpu::end_render_pass(rp);
+    gpu::release_bind_group(grp);
 
     glDisable(GL_POLYGON_OFFSET_LINE);
     glDepthFunc(GL_LESS);
-    glDisable(GL_BLEND);
-    glBindVertexArray(0);
 }
