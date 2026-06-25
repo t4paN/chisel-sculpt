@@ -90,6 +90,16 @@ static const int CURSOR_SEGS = 64;
 // the compute kernels use for their GL-owned SSBOs during the staged port.
 static inline gpu::Buffer buf_view(GLuint h) { gpu::Buffer b; b.handle = h; return b; }
 
+// Create-or-grow an owned seam buffer to exactly `size` bytes and fill it with
+// `data` (buffer-ownership migration). Same-size re-uploads keep the handle and
+// just write_buffer; a size change releases + recreates (the WebGPU-correct path —
+// no in-place resize). Callers that cache the handle must re-fetch after this.
+static void ensure_buffer(gpu::Device& dev, gpu::Buffer& b,
+                          const void* data, uint64_t size, gpu::Usage usage) {
+    if (b.handle && b.size == size) gpu::write_buffer(dev, b, 0, data, size);
+    else { gpu::release_buffer(b); b = gpu::create_buffer(dev, data, size, usage); }
+}
+
 // ---- Shader sources ----
 
 static const char* bg_vert_src = R"(
@@ -558,7 +568,7 @@ GLuint link_program(GLuint vert, GLuint frag) {
 // ---- Renderer ----
 
 Renderer::Renderer()
-    : vao(0), vbo_pos(0), vbo_norm(0), vbo_mask(0), vbo_color(0), vbo_tri_id(0), vbo_bary(0), ebo(0)
+    : vao(0), vbo_mask(0), vbo_color(0), vbo_tri_id(0), vbo_bary(0)
     , debug_edge_vbo(0), debug_edge_count(0)
     , screen_vbo_pos(0), screen_vbo_norm(0)
     , screen_vbo_triid(0), screen_vbo_bary(0), screen_tri_count(0)
@@ -567,11 +577,11 @@ Renderer::Renderer()
 
 Renderer::~Renderer() {
     if (vao) glDeleteVertexArrays(1, &vao);
-    if (vbo_pos) glDeleteBuffers(1, &vbo_pos);
-    if (vbo_norm) glDeleteBuffers(1, &vbo_norm);
+    gpu::release_buffer(vbo_pos);
+    gpu::release_buffer(vbo_norm);
     if (vbo_mask) glDeleteBuffers(1, &vbo_mask);
     if (vbo_color) glDeleteBuffers(1, &vbo_color);
-    if (ebo) glDeleteBuffers(1, &ebo);
+    gpu::release_buffer(ebo);
     gpu::release_render_pipeline(bg_pipeline);
     gpu::release_buffer(bg_vbuf);
     gpu::release_render_pipeline(matcap_pipeline);
@@ -677,13 +687,11 @@ void Renderer::init() {
         pick_ubo = gpu::create_buffer(gpu_dev, nullptr, sizeof(PickParamsGPU), gpu::Usage::Uniform);
     }
 
-    // Mesh VAO
+    // Mesh VAO + the still-GLuint mask/color attribute buffers. vbo_pos/vbo_norm/ebo
+    // are owned gpu::Buffers (Step 1) created lazily on first upload_mesh.
     glGenVertexArrays(1, &vao);
-    glGenBuffers(1, &vbo_pos);
-    glGenBuffers(1, &vbo_norm);
     glGenBuffers(1, &vbo_mask);
     glGenBuffers(1, &vbo_color);
-    glGenBuffers(1, &ebo);
 
     // Brush-cursor overlays — on the gpu:: seam. Three pipelines, each with static
     // camera-independent geometry (built once here) + a std140 Params UBO updated
@@ -869,34 +877,24 @@ void Renderer::upload_mesh(const Mesh& mesh) {
         col_buf[i] = (has_color && i < mesh.color.size()) ? mesh.color[i] : 0xFFFFFFFFu;
     }
 
-    glBindVertexArray(vao);
-
-    glBindBuffer(GL_ARRAY_BUFFER, vbo_pos);
-    glBufferData(GL_ARRAY_BUFFER, pos.size()*sizeof(float), pos.data(), GL_DYNAMIC_DRAW);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, nullptr);
-
-    glBindBuffer(GL_ARRAY_BUFFER, vbo_norm);
-    glBufferData(GL_ARRAY_BUFFER, norm.size()*sizeof(float), norm.data(), GL_DYNAMIC_DRAW);
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 0, nullptr);
+    // pos/norm/ebo: owned seam buffers (Step 1, Vertex|Storage / Index|Storage).
+    // mask/color: still-GLuint attribute buffers (Step 3). The renderer's own `vao`
+    // is unused at draw (the seam render pipeline owns the draw-time VAO), so no
+    // vertex-attribute pointers are configured here anymore.
+    ensure_buffer(gpu_dev, vbo_pos, pos.data(), (uint64_t)pos.size()*sizeof(float),
+                  gpu::Usage::Vertex | gpu::Usage::Storage);
+    ensure_buffer(gpu_dev, vbo_norm, norm.data(), (uint64_t)norm.size()*sizeof(float),
+                  gpu::Usage::Vertex | gpu::Usage::Storage);
+    ensure_buffer(gpu_dev, ebo, mesh.indices.data(),
+                  (uint64_t)mesh.indices.size()*sizeof(uint32_t),
+                  gpu::Usage::Index | gpu::Usage::Storage);
 
     glBindBuffer(GL_ARRAY_BUFFER, vbo_mask);
     glBufferData(GL_ARRAY_BUFFER, mask_buf.size()*sizeof(float), mask_buf.data(), GL_DYNAMIC_DRAW);
-    glEnableVertexAttribArray(2);
-    glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, 0, nullptr);
 
     glBindBuffer(GL_ARRAY_BUFFER, vbo_color);
     glBufferData(GL_ARRAY_BUFFER, col_buf.size()*sizeof(uint32_t), col_buf.data(), GL_DYNAMIC_DRAW);
-    glEnableVertexAttribArray(4);
-    glVertexAttribPointer(4, 4, GL_UNSIGNED_BYTE, GL_TRUE, 0, nullptr);
-
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER,
-                 mesh.indices.size()*sizeof(uint32_t),
-                 mesh.indices.data(), GL_STATIC_DRAW);
-
-    glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
 }
 
 void Renderer::update_mask(const Mesh& mesh) {
@@ -948,11 +946,8 @@ void Renderer::update_mesh_partial(const Mesh& mesh, const std::vector<uint32_t>
     uint32_t offset = min_idx * 3 * sizeof(float);
     uint32_t size = range * 3 * sizeof(float);
 
-    glBindBuffer(GL_ARRAY_BUFFER, vbo_pos);
-    glBufferSubData(GL_ARRAY_BUFFER, offset, size, pos.data());
-
-    glBindBuffer(GL_ARRAY_BUFFER, vbo_norm);
-    glBufferSubData(GL_ARRAY_BUFFER, offset, size, norm.data());
+    gpu::write_buffer(gpu_dev, vbo_pos,  offset, pos.data(),  size);
+    gpu::write_buffer(gpu_dev, vbo_norm, offset, norm.data(), size);
 }
 
 void Renderer::update_mesh_verts(const Mesh& mesh, const std::vector<uint32_t>& verts) {
@@ -983,13 +978,10 @@ void Renderer::update_mesh_verts(const Mesh& mesh, const std::vector<uint32_t>& 
         }
         uint32_t off = start * 3 * sizeof(float);
         uint32_t sz  = run * 3 * sizeof(float);
-        glBindBuffer(GL_ARRAY_BUFFER, vbo_pos);
-        glBufferSubData(GL_ARRAY_BUFFER, off, sz, pos.data());
-        glBindBuffer(GL_ARRAY_BUFFER, vbo_norm);
-        glBufferSubData(GL_ARRAY_BUFFER, off, sz, norm.data());
+        gpu::write_buffer(gpu_dev, vbo_pos,  off, pos.data(),  sz);
+        gpu::write_buffer(gpu_dev, vbo_norm, off, norm.data(), sz);
         i = j;
     }
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
 }
 
 void Renderer::update_mask_verts(const Mesh& mesh, const std::vector<uint32_t>& verts) {
@@ -1116,11 +1108,11 @@ void Renderer::draw_mesh(const Camera& cam, int w, int h, uint32_t index_count,
     gpu::BindBufferEntry be[] = {{ 63, &matcap_ubo, sizeof(MatcapParamsGPU) }};
     gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, matcap_pipeline, be, 1);
     gpu::set_bind_group(rp, matcap_pipeline, grp);
-    gpu::set_vertex_buffer(rp, 0, buf_view(vbo_pos));
-    gpu::set_vertex_buffer(rp, 1, buf_view(vbo_norm));
+    gpu::set_vertex_buffer(rp, 0, vbo_pos);
+    gpu::set_vertex_buffer(rp, 1, vbo_norm);
     gpu::set_vertex_buffer(rp, 2, buf_view(vbo_mask));
     gpu::set_vertex_buffer(rp, 3, buf_view(vbo_color));
-    gpu::set_index_buffer(rp, buf_view(ebo));
+    gpu::set_index_buffer(rp, ebo);
     gpu::draw_indexed(rp, index_count);
     gpu::end_render_pass(rp);
     gpu::release_bind_group(grp);
@@ -1421,9 +1413,9 @@ void Renderer::update_screen_mesh_gpu() {
     // GL-owned src/dst buffers wrapped as transient views at dispatch (same staged
     // pattern as the brush kernels). 0-2 read (mesh pos/norm/idx), 3-4 written
     // (flat soup pos/norm), 63 = tri_count UBO.
-    gpu::Buffer in_pos  = buf_view(vbo_pos);
-    gpu::Buffer in_norm = buf_view(vbo_norm);
-    gpu::Buffer in_idx  = buf_view(ebo);
+    gpu::Buffer in_pos  = vbo_pos;
+    gpu::Buffer in_norm = vbo_norm;
+    gpu::Buffer in_idx  = ebo;
     gpu::Buffer out_pos = buf_view(screen_vbo_pos);
     gpu::Buffer out_norm = buf_view(screen_vbo_norm);
     gpu::BindBufferEntry be[] = {
@@ -1528,7 +1520,7 @@ void Renderer::draw_debug_mesh(const Camera& cam, const Mesh& mesh, int w, int h
     gpu::BindBufferEntry be[] = {{ 63, &debug_edge_ubo, sizeof(DebugParamsGPU) }};
     gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, debug_edge_pipeline, be, 1);
     gpu::set_bind_group(rp, debug_edge_pipeline, grp);
-    gpu::set_vertex_buffer(rp, 0, buf_view(vbo_pos));
+    gpu::set_vertex_buffer(rp, 0, vbo_pos);
     gpu::set_index_buffer(rp, buf_view(debug_edge_vbo));
     gpu::draw_indexed(rp, debug_edge_count);
     gpu::end_render_pass(rp);

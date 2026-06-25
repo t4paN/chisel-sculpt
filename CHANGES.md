@@ -2,6 +2,27 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-25 — WebGPU port, buffer-ownership migration Step 1: mesh pos/norm/ebo are seam-owned
+
+- **`vbo_pos` / `vbo_norm` / `ebo` are now owned `gpu::Buffer`s** (were raw GL handles wrapped in
+  views at dispatch). Created via `gpu::create_buffer` with the combined usage they actually need —
+  `Vertex|Storage` for pos/norm, `Index|Storage` for ebo — since each is both a render vertex/index
+  buffer and a brush-kernel storage buffer (zero-copy resident mesh). This is the first slice of the
+  buffer-ownership migration: foreign GL handles can't be wrapped as `gpu::Buffer` views on WebGPU, so
+  shared buffers must become seam-owned before the WebGPU backend can bind them.
+- **New `ensure_buffer` create-or-grow helper** in the renderer: same-size re-upload keeps the handle
+  and `write_buffer`s; a size change `release_buffer`s + recreates (the WebGPU-correct realloc — no
+  in-place resize). `upload_mesh` + the partial-update paths (`update_mesh_partial`/`update_mesh_verts`)
+  now route pos/norm through the seam; the dead renderer-`vao` attribute setup is gone (the seam render
+  pipeline owns the draw-time VAO).
+- **Call sites updated** — render/screen-expand/debug binds take the `gpu::Buffer` directly; the
+  still-`GLuint` `dispatch_*` params + raw `glBindBuffer` readbacks (brush/undo/scene) pass `.handle`.
+  Per-entity display buffers (`g.vbo_*`) and `vbo_mask`/`vbo_color` stay `GLuint` (the latter migrate in
+  Step 3 with the `mask_ssbo`/`color_ssbo` aliases).
+- **Verified:** gl build green; `chisel-gl-compute-test` PASS; app launches clean (mesh uploads via the
+  owned-buffer path, all pipelines `compiled (gpu:: seam)`, no GL/FBO errors); **sculpting confirmed
+  working in-app** (deforming brushes + mask/paint regression + undo/redo).
+
 ## 2026-06-25 — WebGPU port, render-seam: pick pass + screen-buffer MRT on the gpu:: seam (render port COMPLETE)
 
 - **New seam primitives** (`include/gpu/gpu.h` + GL backend): an offscreen MRT render

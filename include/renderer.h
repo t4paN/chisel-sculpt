@@ -13,13 +13,18 @@ struct Renderer {
 
     // Mesh GPU buffers
     GLuint vao;
-    GLuint vbo_pos;
-    GLuint vbo_norm;
-    GLuint vbo_mask;      // per-vertex sculpt mask values (0..1)
-    GLuint vbo_color;     // per-vertex albedo, packed RGBA8 (paint)
+    // Shared render+compute mesh buffers — owned seam buffers (buffer-ownership
+    // migration Step 1). pos/norm carry Vertex|Storage, ebo Index|Storage: the
+    // render path binds them as vertex/index buffers, the brush kernels bind them
+    // as storage. Passed by `.handle` into the still-GLuint dispatch_* signatures
+    // until those flip to gpu::Buffer in later steps.
+    gpu::Buffer vbo_pos;
+    gpu::Buffer vbo_norm;
+    GLuint vbo_mask;      // per-vertex sculpt mask values (0..1) — Step 3 (aliased by compute.mask_ssbo)
+    GLuint vbo_color;     // per-vertex albedo, packed RGBA8 (paint) — Step 3 (aliased by compute.color_ssbo)
     GLuint vbo_tri_id;    // per-vertex triangle ID (flat, 3 verts per tri)
     GLuint vbo_bary;     // per-vertex barycentric coord
-    GLuint ebo;
+    gpu::Buffer ebo;
 
     // Matcap shader — on the gpu:: seam. Loose uniforms (uView/uProj/facing/
     // objMask/paintVisible) become a std140 Params UBO uploaded per draw.

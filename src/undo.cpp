@@ -196,13 +196,13 @@ bool UndoStack::apply(UndoEntry& e, MeshEntity& ent, Scene& scene, bool forward)
     if (inplace_gpu_ring) {
         Renderer&     r = scene.renderer();
         ComputeState& c = scene.compute();
-        c.dispatch_multires_apply(r.vbo_pos, ent.multires_gpu.disp_ssbo,
+        c.dispatch_multires_apply(r.vbo_pos.handle, ent.multires_gpu.disp_ssbo,
                                   ent.multires_gpu.frames_ssbo, ent.multires_gpu.base_ssbo,
                                   e.verts.data(), nullptr, (uint32_t)e.verts.size(),
                                   e.targets_base, c.undo_ring_ssbo,
                                   (uint32_t)e.ring_offset, forward);
         c.dispatch_compute_normals(e.verts.data(), (uint32_t)e.verts.size(),
-                                   r.vbo_pos, r.vbo_norm, r.ebo);
+                                   r.vbo_pos.handle, r.vbo_norm.handle, r.ebo.handle);
         ent.multires_gpu.mark_cpu_dirty(e.verts);
         // Same frame-cache invalidation the in-place CPU path does below.
         if (e.targets_base) {
@@ -219,7 +219,7 @@ bool UndoStack::apply(UndoEntry& e, MeshEntity& ent, Scene& scene, bool forward)
         {
             static std::vector<float> chk;
             chk.resize(e.verts.size() * 3);
-            glBindBuffer(GL_ARRAY_BUFFER, scene.renderer().vbo_pos);
+            glBindBuffer(GL_ARRAY_BUFFER, scene.renderer().vbo_pos.handle);
             for (size_t k = 0; k < e.verts.size(); ++k)
                 glGetBufferSubData(GL_ARRAY_BUFFER, (GLintptr)e.verts[k] * 3 * sizeof(float),
                                    (GLsizeiptr)3 * sizeof(float), &chk[k * 3]);
@@ -316,7 +316,7 @@ bool UndoStack::apply(UndoEntry& e, MeshEntity& ent, Scene& scene, bool forward)
                             && e.ring_vcount == (uint32_t)e.verts.size();
             gpu_apply_used_ring = use_ring;
             if (use_ring) {
-                c.dispatch_multires_apply(r.vbo_pos, ent.multires_gpu.disp_ssbo,
+                c.dispatch_multires_apply(r.vbo_pos.handle, ent.multires_gpu.disp_ssbo,
                                           ent.multires_gpu.frames_ssbo,
                                           ent.multires_gpu.base_ssbo,
                                           e.verts.data(), nullptr,
@@ -330,21 +330,21 @@ bool UndoStack::apply(UndoEntry& e, MeshEntity& ent, Scene& scene, bool forward)
                     stage[k*6+0] = tx[k]; stage[k*6+1] = ty[k]; stage[k*6+2] = tz[k];
                     stage[k*6+3] = sx[k]; stage[k*6+4] = sy[k]; stage[k*6+5] = sz[k];
                 }
-                c.dispatch_multires_apply(r.vbo_pos, ent.multires_gpu.disp_ssbo,
+                c.dispatch_multires_apply(r.vbo_pos.handle, ent.multires_gpu.disp_ssbo,
                                           ent.multires_gpu.frames_ssbo,
                                           ent.multires_gpu.base_ssbo,
                                           e.verts.data(), stage.data(),
                                           (uint32_t)e.verts.size(), e.targets_base);
             }
             c.dispatch_compute_normals(e.verts.data(), (uint32_t)e.verts.size(),
-                                       r.vbo_pos, r.vbo_norm, r.ebo);
+                                       r.vbo_pos.handle, r.vbo_norm.handle, r.ebo.handle);
             gpu_apply_ran = true;
         }
 #ifdef CHISEL_DEBUG_MULTIRES
         static std::vector<float> gpu_apply_chk;
         if (gpu_apply_ran) {
             gpu_apply_chk.resize(e.verts.size() * 3);
-            glBindBuffer(GL_ARRAY_BUFFER, scene.renderer().vbo_pos);
+            glBindBuffer(GL_ARRAY_BUFFER, scene.renderer().vbo_pos.handle);
             for (size_t k = 0; k < e.verts.size(); ++k) {
                 glGetBufferSubData(GL_ARRAY_BUFFER,
                     (GLintptr)e.verts[k] * 3 * sizeof(float),
