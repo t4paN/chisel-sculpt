@@ -12,9 +12,7 @@ ComputeState::ComputeState()
     , stroke_norm_capacity(0)
     , move_buffers_capacity(0)
     , limb_scratch_capacity(0)
-    , multires_stage_ssbo(0)
     , multires_stage_capacity(0)
-    , undo_ring_ssbo(0)
     , undo_ring_cap_bytes(1024ull * 1024ull * 1024ull)
     , undo_ring_bytes(0)
     , undo_ring_head(0)
@@ -238,9 +236,9 @@ void ComputeState::cleanup() {
     gpu::release_compute_pipeline(multires_apply_pipeline);
     gpu::release_buffer(multires_diff_ubo);
     gpu::release_buffer(multires_apply_ubo);
-    if (multires_stage_ssbo)    { glDeleteBuffers(1, &multires_stage_ssbo); multires_stage_ssbo   = 0; }
+    gpu::release_buffer(multires_stage_ssbo);
     multires_stage_capacity = 0;
-    if (undo_ring_ssbo)         { glDeleteBuffers(1, &undo_ring_ssbo);       undo_ring_ssbo        = 0; }
+    gpu::release_buffer(undo_ring_ssbo);
     undo_ring_bytes = 0;
     undo_ring_head  = 0;
     gpu::release_buffer(adjacency_offset_ssbo);

@@ -191,7 +191,7 @@ bool UndoStack::apply(UndoEntry& e, MeshEntity& ent, Scene& scene, bool forward)
     // write the placeholder old_*/new_* arrays and would clobber the correct GPU VBO.
     const bool inplace_gpu_ring =
         gpu_avail && ent.multires_gpu.level == e.level && e.level == cur
-        && e.ring_offset != SIZE_MAX && scene.compute().undo_ring_ssbo
+        && e.ring_offset != SIZE_MAX && scene.compute().undo_ring_ssbo.handle
         && e.ring_vcount == (uint32_t)e.verts.size();
     if (inplace_gpu_ring) {
         Renderer&     r = scene.renderer();
@@ -199,7 +199,7 @@ bool UndoStack::apply(UndoEntry& e, MeshEntity& ent, Scene& scene, bool forward)
         c.dispatch_multires_apply(r.vbo_pos.handle, ent.multires_gpu.disp_ssbo,
                                   ent.multires_gpu.frames_ssbo, ent.multires_gpu.base_ssbo,
                                   e.verts.data(), nullptr, (uint32_t)e.verts.size(),
-                                  e.targets_base, c.undo_ring_ssbo,
+                                  e.targets_base, c.undo_ring_ssbo.handle,
                                   (uint32_t)e.ring_offset, forward);
         c.dispatch_compute_normals(e.verts.data(), (uint32_t)e.verts.size(),
                                    r.vbo_pos.handle, r.vbo_norm.handle, r.ebo.handle);
@@ -245,7 +245,7 @@ bool UndoStack::apply(UndoEntry& e, MeshEntity& ent, Scene& scene, bool forward)
     // Case 3 (cross-level, e.level != cur): the storage write + cascade below read
     // this entry's CPU old/new — placeholders if it's still ring-resident. Spill it
     // out of the ring first so they hold the real values.
-    if (e.level != cur && e.ring_offset != SIZE_MAX && scene.compute().undo_ring_ssbo) {
+    if (e.level != cur && e.ring_offset != SIZE_MAX && scene.compute().undo_ring_ssbo.handle) {
         spill_entry_from_ring(e, scene.compute());
         e.ring_offset = SIZE_MAX;
         e.ring_vcount = 0;
@@ -312,7 +312,7 @@ bool UndoStack::apply(UndoEntry& e, MeshEntity& ent, Scene& scene, bool forward)
             // ring, the apply shader reads it straight from there — no CPU stage
             // build. Else fall back to the transient stage (2c path). The vcount
             // guard catches any verts/ring-slot misalignment (e.g. a filtered entry).
-            bool use_ring = e.ring_offset != SIZE_MAX && c.undo_ring_ssbo
+            bool use_ring = e.ring_offset != SIZE_MAX && c.undo_ring_ssbo.handle
                             && e.ring_vcount == (uint32_t)e.verts.size();
             gpu_apply_used_ring = use_ring;
             if (use_ring) {
@@ -321,7 +321,7 @@ bool UndoStack::apply(UndoEntry& e, MeshEntity& ent, Scene& scene, bool forward)
                                           ent.multires_gpu.base_ssbo,
                                           e.verts.data(), nullptr,
                                           (uint32_t)e.verts.size(), e.targets_base,
-                                          c.undo_ring_ssbo,
+                                          c.undo_ring_ssbo.handle,
                                           (uint32_t)e.ring_offset, forward);
             } else {
                 static std::vector<float> stage;   // 6 floats/vert: target xyz, source xyz

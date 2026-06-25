@@ -1153,7 +1153,7 @@ bool BrushStroke::finalize(Mesh& mesh, UndoStack& stack, MultiresStack& multires
             if (ring_base != SIZE_MAX)
                 stack.ring_evict_overlap(ring_base * sizeof(float),
                                          snap_list.size() * 6 * sizeof(float), *compute);
-            GLuint ring_ssbo = (ring_base != SIZE_MAX) ? compute->undo_ring_ssbo : 0;
+            GLuint ring_ssbo = (ring_base != SIZE_MAX) ? compute->undo_ring_ssbo.handle : 0;
             compute->dispatch_multires_diff(renderer.vbo_pos.handle, mgpu.disp_ssbo,
                                             mgpu.frames_ssbo, mgpu.snap_pos_ssbo,
                                             mgpu.base_ssbo,

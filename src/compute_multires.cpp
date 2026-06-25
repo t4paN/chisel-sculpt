@@ -111,14 +111,17 @@ void ComputeState::dispatch_multires_diff(GLuint pos_vbo, GLuint disp_ssbo,
     GLuint disp_b  = disp_ssbo   ? disp_ssbo   : pos_vbo;
     GLuint frame_b = frames_ssbo ? frames_ssbo : pos_vbo;
     GLuint base_b  = base_ssbo   ? base_ssbo   : pos_vbo;
-    GLuint ring_b  = ring_ssbo   ? ring_ssbo   : disp_b;
 
     gpu::Buffer posView{   0,                                pos_vbo };
     gpu::Buffer dispView{  0,                                disp_b };
     gpu::Buffer frameView{ 0,                                frame_b };
     gpu::Buffer snapView{  0,                                snap_pos_ssbo };
     gpu::Buffer baseView{  0,                                base_b };
-    gpu::Buffer ringView{  0,                                ring_b };
+
+    // Ring is seam-owned (Step 3b): bind the member directly when capture is on,
+    // else fall back to the disp view (the old GL path's filler) so the slot is live.
+    const bool ring_on = (ring_ssbo != 0);
+    const gpu::Buffer* ring_b = ring_on ? &undo_ring_ssbo : &dispView;
 
     const gpu::BindBufferEntry bg[] = {
         { BIND_POSITIONS,         &posView,   posView.size },
@@ -127,7 +130,7 @@ void ComputeState::dispatch_multires_diff(GLuint pos_vbo, GLuint disp_ssbo,
         { BIND_MULTIRES_FRAMES,   &frameView, frameView.size },
         { BIND_MULTIRES_SNAP_POS, &snapView,  snapView.size },
         { BIND_MULTIRES_BASE,     &baseView,  baseView.size },
-        { BIND_UNDO_RING,         &ringView,  ringView.size },
+        { BIND_UNDO_RING,         ring_b,     ring_b->size },
         { BIND_PARAMS,            &multires_diff_ubo, sizeof(MultiresDiffParamsGPU) },
     };
     gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, multires_diff_pipeline, bg, 8);
@@ -192,23 +195,17 @@ void ComputeState::dispatch_multires_apply(GLuint pos_vbo, GLuint disp_ssbo,
     }
     gpu::write_buffer(gpu_dev, dirty_verts_ssbo, 0, verts, (uint64_t)count * sizeof(uint32_t));
 
-    // Upload the (target, source) staging pairs (stage mode only). GL-owned scratch.
+    // Upload the (target, source) staging pairs (stage mode only). Seam-owned scratch (Step 3b).
     if (!ring_mode && stage) {
-        GLsizeiptr stage_bytes = (GLsizeiptr)count * 6 * sizeof(float);
-        if (!multires_stage_ssbo || count > multires_stage_capacity) {
-            if (multires_stage_ssbo) glDeleteBuffers(1, &multires_stage_ssbo);
-            glGenBuffers(1, &multires_stage_ssbo);
-            glBindBuffer(GL_SHADER_STORAGE_BUFFER, multires_stage_ssbo);
+        if (!multires_stage_ssbo.handle || count > multires_stage_capacity) {
             uint32_t alloc_count = std::max(count, 4096u);
-            glBufferData(GL_SHADER_STORAGE_BUFFER, (GLsizeiptr)alloc_count * 6 * sizeof(float),
-                         nullptr, GL_DYNAMIC_DRAW);
+            gpu::release_buffer(multires_stage_ssbo);
+            multires_stage_ssbo = gpu::create_buffer(gpu_dev, nullptr,
+                                      (uint64_t)alloc_count * 6 * sizeof(float), gpu::Usage::Storage);
             multires_stage_capacity = alloc_count;
-        } else {
-            glBindBuffer(GL_SHADER_STORAGE_BUFFER, multires_stage_ssbo);
         }
-        glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, stage_bytes, stage);
+        gpu::write_buffer(gpu_dev, multires_stage_ssbo, 0, stage, (uint64_t)count * 6 * sizeof(float));
     }
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 
     MultiresApplyParamsGPU u = {};
     u.count        = count;
@@ -225,15 +222,17 @@ void ComputeState::dispatch_multires_apply(GLuint pos_vbo, GLuint disp_ssbo,
     GLuint disp_b  = disp_ssbo   ? disp_ssbo   : pos_vbo;
     GLuint frame_b = frames_ssbo ? frames_ssbo : pos_vbo;
     GLuint base_b  = base_ssbo   ? base_ssbo   : pos_vbo;
-    GLuint stage_b = (!ring_mode && multires_stage_ssbo) ? multires_stage_ssbo : pos_vbo;
-    GLuint ring_b  = ring_mode ? ring_ssbo : pos_vbo;
 
     gpu::Buffer posView{   0,                                pos_vbo };
     gpu::Buffer dispView{  0,                                disp_b };
     gpu::Buffer frameView{ 0,                                frame_b };
     gpu::Buffer baseView{  0,                                base_b };
-    gpu::Buffer stageView{ 0,                                stage_b };
-    gpu::Buffer ringView{  0,                                ring_b };
+
+    // stage + ring are seam-owned (Step 3b): bind the live member for the active mode,
+    // pos view as the filler for the idle one (every slot must point at a live buffer).
+    const gpu::Buffer* stage_b = (!ring_mode && multires_stage_ssbo.handle)
+                                     ? &multires_stage_ssbo : &posView;
+    const gpu::Buffer* ring_b  = ring_mode ? &undo_ring_ssbo : &posView;
 
     const gpu::BindBufferEntry bg[] = {
         { BIND_POSITIONS,       &posView,   posView.size },
@@ -241,8 +240,8 @@ void ComputeState::dispatch_multires_apply(GLuint pos_vbo, GLuint disp_ssbo,
         { BIND_MULTIRES_DISP,   &dispView,  dispView.size },
         { BIND_MULTIRES_FRAMES, &frameView, frameView.size },
         { BIND_MULTIRES_BASE,   &baseView,  baseView.size },
-        { BIND_MULTIRES_STAGE,  &stageView, stageView.size },
-        { BIND_UNDO_RING,       &ringView,  ringView.size },
+        { BIND_MULTIRES_STAGE,  stage_b,    stage_b->size },
+        { BIND_UNDO_RING,       ring_b,     ring_b->size },
         { BIND_PARAMS,          &multires_apply_ubo, sizeof(MultiresApplyParamsGPU) },
     };
     gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, multires_apply_pipeline, bg, 8);
@@ -290,25 +289,24 @@ size_t ComputeState::undo_ring_reserve(size_t float_count) {
 
     // Grow (copy-preserving, doubling) toward the cap while there's headroom. Once
     // the buffer has reached the cap, the wrap below recycles space instead.
-    if ((!undo_ring_ssbo || undo_ring_head + bytes > undo_ring_bytes)
+    if ((!undo_ring_ssbo.handle || undo_ring_head + bytes > undo_ring_bytes)
         && undo_ring_bytes < undo_ring_cap_bytes) {
         size_t newcap = undo_ring_bytes ? undo_ring_bytes : (16ull << 20);
         while (newcap < undo_ring_head + bytes && newcap < undo_ring_cap_bytes) newcap <<= 1;
         if (newcap > undo_ring_cap_bytes) newcap = undo_ring_cap_bytes;
 
-        GLuint nb = 0;
-        glGenBuffers(1, &nb);
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, nb);
-        glBufferData(GL_SHADER_STORAGE_BUFFER, (GLsizeiptr)newcap, nullptr, GL_DYNAMIC_COPY);
-        if (undo_ring_ssbo && undo_ring_head) {
-            glBindBuffer(GL_COPY_READ_BUFFER,  undo_ring_ssbo);
-            glBindBuffer(GL_COPY_WRITE_BUFFER, nb);
+        // Seam-owned now (Step 3b). The copy-preserving grow is a buffer→buffer copy
+        // with no seam primitive yet, so it stays raw GL via .handle (web-stage concern).
+        gpu::Buffer nb = gpu::create_buffer(gpu_dev, nullptr, (uint64_t)newcap, gpu::Usage::Storage);
+        if (undo_ring_ssbo.handle && undo_ring_head) {
+            glBindBuffer(GL_COPY_READ_BUFFER,  undo_ring_ssbo.handle);
+            glBindBuffer(GL_COPY_WRITE_BUFFER, nb.handle);
             glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, 0, 0,
                                 (GLsizeiptr)undo_ring_head);
             glBindBuffer(GL_COPY_READ_BUFFER,  0);
             glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
         }
-        if (undo_ring_ssbo) glDeleteBuffers(1, &undo_ring_ssbo);
+        gpu::release_buffer(undo_ring_ssbo);
         undo_ring_ssbo  = nb;
         undo_ring_bytes = newcap;
     }
@@ -330,16 +328,15 @@ size_t ComputeState::undo_ring_append(const float* data, size_t float_count) {
     const size_t off_floats = undo_ring_reserve(float_count);
     if (off_floats == SIZE_MAX) return SIZE_MAX;
     const size_t byte_off = off_floats * sizeof(float);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, undo_ring_ssbo);
-    glBufferSubData(GL_SHADER_STORAGE_BUFFER, (GLintptr)byte_off,
-                    (GLsizeiptr)(float_count * sizeof(float)), data);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    gpu::write_buffer(gpu_dev, undo_ring_ssbo, (uint64_t)byte_off,
+                      data, (uint64_t)(float_count * sizeof(float)));
     return byte_off;
 }
 
 void ComputeState::undo_ring_read(size_t byte_offset, size_t float_count, float* out) {
-    if (!supported || !undo_ring_ssbo || float_count == 0) return;
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, undo_ring_ssbo);
+    if (!supported || !undo_ring_ssbo.handle || float_count == 0) return;
+    // Readback: no seam primitive yet, stays raw GL via .handle (web-stage concern).
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, undo_ring_ssbo.handle);
     glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, (GLintptr)byte_offset,
                        (GLsizeiptr)(float_count * sizeof(float)), out);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);

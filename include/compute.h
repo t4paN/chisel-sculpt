@@ -304,7 +304,7 @@ struct ComputeState {
     // follows with compute_normals. has_multires_apply() reports readiness.
     gpu::ComputePipeline multires_apply_pipeline;
     gpu::Buffer          multires_apply_ubo;  // 32-byte {count,targets_base,ring_mode,ring_base,forward} block
-    GLuint multires_stage_ssbo;          // float6 * V scratch (target+source), grow-only — GL-owned
+    gpu::Buffer multires_stage_ssbo;     // float6 * V scratch (target+source), grow-only — seam-owned (Step 3b)
     uint32_t multires_stage_capacity;
 
     // GPU-resident undo ring (blood-moon 3b-ii). PERSISTENT history of per-vert
@@ -314,7 +314,7 @@ struct ComputeState {
     // UndoStack::max_bytes / --toaster). Wrap + FIFO eviction land in 3b-iv when a
     // consumer exists to validate against; 3b-ii is append/read/reset + selftest,
     // no stroke-path consumer. Distinct from multires_stage_ssbo (transient scratch).
-    GLuint undo_ring_ssbo;       // persistent float6-per-vert history buffer
+    gpu::Buffer undo_ring_ssbo;  // persistent float6-per-vert history buffer — seam-owned (Step 3b)
     size_t undo_ring_cap_bytes;  // hard ceiling (from UndoStack::max_bytes)
     size_t undo_ring_bytes;      // currently allocated buffer size
     size_t undo_ring_head;       // next free byte offset (bump allocator)
