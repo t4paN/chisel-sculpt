@@ -172,14 +172,14 @@ struct ComputeState {
     int max_ssbo_bindings;
 
     // Accumulation buffer: 4 uints per vertex (dx, dy, dz, weight as float-bits)
-    GLuint accum_ssbo;
+    gpu::Buffer accum_ssbo;
     uint32_t accum_vertex_count;
 
     // Symmetrized accumulation buffer (same shape as accum_ssbo). Populated by
     // the draw symmetrize pass when mirror_x is on; each paired (v, mv) gets
     // out[v] = accum[v] + (-mx, my, mz, mw), so apply produces byte-for-byte
     // mirrored displacements regardless of tessellation drift between twins.
-    GLuint accum_sym_ssbo;
+    gpu::Buffer accum_sym_ssbo;
 
     // Draw brush — ported onto the gpu:: seam (Seam Step 2b). draw_accum carries a
     // 112-byte std140 Params block; apply/symmetrize/mirror only need vertex_count,
@@ -197,7 +197,7 @@ struct ComputeState {
     // surface normal as it was at pen-down, not the live (already-perturbed)
     // VBO normal. Without this, every dab biases toward the camera and long
     // strokes near silhouettes fold triangles.
-    GLuint stroke_norm_ssbo;
+    gpu::Buffer stroke_norm_ssbo;
     uint32_t stroke_norm_capacity;
 
     // Draw apply compute shader (normalizes accum → writes positions)
@@ -324,7 +324,7 @@ struct ComputeState {
     uint32_t adjacency_vertex_count;
 
     // Mirror map SSBO (uploaded once at mesh init, maps vertex -> twin vertex)
-    GLuint mirror_map_ssbo;
+    gpu::Buffer mirror_map_ssbo;
     uint32_t mirror_map_vertex_count;
 
     // Mask SSBO: alias of renderer.vbo_mask. Set once after renderer init so the
@@ -435,7 +435,7 @@ struct ComputeState {
     // buffer is used as the accum source instead of accum_ssbo (used by the draw
     // brush to read from accum_sym_ssbo after symmetrize).
     void dispatch_draw_apply(GLuint pos_vbo, uint32_t vertex_count,
-                              GLuint accum_override = 0);
+                              const gpu::Buffer& accum_override = {});
 
     // Compile the draw-brush symmetrize-accum compute shader. Called once at init.
     bool init_draw_accum_symmetrize();

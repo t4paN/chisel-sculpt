@@ -364,7 +364,7 @@ void ComputeState::dispatch_grow_selection(
 void ComputeState::dispatch_mirror_selection(uint32_t vertex_count, uint32_t tri_count)
 {
     if (tri_count == 0 || !remesh_mirror_selection_pipeline.handle) return;
-    if (mirror_map_vertex_count == 0 || !mirror_map_ssbo) return;
+    if (mirror_map_vertex_count == 0 || !mirror_map_ssbo.handle) return;
     ensure_remesh_smooth_buffers(vertex_count, tri_count);
 
     GLsizeiptr bytes = (GLsizeiptr)tri_count * sizeof(uint32_t);
@@ -384,14 +384,13 @@ void ComputeState::dispatch_mirror_selection(uint32_t vertex_count, uint32_t tri
     gpu::Buffer idxView{    (uint64_t)tri_count*3u*sizeof(uint32_t), remesh_indices_ssbo };
     gpu::Buffer offView{    0, adjacency_offset_ssbo };
     gpu::Buffer listView{   0, adjacency_list_ssbo };
-    gpu::Buffer mirrorView{ 0, mirror_map_ssbo };
     const gpu::BindBufferEntry bg[] = {
         { BIND_REMESH_TRISEL_PONG, &pongView,   pongView.size },
         { BIND_REMESH_TRISEL,      &selView,    selView.size },
         { BIND_INDICES,            &idxView,    idxView.size },
         { BIND_ADJACENCY_OFFSET,   &offView,    offView.size },
         { BIND_ADJACENCY_LIST,     &listView,   listView.size },
-        { BIND_MIRROR_MAP,         &mirrorView, mirrorView.size },
+        { BIND_MIRROR_MAP,         &mirror_map_ssbo, 0 },
         { BIND_PARAMS,             &remesh_mirror_selection_ubo, sizeof(MirrorSelectionParamsGPU) },
     };
     gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, remesh_mirror_selection_pipeline, bg, 7);

@@ -2,6 +2,25 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-25 — WebGPU port, buffer-ownership migration Step 2: draw accum + mirror family seam-owned
+
+- **`accum_ssbo` / `accum_sym_ssbo` / `stroke_norm_ssbo` / `mirror_map_ssbo` are now seam-owned
+  `gpu::Buffer`s** (were raw GL handles wrapped in views at dispatch). These are shared sculpt
+  infrastructure — `accum`/`stroke_norm` feed draw + crease + pinch + smooth, `mirror_map` drives all
+  symmetry — so the whole family migrated as one unit across `compute_draw` (owner), `compute_common`
+  (ctor/destructor), and the consumers `compute_crease_pinch` / `compute_smooth` / `compute_remesh`.
+  Allocation/free go through `create_buffer`/`release_buffer`; bind groups point at the owned members
+  directly (no more per-dispatch view-wrapping).
+- **`dispatch_draw_apply`'s `accum_override` param flips `GLuint` → `const gpu::Buffer&`** — the
+  symmetrize path passes `accum_sym_ssbo` (now a `gpu::Buffer`) as the accum source.
+- Raw-GL *data movement* on these buffers (accum clear/readback, stroke-normal copy) still pokes
+  `.handle` — those are GL-only ops that get seam equivalents at the web stage, not an ownership concern.
+- **Verified:** gl build green; `chisel-gl-compute-test` PASS; app launches clean (mirror_map uploads via
+  the owned-buffer path, draw pipelines compiled, no GL errors); **sculpting confirmed working in-app**
+  by the user — draw/crease/pinch/smooth, mirror symmetry, remesh + re-sculpt, undo/redo.
+- _Known issue (preexisting, not introduced here):_ a full undo can leave **stale vertex normals**
+  (shading doesn't refresh after undoing all the way) — tracked for a later fix.
+
 ## 2026-06-25 — WebGPU port, buffer-ownership migration Step 1: mesh pos/norm/ebo are seam-owned
 
 - **`vbo_pos` / `vbo_norm` / `ebo` are now owned `gpu::Buffer`s** (were raw GL handles wrapped in

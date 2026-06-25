@@ -242,14 +242,12 @@ void ComputeState::dispatch_smooth_mirror_apply(GLuint pos_vbo, uint32_t vertex_
     u.anchor_x = anchor_x;
     gpu::write_buffer(gpu_dev, smooth_mirror_ubo, 0, &u, sizeof(u));
 
-    gpu::Buffer posView{   (uint64_t)vc * 3u * sizeof(float),       pos_vbo };
-    gpu::Buffer accumView{ (uint64_t)vc * 4u * sizeof(uint32_t),    accum_ssbo };
-    gpu::Buffer mirrorView{(uint64_t)mirror_map_vertex_count * sizeof(uint32_t), mirror_map_ssbo };
-    gpu::Buffer maskView{  (uint64_t)vc * sizeof(float),            mask_ssbo };
+    gpu::Buffer posView{ (uint64_t)vc * 3u * sizeof(float), pos_vbo };
+    gpu::Buffer maskView{(uint64_t)vc * sizeof(float),      mask_ssbo };
     const gpu::BindBufferEntry bg[] = {
         { BIND_POSITIONS,  &posView,    posView.size },
-        { BIND_ACCUM,      &accumView,  accumView.size },
-        { BIND_MIRROR_MAP, &mirrorView, mirrorView.size },
+        { BIND_ACCUM,      &accum_ssbo, (uint64_t)vc * 4u * sizeof(uint32_t) },
+        { BIND_MIRROR_MAP, &mirror_map_ssbo, (uint64_t)mirror_map_vertex_count * sizeof(uint32_t) },
         { BIND_MASK,       &maskView,   maskView.size },
         { BIND_PARAMS,     &smooth_mirror_ubo, sizeof(SmoothMirrorParamsGPU) },
     };
@@ -285,13 +283,12 @@ void ComputeState::dispatch_smooth(const SmoothAccumParams& p,
     gpu::write_buffer(gpu_dev, smooth_accum_ubo, 0, &ua, sizeof(ua));
 
     gpu::Buffer posView{   (uint64_t)vc * 3u * sizeof(float),                pos_vbo };
-    gpu::Buffer accumView{ (uint64_t)vc * 4u * sizeof(uint32_t),            accum_ssbo };
     gpu::Buffer dirtyView{ (uint64_t)(1u + smooth_dirty_capacity) * sizeof(uint32_t), smooth_dirty_ssbo };
     {
         const gpu::BindBufferEntry bg[] = {
-            { BIND_POSITIONS,   &posView,   posView.size },
-            { BIND_ACCUM,       &accumView, accumView.size },
-            { BIND_DIRTY_VERTS, &dirtyView, dirtyView.size },
+            { BIND_POSITIONS,   &posView,    posView.size },
+            { BIND_ACCUM,       &accum_ssbo, (uint64_t)vc * 4u * sizeof(uint32_t) },
+            { BIND_DIRTY_VERTS, &dirtyView,  dirtyView.size },
             { BIND_PARAMS,      &smooth_accum_ubo, sizeof(SmoothAccumParamsGPU) },
         };
         gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, smooth_accum_pipeline, bg, 4);
@@ -317,10 +314,10 @@ void ComputeState::dispatch_smooth(const SmoothAccumParams& p,
     gpu::Buffer listView{ 0,                                    adjacency_list_ssbo };
     gpu::Buffer maskView{ (uint64_t)vc * sizeof(float),         mask_ssbo };
     const gpu::BindBufferEntry apply_bg[] = {
-        { BIND_POSITIONS,        &posView,   posView.size },
-        { BIND_INDICES,          &idxView,   idxView.size },
-        { BIND_ACCUM,            &accumView, accumView.size },
-        { BIND_ADJACENCY_OFFSET, &offView,   offView.size },
+        { BIND_POSITIONS,        &posView,    posView.size },
+        { BIND_INDICES,          &idxView,    idxView.size },
+        { BIND_ACCUM,            &accum_ssbo, (uint64_t)vc * 4u * sizeof(uint32_t) },
+        { BIND_ADJACENCY_OFFSET, &offView,    offView.size },
         { BIND_ADJACENCY_LIST,   &listView,  listView.size },
         { BIND_MASK,             &maskView,  maskView.size },
         { BIND_PARAMS,           &smooth_apply_ubo, sizeof(SmoothApplyParamsGPU) },
@@ -379,14 +376,14 @@ uint32_t ComputeState::readback_smooth_dirty(std::vector<uint32_t>& out) {
 
 uint32_t ComputeState::readback_accum_dirty(uint32_t vertex_count, std::vector<uint32_t>& out) {
     out.clear();
-    if (!accum_ssbo || vertex_count == 0) return 0;
+    if (!accum_ssbo.handle || vertex_count == 0) return 0;
 
     GLsizeiptr size = (GLsizeiptr)vertex_count * 4 * sizeof(uint32_t);
     if (readback_buf.size() < vertex_count * 4) {
         readback_buf.resize(vertex_count * 4);
     }
 
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, accum_ssbo);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, accum_ssbo.handle);
     glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, size, readback_buf.data());
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 

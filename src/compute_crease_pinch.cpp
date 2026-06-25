@@ -7,8 +7,8 @@
 // accum-only kernels: they deposit into the shared accum buffer, and the brush
 // reuses the already-seamed draw_apply / symmetrize / mirror_apply for the apply
 // side. Kernel logic lives in the canonical shaders/{glsl,wgsl}/{crease,pinch}_accum.*
-// (embedded at build time); this file drives the seam. accum / stroke-normal buffers
-// stay GL-owned (wrapped in views at dispatch), as with draw.
+// (embedded at build time); this file drives the seam. The shared accum / stroke-normal
+// buffers are seam-owned gpu::Buffers (buffer-ownership Step 2), bound directly here.
 // ---------------------------------------------------------------------------
 
 namespace {
@@ -73,7 +73,7 @@ bool ComputeState::init_crease() {
 }
 
 void ComputeState::dispatch_crease_accum(const CreaseAccumParams& p, GLuint pos_vbo) {
-    if (!has_crease() || !accum_ssbo || !stroke_norm_ssbo) return;
+    if (!has_crease() || !accum_ssbo.handle || !stroke_norm_ssbo.handle) return;
     const uint32_t vc = p.vertex_count;
 
     clear_accum_buffer();   // raw GL (GL-owned accum buffer)
@@ -94,11 +94,9 @@ void ComputeState::dispatch_crease_accum(const CreaseAccumParams& p, GLuint pos_
     u.vertex_count = vc;
     gpu::write_buffer(gpu_dev, crease_ubo, 0, &u, sizeof(u));
 
-    gpu::Buffer posView{  (uint64_t)vc * 3u * sizeof(float),    pos_vbo };
-    gpu::Buffer normView{ (uint64_t)vc * 3u * sizeof(float),    stroke_norm_ssbo };
-    gpu::Buffer accumView{(uint64_t)vc * 4u * sizeof(uint32_t), accum_ssbo };
+    gpu::Buffer posView{ (uint64_t)vc * 3u * sizeof(float), pos_vbo };
     gpu::BindGroup grp = make_accum_bind_group(*this, crease_accum_pipeline,
-                                               posView, normView, accumView,
+                                               posView, stroke_norm_ssbo, accum_ssbo,
                                                crease_ubo, sizeof(CreaseParamsGPU));
 
     gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
@@ -131,7 +129,7 @@ bool ComputeState::init_pinch() {
 }
 
 void ComputeState::dispatch_pinch_accum(const PinchAccumParams& p, GLuint pos_vbo) {
-    if (!has_pinch() || !accum_ssbo || !stroke_norm_ssbo) return;
+    if (!has_pinch() || !accum_ssbo.handle || !stroke_norm_ssbo.handle) return;
     const uint32_t vc = p.vertex_count;
 
     clear_accum_buffer();   // raw GL (GL-owned accum buffer)
@@ -151,11 +149,9 @@ void ComputeState::dispatch_pinch_accum(const PinchAccumParams& p, GLuint pos_vb
     u.vertex_count = vc;
     gpu::write_buffer(gpu_dev, pinch_ubo, 0, &u, sizeof(u));
 
-    gpu::Buffer posView{  (uint64_t)vc * 3u * sizeof(float),    pos_vbo };
-    gpu::Buffer normView{ (uint64_t)vc * 3u * sizeof(float),    stroke_norm_ssbo };
-    gpu::Buffer accumView{(uint64_t)vc * 4u * sizeof(uint32_t), accum_ssbo };
+    gpu::Buffer posView{ (uint64_t)vc * 3u * sizeof(float), pos_vbo };
     gpu::BindGroup grp = make_accum_bind_group(*this, pinch_accum_pipeline,
-                                               posView, normView, accumView,
+                                               posView, stroke_norm_ssbo, accum_ssbo,
                                                pinch_ubo, sizeof(PinchParamsGPU));
 
     gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);

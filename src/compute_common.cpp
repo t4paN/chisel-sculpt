@@ -8,10 +8,7 @@ ComputeState::ComputeState()
     , max_workgroup_size(0)
     , max_workgroup_invocations(0)
     , max_ssbo_bindings(0)
-    , accum_ssbo(0)
     , accum_vertex_count(0)
-    , accum_sym_ssbo(0)
-    , stroke_norm_ssbo(0)
     , stroke_norm_capacity(0)
     , move_affected_ssbo(0)
     , move_weights_ssbo(0)
@@ -29,7 +26,6 @@ ComputeState::ComputeState()
     , adjacency_offset_ssbo(0)
     , adjacency_list_ssbo(0)
     , adjacency_vertex_count(0)
-    , mirror_map_ssbo(0)
     , mirror_map_vertex_count(0)
     , dirty_verts_ssbo(0)
     , dirty_verts_capacity(0)
@@ -203,9 +199,9 @@ GLuint ComputeState::compile_program(const char* src) const {
 }
 
 void ComputeState::cleanup() {
-    if (accum_ssbo) { glDeleteBuffers(1, &accum_ssbo); accum_ssbo = 0; }
-    if (accum_sym_ssbo) { glDeleteBuffers(1, &accum_sym_ssbo); accum_sym_ssbo = 0; }
-    if (stroke_norm_ssbo) { glDeleteBuffers(1, &stroke_norm_ssbo); stroke_norm_ssbo = 0; }
+    gpu::release_buffer(accum_ssbo);
+    gpu::release_buffer(accum_sym_ssbo);
+    gpu::release_buffer(stroke_norm_ssbo);
     stroke_norm_capacity = 0;
     gpu::release_compute_pipeline(draw_accum_pipeline);
     gpu::release_compute_pipeline(draw_symmetrize_pipeline);
@@ -213,7 +209,7 @@ void ComputeState::cleanup() {
     gpu::release_compute_pipeline(draw_mirror_apply_pipeline);
     gpu::release_buffer(draw_accum_ubo);
     gpu::release_buffer(draw_vcount_ubo);
-    if (mirror_map_ssbo) { glDeleteBuffers(1, &mirror_map_ssbo); mirror_map_ssbo = 0; }
+    gpu::release_buffer(mirror_map_ssbo);
     gpu::release_compute_pipeline(smooth_accum_pipeline);
     gpu::release_compute_pipeline(smooth_apply_pipeline);
     gpu::release_compute_pipeline(smooth_mirror_apply_pipeline);
