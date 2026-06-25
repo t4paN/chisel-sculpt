@@ -2,6 +2,26 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-25 — WebGPU port, buffer-ownership migration Step 3a: resident paint (mask/color) seam-owned + alias refresh
+
+- **`renderer.vbo_mask` / `renderer.vbo_color` are now owned `gpu::Buffer`s** (were the last raw-GL
+  working-VAO buffers; Step 1 deferred them here). Both carry `Vertex|Storage` — bound as vertex
+  attributes by the matcap draw AND written as storage by the mask gate / paint kernels. Created lazily
+  by `upload_mesh` via `ensure_buffer`; all the mask/color uploaders (`update_mask*` / `update_color*`)
+  now go through `gpu::write_buffer` instead of `glBindBuffer`+`glBufferSubData`.
+- **The compute alias is no longer cached once at startup.** `compute.mask_ssbo` / `color_ssbo` are
+  non-owning `gpu::Buffer` copies of the renderer's buffers, **re-pointed in `Scene::bind_active_`
+  after every `upload_mesh`**. The old set-once alias (`main.cpp`) relied on GL reusing the same handle
+  across a `glBufferData` realloc — WebGPU has no in-place resize, so a vertex-count change makes a new
+  handle and the stale alias would bind a freed buffer. This was the specific GL-ism Step 1 flagged as
+  the reason mask/color were held back to Step 3.
+- All the mask/color dispatch sites (`compute_draw` / `compute_mask` / `compute_color` / `compute_move`
+  / `compute_limb` / `compute_smooth`) bind the owned alias directly (`&mask_ssbo`); the pen-up
+  mask/color readbacks in `brush.cpp finalize()` still poke `.handle` (a GL-only op, web-stage concern).
+- **Verified:** gl build green; `chisel-gl-compute-test` PASS (mask kernel reproduces CPU); app launches
+  clean (adjacency + mirror_map upload, all pipelines compiled, no GL errors). In-app paint/mask + sculpt
+  re-confirm still user-pending.
+
 ## 2026-06-25 — WebGPU port, buffer-ownership migration Step 2 cont: smooth/move/limb scratch seam-owned
 
 - **The remaining self-contained scratch SSBOs are now seam-owned `gpu::Buffer`s** (were raw GL

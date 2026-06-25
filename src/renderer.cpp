@@ -568,7 +568,7 @@ GLuint link_program(GLuint vert, GLuint frag) {
 // ---- Renderer ----
 
 Renderer::Renderer()
-    : vao(0), vbo_mask(0), vbo_color(0), vbo_tri_id(0), vbo_bary(0)
+    : vao(0), vbo_tri_id(0), vbo_bary(0)
     , debug_edge_vbo(0), debug_edge_count(0)
     , screen_vbo_pos(0), screen_vbo_norm(0)
     , screen_vbo_triid(0), screen_vbo_bary(0), screen_tri_count(0)
@@ -579,8 +579,8 @@ Renderer::~Renderer() {
     if (vao) glDeleteVertexArrays(1, &vao);
     gpu::release_buffer(vbo_pos);
     gpu::release_buffer(vbo_norm);
-    if (vbo_mask) glDeleteBuffers(1, &vbo_mask);
-    if (vbo_color) glDeleteBuffers(1, &vbo_color);
+    gpu::release_buffer(vbo_mask);
+    gpu::release_buffer(vbo_color);
     gpu::release_buffer(ebo);
     gpu::release_render_pipeline(bg_pipeline);
     gpu::release_buffer(bg_vbuf);
@@ -687,11 +687,9 @@ void Renderer::init() {
         pick_ubo = gpu::create_buffer(gpu_dev, nullptr, sizeof(PickParamsGPU), gpu::Usage::Uniform);
     }
 
-    // Mesh VAO + the still-GLuint mask/color attribute buffers. vbo_pos/vbo_norm/ebo
-    // are owned gpu::Buffers (Step 1) created lazily on first upload_mesh.
+    // Mesh VAO. vbo_pos/vbo_norm/ebo (Step 1) and vbo_mask/vbo_color (Step 3a) are all
+    // owned gpu::Buffers created lazily on first upload_mesh.
     glGenVertexArrays(1, &vao);
-    glGenBuffers(1, &vbo_mask);
-    glGenBuffers(1, &vbo_color);
 
     // Brush-cursor overlays — on the gpu:: seam. Three pipelines, each with static
     // camera-independent geometry (built once here) + a std140 Params UBO updated
@@ -877,10 +875,12 @@ void Renderer::upload_mesh(const Mesh& mesh) {
         col_buf[i] = (has_color && i < mesh.color.size()) ? mesh.color[i] : 0xFFFFFFFFu;
     }
 
-    // pos/norm/ebo: owned seam buffers (Step 1, Vertex|Storage / Index|Storage).
-    // mask/color: still-GLuint attribute buffers (Step 3). The renderer's own `vao`
-    // is unused at draw (the seam render pipeline owns the draw-time VAO), so no
-    // vertex-attribute pointers are configured here anymore.
+    // pos/norm/ebo + mask/color: owned seam buffers. pos/norm carry Vertex|Storage,
+    // ebo Index|Storage, mask/color Vertex|Storage (vertex attribute + brush-written
+    // storage). The renderer's own `vao` is unused at draw (the seam render pipeline
+    // owns the draw-time VAO), so no vertex-attribute pointers are configured here.
+    // A size change releases+recreates (new handle) → Scene::bind_active_ refreshes the
+    // compute.mask_ssbo / color_ssbo aliases right after this call.
     ensure_buffer(gpu_dev, vbo_pos, pos.data(), (uint64_t)pos.size()*sizeof(float),
                   gpu::Usage::Vertex | gpu::Usage::Storage);
     ensure_buffer(gpu_dev, vbo_norm, norm.data(), (uint64_t)norm.size()*sizeof(float),
@@ -888,13 +888,10 @@ void Renderer::upload_mesh(const Mesh& mesh) {
     ensure_buffer(gpu_dev, ebo, mesh.indices.data(),
                   (uint64_t)mesh.indices.size()*sizeof(uint32_t),
                   gpu::Usage::Index | gpu::Usage::Storage);
-
-    glBindBuffer(GL_ARRAY_BUFFER, vbo_mask);
-    glBufferData(GL_ARRAY_BUFFER, mask_buf.size()*sizeof(float), mask_buf.data(), GL_DYNAMIC_DRAW);
-
-    glBindBuffer(GL_ARRAY_BUFFER, vbo_color);
-    glBufferData(GL_ARRAY_BUFFER, col_buf.size()*sizeof(uint32_t), col_buf.data(), GL_DYNAMIC_DRAW);
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    ensure_buffer(gpu_dev, vbo_mask, mask_buf.data(), (uint64_t)mask_buf.size()*sizeof(float),
+                  gpu::Usage::Vertex | gpu::Usage::Storage);
+    ensure_buffer(gpu_dev, vbo_color, col_buf.data(), (uint64_t)col_buf.size()*sizeof(uint32_t),
+                  gpu::Usage::Vertex | gpu::Usage::Storage);
 }
 
 void Renderer::update_mask(const Mesh& mesh) {
@@ -902,8 +899,7 @@ void Renderer::update_mask(const Mesh& mesh) {
     std::vector<float> mask_buf(vc);
     for (uint32_t i = 0; i < vc; i++)
         mask_buf[i] = (i < mesh.mask.size()) ? mesh.mask[i] : 0.0f;
-    glBindBuffer(GL_ARRAY_BUFFER, vbo_mask);
-    glBufferSubData(GL_ARRAY_BUFFER, 0, vc * sizeof(float), mask_buf.data());
+    gpu::write_buffer(gpu_dev, vbo_mask, 0, mask_buf.data(), (uint64_t)vc * sizeof(float));
 }
 
 void Renderer::update_mask_partial(const Mesh& mesh, const std::vector<uint32_t>& dirty_verts) {
@@ -922,8 +918,8 @@ void Renderer::update_mask_partial(const Mesh& mesh, const std::vector<uint32_t>
         buf[i] = (v < mesh.mask.size()) ? mesh.mask[v] : 0.0f;
     }
 
-    glBindBuffer(GL_ARRAY_BUFFER, vbo_mask);
-    glBufferSubData(GL_ARRAY_BUFFER, min_idx * sizeof(float), range * sizeof(float), buf.data());
+    gpu::write_buffer(gpu_dev, vbo_mask, (uint64_t)min_idx * sizeof(float),
+                      buf.data(), (uint64_t)range * sizeof(float));
 }
 
 void Renderer::update_mesh_partial(const Mesh& mesh, const std::vector<uint32_t>& dirty_verts) {
@@ -994,7 +990,6 @@ void Renderer::update_mask_verts(const Mesh& mesh, const std::vector<uint32_t>& 
 
     static std::vector<float> buf;
     size_t i = 0, n = sorted.size();
-    glBindBuffer(GL_ARRAY_BUFFER, vbo_mask);
     while (i < n) {
         uint32_t start = sorted[i], end = start;
         size_t j = i + 1;
@@ -1006,10 +1001,10 @@ void Renderer::update_mask_verts(const Mesh& mesh, const std::vector<uint32_t>& 
             uint32_t v = start + k;
             buf[k] = (v < mesh.mask.size()) ? mesh.mask[v] : 0.0f;
         }
-        glBufferSubData(GL_ARRAY_BUFFER, start * sizeof(float), run * sizeof(float), buf.data());
+        gpu::write_buffer(gpu_dev, vbo_mask, (uint64_t)start * sizeof(float),
+                          buf.data(), (uint64_t)run * sizeof(float));
         i = j;
     }
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
 }
 
 // Packed RGBA8 color, mirror of the mask uploaders. Missing entries default to
@@ -1020,8 +1015,7 @@ void Renderer::update_color(const Mesh& mesh) {
     bool has = !mesh.color.empty();
     for (uint32_t i = 0; i < vc; i++)
         buf[i] = (has && i < mesh.color.size()) ? mesh.color[i] : 0xFFFFFFFFu;
-    glBindBuffer(GL_ARRAY_BUFFER, vbo_color);
-    glBufferSubData(GL_ARRAY_BUFFER, 0, vc * sizeof(uint32_t), buf.data());
+    gpu::write_buffer(gpu_dev, vbo_color, 0, buf.data(), (uint64_t)vc * sizeof(uint32_t));
 }
 
 void Renderer::update_color_partial(const Mesh& mesh, const std::vector<uint32_t>& dirty_verts) {
@@ -1041,8 +1035,8 @@ void Renderer::update_color_partial(const Mesh& mesh, const std::vector<uint32_t
         buf[i] = (has && v < mesh.color.size()) ? mesh.color[v] : 0xFFFFFFFFu;
     }
 
-    glBindBuffer(GL_ARRAY_BUFFER, vbo_color);
-    glBufferSubData(GL_ARRAY_BUFFER, min_idx * sizeof(uint32_t), range * sizeof(uint32_t), buf.data());
+    gpu::write_buffer(gpu_dev, vbo_color, (uint64_t)min_idx * sizeof(uint32_t),
+                      buf.data(), (uint64_t)range * sizeof(uint32_t));
 }
 
 void Renderer::update_color_verts(const Mesh& mesh, const std::vector<uint32_t>& verts) {
@@ -1056,7 +1050,6 @@ void Renderer::update_color_verts(const Mesh& mesh, const std::vector<uint32_t>&
     static std::vector<uint32_t> buf;
     bool has = !mesh.color.empty();
     size_t i = 0, n = sorted.size();
-    glBindBuffer(GL_ARRAY_BUFFER, vbo_color);
     while (i < n) {
         uint32_t start = sorted[i], end = start;
         size_t j = i + 1;
@@ -1068,10 +1061,10 @@ void Renderer::update_color_verts(const Mesh& mesh, const std::vector<uint32_t>&
             uint32_t v = start + k;
             buf[k] = (has && v < mesh.color.size()) ? mesh.color[v] : 0xFFFFFFFFu;
         }
-        glBufferSubData(GL_ARRAY_BUFFER, start * sizeof(uint32_t), run * sizeof(uint32_t), buf.data());
+        gpu::write_buffer(gpu_dev, vbo_color, (uint64_t)start * sizeof(uint32_t),
+                          buf.data(), (uint64_t)run * sizeof(uint32_t));
         i = j;
     }
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
 }
 
 void Renderer::draw_background(int w, int h) {
@@ -1110,8 +1103,8 @@ void Renderer::draw_mesh(const Camera& cam, int w, int h, uint32_t index_count,
     gpu::set_bind_group(rp, matcap_pipeline, grp);
     gpu::set_vertex_buffer(rp, 0, vbo_pos);
     gpu::set_vertex_buffer(rp, 1, vbo_norm);
-    gpu::set_vertex_buffer(rp, 2, buf_view(vbo_mask));
-    gpu::set_vertex_buffer(rp, 3, buf_view(vbo_color));
+    gpu::set_vertex_buffer(rp, 2, vbo_mask);
+    gpu::set_vertex_buffer(rp, 3, vbo_color);
     gpu::set_index_buffer(rp, ebo);
     gpu::draw_indexed(rp, index_count);
     gpu::end_render_pass(rp);

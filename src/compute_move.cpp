@@ -208,7 +208,7 @@ void ComputeState::dispatch_move_weight_smooth(uint32_t vertex_count, int iterat
 }
 
 void ComputeState::dispatch_move_apply(const MoveApplyParams& p, GLuint pos_vbo) {
-    if (!move_apply_pipeline.handle || !mask_ssbo) return;
+    if (!move_apply_pipeline.handle || !mask_ssbo.handle) return;
     const uint32_t vc = p.vertex_count;
 
     MoveApplyParamsGPU u = {};
@@ -216,13 +216,12 @@ void ComputeState::dispatch_move_apply(const MoveApplyParams& p, GLuint pos_vbo)
     gpu::write_buffer(gpu_dev, move_apply_ubo, 0, &u, sizeof(u));
 
     gpu::Buffer posView{      (uint64_t)vc * 3u * sizeof(float),       pos_vbo };
-    gpu::Buffer maskView{     (uint64_t)vc * sizeof(float),            mask_ssbo };
     const gpu::BindBufferEntry bg[] = {
         { BIND_POSITIONS,     &posView,            posView.size },
         { BIND_MOVE_AFFECTED, &move_affected_ssbo, move_affected_ssbo.size },
         { BIND_MOVE_WEIGHTS,  &move_weights_ssbo,  move_weights_ssbo.size },
         { BIND_MOVE_INIT,     &move_init_ssbo,     move_init_ssbo.size },
-        { BIND_MASK,          &maskView,     maskView.size },
+        { BIND_MASK,          &mask_ssbo,    (uint64_t)vc * sizeof(float) },
         { BIND_PARAMS,        &move_apply_ubo, sizeof(MoveApplyParamsGPU) },
     };
     gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, move_apply_pipeline, bg, 6);

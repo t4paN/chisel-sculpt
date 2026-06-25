@@ -234,7 +234,7 @@ bool ComputeState::init_smooth() {
 }
 
 void ComputeState::dispatch_smooth_mirror_apply(GLuint pos_vbo, uint32_t vertex_count, float anchor_x) {
-    if (!smooth_mirror_apply_pipeline.handle || mirror_map_vertex_count == 0 || !mask_ssbo) return;
+    if (!smooth_mirror_apply_pipeline.handle || mirror_map_vertex_count == 0 || !mask_ssbo.handle) return;
     const uint32_t vc = vertex_count;
 
     SmoothMirrorParamsGPU u = {};
@@ -243,12 +243,11 @@ void ComputeState::dispatch_smooth_mirror_apply(GLuint pos_vbo, uint32_t vertex_
     gpu::write_buffer(gpu_dev, smooth_mirror_ubo, 0, &u, sizeof(u));
 
     gpu::Buffer posView{ (uint64_t)vc * 3u * sizeof(float), pos_vbo };
-    gpu::Buffer maskView{(uint64_t)vc * sizeof(float),      mask_ssbo };
     const gpu::BindBufferEntry bg[] = {
         { BIND_POSITIONS,  &posView,    posView.size },
         { BIND_ACCUM,      &accum_ssbo, (uint64_t)vc * 4u * sizeof(uint32_t) },
         { BIND_MIRROR_MAP, &mirror_map_ssbo, (uint64_t)mirror_map_vertex_count * sizeof(uint32_t) },
-        { BIND_MASK,       &maskView,   maskView.size },
+        { BIND_MASK,       &mask_ssbo,  (uint64_t)vc * sizeof(float) },
         { BIND_PARAMS,     &smooth_mirror_ubo, sizeof(SmoothMirrorParamsGPU) },
     };
     gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, smooth_mirror_apply_pipeline, bg, 5);
@@ -262,7 +261,7 @@ void ComputeState::dispatch_smooth_mirror_apply(GLuint pos_vbo, uint32_t vertex_
 void ComputeState::dispatch_smooth(const SmoothAccumParams& p,
                                     GLuint /*triid_tex*/, GLuint /*bary_tex*/,
                                     GLuint pos_vbo, GLuint index_ebo) {
-    if (!has_smooth() || !mask_ssbo) return;
+    if (!has_smooth() || !mask_ssbo.handle) return;
     const uint32_t vc = p.vertex_count;
 
     // accum clear + dirty-counter reset stay raw GL (GL-owned buffers).
@@ -307,14 +306,13 @@ void ComputeState::dispatch_smooth(const SmoothAccumParams& p,
     gpu::write_buffer(gpu_dev, smooth_apply_ubo, 0, &up, sizeof(up));
 
     gpu::Buffer idxView{  0,                                    index_ebo };
-    gpu::Buffer maskView{ (uint64_t)vc * sizeof(float),         mask_ssbo };
     const gpu::BindBufferEntry apply_bg[] = {
         { BIND_POSITIONS,        &posView,    posView.size },
         { BIND_INDICES,          &idxView,    idxView.size },
         { BIND_ACCUM,            &accum_ssbo, (uint64_t)vc * 4u * sizeof(uint32_t) },
         { BIND_ADJACENCY_OFFSET, &adjacency_offset_ssbo, adjacency_offset_ssbo.size },
         { BIND_ADJACENCY_LIST,   &adjacency_list_ssbo,   adjacency_list_ssbo.size },
-        { BIND_MASK,             &maskView,  maskView.size },
+        { BIND_MASK,             &mask_ssbo,  (uint64_t)vc * sizeof(float) },
         { BIND_PARAMS,           &smooth_apply_ubo, sizeof(SmoothApplyParamsGPU) },
     };
     gpu::BindGroup apply_grp = gpu::create_bind_group(gpu_dev, smooth_apply_pipeline, apply_bg, 7);
@@ -522,7 +520,7 @@ bool ComputeState::init_stroke_smooth() {
 void ComputeState::dispatch_stroke_smooth_apply(const uint32_t* vert_ids, uint32_t count,
                                                  float strength,
                                                  GLuint pos_vbo, GLuint index_ebo) {
-    if (!stroke_smooth_apply_pipeline.handle || count == 0 || !mask_ssbo) return;
+    if (!stroke_smooth_apply_pipeline.handle || count == 0 || !mask_ssbo.handle) return;
 
     // Upload the dirty-vert id list — seam-owned buffer (shared with compute_normals /
     // multires). Grow-only (release + create); partial fill via write_buffer.
@@ -544,14 +542,13 @@ void ComputeState::dispatch_stroke_smooth_apply(const uint32_t* vert_ids, uint32
     // mask reach unknown so leave 0 too (GL ignores). Adjacency + dirty list seam-owned.
     gpu::Buffer posView{   0,                                                pos_vbo };
     gpu::Buffer idxView{   0,                                                index_ebo };
-    gpu::Buffer maskView{  0,                                                mask_ssbo };
     const gpu::BindBufferEntry bg[] = {
         { BIND_POSITIONS,        &posView,   posView.size },
         { BIND_INDICES,          &idxView,   idxView.size },
         { BIND_ADJACENCY_OFFSET, &adjacency_offset_ssbo, adjacency_offset_ssbo.size },
         { BIND_ADJACENCY_LIST,   &adjacency_list_ssbo,   adjacency_list_ssbo.size },
         { BIND_DIRTY_VERTS,      &dirty_verts_ssbo,      dirty_verts_ssbo.size },
-        { BIND_MASK,             &maskView,  maskView.size },
+        { BIND_MASK,             &mask_ssbo, mask_ssbo.size },
         { BIND_PARAMS,           &stroke_smooth_ubo, sizeof(StrokeSmoothParamsGPU) },
     };
     gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, stroke_smooth_apply_pipeline, bg, 7);

@@ -1334,7 +1334,7 @@ bool BrushStroke::finalize(Mesh& mesh, UndoStack& stack, MultiresStack& multires
         static std::vector<ReadRun> runs;
         coalesce_snap_runs(mask.snap_list, runs);
         static std::vector<float> mask_readback;
-        glBindBuffer(GL_ARRAY_BUFFER, renderer.vbo_mask);
+        glBindBuffer(GL_ARRAY_BUFFER, renderer.vbo_mask.handle);
         for (const ReadRun& r : runs) {
             mask_readback.resize(r.count);
             glGetBufferSubData(GL_ARRAY_BUFFER,
@@ -1355,7 +1355,7 @@ bool BrushStroke::finalize(Mesh& mesh, UndoStack& stack, MultiresStack& multires
         static std::vector<ReadRun> runs;
         coalesce_snap_runs(color.snap_list, runs);
         static std::vector<uint32_t> color_readback;
-        glBindBuffer(GL_ARRAY_BUFFER, renderer.vbo_color);
+        glBindBuffer(GL_ARRAY_BUFFER, renderer.vbo_color.handle);
         for (const ReadRun& r : runs) {
             color_readback.resize(r.count);
             glGetBufferSubData(GL_ARRAY_BUFFER,

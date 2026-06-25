@@ -48,7 +48,7 @@ bool ComputeState::init_mask() {
 }
 
 void ComputeState::dispatch_mask_paint(const MaskPaintParams& p, GLuint pos_vbo) {
-    if (!has_mask() || !mask_ssbo) return;
+    if (!has_mask() || !mask_ssbo.handle) return;
 
     ensure_smooth_dirty_buffer(p.vertex_count);
 
@@ -58,7 +58,6 @@ void ComputeState::dispatch_mask_paint(const MaskPaintParams& p, GLuint pos_vbo)
     // list SSBO). On the GL backend a gpu::Buffer is just its handle; the seam binds
     // them at dispatch. Sizes are advisory on GL, the bind range on WebGPU.
     gpu::Buffer posView{   (uint64_t)vc * 3u * sizeof(float),    pos_vbo };
-    gpu::Buffer maskView{  (uint64_t)vc * sizeof(float),         mask_ssbo };
 
     // Reset the dirty counter (slot 0), then upload this dab's params.
     uint32_t zero = 0;
@@ -76,7 +75,7 @@ void ComputeState::dispatch_mask_paint(const MaskPaintParams& p, GLuint pos_vbo)
 
     const gpu::BindBufferEntry bg[] = {
         { BIND_POSITIONS,   &posView,           posView.size },
-        { BIND_MASK,        &maskView,          maskView.size },
+        { BIND_MASK,        &mask_ssbo,         (uint64_t)vc * sizeof(float) },
         { BIND_DIRTY_VERTS, &smooth_dirty_ssbo, (uint64_t)(vc + 1u) * sizeof(uint32_t) },
         { BIND_PARAMS,      &mask_params_ubo,   sizeof(MaskParamsGPU) },
     };

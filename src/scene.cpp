@@ -188,6 +188,12 @@ void Scene::bind_active_(uint32_t id) {
 
     // Working VBOs hold the incoming entity at offset 0.
     renderer_.upload_mesh(in->mesh);
+    // Refresh the mask/color aliases: upload_mesh may have released+recreated
+    // vbo_mask/vbo_color (new handle on a vertex-count change — the WebGPU-correct
+    // path has no in-place resize), so the compute alias must be re-pointed here
+    // rather than cached once at startup (Step 3a).
+    compute_.mask_ssbo  = renderer_.vbo_mask;
+    compute_.color_ssbo = renderer_.vbo_color;
     // Brush/pick FBO mesh.
     renderer_.upload_screen_mesh(in->mesh);
 

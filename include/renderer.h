@@ -20,8 +20,13 @@ struct Renderer {
     // until those flip to gpu::Buffer in later steps.
     gpu::Buffer vbo_pos;
     gpu::Buffer vbo_norm;
-    GLuint vbo_mask;      // per-vertex sculpt mask values (0..1) — Step 3 (aliased by compute.mask_ssbo)
-    GLuint vbo_color;     // per-vertex albedo, packed RGBA8 (paint) — Step 3 (aliased by compute.color_ssbo)
+    // Owned seam buffers (Step 3a). Both carry Vertex|Storage: render binds them as
+    // vertex attributes, the brush kernels write them as storage (mask gate / paint).
+    // compute.mask_ssbo / color_ssbo alias these; the alias is *refreshed* after every
+    // (re)allocation in Scene::bind_active_ (a WebGPU grow makes a new handle — the old
+    // set-once GL alias relied on stable-handle realloc, which WebGPU doesn't have).
+    gpu::Buffer vbo_mask;      // per-vertex sculpt mask values (0..1)
+    gpu::Buffer vbo_color;     // per-vertex albedo, packed RGBA8 (paint)
     GLuint vbo_tri_id;    // per-vertex triangle ID (flat, 3 verts per tri)
     GLuint vbo_bary;     // per-vertex barycentric coord
     gpu::Buffer ebo;

@@ -328,15 +328,18 @@ struct ComputeState {
     gpu::Buffer mirror_map_ssbo;
     uint32_t mirror_map_vertex_count;
 
-    // Mask SSBO: alias of renderer.vbo_mask. Set once after renderer init so the
-    // apply shaders can scale per-vertex displacement by (1 - mask[v]). The CPU
-    // mask brush keeps mesh.mask authoritative and uploads via vbo_mask, so this
-    // GPU view is always in sync with what the user painted.
-    GLuint mask_ssbo;
+    // Mask SSBO: alias (non-owning copy) of renderer.vbo_mask, so the apply shaders
+    // can scale per-vertex displacement by (1 - mask[v]). The CPU mask brush keeps
+    // mesh.mask authoritative and uploads via vbo_mask, so this GPU view stays in sync.
+    // Refreshed by Scene::bind_active_ after every upload_mesh — a WebGPU grow makes a
+    // new handle, so the old set-once alias is no longer valid (Step 3a). NOT owned
+    // here (renderer owns it); never released through ComputeState.
+    gpu::Buffer mask_ssbo;
 
-    // Color SSBO: alias of renderer.vbo_color. Set once after renderer init so
-    // the paint shader writes packed RGBA8 directly into the display VBO.
-    GLuint color_ssbo;
+    // Color SSBO: alias (non-owning copy) of renderer.vbo_color so the paint shader
+    // writes packed RGBA8 directly into the display VBO. Same refresh contract as
+    // mask_ssbo; not owned here.
+    gpu::Buffer color_ssbo;
 
     // Dirty vertex list SSBO (uploaded per dispatch, used by compute_normals) — seam-owned (Step 2 cont)
     gpu::Buffer dirty_verts_ssbo;

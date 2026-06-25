@@ -94,7 +94,7 @@ void ComputeState::ensure_limb_buffers(uint32_t vertex_count) {
 }
 
 void ComputeState::dispatch_limb_drag(const LimbDragParams& p, GLuint pos_vbo) {
-    if (!has_limb() || !mask_ssbo) return;
+    if (!has_limb() || !mask_ssbo.handle) return;
     const uint32_t vc = p.vertex_count;
 
     LimbDragParamsGPU u = {};
@@ -102,12 +102,11 @@ void ComputeState::dispatch_limb_drag(const LimbDragParams& p, GLuint pos_vbo) {
     gpu::write_buffer(gpu_dev, limb_drag_ubo, 0, &u, sizeof(u));
 
     gpu::Buffer posView{      (uint64_t)vc * 3u * sizeof(float),       pos_vbo };
-    gpu::Buffer maskView{     (uint64_t)vc * sizeof(float),            mask_ssbo };
     const gpu::BindBufferEntry bg[] = {
         { BIND_POSITIONS,     &posView,            posView.size },
         { BIND_MOVE_AFFECTED, &move_affected_ssbo, move_affected_ssbo.size },
         { BIND_MOVE_WEIGHTS,  &move_weights_ssbo,  move_weights_ssbo.size },
-        { BIND_MASK,          &maskView,     maskView.size },
+        { BIND_MASK,          &mask_ssbo,    (uint64_t)vc * sizeof(float) },
         { BIND_PARAMS,        &limb_drag_ubo, sizeof(LimbDragParamsGPU) },
     };
     gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, limb_drag_pipeline, bg, 5);
@@ -121,7 +120,7 @@ void ComputeState::dispatch_limb_drag(const LimbDragParams& p, GLuint pos_vbo) {
 void ComputeState::dispatch_limb_relax(uint32_t vertex_count, int iterations, float lambda,
                                        float tip_dx, float tip_dy, float tip_dz, float tip_bias,
                                        GLuint pos_vbo, GLuint norm_vbo, GLuint index_ebo) {
-    if (!has_limb() || !mask_ssbo || iterations <= 0) return;
+    if (!has_limb() || !mask_ssbo.handle || iterations <= 0) return;
     ensure_limb_buffers(vertex_count);
 
     // src snapshot starts as a full copy of the live positions. pos_vbo is still a raw
@@ -144,7 +143,6 @@ void ComputeState::dispatch_limb_relax(uint32_t vertex_count, int iterations, fl
     // bind; best-effort for the WebGPU min-size guard later). 0 = unguarded.
     gpu::Buffer normView{    (uint64_t)vertex_count * 3u * sizeof(float),    norm_vbo };
     gpu::Buffer idxView{     0,                                             index_ebo };
-    gpu::Buffer maskView{    (uint64_t)vertex_count * sizeof(float),         mask_ssbo };
     // Ping-pong endpoints: scratch snapshot (seam-owned) and the live position VBO.
     gpu::Buffer scratchView{ (uint64_t)vertex_count * 3u * sizeof(float),    limb_pos_scratch_ssbo.handle };
     gpu::Buffer posView{     (uint64_t)vertex_count * 3u * sizeof(float),    pos_vbo };
@@ -159,7 +157,7 @@ void ComputeState::dispatch_limb_relax(uint32_t vertex_count, int iterations, fl
         { BIND_ADJACENCY_OFFSET, &adjacency_offset_ssbo, adjacency_offset_ssbo.size },
         { BIND_ADJACENCY_LIST,   &adjacency_list_ssbo,   adjacency_list_ssbo.size },
         { BIND_MOVE_WEIGHTS,     &move_weights_ssbo,     move_weights_ssbo.size },
-        { BIND_MASK,             &maskView,    maskView.size },
+        { BIND_MASK,             &mask_ssbo,   (uint64_t)vertex_count * sizeof(float) },
         { BIND_PARAMS,           &limb_relax_ubo, sizeof(LimbRelaxParamsGPU) },
     };
     const gpu::BindBufferEntry pong[] = {
@@ -170,7 +168,7 @@ void ComputeState::dispatch_limb_relax(uint32_t vertex_count, int iterations, fl
         { BIND_ADJACENCY_OFFSET, &adjacency_offset_ssbo, adjacency_offset_ssbo.size },
         { BIND_ADJACENCY_LIST,   &adjacency_list_ssbo,   adjacency_list_ssbo.size },
         { BIND_MOVE_WEIGHTS,     &move_weights_ssbo,     move_weights_ssbo.size },
-        { BIND_MASK,             &maskView,    maskView.size },
+        { BIND_MASK,             &mask_ssbo,   (uint64_t)vertex_count * sizeof(float) },
         { BIND_PARAMS,           &limb_relax_ubo, sizeof(LimbRelaxParamsGPU) },
     };
     gpu::BindGroup grp_ping = gpu::create_bind_group(gpu_dev, limb_relax_pipeline, ping, 9);

@@ -231,11 +231,11 @@ int main(int argc, char* argv[]) {
     }
     bool prev_tablet_avail = tablet.available();
 
-    // GPU sculpt shaders read the mask buffer to gate locked vertices.
-    // vbo_mask is generated once in renderer.init() and persists for the run.
-    compute.mask_ssbo = renderer.vbo_mask;
-    // Paint shader writes packed RGBA8 directly into the working color VBO.
-    compute.color_ssbo = renderer.vbo_color;
+    // GPU sculpt shaders read the mask buffer to gate locked vertices; the paint
+    // shader writes the color VBO directly. compute.mask_ssbo / color_ssbo alias the
+    // renderer's owned vbo_mask / vbo_color and are (re)pointed by Scene::bind_active_
+    // after every upload_mesh — a realloc makes a new handle (Step 3a), so a set-once
+    // alias here would go stale on the first topology change.
 
     TextOverlay text;
     text.init();
