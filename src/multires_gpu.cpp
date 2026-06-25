@@ -42,42 +42,30 @@ void interleave_base(const MultiresStack& stack, uint32_t first, uint32_t count,
 } // namespace
 
 void MultiresGPU::ensure(uint32_t vertex_count, uint32_t base_vertex_count) {
-    if (!supported) return;
+    if (!supported || !dev) return;
 
-    if (capacity < vertex_count || !disp_ssbo || !frames_ssbo) {
-        if (disp_ssbo)   { glDeleteBuffers(1, &disp_ssbo);   disp_ssbo = 0; }
-        if (frames_ssbo) { glDeleteBuffers(1, &frames_ssbo); frames_ssbo = 0; }
-
-        glGenBuffers(1, &disp_ssbo);
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, disp_ssbo);
-        glBufferData(GL_SHADER_STORAGE_BUFFER,
-                     (GLsizeiptr)vertex_count * 3 * sizeof(float),
-                     nullptr, GL_DYNAMIC_COPY);
-
-        glGenBuffers(1, &frames_ssbo);
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, frames_ssbo);
-        glBufferData(GL_SHADER_STORAGE_BUFFER,
-                     (GLsizeiptr)vertex_count * 9 * sizeof(float),
-                     nullptr, GL_DYNAMIC_COPY);
-
+    // Grow-only seam buffers (release + create on grow; WebGPU has no in-place
+    // resize). Usage::Storage — these are read/written by the diff/apply kernels.
+    if (capacity < vertex_count || !disp_ssbo.handle || !frames_ssbo.handle) {
+        gpu::release_buffer(disp_ssbo);
+        gpu::release_buffer(frames_ssbo);
+        disp_ssbo   = gpu::create_buffer(*dev, nullptr,
+                          (uint64_t)vertex_count * 3 * sizeof(float), gpu::Usage::Storage);
+        frames_ssbo = gpu::create_buffer(*dev, nullptr,
+                          (uint64_t)vertex_count * 9 * sizeof(float), gpu::Usage::Storage);
         capacity = vertex_count;
     }
 
-    if (base_capacity < base_vertex_count || !base_ssbo) {
-        if (base_ssbo) { glDeleteBuffers(1, &base_ssbo); base_ssbo = 0; }
-        glGenBuffers(1, &base_ssbo);
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, base_ssbo);
-        glBufferData(GL_SHADER_STORAGE_BUFFER,
-                     (GLsizeiptr)base_vertex_count * 3 * sizeof(float),
-                     nullptr, GL_DYNAMIC_COPY);
+    if (base_capacity < base_vertex_count || !base_ssbo.handle) {
+        gpu::release_buffer(base_ssbo);
+        base_ssbo = gpu::create_buffer(*dev, nullptr,
+                        (uint64_t)base_vertex_count * 3 * sizeof(float), gpu::Usage::Storage);
         base_capacity = base_vertex_count;
     }
-
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 }
 
 void MultiresGPU::upload_level(const MultiresStack& stack, int abs_level) {
-    if (!supported || !stack.locked) return;
+    if (!supported || !dev || !stack.locked) return;
 
     uint32_t base_vc = stack.base.vertex_count();
 
@@ -85,10 +73,8 @@ void MultiresGPU::upload_level(const MultiresStack& stack, int abs_level) {
         ensure(1, base_vc);   // disp/frames unused at base; keep them non-null
         static std::vector<float> scratch;
         interleave_base(stack, 0, base_vc, scratch);
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, base_ssbo);
-        glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
-                        (GLsizeiptr)base_vc * 3 * sizeof(float), scratch.data());
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+        gpu::write_buffer(*dev, base_ssbo, 0, scratch.data(),
+                          (uint64_t)base_vc * 3 * sizeof(float));
         level = abs_level;
         return;
     }
@@ -99,17 +85,14 @@ void MultiresGPU::upload_level(const MultiresStack& stack, int abs_level) {
     uint32_t vc = (uint32_t)stack.disp[k].size();
     ensure(vc, base_vc);
 
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, disp_ssbo);
-    glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
-                    (GLsizeiptr)vc * 3 * sizeof(float), stack.disp[k].data());
+    gpu::write_buffer(*dev, disp_ssbo, 0, stack.disp[k].data(),
+                      (uint64_t)vc * 3 * sizeof(float));
 
     // frames[k] is lazily populated by cascade; upload only when present.
     if (k < (int)stack.frames.size() && stack.frames[k].size() == vc) {
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, frames_ssbo);
-        glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
-                        (GLsizeiptr)vc * 9 * sizeof(float), stack.frames[k].data());
+        gpu::write_buffer(*dev, frames_ssbo, 0, stack.frames[k].data(),
+                          (uint64_t)vc * 9 * sizeof(float));
     }
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
     level = abs_level;
 
 #ifdef CHISEL_DEBUG_MULTIRES
@@ -118,7 +101,7 @@ void MultiresGPU::upload_level(const MultiresStack& stack, int abs_level) {
     {
         static std::vector<float> chk;
         chk.resize((size_t)vc * 3);
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, disp_ssbo);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, disp_ssbo.handle);
         glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
                            (GLsizeiptr)vc * 3 * sizeof(float), chk.data());
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
@@ -136,22 +119,19 @@ void MultiresGPU::upload_level(const MultiresStack& stack, int abs_level) {
 
 void MultiresGPU::upload_disp_partial(const MultiresStack& stack, int abs_level,
                                       const std::vector<uint32_t>& verts) {
-    if (!supported || abs_level != level || verts.empty()) return;
+    if (!supported || !dev || abs_level != level || verts.empty()) return;
 
     static std::vector<Run> runs;
     coalesce(verts, runs);
 
     if (abs_level == stack.base_level) {
         static std::vector<float> scratch;
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, base_ssbo);
         for (const Run& r : runs) {
             if (r.first + r.count > stack.base.vertex_count()) continue;
             interleave_base(stack, r.first, r.count, scratch);
-            glBufferSubData(GL_SHADER_STORAGE_BUFFER,
-                            (GLintptr)r.first * 3 * sizeof(float),
-                            (GLsizeiptr)r.count * 3 * sizeof(float), scratch.data());
+            gpu::write_buffer(*dev, base_ssbo, (uint64_t)r.first * 3 * sizeof(float),
+                              scratch.data(), (uint64_t)r.count * 3 * sizeof(float));
         }
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
         return;
     }
 
@@ -159,35 +139,30 @@ void MultiresGPU::upload_disp_partial(const MultiresStack& stack, int abs_level,
     if (k < 0 || k >= (int)stack.disp.size()) return;
     const std::vector<Vec3>& disp = stack.disp[k];
 
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, disp_ssbo);
     for (const Run& r : runs) {
         if (r.first + r.count > disp.size()) continue;
-        glBufferSubData(GL_SHADER_STORAGE_BUFFER,
-                        (GLintptr)r.first * 3 * sizeof(float),
-                        (GLsizeiptr)r.count * 3 * sizeof(float), &disp[r.first]);
+        gpu::write_buffer(*dev, disp_ssbo, (uint64_t)r.first * 3 * sizeof(float),
+                          &disp[r.first], (uint64_t)r.count * 3 * sizeof(float));
     }
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 }
 
 void MultiresGPU::snapshot_positions(GLuint pos_vbo, uint32_t vertex_count) {
-    if (!supported || vertex_count == 0) return;
+    if (!supported || !dev || vertex_count == 0) return;
 
-    // Lazy grow-only resize, then a GPU→GPU copy of the active entity's working
-    // VBO range. Mirrors ComputeState::snapshot_stroke_normals.
-    if (snap_pos_capacity < vertex_count || !snap_pos_ssbo) {
-        if (snap_pos_ssbo) { glDeleteBuffers(1, &snap_pos_ssbo); snap_pos_ssbo = 0; }
-        glGenBuffers(1, &snap_pos_ssbo);
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, snap_pos_ssbo);
-        glBufferData(GL_SHADER_STORAGE_BUFFER,
-                     (GLsizeiptr)vertex_count * 3 * sizeof(float),
-                     nullptr, GL_DYNAMIC_COPY);
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    // Lazy grow-only resize (seam-owned), then a GPU→GPU copy of the active entity's
+    // working VBO range. Mirrors ComputeState::snapshot_stroke_normals. The copy is a
+    // buffer→buffer move with no seam primitive yet, so it stays raw GL via .handle
+    // (web-stage concern).
+    if (snap_pos_capacity < vertex_count || !snap_pos_ssbo.handle) {
+        gpu::release_buffer(snap_pos_ssbo);
+        snap_pos_ssbo = gpu::create_buffer(*dev, nullptr,
+                            (uint64_t)vertex_count * 3 * sizeof(float), gpu::Usage::Storage);
         snap_pos_capacity = vertex_count;
     }
 
     GLsizeiptr byte_size = (GLsizeiptr)vertex_count * 3 * sizeof(float);
     glBindBuffer(GL_COPY_READ_BUFFER,  pos_vbo);
-    glBindBuffer(GL_COPY_WRITE_BUFFER, snap_pos_ssbo);
+    glBindBuffer(GL_COPY_WRITE_BUFFER, snap_pos_ssbo.handle);
     glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, 0, 0, byte_size);
     glBindBuffer(GL_COPY_READ_BUFFER,  0);
     glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
@@ -243,7 +218,7 @@ void MultiresGPU::materialize_cpu(MultiresStack& stack, Mesh& mesh, GLuint vbo_p
 
     if (level == stack.base_level) {
         static std::vector<float> scratch;
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, base_ssbo);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, base_ssbo.handle);
         for (const Run& r : runs) {
             if (r.first + r.count > stack.base.vertex_count()) continue;
             scratch.resize((size_t)r.count * 3);
@@ -262,7 +237,7 @@ void MultiresGPU::materialize_cpu(MultiresStack& stack, Mesh& mesh, GLuint vbo_p
         int k = level - stack.base_level - 1;
         if (k >= 0 && k < (int)stack.disp.size()) {
             std::vector<Vec3>& disp = stack.disp[k];
-            glBindBuffer(GL_SHADER_STORAGE_BUFFER, disp_ssbo);
+            glBindBuffer(GL_SHADER_STORAGE_BUFFER, disp_ssbo.handle);
             for (const Run& r : runs) {
                 if (r.first + r.count > disp.size()) continue;
                 // Vec3 is 3 contiguous floats; &disp[first] is a float3*count span
@@ -280,10 +255,10 @@ void MultiresGPU::materialize_cpu(MultiresStack& stack, Mesh& mesh, GLuint vbo_p
 }
 
 void MultiresGPU::cleanup() {
-    if (disp_ssbo)     { glDeleteBuffers(1, &disp_ssbo);     disp_ssbo = 0; }
-    if (frames_ssbo)   { glDeleteBuffers(1, &frames_ssbo);   frames_ssbo = 0; }
-    if (base_ssbo)     { glDeleteBuffers(1, &base_ssbo);     base_ssbo = 0; }
-    if (snap_pos_ssbo) { glDeleteBuffers(1, &snap_pos_ssbo); snap_pos_ssbo = 0; }
+    gpu::release_buffer(disp_ssbo);
+    gpu::release_buffer(frames_ssbo);
+    gpu::release_buffer(base_ssbo);
+    gpu::release_buffer(snap_pos_ssbo);
     capacity = base_capacity = snap_pos_capacity = 0;
     level = -1;
     cpu_dirty = false;

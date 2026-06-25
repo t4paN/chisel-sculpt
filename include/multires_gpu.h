@@ -1,5 +1,6 @@
 #pragma once
 #include <glad/glad.h>
+#include "gpu/gpu.h"
 #include <cstdint>
 #include <vector>
 
@@ -22,12 +23,18 @@ struct Mesh;
 struct MultiresGPU {
     bool supported = false;
 
+    // Seam device for buffer (re)allocation. Set alongside `supported` (main.cpp),
+    // so it is non-null exactly when the pool is active — the methods all gate on
+    // `supported` first, so every allocating path has a live device. Points at the
+    // ComputeState's gpu_dev; not owned here.
+    gpu::Device* dev = nullptr;
+
     // Absolute subdivision level currently mirrored (-1 = nothing uploaded yet).
     int   level = -1;
 
-    GLuint disp_ssbo   = 0;   // float3 * V  (valid when level > base_level)
-    GLuint frames_ssbo = 0;   // float9 * V  (valid when level > base_level)
-    GLuint base_ssbo   = 0;   // float3 * V  (valid when level == base_level)
+    gpu::Buffer disp_ssbo;    // float3 * V  (valid when level > base_level)
+    gpu::Buffer frames_ssbo;  // float9 * V  (valid when level > base_level)
+    gpu::Buffer base_ssbo;    // float3 * V  (valid when level == base_level)
     uint32_t capacity  = 0;   // verts the disp/frames buffers can hold
     uint32_t base_capacity = 0;
 
@@ -36,7 +43,7 @@ struct MultiresGPU {
     // world pos is gone by pen-up unless captured here. The pen-up diff shader
     // reads this + frames_ssbo + disp_ssbo (the latter already holds the pen-down
     // disp, since Phase 1 only re-syncs it at pen-up) to reproject into disp/base.
-    GLuint snap_pos_ssbo   = 0;   // float3 * V, snapshot at pen-down
+    gpu::Buffer snap_pos_ssbo;    // float3 * V, snapshot at pen-down
     uint32_t snap_pos_capacity = 0;
 
     // Allocate/resize buffers to hold `vertex_count` (active level) and

@@ -2,6 +2,39 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-25 — WebGPU port, buffer-ownership migration Step 3c: MultiresGPU residency pool seam-owned
+
+- **The `MultiresGPU` residency pool (`disp` / `frames` / `base` / `snap_pos`) is now seam-owned
+  `gpu::Buffer`s** (was the last raw-`GLuint` pool, in `multires_gpu.h`). `ensure` / `snapshot_positions`
+  grow them with `release_buffer` + `create_buffer`; `upload_level` / `upload_disp_partial` push partial
+  updates through `gpu::write_buffer` instead of `glBindBuffer`+`glBufferSubData`. The pool gets a
+  `gpu::Device*` set alongside its `supported` flag (`main.cpp`, both residency sites), so it is non-null
+  exactly when the pool is active.
+- **`dispatch_multires_diff` / `dispatch_multires_apply` params flipped `GLuint` → `const gpu::Buffer&`**
+  (`pos_vbo` + the pool buffers): the bind groups now bind the owned members directly with their real
+  sizes — the per-dispatch `gpu::Buffer` view fabrication is gone. `pos_vbo` (always present) stays the
+  harmless filler for any slot the current mode skips; `ring_ssbo` keeps its `GLuint` 0/non-zero mode-flag
+  role (the ring member, seam-owned since 3b, is bound internally). Callers (`brush.cpp`, `undo.cpp`) drop
+  `.handle` on the pool args.
+- **Raw GL kept via `.handle` (web-stage concern):** the pen-down `snap_pos` GPU→GPU copy
+  (`glCopyBufferSubData`) and the `materialize_cpu` / debug readbacks (`glGetBufferSubData`) — no seam
+  copy/map primitive yet. **No raw-GL compute buffer ownership remains except remesh (Step 4) + SDF
+  (Step 5).** GL build green, `chisel-gl-compute-test` PASS, app launches clean (no GL/FBO errors);
+  in-app GPU-resident undo/redo re-confirm user-pending.
+
+## 2026-06-25 — WebGPU port, buffer-ownership migration Step 3b: multires stage + undo ring seam-owned
+
+- **`multires_stage_ssbo` + `undo_ring_ssbo` are now seam-owned `gpu::Buffer`s** (`Usage::Storage`). The
+  `compute.h` members flipped `GLuint` → `gpu::Buffer`; the stage realloc and the undo-ring append go
+  through `release_buffer` / `create_buffer` / `write_buffer`; both `dispatch_multires_diff` / `_apply`
+  bind the owned members directly (active member when its mode is on, a pos/disp view as the live filler
+  when idle).
+- **Raw GL kept via `.handle`:** the ring's copy-preserving grow (`glCopyBufferSubData` old→new) and the
+  `undo_ring_read` readback (`glGetBufferSubData`) — no seam copy/map primitive yet. The `dispatch_*` sigs
+  still take `GLuint ring_ssbo` as a mode flag, so call sites pass `.handle`. GL build green, compute-test
+  PASS, app launches clean (256 MB GPU ring up); in-app undo/redo re-confirm user-pending.
+  *(backfilled — commit `419d677` shipped without its CHANGES.md entry.)*
+
 ## 2026-06-25 — WebGPU port, buffer-ownership migration Step 3a: resident paint (mask/color) seam-owned + alias refresh
 
 - **`renderer.vbo_mask` / `renderer.vbo_color` are now owned `gpu::Buffer`s** (were the last raw-GL

@@ -251,6 +251,7 @@ int main(int argc, char* argv[]) {
     // Phase 1 GPU residency: mirror the startup entity's locked level. Later
     // mutations refresh via refresh_active_gpu_residency() inside the loop.
     scene.active_entity().multires_gpu.supported = compute.supported;
+    scene.active_entity().multires_gpu.dev       = &compute.gpu_dev;
     scene.active_entity().multires_gpu.upload_level(scene.active_multires(),
                                                     scene.active_multires().current_level);
 
@@ -509,6 +510,7 @@ int main(int argc, char* argv[]) {
         auto refresh_active_gpu_residency = [&]() {
             MeshEntity& ent = scene.active_entity();
             ent.multires_gpu.supported = compute.supported;
+            ent.multires_gpu.dev       = &compute.gpu_dev;
             ent.multires_gpu.upload_level(ent.multires, ent.multires.current_level);
         };
 

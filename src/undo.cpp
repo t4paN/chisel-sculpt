@@ -196,7 +196,7 @@ bool UndoStack::apply(UndoEntry& e, MeshEntity& ent, Scene& scene, bool forward)
     if (inplace_gpu_ring) {
         Renderer&     r = scene.renderer();
         ComputeState& c = scene.compute();
-        c.dispatch_multires_apply(r.vbo_pos.handle, ent.multires_gpu.disp_ssbo,
+        c.dispatch_multires_apply(r.vbo_pos, ent.multires_gpu.disp_ssbo,
                                   ent.multires_gpu.frames_ssbo, ent.multires_gpu.base_ssbo,
                                   e.verts.data(), nullptr, (uint32_t)e.verts.size(),
                                   e.targets_base, c.undo_ring_ssbo.handle,
@@ -316,7 +316,7 @@ bool UndoStack::apply(UndoEntry& e, MeshEntity& ent, Scene& scene, bool forward)
                             && e.ring_vcount == (uint32_t)e.verts.size();
             gpu_apply_used_ring = use_ring;
             if (use_ring) {
-                c.dispatch_multires_apply(r.vbo_pos.handle, ent.multires_gpu.disp_ssbo,
+                c.dispatch_multires_apply(r.vbo_pos, ent.multires_gpu.disp_ssbo,
                                           ent.multires_gpu.frames_ssbo,
                                           ent.multires_gpu.base_ssbo,
                                           e.verts.data(), nullptr,
@@ -330,7 +330,7 @@ bool UndoStack::apply(UndoEntry& e, MeshEntity& ent, Scene& scene, bool forward)
                     stage[k*6+0] = tx[k]; stage[k*6+1] = ty[k]; stage[k*6+2] = tz[k];
                     stage[k*6+3] = sx[k]; stage[k*6+4] = sy[k]; stage[k*6+5] = sz[k];
                 }
-                c.dispatch_multires_apply(r.vbo_pos.handle, ent.multires_gpu.disp_ssbo,
+                c.dispatch_multires_apply(r.vbo_pos, ent.multires_gpu.disp_ssbo,
                                           ent.multires_gpu.frames_ssbo,
                                           ent.multires_gpu.base_ssbo,
                                           e.verts.data(), stage.data(),

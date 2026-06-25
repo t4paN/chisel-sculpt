@@ -601,8 +601,9 @@ struct ComputeState {
     // `ring_ssbo`/`ring_base_floats`: when ring_ssbo != 0, the shader also writes
     // (old,new) deltas for each touched vert into the undo ring at ring_base_floats
     // + di*6 (3b-iii capture). Pass ring_ssbo=0 to skip (compute/ring unavailable).
-    void dispatch_multires_diff(GLuint pos_vbo, GLuint disp_ssbo, GLuint frames_ssbo,
-                                GLuint snap_pos_ssbo, GLuint base_ssbo,
+    void dispatch_multires_diff(const gpu::Buffer& pos_vbo, const gpu::Buffer& disp_ssbo,
+                                const gpu::Buffer& frames_ssbo, const gpu::Buffer& snap_pos_ssbo,
+                                const gpu::Buffer& base_ssbo,
                                 const uint32_t* verts, uint32_t count,
                                 bool writes_to_base,
                                 GLuint ring_ssbo, uint32_t ring_base_floats);
@@ -620,8 +621,9 @@ struct ComputeState {
     // new) pair is read from the persistent undo ring at ring_base_floats + di*6
     // instead of from `stage` (which may be null), with target=new on redo (forward),
     // target=old on undo. Pass ring_ssbo=0 to use the CPU stage.
-    void dispatch_multires_apply(GLuint pos_vbo, GLuint disp_ssbo, GLuint frames_ssbo,
-                                 GLuint base_ssbo, const uint32_t* verts,
+    void dispatch_multires_apply(const gpu::Buffer& pos_vbo, const gpu::Buffer& disp_ssbo,
+                                 const gpu::Buffer& frames_ssbo, const gpu::Buffer& base_ssbo,
+                                 const uint32_t* verts,
                                  const float* stage, uint32_t count, bool targets_base,
                                  GLuint ring_ssbo = 0, uint32_t ring_base_floats = 0,
                                  bool forward = false);

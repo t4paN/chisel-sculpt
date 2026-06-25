@@ -9,16 +9,16 @@
 // GPU-resident undo, multires diff + apply — ported onto the gpu:: seam
 // (Seam Step 2b). The two compute kernels now dispatch through gpu::; their
 // kernel logic lives in the canonical shaders/{glsl,wgsl}/multires_{diff,apply}.*
-// (embedded at build time). The persistent undo ring below (undo_ring_*) is raw
-// GL buffer management — it owns a GLuint SSBO that the two kernels read/write
-// via a view at dispatch — and stays raw GL for now (migrates to gpu::Buffer
-// ownership in the later buffer-ownership pass).
+// (embedded at build time).
 //
-// All the resident multires SSBOs (disp/frames/snap_pos/base, the stage scratch,
-// the undo ring) stay GL-owned and are wrapped in transient gpu::Buffer views at
-// dispatch; the dirty-vert id list + stage uploads stay raw GL. The CPU twins are
-// brush.cpp finalize() (diff) and undo.cpp apply() (apply); under
-// CHISEL_DEBUG_MULTIRES the CPU readback stays authoritative and validates these.
+// All the resident multires SSBOs are now seam-owned gpu::Buffers and bound
+// directly: the residency pool (disp/frames/snap_pos/base, in MultiresGPU) migrated
+// in buffer-ownership Step 3c, the stage scratch + undo ring in Step 3b. The
+// dispatch params take const gpu::Buffer& (no GLuint view fabrication). The undo
+// ring's copy-preserving grow + readback and the dirty-vert id / stage uploads still
+// move bytes via raw GL (.handle) — no seam copy/map primitive yet (web-stage
+// concern). The CPU twins are brush.cpp finalize() (diff) and undo.cpp apply()
+// (apply); under CHISEL_DEBUG_MULTIRES the CPU readback validates these.
 // ---------------------------------------------------------------------------
 
 namespace {
@@ -74,16 +74,16 @@ bool ComputeState::init_multires_diff() {
     return true;
 }
 
-void ComputeState::dispatch_multires_diff(GLuint pos_vbo, GLuint disp_ssbo,
-                                          GLuint frames_ssbo, GLuint snap_pos_ssbo,
-                                          GLuint base_ssbo,
+void ComputeState::dispatch_multires_diff(const gpu::Buffer& pos_vbo, const gpu::Buffer& disp_ssbo,
+                                          const gpu::Buffer& frames_ssbo, const gpu::Buffer& snap_pos_ssbo,
+                                          const gpu::Buffer& base_ssbo,
                                           const uint32_t* verts, uint32_t count,
                                           bool writes_to_base,
                                           GLuint ring_ssbo, uint32_t ring_base_floats) {
     if (!has_multires_diff() || count == 0) return;
-    if (!pos_vbo || !snap_pos_ssbo) return;
-    if (!writes_to_base && (!disp_ssbo || !frames_ssbo)) return;
-    if (writes_to_base && !base_ssbo) return;
+    if (!pos_vbo.handle || !snap_pos_ssbo.handle) return;
+    if (!writes_to_base && (!disp_ssbo.handle || !frames_ssbo.handle)) return;
+    if (writes_to_base && !base_ssbo.handle) return;
 
     // Upload the touched-vert list (same lazy-grow idiom as the other list-driven
     // kernels). dirty_verts_ssbo is free at pen-up — the only prior consumer this
@@ -105,31 +105,24 @@ void ComputeState::dispatch_multires_diff(GLuint pos_vbo, GLuint disp_ssbo,
     gpu::write_buffer(gpu_dev, multires_diff_ubo, 0, &u, sizeof(u));
 
     // Every declared binding must point at a live buffer (the seam binds all 8; a 0
-    // handle would fault on some drivers). pos_vbo is always present (checked above),
-    // so it's the harmless filler for any slot the current mode doesn't touch. The
-    // ring falls back to disp as the old GL path did when capture is off.
-    GLuint disp_b  = disp_ssbo   ? disp_ssbo   : pos_vbo;
-    GLuint frame_b = frames_ssbo ? frames_ssbo : pos_vbo;
-    GLuint base_b  = base_ssbo   ? base_ssbo   : pos_vbo;
+    // handle would fault on some drivers). The pool buffers are seam-owned now (Step
+    // 3c) and bound directly; pos_vbo is always present (checked above), so it's the
+    // harmless filler for any slot the current mode doesn't touch. The ring falls back
+    // to disp as the old GL path did when capture is off.
+    const gpu::Buffer* disp_b  = disp_ssbo.handle   ? &disp_ssbo   : &pos_vbo;
+    const gpu::Buffer* frame_b = frames_ssbo.handle ? &frames_ssbo : &pos_vbo;
+    const gpu::Buffer* base_b  = base_ssbo.handle   ? &base_ssbo   : &pos_vbo;
 
-    gpu::Buffer posView{   0,                                pos_vbo };
-    gpu::Buffer dispView{  0,                                disp_b };
-    gpu::Buffer frameView{ 0,                                frame_b };
-    gpu::Buffer snapView{  0,                                snap_pos_ssbo };
-    gpu::Buffer baseView{  0,                                base_b };
-
-    // Ring is seam-owned (Step 3b): bind the member directly when capture is on,
-    // else fall back to the disp view (the old GL path's filler) so the slot is live.
     const bool ring_on = (ring_ssbo != 0);
-    const gpu::Buffer* ring_b = ring_on ? &undo_ring_ssbo : &dispView;
+    const gpu::Buffer* ring_b = ring_on ? &undo_ring_ssbo : disp_b;
 
     const gpu::BindBufferEntry bg[] = {
-        { BIND_POSITIONS,         &posView,   posView.size },
+        { BIND_POSITIONS,         &pos_vbo,   pos_vbo.size },
         { BIND_DIRTY_VERTS,       &dirty_verts_ssbo, (uint64_t)count * sizeof(uint32_t) },
-        { BIND_MULTIRES_DISP,     &dispView,  dispView.size },
-        { BIND_MULTIRES_FRAMES,   &frameView, frameView.size },
-        { BIND_MULTIRES_SNAP_POS, &snapView,  snapView.size },
-        { BIND_MULTIRES_BASE,     &baseView,  baseView.size },
+        { BIND_MULTIRES_DISP,     disp_b,     disp_b->size },
+        { BIND_MULTIRES_FRAMES,   frame_b,    frame_b->size },
+        { BIND_MULTIRES_SNAP_POS, &snap_pos_ssbo, snap_pos_ssbo.size },
+        { BIND_MULTIRES_BASE,     base_b,     base_b->size },
         { BIND_UNDO_RING,         ring_b,     ring_b->size },
         { BIND_PARAMS,            &multires_diff_ubo, sizeof(MultiresDiffParamsGPU) },
     };
@@ -170,16 +163,16 @@ bool ComputeState::init_multires_apply() {
     return true;
 }
 
-void ComputeState::dispatch_multires_apply(GLuint pos_vbo, GLuint disp_ssbo,
-                                           GLuint frames_ssbo, GLuint base_ssbo,
+void ComputeState::dispatch_multires_apply(const gpu::Buffer& pos_vbo, const gpu::Buffer& disp_ssbo,
+                                           const gpu::Buffer& frames_ssbo, const gpu::Buffer& base_ssbo,
                                            const uint32_t* verts, const float* stage,
                                            uint32_t count, bool targets_base,
                                            GLuint ring_ssbo, uint32_t ring_base_floats,
                                            bool forward) {
     if (!has_multires_apply() || count == 0) return;
-    if (!pos_vbo) return;
-    if (targets_base && !base_ssbo) return;
-    if (!targets_base && (!disp_ssbo || !frames_ssbo)) return;
+    if (!pos_vbo.handle) return;
+    if (targets_base && !base_ssbo.handle) return;
+    if (!targets_base && (!disp_ssbo.handle || !frames_ssbo.handle)) return;
 
     // Ring mode (3b-iv): read (old,new) straight from the persistent undo ring, no
     // CPU stage upload. Stage mode: upload the (target,source) pairs as before.
@@ -217,29 +210,25 @@ void ComputeState::dispatch_multires_apply(GLuint pos_vbo, GLuint disp_ssbo,
 
     // Every declared binding must point at a live buffer (some drivers fault on an
     // unbound slot even if the shader never reads it). In ring mode the stage slot
-    // is unused; in stage mode the ring slot is. pos_vbo (always present) is the
-    // harmless filler for whichever is idle and for any 0 handle the mode skips.
-    GLuint disp_b  = disp_ssbo   ? disp_ssbo   : pos_vbo;
-    GLuint frame_b = frames_ssbo ? frames_ssbo : pos_vbo;
-    GLuint base_b  = base_ssbo   ? base_ssbo   : pos_vbo;
-
-    gpu::Buffer posView{   0,                                pos_vbo };
-    gpu::Buffer dispView{  0,                                disp_b };
-    gpu::Buffer frameView{ 0,                                frame_b };
-    gpu::Buffer baseView{  0,                                base_b };
+    // is unused; in stage mode the ring slot is. The pool buffers are seam-owned now
+    // (Step 3c) and bound directly; pos_vbo (always present) is the harmless filler
+    // for whichever is idle and for any 0-handle slot the mode skips.
+    const gpu::Buffer* disp_b  = disp_ssbo.handle   ? &disp_ssbo   : &pos_vbo;
+    const gpu::Buffer* frame_b = frames_ssbo.handle ? &frames_ssbo : &pos_vbo;
+    const gpu::Buffer* base_b  = base_ssbo.handle   ? &base_ssbo   : &pos_vbo;
 
     // stage + ring are seam-owned (Step 3b): bind the live member for the active mode,
-    // pos view as the filler for the idle one (every slot must point at a live buffer).
+    // pos as the filler for the idle one (every slot must point at a live buffer).
     const gpu::Buffer* stage_b = (!ring_mode && multires_stage_ssbo.handle)
-                                     ? &multires_stage_ssbo : &posView;
-    const gpu::Buffer* ring_b  = ring_mode ? &undo_ring_ssbo : &posView;
+                                     ? &multires_stage_ssbo : &pos_vbo;
+    const gpu::Buffer* ring_b  = ring_mode ? &undo_ring_ssbo : &pos_vbo;
 
     const gpu::BindBufferEntry bg[] = {
-        { BIND_POSITIONS,       &posView,   posView.size },
+        { BIND_POSITIONS,       &pos_vbo,   pos_vbo.size },
         { BIND_DIRTY_VERTS,     &dirty_verts_ssbo, (uint64_t)count * sizeof(uint32_t) },
-        { BIND_MULTIRES_DISP,   &dispView,  dispView.size },
-        { BIND_MULTIRES_FRAMES, &frameView, frameView.size },
-        { BIND_MULTIRES_BASE,   &baseView,  baseView.size },
+        { BIND_MULTIRES_DISP,   disp_b,     disp_b->size },
+        { BIND_MULTIRES_FRAMES, frame_b,    frame_b->size },
+        { BIND_MULTIRES_BASE,   base_b,     base_b->size },
         { BIND_MULTIRES_STAGE,  stage_b,    stage_b->size },
         { BIND_UNDO_RING,       ring_b,     ring_b->size },
         { BIND_PARAMS,          &multires_apply_ubo, sizeof(MultiresApplyParamsGPU) },

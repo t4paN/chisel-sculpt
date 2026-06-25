@@ -1154,7 +1154,7 @@ bool BrushStroke::finalize(Mesh& mesh, UndoStack& stack, MultiresStack& multires
                 stack.ring_evict_overlap(ring_base * sizeof(float),
                                          snap_list.size() * 6 * sizeof(float), *compute);
             GLuint ring_ssbo = (ring_base != SIZE_MAX) ? compute->undo_ring_ssbo.handle : 0;
-            compute->dispatch_multires_diff(renderer.vbo_pos.handle, mgpu.disp_ssbo,
+            compute->dispatch_multires_diff(renderer.vbo_pos, mgpu.disp_ssbo,
                                             mgpu.frames_ssbo, mgpu.snap_pos_ssbo,
                                             mgpu.base_ssbo,
                                             snap_list.data(), (uint32_t)snap_list.size(),
@@ -1167,7 +1167,7 @@ bool BrushStroke::finalize(Mesh& mesh, UndoStack& stack, MultiresStack& multires
         static std::vector<float> gpu_diff_chk;   // 3 floats per snap_list entry
         if (gpu_diff_ran) {
             gpu_diff_chk.resize(snap_list.size() * 3);
-            GLuint src = stroke_writes_to_base ? mgpu.base_ssbo : mgpu.disp_ssbo;
+            GLuint src = (stroke_writes_to_base ? mgpu.base_ssbo : mgpu.disp_ssbo).handle;
             glBindBuffer(GL_SHADER_STORAGE_BUFFER, src);
             for (size_t i = 0; i < snap_list.size(); i++) {
                 glGetBufferSubData(GL_SHADER_STORAGE_BUFFER,
