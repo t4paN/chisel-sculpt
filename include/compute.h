@@ -259,10 +259,11 @@ struct ComputeState {
     gpu::Buffer          move_apply_ubo;              // 16-byte {total} block
 
     // Move stroke buffers (allocated lazily, persist across strokes; resized as vertex_count grows)
-    GLuint move_affected_ssbo;       // [count, v0, v1, ...]
-    GLuint move_weights_ssbo;        // vec2 per vertex: (primary, mirror) brush weights
-    GLuint move_weights_pong_ssbo;   // vec2 per vertex (ping-pong scratch)
-    GLuint move_init_ssbo;           // 3 floats per vertex (snapshotted at capture)
+    // Seam-owned gpu::Buffers (Step 2 cont): grow-only scratch; clears/copies/readback via .handle.
+    gpu::Buffer move_affected_ssbo;       // [count, v0, v1, ...]
+    gpu::Buffer move_weights_ssbo;        // vec2 per vertex: (primary, mirror) brush weights
+    gpu::Buffer move_weights_pong_ssbo;   // vec2 per vertex (ping-pong scratch)
+    gpu::Buffer move_init_ssbo;           // 3 floats per vertex (snapshotted at capture)
     uint32_t move_buffers_capacity;
 
     // Limb (snakehook) brush — ported onto the gpu:: seam (Seam Step 2b). Incremental
@@ -273,7 +274,7 @@ struct ComputeState {
     gpu::ComputePipeline limb_relax_pipeline;  // tangential (normal-stripped) Laplacian over the captured set
     gpu::Buffer          limb_drag_ubo;        // 16-byte {delta} block
     gpu::Buffer          limb_relax_ubo;       // 32-byte {vertex_count,lambda,tip_bias,tip_dir} block
-    GLuint limb_pos_scratch_ssbo;    // 3 floats per vertex: read-side snapshot for relax ping-pong
+    gpu::Buffer limb_pos_scratch_ssbo;    // 3 floats per vertex: read-side snapshot for relax ping-pong (seam-owned, Step 2 cont)
     uint32_t limb_scratch_capacity;
 
     // Compute normals — ported onto the gpu:: seam (Seam Step 2b). Shared per-stroke
@@ -318,9 +319,9 @@ struct ComputeState {
     size_t undo_ring_bytes;      // currently allocated buffer size
     size_t undo_ring_head;       // next free byte offset (bump allocator)
 
-    // Adjacency CSR SSBOs (uploaded once at mesh init)
-    GLuint adjacency_offset_ssbo;
-    GLuint adjacency_list_ssbo;
+    // Adjacency CSR SSBOs (uploaded once at mesh init) — seam-owned gpu::Buffers (Step 2 cont)
+    gpu::Buffer adjacency_offset_ssbo;
+    gpu::Buffer adjacency_list_ssbo;
     uint32_t adjacency_vertex_count;
 
     // Mirror map SSBO (uploaded once at mesh init, maps vertex -> twin vertex)
@@ -337,12 +338,12 @@ struct ComputeState {
     // the paint shader writes packed RGBA8 directly into the display VBO.
     GLuint color_ssbo;
 
-    // Dirty vertex list SSBO (uploaded per dispatch, used by compute_normals)
-    GLuint dirty_verts_ssbo;
+    // Dirty vertex list SSBO (uploaded per dispatch, used by compute_normals) — seam-owned (Step 2 cont)
+    gpu::Buffer dirty_verts_ssbo;
     uint32_t dirty_verts_capacity;
 
-    // Smooth compact dirty list SSBO: [count, v0, v1, ...] written by smooth_accum
-    GLuint smooth_dirty_ssbo;
+    // Smooth compact dirty list SSBO: [count, v0, v1, ...] written by smooth_accum — seam-owned (Step 2 cont)
+    gpu::Buffer smooth_dirty_ssbo;
     uint32_t smooth_dirty_capacity;  // max vertex IDs (excludes counter slot)
 
     // Remesh GPU passes — ported onto the gpu:: seam (Seam Step 2b). One-shot /

@@ -91,7 +91,7 @@ void ComputeState::dispatch_color_paint(const ColorPaintParams& p, GLuint pos_vb
     const uint32_t vc = p.vertex_count;
 
     ensure_smooth_dirty_buffer(vc);
-    reset_dirty_counter(smooth_dirty_ssbo);
+    reset_dirty_counter(smooth_dirty_ssbo.handle);
 
     ColorPaintParamsGPU u = {};
     u.anchor_a[0] = p.anchor_a_x; u.anchor_a[1] = p.anchor_a_y; u.anchor_a[2] = p.anchor_a_z;
@@ -107,12 +107,11 @@ void ComputeState::dispatch_color_paint(const ColorPaintParams& p, GLuint pos_vb
     gpu::Buffer posView{   (uint64_t)vc * 3u * sizeof(float),                    pos_vbo };
     gpu::Buffer colorView{ (uint64_t)vc * sizeof(uint32_t),                      color_ssbo };
     gpu::Buffer maskView{  (uint64_t)vc * sizeof(float),                         mask_ssbo };
-    gpu::Buffer dirtyView{ (uint64_t)(1u + smooth_dirty_capacity) * sizeof(uint32_t), smooth_dirty_ssbo };
     const gpu::BindBufferEntry bg[] = {
         { BIND_POSITIONS,   &posView,   posView.size },
         { BIND_COLOR,       &colorView, colorView.size },
         { BIND_MASK,        &maskView,  maskView.size },
-        { BIND_DIRTY_VERTS, &dirtyView, dirtyView.size },
+        { BIND_DIRTY_VERTS, &smooth_dirty_ssbo, smooth_dirty_ssbo.size },
         { BIND_PARAMS,      &color_paint_ubo, sizeof(ColorPaintParamsGPU) },
     };
     gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, color_paint_pipeline, bg, 5);
@@ -125,11 +124,11 @@ void ComputeState::dispatch_color_paint(const ColorPaintParams& p, GLuint pos_vb
 
 void ComputeState::dispatch_color_smooth(const ColorPaintParams& p, GLuint pos_vbo, GLuint index_ebo) {
     if (!has_color_smooth() || !color_ssbo || !mask_ssbo) return;
-    if (!adjacency_offset_ssbo || !adjacency_list_ssbo) return;
+    if (!adjacency_offset_ssbo.handle || !adjacency_list_ssbo.handle) return;
     const uint32_t vc = p.vertex_count;
 
     ensure_smooth_dirty_buffer(vc);
-    reset_dirty_counter(smooth_dirty_ssbo);
+    reset_dirty_counter(smooth_dirty_ssbo.handle);
 
     ColorSmoothParamsGPU u = {};
     u.anchor_a[0] = p.anchor_a_x; u.anchor_a[1] = p.anchor_a_y; u.anchor_a[2] = p.anchor_a_z;
@@ -144,18 +143,15 @@ void ComputeState::dispatch_color_smooth(const ColorPaintParams& p, GLuint pos_v
     gpu::Buffer posView{   (uint64_t)vc * 3u * sizeof(float),                    pos_vbo };
     gpu::Buffer colorView{ (uint64_t)vc * sizeof(uint32_t),                      color_ssbo };
     gpu::Buffer maskView{  (uint64_t)vc * sizeof(float),                         mask_ssbo };
-    gpu::Buffer dirtyView{ (uint64_t)(1u + smooth_dirty_capacity) * sizeof(uint32_t), smooth_dirty_ssbo };
     gpu::Buffer idxView{   0,                                                    index_ebo };
-    gpu::Buffer offView{   0,                                                    adjacency_offset_ssbo };
-    gpu::Buffer listView{  0,                                                    adjacency_list_ssbo };
     const gpu::BindBufferEntry bg[] = {
         { BIND_POSITIONS,        &posView,   posView.size },
         { BIND_COLOR,            &colorView, colorView.size },
         { BIND_MASK,             &maskView,  maskView.size },
-        { BIND_DIRTY_VERTS,      &dirtyView, dirtyView.size },
+        { BIND_DIRTY_VERTS,      &smooth_dirty_ssbo, smooth_dirty_ssbo.size },
         { BIND_INDICES,          &idxView,   idxView.size },
-        { BIND_ADJACENCY_OFFSET, &offView,   offView.size },
-        { BIND_ADJACENCY_LIST,   &listView,  listView.size },
+        { BIND_ADJACENCY_OFFSET, &adjacency_offset_ssbo, adjacency_offset_ssbo.size },
+        { BIND_ADJACENCY_LIST,   &adjacency_list_ssbo,   adjacency_list_ssbo.size },
         { BIND_PARAMS,           &color_smooth_ubo, sizeof(ColorSmoothParamsGPU) },
     };
     gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, color_smooth_pipeline, bg, 8);

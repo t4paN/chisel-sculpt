@@ -332,8 +332,8 @@ void ComputeState::dispatch_grow_selection(
     gpu::Buffer pongView{ (uint64_t)tri_count*sizeof(uint32_t),     remesh_trisel_pong_ssbo };
     gpu::Buffer selView{  (uint64_t)tri_count*sizeof(uint32_t),     remesh_trisel_ssbo };
     gpu::Buffer idxView{  (uint64_t)tri_count*3u*sizeof(uint32_t),  remesh_indices_ssbo };
-    gpu::Buffer offView{  0, adjacency_offset_ssbo };
-    gpu::Buffer listView{ 0, adjacency_list_ssbo };
+    gpu::Buffer offView{  0, adjacency_offset_ssbo.handle };
+    gpu::Buffer listView{ 0, adjacency_list_ssbo.handle };
     const gpu::BindBufferEntry bg[] = {
         { BIND_REMESH_TRISEL_PONG, &pongView, pongView.size },
         { BIND_REMESH_TRISEL,      &selView,  selView.size },
@@ -382,8 +382,8 @@ void ComputeState::dispatch_mirror_selection(uint32_t vertex_count, uint32_t tri
     gpu::Buffer pongView{   (uint64_t)tri_count*sizeof(uint32_t),    remesh_trisel_pong_ssbo };
     gpu::Buffer selView{    (uint64_t)tri_count*sizeof(uint32_t),    remesh_trisel_ssbo };
     gpu::Buffer idxView{    (uint64_t)tri_count*3u*sizeof(uint32_t), remesh_indices_ssbo };
-    gpu::Buffer offView{    0, adjacency_offset_ssbo };
-    gpu::Buffer listView{   0, adjacency_list_ssbo };
+    gpu::Buffer offView{    0, adjacency_offset_ssbo.handle };
+    gpu::Buffer listView{   0, adjacency_list_ssbo.handle };
     const gpu::BindBufferEntry bg[] = {
         { BIND_REMESH_TRISEL_PONG, &pongView,   pongView.size },
         { BIND_REMESH_TRISEL,      &selView,    selView.size },
@@ -446,8 +446,8 @@ void ComputeState::dispatch_find_pinned(
     gpu::write_buffer(gpu_dev, remesh_find_pinned_ubo, 0, &u, sizeof(u));
 
     gpu::Buffer posView{    (uint64_t)vertex_count*3u*sizeof(float), remesh_ping_ssbo };
-    gpu::Buffer offView{    0, adjacency_offset_ssbo };
-    gpu::Buffer listView{   0, adjacency_list_ssbo };
+    gpu::Buffer offView{    0, adjacency_offset_ssbo.handle };
+    gpu::Buffer listView{   0, adjacency_list_ssbo.handle };
     gpu::Buffer selView{    (uint64_t)tri_count*sizeof(uint32_t),    remesh_trisel_ssbo };
     gpu::Buffer pinnedView{ (uint64_t)vertex_count*sizeof(uint32_t), remesh_pinned_ssbo };
     const gpu::BindBufferEntry bg[] = {
@@ -481,8 +481,8 @@ void ComputeState::dispatch_compute_smooth_weights(
     u.vertex_count = vertex_count; u.support_rings = support_rings;
     gpu::write_buffer(gpu_dev, remesh_smooth_weights_ubo, 0, &u, sizeof(u));
 
-    gpu::Buffer offView{     0, adjacency_offset_ssbo };
-    gpu::Buffer listView{    0, adjacency_list_ssbo };
+    gpu::Buffer offView{     0, adjacency_offset_ssbo.handle };
+    gpu::Buffer listView{    0, adjacency_list_ssbo.handle };
     gpu::Buffer weightView{  (uint64_t)vertex_count*sizeof(float),    remesh_weights_ssbo };
     gpu::Buffer pinnedView{  (uint64_t)vertex_count*sizeof(uint32_t), remesh_pinned_ssbo };
     gpu::Buffer fullSelView{ (uint64_t)tri_count*sizeof(uint32_t),    remesh_trisel_ssbo };
@@ -564,8 +564,8 @@ void ComputeState::dispatch_remesh_smooth(
     // Constant inputs across the ping-pong (slots 0 / 13 swap between ping/pong).
     gpu::Buffer normView{ (uint64_t)vertex_count*3u*sizeof(float), remesh_norm_ssbo };
     gpu::Buffer idxView{  (uint64_t)tri_count*3u*sizeof(uint32_t), remesh_indices_ssbo };
-    gpu::Buffer offView{  0, adjacency_offset_ssbo };
-    gpu::Buffer listView{ 0, adjacency_list_ssbo };
+    gpu::Buffer offView{  0, adjacency_offset_ssbo.handle };
+    gpu::Buffer listView{ 0, adjacency_list_ssbo.handle };
     gpu::Buffer wView{    (uint64_t)vertex_count*sizeof(float),    remesh_weights_ssbo };
     gpu::Buffer pinView{  (uint64_t)vertex_count*sizeof(uint32_t), remesh_pinned_ssbo };
     gpu::Buffer selView{  (uint64_t)tri_count*sizeof(uint32_t),    remesh_trisel_ssbo };
@@ -655,8 +655,8 @@ void ComputeState::dispatch_seam_snap_weld(
 
     gpu::Buffer posView{    (uint64_t)vertex_count*3u*sizeof(float),               remesh_ping_ssbo };
     gpu::Buffer maskView{   (uint64_t)(mask_size ? mask_size : 1u)*sizeof(float),  remesh_weights_ssbo };
-    gpu::Buffer offView{    0, adjacency_offset_ssbo };
-    gpu::Buffer listView{   0, adjacency_list_ssbo };
+    gpu::Buffer offView{    0, adjacency_offset_ssbo.handle };
+    gpu::Buffer listView{   0, adjacency_list_ssbo.handle };
     gpu::Buffer idxView{    0, remesh_indices_ssbo };
     gpu::Buffer mergeView{  (uint64_t)vertex_count*sizeof(uint32_t), seam_weld_map_ssbo };
 

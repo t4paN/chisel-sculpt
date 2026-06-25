@@ -269,9 +269,7 @@ void ComputeState::dispatch_smooth(const SmoothAccumParams& p,
     clear_accum_buffer();
     ensure_smooth_dirty_buffer(vc);
     uint32_t zero = 0;
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, smooth_dirty_ssbo);
-    glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(uint32_t), &zero);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    gpu::write_buffer(gpu_dev, smooth_dirty_ssbo, 0, &zero, sizeof(zero));
 
     // ---- Pass 1: accum (world-distance gate → accum.w + dirty list) ----
     SmoothAccumParamsGPU ua = {};
@@ -283,12 +281,11 @@ void ComputeState::dispatch_smooth(const SmoothAccumParams& p,
     gpu::write_buffer(gpu_dev, smooth_accum_ubo, 0, &ua, sizeof(ua));
 
     gpu::Buffer posView{   (uint64_t)vc * 3u * sizeof(float),                pos_vbo };
-    gpu::Buffer dirtyView{ (uint64_t)(1u + smooth_dirty_capacity) * sizeof(uint32_t), smooth_dirty_ssbo };
     {
         const gpu::BindBufferEntry bg[] = {
             { BIND_POSITIONS,   &posView,    posView.size },
             { BIND_ACCUM,       &accum_ssbo, (uint64_t)vc * 4u * sizeof(uint32_t) },
-            { BIND_DIRTY_VERTS, &dirtyView,  dirtyView.size },
+            { BIND_DIRTY_VERTS, &smooth_dirty_ssbo, smooth_dirty_ssbo.size },
             { BIND_PARAMS,      &smooth_accum_ubo, sizeof(SmoothAccumParamsGPU) },
         };
         gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, smooth_accum_pipeline, bg, 4);
@@ -310,15 +307,13 @@ void ComputeState::dispatch_smooth(const SmoothAccumParams& p,
     gpu::write_buffer(gpu_dev, smooth_apply_ubo, 0, &up, sizeof(up));
 
     gpu::Buffer idxView{  0,                                    index_ebo };
-    gpu::Buffer offView{  0,                                    adjacency_offset_ssbo };
-    gpu::Buffer listView{ 0,                                    adjacency_list_ssbo };
     gpu::Buffer maskView{ (uint64_t)vc * sizeof(float),         mask_ssbo };
     const gpu::BindBufferEntry apply_bg[] = {
         { BIND_POSITIONS,        &posView,    posView.size },
         { BIND_INDICES,          &idxView,    idxView.size },
         { BIND_ACCUM,            &accum_ssbo, (uint64_t)vc * 4u * sizeof(uint32_t) },
-        { BIND_ADJACENCY_OFFSET, &offView,    offView.size },
-        { BIND_ADJACENCY_LIST,   &listView,  listView.size },
+        { BIND_ADJACENCY_OFFSET, &adjacency_offset_ssbo, adjacency_offset_ssbo.size },
+        { BIND_ADJACENCY_LIST,   &adjacency_list_ssbo,   adjacency_list_ssbo.size },
         { BIND_MASK,             &maskView,  maskView.size },
         { BIND_PARAMS,           &smooth_apply_ubo, sizeof(SmoothApplyParamsGPU) },
     };
@@ -345,23 +340,21 @@ void ComputeState::dispatch_smooth(const SmoothAccumParams& p,
 }
 
 void ComputeState::ensure_smooth_dirty_buffer(uint32_t max_verts) {
-    if (smooth_dirty_ssbo && max_verts <= smooth_dirty_capacity) return;
+    if (smooth_dirty_ssbo.handle && max_verts <= smooth_dirty_capacity) return;
 
-    if (smooth_dirty_ssbo) glDeleteBuffers(1, &smooth_dirty_ssbo);
-    glGenBuffers(1, &smooth_dirty_ssbo);
     uint32_t alloc = std::max(max_verts, 4096u);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, smooth_dirty_ssbo);
-    glBufferData(GL_SHADER_STORAGE_BUFFER, (alloc + 1) * sizeof(uint32_t), nullptr, GL_DYNAMIC_DRAW);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    gpu::release_buffer(smooth_dirty_ssbo);
+    smooth_dirty_ssbo = gpu::create_buffer(gpu_dev, nullptr,
+                                           (uint64_t)(alloc + 1) * sizeof(uint32_t), gpu::Usage::Storage);
     smooth_dirty_capacity = alloc;
 }
 
 uint32_t ComputeState::readback_smooth_dirty(std::vector<uint32_t>& out) {
     out.clear();
-    if (!smooth_dirty_ssbo) return 0;
+    if (!smooth_dirty_ssbo.handle) return 0;
 
     uint32_t count = 0;
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, smooth_dirty_ssbo);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, smooth_dirty_ssbo.handle);
     glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(uint32_t), &count);
 
     if (count > 0) {
@@ -435,15 +428,16 @@ bool ComputeState::init_compute_normals() {
 
 void ComputeState::upload_adjacency(const uint32_t* offsets, uint32_t offset_count,
                                      const uint32_t* list, uint32_t list_count) {
-    if (!adjacency_offset_ssbo) glGenBuffers(1, &adjacency_offset_ssbo);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, adjacency_offset_ssbo);
-    glBufferData(GL_SHADER_STORAGE_BUFFER, offset_count * sizeof(uint32_t), offsets, GL_STATIC_DRAW);
+    // Grow-only re-upload: the CSR sizes change after remesh, so release + recreate
+    // each time (uploaded once per topology change, not in the hot path). Seam-owned.
+    gpu::release_buffer(adjacency_offset_ssbo);
+    adjacency_offset_ssbo = gpu::create_buffer(gpu_dev, offsets,
+                                               (uint64_t)offset_count * sizeof(uint32_t), gpu::Usage::Storage);
 
-    if (!adjacency_list_ssbo) glGenBuffers(1, &adjacency_list_ssbo);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, adjacency_list_ssbo);
-    glBufferData(GL_SHADER_STORAGE_BUFFER, list_count * sizeof(uint32_t), list, GL_STATIC_DRAW);
+    gpu::release_buffer(adjacency_list_ssbo);
+    adjacency_list_ssbo = gpu::create_buffer(gpu_dev, list,
+                                             (uint64_t)list_count * sizeof(uint32_t), gpu::Usage::Storage);
 
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
     adjacency_vertex_count = offset_count - 1;
 
     std::printf("[compute] adjacency uploaded: %u verts, %u entries\n",
@@ -454,41 +448,33 @@ void ComputeState::dispatch_compute_normals(const uint32_t* dirty_verts, uint32_
                                              GLuint pos_vbo, GLuint norm_vbo, GLuint index_ebo) {
     if (!has_normals() || dirty_count == 0) return;
 
-    // Upload the dirty-vert id list — GL-owned buffer (shared with stroke_smooth),
-    // stays raw GL (alloc + glBufferSubData).
-    GLsizeiptr needed = (GLsizeiptr)dirty_count * sizeof(uint32_t);
-    if (!dirty_verts_ssbo || dirty_count > dirty_verts_capacity) {
-        if (dirty_verts_ssbo) glDeleteBuffers(1, &dirty_verts_ssbo);
-        glGenBuffers(1, &dirty_verts_ssbo);
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, dirty_verts_ssbo);
+    // Upload the dirty-vert id list — seam-owned buffer (shared with stroke_smooth /
+    // multires). Grow-only (release + create); partial fill via write_buffer.
+    if (!dirty_verts_ssbo.handle || dirty_count > dirty_verts_capacity) {
         uint32_t alloc_count = std::max(dirty_count, 4096u);
-        glBufferData(GL_SHADER_STORAGE_BUFFER, alloc_count * sizeof(uint32_t), nullptr, GL_DYNAMIC_DRAW);
+        gpu::release_buffer(dirty_verts_ssbo);
+        dirty_verts_ssbo = gpu::create_buffer(gpu_dev, nullptr,
+                                              (uint64_t)alloc_count * sizeof(uint32_t), gpu::Usage::Storage);
         dirty_verts_capacity = alloc_count;
-    } else {
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, dirty_verts_ssbo);
     }
-    glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, needed, dirty_verts);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    gpu::write_buffer(gpu_dev, dirty_verts_ssbo, 0, dirty_verts, (uint64_t)dirty_count * sizeof(uint32_t));
 
     ComputeNormalsParamsGPU u = {};
     u.dirty_count = dirty_count;
     gpu::write_buffer(gpu_dev, compute_normals_ubo, 0, &u, sizeof(u));
 
-    // pos/norm/index/adjacency sizes are unknown here (and unused on the GL backend —
-    // whole-buffer bind); 0 = unguarded. dirty list sized to its capacity.
+    // pos/norm/index sizes are unknown here (and unused on the GL backend — whole-buffer
+    // bind); 0 = unguarded. Adjacency + dirty list are seam-owned, bound directly.
     gpu::Buffer posView{   0,                                        pos_vbo };
     gpu::Buffer normView{  0,                                        norm_vbo };
     gpu::Buffer idxView{   0,                                        index_ebo };
-    gpu::Buffer offView{   0,                                        adjacency_offset_ssbo };
-    gpu::Buffer listView{  0,                                        adjacency_list_ssbo };
-    gpu::Buffer dirtyView{ (uint64_t)dirty_verts_capacity * sizeof(uint32_t), dirty_verts_ssbo };
     const gpu::BindBufferEntry bg[] = {
         { BIND_POSITIONS,        &posView,   posView.size },
         { BIND_NORMALS,          &normView,  normView.size },
         { BIND_INDICES,          &idxView,   idxView.size },
-        { BIND_ADJACENCY_OFFSET, &offView,   offView.size },
-        { BIND_ADJACENCY_LIST,   &listView,  listView.size },
-        { BIND_DIRTY_VERTS,      &dirtyView, dirtyView.size },
+        { BIND_ADJACENCY_OFFSET, &adjacency_offset_ssbo, adjacency_offset_ssbo.size },
+        { BIND_ADJACENCY_LIST,   &adjacency_list_ssbo,   adjacency_list_ssbo.size },
+        { BIND_DIRTY_VERTS,      &dirty_verts_ssbo,      dirty_verts_ssbo.size },
         { BIND_PARAMS,           &compute_normals_ubo, sizeof(ComputeNormalsParamsGPU) },
     };
     gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, compute_normals_pipeline, bg, 7);
@@ -538,42 +524,33 @@ void ComputeState::dispatch_stroke_smooth_apply(const uint32_t* vert_ids, uint32
                                                  GLuint pos_vbo, GLuint index_ebo) {
     if (!stroke_smooth_apply_pipeline.handle || count == 0 || !mask_ssbo) return;
 
-    // Upload the dirty-vert id list — GL-owned buffer (shared with compute_normals),
-    // stays raw GL (alloc + glBufferSubData).
-    GLsizeiptr needed = (GLsizeiptr)count * sizeof(uint32_t);
-    if (!dirty_verts_ssbo || count > dirty_verts_capacity) {
-        if (dirty_verts_ssbo) glDeleteBuffers(1, &dirty_verts_ssbo);
-        glGenBuffers(1, &dirty_verts_ssbo);
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, dirty_verts_ssbo);
+    // Upload the dirty-vert id list — seam-owned buffer (shared with compute_normals /
+    // multires). Grow-only (release + create); partial fill via write_buffer.
+    if (!dirty_verts_ssbo.handle || count > dirty_verts_capacity) {
         uint32_t alloc_count = std::max(count, 4096u);
-        glBufferData(GL_SHADER_STORAGE_BUFFER, alloc_count * sizeof(uint32_t), nullptr, GL_DYNAMIC_DRAW);
+        gpu::release_buffer(dirty_verts_ssbo);
+        dirty_verts_ssbo = gpu::create_buffer(gpu_dev, nullptr,
+                                              (uint64_t)alloc_count * sizeof(uint32_t), gpu::Usage::Storage);
         dirty_verts_capacity = alloc_count;
-    } else {
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, dirty_verts_ssbo);
     }
-    glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, needed, vert_ids);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    gpu::write_buffer(gpu_dev, dirty_verts_ssbo, 0, vert_ids, (uint64_t)count * sizeof(uint32_t));
 
     StrokeSmoothParamsGPU u = {};
     u.dirty_count = count;
     u.strength = strength;
     gpu::write_buffer(gpu_dev, stroke_smooth_ubo, 0, &u, sizeof(u));
 
-    // pos/index/adjacency sizes unknown here (unused on GL — whole-buffer bind); 0 =
-    // unguarded. dirty list sized to its capacity; mask to dirty list's reach is unknown
-    // so leave 0 too (GL ignores).
+    // pos/index sizes unknown here (unused on GL — whole-buffer bind); 0 = unguarded.
+    // mask reach unknown so leave 0 too (GL ignores). Adjacency + dirty list seam-owned.
     gpu::Buffer posView{   0,                                                pos_vbo };
     gpu::Buffer idxView{   0,                                                index_ebo };
-    gpu::Buffer offView{   0,                                                adjacency_offset_ssbo };
-    gpu::Buffer listView{  0,                                                adjacency_list_ssbo };
-    gpu::Buffer dirtyView{ (uint64_t)dirty_verts_capacity * sizeof(uint32_t), dirty_verts_ssbo };
     gpu::Buffer maskView{  0,                                                mask_ssbo };
     const gpu::BindBufferEntry bg[] = {
         { BIND_POSITIONS,        &posView,   posView.size },
         { BIND_INDICES,          &idxView,   idxView.size },
-        { BIND_ADJACENCY_OFFSET, &offView,   offView.size },
-        { BIND_ADJACENCY_LIST,   &listView,  listView.size },
-        { BIND_DIRTY_VERTS,      &dirtyView, dirtyView.size },
+        { BIND_ADJACENCY_OFFSET, &adjacency_offset_ssbo, adjacency_offset_ssbo.size },
+        { BIND_ADJACENCY_LIST,   &adjacency_list_ssbo,   adjacency_list_ssbo.size },
+        { BIND_DIRTY_VERTS,      &dirty_verts_ssbo,      dirty_verts_ssbo.size },
         { BIND_MASK,             &maskView,  maskView.size },
         { BIND_PARAMS,           &stroke_smooth_ubo, sizeof(StrokeSmoothParamsGPU) },
     };

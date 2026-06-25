@@ -92,55 +92,43 @@ bool ComputeState::init_move() {
 
 void ComputeState::ensure_move_buffers(uint32_t vertex_count) {
     if (move_buffers_capacity >= vertex_count
-        && move_affected_ssbo && move_weights_ssbo
-        && move_weights_pong_ssbo && move_init_ssbo)
+        && move_affected_ssbo.handle && move_weights_ssbo.handle
+        && move_weights_pong_ssbo.handle && move_init_ssbo.handle)
         return;
 
-    if (move_affected_ssbo)     { glDeleteBuffers(1, &move_affected_ssbo);     move_affected_ssbo     = 0; }
-    if (move_weights_ssbo)      { glDeleteBuffers(1, &move_weights_ssbo);      move_weights_ssbo      = 0; }
-    if (move_weights_pong_ssbo) { glDeleteBuffers(1, &move_weights_pong_ssbo); move_weights_pong_ssbo = 0; }
-    if (move_init_ssbo)         { glDeleteBuffers(1, &move_init_ssbo);         move_init_ssbo         = 0; }
+    // Grow-only seam-owned scratch (release + create). The capture pass clears the
+    // counter/weights each pen-down, so no init data is needed here.
+    gpu::release_buffer(move_affected_ssbo);
+    move_affected_ssbo = gpu::create_buffer(gpu_dev, nullptr,
+                             (uint64_t)(1 + vertex_count) * sizeof(uint32_t), gpu::Usage::Storage);
 
-    glGenBuffers(1, &move_affected_ssbo);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, move_affected_ssbo);
-    glBufferData(GL_SHADER_STORAGE_BUFFER,
-                 (GLsizeiptr)(1 + vertex_count) * sizeof(uint32_t),
-                 nullptr, GL_DYNAMIC_COPY);
+    gpu::release_buffer(move_weights_ssbo);
+    move_weights_ssbo = gpu::create_buffer(gpu_dev, nullptr,
+                             (uint64_t)vertex_count * 2 * sizeof(float), gpu::Usage::Storage);
 
-    glGenBuffers(1, &move_weights_ssbo);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, move_weights_ssbo);
-    glBufferData(GL_SHADER_STORAGE_BUFFER,
-                 (GLsizeiptr)vertex_count * 2 * sizeof(float),
-                 nullptr, GL_DYNAMIC_COPY);
+    gpu::release_buffer(move_weights_pong_ssbo);
+    move_weights_pong_ssbo = gpu::create_buffer(gpu_dev, nullptr,
+                             (uint64_t)vertex_count * 2 * sizeof(float), gpu::Usage::Storage);
 
-    glGenBuffers(1, &move_weights_pong_ssbo);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, move_weights_pong_ssbo);
-    glBufferData(GL_SHADER_STORAGE_BUFFER,
-                 (GLsizeiptr)vertex_count * 2 * sizeof(float),
-                 nullptr, GL_DYNAMIC_COPY);
+    gpu::release_buffer(move_init_ssbo);
+    move_init_ssbo = gpu::create_buffer(gpu_dev, nullptr,
+                             (uint64_t)vertex_count * 3 * sizeof(float), gpu::Usage::Storage);
 
-    glGenBuffers(1, &move_init_ssbo);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, move_init_ssbo);
-    glBufferData(GL_SHADER_STORAGE_BUFFER,
-                 (GLsizeiptr)vertex_count * 3 * sizeof(float),
-                 nullptr, GL_DYNAMIC_COPY);
-
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
     move_buffers_capacity = vertex_count;
 }
 
 void ComputeState::dispatch_move_capture(const MoveCaptureParams& p, GLuint pos_vbo) {
     if (!has_move()) return;
     const uint32_t vc = p.vertex_count;
-    const uint32_t cap = move_buffers_capacity;
 
-    // Reset the affected counter + clear the weight buffers — GL-owned, stays raw GL.
+    // Reset the affected counter + clear the weight buffers — raw-GL data movement on
+    // the seam-owned handles (clear/reset is a web-stage concern; stays raw GL on GL).
     uint32_t zero = 0;
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, move_affected_ssbo);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, move_affected_ssbo.handle);
     glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(uint32_t), &zero);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, move_weights_ssbo);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, move_weights_ssbo.handle);
     glClearBufferData(GL_SHADER_STORAGE_BUFFER, GL_RG32F, GL_RG, GL_FLOAT, nullptr);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, move_weights_pong_ssbo);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, move_weights_pong_ssbo.handle);
     glClearBufferData(GL_SHADER_STORAGE_BUFFER, GL_RG32F, GL_RG, GL_FLOAT, nullptr);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 
@@ -153,14 +141,11 @@ void ComputeState::dispatch_move_capture(const MoveCaptureParams& p, GLuint pos_
     gpu::write_buffer(gpu_dev, move_capture_ubo, 0, &u, sizeof(u));
 
     gpu::Buffer posView{      (uint64_t)vc * 3u * sizeof(float),       pos_vbo };
-    gpu::Buffer affectedView{ (uint64_t)(1u + cap) * sizeof(uint32_t), move_affected_ssbo };
-    gpu::Buffer weightsView{  (uint64_t)cap * 2u * sizeof(float),      move_weights_ssbo };
-    gpu::Buffer initView{     (uint64_t)cap * 3u * sizeof(float),      move_init_ssbo };
     const gpu::BindBufferEntry bg[] = {
-        { BIND_POSITIONS,     &posView,      posView.size },
-        { BIND_MOVE_AFFECTED, &affectedView, affectedView.size },
-        { BIND_MOVE_WEIGHTS,  &weightsView,  weightsView.size },
-        { BIND_MOVE_INIT,     &initView,     initView.size },
+        { BIND_POSITIONS,     &posView,            posView.size },
+        { BIND_MOVE_AFFECTED, &move_affected_ssbo, move_affected_ssbo.size },
+        { BIND_MOVE_WEIGHTS,  &move_weights_ssbo,  move_weights_ssbo.size },
+        { BIND_MOVE_INIT,     &move_init_ssbo,     move_init_ssbo.size },
         { BIND_PARAMS,        &move_capture_ubo, sizeof(MoveCaptureParamsGPU) },
     };
     gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, move_capture_pipeline, bg, 5);
@@ -175,32 +160,27 @@ void ComputeState::dispatch_move_weight_smooth(uint32_t vertex_count, int iterat
     if (!move_weight_smooth_pipeline.handle) return;
     const uint32_t cap = move_buffers_capacity;
 
-    // Constant inputs across iterations (sizes unused on the GL backend — whole-buffer
-    // bind; best-effort for the WebGPU min-size guard later). 0 = unguarded.
+    // Constant inputs across iterations. index_ebo is still a raw GL handle (view);
+    // the move scratch + adjacency are seam-owned, bound directly. 0 = unguarded.
     gpu::Buffer idxView{    0,                                       index_ebo };
-    gpu::Buffer offView{    0,                                       adjacency_offset_ssbo };
-    gpu::Buffer listView{   0,                                       adjacency_list_ssbo };
-    gpu::Buffer affView{    (uint64_t)(1u + cap) * sizeof(uint32_t), move_affected_ssbo };
-    gpu::Buffer weightsView{(uint64_t)cap * 2u * sizeof(float),      move_weights_ssbo };
-    gpu::Buffer pongView{   (uint64_t)cap * 2u * sizeof(float),      move_weights_pong_ssbo };
 
     // Two bind groups for the ping-pong: slot 9 = w_in, slot 10 = w_out. ping reads
     // weights→pong, pong reads pong→weights. create_bind_group is a POD fill on GL.
     const gpu::BindBufferEntry ping[] = {
         { BIND_INDICES,          &idxView,     idxView.size },
-        { BIND_ADJACENCY_OFFSET, &offView,     offView.size },
-        { BIND_ADJACENCY_LIST,   &listView,    listView.size },
-        { BIND_MOVE_AFFECTED,    &affView,     affView.size },
-        { BIND_MOVE_WEIGHTS,     &weightsView, weightsView.size },
-        { BIND_MOVE_WEIGHTS_PONG,&pongView,    pongView.size },
+        { BIND_ADJACENCY_OFFSET, &adjacency_offset_ssbo, adjacency_offset_ssbo.size },
+        { BIND_ADJACENCY_LIST,   &adjacency_list_ssbo,   adjacency_list_ssbo.size },
+        { BIND_MOVE_AFFECTED,    &move_affected_ssbo,     move_affected_ssbo.size },
+        { BIND_MOVE_WEIGHTS,     &move_weights_ssbo,      move_weights_ssbo.size },
+        { BIND_MOVE_WEIGHTS_PONG,&move_weights_pong_ssbo, move_weights_pong_ssbo.size },
     };
     const gpu::BindBufferEntry pong[] = {
         { BIND_INDICES,          &idxView,     idxView.size },
-        { BIND_ADJACENCY_OFFSET, &offView,     offView.size },
-        { BIND_ADJACENCY_LIST,   &listView,    listView.size },
-        { BIND_MOVE_AFFECTED,    &affView,     affView.size },
-        { BIND_MOVE_WEIGHTS,     &pongView,    pongView.size },
-        { BIND_MOVE_WEIGHTS_PONG,&weightsView, weightsView.size },
+        { BIND_ADJACENCY_OFFSET, &adjacency_offset_ssbo, adjacency_offset_ssbo.size },
+        { BIND_ADJACENCY_LIST,   &adjacency_list_ssbo,   adjacency_list_ssbo.size },
+        { BIND_MOVE_AFFECTED,    &move_affected_ssbo,     move_affected_ssbo.size },
+        { BIND_MOVE_WEIGHTS,     &move_weights_pong_ssbo, move_weights_pong_ssbo.size },
+        { BIND_MOVE_WEIGHTS_PONG,&move_weights_ssbo,      move_weights_ssbo.size },
     };
     gpu::BindGroup grp_ping = gpu::create_bind_group(gpu_dev, move_weight_smooth_pipeline, ping, 6);
     gpu::BindGroup grp_pong = gpu::create_bind_group(gpu_dev, move_weight_smooth_pipeline, pong, 6);
@@ -218,8 +198,8 @@ void ComputeState::dispatch_move_weight_smooth(uint32_t vertex_count, int iterat
     // Odd iteration count leaves the final result in pong → copy it back to weights so
     // apply always reads the canonical weights buffer. GL-owned copy, stays raw GL.
     if ((iterations & 1) == 1) {
-        glBindBuffer(GL_COPY_READ_BUFFER, move_weights_pong_ssbo);
-        glBindBuffer(GL_COPY_WRITE_BUFFER, move_weights_ssbo);
+        glBindBuffer(GL_COPY_READ_BUFFER, move_weights_pong_ssbo.handle);
+        glBindBuffer(GL_COPY_WRITE_BUFFER, move_weights_ssbo.handle);
         glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, 0, 0,
                             (GLsizeiptr)cap * 2 * sizeof(float));
         glBindBuffer(GL_COPY_READ_BUFFER, 0);
@@ -230,22 +210,18 @@ void ComputeState::dispatch_move_weight_smooth(uint32_t vertex_count, int iterat
 void ComputeState::dispatch_move_apply(const MoveApplyParams& p, GLuint pos_vbo) {
     if (!move_apply_pipeline.handle || !mask_ssbo) return;
     const uint32_t vc = p.vertex_count;
-    const uint32_t cap = move_buffers_capacity;
 
     MoveApplyParamsGPU u = {};
     u.total[0] = p.total_dx; u.total[1] = p.total_dy; u.total[2] = p.total_dz;
     gpu::write_buffer(gpu_dev, move_apply_ubo, 0, &u, sizeof(u));
 
     gpu::Buffer posView{      (uint64_t)vc * 3u * sizeof(float),       pos_vbo };
-    gpu::Buffer affectedView{ (uint64_t)(1u + cap) * sizeof(uint32_t), move_affected_ssbo };
-    gpu::Buffer weightsView{  (uint64_t)cap * 2u * sizeof(float),      move_weights_ssbo };
-    gpu::Buffer initView{     (uint64_t)cap * 3u * sizeof(float),      move_init_ssbo };
     gpu::Buffer maskView{     (uint64_t)vc * sizeof(float),            mask_ssbo };
     const gpu::BindBufferEntry bg[] = {
-        { BIND_POSITIONS,     &posView,      posView.size },
-        { BIND_MOVE_AFFECTED, &affectedView, affectedView.size },
-        { BIND_MOVE_WEIGHTS,  &weightsView,  weightsView.size },
-        { BIND_MOVE_INIT,     &initView,     initView.size },
+        { BIND_POSITIONS,     &posView,            posView.size },
+        { BIND_MOVE_AFFECTED, &move_affected_ssbo, move_affected_ssbo.size },
+        { BIND_MOVE_WEIGHTS,  &move_weights_ssbo,  move_weights_ssbo.size },
+        { BIND_MOVE_INIT,     &move_init_ssbo,     move_init_ssbo.size },
         { BIND_MASK,          &maskView,     maskView.size },
         { BIND_PARAMS,        &move_apply_ubo, sizeof(MoveApplyParamsGPU) },
     };
@@ -258,9 +234,9 @@ void ComputeState::dispatch_move_apply(const MoveApplyParams& p, GLuint pos_vbo)
 }
 
 uint32_t ComputeState::readback_move_affected(std::vector<uint32_t>& out) {
-    if (!move_affected_ssbo) return 0;
+    if (!move_affected_ssbo.handle) return 0;
     uint32_t count = 0;
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, move_affected_ssbo);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, move_affected_ssbo.handle);
     glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(uint32_t), &count);
     if (count > move_buffers_capacity) count = move_buffers_capacity;
     out.resize(count);

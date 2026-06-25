@@ -276,18 +276,17 @@ void ComputeState::dispatch_draw_apply(GLuint pos_vbo, uint32_t vertex_count,
     gpu::write_buffer(gpu_dev, draw_vcount_ubo, 0, &u, sizeof(u));
 
     gpu::Buffer posView{   (uint64_t)vc * 3u * sizeof(float),        pos_vbo };
-    gpu::Buffer dirtyView{ (uint64_t)(vc + 1u) * sizeof(uint32_t),   smooth_dirty_ssbo };
     gpu::Buffer maskView{  (uint64_t)vc * sizeof(float),             mask_ssbo };
 
     uint32_t zero = 0;
-    gpu::write_buffer(gpu_dev, dirtyView, 0, &zero, sizeof(zero));
+    gpu::write_buffer(gpu_dev, smooth_dirty_ssbo, 0, &zero, sizeof(zero));
 
     const gpu::BindBufferEntry bg[] = {
-        { BIND_POSITIONS,   &posView,         posView.size },
-        { BIND_ACCUM,       &accum_src,       (uint64_t)vc * 4u * sizeof(uint32_t) },
-        { BIND_DIRTY_VERTS, &dirtyView,       dirtyView.size },
-        { BIND_MASK,        &maskView,        maskView.size },
-        { BIND_PARAMS,      &draw_vcount_ubo, sizeof(VCountParamsGPU) },
+        { BIND_POSITIONS,   &posView,           posView.size },
+        { BIND_ACCUM,       &accum_src,         (uint64_t)vc * 4u * sizeof(uint32_t) },
+        { BIND_DIRTY_VERTS, &smooth_dirty_ssbo, (uint64_t)(vc + 1u) * sizeof(uint32_t) },
+        { BIND_MASK,        &maskView,          maskView.size },
+        { BIND_PARAMS,      &draw_vcount_ubo,   sizeof(VCountParamsGPU) },
     };
     gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, draw_apply_pipeline, bg, 5);
 

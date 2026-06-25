@@ -87,21 +87,15 @@ void ComputeState::dispatch_multires_diff(GLuint pos_vbo, GLuint disp_ssbo,
 
     // Upload the touched-vert list (same lazy-grow idiom as the other list-driven
     // kernels). dirty_verts_ssbo is free at pen-up — the only prior consumer this
-    // frame is the autosmooth compute_normals pass, which has already run. GL-owned.
-    GLsizeiptr needed = (GLsizeiptr)count * sizeof(uint32_t);
-    if (!dirty_verts_ssbo || count > dirty_verts_capacity) {
-        if (dirty_verts_ssbo) glDeleteBuffers(1, &dirty_verts_ssbo);
-        glGenBuffers(1, &dirty_verts_ssbo);
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, dirty_verts_ssbo);
+    // frame is the autosmooth compute_normals pass, which has already run. Seam-owned.
+    if (!dirty_verts_ssbo.handle || count > dirty_verts_capacity) {
         uint32_t alloc_count = std::max(count, 4096u);
-        glBufferData(GL_SHADER_STORAGE_BUFFER, alloc_count * sizeof(uint32_t),
-                     nullptr, GL_DYNAMIC_DRAW);
+        gpu::release_buffer(dirty_verts_ssbo);
+        dirty_verts_ssbo = gpu::create_buffer(gpu_dev, nullptr,
+                                              (uint64_t)alloc_count * sizeof(uint32_t), gpu::Usage::Storage);
         dirty_verts_capacity = alloc_count;
-    } else {
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, dirty_verts_ssbo);
     }
-    glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, needed, verts);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    gpu::write_buffer(gpu_dev, dirty_verts_ssbo, 0, verts, (uint64_t)count * sizeof(uint32_t));
 
     MultiresDiffParamsGPU u = {};
     u.count          = count;
@@ -120,7 +114,6 @@ void ComputeState::dispatch_multires_diff(GLuint pos_vbo, GLuint disp_ssbo,
     GLuint ring_b  = ring_ssbo   ? ring_ssbo   : disp_b;
 
     gpu::Buffer posView{   0,                                pos_vbo };
-    gpu::Buffer dirtyView{ (uint64_t)count * sizeof(uint32_t), dirty_verts_ssbo };
     gpu::Buffer dispView{  0,                                disp_b };
     gpu::Buffer frameView{ 0,                                frame_b };
     gpu::Buffer snapView{  0,                                snap_pos_ssbo };
@@ -129,7 +122,7 @@ void ComputeState::dispatch_multires_diff(GLuint pos_vbo, GLuint disp_ssbo,
 
     const gpu::BindBufferEntry bg[] = {
         { BIND_POSITIONS,         &posView,   posView.size },
-        { BIND_DIRTY_VERTS,       &dirtyView, dirtyView.size },
+        { BIND_DIRTY_VERTS,       &dirty_verts_ssbo, (uint64_t)count * sizeof(uint32_t) },
         { BIND_MULTIRES_DISP,     &dispView,  dispView.size },
         { BIND_MULTIRES_FRAMES,   &frameView, frameView.size },
         { BIND_MULTIRES_SNAP_POS, &snapView,  snapView.size },
@@ -189,20 +182,15 @@ void ComputeState::dispatch_multires_apply(GLuint pos_vbo, GLuint disp_ssbo,
     // CPU stage upload. Stage mode: upload the (target,source) pairs as before.
     const bool ring_mode = (ring_ssbo != 0);
 
-    // Upload the touched-vert list (reuse dirty_verts_ssbo, as the diff does). GL-owned.
-    GLsizeiptr verts_bytes = (GLsizeiptr)count * sizeof(uint32_t);
-    if (!dirty_verts_ssbo || count > dirty_verts_capacity) {
-        if (dirty_verts_ssbo) glDeleteBuffers(1, &dirty_verts_ssbo);
-        glGenBuffers(1, &dirty_verts_ssbo);
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, dirty_verts_ssbo);
+    // Upload the touched-vert list (reuse dirty_verts_ssbo, as the diff does). Seam-owned.
+    if (!dirty_verts_ssbo.handle || count > dirty_verts_capacity) {
         uint32_t alloc_count = std::max(count, 4096u);
-        glBufferData(GL_SHADER_STORAGE_BUFFER, alloc_count * sizeof(uint32_t),
-                     nullptr, GL_DYNAMIC_DRAW);
+        gpu::release_buffer(dirty_verts_ssbo);
+        dirty_verts_ssbo = gpu::create_buffer(gpu_dev, nullptr,
+                                              (uint64_t)alloc_count * sizeof(uint32_t), gpu::Usage::Storage);
         dirty_verts_capacity = alloc_count;
-    } else {
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, dirty_verts_ssbo);
     }
-    glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, verts_bytes, verts);
+    gpu::write_buffer(gpu_dev, dirty_verts_ssbo, 0, verts, (uint64_t)count * sizeof(uint32_t));
 
     // Upload the (target, source) staging pairs (stage mode only). GL-owned scratch.
     if (!ring_mode && stage) {
@@ -241,7 +229,6 @@ void ComputeState::dispatch_multires_apply(GLuint pos_vbo, GLuint disp_ssbo,
     GLuint ring_b  = ring_mode ? ring_ssbo : pos_vbo;
 
     gpu::Buffer posView{   0,                                pos_vbo };
-    gpu::Buffer dirtyView{ (uint64_t)count * sizeof(uint32_t), dirty_verts_ssbo };
     gpu::Buffer dispView{  0,                                disp_b };
     gpu::Buffer frameView{ 0,                                frame_b };
     gpu::Buffer baseView{  0,                                base_b };
@@ -250,7 +237,7 @@ void ComputeState::dispatch_multires_apply(GLuint pos_vbo, GLuint disp_ssbo,
 
     const gpu::BindBufferEntry bg[] = {
         { BIND_POSITIONS,       &posView,   posView.size },
-        { BIND_DIRTY_VERTS,     &dirtyView, dirtyView.size },
+        { BIND_DIRTY_VERTS,     &dirty_verts_ssbo, (uint64_t)count * sizeof(uint32_t) },
         { BIND_MULTIRES_DISP,   &dispView,  dispView.size },
         { BIND_MULTIRES_FRAMES, &frameView, frameView.size },
         { BIND_MULTIRES_BASE,   &baseView,  baseView.size },

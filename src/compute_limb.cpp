@@ -86,33 +86,27 @@ bool ComputeState::init_limb() {
 }
 
 void ComputeState::ensure_limb_buffers(uint32_t vertex_count) {
-    if (limb_scratch_capacity >= vertex_count && limb_pos_scratch_ssbo) return;
-    if (limb_pos_scratch_ssbo) { glDeleteBuffers(1, &limb_pos_scratch_ssbo); limb_pos_scratch_ssbo = 0; }
-    glGenBuffers(1, &limb_pos_scratch_ssbo);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, limb_pos_scratch_ssbo);
-    glBufferData(GL_SHADER_STORAGE_BUFFER,
-                 (GLsizeiptr)vertex_count * 3 * sizeof(float), nullptr, GL_DYNAMIC_COPY);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    if (limb_scratch_capacity >= vertex_count && limb_pos_scratch_ssbo.handle) return;
+    gpu::release_buffer(limb_pos_scratch_ssbo);
+    limb_pos_scratch_ssbo = gpu::create_buffer(gpu_dev, nullptr,
+                                (uint64_t)vertex_count * 3 * sizeof(float), gpu::Usage::Storage);
     limb_scratch_capacity = vertex_count;
 }
 
 void ComputeState::dispatch_limb_drag(const LimbDragParams& p, GLuint pos_vbo) {
     if (!has_limb() || !mask_ssbo) return;
     const uint32_t vc = p.vertex_count;
-    const uint32_t cap = move_buffers_capacity;
 
     LimbDragParamsGPU u = {};
     u.delta[0] = p.dx; u.delta[1] = p.dy; u.delta[2] = p.dz;
     gpu::write_buffer(gpu_dev, limb_drag_ubo, 0, &u, sizeof(u));
 
     gpu::Buffer posView{      (uint64_t)vc * 3u * sizeof(float),       pos_vbo };
-    gpu::Buffer affectedView{ (uint64_t)(1u + cap) * sizeof(uint32_t), move_affected_ssbo };
-    gpu::Buffer weightsView{  (uint64_t)cap * 2u * sizeof(float),      move_weights_ssbo };
     gpu::Buffer maskView{     (uint64_t)vc * sizeof(float),            mask_ssbo };
     const gpu::BindBufferEntry bg[] = {
-        { BIND_POSITIONS,     &posView,      posView.size },
-        { BIND_MOVE_AFFECTED, &affectedView, affectedView.size },
-        { BIND_MOVE_WEIGHTS,  &weightsView,  weightsView.size },
+        { BIND_POSITIONS,     &posView,            posView.size },
+        { BIND_MOVE_AFFECTED, &move_affected_ssbo, move_affected_ssbo.size },
+        { BIND_MOVE_WEIGHTS,  &move_weights_ssbo,  move_weights_ssbo.size },
         { BIND_MASK,          &maskView,     maskView.size },
         { BIND_PARAMS,        &limb_drag_ubo, sizeof(LimbDragParamsGPU) },
     };
@@ -130,9 +124,10 @@ void ComputeState::dispatch_limb_relax(uint32_t vertex_count, int iterations, fl
     if (!has_limb() || !mask_ssbo || iterations <= 0) return;
     ensure_limb_buffers(vertex_count);
 
-    // src snapshot starts as a full copy of the live positions — GL-owned, stays raw GL.
+    // src snapshot starts as a full copy of the live positions. pos_vbo is still a raw
+    // GL handle; the scratch is seam-owned (raw-GL copy on its handle — web-stage concern).
     glBindBuffer(GL_COPY_READ_BUFFER,  pos_vbo);
-    glBindBuffer(GL_COPY_WRITE_BUFFER, limb_pos_scratch_ssbo);
+    glBindBuffer(GL_COPY_WRITE_BUFFER, limb_pos_scratch_ssbo.handle);
     glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, 0, 0,
                         (GLsizeiptr)vertex_count * 3 * sizeof(float));
     glBindBuffer(GL_COPY_READ_BUFFER, 0);
@@ -149,12 +144,9 @@ void ComputeState::dispatch_limb_relax(uint32_t vertex_count, int iterations, fl
     // bind; best-effort for the WebGPU min-size guard later). 0 = unguarded.
     gpu::Buffer normView{    (uint64_t)vertex_count * 3u * sizeof(float),    norm_vbo };
     gpu::Buffer idxView{     0,                                             index_ebo };
-    gpu::Buffer offView{     0,                                             adjacency_offset_ssbo };
-    gpu::Buffer listView{    0,                                             adjacency_list_ssbo };
-    gpu::Buffer weightsView{ (uint64_t)move_buffers_capacity * 2u * sizeof(float), move_weights_ssbo };
     gpu::Buffer maskView{    (uint64_t)vertex_count * sizeof(float),         mask_ssbo };
-    // Ping-pong endpoints: scratch snapshot and the live position VBO.
-    gpu::Buffer scratchView{ (uint64_t)vertex_count * 3u * sizeof(float),    limb_pos_scratch_ssbo };
+    // Ping-pong endpoints: scratch snapshot (seam-owned) and the live position VBO.
+    gpu::Buffer scratchView{ (uint64_t)vertex_count * 3u * sizeof(float),    limb_pos_scratch_ssbo.handle };
     gpu::Buffer posView{     (uint64_t)vertex_count * 3u * sizeof(float),    pos_vbo };
 
     // Two bind groups differing only in slots 29 (src) / 0 (dst). ping reads
@@ -164,9 +156,9 @@ void ComputeState::dispatch_limb_relax(uint32_t vertex_count, int iterations, fl
         { BIND_POSITIONS,        &posView,     posView.size },
         { BIND_NORMALS,          &normView,    normView.size },
         { BIND_INDICES,          &idxView,     idxView.size },
-        { BIND_ADJACENCY_OFFSET, &offView,     offView.size },
-        { BIND_ADJACENCY_LIST,   &listView,    listView.size },
-        { BIND_MOVE_WEIGHTS,     &weightsView, weightsView.size },
+        { BIND_ADJACENCY_OFFSET, &adjacency_offset_ssbo, adjacency_offset_ssbo.size },
+        { BIND_ADJACENCY_LIST,   &adjacency_list_ssbo,   adjacency_list_ssbo.size },
+        { BIND_MOVE_WEIGHTS,     &move_weights_ssbo,     move_weights_ssbo.size },
         { BIND_MASK,             &maskView,    maskView.size },
         { BIND_PARAMS,           &limb_relax_ubo, sizeof(LimbRelaxParamsGPU) },
     };
@@ -175,9 +167,9 @@ void ComputeState::dispatch_limb_relax(uint32_t vertex_count, int iterations, fl
         { BIND_POSITIONS,        &scratchView, scratchView.size },
         { BIND_NORMALS,          &normView,    normView.size },
         { BIND_INDICES,          &idxView,     idxView.size },
-        { BIND_ADJACENCY_OFFSET, &offView,     offView.size },
-        { BIND_ADJACENCY_LIST,   &listView,    listView.size },
-        { BIND_MOVE_WEIGHTS,     &weightsView, weightsView.size },
+        { BIND_ADJACENCY_OFFSET, &adjacency_offset_ssbo, adjacency_offset_ssbo.size },
+        { BIND_ADJACENCY_LIST,   &adjacency_list_ssbo,   adjacency_list_ssbo.size },
+        { BIND_MOVE_WEIGHTS,     &move_weights_ssbo,     move_weights_ssbo.size },
         { BIND_MASK,             &maskView,    maskView.size },
         { BIND_PARAMS,           &limb_relax_ubo, sizeof(LimbRelaxParamsGPU) },
     };
@@ -198,7 +190,7 @@ void ComputeState::dispatch_limb_relax(uint32_t vertex_count, int iterations, fl
     // Even iteration count leaves the final result in the scratch buffer; copy it
     // back into the live position VBO. GL-owned copy, stays raw GL.
     if ((iterations & 1) == 0) {
-        glBindBuffer(GL_COPY_READ_BUFFER,  limb_pos_scratch_ssbo);
+        glBindBuffer(GL_COPY_READ_BUFFER,  limb_pos_scratch_ssbo.handle);
         glBindBuffer(GL_COPY_WRITE_BUFFER, pos_vbo);
         glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, 0, 0,
                             (GLsizeiptr)vertex_count * 3 * sizeof(float));

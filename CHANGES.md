@@ -2,6 +2,24 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-25 — WebGPU port, buffer-ownership migration Step 2 cont: smooth/move/limb scratch seam-owned
+
+- **The remaining self-contained scratch SSBOs are now seam-owned `gpu::Buffer`s** (were raw GL
+  handles wrapped in views at dispatch): the smooth family's `smooth_dirty_ssbo` + `dirty_verts_ssbo`
+  + the CSR `adjacency_offset_ssbo`/`adjacency_list_ssbo`, the move family's `move_affected` /
+  `move_weights` / `move_weights_pong` / `move_init_ssbo`, and the limb `limb_pos_scratch_ssbo`.
+  Allocation/free go through `create_buffer`/`release_buffer` (grow-only = release + create); bind
+  groups point at the owned members directly. Touches `compute_common` (ctor/dtor), `compute_smooth`,
+  `compute_move`, `compute_limb`, and the shared consumers `compute_draw` / `compute_mask` /
+  `compute_color` / `compute_multires` (dirty-list bind) — plus `compute_remesh` keeps `.handle` views
+  on the now-owned adjacency until its own buffers migrate (Step 4).
+- Raw-GL *data movement* on these buffers (counter resets, weight clears, ping-pong copy-backs, the
+  dirty-list/affected readbacks) still pokes `.handle` — GL-only ops that get seam equivalents at the
+  web stage, not an ownership concern.
+- **Verified:** gl build green; `chisel-gl-compute-test` PASS; app launches clean (adjacency uploads
+  via the owned-buffer path: 2562 verts / 15360 entries, all pipelines compiled, no GL errors). In-app
+  sculpt re-confirm (smooth/grab/snakehook + paint) still user-pending.
+
 ## 2026-06-25 — WebGPU port, buffer-ownership migration Step 2: draw accum + mirror family seam-owned
 
 - **`accum_ssbo` / `accum_sym_ssbo` / `stroke_norm_ssbo` / `mirror_map_ssbo` are now seam-owned

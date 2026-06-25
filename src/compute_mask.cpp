@@ -59,11 +59,10 @@ void ComputeState::dispatch_mask_paint(const MaskPaintParams& p, GLuint pos_vbo)
     // them at dispatch. Sizes are advisory on GL, the bind range on WebGPU.
     gpu::Buffer posView{   (uint64_t)vc * 3u * sizeof(float),    pos_vbo };
     gpu::Buffer maskView{  (uint64_t)vc * sizeof(float),         mask_ssbo };
-    gpu::Buffer dirtyView{ (uint64_t)(vc + 1u) * sizeof(uint32_t), smooth_dirty_ssbo };
 
     // Reset the dirty counter (slot 0), then upload this dab's params.
     uint32_t zero = 0;
-    gpu::write_buffer(gpu_dev, dirtyView, 0, &zero, sizeof(zero));
+    gpu::write_buffer(gpu_dev, smooth_dirty_ssbo, 0, &zero, sizeof(zero));
 
     MaskParamsGPU mp = {};
     mp.anchor_a[0] = p.anchor_a_x; mp.anchor_a[1] = p.anchor_a_y; mp.anchor_a[2] = p.anchor_a_z;
@@ -76,10 +75,10 @@ void ComputeState::dispatch_mask_paint(const MaskPaintParams& p, GLuint pos_vbo)
     gpu::write_buffer(gpu_dev, mask_params_ubo, 0, &mp, sizeof(mp));
 
     const gpu::BindBufferEntry bg[] = {
-        { BIND_POSITIONS,   &posView,         posView.size },
-        { BIND_MASK,        &maskView,        maskView.size },
-        { BIND_DIRTY_VERTS, &dirtyView,       dirtyView.size },
-        { BIND_PARAMS,      &mask_params_ubo, sizeof(MaskParamsGPU) },
+        { BIND_POSITIONS,   &posView,           posView.size },
+        { BIND_MASK,        &maskView,          maskView.size },
+        { BIND_DIRTY_VERTS, &smooth_dirty_ssbo, (uint64_t)(vc + 1u) * sizeof(uint32_t) },
+        { BIND_PARAMS,      &mask_params_ubo,   sizeof(MaskParamsGPU) },
     };
     gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, mask_pipeline, bg, 4);
 

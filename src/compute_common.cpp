@@ -10,12 +10,7 @@ ComputeState::ComputeState()
     , max_ssbo_bindings(0)
     , accum_vertex_count(0)
     , stroke_norm_capacity(0)
-    , move_affected_ssbo(0)
-    , move_weights_ssbo(0)
-    , move_weights_pong_ssbo(0)
-    , move_init_ssbo(0)
     , move_buffers_capacity(0)
-    , limb_pos_scratch_ssbo(0)
     , limb_scratch_capacity(0)
     , multires_stage_ssbo(0)
     , multires_stage_capacity(0)
@@ -23,13 +18,9 @@ ComputeState::ComputeState()
     , undo_ring_cap_bytes(1024ull * 1024ull * 1024ull)
     , undo_ring_bytes(0)
     , undo_ring_head(0)
-    , adjacency_offset_ssbo(0)
-    , adjacency_list_ssbo(0)
     , adjacency_vertex_count(0)
     , mirror_map_vertex_count(0)
-    , dirty_verts_ssbo(0)
     , dirty_verts_capacity(0)
-    , smooth_dirty_ssbo(0)
     , smooth_dirty_capacity(0)
     , mask_ssbo(0)
     , color_ssbo(0)
@@ -233,15 +224,15 @@ void ComputeState::cleanup() {
     gpu::release_compute_pipeline(move_apply_pipeline);
     gpu::release_buffer(move_capture_ubo);
     gpu::release_buffer(move_apply_ubo);
-    if (move_affected_ssbo)         { glDeleteBuffers(1, &move_affected_ssbo);     move_affected_ssbo         = 0; }
-    if (move_weights_ssbo)          { glDeleteBuffers(1, &move_weights_ssbo);      move_weights_ssbo          = 0; }
-    if (move_weights_pong_ssbo)     { glDeleteBuffers(1, &move_weights_pong_ssbo); move_weights_pong_ssbo     = 0; }
-    if (move_init_ssbo)             { glDeleteBuffers(1, &move_init_ssbo);         move_init_ssbo             = 0; }
+    gpu::release_buffer(move_affected_ssbo);
+    gpu::release_buffer(move_weights_ssbo);
+    gpu::release_buffer(move_weights_pong_ssbo);
+    gpu::release_buffer(move_init_ssbo);
     gpu::release_compute_pipeline(limb_drag_pipeline);
     gpu::release_compute_pipeline(limb_relax_pipeline);
     gpu::release_buffer(limb_drag_ubo);
     gpu::release_buffer(limb_relax_ubo);
-    if (limb_pos_scratch_ssbo)      { glDeleteBuffers(1, &limb_pos_scratch_ssbo); limb_pos_scratch_ssbo      = 0; }
+    gpu::release_buffer(limb_pos_scratch_ssbo);
     move_buffers_capacity = 0;
     gpu::release_compute_pipeline(compute_normals_pipeline);
     gpu::release_buffer(compute_normals_ubo);
@@ -254,10 +245,10 @@ void ComputeState::cleanup() {
     if (undo_ring_ssbo)         { glDeleteBuffers(1, &undo_ring_ssbo);       undo_ring_ssbo        = 0; }
     undo_ring_bytes = 0;
     undo_ring_head  = 0;
-    if (adjacency_offset_ssbo) { glDeleteBuffers(1, &adjacency_offset_ssbo); adjacency_offset_ssbo = 0; }
-    if (adjacency_list_ssbo) { glDeleteBuffers(1, &adjacency_list_ssbo); adjacency_list_ssbo = 0; }
-    if (dirty_verts_ssbo) { glDeleteBuffers(1, &dirty_verts_ssbo); dirty_verts_ssbo = 0; }
-    if (smooth_dirty_ssbo) { glDeleteBuffers(1, &smooth_dirty_ssbo); smooth_dirty_ssbo = 0; }
+    gpu::release_buffer(adjacency_offset_ssbo);
+    gpu::release_buffer(adjacency_list_ssbo);
+    gpu::release_buffer(dirty_verts_ssbo);
+    gpu::release_buffer(smooth_dirty_ssbo);
     gpu::release_compute_pipeline(remesh_select_stretched_pipeline);
     gpu::release_compute_pipeline(remesh_select_unmasked_pipeline);
     gpu::release_compute_pipeline(remesh_grow_selection_pipeline);
