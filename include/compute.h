@@ -373,18 +373,18 @@ struct ComputeState {
     gpu::Buffer remesh_seam_weld_ubo;          // 16-byte {vertex_count, mask_size, weld_tol}
     gpu::Buffer remesh_smooth_ubo;             // 16-byte {lambda, seam_tol, vertex_count}
 
-    GLuint remesh_core_sel_ssbo;    // uint[T] — core (pre-grow) tri selection
-    GLuint remesh_trisel_pong_ssbo; // uint[T] — input snapshot for grow/mirror
-    GLuint seam_weld_map_ssbo;       // uint[V] — merge target per vert (v or lower match)
+    gpu::Buffer remesh_core_sel_ssbo;    // uint[T] — core (pre-grow) tri selection
+    gpu::Buffer remesh_trisel_pong_ssbo; // uint[T] — input snapshot for grow/mirror
+    gpu::Buffer seam_weld_map_ssbo;      // uint[V] — merge target per vert (v or lower match)
 
-    // Remesh GL-owned scratch SSBOs (uploads/copies/readback stay raw GL):
-    GLuint remesh_ping_ssbo;       // float[V*3] SOA — positions input
-    GLuint remesh_pong_ssbo;       // float[V*3] SOA — positions output
-    GLuint remesh_norm_ssbo;       // float[V*3] SOA — normals
-    GLuint remesh_weights_ssbo;    // float[V]   — smooth weights (1.0 if non-mask)
-    GLuint remesh_pinned_ssbo;     // uint[V]    — 0/1 pinned flags
-    GLuint remesh_trisel_ssbo;     // uint[T]    — 0/1 tri selected flags
-    GLuint remesh_indices_ssbo;    // uint[T*3]  — triangle indices snapshot
+    // Remesh seam-owned scratch SSBOs (uploads/copies/readback stay raw GL via .handle):
+    gpu::Buffer remesh_ping_ssbo;       // float[V*3] SOA — positions input
+    gpu::Buffer remesh_pong_ssbo;       // float[V*3] SOA — positions output
+    gpu::Buffer remesh_norm_ssbo;       // float[V*3] SOA — normals
+    gpu::Buffer remesh_weights_ssbo;    // float[V]   — smooth weights (1.0 if non-mask)
+    gpu::Buffer remesh_pinned_ssbo;     // uint[V]    — 0/1 pinned flags
+    gpu::Buffer remesh_trisel_ssbo;     // uint[T]    — 0/1 tri selected flags
+    gpu::Buffer remesh_indices_ssbo;    // uint[T*3]  — triangle indices snapshot
     uint32_t remesh_vert_capacity;
     uint32_t remesh_tri_capacity;
 

@@ -20,16 +20,6 @@ ComputeState::ComputeState()
     , mirror_map_vertex_count(0)
     , dirty_verts_capacity(0)
     , smooth_dirty_capacity(0)
-    , remesh_core_sel_ssbo(0)
-    , remesh_trisel_pong_ssbo(0)
-    , seam_weld_map_ssbo(0)
-    , remesh_ping_ssbo(0)
-    , remesh_pong_ssbo(0)
-    , remesh_norm_ssbo(0)
-    , remesh_weights_ssbo(0)
-    , remesh_pinned_ssbo(0)
-    , remesh_trisel_ssbo(0)
-    , remesh_indices_ssbo(0)
     , remesh_vert_capacity(0)
     , remesh_tri_capacity(0)
 {}
@@ -263,16 +253,16 @@ void ComputeState::cleanup() {
     gpu::release_buffer(remesh_seam_snap_ubo);
     gpu::release_buffer(remesh_seam_weld_ubo);
     gpu::release_buffer(remesh_smooth_ubo);
-    if (remesh_core_sel_ssbo)            { glDeleteBuffers(1, &remesh_core_sel_ssbo);         remesh_core_sel_ssbo            = 0; }
-    if (remesh_trisel_pong_ssbo)         { glDeleteBuffers(1, &remesh_trisel_pong_ssbo);     remesh_trisel_pong_ssbo         = 0; }
-    if (seam_weld_map_ssbo)       { glDeleteBuffers(1, &seam_weld_map_ssbo);  seam_weld_map_ssbo       = 0; }
-    if (remesh_ping_ssbo)     { glDeleteBuffers(1, &remesh_ping_ssbo);     remesh_ping_ssbo     = 0; }
-    if (remesh_pong_ssbo)     { glDeleteBuffers(1, &remesh_pong_ssbo);     remesh_pong_ssbo     = 0; }
-    if (remesh_norm_ssbo)     { glDeleteBuffers(1, &remesh_norm_ssbo);     remesh_norm_ssbo     = 0; }
-    if (remesh_weights_ssbo)  { glDeleteBuffers(1, &remesh_weights_ssbo);  remesh_weights_ssbo  = 0; }
-    if (remesh_pinned_ssbo)   { glDeleteBuffers(1, &remesh_pinned_ssbo);   remesh_pinned_ssbo   = 0; }
-    if (remesh_trisel_ssbo)   { glDeleteBuffers(1, &remesh_trisel_ssbo);   remesh_trisel_ssbo   = 0; }
-    if (remesh_indices_ssbo)  { glDeleteBuffers(1, &remesh_indices_ssbo);  remesh_indices_ssbo  = 0; }
+    gpu::release_buffer(remesh_core_sel_ssbo);
+    gpu::release_buffer(remesh_trisel_pong_ssbo);
+    gpu::release_buffer(seam_weld_map_ssbo);
+    gpu::release_buffer(remesh_ping_ssbo);
+    gpu::release_buffer(remesh_pong_ssbo);
+    gpu::release_buffer(remesh_norm_ssbo);
+    gpu::release_buffer(remesh_weights_ssbo);
+    gpu::release_buffer(remesh_pinned_ssbo);
+    gpu::release_buffer(remesh_trisel_ssbo);
+    gpu::release_buffer(remesh_indices_ssbo);
     remesh_vert_capacity = remesh_tri_capacity = 0;
     accum_vertex_count = 0;
     adjacency_vertex_count = 0;
