@@ -2,6 +2,28 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-25 — WebGPU port, buffer-ownership migration Step 5: SDF pool seam-owned (migration complete)
+
+- **The SDF voxel-merge scratch pool (`src/sdf.cpp`) is now seam-owned `gpu::Buffer`s** — the last
+  raw-GL buffer owner in the tree. The nine `GlBuf` RAII handles (`soup_pos` / `soup_idx` / `dist` /
+  `field` / `mc_out` / `mc_cnt` / `tritab` / `splat_box` / `splat_off`) → `gpu::create_buffer`, with
+  usage authored from intent (`Storage`, `+CopySrc` on the four read back to CPU: `splat_box` / `field`
+  / `mc_cnt` / `mc_out`). The throwaway `GlBuf` struct is gone; `VoxelMergeJob`'s destructor releases
+  them explicitly.
+- **Every SDF bind group now binds the owned members directly** with their real `.size` — all the
+  per-dispatch `gpu::Buffer xView{ size, id }` fabrications (count / expand / sign / mc·nets) are
+  deleted. Soup/offset/field CPU uploads route through `gpu::write_buffer`; the `mc_cnt` reset is a
+  `write_buffer` of zero (was `glClearBufferData`).
+- **Raw GL kept via `.handle` (web-stage concern):** the `dist` far-bits clear (`glClearBufferData` —
+  no seam clear primitive), the in-place `mc_out` resize between the extractor count/write passes
+  (`glBufferData` — keeps the GL handle so the shared bind group stays valid; WebGPU will need a
+  bind-group rebuild there), and the `splat_box` / `field` / `mc_cnt` / `mc_out` readbacks
+  (`glGetBufferSubData` → `copy_buffer`+map at the web stage).
+- **Buffer-ownership migration is now complete** — no raw-GL-owned buffers remain anywhere; the tree
+  should compile under `CHISEL_BACKEND_WEBGPU`. GL build green, `chisel-gl-compute-test` PASS (all five
+  `sdf_*` kernels compile+link through the seam), app launches clean (no GL/FBO errors). In-app
+  mirror-merge (R=128/R=256, MC + Surface Nets) re-confirm is user-driven.
+
 ## 2026-06-25 — WebGPU port, buffer-ownership migration Step 3c: MultiresGPU residency pool seam-owned
 
 - **The `MultiresGPU` residency pool (`disp` / `frames` / `base` / `snap_pos`) is now seam-owned
