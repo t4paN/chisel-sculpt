@@ -29,9 +29,14 @@ struct Renderer {
     // Vertex-paint visibility (1 = show albedo, 0 = plain matcap). Set per frame.
     float paint_visible = 1.0f;
 
-    // Entity-id pick shader (writes linear depth + entity id into the screen FBO,
-    // reusing the depth attachment and the triid attachment as an id buffer).
-    GLuint pick_program = 0;
+    // Entity-id pick pass — on the gpu:: seam. Renders into the shared screen
+    // offscreen target writing linear depth (attachment 0) + entity id (attachment
+    // 2). The pass spans pick_begin → N×pick_draw → pick_end, so the RenderPass +
+    // bind group are held as members across those calls.
+    gpu::RenderPipeline pick_pipeline;
+    gpu::Buffer         pick_ubo;        // view/proj + per-draw entity id
+    gpu::RenderPass     pick_pass;       // live only between pick_begin and pick_end
+    gpu::BindGroup      pick_bg;
 
     // Background shader (gradient) — on the gpu:: seam.
     gpu::RenderPipeline bg_pipeline;
@@ -58,28 +63,32 @@ struct Renderer {
     GLuint debug_edge_vbo;         // edge index buffer (GL-owned, built lazily)
     uint32_t debug_edge_count;
 
-    // Screen buffer FBO for brush pipeline
-    GLuint screen_fbo;
-    GLuint screen_depth_tex;    // GL_R32F - linear depth
-    GLuint screen_normal_tex;   // GL_RGB16F - view-space normals
-    GLuint screen_triid_tex;    // GL_R32UI - triangle index
-    GLuint screen_bary_tex;     // GL_RG16F - barycentric u,v (w = 1-u-v)
-    GLuint screen_depth_rbo;    // actual depth/stencil for z-test
-    int screen_buf_w, screen_buf_h;
+    // Screen-buffer MRT for the brush pipeline — on the gpu:: seam. A 4-attachment
+    // offscreen target (R32F depth / RGB16F normal / R32UI triid / RG16F bary) +
+    // depth RBO, shared with the pick pass. The MRT render pipeline writes all four;
+    // loose uView/uProj become a std140 view/proj UBO.
+    gpu::OffscreenTarget screen_target;
+    gpu::RenderPipeline  screen_pipeline;
+    gpu::Buffer          screen_ubo;
 
-    // Screen buffer shader (MRT output)
-    GLuint screen_buf_program;
-
-    // Expanded mesh VAO for screen buffer pass (no index sharing, flat tris)
-    GLuint screen_vao;
+    // Flat triangle-soup vertex buffers for the screen pass (no index sharing).
+    // pos/norm are filled by the GPU-side expand compute; triid/bary are static per
+    // topology. GL-owned (also bound as SSBOs by the expand kernel), wrapped in
+    // gpu::Buffer views at draw/dispatch — same staged pattern as the brush SSBOs.
     GLuint screen_vbo_pos;
     GLuint screen_vbo_norm;
     GLuint screen_vbo_triid;
     GLuint screen_vbo_bary;
     uint32_t screen_tri_count;
 
-    // Compute shader for GPU-side indexed→flat expansion
-    GLuint screen_expand_program;
+    // GPU-side indexed→flat expansion — on the gpu:: compute seam.
+    gpu::ComputePipeline screen_expand_pipeline;
+    gpu::Buffer          screen_expand_ubo;
+
+    // Screen MRT colour-texture handles (triid = attachment 2, bary = attachment 3)
+    // — still passed to the smooth dispatch's (currently unused) texture params.
+    GLuint screen_triid_tex() const { return screen_target.color_tex[2]; }
+    GLuint screen_bary_tex()  const { return screen_target.color_tex[3]; }
 
     bool initialized;
 
@@ -141,7 +150,7 @@ struct Renderer {
     // a per-draw entity id (attachment 2). Read back with read_id_region (id)
     // and read_depth_region (depth → unproject for insert).
     void pick_begin(const Camera& cam, int w, int h);
-    void pick_draw(uint32_t entity_id, GLuint vao, uint32_t index_count);
+    void pick_draw(uint32_t entity_id, GLuint pos_vbo, GLuint ebo, uint32_t index_count);
     void pick_end();
     void read_id_region(int x, int y, int w, int h, uint32_t* out);
     void draw_cursor(const Camera& cam, float cx, float cy, float radius,

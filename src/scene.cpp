@@ -343,10 +343,10 @@ void Scene::render_pick(const Camera& cam, int w, int h) {
     for (auto& up : entities_) {
         if (!up || !up->alive) continue;
         if (up->id == active_id_)
-            renderer_.pick_draw(up->id, renderer_.vao,
+            renderer_.pick_draw(up->id, renderer_.vbo_pos, renderer_.ebo,
                                 (uint32_t)up->mesh.indices.size());
         else
-            renderer_.pick_draw(up->id, up->gpu.vao, up->gpu.index_count);
+            renderer_.pick_draw(up->id, up->gpu.vbo_pos, up->gpu.ebo, up->gpu.index_count);
     }
     renderer_.pick_end();
 }

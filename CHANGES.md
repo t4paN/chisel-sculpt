@@ -2,6 +2,34 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-25 — WebGPU port, render-seam: pick pass + screen-buffer MRT on the gpu:: seam (render port COMPLETE)
+
+- **New seam primitives** (`include/gpu/gpu.h` + GL backend): an offscreen MRT render
+  target (`OffscreenTarget` + `create/resize/release_offscreen_target`), an offscreen
+  render pass with per-attachment clears and a draw-buffer enable mask
+  (`begin_offscreen_pass` / `OffscreenPassDesc` / `ColorOp` / `TexFormat`), and the
+  readback abstraction `read_target_region` (GL: `glReadBuffer`+`glReadPixels`; WebGPU
+  will use `copyTextureToBuffer`+map). `RenderPass` gained an `offscreen` flag so
+  `end_render_pass` rebinds the default framebuffer.
+- **Screen-buffer MRT on the seam** — the 4-attachment brush target (R32F depth /
+  RGB16F normal / R32UI triid / RG16F bary) + depth RBO is now an `OffscreenTarget`;
+  `render_screen_buffers` drives it via a seam render pipeline (loose uView/uProj →
+  std140 UBO). `read_depth/normal/triid/bary_region` go through `read_target_region`.
+- **Entity-id pick pass on the seam** — `pick_begin/draw/end` render into the shared
+  offscreen target writing depth (att 0) + id (att 2) only (the pass's draw-buffer mask
+  disables normal/bary). `pick_draw` now binds a pos VBO + EBO instead of a baked VAO
+  (UBO carries view/proj once + per-draw entity id); `scene.cpp` updated to match.
+- **`screen_expand` compute on the seam** — the indexed→flat triangle-soup expansion is
+  now a `gpu::ComputePipeline` (5 storage + a tri_count UBO). **No raw-GL compute remains
+  anywhere**, and `screen_vao` + the dead `compile_compute_program` helper are gone.
+- **Render-seam port COMPLETE** — every renderer draw/readback path is on `gpu::`; the
+  only raw GL left is the deliberately-deferred depth-func/polygon-offset state on the
+  debug wireframe (folds into the pipeline desc at the web stage).
+- **Verified:** gl build green; `chisel-gl-compute-test` PASS; app launches with the
+  `pick` / `screen` / `screen_expand` pipelines all `compiled (gpu:: seam)`, no
+  FBO-incomplete, no GL errors. **Functional sculpt/pick correctness is user-driven**
+  (the brush back-projection + entity pick readbacks can't be self-verified headless).
+
 ## 2026-06-25 — WebGPU port, render-seam: brush cursor + debug wireframe on the gpu:: seam
 
 - **Brush-cursor overlay on the seam** (`draw_cursor`) — the ring, the footprint-shadow disc

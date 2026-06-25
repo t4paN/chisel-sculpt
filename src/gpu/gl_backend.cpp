@@ -310,6 +310,116 @@ void draw_indexed(RenderPass& rp, uint32_t index_count) {
     glBindVertexArray(0);
 }
 
-void end_render_pass(RenderPass&) { /* no GL pass object; FBO stays bound for the frame */ }
+void end_render_pass(RenderPass& rp) {
+    // Default-target passes leave their FBO bound for the frame; an offscreen pass
+    // rebinds the default framebuffer so the next default pass / readback is correct.
+    if (rp.offscreen) glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+// ---- Offscreen MRT render target + readback ----------------------------------
+
+// TexFormat -> (sized internal format, client format, client type) for glTexImage2D
+// and glReadPixels.
+static void gl_tex_format(TexFormat f, GLint& internal, GLenum& fmt, GLenum& type) {
+    switch (f) {
+        case TexFormat::R32F:  internal = GL_R32F;  fmt = GL_RED;         type = GL_FLOAT;        break;
+        case TexFormat::RGB16F:internal = GL_RGB16F;fmt = GL_RGB;         type = GL_FLOAT;        break;
+        case TexFormat::RG16F: internal = GL_RG16F; fmt = GL_RG;          type = GL_FLOAT;        break;
+        case TexFormat::R32UI: internal = GL_R32UI; fmt = GL_RED_INTEGER; type = GL_UNSIGNED_INT; break;
+        default:               internal = GL_R32F;  fmt = GL_RED;         type = GL_FLOAT;        break;
+    }
+}
+
+OffscreenTarget create_offscreen_target(Device&, int w, int h,
+                                        const TexFormat* fmts, uint32_t color_count) {
+    OffscreenTarget t;
+    t.width = w; t.height = h;
+    t.color_count = (color_count < kMaxColorAttachments) ? color_count : kMaxColorAttachments;
+
+    glGenFramebuffers(1, &t.fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, t.fbo);
+
+    GLenum draw_bufs[kMaxColorAttachments];
+    for (uint32_t i = 0; i < t.color_count; ++i) {
+        t.color_fmt[i] = fmts[i];
+        GLint internal; GLenum fmt, type;
+        gl_tex_format(fmts[i], internal, fmt, type);
+        glGenTextures(1, &t.color_tex[i]);
+        glBindTexture(GL_TEXTURE_2D, t.color_tex[i]);
+        glTexImage2D(GL_TEXTURE_2D, 0, internal, w, h, 0, fmt, type, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + i,
+                               GL_TEXTURE_2D, t.color_tex[i], 0);
+        draw_bufs[i] = GL_COLOR_ATTACHMENT0 + i;
+    }
+
+    glGenRenderbuffers(1, &t.depth_rbo);
+    glBindRenderbuffer(GL_RENDERBUFFER, t.depth_rbo);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w, h);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
+                              GL_RENDERBUFFER, t.depth_rbo);
+
+    glDrawBuffers((GLsizei)t.color_count, draw_bufs);
+
+    GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    if (status != GL_FRAMEBUFFER_COMPLETE)
+        std::printf("[gpu] offscreen target incomplete: 0x%x\n", status);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    return t;
+}
+
+void resize_offscreen_target(Device&, OffscreenTarget& t, int w, int h) {
+    if (w == t.width && h == t.height) return;
+    t.width = w; t.height = h;
+    for (uint32_t i = 0; i < t.color_count; ++i) {
+        GLint internal; GLenum fmt, type;
+        gl_tex_format(t.color_fmt[i], internal, fmt, type);
+        glBindTexture(GL_TEXTURE_2D, t.color_tex[i]);
+        glTexImage2D(GL_TEXTURE_2D, 0, internal, w, h, 0, fmt, type, nullptr);
+    }
+    glBindRenderbuffer(GL_RENDERBUFFER, t.depth_rbo);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w, h);
+}
+
+void release_offscreen_target(OffscreenTarget& t) {
+    for (uint32_t i = 0; i < t.color_count; ++i)
+        if (t.color_tex[i]) glDeleteTextures(1, &t.color_tex[i]);
+    if (t.depth_rbo) glDeleteRenderbuffers(1, &t.depth_rbo);
+    if (t.fbo) glDeleteFramebuffers(1, &t.fbo);
+    t = OffscreenTarget();
+}
+
+RenderPass begin_offscreen_pass(Device& dev, OffscreenTarget& t, const OffscreenPassDesc& d) {
+    RenderPass rp; rp.dev = &dev; rp.offscreen = true;
+    glBindFramebuffer(GL_FRAMEBUFFER, t.fbo);
+    glViewport(0, 0, t.width, t.height);
+
+    // Draw-buffer mask: an enabled attachment maps location i → attachment i; a
+    // disabled one maps to GL_NONE (the pick pass writes only depth + id).
+    GLenum bufs[kMaxColorAttachments];
+    for (uint32_t i = 0; i < t.color_count; ++i)
+        bufs[i] = d.color[i].enabled ? (GL_COLOR_ATTACHMENT0 + i) : GL_NONE;
+    glDrawBuffers((GLsizei)t.color_count, bufs);
+
+    for (uint32_t i = 0; i < t.color_count; ++i) {
+        if (!d.color[i].enabled || !d.color[i].clear) continue;
+        if (d.color[i].is_uint) glClearBufferuiv(GL_COLOR, (GLint)i, d.color[i].u);
+        else                    glClearBufferfv (GL_COLOR, (GLint)i, d.color[i].f);
+    }
+    if (d.clear_depth) glClear(GL_DEPTH_BUFFER_BIT);
+    return rp;
+}
+
+void read_target_region(Device&, OffscreenTarget& t, uint32_t attachment,
+                        int x, int y, int w, int h, void* out) {
+    GLint internal; GLenum fmt, type;
+    gl_tex_format(t.color_fmt[attachment], internal, fmt, type);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, t.fbo);
+    glReadBuffer(GL_COLOR_ATTACHMENT0 + attachment);
+    glReadPixels(x, t.height - y - h, w, h, fmt, type, out);  // GL origin is bottom-left
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+}
 
 } // namespace gpu

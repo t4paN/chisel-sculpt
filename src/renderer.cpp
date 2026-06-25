@@ -58,6 +58,30 @@ struct DebugParamsGPU {
 };
 static_assert(sizeof(DebugParamsGPU) == 128, "debug Params UBO must be 128 bytes (std140)");
 
+// Entity-id pick pass Params UBO — view/proj (constant across the pass) + the
+// per-draw entity id (std140 at binding 63).
+struct PickParamsGPU {
+    float    view[16];     // 0
+    float    proj[16];     // 64
+    uint32_t entity_id;    // 128
+    uint32_t _pad[3];      // 132 (round to 144)
+};
+static_assert(sizeof(PickParamsGPU) == 144, "pick Params UBO must be 144 bytes (std140)");
+
+// Screen-buffer MRT pass Params UBO — just view/proj (std140 at binding 63).
+struct ScreenParamsGPU {
+    float view[16];
+    float proj[16];
+};
+static_assert(sizeof(ScreenParamsGPU) == 128, "screen Params UBO must be 128 bytes (std140)");
+
+// Indexed→flat expand compute Params UBO — triangle count (std140 at binding 63).
+struct ScreenExpandParamsGPU {
+    uint32_t tri_count;
+    uint32_t _pad[3];
+};
+static_assert(sizeof(ScreenExpandParamsGPU) == 16, "expand Params UBO must be 16 bytes (std140)");
+
 // Unit-ring segment count (shared by ring + footprint disc geometry, built once).
 static const int CURSOR_SEGS = 64;
 
@@ -174,11 +198,19 @@ void main() {
 // entity id (attachment 2, the R32UI buffer otherwise used for triangle ids).
 // Reads only position (location 0), so it runs on both the working VAO and the
 // inactive display VAOs (which share the pos/norm/mask/mesh_id attribute layout).
-static const char* pick_vert_src = R"(
-#version 330 core
-layout(location=0) in vec3 aPos;
-uniform mat4 uView;
-uniform mat4 uProj;
+// std140 Params block (binding 63) — byte-identical to PickParamsGPU.
+#define PICK_PARAMS_BLOCK \
+    "layout(std140, binding=63) uniform Params {\n" \
+    "    mat4 uView;\n" \
+    "    mat4 uProj;\n" \
+    "    uint uEntityId;\n" \
+    "};\n"
+
+static const char* pick_vert_src =
+"#version 430 core\n"
+"layout(location=0) in vec3 aPos;\n"
+PICK_PARAMS_BLOCK
+R"(
 out float vDepth;
 void main() {
     vec4 viewPos = uView * vec4(aPos, 1.0);
@@ -187,12 +219,13 @@ void main() {
 }
 )";
 
-static const char* pick_frag_src = R"(
-#version 330 core
+static const char* pick_frag_src =
+"#version 430 core\n"
+PICK_PARAMS_BLOCK
+R"(
 in float vDepth;
 layout(location=0) out float outDepth;
 layout(location=2) out uint  outId;
-uniform uint uEntityId;
 void main() {
     outDepth = vDepth;
     outId = uEntityId;
@@ -378,16 +411,21 @@ void main() {
 
 // ---- Screen buffer MRT shaders (for brush pipeline) ----
 
-static const char* screen_buf_vert_src = R"(
-#version 330 core
-layout(location=0) in vec3 aPos;
-layout(location=1) in vec3 aNorm;
-layout(location=2) in float aTriID;
-layout(location=3) in vec2 aBary;
+// std140 Params block (binding 63) — byte-identical to ScreenParamsGPU.
+#define SCREEN_PARAMS_BLOCK \
+    "layout(std140, binding=63) uniform Params {\n" \
+    "    mat4 uView;\n" \
+    "    mat4 uProj;\n" \
+    "};\n"
 
-uniform mat4 uView;
-uniform mat4 uProj;
-
+static const char* screen_buf_vert_src =
+"#version 430 core\n"
+"layout(location=0) in vec3 aPos;\n"
+"layout(location=1) in vec3 aNorm;\n"
+"layout(location=2) in float aTriID;\n"
+"layout(location=3) in vec2 aBary;\n"
+SCREEN_PARAMS_BLOCK
+R"(
 out vec3 vNormWorld;
 out float vDepth;
 flat out uint vTriID;
@@ -409,7 +447,7 @@ void main() {
 )";
 
 static const char* screen_buf_frag_src = R"(
-#version 330 core
+#version 430 core
 in vec3 vNormWorld;
 in float vDepth;
 flat in uint vTriID;
@@ -438,7 +476,7 @@ layout(std430, binding = 2) readonly buffer IdxIn   { uint  in_idx[]; };
 layout(std430, binding = 3) writeonly buffer PosOut  { float out_pos[]; };
 layout(std430, binding = 4) writeonly buffer NormOut { float out_norm[]; };
 
-uniform uint tri_count;
+layout(std140, binding = 63) uniform Params { uint tri_count; };
 
 void main() {
     uint t = gl_GlobalInvocationID.x;
@@ -458,34 +496,6 @@ void main() {
     out_norm[base+6] = in_norm[i2*3+0]; out_norm[base+7] = in_norm[i2*3+1]; out_norm[base+8] = in_norm[i2*3+2];
 }
 )";
-
-static GLuint compile_compute_program(const char* src) {
-    GLuint shader = glCreateShader(GL_COMPUTE_SHADER);
-    glShaderSource(shader, 1, &src, nullptr);
-    glCompileShader(shader);
-    int ok;
-    glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
-    if (!ok) {
-        char log[1024];
-        glGetShaderInfoLog(shader, sizeof(log), nullptr, log);
-        std::fprintf(stderr, "[renderer] compute compile error: %s\n", log);
-        glDeleteShader(shader);
-        return 0;
-    }
-    GLuint program = glCreateProgram();
-    glAttachShader(program, shader);
-    glLinkProgram(program);
-    glDeleteShader(shader);
-    glGetProgramiv(program, GL_LINK_STATUS, &ok);
-    if (!ok) {
-        char log[1024];
-        glGetProgramInfoLog(program, sizeof(log), nullptr, log);
-        std::fprintf(stderr, "[renderer] compute link error: %s\n", log);
-        glDeleteProgram(program);
-        return 0;
-    }
-    return program;
-}
 
 // std140 Params block (binding 63) — byte-identical to DebugParamsGPU (two mat4).
 #define DEBUG_PARAMS_BLOCK \
@@ -550,13 +560,8 @@ GLuint link_program(GLuint vert, GLuint frag) {
 Renderer::Renderer()
     : vao(0), vbo_pos(0), vbo_norm(0), vbo_mask(0), vbo_color(0), vbo_tri_id(0), vbo_bary(0), ebo(0)
     , debug_edge_vbo(0), debug_edge_count(0)
-    , screen_fbo(0), screen_depth_tex(0), screen_normal_tex(0)
-    , screen_triid_tex(0), screen_bary_tex(0), screen_depth_rbo(0)
-    , screen_buf_w(0), screen_buf_h(0)
-    , screen_buf_program(0)
-    , screen_vao(0), screen_vbo_pos(0), screen_vbo_norm(0)
+    , screen_vbo_pos(0), screen_vbo_norm(0)
     , screen_vbo_triid(0), screen_vbo_bary(0), screen_tri_count(0)
-    , screen_expand_program(0)
     , initialized(false)
 {}
 
@@ -583,19 +588,17 @@ Renderer::~Renderer() {
     gpu::release_render_pipeline(debug_edge_pipeline);
     gpu::release_buffer(debug_edge_ubo);
     if (debug_edge_vbo) glDeleteBuffers(1, &debug_edge_vbo);
-    if (screen_fbo) glDeleteFramebuffers(1, &screen_fbo);
-    if (screen_depth_tex) glDeleteTextures(1, &screen_depth_tex);
-    if (screen_normal_tex) glDeleteTextures(1, &screen_normal_tex);
-    if (screen_triid_tex) glDeleteTextures(1, &screen_triid_tex);
-    if (screen_bary_tex) glDeleteTextures(1, &screen_bary_tex);
-    if (screen_depth_rbo) glDeleteRenderbuffers(1, &screen_depth_rbo);
-    if (screen_buf_program) glDeleteProgram(screen_buf_program);
-    if (screen_vao) glDeleteVertexArrays(1, &screen_vao);
+    gpu::release_render_pipeline(pick_pipeline);
+    gpu::release_buffer(pick_ubo);
+    gpu::release_offscreen_target(screen_target);
+    gpu::release_render_pipeline(screen_pipeline);
+    gpu::release_buffer(screen_ubo);
     if (screen_vbo_pos) glDeleteBuffers(1, &screen_vbo_pos);
     if (screen_vbo_norm) glDeleteBuffers(1, &screen_vbo_norm);
     if (screen_vbo_triid) glDeleteBuffers(1, &screen_vbo_triid);
     if (screen_vbo_bary) glDeleteBuffers(1, &screen_vbo_bary);
-    if (screen_expand_program) glDeleteProgram(screen_expand_program);
+    gpu::release_compute_pipeline(screen_expand_pipeline);
+    gpu::release_buffer(screen_expand_ubo);
 }
 
 void Renderer::init() {
@@ -653,11 +656,26 @@ void Renderer::init() {
         matcap_ubo = gpu::create_buffer(gpu_dev, nullptr, sizeof(MatcapParamsGPU), gpu::Usage::Uniform);
     }
 
-    // Entity-id pick shader
-    pick_program = link_program(
-        compile_shader(GL_VERTEX_SHADER, pick_vert_src),
-        compile_shader(GL_FRAGMENT_SHADER, pick_frag_src)
-    );
+    // Entity-id pick pass — on the gpu:: seam. One pos attribute (slot 0) + a
+    // view/proj/entity-id UBO; writes depth (att 0) + id (att 2) into the screen
+    // offscreen target. Depth-tested, no blend.
+    {
+        gpu::VertexAttr attrs[] = {{ 0, gpu::VertexFormat::F32x3, 0, 0 }};
+        gpu::VertexSlot slots[] = {{ 3 * sizeof(float) }};
+        gpu::BindEntry binds[] = {{ 63, gpu::Bind::Uniform, sizeof(PickParamsGPU) }};
+        gpu::RenderPipelineDesc d;
+        d.shaders.vert_glsl = pick_vert_src;
+        d.shaders.frag_glsl = pick_frag_src;
+        d.attrs = attrs; d.attr_count = 1;
+        d.slots = slots; d.slot_count = 1;
+        d.binds = binds; d.bind_count = 1;
+        d.topology = gpu::Topology::Triangles;
+        d.depth_test = true; d.depth_write = true; d.blend = false;
+        pick_pipeline = gpu::create_render_pipeline(gpu_dev, d);
+        if (!pick_pipeline.handle) std::fprintf(stderr, "[renderer] pick pipeline failed\n");
+        else std::printf("[renderer] pick pipeline compiled (gpu:: seam)\n");
+        pick_ubo = gpu::create_buffer(gpu_dev, nullptr, sizeof(PickParamsGPU), gpu::Usage::Uniform);
+    }
 
     // Mesh VAO
     glGenVertexArrays(1, &vao);
@@ -758,23 +776,59 @@ void Renderer::init() {
         crosshair_ubo = gpu::create_buffer(gpu_dev, nullptr, sizeof(CrosshairParamsGPU), gpu::Usage::Uniform);
     }
 
-    // Screen buffer MRT shader
-    screen_buf_program = link_program(
-        compile_shader(GL_VERTEX_SHADER, screen_buf_vert_src),
-        compile_shader(GL_FRAGMENT_SHADER, screen_buf_frag_src)
-    );
+    // Screen-buffer MRT pipeline — on the gpu:: seam. Four tightly-packed vertex
+    // buffers (pos/norm/triid/bary at slots 0-3) + a view/proj UBO; writes all four
+    // MRT attachments. The offscreen target itself is created lazily (window size).
+    {
+        gpu::VertexAttr attrs[] = {
+            { 0, gpu::VertexFormat::F32x3, 0, 0 },  // aPos
+            { 1, gpu::VertexFormat::F32x3, 1, 0 },  // aNorm
+            { 2, gpu::VertexFormat::F32,   2, 0 },  // aTriID
+            { 3, gpu::VertexFormat::F32x2, 3, 0 },  // aBary
+        };
+        gpu::VertexSlot slots[] = {
+            { 3 * sizeof(float) }, { 3 * sizeof(float) },
+            { 1 * sizeof(float) }, { 2 * sizeof(float) },
+        };
+        gpu::BindEntry binds[] = {{ 63, gpu::Bind::Uniform, sizeof(ScreenParamsGPU) }};
+        gpu::RenderPipelineDesc d;
+        d.shaders.vert_glsl = screen_buf_vert_src;
+        d.shaders.frag_glsl = screen_buf_frag_src;
+        d.attrs = attrs; d.attr_count = 4;
+        d.slots = slots; d.slot_count = 4;
+        d.binds = binds; d.bind_count = 1;
+        d.topology = gpu::Topology::Triangles;
+        d.depth_test = true; d.depth_write = true; d.blend = false;
+        screen_pipeline = gpu::create_render_pipeline(gpu_dev, d);
+        if (!screen_pipeline.handle) std::fprintf(stderr, "[renderer] screen pipeline failed\n");
+        else std::printf("[renderer] screen pipeline compiled (gpu:: seam)\n");
+        screen_ubo = gpu::create_buffer(gpu_dev, nullptr, sizeof(ScreenParamsGPU), gpu::Usage::Uniform);
+    }
 
-    // Screen buffer VAO (expanded mesh, no index buffer)
-    glGenVertexArrays(1, &screen_vao);
+    // Flat triangle-soup vertex buffers (GL-owned; also SSBO targets for the expand
+    // kernel). Allocated/filled in upload_screen_mesh.
     glGenBuffers(1, &screen_vbo_pos);
     glGenBuffers(1, &screen_vbo_norm);
     glGenBuffers(1, &screen_vbo_triid);
     glGenBuffers(1, &screen_vbo_bary);
 
-    // Screen mesh expansion compute shader (indexed → flat triangle-soup)
-    screen_expand_program = compile_compute_program(screen_expand_src);
-    if (!screen_expand_program)
-        std::fprintf(stderr, "[renderer] screen_expand compute shader failed\n");
+    // Indexed→flat expansion — on the gpu:: compute seam. 5 storage bindings
+    // (0-4) + a tri_count Params UBO at binding 63.
+    {
+        gpu::BindEntry binds[] = {
+            { 0, gpu::Bind::StorageRead,      0 },  // in_pos
+            { 1, gpu::Bind::StorageRead,      0 },  // in_norm
+            { 2, gpu::Bind::StorageRead,      0 },  // in_idx
+            { 3, gpu::Bind::StorageReadWrite, 0 },  // out_pos
+            { 4, gpu::Bind::StorageReadWrite, 0 },  // out_norm
+            { 63, gpu::Bind::Uniform, sizeof(ScreenExpandParamsGPU) },
+        };
+        gpu::ShaderSources src; src.glsl = screen_expand_src;
+        screen_expand_pipeline = gpu::create_compute_pipeline(gpu_dev, src, binds, 6);
+        if (!screen_expand_pipeline.handle) std::fprintf(stderr, "[renderer] screen_expand pipeline failed\n");
+        else std::printf("[compute] screen_expand pipeline compiled (gpu:: seam)\n");
+        screen_expand_ubo = gpu::create_buffer(gpu_dev, nullptr, sizeof(ScreenExpandParamsGPU), gpu::Usage::Uniform);
+    }
 
     // Debug wireframe overlay — on the gpu:: seam. Lines pipeline reading mesh
     // positions (slot 0) with a std140 view/proj UBO; the edge index buffer is
@@ -1157,48 +1211,45 @@ void Renderer::draw_display(const Camera& cam, EntityGpu& g, int w, int h,
     gpu::release_bind_group(grp);
 }
 
-// ---- Entity-id pick pass (reuses the screen FBO) ----
+// ---- Entity-id pick pass (renders into the shared screen offscreen target) ----
 
 void Renderer::pick_begin(const Camera& cam, int w, int h) {
     create_screen_buffers(w, h);
-    glBindFramebuffer(GL_FRAMEBUFFER, screen_fbo);
-    glViewport(0, 0, w, h);
 
-    // Only attachment 0 (depth) and attachment 2 (id) are written by the pick
-    // frag. Map output location 2 → attachment 2, leave 1 and 3 disabled.
-    GLenum bufs[] = {GL_COLOR_ATTACHMENT0, GL_NONE, GL_COLOR_ATTACHMENT2, GL_NONE};
-    glDrawBuffers(4, bufs);
+    // Pick writes only depth (att 0) + id (att 2); attachments 1 (normal) and 3
+    // (bary) are disabled so the brush data there is left intact.
+    gpu::OffscreenPassDesc d;
+    d.color[0].enabled = true;  d.color[0].clear = true;  d.color[0].f[0] = 1000.0f; // linear depth
+    d.color[1].enabled = false;
+    d.color[2].enabled = true;  d.color[2].clear = true;  d.color[2].is_uint = true;  // id (0 = none)
+    d.color[3].enabled = false;
+    d.clear_depth = true;
+    pick_pass = gpu::begin_offscreen_pass(gpu_dev, screen_target, d);
+    gpu::set_pipeline(pick_pass, pick_pipeline);
 
-    float clear_depth = 1000.0f;
-    glClearBufferfv(GL_COLOR, 0, &clear_depth);
-    uint32_t clear_id = 0;            // 0 = no entity (ids start at 1)
-    glClearBufferuiv(GL_COLOR, 2, &clear_id);
-    glClear(GL_DEPTH_BUFFER_BIT);
+    // view/proj are constant across the pass; the per-entity id is written per draw.
+    PickParamsGPU p{};
+    cam.get_view_matrix(p.view);
+    cam.get_projection_matrix(p.proj, (float)w / (float)h);
+    gpu::write_buffer(gpu_dev, pick_ubo, 0,  p.view, sizeof p.view);
+    gpu::write_buffer(gpu_dev, pick_ubo, 64, p.proj, sizeof p.proj);
 
-    glEnable(GL_DEPTH_TEST);
-    glUseProgram(pick_program);
-
-    float view[16], proj[16];
-    cam.get_view_matrix(view);
-    cam.get_projection_matrix(proj, (float)w / (float)h);
-    glUniformMatrix4fv(glGetUniformLocation(pick_program, "uView"), 1, GL_FALSE, view);
-    glUniformMatrix4fv(glGetUniformLocation(pick_program, "uProj"), 1, GL_FALSE, proj);
+    gpu::BindBufferEntry be[] = {{ 63, &pick_ubo, sizeof(PickParamsGPU) }};
+    pick_bg = gpu::create_bind_group(gpu_dev, pick_pipeline, be, 1);
+    gpu::set_bind_group(pick_pass, pick_pipeline, pick_bg);
 }
 
-void Renderer::pick_draw(uint32_t entity_id, GLuint vao, uint32_t index_count) {
-    if (!vao || index_count == 0) return;
-    glUniform1ui(glGetUniformLocation(pick_program, "uEntityId"), entity_id);
-    glBindVertexArray(vao);
-    glDrawElements(GL_TRIANGLES, index_count, GL_UNSIGNED_INT, nullptr);
-    glBindVertexArray(0);
+void Renderer::pick_draw(uint32_t entity_id, GLuint pos_vbo, GLuint ebo_, uint32_t index_count) {
+    if (!pos_vbo || index_count == 0) return;
+    gpu::write_buffer(gpu_dev, pick_ubo, 128, &entity_id, sizeof entity_id);
+    gpu::set_vertex_buffer(pick_pass, 0, buf_view(pos_vbo));
+    gpu::set_index_buffer(pick_pass, buf_view(ebo_));
+    gpu::draw_indexed(pick_pass, index_count);
 }
 
 void Renderer::pick_end() {
-    // Restore the screen FBO's full MRT draw-buffer layout for the brush pass.
-    GLenum bufs[] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1,
-                     GL_COLOR_ATTACHMENT2, GL_COLOR_ATTACHMENT3};
-    glDrawBuffers(4, bufs);
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    gpu::end_render_pass(pick_pass);   // rebinds the default framebuffer
+    gpu::release_bind_group(pick_bg);
 }
 
 void Renderer::read_id_region(int x, int y, int w, int h, uint32_t* out) {
@@ -1310,87 +1361,19 @@ void Renderer::draw_cursor(const Camera& cam, float cx, float cy, float radius,
 // ---- Screen Buffer FBO ----
 
 void Renderer::create_screen_buffers(int w, int h) {
-    if (screen_fbo) {
-        // Already created, just resize
+    if (screen_target.color_count) {   // already created → just resize
         resize_screen_buffers(w, h);
         return;
     }
-
-    screen_buf_w = w;
-    screen_buf_h = h;
-
-    glGenFramebuffers(1, &screen_fbo);
-    glBindFramebuffer(GL_FRAMEBUFFER, screen_fbo);
-
-    // Attachment 0: linear depth (R32F)
-    glGenTextures(1, &screen_depth_tex);
-    glBindTexture(GL_TEXTURE_2D, screen_depth_tex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, w, h, 0, GL_RED, GL_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, screen_depth_tex, 0);
-
-    // Attachment 1: view-space normals (RGB16F)
-    glGenTextures(1, &screen_normal_tex);
-    glBindTexture(GL_TEXTURE_2D, screen_normal_tex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, w, h, 0, GL_RGB, GL_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, screen_normal_tex, 0);
-
-    // Attachment 2: triangle ID (R32UI)
-    glGenTextures(1, &screen_triid_tex);
-    glBindTexture(GL_TEXTURE_2D, screen_triid_tex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_R32UI, w, h, 0, GL_RED_INTEGER, GL_UNSIGNED_INT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT2, GL_TEXTURE_2D, screen_triid_tex, 0);
-
-    // Attachment 3: barycentrics (RG16F)
-    glGenTextures(1, &screen_bary_tex);
-    glBindTexture(GL_TEXTURE_2D, screen_bary_tex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RG16F, w, h, 0, GL_RG, GL_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT3, GL_TEXTURE_2D, screen_bary_tex, 0);
-
-    // Depth/stencil renderbuffer for actual z-testing
-    glGenRenderbuffers(1, &screen_depth_rbo);
-    glBindRenderbuffer(GL_RENDERBUFFER, screen_depth_rbo);
-    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w, h);
-    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, screen_depth_rbo);
-
-    GLenum draw_bufs[] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1,
-                          GL_COLOR_ATTACHMENT2, GL_COLOR_ATTACHMENT3};
-    glDrawBuffers(4, draw_bufs);
-
-    GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-    if (status != GL_FRAMEBUFFER_COMPLETE) {
-        std::fprintf(stderr, "Screen FBO incomplete: 0x%x\n", status);
-    }
-
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    // Attachments: 0 linear depth (R32F), 1 world normal (RGB16F), 2 triangle id
+    // (R32UI), 3 barycentrics (RG16F) + a depth/stencil RBO for z-test.
+    gpu::TexFormat fmts[] = { gpu::TexFormat::R32F, gpu::TexFormat::RGB16F,
+                              gpu::TexFormat::R32UI, gpu::TexFormat::RG16F };
+    screen_target = gpu::create_offscreen_target(gpu_dev, w, h, fmts, 4);
 }
 
 void Renderer::resize_screen_buffers(int w, int h) {
-    if (w == screen_buf_w && h == screen_buf_h) return;
-    screen_buf_w = w;
-    screen_buf_h = h;
-
-    glBindTexture(GL_TEXTURE_2D, screen_depth_tex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, w, h, 0, GL_RED, GL_FLOAT, nullptr);
-
-    glBindTexture(GL_TEXTURE_2D, screen_normal_tex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, w, h, 0, GL_RGB, GL_FLOAT, nullptr);
-
-    glBindTexture(GL_TEXTURE_2D, screen_triid_tex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_R32UI, w, h, 0, GL_RED_INTEGER, GL_UNSIGNED_INT, nullptr);
-
-    glBindTexture(GL_TEXTURE_2D, screen_bary_tex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RG16F, w, h, 0, GL_RG, GL_FLOAT, nullptr);
-
-    glBindRenderbuffer(GL_RENDERBUFFER, screen_depth_rbo);
-    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w, h);
+    gpu::resize_offscreen_target(gpu_dev, screen_target, w, h);
 }
 
 void Renderer::upload_screen_mesh(const Mesh& mesh) {
@@ -1398,20 +1381,13 @@ void Renderer::upload_screen_mesh(const Mesh& mesh) {
     screen_tri_count = tc;
     uint32_t flat_vc = tc * 3;
 
-    // Allocate pos/norm buffers (compute shader will fill them)
-    glBindVertexArray(screen_vao);
-
+    // pos/norm are filled by the expand compute; allocate them empty.
     glBindBuffer(GL_ARRAY_BUFFER, screen_vbo_pos);
     glBufferData(GL_ARRAY_BUFFER, (size_t)flat_vc * 3 * sizeof(float), nullptr, GL_DYNAMIC_DRAW);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, nullptr);
-
     glBindBuffer(GL_ARRAY_BUFFER, screen_vbo_norm);
     glBufferData(GL_ARRAY_BUFFER, (size_t)flat_vc * 3 * sizeof(float), nullptr, GL_DYNAMIC_DRAW);
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 0, nullptr);
 
-    // Triid and bary are static per topology — build on CPU
+    // Triid and bary are static per topology — build on CPU.
     std::vector<float> triid(flat_vc);
     std::vector<float> bary(flat_vc * 2);
     for (uint32_t t = 0; t < tc; t++) {
@@ -1421,20 +1397,13 @@ void Renderer::upload_screen_mesh(const Mesh& mesh) {
         bary[(base+1)*2+0] = 0.0f; bary[(base+1)*2+1] = 1.0f;
         bary[(base+2)*2+0] = 0.0f; bary[(base+2)*2+1] = 0.0f;
     }
-
     glBindBuffer(GL_ARRAY_BUFFER, screen_vbo_triid);
     glBufferData(GL_ARRAY_BUFFER, triid.size()*sizeof(float), triid.data(), GL_STATIC_DRAW);
-    glEnableVertexAttribArray(2);
-    glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, 0, nullptr);
-
     glBindBuffer(GL_ARRAY_BUFFER, screen_vbo_bary);
     glBufferData(GL_ARRAY_BUFFER, bary.size()*sizeof(float), bary.data(), GL_STATIC_DRAW);
-    glEnableVertexAttribArray(3);
-    glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
 
-    glBindVertexArray(0);
-
-    // Fill positions/normals via GPU expansion
+    // Fill positions/normals via GPU expansion.
     update_screen_mesh_gpu();
 }
 
@@ -1444,85 +1413,76 @@ void Renderer::update_screen_positions(const Mesh& mesh) {
 }
 
 void Renderer::update_screen_mesh_gpu() {
-    if (!screen_expand_program || screen_tri_count == 0) return;
+    if (!screen_expand_pipeline.handle || screen_tri_count == 0) return;
 
-    glUseProgram(screen_expand_program);
-    glUniform1ui(glGetUniformLocation(screen_expand_program, "tri_count"), screen_tri_count);
+    ScreenExpandParamsGPU p{}; p.tri_count = screen_tri_count;
+    gpu::write_buffer(gpu_dev, screen_expand_ubo, 0, &p, sizeof p);
 
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, vbo_pos);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, vbo_norm);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, ebo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, screen_vbo_pos);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 4, screen_vbo_norm);
+    // GL-owned src/dst buffers wrapped as transient views at dispatch (same staged
+    // pattern as the brush kernels). 0-2 read (mesh pos/norm/idx), 3-4 written
+    // (flat soup pos/norm), 63 = tri_count UBO.
+    gpu::Buffer in_pos  = buf_view(vbo_pos);
+    gpu::Buffer in_norm = buf_view(vbo_norm);
+    gpu::Buffer in_idx  = buf_view(ebo);
+    gpu::Buffer out_pos = buf_view(screen_vbo_pos);
+    gpu::Buffer out_norm = buf_view(screen_vbo_norm);
+    gpu::BindBufferEntry be[] = {
+        { 0, &in_pos, 0 }, { 1, &in_norm, 0 }, { 2, &in_idx, 0 },
+        { 3, &out_pos, 0 }, { 4, &out_norm, 0 },
+        { 63, &screen_expand_ubo, sizeof(ScreenExpandParamsGPU) },
+    };
+    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, screen_expand_pipeline, be, 6);
 
+    gpu::ComputeBatch batch = gpu::begin_compute(gpu_dev);
     uint32_t groups = (screen_tri_count + 63) / 64;
-    glDispatchCompute(groups, 1, 1);
-    glMemoryBarrier(GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT);
-
-    glUseProgram(0);
+    gpu::dispatch(batch, screen_expand_pipeline, grp, groups);
+    gpu::submit(batch);   // issues the vertex-attrib + buffer-update barriers
+    gpu::release_bind_group(grp);
 }
 
 void Renderer::render_screen_buffers(const Camera& cam, int w, int h) {
     create_screen_buffers(w, h);
 
-    glBindFramebuffer(GL_FRAMEBUFFER, screen_fbo);
-    glViewport(0, 0, w, h);
+    // Clear: depth→max, normal→0, triid→0xFFFFFFFF (no triangle), bary→0.
+    gpu::OffscreenPassDesc d;
+    d.color[0].clear = true; d.color[0].f[0] = 1000.0f;
+    d.color[1].clear = true;
+    d.color[2].clear = true; d.color[2].is_uint = true; d.color[2].u[0] = 0xFFFFFFFFu;
+    d.color[3].clear = true;
+    d.clear_depth = true;
+    gpu::RenderPass rp = gpu::begin_offscreen_pass(gpu_dev, screen_target, d);
+    gpu::set_pipeline(rp, screen_pipeline);
 
-    // Clear: depth to max, triid to 0xFFFFFFFF (no triangle), bary to 0
-    float clear_depth = 1000.0f;
-    glClearBufferfv(GL_COLOR, 0, &clear_depth);
-    float clear_normal[] = {0, 0, 0, 0};
-    glClearBufferfv(GL_COLOR, 1, clear_normal);
-    uint32_t clear_triid = 0xFFFFFFFF;
-    glClearBufferuiv(GL_COLOR, 2, &clear_triid);
-    float clear_bary[] = {0, 0};
-    glClearBufferfv(GL_COLOR, 3, clear_bary);
-    glClear(GL_DEPTH_BUFFER_BIT);
-
-    glEnable(GL_DEPTH_TEST);
-    glUseProgram(screen_buf_program);
-
-    float view[16], proj[16];
-    cam.get_view_matrix(view);
-    cam.get_projection_matrix(proj, (float)w / (float)h);
-
-    glUniformMatrix4fv(glGetUniformLocation(screen_buf_program, "uView"), 1, GL_FALSE, view);
-    glUniformMatrix4fv(glGetUniformLocation(screen_buf_program, "uProj"), 1, GL_FALSE, proj);
-
-    glBindVertexArray(screen_vao);
-    glDrawArrays(GL_TRIANGLES, 0, screen_tri_count * 3);
-    glBindVertexArray(0);
-
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    glViewport(0, 0, w, h);
+    ScreenParamsGPU p;
+    cam.get_view_matrix(p.view);
+    cam.get_projection_matrix(p.proj, (float)w / (float)h);
+    gpu::write_buffer(gpu_dev, screen_ubo, 0, &p, sizeof p);
+    gpu::BindBufferEntry be[] = {{ 63, &screen_ubo, sizeof(ScreenParamsGPU) }};
+    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, screen_pipeline, be, 1);
+    gpu::set_bind_group(rp, screen_pipeline, grp);
+    gpu::set_vertex_buffer(rp, 0, buf_view(screen_vbo_pos));
+    gpu::set_vertex_buffer(rp, 1, buf_view(screen_vbo_norm));
+    gpu::set_vertex_buffer(rp, 2, buf_view(screen_vbo_triid));
+    gpu::set_vertex_buffer(rp, 3, buf_view(screen_vbo_bary));
+    gpu::draw(rp, screen_tri_count * 3);
+    gpu::end_render_pass(rp);   // rebinds the default framebuffer
+    gpu::release_bind_group(grp);
 }
 
 void Renderer::read_depth_region(int x, int y, int w, int h, float* out) {
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, screen_fbo);
-    glReadBuffer(GL_COLOR_ATTACHMENT0);
-    glReadPixels(x, screen_buf_h - y - h, w, h, GL_RED, GL_FLOAT, out);
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+    gpu::read_target_region(gpu_dev, screen_target, 0, x, y, w, h, out);
 }
 
 void Renderer::read_normal_region(int x, int y, int w, int h, float* out) {
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, screen_fbo);
-    glReadBuffer(GL_COLOR_ATTACHMENT1);
-    glReadPixels(x, screen_buf_h - y - h, w, h, GL_RGB, GL_FLOAT, out);
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+    gpu::read_target_region(gpu_dev, screen_target, 1, x, y, w, h, out);
 }
 
 void Renderer::read_triid_region(int x, int y, int w, int h, uint32_t* out) {
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, screen_fbo);
-    glReadBuffer(GL_COLOR_ATTACHMENT2);
-    glReadPixels(x, screen_buf_h - y - h, w, h, GL_RED_INTEGER, GL_UNSIGNED_INT, out);
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+    gpu::read_target_region(gpu_dev, screen_target, 2, x, y, w, h, out);
 }
 
 void Renderer::read_bary_region(int x, int y, int w, int h, float* out) {
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, screen_fbo);
-    glReadBuffer(GL_COLOR_ATTACHMENT3);
-    glReadPixels(x, screen_buf_h - y - h, w, h, GL_RG, GL_FLOAT, out);
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+    gpu::read_target_region(gpu_dev, screen_target, 3, x, y, w, h, out);
 }
 
 void Renderer::draw_debug_mesh(const Camera& cam, const Mesh& mesh, int w, int h) {

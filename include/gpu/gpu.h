@@ -256,6 +256,7 @@ struct RenderPass {
     unsigned int vbuf[kMaxVertexAttrs] = {}; // vertex buffer per slot (set_vertex_buffer)
     unsigned int ibuf = 0;                   // index buffer (set_index_buffer)
     RenderPipeline* pipe = nullptr;          // current pipeline (set_pipeline)
+    bool offscreen = false;                  // begin_offscreen_pass → rebind fbo 0 at end
 #endif
 };
 RenderPass begin_render_pass(Device&, const RenderTarget&);
@@ -266,5 +267,63 @@ void set_index_buffer(RenderPass&, const Buffer&);                       // 32-b
 void draw(RenderPass&, uint32_t vertex_count, uint32_t first_vertex = 0);
 void draw_indexed(RenderPass&, uint32_t index_count);
 void end_render_pass(RenderPass&);
+
+// ---- Offscreen MRT render target + readback ----------------------------------
+// The brush screen-buffer pass and the entity-id pick pass render into an offscreen
+// multi-target FBO (linear depth / world normal / triangle-id / barycentrics) and
+// then read regions back to CPU at discrete points (pen-down, pick click). This is
+// the renderer's only readback path; the architecture forbids it mid-stroke.
+
+// Colour-attachment texel formats used by those targets.
+enum class TexFormat : uint32_t { R32F, RGB16F, RG16F, R32UI };
+
+static const uint32_t kMaxColorAttachments = 4;
+
+// A persistent offscreen target: up to kMaxColorAttachments colour textures (each
+// its own TexFormat) + a depth/stencil buffer for z-test. Created once, resized
+// with the window. (GL: an FBO + colour textures + a depth RBO. WebGPU: textures +
+// views, built at the web stage.)
+struct OffscreenTarget {
+    int width = 0, height = 0;
+    uint32_t color_count = 0;
+    TexFormat color_fmt[kMaxColorAttachments] = {};
+#if defined(CHISEL_BACKEND_GL)
+    unsigned int fbo = 0;
+    unsigned int color_tex[kMaxColorAttachments] = {};
+    unsigned int depth_rbo = 0;
+#elif defined(CHISEL_BACKEND_WEBGPU)
+    // (web stage)
+#endif
+};
+OffscreenTarget create_offscreen_target(Device&, int w, int h,
+                                        const TexFormat* fmts, uint32_t color_count);
+void resize_offscreen_target(Device&, OffscreenTarget&, int w, int h);
+void release_offscreen_target(OffscreenTarget&);
+
+// Per-attachment op at offscreen-pass begin. `enabled` = the attachment is written
+// this pass (the pick pass writes only depth+id; GL maps the rest to GL_NONE).
+// `clear` = clear it first; `is_uint` selects u[] (R32UI id buffers) over f[].
+struct ColorOp {
+    bool enabled = true;
+    bool clear   = false;
+    bool is_uint = false;
+    float    f[4] = {0, 0, 0, 0};
+    uint32_t u[4] = {0, 0, 0, 0};
+};
+struct OffscreenPassDesc {
+    ColorOp color[kMaxColorAttachments];
+    bool clear_depth = false;
+};
+// Begin a render pass into an offscreen target (binds the FBO, sets the draw-buffer
+// mask, applies the per-attachment clears + the viewport). Draw with the same
+// set_pipeline/set_vertex_buffer/draw ops; end_render_pass rebinds the default FBO.
+RenderPass begin_offscreen_pass(Device&, OffscreenTarget&, const OffscreenPassDesc&);
+
+// Read a w×h region of colour `attachment` back to `out` (pixel layout implied by
+// that attachment's TexFormat). `y` is top-left origin (flipped to GL internally).
+// Synchronous — legal only at the discrete readback points, never mid-stroke.
+// (GL: glReadBuffer+glReadPixels. WebGPU: copyTextureToBuffer + map, like map_read.)
+void read_target_region(Device&, OffscreenTarget&, uint32_t attachment,
+                        int x, int y, int w, int h, void* out);
 
 } // namespace gpu
