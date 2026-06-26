@@ -2,6 +2,21 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-26 — Fix: full-undo stale normals on the GPU-resident undo path
+
+- **Undoing a stroke fully via the GPU-resident undo ring left the stroke's boundary ring stale-shaded**
+  (positions correct, normals not refreshed). The fully-GPU `inplace_gpu_ring` arm in `UndoStack::apply`
+  (`src/undo.cpp`) recomputed normals for only the reverted verts (`e.verts`), but a moved vert also
+  shifts the face normals it shares with its un-moved neighbours — so those neighbours' vertex normals
+  need recomputing too. The live brush already handles this (`expand_dirty_to_affected` in `post_dab`
+  before `dispatch_compute_normals`); the undo arm took its early return without the expansion.
+- **Fix:** expand `e.verts` to the affected one-ring via `Mesh::expand_dirty_to_affected` before the
+  GPU `dispatch_compute_normals` on that path, matching the brush. The expansion reads only topology
+  (CSR adjacency + indices), so it is safe with `mesh.pos` intentionally stale on the GPU-resident path.
+  The CPU and `e.level == cur` GPU-apply arms were already correct (they fall through to
+  `recompute_normals_partial`, which expands and re-syncs the ring). GL build green; confirmed in-app
+  (a full undo now refreshes the stroke boundary's shading).
+
 ## 2026-06-25 — WebGPU port, buffer-ownership migration Step 5: SDF pool seam-owned (migration complete)
 
 - **The SDF voxel-merge scratch pool (`src/sdf.cpp`) is now seam-owned `gpu::Buffer`s** — the last
@@ -23,6 +38,19 @@ Short, chronological log of notable changes. Newest on top.
   should compile under `CHISEL_BACKEND_WEBGPU`. GL build green, `chisel-gl-compute-test` PASS (all five
   `sdf_*` kernels compile+link through the seam), app launches clean (no GL/FBO errors). In-app
   mirror-merge (R=128/R=256, MC + Surface Nets) re-confirm is user-driven.
+
+## 2026-06-25 — WebGPU port, buffer-ownership migration Step 4: remesh SSBOs seam-owned
+
+- **The full remesh SSBO set (`src/compute_remesh.cpp` / `compute_common.cpp`) is now seam-owned
+  `gpu::Buffer`s** (`Usage::Storage`) instead of raw `GLuint` — `ping` / `pong` / `norm` / `weights` /
+  `pinned` / `trisel` / `indices` / `core_sel` / `trisel_pong`, plus `seam_weld_map`. This was the last
+  raw-`GLuint` buffer owner outside the SDF pool (Step 5). `ensure_remesh_smooth_buffers` is grow-only
+  (`release_buffer` + `create_buffer`); `seam_weld_map` is folded into the vertex-count grow block.
+- **Bind groups point at the owned members directly** with their real sizes — every transient
+  `gpu::Buffer` view fabrication is gone, including the `{0, adjacency_*.handle}` size-0 views.
+  Raw-GL uploads/copies/readbacks stay via `.handle` (web-stage concern).
+- GL build green; behavior unchanged. In-app remesh A/B vs native (select + grow + mirror + smooth,
+  mirror on) is user-driven.
 
 ## 2026-06-25 — WebGPU port, buffer-ownership migration Step 3c: MultiresGPU residency pool seam-owned
 

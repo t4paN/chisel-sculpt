@@ -201,7 +201,18 @@ bool UndoStack::apply(UndoEntry& e, MeshEntity& ent, Scene& scene, bool forward)
                                   e.verts.data(), nullptr, (uint32_t)e.verts.size(),
                                   e.targets_base, c.undo_ring_ssbo.handle,
                                   (uint32_t)e.ring_offset, forward);
-        c.dispatch_compute_normals(e.verts.data(), (uint32_t)e.verts.size(),
+        // Normals must cover the one-ring of the reverted verts, not just the moved
+        // set: a moved vert changes the face normals it shares with its un-moved
+        // neighbours, so those neighbours' vertex normals shift too. The live brush
+        // expands via expand_dirty_to_affected before compute_normals (post_dab); this
+        // fully-GPU undo arm took the early return without that expansion, leaving the
+        // stroke's boundary ring stale-shaded after a full undo. Topology-only read, so
+        // it's safe with mesh.pos still stale on this path.
+        static std::vector<uint32_t> ring;
+        mesh.expand_dirty_to_affected(e.verts, ring);
+        const uint32_t* nrm_v = ring.empty() ? e.verts.data() : ring.data();
+        uint32_t        nrm_n = ring.empty() ? (uint32_t)e.verts.size() : (uint32_t)ring.size();
+        c.dispatch_compute_normals(nrm_v, nrm_n,
                                    r.vbo_pos.handle, r.vbo_norm.handle, r.ebo.handle);
         ent.multires_gpu.mark_cpu_dirty(e.verts);
         // Same frame-cache invalidation the in-place CPU path does below.
