@@ -2,6 +2,23 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-28 — Fix: smooth brush no longer pinches ridges/bumps (revert normal-projected apply)
+
+- **The interactive smooth brush apply was pinching any convex feature**, not just relaxing curvature.
+  Root cause: commit `0e4e365` (2026-06-23, "normal-projected smoothing with a mirror-seam region-blend")
+  replaced the uniform Laplacian apply with mean-curvature flow (Laplacian projected onto the inline
+  area-weighted vertex normal, faded back to the full Laplacian only inside a smoothstep band around
+  x=0). Mean-curvature flow pinches every convex bump by construction — the introducing commit itself
+  flagged "a faint raised ridge can still build up under prolonged smoothing"; that was the failure
+  mode, not a tuning issue.
+- **Fix:** restore the plain uniform Laplacian in `shaders/{glsl,wgsl}/smooth_apply.*` (matches the
+  pen-up autosmooth, which was already on it and is untouched). The mirror seam crease is still handled
+  by the per-iteration `smooth_mirror_apply` reflection added in `442cc77` — that is what actually keeps
+  x=0 from creasing; the normal projection was not load-bearing for it.
+- UBO shape kept at 16 bytes (tail slots renamed `_pad0/_pad1`) so the bind layout and `init_smooth`
+  don't move; only the kernel body and two stale dispatch lines changed. GL build green,
+  `chisel-gl-compute-test` PASS, confirmed in-app.
+
 ## 2026-06-26 — Fix: full-undo stale normals on the GPU-resident undo path
 
 - **Undoing a stroke fully via the GPU-resident undo ring left the stroke's boundary ring stale-shaded**

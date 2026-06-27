@@ -1,10 +1,10 @@
 // smooth_apply.wgsl
-// Port of src/compute_smooth.cpp (smooth_apply_src). Pass 2 of the smooth brush, run
-// once per iteration: a uniform Laplacian over each touched vertex's 1-ring, with the
-// tangential component stripped in the bulk (kills drift on irregular meshes) but
-// faded back inside the mirror seam band (keeps the x=0 seam from pinching). The
-// area-weighted vertex normal is accumulated inline from the same 1-ring walk.
-// (The original u_iteration uniform was unused and is dropped.) See CONVENTIONS.md.
+// Port of src/compute_smooth.cpp (smooth_apply). Pass 2 of the smooth brush, run once
+// per iteration: a uniform Laplacian over each touched vertex's 1-ring. The mirror
+// seam crease is handled by re-imposing the X reflection after every iteration in
+// dispatch_smooth (not by a normal projection in here — that variant pinched ridges/
+// bumps under prolonged smoothing). Tail UBO slots are padding kept for shape parity.
+// See CONVENTIONS.md.
 //
 // Bindings mirror the ComputeBinding enum in include/compute.h:
 //   0 positions (read_write)   2 indices (read)        3 accum (read)
@@ -14,8 +14,8 @@
 struct Params {
     vertex_count : u32,   // 0
     strength     : f32,   // 4
-    mirror_x     : u32,   // 8
-    seam_band    : f32,   // 12
+    _pad0        : u32,   // 8
+    _pad1        : u32,   // 12
 };
 
 @group(0) @binding(0)  var<storage, read_write> positions  : array<f32>;
@@ -43,10 +43,13 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
         return;
     }
 
-    let cur = vec3<f32>(positions[v*3u], positions[v*3u+1u], positions[v*3u+2u]);
+    let cur_x = positions[v * 3u];
+    let cur_y = positions[v * 3u + 1u];
+    let cur_z = positions[v * 3u + 2u];
 
-    var sum = vec3<f32>(0.0);
-    var nrm = vec3<f32>(0.0);   // area-weighted vertex normal, accumulated inline
+    var sum_x = 0.0;
+    var sum_y = 0.0;
+    var sum_z = 0.0;
     var count = 0.0;
 
     let start = adj_offset[v];
@@ -57,16 +60,19 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
         let i1 = indices[t * 3u + 1u];
         let i2 = indices[t * 3u + 2u];
 
-        let p0 = vec3<f32>(positions[i0*3u], positions[i0*3u+1u], positions[i0*3u+2u]);
-        let p1 = vec3<f32>(positions[i1*3u], positions[i1*3u+1u], positions[i1*3u+2u]);
-        let p2 = vec3<f32>(positions[i2*3u], positions[i2*3u+1u], positions[i2*3u+2u]);
-
-        // un-normalized cross = 2*area*unit_normal → area-weighted vertex normal
-        nrm = nrm + cross(p1 - p0, p2 - p0);
-
-        if (v == i0)      { sum = sum + p1 + p2; }
-        else if (v == i1) { sum = sum + p0 + p2; }
-        else              { sum = sum + p0 + p1; }
+        if (v == i0) {
+            sum_x = sum_x + positions[i1*3u]      + positions[i2*3u];
+            sum_y = sum_y + positions[i1*3u + 1u] + positions[i2*3u + 1u];
+            sum_z = sum_z + positions[i1*3u + 2u] + positions[i2*3u + 2u];
+        } else if (v == i1) {
+            sum_x = sum_x + positions[i0*3u]      + positions[i2*3u];
+            sum_y = sum_y + positions[i0*3u + 1u] + positions[i2*3u + 1u];
+            sum_z = sum_z + positions[i0*3u + 2u] + positions[i2*3u + 2u];
+        } else {
+            sum_x = sum_x + positions[i0*3u]      + positions[i1*3u];
+            sum_y = sum_y + positions[i0*3u + 1u] + positions[i1*3u + 1u];
+            sum_z = sum_z + positions[i0*3u + 2u] + positions[i1*3u + 2u];
+        }
         count = count + 2.0;
     }
 
@@ -74,21 +80,9 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
         return;
     }
 
-    var move = sum * (1.0 / count) - cur;
-
-    let nlen = length(nrm);
-    if (nlen > 1e-12) {
-        let n = nrm / nlen;
-        let move_n = dot(move, n) * n;
-        var t = 1.0;
-        if (P.mirror_x != 0u) {
-            t = smoothstep(0.0, P.seam_band, abs(cur.x));
-        }
-        move = mix(move, move_n, t);
-    }
-
+    let inv_c = 1.0 / count;
     let blend = w * P.strength * mscale;
-    positions[v*3u]      = positions[v*3u]      + move.x * blend;
-    positions[v*3u + 1u] = positions[v*3u + 1u] + move.y * blend;
-    positions[v*3u + 2u] = positions[v*3u + 2u] + move.z * blend;
+    positions[v*3u]      = positions[v*3u]      + (sum_x * inv_c - cur_x) * blend;
+    positions[v*3u + 1u] = positions[v*3u + 1u] + (sum_y * inv_c - cur_y) * blend;
+    positions[v*3u + 2u] = positions[v*3u + 2u] + (sum_z * inv_c - cur_z) * blend;
 }

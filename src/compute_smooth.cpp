@@ -7,8 +7,8 @@
 // ---------------------------------------------------------------------------
 // Smooth brush — ported onto the gpu:: seam (Seam Step 2b). Three buffer-only
 // kernels: smooth_accum (world-distance gate → accum.w + dirty list), smooth_apply
-// (normal-projected Laplacian, looped), smooth_mirror_apply (re-impose the X mirror
-// after each iteration). It is buffer-only — the triid/bary pick read is CPU-side
+// (uniform Laplacian, looped), smooth_mirror_apply (re-impose the X mirror after
+// each iteration to keep the seam from creasing). It is buffer-only — the triid/bary pick read is CPU-side
 // back-projection in brush.cpp, NOT a compute input — so it needs no texture-bind
 // seam work. Kernel logic lives in shaders/{glsl,wgsl}/smooth_*.* (embedded at build
 // time). accum / dirty / mirror-map / mask buffers stay GL-owned (wrapped in views at
@@ -26,7 +26,7 @@ static_assert(sizeof(SmoothAccumParamsGPU) == 32, "smooth accum Params UBO must 
 
 // 16-byte std140 block, byte-identical to smooth_apply.{comp,wgsl}'s Params.
 struct SmoothApplyParamsGPU {
-    uint32_t vertex_count; float strength; uint32_t mirror_x; float seam_band;
+    uint32_t vertex_count; float strength; uint32_t _pad0; uint32_t _pad1;
 };
 static_assert(sizeof(SmoothApplyParamsGPU) == 16, "smooth apply Params UBO must be 16 bytes");
 
@@ -294,15 +294,10 @@ void ComputeState::dispatch_smooth(const SmoothAccumParams& p,
         gpu::release_bind_group(grp);
     }
 
-    // ---- Pass 2: apply (normal-projected Laplacian), looped ----
-    // Region-blend seam band: within this distance of x=0 the kernel fades back to
-    // the full uniform Laplacian so the seam relaxes instead of pinching. Half the
-    // brush radius is a starting point; tune by feel.
+    // ---- Pass 2: apply (uniform Laplacian), looped ----
     SmoothApplyParamsGPU up = {};
     up.vertex_count = vc;
     up.strength = p.strength;
-    up.mirror_x = p.mirror_x ? 1u : 0u;
-    up.seam_band = p.world_radius * 0.5f;
     gpu::write_buffer(gpu_dev, smooth_apply_ubo, 0, &up, sizeof(up));
 
     gpu::Buffer idxView{  0,                                    index_ebo };
