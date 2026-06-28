@@ -52,6 +52,13 @@ struct Device {
 };
 #if defined(CHISEL_BACKEND_WEBGPU)
 Device device_from_webgpu(WGPUDevice, WGPUQueue);
+// Windowing code calls these once the surface is configured (and again on resize):
+// the swapchain colour format — swapchain render pipelines bake it as their colour
+// target, and the default render pass clears/loads it — and the default depth view
+// the default render pass attaches (every pass carries depth; see RenderPipelineDesc).
+void webgpu_set_surface_format(WGPUTextureFormat);
+void webgpu_set_default_depth(WGPUTextureView);
+WGPUTextureFormat webgpu_depth_format();   // the single depth format all passes use
 #elif defined(CHISEL_BACKEND_GL)
 Device gl_device();
 #endif
@@ -190,6 +197,8 @@ struct RenderShaderSources {
     const char* frag_glsl = nullptr;  // GL: #version 330 fragment stage
 };
 
+enum class TexFormat : uint32_t;  // defined with the offscreen-target section below
+
 struct RenderPipelineDesc {
     RenderShaderSources shaders;
     const VertexAttr* attrs = nullptr; uint32_t attr_count = 0;
@@ -199,6 +208,16 @@ struct RenderPipelineDesc {
     bool     depth_test  = false;
     bool     depth_write = false;
     bool     blend       = false;  // straight alpha: src_alpha / one_minus_src_alpha
+    // Colour-target format signature. WebGPU bakes the colour-attachment count +
+    // formats (and the depth format) into the pipeline, so a render pipeline is tied
+    // to the render-pass layout it draws into; GL ignores this (FBO compatibility is
+    // loose). Leave `color_targets` null for a SWAPCHAIN pipeline — the WebGPU backend
+    // then uses a single colour target = the surface format. An OFFSCREEN pipeline
+    // lists its target's formats here (must match the OffscreenTarget it draws into,
+    // in attachment order). The depth format is implicit (every pass carries depth).
+    // (Deferred from the render-seam port: "fold into RenderPipelineDesc at the web
+    // stage" — see webgpu-port-plan.md.)
+    const TexFormat* color_targets = nullptr; uint32_t color_target_count = 0;
 };
 
 struct RenderPipeline {
@@ -292,7 +311,12 @@ struct OffscreenTarget {
     unsigned int color_tex[kMaxColorAttachments] = {};
     unsigned int depth_rbo = 0;
 #elif defined(CHISEL_BACKEND_WEBGPU)
-    // (web stage)
+    WGPUTexture     color_tex[kMaxColorAttachments]  = {};
+    WGPUTextureView color_view[kMaxColorAttachments] = {};
+    WGPUTexture     depth_tex  = nullptr;            // RenderAttachment depth for z-test
+    WGPUTextureView depth_view = nullptr;
+    WGPUBuffer      readback   = nullptr;            // lazily grown staging for read_target_region
+    uint64_t        readback_size = 0;
 #endif
 };
 OffscreenTarget create_offscreen_target(Device&, int w, int h,

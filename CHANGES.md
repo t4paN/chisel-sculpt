@@ -2,6 +2,27 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-28 — WebGPU port: render-seam backend implemented (web target started)
+
+- **Started the web target (wgpu-native first).** The `gpu::` render seam now has a full WebGPU
+  backend (`src/gpu/webgpu_backend.cpp`), generalized from the proven `wgpu_window.cpp` probe: render
+  pipelines, the `RenderPipeline` bind-group overload, render passes (`begin/set_pipeline/set_bind_group/
+  set_vertex_buffer/set_index_buffer/draw/draw_indexed/end`), offscreen MRT targets (create/resize/
+  release/`begin_offscreen_pass`) and `read_target_region`. Model: encoder-per-pass, submit at
+  `end_render_pass`; passes after the first `Load` onto the per-frame surface view.
+- **Seam API extension (deferred web-stage item, now due):** `RenderPipelineDesc` gained a
+  colour-target format signature (`color_targets`/`color_target_count`) — null = a swapchain pipeline
+  (one colour target = surface format), else the offscreen `TexFormat` list. WebGPU bakes
+  colour+depth formats into each pipeline; GL ignores the new fields. The two offscreen pipelines
+  (pick, screen-buffer) in `renderer.cpp` now declare their 4 MRT formats.
+- **Backend reconciliations:** RGB16F → RGBA16Float (WebGPU has no 3-channel 16F); `read_target_region`
+  expands 16F readbacks half→float and strips the 256-byte row padding so the seam's readback contract
+  matches GL's (keeps `brush.cpp` back-projection unchanged). Windowing code injects the surface format
+  + default depth view via new `webgpu_set_*` setters.
+- Compiles clean under `CHISEL_BACKEND_WEBGPU` (`chisel-wgpu-window`) and the GL build + compute-test
+  stay green. **Not yet runtime-exercised** — nothing calls the render seam under webgpu until the full
+  app is wired to the backend (next: full-app webgpu build + window/surface bring-up).
+
 ## 2026-06-28 — Fix: smooth brush no longer pinches ridges/bumps (revert normal-projected apply)
 
 - **The interactive smooth brush apply was pinching any convex feature**, not just relaxing curvature.

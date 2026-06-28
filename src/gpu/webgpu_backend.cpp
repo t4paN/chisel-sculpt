@@ -192,4 +192,431 @@ void map_read(Device& dev, const Buffer& staging, uint64_t size, void* out) {
     }
 }
 
+// ============================ Render-side seam ============================
+// WebGPU impl of gpu.h's render primitives, generalized from the proven probe
+// (wgpu_window.cpp). Model: ENCODER-PER-PASS — begin_render_pass creates an encoder
+// + render pass; end_render_pass ends, finishes and submits it. A frame issues
+// several passes against the swapchain view (bg, matcap, cursor, …); all but the
+// first use loadOp=Load to accumulate. The windowing code acquires the surface view
+// into RenderTarget.color and presents (wgpuSurfacePresent) after the last pass.
+
+// Backend globals the windowing code injects (see gpu.h webgpu setters).
+static WGPUTextureFormat g_surface_format = WGPUTextureFormat_BGRA8Unorm;
+static WGPUTextureView   g_default_depth  = nullptr;
+static const WGPUTextureFormat kDepthFormat = WGPUTextureFormat_Depth24Plus;
+
+void webgpu_set_surface_format(WGPUTextureFormat f) { g_surface_format = f; }
+void webgpu_set_default_depth(WGPUTextureView v)    { g_default_depth = v; }
+WGPUTextureFormat webgpu_depth_format()             { return kDepthFormat; }
+
+static WGPUVertexFormat to_wgpu_vformat(VertexFormat f) {
+    switch (f) {
+        case VertexFormat::F32:       return WGPUVertexFormat_Float32;
+        case VertexFormat::F32x2:     return WGPUVertexFormat_Float32x2;
+        case VertexFormat::F32x3:     return WGPUVertexFormat_Float32x3;
+        case VertexFormat::F32x4:     return WGPUVertexFormat_Float32x4;
+        case VertexFormat::U8x4_norm: return WGPUVertexFormat_Unorm8x4;
+    }
+    return WGPUVertexFormat_Float32;
+}
+
+static WGPUPrimitiveTopology to_wgpu_topology(Topology t) {
+    switch (t) {
+        case Topology::Triangles:     return WGPUPrimitiveTopology_TriangleList;
+        case Topology::TriangleStrip: return WGPUPrimitiveTopology_TriangleStrip;
+        case Topology::Lines:         return WGPUPrimitiveTopology_LineList;
+        case Topology::Points:        return WGPUPrimitiveTopology_PointList;
+    }
+    return WGPUPrimitiveTopology_TriangleList;
+}
+
+// TexFormat -> WGPUTextureFormat. NOTE: WebGPU has no renderable 3-channel 16F, so
+// RGB16F (the GL world-normal attachment) maps to RGBA16Float (4ch) here; the extra
+// channel is padding. read_target_region reconciles the readback layout.
+static WGPUTextureFormat to_wgpu_texformat(TexFormat f) {
+    switch (f) {
+        case TexFormat::R32F:   return WGPUTextureFormat_R32Float;
+        case TexFormat::RGB16F: return WGPUTextureFormat_RGBA16Float;
+        case TexFormat::RG16F:  return WGPUTextureFormat_RG16Float;
+        case TexFormat::R32UI:  return WGPUTextureFormat_R32Uint;
+    }
+    return WGPUTextureFormat_R32Float;
+}
+
+RenderPipeline create_render_pipeline(Device& dev, const RenderPipelineDesc& d) {
+    RenderPipeline p;
+    if (!d.shaders.wgsl) { std::printf("[gpu] no WGSL source for render pipeline\n"); return p; }
+
+    WGPUShaderSourceWGSL wgsl = {};
+    wgsl.chain.sType = WGPUSType_ShaderSourceWGSL;
+    wgsl.code = sv(d.shaders.wgsl);
+    WGPUShaderModuleDescriptor smd = {};
+    smd.nextInChain = &wgsl.chain;
+    p.module = wgpuDeviceCreateShaderModule(dev.device, &smd);
+    if (!p.module) { std::printf("[gpu] render shader module failed\n"); return p; }
+
+    // UBO bind-group layout (render groups are UBO-only — see gpu.h texture note).
+    // Visible to both stages: some fragment shaders read the same Params block.
+    if (d.bind_count > 0) {
+        WGPUBindGroupLayoutEntry stackEnt[kMaxBindings] = {};
+        uint32_t n = d.bind_count < kMaxBindings ? d.bind_count : kMaxBindings;
+        for (uint32_t i = 0; i < n; ++i) {
+            stackEnt[i].binding = d.binds[i].binding;
+            stackEnt[i].visibility = WGPUShaderStage_Vertex | WGPUShaderStage_Fragment;
+            stackEnt[i].buffer.type = to_wgpu_bind(d.binds[i].type);
+            stackEnt[i].buffer.minBindingSize = d.binds[i].min_size;
+        }
+        WGPUBindGroupLayoutDescriptor bgld = {};
+        bgld.entryCount = n; bgld.entries = stackEnt;
+        p.bgl = wgpuDeviceCreateBindGroupLayout(dev.device, &bgld);
+        WGPUPipelineLayoutDescriptor pld = {};
+        pld.bindGroupLayoutCount = 1; pld.bindGroupLayouts = &p.bgl;
+        p.pl = wgpuDeviceCreatePipelineLayout(dev.device, &pld);
+    }
+
+    // Vertex buffer layouts: one WGPUVertexBufferLayout per slot, gathering the
+    // attributes whose .slot == that slot. Buffer index == slot (matches the seam's
+    // set_vertex_buffer(slot, ...) and the GL backend's slot model).
+    WGPUVertexAttribute   vattr[kMaxVertexAttrs] = {};
+    WGPUVertexBufferLayout vbl[kMaxVertexAttrs]  = {};
+    uint32_t slot_n = d.slot_count < kMaxVertexAttrs ? d.slot_count : kMaxVertexAttrs;
+    uint32_t attr_n = d.attr_count < kMaxVertexAttrs ? d.attr_count : kMaxVertexAttrs;
+    // attribute storage is laid out per slot; track each slot's count + base.
+    uint32_t slot_base[kMaxVertexAttrs] = {}, slot_cnt[kMaxVertexAttrs] = {};
+    uint32_t cursor = 0;
+    for (uint32_t s = 0; s < slot_n; ++s) {
+        slot_base[s] = cursor;
+        for (uint32_t i = 0; i < attr_n; ++i) {
+            if (d.attrs[i].slot != s) continue;
+            vattr[cursor].format = to_wgpu_vformat(d.attrs[i].format);
+            vattr[cursor].offset = d.attrs[i].offset;
+            vattr[cursor].shaderLocation = d.attrs[i].location;
+            ++cursor; ++slot_cnt[s];
+        }
+        vbl[s].arrayStride = d.slots[s].stride;
+        vbl[s].stepMode = WGPUVertexStepMode_Vertex;
+        vbl[s].attributeCount = slot_cnt[s];
+        vbl[s].attributes = &vattr[slot_base[s]];
+    }
+
+    // Colour targets: null color_targets => one swapchain target (surface format,
+    // honour blend); else the listed offscreen formats (data targets, no blend).
+    WGPUColorTargetState targets[kMaxColorAttachments] = {};
+    WGPUBlendState blend = {};
+    uint32_t tcount;
+    if (!d.color_targets || d.color_target_count == 0) {
+        tcount = 1;
+        targets[0].format = g_surface_format;
+        targets[0].writeMask = WGPUColorWriteMask_All;
+        if (d.blend) {
+            blend.color.operation = WGPUBlendOperation_Add;
+            blend.color.srcFactor = WGPUBlendFactor_SrcAlpha;
+            blend.color.dstFactor = WGPUBlendFactor_OneMinusSrcAlpha;
+            blend.alpha.operation = WGPUBlendOperation_Add;
+            blend.alpha.srcFactor = WGPUBlendFactor_One;
+            blend.alpha.dstFactor = WGPUBlendFactor_OneMinusSrcAlpha;
+            targets[0].blend = &blend;
+        }
+    } else {
+        tcount = d.color_target_count < kMaxColorAttachments ? d.color_target_count : kMaxColorAttachments;
+        for (uint32_t i = 0; i < tcount; ++i) {
+            targets[i].format = to_wgpu_texformat(d.color_targets[i]);
+            targets[i].writeMask = WGPUColorWriteMask_All;
+        }
+    }
+    WGPUFragmentState frag = {};
+    frag.module = p.module; frag.entryPoint = sv("fs_main");
+    frag.targetCount = tcount; frag.targets = targets;
+
+    // Every pass carries depth, so every pipeline declares the depth format.
+    // depth_test off => Always (no cull); depth_write maps directly.
+    WGPUDepthStencilState depth = {};
+    depth.format = kDepthFormat;
+    depth.depthWriteEnabled = d.depth_write ? WGPUOptionalBool_True : WGPUOptionalBool_False;
+    depth.depthCompare = d.depth_test ? WGPUCompareFunction_Less : WGPUCompareFunction_Always;
+    depth.stencilFront.compare = WGPUCompareFunction_Always;
+    depth.stencilBack.compare  = WGPUCompareFunction_Always;
+
+    WGPURenderPipelineDescriptor pd = {};
+    pd.layout = p.pl;  // null => auto layout (pipelines with no UBO)
+    pd.vertex.module = p.module; pd.vertex.entryPoint = sv("vs_main");
+    pd.vertex.bufferCount = slot_n; pd.vertex.buffers = vbl;
+    pd.primitive.topology = to_wgpu_topology(d.topology);
+    pd.primitive.frontFace = WGPUFrontFace_CCW;
+    pd.primitive.cullMode = WGPUCullMode_None;
+    pd.depthStencil = &depth;
+    pd.multisample.count = 1; pd.multisample.mask = 0xFFFFFFFFu;
+    pd.fragment = &frag;
+    p.handle = wgpuDeviceCreateRenderPipeline(dev.device, &pd);
+    if (!p.handle) std::printf("[gpu] render pipeline failed\n");
+    return p;
+}
+
+void release_render_pipeline(RenderPipeline& p) {
+    if (p.handle) { wgpuRenderPipelineRelease(p.handle); p.handle = nullptr; }
+    if (p.pl)     { wgpuPipelineLayoutRelease(p.pl);     p.pl     = nullptr; }
+    if (p.bgl)    { wgpuBindGroupLayoutRelease(p.bgl);   p.bgl    = nullptr; }
+    if (p.module) { wgpuShaderModuleRelease(p.module);   p.module = nullptr; }
+}
+
+BindGroup create_bind_group(Device& dev, RenderPipeline& pipe,
+                            const BindBufferEntry* entries, uint32_t n) {
+    BindGroup g;
+    WGPUBindGroupEntry stackEnt[kMaxBindings] = {};
+    uint32_t cnt = n < kMaxBindings ? n : kMaxBindings;
+    for (uint32_t i = 0; i < cnt; ++i) {
+        stackEnt[i].binding = entries[i].binding;
+        stackEnt[i].buffer  = entries[i].buffer->handle;
+        stackEnt[i].offset  = 0;
+        stackEnt[i].size    = entries[i].size;
+    }
+    WGPUBindGroupDescriptor bgd = {};
+    bgd.layout = pipe.bgl;
+    bgd.entryCount = cnt; bgd.entries = stackEnt;
+    g.handle = wgpuDeviceCreateBindGroup(dev.device, &bgd);
+    return g;
+}
+
+RenderPass begin_render_pass(Device& dev, const RenderTarget& t) {
+    RenderPass rp; rp.dev = &dev;
+    rp.enc = wgpuDeviceCreateCommandEncoder(dev.device, nullptr);
+
+    WGPURenderPassColorAttachment color = {};
+    color.view = t.color;
+    color.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
+    color.loadOp  = t.clear ? WGPULoadOp_Clear : WGPULoadOp_Load;
+    color.storeOp = WGPUStoreOp_Store;
+    color.clearValue = WGPUColor{ t.clear_color[0], t.clear_color[1],
+                                  t.clear_color[2], t.clear_color[3] };
+
+    // The first pass of a frame clears (target.clear) — clear depth there too; later
+    // passes Load both. The default depth view is injected by the windowing code.
+    WGPURenderPassDepthStencilAttachment depthAtt = {};
+    depthAtt.view = g_default_depth;
+    depthAtt.depthLoadOp  = t.clear ? WGPULoadOp_Clear : WGPULoadOp_Load;
+    depthAtt.depthStoreOp = WGPUStoreOp_Store;
+    depthAtt.depthClearValue = 1.0f;
+
+    WGPURenderPassDescriptor pd = {};
+    pd.colorAttachmentCount = 1; pd.colorAttachments = &color;
+    if (g_default_depth) pd.depthStencilAttachment = &depthAtt;
+    rp.pass = wgpuCommandEncoderBeginRenderPass(rp.enc, &pd);
+    return rp;
+}
+
+void set_pipeline(RenderPass& rp, RenderPipeline& pipe) {
+    wgpuRenderPassEncoderSetPipeline(rp.pass, pipe.handle);
+}
+
+void set_bind_group(RenderPass& rp, RenderPipeline&, BindGroup& g) {
+    wgpuRenderPassEncoderSetBindGroup(rp.pass, 0, g.handle, 0, nullptr);
+}
+
+void set_vertex_buffer(RenderPass& rp, uint32_t slot, const Buffer& b) {
+    wgpuRenderPassEncoderSetVertexBuffer(rp.pass, slot, b.handle, 0, WGPU_WHOLE_SIZE);
+}
+
+void set_index_buffer(RenderPass& rp, const Buffer& b) {
+    wgpuRenderPassEncoderSetIndexBuffer(rp.pass, b.handle, WGPUIndexFormat_Uint32, 0, WGPU_WHOLE_SIZE);
+}
+
+void draw(RenderPass& rp, uint32_t vertex_count, uint32_t first_vertex) {
+    wgpuRenderPassEncoderDraw(rp.pass, vertex_count, 1, first_vertex, 0);
+}
+
+void draw_indexed(RenderPass& rp, uint32_t index_count) {
+    wgpuRenderPassEncoderDrawIndexed(rp.pass, index_count, 1, 0, 0, 0);
+}
+
+void end_render_pass(RenderPass& rp) {
+    if (rp.pass) { wgpuRenderPassEncoderEnd(rp.pass); wgpuRenderPassEncoderRelease(rp.pass); rp.pass = nullptr; }
+    if (rp.enc) {
+        WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(rp.enc, nullptr);
+        wgpuQueueSubmit(rp.dev->queue, 1, &cmd);
+        wgpuCommandBufferRelease(cmd);
+        wgpuCommandEncoderRelease(rp.enc);
+        rp.enc = nullptr;
+    }
+}
+
+// ---- Offscreen MRT render target + readback ----------------------------------
+
+OffscreenTarget create_offscreen_target(Device& dev, int w, int h,
+                                        const TexFormat* fmts, uint32_t color_count) {
+    OffscreenTarget t;
+    t.width = w; t.height = h;
+    t.color_count = color_count < kMaxColorAttachments ? color_count : kMaxColorAttachments;
+    for (uint32_t i = 0; i < t.color_count; ++i) {
+        t.color_fmt[i] = fmts[i];
+        WGPUTextureDescriptor td = {};
+        td.usage = WGPUTextureUsage_RenderAttachment | WGPUTextureUsage_CopySrc;
+        td.dimension = WGPUTextureDimension_2D;
+        td.size = { (uint32_t)w, (uint32_t)h, 1 };
+        td.format = to_wgpu_texformat(fmts[i]);
+        td.mipLevelCount = 1; td.sampleCount = 1;
+        t.color_tex[i]  = wgpuDeviceCreateTexture(dev.device, &td);
+        t.color_view[i] = wgpuTextureCreateView(t.color_tex[i], nullptr);
+    }
+    WGPUTextureDescriptor zd = {};
+    zd.usage = WGPUTextureUsage_RenderAttachment;
+    zd.dimension = WGPUTextureDimension_2D;
+    zd.size = { (uint32_t)w, (uint32_t)h, 1 };
+    zd.format = kDepthFormat;
+    zd.mipLevelCount = 1; zd.sampleCount = 1;
+    t.depth_tex  = wgpuDeviceCreateTexture(dev.device, &zd);
+    t.depth_view = wgpuTextureCreateView(t.depth_tex, nullptr);
+    return t;
+}
+
+void resize_offscreen_target(Device& dev, OffscreenTarget& t, int w, int h) {
+    if (w == t.width && h == t.height) return;
+    TexFormat fmts[kMaxColorAttachments];
+    uint32_t cc = t.color_count;
+    for (uint32_t i = 0; i < cc; ++i) fmts[i] = t.color_fmt[i];
+    release_offscreen_target(t);
+    t = create_offscreen_target(dev, w, h, fmts, cc);
+}
+
+void release_offscreen_target(OffscreenTarget& t) {
+    for (uint32_t i = 0; i < t.color_count; ++i) {
+        if (t.color_view[i]) wgpuTextureViewRelease(t.color_view[i]);
+        if (t.color_tex[i])  wgpuTextureRelease(t.color_tex[i]);
+    }
+    if (t.depth_view) wgpuTextureViewRelease(t.depth_view);
+    if (t.depth_tex)  wgpuTextureRelease(t.depth_tex);
+    if (t.readback)   wgpuBufferRelease(t.readback);
+    t = OffscreenTarget();
+}
+
+RenderPass begin_offscreen_pass(Device& dev, OffscreenTarget& t, const OffscreenPassDesc& d) {
+    RenderPass rp; rp.dev = &dev;
+    rp.enc = wgpuDeviceCreateCommandEncoder(dev.device, nullptr);
+
+    // All attachments are always provided (the bound pipeline declares them all);
+    // ColorOp.enabled/clear drives loadOp + the clear value. is_uint selects the
+    // integer clear (R32UI id buffers). storeOp=Store preserves unwritten ones.
+    WGPURenderPassColorAttachment att[kMaxColorAttachments] = {};
+    for (uint32_t i = 0; i < t.color_count; ++i) {
+        const ColorOp& c = d.color[i];
+        att[i].view = t.color_view[i];
+        att[i].depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
+        att[i].loadOp  = c.clear ? WGPULoadOp_Clear : WGPULoadOp_Load;
+        att[i].storeOp = WGPUStoreOp_Store;
+        if (c.is_uint) att[i].clearValue = WGPUColor{ (double)c.u[0], (double)c.u[1], (double)c.u[2], (double)c.u[3] };
+        else           att[i].clearValue = WGPUColor{ c.f[0], c.f[1], c.f[2], c.f[3] };
+    }
+    WGPURenderPassDepthStencilAttachment z = {};
+    z.view = t.depth_view;
+    z.depthLoadOp  = d.clear_depth ? WGPULoadOp_Clear : WGPULoadOp_Load;
+    z.depthStoreOp = WGPUStoreOp_Store;
+    z.depthClearValue = 1.0f;
+
+    WGPURenderPassDescriptor pd = {};
+    pd.colorAttachmentCount = t.color_count; pd.colorAttachments = att;
+    pd.depthStencilAttachment = &z;
+    rp.pass = wgpuCommandEncoderBeginRenderPass(rp.enc, &pd);
+    return rp;
+}
+
+// half (IEEE 754 binary16) -> float, for the 16F readback expansion below.
+static float half_to_float(uint16_t h) {
+    uint32_t sign = (uint32_t)(h & 0x8000) << 16;
+    uint32_t exp  = (h >> 10) & 0x1F;
+    uint32_t mant = h & 0x3FF;
+    uint32_t bits;
+    if (exp == 0) {
+        if (mant == 0) { bits = sign; }
+        else { // subnormal
+            exp = 127 - 15 + 1;
+            while ((mant & 0x400) == 0) { mant <<= 1; --exp; }
+            mant &= 0x3FF;
+            bits = sign | (exp << 23) | (mant << 13);
+        }
+    } else if (exp == 0x1F) {
+        bits = sign | 0x7F800000u | (mant << 13);  // inf/nan
+    } else {
+        bits = sign | ((exp - 15 + 127) << 23) | (mant << 13);
+    }
+    float f; std::memcpy(&f, &bits, 4); return f;
+}
+
+// Format readback descriptor: bytes-per-texel in the WGPU texture, and how to
+// reconcile to the GL readback contract the callers expect.
+static void texformat_readback(TexFormat f, uint32_t& wgpu_bpt, uint32_t& halfs,
+                               uint32_t& out_bpt) {
+    switch (f) {
+        // GL reads RGB16F as GL_RGB/GL_FLOAT (3 floats); WGPU stores RGBA16Float (4
+        // halfs). Expand the first 3 halfs -> 3 floats.
+        case TexFormat::RGB16F: wgpu_bpt = 8; halfs = 3; out_bpt = 12; break;
+        // GL reads RG16F as GL_RG/GL_FLOAT (2 floats); WGPU stores 2 halfs.
+        case TexFormat::RG16F:  wgpu_bpt = 4; halfs = 2; out_bpt = 8;  break;
+        case TexFormat::R32F:   wgpu_bpt = 4; halfs = 0; out_bpt = 4;  break;
+        case TexFormat::R32UI:  wgpu_bpt = 4; halfs = 0; out_bpt = 4;  break;
+        default:                wgpu_bpt = 4; halfs = 0; out_bpt = 4;  break;
+    }
+}
+
+void read_target_region(Device& dev, OffscreenTarget& t, uint32_t attachment,
+                        int x, int y, int w, int h, void* out) {
+    uint32_t wgpu_bpt, halfs, out_bpt;
+    texformat_readback(t.color_fmt[attachment], wgpu_bpt, halfs, out_bpt);
+
+    // copyTextureToBuffer requires bytesPerRow a multiple of 256.
+    uint32_t row_bytes = (uint32_t)w * wgpu_bpt;
+    uint32_t padded_row = (row_bytes + 255u) & ~255u;
+    uint64_t staging_size = (uint64_t)padded_row * h;
+    if (t.readback_size < staging_size) {
+        if (t.readback) wgpuBufferRelease(t.readback);
+        WGPUBufferDescriptor bd = {};
+        bd.usage = WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst;
+        bd.size = staging_size;
+        t.readback = wgpuDeviceCreateBuffer(dev.device, &bd);
+        t.readback_size = staging_size;
+    }
+
+    WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(dev.device, nullptr);
+    WGPUTexelCopyTextureInfo src = {};
+    src.texture = t.color_tex[attachment]; src.mipLevel = 0;
+    src.origin = { (uint32_t)x, (uint32_t)y, 0 };  // gpu.h: y is top-left (WGPU origin too)
+    src.aspect = WGPUTextureAspect_All;
+    WGPUTexelCopyBufferInfo dst = {};
+    dst.buffer = t.readback;
+    dst.layout.offset = 0; dst.layout.bytesPerRow = padded_row; dst.layout.rowsPerImage = h;
+    WGPUExtent3D ext = { (uint32_t)w, (uint32_t)h, 1 };
+    wgpuCommandEncoderCopyTextureToBuffer(enc, &src, &dst, &ext);
+    WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(enc, nullptr);
+    wgpuQueueSubmit(dev.queue, 1, &cmd);
+    wgpuCommandBufferRelease(cmd);
+    wgpuCommandEncoderRelease(enc);
+
+    // map the (padded) staging, then compact rows into `out` (out has no row padding,
+    // and 16F formats expand half->float to match GL's float readback).
+    MapState ms;
+    WGPUBufferMapCallbackInfo mcb = {};
+    mcb.mode = WGPUCallbackMode_AllowProcessEvents;
+    mcb.callback = onMap; mcb.userdata1 = &ms;
+    wgpuBufferMapAsync(t.readback, WGPUMapMode_Read, 0, staging_size, mcb);
+    while (!ms.done) wgpuDevicePoll(dev.device, true, nullptr);
+    if (ms.status != WGPUMapAsyncStatus_Success) {
+        std::memset(out, 0, (size_t)out_bpt * w * h);
+        wgpuBufferUnmap(t.readback);
+        return;
+    }
+    const uint8_t* mapped = (const uint8_t*)wgpuBufferGetMappedRange(t.readback, 0, staging_size);
+    uint8_t* o = (uint8_t*)out;
+    for (int row = 0; row < h; ++row) {
+        const uint8_t* srow = mapped + (size_t)row * padded_row;
+        if (halfs == 0) {
+            std::memcpy(o + (size_t)row * w * out_bpt, srow, (size_t)w * out_bpt);
+        } else {
+            float* of = (float*)(o + (size_t)row * w * out_bpt);
+            for (int px = 0; px < w; ++px) {
+                const uint16_t* sh = (const uint16_t*)(srow + (size_t)px * wgpu_bpt);
+                for (uint32_t c = 0; c < halfs; ++c) of[px * halfs + c] = half_to_float(sh[c]);
+            }
+        }
+    }
+    wgpuBufferUnmap(t.readback);
+}
+
 } // namespace gpu

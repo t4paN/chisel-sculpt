@@ -681,6 +681,13 @@ void Renderer::init() {
         d.binds = binds; d.bind_count = 1;
         d.topology = gpu::Topology::Triangles;
         d.depth_test = true; d.depth_write = true; d.blend = false;
+        // Offscreen MRT signature: same 4 attachments as the screen target it draws
+        // into (it only writes depth@0 + id@2, but WebGPU pipelines must match the
+        // pass's full attachment set). GL ignores these.
+        static const gpu::TexFormat pick_targets[] = {
+            gpu::TexFormat::R32F, gpu::TexFormat::RGB16F,
+            gpu::TexFormat::R32UI, gpu::TexFormat::RG16F };
+        d.color_targets = pick_targets; d.color_target_count = 4;
         pick_pipeline = gpu::create_render_pipeline(gpu_dev, d);
         if (!pick_pipeline.handle) std::fprintf(stderr, "[renderer] pick pipeline failed\n");
         else std::printf("[renderer] pick pipeline compiled (gpu:: seam)\n");
@@ -805,6 +812,11 @@ void Renderer::init() {
         d.binds = binds; d.bind_count = 1;
         d.topology = gpu::Topology::Triangles;
         d.depth_test = true; d.depth_write = true; d.blend = false;
+        // Offscreen MRT signature: writes all four attachments of the screen target.
+        static const gpu::TexFormat screen_targets[] = {
+            gpu::TexFormat::R32F, gpu::TexFormat::RGB16F,
+            gpu::TexFormat::R32UI, gpu::TexFormat::RG16F };
+        d.color_targets = screen_targets; d.color_target_count = 4;
         screen_pipeline = gpu::create_render_pipeline(gpu_dev, d);
         if (!screen_pipeline.handle) std::fprintf(stderr, "[renderer] screen pipeline failed\n");
         else std::printf("[renderer] screen pipeline compiled (gpu:: seam)\n");
