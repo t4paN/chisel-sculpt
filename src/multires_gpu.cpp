@@ -101,10 +101,7 @@ void MultiresGPU::upload_level(const MultiresStack& stack, int abs_level) {
     {
         static std::vector<float> chk;
         chk.resize((size_t)vc * 3);
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, disp_ssbo.handle);
-        glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
-                           (GLsizeiptr)vc * 3 * sizeof(float), chk.data());
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+        gpu::read_buffer(*dev, disp_ssbo, 0, (uint64_t)vc * 3 * sizeof(float), chk.data());
         double maxe = 0.0;
         for (uint32_t v = 0; v < vc; v++) {
             maxe = std::max(maxe, (double)std::fabs(chk[v*3+0] - stack.disp[k][v].x));
@@ -146,13 +143,12 @@ void MultiresGPU::upload_disp_partial(const MultiresStack& stack, int abs_level,
     }
 }
 
-void MultiresGPU::snapshot_positions(GLuint pos_vbo, uint32_t vertex_count) {
+void MultiresGPU::snapshot_positions(const gpu::Buffer& pos_vbo, uint32_t vertex_count) {
     if (!supported || !dev || vertex_count == 0) return;
 
     // Lazy grow-only resize (seam-owned), then a GPU→GPU copy of the active entity's
-    // working VBO range. Mirrors ComputeState::snapshot_stroke_normals. The copy is a
-    // buffer→buffer move with no seam primitive yet, so it stays raw GL via .handle
-    // (web-stage concern).
+    // working VBO range through the seam copy primitive. Mirrors
+    // ComputeState::snapshot_stroke_normals.
     if (snap_pos_capacity < vertex_count || !snap_pos_ssbo.handle) {
         gpu::release_buffer(snap_pos_ssbo);
         snap_pos_ssbo = gpu::create_buffer(*dev, nullptr,
@@ -160,12 +156,8 @@ void MultiresGPU::snapshot_positions(GLuint pos_vbo, uint32_t vertex_count) {
         snap_pos_capacity = vertex_count;
     }
 
-    GLsizeiptr byte_size = (GLsizeiptr)vertex_count * 3 * sizeof(float);
-    glBindBuffer(GL_COPY_READ_BUFFER,  pos_vbo);
-    glBindBuffer(GL_COPY_WRITE_BUFFER, snap_pos_ssbo.handle);
-    glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, 0, 0, byte_size);
-    glBindBuffer(GL_COPY_READ_BUFFER,  0);
-    glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
+    gpu::copy_buffer(*dev, pos_vbo, 0, snap_pos_ssbo, 0,
+                     (uint64_t)vertex_count * 3 * sizeof(float));
 }
 
 void MultiresGPU::mark_cpu_dirty(const std::vector<uint32_t>& verts) {
@@ -174,7 +166,7 @@ void MultiresGPU::mark_cpu_dirty(const std::vector<uint32_t>& verts) {
     dirty_verts.insert(dirty_verts.end(), verts.begin(), verts.end());
 }
 
-void MultiresGPU::materialize_cpu(MultiresStack& stack, Mesh& mesh, GLuint vbo_pos) {
+void MultiresGPU::materialize_cpu(MultiresStack& stack, Mesh& mesh, const gpu::Buffer& vbo_pos) {
     if (!supported || !cpu_dirty) return;
 
     // Inverse of upload_disp_partial: read the mirrored level's GPU storage back
@@ -187,16 +179,14 @@ void MultiresGPU::materialize_cpu(MultiresStack& stack, Mesh& mesh, GLuint vbo_p
     // same runs — the GPU brush wrote the VBO in place and the pen-up readback no
     // longer copies it down (2c-iv), so the live surface readers need it here.
     // mesh.pos is SOA, the VBO is interleaved float3, so de-interleave per run.
-    if (vbo_pos) {
+    if (vbo_pos.handle) {
         static std::vector<float> pos_scratch;
-        glBindBuffer(GL_ARRAY_BUFFER, vbo_pos);
         uint32_t vcount = mesh.vertex_count();
         for (const Run& r : runs) {
             if (r.first + r.count > vcount) continue;
             pos_scratch.resize((size_t)r.count * 3);
-            glGetBufferSubData(GL_ARRAY_BUFFER,
-                               (GLintptr)r.first * 3 * sizeof(float),
-                               (GLsizeiptr)r.count * 3 * sizeof(float), pos_scratch.data());
+            gpu::read_buffer(*dev, vbo_pos, (uint64_t)r.first * 3 * sizeof(float),
+                             (uint64_t)r.count * 3 * sizeof(float), pos_scratch.data());
             for (uint32_t i = 0; i < r.count; i++) {
                 uint32_t v = r.first + i;
                 mesh.pos_x[v] = pos_scratch[i*3+0];
@@ -204,7 +194,6 @@ void MultiresGPU::materialize_cpu(MultiresStack& stack, Mesh& mesh, GLuint vbo_p
                 mesh.pos_z[v] = pos_scratch[i*3+2];
             }
         }
-        glBindBuffer(GL_ARRAY_BUFFER, 0);
 
         // Normals must track the positions we just pulled. The flip leaves
         // mesh.norm_* covering only the moved (snap_list) verts and skips the
@@ -218,13 +207,11 @@ void MultiresGPU::materialize_cpu(MultiresStack& stack, Mesh& mesh, GLuint vbo_p
 
     if (level == stack.base_level) {
         static std::vector<float> scratch;
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, base_ssbo.handle);
         for (const Run& r : runs) {
             if (r.first + r.count > stack.base.vertex_count()) continue;
             scratch.resize((size_t)r.count * 3);
-            glGetBufferSubData(GL_SHADER_STORAGE_BUFFER,
-                               (GLintptr)r.first * 3 * sizeof(float),
-                               (GLsizeiptr)r.count * 3 * sizeof(float), scratch.data());
+            gpu::read_buffer(*dev, base_ssbo, (uint64_t)r.first * 3 * sizeof(float),
+                             (uint64_t)r.count * 3 * sizeof(float), scratch.data());
             for (uint32_t i = 0; i < r.count; i++) {
                 uint32_t v = r.first + i;
                 stack.base.pos_x[v] = scratch[i*3+0];
@@ -232,21 +219,17 @@ void MultiresGPU::materialize_cpu(MultiresStack& stack, Mesh& mesh, GLuint vbo_p
                 stack.base.pos_z[v] = scratch[i*3+2];
             }
         }
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
     } else {
         int k = level - stack.base_level - 1;
         if (k >= 0 && k < (int)stack.disp.size()) {
             std::vector<Vec3>& disp = stack.disp[k];
-            glBindBuffer(GL_SHADER_STORAGE_BUFFER, disp_ssbo.handle);
             for (const Run& r : runs) {
                 if (r.first + r.count > disp.size()) continue;
                 // Vec3 is 3 contiguous floats; &disp[first] is a float3*count span
                 // (mirrors upload_disp_partial's write side).
-                glGetBufferSubData(GL_SHADER_STORAGE_BUFFER,
-                                   (GLintptr)r.first * 3 * sizeof(float),
-                                   (GLsizeiptr)r.count * 3 * sizeof(float), &disp[r.first]);
+                gpu::read_buffer(*dev, disp_ssbo, (uint64_t)r.first * 3 * sizeof(float),
+                                 (uint64_t)r.count * 3 * sizeof(float), &disp[r.first]);
             }
-            glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
         }
     }
 

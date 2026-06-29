@@ -230,11 +230,10 @@ bool UndoStack::apply(UndoEntry& e, MeshEntity& ent, Scene& scene, bool forward)
         {
             static std::vector<float> chk;
             chk.resize(e.verts.size() * 3);
-            glBindBuffer(GL_ARRAY_BUFFER, scene.renderer().vbo_pos.handle);
             for (size_t k = 0; k < e.verts.size(); ++k)
-                glGetBufferSubData(GL_ARRAY_BUFFER, (GLintptr)e.verts[k] * 3 * sizeof(float),
-                                   (GLsizeiptr)3 * sizeof(float), &chk[k * 3]);
-            glBindBuffer(GL_ARRAY_BUFFER, 0);
+                gpu::read_buffer(c.gpu_dev, scene.renderer().vbo_pos,
+                                 (uint64_t)e.verts[k] * 3 * sizeof(float),
+                                 3 * sizeof(float), &chk[k * 3]);
             double maxe = 0.0;
             for (size_t k = 0; k < e.verts.size(); ++k) {
                 uint32_t v = e.verts[k];
@@ -355,13 +354,11 @@ bool UndoStack::apply(UndoEntry& e, MeshEntity& ent, Scene& scene, bool forward)
         static std::vector<float> gpu_apply_chk;
         if (gpu_apply_ran) {
             gpu_apply_chk.resize(e.verts.size() * 3);
-            glBindBuffer(GL_ARRAY_BUFFER, scene.renderer().vbo_pos.handle);
             for (size_t k = 0; k < e.verts.size(); ++k) {
-                glGetBufferSubData(GL_ARRAY_BUFFER,
-                    (GLintptr)e.verts[k] * 3 * sizeof(float),
-                    (GLsizeiptr)3 * sizeof(float), &gpu_apply_chk[k*3]);
+                gpu::read_buffer(scene.compute().gpu_dev, scene.renderer().vbo_pos,
+                    (uint64_t)e.verts[k] * 3 * sizeof(float),
+                    3 * sizeof(float), &gpu_apply_chk[k*3]);
             }
-            glBindBuffer(GL_ARRAY_BUFFER, 0);
         }
 #endif
         if (e.targets_base) {

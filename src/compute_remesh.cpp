@@ -336,18 +336,14 @@ void ComputeState::dispatch_grow_selection(
 
     GLsizeiptr bytes = (GLsizeiptr)tri_count * sizeof(uint32_t);
     for (int r = 0; r < rings; r++) {
-        // Snapshot current selection into pong (the kernel's input) — raw GL copy.
-        glBindBuffer(GL_COPY_READ_BUFFER,  remesh_trisel_ssbo.handle);
-        glBindBuffer(GL_COPY_WRITE_BUFFER, remesh_trisel_pong_ssbo.handle);
-        glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, 0, 0, bytes);
+        // Snapshot current selection into pong (the kernel's input) via the seam copy.
+        gpu::copy_buffer(gpu_dev, remesh_trisel_ssbo, 0, remesh_trisel_pong_ssbo, 0, (uint64_t)bytes);
         glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT | GL_SHADER_STORAGE_BARRIER_BIT);
 
         gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
         gpu::dispatch(b, remesh_grow_selection_pipeline, grp, (tri_count + 255u) / 256u);
         gpu::submit(b);
     }
-    glBindBuffer(GL_COPY_READ_BUFFER, 0);
-    glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
     gpu::release_bind_group(grp);
 }
 
@@ -358,11 +354,7 @@ void ComputeState::dispatch_mirror_selection(uint32_t vertex_count, uint32_t tri
     ensure_remesh_smooth_buffers(vertex_count, tri_count);
 
     GLsizeiptr bytes = (GLsizeiptr)tri_count * sizeof(uint32_t);
-    glBindBuffer(GL_COPY_READ_BUFFER,  remesh_trisel_ssbo.handle);
-    glBindBuffer(GL_COPY_WRITE_BUFFER, remesh_trisel_pong_ssbo.handle);
-    glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, 0, 0, bytes);
-    glBindBuffer(GL_COPY_READ_BUFFER, 0);
-    glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
+    gpu::copy_buffer(gpu_dev, remesh_trisel_ssbo, 0, remesh_trisel_pong_ssbo, 0, (uint64_t)bytes);
     glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT | GL_SHADER_STORAGE_BARRIER_BIT);
 
     MirrorSelectionParamsGPU u = {};
@@ -389,12 +381,8 @@ void ComputeState::snapshot_core_sel(uint32_t tri_count)
 {
     if (tri_count == 0) return;
     GLsizeiptr bytes = (GLsizeiptr)tri_count * sizeof(uint32_t);
-    glBindBuffer(GL_COPY_READ_BUFFER,  remesh_trisel_ssbo.handle);
-    glBindBuffer(GL_COPY_WRITE_BUFFER, remesh_core_sel_ssbo.handle);
-    glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, 0, 0, bytes);
+    gpu::copy_buffer(gpu_dev, remesh_trisel_ssbo, 0, remesh_core_sel_ssbo, 0, (uint64_t)bytes);
     glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT | GL_SHADER_STORAGE_BARRIER_BIT);
-    glBindBuffer(GL_COPY_READ_BUFFER, 0);
-    glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
 }
 
 void ComputeState::readback_trisel(uint32_t tri_count, std::vector<uint32_t>& out)
@@ -402,9 +390,7 @@ void ComputeState::readback_trisel(uint32_t tri_count, std::vector<uint32_t>& ou
     out.resize(tri_count);
     if (tri_count == 0) return;
     glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, remesh_trisel_ssbo.handle);
-    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, tri_count*sizeof(uint32_t), out.data());
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    gpu::read_buffer(gpu_dev, remesh_trisel_ssbo, 0, (uint64_t)tri_count*sizeof(uint32_t), out.data());
 }
 
 void ComputeState::dispatch_find_pinned(
@@ -446,9 +432,7 @@ void ComputeState::dispatch_find_pinned(
 
     out_pinned.resize(vertex_count);
     glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, remesh_pinned_ssbo.handle);
-    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, vertex_count*sizeof(uint32_t), out_pinned.data());
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    gpu::read_buffer(gpu_dev, remesh_pinned_ssbo, 0, (uint64_t)vertex_count*sizeof(uint32_t), out_pinned.data());
 }
 
 void ComputeState::dispatch_compute_smooth_weights(
@@ -572,9 +556,7 @@ void ComputeState::dispatch_remesh_smooth(
 
     readback_buf.resize(vertex_count * 3);
     glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, out_buf->handle);
-    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, vertex_count*3*sizeof(float), readback_buf.data());
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    gpu::read_buffer(gpu_dev, *out_buf, 0, (uint64_t)vertex_count*3*sizeof(float), readback_buf.data());
 
     for (uint32_t i = 0; i < vertex_count; i++) {
         out_pos_x[i] = readback_buf[i*3+0];
@@ -655,8 +637,7 @@ void ComputeState::dispatch_seam_snap_weld(
 
     // Readback snapped positions and count how many changed
     glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, remesh_ping_ssbo.handle);
-    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, vertex_count * 3 * sizeof(float), readback_buf.data());
+    gpu::read_buffer(gpu_dev, remesh_ping_ssbo, 0, (uint64_t)vertex_count * 3 * sizeof(float), readback_buf.data());
     uint32_t n_snapped = 0;
     for (uint32_t i = 0; i < vertex_count; i++) {
         float new_x = readback_buf[i*3+0];
@@ -666,9 +647,7 @@ void ComputeState::dispatch_seam_snap_weld(
 
     // Readback merge map
     out_merge_map.resize(vertex_count);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, seam_weld_map_ssbo.handle);
-    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, vertex_count * sizeof(uint32_t), out_merge_map.data());
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    gpu::read_buffer(gpu_dev, seam_weld_map_ssbo, 0, (uint64_t)vertex_count * sizeof(uint32_t), out_merge_map.data());
 
     // Chase merge chains to roots
     for (uint32_t v = 0; v < vertex_count; v++) {

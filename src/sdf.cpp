@@ -1153,12 +1153,12 @@ VoxelMergeJob* voxel_merge_begin(Scene& scene, ComputeState& cs,
     job->splat_off = gpu::create_buffer(cs.gpu_dev, nullptr, (uint64_t)tri_count*sizeof(uint32_t),   Usage::Storage);
 
     // Packed-distance accumulator: atomicMin target in expand, read by sign (GPU only,
-    // never read back). Cleared to BAND_FAR's bit pattern — raw GL (no seam clear prim).
+    // never read back). Cleared to BAND_FAR's bit pattern via the seam clear primitive
+    // (non-zero fill word: CPU-upload on WebGPU, ClearBuffer-with-pattern on GL).
     job->dist = gpu::create_buffer(cs.gpu_dev, nullptr, (uint64_t)job->corner_count*sizeof(uint32_t), Usage::Storage);
     uint32_t far_bits;
     { float bf = BAND_FAR; std::memcpy(&far_bits, &bf, sizeof(float)); }
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, job->dist.handle);
-    glClearBufferData(GL_SHADER_STORAGE_BUFFER, GL_R32UI, GL_RED_INTEGER, GL_UNSIGNED_INT, &far_bits);
+    gpu::clear_buffer(cs.gpu_dev, job->dist, far_bits);
 
     // Signed field: written by sign, read back for the flood fill, uploaded back, read by MC (CopySrc).
     job->field = gpu::create_buffer(cs.gpu_dev, nullptr, (uint64_t)job->corner_count*sizeof(float), Usage::Storage | Usage::CopySrc);
@@ -1301,9 +1301,8 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
         // ---- Pass B (exclusive scan, CPU): read boxes, scan footprints to offsets,
         //      get total work items. On WebGPU this becomes a GPU scan + mapAsync. ----
         std::vector<uint32_t> box_cpu((size_t)j.tri_count*6), off_cpu(j.tri_count);
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, j.splat_box.handle);
-        glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
-                           (GLsizeiptr)j.tri_count*6*sizeof(uint32_t), box_cpu.data());
+        gpu::read_buffer(cs.gpu_dev, j.splat_box, 0,
+                         (uint64_t)j.tri_count*6*sizeof(uint32_t), box_cpu.data());
         uint64_t acc = 0;
         for (uint32_t t = 0; t < j.tri_count; t++) {
             uint64_t footprint = (uint64_t)box_cpu[6*t+3] * box_cpu[6*t+4] * box_cpu[6*t+5];
@@ -1428,10 +1427,8 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
         //      CPU copy for the relax in Finish (field SSBO isn't written after this,
         //      so one readback serves both). ----
         j.field_cpu.assign(j.corner_count, 0.0f);
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, j.field.handle);   // readback: raw GL (web-stage)
-        glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
-                           (GLsizeiptr)j.corner_count*sizeof(float), j.field_cpu.data());
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+        gpu::read_buffer(cs.gpu_dev, j.field, 0,
+                         (uint64_t)j.corner_count*sizeof(float), j.field_cpu.data());
         flood_fill_sign(j.field_cpu, grid.R, BAND_FAR);
         // Surface-Nets mirror: make the field exactly symmetric here, so the SN
         // dispatch below extracts a continuous mirror-paired surface (no seam to
@@ -1448,20 +1445,21 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
         mu.ox = grid.origin.x; mu.oy = grid.origin.y; mu.oz = grid.origin.z;
         mu.voxel = grid.voxel; mu.R = (int)grid.R; mu.cellCount = j.cell_count;
 
-        // One bind group, reused across both extractor passes; mc_out is realloc'd
-        // in place (raw glBufferData) between them so its GL handle — what the GL
-        // backend records — stays valid. (WebGPU: a realloc makes a NEW handle, so
-        // the web backend must rebuild this bind group after the resize — web-stage.)
-        gpu::BindGroup mgrp;
-        if (j.use_nets) {
-            const gpu::BindBufferEntry mbg[] = {
-                { BIND_SDF_FIELD,    &j.field,  j.field.size },
-                { BIND_SDF_MC_OUT,   &j.mc_out, j.mc_out.size },
-                { BIND_SDF_MC_COUNT, &j.mc_cnt, j.mc_cnt.size },
-                { BIND_PARAMS,       &j.mc_ubo, sizeof(SdfMeshParamsGPU) },
-            };
-            mgrp = gpu::create_bind_group(cs.gpu_dev, j.mc_pipe, mbg, 4);
-        } else {
+        // One bind group per extractor pass. mc_out is resized between the count and
+        // write passes via the seam resize_buffer: on GL the handle is preserved, but
+        // on WebGPU a resize RECREATES the buffer (new handle), so the bind group that
+        // references mc_out must be rebuilt after the resize. Factor creation into a
+        // lambda used for both builds. Surface Nets omits the tri-table binding.
+        auto build_mgrp = [&]() -> gpu::BindGroup {
+            if (j.use_nets) {
+                const gpu::BindBufferEntry mbg[] = {
+                    { BIND_SDF_FIELD,    &j.field,  j.field.size },
+                    { BIND_SDF_MC_OUT,   &j.mc_out, j.mc_out.size },
+                    { BIND_SDF_MC_COUNT, &j.mc_cnt, j.mc_cnt.size },
+                    { BIND_PARAMS,       &j.mc_ubo, sizeof(SdfMeshParamsGPU) },
+                };
+                return gpu::create_bind_group(cs.gpu_dev, j.mc_pipe, mbg, 4);
+            }
             const gpu::BindBufferEntry mbg[] = {
                 { BIND_SDF_FIELD,    &j.field,  j.field.size },
                 { BIND_SDF_MC_OUT,   &j.mc_out, j.mc_out.size },
@@ -1469,8 +1467,9 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
                 { BIND_SDF_TRITABLE, &j.tritab, j.tritab.size },
                 { BIND_PARAMS,       &j.mc_ubo, sizeof(SdfMeshParamsGPU) },
             };
-            mgrp = gpu::create_bind_group(cs.gpu_dev, j.mc_pipe, mbg, 5);
-        }
+            return gpu::create_bind_group(cs.gpu_dev, j.mc_pipe, mbg, 5);
+        };
+        gpu::BindGroup mgrp = build_mgrp();
 
         // ---- Dispatch 3a: extractor count pass ----
         mu.count_only = 1; mu.cap = 0u;
@@ -1483,20 +1482,17 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
         sdf_gl_check("mc-count dispatch");
 
         uint32_t out_tris = 0;
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, j.mc_cnt.handle);
-        glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(uint32_t), &out_tris);
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+        gpu::read_buffer(cs.gpu_dev, j.mc_cnt, 0, sizeof(uint32_t), &out_tris);
         if (out_tris == 0) { gpu::release_bind_group(mgrp); return fail("merge produced no geometry (raise resolution?)"); }
         j.out_tris = out_tris;
 
-        // ---- Size MC_OUT exactly (raw glBufferData: an in-place realloc keeps the GL
-        //      handle, so mgrp stays valid for the write pass — see the bind-group note
-        //      above), reset the counter via the seam. ----
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, j.mc_out.handle);
-        glBufferData(GL_SHADER_STORAGE_BUFFER,
-                     (GLsizeiptr)out_tris * 18 * sizeof(float), nullptr, GL_DYNAMIC_COPY);
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
-        j.mc_out.size = (uint64_t)out_tris * 18 * sizeof(float);
+        // ---- Size MC_OUT exactly via the seam resize, then rebuild mgrp (the write
+        //      pass binds the possibly-recreated mc_out — see the bind-group note above)
+        //      and reset the counter via the seam. ----
+        gpu::resize_buffer(cs.gpu_dev, j.mc_out, (uint64_t)out_tris * 18 * sizeof(float),
+                           gpu::Usage::Storage | gpu::Usage::CopySrc);
+        gpu::release_bind_group(mgrp);
+        mgrp = build_mgrp();
         gpu::write_buffer(cs.gpu_dev, j.mc_cnt, 0, &zero, sizeof(uint32_t));
 
         // ---- Dispatch 3b: extractor write pass ----
@@ -1512,10 +1508,8 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
 
         // ---- Readback the MC soup (the only large readback). On WebGPU -> mapAsync. ----
         j.soup.assign((size_t)out_tris * 18, 0.0f);
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, j.mc_out.handle);
-        glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
-                           (GLsizeiptr)j.soup.size()*sizeof(float), j.soup.data());
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+        gpu::read_buffer(cs.gpu_dev, j.mc_out, 0,
+                         (uint64_t)j.soup.size()*sizeof(float), j.soup.data());
 
         j.phase = Phase::Finish;
         return done(VoxelMergeStatus::Working);

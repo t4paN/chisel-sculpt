@@ -2,6 +2,30 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-30 — WebGPU port Stage 3 (section A): internal data-movement sweep onto seam primitives
+
+- **All raw-GL readbacks/clears/copies on seam-owned buffers routed through the new
+  one-shot seam primitives.** `glGetBufferSubData → gpu::read_buffer`,
+  `glClearBufferData → gpu::clear_buffer`, `glCopyBufferSubData → gpu::copy_buffer`,
+  the SDF `mc_out` `glBufferData` realloc → `gpu::resize_buffer`. Touched:
+  compute_smooth (smooth+accum dirty readbacks), compute_move (weight-buffer clears +
+  counter reset + ping-pong copy + affected readback), compute_remesh (grow/mirror/core
+  selection copies + trisel/pinned/smooth/seam-weld readbacks), compute_multires
+  (undo-ring grow copy + ring readback), multires_gpu (debug + materialize_cpu banded
+  readbacks + snapshot copy), sdf (dist band-sentinel clear, splat-box/field/mc-count/
+  soup readbacks, mc_out resize), undo (two `CHISEL_DEBUG_MULTIRES` VBO readbacks).
+- **SDF `mc_out` resize now rebuilds the extractor bind group.** `resize_buffer`
+  recreates the buffer on WebGPU (new handle), so the count→write-pass bind group is
+  rebuilt after the resize (factored into a `build_mgrp` lambda). GL keeps the handle,
+  so the rebuild is harmless there.
+- **`MultiresGPU::snapshot_positions` / `materialize_cpu` signatures flipped
+  `GLuint → const gpu::Buffer&`**; callers in brush.cpp + scene.cpp drop `.handle`.
+  **`reset_dirty_counter` (compute_color)** retyped to `(gpu::Device&, gpu::Buffer&)`,
+  routed through `write_buffer` (single-word counter reset, not a whole-buffer clear).
+- Behaviour unchanged; **GL build green**. Out of section-A scope and still raw GL:
+  the `glMemoryBarrier` sites (a later `gpu::barrier` pass) and a few bulk position
+  *uploads*; both swept in step B/C of the handoff before the first webgpu app compile.
+
 ## 2026-06-30 — WebGPU port Stage 3 (compile-under-webgpu): seam buffer-op primitives + compute signature flip
 
 - **6 new gpu:: seam buffer-op primitives** (`gpu.h` + both backends), covering the

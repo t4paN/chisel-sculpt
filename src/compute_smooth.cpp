@@ -344,16 +344,14 @@ uint32_t ComputeState::readback_smooth_dirty(std::vector<uint32_t>& out) {
     if (!smooth_dirty_ssbo.handle) return 0;
 
     uint32_t count = 0;
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, smooth_dirty_ssbo.handle);
-    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(uint32_t), &count);
+    gpu::read_buffer(gpu_dev, smooth_dirty_ssbo, 0, sizeof(uint32_t), &count);
 
     if (count > 0) {
         if (count > smooth_dirty_capacity) count = smooth_dirty_capacity;
         out.resize(count);
-        glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, sizeof(uint32_t),
-                           count * sizeof(uint32_t), out.data());
+        gpu::read_buffer(gpu_dev, smooth_dirty_ssbo, sizeof(uint32_t),
+                         count * sizeof(uint32_t), out.data());
     }
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
     return count;
 }
 
@@ -366,9 +364,7 @@ uint32_t ComputeState::readback_accum_dirty(uint32_t vertex_count, std::vector<u
         readback_buf.resize(vertex_count * 4);
     }
 
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, accum_ssbo.handle);
-    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, size, readback_buf.data());
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    gpu::read_buffer(gpu_dev, accum_ssbo, 0, size, readback_buf.data());
 
     uint32_t count = 0;
     for (uint32_t v = 0; v < vertex_count; v++) {

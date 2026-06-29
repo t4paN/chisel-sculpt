@@ -121,16 +121,12 @@ void ComputeState::dispatch_move_capture(const MoveCaptureParams& p, const gpu::
     if (!has_move()) return;
     const uint32_t vc = p.vertex_count;
 
-    // Reset the affected counter + clear the weight buffers — raw-GL data movement on
-    // the seam-owned handles (clear/reset is a web-stage concern; stays raw GL on GL).
+    // Reset the affected counter + clear the weight buffers via the seam buffer-op
+    // primitives on the seam-owned handles (one-shot, pen-down).
     uint32_t zero = 0;
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, move_affected_ssbo.handle);
-    glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(uint32_t), &zero);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, move_weights_ssbo.handle);
-    glClearBufferData(GL_SHADER_STORAGE_BUFFER, GL_RG32F, GL_RG, GL_FLOAT, nullptr);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, move_weights_pong_ssbo.handle);
-    glClearBufferData(GL_SHADER_STORAGE_BUFFER, GL_RG32F, GL_RG, GL_FLOAT, nullptr);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    gpu::write_buffer(gpu_dev, move_affected_ssbo, 0, &zero, sizeof(uint32_t));
+    gpu::clear_buffer(gpu_dev, move_weights_ssbo, 0);
+    gpu::clear_buffer(gpu_dev, move_weights_pong_ssbo, 0);
 
     MoveCaptureParamsGPU u = {};
     u.anchor[0] = p.anchor_x; u.anchor[1] = p.anchor_y; u.anchor[2] = p.anchor_z;
@@ -195,12 +191,8 @@ void ComputeState::dispatch_move_weight_smooth(uint32_t vertex_count, int iterat
     // Odd iteration count leaves the final result in pong → copy it back to weights so
     // apply always reads the canonical weights buffer. GL-owned copy, stays raw GL.
     if ((iterations & 1) == 1) {
-        glBindBuffer(GL_COPY_READ_BUFFER, move_weights_pong_ssbo.handle);
-        glBindBuffer(GL_COPY_WRITE_BUFFER, move_weights_ssbo.handle);
-        glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, 0, 0,
-                            (GLsizeiptr)cap * 2 * sizeof(float));
-        glBindBuffer(GL_COPY_READ_BUFFER, 0);
-        glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
+        gpu::copy_buffer(gpu_dev, move_weights_pong_ssbo, 0,
+                         move_weights_ssbo, 0, (uint64_t)cap * 2 * sizeof(float));
     }
 }
 
@@ -231,14 +223,12 @@ void ComputeState::dispatch_move_apply(const MoveApplyParams& p, const gpu::Buff
 uint32_t ComputeState::readback_move_affected(std::vector<uint32_t>& out) {
     if (!move_affected_ssbo.handle) return 0;
     uint32_t count = 0;
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, move_affected_ssbo.handle);
-    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(uint32_t), &count);
+    gpu::read_buffer(gpu_dev, move_affected_ssbo, 0, sizeof(uint32_t), &count);
     if (count > move_buffers_capacity) count = move_buffers_capacity;
     out.resize(count);
     if (count > 0) {
-        glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, sizeof(uint32_t),
-                           count * sizeof(uint32_t), out.data());
+        gpu::read_buffer(gpu_dev, move_affected_ssbo, sizeof(uint32_t),
+                         count * sizeof(uint32_t), out.data());
     }
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
     return count;
 }

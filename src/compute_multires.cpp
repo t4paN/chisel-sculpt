@@ -284,16 +284,11 @@ size_t ComputeState::undo_ring_reserve(size_t float_count) {
         while (newcap < undo_ring_head + bytes && newcap < undo_ring_cap_bytes) newcap <<= 1;
         if (newcap > undo_ring_cap_bytes) newcap = undo_ring_cap_bytes;
 
-        // Seam-owned now (Step 3b). The copy-preserving grow is a buffer→buffer copy
-        // with no seam primitive yet, so it stays raw GL via .handle (web-stage concern).
+        // Seam-owned now (Step 3b). The copy-preserving grow goes through the seam
+        // buffer→buffer copy primitive.
         gpu::Buffer nb = gpu::create_buffer(gpu_dev, nullptr, (uint64_t)newcap, gpu::Usage::Storage);
         if (undo_ring_ssbo.handle && undo_ring_head) {
-            glBindBuffer(GL_COPY_READ_BUFFER,  undo_ring_ssbo.handle);
-            glBindBuffer(GL_COPY_WRITE_BUFFER, nb.handle);
-            glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, 0, 0,
-                                (GLsizeiptr)undo_ring_head);
-            glBindBuffer(GL_COPY_READ_BUFFER,  0);
-            glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
+            gpu::copy_buffer(gpu_dev, undo_ring_ssbo, 0, nb, 0, (uint64_t)undo_ring_head);
         }
         gpu::release_buffer(undo_ring_ssbo);
         undo_ring_ssbo  = nb;
@@ -324,11 +319,8 @@ size_t ComputeState::undo_ring_append(const float* data, size_t float_count) {
 
 void ComputeState::undo_ring_read(size_t byte_offset, size_t float_count, float* out) {
     if (!supported || !undo_ring_ssbo.handle || float_count == 0) return;
-    // Readback: no seam primitive yet, stays raw GL via .handle (web-stage concern).
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, undo_ring_ssbo.handle);
-    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, (GLintptr)byte_offset,
-                       (GLsizeiptr)(float_count * sizeof(float)), out);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    gpu::read_buffer(gpu_dev, undo_ring_ssbo, (uint64_t)byte_offset,
+                     (uint64_t)(float_count * sizeof(float)), out);
 }
 
 void ComputeState::undo_ring_selftest() {

@@ -336,7 +336,7 @@ void BrushStroke::begin(Renderer& renderer, const Camera& cam,
     if (compute && compute->supported && mgpu.supported
         && brush_type != BrushType::MASK
         && brush_type != BrushType::PAINT) {
-        mgpu.snapshot_positions(renderer.vbo_pos.handle, vert_count);
+        mgpu.snapshot_positions(renderer.vbo_pos, vert_count);
     }
 
     // Only the CPU mask fallback (apply_mask → walk_brush_region) ever reads these
@@ -1249,7 +1249,7 @@ bool BrushStroke::finalize(Mesh& mesh, UndoStack& stack, MultiresStack& multires
             // through the same choke a CPU reader would use, so the diff/capture
             // err-compares below read freshly-materialized mesh.pos/disp (validates the
             // materialize indexing + the ring capture together). Release stays lazy.
-            mgpu.materialize_cpu(multires, mesh, renderer.vbo_pos.handle);
+            mgpu.materialize_cpu(multires, mesh, renderer.vbo_pos);
 #endif
         }
         gpu_positions_deferred = false;

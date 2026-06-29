@@ -62,9 +62,9 @@ struct MultiresGPU {
                              const std::vector<uint32_t>& verts);
 
     // Snapshot the working VBO positions [0, vertex_count) into snap_pos_ssbo at
-    // pen-down. GPU→GPU copy (glCopyBufferSubData), grow-only, one-shot per stroke.
+    // pen-down. GPU→GPU copy (seam copy_buffer), grow-only, one-shot per stroke.
     // No behavior dependence yet — consumed by the Phase-2 pen-up diff shader.
-    void snapshot_positions(GLuint pos_vbo, uint32_t vertex_count);
+    void snapshot_positions(const gpu::Buffer& pos_vbo, uint32_t vertex_count);
 
     // ---- Phase 3 (deferred CPU writeback) -------------------------------------
     // From 3b on, the pen-up diff shader writes disp/base on the GPU and the CPU
@@ -93,7 +93,7 @@ struct MultiresGPU {
     // (banded readback, inverse of upload_disp_partial), then clear the dirty set.
     // No-op unless cpu_dirty. Call before any CPU read of the active level's
     // disp/base/pos. `vbo_pos` is the active entity's working position VBO (offset 0).
-    void materialize_cpu(MultiresStack& stack, Mesh& mesh, GLuint vbo_pos);
+    void materialize_cpu(MultiresStack& stack, Mesh& mesh, const gpu::Buffer& vbo_pos);
 
     void cleanup();
 };

@@ -111,7 +111,7 @@ void Scene::materialize_active_cpu() {
     // Active entity is the working set (offset 0), so its surface lives in the
     // renderer's working position VBO. 2c-i syncs both storage (disp/base) and
     // surface (mesh.pos) from the GPU.
-    e->multires_gpu.materialize_cpu(e->multires, e->mesh, renderer_.vbo_pos.handle);
+    e->multires_gpu.materialize_cpu(e->multires, e->mesh, renderer_.vbo_pos);
 }
 
 void Scene::refresh_mirror_map(int icosphere_level) {
@@ -165,7 +165,7 @@ void Scene::bind_active_(uint32_t id) {
             // back to CPU first (no-op until 2c-iii flips), then park its undo ring
             // so the incoming entity captures from a fresh ring — the ring is a hot
             // cache for the active entity only.
-            out->multires_gpu.materialize_cpu(out->multires, out->mesh, renderer_.vbo_pos.handle);
+            out->multires_gpu.materialize_cpu(out->multires, out->mesh, renderer_.vbo_pos);
             out->undo.ring_park_all(compute_);
             renderer_.upload_display(out->gpu, out->mesh);
         }
@@ -184,7 +184,7 @@ void Scene::bind_active_(uint32_t id) {
     // on cpu_dirty), so the splice/cascade paths that legitimately push CPU→GPU are
     // untouched.
     if (id == bound_active_id_)
-        in->multires_gpu.materialize_cpu(in->multires, in->mesh, renderer_.vbo_pos.handle);
+        in->multires_gpu.materialize_cpu(in->multires, in->mesh, renderer_.vbo_pos);
 
     // Working VBOs hold the incoming entity at offset 0.
     renderer_.upload_mesh(in->mesh);

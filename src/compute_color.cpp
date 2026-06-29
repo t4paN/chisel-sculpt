@@ -32,12 +32,10 @@ struct ColorSmoothParamsGPU {
 };
 static_assert(sizeof(ColorSmoothParamsGPU) == 48, "color smooth Params UBO must be 48 bytes");
 
-// Reset the dirty counter to 0 — GL-owned buffer, stays raw GL.
-void reset_dirty_counter(GLuint dirty_ssbo) {
+// Reset the dirty counter (the buffer's first word) to 0 via the seam.
+void reset_dirty_counter(gpu::Device& dev, gpu::Buffer& dirty_ssbo) {
     uint32_t zero = 0;
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, dirty_ssbo);
-    glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(uint32_t), &zero);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    gpu::write_buffer(dev, dirty_ssbo, 0, &zero, sizeof(uint32_t));
 }
 }
 
@@ -91,7 +89,7 @@ void ComputeState::dispatch_color_paint(const ColorPaintParams& p, const gpu::Bu
     const uint32_t vc = p.vertex_count;
 
     ensure_smooth_dirty_buffer(vc);
-    reset_dirty_counter(smooth_dirty_ssbo.handle);
+    reset_dirty_counter(gpu_dev, smooth_dirty_ssbo);
 
     ColorPaintParamsGPU u = {};
     u.anchor_a[0] = p.anchor_a_x; u.anchor_a[1] = p.anchor_a_y; u.anchor_a[2] = p.anchor_a_z;
@@ -125,7 +123,7 @@ void ComputeState::dispatch_color_smooth(const ColorPaintParams& p, const gpu::B
     const uint32_t vc = p.vertex_count;
 
     ensure_smooth_dirty_buffer(vc);
-    reset_dirty_counter(smooth_dirty_ssbo.handle);
+    reset_dirty_counter(gpu_dev, smooth_dirty_ssbo);
 
     ColorSmoothParamsGPU u = {};
     u.anchor_a[0] = p.anchor_a_x; u.anchor_a[1] = p.anchor_a_y; u.anchor_a[2] = p.anchor_a_z;
