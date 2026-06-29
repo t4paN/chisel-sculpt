@@ -51,9 +51,14 @@ struct VoxelMergeResult {
 // Works with mirror too: rather than MC's keep-+x-and-reflect seam (SN has no vertex
 // on the plane), the SN mirror path symmetrises the field about x=0 and extracts the
 // whole surface, yielding exact mirror-paired verts continuous through the plane.
+// `subtract` = treat every UNSELECTED (red) committed entity as a cutter: the
+// merge unions the selection, then carves those cutters out (boolean A − B),
+// achieved by feeding the cutter triangles into the soup with reversed winding.
+// Cutters are not consumed (only the selection is spliced out for the result).
 VoxelMergeResult voxel_merge_selected(Scene& scene, ComputeState& cs,
                                       int resolution, bool mirror = false,
-                                      bool surface_nets = false);
+                                      bool surface_nets = false,
+                                      bool subtract = false);
 
 // ---- Tick-driven (multi-frame) merge --------------------------------------
 // The merge is a multi-second GPU job (the winding-sign pass alone is seconds at
@@ -72,7 +77,8 @@ enum class VoxelMergeStatus { Working, Done, Failed };
 // first `tick` reports Failed with the error in the result, so all error handling
 // funnels through one path. Caller owns the job; free it with voxel_merge_destroy.
 VoxelMergeJob* voxel_merge_begin(Scene& scene, ComputeState& cs,
-                                 int resolution, bool mirror, bool surface_nets);
+                                 int resolution, bool mirror, bool surface_nets,
+                                 bool subtract = false);
 
 // Advance one budgeted step. Returns Working until the job completes; on the final
 // step it runs the CPU tail (weld → relax → mirror seam → manifold gate → scene

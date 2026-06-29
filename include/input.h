@@ -155,6 +155,7 @@ struct InputState {
     bool voxel_merge_mirror;       // M (vs Y): symmetrise the result about x=0
     bool voxel_merge_surface_nets; // S toggles: Surface Nets vs Marching Cubes extractor
     int  voxel_merge_resolution;   // target cells along longest axis (64..256)
+    bool voxel_merge_subtract;     // '-' in merge dialog: carve unselected (red) meshes from the selected union
 
     // Mask operations
     bool mask_invert_requested;   // Ctrl+I

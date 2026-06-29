@@ -668,7 +668,8 @@ int main(int argc, char* argv[]) {
                 vmerge_job = voxel_merge_begin(scene, compute,
                                                input.voxel_merge_resolution,
                                                input.voxel_merge_mirror,
-                                               input.voxel_merge_surface_nets);
+                                               input.voxel_merge_surface_nets,
+                                               input.voxel_merge_subtract);
                 input.voxel_merge_in_progress = true;
             }
         }
@@ -1405,10 +1406,20 @@ int main(int argc, char* argv[]) {
             draw_quit_dialog(text, win_w, win_h);
         if (input.remesh_confirm_pending)
             draw_remesh_confirm(text, win_w, win_h);
-        if (input.voxel_merge_confirm_pending)
+        if (input.voxel_merge_confirm_pending) {
+            // Count unselected (red) committed entities — candidate cutters for subtract.
+            int n_unselected = 0;
+            for (const auto& up : scene.entities()) {
+                if (!up || !up->alive || up->preview) continue;
+                bool sel = false;
+                for (uint32_t sid : scene.selected_ids())
+                    if (sid == up->id) { sel = true; break; }
+                if (!sel) n_unselected++;
+            }
             draw_voxel_merge_confirm(text, input.voxel_merge_resolution,
-                                     (int)scene.selected_ids().size(),
+                                     (int)scene.selected_ids().size(), n_unselected,
                                      input.voxel_merge_surface_nets, win_w, win_h);
+        }
         if (input.remesh_in_progress)
             draw_remesh_progress(text, win_w, win_h);
         if (input.voxel_merge_in_progress)

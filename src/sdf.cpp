@@ -42,22 +42,38 @@ constexpr float BAND_FAR     = 1e18f;   // sentinel for off-band corners (atomic
 constexpr int   GRID_PAD     = 4;       // cells of empty margin so the surface never touches the wall
 
 // ---- Soup gather ----------------------------------------------------------
-// Concatenate world-space triangles of every selected entity into one soup.
-// Entities are baked in world space (twins are real tris), so no transform.
-// Returns the number of entities gathered.
+// Concatenate world-space triangles into one soup. Entities are baked in world
+// space (twins are real tris), so no transform.
+//   - ADDITIVE part: the current selection, normal winding (unioned).
+//   - CUTTER part (subtract only): every unselected (red) committed entity, with
+//     each triangle wound backwards. The winding-sign pass sums signed solid
+//     angles over the whole soup, so a flipped tri negates its contribution and
+//     the cutter's interior reads as "outside" -> it carves the union (A − B)
+//     instead of joining it. Distance (unsigned) is winding-agnostic, so the
+//     cavity walls still get correct band distances and MC tessellates them.
+//     See sdf_sign.wgsl. Cutters are NOT consumed by the merge — the splice only
+//     replaces the selection.
+// Additive verts are emitted first; `additive_floats` marks the end of the
+// additive block in `pos` so the caller can bound the grid to the kept region
+// (cutters poking outside it still sum into the winding correctly).
 uint32_t gather_soup(const Scene& scene,
                      std::vector<float>&    pos,
                      std::vector<uint32_t>& idx,
                      std::vector<uint32_t>& vcol,  // per-source-vertex colour (white if unpainted)
-                     bool&                  any_paint)
+                     bool&                  any_paint,
+                     bool                   subtract,
+                     uint32_t&              n_additive,
+                     uint32_t&              n_cutter,
+                     size_t&                additive_floats)
 {
-    uint32_t n_ent = 0;
-    any_paint = false;
-    for (uint32_t id : scene.selected_ids()) {
-        const MeshEntity* e = scene.find_entity(id);
-        if (!e) continue;
+    n_additive = 0;
+    n_cutter   = 0;
+    any_paint  = false;
+
+    auto add_entity = [&](const MeshEntity* e, bool cutter) -> bool {
+        if (!e) return false;
         const Mesh& m = e->mesh;
-        if (m.vertex_count() == 0 || m.indices.empty()) continue;
+        if (m.vertex_count() == 0 || m.indices.empty()) return false;
 
         const bool painted = !m.color.empty();
         if (painted) any_paint = true;
@@ -72,10 +88,35 @@ uint32_t gather_soup(const Scene& scene,
             vcol.push_back((painted && v < m.color.size()) ? m.color[v] : 0xFFFFFFFFu);
         }
         idx.reserve(idx.size() + m.indices.size());
-        for (uint32_t i : m.indices) idx.push_back(base + i);
-        n_ent++;
+        if (cutter) {
+            for (size_t t = 0; t + 2 < m.indices.size(); t += 3) {
+                idx.push_back(base + m.indices[t + 0]);
+                idx.push_back(base + m.indices[t + 2]);
+                idx.push_back(base + m.indices[t + 1]);
+            }
+        } else {
+            for (uint32_t i : m.indices) idx.push_back(base + i);
+        }
+        return true;
+    };
+
+    // Additive: the current selection.
+    for (uint32_t id : scene.selected_ids())
+        if (add_entity(scene.find_entity(id), /*cutter=*/false)) n_additive++;
+    additive_floats = pos.size();
+
+    // Cutters: every unselected (red) committed entity — subtract merge only.
+    if (subtract) {
+        for (const auto& up : scene.entities()) {
+            if (!up || !up->alive || up->preview) continue;
+            bool selected = false;
+            for (uint32_t sid : scene.selected_ids())
+                if (sid == up->id) { selected = true; break; }
+            if (selected) continue;
+            if (add_entity(up.get(), /*cutter=*/true)) n_cutter++;
+        }
     }
-    return n_ent;
+    return n_additive + n_cutter;
 }
 
 // ---- Shader sources -------------------------------------------------------
@@ -883,7 +924,8 @@ static void symmetrise_field_x(std::vector<float>& field, const SdfGrid& grid) {
 }
 
 VoxelMergeJob* voxel_merge_begin(Scene& scene, ComputeState& cs,
-                                 int resolution, bool mirror, bool surface_nets) {
+                                 int resolution, bool mirror, bool surface_nets,
+                                 bool subtract) {
     VoxelMergeJob* job = new VoxelMergeJob();
     job->mirror = mirror;
     job->t0 = std::chrono::high_resolution_clock::now();
@@ -898,17 +940,25 @@ VoxelMergeJob* voxel_merge_begin(Scene& scene, ComputeState& cs,
 
     // ---- 1. Gather soup ----
     std::vector<uint32_t> idx;
-    job->res.in_entities = gather_soup(scene, job->pos, idx, job->vcol, job->any_paint);
+    uint32_t n_additive = 0, n_cutter = 0;
+    size_t   additive_floats = 0;
+    job->res.in_entities = gather_soup(scene, job->pos, idx, job->vcol, job->any_paint,
+                                       subtract, n_additive, n_cutter, additive_floats);
     job->res.in_tris     = (uint32_t)(idx.size() / 3);
     if (idx.empty()) return fail("selection has no triangles");
+    if (subtract && n_additive == 0)
+        return fail("subtract needs at least one selected (kept) mesh");
     const uint32_t tri_count = job->res.in_tris;
     job->tri_count = tri_count;
 
     // ---- 2. Grid (cubic, padded so the surface never touches the wall) ----
+    // Bound to the ADDITIVE (kept) verts: the carve region lives inside them, and
+    // cutters poking outside still sum into the winding correctly without stealing
+    // resolution. (additive_floats == pos.size() for a plain union.)
     const std::vector<float>& pos = job->pos;
     Vec3 lo(pos[0], pos[1], pos[2]);
     Vec3 hi = lo;
-    for (size_t i = 0; i < pos.size(); i += 3) {
+    for (size_t i = 0; i < additive_floats; i += 3) {
         lo.x = std::min(lo.x, pos[i  ]); hi.x = std::max(hi.x, pos[i  ]);
         lo.y = std::min(lo.y, pos[i+1]); hi.y = std::max(hi.y, pos[i+1]);
         lo.z = std::min(lo.z, pos[i+2]); hi.z = std::max(hi.z, pos[i+2]);
@@ -1425,8 +1475,9 @@ void voxel_merge_destroy(VoxelMergeJob* job) { delete job; }
 
 // Synchronous convenience: drive the tick job to completion in one (blocking) call.
 VoxelMergeResult voxel_merge_selected(Scene& scene, ComputeState& cs,
-                                      int resolution, bool mirror, bool surface_nets) {
-    VoxelMergeJob* job = voxel_merge_begin(scene, cs, resolution, mirror, surface_nets);
+                                      int resolution, bool mirror, bool surface_nets,
+                                      bool subtract) {
+    VoxelMergeJob* job = voxel_merge_begin(scene, cs, resolution, mirror, surface_nets, subtract);
     VoxelMergeResult out;
     while (voxel_merge_tick(scene, cs, *job, out) == VoxelMergeStatus::Working) {}
     voxel_merge_destroy(job);

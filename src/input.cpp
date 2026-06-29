@@ -55,6 +55,7 @@ InputState::InputState()
     , voxel_merge_confirm_pending(false)
     , voxel_merge_mirror(false)
     , voxel_merge_surface_nets(false)
+    , voxel_merge_subtract(false)
     , voxel_merge_resolution(128)
     , mask_invert_requested(false)
     , mask_clear_requested(false)
@@ -318,9 +319,12 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
         // ...and S to toggle the extractor (Surface Nets vs Marching Cubes).
         bool merge_nets_key = g_input->voxel_merge_confirm_pending
                            && key == GLFW_KEY_S;
+        // ...and '-' to confirm a subtract merge (carve the unselected reds).
+        bool merge_subtract_key = g_input->voxel_merge_confirm_pending
+                               && key == GLFW_KEY_MINUS;
         bool allow = (key == GLFW_KEY_ESCAPE)
                   || (is_yn_dialog && (key == GLFW_KEY_Y || key == GLFW_KEY_N))
-                  || res_keys || merge_mirror_key || merge_nets_key;
+                  || res_keys || merge_mirror_key || merge_nets_key || merge_subtract_key;
         if (!allow) return;
     }
 
@@ -354,6 +358,7 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
                 if (g_input->voxel_merge_confirm_pending) {
                     g_input->voxel_merge_confirm_pending = false;
                     g_input->voxel_merge_mirror = true;   // mirror-symmetric merge
+                    g_input->voxel_merge_subtract = false;
                     g_input->voxel_merge_requested = true;
                     break;
                 }
@@ -456,6 +461,18 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
 
             case GLFW_KEY_X:
                 g_input->mirror_x = !g_input->mirror_x;
+                break;
+
+            case GLFW_KEY_MINUS:
+                // In the merge dialog, '-' confirms a SUBTRACT merge: union the
+                // selected meshes, then carve away every unselected (red) mesh.
+                // Parallels M (union+mirror) and Y (union faithful).
+                if (g_input->voxel_merge_confirm_pending) {
+                    g_input->voxel_merge_confirm_pending = false;
+                    g_input->voxel_merge_mirror = false;
+                    g_input->voxel_merge_subtract = true;
+                    g_input->voxel_merge_requested = true;
+                }
                 break;
 
             case GLFW_KEY_LEFT_SHIFT:
@@ -614,6 +631,7 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
                 if (g_input->voxel_merge_confirm_pending) {
                     g_input->voxel_merge_confirm_pending = false;
                     g_input->voxel_merge_mirror = false;   // faithful (asymmetric) merge
+                    g_input->voxel_merge_subtract = false;
                     g_input->voxel_merge_requested = true;
                 } else if (g_input->remesh_confirm_pending) {
                     g_input->remesh_confirm_pending = false;

@@ -2,6 +2,25 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-29 — SDF voxel-merge: boolean subtract (carve the reds)
+
+- **Subtract merge.** The voxel-merge can now carve instead of only unioning. In the merge
+  dialog, **`-`** confirms a subtract: the selected meshes are unioned, then every **unselected
+  (red)** committed entity is carved out of them (boolean A − B). Parallels `Y` (union) / `M`
+  (mirror-union); `S` still toggles the extractor. Dialog shows `- subtract N red mesh(es)` when
+  reds exist.
+- **Mechanism — reversed winding, no new pass.** The merge signs one pooled soup via the
+  generalized winding number (`sdf_sign.wgsl` sums signed solid angles). Cutters enter the soup
+  with each triangle wound backwards, so their solid-angle contribution negates and their interior
+  reads as "outside" → they subtract. Unsigned distance is winding-agnostic, so cavity walls get
+  correct band distances and MC tessellates them. `gather_soup` now emits selected (additive,
+  normal winding) + unselected (cutter, reversed winding) when `subtract` is set.
+- **Grid bounded to the kept region.** AABB spans only the additive (selected) verts; far-away
+  cutters still sum into the winding correctly without stealing resolution from the carve.
+- **Cutters survive** — only the selection is spliced out for the result. Guard: subtract with no
+  selected mesh reports "subtract needs at least one selected (kept) mesh." `subtract` threaded
+  through `voxel_merge_begin` / `voxel_merge_selected`.
+
 ## 2026-06-29 — Select mode: RMB-drag scale
 
 - **Scale selected meshes with RMB drag in SELECT mode.** Plain right-mouse drag now uniformly
