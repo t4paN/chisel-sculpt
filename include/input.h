@@ -67,7 +67,7 @@ struct InputState {
     bool on_model;          // cursor is over geometry
 
     // Interaction latch: locks mode on mouse-down until release
-    enum class DragMode { NONE, ORBIT, SCULPT, PAN, ZOOM, MOVE_OBJECT };
+    enum class DragMode { NONE, ORBIT, SCULPT, PAN, ZOOM, MOVE_OBJECT, SCALE_OBJECT };
     DragMode drag_mode;
 
     // Quit confirmation

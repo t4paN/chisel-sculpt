@@ -935,6 +935,61 @@ int main(int argc, char* argv[]) {
                 wrap_cursor(window, input, win_w, win_h);
             }
 
+            // Object scale: RMB drag in SELECT mode scales selected meshes about
+            // their shared centroid. Drag right grows, left shrinks (exponential
+            // so the feel is uniform regardless of current size).
+            if (input.drag_mode == InputState::DragMode::SCALE_OBJECT && dx != 0.0f) {
+                const auto& sel = scene.selected_ids();
+                if (!sel.empty()) {
+                    scene.materialize_active_cpu();
+
+                    // Pivot = centroid of selected bounding centres. Invariant under
+                    // uniform scale about itself, so recomputing per frame is stable.
+                    Vec3 pivot = {0, 0, 0};
+                    uint32_t np = 0;
+                    for (uint32_t sel_id : sel) {
+                        MeshEntity* e = scene.find_entity(sel_id);
+                        if (!e) continue;
+                        Vec3 c; float r;
+                        e->mesh.compute_bounding_sphere(c, r);
+                        pivot.x += c.x; pivot.y += c.y; pivot.z += c.z;
+                        np++;
+                    }
+                    if (np > 0) {
+                        pivot.x /= np; pivot.y /= np; pivot.z /= np;
+                        // With symmetry on, scale X about the mirror plane so the
+                        // piece (and its -x twin) stay exact mirrors.
+                        if (input.mirror_x) pivot.x = 0.0f;
+
+                        float f = std::exp(dx * 0.005f);
+
+                        auto scale_mesh = [&](Mesh& m) {
+                            uint32_t n = m.vertex_count();
+                            for (uint32_t v = 0; v < n; v++) {
+                                m.pos_x[v] = pivot.x + (m.pos_x[v] - pivot.x) * f;
+                                m.pos_y[v] = pivot.y + (m.pos_y[v] - pivot.y) * f;
+                                m.pos_z[v] = pivot.z + (m.pos_z[v] - pivot.z) * f;
+                            }
+                        };
+
+                        for (uint32_t sel_id : sel) {
+                            MeshEntity* e = scene.find_entity(sel_id);
+                            if (!e) continue;
+                            uint32_t vc = e->mesh.vertex_count();
+                            scale_mesh(e->mesh);
+                            if (sel_id == scene.active_mesh_id() && multires->locked)
+                                scale_mesh(multires->base);
+
+                            std::vector<uint32_t> local_dirty(vc);
+                            for (uint32_t i = 0; i < vc; i++) local_dirty[i] = i;
+                            scene.sync_partial_entity(sel_id, local_dirty);
+                        }
+                        screen_buffers_dirty = true;
+                    }
+                }
+                wrap_cursor(window, input, win_w, win_h);
+            }
+
             // One-shot actions (IDLE only)
 
             // Delete selected mesh (+ mirror pair if linked)

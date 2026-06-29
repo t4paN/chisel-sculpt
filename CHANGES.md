@@ -2,6 +2,15 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-29 — Select mode: RMB-drag scale
+
+- **Scale selected meshes with RMB drag in SELECT mode.** Plain right-mouse drag now uniformly
+  scales the selected mesh(es) about their shared centroid — drag right to grow, left to shrink
+  (exponential, so the feel is size-independent). Ctrl+RMB stays camera zoom. With symmetry on,
+  X scales about the mirror plane so the piece and its -x twin remain exact mirrors. New
+  `DragMode::SCALE_OBJECT` latched on RMB press in SELECT mode; application mirrors the existing
+  `MOVE_OBJECT` path (materialize active CPU, scale `mesh` + multires base, `sync_partial_entity`).
+
 ## 2026-06-28 — WebGPU port: render-seam backend implemented (web target started)
 
 - **Started the web target (wgpu-native first).** The `gpu::` render seam now has a full WebGPU
