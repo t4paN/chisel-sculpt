@@ -2,6 +2,21 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-29 — SDF voxel-merge: Fast Winding Number sign pass
+
+- **Sign pass is now O(corners·log tris) instead of O(corners·tris).** The winding-sign kernel
+  used to sum the solid angle of *every* soup triangle at *every* band corner — the dominant cost,
+  brutal on heavy meshes. Replaced the per-corner inner loop with a Barnes-Hut traversal of a Fast
+  Winding Number tree (Barill et al. 2018): far nodes contribute via a dipole (order-0) + order-1
+  Taylor expansion; only near leaves are summed exactly. Verified significantly faster on a merge
+  with a >1M-tri input mesh.
+- **Mechanism.** `build_fwn_tree` (sdf.cpp) builds a median-split BVH once on the CPU at merge
+  begin, precomputing each node's expansion point, `g0 = Σ area-weighted normals`, order-1 tensor
+  `T`, and subtree radius. Uploaded as two SSBOs (bindings 38/39). `sdf_sign.{comp,wgsl}` traverse
+  it with a fixed 64-deep stack; acceptance `|q-p| > β·radius`, β=2 (`FWN_BETA`). Near-surface
+  corners still evaluate their nearby triangles exactly, so the inside/outside decision keeps full
+  accuracy where it matters. Raise β if a merge ever comes out inverted/speckled.
+
 ## 2026-06-29 — SDF voxel-merge: boolean subtract (carve the reds)
 
 - **Subtract merge.** The voxel-merge can now carve instead of only unioning. In the merge

@@ -5,6 +5,11 @@
 // edges, so off-band corners just need a consistent sign — never a winding number.
 // Chunked via u_cornerOffset so the host can budget the dominant pass across frames.
 //
+// Winding number via the Fast Winding Number tree (Barill et al. 2018) instead of the
+// old brute O(tris) per-corner solid-angle sum: a node far from the query contributes
+// through its dipole/order-1 expansion; only near leaves are summed exactly. The host
+// (sdf.cpp build_fwn_tree) fills the node + triOrder buffers and matches this layout.
+//
 // Self-contained: SDF_GID / SDF_DEGEN inlined; loose uniforms → anonymous UBO 63.
 #version 430
 layout(local_size_x = 64) in;
@@ -12,6 +17,19 @@ layout(std430, binding = 21) readonly buffer Pos  { float p[]; };
 layout(std430, binding = 22) readonly buffer Idx  { uint  ix[]; };
 layout(std430, binding = 23) readonly buffer Dist { uint  d[]; };
 layout(std430, binding = 24)          buffer Field{ float f[]; };
+
+// FWN tree node — must mirror FwnNodeGPU in sdf.cpp (96 bytes, vec4-aligned).
+struct FwnNode {
+    vec4  p_r;     // xyz = expansion point, w = subtree radius
+    vec4  g0;      // xyz = Σ area-weighted normals (order 0)
+    vec4  t0;      // T row 0 (xyz)
+    vec4  t1;      // T row 1 (xyz)
+    vec4  t2;      // T row 2 (xyz)
+    ivec4 meta;    // x left, y right (<0 ⇒ leaf), z triStart, w triCount
+};
+layout(std430, binding = 38) readonly buffer Nodes { FwnNode nodes[]; };
+layout(std430, binding = 39) readonly buffer Order { uint    triOrder[]; };
+
 layout(std140, binding = 63) uniform Params {
     vec3  u_origin;       // 0
     float u_voxel;        // 12
@@ -20,7 +38,7 @@ layout(std140, binding = 63) uniform Params {
     uint  u_cornerCount;  // 24
     float u_bandFar;      // 28
     uint  u_cornerOffset; // 32  chunked dispatch: base corner index of this slice
-    uint  _pad0;          // 36
+    float u_beta;         // 36  FWN far-field acceptance threshold
     uint  _pad1;          // 40
     uint  _pad2;          // 44
 };
@@ -41,6 +59,17 @@ vec3 tri_vert(uint t, uint k) {
     return vec3(p[3u*v], p[3u*v+1u], p[3u*v+2u]);
 }
 
+// Exact solid angle subtended by triangle t at the (pre-translated) query origin q.
+float tri_solid_angle(uint t, vec3 q) {
+    vec3 va = tri_vert(t,0u), vb = tri_vert(t,1u), vc = tri_vert(t,2u);
+    if (tri_degenerate(va,vb,vc)) return 0.0;       // keep degenerates out of the sum
+    vec3 A = va - q, B = vb - q, C = vc - q;
+    float la=length(A), lb=length(B), lc=length(C);
+    float num = dot(A, cross(B,C));
+    float den = la*lb*lc + dot(A,B)*lc + dot(B,C)*la + dot(C,A)*lb;
+    return 2.0 * atan(num, den);
+}
+
 void main() {
     uint ci = linear_gid() + u_cornerOffset;
     if (ci >= u_cornerCount) return;
@@ -53,16 +82,34 @@ void main() {
     int k =  int(ci) / (R1*R1);
     vec3 q = u_origin + u_voxel*vec3(i,j,k);
 
-    float omega = 0.0;
-    for (uint t = 0u; t < u_triCount; t++) {
-        vec3 va = tri_vert(t,0u), vb = tri_vert(t,1u), vc = tri_vert(t,2u);
-        if (tri_degenerate(va,vb,vc)) continue;   // keep degenerates out of the sign sum
-        vec3 A = va - q, B = vb - q, C = vc - q;
-        float la=length(A), lb=length(B), lc=length(C);
-        float num = dot(A, cross(B,C));
-        float den = la*lb*lc + dot(A,B)*lc + dot(B,C)*la + dot(C,A)*lb;
-        omega += 2.0 * atan(num, den);
+    // Barnes-Hut traversal of the FWN tree; accumulate winding number w directly.
+    float w = 0.0;
+    int stack[64];
+    int sp = 0;
+    stack[sp++] = 0;                          // root
+    while (sp > 0) {
+        FwnNode nd = nodes[stack[--sp]];
+        vec3  dvec = nd.p_r.xyz - q;
+        float r2   = dot(dvec, dvec);
+        float bound = u_beta * nd.p_r.w;
+        if (r2 > bound*bound) {
+            // Far field: dipole (order 0) + order-1 Taylor expansion of (x-q)/|x-q|^3.
+            float r    = sqrt(r2);
+            float ir3  = 1.0 / (r2 * r);
+            float ir5  = ir3 / r2;
+            float w0   = dot(dvec, nd.g0.xyz) * ir3;
+            float trT  = nd.t0.x + nd.t1.y + nd.t2.z;
+            vec3  Td   = vec3(dot(nd.t0.xyz, dvec), dot(nd.t1.xyz, dvec), dot(nd.t2.xyz, dvec));
+            float dTd  = dot(dvec, Td);
+            w += (w0 + trT*ir3 - 3.0*dTd*ir5) / FOUR_PI;
+        } else if (nd.meta.x < 0) {
+            // Near leaf: exact solid-angle sum.
+            for (int n = 0; n < nd.meta.w; n++)
+                w += tri_solid_angle(triOrder[nd.meta.z + n], q) / FOUR_PI;
+        } else if (sp <= 62) {                // recurse (guard the fixed stack)
+            stack[sp++] = nd.meta.x;
+            stack[sp++] = nd.meta.y;
+        }
     }
-    float w = omega / FOUR_PI;
     f[ci] = (w > 0.5 ? -1.0 : 1.0) * dist;          // signed real distance (band)
 }

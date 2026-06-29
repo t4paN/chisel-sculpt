@@ -119,6 +119,133 @@ uint32_t gather_soup(const Scene& scene,
     return n_additive + n_cutter;
 }
 
+// ---- Fast Winding Number tree ---------------------------------------------
+// The winding-sign pass used to be a brute O(band_corners * tris) solid-angle sum:
+// every band corner looped over EVERY soup triangle. Replace the per-corner inner
+// loop with a Barnes-Hut traversal (Barill et al. 2018, "Fast Winding Numbers for
+// Soups and Clouds"): build a median-split BVH over the triangles once on the CPU,
+// precompute each node's dipole (order-0) + order-1 aggregates, and per corner
+// traverse — a node far from the query (|q-p| > beta*radius) contributes via its
+// Taylor expansion; only near leaves are summed exactly. O(corners * log tris).
+//
+// Per node we store, about an area-weighted expansion point p:
+//   g0 = Σ aₜnₜ                         (order-0 area-weighted normal sum)
+//   T  = Σ aₜnₜ ⊗ (cₜ - p)              (order-1 tensor; cₜ = tri centroid)
+// where aₜnₜ = ½(b-a)×(c-a) is already the area-weighted normal. The winding
+// contribution of a far node at query q (d = p-q, r = |d|) is, before /4π:
+//   w0 = d·g0 / r³
+//   w1 = tr(T)/r³ - 3 (dᵀTd)/r⁵
+// (the 0th/1st terms of expanding the Poisson-kernel gradient (x-q)/|x-q|³ about p).
+// radius = max |vertex - p| over the subtree, the conservative acceptance bound.
+constexpr int   FWN_LEAF = 8;       // tris per leaf below which we stop splitting
+constexpr float FWN_BETA = 2.0f;    // far-field acceptance: |q-p| > BETA*radius ⇒ expand
+
+// std430/host-mirrored node (96 bytes; vec4-aligned, no padding holes).
+struct FwnNodeGPU {
+    float px, py, pz, r;            // expansion point (xyz) + subtree radius (w)
+    float g0x, g0y, g0z, _g;       // order-0: Σ area-weighted normals
+    float t0x, t0y, t0z, _0;       // T row 0
+    float t1x, t1y, t1z, _1;       // T row 1
+    float t2x, t2y, t2z, _2;       // T row 2
+    int32_t left, right, tri_start, tri_count;  // children (-1 if leaf) / leaf tri range
+};
+static_assert(sizeof(FwnNodeGPU) == 96, "FwnNode must match the std430 shader struct");
+
+// Build the FWN tree over the soup. `order` is reordered in place into leaf-contiguous
+// runs; `nodes` receives the flat tree (root at index 0). One-shot CPU work (allowed
+// here — the zero-alloc / no-readback rules are stroke-only).
+static void build_fwn_tree(const std::vector<float>& pos, const std::vector<uint32_t>& idx,
+                           std::vector<FwnNodeGPU>& nodes, std::vector<uint32_t>& order)
+{
+    const uint32_t nt = (uint32_t)(idx.size() / 3);
+    nodes.clear();
+    order.resize(nt);
+    if (nt == 0) return;
+
+    // Per-tri centroid + area-weighted normal (an = ½(b-a)×(c-a); |an| = area).
+    std::vector<Vec3> cen(nt), an(nt);
+    for (uint32_t t = 0; t < nt; t++) {
+        uint32_t i0 = idx[3*t], i1 = idx[3*t+1], i2 = idx[3*t+2];
+        Vec3 a(pos[3*i0], pos[3*i0+1], pos[3*i0+2]);
+        Vec3 b(pos[3*i1], pos[3*i1+1], pos[3*i1+2]);
+        Vec3 c(pos[3*i2], pos[3*i2+1], pos[3*i2+2]);
+        cen[t] = (a + b + c) * (1.0f/3.0f);
+        an[t]  = (b - a).cross(c - a) * 0.5f;
+        order[t] = t;
+    }
+
+    nodes.reserve(nt / FWN_LEAF * 2 + 8);
+
+    // Recursive median split over order[start,end). Returns the new node's index.
+    std::function<int32_t(uint32_t,uint32_t)> build = [&](uint32_t start, uint32_t end) -> int32_t {
+        int32_t self = (int32_t)nodes.size();
+        nodes.push_back({});                       // reserve slot (children fill it after recursion)
+
+        // Aggregate dipole + order-1 + radius over this range.
+        Vec3 g0(0,0,0), wcen(0,0,0);
+        double area = 0.0;
+        for (uint32_t s = start; s < end; s++) {
+            uint32_t t = order[s];
+            float at = an[t].length();
+            g0   += an[t];
+            wcen += cen[t] * at;
+            area += at;
+        }
+        Vec3 p = (area > 0.0) ? wcen * (float)(1.0/area)
+                              : [&]{ Vec3 m(0,0,0); for (uint32_t s=start;s<end;s++) m+=cen[order[s]];
+                                     return m * (1.0f/(float)(end-start)); }();
+        // T = Σ an ⊗ (cen - p); radius = max |vertex - p|.
+        float t00=0,t01=0,t02=0, t10=0,t11=0,t12=0, t20=0,t21=0,t22=0;
+        float r2 = 0.0f;
+        for (uint32_t s = start; s < end; s++) {
+            uint32_t t = order[s];
+            Vec3 dlt = cen[t] - p, n = an[t];
+            t00 += n.x*dlt.x; t01 += n.x*dlt.y; t02 += n.x*dlt.z;
+            t10 += n.y*dlt.x; t11 += n.y*dlt.y; t12 += n.y*dlt.z;
+            t20 += n.z*dlt.x; t21 += n.z*dlt.y; t22 += n.z*dlt.z;
+            for (int k = 0; k < 3; k++) {
+                Vec3 v(pos[3*idx[3*t+k]], pos[3*idx[3*t+k]+1], pos[3*idx[3*t+k]+2]);
+                r2 = std::max(r2, (v - p).dot(v - p));
+            }
+        }
+
+        FwnNodeGPU& nd = nodes[self];
+        nd.px=p.x; nd.py=p.y; nd.pz=p.z; nd.r=std::sqrt(r2);
+        nd.g0x=g0.x; nd.g0y=g0.y; nd.g0z=g0.z; nd._g=0;
+        nd.t0x=t00; nd.t0y=t01; nd.t0z=t02; nd._0=0;
+        nd.t1x=t10; nd.t1y=t11; nd.t1z=t12; nd._1=0;
+        nd.t2x=t20; nd.t2y=t21; nd.t2z=t22; nd._2=0;
+
+        uint32_t count = end - start;
+        if (count <= (uint32_t)FWN_LEAF) {         // leaf
+            nd.left = nd.right = -1;
+            nd.tri_start = (int32_t)start; nd.tri_count = (int32_t)count;
+            return self;
+        }
+
+        // Split on the longest centroid-extent axis at the median centroid.
+        Vec3 clo = cen[order[start]], chi = clo;
+        for (uint32_t s = start+1; s < end; s++) {
+            Vec3 c = cen[order[s]];
+            clo.x=std::min(clo.x,c.x); clo.y=std::min(clo.y,c.y); clo.z=std::min(clo.z,c.z);
+            chi.x=std::max(chi.x,c.x); chi.y=std::max(chi.y,c.y); chi.z=std::max(chi.z,c.z);
+        }
+        Vec3 ext = chi - clo;
+        int axis = (ext.x >= ext.y && ext.x >= ext.z) ? 0 : (ext.y >= ext.z ? 1 : 2);
+        uint32_t mid = start + count/2;
+        std::nth_element(order.begin()+start, order.begin()+mid, order.begin()+end,
+            [&](uint32_t a, uint32_t b){ const Vec3& ca=cen[a]; const Vec3& cb=cen[b];
+                return (axis==0?ca.x:axis==1?ca.y:ca.z) < (axis==0?cb.x:axis==1?cb.y:cb.z); });
+
+        int32_t L = build(start, mid);
+        int32_t Rr = build(mid, end);
+        nodes[self].left = L; nodes[self].right = Rr;  // re-index: vector may have realloc'd
+        nodes[self].tri_start = nodes[self].tri_count = 0;
+        return self;
+    };
+    build(0, nt);
+}
+
 // ---- Shader sources -------------------------------------------------------
 // The 5 SDF compute kernels now live as self-contained canonical shaders, embedded at
 // build time: shaders/{glsl,wgsl}/sdf_{count,expand,sign,mc,nets}.* — referenced by
@@ -811,7 +938,8 @@ struct SdfSignParamsGPU {
     float ox, oy, oz;     float voxel;
     int32_t R;            uint32_t triCount;
     uint32_t cornerCount; float bandFar;
-    uint32_t cornerOffset; uint32_t _pad0, _pad1, _pad2;
+    uint32_t cornerOffset; float beta;     // FWN far-field acceptance (|q-p| > beta*radius ⇒ expand)
+    uint32_t _pad1, _pad2;
 };
 struct SdfMeshParamsGPU {                    // shared by mc + nets (same uniforms)
     float ox, oy, oz;     float voxel;
@@ -877,6 +1005,9 @@ struct VoxelMergeJob {
     // around the mc_out resize). Released explicitly in the destructor.
     gpu::Buffer soup_pos, soup_idx, dist, field, mc_out, mc_cnt, tritab, splat_box, splat_off;
 
+    // Fast-winding-number tree (sign pass): node array + leaf-contiguous tri order.
+    gpu::Buffer fwn_nodes, fwn_order;
+
     // Compute pipelines + their Params UBOs, on the gpu:: seam (Seam Step 2b).
     // mc_pipe is compiled from either sdf_mc or sdf_nets per use_nets. Pipelines/UBOs
     // are POD handles → released in the destructor.
@@ -900,6 +1031,7 @@ struct VoxelMergeJob {
         gpu::release_buffer(mc_out);    gpu::release_buffer(mc_cnt);
         gpu::release_buffer(tritab);    gpu::release_buffer(splat_box);
         gpu::release_buffer(splat_off);
+        gpu::release_buffer(fwn_nodes); gpu::release_buffer(fwn_order);
     }
 };
 
@@ -1005,6 +1137,15 @@ VoxelMergeJob* voxel_merge_begin(Scene& scene, ComputeState& cs,
     job->soup_pos = gpu::create_buffer(cs.gpu_dev, pos.data(), pos.size()*sizeof(float),  Usage::Storage);
     job->soup_idx = gpu::create_buffer(cs.gpu_dev, idx.data(), idx.size()*sizeof(uint32_t), Usage::Storage);
 
+    // Fast-winding-number tree for the sign pass (replaces the brute all-tris sum).
+    std::vector<FwnNodeGPU> fwn_nodes;
+    std::vector<uint32_t>   fwn_order;
+    build_fwn_tree(pos, idx, fwn_nodes, fwn_order);
+    job->fwn_nodes = gpu::create_buffer(cs.gpu_dev, fwn_nodes.data(),
+                                        fwn_nodes.size()*sizeof(FwnNodeGPU), Usage::Storage);
+    job->fwn_order = gpu::create_buffer(cs.gpu_dev, fwn_order.data(),
+                                        fwn_order.size()*sizeof(uint32_t),  Usage::Storage);
+
     // Load-balanced splat scratch: per-tri voxel box (6 uints: g0.xyz+span.xyz) +
     // the exclusive scan of footprints (offset). box is GPU-written then read back
     // for a CPU scan (CopySrc); offset is uploaded back for the expand pass's owner search.
@@ -1056,14 +1197,16 @@ VoxelMergeJob* voxel_merge_begin(Scene& scene, ComputeState& cs,
         gpu::embedded_shader("sdf_expand"), expand_layout, 6);
 
     const BindEntry sign_layout[] = {
-        { BIND_SDF_SOUP_POS, Bind::StorageRead,      0 },
-        { BIND_SDF_SOUP_IDX, Bind::StorageRead,      0 },
-        { BIND_SDF_DIST,     Bind::StorageRead,      0 },  // read (written atomically in expand)
-        { BIND_SDF_FIELD,    Bind::StorageReadWrite, 0 },
-        { BIND_PARAMS,       Bind::Uniform,          sizeof(SdfSignParamsGPU) },
+        { BIND_SDF_SOUP_POS,    Bind::StorageRead,      0 },
+        { BIND_SDF_SOUP_IDX,    Bind::StorageRead,      0 },
+        { BIND_SDF_DIST,        Bind::StorageRead,      0 },  // read (written atomically in expand)
+        { BIND_SDF_FIELD,       Bind::StorageReadWrite, 0 },
+        { BIND_SDF_FWN_NODES,   Bind::StorageRead,      0 },  // FWN tree
+        { BIND_SDF_FWN_TRIORDER,Bind::StorageRead,      0 },  // leaf tri order
+        { BIND_PARAMS,          Bind::Uniform,          sizeof(SdfSignParamsGPU) },
     };
     job->sign_pipe = gpu::create_compute_pipeline(cs.gpu_dev,
-        gpu::embedded_shader("sdf_sign"), sign_layout, 5);
+        gpu::embedded_shader("sdf_sign"), sign_layout, 7);
 
     // Iso-surface extractor: Surface Nets (smoother, quad-dominant) or MC (default,
     // manifold-robust). Either way it drives the same mc_pipe two-pass dispatch in
@@ -1244,15 +1387,18 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
         su.ox = grid.origin.x; su.oy = grid.origin.y; su.oz = grid.origin.z;
         su.voxel = grid.voxel; su.R = (int)grid.R;
         su.triCount = j.tri_count; su.cornerCount = j.corner_count; su.bandFar = BAND_FAR;
+        su.beta = FWN_BETA;
 
         const gpu::BindBufferEntry sbg[] = {
-            { BIND_SDF_SOUP_POS, &j.soup_pos, j.soup_pos.size },
-            { BIND_SDF_SOUP_IDX, &j.soup_idx, j.soup_idx.size },
-            { BIND_SDF_DIST,     &j.dist,     j.dist.size },
-            { BIND_SDF_FIELD,    &j.field,    j.field.size },
-            { BIND_PARAMS,       &j.sign_ubo, sizeof(SdfSignParamsGPU) },
+            { BIND_SDF_SOUP_POS,     &j.soup_pos,  j.soup_pos.size },
+            { BIND_SDF_SOUP_IDX,     &j.soup_idx,  j.soup_idx.size },
+            { BIND_SDF_DIST,         &j.dist,      j.dist.size },
+            { BIND_SDF_FIELD,        &j.field,     j.field.size },
+            { BIND_SDF_FWN_NODES,    &j.fwn_nodes, j.fwn_nodes.size },
+            { BIND_SDF_FWN_TRIORDER, &j.fwn_order, j.fwn_order.size },
+            { BIND_PARAMS,           &j.sign_ubo,  sizeof(SdfSignParamsGPU) },
         };
-        gpu::BindGroup sgrp = gpu::create_bind_group(cs.gpu_dev, j.sign_pipe, sbg, 5);
+        gpu::BindGroup sgrp = gpu::create_bind_group(cs.gpu_dev, j.sign_pipe, sbg, 7);
         const uint32_t SIGN_SLICE      = 32768u;  // worst-case all-band slice ~ <1s on Vega 8
         const uint32_t SLICES_PER_TICK = 2u;      // tune: smaller = smoother window, more ticks.
                                                   // Leaning small on purpose — user prefers a

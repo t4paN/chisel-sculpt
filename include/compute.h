@@ -46,6 +46,8 @@ enum ComputeBinding : GLuint {
     BIND_UNDO_RING         = 35, // float6 per touched vert: old(3) + new(3) — persistent undo history (3b-iii)
     BIND_SDF_SPLAT_BOX     = 36, // uint6 per-tri voxel box: g0.xyz + span.xyz (SDF splat Pass A→C)
     BIND_SDF_SPLAT_OFFSET  = 37, // uint exclusive scan of footprint (SDF splat Pass C: owner search)
+    BIND_SDF_FWN_NODES     = 38, // FwnNode[] BVH+dipole tree for the fast winding-number sign pass
+    BIND_SDF_FWN_TRIORDER  = 39, // uint   leaf-contiguous triangle order (sign pass exact-leaf fetch)
     // Reserved high slot for the per-dispatch std140 Params UBO that replaces loose
     // GL uniforms on the gpu:: seam (see webgpu-port-plan.md / CONVENTIONS.md). Every
     // ported kernel binds its *ParamsGPU block here.
