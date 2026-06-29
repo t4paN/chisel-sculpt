@@ -117,7 +117,7 @@ void ComputeState::ensure_move_buffers(uint32_t vertex_count) {
     move_buffers_capacity = vertex_count;
 }
 
-void ComputeState::dispatch_move_capture(const MoveCaptureParams& p, GLuint pos_vbo) {
+void ComputeState::dispatch_move_capture(const MoveCaptureParams& p, const gpu::Buffer& pos_vbo) {
     if (!has_move()) return;
     const uint32_t vc = p.vertex_count;
 
@@ -140,9 +140,8 @@ void ComputeState::dispatch_move_capture(const MoveCaptureParams& p, GLuint pos_
     u.vertex_count = vc;
     gpu::write_buffer(gpu_dev, move_capture_ubo, 0, &u, sizeof(u));
 
-    gpu::Buffer posView{      (uint64_t)vc * 3u * sizeof(float),       pos_vbo };
     const gpu::BindBufferEntry bg[] = {
-        { BIND_POSITIONS,     &posView,            posView.size },
+        { BIND_POSITIONS,     &pos_vbo,            (uint64_t)vc * 3u * sizeof(float) },
         { BIND_MOVE_AFFECTED, &move_affected_ssbo, move_affected_ssbo.size },
         { BIND_MOVE_WEIGHTS,  &move_weights_ssbo,  move_weights_ssbo.size },
         { BIND_MOVE_INIT,     &move_init_ssbo,     move_init_ssbo.size },
@@ -156,18 +155,16 @@ void ComputeState::dispatch_move_capture(const MoveCaptureParams& p, GLuint pos_
     gpu::release_bind_group(grp);
 }
 
-void ComputeState::dispatch_move_weight_smooth(uint32_t vertex_count, int iterations, GLuint index_ebo) {
+void ComputeState::dispatch_move_weight_smooth(uint32_t vertex_count, int iterations, const gpu::Buffer& index_ebo) {
     if (!move_weight_smooth_pipeline.handle) return;
     const uint32_t cap = move_buffers_capacity;
 
     // Constant inputs across iterations. index_ebo is still a raw GL handle (view);
     // the move scratch + adjacency are seam-owned, bound directly. 0 = unguarded.
-    gpu::Buffer idxView{    0,                                       index_ebo };
-
     // Two bind groups for the ping-pong: slot 9 = w_in, slot 10 = w_out. ping reads
     // weights→pong, pong reads pong→weights. create_bind_group is a POD fill on GL.
     const gpu::BindBufferEntry ping[] = {
-        { BIND_INDICES,          &idxView,     idxView.size },
+        { BIND_INDICES,          &index_ebo,   index_ebo.size },
         { BIND_ADJACENCY_OFFSET, &adjacency_offset_ssbo, adjacency_offset_ssbo.size },
         { BIND_ADJACENCY_LIST,   &adjacency_list_ssbo,   adjacency_list_ssbo.size },
         { BIND_MOVE_AFFECTED,    &move_affected_ssbo,     move_affected_ssbo.size },
@@ -175,7 +172,7 @@ void ComputeState::dispatch_move_weight_smooth(uint32_t vertex_count, int iterat
         { BIND_MOVE_WEIGHTS_PONG,&move_weights_pong_ssbo, move_weights_pong_ssbo.size },
     };
     const gpu::BindBufferEntry pong[] = {
-        { BIND_INDICES,          &idxView,     idxView.size },
+        { BIND_INDICES,          &index_ebo,   index_ebo.size },
         { BIND_ADJACENCY_OFFSET, &adjacency_offset_ssbo, adjacency_offset_ssbo.size },
         { BIND_ADJACENCY_LIST,   &adjacency_list_ssbo,   adjacency_list_ssbo.size },
         { BIND_MOVE_AFFECTED,    &move_affected_ssbo,     move_affected_ssbo.size },
@@ -207,7 +204,7 @@ void ComputeState::dispatch_move_weight_smooth(uint32_t vertex_count, int iterat
     }
 }
 
-void ComputeState::dispatch_move_apply(const MoveApplyParams& p, GLuint pos_vbo) {
+void ComputeState::dispatch_move_apply(const MoveApplyParams& p, const gpu::Buffer& pos_vbo) {
     if (!move_apply_pipeline.handle || !mask_ssbo.handle) return;
     const uint32_t vc = p.vertex_count;
 
@@ -215,9 +212,8 @@ void ComputeState::dispatch_move_apply(const MoveApplyParams& p, GLuint pos_vbo)
     u.total[0] = p.total_dx; u.total[1] = p.total_dy; u.total[2] = p.total_dz;
     gpu::write_buffer(gpu_dev, move_apply_ubo, 0, &u, sizeof(u));
 
-    gpu::Buffer posView{      (uint64_t)vc * 3u * sizeof(float),       pos_vbo };
     const gpu::BindBufferEntry bg[] = {
-        { BIND_POSITIONS,     &posView,            posView.size },
+        { BIND_POSITIONS,     &pos_vbo,            (uint64_t)vc * 3u * sizeof(float) },
         { BIND_MOVE_AFFECTED, &move_affected_ssbo, move_affected_ssbo.size },
         { BIND_MOVE_WEIGHTS,  &move_weights_ssbo,  move_weights_ssbo.size },
         { BIND_MOVE_INIT,     &move_init_ssbo,     move_init_ssbo.size },

@@ -93,7 +93,7 @@ void ComputeState::ensure_limb_buffers(uint32_t vertex_count) {
     limb_scratch_capacity = vertex_count;
 }
 
-void ComputeState::dispatch_limb_drag(const LimbDragParams& p, GLuint pos_vbo) {
+void ComputeState::dispatch_limb_drag(const LimbDragParams& p, const gpu::Buffer& pos_vbo) {
     if (!has_limb() || !mask_ssbo.handle) return;
     const uint32_t vc = p.vertex_count;
 
@@ -101,9 +101,8 @@ void ComputeState::dispatch_limb_drag(const LimbDragParams& p, GLuint pos_vbo) {
     u.delta[0] = p.dx; u.delta[1] = p.dy; u.delta[2] = p.dz;
     gpu::write_buffer(gpu_dev, limb_drag_ubo, 0, &u, sizeof(u));
 
-    gpu::Buffer posView{      (uint64_t)vc * 3u * sizeof(float),       pos_vbo };
     const gpu::BindBufferEntry bg[] = {
-        { BIND_POSITIONS,     &posView,            posView.size },
+        { BIND_POSITIONS,     &pos_vbo,            (uint64_t)vc * 3u * sizeof(float) },
         { BIND_MOVE_AFFECTED, &move_affected_ssbo, move_affected_ssbo.size },
         { BIND_MOVE_WEIGHTS,  &move_weights_ssbo,  move_weights_ssbo.size },
         { BIND_MASK,          &mask_ssbo,    (uint64_t)vc * sizeof(float) },
@@ -119,18 +118,14 @@ void ComputeState::dispatch_limb_drag(const LimbDragParams& p, GLuint pos_vbo) {
 
 void ComputeState::dispatch_limb_relax(uint32_t vertex_count, int iterations, float lambda,
                                        float tip_dx, float tip_dy, float tip_dz, float tip_bias,
-                                       GLuint pos_vbo, GLuint norm_vbo, GLuint index_ebo) {
+                                       const gpu::Buffer& pos_vbo, const gpu::Buffer& norm_vbo,
+                                       const gpu::Buffer& index_ebo) {
     if (!has_limb() || !mask_ssbo.handle || iterations <= 0) return;
     ensure_limb_buffers(vertex_count);
 
-    // src snapshot starts as a full copy of the live positions. pos_vbo is still a raw
-    // GL handle; the scratch is seam-owned (raw-GL copy on its handle — web-stage concern).
-    glBindBuffer(GL_COPY_READ_BUFFER,  pos_vbo);
-    glBindBuffer(GL_COPY_WRITE_BUFFER, limb_pos_scratch_ssbo.handle);
-    glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, 0, 0,
-                        (GLsizeiptr)vertex_count * 3 * sizeof(float));
-    glBindBuffer(GL_COPY_READ_BUFFER, 0);
-    glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
+    // src snapshot starts as a full copy of the live positions, through the seam.
+    gpu::copy_buffer(gpu_dev, pos_vbo, 0, limb_pos_scratch_ssbo, 0,
+                     (uint64_t)vertex_count * 3 * sizeof(float));
 
     LimbRelaxParamsGPU u = {};
     u.vertex_count = vertex_count;
@@ -139,13 +134,13 @@ void ComputeState::dispatch_limb_relax(uint32_t vertex_count, int iterations, fl
     u.tip_dir[0] = tip_dx; u.tip_dir[1] = tip_dy; u.tip_dir[2] = tip_dz;
     gpu::write_buffer(gpu_dev, limb_relax_ubo, 0, &u, sizeof(u));
 
-    // Constant inputs across iterations (sizes unused on the GL backend — whole-buffer
-    // bind; best-effort for the WebGPU min-size guard later). 0 = unguarded.
-    gpu::Buffer normView{    (uint64_t)vertex_count * 3u * sizeof(float),    norm_vbo };
-    gpu::Buffer idxView{     0,                                             index_ebo };
+    // Constant inputs across iterations — bound whole (the kernel indexes within range).
+    // Alias the seam buffers so the ping/pong bind tables below read naturally.
+    const gpu::Buffer& normView    = norm_vbo;
+    const gpu::Buffer& idxView     = index_ebo;
     // Ping-pong endpoints: scratch snapshot (seam-owned) and the live position VBO.
-    gpu::Buffer scratchView{ (uint64_t)vertex_count * 3u * sizeof(float),    limb_pos_scratch_ssbo.handle };
-    gpu::Buffer posView{     (uint64_t)vertex_count * 3u * sizeof(float),    pos_vbo };
+    const gpu::Buffer& scratchView = limb_pos_scratch_ssbo;
+    const gpu::Buffer& posView     = pos_vbo;
 
     // Two bind groups differing only in slots 29 (src) / 0 (dst). ping reads
     // scratch→pos, pong reads pos→scratch. create_bind_group is a POD fill on GL.
@@ -186,13 +181,9 @@ void ComputeState::dispatch_limb_relax(uint32_t vertex_count, int iterations, fl
     gpu::release_bind_group(grp_pong);
 
     // Even iteration count leaves the final result in the scratch buffer; copy it
-    // back into the live position VBO. GL-owned copy, stays raw GL.
+    // back into the live position VBO through the seam.
     if ((iterations & 1) == 0) {
-        glBindBuffer(GL_COPY_READ_BUFFER,  limb_pos_scratch_ssbo.handle);
-        glBindBuffer(GL_COPY_WRITE_BUFFER, pos_vbo);
-        glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, 0, 0,
-                            (GLsizeiptr)vertex_count * 3 * sizeof(float));
-        glBindBuffer(GL_COPY_READ_BUFFER, 0);
-        glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
+        gpu::copy_buffer(gpu_dev, limb_pos_scratch_ssbo, 0, pos_vbo, 0,
+                         (uint64_t)vertex_count * 3 * sizeof(float));
     }
 }

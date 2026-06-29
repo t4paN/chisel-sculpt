@@ -199,7 +199,7 @@ bool UndoStack::apply(UndoEntry& e, MeshEntity& ent, Scene& scene, bool forward)
         c.dispatch_multires_apply(r.vbo_pos, ent.multires_gpu.disp_ssbo,
                                   ent.multires_gpu.frames_ssbo, ent.multires_gpu.base_ssbo,
                                   e.verts.data(), nullptr, (uint32_t)e.verts.size(),
-                                  e.targets_base, c.undo_ring_ssbo.handle,
+                                  e.targets_base, c.undo_ring_ssbo.handle != 0,
                                   (uint32_t)e.ring_offset, forward);
         // Normals must cover the one-ring of the reverted verts, not just the moved
         // set: a moved vert changes the face normals it shares with its un-moved
@@ -213,7 +213,7 @@ bool UndoStack::apply(UndoEntry& e, MeshEntity& ent, Scene& scene, bool forward)
         const uint32_t* nrm_v = ring.empty() ? e.verts.data() : ring.data();
         uint32_t        nrm_n = ring.empty() ? (uint32_t)e.verts.size() : (uint32_t)ring.size();
         c.dispatch_compute_normals(nrm_v, nrm_n,
-                                   r.vbo_pos.handle, r.vbo_norm.handle, r.ebo.handle);
+                                   r.vbo_pos, r.vbo_norm, r.ebo);
         ent.multires_gpu.mark_cpu_dirty(e.verts);
         // Same frame-cache invalidation the in-place CPU path does below.
         if (e.targets_base) {
@@ -332,7 +332,7 @@ bool UndoStack::apply(UndoEntry& e, MeshEntity& ent, Scene& scene, bool forward)
                                           ent.multires_gpu.base_ssbo,
                                           e.verts.data(), nullptr,
                                           (uint32_t)e.verts.size(), e.targets_base,
-                                          c.undo_ring_ssbo.handle,
+                                          c.undo_ring_ssbo.handle != 0,
                                           (uint32_t)e.ring_offset, forward);
             } else {
                 static std::vector<float> stage;   // 6 floats/vert: target xyz, source xyz
@@ -348,7 +348,7 @@ bool UndoStack::apply(UndoEntry& e, MeshEntity& ent, Scene& scene, bool forward)
                                           (uint32_t)e.verts.size(), e.targets_base);
             }
             c.dispatch_compute_normals(e.verts.data(), (uint32_t)e.verts.size(),
-                                       r.vbo_pos.handle, r.vbo_norm.handle, r.ebo.handle);
+                                       r.vbo_pos, r.vbo_norm, r.ebo);
             gpu_apply_ran = true;
         }
 #ifdef CHISEL_DEBUG_MULTIRES

@@ -57,13 +57,10 @@ void ComputeState::ensure_accum_buffer(uint32_t vertex_count) {
 
 void ComputeState::clear_accum_buffer() {
     if (!accum_ssbo.handle || accum_vertex_count == 0) return;
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, accum_ssbo.handle);
-    uint32_t zero = 0;
-    glClearBufferData(GL_SHADER_STORAGE_BUFFER, GL_R32UI, GL_RED_INTEGER, GL_UNSIGNED_INT, &zero);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    gpu::clear_buffer(gpu_dev, accum_ssbo, 0);
 }
 
-void ComputeState::snapshot_stroke_normals(GLuint norm_vbo, uint32_t vertex_count) {
+void ComputeState::snapshot_stroke_normals(const gpu::Buffer& norm_vbo, uint32_t vertex_count) {
     // Working buffer holds only the active entity at offset 0 — copy [0, vertex_count).
     if (stroke_norm_capacity < vertex_count || !stroke_norm_ssbo.handle) {
         gpu::release_buffer(stroke_norm_ssbo);
@@ -72,20 +69,14 @@ void ComputeState::snapshot_stroke_normals(GLuint norm_vbo, uint32_t vertex_coun
                                               gpu::Usage::Storage);
         stroke_norm_capacity = vertex_count;
     }
-    GLsizeiptr byte_size = (GLsizeiptr)vertex_count * 3 * sizeof(float);
-    glBindBuffer(GL_COPY_READ_BUFFER,  norm_vbo);
-    glBindBuffer(GL_COPY_WRITE_BUFFER, stroke_norm_ssbo.handle);
-    glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, 0, 0, byte_size);
-    glBindBuffer(GL_COPY_READ_BUFFER,  0);
-    glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
+    uint64_t byte_size = (uint64_t)vertex_count * 3 * sizeof(float);
+    gpu::copy_buffer(gpu_dev, norm_vbo, 0, stroke_norm_ssbo, 0, byte_size);
 }
 
 void ComputeState::readback_accum(uint32_t vertex_count) {
     readback_buf.resize(vertex_count * 4);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, accum_ssbo.handle);
-    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
-                       vertex_count * 4 * sizeof(float), readback_buf.data());
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    gpu::read_buffer(gpu_dev, accum_ssbo, 0,
+                     (uint64_t)vertex_count * 4 * sizeof(float), readback_buf.data());
 }
 
 void ComputeState::upload_accum(const float* disp_x, const float* disp_y,
@@ -205,7 +196,7 @@ bool ComputeState::init_draw_mirror_apply() {
 // glMemoryBarrier calls, so ordering is preserved (extra barriers are always safe).
 // ---------------------------------------------------------------------------
 
-void ComputeState::dispatch_draw_accum(const DrawAccumParams& p, GLuint pos_vbo) {
+void ComputeState::dispatch_draw_accum(const DrawAccumParams& p, const gpu::Buffer& pos_vbo) {
     if (!has_draw() || !accum_ssbo.handle || !stroke_norm_ssbo.handle) return;
     const uint32_t vc = p.vertex_count;
 
@@ -225,9 +216,8 @@ void ComputeState::dispatch_draw_accum(const DrawAccumParams& p, GLuint pos_vbo)
     u.vertex_count = vc;
     gpu::write_buffer(gpu_dev, draw_accum_ubo, 0, &u, sizeof(u));
 
-    gpu::Buffer posView{ (uint64_t)vc * 3u * sizeof(float), pos_vbo };
     const gpu::BindBufferEntry bg[] = {
-        { BIND_POSITIONS, &posView,          posView.size },
+        { BIND_POSITIONS, &pos_vbo,          (uint64_t)vc * 3u * sizeof(float) },
         { BIND_NORMALS,   &stroke_norm_ssbo, (uint64_t)vc * 3u * sizeof(float) },
         { BIND_ACCUM,     &accum_ssbo,       (uint64_t)vc * 4u * sizeof(uint32_t) },
         { BIND_PARAMS,    &draw_accum_ubo,   sizeof(DrawAccumParamsGPU) },
@@ -262,7 +252,7 @@ void ComputeState::dispatch_draw_accum_symmetrize(uint32_t vertex_count) {
     gpu::release_bind_group(grp);
 }
 
-void ComputeState::dispatch_draw_apply(GLuint pos_vbo, uint32_t vertex_count,
+void ComputeState::dispatch_draw_apply(const gpu::Buffer& pos_vbo, uint32_t vertex_count,
                                         const gpu::Buffer& accum_override) {
     if (!draw_apply_pipeline.handle || !mask_ssbo.handle) return;
     const uint32_t vc = vertex_count;
@@ -275,13 +265,11 @@ void ComputeState::dispatch_draw_apply(GLuint pos_vbo, uint32_t vertex_count,
     VCountParamsGPU u = { vc, 0, 0, 0 };
     gpu::write_buffer(gpu_dev, draw_vcount_ubo, 0, &u, sizeof(u));
 
-    gpu::Buffer posView{   (uint64_t)vc * 3u * sizeof(float),        pos_vbo };
-
     uint32_t zero = 0;
     gpu::write_buffer(gpu_dev, smooth_dirty_ssbo, 0, &zero, sizeof(zero));
 
     const gpu::BindBufferEntry bg[] = {
-        { BIND_POSITIONS,   &posView,           posView.size },
+        { BIND_POSITIONS,   &pos_vbo,           (uint64_t)vc * 3u * sizeof(float) },
         { BIND_ACCUM,       &accum_src,         (uint64_t)vc * 4u * sizeof(uint32_t) },
         { BIND_DIRTY_VERTS, &smooth_dirty_ssbo, (uint64_t)(vc + 1u) * sizeof(uint32_t) },
         { BIND_MASK,        &mask_ssbo,         (uint64_t)vc * sizeof(float) },
@@ -295,7 +283,7 @@ void ComputeState::dispatch_draw_apply(GLuint pos_vbo, uint32_t vertex_count,
     gpu::release_bind_group(grp);
 }
 
-void ComputeState::dispatch_draw_mirror_apply(GLuint pos_vbo, uint32_t vertex_count) {
+void ComputeState::dispatch_draw_mirror_apply(const gpu::Buffer& pos_vbo, uint32_t vertex_count) {
     if (!draw_mirror_apply_pipeline.handle || mirror_map_vertex_count == 0) return;
     if (!accum_ssbo.handle || !mask_ssbo.handle) return;
     const uint32_t vc = vertex_count;
@@ -303,9 +291,8 @@ void ComputeState::dispatch_draw_mirror_apply(GLuint pos_vbo, uint32_t vertex_co
     VCountParamsGPU u = { vc, 0, 0, 0 };
     gpu::write_buffer(gpu_dev, draw_vcount_ubo, 0, &u, sizeof(u));
 
-    gpu::Buffer posView{ (uint64_t)vc * 3u * sizeof(float), pos_vbo };
     const gpu::BindBufferEntry bg[] = {
-        { BIND_POSITIONS,  &posView,         posView.size },
+        { BIND_POSITIONS,  &pos_vbo,         (uint64_t)vc * 3u * sizeof(float) },
         { BIND_ACCUM,      &accum_ssbo,      (uint64_t)vc * 4u * sizeof(uint32_t) },
         { BIND_MIRROR_MAP, &mirror_map_ssbo, (uint64_t)mirror_map_vertex_count * sizeof(uint32_t) },
         { BIND_MASK,       &mask_ssbo,       (uint64_t)vc * sizeof(float) },

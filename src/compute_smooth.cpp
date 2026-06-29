@@ -233,7 +233,7 @@ bool ComputeState::init_smooth() {
     return true;
 }
 
-void ComputeState::dispatch_smooth_mirror_apply(GLuint pos_vbo, uint32_t vertex_count, float anchor_x) {
+void ComputeState::dispatch_smooth_mirror_apply(const gpu::Buffer& pos_vbo, uint32_t vertex_count, float anchor_x) {
     if (!smooth_mirror_apply_pipeline.handle || mirror_map_vertex_count == 0 || !mask_ssbo.handle) return;
     const uint32_t vc = vertex_count;
 
@@ -242,9 +242,8 @@ void ComputeState::dispatch_smooth_mirror_apply(GLuint pos_vbo, uint32_t vertex_
     u.anchor_x = anchor_x;
     gpu::write_buffer(gpu_dev, smooth_mirror_ubo, 0, &u, sizeof(u));
 
-    gpu::Buffer posView{ (uint64_t)vc * 3u * sizeof(float), pos_vbo };
     const gpu::BindBufferEntry bg[] = {
-        { BIND_POSITIONS,  &posView,    posView.size },
+        { BIND_POSITIONS,  &pos_vbo,    (uint64_t)vc * 3u * sizeof(float) },
         { BIND_ACCUM,      &accum_ssbo, (uint64_t)vc * 4u * sizeof(uint32_t) },
         { BIND_MIRROR_MAP, &mirror_map_ssbo, (uint64_t)mirror_map_vertex_count * sizeof(uint32_t) },
         { BIND_MASK,       &mask_ssbo,  (uint64_t)vc * sizeof(float) },
@@ -260,7 +259,7 @@ void ComputeState::dispatch_smooth_mirror_apply(GLuint pos_vbo, uint32_t vertex_
 
 void ComputeState::dispatch_smooth(const SmoothAccumParams& p,
                                     GLuint /*triid_tex*/, GLuint /*bary_tex*/,
-                                    GLuint pos_vbo, GLuint index_ebo) {
+                                    const gpu::Buffer& pos_vbo, const gpu::Buffer& index_ebo) {
     if (!has_smooth() || !mask_ssbo.handle) return;
     const uint32_t vc = p.vertex_count;
 
@@ -279,10 +278,9 @@ void ComputeState::dispatch_smooth(const SmoothAccumParams& p,
     ua.vertex_count = vc;
     gpu::write_buffer(gpu_dev, smooth_accum_ubo, 0, &ua, sizeof(ua));
 
-    gpu::Buffer posView{   (uint64_t)vc * 3u * sizeof(float),                pos_vbo };
     {
         const gpu::BindBufferEntry bg[] = {
-            { BIND_POSITIONS,   &posView,    posView.size },
+            { BIND_POSITIONS,   &pos_vbo,    (uint64_t)vc * 3u * sizeof(float) },
             { BIND_ACCUM,       &accum_ssbo, (uint64_t)vc * 4u * sizeof(uint32_t) },
             { BIND_DIRTY_VERTS, &smooth_dirty_ssbo, smooth_dirty_ssbo.size },
             { BIND_PARAMS,      &smooth_accum_ubo, sizeof(SmoothAccumParamsGPU) },
@@ -300,10 +298,9 @@ void ComputeState::dispatch_smooth(const SmoothAccumParams& p,
     up.strength = p.strength;
     gpu::write_buffer(gpu_dev, smooth_apply_ubo, 0, &up, sizeof(up));
 
-    gpu::Buffer idxView{  0,                                    index_ebo };
     const gpu::BindBufferEntry apply_bg[] = {
-        { BIND_POSITIONS,        &posView,    posView.size },
-        { BIND_INDICES,          &idxView,    idxView.size },
+        { BIND_POSITIONS,        &pos_vbo,    (uint64_t)vc * 3u * sizeof(float) },
+        { BIND_INDICES,          &index_ebo,  index_ebo.size },
         { BIND_ACCUM,            &accum_ssbo, (uint64_t)vc * 4u * sizeof(uint32_t) },
         { BIND_ADJACENCY_OFFSET, &adjacency_offset_ssbo, adjacency_offset_ssbo.size },
         { BIND_ADJACENCY_LIST,   &adjacency_list_ssbo,   adjacency_list_ssbo.size },
@@ -438,7 +435,7 @@ void ComputeState::upload_adjacency(const uint32_t* offsets, uint32_t offset_cou
 }
 
 void ComputeState::dispatch_compute_normals(const uint32_t* dirty_verts, uint32_t dirty_count,
-                                             GLuint pos_vbo, GLuint norm_vbo, GLuint index_ebo) {
+                                             const gpu::Buffer& pos_vbo, const gpu::Buffer& norm_vbo, const gpu::Buffer& index_ebo) {
     if (!has_normals() || dirty_count == 0) return;
 
     // Upload the dirty-vert id list — seam-owned buffer (shared with stroke_smooth /
@@ -456,15 +453,12 @@ void ComputeState::dispatch_compute_normals(const uint32_t* dirty_verts, uint32_
     u.dirty_count = dirty_count;
     gpu::write_buffer(gpu_dev, compute_normals_ubo, 0, &u, sizeof(u));
 
-    // pos/norm/index sizes are unknown here (and unused on the GL backend — whole-buffer
-    // bind); 0 = unguarded. Adjacency + dirty list are seam-owned, bound directly.
-    gpu::Buffer posView{   0,                                        pos_vbo };
-    gpu::Buffer normView{  0,                                        norm_vbo };
-    gpu::Buffer idxView{   0,                                        index_ebo };
+    // pos/norm/index bound whole (the kernel scatters over the dirty list). Real buffer
+    // sizes from the seam-owned gpu::Buffers. Adjacency + dirty list are seam-owned too.
     const gpu::BindBufferEntry bg[] = {
-        { BIND_POSITIONS,        &posView,   posView.size },
-        { BIND_NORMALS,          &normView,  normView.size },
-        { BIND_INDICES,          &idxView,   idxView.size },
+        { BIND_POSITIONS,        &pos_vbo,   pos_vbo.size },
+        { BIND_NORMALS,          &norm_vbo,  norm_vbo.size },
+        { BIND_INDICES,          &index_ebo, index_ebo.size },
         { BIND_ADJACENCY_OFFSET, &adjacency_offset_ssbo, adjacency_offset_ssbo.size },
         { BIND_ADJACENCY_LIST,   &adjacency_list_ssbo,   adjacency_list_ssbo.size },
         { BIND_DIRTY_VERTS,      &dirty_verts_ssbo,      dirty_verts_ssbo.size },
@@ -514,7 +508,7 @@ bool ComputeState::init_stroke_smooth() {
 
 void ComputeState::dispatch_stroke_smooth_apply(const uint32_t* vert_ids, uint32_t count,
                                                  float strength,
-                                                 GLuint pos_vbo, GLuint index_ebo) {
+                                                 const gpu::Buffer& pos_vbo, const gpu::Buffer& index_ebo) {
     if (!stroke_smooth_apply_pipeline.handle || count == 0 || !mask_ssbo.handle) return;
 
     // Upload the dirty-vert id list — seam-owned buffer (shared with compute_normals /
@@ -533,13 +527,11 @@ void ComputeState::dispatch_stroke_smooth_apply(const uint32_t* vert_ids, uint32
     u.strength = strength;
     gpu::write_buffer(gpu_dev, stroke_smooth_ubo, 0, &u, sizeof(u));
 
-    // pos/index sizes unknown here (unused on GL — whole-buffer bind); 0 = unguarded.
-    // mask reach unknown so leave 0 too (GL ignores). Adjacency + dirty list seam-owned.
-    gpu::Buffer posView{   0,                                                pos_vbo };
-    gpu::Buffer idxView{   0,                                                index_ebo };
+    // pos/index bound whole (kernel scatters over the dirty list). Real buffer sizes
+    // from the seam-owned gpu::Buffers. Adjacency + dirty list + mask are seam-owned.
     const gpu::BindBufferEntry bg[] = {
-        { BIND_POSITIONS,        &posView,   posView.size },
-        { BIND_INDICES,          &idxView,   idxView.size },
+        { BIND_POSITIONS,        &pos_vbo,   pos_vbo.size },
+        { BIND_INDICES,          &index_ebo, index_ebo.size },
         { BIND_ADJACENCY_OFFSET, &adjacency_offset_ssbo, adjacency_offset_ssbo.size },
         { BIND_ADJACENCY_LIST,   &adjacency_list_ssbo,   adjacency_list_ssbo.size },
         { BIND_DIRTY_VERTS,      &dirty_verts_ssbo,      dirty_verts_ssbo.size },

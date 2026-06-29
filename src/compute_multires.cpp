@@ -79,7 +79,7 @@ void ComputeState::dispatch_multires_diff(const gpu::Buffer& pos_vbo, const gpu:
                                           const gpu::Buffer& base_ssbo,
                                           const uint32_t* verts, uint32_t count,
                                           bool writes_to_base,
-                                          GLuint ring_ssbo, uint32_t ring_base_floats) {
+                                          bool ring_ssbo, uint32_t ring_base_floats) {
     if (!has_multires_diff() || count == 0) return;
     if (!pos_vbo.handle || !snap_pos_ssbo.handle) return;
     if (!writes_to_base && (!disp_ssbo.handle || !frames_ssbo.handle)) return;
@@ -167,7 +167,7 @@ void ComputeState::dispatch_multires_apply(const gpu::Buffer& pos_vbo, const gpu
                                            const gpu::Buffer& frames_ssbo, const gpu::Buffer& base_ssbo,
                                            const uint32_t* verts, const float* stage,
                                            uint32_t count, bool targets_base,
-                                           GLuint ring_ssbo, uint32_t ring_base_floats,
+                                           bool ring_ssbo, uint32_t ring_base_floats,
                                            bool forward) {
     if (!has_multires_apply() || count == 0) return;
     if (!pos_vbo.handle) return;

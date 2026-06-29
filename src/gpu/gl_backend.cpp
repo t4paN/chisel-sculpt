@@ -136,6 +136,46 @@ void map_read(Device&, const Buffer& staging, uint64_t size, void* out) {
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 }
 
+// ---- One-shot buffer ops -----------------------------------------------------
+
+void read_buffer(Device&, const Buffer& src, uint64_t offset, uint64_t size, void* out) {
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, src.handle);
+    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, (GLintptr)offset, (GLsizeiptr)size, out);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+}
+
+void clear_buffer(Device&, Buffer& b, uint32_t fill_word) {
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, b.handle);
+    // R32UI internal format clears the whole store to the repeated 32-bit pattern
+    // (fill_word==0 is the common zero-clear; non-zero writes the SDF band sentinel).
+    glClearBufferData(GL_SHADER_STORAGE_BUFFER, GL_R32UI, GL_RED_INTEGER,
+                      GL_UNSIGNED_INT, &fill_word);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+}
+
+void copy_buffer(Device&, const Buffer& src, uint64_t src_off,
+                 const Buffer& dst, uint64_t dst_off, uint64_t size) {
+    glBindBuffer(GL_COPY_READ_BUFFER,  src.handle);
+    glBindBuffer(GL_COPY_WRITE_BUFFER, dst.handle);
+    glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER,
+                        (GLintptr)src_off, (GLintptr)dst_off, (GLsizeiptr)size);
+    glBindBuffer(GL_COPY_READ_BUFFER,  0);
+    glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
+}
+
+void resize_buffer(Device&, Buffer& b, uint64_t new_size, Usage /*usage*/) {
+    // GL keeps the handle; an in-place glBufferData reallocates its store. (The
+    // Usage role is advisory on GL — see create_buffer.)
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, b.handle);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, (GLsizeiptr)new_size, nullptr, GL_DYNAMIC_DRAW);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    b.size = new_size;
+}
+
+void barrier(Device&) {
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
+}
+
 // ============================ Render-side seam ============================
 // Immediate-mode GL impl of the render primitives (gpu.h "Render-side seam").
 // A current GL context must already exist. The pipeline owns a VAO; its vertex

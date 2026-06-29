@@ -2,6 +2,31 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-30 — WebGPU port Stage 3 (compile-under-webgpu): seam buffer-op primitives + compute signature flip
+
+- **6 new gpu:: seam buffer-op primitives** (`gpu.h` + both backends), covering the
+  raw-GL buffer ops the app did between batches: `read_buffer` (one-call readback —
+  copy→staging→map on WebGPU via a growable backend staging buffer; `glGetBufferSubData`
+  on GL), `clear_buffer` (whole-buffer 32-bit fill: `ClearBuffer` for 0, CPU-upload for
+  the non-zero SDF band sentinel), a one-shot `copy_buffer(Device&,…)`, `resize_buffer`
+  (GL keeps the handle; WebGPU recreates — caller must rebuild dependent bind groups),
+  and `barrier` (GL memory barrier; WebGPU no-op). Both backends compile-verified (GL
+  build + the `chisel-wgpu-window` probe).
+- **Every renderer-VBO-threaded compute dispatch signature flipped `GLuint →
+  const gpu::Buffer&`** (draw/smooth/crease/pinch/move/limb/mask/colour accum+apply,
+  `compute_normals`, `stroke_smooth`). The renderer's mesh buffers were already
+  seam-owned, so this was the boundary flip: callers (`brush.cpp`, `undo.cpp`) drop
+  `.handle`; the per-dispatch `posView`/`idxView` shims are gone; `ring_ssbo` retyped to
+  a `bool` flag (the actual buffer is the `undo_ring_ssbo` member). Texture params
+  (`triid_tex`/`bary_tex`) stay `GLuint` pending the compute-texture seam path.
+- **brush.cpp end-of-stroke readbacks** (positions/normals/mask/colour, + the debug
+  multires check) routed through `gpu::read_buffer`; `compute_limb` scratch ping-pong
+  copies through `gpu::copy_buffer`.
+- Behaviour unchanged; **GL build green** throughout. This is the start of Stage 3
+  (first compile under `CHISEL_BACKEND_WEBGPU`). Remaining internal data-movement
+  (sdf/remesh/multires_gpu/move readbacks+clears+copies) + window/ImGui/CMake bring-up
+  tracked in the working-root handoff `webgpu-stage3-compile-handoff.md`.
+
 ## 2026-06-29 — SDF voxel-merge: Fast Winding Number sign pass
 
 - **Sign pass is now O(corners·log tris) instead of O(corners·tris).** The winding-sign kernel

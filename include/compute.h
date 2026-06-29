@@ -420,13 +420,13 @@ struct ComputeState {
     // Call once at the start of a draw/crease/pinch stroke. The working buffer holds
     // only the active entity at offset 0, so this copies [0, vertex_count) straight
     // across. dispatch_draw_accum reads normals[v*3].
-    void snapshot_stroke_normals(GLuint norm_vbo, uint32_t vertex_count);
+    void snapshot_stroke_normals(const gpu::Buffer& norm_vbo, uint32_t vertex_count);
 
     // Dispatch the draw accumulate shader once over all vertices.
     // Reads positions from pos_vbo and normals from stroke_norm_ssbo (must be
     // populated by snapshot_stroke_normals before calling). Caller must clear
     // accum buffer beforehand. Issues memory barrier.
-    void dispatch_draw_accum(const DrawAccumParams& params, GLuint pos_vbo);
+    void dispatch_draw_accum(const DrawAccumParams& params, const gpu::Buffer& pos_vbo);
 
     // Read back accum buffer into readback_buf (sized vertex_count * 4).
     void readback_accum(uint32_t vertex_count);
@@ -440,7 +440,7 @@ struct ComputeState {
     // pos_vbo is bound as SSBO at BIND_POSITIONS. If accum_override != 0, that
     // buffer is used as the accum source instead of accum_ssbo (used by the draw
     // brush to read from accum_sym_ssbo after symmetrize).
-    void dispatch_draw_apply(GLuint pos_vbo, uint32_t vertex_count,
+    void dispatch_draw_apply(const gpu::Buffer& pos_vbo, uint32_t vertex_count,
                               const gpu::Buffer& accum_override = {});
 
     // Compile the draw-brush symmetrize-accum compute shader. Called once at init.
@@ -456,13 +456,13 @@ struct ComputeState {
 
     // Dispatch mirror apply shader: writes negated-X displacements to mirror twin vertices.
     // Only called when mirror_x is active and mirror_map is uploaded.
-    void dispatch_draw_mirror_apply(GLuint pos_vbo, uint32_t vertex_count);
+    void dispatch_draw_mirror_apply(const gpu::Buffer& pos_vbo, uint32_t vertex_count);
 
     // Compile and dispatch the smooth brush compute shaders.
     bool init_smooth();
     void dispatch_smooth(const SmoothAccumParams& params,
                          GLuint triid_tex, GLuint bary_tex,
-                         GLuint pos_vbo, GLuint index_ebo);
+                         const gpu::Buffer& pos_vbo, const gpu::Buffer& index_ebo);
 
     // Ensure the smooth compact dirty list SSBO is large enough for max_verts IDs.
     void ensure_smooth_dirty_buffer(uint32_t max_verts);
@@ -479,7 +479,7 @@ struct ComputeState {
     // Gated on accum weight > 0 AND vert sharing anchor's x sign, so straddle
     // triangles near the seam don't overwrite anchor-side twins from the
     // opposite side.
-    void dispatch_smooth_mirror_apply(GLuint pos_vbo, uint32_t vertex_count, float anchor_x);
+    void dispatch_smooth_mirror_apply(const gpu::Buffer& pos_vbo, uint32_t vertex_count, float anchor_x);
 
     // Compile the stroke autosmooth shader. Called once at init.
     bool init_stroke_smooth();
@@ -488,21 +488,21 @@ struct ComputeState {
     // Reads positions in-place from pos_vbo; mask gates per-vertex.
     void dispatch_stroke_smooth_apply(const uint32_t* vert_ids, uint32_t count,
                                       float strength,
-                                      GLuint pos_vbo, GLuint index_ebo);
+                                      const gpu::Buffer& pos_vbo, const gpu::Buffer& index_ebo);
 
     // Compile the crease brush accumulate compute shader. Called once at init.
     bool init_crease();
 
     // Dispatch the crease accumulate shader over all vertices.
     // Reads frozen normals from stroke_norm_ssbo (must be populated by snapshot_stroke_normals).
-    void dispatch_crease_accum(const CreaseAccumParams& params, GLuint pos_vbo);
+    void dispatch_crease_accum(const CreaseAccumParams& params, const gpu::Buffer& pos_vbo);
 
     // Compile the pinch brush accumulate compute shader. Called once at init.
     bool init_pinch();
 
     // Dispatch the pinch accumulate shader over all vertices.
     // Reads frozen normals from stroke_norm_ssbo (must be populated by snapshot_stroke_normals).
-    void dispatch_pinch_accum(const PinchAccumParams& params, GLuint pos_vbo);
+    void dispatch_pinch_accum(const PinchAccumParams& params, const gpu::Buffer& pos_vbo);
 
     // Compile the mask brush compute shader. Called once at init.
     bool init_mask();
@@ -548,11 +548,11 @@ struct ComputeState {
     // Dispatch the mask paint shader: per-vertex distance check, writes mask VBO
     // directly. Uses smooth_dirty_ssbo for the compact dirty list. Caller reads
     // back dirty list via readback_smooth_dirty.
-    void dispatch_mask_paint(const MaskPaintParams& params, GLuint pos_vbo);
-    void dispatch_color_paint(const ColorPaintParams& params, GLuint pos_vbo);
+    void dispatch_mask_paint(const MaskPaintParams& params, const gpu::Buffer& pos_vbo);
+    void dispatch_color_paint(const ColorPaintParams& params, const gpu::Buffer& pos_vbo);
     // Paint-smooth: reuses ColorPaintParams (paint_strength = blend amount,
     // paint_r/g/b ignored). Averages neighbour colours via CSR adjacency.
-    void dispatch_color_smooth(const ColorPaintParams& params, GLuint pos_vbo, GLuint index_ebo);
+    void dispatch_color_smooth(const ColorPaintParams& params, const gpu::Buffer& pos_vbo, const gpu::Buffer& index_ebo);
 
     // Compile the three move-brush compute pipelines (capture / weight-smooth /
     // apply) + their Params UBOs, through the gpu:: seam. Called once at init.
@@ -564,14 +564,14 @@ struct ComputeState {
     // Capture pass: brute-force over vertex_count threads. Gates by world-distance
     // to anchor (and mirror x-sign if mirror_x). Writes weight, init position,
     // appends to affected list. Clears affected count + weights up front.
-    void dispatch_move_capture(const MoveCaptureParams& params, GLuint pos_vbo);
+    void dispatch_move_capture(const MoveCaptureParams& params, const gpu::Buffer& pos_vbo);
 
     // Smooth weights: ping-pong Laplacian iterations over the affected set.
-    void dispatch_move_weight_smooth(uint32_t vertex_count, int iterations, GLuint index_ebo);
+    void dispatch_move_weight_smooth(uint32_t vertex_count, int iterations, const gpu::Buffer& index_ebo);
 
     // Apply pass: dispatched over affected list. positions[v] = init[v] + total*w.
     // Sums primary + mirrored brush contributions per vertex (mirror handled in-shader).
-    void dispatch_move_apply(const MoveApplyParams& params, GLuint pos_vbo);
+    void dispatch_move_apply(const MoveApplyParams& params, const gpu::Buffer& pos_vbo);
 
     // Readback affected list. Returns count; fills out[].
     uint32_t readback_move_affected(std::vector<uint32_t>& out);
@@ -580,12 +580,12 @@ struct ComputeState {
     bool init_limb();
     void ensure_limb_buffers(uint32_t vertex_count);
     // Incremental drag: positions[v] += this-dab world delta * w (mirror summed).
-    void dispatch_limb_drag(const LimbDragParams& params, GLuint pos_vbo);
+    void dispatch_limb_drag(const LimbDragParams& params, const gpu::Buffer& pos_vbo);
     // Tangential redistribution: N Laplacian iterations over the captured set,
     // normal component stripped so it evens spacing without deflating the form.
     void dispatch_limb_relax(uint32_t vertex_count, int iterations, float lambda,
                              float tip_dx, float tip_dy, float tip_dz, float tip_bias,
-                             GLuint pos_vbo, GLuint norm_vbo, GLuint index_ebo);
+                             const gpu::Buffer& pos_vbo, const gpu::Buffer& norm_vbo, const gpu::Buffer& index_ebo);
 
     // Compile the compute normals shader. Called once at init.
     bool init_compute_normals();
@@ -608,7 +608,7 @@ struct ComputeState {
                                 const gpu::Buffer& base_ssbo,
                                 const uint32_t* verts, uint32_t count,
                                 bool writes_to_base,
-                                GLuint ring_ssbo, uint32_t ring_base_floats);
+                                bool ring_ssbo, uint32_t ring_base_floats);
 
     // Compile the undo/redo multires apply shader. Called once at init.
     bool init_multires_apply();
@@ -627,7 +627,7 @@ struct ComputeState {
                                  const gpu::Buffer& frames_ssbo, const gpu::Buffer& base_ssbo,
                                  const uint32_t* verts,
                                  const float* stage, uint32_t count, bool targets_base,
-                                 GLuint ring_ssbo = 0, uint32_t ring_base_floats = 0,
+                                 bool ring_ssbo = false, uint32_t ring_base_floats = 0,
                                  bool forward = false);
 
     // ---- GPU-resident undo ring (blood-moon 3b-ii) ----------------------------
@@ -658,7 +658,7 @@ struct ComputeState {
     // Dispatch compute normals for a set of affected vertices.
     // Reads positions from pos_vbo, writes normals to norm_vbo.
     void dispatch_compute_normals(const uint32_t* dirty_verts, uint32_t dirty_count,
-                                  GLuint pos_vbo, GLuint norm_vbo, GLuint index_ebo);
+                                  const gpu::Buffer& pos_vbo, const gpu::Buffer& norm_vbo, const gpu::Buffer& index_ebo);
 
     // Compile remesh GPU shaders. Called once at init.
     bool init_remesh_select();

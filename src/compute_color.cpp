@@ -86,7 +86,7 @@ bool ComputeState::init_color() {
     return true;
 }
 
-void ComputeState::dispatch_color_paint(const ColorPaintParams& p, GLuint pos_vbo) {
+void ComputeState::dispatch_color_paint(const ColorPaintParams& p, const gpu::Buffer& pos_vbo) {
     if (!has_color() || !color_ssbo.handle || !mask_ssbo.handle) return;
     const uint32_t vc = p.vertex_count;
 
@@ -104,9 +104,8 @@ void ComputeState::dispatch_color_paint(const ColorPaintParams& p, GLuint pos_vb
     u.vertex_count = vc;
     gpu::write_buffer(gpu_dev, color_paint_ubo, 0, &u, sizeof(u));
 
-    gpu::Buffer posView{   (uint64_t)vc * 3u * sizeof(float),                    pos_vbo };
     const gpu::BindBufferEntry bg[] = {
-        { BIND_POSITIONS,   &posView,   posView.size },
+        { BIND_POSITIONS,   &pos_vbo,   (uint64_t)vc * 3u * sizeof(float) },
         { BIND_COLOR,       &color_ssbo, (uint64_t)vc * sizeof(uint32_t) },
         { BIND_MASK,        &mask_ssbo,  (uint64_t)vc * sizeof(float) },
         { BIND_DIRTY_VERTS, &smooth_dirty_ssbo, smooth_dirty_ssbo.size },
@@ -120,7 +119,7 @@ void ComputeState::dispatch_color_paint(const ColorPaintParams& p, GLuint pos_vb
     gpu::release_bind_group(grp);
 }
 
-void ComputeState::dispatch_color_smooth(const ColorPaintParams& p, GLuint pos_vbo, GLuint index_ebo) {
+void ComputeState::dispatch_color_smooth(const ColorPaintParams& p, const gpu::Buffer& pos_vbo, const gpu::Buffer& index_ebo) {
     if (!has_color_smooth() || !color_ssbo.handle || !mask_ssbo.handle) return;
     if (!adjacency_offset_ssbo.handle || !adjacency_list_ssbo.handle) return;
     const uint32_t vc = p.vertex_count;
@@ -138,14 +137,12 @@ void ComputeState::dispatch_color_smooth(const ColorPaintParams& p, GLuint pos_v
     u.vertex_count = vc;
     gpu::write_buffer(gpu_dev, color_smooth_ubo, 0, &u, sizeof(u));
 
-    gpu::Buffer posView{   (uint64_t)vc * 3u * sizeof(float),                    pos_vbo };
-    gpu::Buffer idxView{   0,                                                    index_ebo };
     const gpu::BindBufferEntry bg[] = {
-        { BIND_POSITIONS,        &posView,   posView.size },
+        { BIND_POSITIONS,        &pos_vbo,   (uint64_t)vc * 3u * sizeof(float) },
         { BIND_COLOR,            &color_ssbo, (uint64_t)vc * sizeof(uint32_t) },
         { BIND_MASK,             &mask_ssbo,  (uint64_t)vc * sizeof(float) },
         { BIND_DIRTY_VERTS,      &smooth_dirty_ssbo, smooth_dirty_ssbo.size },
-        { BIND_INDICES,          &idxView,   idxView.size },
+        { BIND_INDICES,          &index_ebo, index_ebo.size },
         { BIND_ADJACENCY_OFFSET, &adjacency_offset_ssbo, adjacency_offset_ssbo.size },
         { BIND_ADJACENCY_LIST,   &adjacency_list_ssbo,   adjacency_list_ssbo.size },
         { BIND_PARAMS,           &color_smooth_ubo, sizeof(ColorSmoothParamsGPU) },

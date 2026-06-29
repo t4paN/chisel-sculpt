@@ -37,8 +37,8 @@ static_assert(sizeof(PinchParamsGPU) == 96, "pinch Params UBO must be 96 bytes")
 
 // Bind layout shared by both accum kernels: pos(read) / norm(read) / accum(rw) / UBO.
 gpu::BindGroup make_accum_bind_group(ComputeState& cs, gpu::ComputePipeline& pipe,
-                                     gpu::Buffer& posView, gpu::Buffer& normView,
-                                     gpu::Buffer& accumView, gpu::Buffer& ubo, uint64_t ubo_size) {
+                                     const gpu::Buffer& posView, const gpu::Buffer& normView,
+                                     const gpu::Buffer& accumView, const gpu::Buffer& ubo, uint64_t ubo_size) {
     const gpu::BindBufferEntry bg[] = {
         { BIND_POSITIONS, &posView,   posView.size },
         { BIND_NORMALS,   &normView,  normView.size },
@@ -72,7 +72,7 @@ bool ComputeState::init_crease() {
     return true;
 }
 
-void ComputeState::dispatch_crease_accum(const CreaseAccumParams& p, GLuint pos_vbo) {
+void ComputeState::dispatch_crease_accum(const CreaseAccumParams& p, const gpu::Buffer& pos_vbo) {
     if (!has_crease() || !accum_ssbo.handle || !stroke_norm_ssbo.handle) return;
     const uint32_t vc = p.vertex_count;
 
@@ -94,9 +94,8 @@ void ComputeState::dispatch_crease_accum(const CreaseAccumParams& p, GLuint pos_
     u.vertex_count = vc;
     gpu::write_buffer(gpu_dev, crease_ubo, 0, &u, sizeof(u));
 
-    gpu::Buffer posView{ (uint64_t)vc * 3u * sizeof(float), pos_vbo };
     gpu::BindGroup grp = make_accum_bind_group(*this, crease_accum_pipeline,
-                                               posView, stroke_norm_ssbo, accum_ssbo,
+                                               pos_vbo, stroke_norm_ssbo, accum_ssbo,
                                                crease_ubo, sizeof(CreaseParamsGPU));
 
     gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
@@ -128,7 +127,7 @@ bool ComputeState::init_pinch() {
     return true;
 }
 
-void ComputeState::dispatch_pinch_accum(const PinchAccumParams& p, GLuint pos_vbo) {
+void ComputeState::dispatch_pinch_accum(const PinchAccumParams& p, const gpu::Buffer& pos_vbo) {
     if (!has_pinch() || !accum_ssbo.handle || !stroke_norm_ssbo.handle) return;
     const uint32_t vc = p.vertex_count;
 
@@ -149,9 +148,8 @@ void ComputeState::dispatch_pinch_accum(const PinchAccumParams& p, GLuint pos_vb
     u.vertex_count = vc;
     gpu::write_buffer(gpu_dev, pinch_ubo, 0, &u, sizeof(u));
 
-    gpu::Buffer posView{ (uint64_t)vc * 3u * sizeof(float), pos_vbo };
     gpu::BindGroup grp = make_accum_bind_group(*this, pinch_accum_pipeline,
-                                               posView, stroke_norm_ssbo, accum_ssbo,
+                                               pos_vbo, stroke_norm_ssbo, accum_ssbo,
                                                pinch_ubo, sizeof(PinchParamsGPU));
 
     gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);

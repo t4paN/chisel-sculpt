@@ -160,6 +160,40 @@ void submit(ComputeBatch&);                                  // finish + submit 
 // points (pen-down/up/one-shot) the architecture restricts us to — never mid-stroke.
 void map_read(Device&, const Buffer& staging, uint64_t size, void* out);
 
+// ---- One-shot buffer ops (outside a ComputeBatch) ----------------------------
+// These cover the raw-GL buffer operations the app does between batches (clears,
+// copies, resizes, readbacks, explicit barriers). On GL each is an immediate call;
+// on WebGPU each builds+submits its own one-off encoder (or, for read_buffer, a
+// copy-to-staging + map). Legal at the discrete points the architecture allows
+// (one-shot/user-paced ops, pen-down/up) — never mid-stroke for the readbacks.
+
+// Read `size` bytes from `src` at byte `offset` into `out`. The seam-managed
+// equivalent of glGetBufferSubData: on WebGPU it copies the range into a growable
+// backend staging buffer and maps it (so `src` need not carry MapRead). Synchronous.
+void read_buffer(Device&, const Buffer& src, uint64_t offset, uint64_t size, void* out);
+
+// Fill the whole buffer with the 32-bit pattern `fill_word` (size must be a multiple
+// of 4). The common case fill_word==0 is a plain clear; a non-zero word writes the
+// repeated pattern (e.g. the SDF band sentinel). Replaces glClearBufferData.
+void clear_buffer(Device&, Buffer&, uint32_t fill_word);
+
+// One-shot buffer->buffer copy (the ComputeBatch-free form of copy_buffer). Replaces
+// a standalone glCopyBufferSubData.
+void copy_buffer(Device&, const Buffer& src, uint64_t src_off,
+                 const Buffer& dst, uint64_t dst_off, uint64_t size);
+
+// Reallocate `b` to `new_size` bytes (contents undefined afterwards), keeping its
+// usage role. Replaces a reallocating glBufferData. NOTE: on WebGPU the backend
+// handle CHANGES (a new buffer is created), so any bind group referencing the old
+// handle must be rebuilt by the caller; on GL the handle is preserved.
+void resize_buffer(Device&, Buffer& b, uint64_t new_size, Usage usage);
+
+// Explicit memory barrier between two separately-submitted compute steps (the raw
+// glMemoryBarrier sites that sit outside a single begin_compute batch). On GL it
+// issues the storage+buffer-update barrier; on WebGPU it is a no-op (submit ordering
+// already serialises dependent work).
+void barrier(Device&);
+
 // ========================== Render-side seam ==============================
 // Added for the render-path port (renderer.cpp off raw GL). GL backend lands
 // first; the WebGPU render backend lands with the Emscripten web target (the

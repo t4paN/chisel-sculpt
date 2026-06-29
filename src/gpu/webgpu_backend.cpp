@@ -7,6 +7,7 @@
 #include <webgpu/wgpu.h>   // wgpuDevicePoll for the readback busy-wait
 #include <cstring>
 #include <cstdio>
+#include <vector>
 
 namespace gpu {
 
@@ -191,6 +192,86 @@ void map_read(Device& dev, const Buffer& staging, uint64_t size, void* out) {
         wgpuBufferUnmap(staging.handle);
     }
 }
+
+// ---- One-shot buffer ops -----------------------------------------------------
+
+// A single growable readback staging buffer (MapRead|CopyDst) reused by read_buffer.
+// The app is single-threaded and readbacks are discrete one-shot points, so one
+// scratch buffer that grows to the largest request is enough.
+static WGPUBuffer g_read_staging = nullptr;
+static uint64_t   g_read_staging_size = 0;
+
+void read_buffer(Device& dev, const Buffer& src, uint64_t offset, uint64_t size, void* out) {
+    if (g_read_staging_size < size) {
+        if (g_read_staging) wgpuBufferRelease(g_read_staging);
+        WGPUBufferDescriptor bd = {};
+        bd.usage = WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst;
+        bd.size  = size;
+        g_read_staging = wgpuDeviceCreateBuffer(dev.device, &bd);
+        g_read_staging_size = size;
+    }
+    WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(dev.device, nullptr);
+    wgpuCommandEncoderCopyBufferToBuffer(enc, src.handle, offset, g_read_staging, 0, size);
+    WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(enc, nullptr);
+    wgpuQueueSubmit(dev.queue, 1, &cmd);
+    wgpuCommandBufferRelease(cmd);
+    wgpuCommandEncoderRelease(enc);
+
+    MapState ms;
+    WGPUBufferMapCallbackInfo mcb = {};
+    mcb.mode = WGPUCallbackMode_AllowProcessEvents;
+    mcb.callback = onMap; mcb.userdata1 = &ms;
+    wgpuBufferMapAsync(g_read_staging, WGPUMapMode_Read, 0, size, mcb);
+    while (!ms.done) wgpuDevicePoll(dev.device, true, nullptr);
+    if (ms.status == WGPUMapAsyncStatus_Success) {
+        const void* p = wgpuBufferGetMappedRange(g_read_staging, 0, size);
+        if (p) std::memcpy(out, p, size); else std::memset(out, 0, size);
+    } else {
+        std::memset(out, 0, size);
+    }
+    wgpuBufferUnmap(g_read_staging);
+}
+
+void clear_buffer(Device& dev, Buffer& b, uint32_t fill_word) {
+    if (fill_word == 0) {
+        WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(dev.device, nullptr);
+        wgpuCommandEncoderClearBuffer(enc, b.handle, 0, b.size);
+        WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(enc, nullptr);
+        wgpuQueueSubmit(dev.queue, 1, &cmd);
+        wgpuCommandBufferRelease(cmd);
+        wgpuCommandEncoderRelease(enc);
+        return;
+    }
+    // Non-zero pattern (the SDF band sentinel): WebGPU's ClearBuffer only zeroes, so
+    // upload a CPU-filled vector. This is a one-shot merge path (readback-legal), not
+    // a hot path; a fill compute kernel is the web-stage fast follow-up if needed.
+    uint64_t words = b.size / 4;
+    std::vector<uint32_t> fill((size_t)words, fill_word);
+    wgpuQueueWriteBuffer(dev.queue, b.handle, 0, fill.data(), (size_t)words * 4);
+}
+
+void copy_buffer(Device& dev, const Buffer& src, uint64_t src_off,
+                 const Buffer& dst, uint64_t dst_off, uint64_t size) {
+    WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(dev.device, nullptr);
+    wgpuCommandEncoderCopyBufferToBuffer(enc, src.handle, src_off, dst.handle, dst_off, size);
+    WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(enc, nullptr);
+    wgpuQueueSubmit(dev.queue, 1, &cmd);
+    wgpuCommandBufferRelease(cmd);
+    wgpuCommandEncoderRelease(enc);
+}
+
+void resize_buffer(Device& dev, Buffer& b, uint64_t new_size, Usage usage) {
+    // WebGPU buffers are immutable in size — release and recreate. The handle changes,
+    // so callers must rebuild any bind group that referenced the old handle (see gpu.h).
+    if (b.handle) wgpuBufferRelease(b.handle);
+    WGPUBufferDescriptor bd = {};
+    bd.usage = to_wgpu_usage(usage);
+    bd.size  = new_size;
+    b.handle = wgpuDeviceCreateBuffer(dev.device, &bd);
+    b.size   = new_size;
+}
+
+void barrier(Device&) { /* no-op: submit ordering serialises dependent compute work */ }
 
 // ============================ Render-side seam ============================
 // WebGPU impl of gpu.h's render primitives, generalized from the proven probe

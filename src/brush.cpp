@@ -326,7 +326,7 @@ void BrushStroke::begin(Renderer& renderer, const Camera& cam,
             || brush_type == BrushType::INFLATE
             || brush_type == BrushType::CREASE
             || brush_type == BrushType::PINCH)) {
-        compute->snapshot_stroke_normals(renderer.vbo_norm.handle, vert_count);
+        compute->snapshot_stroke_normals(renderer.vbo_norm, vert_count);
     }
 
     // Phase 2a (GPU-resident undo): snapshot the pen-down VBO positions so the
@@ -416,7 +416,7 @@ void BrushStroke::apply_smooth(DabContext& ctx, float dab_x, float dab_y,
 
     ctx.compute.dispatch_smooth(sp,
         ctx.renderer.screen_triid_tex(), ctx.renderer.screen_bary_tex(),
-        ctx.renderer.vbo_pos.handle, ctx.renderer.ebo.handle);
+        ctx.renderer.vbo_pos, ctx.renderer.ebo);
 
     ctx.compute.readback_smooth_dirty(dirty_verts);
 
@@ -468,7 +468,7 @@ void BrushStroke::apply_crease(DabContext& ctx, float dab_x, float dab_y,
     set_area_normal(params, cyl_axis_x, cyl_axis_y, cyl_axis_z);
     params.vertex_count = ctx.mesh.vertex_count();
 
-    ctx.compute.dispatch_crease_accum(params, ctx.renderer.vbo_pos.handle);
+    ctx.compute.dispatch_crease_accum(params, ctx.renderer.vbo_pos);
 
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
 
@@ -477,10 +477,10 @@ void BrushStroke::apply_crease(DabContext& ctx, float dab_x, float dab_y,
                    && ctx.compute.mirror_map_vertex_count == ctx.vertex_count;
     if (use_sym) {
         ctx.compute.dispatch_draw_accum_symmetrize(ctx.mesh.vertex_count());
-        ctx.compute.dispatch_draw_apply(ctx.renderer.vbo_pos.handle, ctx.mesh.vertex_count(),
+        ctx.compute.dispatch_draw_apply(ctx.renderer.vbo_pos, ctx.mesh.vertex_count(),
                                          ctx.compute.accum_sym_ssbo);
     } else {
-        ctx.compute.dispatch_draw_apply(ctx.renderer.vbo_pos.handle, ctx.mesh.vertex_count());
+        ctx.compute.dispatch_draw_apply(ctx.renderer.vbo_pos, ctx.mesh.vertex_count());
     }
 
     ctx.compute.readback_smooth_dirty(dirty_verts);
@@ -525,7 +525,7 @@ void BrushStroke::apply_pinch(DabContext& ctx, float dab_x, float dab_y,
     set_area_normal(params, cyl_axis_x, cyl_axis_y, cyl_axis_z);
     params.vertex_count = ctx.mesh.vertex_count();
 
-    ctx.compute.dispatch_pinch_accum(params, ctx.renderer.vbo_pos.handle);
+    ctx.compute.dispatch_pinch_accum(params, ctx.renderer.vbo_pos);
 
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
 
@@ -534,10 +534,10 @@ void BrushStroke::apply_pinch(DabContext& ctx, float dab_x, float dab_y,
                    && ctx.compute.mirror_map_vertex_count == ctx.vertex_count;
     if (use_sym) {
         ctx.compute.dispatch_draw_accum_symmetrize(ctx.mesh.vertex_count());
-        ctx.compute.dispatch_draw_apply(ctx.renderer.vbo_pos.handle, ctx.mesh.vertex_count(),
+        ctx.compute.dispatch_draw_apply(ctx.renderer.vbo_pos, ctx.mesh.vertex_count(),
                                          ctx.compute.accum_sym_ssbo);
     } else {
-        ctx.compute.dispatch_draw_apply(ctx.renderer.vbo_pos.handle, ctx.mesh.vertex_count());
+        ctx.compute.dispatch_draw_apply(ctx.renderer.vbo_pos, ctx.mesh.vertex_count());
     }
 
     ctx.compute.readback_smooth_dirty(dirty_verts);
@@ -588,7 +588,7 @@ void BrushStroke::apply_draw(DabContext& ctx, float dab_x, float dab_y,
     params.vertex_count = ctx.mesh.vertex_count();
     params.inflate = inflate ? 1 : 0;
 
-    ctx.compute.dispatch_draw_accum(params, ctx.renderer.vbo_pos.handle);
+    ctx.compute.dispatch_draw_accum(params, ctx.renderer.vbo_pos);
 
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
 
@@ -601,10 +601,10 @@ void BrushStroke::apply_draw(DabContext& ctx, float dab_x, float dab_y,
                    && ctx.compute.mirror_map_vertex_count == ctx.vertex_count;
     if (use_sym) {
         ctx.compute.dispatch_draw_accum_symmetrize(ctx.mesh.vertex_count());
-        ctx.compute.dispatch_draw_apply(ctx.renderer.vbo_pos.handle, ctx.mesh.vertex_count(),
+        ctx.compute.dispatch_draw_apply(ctx.renderer.vbo_pos, ctx.mesh.vertex_count(),
                                          ctx.compute.accum_sym_ssbo);
     } else {
-        ctx.compute.dispatch_draw_apply(ctx.renderer.vbo_pos.handle, ctx.mesh.vertex_count());
+        ctx.compute.dispatch_draw_apply(ctx.renderer.vbo_pos, ctx.mesh.vertex_count());
     }
 
     ctx.compute.readback_smooth_dirty(dirty_verts);
@@ -641,10 +641,10 @@ void BrushStroke::apply_move_gpu(DabContext& ctx, float cursor_dx, float cursor_
         cp.hardness = hardness;
         cp.mirror_x = ctx.input.mirror_x;
         cp.vertex_count = vc;
-        ctx.compute.dispatch_move_capture(cp, ctx.renderer.vbo_pos.handle);
+        ctx.compute.dispatch_move_capture(cp, ctx.renderer.vbo_pos);
 
         // 3 Laplacian iterations on weights (matches CPU)
-        ctx.compute.dispatch_move_weight_smooth(vc, 3, ctx.renderer.ebo.handle);
+        ctx.compute.dispatch_move_weight_smooth(vc, 3, ctx.renderer.ebo);
 
         // Capture writes only the active entity's range [0, vc) — no offset filter.
         ctx.compute.readback_move_affected(move.affected_list);
@@ -679,7 +679,7 @@ void BrushStroke::apply_move_gpu(DabContext& ctx, float cursor_dx, float cursor_
     ap.total_dz = move.total_dz;
     ap.mirror_x = ctx.input.mirror_x;
     ap.vertex_count = ctx.vertex_count;
-    ctx.compute.dispatch_move_apply(ap, ctx.renderer.vbo_pos.handle);
+    ctx.compute.dispatch_move_apply(ap, ctx.renderer.vbo_pos);
 
     dirty_verts = move.affected_list;
     snap_and_mirror_dirty(*this, ctx);
@@ -723,8 +723,8 @@ void BrushStroke::apply_limb_gpu(DabContext& ctx, float cursor_dx, float cursor_
         cp.hardness = hardness;
         cp.mirror_x = ctx.input.mirror_x;
         cp.vertex_count = vc;
-        ctx.compute.dispatch_move_capture(cp, ctx.renderer.vbo_pos.handle);
-        ctx.compute.dispatch_move_weight_smooth(vc, 3, ctx.renderer.ebo.handle);
+        ctx.compute.dispatch_move_capture(cp, ctx.renderer.vbo_pos);
+        ctx.compute.dispatch_move_weight_smooth(vc, 3, ctx.renderer.ebo);
         ctx.compute.readback_move_affected(move.affected_list);
 
         move.captured = true;
@@ -753,7 +753,7 @@ void BrushStroke::apply_limb_gpu(DabContext& ctx, float cursor_dx, float cursor_
     dp.dz = right.z * wdx + up.z * wdy;
     dp.mirror_x = ctx.input.mirror_x;
     dp.vertex_count = ctx.vertex_count;
-    ctx.compute.dispatch_limb_drag(dp, ctx.renderer.vbo_pos.handle);
+    ctx.compute.dispatch_limb_drag(dp, ctx.renderer.vbo_pos);
 
     // Accumulate the world drag → stable tip direction (the leading end the limb has
     // been pulled toward). total_d* is reset by move.reset() at pen-down (begin()).
@@ -767,7 +767,7 @@ void BrushStroke::apply_limb_gpu(DabContext& ctx, float cursor_dx, float cursor_
 
     ctx.compute.dispatch_limb_relax(ctx.vertex_count, LIMB_RELAX_ITERS, LIMB_RELAX_LAMBDA,
                                     tx, ty, tz, LIMB_TIP_BIAS,
-                                    ctx.renderer.vbo_pos.handle, ctx.renderer.vbo_norm.handle, ctx.renderer.ebo.handle);
+                                    ctx.renderer.vbo_pos, ctx.renderer.vbo_norm, ctx.renderer.ebo);
 
     dirty_verts = move.affected_list;
     snap_and_mirror_dirty(*this, ctx);
@@ -792,8 +792,8 @@ void BrushStroke::post_frame(DabContext& ctx) {
     gpu_dirty.erase(std::unique(gpu_dirty.begin(), gpu_dirty.end()), gpu_dirty.end());
     ctx.compute.dispatch_compute_normals(gpu_dirty.data(),
                                           (uint32_t)gpu_dirty.size(),
-                                          ctx.renderer.vbo_pos.handle, ctx.renderer.vbo_norm.handle,
-                                          ctx.renderer.ebo.handle);
+                                          ctx.renderer.vbo_pos, ctx.renderer.vbo_norm,
+                                          ctx.renderer.ebo);
     gpu_normals_deferred = true;
     gpu_dirty.clear();
 }
@@ -824,7 +824,7 @@ void BrushStroke::apply_mask_gpu(DabContext& ctx, float dab_x, float dab_y,
     p.paint_strength = paint_strength;
     p.vertex_count = ctx.mesh.vertex_count();
 
-    ctx.compute.dispatch_mask_paint(p, ctx.renderer.vbo_pos.handle);
+    ctx.compute.dispatch_mask_paint(p, ctx.renderer.vbo_pos);
 
     std::vector<uint32_t> dirty;
     ctx.compute.readback_smooth_dirty(dirty);
@@ -873,7 +873,7 @@ void BrushStroke::apply_color_gpu(DabContext& ctx, float dab_x, float dab_y,
     }
     p.vertex_count = ctx.mesh.vertex_count();
 
-    ctx.compute.dispatch_color_paint(p, ctx.renderer.vbo_pos.handle);
+    ctx.compute.dispatch_color_paint(p, ctx.renderer.vbo_pos);
 
     std::vector<uint32_t> dirty;
     ctx.compute.readback_smooth_dirty(dirty);
@@ -915,7 +915,7 @@ void BrushStroke::apply_color_smooth_gpu(DabContext& ctx, float dab_x, float dab
     p.paint_strength = strength;        // blend amount toward neighbour average
     p.vertex_count = ctx.mesh.vertex_count();
 
-    ctx.compute.dispatch_color_smooth(p, ctx.renderer.vbo_pos.handle, ctx.renderer.ebo.handle);
+    ctx.compute.dispatch_color_smooth(p, ctx.renderer.vbo_pos, ctx.renderer.ebo);
 
     std::vector<uint32_t> dirty;
     ctx.compute.readback_smooth_dirty(dirty);
@@ -1112,15 +1112,15 @@ bool BrushStroke::finalize(Mesh& mesh, UndoStack& stack, MultiresStack& multires
             compute->dispatch_stroke_smooth_apply(snap_list.data(),
                                                    (uint32_t)snap_list.size(),
                                                    AUTOSMOOTH_STRENGTH,
-                                                   renderer.vbo_pos.handle, renderer.ebo.handle);
+                                                   renderer.vbo_pos, renderer.ebo);
         }
         // Refresh normals for the smoothed verts so the deferred normal
         // readback below picks up post-smoothing values.
         if (compute->has_normals()) {
             compute->dispatch_compute_normals(snap_list.data(),
                                                (uint32_t)snap_list.size(),
-                                               renderer.vbo_pos.handle, renderer.vbo_norm.handle,
-                                               renderer.ebo.handle);
+                                               renderer.vbo_pos, renderer.vbo_norm,
+                                               renderer.ebo);
             gpu_normals_deferred = true;
         }
         // Smoothing changed positions on the VBO; force the deferred-readback
@@ -1167,14 +1167,12 @@ bool BrushStroke::finalize(Mesh& mesh, UndoStack& stack, MultiresStack& multires
         static std::vector<float> gpu_diff_chk;   // 3 floats per snap_list entry
         if (gpu_diff_ran) {
             gpu_diff_chk.resize(snap_list.size() * 3);
-            GLuint src = (stroke_writes_to_base ? mgpu.base_ssbo : mgpu.disp_ssbo).handle;
-            glBindBuffer(GL_SHADER_STORAGE_BUFFER, src);
+            const gpu::Buffer& src = stroke_writes_to_base ? mgpu.base_ssbo : mgpu.disp_ssbo;
             for (size_t i = 0; i < snap_list.size(); i++) {
-                glGetBufferSubData(GL_SHADER_STORAGE_BUFFER,
-                    (GLintptr)snap_list[i] * 3 * sizeof(float),
-                    (GLsizeiptr)3 * sizeof(float), &gpu_diff_chk[i * 3]);
+                gpu::read_buffer(compute->gpu_dev, src,
+                    (uint64_t)snap_list[i] * 3 * sizeof(float),
+                    (uint64_t)3 * sizeof(float), &gpu_diff_chk[i * 3]);
             }
-            glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
         }
 #else
         (void)gpu_diff_ran;
@@ -1198,13 +1196,12 @@ bool BrushStroke::finalize(Mesh& mesh, UndoStack& stack, MultiresStack& multires
             static std::vector<ReadRun> runs;
             coalesce_snap_runs(snap_list, runs);
             static std::vector<float> pos_readback;
-            glBindBuffer(GL_ARRAY_BUFFER, renderer.vbo_pos.handle);
             if (stroke_writes_to_base) {
                 for (const ReadRun& r : runs) {
                     pos_readback.resize(r.count * 3);
-                    glGetBufferSubData(GL_ARRAY_BUFFER,
-                        (GLintptr)r.first * 3 * sizeof(float),
-                        (GLsizeiptr)r.count * 3 * sizeof(float),
+                    gpu::read_buffer(compute->gpu_dev, renderer.vbo_pos,
+                        (uint64_t)r.first * 3 * sizeof(float),
+                        (uint64_t)r.count * 3 * sizeof(float),
                         pos_readback.data());
                     for (uint32_t v = r.first; v < r.first + r.count; v++) {
                         uint32_t ri = (v - r.first) * 3;
@@ -1221,9 +1218,9 @@ bool BrushStroke::finalize(Mesh& mesh, UndoStack& stack, MultiresStack& multires
                 auto& disp = multires.disp[stroke_disp_index];
                 for (const ReadRun& r : runs) {
                     pos_readback.resize(r.count * 3);
-                    glGetBufferSubData(GL_ARRAY_BUFFER,
-                        (GLintptr)r.first * 3 * sizeof(float),
-                        (GLsizeiptr)r.count * 3 * sizeof(float),
+                    gpu::read_buffer(compute->gpu_dev, renderer.vbo_pos,
+                        (uint64_t)r.first * 3 * sizeof(float),
+                        (uint64_t)r.count * 3 * sizeof(float),
                         pos_readback.data());
                     for (uint32_t v = r.first; v < r.first + r.count; v++) {
                         uint32_t ri = (v - r.first) * 3;
@@ -1243,7 +1240,6 @@ bool BrushStroke::finalize(Mesh& mesh, UndoStack& stack, MultiresStack& multires
                     }
                 }
             }
-            glBindBuffer(GL_ARRAY_BUFFER, 0);
         } else {
             // mesh.pos + disp/base now hold stale (pen-down) values; the ring holds
             // (old,new) and the VBO/SSBO hold the new state. Defer the sync.
@@ -1334,17 +1330,15 @@ bool BrushStroke::finalize(Mesh& mesh, UndoStack& stack, MultiresStack& multires
         static std::vector<ReadRun> runs;
         coalesce_snap_runs(mask.snap_list, runs);
         static std::vector<float> mask_readback;
-        glBindBuffer(GL_ARRAY_BUFFER, renderer.vbo_mask.handle);
         for (const ReadRun& r : runs) {
             mask_readback.resize(r.count);
-            glGetBufferSubData(GL_ARRAY_BUFFER,
-                (GLintptr)r.first * sizeof(float),
-                (GLsizeiptr)r.count * sizeof(float),
+            gpu::read_buffer(compute->gpu_dev, renderer.vbo_mask,
+                (uint64_t)r.first * sizeof(float),
+                (uint64_t)r.count * sizeof(float),
                 mask_readback.data());
             for (uint32_t v = r.first; v < r.first + r.count; v++)
                 mesh.mask[v] = mask_readback[v - r.first];
         }
-        glBindBuffer(GL_ARRAY_BUFFER, 0);
         gpu_mask_deferred = false;
     }
 
@@ -1355,17 +1349,15 @@ bool BrushStroke::finalize(Mesh& mesh, UndoStack& stack, MultiresStack& multires
         static std::vector<ReadRun> runs;
         coalesce_snap_runs(color.snap_list, runs);
         static std::vector<uint32_t> color_readback;
-        glBindBuffer(GL_ARRAY_BUFFER, renderer.vbo_color.handle);
         for (const ReadRun& r : runs) {
             color_readback.resize(r.count);
-            glGetBufferSubData(GL_ARRAY_BUFFER,
-                (GLintptr)r.first * sizeof(uint32_t),
-                (GLsizeiptr)r.count * sizeof(uint32_t),
+            gpu::read_buffer(compute->gpu_dev, renderer.vbo_color,
+                (uint64_t)r.first * sizeof(uint32_t),
+                (uint64_t)r.count * sizeof(uint32_t),
                 color_readback.data());
             for (uint32_t v = r.first; v < r.first + r.count; v++)
                 mesh.color[v] = color_readback[v - r.first];
         }
-        glBindBuffer(GL_ARRAY_BUFFER, 0);
         gpu_color_deferred = false;
     }
 
@@ -1384,12 +1376,11 @@ bool BrushStroke::finalize(Mesh& mesh, UndoStack& stack, MultiresStack& multires
             static std::vector<ReadRun> runs;
             coalesce_snap_runs(snap_list, runs);
             static std::vector<float> norm_readback;
-            glBindBuffer(GL_ARRAY_BUFFER, renderer.vbo_norm.handle);
             for (const ReadRun& r : runs) {
                 norm_readback.resize(r.count * 3);
-                glGetBufferSubData(GL_ARRAY_BUFFER,
-                    (GLintptr)r.first * 3 * sizeof(float),
-                    (GLsizeiptr)r.count * 3 * sizeof(float),
+                gpu::read_buffer(compute->gpu_dev, renderer.vbo_norm,
+                    (uint64_t)r.first * 3 * sizeof(float),
+                    (uint64_t)r.count * 3 * sizeof(float),
                     norm_readback.data());
                 for (uint32_t v = r.first; v < r.first + r.count; v++) {
                     uint32_t ri = (v - r.first) * 3;
@@ -1398,7 +1389,6 @@ bool BrushStroke::finalize(Mesh& mesh, UndoStack& stack, MultiresStack& multires
                     mesh.norm_z[v] = norm_readback[ri + 2];
                 }
             }
-            glBindBuffer(GL_ARRAY_BUFFER, 0);
         }
         gpu_normals_deferred = false;
     }
