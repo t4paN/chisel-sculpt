@@ -149,6 +149,46 @@ void main() {
 }
 )";
 
+// ---- WGSL HUD shaders (WebGPU backend) ----
+// Params blocks mirror the std140 UBO layout (vec4 forces 16-byte alignment, so the
+// implicit pad after the vec2s is automatic). The font atlas is a sampled texture at
+// the seam's texture/sampler bindings (0/1); the UBO sits at binding 63.
+static const char* text_wgsl_src = R"WGSL(
+struct Params { screen: vec2<f32>, color: vec4<f32> };
+@group(0) @binding(63) var<uniform> P: Params;
+@group(0) @binding(0) var uFont: texture_2d<f32>;
+@group(0) @binding(1) var uSamp: sampler;
+struct VSOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
+@vertex
+fn vs_main(@location(0) aPos: vec2<f32>, @location(1) aUV: vec2<f32>) -> VSOut {
+    var o: VSOut;
+    var ndc = (aPos / P.screen) * 2.0 - 1.0;
+    ndc.y = -ndc.y;
+    o.pos = vec4<f32>(ndc, 0.0, 1.0);
+    o.uv = aUV;
+    return o;
+}
+@fragment
+fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
+    let a = textureSample(uFont, uSamp, in.uv).r;
+    return vec4<f32>(P.color.rgb, P.color.a * a);
+}
+)WGSL";
+
+static const char* panel_wgsl_src = R"WGSL(
+struct Params { offset: vec2<f32>, size: vec2<f32>, screen: vec2<f32>, color: vec4<f32> };
+@group(0) @binding(63) var<uniform> P: Params;
+@vertex
+fn vs_main(@location(0) aPos: vec2<f32>) -> @builtin(position) vec4<f32> {
+    let p = P.offset + aPos * P.size;
+    var ndc = (p / P.screen) * 2.0 - 1.0;
+    ndc.y = -ndc.y;
+    return vec4<f32>(ndc, 0.0, 1.0);
+}
+@fragment
+fn fs_main() -> @location(0) vec4<f32> { return P.color; }
+)WGSL";
+
 // std140-laid-out UBO mirrors (vec4 is 16-aligned).
 struct TextParamsGPU  { float screen[2]; float _pad0[2]; float color[4]; };           // 32 B
 struct PanelParamsGPU { float offset[2]; float size[2]; float screen[2]; float _pad0[2]; float color[4]; }; // 48 B
@@ -201,6 +241,7 @@ void TextOverlay::init(gpu::Device& dev) {
         gpu::VertexSlot slots[] = {{ 4 * sizeof(float) }};
         gpu::BindEntry binds[] = {{ kTextUboBinding, gpu::Bind::Uniform, sizeof(TextParamsGPU) }};
         gpu::RenderPipelineDesc d;
+        d.shaders.wgsl = text_wgsl_src;
         d.shaders.vert_glsl = text_vert_src;
         d.shaders.frag_glsl = text_frag_src;
         d.attrs = attrs; d.attr_count = 2;
@@ -223,6 +264,7 @@ void TextOverlay::init(gpu::Device& dev) {
         gpu::VertexSlot slots[] = {{ 2 * sizeof(float) }};
         gpu::BindEntry binds[] = {{ kTextUboBinding, gpu::Bind::Uniform, sizeof(PanelParamsGPU) }};
         gpu::RenderPipelineDesc d;
+        d.shaders.wgsl = panel_wgsl_src;
         d.shaders.vert_glsl = panel_vert_src;
         d.shaders.frag_glsl = panel_frag_src;
         d.attrs = attrs; d.attr_count = 1;

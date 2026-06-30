@@ -527,6 +527,296 @@ void main() {
 }
 )";
 
+// ---- WGSL render shaders (WebGPU backend) ----
+// One module per program, vs_main + fs_main (the names the seam hardcodes). The
+// std140 Params blocks mirror the *ParamsGPU structs above byte-for-byte — WGSL's
+// uniform layout matches std140 for these flat scalar/vec/mat members. No clip-Z
+// remap: the camera is orthographic with a symmetric (-100,100) near/far, so clip-z
+// = 0.01*depth stays inside both GL's [-1,1] and WebGPU's [0,1] (see camera.cpp).
+
+static const char* bg_wgsl_src = R"WGSL(
+struct VSOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
+@vertex
+fn vs_main(@location(0) aPos: vec2<f32>) -> VSOut {
+    var o: VSOut;
+    o.uv = aPos * 0.5 + 0.5;
+    o.pos = vec4<f32>(aPos, 0.999, 1.0);
+    return o;
+}
+@fragment
+fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
+    let t = in.uv.y;
+    let bot = vec3<f32>(0.18, 0.18, 0.20);
+    let top = vec3<f32>(0.28, 0.28, 0.30);
+    return vec4<f32>(mix(bot, top, t), 1.0);
+}
+)WGSL";
+
+static const char* matcap_wgsl_src = R"WGSL(
+struct Params {
+    view: mat4x4<f32>,
+    proj: mat4x4<f32>,
+    facing_threshold: f32,
+    obj_mask: f32,
+    paint_visible: f32,
+    _pad0: f32,
+};
+@group(0) @binding(63) var<uniform> P: Params;
+struct VSOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) nrm: vec3<f32>,
+    @location(1) mask: f32,
+    @location(2) color: vec4<f32>,
+};
+@vertex
+fn vs_main(@location(0) aPos: vec3<f32>, @location(1) aNorm: vec3<f32>,
+           @location(2) aMask: f32, @location(4) aColor: vec4<f32>) -> VSOut {
+    var o: VSOut;
+    let nm = mat3x3<f32>(P.view[0].xyz, P.view[1].xyz, P.view[2].xyz);
+    o.nrm = normalize(nm * aNorm);
+    o.mask = aMask;
+    o.color = aColor;
+    o.pos = P.proj * P.view * vec4<f32>(aPos, 1.0);
+    return o;
+}
+@fragment
+fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
+    let n = normalize(in.nrm);
+    let rim = 1.0 - abs(n.z);
+    let top = n.y * 0.5 + 0.5;
+    let base = 0.35 + 0.45 * top + 0.15 * (1.0 - rim * rim);
+    let cavity = 1.0 - rim * rim * 0.3;
+    var val = base * cavity;
+    val = val * mix(1.0, 0.4, in.mask);
+    var col = vec3<f32>(val) * mix(vec3<f32>(1.0), in.color.rgb, P.paint_visible);
+    if (P.obj_mask > 0.0) {
+        let tint = vec3<f32>(0.35, 0.12, 0.18);
+        col = mix(col, col * tint, P.obj_mask);
+    }
+    let facing = max(n.z, 0.0);
+    let edge = abs(facing - P.facing_threshold);
+    let px_width = fwidth(facing);
+    if (P.facing_threshold > 0.001 && edge < px_width * 0.5) {
+        return vec4<f32>(1.0, 1.0, 1.0, 1.0);
+    }
+    return vec4<f32>(col, 1.0);
+}
+)WGSL";
+
+// Pick MRT: writes depth@0 + id@2, but the pipeline declares all 4 screen-target
+// attachments, so the fragment must output all 4 (WebGPU rejects partial writes).
+static const char* pick_wgsl_src = R"WGSL(
+struct Params { view: mat4x4<f32>, proj: mat4x4<f32>, entity_id: u32 };
+@group(0) @binding(63) var<uniform> P: Params;
+struct VSOut { @builtin(position) pos: vec4<f32>, @location(0) depth: f32 };
+@vertex
+fn vs_main(@location(0) aPos: vec3<f32>) -> VSOut {
+    var o: VSOut;
+    let viewPos = P.view * vec4<f32>(aPos, 1.0);
+    o.depth = -viewPos.z;
+    o.pos = P.proj * viewPos;
+    return o;
+}
+struct FSOut {
+    @location(0) depth: f32,
+    @location(1) nrm: vec4<f32>,
+    @location(2) id: u32,
+    @location(3) bary: vec2<f32>,
+};
+@fragment
+fn fs_main(in: VSOut) -> FSOut {
+    var o: FSOut;
+    o.depth = in.depth;
+    o.nrm = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    o.id = P.entity_id;
+    o.bary = vec2<f32>(0.0, 0.0);
+    return o;
+}
+)WGSL";
+
+static const char* cursor_wgsl_src = R"WGSL(
+struct Params {
+    center: vec2<f32>,
+    screenSize: vec2<f32>,
+    normal: vec3<f32>,    radius: f32,
+    camRight: vec3<f32>,  baseThick: f32,
+    camUp: vec3<f32>,     frontBoost: f32,
+    camFwd: vec3<f32>,    _pad0: f32,
+    color: vec4<f32>,
+};
+@group(0) @binding(63) var<uniform> P: Params;
+struct VSOut { @builtin(position) pos: vec4<f32>, @location(0) front: f32 };
+@vertex
+fn vs_main(@location(0) aLocal: vec2<f32>, @location(1) aOuter: f32) -> VSOut {
+    var o: VSOut;
+    let N = normalize(P.normal);
+    let r = select(P.camUp, P.camRight, abs(dot(P.camRight, N)) < 0.95);
+    let U = normalize(r - dot(r, N) * N);
+    let V = cross(N, U);
+    var u_screen = vec2<f32>(dot(U, P.camRight), -dot(U, P.camUp));
+    var v_screen = vec2<f32>(dot(V, P.camRight), -dot(V, P.camUp));
+    let MIN_VIS = 0.18;
+    let u_len = length(u_screen);
+    let v_len = length(v_screen);
+    if (u_len < MIN_VIS) {
+        if (u_len > 1e-5) {
+            u_screen = u_screen * (MIN_VIS / u_len);
+        } else {
+            let vn = normalize(v_screen);
+            u_screen = MIN_VIS * vec2<f32>(-vn.y, vn.x);
+        }
+    }
+    if (v_len < MIN_VIS) {
+        if (v_len > 1e-5) {
+            v_screen = v_screen * (MIN_VIS / v_len);
+        } else {
+            let un = normalize(u_screen);
+            v_screen = MIN_VIS * vec2<f32>(-un.y, un.x);
+        }
+    }
+    let ellipse_rim = u_screen * aLocal.x + v_screen * aLocal.y;
+    let dpos_dt = -u_screen * aLocal.y + v_screen * aLocal.x;
+    var outward = vec2<f32>(-dpos_dt.y, dpos_dt.x);
+    if (dot(outward, ellipse_rim) < 0.0) { outward = -outward; }
+    let out_len = length(outward);
+    outward = select(vec2<f32>(1.0, 0.0), outward / out_len, out_len > 1e-6);
+    let rim_world = U * aLocal.x + V * aLocal.y;
+    o.front = -dot(rim_world, P.camFwd);
+    let tFront = clamp(o.front, 0.0, 1.0);
+    let halfThick = (P.baseThick + P.frontBoost * tFront) * 0.5;
+    let screen = P.center + ellipse_rim * P.radius + outward * (aOuter - 0.5) * 2.0 * halfThick;
+    var ndc = (screen / P.screenSize) * 2.0 - 1.0;
+    ndc.y = -ndc.y;
+    o.pos = vec4<f32>(ndc, 0.0, 1.0);
+    return o;
+}
+@fragment
+fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
+    let t = clamp(in.front * 0.5 + 0.5, 0.0, 1.0);
+    let bright = mix(0.78, 1.12, t);
+    let a = P.color.a * mix(0.82, 1.0, t);
+    return vec4<f32>(P.color.rgb * bright, a);
+}
+)WGSL";
+
+static const char* crosshair_wgsl_src = R"WGSL(
+struct Params { center: vec2<f32>, screenSize: vec2<f32>, color: vec4<f32> };
+@group(0) @binding(63) var<uniform> P: Params;
+@vertex
+fn vs_main(@location(0) aPos: vec2<f32>) -> @builtin(position) vec4<f32> {
+    let screen = P.center + aPos;
+    var ndc = (screen / P.screenSize) * 2.0 - 1.0;
+    ndc.y = -ndc.y;
+    return vec4<f32>(ndc, 0.0, 1.0);
+}
+@fragment
+fn fs_main() -> @location(0) vec4<f32> { return P.color; }
+)WGSL";
+
+static const char* cursor_shadow_wgsl_src = R"WGSL(
+struct Params {
+    center: vec2<f32>,
+    radius: f32,           _pad0: f32,
+    screenSize: vec2<f32>, _pad1: vec2<f32>,
+    color: vec4<f32>,
+};
+@group(0) @binding(63) var<uniform> P: Params;
+struct VSOut { @builtin(position) pos: vec4<f32>, @location(0) dist: f32 };
+@vertex
+fn vs_main(@location(0) aPos: vec2<f32>) -> VSOut {
+    var o: VSOut;
+    o.dist = length(aPos);
+    let screen = P.center + aPos * P.radius;
+    var ndc = (screen / P.screenSize) * 2.0 - 1.0;
+    ndc.y = -ndc.y;
+    o.pos = vec4<f32>(ndc, 0.0, 1.0);
+    return o;
+}
+@fragment
+fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
+    let edge = 1.0 - smoothstep(0.72, 1.0, in.dist);
+    let core = 0.55 + 0.45 * smoothstep(0.0, 0.55, in.dist);
+    let a = P.color.a * edge * core;
+    return vec4<f32>(P.color.rgb, a);
+}
+)WGSL";
+
+static const char* screen_buf_wgsl_src = R"WGSL(
+struct Params { view: mat4x4<f32>, proj: mat4x4<f32> };
+@group(0) @binding(63) var<uniform> P: Params;
+struct VSOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) nrmWorld: vec3<f32>,
+    @location(1) depth: f32,
+    @location(2) @interpolate(flat) triID: u32,
+    @location(3) bary: vec2<f32>,
+};
+@vertex
+fn vs_main(@location(0) aPos: vec3<f32>, @location(1) aNorm: vec3<f32>,
+           @location(2) aTriID: f32, @location(3) aBary: vec2<f32>) -> VSOut {
+    var o: VSOut;
+    let viewPos = P.view * vec4<f32>(aPos, 1.0);
+    o.nrmWorld = normalize(aNorm);
+    o.depth = -viewPos.z;
+    o.triID = u32(aTriID);
+    o.bary = aBary;
+    o.pos = P.proj * viewPos;
+    return o;
+}
+struct FSOut {
+    @location(0) depth: f32,
+    @location(1) nrm: vec4<f32>,
+    @location(2) triID: u32,
+    @location(3) bary: vec2<f32>,
+};
+@fragment
+fn fs_main(in: VSOut) -> FSOut {
+    var o: FSOut;
+    o.depth = in.depth;
+    o.nrm = vec4<f32>(normalize(in.nrmWorld), 1.0);
+    o.triID = in.triID;
+    o.bary = in.bary;
+    return o;
+}
+)WGSL";
+
+// Indexed->flat expand (compute). writeonly GLSL maps to read_write storage in WGSL.
+static const char* screen_expand_wgsl_src = R"WGSL(
+@group(0) @binding(0) var<storage, read>       in_pos:  array<f32>;
+@group(0) @binding(1) var<storage, read>       in_norm: array<f32>;
+@group(0) @binding(2) var<storage, read>       in_idx:  array<u32>;
+@group(0) @binding(3) var<storage, read_write> out_pos:  array<f32>;
+@group(0) @binding(4) var<storage, read_write> out_norm: array<f32>;
+struct Params { tri_count: u32 };
+@group(0) @binding(63) var<uniform> P: Params;
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let t = gid.x;
+    if (t >= P.tri_count) { return; }
+    let i0 = in_idx[t*3u+0u];
+    let i1 = in_idx[t*3u+1u];
+    let i2 = in_idx[t*3u+2u];
+    let base = t * 9u;
+    out_pos[base+0u] = in_pos[i0*3u+0u]; out_pos[base+1u] = in_pos[i0*3u+1u]; out_pos[base+2u] = in_pos[i0*3u+2u];
+    out_pos[base+3u] = in_pos[i1*3u+0u]; out_pos[base+4u] = in_pos[i1*3u+1u]; out_pos[base+5u] = in_pos[i1*3u+2u];
+    out_pos[base+6u] = in_pos[i2*3u+0u]; out_pos[base+7u] = in_pos[i2*3u+1u]; out_pos[base+8u] = in_pos[i2*3u+2u];
+    out_norm[base+0u] = in_norm[i0*3u+0u]; out_norm[base+1u] = in_norm[i0*3u+1u]; out_norm[base+2u] = in_norm[i0*3u+2u];
+    out_norm[base+3u] = in_norm[i1*3u+0u]; out_norm[base+4u] = in_norm[i1*3u+1u]; out_norm[base+5u] = in_norm[i1*3u+2u];
+    out_norm[base+6u] = in_norm[i2*3u+0u]; out_norm[base+7u] = in_norm[i2*3u+1u]; out_norm[base+8u] = in_norm[i2*3u+2u];
+}
+)WGSL";
+
+static const char* debug_wgsl_src = R"WGSL(
+struct Params { view: mat4x4<f32>, proj: mat4x4<f32> };
+@group(0) @binding(63) var<uniform> P: Params;
+@vertex
+fn vs_main(@location(0) aPos: vec3<f32>) -> @builtin(position) vec4<f32> {
+    return P.proj * P.view * vec4<f32>(aPos, 1.0);
+}
+@fragment
+fn fs_main() -> @location(0) vec4<f32> { return vec4<f32>(0.15, 0.45, 0.15, 1.0); }
+)WGSL";
+
 // ---- Renderer ----
 
 Renderer::Renderer()
@@ -578,6 +868,7 @@ void Renderer::init() {
         gpu::VertexAttr attrs[] = {{ 0, gpu::VertexFormat::F32x2, 0, 0 }};
         gpu::VertexSlot slots[] = {{ 2 * sizeof(float) }};
         gpu::RenderPipelineDesc d;
+        d.shaders.wgsl = bg_wgsl_src;
         d.shaders.vert_glsl = bg_vert_src;
         d.shaders.frag_glsl = bg_frag_src;
         d.attrs = attrs; d.attr_count = 1;
@@ -612,6 +903,7 @@ void Renderer::init() {
         };
         gpu::BindEntry binds[] = {{ 63, gpu::Bind::Uniform, sizeof(MatcapParamsGPU) }};
         gpu::RenderPipelineDesc d;
+        d.shaders.wgsl = matcap_wgsl_src;
         d.shaders.vert_glsl = matcap_vert_src;
         d.shaders.frag_glsl = matcap_frag_src;
         d.attrs = attrs; d.attr_count = 4;
@@ -633,6 +925,7 @@ void Renderer::init() {
         gpu::VertexSlot slots[] = {{ 3 * sizeof(float) }};
         gpu::BindEntry binds[] = {{ 63, gpu::Bind::Uniform, sizeof(PickParamsGPU) }};
         gpu::RenderPipelineDesc d;
+        d.shaders.wgsl = pick_wgsl_src;
         d.shaders.vert_glsl = pick_vert_src;
         d.shaders.frag_glsl = pick_frag_src;
         d.attrs = attrs; d.attr_count = 1;
@@ -680,6 +973,7 @@ void Renderer::init() {
         gpu::VertexSlot slots[] = {{ 3 * sizeof(float) }};
         gpu::BindEntry binds[] = {{ 63, gpu::Bind::Uniform, sizeof(CursorParamsGPU) }};
         gpu::RenderPipelineDesc d;
+        d.shaders.wgsl = cursor_wgsl_src;
         d.shaders.vert_glsl = cursor_vert_src;
         d.shaders.frag_glsl = cursor_frag_src;
         d.attrs = attrs; d.attr_count = 2;
@@ -709,6 +1003,7 @@ void Renderer::init() {
         gpu::VertexSlot slots[] = {{ 2 * sizeof(float) }};
         gpu::BindEntry binds[] = {{ 63, gpu::Bind::Uniform, sizeof(ShadowParamsGPU) }};
         gpu::RenderPipelineDesc d;
+        d.shaders.wgsl = cursor_shadow_wgsl_src;
         d.shaders.vert_glsl = cursor_shadow_vert_src;
         d.shaders.frag_glsl = cursor_shadow_frag_src;
         d.attrs = attrs; d.attr_count = 1;
@@ -735,6 +1030,7 @@ void Renderer::init() {
         gpu::VertexSlot slots[] = {{ 2 * sizeof(float) }};
         gpu::BindEntry binds[] = {{ 63, gpu::Bind::Uniform, sizeof(CrosshairParamsGPU) }};
         gpu::RenderPipelineDesc d;
+        d.shaders.wgsl = crosshair_wgsl_src;
         d.shaders.vert_glsl = crosshair_vert_src;
         d.shaders.frag_glsl = crosshair_frag_src;
         d.attrs = attrs; d.attr_count = 1;
@@ -764,6 +1060,7 @@ void Renderer::init() {
         };
         gpu::BindEntry binds[] = {{ 63, gpu::Bind::Uniform, sizeof(ScreenParamsGPU) }};
         gpu::RenderPipelineDesc d;
+        d.shaders.wgsl = screen_buf_wgsl_src;
         d.shaders.vert_glsl = screen_buf_vert_src;
         d.shaders.frag_glsl = screen_buf_frag_src;
         d.attrs = attrs; d.attr_count = 4;
@@ -796,7 +1093,7 @@ void Renderer::init() {
             { 4, gpu::Bind::StorageReadWrite, 0 },  // out_norm
             { 63, gpu::Bind::Uniform, sizeof(ScreenExpandParamsGPU) },
         };
-        gpu::ShaderSources src; src.glsl = screen_expand_src;
+        gpu::ShaderSources src; src.wgsl = screen_expand_wgsl_src; src.glsl = screen_expand_src;
         screen_expand_pipeline = gpu::create_compute_pipeline(gpu_dev, src, binds, 6);
         if (!screen_expand_pipeline.handle) std::fprintf(stderr, "[renderer] screen_expand pipeline failed\n");
         else std::printf("[compute] screen_expand pipeline compiled (gpu:: seam)\n");
@@ -811,6 +1108,7 @@ void Renderer::init() {
         gpu::VertexSlot slots[] = {{ 3 * sizeof(float) }};
         gpu::BindEntry binds[] = {{ 63, gpu::Bind::Uniform, sizeof(DebugParamsGPU) }};
         gpu::RenderPipelineDesc d;
+        d.shaders.wgsl = debug_wgsl_src;
         d.shaders.vert_glsl = debug_vert_src;
         d.shaders.frag_glsl = debug_edge_frag_src;
         d.attrs = attrs; d.attr_count = 1;
@@ -1035,8 +1333,16 @@ void Renderer::update_color_verts(const Mesh& mesh, const std::vector<uint32_t>&
 }
 
 void Renderer::draw_background(int w, int h) {
-    gpu::RenderTarget target;          // fbo 0 (default framebuffer), no clear
+    gpu::RenderTarget target;
     target.width = w; target.height = h;
+#if defined(CHISEL_BACKEND_WEBGPU)
+    // First default-framebuffer pass of the frame: it owns the colour+depth clear
+    // via loadOp=Clear (there is no separate glClear on webgpu — see backend
+    // begin_render_pass, which keys both colour and depth loadOp off t.clear).
+    // The gradient quad covers every pixel so the colour clear value is moot; the
+    // point is the depth clear to 1.0. GL keeps its own explicit clear in main.
+    target.clear = true;
+#endif
     gpu::RenderPass rp = gpu::begin_render_pass(gpu_dev, target);
     gpu::set_pipeline(rp, bg_pipeline);
     gpu::set_vertex_buffer(rp, 0, bg_vbuf);

@@ -254,7 +254,17 @@ int main(int argc, char* argv[]) {
     dcb.mode = WGPUCallbackMode_AllowProcessEvents;
     dcb.callback = onDevice;
     dcb.userdata1 = &dr;
-    wgpuAdapterRequestDevice(ar.adapter, nullptr, dcb);
+    // Request the adapter's full supported limits verbatim. The default device
+    // limits cap max_storage_buffers_per_shader_stage at 8, but our compute kernels
+    // bind up to 9 SSBOs — without this the first such pipeline aborts the device.
+    // Copying adapter limits is always valid (required == supported for every field,
+    // alignment limits included). NOTE web target: baseline WebGPU only guarantees 8
+    // storage buffers/stage, so the 9-SSBO kernels need consolidation for Emscripten.
+    WGPULimits limits = WGPU_LIMITS_INIT;
+    wgpuAdapterGetLimits(ar.adapter, &limits);
+    WGPUDeviceDescriptor ddesc = WGPU_DEVICE_DESCRIPTOR_INIT;
+    ddesc.requiredLimits = &limits;
+    wgpuAdapterRequestDevice(ar.adapter, &ddesc, dcb);
     for (int i = 0; i < 200 && !dr.done; ++i) wgpuInstanceProcessEvents(instance);
     if (!dr.ok) { std::fprintf(stderr, "no WebGPU device\n"); return 1; }
     g_device = dr.device;
@@ -1510,8 +1520,8 @@ int main(int argc, char* argv[]) {
 #ifdef CHISEL_BACKEND_WEBGPU
         // Acquire this frame's swapchain colour view and inject it as the default
         // render target; default-screen passes render into it (see webgpu_backend).
-        // The colour/depth CLEAR happens via the first pass's loadOp — wiring that to
-        // the GL frame's explicit clear is a Stage-5 runtime item.
+        // The colour/depth CLEAR happens via the first pass's loadOp=Clear, owned by
+        // renderer.draw_background (the GL build instead clears explicitly below).
         WGPUSurfaceTexture surfTex = {};
         wgpuSurfaceGetCurrentTexture(g_surface, &surfTex);
         WGPUTextureView frameView = surfTex.texture

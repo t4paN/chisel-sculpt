@@ -121,7 +121,9 @@ BindGroup create_bind_group(Device& dev, ComputePipeline& pipe,
         stackEnt[i].binding = entries[i].binding;
         stackEnt[i].buffer  = entries[i].buffer->handle;
         stackEnt[i].offset  = 0;
-        stackEnt[i].size    = entries[i].size;
+        // size 0 means "whole buffer" on the seam (GL binds the whole range); WebGPU
+        // rejects a zero-sized binding, so map it to the WHOLE_SIZE sentinel.
+        stackEnt[i].size    = entries[i].size ? entries[i].size : WGPU_WHOLE_SIZE;
     }
     WGPUBindGroupDescriptor bgd = {};
     bgd.layout = pipe.bgl;
@@ -467,7 +469,7 @@ BindGroup create_bind_group(Device& dev, RenderPipeline& pipe,
         stackEnt[i].binding = entries[i].binding;
         stackEnt[i].buffer  = entries[i].buffer->handle;
         stackEnt[i].offset  = 0;
-        stackEnt[i].size    = entries[i].size;
+        stackEnt[i].size    = entries[i].size ? entries[i].size : WGPU_WHOLE_SIZE;
     }
     if (tex) {                                   // sampled_texture pipeline (font atlas)
         stackEnt[cnt].binding = kTextureBinding;

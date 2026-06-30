@@ -2,6 +2,30 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-01 — WebGPU port Stage 5: runtime bring-up — first full frame renders
+
+- **WebGPU build now boots and sustains the render loop** (native wgpu-native,
+  Vulkan/X11), all pipelines compiling clean with zero validation errors. GL
+  build kept green throughout.
+- **Frame clear wired** (Stage-5 item 1): `Renderer::draw_background` now owns the
+  colour+depth clear on WebGPU via the first pass's `loadOp=Clear` (the backend
+  keys both off `RenderTarget.clear`). GL keeps its explicit `glClear`.
+- **Render shaders ported to WGSL.** All eleven render programs (bg, matcap, pick,
+  cursor, shadow, crosshair, screen-MRT, debug-edge, text, panel) plus the
+  `screen_expand` compute kernel now ship inline WGSL (`vs_main`/`fs_main`)
+  alongside their GLSL; the seam compiles the matching side. Params blocks mirror
+  the std140 `*ParamsGPU` layouts byte-for-byte. No clip-Z remap needed — the
+  orthographic camera's symmetric (-100,100) near/far keeps clip-z inside both
+  GL's [-1,1] and WebGPU's [0,1]. The pick fragment writes all 4 declared MRT
+  attachments (WebGPU rejects partial writes).
+- **Crash fixes uncovered during bring-up:** `move_apply.wgsl` used the WGSL
+  reserved word `target` (→ `dst`); the device was created with default limits
+  (8 storage buffers/stage) but compute kernels bind 9 → now requests the
+  adapter's full supported limits (NOTE: baseline web only guarantees 8, so those
+  kernels need consolidation for the Emscripten target); and the seam's
+  `create_bind_group` now maps a 0 ("whole buffer") binding size to
+  `WGPU_WHOLE_SIZE`, which WebGPU requires instead of a zero-sized binding.
+
 ## 2026-06-30 — WebGPU port Stage C: first full-app `CHISEL_BACKEND_WEBGPU` compile
 
 - The whole `chisel` app now **compiles + links on the WebGPU backend** (clean

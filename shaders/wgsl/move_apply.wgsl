@@ -38,9 +38,9 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     let init = vec3<f32>(move_init[v*3u], move_init[v*3u+1u], move_init[v*3u+2u]);
     let mirror_total = vec3<f32>(-P.total.x, P.total.y, P.total.z);
     let mscale = 1.0 - mask[v];
-    let target = init + (P.total * w.x + mirror_total * w.y) * mscale;
+    let dst = init + (P.total * w.x + mirror_total * w.y) * mscale;
 
-    positions[v*3u]      = target.x;
-    positions[v*3u + 1u] = target.y;
-    positions[v*3u + 2u] = target.z;
+    positions[v*3u]      = dst.x;
+    positions[v*3u + 1u] = dst.y;
+    positions[v*3u + 2u] = dst.z;
 }
