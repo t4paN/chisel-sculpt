@@ -101,7 +101,8 @@ if(CHISEL_GPU_BACKEND STREQUAL "webgpu")
         external/imgui/imgui_widgets.cpp
         external/imgui/imgui_demo.cpp
         external/imgui/imgui_impl_glfw.cpp
-        external/imgui/imgui_impl_wgpu.cpp)
+        external/imgui/imgui_impl_wgpu.cpp
+        external/imgui/ImGuiFileDialog.cpp)  # used by the full app (main.cpp), not the probe
     target_include_directories(imgui_wgpu PUBLIC external/imgui)
     target_compile_definitions(imgui_wgpu PUBLIC IMGUI_IMPL_WEBGPU_BACKEND_WGPU)
     target_link_libraries(imgui_wgpu PUBLIC wgpu glfw)  # wgpu propagates the webgpu headers
@@ -130,26 +131,34 @@ if(CHISEL_GPU_BACKEND STREQUAL "webgpu")
         target_link_libraries(chisel-wgpu-window PRIVATE ${X11_LIBRARIES})
     endif()
 
-    message(STATUS "WebGPU backend: built bring-up probes 'chisel-wgpu-probe', 'chisel-wgpu-window' (full app port in progress)")
-    return()
+    message(STATUS "WebGPU backend: building full app 'chisel' + bring-up probes")
+    # NOTE: no return() — the full chisel app is built below, backend-conditional.
+else()
+    # ---- GL-only deps (the WebGPU branch set up wgpu / imgui_wgpu / glfw above) ----
+    find_package(OpenGL REQUIRED)
+    find_package(glfw3 3.3 REQUIRED)
+
+    # Glad (OpenGL loader) - we'll generate a minimal one
+    add_library(glad STATIC src/glad.c)
+    target_include_directories(glad PUBLIC include)
+
+    # Dear ImGui (vendored). Exclude imgui_impl_wgpu.cpp — that's the WebGPU renderer
+    # backend (vendored for the webgpu build); it needs webgpu headers and must not be
+    # compiled into the GL app, which uses imgui_impl_opengl3.cpp.
+    file(GLOB IMGUI_SOURCES external/imgui/*.cpp)
+    list(FILTER IMGUI_SOURCES EXCLUDE REGEX "imgui_impl_wgpu\\.cpp$")
+    add_library(imgui STATIC ${IMGUI_SOURCES})
+    target_include_directories(imgui PUBLIC external/imgui)
+    target_link_libraries(imgui PRIVATE glfw)
 endif()
 
-# Find packages
-find_package(OpenGL REQUIRED)
-find_package(glfw3 3.3 REQUIRED)
-
-# Glad (OpenGL loader) - we'll generate a minimal one
-add_library(glad STATIC src/glad.c)
-target_include_directories(glad PUBLIC include)
-
-# Dear ImGui (vendored). Exclude imgui_impl_wgpu.cpp — that's the WebGPU renderer
-# backend (vendored for the webgpu build); it needs webgpu headers and must not be
-# compiled into the GL app, which uses imgui_impl_opengl3.cpp.
-file(GLOB IMGUI_SOURCES external/imgui/*.cpp)
-list(FILTER IMGUI_SOURCES EXCLUDE REGEX "imgui_impl_wgpu\\.cpp$")
-add_library(imgui STATIC ${IMGUI_SOURCES})
-target_include_directories(imgui PUBLIC external/imgui)
-target_link_libraries(imgui PRIVATE glfw)
+# The gpu:: seam backend source is the only backend-specific app source: GL uses
+# gl_backend.cpp + the glad loader lib; WebGPU uses webgpu_backend.cpp + wgpu.
+if(CHISEL_GPU_BACKEND STREQUAL "webgpu")
+    set(CHISEL_BACKEND_SRC src/gpu/webgpu_backend.cpp)
+else()
+    set(CHISEL_BACKEND_SRC src/gpu/gl_backend.cpp)
+endif()
 
 # Main executable
 if(NOT WIN32)
@@ -170,7 +179,7 @@ add_executable(chisel
     src/multires_stack.cpp
     src/multires_gpu.cpp
     src/remesh.cpp
-    src/gpu/gl_backend.cpp
+    ${CHISEL_BACKEND_SRC}
     src/compute_common.cpp
     src/compute_draw.cpp
     src/compute_smooth.cpp
@@ -190,9 +199,19 @@ add_executable(chisel
 )
 
 target_include_directories(chisel PRIVATE include external ${CHISEL_GENERATED_DIR})
-# Compute kernels run through the gpu:: seam's GL backend (Seam Step 2b). The seam
-# selects backend handle types at compile time via this macro (see include/gpu/gpu.h).
-target_compile_definitions(chisel PRIVATE CHISEL_BACKEND_GL)
+# Compute kernels run through the gpu:: seam. The seam selects backend handle types
+# at compile time via this macro (see include/gpu/gpu.h). WebGPU also needs the WGSL
+# kernel dir (loaded from disk at runtime, like the probe).
+if(CHISEL_GPU_BACKEND STREQUAL "webgpu")
+    # GLFW must not pull in GL/gl.h: glad.h is still included (via compute.h, for the
+    # GL typedefs like GLuint) and errors if a real GL header preceded it. We never
+    # call or link GL on this backend, so the typedefs are all we want from glad.
+    target_compile_definitions(chisel PRIVATE CHISEL_BACKEND_WEBGPU
+        GLFW_INCLUDE_NONE
+        CHISEL_WGSL_DIR="${CMAKE_CURRENT_SOURCE_DIR}/shaders/wgsl")
+else()
+    target_compile_definitions(chisel PRIVATE CHISEL_BACKEND_GL)
+endif()
 add_dependencies(chisel chisel_shaders)
 
 # Version: an explicit -DCHISEL_VERSION (CI injects the tag) wins; otherwise
@@ -212,7 +231,14 @@ endif()
 message(STATUS "Chisel version: ${CHISEL_VERSION}")
 target_compile_definitions(chisel PRIVATE CHISEL_VERSION="${CHISEL_VERSION}")
 
-target_link_libraries(chisel PRIVATE glad OpenGL::GL glfw imgui)
+if(CHISEL_GPU_BACKEND STREQUAL "webgpu")
+    target_link_libraries(chisel PRIVATE wgpu glfw imgui_wgpu)
+    # The prebuilt .so ships without a SONAME (see wgpu IMPORTED_NO_SONAME above);
+    # RUNPATH lets the loader find it from any cwd.
+    set_target_properties(chisel PROPERTIES BUILD_RPATH "${wgpu_native_SOURCE_DIR}/lib")
+else()
+    target_link_libraries(chisel PRIVATE glad OpenGL::GL glfw imgui)
+endif()
 if(MSVC)
     target_compile_definitions(chisel PRIVATE _USE_MATH_DEFINES)
 endif()
@@ -237,20 +263,22 @@ if(WIN32)
 endif()
 
 # GPU seam — GL backend test (Seam Step 2a). Headless GL 4.3 compute check that the
-# gpu:: seam's GL backend reproduces the mask kernel (CPU-referenced). The full app
-# moves onto gpu:: in Step 2b; for now only this test exercises the GL backend.
-add_executable(chisel-gl-compute-test
-    src/gpu/gl_compute_test.cpp
-    src/gpu/gl_backend.cpp
-    src/sphere.cpp
-    src/mesh.cpp)
-target_include_directories(chisel-gl-compute-test PRIVATE include)
-target_compile_definitions(chisel-gl-compute-test PRIVATE
-    CHISEL_BACKEND_GL
-    CHISEL_GLSL_DIR="${CMAKE_CURRENT_SOURCE_DIR}/shaders/glsl")
-target_link_libraries(chisel-gl-compute-test PRIVATE glad OpenGL::GL glfw)
-if(UNIX AND NOT WIN32)
-    target_link_libraries(chisel-gl-compute-test PRIVATE m dl)
+# gpu:: seam's GL backend reproduces the mask kernel (CPU-referenced). GL-only (links
+# glad/OpenGL); skipped under the webgpu config.
+if(CHISEL_GPU_BACKEND STREQUAL "gl")
+    add_executable(chisel-gl-compute-test
+        src/gpu/gl_compute_test.cpp
+        src/gpu/gl_backend.cpp
+        src/sphere.cpp
+        src/mesh.cpp)
+    target_include_directories(chisel-gl-compute-test PRIVATE include)
+    target_compile_definitions(chisel-gl-compute-test PRIVATE
+        CHISEL_BACKEND_GL
+        CHISEL_GLSL_DIR="${CMAKE_CURRENT_SOURCE_DIR}/shaders/glsl")
+    target_link_libraries(chisel-gl-compute-test PRIVATE glad OpenGL::GL glfw)
+    if(UNIX AND NOT WIN32)
+        target_link_libraries(chisel-gl-compute-test PRIVATE m dl)
+    endif()
 endif()
 
 option(CHISEL_DEBUG_MULTIRES "Run post-projection cascade-to-L_max truth check" OFF)
