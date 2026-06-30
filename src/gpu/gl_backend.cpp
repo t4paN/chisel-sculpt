@@ -17,6 +17,10 @@ static GLenum gl_target(Bind b) {
 
 Device gl_device() { return Device{}; }  // GL has no device object
 
+static Device g_app_device;
+void set_app_device(const Device& d) { g_app_device = d; }
+Device app_device() { return g_app_device; }
+
 Buffer create_buffer(Device&, const void* data, uint64_t size, Usage /*usage*/) {
     // GL buffers carry no fixed usage role; the bind point (SSBO vs UBO) is decided
     // at bind time from the pipeline layout, so the Usage flags are advisory here.

@@ -41,6 +41,10 @@ Device device_from_webgpu(WGPUDevice device, WGPUQueue queue) {
     return d;
 }
 
+static Device g_app_device;
+void set_app_device(const Device& d) { g_app_device = d; }
+Device app_device() { return g_app_device; }
+
 Buffer create_buffer(Device& dev, const void* data, uint64_t size, Usage usage) {
     Buffer b;
     b.size = size;
@@ -284,10 +288,12 @@ void barrier(Device&) { /* no-op: submit ordering serialises dependent compute w
 // Backend globals the windowing code injects (see gpu.h webgpu setters).
 static WGPUTextureFormat g_surface_format = WGPUTextureFormat_BGRA8Unorm;
 static WGPUTextureView   g_default_depth  = nullptr;
+static WGPUTextureView   g_default_color  = nullptr;
 static const WGPUTextureFormat kDepthFormat = WGPUTextureFormat_Depth24Plus;
 
 void webgpu_set_surface_format(WGPUTextureFormat f) { g_surface_format = f; }
 void webgpu_set_default_depth(WGPUTextureView v)    { g_default_depth = v; }
+void webgpu_set_default_color(WGPUTextureView v)    { g_default_color = v; }
 WGPUTextureFormat webgpu_depth_format()             { return kDepthFormat; }
 
 static WGPUVertexFormat to_wgpu_vformat(VertexFormat f) {
@@ -483,7 +489,7 @@ RenderPass begin_render_pass(Device& dev, const RenderTarget& t) {
     rp.enc = wgpuDeviceCreateCommandEncoder(dev.device, nullptr);
 
     WGPURenderPassColorAttachment color = {};
-    color.view = t.color;
+    color.view = t.color ? t.color : g_default_color;  // default-screen pass = swapchain
     color.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
     color.loadOp  = t.clear ? WGPULoadOp_Clear : WGPULoadOp_Load;
     color.storeOp = WGPUStoreOp_Store;

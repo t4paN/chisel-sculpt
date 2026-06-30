@@ -571,7 +571,7 @@ Renderer::~Renderer() {
 }
 
 void Renderer::init() {
-    gpu_dev = gpu::gl_device();
+    gpu_dev = gpu::app_device();
 
     // Background gradient quad — first render program on the gpu:: seam.
     {

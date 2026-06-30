@@ -50,7 +50,7 @@ bool ComputeState::init() {
 
     // The gpu:: seam runs on the current GL context (no device object on GL); ported
     // kernels (mask, Seam Step 2b) dispatch through this. WebGPU injects a real device.
-    gpu_dev = gpu::gl_device();
+    gpu_dev = gpu::app_device();
 
     std::printf("[compute] available: workgroup_size=%d invocations=%d ssbo_bindings=%d float_atomics=%s\n",
                 max_workgroup_size, max_workgroup_invocations, max_ssbo_bindings,

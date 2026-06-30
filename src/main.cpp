@@ -1,5 +1,14 @@
+#ifdef CHISEL_BACKEND_WEBGPU
+#define GLFW_EXPOSE_NATIVE_X11
+#include <GLFW/glfw3.h>
+#include <GLFW/glfw3native.h>
+#include <webgpu/webgpu.h>
+#include <webgpu/wgpu.h>   // wgpu-native extensions (wgpuDevicePoll / ProcessEvents)
+#include "gpu/gpu.h"       // device_from_webgpu + surface-format/depth setters
+#else
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
+#endif
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -27,7 +36,11 @@
 #include "ui_overlay.h"
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
+#ifdef CHISEL_BACKEND_WEBGPU
+#include "imgui_impl_wgpu.h"
+#else
 #include "imgui_impl_opengl3.h"
+#endif
 #include "ImGuiFileDialog.h"
 #include "project_file.h"
 #include <string>
@@ -48,6 +61,67 @@ void setup_char_callback(GLFWwindow* window);
 
 // From window_icon.cpp — sets the GLFW window icon from the embedded PNG.
 void set_window_icon(GLFWwindow* window);
+
+#ifdef CHISEL_BACKEND_WEBGPU
+// WebGPU windowing lives in the app (the seam owns resources, not the surface —
+// see gpu.h). These mirror the proven setup in src/gpu/wgpu_window.cpp, which is a
+// standalone probe (its own main) and so isn't linked into the app.
+namespace {
+struct AdapterResult { WGPUAdapter adapter = nullptr; bool done = false; bool ok = false; };
+struct DeviceResult  { WGPUDevice  device  = nullptr; bool done = false; bool ok = false; };
+
+void onAdapter(WGPURequestAdapterStatus status, WGPUAdapter adapter,
+               WGPUStringView msg, void* ud1, void*) {
+    auto* r = static_cast<AdapterResult*>(ud1);
+    r->done = true;
+    if (status == WGPURequestAdapterStatus_Success) { r->adapter = adapter; r->ok = true; }
+    else std::printf("[win] adapter failed: status=%d msg=%.*s\n",
+                     (int)status, (int)msg.length, msg.data ? msg.data : "");
+}
+void onDevice(WGPURequestDeviceStatus status, WGPUDevice device,
+              WGPUStringView msg, void* ud1, void*) {
+    auto* r = static_cast<DeviceResult*>(ud1);
+    r->done = true;
+    if (status == WGPURequestDeviceStatus_Success) { r->device = device; r->ok = true; }
+    else std::printf("[win] device failed: status=%d msg=%.*s\n",
+                     (int)status, (int)msg.length, msg.data ? msg.data : "");
+}
+
+WGPUSurface  g_surface = nullptr;
+WGPUDevice   g_device  = nullptr;
+WGPUTexture  g_depth_tex  = nullptr;
+WGPUTextureView g_depth_view = nullptr;
+WGPUTextureFormat g_surface_fmt = WGPUTextureFormat_BGRA8Unorm;
+static const WGPUTextureFormat kDepthFormat = WGPUTextureFormat_Depth24Plus;
+
+void configureSurface(int w, int h) {
+    WGPUSurfaceConfiguration cfg = {};
+    cfg.device      = g_device;
+    cfg.format      = g_surface_fmt;
+    cfg.usage       = WGPUTextureUsage_RenderAttachment;
+    cfg.width       = (uint32_t)w;
+    cfg.height      = (uint32_t)h;
+    cfg.alphaMode   = WGPUCompositeAlphaMode_Auto;
+    cfg.presentMode = WGPUPresentMode_Fifo;
+    wgpuSurfaceConfigure(g_surface, &cfg);
+}
+
+void makeDepth(int w, int h) {
+    if (g_depth_view) { wgpuTextureViewRelease(g_depth_view); g_depth_view = nullptr; }
+    if (g_depth_tex)  { wgpuTextureRelease(g_depth_tex);      g_depth_tex  = nullptr; }
+    WGPUTextureDescriptor td = {};
+    td.usage = WGPUTextureUsage_RenderAttachment;
+    td.dimension = WGPUTextureDimension_2D;
+    td.size = { (uint32_t)w, (uint32_t)h, 1 };
+    td.format = kDepthFormat;
+    td.mipLevelCount = 1;
+    td.sampleCount = 1;
+    g_depth_tex  = wgpuDeviceCreateTexture(g_device, &td);
+    g_depth_view = wgpuTextureCreateView(g_depth_tex, nullptr);
+    gpu::webgpu_set_default_depth(g_depth_view);
+}
+} // namespace
+#endif // CHISEL_BACKEND_WEBGPU
 
 enum class AppState { IDLE, SCULPTING };
 
@@ -73,10 +147,18 @@ bool wrap_cursor(GLFWwindow* window, InputState& input, int win_w, int win_h) {
 
 // Read depth buffer at pixel to determine if cursor is on model
 static bool read_depth_at(int x, int y, int screen_h, float* depth) {
+#ifdef CHISEL_BACKEND_WEBGPU
+    // The on-model latch reads the default depth buffer; on WebGPU it comes from the
+    // pick MRT readback instead (Stage 5 runtime bring-up). Stubbed for the compile.
+    (void)x; (void)y; (void)screen_h;
+    *depth = 1.0f;
+    return false;
+#else
     float d;
     glReadPixels(x, screen_h - y, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &d);
     *depth = d;
     return d < 1.0f; // 1.0 = clear value = no geometry
+#endif
 }
 
 int main(int argc, char* argv[]) {
@@ -112,9 +194,13 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+#ifdef CHISEL_BACKEND_WEBGPU
+    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);  // WebGPU owns the surface; no GL context
+#else
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+#endif
 
     // WM_CLASS must match StartupWMClass=Chisel in chisel.desktop so the running
     // window groups under the launcher entry in the taskbar/dock (X11).
@@ -134,6 +220,59 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     set_window_icon(window);
+
+#ifdef CHISEL_BACKEND_WEBGPU
+    // ---- WebGPU: instance -> surface(X11) -> adapter -> device -> seam ----
+    // (mirrors src/gpu/wgpu_window.cpp; the seam owns resources, the window owns
+    // surface/device creation + per-frame acquire/present.)
+    int fbw = mode->width, fbh = mode->height;
+    glfwGetFramebufferSize(window, &fbw, &fbh);
+    WGPUInstance instance = wgpuCreateInstance(nullptr);
+    if (!instance) { std::fprintf(stderr, "wgpuCreateInstance failed\n"); return 1; }
+    WGPUSurfaceSourceXlibWindow x11 = {};
+    x11.chain.sType = WGPUSType_SurfaceSourceXlibWindow;
+    x11.display = glfwGetX11Display();
+    x11.window  = (uint64_t)glfwGetX11Window(window);
+    WGPUSurfaceDescriptor sd = {};
+    sd.nextInChain = &x11.chain;
+    g_surface = wgpuInstanceCreateSurface(instance, &sd);
+    if (!g_surface) { std::fprintf(stderr, "createSurface failed\n"); return 1; }
+
+    AdapterResult ar;
+    WGPURequestAdapterOptions aopt = {};
+    aopt.compatibleSurface = g_surface;
+    WGPURequestAdapterCallbackInfo acb = {};
+    acb.mode = WGPUCallbackMode_AllowProcessEvents;
+    acb.callback = onAdapter;
+    acb.userdata1 = &ar;
+    wgpuInstanceRequestAdapter(instance, &aopt, acb);
+    for (int i = 0; i < 200 && !ar.done; ++i) wgpuInstanceProcessEvents(instance);
+    if (!ar.ok) { std::fprintf(stderr, "no WebGPU adapter\n"); return 1; }
+
+    DeviceResult dr;
+    WGPURequestDeviceCallbackInfo dcb = {};
+    dcb.mode = WGPUCallbackMode_AllowProcessEvents;
+    dcb.callback = onDevice;
+    dcb.userdata1 = &dr;
+    wgpuAdapterRequestDevice(ar.adapter, nullptr, dcb);
+    for (int i = 0; i < 200 && !dr.done; ++i) wgpuInstanceProcessEvents(instance);
+    if (!dr.ok) { std::fprintf(stderr, "no WebGPU device\n"); return 1; }
+    g_device = dr.device;
+    WGPUQueue queue = wgpuDeviceGetQueue(g_device);
+    gpu::set_app_device(gpu::device_from_webgpu(g_device, queue));
+
+    WGPUSurfaceCapabilities caps = {};
+    if (wgpuSurfaceGetCapabilities(g_surface, ar.adapter, &caps) != WGPUStatus_Success
+        || caps.formatCount == 0) {
+        std::fprintf(stderr, "surfaceGetCapabilities failed\n"); return 1;
+    }
+    g_surface_fmt = caps.formats[0];
+    wgpuSurfaceCapabilitiesFreeMembers(caps);
+    gpu::webgpu_set_surface_format(g_surface_fmt);
+    configureSurface(fbw, fbh);
+    makeDepth(fbw, fbh);
+    std::printf("Chisel v0.1 (WebGPU)\n");
+#else
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1); // vsync
 
@@ -148,6 +287,8 @@ int main(int argc, char* argv[]) {
     std::printf("Renderer: %s\n", glGetString(GL_RENDERER));
 
     chisel_init_gl_debug();   // synchronous KHR_debug output (CHISEL_DEBUG builds only)
+    gpu::set_app_device(gpu::gl_device());
+#endif
 
     ComputeState compute;
     compute.init();
@@ -215,8 +356,20 @@ int main(int argc, char* argv[]) {
     ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
     ImGui::GetStyle().HoverDelayNormal = 0.0f;
     ImGui::GetStyle().HoverDelayShort  = 0.0f;
+#ifdef CHISEL_BACKEND_WEBGPU
+    ImGui_ImplGlfw_InitForOther(window, true);
+    ImGui_ImplWGPU_InitInfo imguiInit = {};
+    imguiInit.Device = g_device;
+    imguiInit.NumFramesInFlight = 3;
+    imguiInit.RenderTargetFormat = g_surface_fmt;
+    imguiInit.DepthStencilFormat = WGPUTextureFormat_Undefined;
+    if (!ImGui_ImplWGPU_Init(&imguiInit)) {
+        std::fprintf(stderr, "ImGui_ImplWGPU_Init failed\n"); return 1;
+    }
+#else
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 330");
+#endif
 
     Renderer renderer;
     renderer.init();
@@ -338,7 +491,11 @@ int main(int argc, char* argv[]) {
         mesh = &scene.active_mesh();
         multires = &scene.active_multires();
 
+#ifdef CHISEL_BACKEND_WEBGPU
+        ImGui_ImplWGPU_NewFrame();
+#else
         ImGui_ImplOpenGL3_NewFrame();
+#endif
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
 
@@ -379,7 +536,17 @@ int main(int argc, char* argv[]) {
             input.end_frame();
             continue;
         }
+#ifdef CHISEL_BACKEND_WEBGPU
+        // Reconfigure the surface + depth on resize; per-pass viewport is set by the
+        // seam (no global glViewport).
+        if (win_w != fbw || win_h != fbh) {
+            fbw = win_w; fbh = win_h;
+            configureSurface(fbw, fbh);
+            makeDepth(fbw, fbh);
+        }
+#else
         glViewport(0, 0, win_w, win_h);
+#endif
 
         // Check if cursor is on model (for initial latch decision, not during drag)
         float depth;
@@ -1340,11 +1507,23 @@ int main(int argc, char* argv[]) {
         }
 
         // ---- Render ----
+#ifdef CHISEL_BACKEND_WEBGPU
+        // Acquire this frame's swapchain colour view and inject it as the default
+        // render target; default-screen passes render into it (see webgpu_backend).
+        // The colour/depth CLEAR happens via the first pass's loadOp — wiring that to
+        // the GL frame's explicit clear is a Stage-5 runtime item.
+        WGPUSurfaceTexture surfTex = {};
+        wgpuSurfaceGetCurrentTexture(g_surface, &surfTex);
+        WGPUTextureView frameView = surfTex.texture
+            ? wgpuTextureCreateView(surfTex.texture, nullptr) : nullptr;
+        gpu::webgpu_set_default_color(frameView);
+#else
         // glClear(DEPTH) is gated by the depth write-mask; force it TRUE so the clear
         // can never be silently no-op'd by whatever pipeline drew last (e.g. a HUD
         // pipeline leaving depthMask FALSE). Don't rely on every pipeline upholding it.
         glDepthMask(GL_TRUE);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+#endif
 
         // Background gradient
         renderer.draw_background(win_w, win_h);
@@ -1652,13 +1831,45 @@ int main(int argc, char* argv[]) {
         }
 
         ImGui::Render();
+#ifdef CHISEL_BACKEND_WEBGPU
+        // UI pass: load the scene already drawn into the swapchain view, draw ImGui on
+        // top (no depth), then present.
+        if (frameView) {
+            WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(g_device, nullptr);
+            WGPURenderPassColorAttachment uiColor = {};
+            uiColor.view       = frameView;
+            uiColor.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
+            uiColor.loadOp     = WGPULoadOp_Load;
+            uiColor.storeOp    = WGPUStoreOp_Store;
+            WGPURenderPassDescriptor uiRp = {};
+            uiRp.colorAttachmentCount = 1;
+            uiRp.colorAttachments = &uiColor;
+            WGPURenderPassEncoder uiPass = wgpuCommandEncoderBeginRenderPass(enc, &uiRp);
+            ImGui_ImplWGPU_RenderDrawData(ImGui::GetDrawData(), uiPass);
+            wgpuRenderPassEncoderEnd(uiPass);
+            wgpuRenderPassEncoderRelease(uiPass);
+            WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(enc, nullptr);
+            wgpuQueueSubmit(wgpuDeviceGetQueue(g_device), 1, &cmd);
+            wgpuCommandBufferRelease(cmd);
+            wgpuCommandEncoderRelease(enc);
+        }
+        wgpuSurfacePresent(g_surface);
+        gpu::webgpu_set_default_color(nullptr);
+        if (frameView) wgpuTextureViewRelease(frameView);
+        if (surfTex.texture) wgpuTextureRelease(surfTex.texture);
+#else
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
         glfwSwapBuffers(window);
+#endif
         input.end_frame();
     }
 
+#ifdef CHISEL_BACKEND_WEBGPU
+    ImGui_ImplWGPU_Shutdown();
+#else
     ImGui_ImplOpenGL3_Shutdown();
+#endif
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();
 

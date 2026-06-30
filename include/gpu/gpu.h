@@ -58,10 +58,20 @@ Device device_from_webgpu(WGPUDevice, WGPUQueue);
 // the default render pass attaches (every pass carries depth; see RenderPipelineDesc).
 void webgpu_set_surface_format(WGPUTextureFormat);
 void webgpu_set_default_depth(WGPUTextureView);
+// The current frame's swapchain colour view. The windowing code acquires it each
+// frame; default-screen passes (RenderTarget.color == null) render into it.
+void webgpu_set_default_color(WGPUTextureView);
 WGPUTextureFormat webgpu_depth_format();   // the single depth format all passes use
 #elif defined(CHISEL_BACKEND_GL)
 Device gl_device();
 #endif
+
+// The app's process-wide device, set once by the windowing code at startup before
+// any seam resource is created, then read by renderer/compute init. (GL: an empty
+// handle — a current GL context is the real "device". WebGPU: the
+// device_from_webgpu result.) Backend-agnostic so init code needn't #ifdef.
+void set_app_device(const Device&);
+Device app_device();
 
 struct Buffer {
     uint64_t size = 0;
