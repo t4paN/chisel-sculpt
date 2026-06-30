@@ -1340,6 +1340,10 @@ int main(int argc, char* argv[]) {
         }
 
         // ---- Render ----
+        // glClear(DEPTH) is gated by the depth write-mask; force it TRUE so the clear
+        // can never be silently no-op'd by whatever pipeline drew last (e.g. a HUD
+        // pipeline leaving depthMask FALSE). Don't rely on every pipeline upholding it.
+        glDepthMask(GL_TRUE);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
         // Background gradient

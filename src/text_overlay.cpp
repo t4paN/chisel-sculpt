@@ -207,7 +207,10 @@ void TextOverlay::init(gpu::Device& dev) {
         d.slots = slots; d.slot_count = 1;
         d.binds = binds; d.bind_count = 1;
         d.topology = gpu::Topology::Triangles;
-        d.depth_test = false; d.depth_write = false; d.blend = true;
+        // depth_test off (HUD draws no depth), but depth_write=true so set_pipeline
+        // leaves GL's depthMask TRUE — otherwise the next frame's glClear(DEPTH) in
+        // main is a no-op and the mesh fails the depth test against stale depth.
+        d.depth_test = false; d.depth_write = true; d.blend = true;
         d.sampled_texture = true;
         text_pipeline = gpu::create_render_pipeline(gpu_dev, d);
         if (!text_pipeline.handle) std::fprintf(stderr, "[text] text pipeline failed\n");
@@ -226,7 +229,8 @@ void TextOverlay::init(gpu::Device& dev) {
         d.slots = slots; d.slot_count = 1;
         d.binds = binds; d.bind_count = 1;
         d.topology = gpu::Topology::TriangleStrip;
-        d.depth_test = false; d.depth_write = false; d.blend = true;
+        // depth_write=true keeps GL's depthMask TRUE so the per-frame depth clear works.
+        d.depth_test = false; d.depth_write = true; d.blend = true;
         panel_pipeline = gpu::create_render_pipeline(gpu_dev, d);
         if (!panel_pipeline.handle) std::fprintf(stderr, "[text] panel pipeline failed\n");
         panel_ubo = gpu::create_buffer(gpu_dev, nullptr, sizeof(PanelParamsGPU), gpu::Usage::Uniform);

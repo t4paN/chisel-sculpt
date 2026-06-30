@@ -2,9 +2,31 @@
 
 Short, chronological log of notable changes. Newest on top.
 
-## 2026-06-30 — WebGPU port Stage 3 (section B): renderer + TextOverlay off raw GL, sampled-texture seam — ⚠️ WIP, MESH DOES NOT RENDER
+## 2026-06-30 — Fix Stage 3B render regression: depth clear gated by leftover depthMask
 
-> **KNOWN BROKEN (committed as WIP for a fresh-context resume).** The GL build
+- **Root cause was NOT buffer corruption** (the WIP entry below guessed the
+  flat-soup expand path). `glClear(GL_DEPTH_BUFFER_BIT)` is silently gated by the
+  GL depth write-mask. Every original renderer pipeline deliberately keeps
+  `depth_write=true` (even depth-test-off ones like bg/cursor) so the mask stays
+  TRUE for the per-frame clear. The two new B2 `TextOverlay` pipelines
+  (`text_pipeline`, `panel_pipeline`) set `depth_write=false`; being drawn last
+  each frame (FPS/notification HUD) they left `depthMask=FALSE`, so the next
+  frame's `glClear(DEPTH)` was a no-op. Stale depth → mesh rejected by `GL_LESS`
+  when idle (re-projects to identical depths), partially passing only while the
+  camera moved → "garbled/clipped while orbiting, blank at rest."
+- **Fix:** `depth_write=true` on both TextOverlay pipelines (matches the existing
+  convention), **plus** a defensive `glDepthMask(GL_TRUE)` immediately before the
+  `glClear` in `main.cpp` so the clear can never again be gated by a leftover mask.
+- Same stale-depth buffer was also breaking `read_depth_at` → `on_model` (brush
+  latch / cursor-tilt feedback reads the default depth buffer); fixed by the same
+  change. Verified: sphere stable when idle, cursor follows surface tilt, sculpt
+  registers.
+
+## 2026-06-30 — WebGPU port Stage 3 (section B): renderer + TextOverlay off raw GL, sampled-texture seam — ✅ render regression fixed (see entry above)
+
+> **RESOLVED 2026-06-30 — see the entry above.** (The diagnosis in this note was
+> wrong: it was a depthMask-gated depth clear, not the flat-soup expand path.)
+> The GL build
 > compiles clean and launches with zero pipeline failures / zero GL errors, **but
 > the active mesh no longer renders correctly**: the sphere flashes garbled
 > triangles while the camera orbits, shows nothing when idle, and looks clipped;
