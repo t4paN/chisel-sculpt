@@ -2,6 +2,29 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-30 — WebGPU port Stage C: first full-app `CHISEL_BACKEND_WEBGPU` compile
+
+- The whole `chisel` app now **compiles + links on the WebGPU backend** (clean
+  from-scratch build, against `libwgpu_native` + `libglfw`), with the GL build
+  kept green at every step.
+- **main.cpp** windowing is now dual-backend: under `CHISEL_BACKEND_WEBGPU` it
+  creates a wgpu instance/surface(X11)/adapter/device inline, configures the
+  surface + depth, and per-frame acquires the swapchain view, injects it as the
+  seam's default colour target, then presents. ImGui swaps `imgui_impl_opengl3`
+  → `imgui_impl_wgpu`.
+- **Seam:** `app_device()`/`set_app_device()` (backend-agnostic process device,
+  set once at startup; renderer/compute read it instead of `gl_device()`); plus
+  `webgpu_set_default_color()` (the per-frame swapchain view default-screen
+  passes render into).
+- **compute_common:** GL capability probe + `compile_program` guarded per
+  backend; the WebGPU `init()` advertises sane limits + CAS float atomics.
+- **Deferred A-batch finished:** compute_remesh / brush / remesh raw-GL uploads →
+  `gpu::write_buffer`, barriers → `gpu::barrier`; sdf error-drain / finish-flush
+  / state-cleanup guarded; chisel_debug GL output gated to the GL backend.
+- **CMake:** the webgpu branch builds the full app (no early `return()`),
+  selecting backend source / libs / defines; `GLFW_INCLUDE_NONE` + ImGuiFileDialog
+  added for the webgpu target. Runtime bring-up / A-B is Stage 5.
+
 ## 2026-06-30 — Fix Stage 3B render regression: depth clear gated by leftover depthMask
 
 - **Root cause was NOT buffer corruption** (the WIP entry below guessed the
