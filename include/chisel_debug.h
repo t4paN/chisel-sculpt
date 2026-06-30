@@ -68,9 +68,9 @@ inline void chisel_check_undo_entry(uint32_t vertex_offset, uint32_t mesh_vc,
 
 // --- GL debug output ---
 // Call chisel_init_gl_debug() after gladLoadGL. Requires GL_KHR_debug or GL 4.3+.
-// Falls back to no-op on GL 3.3 without the extension.
+// Falls back to no-op on GL 3.3 without the extension, and on the WebGPU backend.
 
-#ifdef CHISEL_DEBUG
+#if defined(CHISEL_DEBUG) && defined(CHISEL_BACKEND_GL)
 #include <glad/glad.h>
 
 inline void GLAPIENTRY chisel_gl_debug_callback(

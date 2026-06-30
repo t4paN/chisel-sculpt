@@ -955,6 +955,9 @@ static_assert(sizeof(SdfMeshParamsGPU)   == 32, "");
 // GPU hang/TDR is attributed to THIS dispatch (the last "stage OK" before a crash
 // names the dispatch that hung) and report its wall time.
 static void sdf_gl_check(const char* stage) {
+#if defined(CHISEL_BACKEND_WEBGPU)
+    (void)stage;   // GL error-drain has no WebGPU equivalent (validation is async)
+#else
 #ifdef CHISEL_DEBUG
     auto t0 = std::chrono::steady_clock::now();
     glFinish();
@@ -968,6 +971,7 @@ static void sdf_gl_check(const char* stage) {
     std::printf("[sdf][dbg] stage OK: %s (%.1f ms)\n", stage, ms);
     std::fflush(stdout);
 #endif
+#endif // CHISEL_BACKEND_WEBGPU
 }
 
 // Cross-frame state for a tick-driven voxel merge. Heap-owned by the caller. Holds
@@ -1172,7 +1176,9 @@ VoxelMergeJob* voxel_merge_begin(Scene& scene, ComputeState& cs,
     // Static MC case table.
     job->tritab = gpu::create_buffer(cs.gpu_dev, MC_TRI_TABLE, sizeof(MC_TRI_TABLE), Usage::Storage);
 
+#ifndef CHISEL_BACKEND_WEBGPU
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+#endif
 
     // ---- Compile pipelines (gpu:: seam) ----
     using gpu::BindEntry; using gpu::Bind;
@@ -1266,8 +1272,10 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
     auto fail = [&](const std::string& msg) {
         j.res.error = msg;
         j.phase = Phase::Failed;
+#ifndef CHISEL_BACKEND_WEBGPU
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
         glUseProgram(0);
+#endif
         out = j.res;
         return VoxelMergeStatus::Failed;
     };
@@ -1410,7 +1418,9 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
             gpu::ComputeBatch b = gpu::begin_compute(cs.gpu_dev);
             sdf_dispatch_seam(b, j.sign_pipe, sgrp, n);
             gpu::submit(b);
+#ifndef CHISEL_BACKEND_WEBGPU
             glFlush();   // separate ring submission per slice (own watchdog window)
+#endif
             j.sign_off += n;
         }
         gpu::release_bind_group(sgrp);

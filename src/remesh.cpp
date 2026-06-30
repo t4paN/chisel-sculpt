@@ -1080,10 +1080,8 @@ static void mirror_positive_half(Mesh& m, float seam_tol, float target_edge, Com
 
     // Upload indices for the snap shader's neighbor lookups
     cs->ensure_remesh_smooth_buffers(vc, tc);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, cs->remesh_indices_ssbo.handle);
-    glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
-                    tc * 3 * sizeof(uint32_t), m.indices.data());
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    gpu::write_buffer(cs->gpu_dev, cs->remesh_indices_ssbo, 0,
+                      m.indices.data(), tc * 3 * sizeof(uint32_t));
 
     std::vector<uint32_t> merge_map;
     cs->dispatch_seam_snap_weld(

@@ -468,7 +468,7 @@ void BrushStroke::apply_crease(DabContext& ctx, float dab_x, float dab_y,
 
     ctx.compute.dispatch_crease_accum(params, ctx.renderer.vbo_pos);
 
-    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+    gpu::barrier(ctx.compute.gpu_dev);
 
     bool use_sym = ctx.input.mirror_x
                    && ctx.compute.has_draw_symmetrize()
@@ -525,7 +525,7 @@ void BrushStroke::apply_pinch(DabContext& ctx, float dab_x, float dab_y,
 
     ctx.compute.dispatch_pinch_accum(params, ctx.renderer.vbo_pos);
 
-    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+    gpu::barrier(ctx.compute.gpu_dev);
 
     bool use_sym = ctx.input.mirror_x
                    && ctx.compute.has_draw_symmetrize()
@@ -588,7 +588,7 @@ void BrushStroke::apply_draw(DabContext& ctx, float dab_x, float dab_y,
 
     ctx.compute.dispatch_draw_accum(params, ctx.renderer.vbo_pos);
 
-    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+    gpu::barrier(ctx.compute.gpu_dev);
 
     // Symmetrize accum across mirror pairs before apply. Each paired (v, mv)
     // gets out[v] = accum[v] + (-mx, my, mz, mw), so apply produces strictly

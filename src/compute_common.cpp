@@ -27,6 +27,21 @@ ComputeState::ComputeState()
 bool ComputeState::init() {
     supported = false;
 
+    // The gpu:: seam device is set once at startup by the windowing code.
+    gpu_dev = gpu::app_device();
+
+#if defined(CHISEL_BACKEND_WEBGPU)
+    // WebGPU: no raw-GL capability probe. The seam's pipeline creation guarantees
+    // compute support; advertise sane limits and the CAS float-atomic path (the same
+    // emulation the GL fallback uses — the WGSL kernels implement it identically).
+    supported = true;
+    has_native_float_atomics  = false;
+    max_workgroup_size        = 256;
+    max_workgroup_invocations = 256;
+    max_ssbo_bindings         = 8;
+    std::printf("[compute] WebGPU backend: seam pipelines, CAS float atomics\n");
+    return true;
+#else
     if (!GLAD_GL_ARB_compute_shader) {
         std::printf("[compute] GL_ARB_compute_shader not available\n");
         return false;
@@ -47,10 +62,6 @@ bool ComputeState::init() {
     has_native_float_atomics = GLAD_GL_NV_shader_atomic_float != 0;
 
     supported = true;
-
-    // The gpu:: seam runs on the current GL context (no device object on GL); ported
-    // kernels (mask, Seam Step 2b) dispatch through this. WebGPU injects a real device.
-    gpu_dev = gpu::app_device();
 
     std::printf("[compute] available: workgroup_size=%d invocations=%d ssbo_bindings=%d float_atomics=%s\n",
                 max_workgroup_size, max_workgroup_invocations, max_ssbo_bindings,
@@ -139,9 +150,15 @@ void main() { atomicAddFloat(0, 1.0); }
     std::printf("[compute] CAS float atomic validated (64 threads -> %.1f)\n", cas_result);
 
     return true;
+#endif // CHISEL_BACKEND_GL vs WEBGPU
 }
 
 GLuint ComputeState::compile_program(const char* src) const {
+#if defined(CHISEL_BACKEND_WEBGPU)
+    // GLSL compute programs aren't used on WebGPU — kernels run as WGSL via the seam.
+    (void)src;
+    return 0;
+#else
     if (!supported) return 0;
 
     GLuint shader = glCreateShader(GL_COMPUTE_SHADER);
@@ -173,6 +190,7 @@ GLuint ComputeState::compile_program(const char* src) const {
     }
 
     return program;
+#endif
 }
 
 void ComputeState::cleanup() {
