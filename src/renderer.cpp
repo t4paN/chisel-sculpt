@@ -85,11 +85,6 @@ static_assert(sizeof(ScreenExpandParamsGPU) == 16, "expand Params UBO must be 16
 // Unit-ring segment count (shared by ring + footprint disc geometry, built once).
 static const int CURSOR_SEGS = 64;
 
-// Wrap a still-raw GL buffer handle as a transient gpu::Buffer view for binding
-// through the seam (size is unused by the GL vertex/index bind path). Same pattern
-// the compute kernels use for their GL-owned SSBOs during the staged port.
-static inline gpu::Buffer buf_view(GLuint h) { gpu::Buffer b; b.handle = h; return b; }
-
 // Create-or-grow an owned seam buffer to exactly `size` bytes and fill it with
 // `data` (buffer-ownership migration). Same-size re-uploads keep the handle and
 // just write_buffer; a size change releases + recreates (the WebGPU-correct path —
@@ -532,51 +527,15 @@ void main() {
 }
 )";
 
-// ---- Helpers ----
-
-GLuint compile_shader(GLenum type, const char* src) {
-    GLuint s = glCreateShader(type);
-    glShaderSource(s, 1, &src, nullptr);
-    glCompileShader(s);
-    int ok;
-    glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
-    if (!ok) {
-        char log[512];
-        glGetShaderInfoLog(s, 512, nullptr, log);
-        std::fprintf(stderr, "Shader compile error: %s\n", log);
-    }
-    return s;
-}
-
-GLuint link_program(GLuint vert, GLuint frag) {
-    GLuint p = glCreateProgram();
-    glAttachShader(p, vert);
-    glAttachShader(p, frag);
-    glLinkProgram(p);
-    int ok;
-    glGetProgramiv(p, GL_LINK_STATUS, &ok);
-    if (!ok) {
-        char log[512];
-        glGetProgramInfoLog(p, 512, nullptr, log);
-        std::fprintf(stderr, "Program link error: %s\n", log);
-    }
-    glDeleteShader(vert);
-    glDeleteShader(frag);
-    return p;
-}
-
 // ---- Renderer ----
 
 Renderer::Renderer()
-    : vao(0), vbo_tri_id(0), vbo_bary(0)
-    , debug_edge_vbo(0), debug_edge_count(0)
-    , screen_vbo_pos(0), screen_vbo_norm(0)
-    , screen_vbo_triid(0), screen_vbo_bary(0), screen_tri_count(0)
+    : debug_edge_count(0)
+    , screen_tri_count(0)
     , initialized(false)
 {}
 
 Renderer::~Renderer() {
-    if (vao) glDeleteVertexArrays(1, &vao);
     gpu::release_buffer(vbo_pos);
     gpu::release_buffer(vbo_norm);
     gpu::release_buffer(vbo_mask);
@@ -597,16 +556,16 @@ Renderer::~Renderer() {
     gpu::release_buffer(crosshair_ubo);
     gpu::release_render_pipeline(debug_edge_pipeline);
     gpu::release_buffer(debug_edge_ubo);
-    if (debug_edge_vbo) glDeleteBuffers(1, &debug_edge_vbo);
+    gpu::release_buffer(debug_edge_vbo);
     gpu::release_render_pipeline(pick_pipeline);
     gpu::release_buffer(pick_ubo);
     gpu::release_offscreen_target(screen_target);
     gpu::release_render_pipeline(screen_pipeline);
     gpu::release_buffer(screen_ubo);
-    if (screen_vbo_pos) glDeleteBuffers(1, &screen_vbo_pos);
-    if (screen_vbo_norm) glDeleteBuffers(1, &screen_vbo_norm);
-    if (screen_vbo_triid) glDeleteBuffers(1, &screen_vbo_triid);
-    if (screen_vbo_bary) glDeleteBuffers(1, &screen_vbo_bary);
+    gpu::release_buffer(screen_vbo_pos);
+    gpu::release_buffer(screen_vbo_norm);
+    gpu::release_buffer(screen_vbo_triid);
+    gpu::release_buffer(screen_vbo_bary);
     gpu::release_compute_pipeline(screen_expand_pipeline);
     gpu::release_buffer(screen_expand_ubo);
 }
@@ -694,9 +653,9 @@ void Renderer::init() {
         pick_ubo = gpu::create_buffer(gpu_dev, nullptr, sizeof(PickParamsGPU), gpu::Usage::Uniform);
     }
 
-    // Mesh VAO. vbo_pos/vbo_norm/ebo (Step 1) and vbo_mask/vbo_color (Step 3a) are all
-    // owned gpu::Buffers created lazily on first upload_mesh.
-    glGenVertexArrays(1, &vao);
+    // Mesh buffers vbo_pos/vbo_norm/ebo (Step 1) and vbo_mask/vbo_color (Step 3a) are
+    // all owned gpu::Buffers created lazily on first upload_mesh. The draw-time VAO
+    // lives on each render pipeline (seam), so the renderer owns none.
 
     // Brush-cursor overlays — on the gpu:: seam. Three pipelines, each with static
     // camera-independent geometry (built once here) + a std140 Params UBO updated
@@ -823,12 +782,8 @@ void Renderer::init() {
         screen_ubo = gpu::create_buffer(gpu_dev, nullptr, sizeof(ScreenParamsGPU), gpu::Usage::Uniform);
     }
 
-    // Flat triangle-soup vertex buffers (GL-owned; also SSBO targets for the expand
-    // kernel). Allocated/filled in upload_screen_mesh.
-    glGenBuffers(1, &screen_vbo_pos);
-    glGenBuffers(1, &screen_vbo_norm);
-    glGenBuffers(1, &screen_vbo_triid);
-    glGenBuffers(1, &screen_vbo_bary);
+    // Flat triangle-soup vertex buffers (seam-owned; pos/norm also SSBO targets for
+    // the expand kernel). Allocated/filled lazily in upload_screen_mesh.
 
     // Indexed→flat expansion — on the gpu:: compute seam. 5 storage bindings
     // (0-4) + a tri_count Params UBO at binding 63.
@@ -868,7 +823,7 @@ void Renderer::init() {
         else std::printf("[renderer] debug edge pipeline compiled (gpu:: seam)\n");
         debug_edge_ubo = gpu::create_buffer(gpu_dev, nullptr, sizeof(DebugParamsGPU), gpu::Usage::Uniform);
     }
-    glGenBuffers(1, &debug_edge_vbo);  // edge index buffer, populated in draw_debug_mesh
+    // debug_edge_vbo (edge index buffer) is created lazily in draw_debug_mesh.
 
     initialized = true;
 }
@@ -1127,14 +1082,6 @@ void Renderer::draw_mesh(const Camera& cam, int w, int h, uint32_t index_count,
 
 void Renderer::upload_display(EntityGpu& g, const Mesh& mesh) {
     uint32_t vc = mesh.vertex_count();
-    if (!g.vao) {
-        glGenVertexArrays(1, &g.vao);
-        glGenBuffers(1, &g.vbo_pos);
-        glGenBuffers(1, &g.vbo_norm);
-        glGenBuffers(1, &g.vbo_mask);
-        glGenBuffers(1, &g.vbo_color);
-        glGenBuffers(1, &g.ebo);
-    }
 
     std::vector<float> pos(vc * 3), norm(vc * 3), mask_buf(vc);
     std::vector<uint32_t> col_buf(vc);
@@ -1146,50 +1093,31 @@ void Renderer::upload_display(EntityGpu& g, const Mesh& mesh) {
         col_buf[i] = (has_color && i < mesh.color.size()) ? mesh.color[i] : 0xFFFFFFFFu;
     }
 
-    glBindVertexArray(g.vao);
+    // Display-only buffers: vertex attributes for the matcap + pick draws (pos also
+    // bound as a pick vertex buffer). The render pipeline owns the vertex layout.
+    ensure_buffer(gpu_dev, g.vbo_pos, pos.data(), (uint64_t)pos.size()*sizeof(float), gpu::Usage::Vertex);
+    ensure_buffer(gpu_dev, g.vbo_norm, norm.data(), (uint64_t)norm.size()*sizeof(float), gpu::Usage::Vertex);
+    ensure_buffer(gpu_dev, g.vbo_mask, mask_buf.data(), (uint64_t)mask_buf.size()*sizeof(float), gpu::Usage::Vertex);
+    ensure_buffer(gpu_dev, g.vbo_color, col_buf.data(), (uint64_t)col_buf.size()*sizeof(uint32_t), gpu::Usage::Vertex);
+    ensure_buffer(gpu_dev, g.ebo, mesh.indices.data(),
+                  (uint64_t)mesh.indices.size()*sizeof(uint32_t), gpu::Usage::Index);
 
-    glBindBuffer(GL_ARRAY_BUFFER, g.vbo_pos);
-    glBufferData(GL_ARRAY_BUFFER, pos.size()*sizeof(float), pos.data(), GL_DYNAMIC_DRAW);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, nullptr);
-
-    glBindBuffer(GL_ARRAY_BUFFER, g.vbo_norm);
-    glBufferData(GL_ARRAY_BUFFER, norm.size()*sizeof(float), norm.data(), GL_DYNAMIC_DRAW);
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 0, nullptr);
-
-    glBindBuffer(GL_ARRAY_BUFFER, g.vbo_mask);
-    glBufferData(GL_ARRAY_BUFFER, mask_buf.size()*sizeof(float), mask_buf.data(), GL_DYNAMIC_DRAW);
-    glEnableVertexAttribArray(2);
-    glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, 0, nullptr);
-
-    glBindBuffer(GL_ARRAY_BUFFER, g.vbo_color);
-    glBufferData(GL_ARRAY_BUFFER, col_buf.size()*sizeof(uint32_t), col_buf.data(), GL_DYNAMIC_DRAW);
-    glEnableVertexAttribArray(4);
-    glVertexAttribPointer(4, 4, GL_UNSIGNED_BYTE, GL_TRUE, 0, nullptr);
-
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g.ebo);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, mesh.indices.size()*sizeof(uint32_t),
-                 mesh.indices.data(), GL_STATIC_DRAW);
-
-    glBindVertexArray(0);
     g.index_count = (uint32_t)mesh.indices.size();
     g.dirty = false;
 }
 
 void Renderer::free_display(EntityGpu& g) {
-    if (g.vao) glDeleteVertexArrays(1, &g.vao);
-    if (g.vbo_pos)     glDeleteBuffers(1, &g.vbo_pos);
-    if (g.vbo_norm)    glDeleteBuffers(1, &g.vbo_norm);
-    if (g.vbo_mask)    glDeleteBuffers(1, &g.vbo_mask);
-    if (g.vbo_color)   glDeleteBuffers(1, &g.vbo_color);
-    if (g.ebo)         glDeleteBuffers(1, &g.ebo);
+    gpu::release_buffer(g.vbo_pos);
+    gpu::release_buffer(g.vbo_norm);
+    gpu::release_buffer(g.vbo_mask);
+    gpu::release_buffer(g.vbo_color);
+    gpu::release_buffer(g.ebo);
     g = EntityGpu();
 }
 
 void Renderer::draw_display(const Camera& cam, EntityGpu& g, int w, int h,
                             float facing_threshold, bool selected) {
-    if (!g.vao || g.index_count == 0) return;
+    if (g.index_count == 0) return;
     upload_matcap_params(cam, w, h, facing_threshold, selected);
 
     gpu::RenderTarget target; target.width = w; target.height = h;
@@ -1198,11 +1126,11 @@ void Renderer::draw_display(const Camera& cam, EntityGpu& g, int w, int h,
     gpu::BindBufferEntry be[] = {{ 63, &matcap_ubo, sizeof(MatcapParamsGPU) }};
     gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, matcap_pipeline, be, 1);
     gpu::set_bind_group(rp, matcap_pipeline, grp);
-    gpu::set_vertex_buffer(rp, 0, buf_view(g.vbo_pos));
-    gpu::set_vertex_buffer(rp, 1, buf_view(g.vbo_norm));
-    gpu::set_vertex_buffer(rp, 2, buf_view(g.vbo_mask));
-    gpu::set_vertex_buffer(rp, 3, buf_view(g.vbo_color));
-    gpu::set_index_buffer(rp, buf_view(g.ebo));
+    gpu::set_vertex_buffer(rp, 0, g.vbo_pos);
+    gpu::set_vertex_buffer(rp, 1, g.vbo_norm);
+    gpu::set_vertex_buffer(rp, 2, g.vbo_mask);
+    gpu::set_vertex_buffer(rp, 3, g.vbo_color);
+    gpu::set_index_buffer(rp, g.ebo);
     gpu::draw_indexed(rp, g.index_count);
     gpu::end_render_pass(rp);
     gpu::release_bind_group(grp);
@@ -1236,11 +1164,11 @@ void Renderer::pick_begin(const Camera& cam, int w, int h) {
     gpu::set_bind_group(pick_pass, pick_pipeline, pick_bg);
 }
 
-void Renderer::pick_draw(uint32_t entity_id, GLuint pos_vbo, GLuint ebo_, uint32_t index_count) {
-    if (!pos_vbo || index_count == 0) return;
+void Renderer::pick_draw(uint32_t entity_id, const gpu::Buffer& pos_vbo, const gpu::Buffer& ebo_, uint32_t index_count) {
+    if (!pos_vbo.handle || index_count == 0) return;
     gpu::write_buffer(gpu_dev, pick_ubo, 128, &entity_id, sizeof entity_id);
-    gpu::set_vertex_buffer(pick_pass, 0, buf_view(pos_vbo));
-    gpu::set_index_buffer(pick_pass, buf_view(ebo_));
+    gpu::set_vertex_buffer(pick_pass, 0, pos_vbo);
+    gpu::set_index_buffer(pick_pass, ebo_);
     gpu::draw_indexed(pick_pass, index_count);
 }
 
@@ -1346,9 +1274,13 @@ void Renderer::draw_cursor(const Camera& cam, float cx, float cy, float radius,
         gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, crosshair_pipeline, be, 1);
         gpu::set_bind_group(rp, crosshair_pipeline, grp);
         gpu::set_vertex_buffer(rp, 0, crosshair_vbuf);
+#if defined(CHISEL_BACKEND_GL)
         glLineWidth(3.0f);                    // GL-only nicety (WebGPU ignores line width)
+#endif
         gpu::draw(rp, 8);
+#if defined(CHISEL_BACKEND_GL)
         glLineWidth(1.0f);
+#endif
         gpu::release_bind_group(grp);
     }
 
@@ -1378,11 +1310,17 @@ void Renderer::upload_screen_mesh(const Mesh& mesh) {
     screen_tri_count = tc;
     uint32_t flat_vc = tc * 3;
 
-    // pos/norm are filled by the expand compute; allocate them empty.
-    glBindBuffer(GL_ARRAY_BUFFER, screen_vbo_pos);
-    glBufferData(GL_ARRAY_BUFFER, (size_t)flat_vc * 3 * sizeof(float), nullptr, GL_DYNAMIC_DRAW);
-    glBindBuffer(GL_ARRAY_BUFFER, screen_vbo_norm);
-    glBufferData(GL_ARRAY_BUFFER, (size_t)flat_vc * 3 * sizeof(float), nullptr, GL_DYNAMIC_DRAW);
+    // pos/norm are filled by the expand compute (Vertex|Storage); allocate them empty,
+    // reallocating only when the flat vertex count changes (contents aren't preserved).
+    uint64_t pn_bytes = (uint64_t)flat_vc * 3 * sizeof(float);
+    if (screen_vbo_pos.size != pn_bytes) {
+        gpu::release_buffer(screen_vbo_pos);
+        screen_vbo_pos = gpu::create_buffer(gpu_dev, nullptr, pn_bytes, gpu::Usage::Vertex | gpu::Usage::Storage);
+    }
+    if (screen_vbo_norm.size != pn_bytes) {
+        gpu::release_buffer(screen_vbo_norm);
+        screen_vbo_norm = gpu::create_buffer(gpu_dev, nullptr, pn_bytes, gpu::Usage::Vertex | gpu::Usage::Storage);
+    }
 
     // Triid and bary are static per topology — build on CPU.
     std::vector<float> triid(flat_vc);
@@ -1394,11 +1332,8 @@ void Renderer::upload_screen_mesh(const Mesh& mesh) {
         bary[(base+1)*2+0] = 0.0f; bary[(base+1)*2+1] = 1.0f;
         bary[(base+2)*2+0] = 0.0f; bary[(base+2)*2+1] = 0.0f;
     }
-    glBindBuffer(GL_ARRAY_BUFFER, screen_vbo_triid);
-    glBufferData(GL_ARRAY_BUFFER, triid.size()*sizeof(float), triid.data(), GL_STATIC_DRAW);
-    glBindBuffer(GL_ARRAY_BUFFER, screen_vbo_bary);
-    glBufferData(GL_ARRAY_BUFFER, bary.size()*sizeof(float), bary.data(), GL_STATIC_DRAW);
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    ensure_buffer(gpu_dev, screen_vbo_triid, triid.data(), triid.size()*sizeof(float), gpu::Usage::Vertex);
+    ensure_buffer(gpu_dev, screen_vbo_bary, bary.data(), bary.size()*sizeof(float), gpu::Usage::Vertex);
 
     // Fill positions/normals via GPU expansion.
     update_screen_mesh_gpu();
@@ -1415,17 +1350,11 @@ void Renderer::update_screen_mesh_gpu() {
     ScreenExpandParamsGPU p{}; p.tri_count = screen_tri_count;
     gpu::write_buffer(gpu_dev, screen_expand_ubo, 0, &p, sizeof p);
 
-    // GL-owned src/dst buffers wrapped as transient views at dispatch (same staged
-    // pattern as the brush kernels). 0-2 read (mesh pos/norm/idx), 3-4 written
+    // Seam-owned buffers bound directly. 0-2 read (mesh pos/norm/idx), 3-4 written
     // (flat soup pos/norm), 63 = tri_count UBO.
-    gpu::Buffer in_pos  = vbo_pos;
-    gpu::Buffer in_norm = vbo_norm;
-    gpu::Buffer in_idx  = ebo;
-    gpu::Buffer out_pos = buf_view(screen_vbo_pos);
-    gpu::Buffer out_norm = buf_view(screen_vbo_norm);
     gpu::BindBufferEntry be[] = {
-        { 0, &in_pos, 0 }, { 1, &in_norm, 0 }, { 2, &in_idx, 0 },
-        { 3, &out_pos, 0 }, { 4, &out_norm, 0 },
+        { 0, &vbo_pos, 0 }, { 1, &vbo_norm, 0 }, { 2, &ebo, 0 },
+        { 3, &screen_vbo_pos, 0 }, { 4, &screen_vbo_norm, 0 },
         { 63, &screen_expand_ubo, sizeof(ScreenExpandParamsGPU) },
     };
     gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, screen_expand_pipeline, be, 6);
@@ -1457,10 +1386,10 @@ void Renderer::render_screen_buffers(const Camera& cam, int w, int h) {
     gpu::BindBufferEntry be[] = {{ 63, &screen_ubo, sizeof(ScreenParamsGPU) }};
     gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, screen_pipeline, be, 1);
     gpu::set_bind_group(rp, screen_pipeline, grp);
-    gpu::set_vertex_buffer(rp, 0, buf_view(screen_vbo_pos));
-    gpu::set_vertex_buffer(rp, 1, buf_view(screen_vbo_norm));
-    gpu::set_vertex_buffer(rp, 2, buf_view(screen_vbo_triid));
-    gpu::set_vertex_buffer(rp, 3, buf_view(screen_vbo_bary));
+    gpu::set_vertex_buffer(rp, 0, screen_vbo_pos);
+    gpu::set_vertex_buffer(rp, 1, screen_vbo_norm);
+    gpu::set_vertex_buffer(rp, 2, screen_vbo_triid);
+    gpu::set_vertex_buffer(rp, 3, screen_vbo_bary);
     gpu::draw(rp, screen_tri_count * 3);
     gpu::end_render_pass(rp);   // rebinds the default framebuffer
     gpu::release_bind_group(grp);
@@ -1498,9 +1427,8 @@ void Renderer::draw_debug_mesh(const Camera& cam, const Mesh& mesh, int w, int h
             edges.push_back(i2); edges.push_back(i0);
         }
         debug_edge_count = (uint32_t)edges.size();
-        glBindBuffer(GL_ARRAY_BUFFER, debug_edge_vbo);
-        glBufferData(GL_ARRAY_BUFFER, edges.size() * sizeof(uint32_t), edges.data(), GL_STATIC_DRAW);
-        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        ensure_buffer(gpu_dev, debug_edge_vbo, edges.data(),
+                      edges.size() * sizeof(uint32_t), gpu::Usage::Index);
     }
 
     DebugParamsGPU p;
@@ -1511,12 +1439,15 @@ void Renderer::draw_debug_mesh(const Camera& cam, const Mesh& mesh, int w, int h
     // Depth-compare LEQUAL + polygon offset pull the wires just in front of the
     // surface (anti z-fight). The seam doesn't model depth-func / depth-bias yet,
     // so these stay raw GL around the seam draw (they fold into RenderPipelineDesc
-    // when the WebGPU render backend lands). set_pipeline enables depth test + blend
-    // and leaves depth-func untouched, so restore GL_LESS afterwards.
+    // when the WebGPU render backend lands; WebGPU ignores line width). set_pipeline
+    // enables depth test + blend and leaves depth-func untouched, so restore GL_LESS
+    // afterwards.
+#if defined(CHISEL_BACKEND_GL)
     glDepthFunc(GL_LEQUAL);
     glEnable(GL_POLYGON_OFFSET_LINE);
     glPolygonOffset(-1.0f, -1.0f);
     glLineWidth(1.0f);
+#endif
 
     gpu::RenderTarget target;          // fbo 0 (default framebuffer), no clear
     target.width = w; target.height = h;
@@ -1526,11 +1457,13 @@ void Renderer::draw_debug_mesh(const Camera& cam, const Mesh& mesh, int w, int h
     gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, debug_edge_pipeline, be, 1);
     gpu::set_bind_group(rp, debug_edge_pipeline, grp);
     gpu::set_vertex_buffer(rp, 0, vbo_pos);
-    gpu::set_index_buffer(rp, buf_view(debug_edge_vbo));
+    gpu::set_index_buffer(rp, debug_edge_vbo);
     gpu::draw_indexed(rp, debug_edge_count);
     gpu::end_render_pass(rp);
     gpu::release_bind_group(grp);
 
+#if defined(CHISEL_BACKEND_GL)
     glDisable(GL_POLYGON_OFFSET_LINE);
     glDepthFunc(GL_LESS);
+#endif
 }

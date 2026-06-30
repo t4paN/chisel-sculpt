@@ -98,35 +98,16 @@ static const unsigned char font_data[] = {
     0x00,0x00,0x7E,0x0C,0x18,0x30,0x7E,0x00, // z
 };
 
-static const char* panel_vert_src = R"(
-#version 330 core
-layout(location=0) in vec2 aPos;
-uniform vec2 uOffset;
-uniform vec2 uSize;
-uniform vec2 uScreen;
-void main() {
-    vec2 p = uOffset + aPos * uSize;
-    vec2 ndc = (p / uScreen) * 2.0 - 1.0;
-    ndc.y = -ndc.y;
-    gl_Position = vec4(ndc, 0.0, 1.0);
-}
-)";
-
-static const char* panel_frag_src = R"(
-#version 330 core
-uniform vec4 uColor;
-out vec4 fragColor;
-void main() {
-    fragColor = uColor;
-}
-)";
-
+// std140 Params blocks (match the C structs below). Both stages declare the block
+// (the vertex stage reads uScreen; the fragment stage reads uColor) — same pattern
+// as the matcap render shaders. The font sampler defaults to texture unit 0, which
+// is where the seam binds the sampled texture (kTextureBinding == 0).
 static const char* text_vert_src = R"(
-#version 330 core
+#version 430 core
 layout(location=0) in vec2 aPos;
 layout(location=1) in vec2 aUV;
+layout(std140, binding=63) uniform Params { vec2 uScreen; vec4 uColor; };
 out vec2 vUV;
-uniform vec2 uScreen;
 void main() {
     vec2 ndc = (aPos / uScreen) * 2.0 - 1.0;
     ndc.y = -ndc.y;
@@ -136,32 +117,59 @@ void main() {
 )";
 
 static const char* text_frag_src = R"(
-#version 330 core
+#version 430 core
 in vec2 vUV;
-out vec4 fragColor;
+layout(std140, binding=63) uniform Params { vec2 uScreen; vec4 uColor; };
 uniform sampler2D uFont;
-uniform vec4 uColor;
+out vec4 fragColor;
 void main() {
     float a = texture(uFont, vUV).r;
     fragColor = vec4(uColor.rgb, uColor.a * a);
 }
 )";
 
-GLuint compile_shader(GLenum type, const char* src);
-GLuint link_program(GLuint vert, GLuint frag);
+static const char* panel_vert_src = R"(
+#version 430 core
+layout(location=0) in vec2 aPos;
+layout(std140, binding=63) uniform Params { vec2 uOffset; vec2 uSize; vec2 uScreen; vec4 uColor; };
+void main() {
+    vec2 p = uOffset + aPos * uSize;
+    vec2 ndc = (p / uScreen) * 2.0 - 1.0;
+    ndc.y = -ndc.y;
+    gl_Position = vec4(ndc, 0.0, 1.0);
+}
+)";
 
-TextOverlay::TextOverlay()
-    : program(0), vao(0), vbo(0), font_texture(0), initialized(false)
-{}
+static const char* panel_frag_src = R"(
+#version 430 core
+layout(std140, binding=63) uniform Params { vec2 uOffset; vec2 uSize; vec2 uScreen; vec4 uColor; };
+out vec4 fragColor;
+void main() {
+    fragColor = uColor;
+}
+)";
+
+// std140-laid-out UBO mirrors (vec4 is 16-aligned).
+struct TextParamsGPU  { float screen[2]; float _pad0[2]; float color[4]; };           // 32 B
+struct PanelParamsGPU { float offset[2]; float size[2]; float screen[2]; float _pad0[2]; float color[4]; }; // 48 B
+
+static const uint32_t kTextUboBinding = 63;
+
+TextOverlay::TextOverlay() {}
 
 TextOverlay::~TextOverlay() {
-    if (vao) glDeleteVertexArrays(1, &vao);
-    if (vbo) glDeleteBuffers(1, &vbo);
-    if (font_texture) glDeleteTextures(1, &font_texture);
-    if (program) glDeleteProgram(program);
+    gpu::release_render_pipeline(text_pipeline);
+    gpu::release_buffer(text_ubo);
+    gpu::release_buffer(text_vbuf);
+    gpu::release_texture(font_texture);
+    gpu::release_render_pipeline(panel_pipeline);
+    gpu::release_buffer(panel_ubo);
+    gpu::release_buffer(panel_vbuf);
 }
 
-void TextOverlay::init() {
+void TextOverlay::init(gpu::Device& dev) {
+    gpu_dev = dev;
+
     const int COLS = 16;
     const int ROWS = 6;
     const int TEX_W = COLS * 8;
@@ -182,21 +190,49 @@ void TextOverlay::init() {
             }
         }
     }
+    font_texture = gpu::create_sampled_texture(gpu_dev, TEX_W, TEX_H, pixels);
 
-    glGenTextures(1, &font_texture);
-    glBindTexture(GL_TEXTURE_2D, font_texture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, TEX_W, TEX_H, 0,
-                 GL_RED, GL_UNSIGNED_BYTE, pixels);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    // Text pipeline — textured glyph quads, alpha-blended, no depth interaction.
+    {
+        gpu::VertexAttr attrs[] = {
+            { 0, gpu::VertexFormat::F32x2, 0, 0 },                 // aPos
+            { 1, gpu::VertexFormat::F32x2, 0, 2 * sizeof(float) }, // aUV
+        };
+        gpu::VertexSlot slots[] = {{ 4 * sizeof(float) }};
+        gpu::BindEntry binds[] = {{ kTextUboBinding, gpu::Bind::Uniform, sizeof(TextParamsGPU) }};
+        gpu::RenderPipelineDesc d;
+        d.shaders.vert_glsl = text_vert_src;
+        d.shaders.frag_glsl = text_frag_src;
+        d.attrs = attrs; d.attr_count = 2;
+        d.slots = slots; d.slot_count = 1;
+        d.binds = binds; d.bind_count = 1;
+        d.topology = gpu::Topology::Triangles;
+        d.depth_test = false; d.depth_write = false; d.blend = true;
+        d.sampled_texture = true;
+        text_pipeline = gpu::create_render_pipeline(gpu_dev, d);
+        if (!text_pipeline.handle) std::fprintf(stderr, "[text] text pipeline failed\n");
+        text_ubo = gpu::create_buffer(gpu_dev, nullptr, sizeof(TextParamsGPU), gpu::Usage::Uniform);
+    }
 
-    program = link_program(
-        compile_shader(GL_VERTEX_SHADER, text_vert_src),
-        compile_shader(GL_FRAGMENT_SHADER, text_frag_src)
-    );
-
-    glGenVertexArrays(1, &vao);
-    glGenBuffers(1, &vbo);
+    // Panel pipeline — solid translucent quad (unit quad scaled in the shader).
+    {
+        gpu::VertexAttr attrs[] = {{ 0, gpu::VertexFormat::F32x2, 0, 0 }};
+        gpu::VertexSlot slots[] = {{ 2 * sizeof(float) }};
+        gpu::BindEntry binds[] = {{ kTextUboBinding, gpu::Bind::Uniform, sizeof(PanelParamsGPU) }};
+        gpu::RenderPipelineDesc d;
+        d.shaders.vert_glsl = panel_vert_src;
+        d.shaders.frag_glsl = panel_frag_src;
+        d.attrs = attrs; d.attr_count = 1;
+        d.slots = slots; d.slot_count = 1;
+        d.binds = binds; d.bind_count = 1;
+        d.topology = gpu::Topology::TriangleStrip;
+        d.depth_test = false; d.depth_write = false; d.blend = true;
+        panel_pipeline = gpu::create_render_pipeline(gpu_dev, d);
+        if (!panel_pipeline.handle) std::fprintf(stderr, "[text] panel pipeline failed\n");
+        panel_ubo = gpu::create_buffer(gpu_dev, nullptr, sizeof(PanelParamsGPU), gpu::Usage::Uniform);
+        float quad[] = { 0,0, 1,0, 0,1, 1,1 };
+        panel_vbuf = gpu::create_buffer(gpu_dev, quad, sizeof(quad), gpu::Usage::Vertex);
+    }
 
     initialized = true;
 }
@@ -241,68 +277,53 @@ void TextOverlay::draw_text(const char* text, float x, float y, float scale,
         cx += glyph_w;
     }
 
-    glDisable(GL_DEPTH_TEST);
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    // Stream the glyph quads into the vertex buffer (grow only when it must).
+    uint64_t bytes = (uint64_t)vi * sizeof(float);
+    if (text_vbuf.size < bytes) {
+        gpu::release_buffer(text_vbuf);
+        text_vbuf = gpu::create_buffer(gpu_dev, nullptr, bytes, gpu::Usage::Vertex);
+    }
+    gpu::write_buffer(gpu_dev, text_vbuf, 0, verts.data(), bytes);
 
-    glUseProgram(program);
-    glUniform2f(glGetUniformLocation(program, "uScreen"),
-                (float)screen_w, (float)screen_h);
-    glUniform4f(glGetUniformLocation(program, "uColor"), r, g, b, a);
+    TextParamsGPU p{};
+    p.screen[0] = (float)screen_w; p.screen[1] = (float)screen_h;
+    p.color[0] = r; p.color[1] = g; p.color[2] = b; p.color[3] = a;
+    gpu::write_buffer(gpu_dev, text_ubo, 0, &p, sizeof p);
 
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, font_texture);
-    glUniform1i(glGetUniformLocation(program, "uFont"), 0);
-
-    glBindVertexArray(vao);
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER, vi * sizeof(float), verts.data(), GL_STREAM_DRAW);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4*sizeof(float), nullptr);
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4*sizeof(float),
-                          (void*)(2*sizeof(float)));
-
-    glDrawArrays(GL_TRIANGLES, 0, len * 6);
-    glBindVertexArray(0);
-    glDisable(GL_BLEND);
+    gpu::RenderTarget target;          // default framebuffer, no clear (HUD over scene)
+    target.width = screen_w; target.height = screen_h;
+    gpu::RenderPass rp = gpu::begin_render_pass(gpu_dev, target);
+    gpu::set_pipeline(rp, text_pipeline);
+    gpu::BindBufferEntry be[] = {{ kTextUboBinding, &text_ubo, sizeof(TextParamsGPU) }};
+    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, text_pipeline, be, 1, &font_texture);
+    gpu::set_bind_group(rp, text_pipeline, grp);
+    gpu::set_vertex_buffer(rp, 0, text_vbuf);
+    gpu::draw(rp, len * 6);
+    gpu::end_render_pass(rp);
+    gpu::release_bind_group(grp);
 }
 
 void TextOverlay::draw_panel(float x, float y, float w, float h,
                              int screen_w, int screen_h,
                              float r, float g, float b, float a) {
-    static GLuint panel_prog = 0;
-    static GLuint panel_vao = 0, panel_vbo = 0;
+    if (!initialized) return;
 
-    if (!panel_prog) {
-        panel_prog = link_program(
-            compile_shader(GL_VERTEX_SHADER, panel_vert_src),
-            compile_shader(GL_FRAGMENT_SHADER, panel_frag_src)
-        );
-        float quad[] = {0,0, 1,0, 0,1, 1,1};
-        glGenVertexArrays(1, &panel_vao);
-        glGenBuffers(1, &panel_vbo);
-        glBindVertexArray(panel_vao);
-        glBindBuffer(GL_ARRAY_BUFFER, panel_vbo);
-        glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_STATIC_DRAW);
-        glEnableVertexAttribArray(0);
-        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
-        glBindVertexArray(0);
-    }
+    PanelParamsGPU p{};
+    p.offset[0] = x; p.offset[1] = y;
+    p.size[0]   = w; p.size[1]   = h;
+    p.screen[0] = (float)screen_w; p.screen[1] = (float)screen_h;
+    p.color[0] = r; p.color[1] = g; p.color[2] = b; p.color[3] = a;
+    gpu::write_buffer(gpu_dev, panel_ubo, 0, &p, sizeof p);
 
-    glDisable(GL_DEPTH_TEST);
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
-    glUseProgram(panel_prog);
-    glUniform2f(glGetUniformLocation(panel_prog, "uOffset"), x, y);
-    glUniform2f(glGetUniformLocation(panel_prog, "uSize"), w, h);
-    glUniform2f(glGetUniformLocation(panel_prog, "uScreen"),
-                (float)screen_w, (float)screen_h);
-    glUniform4f(glGetUniformLocation(panel_prog, "uColor"), r, g, b, a);
-
-    glBindVertexArray(panel_vao);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    glBindVertexArray(0);
-    glDisable(GL_BLEND);
+    gpu::RenderTarget target;          // default framebuffer, no clear
+    target.width = screen_w; target.height = screen_h;
+    gpu::RenderPass rp = gpu::begin_render_pass(gpu_dev, target);
+    gpu::set_pipeline(rp, panel_pipeline);
+    gpu::BindBufferEntry be[] = {{ kTextUboBinding, &panel_ubo, sizeof(PanelParamsGPU) }};
+    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, panel_pipeline, be, 1);
+    gpu::set_bind_group(rp, panel_pipeline, grp);
+    gpu::set_vertex_buffer(rp, 0, panel_vbuf);
+    gpu::draw(rp, 4);
+    gpu::end_render_pass(rp);
+    gpu::release_bind_group(grp);
 }

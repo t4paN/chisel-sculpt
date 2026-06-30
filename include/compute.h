@@ -461,7 +461,6 @@ struct ComputeState {
     // Compile and dispatch the smooth brush compute shaders.
     bool init_smooth();
     void dispatch_smooth(const SmoothAccumParams& params,
-                         GLuint triid_tex, GLuint bary_tex,
                          const gpu::Buffer& pos_vbo, const gpu::Buffer& index_ebo);
 
     // Ensure the smooth compact dirty list SSBO is large enough for max_verts IDs.

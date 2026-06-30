@@ -2,6 +2,40 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-06-30 — WebGPU port Stage 3 (section B): renderer + TextOverlay off raw GL, sampled-texture seam — ⚠️ WIP, MESH DOES NOT RENDER
+
+> **KNOWN BROKEN (committed as WIP for a fresh-context resume).** The GL build
+> compiles clean and launches with zero pipeline failures / zero GL errors, **but
+> the active mesh no longer renders correctly**: the sphere flashes garbled
+> triangles while the camera orbits, shows nothing when idle, and looks clipped;
+> the brush cursor no longer takes the surface's tilt on hover (the screen-buffer
+> MRT that feeds back-projection + `on_model` is suspect). The matcap draw path
+> (`draw_mesh`/`draw_background`/`draw_cursor`) is byte-for-byte unchanged from the
+> last good commit (`7555a18`) and there are no GL errors, so the regression is
+> almost certainly in the **screen-buffer / flat-soup expand path** or
+> buffer-ownership corrupting shared GPU data (`vbo_pos`/`vbo_norm`) — not the draw
+> itself. See `webgpu-stage3b-render-bug-handoff.md` in the working root.
+
+- **B1 — renderer fully off raw-GL buffers.** EntityGpu display buffers, the
+  flat-soup `screen_vbo_*`, and `debug_edge_vbo` converted from raw `GLuint` to
+  seam-owned `gpu::Buffer`; the `buf_view` shim and the renderer-level `vao`
+  removed (the draw-time VAO already lives on each render pipeline). `pick_draw`
+  takes `const gpu::Buffer&`. The dead `triid_tex`/`bary_tex` params of
+  `dispatch_smooth` + the `screen_triid_tex()`/`screen_bary_tex()` getters removed
+  (no compute kernel samples a texture — that feared "second texture gap" was
+  vestigial). GL-only render-state niceties (`glLineWidth`/`glDepthFunc`/
+  `glPolygonOffset`) wrapped in `#ifdef CHISEL_BACKEND_GL`.
+- **B2 — sampled-texture seam (the one real texture extension).** New `gpu::Texture`
+  (R8, nearest) + `create_sampled_texture`/`release_texture` in **both** backends,
+  plus a `RenderPipelineDesc::sampled_texture` path (texture+sampler at bindings
+  0/1, Params UBO stays at 63; GL binds to unit 0, WebGPU adds the BGL/bind-group
+  entries). `TextOverlay` ported off its ~49 raw-GL calls onto the seam (font atlas
+  + glyph quads + panel, std140 Params UBOs, `#version 430`); `compile_shader`/
+  `link_program` deleted. The WebGPU texture code compile-checks via the
+  `chisel-wgpu-window` probe.
+- WGSL for the text/panel shaders is **deferred to Stage C** alongside the rest of
+  the render-WGSL promotion (every render pipeline is GLSL-only today). GLSL-only.
+
 ## 2026-06-30 — WebGPU port Stage 3 (section A): internal data-movement sweep onto seam primitives
 
 - **All raw-GL readbacks/clears/copies on seam-owned buffers routed through the new

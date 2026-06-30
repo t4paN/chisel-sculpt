@@ -238,7 +238,7 @@ int main(int argc, char* argv[]) {
     // alias here would go stale on the first topology change.
 
     TextOverlay text;
-    text.init();
+    text.init(renderer.gpu_dev);
 
     Camera camera;
 

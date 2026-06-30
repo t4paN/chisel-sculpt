@@ -224,7 +224,7 @@ void Scene::sync() {
     bind_active_(active_id_);
     for (auto& up : entities_) {
         if (!up || !up->alive || up->id == active_id_) continue;
-        if (up->gpu.dirty || !up->gpu.vao)
+        if (up->gpu.dirty || !up->gpu.vbo_pos.handle)
             renderer_.upload_display(up->gpu, up->mesh);
     }
 }
@@ -349,7 +349,7 @@ void Scene::render_pick(const Camera& cam, int w, int h) {
     for (auto& up : entities_) {
         if (!up || !up->alive) continue;
         if (up->id == active_id_)
-            renderer_.pick_draw(up->id, renderer_.vbo_pos.handle, renderer_.ebo.handle,
+            renderer_.pick_draw(up->id, renderer_.vbo_pos, renderer_.ebo,
                                 (uint32_t)up->mesh.indices.size());
         else
             renderer_.pick_draw(up->id, up->gpu.vbo_pos, up->gpu.ebo, up->gpu.index_count);

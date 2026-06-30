@@ -271,17 +271,18 @@ void release_render_pipeline(RenderPipeline& p) {
 }
 
 BindGroup create_bind_group(Device&, RenderPipeline& pipe,
-                            const BindBufferEntry* entries, uint32_t n) {
+                            const BindBufferEntry* entries, uint32_t n, const Texture* tex) {
     BindGroup g;
     g.count = (n < kMaxBindings) ? n : kMaxBindings;
     for (uint32_t i = 0; i < g.count; ++i) {
         g.binding[i] = entries[i].binding;
         g.buffer[i]  = entries[i].buffer->handle;
-        GLenum tgt = GL_UNIFORM_BUFFER;  // render groups are UBO-only
+        GLenum tgt = GL_UNIFORM_BUFFER;  // render UBOs (storage only on the compute path)
         for (uint32_t k = 0; k < pipe.binding_count; ++k)
             if (pipe.binding_id[k] == entries[i].binding) { tgt = gl_target(pipe.binding_type[k]); break; }
         g.target[i] = tgt;
     }
+    g.tex_handle = tex ? tex->handle : 0;
     return g;
 }
 
@@ -312,6 +313,10 @@ void set_pipeline(RenderPass& rp, RenderPipeline& pipe) {
 void set_bind_group(RenderPass&, RenderPipeline&, BindGroup& g) {
     for (uint32_t i = 0; i < g.count; ++i)
         glBindBufferBase(g.target[i], g.binding[i], g.buffer[i]);
+    if (g.tex_handle) {                       // sampled_texture pipeline (font atlas)
+        glActiveTexture(GL_TEXTURE0 + kTextureBinding);
+        glBindTexture(GL_TEXTURE_2D, g.tex_handle);
+    }
 }
 
 void set_vertex_buffer(RenderPass& rp, uint32_t slot, const Buffer& b) {
@@ -354,6 +359,26 @@ void end_render_pass(RenderPass& rp) {
     // Default-target passes leave their FBO bound for the frame; an offscreen pass
     // rebinds the default framebuffer so the next default pass / readback is correct.
     if (rp.offscreen) glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+// ---- Sampled texture (the font atlas) ----------------------------------------
+
+Texture create_sampled_texture(Device&, int w, int h, const void* data) {
+    Texture t; t.width = w; t.height = h;
+    glGenTextures(1, &t.handle);
+    glBindTexture(GL_TEXTURE_2D, t.handle);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);   // R8 rows are unaligned
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, w, h, 0, GL_RED, GL_UNSIGNED_BYTE, data);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    return t;
+}
+
+void release_texture(Texture& t) {
+    if (t.handle) { glDeleteTextures(1, &t.handle); t.handle = 0; }
 }
 
 // ---- Offscreen MRT render target + readback ----------------------------------

@@ -258,7 +258,6 @@ void ComputeState::dispatch_smooth_mirror_apply(const gpu::Buffer& pos_vbo, uint
 }
 
 void ComputeState::dispatch_smooth(const SmoothAccumParams& p,
-                                    GLuint /*triid_tex*/, GLuint /*bary_tex*/,
                                     const gpu::Buffer& pos_vbo, const gpu::Buffer& index_ebo) {
     if (!has_smooth() || !mask_ssbo.handle) return;
     const uint32_t vc = p.vertex_count;

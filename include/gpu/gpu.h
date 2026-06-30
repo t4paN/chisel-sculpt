@@ -126,6 +126,7 @@ struct BindGroup {
     unsigned int target[kMaxBindings] = {};  // GL_SHADER_STORAGE_BUFFER / GL_UNIFORM_BUFFER
     uint32_t     binding[kMaxBindings] = {};
     unsigned int buffer[kMaxBindings]  = {};
+    unsigned int tex_handle = 0;             // sampled texture bound at unit 0 (0 = none)
 #endif
 };
 BindGroup create_bind_group(Device&, ComputePipeline&,
@@ -200,13 +201,17 @@ void barrier(Device&);
 // app isn't compiled under CHISEL_BACKEND_WEBGPU yet, so only the GL side is
 // implemented this stage — nothing references these under webgpu).
 //
-// KEY SIMPLIFIER: none of Chisel's render shaders SAMPLE a texture — matcap, the
+// KEY SIMPLIFIER: almost no Chisel render shader SAMPLES a texture — matcap, the
 // background gradient and the cursor are procedural; the picking MRT textures are
-// written then read back to CPU, never sampled. So render bind groups stay
+// written then read back to CPU, never sampled. So those render bind groups stay
 // UBO-only and reuse the compute BindGroup / create_bind_group verbatim. Loose GL
 // uniforms become a std140 UBO (the same move the compute kernels made), so both
-// backends share one upload struct. (Sampled textures would need a seam extension;
-// they don't exist in this renderer, so we don't build one.)
+// backends share one upload struct.
+//
+// THE ONE EXCEPTION: TextOverlay's bitmap-font HUD samples a single R8 font atlas.
+// That is the whole reason for the small sampled-texture extension below (gpu::Texture
+// + RenderPipelineDesc::sampled_texture + the optional texture arg on the render
+// create_bind_group). It is deliberately sized to exactly that one case.
 
 static const uint32_t kMaxVertexAttrs = 8;
 
@@ -233,6 +238,32 @@ struct RenderShaderSources {
 
 enum class TexFormat : uint32_t;  // defined with the offscreen-target section below
 
+// ---- Sampled texture (a fragment-shader input) -------------------------------
+// The ONLY texture Chisel samples is the bitmap-font atlas (a single-channel R8
+// image, nearest-filtered). Created + uploaded once. A render pipeline that
+// samples it sets RenderPipelineDesc::sampled_texture; the texture binds at
+// kTextureBinding and its sampler at kSamplerBinding in the pipeline's bind group,
+// while the Params UBO keeps its usual binding (63). WGSL declares them at
+// @group(0) @binding(kTextureBinding/kSamplerBinding); GLSL uses a matching
+// `layout(binding=kTextureBinding) uniform sampler2D` (its own binding namespace).
+static const uint32_t kTextureBinding = 0;
+static const uint32_t kSamplerBinding = 1;
+
+struct Texture {
+    int width = 0, height = 0;
+#if defined(CHISEL_BACKEND_WEBGPU)
+    WGPUTexture     handle  = nullptr;
+    WGPUTextureView view    = nullptr;
+    WGPUSampler     sampler = nullptr;
+#elif defined(CHISEL_BACKEND_GL)
+    unsigned int handle = 0;   // GL texture id
+#endif
+};
+// Create an R8 sampled texture of w×h and upload `data` (w*h bytes, one per texel),
+// nearest min/mag filtering. release_texture frees the backend objects.
+Texture create_sampled_texture(Device&, int w, int h, const void* data);
+void    release_texture(Texture&);
+
 struct RenderPipelineDesc {
     RenderShaderSources shaders;
     const VertexAttr* attrs = nullptr; uint32_t attr_count = 0;
@@ -242,6 +273,7 @@ struct RenderPipelineDesc {
     bool     depth_test  = false;
     bool     depth_write = false;
     bool     blend       = false;  // straight alpha: src_alpha / one_minus_src_alpha
+    bool     sampled_texture = false; // fragment samples one R8 texture (the font atlas)
     // Colour-target format signature. WebGPU bakes the colour-attachment count +
     // formats (and the depth format) into the pipeline, so a render pipeline is tied
     // to the render-pass layout it draws into; GL ignores this (FBO compatibility is
@@ -278,10 +310,11 @@ struct RenderPipeline {
 RenderPipeline create_render_pipeline(Device&, const RenderPipelineDesc&);
 void release_render_pipeline(RenderPipeline&);
 
-// UBO bind group for a render pipeline (same BindGroup type as compute; resolves
-// each slot's GL target from the render pipeline's layout). Render groups are
-// UBO-only — see the texture note above.
-BindGroup create_bind_group(Device&, RenderPipeline&, const BindBufferEntry* entries, uint32_t entry_count);
+// Bind group for a render pipeline (same BindGroup type as compute; resolves each
+// slot's GL target from the render pipeline's layout). `tex` is the sampled texture
+// for a sampled_texture pipeline (the font atlas) — null for the UBO-only pipelines.
+BindGroup create_bind_group(Device&, RenderPipeline&, const BindBufferEntry* entries,
+                            uint32_t entry_count, const Texture* tex = nullptr);
 
 // A render target: the default framebuffer (swapchain) for now; offscreen MRT
 // (the picking FBO) grows this struct in the picking slice. `clear` clears colour

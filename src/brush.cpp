@@ -414,9 +414,7 @@ void BrushStroke::apply_smooth(DabContext& ctx, float dab_x, float dab_y,
     sp.region_h = rgn.h;
     sp.screen_h = ctx.win_h;
 
-    ctx.compute.dispatch_smooth(sp,
-        ctx.renderer.screen_triid_tex(), ctx.renderer.screen_bary_tex(),
-        ctx.renderer.vbo_pos, ctx.renderer.ebo);
+    ctx.compute.dispatch_smooth(sp, ctx.renderer.vbo_pos, ctx.renderer.ebo);
 
     ctx.compute.readback_smooth_dirty(dirty_verts);
 

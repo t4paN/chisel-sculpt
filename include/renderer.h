@@ -6,18 +6,14 @@
 #include "gpu/gpu.h"
 
 struct Renderer {
-    // gpu:: seam device (== gpu::gl_device() on GL). Render programs migrate off
-    // raw GL onto the seam one at a time (mirrors the compute Seam 2b port); the
-    // still-raw programs below keep their GLuint members until ported.
+    // gpu:: seam device (== gpu::gl_device() on GL). All render programs and their
+    // buffers are now on the seam (mirrors the compute Seam 2b port).
     gpu::Device gpu_dev;
 
-    // Mesh GPU buffers
-    GLuint vao;
     // Shared render+compute mesh buffers — owned seam buffers (buffer-ownership
     // migration Step 1). pos/norm carry Vertex|Storage, ebo Index|Storage: the
     // render path binds them as vertex/index buffers, the brush kernels bind them
-    // as storage. Passed by `.handle` into the still-GLuint dispatch_* signatures
-    // until those flip to gpu::Buffer in later steps.
+    // as storage. (The draw-time VAO lives on the render pipeline — no renderer VAO.)
     gpu::Buffer vbo_pos;
     gpu::Buffer vbo_norm;
     // Owned seam buffers (Step 3a). Both carry Vertex|Storage: render binds them as
@@ -27,8 +23,6 @@ struct Renderer {
     // set-once GL alias relied on stable-handle realloc, which WebGPU doesn't have).
     gpu::Buffer vbo_mask;      // per-vertex sculpt mask values (0..1)
     gpu::Buffer vbo_color;     // per-vertex albedo, packed RGBA8 (paint)
-    GLuint vbo_tri_id;    // per-vertex triangle ID (flat, 3 verts per tri)
-    GLuint vbo_bary;     // per-vertex barycentric coord
     gpu::Buffer ebo;
 
     // Matcap shader — on the gpu:: seam. Loose uniforms (uView/uProj/facing/
@@ -70,7 +64,7 @@ struct Renderer {
     // is built lazily and bound through the seam.
     gpu::RenderPipeline debug_edge_pipeline;
     gpu::Buffer         debug_edge_ubo;
-    GLuint debug_edge_vbo;         // edge index buffer (GL-owned, built lazily)
+    gpu::Buffer debug_edge_vbo;    // edge index buffer (seam-owned, built lazily)
     uint32_t debug_edge_count;
 
     // Screen-buffer MRT for the brush pipeline — on the gpu:: seam. A 4-attachment
@@ -82,23 +76,17 @@ struct Renderer {
     gpu::Buffer          screen_ubo;
 
     // Flat triangle-soup vertex buffers for the screen pass (no index sharing).
-    // pos/norm are filled by the GPU-side expand compute; triid/bary are static per
-    // topology. GL-owned (also bound as SSBOs by the expand kernel), wrapped in
-    // gpu::Buffer views at draw/dispatch — same staged pattern as the brush SSBOs.
-    GLuint screen_vbo_pos;
-    GLuint screen_vbo_norm;
-    GLuint screen_vbo_triid;
-    GLuint screen_vbo_bary;
+    // pos/norm are filled by the GPU-side expand compute (so they carry
+    // Vertex|Storage); triid/bary are static per topology (Vertex). Seam-owned.
+    gpu::Buffer screen_vbo_pos;
+    gpu::Buffer screen_vbo_norm;
+    gpu::Buffer screen_vbo_triid;
+    gpu::Buffer screen_vbo_bary;
     uint32_t screen_tri_count;
 
     // GPU-side indexed→flat expansion — on the gpu:: compute seam.
     gpu::ComputePipeline screen_expand_pipeline;
     gpu::Buffer          screen_expand_ubo;
-
-    // Screen MRT colour-texture handles (triid = attachment 2, bary = attachment 3)
-    // — still passed to the smooth dispatch's (currently unused) texture params.
-    GLuint screen_triid_tex() const { return screen_target.color_tex[2]; }
-    GLuint screen_bary_tex()  const { return screen_target.color_tex[3]; }
 
     bool initialized;
 
@@ -160,7 +148,7 @@ struct Renderer {
     // a per-draw entity id (attachment 2). Read back with read_id_region (id)
     // and read_depth_region (depth → unproject for insert).
     void pick_begin(const Camera& cam, int w, int h);
-    void pick_draw(uint32_t entity_id, GLuint pos_vbo, GLuint ebo, uint32_t index_count);
+    void pick_draw(uint32_t entity_id, const gpu::Buffer& pos_vbo, const gpu::Buffer& ebo, uint32_t index_count);
     void pick_end();
     void read_id_region(int x, int y, int w, int h, uint32_t* out);
     void draw_cursor(const Camera& cam, float cx, float cy, float radius,
@@ -171,6 +159,3 @@ struct Renderer {
     void draw_debug_mesh(const Camera& cam, const Mesh& mesh, int w, int h);
     void invalidate_debug_mesh() { debug_edge_count = 0; }
 };
-
-GLuint compile_shader(GLenum type, const char* src);
-GLuint link_program(GLuint vert, GLuint frag);
