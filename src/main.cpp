@@ -1,9 +1,19 @@
 #ifdef CHISEL_BACKEND_WEBGPU
+#if defined(__EMSCRIPTEN__)
+// Web target: the browser IS the WebGPU implementation (emdawnwebgpu). No X11
+// native handles, no wgpu-native extension header — the surface comes from a
+// canvas CSS selector, and the event loop is the browser's.
+#include <GLFW/glfw3.h>
+#include <webgpu/webgpu.h>
+#include <emscripten.h>
+#include <emscripten/html5.h>
+#else
 #define GLFW_EXPOSE_NATIVE_X11
 #include <GLFW/glfw3.h>
 #include <GLFW/glfw3native.h>
 #include <webgpu/webgpu.h>
 #include <webgpu/wgpu.h>   // wgpu-native extensions (wgpuDevicePoll / ProcessEvents)
+#endif
 #include "gpu/gpu.h"       // device_from_webgpu + surface-format/depth setters
 #else
 #include <glad/glad.h>
@@ -209,9 +219,12 @@ int main(int argc, char* argv[]) {
 #endif
 
     // WM_CLASS must match StartupWMClass=Chisel in chisel.desktop so the running
-    // window groups under the launcher entry in the taskbar/dock (X11).
+    // window groups under the launcher entry in the taskbar/dock (X11). No window
+    // manager in a browser — these hints don't exist in Emscripten's GLFW.
+#if !defined(__EMSCRIPTEN__)
     glfwWindowHintString(GLFW_X11_CLASS_NAME, "Chisel");
     glfwWindowHintString(GLFW_X11_INSTANCE_NAME, "Chisel");
+#endif
 
     // Get primary monitor for fullscreen
     GLFWmonitor* monitor = glfwGetPrimaryMonitor();
@@ -235,12 +248,21 @@ int main(int argc, char* argv[]) {
     glfwGetFramebufferSize(window, &fbw, &fbh);
     WGPUInstance instance = wgpuCreateInstance(nullptr);
     if (!instance) { std::fprintf(stderr, "wgpuCreateInstance failed\n"); return 1; }
+    WGPUSurfaceDescriptor sd = {};
+#if defined(__EMSCRIPTEN__)
+    // Browser: bind the surface to the page canvas by CSS selector. Emscripten's
+    // GLFW (-sUSE_GLFW=3) drives that same "#canvas" element for input/resize.
+    WGPUEmscriptenSurfaceSourceCanvasHTMLSelector canvasSrc = {};
+    canvasSrc.chain.sType = WGPUSType_EmscriptenSurfaceSourceCanvasHTMLSelector;
+    canvasSrc.selector = WGPUStringView{ "#canvas", 7 };
+    sd.nextInChain = &canvasSrc.chain;
+#else
     WGPUSurfaceSourceXlibWindow x11 = {};
     x11.chain.sType = WGPUSType_SurfaceSourceXlibWindow;
     x11.display = glfwGetX11Display();
     x11.window  = (uint64_t)glfwGetX11Window(window);
-    WGPUSurfaceDescriptor sd = {};
     sd.nextInChain = &x11.chain;
+#endif
     g_surface = wgpuInstanceCreateSurface(instance, &sd);
     if (!g_surface) { std::fprintf(stderr, "createSurface failed\n"); return 1; }
 
@@ -260,14 +282,21 @@ int main(int argc, char* argv[]) {
     dcb.mode = WGPUCallbackMode_AllowProcessEvents;
     dcb.callback = onDevice;
     dcb.userdata1 = &dr;
-    // Request the adapter's full supported limits verbatim. The default device
-    // limits cap max_storage_buffers_per_shader_stage at 8, but our compute kernels
-    // bind up to 9 SSBOs — without this the first such pipeline aborts the device.
-    // Copying adapter limits is always valid (required == supported for every field,
-    // alignment limits included). NOTE web target: baseline WebGPU only guarantees 8
-    // storage buffers/stage, so the 9-SSBO kernels need consolidation for Emscripten.
-    WGPULimits limits = WGPU_LIMITS_INIT;
-    wgpuAdapterGetLimits(ar.adapter, &limits);
+    // Request an explicit, portable limit set — NOT the adapter's maxima verbatim.
+    // Every compute kernel now fits the WebGPU baseline: storage buffers ≤8
+    // (baseline 8, after remesh_smooth was consolidated), workgroups ≤256 invocations
+    // (baseline 256), and no kernel uses workgroup shared memory. So we leave every
+    // field at its baseline default (WGPU_LIMITS_INIT = all "undefined" → default) and
+    // bump ONLY the two buffer-size fields — large sculpts can exceed the 128MB
+    // baseline storage-buffer binding — up to whatever the adapter actually supports.
+    // Result: the device creates on any conformant WebGPU implementation (baseline
+    // browsers included), instead of demanding this GPU's high limits. If the web
+    // build later trips a specific baseline field, bump that one field here.
+    WGPULimits supported = WGPU_LIMITS_INIT;
+    wgpuAdapterGetLimits(ar.adapter, &supported);
+    WGPULimits limits = WGPU_LIMITS_INIT;                     // all baseline defaults
+    limits.maxBufferSize               = supported.maxBufferSize;
+    limits.maxStorageBufferBindingSize = supported.maxStorageBufferBindingSize;
     WGPUDeviceDescriptor ddesc = WGPU_DEVICE_DESCRIPTOR_INIT;
     ddesc.requiredLimits = &limits;
     wgpuAdapterRequestDevice(ar.adapter, &ddesc, dcb);

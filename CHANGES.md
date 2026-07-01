@@ -2,6 +2,36 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-02 — WebGPU web target: platform-gate main.cpp for the browser (canvas surface)
+
+- **`main.cpp`'s WebGPU init now compiles for both native (X11) and the browser.**
+  Split the surface/instance setup: the Emscripten path binds the surface to the page
+  canvas by CSS selector (`WGPUEmscriptenSurfaceSourceCanvasHTMLSelector`, `"#canvas"`)
+  instead of the native `WGPUSurfaceSourceXlibWindow`; drops the wgpu-native-only
+  `<webgpu/wgpu.h>` and the `GLFW_EXPOSE_NATIVE_X11` headers on web; and skips the X11
+  `WM_CLASS` window hints (no window manager in a browser). Confirmed the exact
+  emdawnwebgpu canvas-surface struct against the installed port header (the previous
+  "TBD until emsdk" unknown). Native `build-wgpu` rebuilt + linked clean — behaviour
+  unchanged. First of the platform-abstraction steps toward the full app building under
+  emdawnwebgpu; the CMake full-app Emscripten branch + async-poll gating are next.
+
+## 2026-07-02 — WebGPU: request portable baseline limits, not the adapter's maxima
+
+- **Device creation now requests an explicit baseline-fits limit set instead of
+  copying the adapter's full supported limits verbatim.** Audited the kernels:
+  every compute shader fits the WebGPU baseline — storage buffers ≤8 (baseline 8,
+  since `remesh_smooth` was consolidated), workgroups ≤256 invocations (baseline
+  256), and zero `var<workgroup>` shared memory. The only thing large sculpts need
+  above baseline is buffer size, so `main.cpp` now leaves every limit at its
+  baseline default (`WGPU_LIMITS_INIT`) and bumps **only** `maxBufferSize` +
+  `maxStorageBufferBindingSize` to the adapter-supported value (128MB baseline
+  binding is too small for big meshes).
+- **Why:** the old verbatim copy demanded *this* GPU's high limits, which a baseline
+  WebGPU implementation (some browsers/devices expose only the spec floor regardless
+  of hardware) can't satisfy → device creation fails. The tightened request creates
+  a device on any conformant implementation. Native `build-wgpu` rebuilt + smoke-run
+  clean (device creates, zero validation errors). Prep for the Emscripten web target.
+
 ## 2026-07-02 — WebGPU web target: first hardware adapter reached inside a browser (Emscripten probe)
 
 - **The `chisel-wgpu-probe` (emdawnwebgpu / Emscripten) now reaches the real GPU
