@@ -28,7 +28,7 @@ struct FwnNode {
     t0   : vec4<f32>,   // T row 0
     t1   : vec4<f32>,   // T row 1
     t2   : vec4<f32>,   // T row 2
-    meta : vec4<i32>,   // x left, y right (<0 ⇒ leaf), z triStart, w triCount
+    meta_ : vec4<i32>,   // x left, y right (<0 ⇒ leaf), z triStart, w triCount
 };
 
 @group(0) @binding(21) var<storage, read>       p     : array<f32>;
@@ -98,14 +98,14 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>,
             let Td  = vec3<f32>(dot(nd.t0.xyz, dvec), dot(nd.t1.xyz, dvec), dot(nd.t2.xyz, dvec));
             let dTd = dot(dvec, Td);
             w = w + (w0 + trT*ir3 - 3.0*dTd*ir5) / FOUR_PI;
-        } else if (nd.meta.x < 0) {
+        } else if (nd.meta_.x < 0) {
             // Near leaf: exact solid-angle sum.
-            for (var n = 0; n < nd.meta.w; n = n + 1) {
-                w = w + tri_solid_angle(triOrder[u32(nd.meta.z + n)], q) / FOUR_PI;
+            for (var n = 0; n < nd.meta_.w; n = n + 1) {
+                w = w + tri_solid_angle(triOrder[u32(nd.meta_.z + n)], q) / FOUR_PI;
             }
         } else if (sp <= 62) {                  // recurse (guard the fixed stack)
-            stack[sp] = nd.meta.x; sp = sp + 1;
-            stack[sp] = nd.meta.y; sp = sp + 1;
+            stack[sp] = nd.meta_.x; sp = sp + 1;
+            stack[sp] = nd.meta_.y; sp = sp + 1;
         }
     }
     f[ci] = select(1.0, -1.0, w > 0.5) * dist;        // signed real distance (band)

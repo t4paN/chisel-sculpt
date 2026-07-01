@@ -2,6 +2,19 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-01 — fix(sdf): WGSL voxel-merge sign shader crashed on `meta` reserved word
+
+- **Voxel-merge (J) crashed the WebGPU build on every attempt** — `sdf_sign.wgsl`'s
+  `FwnNode` struct had a field named `meta`, which WGSL reserves as a keyword.
+  `wgpuDeviceCreateShaderModule` rejected the shader at pipeline creation
+  (`voxel_merge_begin`), and the resulting uncaptured-error panic aborted the
+  process (non-unwinding panic in the wgpu-native error handler). Renamed the
+  field to `meta_` (and its five call sites) in the WGSL shader only — purely a
+  buffer layout on the host side (`sdf.cpp`'s `FwnNodeGPU`, matched positionally,
+  not by name), so the GLSL sibling shader (`sdf_sign.comp`, unaffected by the
+  WGSL reserved-word list) didn't need touching.
+- **Validated in-app** (user): voxel-merge no longer crashes.
+
 ## 2026-07-01 — SELECT mode: click-to-select on any entity (was active-mesh-only)
 
 - **Clicking another (non-active) mesh in SELECT mode now selects it** — previously
