@@ -2,6 +2,21 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-02 — WebGPU web target: CMake full-app Emscripten branch
+
+- **The Emscripten `webgpu` config now builds the full `chisel` app, not just the probe.**
+  The `if(EMSCRIPTEN AND webgpu)` branch no longer `return()`s after the probe — it sets
+  up the web-flavored deps (imgui built with the DAWN/emdawnwebgpu ImGui flavor, i.e. *no*
+  `IMGUI_IMPL_WEBGPU_BACKEND_WGPU`) and falls through to the shared `chisel` target. The
+  native-only paths are guarded off web: no wgpu-native FetchContent, no
+  `find_package(glfw3/OpenGL/X11)`, no glad, no `-no-pie`, no X11 tablet libs. The web app
+  target gets `--use-port=emdawnwebgpu` (compile+link), `-sUSE_GLFW=3`, `-sASYNCIFY=1`,
+  `-sALLOW_MEMORY_GROWTH=1`, and an `.html` suffix. Configures clean and compiles the whole
+  CPU/app layer (through ~59%) before hitting the first genuine web-port gap: the async
+  readback path still `#include`s the wgpu-native-only `<webgpu/wgpu.h>` (for
+  `wgpuDevicePoll`) — that's the next step (async event-loop-yield gating). Native
+  `build-wgpu` config path unchanged / still green.
+
 ## 2026-07-02 — WebGPU web target: platform-gate main.cpp for the browser (canvas surface)
 
 - **`main.cpp`'s WebGPU init now compiles for both native (X11) and the browser.**

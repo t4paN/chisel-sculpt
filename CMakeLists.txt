@@ -42,27 +42,41 @@ add_custom_command(
 add_custom_target(chisel_shaders DEPENDS "${CHISEL_SHADERS_HEADER}")
 
 # ---------------------------------------------------------------------------
-# Emscripten web target (Stage 9 bring-up, first milestone). Cross-compiling with
-# emcmake sets EMSCRIPTEN; this must come before the wgpu-native branch below,
-# since the web build has no wgpu-native fetch, no GLFW/X11 windowing yet — the
-# browser supplies WebGPU itself via --use-port=emdawnwebgpu (NOT the deprecated
-# -sUSE_WEBGPU, see ../webgpu-port-plan.md). First goal: the simplest probe
-# (instance -> request adapter -> print info) running in an actual browser tab —
-# proves the toolchain + the async adapter/device request pattern work under
-# Emscripten before porting the windowed/mesh probes. return()s so none of the
-# native wgpu-native / GL / full-app logic below runs for this target.
+# Emscripten web target (Stage 9 bring-up). Cross-compiling with emcmake sets
+# EMSCRIPTEN; this must come before the wgpu-native branch below. The web build
+# has NO wgpu-native fetch and NO find_package(glfw3/OpenGL/X11) — the browser
+# supplies WebGPU via --use-port=emdawnwebgpu (NOT the deprecated -sUSE_WEBGPU)
+# and GLFW is emulated by -sUSE_GLFW=3. This block sets up the web-flavored deps
+# (imgui) + the shared web flags, then FALLS THROUGH (no return) to the shared
+# `chisel` target below, which is guarded backend/EMSCRIPTEN-conditional. The
+# earlier probe target (chisel-wgpu-probe) proved the toolchain + async adapter
+# pattern; the full app is the next milestone. See ../webgpu-emscripten-handoff.md.
 # ---------------------------------------------------------------------------
 if(EMSCRIPTEN AND CHISEL_GPU_BACKEND STREQUAL "webgpu")
-    add_executable(chisel-wgpu-probe src/gpu/wgpu_probe.cpp)
-    target_include_directories(chisel-wgpu-probe PRIVATE include)
-    target_compile_options(chisel-wgpu-probe PRIVATE --use-port=emdawnwebgpu)
-    target_link_options(chisel-wgpu-probe PRIVATE
-        --use-port=emdawnwebgpu
-        -sASYNCIFY=1
-        -sEXIT_RUNTIME=1)
-    set_target_properties(chisel-wgpu-probe PROPERTIES SUFFIX ".html")
-    message(STATUS "WebGPU backend (Emscripten): building chisel-wgpu-probe only (first web milestone)")
-    return()
+    # Web flags. The emdawnwebgpu port is needed at compile (headers) AND link;
+    # -sUSE_GLFW=3 is a link-only setting (warns if passed at compile), so it's
+    # applied to link_options alone below.
+    set(CHISEL_WEB_FLAGS --use-port=emdawnwebgpu)
+
+    # Dear ImGui for the web build: core + GLFW platform backend + WebGPU renderer.
+    # Same source list as native webgpu, but do NOT define
+    # IMGUI_IMPL_WEBGPU_BACKEND_WGPU — imgui_impl_wgpu.h auto-selects the DAWN /
+    # emdawnwebgpu flavor under __EMSCRIPTEN__ (the wgpu-native flavor pulls in
+    # <webgpu/wgpu.h>, which the web port doesn't ship).
+    add_library(imgui_wgpu STATIC
+        external/imgui/imgui.cpp
+        external/imgui/imgui_draw.cpp
+        external/imgui/imgui_tables.cpp
+        external/imgui/imgui_widgets.cpp
+        external/imgui/imgui_demo.cpp
+        external/imgui/imgui_impl_glfw.cpp
+        external/imgui/imgui_impl_wgpu.cpp
+        external/imgui/ImGuiFileDialog.cpp)  # used by main.cpp; web save/load stubbed later
+    target_include_directories(imgui_wgpu PUBLIC external/imgui)
+    target_compile_options(imgui_wgpu PUBLIC ${CHISEL_WEB_FLAGS})
+
+    message(STATUS "WebGPU backend (Emscripten): building full app 'chisel' for the browser")
+    # no return() — fall through to the shared chisel target below.
 endif()
 
 # ---------------------------------------------------------------------------
@@ -72,7 +86,7 @@ endif()
 # build below is skipped entirely (return). Native dev impl = wgpu-native; the web
 # build (Emscripten -sUSE_WEBGPU) is wired in a later stage. See ../webgpu-port-plan.md.
 # ---------------------------------------------------------------------------
-if(CHISEL_GPU_BACKEND STREQUAL "webgpu")
+if(NOT EMSCRIPTEN AND CHISEL_GPU_BACKEND STREQUAL "webgpu")
     include(FetchContent)
     set(WGPU_NATIVE_VERSION "v29.0.0.0" CACHE STRING "wgpu-native release tag")
     set(_wgpu_base "https://github.com/gfx-rs/wgpu-native/releases/download/${WGPU_NATIVE_VERSION}")
@@ -157,8 +171,9 @@ if(CHISEL_GPU_BACKEND STREQUAL "webgpu")
 
     message(STATUS "WebGPU backend: building full app 'chisel' + bring-up probes")
     # NOTE: no return() — the full chisel app is built below, backend-conditional.
-else()
-    # ---- GL-only deps (the WebGPU branch set up wgpu / imgui_wgpu / glfw above) ----
+elseif(NOT EMSCRIPTEN)
+    # ---- GL-only deps (the WebGPU branch set up wgpu / imgui_wgpu / glfw above;
+    #      the Emscripten branch set up its own web imgui / flags above) ----
     find_package(OpenGL REQUIRED)
     find_package(glfw3 3.3 REQUIRED)
 
@@ -185,7 +200,7 @@ else()
 endif()
 
 # Main executable
-if(NOT WIN32)
+if(NOT WIN32 AND NOT EMSCRIPTEN)
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -no-pie")
 endif()
 add_executable(chisel
@@ -238,6 +253,18 @@ else()
 endif()
 add_dependencies(chisel chisel_shaders)
 
+# Emscripten web build: emdawnwebgpu port + emulated GLFW (compile+link), ASYNCIFY
+# for the event-loop-yielding async readbacks, memory growth, and an .html shell.
+if(EMSCRIPTEN)
+    target_compile_options(chisel PRIVATE ${CHISEL_WEB_FLAGS})
+    target_link_options(chisel PRIVATE
+        ${CHISEL_WEB_FLAGS}
+        -sUSE_GLFW=3
+        -sASYNCIFY=1
+        -sALLOW_MEMORY_GROWTH=1)
+    set_target_properties(chisel PROPERTIES SUFFIX ".html")
+endif()
+
 # Version: an explicit -DCHISEL_VERSION (CI injects the tag) wins; otherwise
 # derive from git; "dev" only as a last resort for a tagless local tree.
 if(NOT CHISEL_VERSION)
@@ -255,7 +282,10 @@ endif()
 message(STATUS "Chisel version: ${CHISEL_VERSION}")
 target_compile_definitions(chisel PRIVATE CHISEL_VERSION="${CHISEL_VERSION}")
 
-if(CHISEL_GPU_BACKEND STREQUAL "webgpu")
+if(EMSCRIPTEN)
+    # WebGPU + GLFW come from the emdawnwebgpu port / -sUSE_GLFW=3 (no link targets).
+    target_link_libraries(chisel PRIVATE imgui_wgpu)
+elseif(CHISEL_GPU_BACKEND STREQUAL "webgpu")
     target_link_libraries(chisel PRIVATE wgpu glfw imgui_wgpu)
     # The prebuilt .so ships without a SONAME (see wgpu IMPORTED_NO_SONAME above);
     # RUNPATH lets the loader find it from any cwd.
@@ -266,14 +296,15 @@ endif()
 if(MSVC)
     target_compile_definitions(chisel PRIVATE _USE_MATH_DEFINES)
 endif()
-if(NOT WIN32)
+if(NOT WIN32 AND NOT EMSCRIPTEN)
     target_link_libraries(chisel PRIVATE m dl)
 endif()
 
 # Pen tablet (src/tablet.cpp): direct Xlib calls need libX11. XInput2 (libXi) is
 # dlopen'd at runtime and its headers are vendored under external/xinput2, so
 # libxi-dev is NOT a build dependency — only the ubiquitous libX11 dev headers.
-if(UNIX AND NOT APPLE)
+# No X11 on the web build (the browser supplies input via GLFW emulation).
+if(UNIX AND NOT APPLE AND NOT EMSCRIPTEN)
     find_package(X11 REQUIRED)
     target_link_libraries(chisel PRIVATE ${X11_LIBRARIES})
     target_include_directories(chisel PRIVATE external/xinput2)
