@@ -1,5 +1,6 @@
 #pragma once
 #include <glad/glad.h>
+#include <vector>
 #include "mesh.h"
 #include "camera.h"
 #include "entity_gpu.h"
@@ -35,12 +36,20 @@ struct Renderer {
 
     // Entity-id pick pass — on the gpu:: seam. Renders into the shared screen
     // offscreen target writing linear depth (attachment 0) + entity id (attachment
-    // 2). The pass spans pick_begin → N×pick_draw → pick_end, so the RenderPass +
-    // bind group are held as members across those calls.
-    gpu::RenderPipeline pick_pipeline;
-    gpu::Buffer         pick_ubo;        // view/proj + per-draw entity id
-    gpu::RenderPass     pick_pass;       // live only between pick_begin and pick_end
-    gpu::BindGroup      pick_bg;
+    // 2). The pass spans pick_begin → N×pick_draw → pick_end.
+    //
+    // Each draw uses its OWN UBO + bind group (a growable pool, indexed by pick_slot).
+    // A distinct buffer per draw is mandatory on WebGPU: writeBuffer runs on the queue
+    // timeline at submit, so N writes into ONE shared UBO all collapse to the last
+    // value — every entity would then read the final id (the old single-pick_ubo bug).
+    // The pool persists across picks (picking is user-paced, not a hot path).
+    gpu::RenderPipeline         pick_pipeline;
+    gpu::RenderPass             pick_pass;   // live only between pick_begin and pick_end
+    std::vector<gpu::Buffer>    pick_ubos;   // view/proj + entity id, one per draw slot
+    std::vector<gpu::BindGroup> pick_bgs;    // parallel to pick_ubos
+    uint32_t                    pick_slot = 0;
+    float                       pick_view[16];
+    float                       pick_proj[16];
 
     // Background shader (gradient) — on the gpu:: seam.
     gpu::RenderPipeline bg_pipeline;

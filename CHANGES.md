@@ -2,6 +2,29 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-01 — SELECT mode: click-to-select on any entity (was active-mesh-only)
+
+- **Clicking another (non-active) mesh in SELECT mode now selects it** — previously
+  the SCULPT-vs-ORBIT on-model latch (`input.on_model`) only reflected the *active*
+  entity's screen-target depth (`upload_screen_mesh` only ever uploads the active
+  mesh), so hovering any other entity always read `on_model = false` and the click
+  latched ORBIT — the scene-wide entity pick in `main.cpp` (`scene.render_pick`,
+  which does draw every entity) never got a chance to run. `input.cpp`'s
+  `mouse_button_callback` now latches `drag_mode = SCULPT` unconditionally while
+  `interaction_mode == SELECT`, deferring the ORBIT-vs-pick decision to that
+  per-frame block instead of the on-model latch. Its miss case (`clicked_mesh == 0`)
+  now falls back to `drag_mode = ORBIT` — without this, a SELECT-mode drag over empty
+  space went dead instead of orbiting (regression caught in interactive testing).
+- **Fixed the entity-id pick buffer itself** (`renderer.cpp`/`renderer.h`): pick
+  used one shared `pick_ubo` for every entity's id; WebGPU's `writeBuffer` runs on
+  the queue timeline at submit, so N writes into one buffer all collapse to the
+  last value — every pixel in the pick buffer read back as whichever entity was
+  drawn last, regardless of what was actually under the cursor. Replaced with a
+  growable pool of per-draw UBOs + bind groups (`pick_ubos`/`pick_bgs`, indexed by
+  `pick_slot`), persisted across picks since picking is user-paced, not a hot path.
+- **Validated in-app** (user): selection now flips correctly between two entities
+  by clicking either one.
+
 ## 2026-07-01 — WebGPU port Stage 5 item 2: on-model latch + first real strokes + colour
 
 

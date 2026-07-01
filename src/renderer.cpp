@@ -848,7 +848,8 @@ Renderer::~Renderer() {
     gpu::release_buffer(debug_edge_ubo);
     gpu::release_buffer(debug_edge_vbo);
     gpu::release_render_pipeline(pick_pipeline);
-    gpu::release_buffer(pick_ubo);
+    for (auto& bg : pick_bgs) gpu::release_bind_group(bg);
+    for (auto& ubo : pick_ubos) gpu::release_buffer(ubo);
     gpu::release_offscreen_target(screen_target);
     gpu::release_render_pipeline(screen_pipeline);
     gpu::release_buffer(screen_ubo);
@@ -943,7 +944,7 @@ void Renderer::init() {
         pick_pipeline = gpu::create_render_pipeline(gpu_dev, d);
         if (!pick_pipeline.handle) std::fprintf(stderr, "[renderer] pick pipeline failed\n");
         else std::printf("[renderer] pick pipeline compiled (gpu:: seam)\n");
-        pick_ubo = gpu::create_buffer(gpu_dev, nullptr, sizeof(PickParamsGPU), gpu::Usage::Uniform);
+        // Per-draw pick UBOs + bind groups are created lazily in pick_draw.
     }
 
     // Mesh buffers vbo_pos/vbo_norm/ebo (Step 1) and vbo_mask/vbo_color (Step 3a) are
@@ -1458,29 +1459,38 @@ void Renderer::pick_begin(const Camera& cam, int w, int h) {
     pick_pass = gpu::begin_offscreen_pass(gpu_dev, screen_target, d);
     gpu::set_pipeline(pick_pass, pick_pipeline);
 
-    // view/proj are constant across the pass; the per-entity id is written per draw.
-    PickParamsGPU p{};
-    cam.get_view_matrix(p.view);
-    cam.get_projection_matrix(p.proj, (float)w / (float)h);
-    gpu::write_buffer(gpu_dev, pick_ubo, 0,  p.view, sizeof p.view);
-    gpu::write_buffer(gpu_dev, pick_ubo, 64, p.proj, sizeof p.proj);
-
-    gpu::BindBufferEntry be[] = {{ 63, &pick_ubo, sizeof(PickParamsGPU) }};
-    pick_bg = gpu::create_bind_group(gpu_dev, pick_pipeline, be, 1);
-    gpu::set_bind_group(pick_pass, pick_pipeline, pick_bg);
+    // view/proj are constant across the pass; cache them so each pick_draw can write
+    // them (+ its own id) into its own per-draw UBO. Reset the pool cursor.
+    cam.get_view_matrix(pick_view);
+    cam.get_projection_matrix(pick_proj, (float)w / (float)h);
+    pick_slot = 0;
 }
 
 void Renderer::pick_draw(uint32_t entity_id, const gpu::Buffer& pos_vbo, const gpu::Buffer& ebo_, uint32_t index_count) {
     if (!pos_vbo.handle || index_count == 0) return;
-    gpu::write_buffer(gpu_dev, pick_ubo, 128, &entity_id, sizeof entity_id);
+
+    // Grow the per-draw UBO/bind-group pool on demand. Distinct buffer per draw so the
+    // per-entity id survives WebGPU's queue-timeline writeBuffer (see renderer.h note).
+    if (pick_slot >= pick_ubos.size()) {
+        pick_ubos.push_back(gpu::create_buffer(gpu_dev, nullptr, sizeof(PickParamsGPU), gpu::Usage::Uniform));
+        gpu::BindBufferEntry be[] = {{ 63, &pick_ubos.back(), sizeof(PickParamsGPU) }};
+        pick_bgs.push_back(gpu::create_bind_group(gpu_dev, pick_pipeline, be, 1));
+    }
+    gpu::Buffer& ubo = pick_ubos[pick_slot];
+    gpu::write_buffer(gpu_dev, ubo, 0,   pick_view, sizeof pick_view);
+    gpu::write_buffer(gpu_dev, ubo, 64,  pick_proj, sizeof pick_proj);
+    gpu::write_buffer(gpu_dev, ubo, 128, &entity_id, sizeof entity_id);
+
+    gpu::set_bind_group(pick_pass, pick_pipeline, pick_bgs[pick_slot]);
     gpu::set_vertex_buffer(pick_pass, 0, pos_vbo);
     gpu::set_index_buffer(pick_pass, ebo_);
     gpu::draw_indexed(pick_pass, index_count);
+    pick_slot++;
 }
 
 void Renderer::pick_end() {
     gpu::end_render_pass(pick_pass);   // rebinds the default framebuffer
-    gpu::release_bind_group(pick_bg);
+    // Pool (UBOs + bind groups) is retained for reuse across picks.
 }
 
 void Renderer::read_id_region(int x, int y, int w, int h, uint32_t* out) {

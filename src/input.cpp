@@ -227,6 +227,13 @@ static void mouse_button_callback(GLFWwindow* w, int button, int action, int mod
                 // Slider active, no drag mode
             } else if (g_input->alt_held) {
                 g_input->drag_mode = InputState::DragMode::ORBIT;
+            } else if (g_input->interaction_mode == InputState::InteractionMode::SELECT) {
+                // on_model only reflects the active entity's screen buffer (see
+                // read_depth_at), so it can't tell us whether the cursor is over some
+                // OTHER mesh. SELECT mode does its own scene-wide pick (main.cpp,
+                // scene.render_pick over every entity) once drag_mode is SCULPT, so
+                // latch unconditionally here and let that pick sort out hit vs. miss.
+                g_input->drag_mode = InputState::DragMode::SCULPT;
             } else if (g_input->on_model) {
                 g_input->drag_mode = InputState::DragMode::SCULPT;
             } else {

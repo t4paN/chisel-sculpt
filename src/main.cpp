@@ -967,30 +967,34 @@ int main(int argc, char* argv[]) {
 
             if (already_selected) {
                 input.drag_mode = InputState::DragMode::MOVE_OBJECT;
+            } else if (clicked_mesh == 0) {
+                // Missed every entity — same as a normal empty-space click: orbit.
+                // (The callback latches SCULPT unconditionally in SELECT mode so this
+                // pick pass always gets to run; a miss has to fall back to ORBIT here
+                // instead of going dead, or plain-drag orbiting breaks in SELECT mode.)
+                input.drag_mode = InputState::DragMode::ORBIT;
             } else {
                 input.drag_mode = InputState::DragMode::NONE;
-                if (clicked_mesh != 0) {
-                    if (input.ctrl_held) {
-                        if (scene.toggle_selected(clicked_mesh)) {
-                            screen_buffers_dirty = true;
-                            std::snprintf(input.notification, sizeof(input.notification),
-                                          "Selection: %u meshes",
-                                          (uint32_t)scene.selected_ids().size());
-                            input.notification_timer = 1.5f;
-                        }
-                    } else {
-                        if (scene.select(clicked_mesh)) {
-                            mesh = &scene.active_mesh();
-                            multires = &scene.active_multires();
-                            scene.refresh_mirror_map();
-                            // Undo entries are per-entity (each carries entity_id and
-                            // local indices), so history survives selection switches.
-                            screen_buffers_dirty = true;
-                            uint32_t mid = scene.active_mesh_id();
-                            std::snprintf(input.notification, sizeof(input.notification),
-                                          "Selected mesh %u", mid);
-                            input.notification_timer = 1.5f;
-                        }
+                if (input.ctrl_held) {
+                    if (scene.toggle_selected(clicked_mesh)) {
+                        screen_buffers_dirty = true;
+                        std::snprintf(input.notification, sizeof(input.notification),
+                                      "Selection: %u meshes",
+                                      (uint32_t)scene.selected_ids().size());
+                        input.notification_timer = 1.5f;
+                    }
+                } else {
+                    if (scene.select(clicked_mesh)) {
+                        mesh = &scene.active_mesh();
+                        multires = &scene.active_multires();
+                        scene.refresh_mirror_map();
+                        // Undo entries are per-entity (each carries entity_id and
+                        // local indices), so history survives selection switches.
+                        screen_buffers_dirty = true;
+                        uint32_t mid = scene.active_mesh_id();
+                        std::snprintf(input.notification, sizeof(input.notification),
+                                      "Selected mesh %u", mid);
+                        input.notification_timer = 1.5f;
                     }
                 }
             }
