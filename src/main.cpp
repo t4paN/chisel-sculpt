@@ -967,14 +967,19 @@ int main(int argc, char* argv[]) {
 
             if (already_selected && input.ctrl_held) {
                 // Ctrl+click an already-selected mesh: remove it from the selection
-                // instead of starting a move-drag (toggle_selected no-ops if this is
-                // the active entity — there must always be one active mesh).
+                // instead of starting a move-drag. This works for the active entity
+                // too now — it just drops out of the visible selection (active stays
+                // bound), so peeling out the last one deselects the whole scene.
                 input.drag_mode = InputState::DragMode::NONE;
                 if (scene.toggle_selected(clicked_mesh)) {
                     screen_buffers_dirty = true;
-                    std::snprintf(input.notification, sizeof(input.notification),
-                                  "Selection: %u meshes",
-                                  (uint32_t)scene.selected_ids().size());
+                    uint32_t nsel = (uint32_t)scene.selected_ids().size();
+                    if (nsel == 0)
+                        std::snprintf(input.notification, sizeof(input.notification),
+                                      "Deselected all");
+                    else
+                        std::snprintf(input.notification, sizeof(input.notification),
+                                      "Selection: %u meshes", nsel);
                     input.notification_timer = 1.5f;
                 }
             } else if (already_selected) {
@@ -1588,9 +1593,10 @@ int main(int argc, char* argv[]) {
             uint32_t active_id = scene.active_mesh_id();
             for (auto& up : scene.entities()) {
                 if (!up || !up->alive) continue;
-                // Empty selection = all editable (single-mesh) → no tint. Otherwise
-                // an entity is tinted (deselected) unless it's in the selection set.
-                bool selected = sel.empty();
+                // An entity is tinted (deselected) unless it's in the selection set.
+                // An empty set is a real, reachable state (the user deselected
+                // everything) → every entity tinted: a fully-deselected scene.
+                bool selected = false;
                 for (uint32_t id : sel) if (id == up->id) { selected = true; break; }
                 if (up->id == active_id)
                     renderer.draw_mesh(camera, win_w, win_h,

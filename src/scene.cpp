@@ -287,7 +287,11 @@ void Scene::collapse_selection_to_active() {
 
 bool Scene::toggle_selected(uint32_t entity_id) {
     if (entity_id == 0) return false;
-    if (entity_id == active_id_) return false;
+    // The active entity may be toggled out too: this only removes it from the
+    // *visible* selection set (the highlight/group), not from active_id_ — the
+    // working buffers stay bound so the always-a-valid-active invariant holds.
+    // Peeling out the last member yields a legitimately empty selection (a
+    // fully-deselected scene); a plain click re-selects via select().
 
     for (auto it = selected_ids_.begin(); it != selected_ids_.end(); ++it) {
         if (*it == entity_id) {
@@ -315,11 +319,14 @@ uint32_t Scene::alive_count() const {
 }
 
 bool Scene::select(uint32_t entity_id) {
-    std::printf("[select] entity_id=%u active=%u\n", entity_id, active_id_);
     if (entity_id == 0) return false;
-    if (entity_id == active_id_) return false;
     MeshEntity* e = find_entity(entity_id);
     if (!e) return false;
+    // Note: no early-out when entity_id == active_id_. After a full deselect the
+    // active entity stays bound but drops out of the visible selection; a plain
+    // click on it must re-highlight it. set_active rebuilds selected_ids_ to just
+    // this entity, and bind_active_ already no-ops when it's already bound (so no
+    // working-buffer churn on the common re-click-the-active case).
     set_active(entity_id);
     return true;
 }

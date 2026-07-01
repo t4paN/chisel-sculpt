@@ -2,6 +2,33 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-01 — feat(select): a scene can now be fully deselected (peel out the active entity too)
+
+- **You can now ctrl+click your way down to an empty selection — a genuinely
+  fully-deselected scene.** Before, deselection was "preloaded" with one stuck
+  model (usually the last-created / active one): `toggle_selected` refused to drop
+  `active_id_` ("there must always be one active mesh"), so ctrl+click could peel
+  every *other* mesh out but never the last one.
+- **Design: decouple the *visible selection* from the *active* entity.** The
+  always-a-valid-active invariant (four `assert`s + the main loop's live `mesh`/
+  `multires` pointers) is untouched — `active_id_` stays bound in the working
+  buffers the whole time. Ctrl+click on the active mesh only removes it from the
+  *highlight/group set* (`selected_ids_`), not from `active_id_`. Peeling out the
+  last member yields a legitimately empty set.
+- **Three edits:** (1) `toggle_selected` drops its `entity_id == active_id_`
+  early-out; (2) `select` drops the same guard so a plain click on the now-
+  unhighlighted active mesh **re-highlights** it (`set_active` rebuilds the set;
+  `bind_active_` already no-ops when it's the same buffer → no working-buffer
+  churn); (3) the render tint's dead `bool selected = sel.empty()` branch (empty
+  was never reachable before, and meant "all editable") is repurposed to
+  `false` → an empty set now tints **every** entity: the fully-deselected look.
+  Notification reads "Deselected all" on the last peel.
+- Empty-selection is safe for the other consumers: `delete_selected` and the
+  MOVE_OBJECT drag key off `active_id_`/`selected()`, not the set; project
+  save/load re-seeds the active into an empty set on reload. Same fix mirrored to
+  `chisel-public-src` (shared logic). Built clean on both backends; validated
+  in-app on `build-wgpu` — pick / unpick / deselect-all all correct.
+
 ## 2026-07-01 — fix(select): SELECT-mode ctrl+click couldn't deselect an already-selected mesh
 
 - Clicking an already-selected mesh always latched a `MOVE_OBJECT` drag, regardless of
