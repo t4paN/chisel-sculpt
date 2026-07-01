@@ -15,13 +15,22 @@ namespace gpu {
 static WGPUStringView sv(const char* s) { return WGPUStringView{ s, s ? std::strlen(s) : 0 }; }
 
 static WGPUBufferUsage to_wgpu_usage(Usage u) {
+    // MAP_READ is exclusive in WebGPU: it may only pair with COPY_DST (used by the
+    // internal readback staging). Any other flag on a mappable buffer is rejected.
+    if (has(u, Usage::MapRead))
+        return (WGPUBufferUsage)(WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst);
+
     uint32_t f = (uint32_t)WGPUBufferUsage_CopyDst;   // always writable (matches makeBuf)
     if (has(u, Usage::Vertex))  f |= WGPUBufferUsage_Vertex;
     if (has(u, Usage::Index))   f |= WGPUBufferUsage_Index;
     if (has(u, Usage::Storage)) f |= WGPUBufferUsage_Storage;
     if (has(u, Usage::Uniform)) f |= WGPUBufferUsage_Uniform;
-    if (has(u, Usage::CopySrc)) f |= WGPUBufferUsage_CopySrc;
-    if (has(u, Usage::MapRead)) f |= WGPUBufferUsage_MapRead;
+    // Symmetric with the always-on CopyDst: any non-mappable buffer may be a copy or
+    // read_buffer source. The gpu:: seam copies freely between buffers (stroke-normal
+    // snapshot, undo ring, remesh ping-pong, limb scratch, SDF readbacks, …) and
+    // WebGPU aborts a copy whose source lacks COPY_SRC. GL ignores usage flags, so
+    // this only bites here; the explicit Usage::CopySrc bit becomes a no-op.
+    f |= WGPUBufferUsage_CopySrc;
     return (WGPUBufferUsage)f;
 }
 
@@ -711,6 +720,15 @@ static void texformat_readback(TexFormat f, uint32_t& wgpu_bpt, uint32_t& halfs,
 
 void read_target_region(Device& dev, OffscreenTarget& t, uint32_t attachment,
                         int x, int y, int w, int h, void* out) {
+    // Target not built yet (queried before the first offscreen render), or the region
+    // straddles the edge on the frame after a resize: leave `out` as the caller set it
+    // (the on-model depth read pre-inits to the 1000 "no geometry" clear) rather than
+    // issuing an out-of-bounds copyTextureToBuffer, which wgpu-native aborts on.
+    if (attachment >= t.color_count || !t.color_tex[attachment] ||
+        x < 0 || y < 0 || w <= 0 || h <= 0 ||
+        x + w > t.width || y + h > t.height)
+        return;
+
     uint32_t wgpu_bpt, halfs, out_bpt;
     texformat_readback(t.color_fmt[attachment], wgpu_bpt, halfs, out_bpt);
 

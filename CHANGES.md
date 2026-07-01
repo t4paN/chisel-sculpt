@@ -2,6 +2,64 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-01 — WebGPU port Stage 5 item 2: on-model latch + first real strokes + colour
+
+
+
+- **The WebGPU build can now sculpt.** `read_depth_at` (the per-frame on-model
+  test that decides SCULPT vs ORBIT on left-press) was stubbed to `return false`
+  on WebGPU, so `input.on_model` was always false and left-drag *always* orbited —
+  no brush could ever start. It now samples the screen-target's linear-depth
+  attachment (0, `-viewPos.z`, cleared to 1000) via the existing
+  `read_depth_region`/`read_target_region` async readback — the same idle-refreshed
+  offscreen buffer the cursor-normal sampling already reads, so the freshness
+  domain matches (the latch only fires when stationary, when the buffers are
+  current). On-model = `depth < 500` (clear 1000 ≫ geometry depth, far plane ~100).
+  GL path unchanged (still reads the default framebuffer depth). Turns out the
+  async MAP_READ machinery the handoff flagged as "missing" was already implemented
+  and in use — the only gap was wiring this one caller.
+- **Seam robustness: `read_target_region` (webgpu) guards an unbuilt/out-of-range
+  target.** `read_depth_at` runs every frame from frame 1, before the first
+  offscreen render creates the screen target, so it hit a null texture →
+  `copyTextureToBuffer` → wgpu-native non-unwinding abort. The readback now returns
+  early (leaving the caller's pre-init) when the attachment isn't built or the
+  region straddles the edge (covers the resize-race frame too). The normal path
+  never tripped this — it's guarded by `!screen_buffers_dirty`.
+- Builds clean both backends (`-j2`); WebGPU boots + sustains the loop for 8 s with
+  zero validation errors/panic. **Confirmed in-app (user, 2026-07-01):** left-drag
+  on the mesh sculpts, orbit off-mesh still orbits — the latch works.
+- **Perf gate applied:** `read_depth_at` was firing a full readback (GPU sync) every
+  frame, even mid-orbit/mid-stroke when the on-model value isn't consumed — a wasted
+  `glReadPixels` on GL, a blocking `wgpuDevicePoll` on WebGPU. Folded it into the
+  existing `!camera_moving && !screen_buffers_dirty` block (next to the cursor-normal
+  sampling), so it only reads when stationary over fresh buffers — exactly when the
+  press latch fires. Orbiting/mid-stroke, `on_model` keeps its last value (not
+  consumed then). One path for both backends.
+- **First real WebGPU strokes: buffers now default to `COPY_SRC`.** Stage C only
+  *compiled* the compute/stroke paths — this is the first time they *ran* on WebGPU,
+  and the very first brush stroke aborted: `snapshot_stroke_normals` does
+  `copy_buffer` from `vbo_norm` (created `Vertex|Storage`, no `COPY_SRC`), and
+  WebGPU rejects a copy whose source lacks that flag (GL ignores usage entirely, so
+  every earlier A/B was blind to it). ~15 buffers across 8 files are used as copy /
+  `read_buffer` sources. Fixed at the seam instead of annotating each: `to_wgpu_usage`
+  now auto-adds `COPY_SRC` to every non-mappable buffer — symmetric with the always-on
+  `COPY_DST` ("every buffer can be written" → "…and read"). MAP_READ buffers early-out
+  (WebGPU only lets MAP_READ pair with COPY_DST). Zero cost, no whack-a-mole, explicit
+  `Usage::CopySrc` becomes a no-op. **Confirmed in-app (user):** basic sculpting works.
+- **Colour fix: linear surface format (no double sRGB encode).** Background + matcap
+  rendered washed-out/too-light because the surface was configured as
+  `caps.formats[0]`, which wgpu-native lists as the *sRGB* variant
+  (`BGRA8UnormSrgb`) — so the GPU re-encoded our already-display-ready colours. GL
+  writes shader output straight to the (linear) default framebuffer with no such
+  encode. `main.cpp` now scans the surface caps for the plain `BGRA8Unorm`/`RGBA8Unorm`
+  twin and configures that (pipelines key off the same `g_surface_fmt`, so they match).
+  **Confirmed in-app (user):** colours now match the GL build.
+- Known regression to chase (separate from bring-up): the **GL build in this tree
+  sculpts 1.3M tris noticeably slower than `chisel-public-src`'s GL build** (user).
+  Both are GL — so the `gpu::` seam refactor added stroke-path overhead to the GL
+  path itself. Suspects: per-dab bind-group create/release, added barriers, or a
+  readback/materialize that crept into the hot path. Needs a profile pass.
+
 ## 2026-07-01 — WebGPU port Stage 5: runtime bring-up — first full frame renders
 
 - **WebGPU build now boots and sustains the render loop** (native wgpu-native,

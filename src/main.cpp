@@ -146,14 +146,20 @@ bool wrap_cursor(GLFWwindow* window, InputState& input, int win_w, int win_h) {
 }
 
 // Read depth buffer at pixel to determine if cursor is on model
-static bool read_depth_at(int x, int y, int screen_h, float* depth) {
+static bool read_depth_at(Renderer& renderer, int x, int y, int screen_h, float* depth) {
 #ifdef CHISEL_BACKEND_WEBGPU
-    // The on-model latch reads the default depth buffer; on WebGPU it comes from the
-    // pick MRT readback instead (Stage 5 runtime bring-up). Stubbed for the compile.
-    (void)x; (void)y; (void)screen_h;
-    *depth = 1.0f;
-    return false;
+    // No cheap read of the swapchain depth on WebGPU, so the on-model latch samples
+    // the screen-target's linear-depth attachment (0, `-viewPos.z`, cleared to 1000)
+    // — the same idle-refreshed offscreen buffer the cursor-normal sampling reads.
+    // Freshness domain matches: the press latch only fires when stationary, when the
+    // screen buffers are current (they refresh on the idle path before the next press).
+    (void)screen_h;
+    float d = 1000.0f;
+    renderer.read_depth_region(x, y, 1, 1, &d);
+    *depth = d;
+    return d < 500.0f;  // clear = 1000; geometry linear-depth is « far plane (~100)
 #else
+    (void)renderer;
     float d;
     glReadPixels(x, screen_h - y, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &d);
     *depth = d;
@@ -276,7 +282,19 @@ int main(int argc, char* argv[]) {
         || caps.formatCount == 0) {
         std::fprintf(stderr, "surfaceGetCapabilities failed\n"); return 1;
     }
+    // Prefer a non-sRGB (linear) surface format to match the GL backend, which writes
+    // shader output straight to the default framebuffer with no sRGB encode. wgpu-native
+    // usually lists the *sRGB* variant first (caps.formats[0] = BGRA8UnormSrgb), and
+    // configuring that makes the GPU re-encode our already-display-ready colours →
+    // everything washes out lighter. Pick the plain UNORM twin if the surface offers it.
     g_surface_fmt = caps.formats[0];
+    for (size_t i = 0; i < caps.formatCount; ++i) {
+        WGPUTextureFormat f = caps.formats[i];
+        if (f == WGPUTextureFormat_BGRA8Unorm || f == WGPUTextureFormat_RGBA8Unorm) {
+            g_surface_fmt = f;
+            break;
+        }
+    }
     wgpuSurfaceCapabilitiesFreeMembers(caps);
     gpu::webgpu_set_surface_format(g_surface_fmt);
     configureSurface(fbw, fbh);
@@ -558,11 +576,6 @@ int main(int argc, char* argv[]) {
         glViewport(0, 0, win_w, win_h);
 #endif
 
-        // Check if cursor is on model (for initial latch decision, not during drag)
-        float depth;
-        input.on_model = read_depth_at(
-            (int)input.mouse_x, (int)input.mouse_y, win_h, &depth);
-
         // Update cursor normal: average surface normal under the brush circle.
         // Sampling contributes for any brush pixel that hits geometry — so as the
         // cursor slides past the silhouette, the remaining on-model pixels bias
@@ -590,6 +603,15 @@ int main(int argc, char* argv[]) {
             int cx = (int)input.mouse_x;
             int cy = (int)input.mouse_y;
             if (cx >= 0 && cx < win_w && cy >= 0 && cy < win_h) {
+                // On-model latch (SCULPT vs ORBIT on left-press) reads the same fresh
+                // screen buffer as the cursor normal. Gated with it so the depth
+                // readback — a wasted glReadPixels on GL, a full GPU sync on WebGPU —
+                // only fires when stationary over fresh buffers, which is exactly when
+                // the press latch fires. Orbiting/mid-stroke, on_model keeps its last
+                // value (not consumed then).
+                float depth;
+                input.on_model = read_depth_at(renderer, cx, cy, win_h, &depth);
+
                 float norm_pixel[3];
                 renderer.read_normal_region(cx, cy, 1, 1, norm_pixel);
                 float len = std::sqrt(norm_pixel[0]*norm_pixel[0] + norm_pixel[1]*norm_pixel[1] + norm_pixel[2]*norm_pixel[2]);
