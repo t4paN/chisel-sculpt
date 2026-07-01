@@ -42,6 +42,30 @@ add_custom_command(
 add_custom_target(chisel_shaders DEPENDS "${CHISEL_SHADERS_HEADER}")
 
 # ---------------------------------------------------------------------------
+# Emscripten web target (Stage 9 bring-up, first milestone). Cross-compiling with
+# emcmake sets EMSCRIPTEN; this must come before the wgpu-native branch below,
+# since the web build has no wgpu-native fetch, no GLFW/X11 windowing yet — the
+# browser supplies WebGPU itself via --use-port=emdawnwebgpu (NOT the deprecated
+# -sUSE_WEBGPU, see ../webgpu-port-plan.md). First goal: the simplest probe
+# (instance -> request adapter -> print info) running in an actual browser tab —
+# proves the toolchain + the async adapter/device request pattern work under
+# Emscripten before porting the windowed/mesh probes. return()s so none of the
+# native wgpu-native / GL / full-app logic below runs for this target.
+# ---------------------------------------------------------------------------
+if(EMSCRIPTEN AND CHISEL_GPU_BACKEND STREQUAL "webgpu")
+    add_executable(chisel-wgpu-probe src/gpu/wgpu_probe.cpp)
+    target_include_directories(chisel-wgpu-probe PRIVATE include)
+    target_compile_options(chisel-wgpu-probe PRIVATE --use-port=emdawnwebgpu)
+    target_link_options(chisel-wgpu-probe PRIVATE
+        --use-port=emdawnwebgpu
+        -sASYNCIFY=1
+        -sEXIT_RUNTIME=1)
+    set_target_properties(chisel-wgpu-probe PROPERTIES SUFFIX ".html")
+    message(STATUS "WebGPU backend (Emscripten): building chisel-wgpu-probe only (first web milestone)")
+    return()
+endif()
+
+# ---------------------------------------------------------------------------
 # WebGPU backend (Stage 2 bring-up). Fetches the wgpu-native prebuilt and builds
 # the bring-up probe targets. The full chisel app is NOT portable to webgpu until
 # the gpu:: seam lands, so this backend currently builds only the probes; the GL

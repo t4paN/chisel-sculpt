@@ -1,6 +1,9 @@
 // Stage 2 Step 1 probe: prove wgpu-native links and can reach a GPU adapter.
 #include <webgpu/webgpu.h>
 #include <cstdio>
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
 
 struct AdapterResult { WGPUAdapter adapter = nullptr; bool done = false; bool ok = false; };
 
@@ -33,7 +36,18 @@ int main() {
     cb.userdata1 = &res;
 
     wgpuInstanceRequestAdapter(instance, nullptr, cb);
-    for (int i = 0; i < 100 && !res.done; ++i) wgpuInstanceProcessEvents(instance);
+    for (int i = 0; i < 100 && !res.done; ++i) {
+        wgpuInstanceProcessEvents(instance);
+#ifdef __EMSCRIPTEN__
+        // On the web, requestAdapter is a JS promise that only resolves once
+        // control returns to the browser event loop. ASYNCIFY (-sASYNCIFY) makes
+        // emscripten_sleep unwind to the loop, let the promise + ProcessEvents
+        // deliver the callback, then rewind — without this the busy-wait never
+        // yields, res.done stays false, and we release the instance while the
+        // request is still pending ("external Instance reference no longer exists").
+        emscripten_sleep(10);
+#endif
+    }
 
     if (!res.ok) { std::printf("[probe] no adapter available\n"); wgpuInstanceRelease(instance); return 2; }
 

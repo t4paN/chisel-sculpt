@@ -2,6 +2,30 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-02 — WebGPU web target: first hardware adapter reached inside a browser (Emscripten probe)
+
+- **The `chisel-wgpu-probe` (emdawnwebgpu / Emscripten) now reaches the real GPU
+  adapter in a browser tab** — `vendor: amd, architecture: gcn-5` (Vega/Raven via
+  the browser's Dawn), `[probe] OK`. First end-to-end proof that the web toolchain
+  chain works: emcc 6.0.1 → `--use-port=emdawnwebgpu` → async adapter/device request
+  → hardware. Confirmed in both Chrome and Firefox.
+- **Fix — the wait loop never yielded to the browser event loop.** The probe
+  busy-called `wgpuInstanceProcessEvents` in a tight C `for`-loop after
+  `wgpuInstanceRequestAdapter`. On native wgpu-native that pumps synchronously, but
+  on the web `requestAdapter` is a JS promise that only resolves once control returns
+  to the event loop — so `res.done` stayed false through all 100 spins, the probe
+  gave up and `wgpuInstanceRelease`d the instance, and the promise *then* resolved
+  against a freed instance → `status=2 "A valid external Instance reference no longer
+  exists."` Fix: `emscripten_sleep(10)` inside the loop (ASYNCIFY, already enabled)
+  unwinds to the event loop each poll, lets the promise + `ProcessEvents` deliver the
+  callback, then rewinds. Guarded `#ifdef __EMSCRIPTEN__` so the native path is
+  untouched. This validates the "Option A" async strategy for the whole port: web
+  WebGPU waits (adapter/device/mapAsync) need the event loop to turn; the full app
+  gets this for free via the browser main-loop, the busy-wait was a probe-only shape.
+- Environment: emsdk installed at `~/emsdk`; a "Chrome (WebGPU dev)" launcher forces
+  WebGPU on (the AMD Raven APU is on Chrome's default blocklist, needs
+  `--enable-unsafe-webgpu --enable-features=Vulkan`).
+
 ## 2026-07-01 — feat(select): a scene can now be fully deselected (peel out the active entity too)
 
 - **You can now ctrl+click your way down to an empty selection — a genuinely
