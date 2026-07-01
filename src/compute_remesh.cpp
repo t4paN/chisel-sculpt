@@ -157,12 +157,14 @@ bool ComputeState::init_remesh_smooth_weights() {
 }
 
 bool ComputeState::init_remesh_smooth() {
+    // BIND_ADJACENCY_OFFSET here carries the CSR-concatenated adjacency buffer
+    // (offsets then list — see remesh_adj_csr_ssbo); BIND_ADJACENCY_LIST is not
+    // bound separately, keeping this kernel at 8 storage buffers (was 9).
     const gpu::BindEntry layout[] = {
         { BIND_POSITIONS,        gpu::Bind::StorageReadWrite, 0 },
         { BIND_NORMALS,          gpu::Bind::StorageRead,      0 },
         { BIND_INDICES,          gpu::Bind::StorageRead,      0 },
         { BIND_ADJACENCY_OFFSET, gpu::Bind::StorageRead,      0 },
-        { BIND_ADJACENCY_LIST,   gpu::Bind::StorageRead,      0 },
         { BIND_REMESH_IN_POS,    gpu::Bind::StorageRead,      0 },
         { BIND_REMESH_WEIGHTS,   gpu::Bind::StorageRead,      0 },
         { BIND_REMESH_PINNED,    gpu::Bind::StorageRead,      0 },
@@ -170,7 +172,7 @@ bool ComputeState::init_remesh_smooth() {
         { BIND_PARAMS,           gpu::Bind::Uniform,          sizeof(RemeshSmoothParamsGPU) },
     };
     remesh_smooth_pipeline = gpu::create_compute_pipeline(gpu_dev,
-        gpu::embedded_shader("remesh_smooth"), layout, 10);
+        gpu::embedded_shader("remesh_smooth"), layout, 9);
     if (!remesh_smooth_pipeline.handle) {
         std::fprintf(stderr, "[compute] remesh smooth shader failed\n");
         return false;
@@ -504,21 +506,33 @@ void ComputeState::dispatch_remesh_smooth(
     u.lambda = lambda; u.seam_tol = seam_tol; u.vertex_count = vertex_count;
     gpu::write_buffer(gpu_dev, remesh_smooth_ubo, 0, &u, sizeof(u));
 
+    // CSR-concatenate the shared adjacency buffers (offsets, then list appended at
+    // element vertex_count+1) into one scratch buffer so this kernel binds 8 storage
+    // buffers instead of 9 — see remesh_adj_csr_ssbo comment in compute.h. One-shot
+    // GPU->GPU copy, not per-frame: remesh runs at drag-release, not mid-stroke.
+    {
+        uint64_t off_bytes  = adjacency_offset_ssbo.size;
+        uint64_t list_bytes = adjacency_list_ssbo.size;
+        gpu::release_buffer(remesh_adj_csr_ssbo);
+        remesh_adj_csr_ssbo = gpu::create_buffer(gpu_dev, nullptr, off_bytes + list_bytes, gpu::Usage::Storage);
+        gpu::copy_buffer(gpu_dev, adjacency_offset_ssbo, 0, remesh_adj_csr_ssbo, 0, off_bytes);
+        gpu::copy_buffer(gpu_dev, adjacency_list_ssbo, 0, remesh_adj_csr_ssbo, off_bytes, list_bytes);
+    }
+
     // Constant inputs across the ping-pong; ping/pong (slots 0 / 13) swap each step.
     auto make_bg = [&](gpu::Buffer& inBuf, gpu::Buffer& outBuf) {
         const gpu::BindBufferEntry bg[] = {
             { BIND_POSITIONS,        &outBuf,  outBuf.size },   // out_pos (read_write)
             { BIND_NORMALS,          &remesh_norm_ssbo,      remesh_norm_ssbo.size },
             { BIND_INDICES,          &remesh_indices_ssbo,   remesh_indices_ssbo.size },
-            { BIND_ADJACENCY_OFFSET, &adjacency_offset_ssbo, adjacency_offset_ssbo.size },
-            { BIND_ADJACENCY_LIST,   &adjacency_list_ssbo,   adjacency_list_ssbo.size },
+            { BIND_ADJACENCY_OFFSET, &remesh_adj_csr_ssbo,   remesh_adj_csr_ssbo.size },
             { BIND_REMESH_IN_POS,    &inBuf,   inBuf.size },    // in_pos (read)
             { BIND_REMESH_WEIGHTS,   &remesh_weights_ssbo,   remesh_weights_ssbo.size },
             { BIND_REMESH_PINNED,    &remesh_pinned_ssbo,    remesh_pinned_ssbo.size },
             { BIND_REMESH_TRISEL,    &remesh_trisel_ssbo,    remesh_trisel_ssbo.size },
             { BIND_PARAMS,           &remesh_smooth_ubo, sizeof(RemeshSmoothParamsGPU) },
         };
-        return gpu::create_bind_group(gpu_dev, remesh_smooth_pipeline, bg, 10);
+        return gpu::create_bind_group(gpu_dev, remesh_smooth_pipeline, bg, 9);
     };
     gpu::BindGroup grp_a = make_bg(remesh_ping_ssbo, remesh_pong_ssbo);  // in=ping, out=pong
     gpu::BindGroup grp_b = make_bg(remesh_pong_ssbo, remesh_ping_ssbo);  // in=pong, out=ping

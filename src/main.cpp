@@ -965,7 +965,19 @@ int main(int argc, char* argv[]) {
                     if (sel_id == clicked_mesh) { already_selected = true; break; }
             }
 
-            if (already_selected) {
+            if (already_selected && input.ctrl_held) {
+                // Ctrl+click an already-selected mesh: remove it from the selection
+                // instead of starting a move-drag (toggle_selected no-ops if this is
+                // the active entity — there must always be one active mesh).
+                input.drag_mode = InputState::DragMode::NONE;
+                if (scene.toggle_selected(clicked_mesh)) {
+                    screen_buffers_dirty = true;
+                    std::snprintf(input.notification, sizeof(input.notification),
+                                  "Selection: %u meshes",
+                                  (uint32_t)scene.selected_ids().size());
+                    input.notification_timer = 1.5f;
+                }
+            } else if (already_selected) {
                 input.drag_mode = InputState::DragMode::MOVE_OBJECT;
             } else if (clicked_mesh == 0) {
                 // Missed every entity — same as a normal empty-space click: orbit.

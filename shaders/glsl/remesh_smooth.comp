@@ -4,14 +4,17 @@
 // only — a full Laplacian shrinks the form). Seam x is clamped so non-pinned verts can't
 // drift into / across the seam band. Pinned / out-of-region / weightless / degenerate-
 // normal verts pass through. 16-byte std140 Params UBO at binding 63.
+// binding 4 (adj_csr) is a CSR-concatenated copy of the shared adjacency
+// offset+list buffers — see remesh_smooth.wgsl's header comment and
+// remesh_adj_csr_ssbo in include/compute.h. Kept in lockstep with the WGSL
+// sibling even though GL has no 8-storage-buffer cap of its own.
 #version 430
 layout(local_size_x = 256) in;
 
 layout(std430, binding = 0)           buffer OutPosBuf  { float out_pos[]; };
 layout(std430, binding = 1)  readonly buffer NormBuf    { float normals[]; };
 layout(std430, binding = 2)  readonly buffer IdxBuf     { uint  indices[]; };
-layout(std430, binding = 4)  readonly buffer AdjOffBuf  { uint  adj_off[];  };
-layout(std430, binding = 5)  readonly buffer AdjListBuf { uint  adj_list[]; };
+layout(std430, binding = 4)  readonly buffer AdjCsrBuf  { uint  adj_csr[];  };
 layout(std430, binding = 13) readonly buffer InPosBuf   { float in_pos[];   };
 layout(std430, binding = 14) readonly buffer WeightBuf  { float weights[];  };
 layout(std430, binding = 15) readonly buffer PinnedBuf  { uint  pinned[];   };
@@ -37,19 +40,21 @@ void main() {
     float w = weights[v];
     if (w < 1e-6) return;
 
-    uint t_start = adj_off[v];
-    uint t_end   = adj_off[v + 1u];
+    // adj_csr[0 .. vertex_count] is the offset array; the list starts right after.
+    uint list_base = P.vertex_count + 1u;
+    uint t_start = adj_csr[v];
+    uint t_end   = adj_csr[v + 1u];
 
     bool in_region = false;
     for (uint j = t_start; j < t_end; j++) {
-        if (tri_sel[adj_list[j]] != 0u) { in_region = true; break; }
+        if (tri_sel[adj_csr[list_base + j]] != 0u) { in_region = true; break; }
     }
     if (!in_region) return;
 
     uint nbrs[48];
     uint nbr_count = 0u;
     for (uint j = t_start; j < t_end; j++) {
-        uint t = adj_list[j];
+        uint t = adj_csr[list_base + j];
         for (int k = 0; k < 3; k++) {
             uint n = indices[t*3u + uint(k)];
             if (n == v) continue;

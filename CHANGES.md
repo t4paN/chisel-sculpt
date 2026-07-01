@@ -2,6 +2,33 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-01 — fix(select): SELECT-mode ctrl+click couldn't deselect an already-selected mesh
+
+- Clicking an already-selected mesh always latched a `MOVE_OBJECT` drag, regardless of
+  Ctrl, so `scene.toggle_selected()` (the removal path) was unreachable for anything
+  already in the selection — ctrl+click could add to a multi-selection but never
+  remove from it. `main.cpp`'s SELECT-mode click handler now checks `ctrl_held`
+  before the `MOVE_OBJECT` branch: ctrl+click on an already-selected mesh toggles it
+  out instead. Preexisting bug, not a WebGPU-port regression — same fix applied to
+  `chisel-public-src`. Confirmed in-app.
+
+## 2026-07-01 — perf/refactor(compute): remesh_smooth down to 8 storage buffers (Emscripten blocker)
+
+- **Cleared the last blocker before standing up the Emscripten web target.** WebGPU's
+  web baseline guarantees only 8 storage buffers per shader stage; `remesh_smooth`
+  was the sole kernel over that line, at 9 (confirmed via `CONVENTIONS.md`'s
+  per-kernel audit — no other kernel, including SDF's 9 `BIND_SDF_*` slots spread
+  across 5 kernels, ever co-binds more than 8).
+- Fix: CSR-concatenate the shared `adjacency_offset_ssbo`/`adjacency_list_ssbo` into
+  a new `remesh_adj_csr_ssbo` scratch buffer (offsets first, list appended at
+  element `vertex_count+1`), built via two `copy_buffer` calls inside
+  `dispatch_remesh_smooth` each time it runs (cheap — remesh fires at drag-release,
+  not per-frame). Only `remesh_smooth`'s own bind group and its two shader siblings
+  (`remesh_smooth.wgsl`/`.comp`) changed; every other remesh kernel still binds the
+  original shared adjacency buffers untouched.
+- Both backends build clean and smoke-run with zero validation errors; the smoothing
+  math itself is unchanged (same values addressed through a merged buffer).
+
 ## 2026-07-01 — fix(sdf): WGSL voxel-merge sign shader crashed on `meta` reserved word
 
 - **Voxel-merge (J) crashed the WebGPU build on every attempt** — `sdf_sign.wgsl`'s

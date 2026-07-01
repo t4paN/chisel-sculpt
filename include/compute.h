@@ -387,6 +387,13 @@ struct ComputeState {
     gpu::Buffer remesh_pinned_ssbo;     // uint[V]    — 0/1 pinned flags
     gpu::Buffer remesh_trisel_ssbo;     // uint[T]    — 0/1 tri selected flags
     gpu::Buffer remesh_indices_ssbo;    // uint[T*3]  — triangle indices snapshot
+    // remesh_smooth is the one kernel that needs all of adjacency + its own scratch
+    // at once (9 storage buffers — one over the 8/stage web baseline). This is a
+    // CSR-concatenated copy of adjacency_offset_ssbo+adjacency_list_ssbo (offsets
+    // first, list appended at element vertex_count+1) rebuilt each dispatch, so the
+    // two shared adjacency buffers collapse into a single binding just for that
+    // kernel — see dispatch_remesh_smooth.
+    gpu::Buffer remesh_adj_csr_ssbo;
     uint32_t remesh_vert_capacity;
     uint32_t remesh_tri_capacity;
 

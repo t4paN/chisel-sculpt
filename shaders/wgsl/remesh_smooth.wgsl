@@ -7,11 +7,14 @@
 // See CONVENTIONS.md.
 //
 // Bindings mirror the ComputeBinding enum in include/compute.h:
-//   0 out_pos (read_write)  1 normals (read)  2 indices (read)  4 adj_off (read)
-//   5 adj_list (read)  13 in_pos (read)  14 weights (read)  15 pinned (read)
-//   16 tri_sel (read)  63 params UBO
-// 9 storage buffers — at the default WebGPU maxStorageBuffersPerShaderStage; if a
-// browser caps lower, split by lifetime into group(1)/group(2) (see CONVENTIONS.md).
+//   0 out_pos (read_write)  1 normals (read)  2 indices (read)  4 adj_csr (read)
+//   13 in_pos (read)  14 weights (read)  15 pinned (read)  16 tri_sel (read)
+//   63 params UBO
+// 8 storage buffers. adj_csr is a CSR-concatenated copy of the shared adjacency
+// offset+list buffers (offsets in [0, vertex_count], list appended starting at
+// element vertex_count+1 — see remesh_adj_csr_ssbo in compute.h) built by the C++
+// side each dispatch; this merge is what keeps the kernel under the 8/stage web
+// baseline (it was 9 with adj_off/adj_list as separate bindings).
 
 struct Params {
     lambda       : f32,
@@ -23,8 +26,7 @@ struct Params {
 @group(0) @binding(0)  var<storage, read_write> out_pos  : array<f32>;
 @group(0) @binding(1)  var<storage, read>       normals  : array<f32>;
 @group(0) @binding(2)  var<storage, read>       indices  : array<u32>;
-@group(0) @binding(4)  var<storage, read>       adj_off  : array<u32>;
-@group(0) @binding(5)  var<storage, read>       adj_list : array<u32>;
+@group(0) @binding(4)  var<storage, read>       adj_csr  : array<u32>;
 @group(0) @binding(13) var<storage, read>       in_pos   : array<f32>;
 @group(0) @binding(14) var<storage, read>       weights  : array<f32>;
 @group(0) @binding(15) var<storage, read>       pinned   : array<u32>;
@@ -47,19 +49,21 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     let w = weights[v];
     if (w < 1e-6) { return; }
 
-    let t_start = adj_off[v];
-    let t_end   = adj_off[v + 1u];
+    // adj_csr[0 .. vertex_count] is the offset array; the list starts right after.
+    let list_base = P.vertex_count + 1u;
+    let t_start = adj_csr[v];
+    let t_end   = adj_csr[v + 1u];
 
     var in_region = false;
     for (var j = t_start; j < t_end; j = j + 1u) {
-        if (tri_sel[adj_list[j]] != 0u) { in_region = true; break; }
+        if (tri_sel[adj_csr[list_base + j]] != 0u) { in_region = true; break; }
     }
     if (!in_region) { return; }
 
     var nbrs : array<u32, 48>;
     var nbr_count = 0u;
     for (var j = t_start; j < t_end; j = j + 1u) {
-        let t = adj_list[j];
+        let t = adj_csr[list_base + j];
         for (var k = 0u; k < 3u; k = k + 1u) {
             let n = indices[t*3u + k];
             if (n == v) { continue; }

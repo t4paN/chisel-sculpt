@@ -281,6 +281,7 @@ void ComputeState::cleanup() {
     gpu::release_buffer(remesh_pinned_ssbo);
     gpu::release_buffer(remesh_trisel_ssbo);
     gpu::release_buffer(remesh_indices_ssbo);
+    gpu::release_buffer(remesh_adj_csr_ssbo);
     remesh_vert_capacity = remesh_tri_capacity = 0;
     accum_vertex_count = 0;
     adjacency_vertex_count = 0;
