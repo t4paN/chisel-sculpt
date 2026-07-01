@@ -2,6 +2,26 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-02 — WebGPU web target: async readback gating → full app compiles + links for the web
+
+- **`webgpu_backend.cpp`'s three map-read readbacks now yield to the browser event loop
+  on the web instead of busy-polling `wgpuDevicePoll`.** `wgpuDevicePoll` and its
+  `<webgpu/wgpu.h>` header are wgpu-native-only; on emdawnwebgpu the async map is a JS
+  promise that only resolves once control returns to the event loop. Factored the three
+  identical `while(!done) wgpuDevicePoll(...)` spins into one `pump_until_mapped` helper:
+  native keeps `wgpuDevicePoll`, web does `wgpuInstanceProcessEvents` + `emscripten_sleep`
+  under ASYNCIFY (the pattern proven by the adapter probe). The instance is handed to the
+  seam via a new `webgpu_set_instance()` setter (called once at startup; a no-op on native).
+- **Result: the full `chisel` app now compiles AND links for the web** →
+  `chisel.html` + `.js` + `.wasm` (~2.1 MB). The anticipated ImGui-flavor (step 3) and
+  project-save/load (step 4) blockers didn't materialise at compile time — the DAWN ImGui
+  backend auto-selects under `__EMSCRIPTEN__` and `project_file.cpp` builds against
+  Emscripten's filesystem shims. Native `build-wgpu` rebuilt green (unchanged behaviour).
+- **NOT yet runnable in a browser:** the main loop is still the native
+  `while(!glfwWindowShouldClose)`, which never returns control to the browser event loop.
+  Converting it to `emscripten_set_main_loop_arg` (handoff step 5) is the next step before
+  a first frame.
+
 ## 2026-07-02 — WebGPU web target: CMake full-app Emscripten branch
 
 - **The Emscripten `webgpu` config now builds the full `chisel` app, not just the probe.**

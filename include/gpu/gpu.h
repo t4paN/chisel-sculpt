@@ -52,6 +52,10 @@ struct Device {
 };
 #if defined(CHISEL_BACKEND_WEBGPU)
 Device device_from_webgpu(WGPUDevice, WGPUQueue);
+// The WGPUInstance, set once at startup. On the web build the async map-read
+// readbacks drive their AllowProcessEvents callbacks via wgpuInstanceProcessEvents
+// (with an ASYNCIFY yield); native readbacks use wgpuDevicePoll and ignore this.
+void webgpu_set_instance(WGPUInstance);
 // Windowing code calls these once the surface is configured (and again on resize):
 // the swapchain colour format — swapchain render pipelines bake it as their colour
 // target, and the default render pass clears/loads it — and the default depth view

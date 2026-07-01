@@ -4,7 +4,11 @@
 #include "gpu/gpu.h"
 
 #include <webgpu/webgpu.h>
-#include <webgpu/wgpu.h>   // wgpuDevicePoll for the readback busy-wait
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>    // emscripten_sleep — ASYNCIFY event-loop yield for async map
+#else
+#include <webgpu/wgpu.h>   // wgpuDevicePoll for the readback busy-wait (wgpu-native only)
+#endif
 #include <cstring>
 #include <cstdio>
 #include <vector>
@@ -53,6 +57,13 @@ Device device_from_webgpu(WGPUDevice device, WGPUQueue queue) {
 static Device g_app_device;
 void set_app_device(const Device& d) { g_app_device = d; }
 Device app_device() { return g_app_device; }
+
+// The WGPUInstance (set once at startup). Needed only on the web build: the async
+// map callbacks use AllowProcessEvents mode, so they're delivered from
+// wgpuInstanceProcessEvents while the ASYNCIFY yield lets the browser resolve the
+// promise (see pump_until_mapped). Native readbacks use wgpuDevicePoll instead.
+static WGPUInstance g_instance = nullptr;
+void webgpu_set_instance(WGPUInstance i) { g_instance = i; }
 
 Buffer create_buffer(Device& dev, const void* data, uint64_t size, Usage usage) {
     Buffer b;
@@ -191,13 +202,30 @@ static void onMap(WGPUMapAsyncStatus status, WGPUStringView, void* ud1, void*) {
     s->done = true; s->status = status;
 }
 
+// Drive an AllowProcessEvents map callback to completion.
+//   Native (wgpu-native): wgpuDevicePoll(..., wait=true) blocks the calling thread
+//     until the queue drains and the callback has fired — one entry point, no yield.
+//   Web (emdawnwebgpu): wgpuDevicePoll doesn't exist, and the map is a browser
+//     promise that only resolves once control returns to the JS event loop. ASYNCIFY
+//     makes emscripten_sleep unwind to that loop; wgpuInstanceProcessEvents then
+//     delivers the (now-ready) callback. Without the yield the busy-wait spins
+//     forever and the promise never resolves (same pattern as the adapter probe).
+static void pump_until_mapped(Device& dev, const MapState& ms) {
+#ifdef __EMSCRIPTEN__
+    (void)dev;
+    while (!ms.done) { wgpuInstanceProcessEvents(g_instance); emscripten_sleep(1); }
+#else
+    pump_until_mapped(dev, ms);
+#endif
+}
+
 void map_read(Device& dev, const Buffer& staging, uint64_t size, void* out) {
     MapState ms;
     WGPUBufferMapCallbackInfo mcb = {};
     mcb.mode = WGPUCallbackMode_AllowProcessEvents;
     mcb.callback = onMap; mcb.userdata1 = &ms;
     wgpuBufferMapAsync(staging.handle, WGPUMapMode_Read, 0, size, mcb);
-    while (!ms.done) wgpuDevicePoll(dev.device, true, nullptr);
+    pump_until_mapped(dev, ms);
     if (ms.status == WGPUMapAsyncStatus_Success) {
         const void* p = wgpuBufferGetMappedRange(staging.handle, 0, size);
         if (p) std::memcpy(out, p, size); else std::memset(out, 0, size);
@@ -237,7 +265,7 @@ void read_buffer(Device& dev, const Buffer& src, uint64_t offset, uint64_t size,
     mcb.mode = WGPUCallbackMode_AllowProcessEvents;
     mcb.callback = onMap; mcb.userdata1 = &ms;
     wgpuBufferMapAsync(g_read_staging, WGPUMapMode_Read, 0, size, mcb);
-    while (!ms.done) wgpuDevicePoll(dev.device, true, nullptr);
+    pump_until_mapped(dev, ms);
     if (ms.status == WGPUMapAsyncStatus_Success) {
         const void* p = wgpuBufferGetMappedRange(g_read_staging, 0, size);
         if (p) std::memcpy(out, p, size); else std::memset(out, 0, size);
@@ -767,7 +795,7 @@ void read_target_region(Device& dev, OffscreenTarget& t, uint32_t attachment,
     mcb.mode = WGPUCallbackMode_AllowProcessEvents;
     mcb.callback = onMap; mcb.userdata1 = &ms;
     wgpuBufferMapAsync(t.readback, WGPUMapMode_Read, 0, staging_size, mcb);
-    while (!ms.done) wgpuDevicePoll(dev.device, true, nullptr);
+    pump_until_mapped(dev, ms);
     if (ms.status != WGPUMapAsyncStatus_Success) {
         std::memset(out, 0, (size_t)out_bpt * w * h);
         wgpuBufferUnmap(t.readback);

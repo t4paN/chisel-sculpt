@@ -248,6 +248,8 @@ int main(int argc, char* argv[]) {
     glfwGetFramebufferSize(window, &fbw, &fbh);
     WGPUInstance instance = wgpuCreateInstance(nullptr);
     if (!instance) { std::fprintf(stderr, "wgpuCreateInstance failed\n"); return 1; }
+    // The seam's web readbacks pump this instance's event loop (no-op on native).
+    gpu::webgpu_set_instance(instance);
     WGPUSurfaceDescriptor sd = {};
 #if defined(__EMSCRIPTEN__)
     // Browser: bind the surface to the page canvas by CSS selector. Emscripten's
