@@ -2,6 +2,16 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-01 — fix(select): SELECT-mode ctrl+click couldn't deselect an already-selected mesh
+
+- Clicking an already-selected mesh always latched a `MOVE_OBJECT` drag, regardless of
+  Ctrl, so `scene.toggle_selected()` (the removal path) was unreachable for anything
+  already in the selection — ctrl+click could add to a multi-selection but never
+  remove from it. `main.cpp`'s SELECT-mode click handler now checks `ctrl_held`
+  before the `MOVE_OBJECT` branch: ctrl+click on an already-selected mesh toggles it
+  out instead. Found while testing the `chisel-webgpu` fork (same bug there, fixed
+  in both trees). Confirmed in-app.
+
 ## 2026-06-23 — Multimesh sync: stop stale CPU mesh from clobbering live GPU edits
 
 - **Inserting a mesh after a GPU brush stroke no longer makes the previous entity's strokes vanish, switching to paint no longer breaks its normals, and a full undo no longer breaks normals.** All three were the same bug. Since the blood-moon GPU-resident "flip", a stroke deliberately leaves the active entity's CPU mesh stale (`mark_cpu_dirty`) — the truth lives in the working VBO + disp/base SSBOs, reconciled lazily by `MultiresGPU::materialize_cpu`. Two readers acted on the stale CPU copy without reconciling first.
