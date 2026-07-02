@@ -2,6 +2,36 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-03 — Web: the brush finally lands in the browser (readbacks return real data)
+
+The keystone's async readbacks were silently returning all-zeros on the web build — so
+`sample_depth/normal/triid` never got valid data: the on-model latch read *false* over
+the mesh (left-drag orbited instead of sculpting), the cursor ring never tilted to the
+surface, and no brush could anchor. Two bugs, both in `webgpu_backend.cpp`:
+
+- **Read-mapped buffers were read with `wgpuBufferGetMappedRange` → NULL.** For a buffer
+  mapped `MapMode::Read`, WebGPU requires `wgpuBufferGetConstMappedRange` (const pointer);
+  the mutable `GetMappedRange` is only valid for `MapWrite`/`mappedAtCreation` and returns
+  **null** on a read map. The map succeeded (status Success, correct sizes) but the getter
+  handed back null every time, so every readback memset its output to zero. **`wgpu-native`
+  is lenient and returns the pointer anyway — which is exactly why the native build worked
+  and masked this the whole time.** Fixed all four read-map sites (the async ticket take +
+  the three blocking one-shot readbacks used by SDF merge / entity pick). Confirmed in-app
+  (user): plane cache lands `ok=1` with real depth/triid/normal, and **strokes sculpt the
+  sphere in Chrome** — draw/mask/paint verified.
+- **`ticket_drop` returned still-map-pending staging buffers to the reuse pool.** Unmapping
+  a buffer whose `mapAsync` callback hasn't been delivered doesn't make it reusable that
+  frame under Dawn, so the next kick reused it in a submit + re-map → a storm of
+  "used in submit while mapped" / "already mapped" validation errors (fired ~14×/s the
+  moment a stroke started, corrupting the per-dab readbacks). Drop now destroys a
+  not-yet-resolved buffer instead of pooling it, and `staging_release` guards with
+  `wgpuBufferGetMapState` so no path can pool a non-`Unmapped` buffer. GL path unchanged
+  (its tickets resolve immediately). No behavioral change on native.
+
+Known follow-up filed same session: **undo across a multires level-switch entry throws
+`memory access out of bounds` (in a promise / async readback) on web** — see
+`wgpu-undo-oob-crashlog.txt` and the handoff backlog.
+
 ## 2026-07-02 — Web keystone: zero GPU→CPU readbacks inside the frame
 
 The frame loop no longer blocks on any GPU readback — the root cause of the brush not

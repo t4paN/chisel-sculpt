@@ -228,7 +228,7 @@ void map_read(Device& dev, const Buffer& staging, uint64_t size, void* out) {
     wgpuBufferMapAsync(staging.handle, WGPUMapMode_Read, 0, size, mcb);
     pump_until_mapped(dev, ms);
     if (ms.status == WGPUMapAsyncStatus_Success) {
-        const void* p = wgpuBufferGetMappedRange(staging.handle, 0, size);
+        const void* p = wgpuBufferGetConstMappedRange(staging.handle, 0, size);
         if (p) std::memcpy(out, p, size); else std::memset(out, 0, size);
         wgpuBufferUnmap(staging.handle);
     } else {
@@ -268,7 +268,7 @@ void read_buffer(Device& dev, const Buffer& src, uint64_t offset, uint64_t size,
     wgpuBufferMapAsync(g_read_staging, WGPUMapMode_Read, 0, size, mcb);
     pump_until_mapped(dev, ms);
     if (ms.status == WGPUMapAsyncStatus_Success) {
-        const void* p = wgpuBufferGetMappedRange(g_read_staging, 0, size);
+        const void* p = wgpuBufferGetConstMappedRange(g_read_staging, 0, size);
         if (p) std::memcpy(out, p, size); else std::memset(out, 0, size);
     } else {
         std::memset(out, 0, size);
@@ -802,7 +802,7 @@ void read_target_region(Device& dev, OffscreenTarget& t, uint32_t attachment,
         wgpuBufferUnmap(t.readback);
         return;
     }
-    const uint8_t* mapped = (const uint8_t*)wgpuBufferGetMappedRange(t.readback, 0, staging_size);
+    const uint8_t* mapped = (const uint8_t*)wgpuBufferGetConstMappedRange(t.readback, 0, staging_size);
     uint8_t* o = (uint8_t*)out;
     for (int row = 0; row < h; ++row) {
         const uint8_t* srow = mapped + (size_t)row * padded_row;
@@ -868,6 +868,11 @@ static WGPUBuffer staging_acquire(Device& dev, uint64_t size, uint64_t& alloc_si
 
 static void staging_release(WGPUBuffer b, uint64_t size) {
     if (!b) return;
+    // Never pool a buffer that isn't fully Unmapped: reusing a still-mapped/pending
+    // MapRead buffer in a copy-submit + re-map trips WebGPU validation ("used in
+    // submit while mapped" / "already mapped") and corrupts the readback. Callers are
+    // expected to unmap first; this guard catches any path that doesn't.
+    if (wgpuBufferGetMapState(b) != WGPUBufferMapState_Unmapped) { wgpuBufferRelease(b); return; }
     if (g_staging_pool.size() >= 16) { wgpuBufferRelease(b); return; }
     g_staging_pool.push_back({size, b});
 }
@@ -974,7 +979,7 @@ bool ticket_take(Device&, ReadTicket t, void* out, uint64_t out_size) {
     bool good = r.done && r.ok && out_size == r.out_size;
     const uint8_t* mapped = nullptr;
     if (good) {
-        mapped = (const uint8_t*)wgpuBufferGetMappedRange(r.staging, 0, r.map_size);
+        mapped = (const uint8_t*)wgpuBufferGetConstMappedRange(r.staging, 0, r.map_size);
         good = mapped != nullptr;
     }
     if (!good) {
@@ -1008,8 +1013,18 @@ bool ticket_take(Device&, ReadTicket t, void* out, uint64_t out_size) {
 void ticket_drop(Device&, ReadTicket t) {
     auto it = g_tickets.find(t);
     if (it == g_tickets.end()) return;
-    wgpuBufferUnmap(it->second.staging);     // aborts a still-pending map
-    staging_release(it->second.staging, it->second.staging_size);
+    AsyncRead& r = it->second;
+    wgpuBufferUnmap(r.staging);               // aborts a still-pending map
+    if (r.done) {
+        // Map resolved: buffer is genuinely idle, safe to reuse.
+        staging_release(r.staging, r.staging_size);
+    } else {
+        // Map callback not yet delivered (dropped mid-flight: aborted stroke, mode
+        // switch, plane re-kick). Unmapping does NOT make it reusable this frame under
+        // Dawn — pooling it would hand the next kick a buffer whose map is still being
+        // torn down, tripping "used in submit while mapped". Destroy it instead.
+        wgpuBufferRelease(r.staging);
+    }
     g_tickets.erase(it);
 }
 
