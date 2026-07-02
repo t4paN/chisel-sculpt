@@ -2,6 +2,22 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-03 — Web: itch.io packaging script
+
+`packaging/web/pack-itch.sh [version]` stages the three runtime files into a flat zip with
+`chisel.html` renamed to `index.html` (itch's HTML player opens `index.html` at the zip root)
+and writes `dist/chisel-itch-<version>.zip`. Build is single-threaded ASYNCIFY, so there are
+no `.data`/`.worker` sidecars — just html + js glue + wasm (~2.4 MB). First itch upload is a
+draft/private smoke test (SharedArrayBuffer OFF — no COOP/COEP needed).
+
+## 2026-07-03 — Web: debug console overlay is now `~`-toggled, hidden by default
+
+The `?debug=1` on-page console used to eat half the screen from load. It now starts hidden
+and toggles with the `~` key (quake-style). The keydown is captured on `window` and swallowed
+(`preventDefault`+`stopPropagation`) so the backtick never reaches the app; log mirroring stays
+wired up while hidden, so nothing before the first open is lost. `?debug=1` still gates whether
+the console exists at all. Verified in Chrome (WebGPU): clean boot, overlay hidden on load.
+
 ## 2026-07-03 — Web: the brush finally lands in the browser (readbacks return real data)
 
 The keystone's async readbacks were silently returning all-zeros on the web build — so

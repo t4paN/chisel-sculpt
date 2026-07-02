@@ -22,14 +22,26 @@
     // ?debug=1 → on-page console overlay: mirrors console.log/warn/error and
     // uncaught errors into a floating panel. For devices where devtools aren't
     // handy (phone/tablet LAN testing) — no effect without the query param.
+    // Hidden by default; the `~` key toggles it (quake-style). Mirroring stays
+    // wired up while hidden, so nothing is lost before the panel is opened.
     var dbgPane = null;
     if (/[?&]debug=1/.test(location.search)) {
       dbgPane = document.createElement('pre');
       dbgPane.style.cssText = 'position:fixed;left:0;bottom:0;max-height:45vh;width:100vw;' +
         'margin:0;padding:4px 6px;overflow-y:auto;z-index:99;box-sizing:border-box;' +
         'background:rgba(0,0,0,.75);color:#9f9;font:10px/1.4 monospace;white-space:pre-wrap;' +
-        'pointer-events:auto';
+        'pointer-events:auto;display:none';
       document.body.appendChild(dbgPane);
+      // `~` (Backquote) toggles the panel. Captured on window so it fires
+      // regardless of focus, and swallowed so the backtick never reaches the app.
+      window.addEventListener('keydown', function(e) {
+        if (e.code === 'Backquote' || e.key === '`' || e.key === '~') {
+          e.preventDefault(); e.stopPropagation();
+          var hidden = dbgPane.style.display === 'none';
+          dbgPane.style.display = hidden ? 'block' : 'none';
+          if (hidden) dbgPane.scrollTop = dbgPane.scrollHeight;
+        }
+      }, true);
       var dbgWrap = function(fn, tag, color) {
         return function() {
           fn.apply(console, arguments);
@@ -49,7 +61,7 @@
       window.addEventListener('unhandledrejection', function(e) {
         console.error('[promise]', e.reason && (e.reason.message || String(e.reason)));
       });
-      console.log('[dbg] overlay on; ua: ' + navigator.userAgent);
+      console.log('[dbg] overlay ready (press ~ to toggle); ua: ' + navigator.userAgent);
       console.log('[dbg] secureContext=' + window.isSecureContext +
                   ' webgpu=' + (navigator.gpu ? 'yes' : 'NO'));
     }

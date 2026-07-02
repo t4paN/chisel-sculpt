@@ -9,3 +9,6 @@ packaging/out/
 packaging/tools/
 
 imgui.ini
+
+# itch.io packaging output
+dist/
