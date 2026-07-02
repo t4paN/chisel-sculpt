@@ -226,13 +226,25 @@ int main(int argc, char* argv[]) {
     glfwWindowHintString(GLFW_X11_INSTANCE_NAME, "Chisel");
 #endif
 
+    // Initial window size.
+#if defined(__EMSCRIPTEN__)
+    // Emscripten's GLFW shim has no real monitor and returns a NULL video mode
+    // (libglfw.js: glfwGetVideoMode => 0), so mode->width/height read 0 and
+    // glfwCreateWindow(0,0) fails ("width <= 0 ... return 0"). Size from the browser
+    // viewport instead; the in-loop resize handler tracks the canvas thereafter.
+    int init_w = EM_ASM_INT({ return window.innerWidth  | 0; });
+    int init_h = EM_ASM_INT({ return window.innerHeight | 0; });
+    if (init_w <= 0) init_w = 1280;
+    if (init_h <= 0) init_h = 720;
+#else
     // Get primary monitor for fullscreen
     GLFWmonitor* monitor = glfwGetPrimaryMonitor();
     const GLFWvidmode* mode = glfwGetVideoMode(monitor);
+    int init_w = mode->width, init_h = mode->height;
+#endif
 
     // Start windowed but maximized (easier for development)
-    GLFWwindow* window = glfwCreateWindow(
-        mode->width, mode->height, "Chisel", nullptr, nullptr);
+    GLFWwindow* window = glfwCreateWindow(init_w, init_h, "Chisel", nullptr, nullptr);
     if (!window) {
         std::fprintf(stderr, "Failed to create window\n");
         glfwTerminate();
@@ -244,7 +256,7 @@ int main(int argc, char* argv[]) {
     // ---- WebGPU: instance -> surface(X11) -> adapter -> device -> seam ----
     // (mirrors src/gpu/wgpu_window.cpp; the seam owns resources, the window owns
     // surface/device creation + per-frame acquire/present.)
-    int fbw = mode->width, fbh = mode->height;
+    int fbw = init_w, fbh = init_h;
     glfwGetFramebufferSize(window, &fbw, &fbh);
     WGPUInstance instance = wgpuCreateInstance(nullptr);
     if (!instance) { std::fprintf(stderr, "wgpuCreateInstance failed\n"); return 1; }
@@ -276,7 +288,13 @@ int main(int argc, char* argv[]) {
     acb.callback = onAdapter;
     acb.userdata1 = &ar;
     wgpuInstanceRequestAdapter(instance, &aopt, acb);
-    for (int i = 0; i < 200 && !ar.done; ++i) wgpuInstanceProcessEvents(instance);
+    for (int i = 0; i < 200 && !ar.done; ++i) {
+        wgpuInstanceProcessEvents(instance);
+#ifdef __EMSCRIPTEN__
+        emscripten_sleep(10);  // ASYNCIFY yield: requestAdapter is a JS promise that
+                               // only resolves once control returns to the event loop.
+#endif
+    }
     if (!ar.ok) { std::fprintf(stderr, "no WebGPU adapter\n"); return 1; }
 
     DeviceResult dr;
@@ -302,7 +320,12 @@ int main(int argc, char* argv[]) {
     WGPUDeviceDescriptor ddesc = WGPU_DEVICE_DESCRIPTOR_INIT;
     ddesc.requiredLimits = &limits;
     wgpuAdapterRequestDevice(ar.adapter, &ddesc, dcb);
-    for (int i = 0; i < 200 && !dr.done; ++i) wgpuInstanceProcessEvents(instance);
+    for (int i = 0; i < 200 && !dr.done; ++i) {
+        wgpuInstanceProcessEvents(instance);
+#ifdef __EMSCRIPTEN__
+        emscripten_sleep(10);  // ASYNCIFY yield (see requestAdapter loop above).
+#endif
+    }
     if (!dr.ok) { std::fprintf(stderr, "no WebGPU device\n"); return 1; }
     g_device = dr.device;
     WGPUQueue queue = wgpuDeviceGetQueue(g_device);
@@ -517,7 +540,7 @@ int main(int argc, char* argv[]) {
     float fps_display = 0.0f;
 
     // Store windowed position/size for fullscreen restore
-    int windowed_x = 0, windowed_y = 0, windowed_w = mode->width, windowed_h = mode->height;
+    int windowed_x = 0, windowed_y = 0, windowed_w = init_w, windowed_h = init_h;
     glfwGetWindowPos(window, &windowed_x, &windowed_y);
     glfwGetWindowSize(window, &windowed_w, &windowed_h);
 
@@ -536,8 +559,12 @@ int main(int argc, char* argv[]) {
         stk.base.color.resize(vb, 0xFFFFFFFFu);
     };
 
-    // Main loop
-    while (!glfwWindowShouldClose(window)) {
+    // Main loop. The body is a lambda capturing every setup local by reference so the
+    // same code drives both targets: native spins it in a blocking while-loop; the web
+    // hands it to emscripten_set_main_loop_arg (below), since the browser owns the event
+    // loop. simulate_infinite_loop=true throws to keep main()'s stack frame — and thus
+    // every captured local and the lambda itself — alive across browser-driven frames.
+    auto frame = [&]() {
         input.begin_frame();
         glfwPollEvents();
         tablet.poll(brush_stroke.is_active());
@@ -593,7 +620,7 @@ int main(int argc, char* argv[]) {
         glfwGetFramebufferSize(window, &win_w, &win_h);
         if (win_w == 0 || win_h == 0) {
             input.end_frame();
-            continue;
+            return;   // skip this frame (lambda body; == `continue` in the native loop)
         }
 #ifdef CHISEL_BACKEND_WEBGPU
         // Reconfigure the surface + depth on resize; per-pass viewport is set by the
@@ -1584,11 +1611,16 @@ int main(int argc, char* argv[]) {
 
         // ---- Cursor visibility ----
         bool non_edit_mode = input.interaction_mode != InputState::InteractionMode::EDIT;
+        // Native hides the OS cursor while sculpting (we draw our own brush cursor).
+        // Emscripten's GLFW can't hide the cursor (it warns every frame) — leave the
+        // browser cursor visible on the web.
+#ifndef __EMSCRIPTEN__
         if (input.quit_requested || input.export_dialog_active || input.import_dialog_active || input.save_dialog_active || input.remesh_confirm_pending || input.voxel_merge_confirm_pending || imgui_wants_mouse || non_edit_mode) {
             glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
         } else {
             glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_HIDDEN);
         }
+#endif
 
         // ---- Render ----
 #ifdef CHISEL_BACKEND_WEBGPU
@@ -1938,7 +1970,12 @@ int main(int argc, char* argv[]) {
             wgpuCommandBufferRelease(cmd);
             wgpuCommandEncoderRelease(enc);
         }
+#ifndef __EMSCRIPTEN__
+        // Native (wgpu-native) presents explicitly. On the web the browser composites
+        // the canvas automatically when the requestAnimationFrame callback returns, and
+        // emdawnwebgpu aborts if wgpuSurfacePresent is called at all — so skip it.
         wgpuSurfacePresent(g_surface);
+#endif
         gpu::webgpu_set_default_color(nullptr);
         if (frameView) wgpuTextureViewRelease(frameView);
         if (surfTex.texture) wgpuTextureRelease(surfTex.texture);
@@ -1948,7 +1985,18 @@ int main(int argc, char* argv[]) {
         glfwSwapBuffers(window);
 #endif
         input.end_frame();
-    }
+    };
+
+#ifdef __EMSCRIPTEN__
+    // Browser drives the loop via requestAnimationFrame (fps=0). simulate_infinite_loop
+    // =true unwinds out of main() but preserves its stack, so &frame and every captured
+    // local stay valid; the trampoline (a captureless lambda → C function pointer)
+    // forwards each tick to `frame`. Code after this line never runs on the web.
+    emscripten_set_main_loop_arg(
+        [](void* p) { (*static_cast<decltype(frame)*>(p))(); }, &frame, 0, true);
+#else
+    while (!glfwWindowShouldClose(window)) frame();
+#endif
 
 #ifdef CHISEL_BACKEND_WEBGPU
     ImGui_ImplWGPU_Shutdown();

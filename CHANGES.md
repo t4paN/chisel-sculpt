@@ -2,6 +2,44 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-02 — WebGPU web target: FIRST INTERACTIVE BROWSER RENDER
+
+Chisel now runs interactively in the browser on WebGPU (AMD Vega 8 / Mesa RADV / Chrome):
+all compute + render pipelines compile, the sphere renders, the ImGui UI draws and is
+clickable, fullscreen works. Five bring-up fixes in `main.cpp` got us from "compiles" to
+"runs", each a distinct blocker found by reading Chrome's `--enable-logging=stderr` console:
+
+- **Main loop → `emscripten_set_main_loop_arg`.** The native `while(!glfwWindowShouldClose)`
+  never yields to the browser. Wrapped the ~890-line body in a `[&]` lambda: native still
+  spins it in the blocking while; web hands it to `emscripten_set_main_loop_arg(cb,&frame,
+  0,/*simulate_infinite_loop=*/true)` — `true` throws to keep `main()`'s stack (hence every
+  captured local + the lambda) alive across RAF-driven frames. The one loop-level `continue`
+  (zero-size skip) became `return`.
+- **Window creation failed on the web.** Emscripten's GLFW shim returns a NULL video mode
+  (`libglfw.js: glfwGetVideoMode => 0`), so `mode->width/height` read 0 and
+  `glfwCreateWindow(0,0)` returned null ("Failed to create window"). Now sizes the initial
+  window from the browser viewport (`EM_ASM_INT window.innerWidth/Height`, fallback 1280x720)
+  on web; native keeps the primary-monitor video mode. `GLFW_NO_API` was never the problem.
+- **`wgpuSurfacePresent` aborted the runtime every frame.** emdawnwebgpu auto-composites the
+  canvas when the RAF callback returns and aborts if `wgpuSurfacePresent` is called at all;
+  gated it to native (`#ifndef __EMSCRIPTEN__`). This was what killed frame 0.
+- **Startup adapter/device requests now yield on the web** — the two `wgpuInstanceProcessEvents`
+  spins got the `emscripten_sleep(10)` ASYNCIFY yield (same bug/fix as the probe), so the
+  requestAdapter/requestDevice promises actually resolve.
+- **Cursor-hide spam gated off.** Emscripten's GLFW can't hide the cursor and warned every
+  frame; the `glfwSetInputMode(GLFW_CURSOR_HIDDEN)` block is native-only now (browser cursor
+  stays visible).
+
+Native `build-wgpu` rebuilt green throughout (all web paths are `__EMSCRIPTEN__`-gated).
+
+**Known-not-yet-good (next thread — see `../wgpu-finishline.md`):** brush strokes don't land
+and FPS drops on stroke/orbit/idle. Root causes identified: (1) global `-sASYNCIFY=1` with no
+allowlist taxes the whole hot path; (2) the brush reads GPU→CPU per dab, and on the web each
+readback is a full event-loop round-trip that also stalls the stroke mid-RAF. Fixes deferred
+to the perf thread (JSPI/ASYNCIFY-narrowing + batch stroke readback to once-per-stroke).
+File I/O on web is in-memory MEMFS only (no host folder, wiped on reload) — real import/export
+needs a preload or browser file-picker (was checklist step 4).
+
 ## 2026-07-02 — WebGPU web target: async readback gating → full app compiles + links for the web
 
 - **`webgpu_backend.cpp`'s three map-read readbacks now yield to the browser event loop
