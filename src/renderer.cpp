@@ -1709,6 +1709,77 @@ void Renderer::render_screen_buffers(const Camera& cam, int w, int h) {
     gpu::draw(rp, screen_tri_count * 3);
     gpu::end_render_pass(rp);   // rebinds the default framebuffer
     gpu::release_bind_group(grp);
+
+#if defined(CHISEL_BACKEND_WEBGPU)
+    // Kick the async plane reads right behind the render (queue order guarantees the
+    // copies see this pass's output even if a pick pass overwrites the FBO later).
+    // poll_plane_reads() lands them; until then sample_* report not-ready.
+    for (int i = 0; i < 3; ++i)
+        if (plane_tk[i]) { gpu::ticket_drop(gpu_dev, plane_tk[i]); plane_tk[i] = 0; }
+    plane_valid = false;
+    plane_tk[0] = gpu::read_target_region_async(gpu_dev, screen_target, 0, 0, 0, w, h);
+    plane_tk[1] = gpu::read_target_region_async(gpu_dev, screen_target, 1, 0, 0, w, h);
+    plane_tk[2] = gpu::read_target_region_async(gpu_dev, screen_target, 2, 0, 0, w, h);
+    plane_kick_w = w; plane_kick_h = h;
+    plane_pending = true;
+#endif
+}
+
+void Renderer::poll_plane_reads() {
+#if defined(CHISEL_BACKEND_WEBGPU)
+    if (!plane_pending) return;
+    for (int i = 0; i < 3; ++i)
+        if (!gpu::ticket_ready(gpu_dev, plane_tk[i])) return;
+    size_t px = (size_t)plane_kick_w * plane_kick_h;
+    plane_depth.resize(px);
+    plane_norm.resize(px * 3);
+    plane_triid.resize(px);
+    bool ok = px > 0;
+    ok &= gpu::ticket_take(gpu_dev, plane_tk[0], plane_depth.data(), px * sizeof(float));
+    ok &= gpu::ticket_take(gpu_dev, plane_tk[1], plane_norm.data(),  px * 3 * sizeof(float));
+    ok &= gpu::ticket_take(gpu_dev, plane_tk[2], plane_triid.data(), px * sizeof(uint32_t));
+    plane_tk[0] = plane_tk[1] = plane_tk[2] = 0;
+    plane_pending = false;
+    plane_w = plane_kick_w; plane_h = plane_kick_h;
+    plane_valid = ok;
+#endif
+}
+
+bool Renderer::sample_depth(int x, int y, float* out) {
+#if defined(CHISEL_BACKEND_WEBGPU)
+    if (!plane_valid || x < 0 || y < 0 || x >= plane_w || y >= plane_h) return false;
+    *out = plane_depth[(size_t)y * plane_w + x];
+    return true;
+#else
+    if (x < 0 || y < 0 || x >= screen_target.width || y >= screen_target.height) return false;
+    read_depth_region(x, y, 1, 1, out);
+    return true;
+#endif
+}
+
+bool Renderer::sample_normal(int x, int y, float out[3]) {
+#if defined(CHISEL_BACKEND_WEBGPU)
+    if (!plane_valid || x < 0 || y < 0 || x >= plane_w || y >= plane_h) return false;
+    size_t i = ((size_t)y * plane_w + x) * 3;
+    out[0] = plane_norm[i + 0]; out[1] = plane_norm[i + 1]; out[2] = plane_norm[i + 2];
+    return true;
+#else
+    if (x < 0 || y < 0 || x >= screen_target.width || y >= screen_target.height) return false;
+    read_normal_region(x, y, 1, 1, out);
+    return true;
+#endif
+}
+
+bool Renderer::sample_triid(int x, int y, uint32_t* out) {
+#if defined(CHISEL_BACKEND_WEBGPU)
+    if (!plane_valid || x < 0 || y < 0 || x >= plane_w || y >= plane_h) return false;
+    *out = plane_triid[(size_t)y * plane_w + x];
+    return true;
+#else
+    if (x < 0 || y < 0 || x >= screen_target.width || y >= screen_target.height) return false;
+    read_triid_region(x, y, 1, 1, out);
+    return true;
+#endif
 }
 
 void Renderer::read_depth_region(int x, int y, int w, int h, float* out) {

@@ -255,14 +255,24 @@ add_dependencies(chisel chisel_shaders)
 
 # Emscripten web build: emdawnwebgpu port + emulated GLFW (compile+link), ASYNCIFY
 # for the event-loop-yielding async readbacks, memory growth, and an .html shell.
+# NOTE: JSPI (-sJSPI) was tried 2026-07-02 — near-zero overhead, but it can only
+# suspend on a WebAssembly.promising stack. Startup polls (inside main()) work, but
+# the RAF main-loop callback is NOT promising, so any in-frame readback throws
+# "SuspendError: trying to suspend without WebAssembly.promising". JSPI is viable
+# only once NO readback happens inside the frame (see wgpu-finishline.md item 2).
 if(EMSCRIPTEN)
     target_compile_options(chisel PRIVATE ${CHISEL_WEB_FLAGS})
     target_link_options(chisel PRIVATE
         ${CHISEL_WEB_FLAGS}
         -sUSE_GLFW=3
         -sASYNCIFY=1
-        -sALLOW_MEMORY_GROWTH=1)
-    set_target_properties(chisel PROPERTIES SUFFIX ".html")
+        -sALLOW_MEMORY_GROWTH=1
+        # Custom full-window shell: canvas is 100vw x 100vh (no logo/spinner/textarea,
+        # no stock "Resize canvas" button). The app reads clientWidth/clientHeight and
+        # sizes the surface/depth to match, so attachments never diverge (see main.cpp).
+        --shell-file ${CMAKE_SOURCE_DIR}/packaging/web/shell.html)
+    set_target_properties(chisel PROPERTIES SUFFIX ".html"
+        LINK_DEPENDS ${CMAKE_SOURCE_DIR}/packaging/web/shell.html)
 endif()
 
 # Version: an explicit -DCHISEL_VERSION (CI injects the tag) wins; otherwise

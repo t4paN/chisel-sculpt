@@ -155,25 +155,27 @@ bool wrap_cursor(GLFWwindow* window, InputState& input, int win_w, int win_h) {
     return wrapped;
 }
 
-// Read depth buffer at pixel to determine if cursor is on model
-static bool read_depth_at(Renderer& renderer, int x, int y, int screen_h, float* depth) {
+// Sample depth at a pixel to decide if the cursor is on the model. Returns false
+// when no fresh sample is available this frame — the caller keeps the previous
+// on_model value (matters on webgpu, where the plane cache lands a frame or two
+// after the screen-buffer render; forcing false there would drop the sculpt latch
+// between rapid consecutive strokes).
+static bool sample_on_model(Renderer& renderer, int x, int y, int screen_h, bool* on_model) {
 #ifdef CHISEL_BACKEND_WEBGPU
     // No cheap read of the swapchain depth on WebGPU, so the on-model latch samples
     // the screen-target's linear-depth attachment (0, `-viewPos.z`, cleared to 1000)
-    // — the same idle-refreshed offscreen buffer the cursor-normal sampling reads.
-    // Freshness domain matches: the press latch only fires when stationary, when the
-    // screen buffers are current (they refresh on the idle path before the next press).
+    // via the renderer's CPU plane cache — no in-frame readback.
     (void)screen_h;
     float d = 1000.0f;
-    renderer.read_depth_region(x, y, 1, 1, &d);
-    *depth = d;
-    return d < 500.0f;  // clear = 1000; geometry linear-depth is « far plane (~100)
+    if (!renderer.sample_depth(x, y, &d)) return false;
+    *on_model = d < 500.0f;  // clear = 1000; geometry linear-depth is « far plane (~100)
+    return true;
 #else
     (void)renderer;
     float d;
     glReadPixels(x, screen_h - y, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &d);
-    *depth = d;
-    return d < 1.0f; // 1.0 = clear value = no geometry
+    *on_model = d < 1.0f; // 1.0 = clear value = no geometry
+    return true;
 #endif
 }
 
@@ -617,14 +619,25 @@ int main(int argc, char* argv[]) {
         }
 
         int win_w, win_h;
+#if defined(__EMSCRIPTEN__)
+        // The custom shell's canvas is 100vw x 100vh, so its CSS (client) size is the
+        // authoritative window size. glfwGetFramebufferSize can't be trusted here: the
+        // canvas backing may be resized outside GLFW's knowledge, and stale GLFW size
+        // vs. a resized surface produces attachment-size-mismatch validation errors.
+        // Read the displayed size and drive the surface/depth backing to match it.
+        win_w = EM_ASM_INT({ return (Module.canvas.clientWidth  || window.innerWidth)  | 0; });
+        win_h = EM_ASM_INT({ return (Module.canvas.clientHeight || window.innerHeight) | 0; });
+#else
         glfwGetFramebufferSize(window, &win_w, &win_h);
+#endif
         if (win_w == 0 || win_h == 0) {
             input.end_frame();
             return;   // skip this frame (lambda body; == `continue` in the native loop)
         }
 #ifdef CHISEL_BACKEND_WEBGPU
         // Reconfigure the surface + depth on resize; per-pass viewport is set by the
-        // seam (no global glViewport).
+        // seam (no global glViewport). On web, configureSurface also sets the canvas
+        // backing (dpr=1), keeping color (surface) and depth attachments the same size.
         if (win_w != fbw || win_h != fbh) {
             fbw = win_w; fbh = win_h;
             configureSurface(fbw, fbh);
@@ -633,6 +646,12 @@ int main(int argc, char* argv[]) {
 #else
         glViewport(0, 0, win_w, win_h);
 #endif
+
+        // Pump async GPU→CPU readbacks once per frame: deliver map callbacks (no-op
+        // on GL) and land any finished screen-buffer plane reads. Everything that
+        // samples the screen buffers inside the frame goes through these caches.
+        gpu::process_events(renderer.gpu_dev);
+        renderer.poll_plane_reads();
 
         // Update cursor normal: average surface normal under the brush circle.
         // Sampling contributes for any brush pixel that hits geometry — so as the
@@ -662,22 +681,23 @@ int main(int argc, char* argv[]) {
             int cy = (int)input.mouse_y;
             if (cx >= 0 && cx < win_w && cy >= 0 && cy < win_h) {
                 // On-model latch (SCULPT vs ORBIT on left-press) reads the same fresh
-                // screen buffer as the cursor normal. Gated with it so the depth
-                // readback — a wasted glReadPixels on GL, a full GPU sync on WebGPU —
-                // only fires when stationary over fresh buffers, which is exactly when
-                // the press latch fires. Orbiting/mid-stroke, on_model keeps its last
-                // value (not consumed then).
-                float depth;
-                input.on_model = read_depth_at(renderer, cx, cy, win_h, &depth);
+                // screen buffer as the cursor normal. Gated with it so it only fires
+                // when stationary over fresh buffers, which is exactly when the press
+                // latch fires. Orbiting/mid-stroke — or while the webgpu plane cache
+                // hasn't landed yet — on_model keeps its last value.
+                bool om;
+                if (sample_on_model(renderer, cx, cy, win_h, &om))
+                    input.on_model = om;
 
                 float norm_pixel[3];
-                renderer.read_normal_region(cx, cy, 1, 1, norm_pixel);
-                float len = std::sqrt(norm_pixel[0]*norm_pixel[0] + norm_pixel[1]*norm_pixel[1] + norm_pixel[2]*norm_pixel[2]);
-                if (len > 1e-6f) {
-                    target_nx = norm_pixel[0] / len;
-                    target_ny = norm_pixel[1] / len;
-                    target_nz = norm_pixel[2] / len;
-                    have_sample = true;
+                if (renderer.sample_normal(cx, cy, norm_pixel)) {
+                    float len = std::sqrt(norm_pixel[0]*norm_pixel[0] + norm_pixel[1]*norm_pixel[1] + norm_pixel[2]*norm_pixel[2]);
+                    if (len > 1e-6f) {
+                        target_nx = norm_pixel[0] / len;
+                        target_ny = norm_pixel[1] / len;
+                        target_nz = norm_pixel[2] / len;
+                        have_sample = true;
+                    }
                 }
             }
         }
@@ -1108,25 +1128,38 @@ int main(int argc, char* argv[]) {
                                input.brush_size,
                                win_w, win_h, mesh->vertex_count(), *multires,
                                input.current_brush, scene.active_mesh_id(),
-                               scene.active_entity().multires_gpu);
+                               scene.active_entity().multires_gpu,
+                               !screen_buffers_dirty);
             brush_stroke.cursor_hist_count = 1;
             brush_stroke.cursor_hist_x[0] = (float)input.mouse_x;
             brush_stroke.cursor_hist_y[0] = (float)input.mouse_y;
             app_state = AppState::SCULPTING;
         }
 
-        // SCULPTING → IDLE (pen-up)
-        if (app_state == AppState::SCULPTING && input.drag_mode != InputState::DragMode::SCULPT) {
-            bool had_update = brush_stroke.finalize(*mesh, scene.active_undo(), *multires,
-                                                     scene.active_entity().multires_gpu,
-                                                     renderer, input.current_brush,
-                                                     input.autosmooth);
-            print_undo_top("stroke-commit");
+        // SCULPTING → IDLE (pen-up). finalize is a small per-frame state machine:
+        // it drains in-flight dab readbacks, kicks the pen-up buffer reads, and
+        // commits when they land — one call on GL, a few frames on webgpu/web.
+        // app_state stays SCULPTING while it runs, which blocks new strokes and the
+        // IDLE-only ops (undo, delete, merge, …) exactly like an active stroke; a
+        // re-press during the reconcile starts its stroke from the IDLE transition
+        // a frame or two later.
+        if (app_state == AppState::SCULPTING
+            && (brush_stroke.reconciling()
+                || input.drag_mode != InputState::DragMode::SCULPT)) {
             input.sculpting = false;
-            if (had_update)
-                renderer.update_screen_positions(*mesh);
-            screen_buffers_dirty = true;
-            app_state = AppState::IDLE;
+            DabContext fctx { renderer, camera, compute, *mesh, *multires, input,
+                              win_w, win_h, brush_stroke.vertex_count, input.brush_size };
+            bool had_update = false;
+            if (brush_stroke.finalize(fctx, *mesh, scene.active_undo(), *multires,
+                                      scene.active_entity().multires_gpu,
+                                      renderer, input.current_brush,
+                                      input.autosmooth, had_update)) {
+                print_undo_top("stroke-commit");
+                if (had_update)
+                    renderer.update_screen_positions(*mesh);
+                screen_buffers_dirty = true;
+                app_state = AppState::IDLE;
+            }
         }
 
         // ---- State-specific update ----
@@ -1598,14 +1631,17 @@ int main(int argc, char* argv[]) {
                     }
                 }
 
+                brush_stroke.needs_mesh_update = true;
+                } // dab_count > 0
+
+                // Runs every stroke frame (not just dab frames): drains landed async
+                // dab readbacks — snap/normals bookkeeping for dabs kicked 1–2 frames
+                // ago — then dispatches partial normals for whatever landed.
                 {
                     DabContext ctx { renderer, camera, compute, *mesh, *multires, input, win_w, win_h,
                                      brush_stroke.vertex_count, eff_brush_size };
                     brush_stroke.post_frame(ctx);
                 }
-
-                brush_stroke.needs_mesh_update = true;
-                } // dab_count > 0
             }
         }
 

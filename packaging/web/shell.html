@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en-us">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+  <title>Chisel</title>
+  <style>
+    html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #1a1a1a; }
+    /* Full-window canvas. The CSS size (100vw x 100vh) is authoritative — the app
+       reads clientWidth/clientHeight each frame and sets the WebGPU surface + depth
+       backing to match (dpr=1), so color/depth attachments never diverge. */
+    #canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block;
+              border: 0; outline: none; background: #1a1a1a; touch-action: none; }
+    #boot { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+            color: #787878; font-family: system-ui, sans-serif; font-size: 14px; pointer-events: none; }
+  </style>
+</head>
+<body>
+  <canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
+  <div id="boot">Loading Chisel…</div>
+  <script>
+    // ?debug=1 → on-page console overlay: mirrors console.log/warn/error and
+    // uncaught errors into a floating panel. For devices where devtools aren't
+    // handy (phone/tablet LAN testing) — no effect without the query param.
+    var dbgPane = null;
+    if (/[?&]debug=1/.test(location.search)) {
+      dbgPane = document.createElement('pre');
+      dbgPane.style.cssText = 'position:fixed;left:0;bottom:0;max-height:45vh;width:100vw;' +
+        'margin:0;padding:4px 6px;overflow-y:auto;z-index:99;box-sizing:border-box;' +
+        'background:rgba(0,0,0,.75);color:#9f9;font:10px/1.4 monospace;white-space:pre-wrap;' +
+        'pointer-events:auto';
+      document.body.appendChild(dbgPane);
+      var dbgWrap = function(fn, tag, color) {
+        return function() {
+          fn.apply(console, arguments);
+          var line = document.createElement('div');
+          if (color) line.style.color = color;
+          line.textContent = tag + Array.prototype.map.call(arguments, function(a) {
+            try { return typeof a === 'string' ? a : JSON.stringify(a); }
+            catch (e) { return String(a); }
+          }).join(' ');
+          dbgPane.appendChild(line);
+          dbgPane.scrollTop = dbgPane.scrollHeight;
+        };
+      };
+      console.log   = dbgWrap(console.log.bind(console),   '', null);
+      console.warn  = dbgWrap(console.warn.bind(console),  '[warn] ', '#ff9');
+      console.error = dbgWrap(console.error.bind(console), '[err] ',  '#f99');
+      window.addEventListener('unhandledrejection', function(e) {
+        console.error('[promise]', e.reason && (e.reason.message || String(e.reason)));
+      });
+      console.log('[dbg] overlay on; ua: ' + navigator.userAgent);
+      console.log('[dbg] secureContext=' + window.isSecureContext +
+                  ' webgpu=' + (navigator.gpu ? 'yes' : 'NO'));
+    }
+    var canvasElement = document.getElementById('canvas');
+    canvasElement.addEventListener('webglcontextlost', function(e) {
+      alert('Graphics context lost — reload the page.'); e.preventDefault();
+    }, false);
+    var Module = {
+      print:   function() { console.log.apply(console, arguments); },
+      printErr: function() { console.error.apply(console, arguments); },
+      canvas:  canvasElement,
+      onRuntimeInitialized: function() {
+        var b = document.getElementById('boot'); if (b) b.remove();
+      }
+    };
+    window.onerror = function(msg, src, line) {
+      console.error('[onerror]', msg, src ? src + ':' + line : '');
+    };
+  </script>
+  {{{ SCRIPT }}}
+</body>
+</html>

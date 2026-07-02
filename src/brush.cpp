@@ -67,6 +67,7 @@ BrushRegion compute_brush_region(float dab_x, float dab_y,
 MoveState::MoveState()
     : total_dx(0.0f), total_dy(0.0f), total_dz(0.0f)
     , captured(false)
+    , capture_tk(0), capture_words(0), capture_booked(false)
 {}
 
 void MoveState::reset(uint32_t vert_count) {
@@ -78,6 +79,9 @@ void MoveState::reset(uint32_t vert_count) {
     init_z.clear();
     total_dx = total_dy = total_dz = 0.0f;
     captured = false;
+    capture_tk = 0;          // owner (BrushStroke::end/finalize) drops in-flight tickets
+    capture_words = 0;
+    capture_booked = false;
 }
 
 void MoveState::clear() {
@@ -85,6 +89,9 @@ void MoveState::clear() {
     weights.clear();
     affected_flag.clear();
     captured = false;
+    capture_tk = 0;
+    capture_words = 0;
+    capture_booked = false;
 }
 
 void MaskState::reset() {
@@ -120,7 +127,10 @@ static void set_area_normal(P& p, float ax, float ay, float az) {
 
 // --- BrushStroke ---
 
-static void snap_and_mirror_dirty(BrushStroke& bs, DabContext& ctx) {
+// anchor_x is the dab's anchor X at dispatch time — passed explicitly because the
+// bookkeeping now runs when the dab's async dirty readback lands, by which point
+// bs.anchor_pos may already belong to a later dab.
+static void snap_and_mirror_dirty(BrushStroke& bs, DabContext& ctx, float anchor_x) {
     uint32_t vc = ctx.mesh.vertex_count();
     for (uint32_t v : bs.dirty_verts) {
         if (v >= vc) {
@@ -152,7 +162,7 @@ static void snap_and_mirror_dirty(BrushStroke& bs, DabContext& ctx) {
                 continue;
             }
             if (mv == v) continue;
-            if (ctx.mesh.pos_x[v] * bs.anchor_pos.x < 0.0f) continue;
+            if (ctx.mesh.pos_x[v] * anchor_x < 0.0f) continue;
             if (!bs.snap_flag[mv]) {
                 bs.snap_flag[mv] = true;
                 if (bs.stroke_writes_to_base) {
@@ -179,6 +189,81 @@ static uint32_t mirror_of(uint32_t v, const Mesh& m) {
     return v;
 }
 
+// --- Per-dab async dirty readbacks ---
+
+void BrushStroke::kick_dab_readback(DabContext& ctx, uint8_t kind) {
+    uint32_t words = 0;
+    gpu::ReadTicket tk = ctx.compute.kick_dirty_read(words);
+    if (!tk) return;
+    PendingDab pd;
+    pd.tk = tk;
+    pd.words = words;
+    pd.anchor_x = anchor_pos.x;
+    pd.kind = kind;
+    pending_dabs.push_back(pd);
+}
+
+void BrushStroke::drain_dab_readbacks(DabContext& ctx) {
+    // Land the move/limb capture list first — dabs applied while it was in flight
+    // skipped their bookkeeping, so catch up once here (the affected set is
+    // constant for the whole stroke; snap dedups by flag).
+    if (move.capture_tk && gpu::ticket_ready(ctx.compute.gpu_dev, move.capture_tk)) {
+        ctx.compute.take_count_list_read(move.capture_tk, move.capture_words,
+                                         move.affected_list);
+        move.capture_tk = 0;
+    }
+    if (move.captured && move.capture_tk == 0 && !move.capture_booked
+        && !move.affected_list.empty()) {
+        dirty_verts = move.affected_list;
+        snap_and_mirror_dirty(*this, ctx, anchor_pos.x);
+        post_dab(ctx);
+        dirty_verts.clear();
+        move.capture_booked = true;
+    }
+
+    // Consume landed dab tickets in FIFO order (dab order matters for first-touch
+    // snapshots; queue order means earlier tickets land first anyway).
+    while (!pending_dabs.empty()) {
+        PendingDab pd = pending_dabs.front();
+        if (!gpu::ticket_ready(ctx.compute.gpu_dev, pd.tk)) break;
+        pending_dabs.erase(pending_dabs.begin());
+        dirty_verts.clear();
+        if (!ctx.compute.take_count_list_read(pd.tk, pd.words, dirty_verts)) continue;
+        if (dirty_verts.empty()) continue;
+        if (pd.kind == DAB_GEO) {
+            snap_and_mirror_dirty(*this, ctx, pd.anchor_x);
+            post_dab(ctx);
+        } else if (pd.kind == DAB_MASK) {
+            if (mask.snap_flag.empty()) {
+                mask.snap_flag.assign(vertex_count, false);
+                mask.snap.assign(vertex_count, 0.0f);
+            }
+            for (uint32_t v : dirty_verts) {
+                if (v >= vertex_count) continue;
+                if (!mask.snap_flag[v]) {
+                    mask.snap_flag[v] = true;
+                    mask.snap[v] = (v < (uint32_t)ctx.mesh.mask.size()) ? ctx.mesh.mask[v] : 0.0f;
+                    mask.snap_list.push_back(v);
+                }
+            }
+        } else {   // DAB_COLOR
+            if (color.snap_flag.empty()) {
+                color.snap_flag.assign(vertex_count, false);
+                color.snap.assign(vertex_count, 0xFFFFFFFFu);
+            }
+            for (uint32_t v : dirty_verts) {
+                if (v >= vertex_count) continue;
+                if (!color.snap_flag[v]) {
+                    color.snap_flag[v] = true;
+                    color.snap[v] = (v < (uint32_t)ctx.mesh.color.size()) ? ctx.mesh.color[v] : 0xFFFFFFFFu;
+                    color.snap_list.push_back(v);
+                }
+            }
+        }
+        dirty_verts.clear();
+    }
+}
+
 BrushStroke::BrushStroke()
     : region_x(0), region_y(0), region_w(0), region_h(0)
     , cached_w(0), cached_h(0)
@@ -196,7 +281,9 @@ BrushStroke::BrushStroke()
     , gpu_mask_deferred(false)
     , gpu_color_deferred(false)
     , phase(StrokePhase::NONE), needs_mesh_update(false), vertex_count(0)
-{}
+{
+    pending_dabs.reserve(64);   // dabs in flight ≈ dabs/frame × readback latency — tiny
+}
 
 void BrushStroke::set_anchor(const Mesh& mesh, const Camera& cam,
                               float cursor_x, float cursor_y, float brush_radius,
@@ -206,12 +293,15 @@ void BrushStroke::set_anchor(const Mesh& mesh, const Camera& cam,
     int cy = (int)cursor_y;
     if (cx < 0 || cx >= screen_w || cy < 0 || cy >= screen_h) return;
 
+    // Cursor samples come from the renderer's plane cache — no in-frame readback.
+    // Not-landed-yet (webgpu, 1–2 frames after the screen-buffer render) skips the
+    // dab; on GL the samples are the same immediate 1×1 reads as before.
     uint32_t tid;
     float nx, ny, nz;
 
-    renderer.read_triid_region(cx, cy, 1, 1, &tid);
+    if (!renderer.sample_triid(cx, cy, &tid)) return;
     float norm_pixel[3];
-    renderer.read_normal_region(cx, cy, 1, 1, norm_pixel);
+    if (!renderer.sample_normal(cx, cy, norm_pixel)) return;
     nx = norm_pixel[0];
     ny = norm_pixel[1];
     nz = norm_pixel[2];
@@ -232,7 +322,7 @@ void BrushStroke::set_anchor(const Mesh& mesh, const Camera& cam,
     // by the per-pixel depth. So the in-plane offset uses `distance`; `hit_depth` only
     // places the point along the view axis. (linear depth = fwd · (world − cam_pos).)
     float hit_depth = 0.0f;
-    renderer.read_depth_region(cx, cy, 1, 1, &hit_depth);
+    if (!renderer.sample_depth(cx, cy, &hit_depth)) return;
     float ndc_x  = 2.0f * (float)cx / (float)screen_w - 1.0f;
     float ndc_y  = 1.0f - 2.0f * (float)cy / (float)screen_h;
     float aspect = (float)screen_w / (float)screen_h;
@@ -284,9 +374,21 @@ void BrushStroke::begin(Renderer& renderer, const Camera& cam,
                         float screen_x, float screen_y, float brush_radius,
                         int screen_w_in, int screen_h_in, uint32_t vert_count,
                         const MultiresStack& multires, BrushType brush_type,
-                        uint32_t entity_id, MultiresGPU& mgpu) {
+                        uint32_t entity_id, MultiresGPU& mgpu,
+                        bool screen_buffers_fresh) {
     phase = StrokePhase::BEGIN;
     needs_mesh_update = false;
+
+    // Drop any leftover async dab tickets from an aborted stroke (mode switches can
+    // force phase=NONE without finalize); their bookkeeping context is gone.
+    for (PendingDab& pd : pending_dabs)
+        gpu::ticket_drop(renderer.gpu_dev, pd.tk);
+    pending_dabs.clear();
+    if (move.capture_tk) {
+        gpu::ticket_drop(renderer.gpu_dev, move.capture_tk);
+        move.capture_tk = 0;
+    }
+
     vertex_count = vert_count;
     stroke_entity_id = entity_id;
     last_dab_x = screen_x;
@@ -314,7 +416,12 @@ void BrushStroke::begin(Renderer& renderer, const Camera& cam,
     mask.reset();
     color.reset();
 
-    renderer.render_screen_buffers(cam, screen_w, screen_h);
+    // The sculpt latch normally guarantees the idle path just rendered these for
+    // this exact camera/mesh — reuse them (and the landed plane cache). Only a
+    // press that slipped through on a retained latch (stale buffers) re-renders;
+    // its first dab then anchors when the re-kicked plane cache lands.
+    if (!screen_buffers_fresh)
+        renderer.render_screen_buffers(cam, screen_w, screen_h);
 
     // Freeze per-vertex normals for the entire stroke. Draw_accum reads
     // displacement direction from this snapshot — without it, each dab would
@@ -416,13 +523,12 @@ void BrushStroke::apply_smooth(DabContext& ctx, float dab_x, float dab_y,
 
     ctx.compute.dispatch_smooth(sp, ctx.renderer.vbo_pos, ctx.renderer.ebo);
 
-    ctx.compute.readback_smooth_dirty(dirty_verts);
-
     // Mirror reflection is now re-imposed after every smoothing iteration inside
     // dispatch_smooth (so the seam band relaxes in lockstep), making a separate
     // end-of-dab dispatch_smooth_mirror_apply redundant.
 
-    snap_and_mirror_dirty(*this, ctx);
+    // Dirty list lands async (drain_dab_readbacks) → snap + partial normals there.
+    kick_dab_readback(ctx, DAB_GEO);
 
     gpu_positions_deferred = true;
 }
@@ -481,8 +587,7 @@ void BrushStroke::apply_crease(DabContext& ctx, float dab_x, float dab_y,
         ctx.compute.dispatch_draw_apply(ctx.renderer.vbo_pos, ctx.mesh.vertex_count());
     }
 
-    ctx.compute.readback_smooth_dirty(dirty_verts);
-    snap_and_mirror_dirty(*this, ctx);
+    kick_dab_readback(ctx, DAB_GEO);   // dirty list lands async → snap + normals
 
     gpu_positions_deferred = true;
 }
@@ -538,8 +643,7 @@ void BrushStroke::apply_pinch(DabContext& ctx, float dab_x, float dab_y,
         ctx.compute.dispatch_draw_apply(ctx.renderer.vbo_pos, ctx.mesh.vertex_count());
     }
 
-    ctx.compute.readback_smooth_dirty(dirty_verts);
-    snap_and_mirror_dirty(*this, ctx);
+    kick_dab_readback(ctx, DAB_GEO);   // dirty list lands async → snap + normals
 
     gpu_positions_deferred = true;
 }
@@ -605,8 +709,7 @@ void BrushStroke::apply_draw(DabContext& ctx, float dab_x, float dab_y,
         ctx.compute.dispatch_draw_apply(ctx.renderer.vbo_pos, ctx.mesh.vertex_count());
     }
 
-    ctx.compute.readback_smooth_dirty(dirty_verts);
-    snap_and_mirror_dirty(*this, ctx);
+    kick_dab_readback(ctx, DAB_GEO);   // dirty list lands async → snap + normals
 
     gpu_positions_deferred = true;
 }
@@ -645,13 +748,23 @@ void BrushStroke::apply_move_gpu(DabContext& ctx, float cursor_dx, float cursor_
         ctx.compute.dispatch_move_weight_smooth(vc, 3, ctx.renderer.ebo);
 
         // Capture writes only the active entity's range [0, vc) — no offset filter.
-        ctx.compute.readback_move_affected(move.affected_list);
+        // Kick the affected-list readback async: the apply below only needs the
+        // GPU-side weights, so dabs keep landing while the list is in flight; the
+        // snap/normals bookkeeping catches up in drain_dab_readbacks when it lands.
+        move.capture_words = 0;
+        move.capture_tk = ctx.compute.kick_move_affected_read(move.capture_words);
 
         move.total_dx = move.total_dy = move.total_dz = 0.0f;
         move.captured = true;
     }
 
-    if (move.affected_list.empty()) return;
+    if (move.capture_tk && gpu::ticket_ready(ctx.compute.gpu_dev, move.capture_tk)) {
+        ctx.compute.take_count_list_read(move.capture_tk, move.capture_words,
+                                         move.affected_list);
+        move.capture_tk = 0;
+    }
+    const bool capture_pending = move.capture_tk != 0;
+    if (!capture_pending && move.affected_list.empty()) return;
 
     // Accumulate cursor delta → world-space total
     float fov_rad = ctx.cam.fov * 3.14159265358979323846f / 180.0f;
@@ -679,8 +792,13 @@ void BrushStroke::apply_move_gpu(DabContext& ctx, float cursor_dx, float cursor_
     ap.vertex_count = ctx.vertex_count;
     ctx.compute.dispatch_move_apply(ap, ctx.renderer.vbo_pos);
 
-    dirty_verts = move.affected_list;
-    snap_and_mirror_dirty(*this, ctx);
+    // Bookkeeping needs the CPU list; while the capture readback is in flight the
+    // apply is still correct (cumulative total) and drain_dab_readbacks catches up.
+    if (!capture_pending) {
+        dirty_verts = move.affected_list;
+        snap_and_mirror_dirty(*this, ctx, anchor_pos.x);
+        move.capture_booked = true;
+    }
 
     gpu_positions_deferred = true;
 }
@@ -723,12 +841,20 @@ void BrushStroke::apply_limb_gpu(DabContext& ctx, float cursor_dx, float cursor_
         cp.vertex_count = vc;
         ctx.compute.dispatch_move_capture(cp, ctx.renderer.vbo_pos);
         ctx.compute.dispatch_move_weight_smooth(vc, 3, ctx.renderer.ebo);
-        ctx.compute.readback_move_affected(move.affected_list);
+        // Async affected-list readback — same scheme as apply_move_gpu.
+        move.capture_words = 0;
+        move.capture_tk = ctx.compute.kick_move_affected_read(move.capture_words);
 
         move.captured = true;
     }
 
-    if (move.affected_list.empty()) return;
+    if (move.capture_tk && gpu::ticket_ready(ctx.compute.gpu_dev, move.capture_tk)) {
+        ctx.compute.take_count_list_read(move.capture_tk, move.capture_words,
+                                         move.affected_list);
+        move.capture_tk = 0;
+    }
+    const bool capture_pending = move.capture_tk != 0;
+    if (!capture_pending && move.affected_list.empty()) return;
 
     // This dab's world-space drag increment (screen delta → view plane). Unlike
     // move this is applied incrementally so the relax accumulates frame to frame.
@@ -767,8 +893,11 @@ void BrushStroke::apply_limb_gpu(DabContext& ctx, float cursor_dx, float cursor_
                                     tx, ty, tz, LIMB_TIP_BIAS,
                                     ctx.renderer.vbo_pos, ctx.renderer.vbo_norm, ctx.renderer.ebo);
 
-    dirty_verts = move.affected_list;
-    snap_and_mirror_dirty(*this, ctx);
+    if (!capture_pending) {
+        dirty_verts = move.affected_list;
+        snap_and_mirror_dirty(*this, ctx, anchor_pos.x);
+        move.capture_booked = true;
+    }
 
     gpu_positions_deferred = true;
 }
@@ -784,6 +913,8 @@ void BrushStroke::post_dab(DabContext& ctx) {
 }
 
 void BrushStroke::post_frame(DabContext& ctx) {
+    drain_dab_readbacks(ctx);
+
     if (gpu_dirty.empty()) return;
 
     std::sort(gpu_dirty.begin(), gpu_dirty.end());
@@ -824,20 +955,10 @@ void BrushStroke::apply_mask_gpu(DabContext& ctx, float dab_x, float dab_y,
 
     ctx.compute.dispatch_mask_paint(p, ctx.renderer.vbo_pos);
 
-    std::vector<uint32_t> dirty;
-    ctx.compute.readback_smooth_dirty(dirty);
-
-    if (mask.snap_flag.empty()) {
-        mask.snap_flag.assign(vertex_count, false);
-        mask.snap.assign(vertex_count, 0.0f);
-    }
-    for (uint32_t v : dirty) {
-        if (!mask.snap_flag[v]) {
-            mask.snap_flag[v] = true;
-            mask.snap[v] = (v < (uint32_t)ctx.mesh.mask.size()) ? ctx.mesh.mask[v] : 0.0f;
-            mask.snap_list.push_back(v);
-        }
-    }
+    // Dirty list lands async → mask first-touch snapshots in drain_dab_readbacks.
+    // mesh.mask stays pen-down-stale all stroke, so the delayed snapshot reads the
+    // same pre-stroke values the synchronous one did.
+    kick_dab_readback(ctx, DAB_MASK);
 
     gpu_mask_deferred = true;
     needs_mesh_update = true;
@@ -873,20 +994,8 @@ void BrushStroke::apply_color_gpu(DabContext& ctx, float dab_x, float dab_y,
 
     ctx.compute.dispatch_color_paint(p, ctx.renderer.vbo_pos);
 
-    std::vector<uint32_t> dirty;
-    ctx.compute.readback_smooth_dirty(dirty);
-
-    if (color.snap_flag.empty()) {
-        color.snap_flag.assign(vertex_count, false);
-        color.snap.assign(vertex_count, 0xFFFFFFFFu);
-    }
-    for (uint32_t v : dirty) {
-        if (!color.snap_flag[v]) {
-            color.snap_flag[v] = true;
-            color.snap[v] = (v < (uint32_t)ctx.mesh.color.size()) ? ctx.mesh.color[v] : 0xFFFFFFFFu;
-            color.snap_list.push_back(v);
-        }
-    }
+    // Dirty list lands async → color first-touch snapshots in drain_dab_readbacks.
+    kick_dab_readback(ctx, DAB_COLOR);
 
     gpu_color_deferred = true;
     needs_mesh_update = true;
@@ -915,20 +1024,8 @@ void BrushStroke::apply_color_smooth_gpu(DabContext& ctx, float dab_x, float dab
 
     ctx.compute.dispatch_color_smooth(p, ctx.renderer.vbo_pos, ctx.renderer.ebo);
 
-    std::vector<uint32_t> dirty;
-    ctx.compute.readback_smooth_dirty(dirty);
-
-    if (color.snap_flag.empty()) {
-        color.snap_flag.assign(vertex_count, false);
-        color.snap.assign(vertex_count, 0xFFFFFFFFu);
-    }
-    for (uint32_t v : dirty) {
-        if (!color.snap_flag[v]) {
-            color.snap_flag[v] = true;
-            color.snap[v] = (v < (uint32_t)ctx.mesh.color.size()) ? ctx.mesh.color[v] : 0xFFFFFFFFu;
-            color.snap_list.push_back(v);
-        }
-    }
+    // Dirty list lands async → color first-touch snapshots in drain_dab_readbacks.
+    kick_dab_readback(ctx, DAB_COLOR);
 
     gpu_color_deferred = true;
     needs_mesh_update = true;
@@ -1090,152 +1187,183 @@ void BrushStroke::apply_mask_changes(Mesh& mesh, std::vector<uint32_t>& dirty_ve
     std::fill(mask.delta.begin(), mask.delta.end(), 0.0f);
 }
 
-bool BrushStroke::finalize(Mesh& mesh, UndoStack& stack, MultiresStack& multires,
-                           MultiresGPU& mgpu, Renderer& renderer,
-                           BrushType brush_type, bool autosmooth) {
-    stroke_ring_base = SIZE_MAX;   // set below iff the pen-up diff captured into the ring (3b-iv)
-    // Autosmooth: one Laplacian pass over the stroke's affected verts before
-    // we read positions back. The smoothed positions become the "after" state
-    // recorded in the undo entry. Draw-only — other brushes have their own
-    // tuning. Mask gating is built into the shader.
-    static constexpr float AUTOSMOOTH_STRENGTH   = 0.3f;
-    static constexpr int   AUTOSMOOTH_ITERATIONS = 1;
-    if (autosmooth
-        && brush_type == BrushType::DRAW
-        && !snap_list.empty()
-        && compute && compute->supported
-        && compute->has_stroke_smooth()
-        && compute->adjacency_vertex_count > 0) {
-        for (int it = 0; it < AUTOSMOOTH_ITERATIONS; it++) {
-            compute->dispatch_stroke_smooth_apply(snap_list.data(),
-                                                   (uint32_t)snap_list.size(),
-                                                   AUTOSMOOTH_STRENGTH,
-                                                   renderer.vbo_pos, renderer.ebo);
-        }
-        // Refresh normals for the smoothed verts so the deferred normal
-        // readback below picks up post-smoothing values.
-        if (compute->has_normals()) {
-            compute->dispatch_compute_normals(snap_list.data(),
-                                               (uint32_t)snap_list.size(),
-                                               renderer.vbo_pos, renderer.vbo_norm,
-                                               renderer.ebo);
-            gpu_normals_deferred = true;
-        }
-        // Smoothing changed positions on the VBO; force the deferred-readback
-        // path below so mesh.pos_* / multires sync to the new state.
-        gpu_positions_deferred = true;
+bool BrushStroke::finalize(DabContext& ctx, Mesh& mesh, UndoStack& stack,
+                           MultiresStack& multires, MultiresGPU& mgpu,
+                           Renderer& renderer, BrushType brush_type,
+                           bool autosmooth, bool& had_update) {
+    had_update = false;
+
+    if (fin_state == FinState::IDLE) {
+        // Tick 0: stop dab processing and freeze the commit inputs — the user can
+        // switch brush/toggles while the reconcile is in flight.
+        fin_state = FinState::DRAIN;
+        phase = StrokePhase::END;
+        fin_brush_type = brush_type;
+        fin_autosmooth = autosmooth;
+        fin_ring_captured = false;
+        stroke_ring_base = SIZE_MAX;   // set below iff the pen-up diff captured into the ring (3b-iv)
     }
 
-    // Deferred position readback: GPU wrote positions to VBO during the stroke.
-    // Sync mesh.pos_* and multires at pen-up before commit_undo. The active
-    // entity is the working buffer, so vert index == VBO offset (offset 0).
-    if (gpu_positions_deferred && !snap_list.empty()) {
-        // Phase 2b (GPU-resident undo): reproject the stroke delta into the
-        // resident disp/base layer on the GPU, from the pen-down snapshots. This
-        // is the twin of the CPU readback loop below. The CPU path stays
-        // authoritative in 2b (it re-syncs disp_ssbo via upload_disp_partial at
-        // the end); under CHISEL_DEBUG_MULTIRES we snapshot the GPU result here
-        // and compare it to the CPU result before that re-sync overwrites it.
-        bool gpu_diff_ran = false;
-        size_t ring_base = SIZE_MAX;   // float offset of this stroke's span in the undo ring (3b-iii)
-        if (compute && compute->supported && mgpu.supported
-            && mgpu.level == stroke_level) {
-            // Reserve float6 per touched vert; the diff shader fills (old,new). On
-            // cap overflow reserve returns SIZE_MAX and we skip ring capture (the
-            // CPU path stays authoritative — dual-bookkeeping in 3b-iii).
-            ring_base = compute->undo_ring_reserve(snap_list.size() * 6);
-            stroke_ring_base = ring_base;   // recorded on the UndoEntry by commit_undo (3b-iv)
-            // Circular ring (3b-iv part 2): the span we just reserved may overwrite
-            // older entries' bytes. Invalidate them (→ CPU-stage fallback) before the
-            // diff fills the span. No-op until the ring wraps at the cap.
-            if (ring_base != SIZE_MAX)
-                stack.ring_evict_overlap(ring_base * sizeof(float),
-                                         snap_list.size() * 6 * sizeof(float), *compute);
-            bool ring_ssbo = (ring_base != SIZE_MAX) && compute->undo_ring_ssbo.handle != 0;
-            compute->dispatch_multires_diff(renderer.vbo_pos, mgpu.disp_ssbo,
-                                            mgpu.frames_ssbo, mgpu.snap_pos_ssbo,
-                                            mgpu.base_ssbo,
-                                            snap_list.data(), (uint32_t)snap_list.size(),
-                                            stroke_writes_to_base,
-                                            ring_ssbo,
-                                            (uint32_t)(ring_base == SIZE_MAX ? 0 : ring_base));
-            gpu_diff_ran = true;
-        }
-#ifdef CHISEL_DEBUG_MULTIRES
-        static std::vector<float> gpu_diff_chk;   // 3 floats per snap_list entry
-        if (gpu_diff_ran) {
-            gpu_diff_chk.resize(snap_list.size() * 3);
-            const gpu::Buffer& src = stroke_writes_to_base ? mgpu.base_ssbo : mgpu.disp_ssbo;
-            for (size_t i = 0; i < snap_list.size(); i++) {
-                gpu::read_buffer(compute->gpu_dev, src,
-                    (uint64_t)snap_list[i] * 3 * sizeof(float),
-                    (uint64_t)3 * sizeof(float), &gpu_diff_chk[i * 3]);
+    if (fin_state == FinState::DRAIN) {
+        // Stage 1a: land every in-flight dab readback — snap_list must be complete
+        // before autosmooth spans it and the ring diff sizes off it. post_frame also
+        // dispatches partial normals for the late-landing dabs.
+        post_frame(ctx);
+        if (dab_readbacks_pending()) return false;   // tick again next frame
+
+        // Stage 1b: GPU-side pen-up work, then kick the async buffer reads.
+        //
+        // Autosmooth: one Laplacian pass over the stroke's affected verts before
+        // we read positions back. The smoothed positions become the "after" state
+        // recorded in the undo entry. Draw-only — other brushes have their own
+        // tuning. Mask gating is built into the shader.
+        static constexpr float AUTOSMOOTH_STRENGTH   = 0.3f;
+        static constexpr int   AUTOSMOOTH_ITERATIONS = 1;
+        if (fin_autosmooth
+            && fin_brush_type == BrushType::DRAW
+            && !snap_list.empty()
+            && compute && compute->supported
+            && compute->has_stroke_smooth()
+            && compute->adjacency_vertex_count > 0) {
+            for (int it = 0; it < AUTOSMOOTH_ITERATIONS; it++) {
+                compute->dispatch_stroke_smooth_apply(snap_list.data(),
+                                                       (uint32_t)snap_list.size(),
+                                                       AUTOSMOOTH_STRENGTH,
+                                                       renderer.vbo_pos, renderer.ebo);
             }
+            // Refresh normals for the smoothed verts so the deferred normal
+            // readback below picks up post-smoothing values.
+            if (compute->has_normals()) {
+                compute->dispatch_compute_normals(snap_list.data(),
+                                                   (uint32_t)snap_list.size(),
+                                                   renderer.vbo_pos, renderer.vbo_norm,
+                                                   renderer.ebo);
+                gpu_normals_deferred = true;
+            }
+            // Smoothing changed positions on the VBO; force the deferred-readback
+            // path below so mesh.pos_* / multires sync to the new state.
+            gpu_positions_deferred = true;
         }
-#else
-        (void)gpu_diff_ran;
+
+        if (gpu_positions_deferred && !snap_list.empty()) {
+            // Phase 2b (GPU-resident undo): reproject the stroke delta into the
+            // resident disp/base layer on the GPU, from the pen-down snapshots.
+            size_t ring_base = SIZE_MAX;   // float offset of this stroke's span in the undo ring (3b-iii)
+            if (compute && compute->supported && mgpu.supported
+                && mgpu.level == stroke_level) {
+                // Reserve float6 per touched vert; the diff shader fills (old,new). On
+                // cap overflow reserve returns SIZE_MAX and we skip ring capture (the
+                // CPU path stays authoritative — dual-bookkeeping in 3b-iii).
+                ring_base = compute->undo_ring_reserve(snap_list.size() * 6);
+                stroke_ring_base = ring_base;   // recorded on the UndoEntry by commit_undo (3b-iv)
+                // Circular ring (3b-iv part 2): the span we just reserved may overwrite
+                // older entries' bytes. Invalidate them (→ CPU-stage fallback) before the
+                // diff fills the span. No-op until the ring wraps at the cap. (NOTE:
+                // eviction block-reads the ring on wrap — rare; must leave the frame
+                // before the JSPI flip.)
+                if (ring_base != SIZE_MAX)
+                    stack.ring_evict_overlap(ring_base * sizeof(float),
+                                             snap_list.size() * 6 * sizeof(float), *compute);
+                bool ring_ssbo = (ring_base != SIZE_MAX) && compute->undo_ring_ssbo.handle != 0;
+                compute->dispatch_multires_diff(renderer.vbo_pos, mgpu.disp_ssbo,
+                                                mgpu.frames_ssbo, mgpu.snap_pos_ssbo,
+                                                mgpu.base_ssbo,
+                                                snap_list.data(), (uint32_t)snap_list.size(),
+                                                stroke_writes_to_base,
+                                                ring_ssbo,
+                                                (uint32_t)(ring_base == SIZE_MAX ? 0 : ring_base));
+            }
+            fin_ring_captured = (ring_base != SIZE_MAX);
+
+#ifdef CHISEL_DEBUG_MULTIRES
+            // Truth-check build only: blocking snapshot of the GPU diff result;
+            // compared in stage 2 once the CPU result exists. (Debug builds accept
+            // the in-frame sync.)
+            if (compute && compute->supported && mgpu.supported
+                && mgpu.level == stroke_level) {
+                fin_gpu_diff_chk.resize(snap_list.size() * 3);
+                const gpu::Buffer& src = stroke_writes_to_base ? mgpu.base_ssbo : mgpu.disp_ssbo;
+                for (size_t i = 0; i < snap_list.size(); i++) {
+                    gpu::read_buffer(compute->gpu_dev, src,
+                        (uint64_t)snap_list[i] * 3 * sizeof(float),
+                        (uint64_t)3 * sizeof(float), &fin_gpu_diff_chk[i * 3]);
+                }
+            }
 #endif
 
-        // THE FLIP (2c-iii): when the pen-up diff captured (old,new) into the GPU undo
-        // ring, the GPU now owns this stroke — the working VBO holds the new surface and
-        // disp_ssbo/base_ssbo the new storage. Drop the CPU position readback; just mark
-        // the CPU copy dirty so the next CPU reader (save/cascade/remesh/mirror) pulls it
-        // down through the Scene materialize choke. The degrade path (ring overflow OR no
-        // compute / level mismatch → ring_captured false) keeps the authoritative readback:
-        // those cases have no GPU truth (architecture rule: always degrade gracefully).
-        const bool ring_captured = (ring_base != SIZE_MAX);
-        if (!ring_captured) {
+            // THE FLIP (2c-iii): when the pen-up diff captured (old,new) into the GPU
+            // undo ring, the GPU owns this stroke — no CPU position readback at all;
+            // stage 2 just marks the CPU copy dirty (Scene materialize choke pulls it
+            // down lazily). The degrade path (ring overflow OR no compute / level
+            // mismatch) keeps the authoritative readback — kicked async here, landed
+            // in stage 2.
+            if (!fin_ring_captured)
+                fin_pos_tk = gpu::read_buffer_async(compute->gpu_dev, renderer.vbo_pos,
+                                                    0, (uint64_t)vertex_count * 3 * sizeof(float));
+        }
+
+        // Full working-range copies, one ticket per deferred buffer. One map beats
+        // the old per-run blocking reads; stage 2 indexes only the snap verts.
+        if (gpu_mask_deferred && !mask.snap_list.empty() && compute)
+            fin_mask_tk = gpu::read_buffer_async(compute->gpu_dev, renderer.vbo_mask,
+                                                 0, (uint64_t)vertex_count * sizeof(float));
+        if (gpu_color_deferred && !color.snap_list.empty() && compute)
+            fin_color_tk = gpu::read_buffer_async(compute->gpu_dev, renderer.vbo_color,
+                                                  0, (uint64_t)vertex_count * sizeof(uint32_t));
+        if (gpu_normals_deferred && !snap_list.empty() && compute)
+            fin_norm_tk = gpu::read_buffer_async(compute->gpu_dev, renderer.vbo_norm,
+                                                 0, (uint64_t)vertex_count * 3 * sizeof(float));
+
+        fin_state = FinState::READS;   // fall through — GL tickets are ready already
+    }
+
+    // ---- Stage 2: land the reads, sync CPU state, commit the undo entry ----
+    if (fin_pos_tk || fin_mask_tk || fin_color_tk || fin_norm_tk) {
+        gpu::Device& dev = compute->gpu_dev;
+        if (!gpu::ticket_ready(dev, fin_pos_tk) || !gpu::ticket_ready(dev, fin_mask_tk)
+            || !gpu::ticket_ready(dev, fin_color_tk) || !gpu::ticket_ready(dev, fin_norm_tk))
+            return false;   // tick again next frame
+    }
+
+    const uint32_t vc = vertex_count;
+
+    if (gpu_positions_deferred && !snap_list.empty()) {
+        if (!fin_ring_captured) {
             // Invariant: this baseline (mesh.pos) is the pre-stroke surface. Staleness
             // only ever comes from a prior flipped stroke, and the flip requires
             // compute — so the only reachable !ring_captured case is !compute->supported
             // (or a never-flipped session), where no prior stroke went stale. Hence
-            // mesh.pos is fresh here. (A single stroke can't exceed the ring cap on any
-            // real mesh, so the overflow branch of reserve is unreachable in practice.)
-            static std::vector<ReadRun> runs;
-            coalesce_snap_runs(snap_list, runs);
-            static std::vector<float> pos_readback;
+            // mesh.pos is fresh here.
+            fin_pos_buf.resize((size_t)vc * 3);
+            gpu::ticket_take(compute->gpu_dev, fin_pos_tk, fin_pos_buf.data(),
+                             (uint64_t)vc * 3 * sizeof(float));
+            fin_pos_tk = 0;
             if (stroke_writes_to_base) {
-                for (const ReadRun& r : runs) {
-                    pos_readback.resize(r.count * 3);
-                    gpu::read_buffer(compute->gpu_dev, renderer.vbo_pos,
-                        (uint64_t)r.first * 3 * sizeof(float),
-                        (uint64_t)r.count * 3 * sizeof(float),
-                        pos_readback.data());
-                    for (uint32_t v = r.first; v < r.first + r.count; v++) {
-                        uint32_t ri = (v - r.first) * 3;
-                        mesh.pos_x[v] = pos_readback[ri + 0];
-                        mesh.pos_y[v] = pos_readback[ri + 1];
-                        mesh.pos_z[v] = pos_readback[ri + 2];
-                        multires.base.pos_x[v] = mesh.pos_x[v];
-                        multires.base.pos_y[v] = mesh.pos_y[v];
-                        multires.base.pos_z[v] = mesh.pos_z[v];
-                    }
+                for (uint32_t v : snap_list) {
+                    mesh.pos_x[v] = fin_pos_buf[(size_t)v * 3 + 0];
+                    mesh.pos_y[v] = fin_pos_buf[(size_t)v * 3 + 1];
+                    mesh.pos_z[v] = fin_pos_buf[(size_t)v * 3 + 2];
+                    multires.base.pos_x[v] = mesh.pos_x[v];
+                    multires.base.pos_y[v] = mesh.pos_y[v];
+                    multires.base.pos_z[v] = mesh.pos_z[v];
                 }
             } else {
                 const auto& frames = multires.frames[stroke_disp_index];
                 auto& disp = multires.disp[stroke_disp_index];
-                for (const ReadRun& r : runs) {
-                    pos_readback.resize(r.count * 3);
-                    gpu::read_buffer(compute->gpu_dev, renderer.vbo_pos,
-                        (uint64_t)r.first * 3 * sizeof(float),
-                        (uint64_t)r.count * 3 * sizeof(float),
-                        pos_readback.data());
-                    for (uint32_t v = r.first; v < r.first + r.count; v++) {
-                        uint32_t ri = (v - r.first) * 3;
-                        float new_x = pos_readback[ri + 0];
-                        float new_y = pos_readback[ri + 1];
-                        float new_z = pos_readback[ri + 2];
-                        float dx = new_x - mesh.pos_x[v];
-                        float dy = new_y - mesh.pos_y[v];
-                        float dz = new_z - mesh.pos_z[v];
-                        const Frame& f = frames[v];
-                        disp[v].x += f.t.x*dx + f.t.y*dy + f.t.z*dz;
-                        disp[v].y += f.b.x*dx + f.b.y*dy + f.b.z*dz;
-                        disp[v].z += f.n.x*dx + f.n.y*dy + f.n.z*dz;
-                        mesh.pos_x[v] = new_x;
-                        mesh.pos_y[v] = new_y;
-                        mesh.pos_z[v] = new_z;
-                    }
+                for (uint32_t v : snap_list) {
+                    float new_x = fin_pos_buf[(size_t)v * 3 + 0];
+                    float new_y = fin_pos_buf[(size_t)v * 3 + 1];
+                    float new_z = fin_pos_buf[(size_t)v * 3 + 2];
+                    float dx = new_x - mesh.pos_x[v];
+                    float dy = new_y - mesh.pos_y[v];
+                    float dz = new_z - mesh.pos_z[v];
+                    const Frame& f = frames[v];
+                    disp[v].x += f.t.x*dx + f.t.y*dy + f.t.z*dz;
+                    disp[v].y += f.b.x*dx + f.b.y*dy + f.b.z*dz;
+                    disp[v].z += f.n.x*dx + f.n.y*dy + f.n.z*dz;
+                    mesh.pos_x[v] = new_x;
+                    mesh.pos_y[v] = new_y;
+                    mesh.pos_z[v] = new_z;
                 }
             }
         } else {
@@ -1253,26 +1381,27 @@ bool BrushStroke::finalize(Mesh& mesh, UndoStack& stack, MultiresStack& multires
         gpu_positions_deferred = false;
 
 #ifdef CHISEL_DEBUG_MULTIRES
-        // Phase 2b validation: GPU diff (snapshotted above) vs the CPU result we
-        // just computed. Both should agree to float noise. Runs before the
-        // upload_disp_partial re-sync below clobbers the GPU diff with CPU truth.
+        // Phase 2b validation: GPU diff (snapshotted in stage 1) vs the CPU result we
+        // just computed. Both should agree to float noise.
+        bool gpu_diff_ran = compute && compute->supported && mgpu.supported
+                            && mgpu.level == stroke_level;
         if (gpu_diff_ran) {
             double maxe = 0.0;
             if (stroke_writes_to_base) {
                 for (size_t i = 0; i < snap_list.size(); i++) {
                     uint32_t v = snap_list[i];
-                    maxe = std::max(maxe, (double)std::fabs(gpu_diff_chk[i*3+0] - multires.base.pos_x[v]));
-                    maxe = std::max(maxe, (double)std::fabs(gpu_diff_chk[i*3+1] - multires.base.pos_y[v]));
-                    maxe = std::max(maxe, (double)std::fabs(gpu_diff_chk[i*3+2] - multires.base.pos_z[v]));
+                    maxe = std::max(maxe, (double)std::fabs(fin_gpu_diff_chk[i*3+0] - multires.base.pos_x[v]));
+                    maxe = std::max(maxe, (double)std::fabs(fin_gpu_diff_chk[i*3+1] - multires.base.pos_y[v]));
+                    maxe = std::max(maxe, (double)std::fabs(fin_gpu_diff_chk[i*3+2] - multires.base.pos_z[v]));
                 }
             } else if (stroke_disp_index >= 0
                        && stroke_disp_index < (int)multires.disp.size()) {
                 const auto& disp = multires.disp[stroke_disp_index];
                 for (size_t i = 0; i < snap_list.size(); i++) {
                     uint32_t v = snap_list[i];
-                    maxe = std::max(maxe, (double)std::fabs(gpu_diff_chk[i*3+0] - disp[v].x));
-                    maxe = std::max(maxe, (double)std::fabs(gpu_diff_chk[i*3+1] - disp[v].y));
-                    maxe = std::max(maxe, (double)std::fabs(gpu_diff_chk[i*3+2] - disp[v].z));
+                    maxe = std::max(maxe, (double)std::fabs(fin_gpu_diff_chk[i*3+0] - disp[v].x));
+                    maxe = std::max(maxe, (double)std::fabs(fin_gpu_diff_chk[i*3+1] - disp[v].y));
+                    maxe = std::max(maxe, (double)std::fabs(fin_gpu_diff_chk[i*3+2] - disp[v].z));
                 }
             }
             std::printf("[mgpu][debug] multires_diff L%d %s max|err|=%.3e (%zu verts)\n",
@@ -1282,13 +1411,11 @@ bool BrushStroke::finalize(Mesh& mesh, UndoStack& stack, MultiresStack& multires
 
         // Phase 3b-iii validation: the (old,new) the diff shader wrote into the undo
         // ring vs the CPU truth — old should match the pen-down snapshot (snap_*),
-        // new should match the post-readback CPU disp/pos. Runs after the CPU
-        // readback above has materialized the new values. Confirms the GPU ring
-        // capture is faithful before 3b-iv trusts it (and drops the CPU readback).
-        if (gpu_diff_ran && ring_base != SIZE_MAX) {
+        // new should match the post-readback CPU disp/pos.
+        if (gpu_diff_ran && stroke_ring_base != SIZE_MAX) {
             static std::vector<float> ring_chk;   // 6 floats/vert: old(3) + new(3)
             ring_chk.resize(snap_list.size() * 6);
-            compute->undo_ring_read(ring_base * sizeof(float),
+            compute->undo_ring_read(stroke_ring_base * sizeof(float),
                                     snap_list.size() * 6, ring_chk.data());
             double maxe_old = 0.0, maxe_new = 0.0;
             for (size_t i = 0; i < snap_list.size(); i++) {
@@ -1319,24 +1446,18 @@ bool BrushStroke::finalize(Mesh& mesh, UndoStack& stack, MultiresStack& multires
         // index. In the flipped ring path the diff shader already wrote disp_ssbo/
         // base_ssbo and CPU storage is stale, so re-uploading would clobber the GPU
         // truth — skip it (the SSBO is already current there).
-        if (!ring_captured)
+        if (!fin_ring_captured)
             mgpu.upload_disp_partial(multires, stroke_level, snap_list);
     }
 
     if (gpu_mask_deferred && !mask.snap_list.empty()) {
         if (mesh.mask.empty()) mesh.mask.assign(mesh.vertex_count(), 0.0f);
-        static std::vector<ReadRun> runs;
-        coalesce_snap_runs(mask.snap_list, runs);
-        static std::vector<float> mask_readback;
-        for (const ReadRun& r : runs) {
-            mask_readback.resize(r.count);
-            gpu::read_buffer(compute->gpu_dev, renderer.vbo_mask,
-                (uint64_t)r.first * sizeof(float),
-                (uint64_t)r.count * sizeof(float),
-                mask_readback.data());
-            for (uint32_t v = r.first; v < r.first + r.count; v++)
-                mesh.mask[v] = mask_readback[v - r.first];
-        }
+        fin_mask_buf.resize(vc);
+        gpu::ticket_take(compute->gpu_dev, fin_mask_tk, fin_mask_buf.data(),
+                         (uint64_t)vc * sizeof(float));
+        fin_mask_tk = 0;
+        for (uint32_t v : mask.snap_list)
+            if (v < vc) mesh.mask[v] = fin_mask_buf[v];
         gpu_mask_deferred = false;
     }
 
@@ -1344,24 +1465,18 @@ bool BrushStroke::finalize(Mesh& mesh, UndoStack& stack, MultiresStack& multires
         if (mesh.color.empty()) mesh.color.assign(mesh.vertex_count(), 0xFFFFFFFFu);
         else if (mesh.color.size() < mesh.vertex_count())
             mesh.color.resize(mesh.vertex_count(), 0xFFFFFFFFu);
-        static std::vector<ReadRun> runs;
-        coalesce_snap_runs(color.snap_list, runs);
-        static std::vector<uint32_t> color_readback;
-        for (const ReadRun& r : runs) {
-            color_readback.resize(r.count);
-            gpu::read_buffer(compute->gpu_dev, renderer.vbo_color,
-                (uint64_t)r.first * sizeof(uint32_t),
-                (uint64_t)r.count * sizeof(uint32_t),
-                color_readback.data());
-            for (uint32_t v = r.first; v < r.first + r.count; v++)
-                mesh.color[v] = color_readback[v - r.first];
-        }
+        fin_color_buf.resize(vc);
+        gpu::ticket_take(compute->gpu_dev, fin_color_tk, fin_color_buf.data(),
+                         (uint64_t)vc * sizeof(uint32_t));
+        fin_color_tk = 0;
+        for (uint32_t v : color.snap_list)
+            if (v < vc) mesh.color[v] = fin_color_buf[v];
         gpu_color_deferred = false;
     }
 
-    if (brush_type == BrushType::MASK) {
+    if (fin_brush_type == BrushType::MASK) {
         commit_mask_undo(mesh, stack);
-    } else if (brush_type == BrushType::PAINT) {
+    } else if (fin_brush_type == BrushType::PAINT) {
         commit_color_undo(mesh, stack);
     } else {
         for (int fi = stroke_disp_index + 1; fi < (int)multires.frames.size(); fi++)
@@ -1371,29 +1486,23 @@ bool BrushStroke::finalize(Mesh& mesh, UndoStack& stack, MultiresStack& multires
 
     if (gpu_normals_deferred) {
         if (!snap_list.empty()) {
-            static std::vector<ReadRun> runs;
-            coalesce_snap_runs(snap_list, runs);
-            static std::vector<float> norm_readback;
-            for (const ReadRun& r : runs) {
-                norm_readback.resize(r.count * 3);
-                gpu::read_buffer(compute->gpu_dev, renderer.vbo_norm,
-                    (uint64_t)r.first * 3 * sizeof(float),
-                    (uint64_t)r.count * 3 * sizeof(float),
-                    norm_readback.data());
-                for (uint32_t v = r.first; v < r.first + r.count; v++) {
-                    uint32_t ri = (v - r.first) * 3;
-                    mesh.norm_x[v] = norm_readback[ri + 0];
-                    mesh.norm_y[v] = norm_readback[ri + 1];
-                    mesh.norm_z[v] = norm_readback[ri + 2];
-                }
+            fin_norm_buf.resize((size_t)vc * 3);
+            gpu::ticket_take(compute->gpu_dev, fin_norm_tk, fin_norm_buf.data(),
+                             (uint64_t)vc * 3 * sizeof(float));
+            fin_norm_tk = 0;
+            for (uint32_t v : snap_list) {
+                mesh.norm_x[v] = fin_norm_buf[(size_t)v * 3 + 0];
+                mesh.norm_y[v] = fin_norm_buf[(size_t)v * 3 + 1];
+                mesh.norm_z[v] = fin_norm_buf[(size_t)v * 3 + 2];
             }
         }
         gpu_normals_deferred = false;
     }
 
-    bool had_mesh_update = needs_mesh_update;
+    had_update = needs_mesh_update;
+    fin_state = FinState::IDLE;
     end();
-    return had_mesh_update;
+    return true;
 }
 
 void BrushStroke::end() {

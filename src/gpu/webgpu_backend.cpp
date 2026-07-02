@@ -12,6 +12,7 @@
 #include <cstring>
 #include <cstdio>
 #include <vector>
+#include <unordered_map>
 
 namespace gpu {
 
@@ -215,7 +216,7 @@ static void pump_until_mapped(Device& dev, const MapState& ms) {
     (void)dev;
     while (!ms.done) { wgpuInstanceProcessEvents(g_instance); emscripten_sleep(1); }
 #else
-    pump_until_mapped(dev, ms);
+    while (!ms.done) wgpuDevicePoll(dev.device, /*wait=*/true, nullptr);
 #endif
 }
 
@@ -816,6 +817,200 @@ void read_target_region(Device& dev, OffscreenTarget& t, uint32_t attachment,
         }
     }
     wgpuBufferUnmap(t.readback);
+}
+
+// ---- Async readback tickets ----------------------------------------------------
+// The in-frame read path: enqueue the copy → staging now, mapAsync, and let the
+// caller poll ticket_ready on later frames. Map callbacks use AllowProcessEvents
+// mode and are delivered from process_events() — wgpuInstanceProcessEvents on web,
+// a non-blocking wgpuDevicePoll natively. Nothing in this section blocks, waits, or
+// (on web) suspends: that's the whole point.
+
+struct AsyncRead {
+    WGPUBuffer staging = nullptr;
+    uint64_t   staging_size = 0;   // full allocation (pooled; may exceed map_size)
+    uint64_t   map_size = 0;       // bytes copied into the staging
+    uint64_t   out_size = 0;       // bytes the caller receives after reconciliation
+    bool done = false, ok = false;
+    // target-region reconciliation (padded rows / half→float expand); w==0 for
+    // plain buffer reads (straight memcpy).
+    uint32_t w = 0, h = 0, wgpu_bpt = 0, halfs = 0, out_bpt = 0, padded_row = 0;
+};
+
+static std::unordered_map<uint32_t, AsyncRead> g_tickets;
+static uint32_t g_next_ticket = 1;
+
+// Small pool of MapRead staging buffers so per-dab kicks don't allocate a GPU
+// buffer each time. Best-fit reuse; a buffer much larger than the request is left
+// for a bigger read rather than hogged by a tiny one.
+static std::vector<std::pair<uint64_t, WGPUBuffer>> g_staging_pool;
+
+static WGPUBuffer staging_acquire(Device& dev, uint64_t size, uint64_t& alloc_size) {
+    int best = -1;
+    for (int i = 0; i < (int)g_staging_pool.size(); ++i) {
+        uint64_t s = g_staging_pool[i].first;
+        if (s >= size && s <= size * 4 + 4096
+            && (best < 0 || s < g_staging_pool[best].first))
+            best = i;
+    }
+    if (best >= 0) {
+        alloc_size = g_staging_pool[best].first;
+        WGPUBuffer b = g_staging_pool[best].second;
+        g_staging_pool.erase(g_staging_pool.begin() + best);
+        return b;
+    }
+    WGPUBufferDescriptor bd = {};
+    bd.usage = WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst;
+    bd.size  = size;
+    alloc_size = size;
+    return wgpuDeviceCreateBuffer(dev.device, &bd);
+}
+
+static void staging_release(WGPUBuffer b, uint64_t size) {
+    if (!b) return;
+    if (g_staging_pool.size() >= 16) { wgpuBufferRelease(b); return; }
+    g_staging_pool.push_back({size, b});
+}
+
+static void on_ticket_map(WGPUMapAsyncStatus status, WGPUStringView, void* ud1, void*) {
+    uint32_t id = (uint32_t)(uintptr_t)ud1;
+    auto it = g_tickets.find(id);
+    if (it == g_tickets.end()) return;   // ticket was dropped before the map landed
+    it->second.done = true;
+    it->second.ok = (status == WGPUMapAsyncStatus_Success);
+}
+
+static ReadTicket ticket_register(AsyncRead& r) {
+    uint32_t id = g_next_ticket++;
+    if (!g_next_ticket) g_next_ticket = 1;
+    g_tickets.emplace(id, r);
+    WGPUBufferMapCallbackInfo mcb = {};
+    mcb.mode = WGPUCallbackMode_AllowProcessEvents;
+    mcb.callback = on_ticket_map;
+    mcb.userdata1 = (void*)(uintptr_t)id;
+    wgpuBufferMapAsync(r.staging, WGPUMapMode_Read, 0, r.map_size, mcb);
+    return id;
+}
+
+ReadTicket read_buffer_async(Device& dev, const Buffer& src, uint64_t offset, uint64_t size) {
+    if (!src.handle || size == 0) return 0;
+    AsyncRead r;
+    r.staging = staging_acquire(dev, size, r.staging_size);
+    r.map_size = size;
+    r.out_size = size;
+
+    WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(dev.device, nullptr);
+    wgpuCommandEncoderCopyBufferToBuffer(enc, src.handle, offset, r.staging, 0, size);
+    WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(enc, nullptr);
+    wgpuQueueSubmit(dev.queue, 1, &cmd);
+    wgpuCommandBufferRelease(cmd);
+    wgpuCommandEncoderRelease(enc);
+
+    return ticket_register(r);
+}
+
+ReadTicket read_target_region_async(Device& dev, OffscreenTarget& t, uint32_t attachment,
+                                    int x, int y, int w, int h) {
+    // Same bounds guard as read_target_region: a stale or straddling request yields
+    // an invalid ticket (ready, take()=false) instead of an aborting copy.
+    if (attachment >= t.color_count || !t.color_tex[attachment] ||
+        x < 0 || y < 0 || w <= 0 || h <= 0 ||
+        x + w > t.width || y + h > t.height)
+        return 0;
+
+    uint32_t wgpu_bpt, halfs, out_bpt;
+    texformat_readback(t.color_fmt[attachment], wgpu_bpt, halfs, out_bpt);
+    uint32_t row_bytes  = (uint32_t)w * wgpu_bpt;
+    uint32_t padded_row = (row_bytes + 255u) & ~255u;   // copyTextureToBuffer: 256-align
+    uint64_t staging_size = (uint64_t)padded_row * h;
+
+    AsyncRead r;
+    r.staging = staging_acquire(dev, staging_size, r.staging_size);
+    r.map_size = staging_size;
+    r.out_size = (uint64_t)out_bpt * w * h;
+    r.w = (uint32_t)w; r.h = (uint32_t)h;
+    r.wgpu_bpt = wgpu_bpt; r.halfs = halfs; r.out_bpt = out_bpt; r.padded_row = padded_row;
+
+    WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(dev.device, nullptr);
+    WGPUTexelCopyTextureInfo src = {};
+    src.texture = t.color_tex[attachment]; src.mipLevel = 0;
+    src.origin = { (uint32_t)x, (uint32_t)y, 0 };
+    src.aspect = WGPUTextureAspect_All;
+    WGPUTexelCopyBufferInfo dst = {};
+    dst.buffer = r.staging;
+    dst.layout.offset = 0; dst.layout.bytesPerRow = padded_row; dst.layout.rowsPerImage = (uint32_t)h;
+    WGPUExtent3D ext = { (uint32_t)w, (uint32_t)h, 1 };
+    wgpuCommandEncoderCopyTextureToBuffer(enc, &src, &dst, &ext);
+    WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(enc, nullptr);
+    wgpuQueueSubmit(dev.queue, 1, &cmd);
+    wgpuCommandBufferRelease(cmd);
+    wgpuCommandEncoderRelease(enc);
+
+    return ticket_register(r);
+}
+
+void process_events(Device& dev) {
+#ifdef __EMSCRIPTEN__
+    (void)dev;
+    wgpuInstanceProcessEvents(g_instance);
+#else
+    wgpuDevicePoll(dev.device, /*wait=*/false, nullptr);
+#endif
+}
+
+bool ticket_ready(Device&, ReadTicket t) {
+    if (t == 0) return true;                 // invalid ticket: "ready", take() fails
+    auto it = g_tickets.find(t);
+    return it == g_tickets.end() || it->second.done;
+}
+
+bool ticket_take(Device&, ReadTicket t, void* out, uint64_t out_size) {
+    auto it = g_tickets.find(t);
+    if (it == g_tickets.end()) {
+        std::memset(out, 0, (size_t)out_size);
+        return false;
+    }
+    AsyncRead& r = it->second;
+    bool good = r.done && r.ok && out_size == r.out_size;
+    const uint8_t* mapped = nullptr;
+    if (good) {
+        mapped = (const uint8_t*)wgpuBufferGetMappedRange(r.staging, 0, r.map_size);
+        good = mapped != nullptr;
+    }
+    if (!good) {
+        std::memset(out, 0, (size_t)out_size);
+    } else if (r.w == 0) {
+        std::memcpy(out, mapped, (size_t)r.out_size);
+    } else {
+        // Compact padded rows into `out`; expand 16F half→float (same reconciliation
+        // as the blocking read_target_region).
+        uint8_t* o = (uint8_t*)out;
+        for (uint32_t row = 0; row < r.h; ++row) {
+            const uint8_t* srow = mapped + (size_t)row * r.padded_row;
+            if (r.halfs == 0) {
+                std::memcpy(o + (size_t)row * r.w * r.out_bpt, srow, (size_t)r.w * r.out_bpt);
+            } else {
+                float* of = (float*)(o + (size_t)row * r.w * r.out_bpt);
+                for (uint32_t px = 0; px < r.w; ++px) {
+                    const uint16_t* sh = (const uint16_t*)(srow + (size_t)px * r.wgpu_bpt);
+                    for (uint32_t c = 0; c < r.halfs; ++c)
+                        of[px * r.halfs + c] = half_to_float(sh[c]);
+                }
+            }
+        }
+    }
+    wgpuBufferUnmap(r.staging);              // also aborts a still-pending map
+    staging_release(r.staging, r.staging_size);
+    g_tickets.erase(it);
+    return good;
+}
+
+void ticket_drop(Device&, ReadTicket t) {
+    auto it = g_tickets.find(t);
+    if (it == g_tickets.end()) return;
+    wgpuBufferUnmap(it->second.staging);     // aborts a still-pending map
+    staging_release(it->second.staging, it->second.staging_size);
+    g_tickets.erase(it);
 }
 
 } // namespace gpu

@@ -431,4 +431,29 @@ RenderPass begin_offscreen_pass(Device&, OffscreenTarget&, const OffscreenPassDe
 void read_target_region(Device&, OffscreenTarget&, uint32_t attachment,
                         int x, int y, int w, int h, void* out);
 
+// ---- Async readback tickets ---------------------------------------------------
+// Non-blocking GPU→CPU reads for anything that runs inside the frame loop: kick a
+// copy now, poll ticket_ready on later frames, ticket_take the bytes when they land.
+// The frame callback must never block or suspend on a readback (the web build dies
+// on it under JSPI), so per-dab / per-frame readers go through tickets; the blocking
+// read_buffer / read_target_region stay legal only at one-shot user-paced points.
+//   GL:          the read happens synchronously at kick; tickets are ready at once.
+//   wgpu-native: copy + mapAsync; process_events polls the device (non-blocking).
+//   web:         copy + mapAsync; process_events pumps the instance — no suspend.
+using ReadTicket = uint32_t;                        // 0 = invalid / none
+ReadTicket read_buffer_async(Device&, const Buffer& src, uint64_t offset, uint64_t size);
+// Result layout matches read_target_region's contract for the attachment's format
+// (tight rows, 16F expanded to float): bytes = texformat_out_bpp(fmt) * w * h.
+ReadTicket read_target_region_async(Device&, OffscreenTarget&, uint32_t attachment,
+                                    int x, int y, int w, int h);
+constexpr uint32_t texformat_out_bpp(TexFormat f) {
+    return f == TexFormat::RGB16F ? 12u : f == TexFormat::RG16F ? 8u : 4u;
+}
+void process_events(Device&);                        // pump map callbacks (once per frame)
+bool ticket_ready(Device&, ReadTicket);              // data landed (or failed)?
+// Copy the result into out (out_size must equal the request size) and release the
+// ticket. Returns false if the read failed (out is zero-filled). Consumes the ticket.
+bool ticket_take(Device&, ReadTicket, void* out, uint64_t out_size);
+void ticket_drop(Device&, ReadTicket);               // release without reading
+
 } // namespace gpu

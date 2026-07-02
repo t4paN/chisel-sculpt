@@ -138,6 +138,28 @@ struct Renderer {
     void read_triid_region(int x, int y, int w, int h, uint32_t* out);
     void read_bary_region(int x, int y, int w, int h, float* out);
 
+    // Cursor-sample plane cache — the in-frame read path for the screen buffers.
+    // On WebGPU a 1×1 readback is a full GPU sync (and a fatal suspend on web), so
+    // render_screen_buffers kicks an async full-plane read of depth/normal/triid,
+    // poll_plane_reads() lands it a frame or two later, and sample_* index the CPU
+    // copy (false = cache not landed yet / out of bounds — caller keeps its last
+    // value or skips the dab). On GL sample_* are the same cheap immediate 1×1
+    // glReadPixels as before and the cache machinery is a no-op.
+    void poll_plane_reads();                          // call once per frame
+    bool sample_depth(int x, int y, float* out);      // attachment 0, linear distance
+    bool sample_normal(int x, int y, float out[3]);   // attachment 1, raw normal texel
+    bool sample_triid(int x, int y, uint32_t* out);   // attachment 2
+#if defined(CHISEL_BACKEND_WEBGPU)
+    std::vector<float>    plane_depth;
+    std::vector<float>    plane_norm;                 // 3 floats per pixel
+    std::vector<uint32_t> plane_triid;
+    int  plane_w = 0, plane_h = 0;                    // dims of the landed planes
+    int  plane_kick_w = 0, plane_kick_h = 0;          // dims of the in-flight kick
+    gpu::ReadTicket plane_tk[3] = {0, 0, 0};
+    bool plane_pending = false;
+    bool plane_valid   = false;
+#endif
+
     void draw_background(int w, int h);
     // Fill + upload the matcap Params UBO (camera + per-draw flags); shared by
     // draw_mesh and draw_display.

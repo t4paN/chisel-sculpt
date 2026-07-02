@@ -477,6 +477,19 @@ struct ComputeState {
     // Returns the count; fills out with vertex IDs.
     uint32_t readback_smooth_dirty(std::vector<uint32_t>& out);
 
+    // Async twins of the count+list readbacks (dirty list / move-affected list):
+    // kick right after the dab's dispatches, take on a later frame once the ticket
+    // is ready — no in-frame GPU sync. One ticket copies the count word plus the
+    // full capacity; take() trims to the count. `words` echoes the copied u32 count
+    // (capacity can change between kick and take across topology edits).
+    gpu::ReadTicket kick_count_list_read(const gpu::Buffer& buf, uint32_t capacity,
+                                         uint32_t& words);
+    bool take_count_list_read(gpu::ReadTicket t, uint32_t words,
+                              std::vector<uint32_t>& out);
+    gpu::ReadTicket kick_dirty_read(uint32_t& words);          // smooth_dirty_ssbo
+    gpu::ReadTicket kick_move_affected_read(uint32_t& words);  // move_affected_ssbo
+    std::vector<uint32_t> count_list_scratch;                  // take() staging (persistent)
+
     // Scan accum buffer for vertices where w > 0 (touched by the brush).
     // Returns the count; fills out with vertex IDs (not positions).
     uint32_t readback_accum_dirty(uint32_t vertex_count, std::vector<uint32_t>& out);

@@ -52,6 +52,14 @@ struct MoveState {
     float total_dx, total_dy, total_dz;
     bool  captured;
 
+    // In-flight async readback of the GPU capture's affected list. The apply
+    // dispatches don't need the CPU list (weights live GPU-side), so dabs keep
+    // landing while this is pending; the snap/normals bookkeeping starts once it
+    // lands (a frame or two).
+    gpu::ReadTicket capture_tk;
+    uint32_t        capture_words;
+    bool            capture_booked;   // first landed-dab bookkeeping done
+
     MoveState();
     void reset(uint32_t vert_count);
     void clear();
@@ -106,6 +114,24 @@ struct BrushStroke {
     // Persistent scratch buffers (avoid per-frame allocation)
     std::vector<uint32_t> dirty_verts;
     std::vector<uint32_t> gpu_dirty;
+
+    // In-flight per-dab dirty-list readbacks. Each dab kicks one ticket right after
+    // its dispatches; drain_dab_readbacks (from post_frame, and finalize before the
+    // pen-up commit) consumes them in FIFO order a frame or two later and runs the
+    // snap/normals bookkeeping that used to happen synchronously per dab. The CPU
+    // mesh stays pen-down-stale for the whole stroke, so the delayed snapshot
+    // captures the same pre-stroke values it always did.
+    enum : uint8_t { DAB_GEO = 0, DAB_MASK = 1, DAB_COLOR = 2 };
+    struct PendingDab {
+        gpu::ReadTicket tk = 0;
+        uint32_t words = 0;
+        float anchor_x = 0.0f;   // this dab's anchor (mirror-side snap filter)
+        uint8_t kind = DAB_GEO;
+    };
+    std::vector<PendingDab> pending_dabs;
+    void kick_dab_readback(DabContext& ctx, uint8_t kind);
+    void drain_dab_readbacks(DabContext& ctx);
+    bool dab_readbacks_pending() const { return !pending_dabs.empty() || move.capture_tk != 0; }
 
 
     // Last successfully anchored brush position — persists across strokes for F-focus
@@ -169,12 +195,17 @@ struct BrushStroke {
     // Begin a new stroke: capture screen buffers and stroke-level metadata.
     // The active entity lives in the renderer's working buffers at offset 0, so
     // the brush dispatches over [0, vert_count). entity_id is the active entity
-    // at pen-down; stamped onto undo entries.
+    // at pen-down; stamped onto undo entries. screen_buffers_fresh = the idle path
+    // already rendered the screen buffers for this camera/mesh (the usual case) —
+    // begin() then reuses them and the renderer's landed plane cache instead of
+    // re-rendering, which would re-kick the async plane reads and cost the first
+    // dab(s) on webgpu.
     void begin(Renderer& renderer, const Camera& cam,
                float screen_x, float screen_y, float brush_radius,
                int screen_w, int screen_h, uint32_t vert_count,
                const MultiresStack& multires, BrushType brush_type,
-               uint32_t entity_id, MultiresGPU& mgpu);
+               uint32_t entity_id, MultiresGPU& mgpu,
+               bool screen_buffers_fresh);
 
     // GPU dispatch methods (absorb code from main.cpp)
     void apply_smooth(DabContext& ctx, float dab_x, float dab_y,
@@ -228,15 +259,28 @@ struct BrushStroke {
     void apply_color_smooth_gpu(DabContext& ctx, float dab_x, float dab_y,
                                 float strength, float hardness);
 
-    // Back-project depth changes to mesh vertices.
-    // Finalize stroke: commit undo, readback deferred normals, clear state.
-    // When autosmooth is true and brush_type == DRAW, runs a light Laplacian
-    // pass on the snap_list verts before position readback so the smoothed
-    // result is what gets committed to the undo stack.
-    // Returns true if geometry was modified (caller should update_screen_positions).
-    bool finalize(Mesh& mesh, UndoStack& stack, MultiresStack& multires,
-                  MultiresGPU& mgpu, Renderer& renderer, BrushType brush_type,
-                  bool autosmooth);
+    // Pen-up reconcile — tick once per frame from main once the stroke ends, until
+    // it returns true (the commit completed this call; had_update = geometry was
+    // modified, caller should update_screen_positions). Stage 1 drains in-flight
+    // dab readbacks, runs autosmooth + the GPU undo-ring diff, and kicks the pen-up
+    // buffer reads; stage 2 lands them, syncs mesh/multires, and commits the undo
+    // entry. Multi-frame only when async readbacks are in flight (webgpu); on GL it
+    // completes on the first call, like the old synchronous finalize.
+    bool finalize(DabContext& ctx, Mesh& mesh, UndoStack& stack,
+                  MultiresStack& multires, MultiresGPU& mgpu, Renderer& renderer,
+                  BrushType brush_type, bool autosmooth, bool& had_update);
+
+    // Pen-up reconcile state (see finalize).
+    enum class FinState : uint8_t { IDLE, DRAIN, READS };
+    FinState fin_state = FinState::IDLE;
+    bool reconciling() const { return fin_state != FinState::IDLE; }
+    bool fin_ring_captured = false;
+    BrushType fin_brush_type = BrushType::DRAW;   // captured at the first tick —
+    bool      fin_autosmooth = false;             // input can change mid-reconcile
+    gpu::ReadTicket fin_pos_tk = 0, fin_mask_tk = 0, fin_color_tk = 0, fin_norm_tk = 0;
+    std::vector<float>    fin_pos_buf, fin_mask_buf, fin_norm_buf;  // persistent
+    std::vector<uint32_t> fin_color_buf;
+    std::vector<float>    fin_gpu_diff_chk;   // CHISEL_DEBUG_MULTIRES stage-1 snapshot
 
     // Clear stroke buffers (called by finalize)
     void end();

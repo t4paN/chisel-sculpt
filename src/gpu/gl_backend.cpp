@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstring>
 #include <vector>
+#include <unordered_map>
 
 namespace gpu {
 
@@ -489,6 +490,61 @@ void read_target_region(Device&, OffscreenTarget& t, uint32_t attachment,
     glReadBuffer(GL_COLOR_ATTACHMENT0 + attachment);
     glReadPixels(x, t.height - y - h, w, h, fmt, type, out);  // GL origin is bottom-left
     glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+}
+
+// ---- Async readback tickets ----------------------------------------------------
+// GL is immediate-mode: the read happens synchronously at kick and the ticket just
+// carries the bytes until the caller takes them. Keeps the app-side code on one
+// cross-backend path; only the WebGPU backends are actually asynchronous.
+
+static std::unordered_map<uint32_t, std::vector<uint8_t>> g_gl_tickets;
+static uint32_t g_gl_next_ticket = 1;
+
+ReadTicket read_buffer_async(Device& dev, const Buffer& src, uint64_t offset, uint64_t size) {
+    std::vector<uint8_t> data((size_t)size);
+    read_buffer(dev, src, offset, size, data.data());
+    uint32_t id = g_gl_next_ticket++;
+    if (!g_gl_next_ticket) g_gl_next_ticket = 1;
+    g_gl_tickets.emplace(id, std::move(data));
+    return id;
+}
+
+ReadTicket read_target_region_async(Device& dev, OffscreenTarget& t, uint32_t attachment,
+                                    int x, int y, int w, int h) {
+    // Mirror the webgpu backend's bounds guard: a stale/straddling request yields a
+    // failed ticket rather than an out-of-bounds read.
+    if (attachment >= t.color_count ||
+        x < 0 || y < 0 || w <= 0 || h <= 0 ||
+        x + w > t.width || y + h > t.height)
+        return 0;
+    std::vector<uint8_t> data((size_t)texformat_out_bpp(t.color_fmt[attachment]) * w * h);
+    read_target_region(dev, t, attachment, x, y, w, h, data.data());
+    uint32_t id = g_gl_next_ticket++;
+    if (!g_gl_next_ticket) g_gl_next_ticket = 1;
+    g_gl_tickets.emplace(id, std::move(data));
+    return id;
+}
+
+void process_events(Device&) {}
+
+bool ticket_ready(Device&, ReadTicket t) {
+    return t == 0 || g_gl_tickets.count(t) != 0;   // invalid tickets are "ready" (failed)
+}
+
+bool ticket_take(Device&, ReadTicket t, void* out, uint64_t out_size) {
+    auto it = g_gl_tickets.find(t);
+    if (it == g_gl_tickets.end() || it->second.size() != (size_t)out_size) {
+        std::memset(out, 0, (size_t)out_size);
+        if (it != g_gl_tickets.end()) g_gl_tickets.erase(it);
+        return false;
+    }
+    std::memcpy(out, it->second.data(), (size_t)out_size);
+    g_gl_tickets.erase(it);
+    return true;
+}
+
+void ticket_drop(Device&, ReadTicket t) {
+    g_gl_tickets.erase(t);
 }
 
 } // namespace gpu

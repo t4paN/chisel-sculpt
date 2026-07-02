@@ -2,6 +2,43 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-02 — Web keystone: zero GPU→CPU readbacks inside the frame
+
+The frame loop no longer blocks on any GPU readback — the root cause of the brush not
+landing on the web build (each in-frame readback was a full event-loop round-trip under
+ASYNCIFY) and the prerequisite for the JSPI perf flip. Also finally honors the native
+architecture rule "no GPU readback during strokes" on every backend. Four pieces:
+
+- **Async read-ticket API on the `gpu::` seam** (`read_buffer_async` /
+  `read_target_region_async` / `process_events` / `ticket_ready` / `ticket_take`): kick a
+  copy now, poll across frames, take the bytes when they land. GL implements it as the
+  same immediate reads as before (tickets ready at once — zero behavior change); WebGPU
+  uses a pooled MapRead staging + `mapAsync`, pumped once per frame without blocking.
+  Also fixed a latent bug: `pump_until_mapped`'s native branch was infinite self-recursion
+  instead of `wgpuDevicePoll(wait=true)`.
+- **CPU plane cache for the screen buffers.** `render_screen_buffers` kicks async
+  full-plane reads of depth/normal/triid; `set_anchor` (three 1×1 reads *per dab*), the
+  on-model latch, and the cursor-normal sample now index the CPU copy. The latch keeps its
+  last value while the cache is in flight so rapid consecutive strokes don't misfire into
+  orbit; `begin()` reuses fresh idle buffers instead of re-rendering, so the first dab
+  still lands immediately.
+- **Per-dab dirty-list readbacks → tickets.** Each dab kicks its dirty-list copy; the
+  undo-snapshot + partial-normals bookkeeping lands a frame later in
+  `drain_dab_readbacks` (run from `post_frame`). Correct because the CPU mesh stays
+  pen-down-stale for the whole stroke — the delayed snapshot reads the same pre-stroke
+  values. Move/limb keep applying via GPU-side weights while their capture list is in
+  flight, so no drag input is lost.
+- **Pen-up reconcile state machine.** `finalize` now ticks per frame: drain dab tickets →
+  autosmooth + GPU undo-ring diff → kick full-buffer async reads (pos/mask/color/norm) →
+  commit when they land. One call on GL, a few frames on web, frames keep rendering
+  throughout; `app_state` stays SCULPTING during the reconcile, which blocks undo/new
+  strokes exactly like an active stroke.
+
+Verified: both native builds green (wgpu-native + GL), native smoke boot clean, web build
+boots in Chrome with zero validation errors. Interactive brush-lands verification still
+pending (needs a human hand). Also: the web shell gained a `?debug=1` on-page console
+overlay for devices without devtools.
+
 ## 2026-07-02 — WebGPU web target: FIRST INTERACTIVE BROWSER RENDER
 
 Chisel now runs interactively in the browser on WebGPU (AMD Vega 8 / Mesa RADV / Chrome):

@@ -288,3 +288,36 @@ void ComputeState::cleanup() {
     dirty_verts_capacity = 0;
     smooth_dirty_capacity = 0;
 }
+
+// ---------------------------------------------------------------------------
+// Async count+list readbacks (dirty list / move-affected list)
+// ---------------------------------------------------------------------------
+
+gpu::ReadTicket ComputeState::kick_count_list_read(const gpu::Buffer& buf,
+                                                   uint32_t capacity, uint32_t& words) {
+    if (!buf.handle || capacity == 0) { words = 0; return 0; }
+    words = capacity + 1;   // [count, id0, id1, ...]
+    return gpu::read_buffer_async(gpu_dev, buf, 0, (uint64_t)words * sizeof(uint32_t));
+}
+
+bool ComputeState::take_count_list_read(gpu::ReadTicket t, uint32_t words,
+                                        std::vector<uint32_t>& out) {
+    out.clear();
+    if (!t || words == 0) return true;
+    count_list_scratch.resize(words);
+    if (!gpu::ticket_take(gpu_dev, t, count_list_scratch.data(),
+                          (uint64_t)words * sizeof(uint32_t)))
+        return false;
+    uint32_t count = count_list_scratch[0];
+    if (count > words - 1) count = words - 1;
+    out.assign(count_list_scratch.begin() + 1, count_list_scratch.begin() + 1 + count);
+    return true;
+}
+
+gpu::ReadTicket ComputeState::kick_dirty_read(uint32_t& words) {
+    return kick_count_list_read(smooth_dirty_ssbo, smooth_dirty_capacity, words);
+}
+
+gpu::ReadTicket ComputeState::kick_move_affected_read(uint32_t& words) {
+    return kick_count_list_read(move_affected_ssbo, move_buffers_capacity, words);
+}
