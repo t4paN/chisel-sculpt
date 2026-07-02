@@ -2,6 +2,16 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-03 — Fix: mask invert (Ctrl+I) is now undoable
+
+Ctrl+I flipped `mesh.mask` in place without pushing anything onto the undo stack, so
+Ctrl+Z silently skipped over the invert (the mask-clear path right beside it always did
+record an entry — invert was the odd one out). It now builds a `MASK` undo entry
+capturing every vertex whose value actually changes (`mask != 0.5`) as old→new before
+flipping, mirroring mask-clear. Verified on web: undo steps back through an invert and
+past masks. (Still open: strokes applied *after* a mask aren't fully reverting — separate
+from the invert gap, and from the high-multires-level undo OOB.)
+
 ## 2026-07-03 — Web: itch.io packaging script
 
 `packaging/web/pack-itch.sh [version]` stages the three runtime files into a flat zip with

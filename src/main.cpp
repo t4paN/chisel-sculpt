@@ -1338,10 +1338,25 @@ int main(int argc, char* argv[]) {
                 } else if (mesh->mask.size() < mesh->vertex_count()) {
                     mesh->mask.resize(mesh->vertex_count(), 0.0f);
                 }
+                // Record the flip as an undoable MASK entry (mirrors mask-clear below),
+                // capturing every vertex whose value actually changes (mask != 0.5) as
+                // old->new. Without this the invert leaves nothing on the stack and
+                // Ctrl+Z silently skips over it.
+                UndoEntry mask_e;
+                mask_e.kind = UndoEntry::Kind::MASK;
                 for (uint32_t v = 0; v < mesh->vertex_count(); v++) {
-                    mesh->mask[v] = 1.0f - mesh->mask[v];
+                    float old_val = mesh->mask[v];
+                    float new_val = 1.0f - old_val;
+                    if (old_val != new_val) {
+                        mask_e.verts.push_back(v);
+                        mask_e.old_mask.push_back(old_val);
+                        mask_e.new_mask.push_back(new_val);
+                    }
+                    mesh->mask[v] = new_val;
                 }
                 renderer.update_mask(*mesh);
+                if (!mask_e.verts.empty())
+                    scene.active_undo().push(std::move(mask_e));
             }
 
             // Mask clear (Ctrl+A when mask brush is active)
