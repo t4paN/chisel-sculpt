@@ -1685,6 +1685,12 @@ void Renderer::update_screen_mesh_gpu() {
 void Renderer::render_screen_buffers(const Camera& cam, int w, int h) {
     create_screen_buffers(w, h);
 
+    // Re-expand the flat soup from the live working VBO first. GPU-side writes
+    // (in-place GPU undo/redo, compute kernels) update vbo_pos/vbo_norm without
+    // going through update_screen_positions — rendering the stale soup here left
+    // the brush picking against ghost (pre-undo) geometry.
+    update_screen_mesh_gpu();
+
     // Clear: depth→max, normal→0, triid→0xFFFFFFFF (no triangle), bary→0.
     gpu::OffscreenPassDesc d;
     d.color[0].clear = true; d.color[0].f[0] = 1000.0f;

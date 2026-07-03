@@ -454,6 +454,11 @@ int main(int argc, char* argv[]) {
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 330");
 #endif
+#ifdef __EMSCRIPTEN__
+    // ImGui must not read GLFW's desynced pointer coords either — take the cursor
+    // callback back; chisel_set_pointer feeds ImGui the DOM position instead.
+    input_web_take_cursor_callback(window);
+#endif
 
     Renderer renderer;
     renderer.init();
@@ -2073,10 +2078,28 @@ int main(int argc, char* argv[]) {
         var c = Module.canvas;
         var feed = function(e) {
             var r = c.getBoundingClientRect();
-            Module._chisel_set_pointer(e.clientX - r.left, e.clientY - r.top);
+            // movementX drives the slider drags (consistent CSS-scale deltas even
+            // under pointer lock, where clientX freezes).
+            Module._chisel_set_pointer(e.clientX - r.left, e.clientY - r.top,
+                                       e.movementX || 0);
         };
         c.addEventListener('pointermove', feed);
         c.addEventListener('pointerdown', feed);
+
+        // Keep app-owned shortcuts away from the browser: Emscripten's GLFW only
+        // preventDefault()s Backspace/Tab, so F1 opened help, Ctrl+D bookmarked,
+        // Ctrl+S saved the page, … The app still receives these through GLFW's own
+        // window-level listener (preventDefault stops the browser default, not
+        // propagation). Ctrl+Shift combos stay untouched except Shift+Z (redo) so
+        // devtools (Ctrl+Shift+I) keep working.
+        window.addEventListener('keydown', function(e) {
+            var k = (e.key || "").toLowerCase();
+            var ctrl = e.ctrlKey || e.metaKey;
+            if (e.key === 'F1'
+                || (ctrl && !e.altKey && (!e.shiftKey || k === 'z')
+                    && ['d','s','o','i','z','y','p'].indexOf(k) !== -1))
+                e.preventDefault();
+        }, true);
     });
 
     // Browser drives the loop via requestAnimationFrame (fps=0). simulate_infinite_loop

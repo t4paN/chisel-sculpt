@@ -4,6 +4,8 @@
 #include <algorithm>
 #if defined(__EMSCRIPTEN__)
 #include <emscripten.h>
+#include "imgui.h"
+#include "imgui_impl_glfw.h"
 #endif
 
 InputState::InputState()
@@ -148,18 +150,15 @@ static int g_shift_tap_count = 0;
 static int g_ctrl_tap_count = 0;
 
 static double g_slider_last_raw_x = 0;
+static GLFWwindow* g_window = nullptr;
 
-static void cursor_pos_callback(GLFWwindow* w, double x, double y) {
-    if (!g_input) return;
+// Slider drag: accumulate a horizontal delta into the active slider, clamped so
+// the accumulator doesn't overshoot the value range. Fed from the GLFW cursor
+// callback natively, from the DOM pointermove listener (movementX) on web.
+static void apply_slider_delta(float dx) {
+    g_input->slider_accum += dx;
 
-    // Handle slider drag: accumulate delta, don't update mouse position
-    if (g_input->slider_mode != InputState::SliderMode::NONE) {
-        float dx = (float)(x - g_slider_last_raw_x);
-        g_slider_last_raw_x = x;
-        g_input->slider_accum += dx;
-
-        // Clamp accumulator to valid range so it doesn't overshoot
-        switch (g_input->slider_mode) {
+    switch (g_input->slider_mode) {
             case InputState::SliderMode::SIZE: {
                 float scaled = g_input->slider_accum * 0.4f;
                 float min_val = 5.0f - g_input->slider_start_value;
@@ -197,40 +196,82 @@ static void cursor_pos_callback(GLFWwindow* w, double x, double y) {
                 break;
             }
             default: break;
-        }
-        int save_brush = g_input->smooth_locked ? (int)BrushType::SMOOTH : (int)g_input->current_brush;
-        g_input->per_brush[save_brush].strength = g_input->brush_strength;
-        g_input->per_brush[save_brush].hardness = g_input->brush_hardness;
-        // Don't update mouse_x/y — keep cursor visually locked
-        return;
     }
+    int save_brush = g_input->smooth_locked ? (int)BrushType::SMOOTH : (int)g_input->current_brush;
+    g_input->per_brush[save_brush].strength = g_input->brush_strength;
+    g_input->per_brush[save_brush].hardness = g_input->brush_hardness;
+    // Don't update mouse_x/y — keep cursor visually locked
+}
+
+// Grab/release the browser pointer lock for the slider drag: the OS cursor stays
+// frozen at the grab point (and Chrome restores it there on release) while
+// pointermove keeps delivering movementX. No-op if the browser refuses the lock —
+// the DOM movementX feed still works, only the visible cursor wanders.
+#if defined(__EMSCRIPTEN__)
+static void web_pointer_lock(bool grab) {
+    if (grab) EM_ASM({ if (Module.canvas.requestPointerLock) Module.canvas.requestPointerLock(); });
+    else      EM_ASM({ if (document.exitPointerLock) document.exitPointerLock(); });
+}
+#else
+static void web_pointer_lock(bool) {}
+#endif
+
+static void cursor_pos_callback(GLFWwindow* w, double x, double y) {
+    if (!g_input) return;
+    (void)w;
 
 #if defined(__EMSCRIPTEN__)
-    // On web we ignore GLFW's pointer coords: it reports them in canvas
+    // On web we ignore GLFW's pointer coords entirely: it reports them in canvas
     // backing-store space (scaled by canvas.width / boundingRect.width, and it
     // caches a bounding rect that goes stale across a resize), which desyncs from
     // the CSS-pixel space that rendering + picking use → the post-resize cursor
-    // offset. Position is fed instead by chisel_set_pointer(), driven by a DOM
-    // pointermove listener that reads a *fresh* getBoundingClientRect every event.
+    // offset. Position AND slider deltas are fed instead by chisel_set_pointer(),
+    // driven by a DOM pointermove listener that reads a *fresh*
+    // getBoundingClientRect (and movementX) every event.
     (void)x; (void)y;
 #else
+    // Slider drag: accumulate delta, don't update mouse position.
+    if (g_input->slider_mode != InputState::SliderMode::NONE) {
+        float dx = (float)(x - g_slider_last_raw_x);
+        g_slider_last_raw_x = x;
+        apply_slider_delta(dx);
+        return;
+    }
     g_input->mouse_x = x;
     g_input->mouse_y = y;
 #endif
 }
 
 #if defined(__EMSCRIPTEN__)
-// Called from the shell's DOM pointermove listener (see main.cpp) with the pointer
-// position already in CSS-pixel space relative to the canvas top-left — i.e. the
-// exact space the render surface, pick planes and cursor ring live in. Bypasses
-// GLFW's coordinate mangling entirely, so it's correct through any resize/DPR.
-extern "C" EMSCRIPTEN_KEEPALIVE void chisel_set_pointer(double x, double y) {
+// Called from the shell's DOM pointermove/pointerdown listener (see main.cpp) with
+// the pointer position already in CSS-pixel space relative to the canvas top-left —
+// i.e. the exact space the render surface, pick planes and cursor ring live in —
+// plus the event's movementX. Bypasses GLFW's coordinate mangling entirely, so it's
+// correct through any resize/DPR.
+extern "C" EMSCRIPTEN_KEEPALIVE void chisel_set_pointer(double x, double y, double dx) {
     if (!g_input) return;
-    // While a slider drag is active the pointer is visually locked and driven by
-    // GLFW deltas — don't let raw motion move the cached mouse position.
-    if (g_input->slider_mode != InputState::SliderMode::NONE) return;
+    // While a slider drag is active the pointer is locked (or at least visually
+    // frozen) — consume only the relative motion, don't move the cached position.
+    if (g_input->slider_mode != InputState::SliderMode::NONE) {
+        apply_slider_delta((float)dx);
+        return;
+    }
     g_input->mouse_x = x;
     g_input->mouse_y = y;
+    // Feed ImGui the same CSS-pixel position through its own backend entry point.
+    // Its GLFW cursor callback was taken back (input_web_take_cursor_callback), so
+    // this is the only position source it sees — toolbar/dialog hit-testing stays
+    // aligned with the real pointer instead of GLFW's desynced coords.
+    if (g_window && ImGui::GetCurrentContext())
+        ImGui_ImplGlfw_CursorPosCallback(g_window, x, y);
+}
+
+// ImGui_ImplGlfw installs its own cursor-pos callback (chaining to ours) and would
+// keep feeding ImGui the desynced GLFW coords the app already ignores. Take the
+// callback back after ImGui init so GLFW motion reaches neither consumer;
+// chisel_set_pointer above feeds both from the DOM.
+void input_web_take_cursor_callback(GLFWwindow* window) {
+    glfwSetCursorPosCallback(window, cursor_pos_callback);
 }
 #endif
 
@@ -448,6 +489,7 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
                     g_input->slider_start_value = g_input->brush_size;
                     g_input->slider_accum = 0;
                     g_slider_last_raw_x = g_input->mouse_x;
+                    web_pointer_lock(true);
                 }
                 break;
 
@@ -458,6 +500,7 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
                 g_input->slider_start_value = g_input->brush_strength;
                 g_input->slider_accum = 0;
                 g_slider_last_raw_x = g_input->mouse_x;
+                web_pointer_lock(true);
                 break;
 
             case GLFW_KEY_A:
@@ -472,6 +515,7 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
                     g_input->slider_start_value = g_input->brush_hardness;
                     g_input->slider_accum = 0;
                     g_slider_last_raw_x = g_input->mouse_x;
+                    web_pointer_lock(true);
                 }
                 break;
 
@@ -487,6 +531,7 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
                     g_input->slider_start_value = g_input->brush_spacing;
                     g_input->slider_accum = 0;
                     g_slider_last_raw_x = g_input->mouse_x;
+                    web_pointer_lock(true);
                 }
                 break;
 
@@ -769,13 +814,15 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
             case GLFW_KEY_A:
             case GLFW_KEY_O:
                 if (g_input->slider_mode != InputState::SliderMode::NONE) {
-                    // Warp cursor back to where slider started
+                    // Warp cursor back to where slider started (on web the pointer
+                    // lock release restores the OS cursor there instead)
                     glfwSetCursorPos(w, g_input->slider_start_x, g_input->slider_start_y);
                     g_input->mouse_x = g_input->slider_start_x;
                     g_input->mouse_y = g_input->slider_start_y;
                     g_input->prev_mouse_x = g_input->slider_start_x;
                     g_input->prev_mouse_y = g_input->slider_start_y;
                     g_input->slider_mode = InputState::SliderMode::NONE;
+                    web_pointer_lock(false);
                 }
                 break;
         }
@@ -784,6 +831,7 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
 
 void setup_input_callbacks(GLFWwindow* window, InputState* state) {
     g_input = state;
+    g_window = window;
     glfwSetCursorPosCallback(window, cursor_pos_callback);
     glfwSetMouseButtonCallback(window, mouse_button_callback);
     glfwSetScrollCallback(window, scroll_cb_internal);

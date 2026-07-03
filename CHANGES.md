@@ -2,6 +2,59 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-03 — Fix: brush collided with ghost (undone) geometry after undo [itch feedback, top priority]
+
+Sculpting over a previously-sculpted-then-undone area deflected strokes as if the undone
+bumps were still there. Root cause: the brush picks depth/normal/tri-id from the offscreen
+screen-buffer pass, which renders a **flat expanded "soup" copy** of the mesh
+(`screen_vbo_pos/norm`, filled by the screen-expand compute) — and that soup was only
+re-expanded on stroke commit / entity sync (`update_screen_positions`). The in-place
+GPU-resident undo/redo writes the working VBO directly and never touched the soup, so
+`render_screen_buffers` kept re-rendering pre-undo geometry into the pick planes: the
+visible mesh reverted (matcap draws the live VBO), brush picking didn't. Fix:
+`render_screen_buffers` now always re-expands the soup from the live working VBO first
+(one tri-count/64 compute dispatch, idle-path only — the same pass the stroke path already
+runs). Affects native GL/wgpu builds of this tree too, not just web. **Needs in-browser
+re-confirm on itch.**
+
+## 2026-07-03 — Fix (web): ImGui got the desynced pointer too — buttons/dialogs missed clicks [itch feedback]
+
+The DOM-pointer fix (below) fed corrected CSS-pixel coords to the app's input only;
+ImGui_ImplGlfw kept consuming GLFW's backing-store coords through its own chained cursor
+callback, so subdiv +/-, undo/redo buttons and the file dialogs hit-tested against a
+phantom cursor (offset grows with resize/itch scaling). Fix: on web the app re-takes the
+GLFW cursor callback after ImGui init (`input_web_take_cursor_callback`) and
+`chisel_set_pointer` feeds the DOM position to ImGui through
+`ImGui_ImplGlfw_CursorPosCallback` — one position source for everything. Likely also fixes
+the phantom `WantCaptureMouse` eating clicks (suspected cause of "can't place insert-mesh
+on empty canvas"). **Needs in-browser re-confirm on itch, incl. insert-mode Y/N +
+empty-canvas placement.**
+
+## 2026-07-03 — Fix (web): S/A/W slider drags — grab jump, wrong scale, wandering cursor [itch feedback]
+
+Three symptoms, one root: slider deltas came from GLFW's cursor callback (backing-store
+space) while the drag anchor was the DOM-fed CSS position — the first callback delta was
+`glfw_x − css_x` (instant value jump on grab), subsequent deltas were scaled by the
+canvas/CSS ratio (needed a much bigger stroke), and with no pointer lock the OS cursor
+wandered off while the ring stayed frozen. Fix: on web, slider deltas now come from the
+DOM listener's `movementX` (CSS-consistent by construction) and the canvas grabs the
+**browser pointer lock** for the drag (S/A/W/O keydown → `requestPointerLock`, key release
+→ exit; Chrome restores the cursor to the grab point, matching the native warp-back). If
+the browser refuses the lock, deltas still work — only the visible cursor roams. Slider
+math extracted to `apply_slider_delta`, shared by the native GLFW path (behavior unchanged)
+and the web feed. Files: `input.cpp/h`, `main.cpp` listener.
+
+## 2026-07-03 — Fix (web): browser shortcuts fired during sculpting (F1 help, Ctrl+D bookmark, …) [itch feedback]
+
+Emscripten's GLFW only `preventDefault()`s Backspace/Tab, so app-owned combos leaked:
+F1 opened browser help, Ctrl+D (level up) bookmarked, Ctrl+S (save) saved the page. Added
+a capture-phase `keydown` listener that `preventDefault()`s F1 and Ctrl/Cmd+`d s o i z y p`
+(no Alt; Ctrl+Shift combos untouched except Shift+Z redo, so Ctrl+Shift+I devtools still
+works). The app still receives the keys — preventDefault stops the browser default, not
+propagation. Known open (itch feedback, needs design): the save/open dialog on web browses
+MEMFS (`/home/web_user/Desktop/chisel-sculpts`) — saves vanish on reload and host files
+are invisible; needs a download/upload bridge instead of a filesystem dialog.
+
 ## 2026-07-03 — Fix (web): undo did nothing on WebGPU (buffer-aliasing in multires apply)
 
 **Undo/redo silently did nothing on the web build** — the stack popped, but the mesh never

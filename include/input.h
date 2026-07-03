@@ -183,3 +183,9 @@ struct InputState {
 
 void setup_input_callbacks(GLFWwindow* window, InputState* state);
 void setup_char_callback(GLFWwindow* window);
+#if defined(__EMSCRIPTEN__)
+// Re-take the GLFW cursor-pos callback from ImGui_ImplGlfw (call after ImGui init):
+// on web both consumers are fed the DOM CSS-pixel position via chisel_set_pointer
+// instead of GLFW's desynced backing-store coords.
+void input_web_take_cursor_callback(GLFWwindow* window);
+#endif
