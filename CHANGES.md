@@ -2,6 +2,22 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-03 — Fix (web): cursor/pick offset after window resize
+
+The brush ring and pick point drifted from the real pointer after resizing the browser
+window, the offset growing with the resize. Root cause: on web, GLFW reports pointer
+coords in canvas backing-store space (scaled by `canvas.width / boundingRect.width`, off
+an internally-cached bounding rect that goes stale across a resize), while rendering,
+picking and the cursor ring all run in CSS-pixel space. The two only agree at the startup
+size. Debug trace confirmed everything is a clean 1:1 at rest (`win/fb/client/backing/plane`
+all equal) — purely a resize-time seam desync. An earlier per-frame `clientWidth/canvas.width`
+correction was a no-op whenever the two are equal (the normal state) and couldn't touch
+GLFW's cached rect, so it didn't hold. Fix: **bypass GLFW's coordinates on web entirely** —
+a DOM `pointermove`/`pointerdown` listener reads a *fresh* `getBoundingClientRect` per event
+and feeds the canvas-relative CSS-pixel position straight into input via an exported
+`chisel_set_pointer` (`main.cpp` listener + `input.cpp`); GLFW pointer coords are ignored
+under `__EMSCRIPTEN__`. Correct through any resize/DPR by construction. Verified in Chrome.
+
 ## 2026-07-03 — Fix: mask invert (Ctrl+I) is now undoable
 
 Ctrl+I flipped `mesh.mask` in place without pushing anything onto the undo stack, so

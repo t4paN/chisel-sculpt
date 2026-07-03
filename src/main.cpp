@@ -568,6 +568,48 @@ int main(int argc, char* argv[]) {
     // every captured local and the lambda itself — alive across browser-driven frames.
     auto frame = [&]() {
         input.begin_frame();
+
+        // Resolve the window/drawable size and, on web, reconfigure the surface + depth
+        // BEFORE polling input. glfwPollEvents scales the incoming pointer by the current
+        // canvas backing (canvas.width / boundingRect.width); if the surface were
+        // reconfigured *after* the poll, the first mouse event of a resize frame would
+        // still be scaled by the stale backing → an out-of-range cursor for a frame
+        // (seen as the ring jumping off the pointer right after a resize). Doing it first
+        // means the pointer is already in the freshly-resized space when events arrive.
+        int win_w, win_h;
+#if defined(__EMSCRIPTEN__)
+        // The custom shell's canvas is 100vw x 100vh, so its CSS (client) size is the
+        // authoritative window size. glfwGetFramebufferSize can't be trusted here: the
+        // canvas backing may be resized outside GLFW's knowledge, and stale GLFW size
+        // vs. a resized surface produces attachment-size-mismatch validation errors.
+        win_w = EM_ASM_INT({ return (Module.canvas.clientWidth  || window.innerWidth)  | 0; });
+        win_h = EM_ASM_INT({ return (Module.canvas.clientHeight || window.innerHeight) | 0; });
+#else
+        glfwGetFramebufferSize(window, &win_w, &win_h);
+#endif
+        if (win_w == 0 || win_h == 0) {
+            glfwPollEvents();      // keep the browser event loop breathing on a hidden frame
+            input.end_frame();
+            return;   // skip this frame (lambda body; == `continue` in the native loop)
+        }
+#ifdef CHISEL_BACKEND_WEBGPU
+        // Reconfigure the surface + depth on resize; per-pass viewport is set by the
+        // seam (no global glViewport). On web, configureSurface also sets the canvas
+        // backing (dpr=1), keeping color (surface) and depth attachments the same size.
+        if (win_w != fbw || win_h != fbh) {
+            fbw = win_w; fbh = win_h;
+            configureSurface(fbw, fbh);
+            makeDepth(fbw, fbh);
+            // The pick planes (depth/normal/triid) only re-render on this flag. Without
+            // it they stay at the old size + framing after a resize while the visible
+            // model re-renders at the new size, so the cursor latch / normal / brush
+            // anchor sample a stale-aspect plane → cursor offset until the camera moves.
+            screen_buffers_dirty = true;
+        }
+#else
+        glViewport(0, 0, win_w, win_h);
+#endif
+
         glfwPollEvents();
         tablet.poll(brush_stroke.is_active());
         if (tablet.available() && !prev_tablet_avail) {
@@ -618,34 +660,8 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        int win_w, win_h;
-#if defined(__EMSCRIPTEN__)
-        // The custom shell's canvas is 100vw x 100vh, so its CSS (client) size is the
-        // authoritative window size. glfwGetFramebufferSize can't be trusted here: the
-        // canvas backing may be resized outside GLFW's knowledge, and stale GLFW size
-        // vs. a resized surface produces attachment-size-mismatch validation errors.
-        // Read the displayed size and drive the surface/depth backing to match it.
-        win_w = EM_ASM_INT({ return (Module.canvas.clientWidth  || window.innerWidth)  | 0; });
-        win_h = EM_ASM_INT({ return (Module.canvas.clientHeight || window.innerHeight) | 0; });
-#else
-        glfwGetFramebufferSize(window, &win_w, &win_h);
-#endif
-        if (win_w == 0 || win_h == 0) {
-            input.end_frame();
-            return;   // skip this frame (lambda body; == `continue` in the native loop)
-        }
-#ifdef CHISEL_BACKEND_WEBGPU
-        // Reconfigure the surface + depth on resize; per-pass viewport is set by the
-        // seam (no global glViewport). On web, configureSurface also sets the canvas
-        // backing (dpr=1), keeping color (surface) and depth attachments the same size.
-        if (win_w != fbw || win_h != fbh) {
-            fbw = win_w; fbh = win_h;
-            configureSurface(fbw, fbh);
-            makeDepth(fbw, fbh);
-        }
-#else
-        glViewport(0, 0, win_w, win_h);
-#endif
+        // (win_w / win_h resolved and the surface reconfigured at the top of the frame,
+        //  before glfwPollEvents — see the note there.)
 
         // Pump async GPU→CPU readbacks once per frame: deliver map callbacks (no-op
         // on GL) and land any finished screen-buffer plane reads. Everything that
@@ -2039,6 +2055,20 @@ int main(int argc, char* argv[]) {
     };
 
 #ifdef __EMSCRIPTEN__
+    // Feed pointer position straight from the DOM in CSS-pixel space (canvas-relative),
+    // bypassing GLFW's backing-store coords which desync from render/pick space across a
+    // resize (the cursor-offset bug). A fresh getBoundingClientRect per event keeps it
+    // exact through any resize/DPR change. chisel_set_pointer lives in input.cpp.
+    EM_ASM({
+        var c = Module.canvas;
+        var feed = function(e) {
+            var r = c.getBoundingClientRect();
+            Module._chisel_set_pointer(e.clientX - r.left, e.clientY - r.top);
+        };
+        c.addEventListener('pointermove', feed);
+        c.addEventListener('pointerdown', feed);
+    });
+
     // Browser drives the loop via requestAnimationFrame (fps=0). simulate_infinite_loop
     // =true unwinds out of main() but preserves its stack, so &frame and every captured
     // local stay valid; the trampoline (a captureless lambda → C function pointer)

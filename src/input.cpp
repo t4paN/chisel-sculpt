@@ -2,6 +2,9 @@
 #include <cmath>
 #include <cstdio>
 #include <algorithm>
+#if defined(__EMSCRIPTEN__)
+#include <emscripten.h>
+#endif
 
 InputState::InputState()
     : mouse_x(0), mouse_y(0)
@@ -202,9 +205,34 @@ static void cursor_pos_callback(GLFWwindow* w, double x, double y) {
         return;
     }
 
+#if defined(__EMSCRIPTEN__)
+    // On web we ignore GLFW's pointer coords: it reports them in canvas
+    // backing-store space (scaled by canvas.width / boundingRect.width, and it
+    // caches a bounding rect that goes stale across a resize), which desyncs from
+    // the CSS-pixel space that rendering + picking use → the post-resize cursor
+    // offset. Position is fed instead by chisel_set_pointer(), driven by a DOM
+    // pointermove listener that reads a *fresh* getBoundingClientRect every event.
+    (void)x; (void)y;
+#else
+    g_input->mouse_x = x;
+    g_input->mouse_y = y;
+#endif
+}
+
+#if defined(__EMSCRIPTEN__)
+// Called from the shell's DOM pointermove listener (see main.cpp) with the pointer
+// position already in CSS-pixel space relative to the canvas top-left — i.e. the
+// exact space the render surface, pick planes and cursor ring live in. Bypasses
+// GLFW's coordinate mangling entirely, so it's correct through any resize/DPR.
+extern "C" EMSCRIPTEN_KEEPALIVE void chisel_set_pointer(double x, double y) {
+    if (!g_input) return;
+    // While a slider drag is active the pointer is visually locked and driven by
+    // GLFW deltas — don't let raw motion move the cached mouse position.
+    if (g_input->slider_mode != InputState::SliderMode::NONE) return;
     g_input->mouse_x = x;
     g_input->mouse_y = y;
 }
+#endif
 
 static void mouse_button_callback(GLFWwindow* w, int button, int action, int mods) {
     if (!g_input) return;
