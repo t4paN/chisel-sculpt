@@ -308,6 +308,11 @@ struct ComputeState {
     gpu::Buffer          multires_apply_ubo;  // 32-byte {count,targets_base,ring_mode,ring_base,forward} block
     gpu::Buffer multires_stage_ssbo;     // float6 * V scratch (target+source), grow-only — seam-owned (Step 3b)
     uint32_t multires_stage_capacity;
+    // Tiny dummy storage buffer bound into idle read_write slots (disp/base) of the
+    // diff/apply bind groups. WebGPU forbids binding the writable pos VBO as a filler
+    // (writable+read alias in one compute pass → dropped submit); this distinct buffer
+    // is never read/written by the shader for the idle mode, so a small size is fine.
+    gpu::Buffer multires_filler_ssbo;
 
     // GPU-resident undo ring (blood-moon 3b-ii). PERSISTENT history of per-vert
     // (old,new) STROKE deltas — float6 per recorded vert — so pen-up can capture

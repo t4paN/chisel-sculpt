@@ -2,6 +2,31 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-03 — Fix (web): undo did nothing on WebGPU (buffer-aliasing in multires apply)
+
+**Undo/redo silently did nothing on the web build** — the stack popped, but the mesh never
+reverted. A base-level stroke undo showed no change at all; strokes made above the base only
+appeared to revert in a lump when you undid back across the level-change entry (that's the
+CPU-side cascade rebuild — a different, working code path). Root cause: `dispatch_multires_apply`
+binds the working positions VBO as a **read-write** storage buffer, but reused that *same*
+buffer as the read-only filler for whichever bind slots the current mode leaves idle
+(`stage`/`ring`, and `disp`/`base`/`frames` when absent). WebGPU forbids one buffer being
+writable **and** readable in a single compute pass (`usage (Storage(read-write)|Storage(read-only))
+… in the same synchronization scope`); it invalidated the whole command buffer and dropped the
+submit, so the apply shader never ran and the VBO was never written. GL has no such rule, which
+is why native undo always worked. Confirmed with a before/after VBO readback (`before == after`)
+and the verbatim validation error in the Chrome log.
+
+Fix: stop using the writable VBO as a filler. Idle **read** slots now borrow `dirty_verts_ssbo`
+(already bound read-only, always present); the single idle **read-write** slot (guards guarantee
+only one of `disp`/`base` is ever idle) gets a small dedicated `multires_filler_ssbo` the shader
+never touches for that mode. Files: `compute_multires.cpp`, `compute.h`. Capture (`multires_diff`)
+was unaffected — there `pos` is read-only, so its filler never aliased. Also folded in: an
+in-place-undo → cascade path now `materialize_active_cpu()`s before `cascade_to_level`/
+`splice_active` (`main.cpp`), matching every other rebuild path, so a GPU-resident undo that
+then cascades doesn't index stale/oversized adjacency. **Validated in-app (user):** base + higher-
+level stroke undo now revert live in the browser; `Invalid CommandBuffer` spam gone.
+
 ## 2026-07-03 — Fix (web): cursor/pick offset after window resize
 
 The brush ring and pick point drifted from the real pointer after resizing the browser

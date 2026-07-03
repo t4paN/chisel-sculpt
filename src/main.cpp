@@ -1400,6 +1400,16 @@ int main(int argc, char* argv[]) {
             // surface from its multires stack (the pre-multimesh single-mesh flow).
             auto cascade_active = [&](bool needs_cascade) {
                 if (!needs_cascade) return;
+                // An in-place GPU-resident undo (undo.cpp Case 1) writes the working
+                // VBO + disp/base SSBO and only mark_cpu_dirty()s the touched verts —
+                // CPU disp/base/pos stay stale. Flush them back NOW, while the surface
+                // is still at the current (pre-cascade) level so multires_gpu's dirty
+                // vert indices are in range: cascade_to_level below reads CPU disp/base
+                // (else the descended surface is wrong), and splice_active shrinks the
+                // mesh — a later materialize against the smaller mesh would index its
+                // adjacency out of bounds (wasm traps; native was lenient). Same choke
+                // every other rebuild path already runs first (level-switch/remesh/merge).
+                scene.materialize_active_cpu();
                 MeshEntity& ent = scene.active_entity();
                 sync_color_to_base(ent.mesh, ent.multires);
                 auto saved_mask = std::move(ent.mesh.mask);

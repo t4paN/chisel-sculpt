@@ -209,19 +209,27 @@ void ComputeState::dispatch_multires_apply(const gpu::Buffer& pos_vbo, const gpu
     gpu::write_buffer(gpu_dev, multires_apply_ubo, 0, &u, sizeof(u));
 
     // Every declared binding must point at a live buffer (some drivers fault on an
-    // unbound slot even if the shader never reads it). In ring mode the stage slot
-    // is unused; in stage mode the ring slot is. The pool buffers are seam-owned now
-    // (Step 3c) and bound directly; pos_vbo (always present) is the harmless filler
-    // for whichever is idle and for any 0-handle slot the mode skips.
-    const gpu::Buffer* disp_b  = disp_ssbo.handle   ? &disp_ssbo   : &pos_vbo;
-    const gpu::Buffer* frame_b = frames_ssbo.handle ? &frames_ssbo : &pos_vbo;
-    const gpu::Buffer* base_b  = base_ssbo.handle   ? &base_ssbo   : &pos_vbo;
+    // unbound slot even if the shader never reads it). CRITICAL on WebGPU: pos_vbo is
+    // bound read_write at BIND_POSITIONS, so it must NOT double as a filler — binding
+    // one buffer as both writable and readable in a single compute pass is a hard
+    // validation error there (the whole submit is dropped, so the apply silently does
+    // nothing; GL is lenient, which is why native worked). Idle READ slots (frames,
+    // and whichever of stage/ring the mode skips) get dirty_verts_ssbo, itself already
+    // bound read-only here. The idle READ_WRITE slot (disp in base mode, or base in
+    // disp mode — the guards above guarantee only one is ever idle) gets a small,
+    // distinct dummy the shader never touches for that mode.
+    if (!multires_filler_ssbo.handle) {
+        multires_filler_ssbo = gpu::create_buffer(gpu_dev, nullptr, 256, gpu::Usage::Storage);
+    }
+    const gpu::Buffer* disp_b  = disp_ssbo.handle   ? &disp_ssbo   : &multires_filler_ssbo;
+    const gpu::Buffer* frame_b = frames_ssbo.handle ? &frames_ssbo : &dirty_verts_ssbo;
+    const gpu::Buffer* base_b  = base_ssbo.handle   ? &base_ssbo   : &multires_filler_ssbo;
 
     // stage + ring are seam-owned (Step 3b): bind the live member for the active mode,
-    // pos as the filler for the idle one (every slot must point at a live buffer).
+    // dirty_verts (read-only) as the filler for the idle one.
     const gpu::Buffer* stage_b = (!ring_mode && multires_stage_ssbo.handle)
-                                     ? &multires_stage_ssbo : &pos_vbo;
-    const gpu::Buffer* ring_b  = ring_mode ? &undo_ring_ssbo : &pos_vbo;
+                                     ? &multires_stage_ssbo : &dirty_verts_ssbo;
+    const gpu::Buffer* ring_b  = ring_mode ? &undo_ring_ssbo : &dirty_verts_ssbo;
 
     const gpu::BindBufferEntry bg[] = {
         { BIND_POSITIONS,       &pos_vbo,   pos_vbo.size },
