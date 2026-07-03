@@ -25,7 +25,11 @@ was unaffected — there `pos` is read-only, so its filler never aliased. Also f
 in-place-undo → cascade path now `materialize_active_cpu()`s before `cascade_to_level`/
 `splice_active` (`main.cpp`), matching every other rebuild path, so a GPU-resident undo that
 then cascades doesn't index stale/oversized adjacency. **Validated in-app (user):** base + higher-
-level stroke undo now revert live in the browser; `Invalid CommandBuffer` spam gone.
+level stroke undo now revert live in the browser; `Invalid CommandBuffer` spam gone. **This also
+closes the high-multires-level undo OOB crash** (the `memory access out of bounds (in promise)`
+release-blocker): the full walk — sculpt up several subdiv levels, then Ctrl-Z all the way back to
+empty — now completes cleanly on web (user-confirmed). The dropped submits from the aliasing error
+were leaving GPU/CPU state inconsistent, which is what the async-readback trap fell out of.
 
 ## 2026-07-03 — Fix (web): cursor/pick offset after window resize
 
