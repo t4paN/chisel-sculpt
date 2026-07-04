@@ -2,6 +2,12 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-04 — WebGPU refactor complete; backwards save/load compatibility intact
+
+All three targets (web / native WebGPU / native GL) now build and run from the one
+codebase. Save/load and import kept working across every version along the way —
+models from the earliest saving builds still open fine on the live itch.io deploy.
+
 ## 2026-07-04 — Fix: native WebGPU build crashed on startup (wgpu-native panic)
 
 `build-wgpu/chisel` aborted right after the first frame: `staging_release` verified
@@ -10,6 +16,10 @@ in wgpu-native (fine on web via Emscripten). Dropped the runtime query — idle-
 already tracked by the ticket's `done` flag; `ticket_take` now destroys instead of
 pooling a staging buffer whose map callback hasn't landed (same rule as `ticket_drop`).
 Confirmed: native wgpu build starts and sculpts normally.
+
+Same day: full-app GL backend re-validated on this tree (`cmake -B build-gl
+-DCHISEL_GPU_BACKEND=gl`) — built clean first try, user-confirmed working in-app. All
+three targets (gl / native wgpu / web) now green from the one codebase.
 
 ## 2026-07-04 — itch.io feedback round 1: CLOSED (all confirmed on live v0.1.11)
 
