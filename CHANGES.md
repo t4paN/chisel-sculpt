@@ -2,6 +2,17 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-05 — Fix: camera sliced the model open when zooming close (WebGPU backends)
+
+The ortho camera's near_plane=-100 lets GL draw everything up to 100 units behind the
+camera plane — that's why you could never zoom *inside* a model. WebGPU clips NDC z in
+[0,1] (GL: [-1,1]) and the shaders got the GL-style matrix raw, so behind-plane
+geometry landed at negative depth and was discarded: the camera plane itself became
+the near plane, slicing the mesh open on close zoom. `get_projection_matrix` now
+remaps the z row (z' = 0.5z + 0.5w, the standard GL→WebGPU conversion) under
+CHISEL_BACKEND_WEBGPU; GL builds unchanged. User-confirmed: zoom behaves like the old
+GL builds again on web + native wgpu.
+
 ## 2026-07-05 — Cross-platform .chisel compatibility: canonical multires numbering, format v4
 
 Root cause of "old multires models shred on web": `loop_subdivide` numbered its

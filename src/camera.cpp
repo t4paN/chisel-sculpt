@@ -110,4 +110,16 @@ void Camera::get_projection_matrix(float* m, float aspect) const {
     m[10] = -2.0f / (far_plane - near_plane);
     m[14] = -(far_plane + near_plane) / (far_plane - near_plane);
     m[15] = 1.0f;
+
+#ifdef CHISEL_BACKEND_WEBGPU
+    // GL clips NDC z in [-1,1]; WebGPU clips in [0,1]. Remap the z row
+    // (z' = 0.5*z + 0.5*w) or the near_plane=-100 "nothing behind the ortho
+    // camera plane ever clips" trick silently dies on WebGPU: the camera plane
+    // itself becomes the near plane, and zooming close slices the model open
+    // (camera sees inside the mesh — GL builds never did this).
+    m[2]  = 0.5f * m[2]  + 0.5f * m[3];
+    m[6]  = 0.5f * m[6]  + 0.5f * m[7];
+    m[10] = 0.5f * m[10] + 0.5f * m[11];
+    m[14] = 0.5f * m[14] + 0.5f * m[15];
+#endif
 }
