@@ -2,6 +2,21 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-04 — Fix: mesh export shipped stale geometry ("spheres with normal maps") + web save gets the browser's real save dialog
+
+Exported .obj/.stl/.ply had no stroke volume — silhouette stayed the base sphere while
+the normals carried sculpt detail. Root cause: GPU-resident sculpting/undo leave the
+CPU-side `mesh.pos` stale; project save pulls the live surface back via
+`scene.materialize_active_cpu()` before writing, but the export path never did — on
+native OR web (latent native bug too, exposed by the web round-trip test). Fix:
+materialize before export on both paths. Also: `web_download_file` now tries
+`showSaveFilePicker` first — the browser's real save dialog with folder browsing and an
+editable, prefilled name (user request) — falling back to the plain anchor download when
+the API is missing (Firefox/Safari) or refused (Chrome blocks it in cross-origin iframes,
+which is how itch embeds games — so on itch it may still be a plain download; the
+browser-side "Ask where to save each file" setting is the itch-proof alternative).
+A user-cancelled picker saves nothing. **Needs in-browser confirm on itch (v0.1.11).**
+
 ## 2026-07-04 — Web save/open bridge: browser downloads + file picker [itch feedback, last of round 1]
 
 The web build's file dialogs browsed Emscripten's MEMFS — an empty RAM disk that dies

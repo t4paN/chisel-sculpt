@@ -147,18 +147,36 @@ extern "C" EMSCRIPTEN_KEEPALIVE void chisel_web_import_done(const char* path) {
     g_web_import_path = path ? path : "";
 }
 
-// Read fs_path out of MEMFS, hand it to the browser as a download, delete it.
+// Read fs_path out of MEMFS and hand it to the browser, deleting the MEMFS copy.
+// Preferred route is showSaveFilePicker (the browser's real save dialog: folder
+// browsing + editable name, prefilled with download_name) — but Chrome blocks it
+// in cross-origin iframes (itch embeds the game that way), so any refusal falls
+// back to a plain anchor download. A user cancel (AbortError) saves nothing.
 static void web_download_file(const char* fs_path, const char* download_name) {
     EM_ASM({
         var path = UTF8ToString($0);
         var name = UTF8ToString($1);
         var data = FS.readFile(path);
-        var a = document.createElement('a');
-        a.href = URL.createObjectURL(new Blob([data]));
-        a.download = name;
-        a.click();
-        setTimeout(function() { URL.revokeObjectURL(a.href); }, 10000);
         FS.unlink(path);
+        var fallback = function() {
+            var a = document.createElement('a');
+            a.href = URL.createObjectURL(new Blob([data]));
+            a.download = name;
+            a.click();
+            setTimeout(function() { URL.revokeObjectURL(a.href); }, 10000);
+        };
+        if (window.showSaveFilePicker) {
+            window.showSaveFilePicker({ suggestedName: name }).then(function(h) {
+                return h.createWritable().then(function(w) {
+                    return w.write(data).then(function() { return w.close(); });
+                });
+            }).catch(function(e) {
+                if (e && e.name === 'AbortError') return;   // user cancelled
+                fallback();   // SecurityError (cross-origin iframe) etc.
+            });
+        } else {
+            fallback();       // Firefox/Safari: no File System Access API
+        }
     }, fs_path, download_name);
 }
 
@@ -1985,6 +2003,9 @@ int main(int argc, char* argv[]) {
                 auto dot = path.find_last_of('.');
                 std::string ext = (dot != std::string::npos) ? path.substr(dot + 1) : "";
                 for (char& ch : ext) ch = (char)std::tolower((unsigned char)ch);
+                // GPU-resident sculpting/undo leave mesh.pos stale on the CPU —
+                // pull the live surface back first (save does the same).
+                scene.materialize_active_cpu();
                 bool ok = (ext == "stl") ? mesh->export_stl(path.c_str())
                         : (ext == "ply") ? mesh->export_ply(path.c_str())
                                          : mesh->export_obj(path.c_str());
@@ -2106,6 +2127,9 @@ int main(int argc, char* argv[]) {
                     || name.compare(name.size() - ext.size(), ext.size(), ext) != 0)
                     name += ext;
                 std::string fs_path = "/" + name;
+                // GPU-resident sculpting/undo leave mesh.pos stale on the CPU —
+                // pull the live surface back first (save does the same).
+                scene.materialize_active_cpu();
                 bool ok = (ext == ".stl") ? mesh->export_stl(fs_path.c_str())
                         : (ext == ".ply") ? mesh->export_ply(fs_path.c_str())
                                           : mesh->export_obj(fs_path.c_str());
