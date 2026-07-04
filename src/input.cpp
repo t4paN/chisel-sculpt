@@ -103,6 +103,19 @@ void InputState::clear_smooth_lock() {
 }
 
 void InputState::begin_frame() {
+    // One-shot event flags are cleared in end_frame, NOT here. On the web,
+    // GLFW callbacks fire from DOM handlers *between* rAF frames (glfwPollEvents
+    // is a no-op), so a top-of-frame clear would eat every press/keydown before
+    // any consumer ran — this is what killed insert-mesh placement and its Y/N
+    // prompt in the browser build. Clearing at end-of-frame is correct on both
+    // targets: native events land mid-frame via glfwPollEvents, web events land
+    // between frames; either way they're set after the previous clear and read
+    // before the next one.
+}
+
+void InputState::end_frame() {
+    prev_mouse_x = mouse_x;
+    prev_mouse_y = mouse_y;
     mouse1_just_pressed = false;
     mouse1_just_released = false;
     enter_pressed = false;
@@ -110,11 +123,6 @@ void InputState::begin_frame() {
     key_n_pressed = false;
     debug_stride_cycle_requested = false;
     debug_pick_vertex_requested  = false;
-}
-
-void InputState::end_frame() {
-    prev_mouse_x = mouse_x;
-    prev_mouse_y = mouse_y;
 }
 
 bool InputState::is_smooth_active() const {

@@ -2,6 +2,21 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-04 — Fix (web): insert-mesh dead in browser — one-shot input flags eaten before consumers [itch feedback]
+
+Insert mode couldn't place on empty canvas and the Y/N mirror prompt ignored keys — web
+only, native fine. Root cause: `InputState::begin_frame()` cleared the one-shot event
+flags (`mouse1_just_pressed`, `key_y_pressed`, `key_n_pressed`, …) at the top of the
+frame. On native that's harmless — events arrive later in the frame via `glfwPollEvents`.
+On Emscripten `glfwPollEvents` is a no-op; GLFW callbacks fire from DOM handlers *between*
+rAF frames, so every press landed before the top-of-frame clear and was wiped before any
+consumer ran (JS is single-threaded — eaten 100% of the time, not a race). Insert was the
+sole consumer of these edge flags, which is why only it broke: empty-canvas placement
+needs `ORBIT + mouse1_just_pressed`, the Y/N prompt needs `key_y/n_pressed`; on-model
+placement worked because it keys off the level-state `drag_mode == SCULPT`. Fix: clear
+the one-shot flags in `end_frame()` instead — set-after-clear, read-before-next-clear on
+both targets. **Needs in-browser confirm on itch (v0.1.9).**
+
 ## 2026-07-03 — Fix: brush collided with ghost (undone) geometry after undo [itch feedback, top priority]
 
 Sculpting over a previously-sculpted-then-undone area deflected strokes as if the undone
