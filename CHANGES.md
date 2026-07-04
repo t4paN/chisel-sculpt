@@ -2,6 +2,15 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-04 — itch.io feedback round 1: CLOSED (all confirmed on live v0.1.11)
+
+User confirmed on the live itch deploy: save/open round-trip works, exports carry real
+stroke volume, insert-mesh places + prompts correctly, and a triple multi-mesh SDF merge
+(two centered + mirrored) works in-browser. showSaveFilePicker is indeed blocked by
+itch's cross-origin iframe — saves fall back to the plain download + ImGui name prompt,
+accepted as the itch behavior. All 6 round-1 reports fixed and verified; perf is good up
+to ~300–500k tris on a modest machine (browser-tab RAM is the ceiling, not GPU).
+
 ## 2026-07-04 — Fix: mesh export shipped stale geometry ("spheres with normal maps") + web save gets the browser's real save dialog
 
 Exported .obj/.stl/.ply had no stroke volume — silhouette stayed the base sphere while
