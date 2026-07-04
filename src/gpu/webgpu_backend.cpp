@@ -868,11 +868,12 @@ static WGPUBuffer staging_acquire(Device& dev, uint64_t size, uint64_t& alloc_si
 
 static void staging_release(WGPUBuffer b, uint64_t size) {
     if (!b) return;
-    // Never pool a buffer that isn't fully Unmapped: reusing a still-mapped/pending
-    // MapRead buffer in a copy-submit + re-map trips WebGPU validation ("used in
-    // submit while mapped" / "already mapped") and corrupts the readback. Callers are
-    // expected to unmap first; this guard catches any path that doesn't.
-    if (wgpuBufferGetMapState(b) != WGPUBufferMapState_Unmapped) { wgpuBufferRelease(b); return; }
+    // Callers must only hand in a fully Unmapped, idle buffer: pooling a
+    // still-mapped/pending MapRead buffer trips WebGPU validation ("used in submit
+    // while mapped") and corrupts the readback. Idle-ness is tracked via the
+    // ticket's `done` flag — do NOT verify with wgpuBufferGetMapState here: that
+    // entrypoint is an unimplemented panicking stub in wgpu-native (native builds
+    // abort the moment it's called).
     if (g_staging_pool.size() >= 16) { wgpuBufferRelease(b); return; }
     g_staging_pool.push_back({size, b});
 }
@@ -1005,7 +1006,13 @@ bool ticket_take(Device&, ReadTicket t, void* out, uint64_t out_size) {
         }
     }
     wgpuBufferUnmap(r.staging);              // also aborts a still-pending map
-    staging_release(r.staging, r.staging_size);
+    if (r.done) {
+        staging_release(r.staging, r.staging_size);
+    } else {
+        // Taken before the map callback landed: same teardown hazard as ticket_drop
+        // — the abort may still be in flight, so destroy instead of pooling.
+        wgpuBufferRelease(r.staging);
+    }
     g_tickets.erase(it);
     return good;
 }

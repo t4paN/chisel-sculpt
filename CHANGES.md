@@ -2,6 +2,15 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-04 — Fix: native WebGPU build crashed on startup (wgpu-native panic)
+
+`build-wgpu/chisel` aborted right after the first frame: `staging_release` verified
+buffer idle-ness with `wgpuBufferGetMapState`, which is an unimplemented panicking stub
+in wgpu-native (fine on web via Emscripten). Dropped the runtime query — idle-ness is
+already tracked by the ticket's `done` flag; `ticket_take` now destroys instead of
+pooling a staging buffer whose map callback hasn't landed (same rule as `ticket_drop`).
+Confirmed: native wgpu build starts and sculpts normally.
+
 ## 2026-07-04 — itch.io feedback round 1: CLOSED (all confirmed on live v0.1.11)
 
 User confirmed on the live itch deploy: save/open round-trip works, exports carry real
