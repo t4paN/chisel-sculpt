@@ -11,7 +11,11 @@
 static constexpr uint32_t MAGIC   = 0x4C534843; // "CHSL" little-endian
 // v3 adds per-vertex paint colour after the mask in every mesh body (working +
 // multires base). v2 files are still read by the same loader with has_color=false.
-static constexpr uint32_t VERSION = 3;
+// v4: identical byte layout to v3; the version bump marks that multires disp
+// layers are encoded under the CANONICAL (sorted-edge-key) midpoint numbering
+// of loop_subdivide, which is platform-independent. v<=3 disp data used the
+// stdlib hash-map iteration order of whatever platform saved the file.
+static constexpr uint32_t VERSION = 4;
 
 struct ChunkHeader {
     char     tag[4];
@@ -356,11 +360,21 @@ LoadResult load_project(const char* path, ProjectData& data) {
 
     // Legacy versions live in their own removable modules. Delete the branch +
     // the module together when support is dropped.
-    if (version == 1)
-        return load_project_v1(path, data);
+    LoadResult lr;
+    if (version == 1) {
+        lr = load_project_v1(path, data);
+    } else {
+        if (version < 2 || version > 4) return LoadResult::ERR_VERSION;
+        lr = load_project_v2(f, (std::streamoff)file_size, data, version >= 3);
+    }
 
-    if (version != 2 && version != 3) return LoadResult::ERR_VERSION;
-    return load_project_v2(f, (std::streamoff)file_size, data, version >= 3);
+    // v<=3 multires disp layers are indexed under the saving platform's legacy
+    // (hash-order) midpoint numbering; flag them for migration on scene rebuild.
+    // v4+ files are canonical by definition.
+    if (lr == LoadResult::OK && version <= 3)
+        for (EntityRecord& e : data.entities)
+            e.legacy_numbering = true;
+    return lr;
 }
 
 // ------------------------------------------------------------------ strings --

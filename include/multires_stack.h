@@ -65,6 +65,13 @@ void compute_frames(const Mesh& m, std::vector<Frame>& out);
 // Rebuilds CSR adjacency on `out`. Mirror map NOT rebuilt — caller must do that.
 void cascade_to_level(MultiresStack& stack, Mesh& out, int K);
 
+// Re-encode a v<=3 stack (legacy platform-specific midpoint numbering, see
+// mesh.h) into canonical numbering, validating the legacy replay against the
+// current-level surface cached in the project file. Returns false when the
+// file was saved on a different platform and cannot be decoded here — caller
+// keeps the cached surface and flattens the stack.
+bool migrate_legacy_numbering(MultiresStack& stack, const Mesh& cached_surface);
+
 // Snapshot of the subset of multires state affected by a projection, used to
 // make a single atomic undo entry.
 struct MultiresSnapshot {

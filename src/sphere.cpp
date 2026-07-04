@@ -1,4 +1,5 @@
 #include "mesh.h"
+#include <algorithm>
 #include <cmath>
 #include <unordered_map>
 
@@ -6,7 +7,7 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-Mesh loop_subdivide(const Mesh& input) {
+Mesh loop_subdivide(const Mesh& input, bool legacy_numbering) {
     const uint32_t V = input.vertex_count();
     const uint32_t F = input.tri_count();
 
@@ -56,12 +57,14 @@ Mesh loop_subdivide(const Mesh& input) {
         for (uint32_t i = 0; i < V; i++) out.color[i] = input.color[i];
     }
 
-    // Pass 2: assign indices and positions to edge-midpoint vertices
-    uint32_t next_vert = V;
-    for (auto& [key, d] : edge_map) {
+    // Pass 2: assign indices and positions to edge-midpoint vertices.
+    // Canonical numbering: edges in sorted-key order — bit-identical on every
+    // platform. Legacy numbering (v<=3 files) is the raw unordered_map iteration
+    // order this platform's stdlib produces; see the header note in mesh.h.
+    auto assign_midpoint = [&](uint64_t key, EdgeData& d, uint32_t vert) {
         uint32_t v0 = (uint32_t)(key >> 32);
         uint32_t v1 = (uint32_t)(key & 0xFFFFFFFF);
-        d.new_vert = next_vert++;
+        d.new_vert = vert;
         Vec3 p0 = input.get_pos(v0);
         Vec3 p1 = input.get_pos(v1);
         Vec3 pos;
@@ -74,6 +77,18 @@ Mesh loop_subdivide(const Mesh& input) {
         }
         out.set_pos(d.new_vert, pos);
         if (has_color) out.color[d.new_vert] = color_avg(input.color[v0], input.color[v1]);
+    };
+    uint32_t next_vert = V;
+    if (legacy_numbering) {
+        for (auto& [key, d] : edge_map)
+            assign_midpoint(key, d, next_vert++);
+    } else {
+        std::vector<uint64_t> sorted_keys;
+        sorted_keys.reserve(edge_map.size());
+        for (auto& [key, d] : edge_map) sorted_keys.push_back(key);
+        std::sort(sorted_keys.begin(), sorted_keys.end());
+        for (uint64_t key : sorted_keys)
+            assign_midpoint(key, edge_map.at(key), next_vert++);
     }
 
     // Pass 3: move original vertices with Loop weights

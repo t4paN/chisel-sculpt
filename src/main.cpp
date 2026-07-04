@@ -1929,12 +1929,20 @@ int main(int argc, char* argv[]) {
                     app_state = AppState::IDLE;
                     screen_buffers_dirty = true;
 
-                    std::snprintf(input.notification, sizeof(input.notification),
-                                  "Loaded: %.400s (%zu mesh%s, active %u v, %u t)",
-                                  path.c_str(), proj.entities.size(),
-                                  proj.entities.size() == 1 ? "" : "es",
-                                  mesh->vertex_count(), mesh->tri_count());
-                    input.notification_timer = 3.0f;
+                    if (scene.load_flattened() > 0) {
+                        std::snprintf(input.notification, sizeof(input.notification),
+                                      "Loaded with %d mesh(es) flattened: file is from "
+                                      "another platform — re-save there to migrate",
+                                      scene.load_flattened());
+                        input.notification_timer = 6.0f;
+                    } else {
+                        std::snprintf(input.notification, sizeof(input.notification),
+                                      "Loaded: %.400s (%zu mesh%s, active %u v, %u t)",
+                                      path.c_str(), proj.entities.size(),
+                                      proj.entities.size() == 1 ? "" : "es",
+                                      mesh->vertex_count(), mesh->tri_count());
+                        input.notification_timer = 3.0f;
+                    }
                 } else {
                     error_popup_msg = std::string("Load failed: ") + result_string(lr) + "\n" + path;
                     error_popup_trigger = true;
@@ -1979,6 +1987,22 @@ int main(int argc, char* argv[]) {
                 }
             }
         };
+
+        // Dev hook: CHISEL_AUTO_IMPORT=<path> imports a file on the first frame
+        // (headless load-path testing without driving the UI). No-op when unset.
+        {
+            static bool auto_import_done = false;
+            if (!auto_import_done) {
+                auto_import_done = true;
+                if (const char* auto_path = std::getenv("CHISEL_AUTO_IMPORT")) {
+                    if (FILE* tf = std::fopen(auto_path, "rb")) {
+                        std::fclose(tf);
+                        std::printf("[auto-import] loading %s\n", auto_path);
+                        do_import_path(auto_path);
+                    }
+                }
+            }
+        }
 
 #ifndef __EMSCRIPTEN__
         // ---- ImGui file dialogs (native: browse the real filesystem) ----

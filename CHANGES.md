@@ -2,6 +2,35 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-05 — Cross-platform .chisel compatibility: canonical multires numbering, format v4
+
+Root cause of "old multires models shred on web": `loop_subdivide` numbered its
+edge-midpoint vertices in `std::unordered_map` iteration order — a stdlib detail, so
+native (libstdc++) and web (Emscripten libc++) produced different vertex numberings.
+Multires disp layers are indexed by those numbers and persist in .chisel files, so a
+file opened on the other platform decoded its displacements against the wrong
+vertices: spikes where displacement was strong, fine where it was ~zero. Each platform
+was self-consistent (files round-tripped locally), which is why it hid — and why a
+web-saved scene opened in old native GL shredded only the active entity (the only one
+with nonzero disp layers).
+
+- `loop_subdivide` now numbers midpoints canonically (sorted edge keys): the whole
+  cascade is bit-identical on every platform (verified — native and web produce
+  identical FNV checksums for subdivision, frames, and cascade output).
+- .chisel format v4 (byte layout unchanged): marks disp layers canonically numbered.
+- v≤3 loader: replays the cascade under the legacy numbering, self-validates against
+  the current-level surface cached in the file, then re-encodes every layer to
+  canonical — existing libraries migrate transparently on their origin platform, and
+  the next save writes portable v4.
+- v≤3 file on a *foreign* platform: validation catches the mismatch; the cached
+  surface (always correct) is kept and the stack is flattened at the current level,
+  with a notification — no silent shards, OBJ/re-save escape hatches intact.
+- Dev hook: `CHISEL_AUTO_IMPORT=<path>` imports a file on the first frame.
+
+Verified with knavi1.chisel (v3 native-born, base L4 + one layer, sculpted at L5):
+native migrates (mirror rebuild 0 unpaired, matches pre-fix baseline bit-for-bit);
+web takes the flatten fallback with correct geometry (0 unpaired).
+
 ## 2026-07-04 — WebGPU refactor complete; backwards save/load compatibility intact
 
 All three targets (web / native WebGPU / native GL) now build and run from the one

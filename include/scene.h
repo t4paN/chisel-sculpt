@@ -111,6 +111,10 @@ public:
                        const std::vector<uint32_t>& selected,
                        uint32_t next_id);
 
+    // Entities whose legacy (v<=3) multires stack could not be decoded on this
+    // platform during the last load_entities — surfaces kept, stacks flattened.
+    int load_flattened() const { return load_flattened_; }
+
     // ---- Reset ----
     // Replace scene with a single mesh (e.g. after remesh/load).
     // Does NOT call sync() — caller must do adjacency/mirror/sync after.
@@ -172,6 +176,7 @@ private:
     uint32_t next_id_        = 1;
     uint32_t active_id_      = 0;
     uint32_t preview_id_     = 0;
+    int      load_flattened_ = 0;
     std::vector<uint32_t> selected_ids_;
 
     bool mirror_use_topology_ = true;

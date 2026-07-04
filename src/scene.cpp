@@ -376,6 +376,7 @@ void Scene::load_entities(std::vector<EntityRecord>& records,
     entities_.clear();
     bound_active_id_ = 0;
     preview_id_      = 0;
+    load_flattened_  = 0;
 
     for (EntityRecord& rec : records) {
         auto up = std::make_unique<MeshEntity>();
@@ -392,7 +393,25 @@ void Scene::load_entities(std::vector<EntityRecord>& records,
         if (up->multires.locked) {
             auto saved_mask  = std::move(up->mesh.mask);
             auto saved_color = std::move(up->mesh.color);
-            cascade_to_level(up->multires, up->mesh, up->multires.current_level);
+            bool stack_ok = true;
+            if (rec.legacy_numbering && !up->multires.disp.empty())
+                stack_ok = migrate_legacy_numbering(up->multires, up->mesh);
+            if (stack_ok) {
+                cascade_to_level(up->multires, up->mesh, up->multires.current_level);
+            } else {
+                // v<=3 file saved on a different platform: its disp layers can't
+                // be decoded here, but the cached surface is ground truth. Keep
+                // it and relock the stack flat at the current level — geometry
+                // correct, lower levels lost. (Re-saving on the origin platform
+                // migrates the file properly to v4.)
+                std::printf("[load] entity %u: foreign legacy multires — "
+                            "flattened at level %d\n",
+                            up->id, up->multires.current_level);
+                int lvl = up->multires.current_level;
+                up->mesh.build_adjacency();
+                multires_stack_init_from_lock(up->multires, up->mesh, lvl);
+                load_flattened_++;
+            }
             if (!saved_mask.empty() && saved_mask.size() == up->mesh.vertex_count())
                 up->mesh.mask = std::move(saved_mask);
             if (!saved_color.empty() && saved_color.size() == up->mesh.vertex_count())

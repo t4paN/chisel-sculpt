@@ -204,6 +204,122 @@ void cascade_to_level(MultiresStack& stack, Mesh& out, int K) {
 }
 
 // ---------------------------------------------------------------------------
+// Legacy-numbering migration (v<=3 project files)
+// ---------------------------------------------------------------------------
+// v<=3 files store disp[k] indexed under the midpoint numbering that this
+// platform's std::unordered_map iteration produced at save time (see the
+// legacy_numbering note in mesh.h). Replay the cascade under that numbering,
+// validate the replay against the current-level surface cached in the file,
+// and re-encode every layer under the canonical numbering. Returns false when
+// the replay does not match the cached surface — the file was saved under a
+// different stdlib (another platform); its stack cannot be decoded here.
+bool migrate_legacy_numbering(MultiresStack& stack, const Mesh& cached_surface) {
+    if (stack.disp.empty()) return true;
+
+    Mesh m_leg = stack.base;   // legacy chain (displaced, legacy numbering)
+    Mesh m_can = stack.base;   // canonical chain (displaced, canonical numbering)
+
+    const int layers = (int)stack.disp.size();
+    const int cur_k  = stack.current_level - stack.base_level - 1;
+    // Cached surface at base level: the base is stored verbatim, nothing to
+    // validate against. Above the stored layers: nothing to validate WITH.
+    if (cur_k >= layers) return false;
+    bool validated = (cur_k < 0);
+
+    std::vector<std::vector<Vec3>>  new_disp(layers);
+    std::vector<std::vector<Frame>> new_frames(layers);
+
+    for (int k = 0; k < layers; k++) {
+        // Legacy replay — exactly the sequence the v<=3 cascade ran.
+        m_leg.build_adjacency();
+        Mesh sub_leg = loop_subdivide(m_leg, /*legacy_numbering=*/true);
+        sub_leg.build_adjacency();
+        sub_leg.recompute_normals();
+        std::vector<Frame> fr_leg;
+        compute_frames(sub_leg, fr_leg);
+
+        // Canonical twin of the same level.
+        m_can.build_adjacency();
+        Mesh sub_can = loop_subdivide(m_can, /*legacy_numbering=*/false);
+        sub_can.build_adjacency();
+        sub_can.recompute_normals();
+        compute_frames(sub_can, new_frames[k]);
+
+        // Fine-level permutation: Pass 4 emits sub-faces in coarse-face order on
+        // both chains, so the parallel index arrays pair every legacy id with
+        // its canonical id.
+        const uint32_t vc = sub_leg.vertex_count();
+        if (sub_can.vertex_count() != vc ||
+            sub_can.indices.size() != sub_leg.indices.size()) return false;
+        std::vector<uint32_t> perm(vc, UINT32_MAX);
+        for (size_t j = 0; j < sub_leg.indices.size(); j++) {
+            uint32_t l = sub_leg.indices[j], c = sub_can.indices[j];
+            if (perm[l] == UINT32_MAX) perm[l] = c;
+            else if (perm[l] != c) return false;    // chains not parallel — bail
+        }
+
+        const std::vector<Vec3>& disp_leg = stack.disp[k];
+        if (disp_leg.size() != vc) return false;
+
+        // Displace the legacy chain with the stored layer.
+        for (uint32_t v = 0; v < vc; v++) {
+            const Frame& f = fr_leg[v];
+            const Vec3&  d = disp_leg[v];
+            sub_leg.set_pos(v, sub_leg.get_pos(v) + f.t * d.x + f.b * d.y + f.n * d.z);
+        }
+
+        // Validate the replay at the level the file cached its surface for.
+        if (k == cur_k) {
+            if (cached_surface.vertex_count() != vc) return false;
+            Vec3 lo = cached_surface.get_pos(0), hi = lo;
+            for (uint32_t v = 1; v < vc; v++) {
+                Vec3 p = cached_surface.get_pos(v);
+                lo = { std::min(lo.x, p.x), std::min(lo.y, p.y), std::min(lo.z, p.z) };
+                hi = { std::max(hi.x, p.x), std::max(hi.y, p.y), std::max(hi.z, p.z) };
+            }
+            float diag = (hi - lo).length();
+            float max_d = 0.0f;
+            for (uint32_t v = 0; v < vc; v++)
+                max_d = std::max(max_d, (sub_leg.get_pos(v) - cached_surface.get_pos(v)).length());
+            // GPU-materialized save vs CPU replay leaves ~1e-6 relative slack;
+            // a numbering mismatch scrambles at edge-length scale (>1e-1).
+            if (!(max_d <= 1e-3f * diag)) {
+                std::printf("[migrate] legacy replay mismatch: max_d=%g diag=%g\n",
+                            max_d, diag);
+                return false;
+            }
+            validated = true;
+        }
+
+        // Re-encode: world delta against the canonical pre-displacement surface,
+        // decomposed in the canonical frame; then advance the canonical chain by
+        // exactly what a future cascade will reproduce.
+        new_disp[k].resize(vc);
+        for (uint32_t v = 0; v < vc; v++) {
+            uint32_t c = perm[v];
+            Vec3 delta = sub_leg.get_pos(v) - sub_can.get_pos(c);
+            const Frame& f = new_frames[k][c];
+            new_disp[k][c] = { delta.dot(f.t), delta.dot(f.b), delta.dot(f.n) };
+        }
+        for (uint32_t v = 0; v < vc; v++) {
+            const Frame& f = new_frames[k][v];
+            const Vec3&  d = new_disp[k][v];
+            sub_can.set_pos(v, sub_can.get_pos(v) + f.t * d.x + f.b * d.y + f.n * d.z);
+        }
+
+        m_leg = std::move(sub_leg);
+        m_can = std::move(sub_can);
+    }
+
+    if (!validated) return false;
+
+    stack.disp   = std::move(new_disp);
+    stack.frames = std::move(new_frames);
+    for (auto& mv : stack.mirror) mv.clear();   // lazily rebuilt from base_mirror
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // Projection (Chunk 4a)
 // ---------------------------------------------------------------------------
 

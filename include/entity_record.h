@@ -13,4 +13,9 @@ struct EntityRecord {
     uint32_t      subdiv_level = 4;
     Mesh          mesh;
     MultiresStack multires;
+    // Set by the project loader for v<=3 files: multires disp layers are indexed
+    // under the saving platform's legacy (hash-order) midpoint numbering and must
+    // be migrated to canonical numbering before the stack is usable. Transient —
+    // never persisted.
+    bool          legacy_numbering = false;
 };

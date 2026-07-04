@@ -84,7 +84,12 @@ struct Mesh {
 // operates as a free function so multires_stack can call it on the base cage.
 void build_mirror_spatial(const Mesh& m, std::vector<uint32_t>& out);
 
-Mesh loop_subdivide(const Mesh& input);
+// legacy_numbering: pre-v4 midpoint-vertex numbering (stdlib hash-map iteration
+// order — platform-specific). Only the v<=3 project loader may pass true; every
+// live path uses the canonical sorted-edge-key numbering, identical on all
+// platforms. Multires disp layers are indexed by these vertex numbers and
+// persist in .chisel files, so the numbering is effectively on-disk ABI.
+Mesh loop_subdivide(const Mesh& input, bool legacy_numbering = false);
 Mesh icosahedron();
 Mesh icosphere(int subdivisions);
 
