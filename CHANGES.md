@@ -2,6 +2,24 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-04 — Web save/open bridge: browser downloads + file picker [itch feedback, last of round 1]
+
+The web build's file dialogs browsed Emscripten's MEMFS — an empty RAM disk that dies
+with the tab; host files are invisible to it by browser design. Now (web only, native
+ImGuiFileDialog untouched): **save/export** open a small name-prompt modal, write through
+the normal writers into MEMFS, and hand the bytes to the browser as a download (Ctrl+S
+re-saves under the same name, straight to download); **open/import** skip ImGui entirely
+and fire the browser's own `<input type=file>` picker (.chisel/.obj/.ply) — the picked
+file's bytes land in MEMFS, the normal loaders read them, then the RAM copy is freed.
+Plumbing: `web_download_file` / `web_open_file_picker` EM_ASM helpers + a
+`chisel_web_import_done` JS→C callback (needs `-sEXPORTED_RUNTIME_METHODS=ccall`);
+the shared open/import processing got extracted into `do_import_path`, used by both
+targets. The same `*_dialog_active` flags drive the web modals, so sculpt-input and
+hotkey gating work unchanged. Bonus: with no ImGuiFileDialog references left in the web
+path, the linker strips it + std::filesystem — wasm 2.2 MB → 1.8 MB. Boot-smoked clean
+in WebGPU Chrome (all pipelines, zero errors); **needs in-browser confirm on itch
+(v0.1.10)**. No IDBFS persistence by design (user decision 2026-07-04).
+
 ## 2026-07-04 — Fix (web): insert-mesh dead in browser — one-shot input flags eaten before consumers [itch feedback]
 
 Insert mode couldn't place on empty canvas and the Y/N mirror prompt ignored keys — web

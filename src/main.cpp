@@ -133,6 +133,58 @@ void makeDepth(int w, int h) {
 } // namespace
 #endif // CHISEL_BACKEND_WEBGPU
 
+#ifdef __EMSCRIPTEN__
+// Browser save/open bridge. MEMFS is RAM that dies with the tab, and host files
+// are invisible to it, so path-based dialogs are meaningless on web: save/export
+// write through the normal writers into MEMFS and the bytes leave as a browser
+// download; open/import goes through an <input type=file> picker whose bytes
+// land back in MEMFS for the normal loaders. No IDBFS persistence by design.
+
+// Set async by the picker's JS callback; the frame loop consumes it. Safe to
+// assign from JS mid-ASYNCIFY-suspend: plain reentry, nothing here suspends.
+static std::string g_web_import_path;
+extern "C" EMSCRIPTEN_KEEPALIVE void chisel_web_import_done(const char* path) {
+    g_web_import_path = path ? path : "";
+}
+
+// Read fs_path out of MEMFS, hand it to the browser as a download, delete it.
+static void web_download_file(const char* fs_path, const char* download_name) {
+    EM_ASM({
+        var path = UTF8ToString($0);
+        var name = UTF8ToString($1);
+        var data = FS.readFile(path);
+        var a = document.createElement('a');
+        a.href = URL.createObjectURL(new Blob([data]));
+        a.download = name;
+        a.click();
+        setTimeout(function() { URL.revokeObjectURL(a.href); }, 10000);
+        FS.unlink(path);
+    }, fs_path, download_name);
+}
+
+// Fire the browser's file picker. Needs transient user activation, so it must
+// run within a few seconds of the click/keypress that requested it (it does:
+// the request flag is consumed the next frame). Result arrives whenever the
+// user picks — chisel_web_import_done gets the MEMFS path.
+static void web_open_file_picker() {
+    EM_ASM({
+        var inp = document.createElement('input');
+        inp.type = 'file';
+        inp.accept = '.chisel,.obj,.ply';
+        inp.onchange = function() {
+            var f = inp.files && inp.files[0];
+            if (!f) return;
+            f.arrayBuffer().then(function(buf) {
+                var path = '/' + f.name;
+                FS.writeFile(path, new Uint8Array(buf));
+                Module.ccall('chisel_web_import_done', null, ['string'], [path]);
+            });
+        };
+        inp.click();
+    });
+}
+#endif // __EMSCRIPTEN__
+
 enum class AppState { IDLE, SCULPTING };
 
 // Wrap cursor at screen edges. Returns true if cursor was wrapped.
@@ -536,6 +588,11 @@ int main(int argc, char* argv[]) {
         }
     }
     std::string current_project_path;
+#ifdef __EMSCRIPTEN__
+    // Filename fields for the web save/export prompts (remember the last name).
+    char web_save_name[96]   = "sculpt";
+    char web_export_name[96] = "sculpt";
+#endif
     std::string error_popup_msg;
     bool error_popup_trigger = false;
 
@@ -1819,7 +1876,94 @@ int main(int argc, char* argv[]) {
         draw_fps(text, fps_display, win_w, win_h);
         draw_version(text, CHISEL_VERSION, win_w, win_h);
 
-        // ---- ImGui file dialogs ----
+        // ---- Open/import a path (shared by the native dialog and the web picker) ----
+        auto do_import_path = [&](const std::string& path) {
+            auto dot = path.find_last_of('.');
+            std::string ext = (dot != std::string::npos) ? path.substr(dot + 1) : "";
+            for (char& ch : ext) ch = (char)std::tolower((unsigned char)ch);
+
+            if (ext == "chisel") {
+                ProjectData proj;
+                LoadResult lr = load_project(path.c_str(), proj);
+                if (lr == LoadResult::OK && !proj.entities.empty()) {
+                    camera = proj.camera;
+                    input.mirror_x = proj.mirror_x;
+                    input.subdiv_level = proj.subdiv_level;
+                    input.mesh_locked = true;
+                    current_project_path = path;
+
+                    // Rebuild the whole multimesh scene. load_entities does
+                    // per-entity cascade/adjacency/normals/mirror and restores
+                    // the saved selection; the active entity's mirror map is
+                    // (re)cached by refresh_mirror_map before sync.
+                    scene.set_mirror_topology(proj.mirror_use_topology);
+                    scene.load_entities(proj.entities, proj.active_id,
+                                        proj.selected_ids, proj.next_id);
+                    scene.refresh_mirror_map(input.subdiv_level);
+                    scene.sync();
+
+                    mesh = &scene.active_mesh();
+                    multires = &scene.active_multires();
+                    refresh_active_gpu_residency();
+                    mesh->compute_bounding_sphere(mesh_center, mesh_radius);
+                    brush_stroke.vertex_count = 0;
+                    brush_stroke.phase = StrokePhase::NONE;
+                    app_state = AppState::IDLE;
+                    screen_buffers_dirty = true;
+
+                    std::snprintf(input.notification, sizeof(input.notification),
+                                  "Loaded: %.400s (%zu mesh%s, active %u v, %u t)",
+                                  path.c_str(), proj.entities.size(),
+                                  proj.entities.size() == 1 ? "" : "es",
+                                  mesh->vertex_count(), mesh->tri_count());
+                    input.notification_timer = 3.0f;
+                } else {
+                    error_popup_msg = std::string("Load failed: ") + result_string(lr) + "\n" + path;
+                    error_popup_trigger = true;
+                }
+            } else {
+                Mesh loaded;
+                bool imported = (ext == "ply") ? Mesh::import_ply(path.c_str(), loaded)
+                                               : Mesh::import_obj(path.c_str(), loaded);
+                if (imported) {
+                    *mesh = std::move(loaded);
+                    mesh->mask.clear();
+
+                    scene.set_mirror_topology(false);
+                    scene.refresh_mirror_map();
+                    mesh->build_adjacency();
+
+                    input.mesh_locked = true;
+                    multires_stack_init_from_lock(*multires, *mesh, 0);
+                    scene.reset_to_single_mesh(0);
+                    scene.sync();
+                    mesh = &scene.active_mesh();
+                    multires = &scene.active_multires();
+                    refresh_active_gpu_residency();
+                    mesh->compute_bounding_sphere(mesh_center, mesh_radius);
+                    camera.set_target(mesh_center);
+                    camera.distance = mesh_radius * 2.5f;
+                    current_project_path.clear();
+
+                    scene.active_undo().clear(&compute);
+                    brush_stroke.vertex_count = 0;
+                    brush_stroke.phase = StrokePhase::NONE;
+                    app_state = AppState::IDLE;
+                    screen_buffers_dirty = true;
+
+                    std::snprintf(input.notification, sizeof(input.notification),
+                                  "Imported: %.400s (%u v, %u t)",
+                                  path.c_str(), mesh->vertex_count(), mesh->tri_count());
+                    input.notification_timer = 3.0f;
+                } else {
+                    error_popup_msg = "Import failed: " + path;
+                    error_popup_trigger = true;
+                }
+            }
+        };
+
+#ifndef __EMSCRIPTEN__
+        // ---- ImGui file dialogs (native: browse the real filesystem) ----
         auto* fd = IGFD::FileDialog::Instance();
 
         if (input.export_dialog_active && !fd->IsOpened("ExportKey")) {
@@ -1860,95 +2004,14 @@ int main(int argc, char* argv[]) {
             fd->Close();
 
         if (fd->Display("ImportKey", ImGuiWindowFlags_NoCollapse, ImVec2(600, 400))) {
-            if (fd->IsOk()) {
-                std::string path = fd->GetFilePathName();
-                auto dot = path.find_last_of('.');
-                std::string ext = (dot != std::string::npos) ? path.substr(dot + 1) : "";
-
-                if (ext == "chisel") {
-                    ProjectData proj;
-                    LoadResult lr = load_project(path.c_str(), proj);
-                    if (lr == LoadResult::OK && !proj.entities.empty()) {
-                        camera = proj.camera;
-                        input.mirror_x = proj.mirror_x;
-                        input.subdiv_level = proj.subdiv_level;
-                        input.mesh_locked = true;
-                        current_project_path = path;
-
-                        // Rebuild the whole multimesh scene. load_entities does
-                        // per-entity cascade/adjacency/normals/mirror and restores
-                        // the saved selection; the active entity's mirror map is
-                        // (re)cached by refresh_mirror_map before sync.
-                        scene.set_mirror_topology(proj.mirror_use_topology);
-                        scene.load_entities(proj.entities, proj.active_id,
-                                            proj.selected_ids, proj.next_id);
-                        scene.refresh_mirror_map(input.subdiv_level);
-                        scene.sync();
-
-                        mesh = &scene.active_mesh();
-                        multires = &scene.active_multires();
-                        refresh_active_gpu_residency();
-                        mesh->compute_bounding_sphere(mesh_center, mesh_radius);
-                        brush_stroke.vertex_count = 0;
-                        brush_stroke.phase = StrokePhase::NONE;
-                        app_state = AppState::IDLE;
-                        screen_buffers_dirty = true;
-
-                        std::snprintf(input.notification, sizeof(input.notification),
-                                      "Loaded: %.400s (%zu mesh%s, active %u v, %u t)",
-                                      path.c_str(), proj.entities.size(),
-                                      proj.entities.size() == 1 ? "" : "es",
-                                      mesh->vertex_count(), mesh->tri_count());
-                        input.notification_timer = 3.0f;
-                    } else {
-                        error_popup_msg = std::string("Load failed: ") + result_string(lr) + "\n" + path;
-                        error_popup_trigger = true;
-                    }
-                } else {
-                    Mesh loaded;
-                    bool imported = (ext == "ply") ? Mesh::import_ply(path.c_str(), loaded)
-                                                   : Mesh::import_obj(path.c_str(), loaded);
-                    if (imported) {
-                        *mesh = std::move(loaded);
-                        mesh->mask.clear();
-
-                        scene.set_mirror_topology(false);
-                        scene.refresh_mirror_map();
-                        mesh->build_adjacency();
-
-                        input.mesh_locked = true;
-                        multires_stack_init_from_lock(*multires, *mesh, 0);
-                        scene.reset_to_single_mesh(0);
-                        scene.sync();
-                        mesh = &scene.active_mesh();
-                        multires = &scene.active_multires();
-                        refresh_active_gpu_residency();
-                        mesh->compute_bounding_sphere(mesh_center, mesh_radius);
-                        camera.set_target(mesh_center);
-                        camera.distance = mesh_radius * 2.5f;
-                        current_project_path.clear();
-
-                        scene.active_undo().clear(&compute);
-                        brush_stroke.vertex_count = 0;
-                        brush_stroke.phase = StrokePhase::NONE;
-                        app_state = AppState::IDLE;
-                        screen_buffers_dirty = true;
-
-                        std::snprintf(input.notification, sizeof(input.notification),
-                                      "Imported: %.400s (%u v, %u t)",
-                                      path.c_str(), mesh->vertex_count(), mesh->tri_count());
-                        input.notification_timer = 3.0f;
-                    } else {
-                        error_popup_msg = "Import failed: " + path;
-                        error_popup_trigger = true;
-                    }
-                }
-            }
+            if (fd->IsOk())
+                do_import_path(fd->GetFilePathName());
             fd->Close();
             input.import_dialog_active = false;
         }
         if (!input.import_dialog_active && fd->IsOpened("ImportKey"))
             fd->Close();
+#endif // !__EMSCRIPTEN__
 
         // ---- Save project (.chisel) ----
         auto do_save_project = [&](const std::string& path) {
@@ -1975,6 +2038,12 @@ int main(int argc, char* argv[]) {
             SaveResult sr = save_project(path.c_str(), proj);
             if (sr == SaveResult::OK) {
                 current_project_path = path;
+#ifdef __EMSCRIPTEN__
+                // A MEMFS "save" only counts once the bytes leave as a download
+                // (which also unlinks the MEMFS copy; Ctrl+S recreates it).
+                web_download_file(path.c_str(),
+                                  path.substr(path.find_last_of('/') + 1).c_str());
+#endif
                 std::snprintf(input.notification, sizeof(input.notification),
                               "Saved: %.400s", path.c_str());
                 input.notification_timer = 2.0f;
@@ -1997,6 +2066,7 @@ int main(int argc, char* argv[]) {
             input.save_dialog_active = true;
         }
 
+#ifndef __EMSCRIPTEN__
         if (input.save_dialog_active && !fd->IsOpened("SaveKey")) {
             IGFD::FileDialogConfig cfg;
             cfg.path = default_browse_path;
@@ -2013,6 +2083,103 @@ int main(int argc, char* argv[]) {
         }
         if (!input.save_dialog_active && fd->IsOpened("SaveKey"))
             fd->Close();
+#else
+        // ---- Web dialogs: name prompt + browser download; picker for open ----
+        // (same *_dialog_active flags as native, so the sculpt-input and hotkey
+        // gating keeps working unchanged)
+
+        // Export: pick a name, a format button writes via the normal exporter
+        // into MEMFS, web_download_file hands the bytes to the browser.
+        if (input.export_dialog_active && !ImGui::IsPopupOpen("Export Mesh"))
+            ImGui::OpenPopup("Export Mesh");
+        if (ImGui::BeginPopupModal("Export Mesh", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            if (!input.export_dialog_active)   // ESC cleared the flag
+                ImGui::CloseCurrentPopup();
+            ImGui::TextUnformatted("Download as:");
+            if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+            ImGui::SetNextItemWidth(280);
+            ImGui::InputText("##export_name", web_export_name, sizeof(web_export_name));
+            auto web_export = [&](const std::string& ext) {
+                std::string name = web_export_name[0] ? web_export_name : "sculpt";
+                // Don't double the extension if the user typed it.
+                if (name.size() < ext.size()
+                    || name.compare(name.size() - ext.size(), ext.size(), ext) != 0)
+                    name += ext;
+                std::string fs_path = "/" + name;
+                bool ok = (ext == ".stl") ? mesh->export_stl(fs_path.c_str())
+                        : (ext == ".ply") ? mesh->export_ply(fs_path.c_str())
+                                          : mesh->export_obj(fs_path.c_str());
+                if (ok) {
+                    web_download_file(fs_path.c_str(), name.c_str());
+                    std::snprintf(input.notification, sizeof(input.notification),
+                                  "Exported: %.400s", name.c_str());
+                    input.notification_timer = 3.0f;
+                } else {
+                    error_popup_msg = "Export failed: " + name;
+                    error_popup_trigger = true;
+                }
+                input.export_dialog_active = false;
+                ImGui::CloseCurrentPopup();
+            };
+            if (ImGui::Button(".obj")) web_export(".obj");
+            ImGui::SameLine();
+            if (ImGui::Button(".stl")) web_export(".stl");
+            ImGui::SameLine();
+            if (ImGui::Button(".ply")) web_export(".ply");
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel")) {
+                input.export_dialog_active = false;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+
+        // Save project: one name field, ".chisel" appended, straight to download.
+        if (input.save_dialog_active && !ImGui::IsPopupOpen("Save Project"))
+            ImGui::OpenPopup("Save Project");
+        if (ImGui::BeginPopupModal("Save Project", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            if (!input.save_dialog_active)
+                ImGui::CloseCurrentPopup();
+            ImGui::TextUnformatted("Download project as:");
+            if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+            ImGui::SetNextItemWidth(220);
+            bool commit = ImGui::InputText("##save_name", web_save_name, sizeof(web_save_name),
+                                           ImGuiInputTextFlags_EnterReturnsTrue);
+            ImGui::SameLine();
+            ImGui::TextUnformatted(".chisel");
+            if (ImGui::Button("Save") || commit) {
+                std::string name = web_save_name[0] ? web_save_name : "sculpt";
+                const std::string ext = ".chisel";
+                if (name.size() >= ext.size()
+                    && name.compare(name.size() - ext.size(), ext.size(), ext) == 0)
+                    name.resize(name.size() - ext.size());
+                do_save_project("/" + name + ext);
+                input.save_dialog_active = false;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel")) {
+                input.save_dialog_active = false;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+
+        // Open/import: no ImGui — the browser's picker IS the dialog. The picked
+        // file lands in MEMFS async (chisel_web_import_done); consume it here,
+        // then free the RAM copy (current_project_path stays valid — a save
+        // recreates the file before downloading it).
+        if (input.import_dialog_active) {
+            input.import_dialog_active = false;
+            web_open_file_picker();
+        }
+        if (!g_web_import_path.empty()) {
+            std::string path = g_web_import_path;
+            g_web_import_path.clear();
+            do_import_path(path);
+            ::remove(path.c_str());
+        }
+#endif // __EMSCRIPTEN__
 
         // ---- Button islands (brush selection + ops) ----
         draw_button_islands(input, win_w, win_h);
