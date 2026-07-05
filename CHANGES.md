@@ -2,6 +2,20 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-05 — Docs: README rewritten + full MANUAL.md; repo merge; v0.1.12 live
+
+- README rewritten as the go-public front door: play-now itch link up top, one
+  codebase / three targets (GL, native WebGPU, web), cross-platform .chisel files,
+  current feature list (8 brushes, paint mode, boolean subtract, Surface Nets,
+  per-object undo), real build commands, refreshed AI-credits table.
+- New MANUAL.md: full controls/workflow reference; README links to it. All facts
+  verified against source (redo is Ctrl+Shift+Z only; paint does live on the
+  multires base cage).
+- Repo merge: chisel-webgpu history fast-forwarded onto `t4paN/chisel-sculpt`
+  (canonical again); GL-era tip preserved as `native-gl` branch + v0.1.5 release.
+- v0.1.12 pushed to itch (html5) and released on GitHub (AppImage + Windows zip):
+  cross-platform .chisel v4 + camera zoom fix now live for web players.
+
 ## 2026-07-05 — Fix: camera sliced the model open when zooming close (WebGPU backends)
 
 The ortho camera's near_plane=-100 lets GL draw everything up to 100 units behind the
