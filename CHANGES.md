@@ -2,6 +2,14 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-06 — Build: default to Release when no build type is set
+
+- build-gl and build-wgpu had an empty CMAKE_BUILD_TYPE, i.e. -O0 — all
+  CPU-side mesh/brush code ran unoptimized (the "perf feels slow" report).
+  CMakeLists now defaults an unset build type to Release with a status
+  message; both native trees reconfigured and rebuilt. Web build was
+  already Release and is unaffected.
+
 ## 2026-07-06 — Fix: centered inserted meshes X-locked without catching mirrored pairs
 
 - Select-move classified "centered" purely by bounding centre at x≈0, which is

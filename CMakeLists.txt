@@ -5,6 +5,13 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# An unset build type means -O0 — a silent several-times slowdown of all
+# CPU-side mesh/brush code. Default to Release unless explicitly overridden.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+    message(STATUS "CMAKE_BUILD_TYPE not set — defaulting to Release")
+endif()
+
 # ---------------------------------------------------------------------------
 # GPU backend selection (WebGPU port — see ../webgpu-port-plan.md).
 #   gl     : OpenGL 4.3 compute — the reference backend, builds today.
