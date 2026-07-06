@@ -1,4 +1,5 @@
 #include "compute.h"
+#include "gpu_shaders_generated.h"   // gpu::embedded_shader("mirror_project")
 #include <cstdio>
 #include <cstring>
 
@@ -213,6 +214,8 @@ void ComputeState::cleanup() {
     gpu::release_buffer(smooth_mirror_ubo);
     gpu::release_compute_pipeline(stroke_smooth_apply_pipeline);
     gpu::release_buffer(stroke_smooth_ubo);
+    gpu::release_compute_pipeline(mirror_project_pipeline);
+    gpu::release_buffer(mirror_project_ubo);
     gpu::release_compute_pipeline(crease_accum_pipeline);
     gpu::release_compute_pipeline(pinch_accum_pipeline);
     gpu::release_buffer(crease_ubo);
@@ -322,4 +325,81 @@ gpu::ReadTicket ComputeState::kick_dirty_read(uint32_t& words) {
 
 gpu::ReadTicket ComputeState::kick_move_affected_read(uint32_t& words) {
     return kick_count_list_read(move_affected_ssbo, move_buffers_capacity, words);
+}
+
+// ---------------------------------------------------------------------------
+// Mirror constraint projection (single symmetry sink for all brushes)
+// ---------------------------------------------------------------------------
+
+// 16-byte std140 block, byte-identical to mirror_project.{comp,wgsl}'s Params.
+struct MirrorProjectParamsGPU {
+    uint32_t vertex_count;
+    uint32_t list_mode;    // 0 = {count, ids[]} header, 1 = plain ids + list_count
+    uint32_t list_count;
+    uint32_t _pad0;
+};
+static_assert(sizeof(MirrorProjectParamsGPU) == 16, "mirror_project Params UBO must be 16 bytes");
+
+bool ComputeState::init_mirror_project() {
+    if (!supported) return false;
+    const gpu::BindEntry layout[] = {
+        { BIND_POSITIONS,   gpu::Bind::StorageReadWrite, 0 },
+        { BIND_DIRTY_VERTS, gpu::Bind::StorageRead,      0 },
+        { BIND_MIRROR_MAP,  gpu::Bind::StorageRead,      0 },
+        { BIND_MASK,        gpu::Bind::StorageRead,      0 },
+        { BIND_PARAMS,      gpu::Bind::Uniform,          sizeof(MirrorProjectParamsGPU) },
+    };
+    mirror_project_pipeline = gpu::create_compute_pipeline(gpu_dev,
+                                  gpu::embedded_shader("mirror_project"), layout, 5);
+    if (!mirror_project_pipeline.handle) {
+        std::printf("[compute] mirror_project pipeline failed to compile\n");
+        return false;
+    }
+    mirror_project_ubo = gpu::create_buffer(gpu_dev, nullptr, sizeof(MirrorProjectParamsGPU),
+                                            gpu::Usage::Uniform);
+    std::printf("[compute] mirror_project pipeline compiled (gpu:: seam)\n");
+    return true;
+}
+
+static void dispatch_mirror_project_impl(ComputeState& cs, const gpu::Buffer& pos_vbo,
+                                         uint32_t vertex_count, const gpu::Buffer& list_buf,
+                                         uint32_t list_mode, uint32_t list_count,
+                                         uint32_t groups) {
+    if (!cs.has_mirror_project() || !cs.mask_ssbo.handle) return;
+    if (!cs.mirror_map_ssbo.handle || cs.mirror_map_vertex_count != vertex_count) return;
+    if (!list_buf.handle || groups == 0) return;
+
+    MirrorProjectParamsGPU u = { vertex_count, list_mode, list_count, 0 };
+    gpu::write_buffer(cs.gpu_dev, cs.mirror_project_ubo, 0, &u, sizeof(u));
+
+    const gpu::BindBufferEntry bg[] = {
+        { BIND_POSITIONS,   &pos_vbo,               (uint64_t)vertex_count * 3u * sizeof(float) },
+        { BIND_DIRTY_VERTS, &list_buf,              list_buf.size },
+        { BIND_MIRROR_MAP,  &cs.mirror_map_ssbo,    (uint64_t)cs.mirror_map_vertex_count * sizeof(uint32_t) },
+        { BIND_MASK,        &cs.mask_ssbo,          (uint64_t)vertex_count * sizeof(float) },
+        { BIND_PARAMS,      &cs.mirror_project_ubo, sizeof(MirrorProjectParamsGPU) },
+    };
+    gpu::BindGroup grp = gpu::create_bind_group(cs.gpu_dev, cs.mirror_project_pipeline, bg, 5);
+
+    gpu::ComputeBatch b = gpu::begin_compute(cs.gpu_dev);
+    gpu::dispatch(b, cs.mirror_project_pipeline, grp, groups);
+    gpu::submit(b);
+    gpu::release_bind_group(grp);
+}
+
+void ComputeState::dispatch_mirror_project_header(const gpu::Buffer& pos_vbo,
+                                                  uint32_t vertex_count,
+                                                  const gpu::Buffer& list_buf) {
+    // Entry count lives in list_buf[0] on the GPU; dispatch worst-case threads
+    // (same cost class as the apply kernels, which run full-range per dab) and
+    // let overshoot threads early-out on the count.
+    dispatch_mirror_project_impl(*this, pos_vbo, vertex_count, list_buf,
+                                 0u, 0u, (vertex_count + 255u) / 256u);
+}
+
+void ComputeState::dispatch_mirror_project_ids(const gpu::Buffer& pos_vbo,
+                                               uint32_t vertex_count, uint32_t id_count) {
+    if (id_count == 0) return;
+    dispatch_mirror_project_impl(*this, pos_vbo, vertex_count, dirty_verts_ssbo,
+                                 1u, id_count, (id_count + 255u) / 256u);
 }

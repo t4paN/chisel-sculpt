@@ -30,9 +30,20 @@ struct Mesh {
     std::vector<float> norm_x, norm_y, norm_z; // vertex normals
     std::vector<uint32_t> indices;             // triangle indices (3 per tri)
 
-    // Mirror map: mirror_x_map[i] = index of vertex mirrored across X axis
-    // A vertex maps to itself if it sits on the mirror plane
+    // Mirror map: mirror_x_map[i] = index of vertex mirrored across X axis.
+    // Three explicit classes: paired (twin index), seam (maps to itself —
+    // constrained to the x=0 plane), unpaired (MIRROR_UNPAIRED sentinel — the
+    // mirror machinery leaves it alone). The sentinel is >= vertex_count, which
+    // kernels already treat as "copy through".
+    static constexpr uint32_t MIRROR_UNPAIRED = 0xFFFFFFFFu;
     std::vector<uint32_t> mirror_x_map;
+
+    // Topology stamp: bumped by build_adjacency() (called at every topology
+    // change, never during strokes). The mirror map records the stamp it was
+    // built at, so position-only edits can never trigger a rebuild that would
+    // reclassify drifted verts.
+    uint32_t topo_version = 0;
+    uint32_t mirror_topo_version = 0xFFFFFFFFu;
 
     // Vertex -> triangle adjacency (CSR format)
     // vert_tri_offset[i] .. vert_tri_offset[i+1] indexes into vert_tri_list

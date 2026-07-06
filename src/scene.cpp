@@ -126,6 +126,7 @@ void Scene::refresh_mirror_map(int icosphere_level) {
                 auto& cached = icosphere_mirror_cache_[icosphere_level];
                 if (!cached.empty() && cached.size() == m.vertex_count()) {
                     m.mirror_x_map = cached;
+                    m.mirror_topo_version = m.topo_version;
                     return;
                 }
                 m.build_mirror_x_map();
@@ -137,6 +138,13 @@ void Scene::refresh_mirror_map(int icosphere_level) {
             return;
         }
     }
+    // Persistent map: rebuild only when topology actually changed. Rebuilding
+    // from sculpted positions reclassifies drifted verts (paired → unpaired),
+    // which bakes seam asymmetry in permanently — never do it for
+    // position-only edits.
+    if (m.mirror_x_map.size() == m.vertex_count()
+        && m.mirror_topo_version == m.topo_version)
+        return;
     m.build_mirror_x_map();
     sync_mirror_map();
 }

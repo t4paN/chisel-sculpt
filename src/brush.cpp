@@ -157,6 +157,7 @@ static void snap_and_mirror_dirty(BrushStroke& bs, DabContext& ctx, float anchor
             uint32_t v = bs.dirty_verts[i];
             if (v >= vc) continue;
             uint32_t mv = ctx.mesh.mirror_x_map[v];
+            if (mv == Mesh::MIRROR_UNPAIRED) continue;
             if (mv >= vc) {
                 std::printf("[CRASH-GUARD] mirror %u -> %u >= vc %u\n", v, mv, vc);
                 continue;
@@ -192,6 +193,14 @@ static uint32_t mirror_of(uint32_t v, const Mesh& m) {
 // --- Per-dab async dirty readbacks ---
 
 void BrushStroke::kick_dab_readback(DabContext& ctx, uint8_t kind) {
+    // Symmetry sink: every geometry dab ends here (draw/smooth/crease/pinch),
+    // with this dab's touched verts in the GPU dirty list. Re-impose exact
+    // X-mirror symmetry over that set before anything reads positions — one
+    // projection instead of per-brush symmetry in every producer kernel.
+    if (kind == DAB_GEO && ctx.input.mirror_x)
+        ctx.compute.dispatch_mirror_project_header(ctx.renderer.vbo_pos,
+                                                   ctx.mesh.vertex_count(),
+                                                   ctx.compute.smooth_dirty_ssbo);
     uint32_t words = 0;
     gpu::ReadTicket tk = ctx.compute.kick_dirty_read(words);
     if (!tk) return;
@@ -792,6 +801,12 @@ void BrushStroke::apply_move_gpu(DabContext& ctx, float cursor_dx, float cursor_
     ap.vertex_count = ctx.vertex_count;
     ctx.compute.dispatch_move_apply(ap, ctx.renderer.vbo_pos);
 
+    // Symmetry sink for move (doesn't route through kick_dab_readback): the
+    // captured affected list shares the {count, ids[]} layout.
+    if (ctx.input.mirror_x)
+        ctx.compute.dispatch_mirror_project_header(ctx.renderer.vbo_pos, ctx.vertex_count,
+                                                   ctx.compute.move_affected_ssbo);
+
     // Bookkeeping needs the CPU list; while the capture readback is in flight the
     // apply is still correct (cumulative total) and drain_dab_readbacks catches up.
     if (!capture_pending) {
@@ -892,6 +907,11 @@ void BrushStroke::apply_limb_gpu(DabContext& ctx, float cursor_dx, float cursor_
     ctx.compute.dispatch_limb_relax(ctx.vertex_count, LIMB_RELAX_ITERS, LIMB_RELAX_LAMBDA,
                                     tx, ty, tz, LIMB_TIP_BIAS,
                                     ctx.renderer.vbo_pos, ctx.renderer.vbo_norm, ctx.renderer.ebo);
+
+    // Symmetry sink for limb (drag + relax both move verts; same affected list).
+    if (ctx.input.mirror_x)
+        ctx.compute.dispatch_mirror_project_header(ctx.renderer.vbo_pos, ctx.vertex_count,
+                                                   ctx.compute.move_affected_ssbo);
 
     if (!capture_pending) {
         dirty_verts = move.affected_list;
@@ -1261,6 +1281,14 @@ bool BrushStroke::finalize(DabContext& ctx, Mesh& mesh, UndoStack& stack,
                                                        AUTOSMOOTH_STRENGTH,
                                                        renderer.vbo_pos, renderer.ebo);
             }
+            // Symmetry sink: autosmooth moved positions after the last per-dab
+            // projection, so project once more before normals / undo capture /
+            // multires diff read them. snap_list ids are already resident in
+            // dirty_verts_ssbo (uploaded by stroke_smooth above).
+            if (ctx.input.mirror_x)
+                compute->dispatch_mirror_project_ids(renderer.vbo_pos,
+                                                     mesh.vertex_count(),
+                                                     (uint32_t)snap_list.size());
             // Refresh normals for the smoothed verts so the deferred normal
             // readback below picks up post-smoothing values.
             if (compute->has_normals()) {

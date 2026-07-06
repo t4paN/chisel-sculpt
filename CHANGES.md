@@ -2,6 +2,23 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-06 — Fix: X-mirror seam zipper — systemic symmetry enforcement
+
+- The midline seam no longer breaks under sculpting (the pinched sliver /
+  zipper band that smoothing amplified). Root cause was structural: the mirror
+  map self-mapped unpaired verts identically to seam verts and was rebuilt
+  from sculpted positions, so any drift got reclassified into a class the
+  mirror machinery ignores — permanent, invisible, self-amplifying.
+- Fix, two parts: (1) persistent 3-class mirror map — unpaired verts now carry
+  an explicit sentinel, and the map only rebuilds when topology actually
+  changes (stamped via build_adjacency), never from position-only edits;
+  (2) new mirror_project kernel (GLSL+WGSL) runs after every geometry dab and
+  the pen-up autosmooth, projecting touched verts back onto exact symmetry:
+  seam verts snap to x=0, pairs average with their reflected twin, fully
+  masked verts stay pinned. One sink corrects all producer kernels instead of
+  per-brush symmetry patches. Confirmed on the itch web build
+  (0.1.14-seamtest1): the draw+smooth midline repro holds clean.
+
 ## 2026-07-06 — Build: default to Release when no build type is set
 
 - build-gl and build-wgpu had an empty CMAKE_BUILD_TYPE, i.e. -O0 — all

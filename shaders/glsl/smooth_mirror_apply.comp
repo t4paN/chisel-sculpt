@@ -30,7 +30,7 @@ void main() {
     if (vx * P.anchor_x < 0.0) return;
 
     uint mv = mirror_map[v];
-    if (mv == v) return;
+    if (mv == v || mv >= P.vertex_count) return;   // seam / MIRROR_UNPAIRED sentinel
 
     float mscale = 1.0 - mask[mv];
     if (mscale <= 0.0) return;

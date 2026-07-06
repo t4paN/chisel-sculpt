@@ -124,7 +124,7 @@ void InsertController::tick(InputState& input, Camera& camera,
                     if (!m.mask.empty()) m.mask.resize(m.vertex_count(), 0.0f);
                     m.recompute_normals();
                     m.build_adjacency();
-                    build_mirror_spatial(m, m.mirror_x_map);
+                    m.build_mirror_x_map();   // also stamps mirror_topo_version
                 }
             }
 

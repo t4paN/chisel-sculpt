@@ -192,14 +192,20 @@ void cascade_to_level(MultiresStack& stack, Mesh& out, int K) {
     m.build_adjacency();    // CSR for post-switch brush ops
     out = std::move(m);
 
-    // Populate topology mirror map in the output mesh.
+    // Populate topology mirror map in the output mesh. Sync the topo stamp so
+    // the persistent-map gate in refresh_mirror_map treats the cached map as
+    // current (a rebuild from sculpted positions would reclassify drifted verts).
     if (K == stack.base_level) {
-        if (!stack.base_mirror.empty())
+        if (!stack.base_mirror.empty()) {
             out.mirror_x_map = stack.base_mirror;
+            out.mirror_topo_version = out.topo_version;
+        }
     } else {
         int k = K - stack.base_level - 1;
-        if (k < (int)stack.mirror.size() && !stack.mirror[k].empty())
+        if (k < (int)stack.mirror.size() && !stack.mirror[k].empty()) {
             out.mirror_x_map = stack.mirror[k];
+            out.mirror_topo_version = out.topo_version;
+        }
     }
 }
 

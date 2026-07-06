@@ -1,0 +1,60 @@
+// mirror_project.comp — GLSL 430 sibling of shaders/wgsl/mirror_project.wgsl.
+// Symmetry constraint projection: after a dab (or the pen-up autosmooth) has
+// moved vertices, re-impose exact X-mirror symmetry over the touched set instead
+// of trusting every producer kernel to be symmetric. Per touched vertex v:
+//   seam   (map[v] == v)          → snap pos.x to 0 (y/z free)
+//   paired (map[v] == twin)       → canonical side (v < twin) averages v with the
+//                                   reflected twin and writes both sides
+//   unpaired (sentinel >= count)  → untouched
+// Pairs with either side fully masked are skipped (mask pins verts; asymmetry
+// under a mask is intentional). Idempotent, race-free: only the list entry whose
+// id is the smaller pair index writes, and the map is an involution.
+// The touched list is either the per-dab dirty buffer {count, ids[]} (list_mode 0)
+// or a plain id array with the count in Params (list_mode 1, stroke_smooth path).
+#version 430
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0)  buffer PosBuf              { float positions[];  };
+layout(std430, binding = 6)  readonly buffer ListBuf    { uint  list[];       };
+layout(std430, binding = 7)  readonly buffer MirrorBuf  { uint  mirror_map[]; };
+layout(std430, binding = 12) readonly buffer MaskBuf    { float mask[];       };
+
+layout(std140, binding = 63) uniform Params {
+    uint vertex_count;   // 0
+    uint list_mode;      // 4   0 = {count, ids[]} header, 1 = plain ids + list_count
+    uint list_count;     // 8   entry count for list_mode 1
+    uint _pad0;          // 12  (struct rounds to 16)
+} P;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    uint n = (P.list_mode == 0u) ? list[0] : P.list_count;
+    if (i >= n) return;
+    uint v = (P.list_mode == 0u) ? list[i + 1u] : list[i];
+    if (v >= P.vertex_count) return;
+
+    uint mv = mirror_map[v];
+    if (mv >= P.vertex_count) return;          // MIRROR_UNPAIRED sentinel
+
+    if (mv == v) {
+        // Seam vertex: constrained to the mirror plane.
+        if (mask[v] >= 1.0) return;
+        positions[v * 3u] = 0.0;
+        return;
+    }
+
+    if (v > mv) return;                        // one projection per pair
+    if (mask[v] >= 1.0 || mask[mv] >= 1.0) return;
+
+    uint a = v * 3u;
+    uint b = mv * 3u;
+    float px = 0.5 * (positions[a + 0u] - positions[b + 0u]);
+    float py = 0.5 * (positions[a + 1u] + positions[b + 1u]);
+    float pz = 0.5 * (positions[a + 2u] + positions[b + 2u]);
+    positions[a + 0u] =  px;
+    positions[a + 1u] =  py;
+    positions[a + 2u] =  pz;
+    positions[b + 0u] = -px;
+    positions[b + 1u] =  py;
+    positions[b + 2u] =  pz;
+}

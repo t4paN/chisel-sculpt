@@ -40,7 +40,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     }
 
     let mv = mirror_map[v];
-    if (mv == v) {
+    if (mv == v || mv >= P.vertex_count) {   // seam / MIRROR_UNPAIRED sentinel
         return;
     }
 

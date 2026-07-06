@@ -188,6 +188,11 @@ void build_mirror_spatial(const Mesh& m, std::vector<uint32_t>& out) {
     for (uint32_t ni = 0; ni < neg_side.size(); ni++)
         neg_idx_map[neg_side[ni]] = ni;
 
+    // Off-plane verts default to UNPAIRED; a committed mutual pair overwrites.
+    // Seam verts (bucketed above) keep the self-map, meaning "pinned to x=0".
+    for (uint32_t i : pos_side) out[i] = Mesh::MIRROR_UNPAIRED;
+    for (uint32_t j : neg_side) out[j] = Mesh::MIRROR_UNPAIRED;
+
     for (uint32_t pi = 0; pi < pos_side.size(); pi++) {
         uint32_t i = pos_side[pi];
         uint32_t j = pos_best[pi];
@@ -202,10 +207,9 @@ void build_mirror_spatial(const Mesh& m, std::vector<uint32_t>& out) {
 
     uint32_t paired = 0, seam = 0, unpaired = 0;
     for (uint32_t i = 0; i < vc; i++) {
-        if (out[i] == i) {
-            if (std::fabs(m.pos_x[i]) < seam_tol) seam++;
-            else unpaired++;
-        } else paired++;
+        if (out[i] == Mesh::MIRROR_UNPAIRED) unpaired++;
+        else if (out[i] == i) seam++;
+        else paired++;
     }
     std::printf("[mirror] spatial rebuild: %u paired, %u seam, %u unpaired (tol=%.4f, edge=%.4f, "
                 "+x=%zu, -x=%zu)\n",
@@ -215,9 +219,11 @@ void build_mirror_spatial(const Mesh& m, std::vector<uint32_t>& out) {
 
 void Mesh::build_mirror_x_map() {
     build_mirror_spatial(*this, mirror_x_map);
+    mirror_topo_version = topo_version;
 }
 
 void Mesh::build_adjacency() {
+    topo_version++;   // adjacency is rebuilt exactly when topology changes
     uint32_t vc = vertex_count();
     uint32_t tc = tri_count();
 

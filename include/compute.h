@@ -225,6 +225,13 @@ struct ComputeState {
     gpu::ComputePipeline stroke_smooth_apply_pipeline;
     gpu::Buffer          stroke_smooth_ubo;   // 16-byte {dirty_count, strength} block
 
+    // Mirror constraint projection: after each geometry dab (and the pen-up
+    // autosmooth) re-imposes exact X-mirror symmetry over the touched verts —
+    // seam verts snap to x=0, pairs average with the reflected twin. One sink
+    // instead of per-brush symmetry in every producer kernel.
+    gpu::ComputePipeline mirror_project_pipeline;
+    gpu::Buffer          mirror_project_ubo;  // 16-byte {vcount, list_mode, list_count}
+
     // Crease + pinch brushes — ported onto the gpu:: seam (Seam Step 2b). Both are
     // accum-only kernels (deposit into the shared accum buffer); the apply side
     // reuses draw_apply / symmetrize / mirror_apply. Crease carries a 112-byte Params
@@ -518,6 +525,19 @@ struct ComputeState {
     void dispatch_stroke_smooth_apply(const uint32_t* vert_ids, uint32_t count,
                                       float strength,
                                       const gpu::Buffer& pos_vbo, const gpu::Buffer& index_ebo);
+
+    // Compile the mirror constraint-projection shader. Called once at init.
+    bool init_mirror_project();
+    bool has_mirror_project() const { return mirror_project_pipeline.handle != 0; }
+
+    // Project X-mirror symmetry over a touched-vertex list. Header variant reads
+    // a {count, ids[]} buffer (per-dab smooth_dirty_ssbo / move_affected_ssbo);
+    // the ids variant reads `id_count` plain ids already resident in
+    // dirty_verts_ssbo (pen-up stroke_smooth path).
+    void dispatch_mirror_project_header(const gpu::Buffer& pos_vbo, uint32_t vertex_count,
+                                        const gpu::Buffer& list_buf);
+    void dispatch_mirror_project_ids(const gpu::Buffer& pos_vbo, uint32_t vertex_count,
+                                     uint32_t id_count);
 
     // Compile the crease brush accumulate compute shader. Called once at init.
     bool init_crease();

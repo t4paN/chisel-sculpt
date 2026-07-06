@@ -24,7 +24,7 @@ void main() {
     if (w <= 0.0) return;
 
     uint mv = mirror_map[v];
-    if (mv == v) return;
+    if (mv == v || mv >= P.vertex_count) return;   // seam / MIRROR_UNPAIRED sentinel
 
     float scale = 1.0 - mask[mv];
     if (scale <= 0.0) return;
