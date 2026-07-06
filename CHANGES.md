@@ -2,6 +2,14 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-06 — Fix: web shortcut capture is now keyboard-layout independent
+
+- The browser-shortcut suppressor matched on e.key, so under a non-Latin
+  layout (e.g. Greek) Ctrl+D arrived as 'δ', missed the list, and Chrome
+  bookmarked the page. Now matches on e.code (physical KeyD/KeyS/…) — same
+  shortcut set, same Shift+Z redo exception, devtools untouched. Confirmed
+  live on itch (0.1.14-seamtest2) in both English and Greek layouts.
+
 ## 2026-07-06 — Fix: X-mirror seam zipper — systemic symmetry enforcement
 
 - The midline seam no longer breaks under sculpting (the pinched sliver /

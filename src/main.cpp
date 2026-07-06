@@ -2343,13 +2343,15 @@ int main(int argc, char* argv[]) {
         // Ctrl+S saved the page, … The app still receives these through GLFW's own
         // window-level listener (preventDefault stops the browser default, not
         // propagation). Ctrl+Shift combos stay untouched except Shift+Z (redo) so
-        // devtools (Ctrl+Shift+I) keep working.
+        // devtools (Ctrl+Shift+I) keep working. Matched on e.code (physical key),
+        // not e.key: under a non-Latin layout (e.g. Greek) Ctrl+D arrives as
+        // e.key='δ' and a key-based match lets the browser bookmark anyway.
         window.addEventListener('keydown', function(e) {
-            var k = (e.key || "").toLowerCase();
+            var code = e.code || "";
             var ctrl = e.ctrlKey || e.metaKey;
             if (e.key === 'F1'
-                || (ctrl && !e.altKey && (!e.shiftKey || k === 'z')
-                    && ['d','s','o','i','z','y','p'].indexOf(k) !== -1))
+                || (ctrl && !e.altKey && (!e.shiftKey || code === 'KeyZ')
+                    && ['KeyD','KeyS','KeyO','KeyI','KeyZ','KeyY','KeyP'].indexOf(code) !== -1))
                 e.preventDefault();
         }, true);
     });
