@@ -200,7 +200,8 @@ static int vertex_valence(const EdgeTable& et, uint32_t v) {
 static uint32_t split_long_edges(Mesh& m, EdgeTable& et,
                                  std::vector<uint32_t>& tri_selected,
                                  std::vector<uint32_t>& pinned,
-                                 float high, float seam_tol) {
+                                 float high, float seam_tol,
+                                 std::vector<float>* sel_mask) {
     uint32_t total_split = 0;
     // Sub-pass cap. Each sub-pass rebuilds adjacency at the top, so this directly
     // bounds wall-time. The touched_tris guard defers edges that share a tri with
@@ -329,6 +330,17 @@ static uint32_t split_long_edges(Mesh& m, EdgeTable& et,
             if (!angle_ok) continue;
 
             bool new_pinned = pinned[va] && pinned[vb];
+            bool seam_edge  = std::fabs(m.pos_x[va]) < seam_tol &&
+                              std::fabs(m.pos_x[vb]) < seam_tol;
+            // Never subdivide a fully-masked edge — even on the seam. Protected
+            // tris must stay byte-identical on both sides; a one-sided split
+            // makes a T-junction against the preserved -x twin.
+            if (!m.mask.empty() &&
+                va < (uint32_t)m.mask.size() && m.mask[va] >= 1.0f &&
+                vb < (uint32_t)m.mask.size() && m.mask[vb] >= 1.0f) continue;
+            // Off-seam pins are mask pins: refining fully-protected geometry is
+            // pointless, and snapping their midpoint to x=0 would teleport it.
+            if (new_pinned && !seam_edge) continue;
             float new_x = new_pinned ? 0.0f : mx;  // snap midpoint of two seam verts
 
             uint32_t vm = m.vertex_count();
@@ -343,6 +355,14 @@ static uint32_t split_long_edges(Mesh& m, EdgeTable& et,
                 float ma = (va < (uint32_t)m.mask.size()) ? m.mask[va] : 0.0f;
                 float mb = (vb < (uint32_t)m.mask.size()) ? m.mask[vb] : 0.0f;
                 m.mask.push_back((ma + mb) * 0.5f);
+            }
+            if (sel_mask && !sel_mask->empty()) {
+                // AND rule: a midpoint counts as masked-for-selection only when
+                // both parents do, so the frozen selection border never creeps
+                // into the falloff as interpolated mask values drift toward 0.5.
+                float sa = (va < (uint32_t)sel_mask->size()) ? (*sel_mask)[va] : 0.0f;
+                float sb = (vb < (uint32_t)sel_mask->size()) ? (*sel_mask)[vb] : 0.0f;
+                sel_mask->push_back((sa >= 0.5f && sb >= 0.5f) ? 1.0f : 0.0f);
             }
             if (!m.color.empty()) {
                 uint32_t ca = (va < (uint32_t)m.color.size()) ? m.color[va] : 0xFFFFFFFFu;
@@ -406,7 +426,7 @@ static uint32_t split_long_edges(Mesh& m, EdgeTable& et,
 // Pass 2: Collapse short edges
 // ---------------------------------------------------------------------------
 
-static void compact_mesh(Mesh& m); // forward declaration — defined after flip/smooth
+static void compact_mesh(Mesh& m, std::vector<float>* aux = nullptr); // forward declaration — defined after flip/smooth
 
 static bool collapse_would_invert(const Mesh& m, const EdgeTable& et,
                                   uint32_t v_keep, uint32_t v_remove, Vec3 new_pos) {
@@ -496,7 +516,8 @@ static bool link_condition(const EdgeTable& et, uint32_t v0, uint32_t v1) {
 static uint32_t collapse_short_edges(Mesh& m, EdgeTable& et,
                                      std::vector<uint32_t>& tri_selected,
                                      std::vector<uint32_t>& pinned,
-                                     float low, float seam_tol) {
+                                     float low, float seam_tol,
+                                     std::vector<float>* sel_mask) {
     uint32_t total_collapse = 0;
     static constexpr int MAX_ITERS = 20;
     // Minimum angle for triangles after collapse. ~15°.
@@ -538,34 +559,28 @@ static uint32_t collapse_short_edges(Mesh& m, EdgeTable& et,
 
             if (consumed_verts.count(va) || consumed_verts.count(vb)) continue;
 
-            // Block collapse of edges whose adjacent tris stitch a PROTECTED
-            // boundary — an off-seam pin (mask / grown-selection border) together
-            // with an interior vert. Collapsing those breaks connectivity to the
-            // protected region and leaves holes at the border.
+            // Pinned-pinned edges may only collapse when BOTH pins sit on the
+            // mirror seam (that decimates the seam line to target spacing and
+            // snaps to x=0 below). Any off-seam pin in the pair is a mask /
+            // border pin: merging two of those would move protected geometry.
             //
-            // Mirror-seam pins (|x| < seam_tol) are deliberately NOT counted as a
-            // boundary pin here: seam verts are pinned for the whole loop, so the
-            // center line otherwise stays frozen at input density while the interior
-            // re-spaces to target — a visibly finer seam band. Letting a pure seam
-            // edge [seam, seam, interior] collapse (pinned-pinned, snapped to x=0
-            // below) decimates the seam to target spacing. A true mask border
-            // [off-seam-pin, interior, interior] still trips the guard and is blocked.
+            // A single off-seam pin with a free endpoint is ALLOWED: the free
+            // vert collapses INTO the pin (v_keep = pin, new_pos = pin's exact
+            // position below), which removes crunched border tris without the
+            // protected region moving. Free-free edges on border-stitching tris
+            // are also allowed — the collapse apply rewrites every adjacent tri
+            // through full CSR adjacency, and the angle gate covers survivors,
+            // so the stitch stays intact.
             {
-                bool boundary_edge = false;
-                uint32_t adj_tris[2] = { e.tri_a, e.tri_b };
-                for (uint32_t tri : adj_tris) {
-                    if (tri == INVALID) continue;
-                    bool has_border_pin = false, has_interior = false;
-                    for (int k = 0; k < 3; k++) {
-                        uint32_t tv = m.indices[tri*3+k];
-                        bool is_pinned = (tv < (uint32_t)pinned.size() && pinned[tv]);
-                        bool on_seam   = (std::fabs(m.pos_x[tv]) < seam_tol);
-                        if (is_pinned && !on_seam) has_border_pin = true;
-                        else if (!is_pinned)       has_interior   = true;
-                    }
-                    if (has_border_pin && has_interior) { boundary_edge = true; break; }
-                }
-                if (boundary_edge) continue;
+                bool seam_a = std::fabs(m.pos_x[va]) < seam_tol;
+                bool seam_b = std::fabs(m.pos_x[vb]) < seam_tol;
+                if (pinned[va] && pinned[vb] && !(seam_a && seam_b)) continue;
+                // Seam verts inside a masked patch are still protected: a
+                // seam-decimation collapse there would rewrite original
+                // protected tris on one side only.
+                if (pinned[va] && pinned[vb] && !m.mask.empty() &&
+                    ((va < (uint32_t)m.mask.size() && m.mask[va] >= 1.0f) ||
+                     (vb < (uint32_t)m.mask.size() && m.mask[vb] >= 1.0f))) continue;
             }
 
             // Pinned-vs-near-seam-free leaves an orphaned mirror partner on the
@@ -589,7 +604,8 @@ static uint32_t collapse_short_edges(Mesh& m, EdgeTable& et,
             Vec3 new_pos;
             if (pinned[v_keep]) {
                 new_pos = m.get_pos(v_keep);
-                new_pos.x = 0.0f;  // snap exact: pinned must sit on x=0
+                // Snap exact only for seam pins; mask pins keep their position.
+                if (std::fabs(new_pos.x) < seam_tol) new_pos.x = 0.0f;
             } else {
                 new_pos = (m.get_pos(va) + m.get_pos(vb)) * 0.5f;
             }
@@ -628,6 +644,34 @@ static uint32_t collapse_short_edges(Mesh& m, EdgeTable& et,
                     }
                 }
                 if (straddle) continue;
+            }
+
+            // Never mint a NEW fully-masked tri. The mirror step carries
+            // fully-masked tris as "already present on both sides" — true only
+            // for ORIGINAL protected tris (symmetric by construction), not for
+            // tris a collapse rewires into [masked,masked,masked] on one side.
+            // Those get skipped from reflection with no -x twin to stand in,
+            // leaving open-edge cracks along the preserved patch border.
+            if (!m.mask.empty() && v_keep < (uint32_t)m.mask.size() &&
+                m.mask[v_keep] >= 1.0f) {
+                bool mints_protected = false;
+                uint32_t rs = m.vert_tri_offset[v_remove];
+                uint32_t re = m.vert_tri_offset[v_remove + 1];
+                for (uint32_t j = rs; j < re && !mints_protected; j++) {
+                    uint32_t tri = m.vert_tri_list[j];
+                    if (tri_contains_vert(m, tri, v_keep)) continue; // dies with the collapse
+                    bool all_masked = true;
+                    for (int k = 0; k < 3; k++) {
+                        uint32_t tv = m.indices[tri*3+k];
+                        if (tv == v_remove) continue; // rewired to v_keep (masked)
+                        if (tv >= (uint32_t)m.mask.size() || m.mask[tv] < 1.0f) {
+                            all_masked = false;
+                            break;
+                        }
+                    }
+                    if (all_masked) mints_protected = true;
+                }
+                if (mints_protected) continue;
             }
 
             // Check angle quality: all triangles around v_remove should not become too thin
@@ -716,7 +760,7 @@ static uint32_t collapse_short_edges(Mesh& m, EdgeTable& et,
                 new_pinned.push_back(v < (uint32_t)pinned.size() ? pinned[v] : 0u);
             }
 
-            compact_mesh(m);
+            compact_mesh(m, sel_mask);
             tri_selected = std::move(new_ts);
             pinned       = std::move(new_pinned);
         }
@@ -854,7 +898,7 @@ static uint32_t flip_edges(Mesh& m, EdgeTable& et,
 // Compaction: remove degenerate tris and orphaned verts
 // ---------------------------------------------------------------------------
 
-static void compact_mesh(Mesh& m) {
+static void compact_mesh(Mesh& m, std::vector<float>* aux) {
     uint32_t tc = m.tri_count();
 
     // Remove degenerate triangles
@@ -932,6 +976,15 @@ static void compact_mesh(Mesh& m) {
             new_color[remap[i]] = m.color[i];
         }
         m.color = std::move(new_color);
+    }
+
+    if (aux && !aux->empty()) {
+        std::vector<float> new_aux(new_count, 0.0f);
+        for (uint32_t i = 0; i < vc && i < (uint32_t)aux->size(); i++) {
+            if (remap[i] == INVALID) continue;
+            new_aux[remap[i]] = (*aux)[i];
+        }
+        *aux = std::move(new_aux);
     }
 }
 
@@ -1210,6 +1263,41 @@ static void mirror_positive_half(Mesh& m, float seam_tol, float target_edge, Com
         }
         std::printf("[mirror] split %u seam-crossing triangles (%zu new seam verts)\n",
                     num_split, split_cache.size());
+
+        // Stitch pass: protected tris are exempt from the clip above, but a
+        // clipped NEIGHBOR may have minted a cut vert on a shared straddling
+        // edge — a T-junction (zero-width slit along that edge). Subdivide the
+        // protected tri at the same cached cut vert. On a masked-masked edge
+        // the cut vert inherits mask 1.0, so the pieces stay protected; and a
+        // straddling patch is its own mirror image, so symmetry is preserved.
+        uint32_t stitched = 0;
+        bool stitch_changed = true;
+        while (stitch_changed) {
+            stitch_changed = false;
+            uint32_t cur_tc = m.tri_count();
+            for (uint32_t t = 0; t < cur_tc; t++) {
+                if (!tri_protected(t)) continue;
+                for (int e = 0; e < 3; e++) {
+                    uint32_t a = m.indices[t*3+e];
+                    uint32_t b = m.indices[t*3+(e+1)%3];
+                    auto it = split_cache.find(edge_key(a, b));
+                    if (it == split_cache.end()) continue;
+                    uint32_t mv = it->second;
+                    uint32_t c = m.indices[t*3+(e+2)%3];
+                    m.indices[t*3+0] = a;
+                    m.indices[t*3+1] = mv;
+                    m.indices[t*3+2] = c;
+                    m.indices.push_back(mv);
+                    m.indices.push_back(b);
+                    m.indices.push_back(c);
+                    stitched++;
+                    stitch_changed = true;
+                    break;
+                }
+            }
+        }
+        if (stitched > 0)
+            std::printf("[mirror] stitched %u protected T-junction edges\n", stitched);
     }
 
     // Filter triangles that became degenerate during seam-split.
@@ -1315,6 +1403,15 @@ static void mirror_positive_half(Mesh& m, float seam_tol, float target_edge, Com
         if (!neg_protected.empty()) {
             float mtol = seam_tol * 50.0f;
             float mtol_sq = mtol * mtol;
+            // Closest-first, one-to-one. A border +x vert whose -x twin was
+            // dropped (no fully-protected tri left to keep it alive) must NOT
+            // grab a neighboring patch vert as partner — that folds reflected
+            // border tris onto the wrong vert and leaves the preserved patch
+            // edge uncovered (open-edge cracks). Sorting by distance lets true
+            // twins (d ~ 0) claim each other first; anything left over falls
+            // through to the mint-a-mirror-vert path, which is always safe.
+            struct PairCand { float d2; uint32_t pos_v, neg_v; };
+            std::vector<PairCand> cands;
             for (uint32_t v = 0; v < vc; v++) {
                 if (side[v] != 1 || !is_protected(v)) continue;
                 float best_d2 = mtol_sq;
@@ -1326,14 +1423,20 @@ static void mirror_positive_half(Mesh& m, float seam_tol, float target_edge, Com
                     float d2 = dx*dx + dy*dy + dz*dz;
                     if (d2 < best_d2) { best_d2 = d2; best = nv; }
                 }
-                if (best != INVALID) {
-                    masked_pair[v] = best;
-                    masked_pair[best] = v;
-                }
+                if (best != INVALID) cands.push_back({best_d2, v, best});
             }
-            uint32_t n_paired = 0;
-            for (uint32_t v = 0; v < vc; v++) if (masked_pair[v] != INVALID) n_paired++;
-            std::printf("[mirror] masked spatial pairs: %u\n", n_paired / 2);
+            std::sort(cands.begin(), cands.end(),
+                      [](const PairCand& a, const PairCand& b) { return a.d2 < b.d2; });
+            uint32_t n_paired = 0, n_rejected = 0;
+            for (const auto& c : cands) {
+                if (masked_pair[c.pos_v] != INVALID ||
+                    masked_pair[c.neg_v] != INVALID) { n_rejected++; continue; }
+                masked_pair[c.pos_v] = c.neg_v;
+                masked_pair[c.neg_v] = c.pos_v;
+                n_paired++;
+            }
+            std::printf("[mirror] masked spatial pairs: %u (%u double-claims rejected)\n",
+                        n_paired, n_rejected);
         }
     }
 
@@ -1397,6 +1500,9 @@ static void mirror_positive_half(Mesh& m, float seam_tol, float target_edge, Com
         uint32_t mi1 = vert_mirror[i1];
         uint32_t mi2 = vert_mirror[i2];
         if (mi0 == INVALID || mi1 == INVALID || mi2 == INVALID) continue;
+        // Two source verts mapping to one target would make a degenerate
+        // reflected tri (and an open edge next to it) — never emit those.
+        if (mi0 == mi1 || mi1 == mi2 || mi0 == mi2) continue;
 
         m.indices.push_back(mi0);
         m.indices.push_back(mi2);
@@ -1577,6 +1683,58 @@ static uint32_t repair_flipped_tris(Mesh& m, float seam_tol,
 }
 
 // ---------------------------------------------------------------------------
+// Watertightness audit (diagnostic)
+// ---------------------------------------------------------------------------
+// A closed mesh must have two tris on every edge at every stage. Any open edge
+// is a crack; classify by mask value + seam proximity to localize the culprit.
+static void audit_open_edges(const Mesh& m, float seam_tol, const char* stage) {
+    EdgeTable et;
+    et.build(m);
+    uint32_t open_total = 0, open_seam = 0;
+    uint32_t open_masked = 0, open_falloff = 0, open_unmasked = 0;
+    uint32_t n_sample = 0;
+    static constexpr uint32_t MAX_SAMPLES = 6;
+    struct { float x, y, z, m0, m1; } samples[MAX_SAMPLES];
+
+    for (const auto& e : et.edges) {
+        if (e.dead) continue;
+        if (e.tri_a != INVALID && e.tri_b != INVALID) continue;
+        open_total++;
+        bool seam_edge = std::fabs(m.pos_x[e.v0]) < seam_tol &&
+                         std::fabs(m.pos_x[e.v1]) < seam_tol;
+        if (seam_edge) { open_seam++; continue; }
+        float m0 = (e.v0 < (uint32_t)m.mask.size()) ? m.mask[e.v0] : 0.0f;
+        float m1 = (e.v1 < (uint32_t)m.mask.size()) ? m.mask[e.v1] : 0.0f;
+        float mmax = std::max(m0, m1);
+        if (mmax >= 1.0f)      open_masked++;
+        else if (mmax > 0.0f)  open_falloff++;
+        else                   open_unmasked++;
+        if (n_sample < MAX_SAMPLES) {
+            samples[n_sample] = {
+                (m.pos_x[e.v0] + m.pos_x[e.v1]) * 0.5f,
+                (m.pos_y[e.v0] + m.pos_y[e.v1]) * 0.5f,
+                (m.pos_z[e.v0] + m.pos_z[e.v1]) * 0.5f,
+                m0, m1 };
+            n_sample++;
+        }
+    }
+
+    if (open_total == 0) {
+        std::printf("[remesh-audit] %s: watertight\n", stage);
+        return;
+    }
+    std::printf("[remesh-audit] %s: %u OPEN EDGES (on-seam=%u, masked=%u, "
+                "falloff=%u, unmasked=%u)\n",
+                stage, open_total, open_seam, open_masked, open_falloff,
+                open_unmasked);
+    for (uint32_t i = 0; i < n_sample; i++)
+        std::printf("[remesh-audit]   open edge at (%.4f, %.4f, %.4f) "
+                    "mask=(%.3f, %.3f)\n",
+                    samples[i].x, samples[i].y, samples[i].z,
+                    samples[i].m0, samples[i].m1);
+}
+
+// ---------------------------------------------------------------------------
 // Top-level entry point
 // ---------------------------------------------------------------------------
 
@@ -1614,6 +1772,18 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
     std::vector<uint32_t> tri_selected;
     static constexpr int SUPPORT_RINGS = 2;
 
+    // Selection mask, binarized once at entry and maintained across topology ops
+    // (split appends with an AND rule, compact_mesh remaps). Selection is driven
+    // by THIS instead of live mask values: split midpoints get averaged mask
+    // values that drift across the 0.5 threshold, which made the core border —
+    // and with it the pinned set — churn on every rebuild.
+    std::vector<float> sel_mask;
+    if (using_mask) {
+        sel_mask.resize(mesh.mask.size());
+        for (size_t i = 0; i < mesh.mask.size(); i++)
+            sel_mask[i] = (mesh.mask[i] >= 0.5f) ? 1.0f : 0.0f;
+    }
+
     // GPU grow_selection / mirror_selection need adjacency on GPU; upload before select.
     cs->upload_adjacency(mesh.vert_tri_offset.data(),
                          (uint32_t)mesh.vert_tri_offset.size(),
@@ -1623,10 +1793,7 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
     if (using_mask) {
         cs->dispatch_select_unmasked(mesh.vertex_count(), mesh.tri_count(),
             mesh.indices.data(),
-            mesh.mask.empty() ? nullptr : mesh.mask.data(),
-            (uint32_t)mesh.mask.size());
-        // Snapshot pre-grow selection for smooth_weights (GPU copy).
-        cs->snapshot_core_sel(mesh.tri_count());
+            sel_mask.data(), (uint32_t)sel_mask.size());
         cs->dispatch_grow_selection(mesh.vertex_count(), mesh.tri_count(), SUPPORT_RINGS);
     } else {
         cs->dispatch_select_stretched(mesh.vertex_count(), mesh.tri_count(),
@@ -1672,6 +1839,18 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
 
     // Find pinned boundary vertices (includes mirror seam). tri_sel already on GPU.
     std::vector<uint32_t> pinned;
+
+    // Fully-masked verts are hard pins regardless of selection topology: the
+    // grown selection reaches SUPPORT_RINGS into masked territory, and without
+    // this the smooth pass and collapse midpoints could move protected geometry.
+    auto apply_mask_pins = [&]() {
+        if (!using_mask) return;
+        uint32_t n = std::min<uint32_t>(mesh.vertex_count(), (uint32_t)mesh.mask.size());
+        n = std::min<uint32_t>(n, (uint32_t)pinned.size());
+        for (uint32_t v = 0; v < n; v++)
+            if (mesh.mask[v] >= 1.0f) pinned[v] = 1u;
+    };
+
     cs->dispatch_find_pinned(mesh.vertex_count(), mesh.tri_count(),
                              mesh.pos_x.data(), mesh.pos_y.data(), mesh.pos_z.data(),
                              seam_tol, pinned);
@@ -1681,15 +1860,33 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
             if (pinned[v] && std::fabs(mesh.pos_x[v]) < seam_tol)
                 mesh.pos_x[v] = 0.0f;
     }
+    apply_mask_pins();
 
-    // Per-vertex smoothing weights (mask path only). core_sel already on GPU.
+    // Per-vertex smoothing weights (mask path only): mask-proportional falloff,
+    // computed on CPU and uploaded by dispatch_remesh_smooth. weight = 1 - mask
+    // for any unpinned vert touching the selection — a continuous transition
+    // instead of the old 2-ring quantized ramp, which hit zero exactly where the
+    // border band needed relaxing most.
     std::vector<float> smooth_weights;
-    bool weights_on_gpu = false;
-    if (using_mask) {
-        cs->dispatch_compute_smooth_weights(
-            mesh.vertex_count(), mesh.tri_count(), SUPPORT_RINGS);
-        weights_on_gpu = true;
-    }
+    auto compute_weights_cpu = [&]() {
+        if (!using_mask) return;
+        uint32_t vc = mesh.vertex_count();
+        smooth_weights.assign(vc, 0.0f);
+        for (uint32_t v = 0; v < vc; v++) {
+            if (v < (uint32_t)pinned.size() && pinned[v]) continue;
+            uint32_t ts = mesh.vert_tri_offset[v];
+            uint32_t te = mesh.vert_tri_offset[v + 1];
+            bool any_sel = false;
+            for (uint32_t j = ts; j < te; j++) {
+                uint32_t t = mesh.vert_tri_list[j];
+                if (t < (uint32_t)tri_selected.size() && tri_selected[t]) { any_sel = true; break; }
+            }
+            if (!any_sel) continue;
+            float mv = (v < (uint32_t)mesh.mask.size()) ? mesh.mask[v] : 0.0f;
+            smooth_weights[v] = std::max(0.0f, 1.0f - mv);
+        }
+    };
+    compute_weights_cpu();
 
     std::printf("[remesh] %u raw selected, %u total (after grow+support), "
                 "target_edge=%.4f, %d iters\n",
@@ -1697,7 +1894,7 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
 
     // Helper: full rebuild of all transient state after topology changes
     auto rebuild_all = [&]() {
-        compact_mesh(mesh);
+        compact_mesh(mesh, &sel_mask);
         mesh.mirror_x_map.clear();
         mesh.build_adjacency();
         cs->upload_adjacency(mesh.vert_tri_offset.data(),
@@ -1709,9 +1906,7 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
         if (using_mask) {
             cs->dispatch_select_unmasked(mesh.vertex_count(), mesh.tri_count(),
                 mesh.indices.data(),
-                mesh.mask.empty() ? nullptr : mesh.mask.data(),
-                (uint32_t)mesh.mask.size());
-            cs->snapshot_core_sel(mesh.tri_count());
+                sel_mask.data(), (uint32_t)sel_mask.size());
             cs->dispatch_grow_selection(mesh.vertex_count(), mesh.tri_count(), SUPPORT_RINGS);
         } else {
             cs->dispatch_select_stretched(mesh.vertex_count(), mesh.tri_count(),
@@ -1733,17 +1928,14 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
         for (uint32_t v = 0; v < vc; v++)
             if (pinned[v] && std::fabs(mesh.pos_x[v]) < seam_tol)
                 mesh.pos_x[v] = 0.0f;
-        if (using_mask) {
-            cs->dispatch_compute_smooth_weights(
-                mesh.vertex_count(), mesh.tri_count(), SUPPORT_RINGS);
-            weights_on_gpu = true;
-        }
+        apply_mask_pins();
+        compute_weights_cpu();
     };
 
     // Flip changes indices but not vertex/tri count and not which verts belong
     // to the selection (flip is gated on both adjacent tris being selected,
     // and the four involved verts keep the same set of adjacent selected tris).
-    // So pinned, weights, selection, mirror map, and core_selected are all
+    // So pinned, weights, selection, and mirror map are all
     // invariant — just refresh CPU+GPU adjacency and recompute normals.
     auto rebuild_after_flip = [&]() {
         mesh.build_adjacency();
@@ -1769,10 +1961,10 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
     // 10 iters for 1-2 trivial ops.
     int iters_done = 0;
     for (int iter = 0; iter < iterations; iter++) {
-        uint32_t n_split = split_long_edges(mesh, et, tri_selected, pinned, high, seam_tol);
+        uint32_t n_split = split_long_edges(mesh, et, tri_selected, pinned, high, seam_tol, &sel_mask);
         rebuild_all();
 
-        uint32_t n_collapse = collapse_short_edges(mesh, et, tri_selected, pinned, low, seam_tol);
+        uint32_t n_collapse = collapse_short_edges(mesh, et, tri_selected, pinned, low, seam_tol, &sel_mask);
         et.build(mesh);
         rebuild_all();
 
@@ -1787,8 +1979,7 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
                 mesh.norm_x.data(), mesh.norm_y.data(), mesh.norm_z.data(),
                 smooth_weights, pinned,
                 0.8f, seam_tol,
-                mesh.pos_x.data(), mesh.pos_y.data(), mesh.pos_z.data(),
-                weights_on_gpu);
+                mesh.pos_x.data(), mesh.pos_y.data(), mesh.pos_z.data());
         }
 
         uint32_t total_ops = n_split + n_collapse + n_flip;
@@ -1808,10 +1999,14 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
     // Final compaction and rebuild
     compact_mesh(mesh);
 
+    audit_open_edges(mesh, seam_tol, "pre-mirror");
+
     mirror_positive_half(mesh, seam_tol, target_edge_length, cs);
 
     mesh.build_adjacency();
     mesh.recompute_normals();
+
+    audit_open_edges(mesh, seam_tol, "post-mirror");
 
     // Replace multires stack
     stack.base          = mesh;

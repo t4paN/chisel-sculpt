@@ -2,6 +2,33 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-07 — Fix: masked iso remesh — border crunch gone, watertight at the mask patch
+
+- Mask-border crunch fixed, three parts: (1) collapse can now eat border
+  slivers — a free vert collapses INTO a mask pin instead of the old blanket
+  guard that blocked every collapse near the border (only splits were legal
+  there, so crunch accumulated); (2) fully-masked verts (mask >= 1.0) are hard
+  pins and the smooth weight is mask-proportional (1 - mask) instead of the
+  2-ring quantized ramp that hit zero exactly where the border needed
+  relaxing; (3) the selection border is frozen at remesh entry (binarized
+  sel_mask carried through splits/compaction) — split-midpoint mask averaging
+  used to shift the border every iteration, so the loop rarely converged
+  early. Masked remeshes are faster now for that reason.
+- Crack fixes at the preserved mask patch (the "cracked tris on the left"):
+  the mirror step carries fully-masked tris as "present on both sides", which
+  is only true if the protected tri set never changes during the remesh. Now
+  enforced: a collapse may not rewire a falloff tri into an all-masked one,
+  fully-masked edges are never split (was possible on the seam), and
+  seam-decimation collapses skip masked seam verts. Masked spatial pairing is
+  closest-first and one-to-one (an orphaned border vert mints a mirror vert
+  instead of grabbing a neighbor's twin). Where the mask crosses x=0, a
+  clipped neighbor's cut vert on a shared straddling edge left a zero-width
+  T-junction slit — protected tris are now stitched at the same cached cut
+  vert.
+- Remesh self-audits watertightness (pre- and post-mirror) and prints any
+  open edges with position + mask class; confirmed watertight on masked +
+  mirrored + seam-crossing remeshes at 5k and 22k tris.
+
 ## 2026-07-06 — Fix: web shortcut capture is now keyboard-layout independent
 
 - The browser-shortcut suppressor matched on e.key, so under a non-Latin
