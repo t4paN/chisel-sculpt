@@ -218,7 +218,9 @@ void ComputeState::cleanup() {
     gpu::release_buffer(crease_ubo);
     gpu::release_buffer(pinch_ubo);
     gpu::release_compute_pipeline(mask_pipeline);
+    gpu::release_compute_pipeline(mask_smooth_pipeline);
     gpu::release_buffer(mask_params_ubo);
+    gpu::release_buffer(mask_smooth_ubo);
     gpu::release_compute_pipeline(color_paint_pipeline);
     gpu::release_compute_pipeline(color_smooth_pipeline);
     gpu::release_buffer(color_paint_ubo);

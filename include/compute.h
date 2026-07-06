@@ -237,8 +237,13 @@ struct ComputeState {
     // Mask brush — ported onto the gpu:: seam (Seam Step 2b). Pipeline compiled from
     // the embedded mask_paint kernel; the std140 Params block (binding 63) replaces
     // the old loose uniforms and is uploaded per dab. has_mask() reports availability.
+    // mask_smooth is the smooth gesture while the mask brush is active: blends mask
+    // values toward the 1-ring neighbour average (never touches geometry), so mask
+    // edits stay in their own undo category. has_mask_smooth() reports readiness.
     gpu::ComputePipeline mask_pipeline;
+    gpu::ComputePipeline mask_smooth_pipeline;
     gpu::Buffer          mask_params_ubo;
+    gpu::Buffer          mask_smooth_ubo;    // 48-byte block, same shape as mask_paint's
 
     // Paint brush — ported onto the gpu:: seam (Seam Step 2b). Buffer-only: writes the
     // colour VBO/SSBO directly (lerp-to-colour) and the paint-smooth blends each vertex
@@ -535,6 +540,7 @@ struct ComputeState {
     // Is the mask kernel compiled and ready? (replaces the old `mask_paint_program`
     // truthiness check now that the program lives behind the gpu:: seam.)
     bool has_mask() const { return mask_pipeline.handle != 0; }
+    bool has_mask_smooth() const { return mask_smooth_pipeline.handle != 0; }
 
     // Draw-brush readiness (replaces draw_*_program truthiness checks). has_draw()
     // gates the whole draw path; has_draw_symmetrize() gates the mirror-symmetry pass.
@@ -573,6 +579,9 @@ struct ComputeState {
     // directly. Uses smooth_dirty_ssbo for the compact dirty list. Caller reads
     // back dirty list via readback_smooth_dirty.
     void dispatch_mask_paint(const MaskPaintParams& params, const gpu::Buffer& pos_vbo);
+    // Mask-smooth: reuses MaskPaintParams (paint_strength = blend amount). Averages
+    // neighbour mask values via CSR adjacency; geometry untouched.
+    void dispatch_mask_smooth(const MaskPaintParams& params, const gpu::Buffer& pos_vbo, const gpu::Buffer& index_ebo);
     void dispatch_color_paint(const ColorPaintParams& params, const gpu::Buffer& pos_vbo);
     // Paint-smooth: reuses ColorPaintParams (paint_strength = blend amount,
     // paint_r/g/b ignored). Averages neighbour colours via CSR adjacency.

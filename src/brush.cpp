@@ -964,6 +964,36 @@ void BrushStroke::apply_mask_gpu(DabContext& ctx, float dab_x, float dab_y,
     needs_mesh_update = true;
 }
 
+void BrushStroke::apply_mask_smooth_gpu(DabContext& ctx, float dab_x, float dab_y,
+                                        float strength, float hardness) {
+    if (!is_active()) return;
+    if (!ctx.compute.supported || !ctx.compute.has_mask_smooth()) return;
+
+    set_anchor(ctx.mesh, ctx.cam, dab_x, dab_y, ctx.eff_brush_size, ctx.win_h, ctx.renderer);
+    if (!anchor_valid) return;
+
+    MaskPaintParams p{};
+    p.anchor_a_x = anchor_pos.x;
+    p.anchor_a_y = anchor_pos.y;
+    p.anchor_a_z = anchor_pos.z;
+    p.anchor_b_x = -anchor_pos.x;
+    p.anchor_b_y =  anchor_pos.y;
+    p.anchor_b_z =  anchor_pos.z;
+    p.use_b = ctx.input.mirror_x ? 1 : 0;
+    p.world_radius = anchor_world_radius;
+    p.hardness = hardness;
+    p.paint_strength = strength;        // blend amount toward neighbour average
+    p.vertex_count = ctx.mesh.vertex_count();
+
+    ctx.compute.dispatch_mask_smooth(p, ctx.renderer.vbo_pos, ctx.renderer.ebo);
+
+    // Dirty list lands async → mask first-touch snapshots in drain_dab_readbacks.
+    kick_dab_readback(ctx, DAB_MASK);
+
+    gpu_mask_deferred = true;
+    needs_mesh_update = true;
+}
+
 void BrushStroke::apply_color_gpu(DabContext& ctx, float dab_x, float dab_y,
                                   float strength, float hardness, bool erase) {
     if (!is_active()) return;
@@ -1474,11 +1504,17 @@ bool BrushStroke::finalize(DabContext& ctx, Mesh& mesh, UndoStack& stack,
         gpu_color_deferred = false;
     }
 
-    if (fin_brush_type == BrushType::MASK) {
+    // Commit whatever the stroke actually changed, not what the brush type claims:
+    // a smooth gesture during a mask/paint stroke (or a compute degrade path) can
+    // touch a different category than fin_brush_type, and an entry keyed on the
+    // wrong category records nothing — leaving an un-undoable edit on the mesh.
+    // Each non-empty snap set gets its own entry; commit_*_undo self-filter
+    // unchanged verts and push() drops empties, so pure strokes still push one.
+    if (!mask.snap_list.empty())
         commit_mask_undo(mesh, stack);
-    } else if (fin_brush_type == BrushType::PAINT) {
+    if (!color.snap_list.empty())
         commit_color_undo(mesh, stack);
-    } else {
+    if (!snap_list.empty()) {
         for (int fi = stroke_disp_index + 1; fi < (int)multires.frames.size(); fi++)
             multires.frames[fi].clear();
         commit_undo(mesh, stack, multires);

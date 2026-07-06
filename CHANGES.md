@@ -2,6 +2,21 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-06 — Fix: mask undo chronology + smooth gesture now smooths the mask
+
+- Shift-smooth while the mask brush is active ran the GEOMETRY smooth, but pen-up
+  commits undo entries by brush type (MASK → mask deltas only) — the geometry edit
+  was never recorded, so Ctrl+Z skipped it and "ate" earlier strokes, and the edit
+  itself was permanently un-undoable.
+- Smooth gesture in mask mode now blends mask values toward the 1-ring neighbour
+  average (new mask_smooth GLSL+WGSL kernel pair, modeled on the paint-blend one):
+  softens mask outlines, never touches geometry. Degrades to the old geometry
+  smooth when compute is unavailable, same as paint.
+- Structural plug: pen-up now commits an undo entry per category the stroke
+  actually changed (geometry / mask / colour), not what the brush type claims.
+- Undo console trace now labels MASK/PAINT entries (previously printed as STROKE).
+- User-confirmed: mask-smooth blurs, undo with mask is chronological.
+
 ## 2026-07-06 — Web: cursor hides while sculpting; F-keys no longer leak to the browser (v0.1.13)
 
 - The web build now hides the mouse pointer during sculpting, matching native

@@ -248,6 +248,12 @@ struct BrushStroke {
     void apply_mask_gpu(DabContext& ctx, float dab_x, float dab_y,
                         float strength, float hardness, bool invert);
 
+    // GPU mask-smooth: the smooth gesture (shift / double-shift) while the mask
+    // brush is active — blends mask values toward their neighbour average
+    // instead of smoothing geometry. Shares the mask undo-snap path.
+    void apply_mask_smooth_gpu(DabContext& ctx, float dab_x, float dab_y,
+                               float strength, float hardness);
+
     // GPU paint brush: compute shader lerps vertex albedo in the color VBO.
     // erase = paint toward white instead of the brush color.
     void apply_color_gpu(DabContext& ctx, float dab_x, float dab_y,

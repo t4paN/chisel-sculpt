@@ -869,6 +869,12 @@ int main(int argc, char* argv[]) {
                     std::printf("[undo-trace][%s] depth=%zu top=LEVEL from=%d to=%d proj=%d\n",
                                 tag, undo_stack.undo_depth(), e->from_level, e->to_level,
                                 (int)!e->before.empty());
+                else if (e->kind == UndoEntry::Kind::MASK)
+                    std::printf("[undo-trace][%s] depth=%zu top=MASK verts=%zu\n",
+                                tag, undo_stack.undo_depth(), e->verts.size());
+                else if (e->kind == UndoEntry::Kind::PAINT)
+                    std::printf("[undo-trace][%s] depth=%zu top=PAINT verts=%zu\n",
+                                tag, undo_stack.undo_depth(), e->verts.size());
                 else
                     std::printf("[undo-trace][%s] depth=%zu top=STROKE level=%d targets_base=%d disp_index=%d\n",
                                 tag, undo_stack.undo_depth(), e->level, (int)e->targets_base, e->disp_index);
@@ -1683,9 +1689,16 @@ int main(int argc, char* argv[]) {
 
                     if (is_smooth) {
                         // Smooth gesture while painting blends colours, not geometry.
+                        // Same idea while masking: blend mask values, not geometry —
+                        // otherwise the stroke moves verts but finalize (keyed on
+                        // current_brush == MASK) records only mask deltas, leaving an
+                        // un-undoable geometry edit on the mesh.
                         if (input.current_brush == BrushType::PAINT &&
                             compute.supported && compute.has_color_smooth()) {
                             brush_stroke.apply_color_smooth_gpu(ctx, dab_x, dab_y, eff_strength, eff_hardness);
+                        } else if (input.current_brush == BrushType::MASK &&
+                                   compute.supported && compute.has_mask_smooth()) {
+                            brush_stroke.apply_mask_smooth_gpu(ctx, dab_x, dab_y, eff_strength, eff_hardness);
                         } else {
                             brush_stroke.apply_smooth(ctx, dab_x, dab_y, eff_strength, eff_hardness);
                         }
