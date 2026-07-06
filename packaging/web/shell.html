@@ -65,6 +65,15 @@
       console.log('[dbg] secureContext=' + window.isSecureContext +
                   ' webgpu=' + (navigator.gpu ? 'yes' : 'NO'));
     }
+    // The app owns F1–F3 (view snaps) and F9/F10 (debug). Suppress the browser
+    // defaults — F3's find bar and F10's menu focus steal keyboard focus from
+    // the page, so the NEXT app key goes to the browser instead (F1 → help tab).
+    // Capture-phase and registered before the runtime script, so this runs
+    // ahead of GLFW's window listener; preventDefault still lets GLFW see the
+    // key. F12 is deliberately left alone: devtools outranks its debug toggle.
+    window.addEventListener('keydown', function(e) {
+      if (['F1','F2','F3','F9','F10'].indexOf(e.key) !== -1) e.preventDefault();
+    }, true);
     var canvasElement = document.getElementById('canvas');
     canvasElement.addEventListener('webglcontextlost', function(e) {
       alert('Graphics context lost — reload the page.'); e.preventDefault();

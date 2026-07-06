@@ -1768,14 +1768,17 @@ int main(int argc, char* argv[]) {
 
         // ---- Cursor visibility ----
         bool non_edit_mode = input.interaction_mode != InputState::InteractionMode::EDIT;
-        // Native hides the OS cursor while sculpting (we draw our own brush cursor).
-        // Emscripten's GLFW can't hide the cursor (it warns every frame) — leave the
-        // browser cursor visible on the web.
+        // Hide the OS cursor while sculpting (we draw our own brush cursor).
+        bool show_os_cursor = input.quit_requested || input.export_dialog_active || input.import_dialog_active || input.save_dialog_active || input.remesh_confirm_pending || input.voxel_merge_confirm_pending || imgui_wants_mouse || non_edit_mode;
 #ifndef __EMSCRIPTEN__
-        if (input.quit_requested || input.export_dialog_active || input.import_dialog_active || input.save_dialog_active || input.remesh_confirm_pending || input.voxel_merge_confirm_pending || imgui_wants_mouse || non_edit_mode) {
-            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
-        } else {
-            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_HIDDEN);
+        glfwSetInputMode(window, GLFW_CURSOR, show_os_cursor ? GLFW_CURSOR_NORMAL : GLFW_CURSOR_HIDDEN);
+#else
+        // Emscripten's GLFW has no GLFW_CURSOR_HIDDEN (warns every frame) —
+        // drive the canvas CSS cursor instead, only on state change.
+        static bool css_cursor_hidden = false;
+        if (css_cursor_hidden == show_os_cursor) {
+            css_cursor_hidden = !show_os_cursor;
+            EM_ASM({ Module['canvas'].style.cursor = $0 ? 'none' : 'auto'; }, css_cursor_hidden);
         }
 #endif
 
