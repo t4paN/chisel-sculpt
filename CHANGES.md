@@ -2,6 +2,16 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-06 — Fix: centered inserted meshes X-locked without catching mirrored pairs
+
+- Select-move classified "centered" purely by bounding centre at x≈0, which is
+  also true for a symmetrized pair — so pairs were wrongly X-locked (symmetry
+  off) instead of translating freely. Now the plane test also checks whether
+  geometry is continuous across x=0 (any triangle touching/crossing the plane):
+  centered single meshes are X-locked regardless of the symmetry toggle; pairs
+  keep the mirrored lobe spread/converge with symmetry on and translate freely
+  with symmetry off. User-confirmed.
+
 ## 2026-07-06 — Fix: mask undo chronology + smooth gesture now smooths the mask
 
 - Shift-smooth while the mask brush is active ran the GEOMETRY smooth, but pen-up

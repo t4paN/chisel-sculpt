@@ -1305,20 +1305,40 @@ int main(int argc, char* argv[]) {
                         if (!e) continue;
                         uint32_t vc = e->mesh.vertex_count();
 
-                        // X-axis behaviour for a *centered* (symmetric) piece — its
-                        // bounding centre sits on the mirror plane. With symmetry on,
-                        // mirror the motion per-lobe: +x verts move +delta.x, -x verts
-                        // -delta.x, seam pinned at 0 -> the lobes (the mesh and its
-                        // -x twin) spread/converge as exact mirrors, stays symmetric.
-                        // With symmetry off, lock X so the piece stays centered.
-                        // Off-centre pieces always translate freely on all axes.
+                        // X-axis behaviour depends on WHAT sits on the mirror plane.
+                        // Bounding centre at x=0 alone can't tell a centered single
+                        // piece from a symmetrized pair — the pair's centre is also
+                        // at 0 — so also test whether the geometry is continuous
+                        // across the plane (some triangle touches/crosses x=0):
+                        // - Centered single (spans the seam): lock X so it stays
+                        //   centered, regardless of the symmetry toggle.
+                        // - Symmetrized pair (two disjoint lobes, nothing crossing):
+                        //   with symmetry on, move the lobes as exact mirrors
+                        //   (spread/converge); with symmetry off, translate freely.
+                        // - Off-centre pieces always translate freely on all axes.
                         Vec3 c; float r;
                         e->mesh.compute_bounding_sphere(c, r);
                         float rr = (r > 0.0f) ? r : 1.0f;
                         bool centered = std::fabs(c.x) < 1e-3f * rr;
-                        bool mirror_lobes = centered && input.mirror_x;
-                        bool lock_x = centered && !input.mirror_x;
                         float seam_eps = 1e-4f * rr;
+
+                        bool spans_seam = false;
+                        if (centered) {
+                            const Mesh& sm = e->mesh;
+                            float band = 1e-3f * rr;
+                            for (size_t t = 0; t + 2 < sm.indices.size() && !spans_seam; t += 3) {
+                                bool pos = false, neg = false;
+                                for (int k = 0; k < 3; k++) {
+                                    float x = sm.pos_x[sm.indices[t + k]];
+                                    if (x > band) pos = true;
+                                    else if (x < -band) neg = true;
+                                    else { pos = true; neg = true; }  // in the seam band
+                                }
+                                spans_seam = pos && neg;
+                            }
+                        }
+                        bool lock_x = centered && spans_seam;
+                        bool mirror_lobes = centered && !spans_seam && input.mirror_x;
 
                         auto move_mesh = [&](Mesh& m) {
                             uint32_t n = m.vertex_count();
