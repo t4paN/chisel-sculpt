@@ -2,6 +2,16 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-06 — Web: cursor hides while sculpting; F-keys no longer leak to the browser (v0.1.13)
+
+- The web build now hides the mouse pointer during sculpting, matching native
+  (Emscripten GLFW lacks GLFW_CURSOR_HIDDEN — the canvas CSS cursor is driven
+  from the same condition instead; visible again over UI panels and dialogs).
+- F1–F3/F9/F10 browser defaults are suppressed in the shell. F3 opened the
+  find-in-page bar, which stole keyboard focus — that's why F1 worked once,
+  then opened browser help after an F3. User-confirmed fixed on live itch.
+- v0.1.13 pushed to itch (html5) + tagged.
+
 ## 2026-07-05 — Docs: README rewritten + full MANUAL.md; repo merge; v0.1.12 live
 
 - README rewritten as the go-public front door: play-now itch link up top, one
