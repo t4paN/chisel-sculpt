@@ -68,13 +68,16 @@ struct Renderer {
     gpu::Buffer shadow_ubo;
     gpu::Buffer crosshair_ubo;
 
-    // Debug visualization (wireframe edge overlay) — on the gpu:: seam. Lines
-    // pipeline + a std140 Params UBO (view/proj); the GL-owned edge index buffer
+    // Debug visualization (wireframe edge overlay) — on the gpu:: seam. Fat-line
+    // Triangles pipeline (screen-space ribbon expansion in the vertex stage, AA
+    // feather in the fragment stage) + a std140 Params UBO; the edge-pair SSBO
     // is built lazily and bound through the seam.
     gpu::RenderPipeline debug_edge_pipeline;
     gpu::Buffer         debug_edge_ubo;
-    gpu::Buffer debug_edge_vbo;    // edge index buffer (seam-owned, built lazily)
-    uint32_t debug_edge_count;
+    gpu::Buffer debug_edge_vbo;    // unique edge-pair SSBO (seam-owned, built lazily)
+    uint32_t debug_edge_count;     // u32 entries in it (2 per unique edge)
+    uint32_t debug_edge_src_tris;  // tri count it was built from (stale-cache check)
+    float    debug_mesh_radius;    // bounding radius at build (zoom-adaptive width)
 
     // Screen-buffer MRT for the brush pipeline — on the gpu:: seam. A 4-attachment
     // offscreen target (R32F depth / RGB16F normal / R32UI triid / RG16F bary) +
@@ -188,5 +191,5 @@ struct Renderer {
 
     // Debug visualization
     void draw_debug_mesh(const Camera& cam, const Mesh& mesh, int w, int h);
-    void invalidate_debug_mesh() { debug_edge_count = 0; }
+    void invalidate_debug_mesh() { debug_edge_count = 0; debug_edge_src_tris = 0; }
 };

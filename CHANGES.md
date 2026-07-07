@@ -2,6 +2,24 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-07 — Wireframe overlay (Y): antialiased fat lines, auto-rebuild, new colour
+
+- The Y-key wireframe now auto-rebuilds when the topology changes underneath
+  it (multires level switch, remesh, merge): stale-cache guard on the tri
+  count in the draw + invalidate on every full mesh upload. No more toggling
+  Y off/on after a rez change.
+- Lines are drawn as screen-space ribbons expanded in the vertex shader — no
+  vertex buffer, edge pairs pulled from SSBOs by vertex id — with an ~1px
+  alpha feather in the fragment stage. Antialiased at any width on EVERY
+  backend; the browser build gets thick lines for the first time (WebGPU has
+  no native line width, GL wide lines are capped/deprecated).
+- 3px base width, swelling up to 2.5× as the model's projected diameter
+  shrinks below ~600px, so the wireframe stays readable zoomed out.
+- Colour: Aegean blue with a cypress-green tinge (0.08, 0.33, 0.42). Edge
+  list deduplicated (shared edges used to double-blend their AA fringes);
+  the anti-z-fight depth bias moved from glPolygonOffset into the shader
+  (the geometry is fill now, and it's backend-portable).
+
 ## 2026-07-07 — SDF merge: cross-field flow (quad-remesher-style edge alignment)
 
 - The post-merge relax is now steered by a curvature-aligned cross field:

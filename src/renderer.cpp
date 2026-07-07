@@ -3,6 +3,7 @@
 #include <cstring>
 #include <cmath>
 #include <algorithm>
+#include <unordered_set>
 
 // Matcap Params UBO payload — byte-identical to the std140 `Params` block in the
 // matcap shaders (two mat4 = 128 B, then three floats + 4 B pad = 16 B).
@@ -51,12 +52,18 @@ struct CrosshairParamsGPU {     // centre X
 };
 static_assert(sizeof(CrosshairParamsGPU) == 32, "crosshair Params UBO must be 32 bytes (std140)");
 
-// Debug-mesh edge overlay (wireframe) Params UBO — two mat4 (std140 at binding 63).
+// Debug-mesh edge overlay (wireframe) Params UBO — view/proj + the screen-space
+// expansion inputs (std140 at binding 63). The overlay draws edges as expanded
+// quads (see debug_vert_src), so it needs the viewport in pixels, the half-width
+// to expand by, and a small NDC depth bias to pull the wires off the surface.
 struct DebugParamsGPU {
     float view[16];
     float proj[16];
+    float viewport[2];       // 128  framebuffer size in px
+    float half_width_px;     // 136  line half-width (zoom-compensated)
+    float depth_bias_ndc;    // 140  toward-viewer bias (replaces glPolygonOffset)
 };
-static_assert(sizeof(DebugParamsGPU) == 128, "debug Params UBO must be 128 bytes (std140)");
+static_assert(sizeof(DebugParamsGPU) == 144, "debug Params UBO must be 144 bytes (std140)");
 
 // Entity-id pick pass Params UBO — view/proj (constant across the pass) + the
 // per-draw entity id (std140 at binding 63).
@@ -502,28 +509,63 @@ void main() {
 }
 )";
 
-// std140 Params block (binding 63) — byte-identical to DebugParamsGPU (two mat4).
+// Wireframe overlay, screen-space fat lines. GL wide lines are capped/deprecated
+// in core profile and WebGPU has no line width at all, so each edge is drawn as
+// a camera-facing quad (2 tris = 6 verts) expanded in the VERTEX shader: no
+// vertex buffer — gl_VertexID pulls the edge's endpoints from the mesh position
+// SSBO via an edge-pair SSBO. The lateral coordinate (±1 across the ribbon)
+// feathers alpha over the outermost ~1px in the fragment stage → antialiased on
+// every backend, any width. Depth bias moved into the shader (toward-viewer NDC
+// nudge) since polygon offset can't apply to what is now fill geometry.
+// std140 Params block (binding 63) — byte-identical to DebugParamsGPU.
 #define DEBUG_PARAMS_BLOCK \
     "layout(std140, binding=63) uniform Params {\n" \
     "    mat4 uView;\n" \
     "    mat4 uProj;\n" \
+    "    vec2 uViewport;\n" \
+    "    float uHalfW;\n" \
+    "    float uBias;\n" \
     "};\n"
 
 static const char* debug_vert_src =
 "#version 430 core\n"
-"layout(location=0) in vec3 aPos;\n"
+"layout(std430, binding = 0) readonly buffer PosIn { float vpos[]; };\n"
+"layout(std430, binding = 1) readonly buffer EdgeIn { uint eidx[]; };\n"
 DEBUG_PARAMS_BLOCK
 R"(
+out float vLat;
 void main() {
-    gl_Position = uProj * uView * vec4(aPos, 1.0);
+    uint vid = uint(gl_VertexID);
+    uint e = vid / 6u;
+    uint c = vid % 6u;
+    uint ia = eidx[e*2u+0u], ib = eidx[e*2u+1u];
+    vec4 ca = uProj * uView * vec4(vpos[ia*3u+0u], vpos[ia*3u+1u], vpos[ia*3u+2u], 1.0);
+    vec4 cb = uProj * uView * vec4(vpos[ib*3u+0u], vpos[ib*3u+1u], vpos[ib*3u+2u], 1.0);
+    vec2 sa = (ca.xy / ca.w * 0.5 + 0.5) * uViewport;
+    vec2 sb = (cb.xy / cb.w * 0.5 + 0.5) * uViewport;
+    vec2 d  = sb - sa;
+    vec2 n  = vec2(-d.y, d.x) / max(length(d), 1e-4);
+    // 6 verts -> 2 tris over ribbon corners 0:A+ 1:A- 2:B+ 3:B-
+    uint corner = (c == 0u) ? 0u : (c == 1u || c == 4u) ? 1u : (c == 5u) ? 3u : 2u;
+    bool  atB  = corner >= 2u;
+    float side = (corner == 1u || corner == 3u) ? -1.0 : 1.0;
+    vec4 clip = atB ? cb : ca;
+    vec2 sp   = (atB ? sb : sa) + n * (side * uHalfW);
+    vec2 ndc  = sp / uViewport * 2.0 - 1.0;
+    gl_Position = vec4(ndc * clip.w, clip.z - uBias * clip.w, clip.w);
+    vLat = side;
 }
 )";
 
-static const char* debug_edge_frag_src = R"(
-#version 430 core
+static const char* debug_edge_frag_src =
+"#version 430 core\n"
+DEBUG_PARAMS_BLOCK
+R"(
+in float vLat;
 out vec4 fragColor;
 void main() {
-    fragColor = vec4(0.15, 0.45, 0.15, 1.0);
+    float aa = clamp((1.0 - abs(vLat)) * uHalfW, 0.0, 1.0);   // ~1px edge feather
+    fragColor = vec4(0.08, 0.33, 0.42, aa);   // Aegean blue, cypress-green tinge
 }
 )";
 
@@ -807,20 +849,55 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 )WGSL";
 
 static const char* debug_wgsl_src = R"WGSL(
-struct Params { view: mat4x4<f32>, proj: mat4x4<f32> };
+struct Params {
+    view: mat4x4<f32>, proj: mat4x4<f32>,
+    viewport: vec2<f32>, half_w: f32, bias: f32,
+};
 @group(0) @binding(63) var<uniform> P: Params;
+@group(0) @binding(0) var<storage, read> vpos: array<f32>;
+@group(0) @binding(1) var<storage, read> eidx: array<u32>;
+struct VSOut { @builtin(position) pos: vec4<f32>, @location(0) lat: f32 };
 @vertex
-fn vs_main(@location(0) aPos: vec3<f32>) -> @builtin(position) vec4<f32> {
-    return P.proj * P.view * vec4<f32>(aPos, 1.0);
+fn vs_main(@builtin(vertex_index) vid: u32) -> VSOut {
+    let e = vid / 6u;
+    let c = vid % 6u;
+    let ia = eidx[e*2u+0u]; let ib = eidx[e*2u+1u];
+    let ca = P.proj * P.view * vec4<f32>(vpos[ia*3u], vpos[ia*3u+1u], vpos[ia*3u+2u], 1.0);
+    let cb = P.proj * P.view * vec4<f32>(vpos[ib*3u], vpos[ib*3u+1u], vpos[ib*3u+2u], 1.0);
+    let sa = (ca.xy / ca.w * 0.5 + vec2<f32>(0.5)) * P.viewport;
+    let sb = (cb.xy / cb.w * 0.5 + vec2<f32>(0.5)) * P.viewport;
+    let d  = sb - sa;
+    let n  = vec2<f32>(-d.y, d.x) / max(length(d), 1e-4);
+    // 6 verts -> 2 tris over ribbon corners 0:A+ 1:A- 2:B+ 3:B-
+    var corner = 2u;
+    if (c == 0u) { corner = 0u; }
+    else if (c == 1u || c == 4u) { corner = 1u; }
+    else if (c == 5u) { corner = 3u; }
+    let atB  = corner >= 2u;
+    var side = 1.0;
+    if (corner == 1u || corner == 3u) { side = -1.0; }
+    var clip = ca; var sp = sa;
+    if (atB) { clip = cb; sp = sb; }
+    sp = sp + n * (side * P.half_w);
+    let ndc = sp / P.viewport * 2.0 - vec2<f32>(1.0);
+    var o: VSOut;
+    o.pos = vec4<f32>(ndc * clip.w, clip.z - P.bias * clip.w, clip.w);
+    o.lat = side;
+    return o;
 }
 @fragment
-fn fs_main() -> @location(0) vec4<f32> { return vec4<f32>(0.15, 0.45, 0.15, 1.0); }
+fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
+    let aa = clamp((1.0 - abs(in.lat)) * P.half_w, 0.0, 1.0);
+    return vec4<f32>(0.08, 0.33, 0.42, aa);
+}
 )WGSL";
 
 // ---- Renderer ----
 
 Renderer::Renderer()
     : debug_edge_count(0)
+    , debug_edge_src_tris(0)
+    , debug_mesh_radius(1.0f)
     , screen_tri_count(0)
     , initialized(false)
 {}
@@ -1101,22 +1178,25 @@ void Renderer::init() {
         screen_expand_ubo = gpu::create_buffer(gpu_dev, nullptr, sizeof(ScreenExpandParamsGPU), gpu::Usage::Uniform);
     }
 
-    // Debug wireframe overlay — on the gpu:: seam. Lines pipeline reading mesh
-    // positions (slot 0) with a std140 view/proj UBO; the edge index buffer is
-    // built lazily in draw_debug_mesh.
+    // Debug wireframe overlay — on the gpu:: seam. Screen-space fat lines: a
+    // Triangles pipeline with NO vertex buffers — the vertex stage pulls edge
+    // endpoints from the mesh position SSBO (binding 0) through the edge-pair
+    // SSBO (binding 1, built lazily in draw_debug_mesh) and expands each edge
+    // into an antialiased ribbon (see debug_vert_src). depth_write off: the
+    // feathered fringes must not occlude neighbouring lines' blends.
     {
-        gpu::VertexAttr attrs[] = {{ 0, gpu::VertexFormat::F32x3, 0, 0 }};
-        gpu::VertexSlot slots[] = {{ 3 * sizeof(float) }};
-        gpu::BindEntry binds[] = {{ 63, gpu::Bind::Uniform, sizeof(DebugParamsGPU) }};
+        gpu::BindEntry binds[] = {
+            { 0,  gpu::Bind::StorageRead, 0 },
+            { 1,  gpu::Bind::StorageRead, 0 },
+            { 63, gpu::Bind::Uniform, sizeof(DebugParamsGPU) },
+        };
         gpu::RenderPipelineDesc d;
         d.shaders.wgsl = debug_wgsl_src;
         d.shaders.vert_glsl = debug_vert_src;
         d.shaders.frag_glsl = debug_edge_frag_src;
-        d.attrs = attrs; d.attr_count = 1;
-        d.slots = slots; d.slot_count = 1;
-        d.binds = binds; d.bind_count = 1;
-        d.topology = gpu::Topology::Lines;
-        d.depth_test = true; d.depth_write = true; d.blend = true;
+        d.binds = binds; d.bind_count = 3;
+        d.topology = gpu::Topology::Triangles;
+        d.depth_test = true; d.depth_write = false; d.blend = true;
         debug_edge_pipeline = gpu::create_render_pipeline(gpu_dev, d);
         if (!debug_edge_pipeline.handle) std::fprintf(stderr, "[renderer] debug edge pipeline failed\n");
         else std::printf("[renderer] debug edge pipeline compiled (gpu:: seam)\n");
@@ -1129,6 +1209,11 @@ void Renderer::init() {
 
 void Renderer::upload_mesh(const Mesh& mesh) {
     uint32_t vc = mesh.vertex_count();
+
+    // Any full re-upload may carry new topology (remesh, merge, multires level,
+    // valence flips) — invalidate the wireframe overlay's cached edge buffer so
+    // it rebuilds against the new indices even when the tri count is unchanged.
+    invalidate_debug_mesh();
 
     // Interleave SoA → AoS for VBO upload
     std::vector<float> pos(vc * 3), norm(vc * 3), mask_buf(vc);
@@ -1807,56 +1892,69 @@ void Renderer::read_bary_region(int x, int y, int w, int h, float* out) {
 void Renderer::draw_debug_mesh(const Camera& cam, const Mesh& mesh, int w, int h) {
     uint32_t tc = mesh.tri_count();
 
-    // Build the edge index buffer lazily (GL-owned; rebuilt after invalidate).
+    // Stale-cache guard: if the mesh's topology changed while the overlay stayed
+    // on (multires level switch, remesh, merge), the cached edge buffer no longer
+    // matches — rebuild instead of drawing garbage edges against the new verts.
+    if (debug_edge_src_tris != tc) debug_edge_count = 0;
+
+    // Build the edge-pair SSBO lazily (rebuilt after invalidate). Unique
+    // undirected edges only — each interior edge is shared by two tris, and a
+    // double-drawn ribbon would double-blend its AA fringe.
     if (debug_edge_count == 0) {
+        std::unordered_set<uint64_t> seen;
+        seen.reserve((size_t)tc * 2);
         std::vector<uint32_t> edges;
-        edges.reserve(tc * 6);
+        edges.reserve((size_t)tc * 3);          // E ≈ 1.5·T for a closed mesh
         for (uint32_t i = 0; i < tc; i++) {
-            uint32_t i0 = mesh.indices[i*3+0];
-            uint32_t i1 = mesh.indices[i*3+1];
-            uint32_t i2 = mesh.indices[i*3+2];
-            edges.push_back(i0); edges.push_back(i1);
-            edges.push_back(i1); edges.push_back(i2);
-            edges.push_back(i2); edges.push_back(i0);
+            for (int k = 0; k < 3; k++) {
+                uint32_t a = mesh.indices[i*3+k], b = mesh.indices[i*3+(k+1)%3];
+                uint64_t key = (a < b) ? ((uint64_t)a << 32 | b) : ((uint64_t)b << 32 | a);
+                if (!seen.insert(key).second) continue;
+                edges.push_back(a); edges.push_back(b);
+            }
         }
-        debug_edge_count = (uint32_t)edges.size();
+        debug_edge_count    = (uint32_t)edges.size();
+        debug_edge_src_tris = tc;
         ensure_buffer(gpu_dev, debug_edge_vbo, edges.data(),
-                      edges.size() * sizeof(uint32_t), gpu::Usage::Index);
+                      edges.size() * sizeof(uint32_t), gpu::Usage::Storage);
+        // Cache the mesh extent for the zoom-adaptive width below. Positions
+        // drift while sculpting but the scale doesn't move much between
+        // topology rebuilds, and this is only a line-width heuristic.
+        Vec3 c; mesh.compute_bounding_sphere(c, debug_mesh_radius);
     }
 
     DebugParamsGPU p;
     cam.get_view_matrix(p.view);
     cam.get_projection_matrix(p.proj, (float)w / (float)h);
+    p.viewport[0] = (float)w;
+    p.viewport[1] = (float)h;
+    // Zoom-adaptive width: 3px while the model fills the view, swelling up to
+    // 2.5× as its projected diameter shrinks below ~600px so the wireframe
+    // stays readable from afar. ppwu from the ortho proj (m00 = 2/world-width).
+    float ppwu    = 0.5f * p.proj[0] * (float)w;
+    float diam_px = std::max(2.0f * debug_mesh_radius * ppwu, 1.0f);
+    float swell   = std::min(std::max(600.0f / diam_px, 1.0f), 2.5f);
+    p.half_width_px  = 1.5f * swell;
+    // NDC bias in place of glPolygonOffset: clears the surface for tilts up to
+    // ~70° at this width; ~1% of a unit-radius model's depth, so hidden lines
+    // stay hidden except at extreme grazing angles.
+    p.depth_bias_ndc = 2.5e-4f;
     gpu::write_buffer(gpu_dev, debug_edge_ubo, 0, &p, sizeof p);
 
-    // Depth-compare LEQUAL + polygon offset pull the wires just in front of the
-    // surface (anti z-fight). The seam doesn't model depth-func / depth-bias yet,
-    // so these stay raw GL around the seam draw (they fold into RenderPipelineDesc
-    // when the WebGPU render backend lands; WebGPU ignores line width). set_pipeline
-    // enables depth test + blend and leaves depth-func untouched, so restore GL_LESS
-    // afterwards.
-#if defined(CHISEL_BACKEND_GL)
-    glDepthFunc(GL_LEQUAL);
-    glEnable(GL_POLYGON_OFFSET_LINE);
-    glPolygonOffset(-1.0f, -1.0f);
-    glLineWidth(1.0f);
-#endif
-
+    // No vertex/index buffers — the vertex stage pulls from the two SSBOs and
+    // expands each edge into a 6-vertex screen-space ribbon (AA in the frag).
     gpu::RenderTarget target;          // fbo 0 (default framebuffer), no clear
     target.width = w; target.height = h;
     gpu::RenderPass rp = gpu::begin_render_pass(gpu_dev, target);
     gpu::set_pipeline(rp, debug_edge_pipeline);
-    gpu::BindBufferEntry be[] = {{ 63, &debug_edge_ubo, sizeof(DebugParamsGPU) }};
-    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, debug_edge_pipeline, be, 1);
+    gpu::BindBufferEntry be[] = {
+        { 0,  &vbo_pos,        vbo_pos.size },
+        { 1,  &debug_edge_vbo, debug_edge_vbo.size },
+        { 63, &debug_edge_ubo, sizeof(DebugParamsGPU) },
+    };
+    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, debug_edge_pipeline, be, 3);
     gpu::set_bind_group(rp, debug_edge_pipeline, grp);
-    gpu::set_vertex_buffer(rp, 0, vbo_pos);
-    gpu::set_index_buffer(rp, debug_edge_vbo);
-    gpu::draw_indexed(rp, debug_edge_count);
+    gpu::draw(rp, (debug_edge_count / 2u) * 6u);
     gpu::end_render_pass(rp);
     gpu::release_bind_group(grp);
-
-#if defined(CHISEL_BACKEND_GL)
-    glDisable(GL_POLYGON_OFFSET_LINE);
-    glDepthFunc(GL_LESS);
-#endif
 }
