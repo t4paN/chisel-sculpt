@@ -2,6 +2,20 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-07 — SDF merge: anti-pimple field smoothing
+
+- Merge output used to carry a uniform sprinkle of voxel-scale bumps
+  ("pimples"): the distance field is exact at grid corners but trilinear
+  between them, so the zero level set scallops at lattice frequency — and the
+  relax faithfully reprojects every vertex back onto that lumpy surface, so it
+  could never fix them. Now fixed at the source: smooth_field_band() runs two
+  gentle Jacobi blur passes over the in-band field corners (off-band sentinels
+  excluded) right after the sign flood-fill. 1–3-voxel bumps flatten out; the
+  large-scale form is untouched (sub-voxel shrink). All merge flavours benefit
+  (MC, Surface Nets, mirror, subtract), and the cross-field Hessian gets
+  cleaner curvature directions from the smoother field as a bonus.
+- Tuning knobs at the call site in the Mesh phase: passes (2) and blend (0.5).
+
 ## 2026-07-07 — Wireframe overlay (Y): antialiased fat lines, auto-rebuild, new colour
 
 - The Y-key wireframe now auto-rebuilds when the topology changes underneath

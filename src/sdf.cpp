@@ -399,6 +399,47 @@ void flood_fill_sign(std::vector<float>& field, uint32_t R, float band_far) {
         if (!known[c]) field[c] = band_far;
 }
 
+// ---- Band-limited field smoothing (anti-pimple) -----------------------------
+// The distance field is exact AT grid corners but trilinear between them, so the
+// zero level set carries a lattice-frequency scallop — the "pimples" visible on
+// merge output. The relax can't remove them: it deliberately reprojects every
+// vertex back onto that (lumpy) iso-surface. Fix them at the source: a couple of
+// gentle Jacobi blur passes over the in-band field corners flattens 1–3-voxel
+// bumps while leaving the overall form (many-voxel wavelengths) essentially
+// untouched. Everything downstream wins — the extractor sees a smoother surface,
+// the relax reprojects onto it, and the cross-field Hessian gets cleaner
+// directions. Off-band ±BAND_FAR sentinels are left alone and excluded from the
+// averages (mixing one in would swamp a genuine distance).
+// Mild global shrink (mean-curvature-flow style) is sub-voxel at these settings.
+static void smooth_field_band(std::vector<float>& f, uint32_t R, float band_far,
+                              int passes, float blend)
+{
+    const int R1 = (int)R + 1;
+    const float SENT = band_far * 0.5f;      // |f| >= SENT ⇒ off-band sentinel
+    std::vector<float> src;
+    for (int p = 0; p < passes; p++) {
+        src = f;
+        for (int k = 0; k < R1; k++)
+        for (int j = 0; j < R1; j++)
+        for (int i = 0; i < R1; i++) {
+            const size_t c = (size_t)i + (size_t)R1 * ((size_t)j + (size_t)R1 * k);
+            const float fc = src[c];
+            if (std::fabs(fc) >= SENT) continue;
+            float acc = fc; int cnt = 1;
+            auto tap = [&](int ii, int jj, int kk) {
+                if (ii < 0 || ii >= R1 || jj < 0 || jj >= R1 || kk < 0 || kk >= R1) return;
+                const float v = src[(size_t)ii + (size_t)R1 * ((size_t)jj + (size_t)R1 * kk)];
+                if (std::fabs(v) >= SENT) return;
+                acc += v; cnt++;
+            };
+            tap(i+1,j,k); tap(i-1,j,k);
+            tap(i,j+1,k); tap(i,j-1,k);
+            tap(i,j,k+1); tap(i,j,k-1);
+            f[c] = fc + (acc / (float)cnt - fc) * blend;
+        }
+    }
+}
+
 // ---- Tangential relaxation toward the iso-surface --------------------------
 // Trilinearly sample the signed MC field (read back to CPU) at a world point.
 // Corner (i,j,k) index = i + S*(j + S*k), S = R+1 — matches the MC shader.
@@ -1727,6 +1768,10 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
         gpu::read_buffer(cs.gpu_dev, j.field, 0,
                          (uint64_t)j.corner_count*sizeof(float), j.field_cpu.data());
         flood_fill_sign(j.field_cpu, grid.R, BAND_FAR);
+        // Anti-pimple: flatten the lattice-frequency scallop of the trilinear
+        // zero set before anything reads the field (extractor, relax reprojection,
+        // cross-field Hessian). Two gentle passes; form stays, pimples go.
+        smooth_field_band(j.field_cpu, grid.R, BAND_FAR, /*passes=*/2, /*blend=*/0.5f);
         // Surface-Nets mirror: make the field exactly symmetric here, so the SN
         // dispatch below extracts a continuous mirror-paired surface (no seam to
         // close). MC's mirror path leaves the field as-is and seams at extraction.
