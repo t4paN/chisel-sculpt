@@ -28,6 +28,10 @@ Short, chronological log of notable changes. Newest on top.
 - Remesh self-audits watertightness (pre- and post-mirror) and prints any
   open edges with position + mask class; confirmed watertight on masked +
   mirrored + seam-crossing remeshes at 5k and 22k tris.
+- Pushed to itch as 0.1.14-remesh1 after local validation (audit clean,
+  mirror map fully paired post-remesh). Push now stages only the web files
+  (html/js/wasm/data + assets) — earlier pushes shipped the whole build dir,
+  CMake droppings included.
 
 ## 2026-07-06 — Fix: web shortcut capture is now keyboard-layout independent
 
