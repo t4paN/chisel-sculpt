@@ -2,6 +2,29 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-07 — SDF merge: cross-field flow (quad-remesher-style edge alignment)
+
+- The post-merge relax is now steered by a curvature-aligned cross field:
+  principal directions come straight from the SDF Hessian (we own the signed
+  field — no noisy mesh-based curvature estimation), smoothed as a 4-RoSy
+  field so its singularities (the poles) migrate to curvature concentrations.
+  That's the quad-remesher pole-placement effect, emerging from smoothing
+  rather than from any explicit placement step.
+- relax_to_field gained a confidence-weighted alignment force: 1-ring edges
+  are pulled onto the nearest cross axis while every pass still reprojects
+  onto the zero level set — silhouette and watertightness untouched by
+  construction. Umbilic/flat regions (confidence → 0) behave exactly as
+  before, so a sphere merge is unchanged.
+- New valence-flip pass between the two relax halves (target valence 6
+  interior / 4 on the mirror seam) with existing-edge + fold-over guards.
+  Flips move no vertices, so mirror pairing (position-based) and the H-D
+  watertight gate are unaffected. Validated standalone: torus with randomized
+  diagonals — 337 flips, valence energy 1154 → 248, still manifold and
+  orientation-consistent.
+- Both merge paths get it (mirror-MC relaxes the +x half pre-reflection;
+  faithful and SN-mirror relax the whole mesh). Console: "[sdf-flow] ...
+  N valence flips".
+
 ## 2026-07-07 — Fix: masked iso remesh — border crunch gone, watertight at the mask patch
 
 - Mask-border crunch fixed, three parts: (1) collapse can now eat border

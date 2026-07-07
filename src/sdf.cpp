@@ -446,6 +446,152 @@ float sample_field(const std::vector<float>& f, const SdfGrid& g, Vec3 p) {
     return c0*(1-fz) + c1*fz;
 }
 
+// ---- Cross-field flow (quad-remesher-style edge alignment + pole placement) -
+// The relax below evens triangle SIZES but leaves edge FLOW arbitrary: MC/SN
+// inherit grid-diagonal directions, with irregular vertices (poles) scattered
+// everywhere. Real quad remeshers get their look from a smoothed 4-RoSy cross
+// field aligned to principal curvature — edges follow the form (rings around
+// limbs, lines along ridges) and poles migrate to the field's singularities at
+// curvature concentrations. We own the SIGNED FIELD the surface came from, so
+// principal directions are exact Hessian eigenvectors of the SDF — no noisy
+// mesh-based curvature estimation. The smoothed field then (a) steers an
+// alignment force inside relax_to_field (vertices drift tangentially until
+// their 1-ring edges hug the cross axes; every pass still reprojects onto the
+// zero level set, so shape and watertightness are untouched by construction)
+// and (b) a valence-flip pass consolidates the leftover irregular vertices.
+struct CrossField {
+    std::vector<Vec3>  dir;   // unit principal-curvature direction, in the tangent plane
+    std::vector<Vec3>  nrm;   // unit field gradient (surface normal) at build time
+    std::vector<float> conf;  // anisotropy confidence [0,1) — 0 = umbilic/flat, no say
+};
+
+// Principal curvature direction per vertex from the SDF Hessian: the shape
+// operator restricted to the tangent plane is S = (P H P)/|∇f| (P = I − nnᵀ);
+// its eigenvectors are the principal directions and |κ1−κ2| (the anisotropy)
+// says how meaningful they are. All from 19 trilinear field samples per vertex.
+void build_cross_field(const Mesh& m, const std::vector<float>& field,
+                       const SdfGrid& grid, CrossField& cf) {
+    uint32_t nv = m.vertex_count();
+    cf.dir.assign(nv, Vec3(0,0,0));
+    cf.nrm.assign(nv, Vec3(0,0,0));
+    cf.conf.assign(nv, 0.0f);
+
+    const float h = grid.voxel;             // Hessian step: full voxel for stability
+    std::vector<float> aniso(nv, 0.0f);
+    double aniso_sum = 0.0; uint32_t aniso_n = 0;
+
+    for (uint32_t v = 0; v < nv; v++) {
+        Vec3 p(m.pos_x[v], m.pos_y[v], m.pos_z[v]);
+        auto S = [&](float dx, float dy, float dz) {
+            return sample_field(field, grid, Vec3(p.x+dx, p.y+dy, p.z+dz));
+        };
+        float f0  = S(0,0,0);
+        float fxp = S( h,0,0), fxm = S(-h,0,0);
+        float fyp = S(0, h,0), fym = S(0,-h,0);
+        float fzp = S(0,0, h), fzm = S(0,0,-h);
+
+        Vec3 g((fxp-fxm)/(2*h), (fyp-fym)/(2*h), (fzp-fzm)/(2*h));
+        float gl = g.length();
+        if (gl < 1e-9f) continue;           // degenerate gradient: leave conf 0
+        Vec3 n = g * (1.0f/gl);
+        cf.nrm[v] = n;
+
+        float ih2 = 1.0f/(h*h);
+        float hxx = (fxp - 2*f0 + fxm)*ih2;
+        float hyy = (fyp - 2*f0 + fym)*ih2;
+        float hzz = (fzp - 2*f0 + fzm)*ih2;
+        float hxy = (S( h, h,0) - S( h,-h,0) - S(-h, h,0) + S(-h,-h,0))*(0.25f*ih2);
+        float hxz = (S( h,0, h) - S( h,0,-h) - S(-h,0, h) + S(-h,0,-h))*(0.25f*ih2);
+        float hyz = (S(0, h, h) - S(0, h,-h) - S(0,-h, h) + S(0,-h,-h))*(0.25f*ih2);
+        auto Hmul = [&](const Vec3& u) {
+            return Vec3(hxx*u.x + hxy*u.y + hxz*u.z,
+                        hxy*u.x + hyy*u.y + hyz*u.z,
+                        hxz*u.x + hyz*u.y + hzz*u.z);
+        };
+
+        // Orthonormal tangent basis (seed off the smallest normal component).
+        Vec3 seed = (std::fabs(n.x) <= std::fabs(n.y) && std::fabs(n.x) <= std::fabs(n.z))
+                    ? Vec3(1,0,0) : (std::fabs(n.y) <= std::fabs(n.z) ? Vec3(0,1,0) : Vec3(0,0,1));
+        Vec3 e1 = n.cross(seed).normalized();
+        Vec3 e2 = n.cross(e1);
+
+        // 2x2 shape operator in the tangent basis; eigen-direction analytically.
+        float a = e1.dot(Hmul(e1)) / gl;
+        float b = e1.dot(Hmul(e2)) / gl;
+        float c = e2.dot(Hmul(e2)) / gl;
+        float th = 0.5f * std::atan2(2.0f*b, a - c);
+        cf.dir[v]  = (e1 * std::cos(th) + e2 * std::sin(th)).normalized();
+        aniso[v]   = std::sqrt((a-c)*(a-c) + 4.0f*b*b);   // |κ1 − κ2|
+        aniso_sum += aniso[v]; aniso_n++;
+    }
+
+    // Self-normalizing confidence: aniso/(aniso + mean). Flat/spherical regions
+    // (sphere: aniso≡0) get ~0 and the whole system degrades to today's relax.
+    float mean = (aniso_n > 0) ? (float)(aniso_sum / aniso_n) : 0.0f;
+    if (mean > 1e-12f)
+        for (uint32_t v = 0; v < nv; v++)
+            cf.conf[v] = aniso[v] / (aniso[v] + mean);
+}
+
+// Jacobi 4-RoSy smoothing (extrinsic, Instant-Meshes style): each vertex
+// re-averages its neighbours' directions, each first rotated to the best of the
+// 4 cross-symmetric representatives, plus a confidence-weighted anchor to its
+// own curvature direction. Singularities (poles) migrate out of confident
+// anisotropic regions and settle where curvature concentrates — that IS the
+// quad-remesher pole placement, emerging from smoothing rather than any
+// explicit placement step.
+void smooth_cross_field(const Mesh& m, CrossField& cf, int iters) {
+    uint32_t nv = m.vertex_count();
+    if (nv == 0) return;
+
+    // Unique 1-ring neighbours (same construction as relax_to_field).
+    std::vector<std::vector<uint32_t>> nbr(nv);
+    {
+        std::vector<std::unordered_set<uint32_t>> sets(nv);
+        for (size_t t = 0; t + 2 < m.indices.size(); t += 3) {
+            uint32_t a = m.indices[t], b = m.indices[t+1], c = m.indices[t+2];
+            sets[a].insert(b); sets[a].insert(c);
+            sets[b].insert(a); sets[b].insert(c);
+            sets[c].insert(a); sets[c].insert(b);
+        }
+        for (uint32_t v = 0; v < nv; v++) nbr[v].assign(sets[v].begin(), sets[v].end());
+    }
+
+    const float LAMBDA_DATA = 1.0f;          // curvature-anchor weight
+    std::vector<Vec3> dir0 = cf.dir;         // the anchor: unsmoothed curvature dirs
+    std::vector<Vec3> next(nv);
+
+    for (int it = 0; it < iters; it++) {
+        for (uint32_t v = 0; v < nv; v++) {
+            Vec3 n = cf.nrm[v];
+            Vec3 d = cf.dir[v];
+            if (n.length() < 0.5f || d.length() < 0.5f) { next[v] = d; continue; }
+
+            // Pick the 4-RoSy representative of `x` closest to d (candidates
+            // x, n×x and their negations — sign folds into the dot test).
+            auto rosy_match = [&](Vec3 x) -> Vec3 {
+                Vec3 y = n.cross(x);
+                float dx = d.dot(x), dy = d.dot(y);
+                Vec3 best = (std::fabs(dx) >= std::fabs(dy)) ? x : y;
+                float s   = (std::fabs(dx) >= std::fabs(dy)) ? dx : dy;
+                return (s < 0.0f) ? best * -1.0f : best;
+            };
+
+            Vec3 acc = rosy_match(dir0[v]) * (LAMBDA_DATA * cf.conf[v]);
+            for (uint32_t u : nbr[v]) {
+                Vec3 du = cf.dir[u];
+                du = du - n * du.dot(n);              // transport into v's tangent plane
+                if (du.dot(du) < 1e-12f) continue;
+                acc += rosy_match(du.normalized()) * (0.25f + 0.75f * cf.conf[u]);
+            }
+            acc = acc - n * acc.dot(n);
+            float al = acc.length();
+            next[v] = (al > 1e-9f) ? acc * (1.0f/al) : d;
+        }
+        cf.dir.swap(next);
+    }
+}
+
 // Even out the marching-cubes triangulation WITHOUT losing shape. Each pass
 // moves a vertex toward its 1-ring centroid but only in the tangent plane (the
 // normal component, taken from the SDF gradient, is stripped), then snaps the
@@ -456,9 +602,14 @@ float sample_field(const std::vector<float>& f, const SdfGrid& g, Vec3 p) {
 // field we already built; no perform_remesh (which would mirror-symmetrise).
 // `pinned` (optional): verts flagged 1 are held fixed across every pass. Used by
 // the mirror path to lock the x=0 seam loop so the two halves stay weldable.
+// `flow` (optional): smoothed cross field; adds a confidence-weighted tangential
+// force snapping each 1-ring edge onto its nearest cross axis, so the edge flow
+// follows curvature (the quad-remesher look) while the reprojection keeps every
+// vertex exactly on the surface.
 void relax_to_field(Mesh& m, const std::vector<float>& field,
                     const SdfGrid& grid, int iters, float lambda,
-                    const std::vector<uint8_t>* pinned = nullptr) {
+                    const std::vector<uint8_t>* pinned = nullptr,
+                    const CrossField* flow = nullptr) {
     uint32_t nv = m.vertex_count();
     if (nv == 0 || m.indices.empty() || iters <= 0) return;
 
@@ -520,6 +671,29 @@ void relax_to_field(Mesh& m, const std::vector<float>& field,
                 Vec3 n = grad * (1.0f / gl);
                 Vec3 dt = d - n * d.dot(n);     // tangential component only
                 pn = p + dt * lambda;
+                // Cross-field alignment: pull each 1-ring edge's tangential part
+                // onto its nearest cross axis (keep the along-axis component,
+                // cancel the across). Confidence-weighted, so umbilic regions
+                // (sphere) feel nothing and behave exactly as before.
+                if (flow && flow->conf[v] > 0.02f) {
+                    Vec3 a1 = flow->dir[v];
+                    a1 = a1 - n * a1.dot(n);
+                    float a1l = a1.length();
+                    if (a1l > 1e-6f) {
+                        a1 = a1 * (1.0f/a1l);
+                        Vec3 a2 = n.cross(a1);
+                        Vec3 al(0,0,0);
+                        for (uint32_t u : N) {
+                            Vec3 e(m.pos_x[u]-p.x, m.pos_y[u]-p.y, m.pos_z[u]-p.z);
+                            Vec3 et = e - n * e.dot(n);
+                            float f1 = et.dot(a1), f2 = et.dot(a2);
+                            Vec3 tgt = (std::fabs(f1) >= std::fabs(f2)) ? a1 * f1 : a2 * f2;
+                            al += (tgt - et);
+                        }
+                        constexpr float MU = 0.5f;   // alignment strength (× conf)
+                        pn += al * (MU * flow->conf[v] / (float)N.size());
+                    }
+                }
                 pn = pn - n * sample_field(field, grid, pn);  // reproject onto zero level set
             } else {
                 pn = p + d * lambda;            // no usable gradient — fall back to plain move
@@ -528,6 +702,119 @@ void relax_to_field(Mesh& m, const std::vector<float>& field,
         }
         m.pos_x = nx; m.pos_y = ny; m.pos_z = nz;   // Jacobi update (all verts move together)
     }
+}
+
+// ---- Valence-targeting edge flips ------------------------------------------
+// Rotate interior edges toward the regular valence (6 interior / 4 on the seam
+// boundary) so irregular vertices consolidate into few, well-placed poles
+// instead of MC's scatter. Flips move NO vertices — positions (and thus the
+// mirror partner map) are untouched; watertightness is preserved by the same
+// guards the iso remesher uses (existing-edge check ⇒ no non-manifold fuse,
+// normal agreement ⇒ no fold-over). Greedy sweeps over a sorted edge list with
+// a staleness re-check, table rebuilt per sweep (one-shot op, allocation fine).
+uint32_t flip_valence(Mesh& m, const std::vector<uint8_t>* seam, int sweeps = 3) {
+    uint32_t nv = m.vertex_count();
+    uint32_t flips_total = 0;
+    auto ekey = [](uint32_t a, uint32_t b) -> uint64_t {
+        if (a > b) std::swap(a, b);
+        return ((uint64_t)a << 32) | (uint64_t)b;
+    };
+    auto target = [&](uint32_t v) -> int { return (seam && (*seam)[v]) ? 4 : 6; };
+
+    for (int sweep = 0; sweep < sweeps; sweep++) {
+        // Edge -> its (up to 2) incident tris, + per-vertex valence (edge count).
+        std::unordered_map<uint64_t, std::pair<int32_t,int32_t>> etab;
+        etab.reserve(m.indices.size());
+        for (uint32_t t = 0; t * 3 + 2 < m.indices.size(); t++) {
+            uint32_t i0=m.indices[t*3], i1=m.indices[t*3+1], i2=m.indices[t*3+2];
+            uint64_t ks[3] = { ekey(i0,i1), ekey(i1,i2), ekey(i2,i0) };
+            for (uint64_t k : ks) {
+                auto it = etab.find(k);
+                if (it == etab.end()) etab.emplace(k, std::make_pair((int32_t)t, -1));
+                else if (it->second.second < 0) it->second.second = (int32_t)t;
+            }
+        }
+        std::vector<int> val(nv, 0);
+        for (auto& kv : etab) {
+            val[(uint32_t)(kv.first >> 32)]++;
+            val[(uint32_t)(kv.first & 0xffffffffu)]++;
+        }
+        // Deterministic order (map iteration isn't).
+        std::vector<uint64_t> keys; keys.reserve(etab.size());
+        for (auto& kv : etab) if (kv.second.second >= 0) keys.push_back(kv.first);
+        std::sort(keys.begin(), keys.end());
+
+        uint32_t flips = 0;
+        for (uint64_t k : keys) {
+            auto& tt = etab[k];
+            uint32_t a = (uint32_t)(k >> 32), b = (uint32_t)(k & 0xffffffffu);
+            uint32_t t0 = (uint32_t)tt.first, t1 = (uint32_t)tt.second;
+            // Staleness: an earlier flip this sweep may have rewritten t0/t1.
+            auto has_edge = [&](uint32_t t) {
+                int hit = 0;
+                for (int i = 0; i < 3; i++) {
+                    uint32_t w = m.indices[t*3+i];
+                    if (w == a || w == b) hit++;
+                }
+                return hit == 2;
+            };
+            if (!has_edge(t0) || !has_edge(t1)) continue;
+
+            auto other = [&](uint32_t t) -> uint32_t {
+                for (int i = 0; i < 3; i++) {
+                    uint32_t w = m.indices[t*3+i];
+                    if (w != a && w != b) return w;
+                }
+                return 0xFFFFFFFFu;
+            };
+            uint32_t c = other(t0);
+            uint32_t d = other(t1);
+            if (c == d || c == 0xFFFFFFFFu || d == 0xFFFFFFFFu) continue;
+            if (etab.count(ekey(c, d))) continue;          // edge exists ⇒ flip = non-manifold
+
+            // Valence energy Σ(val−target)² over the four corners, before vs after.
+            auto E = [&](int va,int vb,int vc,int vd) {
+                auto s=[&](int x,uint32_t v){int e=x-target(v);return e*e;};
+                return s(va,a)+s(vb,b)+s(vc,c)+s(vd,d);
+            };
+            if (val[a] <= 3 || val[b] <= 3) continue;      // never drop below valence 3
+            if (E(val[a]-1, val[b]-1, val[c]+1, val[d]+1) >= E(val[a],val[b],val[c],val[d]))
+                continue;
+
+            // Geometric guard: both new tris must agree with the old pair's
+            // orientation (no fold-over) and be non-degenerate.
+            Vec3 pa(m.pos_x[a],m.pos_y[a],m.pos_z[a]), pb(m.pos_x[b],m.pos_y[b],m.pos_z[b]);
+            Vec3 pc(m.pos_x[c],m.pos_y[c],m.pos_z[c]), pd(m.pos_x[d],m.pos_y[d],m.pos_z[d]);
+            // t0 wound (a,b,c)-equivalent, t1 (b,a,d)-equivalent by construction.
+            Vec3 n_old = (pb-pa).cross(pc-pa) + (pa-pb).cross(pd-pb);
+            Vec3 n0 = (pa-pc).cross(pd-pc);                // new tri (c,a,d)
+            Vec3 n1 = (pb-pd).cross(pc-pd);                // new tri (d,b,c)
+            float area_eps = 1e-12f * n_old.dot(n_old) + 1e-30f;
+            if (n0.dot(n_old) <= 0.0f || n1.dot(n_old) <= 0.0f) continue;
+            if (n0.dot(n0) < area_eps || n1.dot(n1) < area_eps) continue;
+
+            // Apply: rewrite the two tris across the c–d diagonal, orientation-
+            // consistent with the originals (derivation: t0=(a,b,c), t1=(b,a,d)
+            // ⇒ new (c,a,d) and (d,b,c) share d→c / c→d opposed half-edges).
+            // Preserve t0's actual rotation start? Not needed — winding parity is
+            // all that matters and (c,a,d)/(d,b,c) keep it for any rotation of t0/t1.
+            bool t0_fwd = false;                            // does t0 wind a→b (vs b→a)?
+            for (int i = 0; i < 3; i++)
+                if (m.indices[t0*3+i] == a && m.indices[t0*3+(i+1)%3] == b) t0_fwd = true;
+            uint32_t A = t0_fwd ? a : b, B = t0_fwd ? b : a;
+            // With t0 winding A→B (opposite vert c) and t1 winding B→A (opposite d):
+            m.indices[t0*3+0]=c; m.indices[t0*3+1]=A; m.indices[t0*3+2]=d;
+            m.indices[t1*3+0]=d; m.indices[t1*3+1]=B; m.indices[t1*3+2]=c;
+
+            val[a]--; val[b]--; val[c]++; val[d]++;
+            etab.erase(k);
+            etab.emplace(ekey(c,d), std::make_pair((int32_t)t0,(int32_t)t1));
+            flips++;
+        }
+        flips_total += flips;
+        if (flips == 0) break;
+    }
+    return flips_total;
 }
 
 // ---- Mirror-symmetric extraction -------------------------------------------
@@ -1545,13 +1832,25 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
         // ---- Relax the MC triangulation onto the (already read-back) signed field ----
         // Spreads the blocky/uneven MC tris to uniform spacing while holding the
         // silhouette. Reuses j.field_cpu from the Mesh phase (no second readback).
+        // Cross-field flow: curvature-aligned 4-RoSy field from the SDF Hessian
+        // steers the relax (edge flow follows the form) and a valence-flip pass
+        // between the two relax halves consolidates poles at the field's
+        // singularities. Flips move no vertices, so mirror pairing (position-
+        // based) and the H-D watertight gate are unaffected; on a sphere the
+        // confidence weight goes to ~0 and this degrades to the old plain relax.
         if (j.mirror && !j.use_nets) {
             // MC keep-+x-and-reflect: relax that half alone (seam pinned), then
             // mirror it -> both sides identical, exact partner map, no seam fight.
             std::vector<uint8_t> seam;
             clip_to_plus_x(welded, grid.voxel, seam);
             weld_near_seam(welded, grid.voxel, seam);   // B: collapse the seam sliver column
-            relax_to_field(welded, j.field_cpu, grid, /*iters=*/8, /*lambda=*/0.5f, &seam);  // A: 1D seam relax
+            CrossField flow;
+            build_cross_field(welded, j.field_cpu, grid, flow);
+            smooth_cross_field(welded, flow, /*iters=*/24);
+            relax_to_field(welded, j.field_cpu, grid, /*iters=*/4, /*lambda=*/0.5f, &seam, &flow);  // A: 1D seam relax
+            uint32_t flips = flip_valence(welded, &seam);
+            relax_to_field(welded, j.field_cpu, grid, /*iters=*/4, /*lambda=*/0.5f, &seam, &flow);
+            std::printf("[sdf-flow] cross-field relax: %u valence flips (+x half)\n", flips);
             validate_seam_loop(welded, grid.voxel, seam);  // H-B: close seam escapees before reflecting
             reflect_across_x(welded, seam);
             weld_seam_band(welded, grid.voxel);   // H-A: weld any unflagged escapees onto x=0
@@ -1560,7 +1859,14 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
             // symmetric (Mesh phase) so the full extracted surface is mirror-paired
             // and continuous — a plain relax keeps that symmetry (Jacobi + symmetric
             // field => mirror-paired verts move identically). No seam surgery.
-            relax_to_field(welded, j.field_cpu, grid, /*iters=*/8, /*lambda=*/0.5f);
+            // (Flips only rewrite indices — vertex positions stay mirror-paired.)
+            CrossField flow;
+            build_cross_field(welded, j.field_cpu, grid, flow);
+            smooth_cross_field(welded, flow, /*iters=*/24);
+            relax_to_field(welded, j.field_cpu, grid, /*iters=*/4, /*lambda=*/0.5f, nullptr, &flow);
+            uint32_t flips = flip_valence(welded, nullptr);
+            relax_to_field(welded, j.field_cpu, grid, /*iters=*/4, /*lambda=*/0.5f, nullptr, &flow);
+            std::printf("[sdf-flow] cross-field relax: %u valence flips\n", flips);
         }
 
         welded.build_adjacency();
