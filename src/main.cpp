@@ -148,6 +148,13 @@ extern "C" EMSCRIPTEN_KEEPALIVE void chisel_web_import_done(const char* path) {
     g_web_import_path = path ? path : "";
 }
 
+// Brush-alpha custom image: same MEMFS bridge as import, separate path so the two
+// pickers can't clobber each other. The frame loop consumes it into the alpha pool.
+static std::string g_web_alpha_path;
+extern "C" EMSCRIPTEN_KEEPALIVE void chisel_web_alpha_done(const char* path) {
+    g_web_alpha_path = path ? path : "";
+}
+
 // Read fs_path out of MEMFS and hand it to the browser, deleting the MEMFS copy.
 // Preferred route is showSaveFilePicker (the browser's real save dialog: folder
 // browsing + editable name, prefilled with download_name) — but Chrome blocks it
@@ -197,6 +204,27 @@ static void web_open_file_picker() {
                 var path = '/' + f.name;
                 FS.writeFile(path, new Uint8Array(buf));
                 Module.ccall('chisel_web_import_done', null, ['string'], [path]);
+            });
+        };
+        inp.click();
+    });
+}
+
+// Brush-alpha image picker — twin of web_open_file_picker, image types, lands in
+// MEMFS under /alpha_ (namespaced so it never collides with an import) and reports
+// via chisel_web_alpha_done.
+static void web_open_alpha_picker() {
+    EM_ASM({
+        var inp = document.createElement('input');
+        inp.type = 'file';
+        inp.accept = 'image/png,image/jpeg,.png,.jpg,.jpeg,.tga,.bmp';
+        inp.onchange = function() {
+            var f = inp.files && inp.files[0];
+            if (!f) return;
+            f.arrayBuffer().then(function(buf) {
+                var path = '/alpha_' + f.name;
+                FS.writeFile(path, new Uint8Array(buf));
+                Module.ccall('chisel_web_alpha_done', null, ['string'], [path]);
             });
         };
         inp.click();
@@ -2344,6 +2372,20 @@ int main(int argc, char* argv[]) {
             std::string path = g_web_import_path;
             g_web_import_path.clear();
             do_import_path(path);
+            ::remove(path.c_str());
+        }
+
+        // Brush-alpha custom image: browser picker IS the dialog. Bytes land in MEMFS
+        // (chisel_web_alpha_done); decode into the pool, select it, free the RAM copy.
+        if (input.load_alpha_dialog_active) {
+            input.load_alpha_dialog_active = false;
+            web_open_alpha_picker();
+        }
+        if (!g_web_alpha_path.empty()) {
+            std::string path = g_web_alpha_path;
+            g_web_alpha_path.clear();
+            int idx = alpha_lib.load_custom(path.c_str());
+            if (idx > 0) input.active_alpha = idx;
             ::remove(path.c_str());
         }
 #endif // __EMSCRIPTEN__

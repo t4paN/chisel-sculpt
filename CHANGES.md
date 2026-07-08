@@ -20,6 +20,11 @@ Short, chronological log of notable changes. Newest on top.
   anchor, screen-aligned via the camera basis; mirror-side dabs reflect the
   frame across X. New files: brush_alpha.{h,cpp} (pool + stb load),
   compute_alpha.cpp (buffers + per-dab frame upload).
+- Custom-image loading works on both targets: native file dialog on desktop,
+  and on web the browser's `<input type=file>` picker (twin of the import
+  bridge — bytes land in MEMFS, decode via stb, join the pool). Verified in a
+  local browser build. Presets are procedural, so they ship as zero bytes and
+  work everywhere.
 
 ## 2026-07-08 — Import: "Append to scene" option (add as new object)
 
