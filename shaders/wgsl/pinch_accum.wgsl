@@ -1,7 +1,8 @@
 // pinch_accum.wgsl
 // Port of src/compute_crease_pinch.cpp (pinch_accum_src). Pinch brush accumulate
 // pass: pinch_amount >= 0 pulls verts tangentially toward the anchor (pinch); < 0
-// flattens by pushing along -normal proportional to height. Deposits into the
+// is an asymmetric flatten — shaves peaks fully, fills valleys partially (biased
+// subtractive). Deposits into the
 // shared accum buffer; the apply side reuses draw_apply / symmetrize / mirror_apply.
 // Lockstep with pinch_accum.comp. See CONVENTIONS.md.
 //
@@ -79,8 +80,18 @@ fn deposit(v : u32, anchor : vec3<f32>, view : vec3<f32>, anchor_n : vec3<f32>,
         let tangent = to_anchor - dot(to_anchor, anchor_n) * anchor_n;
         d = tangent * (w * P.pinch_amount / P.world_radius);
     } else {
-        let height = dot(vp - anchor, anchor_n);
-        d = -anchor_n * (height * w * 1.5 * (-P.pinch_amount) / P.world_radius);
+        // Reverse pinch: an asymmetric flatten biased subtractive — a middle
+        // ground between the old symmetric flatten (raised valleys as much as it
+        // cut peaks) and a pure scrape (never filled valleys at all). The cut
+        // plane sits a touch below the anchor; peaks above it are shaved at full
+        // strength, valleys below get only a fraction of the fill.
+        let depth = P.world_radius * 0.08;
+        let height = dot(vp - anchor, anchor_n) + depth;
+        var factor = 1.0;
+        if (height < 0.0) {
+            factor = 0.4;
+        }
+        d = -anchor_n * (height * factor * w * 1.5 * (-P.pinch_amount) / P.world_radius);
     }
 
     let base = v * 4u;

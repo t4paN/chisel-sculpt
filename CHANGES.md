@@ -2,6 +2,18 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-08 — Reverse pinch biased subtractive (asymmetric flatten)
+
+- The reverse-pinch (Ctrl/subtract) branch used to be a symmetric flatten: it
+  pulled every vert onto the anchor's tangent plane, raising the valleys as much
+  as it lowered the peaks. On a convex form the neighborhood sits below that
+  plane, so it built a plateau *on top* of the surface — additive. Reworked the
+  `pinch_amount < 0` branch of pinch_accum (both wgsl + glsl twins) into an
+  asymmetric flatten: cut plane sunk a touch below the anchor (0.08·radius),
+  peaks above it shaved at full strength, valleys below filled at only 0.4×.
+  Nets subtractive (scrape-like) while keeping the flatten feel. Forward pinch
+  untouched. Tuning knobs: `depth` (0.08·radius) and the 0.4 valley factor.
+
 ## 2026-07-07 — SDF merge: anti-pimple field smoothing
 
 - Merge output used to carry a uniform sprinkle of voxel-scale bumps

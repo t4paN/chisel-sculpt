@@ -1,7 +1,7 @@
 // pinch_accum.comp — GLSL 430 sibling of shaders/wgsl/pinch_accum.wgsl.
 // Pinch brush accumulate pass: pinch_amount >= 0 pulls verts tangentially toward
-// the anchor (pinch); < 0 flattens by pushing along -normal proportional to height
-// (smooth/flatten). Deposits into the shared accum buffer; the apply side reuses
+// the anchor (pinch); < 0 is an asymmetric flatten — shaves peaks fully, fills
+// valleys partially (biased subtractive). Deposits into the shared accum buffer; the apply side reuses
 // draw_apply / symmetrize / mirror_apply. 96-byte std140 Params UBO @63.
 #version 430
 layout(local_size_x = 256) in;
@@ -61,8 +61,15 @@ void deposit(uint v, vec3 anchor, vec3 view, vec3 anchor_n, vec3 vp, vec3 vn) {
         vec3 tangent = to_anchor - dot(to_anchor, anchor_n) * anchor_n;
         d = tangent * (w * P.pinch_amount / P.world_radius);
     } else {
-        float height = dot(vp - anchor, anchor_n);
-        d = -anchor_n * (height * w * 1.5 * (-P.pinch_amount) / P.world_radius);
+        // Reverse pinch: an asymmetric flatten biased subtractive — a middle
+        // ground between the old symmetric flatten (raised valleys as much as it
+        // cut peaks) and a pure scrape (never filled valleys at all). The cut
+        // plane sits a touch below the anchor; peaks above it are shaved at full
+        // strength, valleys below get only a fraction of the fill.
+        float depth = P.world_radius * 0.08;
+        float height = dot(vp - anchor, anchor_n) + depth;
+        float factor = height < 0.0 ? 0.4 : 1.0;
+        d = -anchor_n * (height * factor * w * 1.5 * (-P.pinch_amount) / P.world_radius);
     }
 
     uint base = v * 4u;
