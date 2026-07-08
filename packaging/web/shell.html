@@ -71,8 +71,22 @@
     // Capture-phase and registered before the runtime script, so this runs
     // ahead of GLFW's window listener; preventDefault still lets GLFW see the
     // key. F12 is deliberately left alone: devtools outranks its debug toggle.
+    // Alt is swallowed while the app is focused and windowed: a bare Alt tap
+    // otherwise pops Firefox's menu bar, which steals keyboard focus (took a
+    // second Alt to get it back). Guarded so it never fights the browser when
+    // the page is backgrounded or fullscreen (no menu bar there anyway). As
+    // with the F-keys, preventDefault still lets GLFW see the key, so Alt-
+    // modified brush gestures keep working. Firefox activates the menu on Alt
+    // keyUP, so both edges are handled.
+    function appOwnsAlt() {
+      return document.hasFocus() && !document.fullscreenElement;
+    }
     window.addEventListener('keydown', function(e) {
       if (['F1','F2','F3','F9','F10'].indexOf(e.key) !== -1) e.preventDefault();
+      if (e.key === 'Alt' && appOwnsAlt()) e.preventDefault();
+    }, true);
+    window.addEventListener('keyup', function(e) {
+      if (e.key === 'Alt' && appOwnsAlt()) e.preventDefault();
     }, true);
     var canvasElement = document.getElementById('canvas');
     canvasElement.addEventListener('webglcontextlost', function(e) {

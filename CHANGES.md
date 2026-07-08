@@ -2,6 +2,18 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-08 — Web: swallow Alt so it can't pop Firefox's menu bar
+
+- Windowed (non-fullscreen) Firefox activated its menu bar on a bare Alt tap,
+  stealing keyboard focus from the canvas — it took a second Alt to get it
+  back. The shell now preventDefaults Alt on both keydown and keyup while the
+  page is focused and not fullscreen (Firefox arms the menu on Alt keyUP).
+  Mirrors the existing F-key suppressor: preventDefault only, no
+  stopPropagation, so GLFW still sees Alt and Alt-modified brush gestures keep
+  working. Guarded by document.hasFocus()/fullscreenElement so it never fights
+  the browser when the app is backgrounded or fullscreen.
+- Unverified locally (no emcc/node in this env); confirm on the itch build.
+
 ## 2026-07-08 — HUD: toolbar box to bottom-right, version folded into the header
 
 - The black toolbar/info panel moved from the bottom-left corner to the
