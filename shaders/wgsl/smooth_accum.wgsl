@@ -28,6 +28,57 @@ struct Dirty {
 @group(0) @binding(6)  var<storage, read_write> dirty     : Dirty;
 @group(0) @binding(63) var<uniform>             P         : Params;
 
+// --- shared brush-alpha stamp (keep byte-identical across every dab kernel) ---
+struct AlphaParams {
+    tangent      : vec3<f32>,
+    inv_diameter : f32,
+    bitangent    : vec3<f32>,
+    enabled      : u32,
+    tex_w        : u32,
+    tex_h        : u32,
+    _apad0       : u32,
+    _apad1       : u32,
+};
+@group(0) @binding(40) var<storage, read> alpha_tex : array<f32>;
+@group(0) @binding(62) var<uniform>       AP        : AlphaParams;
+fn alpha_bilinear(u : f32, v : f32) -> f32 {
+    let W = i32(AP.tex_w);
+    let H = i32(AP.tex_h);
+    let fx = u * f32(W) - 0.5;
+    let fy = v * f32(H) - 0.5;
+    let x0i = i32(floor(fx));
+    let y0i = i32(floor(fy));
+    let tx = fx - f32(x0i);
+    let ty = fy - f32(y0i);
+    let x0 = clamp(x0i, 0, W - 1);
+    let y0 = clamp(y0i, 0, H - 1);
+    let x1 = clamp(x0i + 1, 0, W - 1);
+    let y1 = clamp(y0i + 1, 0, H - 1);
+    let c00 = alpha_tex[y0 * W + x0];
+    let c10 = alpha_tex[y0 * W + x1];
+    let c01 = alpha_tex[y1 * W + x0];
+    let c11 = alpha_tex[y1 * W + x1];
+    return mix(mix(c00, c10, tx), mix(c01, c11, tx), ty);
+}
+fn sample_alpha(rel : vec3<f32>, mirrored : u32) -> f32 {
+    if (AP.enabled == 0u) {
+        return 1.0;
+    }
+    var tang = AP.tangent;
+    var bitan = AP.bitangent;
+    if (mirrored != 0u) {
+        tang.x = -tang.x;
+        bitan.x = -bitan.x;
+    }
+    let u = dot(rel, tang) * AP.inv_diameter + 0.5;
+    let v = dot(rel, bitan) * AP.inv_diameter + 0.5;
+    if (u < 0.0 || u > 1.0 || v < 0.0 || v > 1.0) {
+        return 0.0;
+    }
+    return alpha_bilinear(u, v);
+}
+// --- end shared brush-alpha stamp ---
+
 fn brush_falloff(dist : f32, radius : f32) -> f32 {
     let t = dist / radius;
     let inner = 0.15 + P.hardness * 0.55;
@@ -57,7 +108,8 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
         return;
     }
 
-    let w = brush_falloff(d, P.world_radius);
+    var w = brush_falloff(d, P.world_radius);
+    w = w * sample_alpha(p - P.anchor, 0u);
     if (w <= 0.0) {
         return;
     }

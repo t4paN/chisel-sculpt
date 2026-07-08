@@ -40,12 +40,14 @@ gpu::BindGroup make_accum_bind_group(ComputeState& cs, gpu::ComputePipeline& pip
                                      const gpu::Buffer& posView, const gpu::Buffer& normView,
                                      const gpu::Buffer& accumView, const gpu::Buffer& ubo, uint64_t ubo_size) {
     const gpu::BindBufferEntry bg[] = {
-        { BIND_POSITIONS, &posView,   posView.size },
-        { BIND_NORMALS,   &normView,  normView.size },
-        { BIND_ACCUM,     &accumView, accumView.size },
-        { BIND_PARAMS,    &ubo,       ubo_size },
+        { BIND_POSITIONS,    &posView,   posView.size },
+        { BIND_NORMALS,      &normView,  normView.size },
+        { BIND_ACCUM,        &accumView, accumView.size },
+        { BIND_ALPHA_TEX,    &cs.alpha_tex_ssbo,   (uint64_t)cs.alpha_tex_w * cs.alpha_tex_h * sizeof(float) },
+        { BIND_ALPHA_PARAMS, &cs.alpha_params_ubo, 48 },
+        { BIND_PARAMS,       &ubo,       ubo_size },
     };
-    return gpu::create_bind_group(cs.gpu_dev, pipe, bg, 4);
+    return gpu::create_bind_group(cs.gpu_dev, pipe, bg, 6);
 }
 }
 
@@ -56,13 +58,15 @@ gpu::BindGroup make_accum_bind_group(ComputeState& cs, gpu::ComputePipeline& pip
 bool ComputeState::init_crease() {
     if (!supported) return false;
     const gpu::BindEntry layout[] = {
-        { BIND_POSITIONS, gpu::Bind::StorageRead,      0 },
-        { BIND_NORMALS,   gpu::Bind::StorageRead,      0 },
-        { BIND_ACCUM,     gpu::Bind::StorageReadWrite, 0 },
-        { BIND_PARAMS,    gpu::Bind::Uniform,          sizeof(CreaseParamsGPU) },
+        { BIND_POSITIONS,    gpu::Bind::StorageRead,      0 },
+        { BIND_NORMALS,      gpu::Bind::StorageRead,      0 },
+        { BIND_ACCUM,        gpu::Bind::StorageReadWrite, 0 },
+        { BIND_ALPHA_TEX,    gpu::Bind::StorageRead,      0 },
+        { BIND_ALPHA_PARAMS, gpu::Bind::Uniform,          48 },
+        { BIND_PARAMS,       gpu::Bind::Uniform,          sizeof(CreaseParamsGPU) },
     };
     crease_accum_pipeline = gpu::create_compute_pipeline(gpu_dev,
-                                gpu::embedded_shader("crease_accum"), layout, 4);
+                                gpu::embedded_shader("crease_accum"), layout, 6);
     if (!crease_accum_pipeline.handle) {
         std::printf("[compute] crease_accum pipeline failed to compile\n");
         return false;
@@ -111,13 +115,15 @@ void ComputeState::dispatch_crease_accum(const CreaseAccumParams& p, const gpu::
 bool ComputeState::init_pinch() {
     if (!supported) return false;
     const gpu::BindEntry layout[] = {
-        { BIND_POSITIONS, gpu::Bind::StorageRead,      0 },
-        { BIND_NORMALS,   gpu::Bind::StorageRead,      0 },
-        { BIND_ACCUM,     gpu::Bind::StorageReadWrite, 0 },
-        { BIND_PARAMS,    gpu::Bind::Uniform,          sizeof(PinchParamsGPU) },
+        { BIND_POSITIONS,    gpu::Bind::StorageRead,      0 },
+        { BIND_NORMALS,      gpu::Bind::StorageRead,      0 },
+        { BIND_ACCUM,        gpu::Bind::StorageReadWrite, 0 },
+        { BIND_ALPHA_TEX,    gpu::Bind::StorageRead,      0 },
+        { BIND_ALPHA_PARAMS, gpu::Bind::Uniform,          48 },
+        { BIND_PARAMS,       gpu::Bind::Uniform,          sizeof(PinchParamsGPU) },
     };
     pinch_accum_pipeline = gpu::create_compute_pipeline(gpu_dev,
-                               gpu::embedded_shader("pinch_accum"), layout, 4);
+                               gpu::embedded_shader("pinch_accum"), layout, 6);
     if (!pinch_accum_pipeline.handle) {
         std::printf("[compute] pinch_accum pipeline failed to compile\n");
         return false;

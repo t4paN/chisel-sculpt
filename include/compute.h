@@ -48,6 +48,8 @@ enum ComputeBinding : GLuint {
     BIND_SDF_SPLAT_OFFSET  = 37, // uint exclusive scan of footprint (SDF splat Pass C: owner search)
     BIND_SDF_FWN_NODES     = 38, // FwnNode[] BVH+dipole tree for the fast winding-number sign pass
     BIND_SDF_FWN_TRIORDER  = 39, // uint   leaf-contiguous triangle order (sign pass exact-leaf fetch)
+    BIND_ALPHA_TEX         = 40, // float  brush-alpha bitmap (w*h, row-major, 0..1) — shared dab stamp
+    BIND_ALPHA_PARAMS      = 62, // 48-byte AlphaParams UBO (per-dab stamp frame) — shared dab stamp
     // Reserved high slot for the per-dispatch std140 Params UBO that replaces loose
     // GL uniforms on the gpu:: seam (see webgpu-port-plan.md / CONVENTIONS.md). Every
     // ported kernel binds its *ParamsGPU block here.
@@ -176,6 +178,18 @@ struct ComputeState {
     // Accumulation buffer: 4 uints per vertex (dx, dy, dz, weight as float-bits)
     gpu::Buffer accum_ssbo;
     uint32_t accum_vertex_count;
+
+    // Brush alpha (stamp) — SHARED across every falloff-computing dab kernel. The
+    // selected grayscale bitmap lives in alpha_tex_ssbo (row-major float 0..1); the
+    // per-dab stamp frame (screen-aligned tangent/bitangent + enable + dims) rides
+    // in the 48-byte alpha_params_ubo. A dab kernel samples it and multiplies its
+    // computed falloff weight. Both buffers are ALWAYS allocated (a 1x1 dummy with
+    // enabled=0 when no alpha is active) so bind groups stay complete. See BIND_ALPHA_*.
+    gpu::Buffer alpha_tex_ssbo;        // float[w*h], 0..1, row-major
+    gpu::Buffer alpha_params_ubo;      // 48-byte AlphaParams block (per-dab)
+    uint32_t    alpha_tex_w = 0;
+    uint32_t    alpha_tex_h = 0;
+    bool        alpha_enabled = false; // mirror of the last-set frame's enable
 
     // Symmetrized accumulation buffer (same shape as accum_ssbo). Populated by
     // the draw symmetrize pass when mirror_x is on; each paired (v, mv) gets
@@ -421,6 +435,19 @@ struct ComputeState {
 
     // Probe GL extensions after GLAD loads. Returns true if compute is usable.
     bool init();
+
+    // Brush alpha (stamp) plumbing — see the alpha_* members above.
+    // init_alpha: allocate the always-bound 1x1 dummy SSBO + the per-dab params UBO.
+    bool init_alpha();
+    // upload_alpha: replace the bitmap. w==0 || h==0 || data==nullptr => alpha off
+    // (reverts to a 1x1 dummy; set_alpha_frame will still report enabled=false).
+    void upload_alpha(const float* data, uint32_t w, uint32_t h);
+    // set_alpha_frame: write the per-dab stamp frame UBO. `enabled` gates sampling in
+    // the kernel (round brush when false). tangent/bitangent span the stamp plane;
+    // inv_diameter maps a vertex's plane offset to [0,1] uv (0.5 / world_radius).
+    void set_alpha_frame(const float tangent[3], const float bitangent[3],
+                         float inv_diameter, bool enabled);
+    bool has_alpha() const { return alpha_tex_ssbo.handle && alpha_params_ubo.handle; }
 
     // Compile a compute shader source into a linked program. Returns 0 on failure.
     GLuint compile_program(const char* src) const;

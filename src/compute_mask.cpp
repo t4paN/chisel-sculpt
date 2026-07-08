@@ -31,12 +31,14 @@ bool ComputeState::init_mask() {
 
     gpu::ShaderSources src = gpu::embedded_shader("mask_paint");
     const gpu::BindEntry layout[] = {
-        { BIND_POSITIONS,   gpu::Bind::StorageRead,      0 },
-        { BIND_MASK,        gpu::Bind::StorageReadWrite, 0 },
-        { BIND_DIRTY_VERTS, gpu::Bind::StorageReadWrite, 0 },
-        { BIND_PARAMS,      gpu::Bind::Uniform,          sizeof(MaskParamsGPU) },
+        { BIND_POSITIONS,    gpu::Bind::StorageRead,      0 },
+        { BIND_MASK,         gpu::Bind::StorageReadWrite, 0 },
+        { BIND_DIRTY_VERTS,  gpu::Bind::StorageReadWrite, 0 },
+        { BIND_ALPHA_TEX,    gpu::Bind::StorageRead,      0 },
+        { BIND_ALPHA_PARAMS, gpu::Bind::Uniform,          48 },
+        { BIND_PARAMS,       gpu::Bind::Uniform,          sizeof(MaskParamsGPU) },
     };
-    mask_pipeline = gpu::create_compute_pipeline(gpu_dev, src, layout, 4);
+    mask_pipeline = gpu::create_compute_pipeline(gpu_dev, src, layout, 6);
     if (!mask_pipeline.handle) {
         std::printf("[compute] mask_paint pipeline failed to compile\n");
         return false;
@@ -127,12 +129,14 @@ void ComputeState::dispatch_mask_paint(const MaskPaintParams& p, const gpu::Buff
     gpu::write_buffer(gpu_dev, mask_params_ubo, 0, &mp, sizeof(mp));
 
     const gpu::BindBufferEntry bg[] = {
-        { BIND_POSITIONS,   &pos_vbo,           (uint64_t)vc * 3u * sizeof(float) },
-        { BIND_MASK,        &mask_ssbo,         (uint64_t)vc * sizeof(float) },
-        { BIND_DIRTY_VERTS, &smooth_dirty_ssbo, (uint64_t)(vc + 1u) * sizeof(uint32_t) },
-        { BIND_PARAMS,      &mask_params_ubo,   sizeof(MaskParamsGPU) },
+        { BIND_POSITIONS,    &pos_vbo,           (uint64_t)vc * 3u * sizeof(float) },
+        { BIND_MASK,         &mask_ssbo,         (uint64_t)vc * sizeof(float) },
+        { BIND_DIRTY_VERTS,  &smooth_dirty_ssbo, (uint64_t)(vc + 1u) * sizeof(uint32_t) },
+        { BIND_ALPHA_TEX,    &alpha_tex_ssbo,    (uint64_t)alpha_tex_w * alpha_tex_h * sizeof(float) },
+        { BIND_ALPHA_PARAMS, &alpha_params_ubo,  48 },
+        { BIND_PARAMS,       &mask_params_ubo,   sizeof(MaskParamsGPU) },
     };
-    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, mask_pipeline, bg, 4);
+    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, mask_pipeline, bg, 6);
 
     uint32_t groups = (vc + 255u) / 256u;
     gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);

@@ -181,13 +181,15 @@ bool ComputeState::init_smooth() {
     if (!supported) return false;
 
     const gpu::BindEntry accum_layout[] = {
-        { BIND_POSITIONS,   gpu::Bind::StorageRead,      0 },
-        { BIND_ACCUM,       gpu::Bind::StorageReadWrite, 0 },
-        { BIND_DIRTY_VERTS, gpu::Bind::StorageReadWrite, 0 },
-        { BIND_PARAMS,      gpu::Bind::Uniform,          sizeof(SmoothAccumParamsGPU) },
+        { BIND_POSITIONS,    gpu::Bind::StorageRead,      0 },
+        { BIND_ACCUM,        gpu::Bind::StorageReadWrite, 0 },
+        { BIND_DIRTY_VERTS,  gpu::Bind::StorageReadWrite, 0 },
+        { BIND_ALPHA_TEX,    gpu::Bind::StorageRead,      0 },
+        { BIND_ALPHA_PARAMS, gpu::Bind::Uniform,          48 },
+        { BIND_PARAMS,       gpu::Bind::Uniform,          sizeof(SmoothAccumParamsGPU) },
     };
     smooth_accum_pipeline = gpu::create_compute_pipeline(gpu_dev,
-                                gpu::embedded_shader("smooth_accum"), accum_layout, 4);
+                                gpu::embedded_shader("smooth_accum"), accum_layout, 6);
     if (!smooth_accum_pipeline.handle) {
         std::printf("[compute] smooth_accum pipeline failed to compile\n");
         return false;
@@ -279,12 +281,14 @@ void ComputeState::dispatch_smooth(const SmoothAccumParams& p,
 
     {
         const gpu::BindBufferEntry bg[] = {
-            { BIND_POSITIONS,   &pos_vbo,    (uint64_t)vc * 3u * sizeof(float) },
-            { BIND_ACCUM,       &accum_ssbo, (uint64_t)vc * 4u * sizeof(uint32_t) },
-            { BIND_DIRTY_VERTS, &smooth_dirty_ssbo, smooth_dirty_ssbo.size },
-            { BIND_PARAMS,      &smooth_accum_ubo, sizeof(SmoothAccumParamsGPU) },
+            { BIND_POSITIONS,    &pos_vbo,    (uint64_t)vc * 3u * sizeof(float) },
+            { BIND_ACCUM,        &accum_ssbo, (uint64_t)vc * 4u * sizeof(uint32_t) },
+            { BIND_DIRTY_VERTS,  &smooth_dirty_ssbo, smooth_dirty_ssbo.size },
+            { BIND_ALPHA_TEX,    &alpha_tex_ssbo,   (uint64_t)alpha_tex_w * alpha_tex_h * sizeof(float) },
+            { BIND_ALPHA_PARAMS, &alpha_params_ubo, 48 },
+            { BIND_PARAMS,       &smooth_accum_ubo, sizeof(SmoothAccumParamsGPU) },
         };
-        gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, smooth_accum_pipeline, bg, 4);
+        gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, smooth_accum_pipeline, bg, 6);
         gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
         gpu::dispatch(b, smooth_accum_pipeline, grp, (vc + 255u) / 256u);
         gpu::submit(b);

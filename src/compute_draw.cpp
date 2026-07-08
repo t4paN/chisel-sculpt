@@ -114,13 +114,15 @@ void ComputeState::upload_mirror_map(const std::vector<uint32_t>& map) {
 bool ComputeState::init_draw_accum() {
     if (!supported) return false;
     const gpu::BindEntry layout[] = {
-        { BIND_POSITIONS, gpu::Bind::StorageRead,      0 },
-        { BIND_NORMALS,   gpu::Bind::StorageRead,      0 },
-        { BIND_ACCUM,     gpu::Bind::StorageReadWrite, 0 },
-        { BIND_PARAMS,    gpu::Bind::Uniform,          sizeof(DrawAccumParamsGPU) },
+        { BIND_POSITIONS,    gpu::Bind::StorageRead,      0 },
+        { BIND_NORMALS,      gpu::Bind::StorageRead,      0 },
+        { BIND_ACCUM,        gpu::Bind::StorageReadWrite, 0 },
+        { BIND_ALPHA_TEX,    gpu::Bind::StorageRead,      0 },
+        { BIND_ALPHA_PARAMS, gpu::Bind::Uniform,          48 },
+        { BIND_PARAMS,       gpu::Bind::Uniform,          sizeof(DrawAccumParamsGPU) },
     };
     draw_accum_pipeline = gpu::create_compute_pipeline(gpu_dev, gpu::embedded_shader("draw_accum"),
-                                                       layout, 4);
+                                                       layout, 6);
     if (!draw_accum_pipeline.handle) {
         std::printf("[compute] draw_accum pipeline failed to compile\n");
         return false;
@@ -217,12 +219,14 @@ void ComputeState::dispatch_draw_accum(const DrawAccumParams& p, const gpu::Buff
     gpu::write_buffer(gpu_dev, draw_accum_ubo, 0, &u, sizeof(u));
 
     const gpu::BindBufferEntry bg[] = {
-        { BIND_POSITIONS, &pos_vbo,          (uint64_t)vc * 3u * sizeof(float) },
-        { BIND_NORMALS,   &stroke_norm_ssbo, (uint64_t)vc * 3u * sizeof(float) },
-        { BIND_ACCUM,     &accum_ssbo,       (uint64_t)vc * 4u * sizeof(uint32_t) },
-        { BIND_PARAMS,    &draw_accum_ubo,   sizeof(DrawAccumParamsGPU) },
+        { BIND_POSITIONS,    &pos_vbo,          (uint64_t)vc * 3u * sizeof(float) },
+        { BIND_NORMALS,      &stroke_norm_ssbo, (uint64_t)vc * 3u * sizeof(float) },
+        { BIND_ACCUM,        &accum_ssbo,       (uint64_t)vc * 4u * sizeof(uint32_t) },
+        { BIND_ALPHA_TEX,    &alpha_tex_ssbo,   (uint64_t)alpha_tex_w * alpha_tex_h * sizeof(float) },
+        { BIND_ALPHA_PARAMS, &alpha_params_ubo, 48 },
+        { BIND_PARAMS,       &draw_accum_ubo,   sizeof(DrawAccumParamsGPU) },
     };
-    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, draw_accum_pipeline, bg, 4);
+    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, draw_accum_pipeline, bg, 6);
 
     gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
     gpu::dispatch(b, draw_accum_pipeline, grp, (vc + 255u) / 256u);

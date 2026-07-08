@@ -52,6 +52,7 @@
 #include "imgui_impl_opengl3.h"
 #endif
 #include "ImGuiFileDialog.h"
+#include "brush_alpha.h"
 #include "project_file.h"
 #include <string>
 #include <filesystem>
@@ -463,6 +464,7 @@ int main(int argc, char* argv[]) {
         compute.init_compute_normals();
         compute.init_multires_diff();
         compute.init_multires_apply();
+        compute.init_alpha();   // shared brush-alpha stamp buffers (all dab kernels)
         compute.undo_ring_set_budget(UndoStack::ring_max_bytes);  // blood-moon 3b-iv (decoupled)
         compute.undo_ring_selftest();                        // no-op in release
         compute.init_remesh_select();
@@ -584,6 +586,13 @@ int main(int argc, char* argv[]) {
     Vec3 last_sculpt_point = mesh_center;
     BrushStroke brush_stroke;
     brush_stroke.compute = &compute;
+
+    // Brush-alpha (stamp) library — built-in pool + user-loaded images. The selected
+    // entry's bitmap is uploaded to the compute state whenever input.active_alpha
+    // changes; every falloff-computing dab kernel then modulates by it.
+    AlphaLibrary alpha_lib;
+    alpha_lib.init_builtins();
+    int last_uploaded_alpha = -1;
     // Undo history is per-model: each MeshEntity owns its UndoStack. Undo/redo
     // always act on the active entity via scene.active_undo(), resolved fresh at
     // each use so a mid-frame selection change targets the right stack.
@@ -977,6 +986,20 @@ int main(int argc, char* argv[]) {
             }
             input.snap_view_requested = InputState::SnapView::NONE;
             screen_buffers_dirty = true;
+        }
+
+        // ---- Brush-alpha upload-on-change ----
+        // Push the selected stamp to the compute state when it changes (cheap: only
+        // on selection, not per frame). Index 0 (Round) uploads a null → alpha off.
+        if (input.active_alpha < 0 || input.active_alpha >= alpha_lib.count())
+            input.active_alpha = 0;
+        if (input.active_alpha != last_uploaded_alpha) {
+            const AlphaEntry& ae = alpha_lib.get(input.active_alpha);
+            if (ae.is_round || ae.data.empty())
+                compute.upload_alpha(nullptr, 0, 0);
+            else
+                compute.upload_alpha(ae.data.data(), ae.w, ae.h);
+            last_uploaded_alpha = input.active_alpha;
         }
 
         // ---- File dialogs (ImGuiFileDialog) ----
@@ -2128,6 +2151,30 @@ int main(int argc, char* argv[]) {
         }
         if (!input.import_dialog_active && fd->IsOpened("ImportKey"))
             fd->Close();
+
+        // Brush-alpha custom image loader (mirrors ImportKey). Loads a grayscale
+        // bitmap as a new pool entry and selects it.
+        if (input.load_alpha_dialog_active && !fd->IsOpened("AlphaKey")) {
+            IGFD::FileDialogConfig cfg;
+            cfg.path = default_browse_path;
+            cfg.flags = ImGuiFileDialogFlags_None;
+            fd->OpenDialog("AlphaKey", "Load Brush Alpha", ".png,.jpg,.jpeg,.tga,.bmp", cfg);
+        }
+        if (fd->Display("AlphaKey", ImGuiWindowFlags_NoCollapse, ImVec2(600, 400))) {
+            if (fd->IsOk()) {
+                int idx = alpha_lib.load_custom(fd->GetFilePathName().c_str());
+                if (idx > 0) {
+                    input.active_alpha = idx;   // upload-on-change picks it up next frame
+                } else {
+                    error_popup_msg = "Failed to load alpha image: " + fd->GetFilePathName();
+                    error_popup_trigger = true;
+                }
+            }
+            fd->Close();
+            input.load_alpha_dialog_active = false;
+        }
+        if (!input.load_alpha_dialog_active && fd->IsOpened("AlphaKey"))
+            fd->Close();
 #endif // !__EMSCRIPTEN__
 
         // ---- Save project (.chisel) ----
@@ -2302,7 +2349,7 @@ int main(int argc, char* argv[]) {
 #endif // __EMSCRIPTEN__
 
         // ---- Button islands (brush selection + ops) ----
-        draw_button_islands(input, win_w, win_h);
+        draw_button_islands(input, win_w, win_h, &alpha_lib);
 
         // ---- Error popup ----
         if (error_popup_trigger) {

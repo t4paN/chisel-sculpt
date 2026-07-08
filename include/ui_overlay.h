@@ -3,6 +3,7 @@
 
 struct TextOverlay;
 struct InputState;
+struct AlphaLibrary;
 
 void draw_quit_dialog(TextOverlay& text, int win_w, int win_h);
 void draw_remesh_confirm(TextOverlay& text, int win_w, int win_h);
@@ -20,4 +21,5 @@ void draw_mode_indicator(TextOverlay& text, const char* mode_text, int win_w, in
 
 // ImGui button islands: brush selection + ops (undo/redo, multires, save/load)
 // Returns true if any button was clicked (caller should check input flags).
-void draw_button_islands(InputState& input, int win_w, int win_h);
+void draw_button_islands(InputState& input, int win_w, int win_h,
+                         const AlphaLibrary* alpha_lib = nullptr);

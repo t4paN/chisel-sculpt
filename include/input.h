@@ -44,6 +44,14 @@ struct InputState {
     float brush_spacing;    // fraction of brush radius between dabs (0.05..1.0)
     BrushSettings per_brush[(int)BrushType::COUNT];
 
+    // Brush-alpha (stamp) selection. Index into the AlphaLibrary pool; 0 = Round
+    // (no stamp). Shared across every falloff-computing brush. The main loop uploads
+    // the selected bitmap to ComputeState when this changes; each dab modulates its
+    // falloff by the sampled alpha. load_alpha_dialog_active pops the custom-image
+    // file picker (mirrors import_dialog_active).
+    int  active_alpha = 0;
+    bool load_alpha_dialog_active = false;
+
     // Paint brush albedo (RGB, [0,1]). paint_color is the active colour used by
     // the brush; paint_color_alt is a stashed second colour. Q/E swap them while
     // the paint brush is active. RMB swatch / toolbar boxes edit both.

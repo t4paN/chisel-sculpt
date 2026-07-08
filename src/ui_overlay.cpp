@@ -1,6 +1,7 @@
 #include "ui_overlay.h"
 #include "text_overlay.h"
 #include "input.h"
+#include "brush_alpha.h"
 #include "imgui.h"
 #include <cstdio>
 #include <cstring>
@@ -411,7 +412,63 @@ static bool shape_swatch(const char* label, int kind, const char* tooltip,
     return clicked;
 }
 
-void draw_button_islands(InputState& input, int win_w, int win_h) {
+// Alpha-stamp swatch: a square button showing the 16x16 preview of a brush-alpha,
+// styled like shape_swatch (same 4-state background). `preview` is 256 grayscale
+// values in [0,1] row-major, or nullptr to draw a "＋" (load-custom) glyph.
+static bool alpha_swatch(const char* label, const float* preview, const char* tooltip,
+                         float size, bool selected) {
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 pos = ImGui::GetCursorScreenPos();
+    ImVec2 sz  = ImVec2(size, size);
+
+    ImGui::PushID(label);
+    bool clicked = ImGui::InvisibleButton(label, sz);
+    bool hovered = ImGui::IsItemHovered();
+    bool active  = ImGui::IsItemActive();
+    if (hovered && tooltip) ImGui::SetTooltip("%s", tooltip);
+
+    ImU32 bg;
+    if (selected)     bg = ImGui::GetColorU32(col_btn_act);
+    else if (active)  bg = ImGui::GetColorU32(ImVec4(0.45f, 0.30f, 0.60f, 1.0f));
+    else if (hovered) bg = ImGui::GetColorU32(col_btn_hover);
+    else              bg = ImGui::GetColorU32(col_btn);
+    float rounding = size * 0.28f;
+    dl->AddRectFilled(ImVec2(pos.x + 2, pos.y + 2), ImVec2(pos.x + size + 2, pos.y + size + 2),
+                      IM_COL32(0, 0, 0, 80), rounding);
+    dl->AddRectFilled(pos, ImVec2(pos.x + size, pos.y + size), bg, rounding);
+
+    const float inset = size * 0.14f;
+    float x0 = pos.x + inset, y0 = pos.y + inset;
+    float cell = (size - 2 * inset) / 16.0f;
+
+    if (!preview) {
+        // Load-custom "＋".
+        float cx = pos.x + size * 0.5f, cy = pos.y + size * 0.5f, r = size * 0.22f;
+        ImU32 col = IM_COL32(224, 224, 230, 255);
+        dl->AddLine(ImVec2(cx - r, cy), ImVec2(cx + r, cy), col, 2.0f);
+        dl->AddLine(ImVec2(cx, cy - r), ImVec2(cx, cy + r), col, 2.0f);
+    } else {
+        // Dark backing so low alpha reads, then the grayscale grid on top.
+        dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + cell * 16, y0 + cell * 16),
+                          IM_COL32(30, 30, 34, 255));
+        for (int y = 0; y < 16; y++) {
+            for (int x = 0; x < 16; x++) {
+                float a = preview[y * 16 + x];
+                if (a <= 0.02f) continue;
+                int g = (int)(a * 255.0f + 0.5f);
+                dl->AddRectFilled(ImVec2(x0 + x * cell, y0 + y * cell),
+                                  ImVec2(x0 + (x + 1) * cell, y0 + (y + 1) * cell),
+                                  IM_COL32(g, g, g, 255));
+            }
+        }
+    }
+
+    ImGui::PopID();
+    return clicked;
+}
+
+void draw_button_islands(InputState& input, int win_w, int win_h,
+                         const AlphaLibrary* alpha_lib) {
     const float btn_h    = 38.0f;
     const float btn_gap  = 6.0f;
     const float row_gap  = 10.0f;
@@ -559,6 +616,25 @@ void draw_button_islands(InputState& input, int win_w, int win_h) {
                           ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel);
         ImGui::SameLine();
         ImGui::TextUnformatted("Q/E swap");
+    }
+
+    // Brush-alpha (stamp) picker: Round + built-ins + custom, then a "＋" to load an
+    // image. Shown in EDIT mode (sculpt + paint) — the stamp modulates every dab
+    // brush. Selection drives input.active_alpha; the main loop uploads on change.
+    if (mode == InputState::InteractionMode::EDIT && alpha_lib && alpha_lib->count() > 0) {
+        const float sw = btn_h;
+        int n = alpha_lib->count();
+        for (int i = 0; i < n; i++) {
+            if (i > 0) ImGui::SameLine();
+            const AlphaEntry& ae = alpha_lib->get(i);
+            char id[32];
+            std::snprintf(id, sizeof(id), "Alpha%d", i);
+            if (alpha_swatch(id, ae.preview, ae.name.c_str(), sw, input.active_alpha == i))
+                input.active_alpha = i;
+        }
+        ImGui::SameLine();
+        if (alpha_swatch("AlphaLoad", nullptr, "Load a grayscale image as a brush alpha", sw, false))
+            input.load_alpha_dialog_active = true;
     }
 
     mode_h = ImGui::GetWindowSize().y;

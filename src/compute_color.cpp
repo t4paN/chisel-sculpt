@@ -47,14 +47,16 @@ bool ComputeState::init_color() {
     if (!supported) return false;
 
     const gpu::BindEntry paint_layout[] = {
-        { BIND_POSITIONS,   gpu::Bind::StorageRead,      0 },
-        { BIND_COLOR,       gpu::Bind::StorageReadWrite, 0 },
-        { BIND_MASK,        gpu::Bind::StorageRead,      0 },
-        { BIND_DIRTY_VERTS, gpu::Bind::StorageReadWrite, 0 },
-        { BIND_PARAMS,      gpu::Bind::Uniform,          sizeof(ColorPaintParamsGPU) },
+        { BIND_POSITIONS,    gpu::Bind::StorageRead,      0 },
+        { BIND_COLOR,        gpu::Bind::StorageReadWrite, 0 },
+        { BIND_MASK,         gpu::Bind::StorageRead,      0 },
+        { BIND_DIRTY_VERTS,  gpu::Bind::StorageReadWrite, 0 },
+        { BIND_ALPHA_TEX,    gpu::Bind::StorageRead,      0 },
+        { BIND_ALPHA_PARAMS, gpu::Bind::Uniform,          48 },
+        { BIND_PARAMS,       gpu::Bind::Uniform,          sizeof(ColorPaintParamsGPU) },
     };
     color_paint_pipeline = gpu::create_compute_pipeline(gpu_dev,
-                               gpu::embedded_shader("color_paint"), paint_layout, 5);
+                               gpu::embedded_shader("color_paint"), paint_layout, 7);
     if (!color_paint_pipeline.handle) {
         std::printf("[compute] color_paint pipeline failed to compile\n");
         return false;
@@ -103,13 +105,15 @@ void ComputeState::dispatch_color_paint(const ColorPaintParams& p, const gpu::Bu
     gpu::write_buffer(gpu_dev, color_paint_ubo, 0, &u, sizeof(u));
 
     const gpu::BindBufferEntry bg[] = {
-        { BIND_POSITIONS,   &pos_vbo,   (uint64_t)vc * 3u * sizeof(float) },
-        { BIND_COLOR,       &color_ssbo, (uint64_t)vc * sizeof(uint32_t) },
-        { BIND_MASK,        &mask_ssbo,  (uint64_t)vc * sizeof(float) },
-        { BIND_DIRTY_VERTS, &smooth_dirty_ssbo, smooth_dirty_ssbo.size },
-        { BIND_PARAMS,      &color_paint_ubo, sizeof(ColorPaintParamsGPU) },
+        { BIND_POSITIONS,    &pos_vbo,   (uint64_t)vc * 3u * sizeof(float) },
+        { BIND_COLOR,        &color_ssbo, (uint64_t)vc * sizeof(uint32_t) },
+        { BIND_MASK,         &mask_ssbo,  (uint64_t)vc * sizeof(float) },
+        { BIND_DIRTY_VERTS,  &smooth_dirty_ssbo, smooth_dirty_ssbo.size },
+        { BIND_ALPHA_TEX,    &alpha_tex_ssbo,   (uint64_t)alpha_tex_w * alpha_tex_h * sizeof(float) },
+        { BIND_ALPHA_PARAMS, &alpha_params_ubo, 48 },
+        { BIND_PARAMS,       &color_paint_ubo, sizeof(ColorPaintParamsGPU) },
     };
-    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, color_paint_pipeline, bg, 5);
+    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, color_paint_pipeline, bg, 7);
 
     gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
     gpu::dispatch(b, color_paint_pipeline, grp, (vc + 255u) / 256u);

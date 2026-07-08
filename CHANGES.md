@@ -2,6 +2,25 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-08 — Brush alphas (stamp textures) for every dab brush
+
+- Brushes can now be modulated by a grayscale alpha "stamp": the sampled alpha
+  multiplies the brush falloff per vertex, so the dab takes the texture's shape
+  and intensity. Applies to draw, crease, pinch, smooth, mask, and paint — every
+  falloff-computing dab kernel, GL and WebGPU in lockstep. (Move/limb are drag
+  tools, not stamps, so they're excluded by design.)
+- Toolbar picker (Edit mode): Round + built-in presets (Soft / Ring / Square /
+  Grunge), plus a "＋" swatch that loads any grayscale image (PNG/JPG/TGA/BMP via
+  stb) as a new pool entry. Round = no stamp (classic radial brush). Shares the
+  "pool" UI pattern with the insert-mesh shape picker.
+- Implementation: a single shared binding pair — one SSBO for the selected
+  bitmap (BIND_ALPHA_TEX=40) + a 48-byte per-dab stamp-frame UBO
+  (BIND_ALPHA_PARAMS=62) — added only to the deposit kernels, so no existing
+  Params UBO layout changed. The stamp plane is the surface tangent plane at the
+  anchor, screen-aligned via the camera basis; mirror-side dabs reflect the
+  frame across X. New files: brush_alpha.{h,cpp} (pool + stb load),
+  compute_alpha.cpp (buffers + per-dab frame upload).
+
 ## 2026-07-08 — Import: "Append to scene" option (add as new object)
 
 - The import file dialog now has a side-panel "Append to scene" checkbox. On:

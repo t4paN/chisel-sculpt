@@ -378,6 +378,36 @@ float BrushStroke::falloff(float dist, float radius, float hardness) const {
     return 1.0f - blend;
 }
 
+void BrushStroke::set_alpha_dab(DabContext& ctx) {
+    // Round brush unless a stamp is selected AND uploaded (tex_w > 1 means the 1x1
+    // dummy has been replaced). Writing enabled=false keeps the kernels' sample_alpha
+    // returning 1.0, so nothing changes for the default brush.
+    bool enabled = ctx.input.active_alpha > 0 && ctx.compute.alpha_tex_w > 1;
+    if (!enabled || anchor_world_radius <= 0.0f) {
+        float t[3] = {1.0f, 0.0f, 0.0f}, b[3] = {0.0f, 1.0f, 0.0f};
+        ctx.compute.set_alpha_frame(t, b, 0.0f, false);
+        return;
+    }
+
+    // Stamp plane = surface tangent plane at the anchor (cyl_axis is the area normal).
+    // Orient it to the screen: project the camera right/up onto that plane so the
+    // stamp reads upright from the current view.
+    Vec3 n = Vec3(cyl_axis_x, cyl_axis_y, cyl_axis_z).normalized();
+    float vm[16];
+    ctx.cam.get_view_matrix(vm);
+    Vec3 right = {vm[0], vm[4], vm[8]};
+    Vec3 up    = {vm[1], vm[5], vm[9]};
+    Vec3 t = right - n * right.dot(n);
+    if (t.length() < 1e-5f) t = up - n * up.dot(n);
+    t = t.normalized();
+    Vec3 b = n.cross(t).normalized();
+
+    float inv_diam = 0.5f / anchor_world_radius;
+    float tf[3] = {t.x, t.y, t.z};
+    float bf[3] = {b.x, b.y, b.z};
+    ctx.compute.set_alpha_frame(tf, bf, inv_diam, true);
+}
+
 
 void BrushStroke::begin(Renderer& renderer, const Camera& cam,
                         float screen_x, float screen_y, float brush_radius,
@@ -530,6 +560,7 @@ void BrushStroke::apply_smooth(DabContext& ctx, float dab_x, float dab_y,
     sp.region_h = rgn.h;
     sp.screen_h = ctx.win_h;
 
+    set_alpha_dab(ctx);
     ctx.compute.dispatch_smooth(sp, ctx.renderer.vbo_pos, ctx.renderer.ebo);
 
     // Mirror reflection is now re-imposed after every smoothing iteration inside
@@ -581,6 +612,7 @@ void BrushStroke::apply_crease(DabContext& ctx, float dab_x, float dab_y,
     set_area_normal(params, cyl_axis_x, cyl_axis_y, cyl_axis_z);
     params.vertex_count = ctx.mesh.vertex_count();
 
+    set_alpha_dab(ctx);
     ctx.compute.dispatch_crease_accum(params, ctx.renderer.vbo_pos);
 
     gpu::barrier(ctx.compute.gpu_dev);
@@ -637,6 +669,7 @@ void BrushStroke::apply_pinch(DabContext& ctx, float dab_x, float dab_y,
     set_area_normal(params, cyl_axis_x, cyl_axis_y, cyl_axis_z);
     params.vertex_count = ctx.mesh.vertex_count();
 
+    set_alpha_dab(ctx);
     ctx.compute.dispatch_pinch_accum(params, ctx.renderer.vbo_pos);
 
     gpu::barrier(ctx.compute.gpu_dev);
@@ -699,6 +732,7 @@ void BrushStroke::apply_draw(DabContext& ctx, float dab_x, float dab_y,
     params.vertex_count = ctx.mesh.vertex_count();
     params.inflate = inflate ? 1 : 0;
 
+    set_alpha_dab(ctx);
     ctx.compute.dispatch_draw_accum(params, ctx.renderer.vbo_pos);
 
     gpu::barrier(ctx.compute.gpu_dev);
@@ -973,6 +1007,7 @@ void BrushStroke::apply_mask_gpu(DabContext& ctx, float dab_x, float dab_y,
     p.paint_strength = paint_strength;
     p.vertex_count = ctx.mesh.vertex_count();
 
+    set_alpha_dab(ctx);
     ctx.compute.dispatch_mask_paint(p, ctx.renderer.vbo_pos);
 
     // Dirty list lands async → mask first-touch snapshots in drain_dab_readbacks.
@@ -1042,6 +1077,7 @@ void BrushStroke::apply_color_gpu(DabContext& ctx, float dab_x, float dab_y,
     }
     p.vertex_count = ctx.mesh.vertex_count();
 
+    set_alpha_dab(ctx);
     ctx.compute.dispatch_color_paint(p, ctx.renderer.vbo_pos);
 
     // Dirty list lands async → color first-touch snapshots in drain_dab_readbacks.
