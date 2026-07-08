@@ -1987,7 +1987,35 @@ int main(int argc, char* argv[]) {
                 Mesh loaded;
                 bool imported = (ext == "ply") ? Mesh::import_ply(path.c_str(), loaded)
                                                : Mesh::import_obj(path.c_str(), loaded);
-                if (imported) {
+                if (imported && input.import_append) {
+                    // Append: add the mesh as a NEW scene entity at its authored
+                    // scale, leaving existing entities, the camera, and their undo
+                    // untouched. Same commit path insert uses (add_preview →
+                    // commit_preview → multires/mirror init).
+                    loaded.mask.clear();
+                    uint32_t new_id = scene.add_preview(loaded, 0);
+                    scene.commit_preview(new_id);
+                    multires_stack_init_from_lock(scene.active_multires(),
+                                                  scene.active_mesh(), 0);
+                    scene.set_mirror_topology(false);
+                    scene.refresh_mirror_map();
+                    scene.sync();
+
+                    input.mesh_locked = true;
+                    mesh = &scene.active_mesh();
+                    multires = &scene.active_multires();
+                    refresh_active_gpu_residency();
+                    mesh->compute_bounding_sphere(mesh_center, mesh_radius);
+                    brush_stroke.vertex_count = 0;
+                    brush_stroke.phase = StrokePhase::NONE;
+                    app_state = AppState::IDLE;
+                    screen_buffers_dirty = true;
+
+                    std::snprintf(input.notification, sizeof(input.notification),
+                                  "Appended: %.400s (%u v, %u t)",
+                                  path.c_str(), mesh->vertex_count(), mesh->tri_count());
+                    input.notification_timer = 3.0f;
+                } else if (imported) {
                     *mesh = std::move(loaded);
                     mesh->mask.clear();
 
@@ -2054,6 +2082,14 @@ int main(int argc, char* argv[]) {
             IGFD::FileDialogConfig cfg;
             cfg.path = default_browse_path;
             cfg.flags = ImGuiFileDialogFlags_None;
+            cfg.sidePaneWidth = 190.0f;
+            cfg.sidePane = [&](const char*, IGFD::UserDatas, bool*) {
+                ImGui::Checkbox("Append to scene", &input.import_append);
+                ImGui::Spacing();
+                ImGui::TextWrapped("On: add the mesh as a new object at its "
+                                   "own scale (OBJ/PLY only). Off: replace the "
+                                   "scene. .chisel projects always replace.");
+            };
             fd->OpenDialog("ImportKey", "Open File", ".chisel,.obj,.ply", cfg);
         }
 

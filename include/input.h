@@ -76,6 +76,7 @@ struct InputState {
     // File dialogs (Ctrl+E export, Ctrl+O import, Ctrl+S save, Ctrl+Shift+S save-as)
     bool export_dialog_active;
     bool import_dialog_active;
+    bool import_append;           // import dialog checkbox: add as new entity vs replace scene
     bool save_requested;
     bool save_as_requested;
     bool save_dialog_active;

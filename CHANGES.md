@@ -2,6 +2,20 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-08 — Import: "Append to scene" option (add as new object)
+
+- The import file dialog now has a side-panel "Append to scene" checkbox. On:
+  the loaded OBJ/PLY is added as a new scene entity at its authored scale,
+  leaving existing objects, the camera, and their undo untouched (same commit
+  path insert uses: add_preview → commit_preview → multires/mirror init). Off:
+  unchanged replace-scene behaviour. .chisel projects always replace.
+- Reuses the existing Mesh::import_obj/import_ply parser (fan-triangulates
+  quads/n-gons) — no second importer, per the "extend, don't duplicate" call.
+  Reposition an appended object with Select mode.
+- Caveats: import is literal (no vertex welding), so a seamed OBJ export comes
+  in non-watertight; the web file picker can't host the checkbox, so append is
+  native-dialog only for now.
+
 ## 2026-07-08 — Insert: primitive shape pool (sphere / box / cylinder)
 
 - Insert mode now spawns a box or cylinder in addition to the sphere. A
