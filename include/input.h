@@ -164,6 +164,10 @@ struct InputState {
     // Multi-mesh interaction modes (1/2/3 keys)
     enum class InteractionMode { EDIT, INSERT, SELECT };
     InteractionMode interaction_mode;
+
+    // Insert-mode primitive selected in the shape picker (INSERT mode UI).
+    enum class InsertShape { SPHERE, BOX, CYLINDER };
+    InsertShape insert_shape;
     bool delete_mesh_requested;   // Delete key
     bool enter_pressed;           // Enter key (consumed per-frame)
     bool key_y_pressed;           // Y key (consumed per-frame, for prompts)

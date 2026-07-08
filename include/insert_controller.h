@@ -49,7 +49,10 @@ private:
         int subdiv_level = 4;
 
         uint32_t preview_mesh_id = 0;
-        std::vector<float> base_dir_x, base_dir_y, base_dir_z;
+        // Canonical (unit bounding-radius, origin-centred) primitive positions, kept
+        // so a drag rescale is just pos = spawn + base_pos * radius. The preview's
+        // baked normals need no rescale — uniform scale + translate preserves them.
+        std::vector<float> base_pos_x, base_pos_y, base_pos_z;
 
         void reset() {
             phase = Phase::IDLE;
@@ -60,9 +63,9 @@ private:
             drag_accum = 0.0f;
             preview_mesh_id = 0;
             subdiv_level = 4;
-            base_dir_x.clear();
-            base_dir_y.clear();
-            base_dir_z.clear();
+            base_pos_x.clear();
+            base_pos_y.clear();
+            base_pos_z.clear();
         }
     };
 

@@ -351,6 +351,66 @@ static bool squircle_button(const char* label, const char* display, const char* 
     return clicked;
 }
 
+// Small square swatch with a vector shape icon (sphere/box/cylinder), styled like
+// the paint colour boxes: distinct from the text mode-buttons so it reads as a
+// picker. Returns true on click. `kind`: 0=sphere, 1=box, 2=cylinder.
+static bool shape_swatch(const char* label, int kind, const char* tooltip,
+                         float size, bool selected) {
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 pos = ImGui::GetCursorScreenPos();
+    ImVec2 sz  = ImVec2(size, size);
+
+    ImGui::PushID(label);
+    bool clicked = ImGui::InvisibleButton(label, sz);
+    bool hovered = ImGui::IsItemHovered();
+    bool active  = ImGui::IsItemActive();
+    if (hovered && tooltip) ImGui::SetTooltip("%s", tooltip);
+
+    ImU32 bg;
+    if (selected)     bg = ImGui::GetColorU32(col_btn_act);
+    else if (active)  bg = ImGui::GetColorU32(ImVec4(0.45f, 0.30f, 0.60f, 1.0f));
+    else if (hovered) bg = ImGui::GetColorU32(col_btn_hover);
+    else              bg = ImGui::GetColorU32(col_btn);
+    float rounding = size * 0.28f;
+    dl->AddRectFilled(ImVec2(pos.x + 2, pos.y + 2), ImVec2(pos.x + size + 2, pos.y + size + 2),
+                      IM_COL32(0, 0, 0, 80), rounding);
+    dl->AddRectFilled(pos, ImVec2(pos.x + size, pos.y + size), bg, rounding);
+
+    float cx = pos.x + size * 0.5f, cy = pos.y + size * 0.5f;
+    const ImU32 light = IM_COL32(224, 224, 230, 255);
+    const ImU32 mid   = IM_COL32(176, 176, 186, 255);
+    const ImU32 dark  = IM_COL32(120, 120, 132, 255);
+
+    if (kind == 0) {
+        // Sphere: filled disc with an offset highlight.
+        float r = size * 0.28f;
+        dl->AddCircleFilled(ImVec2(cx, cy), r, mid, 24);
+        dl->AddCircleFilled(ImVec2(cx - r * 0.32f, cy - r * 0.32f), r * 0.42f, light, 16);
+    } else if (kind == 1) {
+        // Box: isometric cube — top (light), left (mid), right (dark).
+        float a = size * 0.26f, e = a * 0.5f;
+        ImVec2 T (cx,       cy - a);
+        ImVec2 R (cx + a,   cy - e);
+        ImVec2 L (cx - a,   cy - e);
+        ImVec2 Bc(cx,       cy);
+        ImVec2 B (cx,       cy + a);
+        ImVec2 Rb(cx + a,   cy + e);
+        ImVec2 Lb(cx - a,   cy + e);
+        dl->AddQuadFilled(T, R, Bc, L, light);   // top face
+        dl->AddQuadFilled(L, Bc, B, Lb, mid);    // left face
+        dl->AddQuadFilled(Bc, R, Rb, B, dark);   // right face
+    } else {
+        // Cylinder: body + bottom cap (mid) with a lighter top ellipse.
+        float rw = size * 0.20f, rh = size * 0.24f, ry = rw * 0.42f;
+        dl->AddRectFilled(ImVec2(cx - rw, cy - rh), ImVec2(cx + rw, cy + rh), mid);
+        dl->AddEllipseFilled(ImVec2(cx, cy + rh), ImVec2(rw, ry), mid, 0.0f, 20);
+        dl->AddEllipseFilled(ImVec2(cx, cy - rh), ImVec2(rw, ry), light, 0.0f, 20);
+    }
+
+    ImGui::PopID();
+    return clicked;
+}
+
 void draw_button_islands(InputState& input, int win_w, int win_h) {
     const float btn_h    = 38.0f;
     const float btn_gap  = 6.0f;
@@ -442,7 +502,7 @@ void draw_button_islands(InputState& input, int win_w, int win_h) {
             }
         }
         ImGui::SameLine();
-        if (squircle_button("Insert", "Insert", "Spawn a sphere (Shortcut: 2)",
+        if (squircle_button("Insert", "Insert", "Spawn a primitive (Shortcut: 2)",
                             ImVec2(calc_btn_w("Insert"), btn_h),
                             mode == InputState::InteractionMode::INSERT)) {
             input.interaction_mode = InputState::InteractionMode::INSERT;
@@ -469,6 +529,23 @@ void draw_button_islands(InputState& input, int win_w, int win_h) {
                                                 : "Paint hidden (click to show)",
                             ImVec2(btn_h, btn_h), input.paint_visible)) {
             input.paint_visible = !input.paint_visible;
+        }
+    }
+
+    // Insert shape picker: Sphere / Box / Cylinder. Only shown in insert mode; the
+    // selection drives which primitive InsertController spawns on the next click.
+    if (mode == InputState::InteractionMode::INSERT) {
+        struct ShapeBtn { const char* id; int kind; const char* tooltip; InputState::InsertShape shape; };
+        ShapeBtn shapes[] = {
+            {"ShapeSphere",   0, "Sphere",   InputState::InsertShape::SPHERE},
+            {"ShapeBox",      1, "Box",      InputState::InsertShape::BOX},
+            {"ShapeCylinder", 2, "Cylinder", InputState::InsertShape::CYLINDER},
+        };
+        for (int i = 0; i < 3; i++) {
+            if (i > 0) ImGui::SameLine();
+            bool sel = input.insert_shape == shapes[i].shape;
+            if (shape_swatch(shapes[i].id, shapes[i].kind, shapes[i].tooltip, btn_h, sel))
+                input.insert_shape = shapes[i].shape;
         }
     }
 

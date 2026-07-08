@@ -209,3 +209,122 @@ Mesh icosphere(int subdivisions) {
     }
     return m;
 }
+
+// Scale every vertex so the furthest from the origin lands at distance 1, then
+// bake face-averaged normals. Shared final step for the box/cylinder builders so
+// all insert primitives live on the same unit bounding sphere as the icosphere.
+static void finalize_primitive(Mesh& m) {
+    float max_d2 = 0.0f;
+    uint32_t vc = m.vertex_count();
+    for (uint32_t i = 0; i < vc; i++) {
+        Vec3 p = m.get_pos(i);
+        float d2 = p.x*p.x + p.y*p.y + p.z*p.z;
+        if (d2 > max_d2) max_d2 = d2;
+    }
+    float inv = (max_d2 > 0.0f) ? 1.0f / std::sqrt(max_d2) : 1.0f;
+    for (uint32_t i = 0; i < vc; i++) m.set_pos(i, m.get_pos(i) * inv);
+
+    m.norm_x.assign(vc, 0.0f);
+    m.norm_y.assign(vc, 0.0f);
+    m.norm_z.assign(vc, 0.0f);
+    m.recompute_normals();
+}
+
+Mesh box_primitive(int seg) {
+    if (seg < 1) seg = 1;
+    Mesh m;
+
+    // Weld surface grid points across faces: a packed (i,j,k) key with each axis in
+    // [0,seg] maps to a single vertex, so shared edges/corners aren't duplicated.
+    std::unordered_map<uint64_t, uint32_t> vmap;
+    vmap.reserve((size_t)(seg + 1) * (seg + 1) * 6);
+    auto key = [&](int i, int j, int k) -> uint64_t {
+        return ((uint64_t)(uint32_t)i << 42) | ((uint64_t)(uint32_t)j << 21) | (uint32_t)k;
+    };
+    auto vert = [&](int i, int j, int k) -> uint32_t {
+        uint64_t kk = key(i, j, k);
+        auto it = vmap.find(kk);
+        if (it != vmap.end()) return it->second;
+        uint32_t id = m.vertex_count();
+        vmap.emplace(kk, id);
+        m.pos_x.push_back(-1.0f + 2.0f * (float)i / (float)seg);
+        m.pos_y.push_back(-1.0f + 2.0f * (float)j / (float)seg);
+        m.pos_z.push_back(-1.0f + 2.0f * (float)k / (float)seg);
+        return id;
+    };
+
+    // Each face: one axis fixed, the other two swept over the (u,v) grid. u/v axes
+    // are ordered so the emitted winding gives an outward normal.
+    auto emit_face = [&](int fixed_axis, int fixed_val, int u_axis, int v_axis) {
+        auto coord = [&](int u, int v, int c[3]) {
+            c[0] = c[1] = c[2] = 0;
+            c[fixed_axis] = fixed_val; c[u_axis] = u; c[v_axis] = v;
+        };
+        for (int u = 0; u < seg; u++) {
+            for (int v = 0; v < seg; v++) {
+                int c00[3], c10[3], c11[3], c01[3];
+                coord(u,   v,   c00); coord(u+1, v,   c10);
+                coord(u+1, v+1, c11); coord(u,   v+1, c01);
+                uint32_t a = vert(c00[0], c00[1], c00[2]);
+                uint32_t b = vert(c10[0], c10[1], c10[2]);
+                uint32_t c = vert(c11[0], c11[1], c11[2]);
+                uint32_t d = vert(c01[0], c01[1], c01[2]);
+                m.indices.push_back(a); m.indices.push_back(b); m.indices.push_back(c);
+                m.indices.push_back(a); m.indices.push_back(c); m.indices.push_back(d);
+            }
+        }
+    };
+    emit_face(0, seg, 1, 2);  // +X: sweep Y,Z
+    emit_face(0, 0,   2, 1);  // -X: sweep Z,Y
+    emit_face(1, seg, 2, 0);  // +Y: sweep Z,X
+    emit_face(1, 0,   0, 2);  // -Y: sweep X,Z
+    emit_face(2, seg, 0, 1);  // +Z: sweep X,Y
+    emit_face(2, 0,   1, 0);  // -Z: sweep Y,X
+
+    finalize_primitive(m);
+    return m;
+}
+
+Mesh cylinder_primitive(int radial, int height_seg) {
+    if (radial < 3) radial = 3;
+    if (height_seg < 1) height_seg = 1;
+    Mesh m;
+
+    // Side rings: (height_seg+1) rings of `radial` verts. The seam welds naturally
+    // because index a is taken mod radial — no duplicated seam column.
+    for (int r = 0; r <= height_seg; r++) {
+        float y = -1.0f + 2.0f * (float)r / (float)height_seg;
+        for (int a = 0; a < radial; a++) {
+            float ang = 2.0f * (float)M_PI * (float)a / (float)radial;
+            m.pos_x.push_back(std::cos(ang));
+            m.pos_y.push_back(y);
+            m.pos_z.push_back(std::sin(ang));
+        }
+    }
+    auto ring = [&](int r, int a) -> uint32_t { return (uint32_t)(r * radial + (a % radial)); };
+
+    // Side quads (outward-facing winding, angle increases CCW seen from +Y).
+    for (int r = 0; r < height_seg; r++) {
+        for (int a = 0; a < radial; a++) {
+            uint32_t v00 = ring(r,   a),   v10 = ring(r,   a+1);
+            uint32_t v11 = ring(r+1, a+1), v01 = ring(r+1, a);
+            m.indices.push_back(v00); m.indices.push_back(v01); m.indices.push_back(v11);
+            m.indices.push_back(v00); m.indices.push_back(v11); m.indices.push_back(v10);
+        }
+    }
+
+    // Cap centres, fanned to the existing rim rings so the mesh stays watertight.
+    uint32_t top_c = m.vertex_count();
+    m.pos_x.push_back(0.0f); m.pos_y.push_back( 1.0f); m.pos_z.push_back(0.0f);
+    uint32_t bot_c = m.vertex_count();
+    m.pos_x.push_back(0.0f); m.pos_y.push_back(-1.0f); m.pos_z.push_back(0.0f);
+    for (int a = 0; a < radial; a++) {
+        // Top (+Y outward): reversed sweep so the fan normal is +Y.
+        m.indices.push_back(top_c); m.indices.push_back(ring(height_seg, a+1)); m.indices.push_back(ring(height_seg, a));
+        // Bottom (-Y outward).
+        m.indices.push_back(bot_c); m.indices.push_back(ring(0, a)); m.indices.push_back(ring(0, a+1));
+    }
+
+    finalize_primitive(m);
+    return m;
+}

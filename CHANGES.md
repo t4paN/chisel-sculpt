@@ -2,6 +2,25 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-08 — Insert: primitive shape pool (sphere / box / cylinder)
+
+- Insert mode now spawns a box or cylinder in addition to the sphere. A
+  Sphere/Box/Cylinder picker of small vector-icon swatches (drawn like the paint
+  colour boxes — filled disc, isometric cube, capped cylinder) appears in the
+  toolbar while Insert mode is active and drives which primitive the next click
+  places. The swatch style is deliberately distinct from the text mode-buttons
+  so it reads as a picker rather than blending into the row above it.
+- Box and cylinder are generated procedurally (`box_primitive` /
+  `cylinder_primitive` in sphere.cpp), matching the icosphere approach: welded,
+  watertight, triangulated, and normalised to the same unit bounding-sphere
+  radius so insert-mode radial scaling behaves identically across shapes.
+  Verified closed-manifold (0 boundary/non-manifold edges), outward winding,
+  and outward normals via a standalone geometry test.
+- InsertController now stores canonical vertex *positions* (was normalized
+  directions, which would have spherized a box/cylinder) and scales them
+  uniformly on drag — the sphere path is unchanged. Snap-to-centre, mirror
+  symmetrize, and multires lock are all shape-agnostic and unchanged.
+
 ## 2026-07-08 — Web: swallow Alt so it can't pop Firefox's menu bar
 
 - Windowed (non-fullscreen) Firefox activated its menu bar on a bare Alt tap,

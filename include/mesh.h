@@ -104,6 +104,16 @@ Mesh loop_subdivide(const Mesh& input, bool legacy_numbering = false);
 Mesh icosahedron();
 Mesh icosphere(int subdivisions);
 
+// Procedural insert-mesh primitives. Both are watertight, welded (one normal per
+// vertex), triangulated, and normalised so the furthest vertex sits at distance 1
+// from the origin — i.e. they share the icosphere's unit bounding-sphere radius so
+// the insert-mode radial scale is consistent across shapes.
+//   box:      subdivided cube, `seg` quads per edge (seg >= 1).
+//   cylinder: axis along Y, `radial` segments around, `height_seg` along the axis,
+//             triangle-fan caps sharing the rim ring.
+Mesh box_primitive(int seg);
+Mesh cylinder_primitive(int radial, int height_seg);
+
 // Packed-RGBA8 vertex-colour blending used to carry paint across topology
 // changes (subdivide / remesh). Alpha is forced to 0xFF — the paint model
 // keeps alpha at 1.0, and unpainted verts are white 0xFFFFFFFF.

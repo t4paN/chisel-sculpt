@@ -147,9 +147,9 @@ void InsertController::tick(InputState& input, Camera& camera,
                 if (pe) {
                     uint32_t vc = pe->mesh.vertex_count();
                     for (uint32_t i = 0; i < vc; i++) {
-                        pe->mesh.pos_x[i] = state_.spawn_point.x + state_.base_dir_x[i] * state_.current_radius;
-                        pe->mesh.pos_y[i] = state_.spawn_point.y + state_.base_dir_y[i] * state_.current_radius;
-                        pe->mesh.pos_z[i] = state_.spawn_point.z + state_.base_dir_z[i] * state_.current_radius;
+                        pe->mesh.pos_x[i] = state_.spawn_point.x + state_.base_pos_x[i] * state_.current_radius;
+                        pe->mesh.pos_y[i] = state_.spawn_point.y + state_.base_pos_y[i] * state_.current_radius;
+                        pe->mesh.pos_z[i] = state_.spawn_point.z + state_.base_pos_z[i] * state_.current_radius;
                     }
                     // local indices: 0..vc-1
                     std::vector<uint32_t> local_dirty(vc);
@@ -179,9 +179,9 @@ void InsertController::tick(InputState& input, Camera& camera,
                 uint32_t vc = pe->mesh.vertex_count();
                 state_.spawn_point.x = 0.0f;
                 for (uint32_t i = 0; i < vc; i++) {
-                    pe->mesh.pos_x[i] = state_.base_dir_x[i] * state_.current_radius;
-                    pe->mesh.pos_y[i] = state_.spawn_point.y + state_.base_dir_y[i] * state_.current_radius;
-                    pe->mesh.pos_z[i] = state_.spawn_point.z + state_.base_dir_z[i] * state_.current_radius;
+                    pe->mesh.pos_x[i] = state_.base_pos_x[i] * state_.current_radius;
+                    pe->mesh.pos_y[i] = state_.spawn_point.y + state_.base_pos_y[i] * state_.current_radius;
+                    pe->mesh.pos_z[i] = state_.spawn_point.z + state_.base_pos_z[i] * state_.current_radius;
                 }
                 pe->mesh.recompute_normals();
                 std::snprintf(input.notification, sizeof(input.notification),
@@ -259,22 +259,36 @@ void InsertController::tick(InputState& input, Camera& camera,
                 state_.drag_start_x = (float)input.mouse_x;
                 state_.drag_start_y = (float)input.mouse_y;
 
-                Mesh sphere = icosphere(state_.subdiv_level);
-                sphere.recompute_normals();
-                uint32_t svc = sphere.vertex_count();
-                state_.base_dir_x.resize(svc);
-                state_.base_dir_y.resize(svc);
-                state_.base_dir_z.resize(svc);
+                // Build the chosen primitive in canonical (unit bounding-radius,
+                // origin-centred) space with normals already baked. Densities are
+                // tuned so each shape ships as a workable base cage.
+                Mesh prim;
+                switch (input.insert_shape) {
+                    case InputState::InsertShape::BOX:
+                        prim = box_primitive(12);
+                        break;
+                    case InputState::InsertShape::CYLINDER:
+                        prim = cylinder_primitive(32, 8);
+                        break;
+                    case InputState::InsertShape::SPHERE:
+                    default:
+                        prim = icosphere(state_.subdiv_level);
+                        prim.recompute_normals();
+                        break;
+                }
+                uint32_t svc = prim.vertex_count();
+                state_.base_pos_x.resize(svc);
+                state_.base_pos_y.resize(svc);
+                state_.base_pos_z.resize(svc);
                 for (uint32_t i = 0; i < svc; i++) {
-                    Vec3 d = sphere.get_pos(i).normalized();
-                    state_.base_dir_x[i] = d.x;
-                    state_.base_dir_y[i] = d.y;
-                    state_.base_dir_z[i] = d.z;
-                    sphere.set_pos(i, spawn + d * state_.current_radius);
-                    sphere.set_normal(i, d);
+                    Vec3 p = prim.get_pos(i);
+                    state_.base_pos_x[i] = p.x;
+                    state_.base_pos_y[i] = p.y;
+                    state_.base_pos_z[i] = p.z;
+                    prim.set_pos(i, spawn + p * state_.current_radius);
                 }
 
-                state_.preview_mesh_id = scene_.add_preview(sphere, state_.subdiv_level);
+                state_.preview_mesh_id = scene_.add_preview(prim, state_.subdiv_level);
                 screen_buffers_dirty = true;
                 state_.phase = Phase::PLACING;
                 std::snprintf(input.notification, sizeof(input.notification),
