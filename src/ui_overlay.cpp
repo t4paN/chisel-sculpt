@@ -108,10 +108,11 @@ void draw_voxel_merge_progress(TextOverlay& text, int win_w, int win_h, float pr
 }
 
 void draw_toolbar(TextOverlay& text, const InputState& input,
-                  uint32_t tri_count, uint32_t vert_count, int win_w, int win_h) {
+                  uint32_t tri_count, uint32_t vert_count, const char* ver,
+                  int win_w, int win_h) {
     float panel_w = 220.0f;
     float panel_h = 300.0f;
-    float panel_x = 10.0f;
+    float panel_x = (float)win_w - panel_w - 10.0f;
     float panel_y = (float)win_h - panel_h - 10.0f;
 
     text.draw_panel(panel_x, panel_y, panel_w, panel_h,
@@ -124,6 +125,20 @@ void draw_toolbar(TextOverlay& text, const InputState& input,
 
     text.draw_text("CHISEL", tx, ty, scale, win_w, win_h,
                   CGA(yellow), 1.0f);
+
+    // Version next to the logo, smaller and dimmer. Strip the leading 'v' and
+    // any git-describe suffix (-N-gHASH) so a local build reads like a tag.
+    if (ver && *ver) {
+        char vbuf[24];
+        const char* s = (*ver == 'v' || *ver == 'V') ? ver + 1 : ver;
+        size_t vi = 0;
+        while (s[vi] && s[vi] != '-' && vi < sizeof(vbuf) - 1) { vbuf[vi] = s[vi]; vi++; }
+        vbuf[vi] = '\0';
+        float logo_w = 6.0f * 8.0f * scale;   // "CHISEL" = 6 glyphs
+        float vscale = 1.1f;
+        text.draw_text(vbuf, tx + logo_w + 8.0f, ty + 3.0f, vscale,
+                      win_w, win_h, CGA(light_gray), 0.9f);
+    }
     ty += line_h + 6;
 
     char buf[128];
@@ -260,13 +275,6 @@ void draw_fps(TextOverlay& text, float fps, int win_w, int win_h) {
     float tw = std::strlen(buf) * 8.0f * 2.0f;
     text.draw_text(buf, (float)win_w - tw - 12.0f, 12.0f, 2.0f,
                   win_w, win_h, CGA(light_gray), 0.8f);
-}
-
-void draw_version(TextOverlay& text, const char* ver, int win_w, int win_h) {
-    float tw = std::strlen(ver) * 8.0f * 2.0f;
-    text.draw_text(ver, (float)win_w - tw - 12.0f,
-                  (float)win_h - 28.0f, 2.0f,
-                  win_w, win_h, CGA(dark_gray), 0.6f);
 }
 
 void draw_mode_indicator(TextOverlay& text, const char* mode_text, int win_w, int win_h) {

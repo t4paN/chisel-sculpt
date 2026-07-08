@@ -2,6 +2,16 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-08 — HUD: toolbar box to bottom-right, version folded into the header
+
+- The black toolbar/info panel moved from the bottom-left corner to the
+  bottom-right. Its header now reads "CHISEL <version>" — the version sits next
+  to the logo, smaller (1.1× vs 1.5×) and dimmer. The version string strips the
+  leading 'v' and the git-describe suffix (-N-gHASH), so a local build reads
+  like a clean tag (e.g. 0.1.13) and CI-tagged builds show the tag as-is.
+- Removed the standalone bottom-right version readout (draw_version) — it now
+  lives in the box.
+
 ## 2026-07-08 — Reverse pinch biased subtractive (asymmetric flatten)
 
 - The reverse-pinch (Ctrl/subtract) branch used to be a symmetric flatten: it

@@ -1920,7 +1920,7 @@ int main(int argc, char* argv[]) {
             draw_voxel_merge_progress(text, win_w, win_h,
                                       vmerge_job ? voxel_merge_progress(*vmerge_job) : 0.0f);
         if (input.toolbar_visible)
-            draw_toolbar(text, input, mesh->tri_count(), mesh->vertex_count(), win_w, win_h);
+            draw_toolbar(text, input, mesh->tri_count(), mesh->vertex_count(), CHISEL_VERSION, win_w, win_h);
         if (input.slider_mode != InputState::SliderMode::NONE)
             draw_slider(text, input, win_w, win_h);
         if (input.interaction_mode == InputState::InteractionMode::SELECT)
@@ -1929,7 +1929,6 @@ int main(int argc, char* argv[]) {
             draw_mode_indicator(text, "INSERT", win_w, win_h);
         draw_notification(text, input, win_w, win_h);
         draw_fps(text, fps_display, win_w, win_h);
-        draw_version(text, CHISEL_VERSION, win_w, win_h);
 
         // ---- Open/import a path (shared by the native dialog and the web picker) ----
         auto do_import_path = [&](const std::string& path) {
