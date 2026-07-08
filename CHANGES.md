@@ -2,6 +2,19 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-08 — Fix: Linux AppImage "Failed to create window" on rolling distros
+
+- The AppImage's lib-bundling step (`linux.yml`) copied every non-allowlisted
+  `ldd` dependency into `usr/lib`, which swept in `libstdc++.so.6` + `libgcc_s.so.1`
+  from the Ubuntu 20.04 build container. `AppRun` puts `usr/lib` first on
+  `LD_LIBRARY_PATH`, so that old libstdc++ (GLIBCXX_3.4.28) shadowed the host's
+  newer one — and Mesa's DRI driver, dlopen'd during GL-context creation and built
+  against the host libstdc++, then failed to load → `glfwCreateWindow` returned
+  NULL → "Failed to create window" on any distro newer than the build container.
+- Fix: never bundle `libstdc++`/`libgcc_s` (standard AppImage practice). Building
+  on 20.04 already floors the required GLIBCXX low enough for every current host to
+  satisfy from its own system copy. Windows/web builds were unaffected.
+
 ## 2026-07-08 — Brush alphas (stamp textures) for every dab brush
 
 - Brushes can now be modulated by a grayscale alpha "stamp": the sampled alpha

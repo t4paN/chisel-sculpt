@@ -61,6 +61,14 @@ jobs:
                 ;;
               */libc.so*|*/libpthread.so*|*/libdl.so*|*/librt.so*|*/libm.so*|*/ld-linux*)
                 ;;
+              */libstdc++.so*|*/libgcc_s.so*)
+                # NEVER bundle these: AppRun puts usr/lib first, so an old bundled
+                # libstdc++ (from the 20.04 build container) shadows the host's and
+                # Mesa's DRI driver — dlopen'd during GL context creation, built
+                # against the *newer* host libstdc++ — fails to load → glfwCreateWindow
+                # returns NULL → "Failed to create window" on rolling distros. Building
+                # on 20.04 already floors the required GLIBCXX low enough for the host's.
+                ;;
               *)
                 cp -v "$lib" usr/lib/
                 ;;
