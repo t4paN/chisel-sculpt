@@ -619,9 +619,13 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
     }
 
     // Brush-alpha (stamp) picker: Round + built-ins + custom, then a "＋" to load an
-    // image. Shown in EDIT mode (sculpt + paint) — the stamp modulates every dab
-    // brush. Selection drives input.active_alpha; the main loop uploads on change.
-    if (mode == InputState::InteractionMode::EDIT && alpha_lib && alpha_lib->count() > 0) {
+    // image. Alphas apply to Draw, Mask and Paint only — the picker is hidden for
+    // every other brush (their dabs force the stamp off; see set_alpha_dab).
+    // Selection drives input.active_alpha; the main loop uploads on change.
+    bool alpha_brush = current == BrushType::DRAW || current == BrushType::MASK ||
+                       current == BrushType::PAINT;
+    if (mode == InputState::InteractionMode::EDIT && alpha_brush
+        && alpha_lib && alpha_lib->count() > 0) {
         const float sw = btn_h;
         int n = alpha_lib->count();
         for (int i = 0; i < n; i++) {
@@ -669,8 +673,10 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
                 if (!input.smooth_locked) {
                     input.per_brush[(int)input.current_brush].strength = input.brush_strength;
                     input.per_brush[(int)input.current_brush].hardness = input.brush_hardness;
+                    input.per_brush[(int)input.current_brush].spacing  = input.brush_spacing;
                     input.brush_strength = input.per_brush[(int)BrushType::SMOOTH].strength;
                     input.brush_hardness = input.per_brush[(int)BrushType::SMOOTH].hardness;
+                    input.brush_spacing  = input.per_brush[(int)BrushType::SMOOTH].spacing;
                     input.smooth_locked = true;
                 } else {
                     input.clear_smooth_lock();

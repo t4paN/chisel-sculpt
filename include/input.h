@@ -17,6 +17,7 @@ enum class BrushType {
 struct BrushSettings {
     float strength;
     float hardness;
+    float spacing;
 };
 
 struct InputState {
@@ -41,14 +42,15 @@ struct InputState {
     float brush_size;       // pixels (shared across all brushes)
     float brush_strength;   // 0..1 (per-brush, synced via switch_brush)
     float brush_hardness;   // 0..1 (per-brush, synced via switch_brush)
-    float brush_spacing;    // fraction of brush radius between dabs (0.05..1.0)
+    float brush_spacing;    // fraction of brush radius between dabs (0.05..1.0, per-brush)
     BrushSettings per_brush[(int)BrushType::COUNT];
 
     // Brush-alpha (stamp) selection. Index into the AlphaLibrary pool; 0 = Round
-    // (no stamp). Shared across every falloff-computing brush. The main loop uploads
-    // the selected bitmap to ComputeState when this changes; each dab modulates its
-    // falloff by the sampled alpha. load_alpha_dialog_active pops the custom-image
-    // file picker (mirrors import_dialog_active).
+    // (no stamp). One shared selection, but it only affects Draw, Mask and Paint —
+    // every other brush forces the stamp off per dab (set_alpha_dab). The main loop
+    // uploads the selected bitmap to ComputeState when this changes; each alpha-
+    // capable dab modulates its falloff by the sampled alpha. load_alpha_dialog_active
+    // pops the custom-image file picker (mirrors import_dialog_active).
     int  active_alpha = 0;
     bool load_alpha_dialog_active = false;
 

@@ -7,8 +7,9 @@
 // modulate the brush falloff. Index 0 is always "Round" (no stamp — the classic
 // radial brush); the rest are procedural built-ins plus any user-loaded images.
 // The selected entry's `data` is uploaded to ComputeState::upload_alpha and sampled
-// per-dab by every falloff-computing kernel. Shares the "pool" UI pattern with the
-// insert-mesh shape picker.
+// per-dab by the alpha-capable brushes (Draw, Mask, Paint — all others force the
+// stamp off, see BrushStroke::set_alpha_dab). Shares the "pool" UI pattern with
+// the insert-mesh shape picker.
 
 struct AlphaEntry {
     std::string        name;

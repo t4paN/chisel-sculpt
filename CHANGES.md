@@ -2,6 +2,18 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-11 — Alphas restricted to Draw/Mask/Paint; per-brush spacing
+
+- Brush alphas (stamps) now apply to Draw, Mask, and Paint only. Every other
+  brush always runs the classic round falloff — a stamp picked while painting
+  no longer leaks into Crease/Pinch/Inflate/Smooth and wrecks their strokes.
+  The toolbar alpha picker is hidden for non-alpha brushes; the selection is
+  kept, so it's right where you left it when you return to an alpha brush.
+- Brush spacing is now a per-brush setting (was global), joining strength and
+  hardness in the per-brush stash/restore on every brush switch and smooth-lock
+  toggle. Stamp-heavy Paint can keep wide spacing while Draw stays dense.
+  Held-Shift transient smoothing now uses Smooth's spacing mid-stroke too.
+
 ## 2026-07-08 — Fix: Linux AppImage "Failed to create window" on rolling distros
 
 - The AppImage's lib-bundling step (`linux.yml`) copied every non-allowlisted

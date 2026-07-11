@@ -391,9 +391,10 @@ struct BrushStroke {
 
     // Build this dab's brush-alpha stamp frame (screen-aligned tangent/bitangent in
     // the surface tangent plane) and push it to the compute state's shared alpha UBO.
-    // A no-op-equivalent (enabled=false) is written when no alpha is selected, so the
-    // round brush is preserved. Call once per dab, after set_anchor().
-    void set_alpha_dab(DabContext& ctx);
+    // A no-op-equivalent (enabled=false) is written when no alpha is selected or the
+    // calling brush doesn't support alphas (`allow` = false; only draw/mask/paint do),
+    // so the round brush is preserved. Call once per dab, after set_anchor().
+    void set_alpha_dab(DabContext& ctx, bool allow);
 
 private:
     float falloff(float dist, float radius, float hardness) const;

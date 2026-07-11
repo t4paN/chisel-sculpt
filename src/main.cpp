@@ -1697,7 +1697,9 @@ int main(int argc, char* argv[]) {
                 float dab_dx = cur_x - brush_stroke.last_dab_x;
                 float dab_dy = cur_y - brush_stroke.last_dab_y;
                 float dab_dist = std::sqrt(dab_dx*dab_dx + dab_dy*dab_dy);
-                float spacing = input.brush_size * input.brush_spacing;
+                // eff.spacing (not the live global): transient shift-smooth doesn't
+                // swap the live globals, so this is what makes it use Smooth's spacing.
+                float spacing = input.brush_size * eff.spacing;
 
                 int dab_count = 0;
                 if (is_grab || brush_stroke.phase == StrokePhase::BEGIN) {

@@ -75,6 +75,7 @@ InputState::InputState()
     for (int i = 0; i < (int)BrushType::COUNT; i++) {
         per_brush[i].strength = brush_strength;
         per_brush[i].hardness = brush_hardness;
+        per_brush[i].spacing  = brush_spacing;
     }
     per_brush[(int)BrushType::MASK].strength = 1.0f;      // 100% strength
     per_brush[(int)BrushType::MASK].hardness = 0.64f;     // 64% hardness
@@ -90,17 +91,21 @@ void InputState::switch_brush(BrushType to) {
     if (to == current_brush) return;
     per_brush[(int)current_brush].strength = brush_strength;
     per_brush[(int)current_brush].hardness = brush_hardness;
+    per_brush[(int)current_brush].spacing  = brush_spacing;
     current_brush = to;
     brush_strength = per_brush[(int)to].strength;
     brush_hardness = per_brush[(int)to].hardness;
+    brush_spacing  = per_brush[(int)to].spacing;
 }
 
 void InputState::clear_smooth_lock() {
     if (!smooth_locked) return;
     per_brush[(int)BrushType::SMOOTH].strength = brush_strength;
     per_brush[(int)BrushType::SMOOTH].hardness = brush_hardness;
+    per_brush[(int)BrushType::SMOOTH].spacing  = brush_spacing;
     brush_strength = per_brush[(int)current_brush].strength;
     brush_hardness = per_brush[(int)current_brush].hardness;
+    brush_spacing  = per_brush[(int)current_brush].spacing;
     smooth_locked = false;
 }
 
@@ -210,6 +215,7 @@ static void apply_slider_delta(float dx) {
     int save_brush = g_input->smooth_locked ? (int)BrushType::SMOOTH : (int)g_input->current_brush;
     g_input->per_brush[save_brush].strength = g_input->brush_strength;
     g_input->per_brush[save_brush].hardness = g_input->brush_hardness;
+    g_input->per_brush[save_brush].spacing  = g_input->brush_spacing;
     // Don't update mouse_x/y — keep cursor visually locked
 }
 
@@ -573,8 +579,10 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
                         // Save current brush settings, load smooth's
                         g_input->per_brush[(int)g_input->current_brush].strength = g_input->brush_strength;
                         g_input->per_brush[(int)g_input->current_brush].hardness = g_input->brush_hardness;
+                        g_input->per_brush[(int)g_input->current_brush].spacing  = g_input->brush_spacing;
                         g_input->brush_strength = g_input->per_brush[(int)BrushType::SMOOTH].strength;
                         g_input->brush_hardness = g_input->per_brush[(int)BrushType::SMOOTH].hardness;
+                        g_input->brush_spacing  = g_input->per_brush[(int)BrushType::SMOOTH].spacing;
                         g_input->smooth_locked = true;
                     } else {
                         g_input->clear_smooth_lock();
