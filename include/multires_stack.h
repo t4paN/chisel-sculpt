@@ -39,6 +39,23 @@ struct MultiresStack {
     std::vector<uint32_t> base_mirror;
     std::vector<std::vector<uint32_t>> mirror;
 
+    // Finest-level paint planes. Canonical Loop numbering nests vertex ids
+    // across levels (level-K verts are exactly [0, V_K) at every finer level),
+    // so ONE array sized for L_max = base_level + disp.size() carries paint for
+    // EVERY level: the working array at level K is the [0, V_K) prefix.
+    // Empty = feature unused (no paint / no mask). Written by
+    // multires_sync_paint (diff working prefix, re-interpolate descendants of
+    // changed verts), read back by cascade_to_level. NOT touched by projection
+    // snapshots — paint has its own undo category.
+    std::vector<uint32_t> color;
+    std::vector<float>    mask;
+
+    // midpoint_parents[k]: for each midpoint vertex of the mesh at level
+    // (base_level + k + 1), its two parent vertex ids at level (base_level + k)
+    // — 2 ids per midpoint, midpoints indexed from V_k. Topology-only, built
+    // lazily (captured during cascade, or replayed on demand); cleared on lock.
+    std::vector<std::vector<uint32_t>> midpoint_parents;
+
     // Absolute subdivision level the user is currently editing at.
     int current_level = 0;
 
@@ -57,11 +74,23 @@ void multires_stack_debug_print(const MultiresStack& stack);
 // Tangent = direction to lowest-indexed neighbor, projected onto tangent plane.
 void compute_frames(const Mesh& m, std::vector<Frame>& out);
 
+// Fold the working mesh's paint (colour + mask) into the stack's finest-level
+// planes. Call BEFORE any cascade that rebuilds the working surface. Diffs the
+// working prefix against the stored plane and re-interpolates only the
+// descendants of changed verts up to L_max — untouched fine detail survives
+// exactly; repainted regions cover smoothly. The working level is derived from
+// working.vertex_count() (robust when current_level was already moved). An
+// empty working mask clears the mask plane (a cleared mask must not
+// resurrect); an empty working colour leaves the colour plane alone.
+void multires_sync_paint(MultiresStack& stack, const Mesh& working);
+
 // Rebuild `out` to the stack's surface at absolute level K.
 // Preconditions: stack.locked == true, base_level <= K <= MULTIRES_MAX_LEVEL.
 // Runs (K - base_level) Loop passes from stack.base, lazily zero-fills disp[k] and
 // frames[k], computes frames on the pre-displacement surface, then applies disp[k]
-// in local-frame coordinates.
+// in local-frame coordinates. out.color/out.mask are filled from the stack's
+// finest-level paint planes ([0, V_K) prefix; extended first if disp grew) —
+// cleared when the corresponding plane is empty.
 // Rebuilds CSR adjacency on `out`. Mirror map NOT rebuilt — caller must do that.
 void cascade_to_level(MultiresStack& stack, Mesh& out, int K);
 

@@ -2008,7 +2008,10 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
 
     audit_open_edges(mesh, seam_tol, "post-mirror");
 
-    // Replace multires stack
+    // Replace multires stack (fresh level-0 lock on the new topology). Paint
+    // planes restart from the remeshed surface: colour survived the remesh
+    // (edge ops interpolate it), the mask dies with the old topology
+    // (main.cpp clears mesh.mask right after).
     stack.base          = mesh;
     stack.base_level    = 0;
     stack.current_level = 0;
@@ -2016,6 +2019,12 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
     stack.frames.clear();
     stack.mirror.clear();
     stack.base_mirror.clear();
+    stack.midpoint_parents.clear();
+    stack.color = mesh.color;
+    if (!stack.color.empty()) stack.color.resize(mesh.vertex_count(), 0xFFFFFFFFu);
+    stack.mask.clear();
+    stack.base.color.clear();
+    stack.base.mask.clear();
     stack.locked = true;
 
     auto t1 = std::chrono::steady_clock::now();

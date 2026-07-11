@@ -2,6 +2,27 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-11 — Full paint/mask fidelity across subdiv levels
+
+- Vertex paint and the sculpt mask now keep their exact shape across multires
+  level changes. Instead of folding down to the base cage and interpolating
+  back up (which clamped everything to ~base resolution on a down-and-up round
+  trip), one array at the stack's finest level carries paint for every level —
+  canonical Loop numbering nests vertex ids, so a coarser level is simply a
+  prefix of it. Fine-level detail survives level switches untouched.
+- Coarse repaints still cover cleanly: before each cascade the working surface
+  is diffed against the stored plane and only the descendants of changed verts
+  are re-interpolated — no stale speckle over repainted regions, no blur
+  anywhere else.
+- Mask clear/invert stay consistent with the fine plane (clear drops it
+  entirely; invert flips it elementwise — exact, since midpoint averaging is
+  linear).
+- Project format bumped to v5: the paint planes are saved per locked mesh, so
+  fidelity now survives save/load too. Older files load as before at
+  current-level fidelity.
+- Fixed along the way: on multi-entity level switches the active entity kept a
+  stale wrong-sized colour array (same latent bug the mask had before v0.1.17).
+
 ## 2026-07-11 — Mask persists across subdiv level changes
 
 - The sculpt mask now survives multires level switches (D / Shift-D), riding

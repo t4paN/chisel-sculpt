@@ -664,31 +664,11 @@ int main(int argc, char* argv[]) {
     glfwGetWindowPos(window, &windowed_x, &windowed_y);
     glfwGetWindowSize(window, &windowed_w, &windowed_h);
 
-    // Fold the working mesh's vertex paint AND sculpt mask into the multires
-    // base before a cascade. cascade_to_level rebuilds the surface from
-    // stack.base, so paint/mask only survive a level change if base carries
-    // them. Loop keeps the original verts as the [0, base.vcount) prefix at
-    // every level, so the prefix of the working array IS the base array
-    // (model B: single array, interpolate up — fine-level midpoint detail
-    // blurs to base on round-trip). Unlike colour, an empty working mask
-    // clears the base copy — a cleared mask must not resurrect on cascade.
-    auto sync_paint_to_base = [](const Mesh& working, MultiresStack& stk) {
-        uint32_t vb = stk.base.vertex_count();
-        if (!working.color.empty()) {
-            stk.base.color.assign(
-                working.color.begin(),
-                working.color.begin() + std::min<size_t>(vb, working.color.size()));
-            stk.base.color.resize(vb, 0xFFFFFFFFu);
-        }
-        if (working.mask.empty()) {
-            stk.base.mask.clear();
-        } else {
-            stk.base.mask.assign(
-                working.mask.begin(),
-                working.mask.begin() + std::min<size_t>(vb, working.mask.size()));
-            stk.base.mask.resize(vb, 0.0f);
-        }
-    };
+    // Paint/mask persistence across cascades lives in the multires stack's
+    // finest-level planes: multires_sync_paint (multires_stack.cpp) folds the
+    // working arrays in before a cascade, cascade_to_level reads the prefix
+    // back out. Full fidelity — fine-level detail survives level round-trips
+    // exactly; a coarse repaint re-interpolates only the region it touched.
 
     // Main loop. The body is a lambda capturing every setup local by reference so the
     // same code drives both targets: native spins it in a blocking while-loop; the web
@@ -967,10 +947,10 @@ int main(int argc, char* argv[]) {
                 }
                 scene.active_undo().push(std::move(lvl_e));
                 multires->current_level = target;
-                sync_paint_to_base(*mesh, *multires);
+                multires_sync_paint(*multires, *mesh);
                 if (scene.alive_count() <= 1) {
-                    // Mask rides the cascade (fold-to-base + Loop interpolation,
-                    // same as colour) — no save/restore needed across the rebuild.
+                    // Paint/mask ride the cascade (finest-level planes) — no
+                    // save/restore needed across the rebuild.
                     cascade_to_level(*multires, *mesh, target);
                     scene.refresh_mirror_map();
                     scene.sync();  // rebinds active: rebuilds adjacency from new topology
@@ -1538,6 +1518,11 @@ int main(int argc, char* argv[]) {
                     }
                     mesh->mask[v] = new_val;
                 }
+                // Invert the finest-level plane too: midpoint averaging is
+                // linear (avg(1-a,1-b) == 1-avg(a,b)), so an elementwise flip
+                // keeps every level consistent — fine detail inverts in place
+                // instead of being re-interpolated from the coarse prefix.
+                for (float& mv : multires->mask) mv = 1.0f - mv;
                 renderer.update_mask(*mesh);
                 if (!mask_e.verts.empty())
                     scene.active_undo().push(std::move(mask_e));
@@ -1546,6 +1531,10 @@ int main(int argc, char* argv[]) {
             // Mask clear (Ctrl+A when mask brush is active)
             if (input.mask_clear_requested) {
                 input.mask_clear_requested = false;
+                // Drop the finest-level plane outright: clearing only the
+                // working prefix would leave fine-level detail to resurrect
+                // on the next level switch.
+                multires->mask.clear();
                 if (!mesh->mask.empty()) {
                     UndoEntry mask_e;
                     mask_e.kind      = UndoEntry::Kind::MASK;
@@ -1579,7 +1568,7 @@ int main(int argc, char* argv[]) {
                 // every other rebuild path already runs first (level-switch/remesh/merge).
                 scene.materialize_active_cpu();
                 MeshEntity& ent = scene.active_entity();
-                sync_paint_to_base(ent.mesh, ent.multires);
+                multires_sync_paint(ent.multires, ent.mesh);
                 // Same-level cascade: restore the working mask verbatim after the
                 // rebuild (exact — no fold/interpolate round-trip blur).
                 auto saved_mask = std::move(ent.mesh.mask);
@@ -1643,7 +1632,7 @@ int main(int argc, char* argv[]) {
                     scene.active_undo().push(std::move(e));
                     print_undo_top("project");
 
-                    sync_paint_to_base(*mesh, *multires);
+                    multires_sync_paint(*multires, *mesh);
                     if (scene.alive_count() <= 1) {
                         auto saved_mask = std::move(mesh->mask);
                         cascade_to_level(*multires, *mesh, multires->current_level);

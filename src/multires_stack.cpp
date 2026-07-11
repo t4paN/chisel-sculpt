@@ -73,6 +73,165 @@ static void build_fine_mirror(
 #endif
 }
 
+// ---------------------------------------------------------------------------
+// Finest-level paint planes (colour + mask)
+// ---------------------------------------------------------------------------
+
+// Vertex count of the mesh at level (base_level + k). disp[k] is sized per
+// level, so the counts come free of any topology replay.
+static uint32_t level_vcount(const MultiresStack& s, int k) {
+    return k == 0 ? s.base.vertex_count() : (uint32_t)s.disp[k - 1].size();
+}
+
+// Vertex count at L_max — the size a non-empty paint plane must have.
+static uint32_t plane_vcount(const MultiresStack& s) {
+    return level_vcount(s, (int)s.disp.size());
+}
+
+// k such that level_vcount(s, k) == vc, or -1. V strictly grows per level, so
+// the match is unique.
+static int level_index_for_vcount(const MultiresStack& s, uint32_t vc) {
+    for (int k = 0; k <= (int)s.disp.size(); k++)
+        if (level_vcount(s, k) == vc) return k;
+    return -1;
+}
+
+// Recover the edge->midpoint parent pairs from loop_subdivide's fixed Pass-4
+// layout (same trick as build_fine_mirror above): fine_idx[t*12+1] is the
+// midpoint of coarse edge (a,b), [+4] of (b,c), [+7] of (c,a).
+static void build_parent_map(uint32_t                     V_coarse,
+                             const std::vector<uint32_t>& coarse_idx,
+                             const std::vector<uint32_t>& fine_idx,
+                             uint32_t                     V_fine,
+                             std::vector<uint32_t>&       out) {
+    out.assign((size_t)(V_fine - V_coarse) * 2, UINT32_MAX);
+    const uint32_t F = (uint32_t)(coarse_idx.size() / 3);
+    for (uint32_t t = 0; t < F; t++) {
+        uint32_t a = coarse_idx[t*3+0], b = coarse_idx[t*3+1], c = coarse_idx[t*3+2];
+        uint32_t ab = fine_idx[t*12+1], bc = fine_idx[t*12+4], ca = fine_idx[t*12+7];
+        out[(size_t)(ab - V_coarse)*2] = a; out[(size_t)(ab - V_coarse)*2+1] = b;
+        out[(size_t)(bc - V_coarse)*2] = b; out[(size_t)(bc - V_coarse)*2+1] = c;
+        out[(size_t)(ca - V_coarse)*2] = c; out[(size_t)(ca - V_coarse)*2+1] = a;
+    }
+}
+
+// Make sure midpoint_parents[0 .. up_to_k) exist. Normally captured for free
+// during cascade_to_level's replay; this fallback replays the subdivision from
+// base for the gap case (e.g. paint sync right after load, before any cascade
+// has walked the upper levels). One-shot — maps are cached until relock.
+static void ensure_parent_maps(MultiresStack& s, int up_to_k) {
+    bool complete = (int)s.midpoint_parents.size() >= up_to_k;
+    for (int k = 0; complete && k < up_to_k; k++)
+        if (s.midpoint_parents[k].empty()) complete = false;
+    if (complete) return;
+
+    Mesh m = s.base;
+    for (int k = 0; k < up_to_k; k++) {
+        uint32_t Vc = m.vertex_count();
+        std::vector<uint32_t> cidx = m.indices;
+        m.build_adjacency();
+        m = loop_subdivide(m);
+        if ((int)s.midpoint_parents.size() <= k) s.midpoint_parents.emplace_back();
+        if (s.midpoint_parents[k].empty())
+            build_parent_map(Vc, cidx, m.indices, m.vertex_count(), s.midpoint_parents[k]);
+    }
+}
+
+// Midpoint-interpolate a plane's levels (k_from, k_to]: every midpoint at each
+// level gets the average of its two parents. Parent maps must exist.
+template <typename T, typename AVG>
+static void interpolate_plane_up(std::vector<T>& plane, const MultiresStack& s,
+                                 int k_from, int k_to, AVG avg) {
+    for (int k = k_from; k < k_to; k++) {
+        const std::vector<uint32_t>& par = s.midpoint_parents[k];
+        const uint32_t Vc = level_vcount(s, k);
+        const size_t   n  = par.size() / 2;
+        for (size_t mi = 0; mi < n; mi++)
+            plane[Vc + mi] = avg(plane[par[mi*2]], plane[par[mi*2 + 1]]);
+    }
+}
+
+// Grow non-empty planes to V(L_max) when disp gained layers since the plane
+// was last touched — new fine verts start as interpolation of the level below,
+// exactly like disp zero-fill.
+static void extend_planes(MultiresStack& s) {
+    const uint32_t V_top = plane_vcount(s);
+    const int      k_top = (int)s.disp.size();
+    auto extend = [&](auto& plane, auto def, auto avg) {
+        if (plane.empty() || plane.size() >= V_top) return;
+        int k_from = level_index_for_vcount(s, (uint32_t)plane.size());
+        if (k_from < 0) { plane.clear(); return; }   // stale size — drop, don't guess
+        ensure_parent_maps(s, k_top);
+        plane.resize(V_top, def);
+        interpolate_plane_up(plane, s, k_from, k_top, avg);
+    };
+    extend(s.color, (uint32_t)0xFFFFFFFFu,
+           [](uint32_t a, uint32_t b) { return color_avg(a, b); });
+    extend(s.mask, 0.0f,
+           [](float a, float b) { return 0.5f * (a + b); });
+}
+
+// Diff the working array's prefix against the plane and re-interpolate only
+// the descendants of changed verts — the linear pass + touched-region walk
+// that makes coarse repaint cover smoothly while untouched fine detail
+// survives exactly. Initialises the plane from the working array when empty.
+template <typename T, typename AVG>
+static void sync_plane(std::vector<T>& plane, const std::vector<T>& work,
+                       uint32_t Vw, MultiresStack& s, int kw, T def, AVG avg) {
+    const int      k_top = (int)s.disp.size();
+    const uint32_t V_top = plane_vcount(s);
+
+    if (plane.empty()) {
+        ensure_parent_maps(s, k_top);
+        plane.assign(V_top, def);
+        for (uint32_t v = 0; v < Vw; v++)
+            plane[v] = (v < (uint32_t)work.size()) ? work[v] : def;
+        interpolate_plane_up(plane, s, kw, k_top, avg);
+        return;
+    }
+
+    bool any = false;
+    std::vector<uint8_t> changed(V_top, 0);
+    for (uint32_t v = 0; v < Vw; v++) {
+        T wv = (v < (uint32_t)work.size()) ? work[v] : def;
+        if (!(plane[v] == wv)) { plane[v] = wv; changed[v] = 1; any = true; }
+    }
+    if (!any) return;
+
+    ensure_parent_maps(s, k_top);
+    for (int k = kw; k < k_top; k++) {
+        const std::vector<uint32_t>& par = s.midpoint_parents[k];
+        const uint32_t Vc = level_vcount(s, k);
+        const size_t   n  = par.size() / 2;
+        for (size_t mi = 0; mi < n; mi++) {
+            uint32_t p0 = par[mi*2], p1 = par[mi*2 + 1];
+            if (changed[p0] | changed[p1]) {
+                plane[Vc + mi]   = avg(plane[p0], plane[p1]);
+                changed[Vc + mi] = 1;
+            }
+        }
+    }
+}
+
+void multires_sync_paint(MultiresStack& stack, const Mesh& working) {
+    if (!stack.locked) return;
+    const uint32_t Vw = working.vertex_count();
+    const int      kw = level_index_for_vcount(stack, Vw);
+    if (kw < 0) return;   // working mesh is not a stack level — nothing to fold
+
+    extend_planes(stack);  // disp may have grown since the planes were touched
+
+    if (!working.color.empty())
+        sync_plane(stack.color, working.color, Vw, stack, kw, (uint32_t)0xFFFFFFFFu,
+                   [](uint32_t a, uint32_t b) { return color_avg(a, b); });
+
+    if (working.mask.empty())
+        stack.mask.clear();    // a cleared mask must not resurrect on cascade
+    else
+        sync_plane(stack.mask, working.mask, Vw, stack, kw, 0.0f,
+                   [](float a, float b) { return 0.5f * (a + b); });
+}
+
 void multires_stack_init_from_lock(MultiresStack& stack,
                                    const Mesh& locked_mesh,
                                    int icosphere_level) {
@@ -82,7 +241,18 @@ void multires_stack_init_from_lock(MultiresStack& stack,
     stack.disp.clear();
     stack.frames.clear();
     stack.mirror.clear();
+    stack.midpoint_parents.clear();
     stack.locked = true;
+
+    // Paint lives in the finest-level planes, not in base — at lock the
+    // whole working array IS the prefix. Strip base's copies so cascades
+    // don't carry a second, stale source of paint.
+    stack.color = locked_mesh.color;
+    if (!stack.color.empty()) stack.color.resize(locked_mesh.vertex_count(), 0xFFFFFFFFu);
+    stack.mask = locked_mesh.mask;
+    if (!stack.mask.empty()) stack.mask.resize(locked_mesh.vertex_count(), 0.0f);
+    stack.base.color.clear();
+    stack.base.mask.clear();
 
     build_mirror_spatial(stack.base, stack.base_mirror);
 
@@ -169,6 +339,13 @@ void cascade_to_level(MultiresStack& stack, Mesh& out, int K) {
             compute_frames(m, stack.frames[i]);
         }
 
+        // Lazy midpoint->parents capture for the paint planes (topology-only,
+        // recovered from the Pass-4 layout — free while we're replaying anyway).
+        if ((int)stack.midpoint_parents.size() <= i) stack.midpoint_parents.emplace_back();
+        if (stack.midpoint_parents[i].empty())
+            build_parent_map(V_coarse, coarse_idx, m.indices,
+                             m.vertex_count(), stack.midpoint_parents[i]);
+
         // Lazy topology mirror propagation.
         if ((int)stack.mirror.size() <= i) stack.mirror.emplace_back();
         if (stack.mirror[i].empty() && !stack.base_mirror.empty()) {
@@ -191,6 +368,19 @@ void cascade_to_level(MultiresStack& stack, Mesh& out, int K) {
     m.recompute_normals();
     m.build_adjacency();    // CSR for post-switch brush ops
     out = std::move(m);
+
+    // Paint rides the finest-level planes: the working array at level K is the
+    // [0, V_K) prefix. Extend first — the pass loop above may have grown disp.
+    extend_planes(stack);
+    const uint32_t V_K = out.vertex_count();
+    if (!stack.color.empty())
+        out.color.assign(stack.color.begin(), stack.color.begin() + V_K);
+    else
+        out.color.clear();
+    if (!stack.mask.empty())
+        out.mask.assign(stack.mask.begin(), stack.mask.begin() + V_K);
+    else
+        out.mask.clear();
 
     // Populate topology mirror map in the output mesh. Sync the topo stamp so
     // the persistent-map gate in refresh_mirror_map treats the cached map as

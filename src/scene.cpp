@@ -424,6 +424,11 @@ void Scene::load_entities(std::vector<EntityRecord>& records,
                 up->mesh.mask = std::move(saved_mask);
             if (!saved_color.empty() && saved_color.size() == up->mesh.vertex_count())
                 up->mesh.color = std::move(saved_color);
+            // Reconcile the finest-level paint planes with the cached surface:
+            // for v5 files this is a no-op diff; for older files (no planes on
+            // disk) it initialises them from the working mesh at current-level
+            // fidelity — the same fallback pattern the v3->v4 migration uses.
+            multires_sync_paint(up->multires, up->mesh);
         }
         up->mesh.recompute_normals();
         up->mesh.build_adjacency();
@@ -600,10 +605,12 @@ void Scene::splice_active(const Mesh& replacement) {
     e->mesh.norm_y  = replacement.norm_y;
     e->mesh.norm_z  = replacement.norm_z;
     e->mesh.indices = replacement.indices;
-    // Cascade output is authoritative for the mask: it carries the base-derived
-    // (or caller-restored) mask, and an empty one means "no mask" — copying it
-    // unconditionally also drops stale wrong-sized masks after a level change.
-    e->mesh.mask = replacement.mask;
+    // Cascade output is authoritative for mask AND colour: it carries the
+    // plane-derived (or caller-restored) arrays, and an empty one means "none".
+    // Copying unconditionally also drops stale wrong-sized arrays after a
+    // multi-entity level change (colour previously kept the old level's array).
+    e->mesh.mask  = replacement.mask;
+    e->mesh.color = replacement.color;
     e->mesh.build_adjacency();
     e->mesh.recompute_normals();
     // sync() → bind_active_ re-uploads the working buffers + adjacency/mirror

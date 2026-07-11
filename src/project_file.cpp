@@ -15,7 +15,13 @@ static constexpr uint32_t MAGIC   = 0x4C534843; // "CHSL" little-endian
 // layers are encoded under the CANONICAL (sorted-edge-key) midpoint numbering
 // of loop_subdivide, which is platform-independent. v<=3 disp data used the
 // stdlib hash-map iteration order of whatever platform saved the file.
-static constexpr uint32_t VERSION = 4;
+// v5 appends the finest-level paint planes (colour count+data, mask
+// count+data) to each locked multires body, after the disp layers — full
+// paint/mask fidelity across levels survives save/load. The v3 base-colour
+// field remains in the layout but is written empty (paint lives in the
+// planes now). Older files load with empty planes; scene.cpp initialises
+// them from the cached working surface (current-level fidelity).
+static constexpr uint32_t VERSION = 5;
 
 struct ChunkHeader {
     char     tag[4];
@@ -92,6 +98,13 @@ static void write_multires_body(std::ofstream& f, const MultiresStack& s) {
         if (nv > 0)
             write_raw(f, s.disp[k].data(), nv * sizeof(Vec3));
     }
+    // v5: finest-level paint planes (count then data, empty when unused).
+    uint32_t pcc = (uint32_t)s.color.size();
+    write_u32(f, pcc);
+    if (pcc > 0) write_raw(f, s.color.data(), pcc * sizeof(uint32_t));
+    uint32_t pmc = (uint32_t)s.mask.size();
+    write_u32(f, pmc);
+    if (pmc > 0) write_floats(f, s.mask.data(), pmc);
 }
 
 static void write_camr_chunk(std::ofstream& f, const Camera& c) {
@@ -206,7 +219,8 @@ static bool read_mesh_body(ChunkReader& r, Mesh& m, bool has_color) {
     return true;
 }
 
-static bool read_multires_body(ChunkReader& r, MultiresStack& s, bool has_color) {
+static bool read_multires_body(ChunkReader& r, MultiresStack& s, bool has_color,
+                               bool has_planes) {
     uint8_t locked_byte;
     if (!r.read_u8(locked_byte)) return false;
     s.locked = (locked_byte != 0);
@@ -248,6 +262,23 @@ static bool read_multires_body(ChunkReader& r, MultiresStack& s, bool has_color)
         s.mirror[k].clear();
     }
     s.base_mirror.clear();
+    s.midpoint_parents.clear();
+    // v5: finest-level paint planes. Non-empty planes must be sized for L_max
+    // (= last disp layer's vertex count, or the base when no layers); anything
+    // else is dropped — scene.cpp re-initialises planes from the cached
+    // working surface, same as a pre-v5 load.
+    s.color.clear();
+    s.mask.clear();
+    if (has_planes) {
+        const size_t v_top = num_layers ? s.disp[num_layers - 1].size() : (size_t)bvc;
+        uint32_t pcc, pmc;
+        if (!r.read_u32(pcc)) return false;
+        if (pcc > 0 && !r.read_u32_vec(s.color, pcc)) return false;
+        if (!r.read_u32(pmc)) return false;
+        if (pmc > 0 && !r.read_float_vec(s.mask, pmc)) return false;
+        if (!s.color.empty() && s.color.size() != v_top) s.color.clear();
+        if (!s.mask.empty()  && s.mask.size()  != v_top) s.mask.clear();
+    }
     return true;
 }
 
@@ -288,18 +319,21 @@ static bool read_scen_chunk(ChunkReader& r, ProjectData& d) {
     return true;
 }
 
-static bool read_enty_chunk(ChunkReader& r, EntityRecord& e, bool has_color) {
+static bool read_enty_chunk(ChunkReader& r, EntityRecord& e, bool has_color,
+                            bool has_planes) {
     if (!r.read_u32(e.id) || !r.read_u32(e.subdiv_level)) return false;
     if (!read_mesh_body(r, e.mesh, has_color)) return false;
-    if (!read_multires_body(r, e.multires, has_color)) return false;
+    if (!read_multires_body(r, e.multires, has_color, has_planes)) return false;
     return true;
 }
 
-// v2/v3 reader: file already validated (magic ok, version 2 or 3) and `f`
-// positioned just past the 8-byte header. The only difference is v3 carries
-// per-vertex paint colour in each mesh body, gated by has_color.
+// v2+ reader: file already validated (magic + version ok) and `f` positioned
+// just past the 8-byte header. Layout differences are feature-gated: v3+
+// carries per-vertex paint colour in each mesh body (has_color), v5+ carries
+// finest-level paint planes in each locked multires body (has_planes).
 static LoadResult load_project_v2(std::ifstream& f, std::streamoff file_size,
-                                  ProjectData& data, bool has_color) {
+                                  ProjectData& data, bool has_color,
+                                  bool has_planes) {
     bool has_scen = false;
 
     while ((std::streamoff)f.tellg() < file_size) {
@@ -319,7 +353,7 @@ static LoadResult load_project_v2(std::ifstream& f, std::streamoff file_size,
 
         if (std::memcmp(hdr.tag, "ENTY", 4) == 0) {
             EntityRecord e;
-            if (!read_enty_chunk(cr, e, has_color)) return LoadResult::ERR_CORRUPT;
+            if (!read_enty_chunk(cr, e, has_color, has_planes)) return LoadResult::ERR_CORRUPT;
             data.entities.push_back(std::move(e));
         } else if (std::memcmp(hdr.tag, "SCEN", 4) == 0) {
             if (!read_scen_chunk(cr, data)) return LoadResult::ERR_CORRUPT;
@@ -364,8 +398,9 @@ LoadResult load_project(const char* path, ProjectData& data) {
     if (version == 1) {
         lr = load_project_v1(path, data);
     } else {
-        if (version < 2 || version > 4) return LoadResult::ERR_VERSION;
-        lr = load_project_v2(f, (std::streamoff)file_size, data, version >= 3);
+        if (version < 2 || version > VERSION) return LoadResult::ERR_VERSION;
+        lr = load_project_v2(f, (std::streamoff)file_size, data,
+                             version >= 3, version >= 5);
     }
 
     // v<=3 multires disp layers are indexed under the saving platform's legacy
