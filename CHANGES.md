@@ -2,6 +2,22 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-11 — Mask persists across subdiv level changes
+
+- The sculpt mask now survives multires level switches (D / Shift-D), riding
+  the same rails as vertex paint: it's folded into the multires base before a
+  cascade and carried up through Loop subdivision (originals keep their exact
+  value, midpoints average their two parents). Previously any level change
+  silently dropped the mask.
+- Clearing the mask sticks: an empty mask clears the base copy too, so a
+  cleared mask can't resurrect on the next level switch.
+- Same-level rebuilds (undo below view level, projection) keep the mask
+  verbatim — no interpolation blur where none is needed.
+- Fixed along the way: on multi-entity level switches the active entity kept a
+  stale wrong-sized mask; the cascade output is now authoritative.
+- Same trade-off as paint (model B): mask detail painted at a fine level blurs
+  to base resolution on a down-and-back-up round trip.
+
 ## 2026-07-11 — Alphas restricted to Draw/Mask/Paint; per-brush spacing
 
 - Brush alphas (stamps) now apply to Draw, Mask, and Paint only. Every other

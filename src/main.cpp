@@ -664,19 +664,30 @@ int main(int argc, char* argv[]) {
     glfwGetWindowPos(window, &windowed_x, &windowed_y);
     glfwGetWindowSize(window, &windowed_w, &windowed_h);
 
-    // Fold the working mesh's vertex paint into the multires base before a
-    // cascade. cascade_to_level rebuilds the surface from stack.base, so paint
-    // only survives a level change if base.color carries it. Loop keeps the
-    // original verts as the [0, base.vcount) prefix at every level, so the
-    // prefix of the working colour IS the base colour (model B: single array,
-    // interpolate up — fine-level midpoint paint blurs to base on round-trip).
-    auto sync_color_to_base = [](const Mesh& working, MultiresStack& stk) {
-        if (working.color.empty()) return;
+    // Fold the working mesh's vertex paint AND sculpt mask into the multires
+    // base before a cascade. cascade_to_level rebuilds the surface from
+    // stack.base, so paint/mask only survive a level change if base carries
+    // them. Loop keeps the original verts as the [0, base.vcount) prefix at
+    // every level, so the prefix of the working array IS the base array
+    // (model B: single array, interpolate up — fine-level midpoint detail
+    // blurs to base on round-trip). Unlike colour, an empty working mask
+    // clears the base copy — a cleared mask must not resurrect on cascade.
+    auto sync_paint_to_base = [](const Mesh& working, MultiresStack& stk) {
         uint32_t vb = stk.base.vertex_count();
-        stk.base.color.assign(
-            working.color.begin(),
-            working.color.begin() + std::min<size_t>(vb, working.color.size()));
-        stk.base.color.resize(vb, 0xFFFFFFFFu);
+        if (!working.color.empty()) {
+            stk.base.color.assign(
+                working.color.begin(),
+                working.color.begin() + std::min<size_t>(vb, working.color.size()));
+            stk.base.color.resize(vb, 0xFFFFFFFFu);
+        }
+        if (working.mask.empty()) {
+            stk.base.mask.clear();
+        } else {
+            stk.base.mask.assign(
+                working.mask.begin(),
+                working.mask.begin() + std::min<size_t>(vb, working.mask.size()));
+            stk.base.mask.resize(vb, 0.0f);
+        }
     };
 
     // Main loop. The body is a lambda capturing every setup local by reference so the
@@ -956,12 +967,11 @@ int main(int argc, char* argv[]) {
                 }
                 scene.active_undo().push(std::move(lvl_e));
                 multires->current_level = target;
-                sync_color_to_base(*mesh, *multires);
+                sync_paint_to_base(*mesh, *multires);
                 if (scene.alive_count() <= 1) {
-                    auto saved_mask = std::move(mesh->mask);
+                    // Mask rides the cascade (fold-to-base + Loop interpolation,
+                    // same as colour) — no save/restore needed across the rebuild.
                     cascade_to_level(*multires, *mesh, target);
-                    if (!saved_mask.empty() && saved_mask.size() == mesh->vertex_count())
-                        mesh->mask = std::move(saved_mask);
                     scene.refresh_mirror_map();
                     scene.sync();  // rebinds active: rebuilds adjacency from new topology
                 } else {
@@ -1569,7 +1579,9 @@ int main(int argc, char* argv[]) {
                 // every other rebuild path already runs first (level-switch/remesh/merge).
                 scene.materialize_active_cpu();
                 MeshEntity& ent = scene.active_entity();
-                sync_color_to_base(ent.mesh, ent.multires);
+                sync_paint_to_base(ent.mesh, ent.multires);
+                // Same-level cascade: restore the working mask verbatim after the
+                // rebuild (exact — no fold/interpolate round-trip blur).
                 auto saved_mask = std::move(ent.mesh.mask);
                 Mesh solo;
                 cascade_to_level(ent.multires, solo, ent.multires.current_level);
@@ -1631,7 +1643,7 @@ int main(int argc, char* argv[]) {
                     scene.active_undo().push(std::move(e));
                     print_undo_top("project");
 
-                    sync_color_to_base(*mesh, *multires);
+                    sync_paint_to_base(*mesh, *multires);
                     if (scene.alive_count() <= 1) {
                         auto saved_mask = std::move(mesh->mask);
                         cascade_to_level(*multires, *mesh, multires->current_level);
@@ -1640,8 +1652,13 @@ int main(int argc, char* argv[]) {
                         scene.refresh_mirror_map();
                         scene.sync();
                     } else {
+                        // Same-level cascade — keep the exact working mask (see
+                        // the undo cascade above).
+                        auto saved_mask = std::move(mesh->mask);
                         Mesh solo;
                         cascade_to_level(*multires, solo, multires->current_level);
+                        if (!saved_mask.empty() && saved_mask.size() == solo.vertex_count())
+                            solo.mask = std::move(saved_mask);
                         scene.splice_active(solo);
                         scene.refresh_mirror_map();
                     }

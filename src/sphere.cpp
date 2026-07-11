@@ -57,6 +57,14 @@ Mesh loop_subdivide(const Mesh& input, bool legacy_numbering) {
         for (uint32_t i = 0; i < V; i++) out.color[i] = input.color[i];
     }
 
+    // Same ride for the sculpt mask (may be shorter than V — zero-pad).
+    const bool has_mask = !input.mask.empty();
+    if (has_mask) {
+        out.mask.resize(outV, 0.0f);
+        for (uint32_t i = 0; i < V && i < (uint32_t)input.mask.size(); i++)
+            out.mask[i] = input.mask[i];
+    }
+
     // Pass 2: assign indices and positions to edge-midpoint vertices.
     // Canonical numbering: edges in sorted-key order — bit-identical on every
     // platform. Legacy numbering (v<=3 files) is the raw unordered_map iteration
@@ -77,6 +85,11 @@ Mesh loop_subdivide(const Mesh& input, bool legacy_numbering) {
         }
         out.set_pos(d.new_vert, pos);
         if (has_color) out.color[d.new_vert] = color_avg(input.color[v0], input.color[v1]);
+        if (has_mask) {
+            float m0 = (v0 < (uint32_t)input.mask.size()) ? input.mask[v0] : 0.0f;
+            float m1 = (v1 < (uint32_t)input.mask.size()) ? input.mask[v1] : 0.0f;
+            out.mask[d.new_vert] = 0.5f * (m0 + m1);
+        }
     };
     uint32_t next_vert = V;
     if (legacy_numbering) {

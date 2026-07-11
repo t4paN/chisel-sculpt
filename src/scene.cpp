@@ -600,8 +600,10 @@ void Scene::splice_active(const Mesh& replacement) {
     e->mesh.norm_y  = replacement.norm_y;
     e->mesh.norm_z  = replacement.norm_z;
     e->mesh.indices = replacement.indices;
-    if (!replacement.mask.empty())
-        e->mesh.mask = replacement.mask;
+    // Cascade output is authoritative for the mask: it carries the base-derived
+    // (or caller-restored) mask, and an empty one means "no mask" — copying it
+    // unconditionally also drops stale wrong-sized masks after a level change.
+    e->mesh.mask = replacement.mask;
     e->mesh.build_adjacency();
     e->mesh.recompute_normals();
     // sync() → bind_active_ re-uploads the working buffers + adjacency/mirror
