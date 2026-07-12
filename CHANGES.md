@@ -2,6 +2,20 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-12 — Colour-jumble hunt prep: upload clamp + paint audit logs
+
+- Partial colour/mask VBO uploads now skip vertex ids beyond the current
+  level's vertex count. Undo entries recorded at another level could hand the
+  uploader out-of-range ids; on WebGPU an out-of-bounds buffer write is a
+  validation error that can take down the whole GPU device (a candidate for
+  the reported crash-like event). When the clamp fires it logs a
+  `[paint-audit]` line — that alone confirms one of the jumble leads.
+- `[paint-audit]` instrumentation for the colour-jumble live-debug session:
+  every cascade logs its paint-plane sizes, every paint sync logs how many
+  verts changed and how many descendants were re-interpolated, and every
+  paint/mask undo apply logs the entry size and max vertex id vs the current
+  vertex count. Visible in the browser console (F12) on the web build.
+
 ## 2026-07-11 — Full paint/mask fidelity across subdiv levels
 
 - Vertex paint and the sculpt mask now keep their exact shape across multires

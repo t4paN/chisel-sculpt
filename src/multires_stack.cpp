@@ -175,9 +175,14 @@ static void extend_planes(MultiresStack& s) {
 // the descendants of changed verts — the linear pass + touched-region walk
 // that makes coarse repaint cover smoothly while untouched fine detail
 // survives exactly. Initialises the plane from the working array when empty.
+// [paint-audit] fold telemetry: how many working verts differed from the plane
+// and how many descendants got re-interpolated. A huge `changed` right after a
+// small stroke = a stale working array being folded in (the jumble suspects).
+struct PaintSyncCounts { uint32_t changed = 0; uint32_t propagated = 0; };
+
 template <typename T, typename AVG>
-static void sync_plane(std::vector<T>& plane, const std::vector<T>& work,
-                       uint32_t Vw, MultiresStack& s, int kw, T def, AVG avg) {
+static PaintSyncCounts sync_plane(std::vector<T>& plane, const std::vector<T>& work,
+                                  uint32_t Vw, MultiresStack& s, int kw, T def, AVG avg) {
     const int      k_top = (int)s.disp.size();
     const uint32_t V_top = plane_vcount(s);
 
@@ -187,16 +192,16 @@ static void sync_plane(std::vector<T>& plane, const std::vector<T>& work,
         for (uint32_t v = 0; v < Vw; v++)
             plane[v] = (v < (uint32_t)work.size()) ? work[v] : def;
         interpolate_plane_up(plane, s, kw, k_top, avg);
-        return;
+        return { Vw, V_top - Vw };
     }
 
-    bool any = false;
+    PaintSyncCounts counts;
     std::vector<uint8_t> changed(V_top, 0);
     for (uint32_t v = 0; v < Vw; v++) {
         T wv = (v < (uint32_t)work.size()) ? work[v] : def;
-        if (!(plane[v] == wv)) { plane[v] = wv; changed[v] = 1; any = true; }
+        if (!(plane[v] == wv)) { plane[v] = wv; changed[v] = 1; counts.changed++; }
     }
-    if (!any) return;
+    if (!counts.changed) return counts;
 
     ensure_parent_maps(s, k_top);
     for (int k = kw; k < k_top; k++) {
@@ -208,28 +213,49 @@ static void sync_plane(std::vector<T>& plane, const std::vector<T>& work,
             if (changed[p0] | changed[p1]) {
                 plane[Vc + mi]   = avg(plane[p0], plane[p1]);
                 changed[Vc + mi] = 1;
+                counts.propagated++;
             }
         }
     }
+    return counts;
 }
 
 void multires_sync_paint(MultiresStack& stack, const Mesh& working) {
     if (!stack.locked) return;
     const uint32_t Vw = working.vertex_count();
     const int      kw = level_index_for_vcount(stack, Vw);
-    if (kw < 0) return;   // working mesh is not a stack level — nothing to fold
+    if (kw < 0) {
+        // working mesh is not a stack level — nothing to fold. Should never
+        // fire mid-session; if it does, a fold got silently skipped.
+        std::printf("[paint-audit] sync SKIP: Vw %u matches no stack level\n", Vw);
+        return;
+    }
 
     extend_planes(stack);  // disp may have grown since the planes were touched
 
+    const bool color_init = stack.color.empty();
+    PaintSyncCounts cc, mc;
     if (!working.color.empty())
-        sync_plane(stack.color, working.color, Vw, stack, kw, (uint32_t)0xFFFFFFFFu,
-                   [](uint32_t a, uint32_t b) { return color_avg(a, b); });
+        cc = sync_plane(stack.color, working.color, Vw, stack, kw, (uint32_t)0xFFFFFFFFu,
+                        [](uint32_t a, uint32_t b) { return color_avg(a, b); });
 
-    if (working.mask.empty())
+    const bool mask_init = stack.mask.empty();
+    bool mask_cleared = false;
+    if (working.mask.empty()) {
+        mask_cleared = !stack.mask.empty();
         stack.mask.clear();    // a cleared mask must not resurrect on cascade
-    else
-        sync_plane(stack.mask, working.mask, Vw, stack, kw, 0.0f,
-                   [](float a, float b) { return 0.5f * (a + b); });
+    } else {
+        mc = sync_plane(stack.mask, working.mask, Vw, stack, kw, 0.0f,
+                        [](float a, float b) { return 0.5f * (a + b); });
+    }
+
+    std::printf("[paint-audit] sync L%d (Vw %u): color %u changed / %u prop%s,"
+                " mask %u / %u%s%s\n",
+                stack.base_level + kw, Vw, cc.changed, cc.propagated,
+                (color_init && !working.color.empty()) ? " (init)" : "",
+                mc.changed, mc.propagated,
+                (mask_init && !working.mask.empty()) ? " (init)" : "",
+                mask_cleared ? " (plane cleared)" : "");
 }
 
 void multires_stack_init_from_lock(MultiresStack& stack,
@@ -381,6 +407,12 @@ void cascade_to_level(MultiresStack& stack, Mesh& out, int K) {
         out.mask.assign(stack.mask.begin(), stack.mask.begin() + V_K);
     else
         out.mask.clear();
+
+    // [paint-audit] a non-empty plane must be exactly V(L_max) — anything else
+    // means the prefix handed to the working mesh is misaligned.
+    std::printf("[paint-audit] cascade L%d: V_K %u, color plane %zu/%u, mask %zu/%u\n",
+                K, V_K, stack.color.size(), plane_vcount(stack),
+                stack.mask.size(), plane_vcount(stack));
 
     // Populate topology mirror map in the output mesh. Sync the topo stamp so
     // the persistent-map gate in refresh_mirror_map treats the cached map as

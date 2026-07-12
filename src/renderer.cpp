@@ -1339,6 +1339,17 @@ void Renderer::update_mask_verts(const Mesh& mesh, const std::vector<uint32_t>& 
     std::sort(sorted.begin(), sorted.end());
     sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
 
+    // The working VBO is sized for the current level; ids past vertex_count are
+    // stale (another level's) and on WebGPU an OOB writeBuffer can kill the device.
+    const uint32_t vc = mesh.vertex_count();
+    if (sorted.back() >= vc) {
+        size_t keep = std::lower_bound(sorted.begin(), sorted.end(), vc) - sorted.begin();
+        std::printf("[paint-audit] mask upload CLAMP: %zu/%zu ids >= vcount %u (max %u)\n",
+                    sorted.size() - keep, sorted.size(), vc, sorted.back());
+        sorted.resize(keep);
+        if (sorted.empty()) return;
+    }
+
     static std::vector<float> buf;
     size_t i = 0, n = sorted.size();
     while (i < n) {
@@ -1397,6 +1408,16 @@ void Renderer::update_color_verts(const Mesh& mesh, const std::vector<uint32_t>&
     sorted = verts;
     std::sort(sorted.begin(), sorted.end());
     sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
+
+    // Same OOB guard as update_mask_verts — stale ids must not reach writeBuffer.
+    const uint32_t vc = mesh.vertex_count();
+    if (sorted.back() >= vc) {
+        size_t keep = std::lower_bound(sorted.begin(), sorted.end(), vc) - sorted.begin();
+        std::printf("[paint-audit] color upload CLAMP: %zu/%zu ids >= vcount %u (max %u)\n",
+                    sorted.size() - keep, sorted.size(), vc, sorted.back());
+        sorted.resize(keep);
+        if (sorted.empty()) return;
+    }
 
     static std::vector<uint32_t> buf;
     bool has = !mesh.color.empty();

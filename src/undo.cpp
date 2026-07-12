@@ -148,6 +148,18 @@ bool UndoStack::apply(UndoEntry& e, MeshEntity& ent, Scene& scene, bool forward)
     Mesh&          mesh     = ent.mesh;
     MultiresStack& multires = ent.multires;
 
+    // [paint-audit] a max id >= current vcount means this entry's ids belong to
+    // another level — the writes below clamp, but the entry itself is misrouted.
+    if (e.kind == UndoEntry::Kind::MASK || e.kind == UndoEntry::Kind::PAINT) {
+        uint32_t max_id = 0;
+        for (uint32_t v : e.verts) if (v > max_id) max_id = v;
+        std::printf("[paint-audit] undo %s %s: %zu verts, max id %u / vcount %u%s\n",
+                    e.kind == UndoEntry::Kind::MASK ? "MASK" : "PAINT",
+                    forward ? "redo" : "undo", e.verts.size(), max_id,
+                    mesh.vertex_count(),
+                    max_id >= mesh.vertex_count() ? "  ** OOB — Lead 1 **" : "");
+    }
+
     if (e.kind == UndoEntry::Kind::MASK) {
         const std::vector<float>& target = forward ? e.new_mask : e.old_mask;
         if (mesh.mask.empty()) mesh.mask.assign(mesh.vertex_count(), 0.0f);
