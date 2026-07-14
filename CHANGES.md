@@ -2,6 +2,26 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-14 — Density paint (chunk 1 of 3): the field + painting
+
+- Paint mode gains a **Colour | Density** target. Density paints a per-vertex
+  remesh-density field (0 = coarse, 1 = dense, unpainted = neutral 0.5) that
+  the upcoming adaptive remesher will consume — artist paints where the
+  triangle budget goes. While the density target is active the viewport shows
+  the field as a green→yellow→red colormap instead of albedo; Ctrl lowers,
+  Shift smooths, alphas apply, X-mirror works — the brush pair is a clone of
+  the mask kernels (GLSL + WGSL).
+- Full fidelity plumbing from day one: the field rides its own finest-level
+  multires plane (like colour/mask since v0.1.18), survives level switches,
+  subdivision, isotropic remesh (edge ops interpolate it), has its own undo
+  category, and serializes in `.chisel` **v6** (older files load as unpainted;
+  v6 files refuse cleanly in older builds).
+- Not yet consumed: remesh output is unchanged until chunk 2 (adaptive sizing)
+  lands. Headless tests green (`density-plane-test.cpp`: plane fold, cascade
+  round-trip, empty-field invisibility, v6 byte-exact round-trip; both
+  existing paint/mask tests still pass); density pipelines compile on GL,
+  native WebGPU, and web.
+
 ## 2026-07-14 — Subdivision guard: refuse over-limit levels instead of crashing
 
 - Going up a subdivision level now predicts the largest resulting GPU buffer

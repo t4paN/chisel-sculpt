@@ -171,6 +171,20 @@ bool UndoStack::apply(UndoEntry& e, MeshEntity& ent, Scene& scene, bool forward)
         return false;
     }
 
+    if (e.kind == UndoEntry::Kind::DENSITY) {
+        // Same float pair as MASK entries; neutral default is 0.5, not 0.
+        const std::vector<float>& target = forward ? e.new_mask : e.old_mask;
+        if (mesh.density.empty()) mesh.density.assign(mesh.vertex_count(), 0.5f);
+        else if (mesh.density.size() < mesh.vertex_count())
+            mesh.density.resize(mesh.vertex_count(), 0.5f);
+        for (size_t k = 0; k < e.verts.size(); ++k) {
+            uint32_t v = e.verts[k];
+            if (v < (uint32_t)mesh.density.size()) mesh.density[v] = target[k];
+        }
+        scene.sync_density_partial_entity(ent.id, e.verts);
+        return false;
+    }
+
     if (e.kind == UndoEntry::Kind::PAINT) {
         const std::vector<uint32_t>& target = forward ? e.new_color : e.old_color;
         if (mesh.color.empty()) mesh.color.assign(mesh.vertex_count(), 0xFFFFFFFFu);

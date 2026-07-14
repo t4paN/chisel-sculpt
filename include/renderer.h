@@ -24,6 +24,9 @@ struct Renderer {
     // set-once GL alias relied on stable-handle realloc, which WebGPU doesn't have).
     gpu::Buffer vbo_mask;      // per-vertex sculpt mask values (0..1)
     gpu::Buffer vbo_color;     // per-vertex albedo, packed RGBA8 (paint)
+    gpu::Buffer vbo_density;   // per-vertex remesh-density field (0..1, 0.5 neutral);
+                               // storage-only in practice (never a draw attribute —
+                               // the density view colormaps into vbo_color instead)
     gpu::Buffer ebo;
 
     // Matcap shader — on the gpu:: seam. Loose uniforms (uView/uProj/facing/
@@ -109,6 +112,8 @@ struct Renderer {
     void upload_mesh(const Mesh& mesh);
     void update_mask(const Mesh& mesh);
     void update_mask_partial(const Mesh& mesh, const std::vector<uint32_t>& dirty_verts);
+    void update_density(const Mesh& mesh);
+    void update_density_verts(const Mesh& mesh, const std::vector<uint32_t>& verts);
     void update_color(const Mesh& mesh);
     void update_color_partial(const Mesh& mesh, const std::vector<uint32_t>& dirty_verts);
 

@@ -369,6 +369,11 @@ static uint32_t split_long_edges(Mesh& m, EdgeTable& et,
                 uint32_t cb = (vb < (uint32_t)m.color.size()) ? m.color[vb] : 0xFFFFFFFFu;
                 m.color.push_back(color_avg(ca, cb));
             }
+            if (!m.density.empty()) {
+                float da = (va < (uint32_t)m.density.size()) ? m.density[va] : 0.5f;
+                float db = (vb < (uint32_t)m.density.size()) ? m.density[vb] : 0.5f;
+                m.density.push_back((da + db) * 0.5f);
+            }
 
             uint32_t tris_to_split[2] = { se.tri_a, se.tri_b };
             for (uint32_t tri : tris_to_split) {
@@ -976,6 +981,15 @@ static void compact_mesh(Mesh& m, std::vector<float>* aux) {
             new_color[remap[i]] = m.color[i];
         }
         m.color = std::move(new_color);
+    }
+
+    if (!m.density.empty()) {
+        std::vector<float> new_density(new_count, 0.5f);
+        for (uint32_t i = 0; i < vc && i < (uint32_t)m.density.size(); i++) {
+            if (remap[i] == INVALID) continue;
+            new_density[remap[i]] = m.density[i];
+        }
+        m.density = std::move(new_density);
     }
 
     if (aux && !aux->empty()) {
@@ -2023,8 +2037,13 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
     stack.color = mesh.color;
     if (!stack.color.empty()) stack.color.resize(mesh.vertex_count(), 0xFFFFFFFFu);
     stack.mask.clear();
+    // Density survives like colour (edge ops interpolate it) — it exists to
+    // steer exactly this kind of restructuring, so it must outlive it.
+    stack.density = mesh.density;
+    if (!stack.density.empty()) stack.density.resize(mesh.vertex_count(), 0.5f);
     stack.base.color.clear();
     stack.base.mask.clear();
+    stack.base.density.clear();
     stack.locked = true;
 
     auto t1 = std::chrono::steady_clock::now();

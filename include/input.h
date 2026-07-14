@@ -62,6 +62,10 @@ struct InputState {
     // Show vertex paint in the viewport. Toggle (next to the Paint icon) lets you
     // hide albedo while sculpting; the paint brush always forces it visible.
     bool paint_visible;
+    // Paint-brush target: false = albedo (colour), true = the remesh-density field.
+    // While true the viewport shows colormap(density) instead of albedo (green =
+    // coarse, red = dense); main.cpp owns the enter/exit colour-VBO swap.
+    bool paint_target_density = false;
 
     // Slider drag mode (S/W/A/O key held + dragging)
     enum class SliderMode { NONE, SIZE, STRENGTH, HARDNESS, SPACING };

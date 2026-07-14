@@ -59,6 +59,12 @@ struct Mesh {
     // it is creative work, not a transient selection. 0xFFFFFFFF = white.
     std::vector<uint32_t> color;
 
+    // Remesh-density field: per-vertex 0..1 (0 = coarse, 1 = dense), painted in
+    // Paint mode (density target) and consumed by the adaptive remesher. Empty =
+    // unpainted = implicit 0.5 everywhere (neutral: remesh behaves exactly as a
+    // uniform target). Carried by interpolation like color.
+    std::vector<float> density;
+
     uint32_t vertex_count() const { return (uint32_t)pos_x.size(); }
     uint32_t tri_count() const { return (uint32_t)(indices.size() / 3); }
 

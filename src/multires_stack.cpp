@@ -169,6 +169,8 @@ static void extend_planes(MultiresStack& s) {
            [](uint32_t a, uint32_t b) { return color_avg(a, b); });
     extend(s.mask, 0.0f,
            [](float a, float b) { return 0.5f * (a + b); });
+    extend(s.density, 0.5f,
+           [](float a, float b) { return 0.5f * (a + b); });
 }
 
 // Diff the working array's prefix against the plane and re-interpolate only
@@ -249,6 +251,12 @@ void multires_sync_paint(MultiresStack& stack, const Mesh& working) {
                         [](float a, float b) { return 0.5f * (a + b); });
     }
 
+    // Density folds like colour: an empty working array means "feature unused",
+    // never "cleared" (there is no density-clear op), so the plane is left alone.
+    if (!working.density.empty())
+        sync_plane(stack.density, working.density, Vw, stack, kw, 0.5f,
+                   [](float a, float b) { return 0.5f * (a + b); });
+
     std::printf("[paint-audit] sync L%d (Vw %u): color %u changed / %u prop%s,"
                 " mask %u / %u%s%s\n",
                 stack.base_level + kw, Vw, cc.changed, cc.propagated,
@@ -277,8 +285,11 @@ void multires_stack_init_from_lock(MultiresStack& stack,
     if (!stack.color.empty()) stack.color.resize(locked_mesh.vertex_count(), 0xFFFFFFFFu);
     stack.mask = locked_mesh.mask;
     if (!stack.mask.empty()) stack.mask.resize(locked_mesh.vertex_count(), 0.0f);
+    stack.density = locked_mesh.density;
+    if (!stack.density.empty()) stack.density.resize(locked_mesh.vertex_count(), 0.5f);
     stack.base.color.clear();
     stack.base.mask.clear();
+    stack.base.density.clear();
 
     build_mirror_spatial(stack.base, stack.base_mirror);
 
@@ -407,6 +418,10 @@ void cascade_to_level(MultiresStack& stack, Mesh& out, int K) {
         out.mask.assign(stack.mask.begin(), stack.mask.begin() + V_K);
     else
         out.mask.clear();
+    if (!stack.density.empty())
+        out.density.assign(stack.density.begin(), stack.density.begin() + V_K);
+    else
+        out.density.clear();
 
     // [paint-audit] a non-empty plane must be exactly V(L_max) — anything else
     // means the prefix handed to the working mesh is misaligned.

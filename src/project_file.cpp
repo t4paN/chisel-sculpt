@@ -21,7 +21,10 @@ static constexpr uint32_t MAGIC   = 0x4C534843; // "CHSL" little-endian
 // field remains in the layout but is written empty (paint lives in the
 // planes now). Older files load with empty planes; scene.cpp initialises
 // them from the cached working surface (current-level fidelity).
-static constexpr uint32_t VERSION = 5;
+// v6 appends the remesh-density field: per-vertex f32 in each mesh body and a
+// finest-level density plane in each locked multires body (both count+data,
+// empty when unpainted). Older files load with no field (= neutral 0.5).
+static constexpr uint32_t VERSION = 6;
 
 struct ChunkHeader {
     char     tag[4];
@@ -72,6 +75,10 @@ static void write_mesh_body(std::ofstream& f, const Mesh& m) {
     uint32_t cc = (uint32_t)m.color.size();
     write_u32(f, cc);
     if (cc > 0) write_raw(f, m.color.data(), cc * sizeof(uint32_t));
+    // v6: remesh-density field (count then data, empty when unpainted).
+    uint32_t dc = (uint32_t)m.density.size();
+    write_u32(f, dc);
+    if (dc > 0) write_floats(f, m.density.data(), dc);
 }
 
 static void write_multires_body(std::ofstream& f, const MultiresStack& s) {
@@ -105,6 +112,10 @@ static void write_multires_body(std::ofstream& f, const MultiresStack& s) {
     uint32_t pmc = (uint32_t)s.mask.size();
     write_u32(f, pmc);
     if (pmc > 0) write_floats(f, s.mask.data(), pmc);
+    // v6: finest-level density plane.
+    uint32_t pdc = (uint32_t)s.density.size();
+    write_u32(f, pdc);
+    if (pdc > 0) write_floats(f, s.density.data(), pdc);
 }
 
 static void write_camr_chunk(std::ofstream& f, const Camera& c) {
@@ -193,7 +204,7 @@ public:
     }
 };
 
-static bool read_mesh_body(ChunkReader& r, Mesh& m, bool has_color) {
+static bool read_mesh_body(ChunkReader& r, Mesh& m, bool has_color, bool has_density) {
     uint32_t vc, tc;
     if (!r.read_u32(vc) || !r.read_u32(tc)) return false;
     if (!r.read_float_vec(m.pos_x, vc)) return false;
@@ -213,6 +224,12 @@ static bool read_mesh_body(ChunkReader& r, Mesh& m, bool has_color) {
         if (!r.read_u32(cc)) return false;
         if (cc > 0 && !r.read_u32_vec(m.color, cc)) return false;
     }
+    m.density.clear();
+    if (has_density) {
+        uint32_t dc;
+        if (!r.read_u32(dc)) return false;
+        if (dc > 0 && !r.read_float_vec(m.density, dc)) return false;
+    }
     m.norm_x.resize(vc, 0.0f); m.norm_y.resize(vc, 0.0f); m.norm_z.resize(vc, 0.0f);
     m.mirror_x_map.clear();
     m.vert_tri_offset.clear(); m.vert_tri_list.clear();
@@ -220,7 +237,7 @@ static bool read_mesh_body(ChunkReader& r, Mesh& m, bool has_color) {
 }
 
 static bool read_multires_body(ChunkReader& r, MultiresStack& s, bool has_color,
-                               bool has_planes) {
+                               bool has_planes, bool has_density) {
     uint8_t locked_byte;
     if (!r.read_u8(locked_byte)) return false;
     s.locked = (locked_byte != 0);
@@ -269,6 +286,7 @@ static bool read_multires_body(ChunkReader& r, MultiresStack& s, bool has_color,
     // working surface, same as a pre-v5 load.
     s.color.clear();
     s.mask.clear();
+    s.density.clear();
     if (has_planes) {
         const size_t v_top = num_layers ? s.disp[num_layers - 1].size() : (size_t)bvc;
         uint32_t pcc, pmc;
@@ -278,6 +296,13 @@ static bool read_multires_body(ChunkReader& r, MultiresStack& s, bool has_color,
         if (pmc > 0 && !r.read_float_vec(s.mask, pmc)) return false;
         if (!s.color.empty() && s.color.size() != v_top) s.color.clear();
         if (!s.mask.empty()  && s.mask.size()  != v_top) s.mask.clear();
+        // v6: density plane, same size validation.
+        if (has_density) {
+            uint32_t pdc;
+            if (!r.read_u32(pdc)) return false;
+            if (pdc > 0 && !r.read_float_vec(s.density, pdc)) return false;
+            if (!s.density.empty() && s.density.size() != v_top) s.density.clear();
+        }
     }
     return true;
 }
@@ -320,20 +345,21 @@ static bool read_scen_chunk(ChunkReader& r, ProjectData& d) {
 }
 
 static bool read_enty_chunk(ChunkReader& r, EntityRecord& e, bool has_color,
-                            bool has_planes) {
+                            bool has_planes, bool has_density) {
     if (!r.read_u32(e.id) || !r.read_u32(e.subdiv_level)) return false;
-    if (!read_mesh_body(r, e.mesh, has_color)) return false;
-    if (!read_multires_body(r, e.multires, has_color, has_planes)) return false;
+    if (!read_mesh_body(r, e.mesh, has_color, has_density)) return false;
+    if (!read_multires_body(r, e.multires, has_color, has_planes, has_density)) return false;
     return true;
 }
 
 // v2+ reader: file already validated (magic + version ok) and `f` positioned
 // just past the 8-byte header. Layout differences are feature-gated: v3+
 // carries per-vertex paint colour in each mesh body (has_color), v5+ carries
-// finest-level paint planes in each locked multires body (has_planes).
+// finest-level paint planes in each locked multires body (has_planes), v6+
+// the remesh-density field in both (has_density).
 static LoadResult load_project_v2(std::ifstream& f, std::streamoff file_size,
                                   ProjectData& data, bool has_color,
-                                  bool has_planes) {
+                                  bool has_planes, bool has_density) {
     bool has_scen = false;
 
     while ((std::streamoff)f.tellg() < file_size) {
@@ -353,7 +379,7 @@ static LoadResult load_project_v2(std::ifstream& f, std::streamoff file_size,
 
         if (std::memcmp(hdr.tag, "ENTY", 4) == 0) {
             EntityRecord e;
-            if (!read_enty_chunk(cr, e, has_color, has_planes)) return LoadResult::ERR_CORRUPT;
+            if (!read_enty_chunk(cr, e, has_color, has_planes, has_density)) return LoadResult::ERR_CORRUPT;
             data.entities.push_back(std::move(e));
         } else if (std::memcmp(hdr.tag, "SCEN", 4) == 0) {
             if (!read_scen_chunk(cr, data)) return LoadResult::ERR_CORRUPT;
@@ -400,7 +426,7 @@ LoadResult load_project(const char* path, ProjectData& data) {
     } else {
         if (version < 2 || version > VERSION) return LoadResult::ERR_VERSION;
         lr = load_project_v2(f, (std::streamoff)file_size, data,
-                             version >= 3, version >= 5);
+                             version >= 3, version >= 5, version >= 6);
     }
 
     // v<=3 multires disp layers are indexed under the saving platform's legacy

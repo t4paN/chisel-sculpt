@@ -65,6 +65,14 @@ Mesh loop_subdivide(const Mesh& input, bool legacy_numbering) {
             out.mask[i] = input.mask[i];
     }
 
+    // And the remesh-density field (neutral 0.5 where absent).
+    const bool has_density = !input.density.empty();
+    if (has_density) {
+        out.density.resize(outV, 0.5f);
+        for (uint32_t i = 0; i < V && i < (uint32_t)input.density.size(); i++)
+            out.density[i] = input.density[i];
+    }
+
     // Pass 2: assign indices and positions to edge-midpoint vertices.
     // Canonical numbering: edges in sorted-key order — bit-identical on every
     // platform. Legacy numbering (v<=3 files) is the raw unordered_map iteration
@@ -89,6 +97,11 @@ Mesh loop_subdivide(const Mesh& input, bool legacy_numbering) {
             float m0 = (v0 < (uint32_t)input.mask.size()) ? input.mask[v0] : 0.0f;
             float m1 = (v1 < (uint32_t)input.mask.size()) ? input.mask[v1] : 0.0f;
             out.mask[d.new_vert] = 0.5f * (m0 + m1);
+        }
+        if (has_density) {
+            float d0 = (v0 < (uint32_t)input.density.size()) ? input.density[v0] : 0.5f;
+            float d1 = (v1 < (uint32_t)input.density.size()) ? input.density[v1] : 0.5f;
+            out.density[d.new_vert] = 0.5f * (d0 + d1);
         }
     };
     uint32_t next_vert = V;

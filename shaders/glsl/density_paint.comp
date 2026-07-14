@@ -1,0 +1,87 @@
+// density_paint.comp — GLSL 430 sibling of shaders/wgsl/density_paint.wgsl.
+// Same kernel, same ComputeBinding bindings, same std140 Params UBO at binding 63
+// (byte-identical to MaskParamsGPU). The dual-backend gpu:: seam compiles this on
+// the GL backend and the .wgsl on WebGPU; the two must stay in lockstep.
+#version 430
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0)  readonly buffer PosBuf  { float positions[]; };
+layout(std430, binding = 41)          buffer DensityBuf { float density_buf[]; };
+layout(std430, binding = 6)           buffer DirtyBuf { uint count; uint ids[]; } dirty;
+
+// std140 UBO — matches density_paint.wgsl's Params and the C++ MaskParamsGPU (48 bytes).
+layout(std140, binding = 63) uniform Params {
+    vec3  anchor_a;        // 0..11
+    float world_radius;    // 12
+    vec3  anchor_b;        // 16..27
+    float hardness;        // 28
+    float paint_strength;  // 32
+    uint  use_b;           // 36
+    uint  vertex_count;    // 40
+    uint  _pad0;           // 44
+} P;
+
+// --- shared brush-alpha stamp (keep byte-identical across every dab kernel) ---
+layout(std430, binding = 40) readonly buffer AlphaBuf { float alpha_tex[]; };
+layout(std140, binding = 62) uniform AlphaParams {
+    vec3 tangent;   float inv_diameter;
+    vec3 bitangent; uint enabled;
+    uint tex_w; uint tex_h; uint _apad0; uint _apad1;
+} AP;
+float alpha_bilinear(float u, float v) {
+    int W = int(AP.tex_w); int H = int(AP.tex_h);
+    float fx = u * float(W) - 0.5; float fy = v * float(H) - 0.5;
+    int x0 = int(floor(fx)); int y0 = int(floor(fy));
+    float tx = fx - float(x0); float ty = fy - float(y0);
+    int x1 = clamp(x0 + 1, 0, W - 1); int y1 = clamp(y0 + 1, 0, H - 1);
+    x0 = clamp(x0, 0, W - 1); y0 = clamp(y0, 0, H - 1);
+    float c00 = alpha_tex[y0 * W + x0]; float c10 = alpha_tex[y0 * W + x1];
+    float c01 = alpha_tex[y1 * W + x0]; float c11 = alpha_tex[y1 * W + x1];
+    return mix(mix(c00, c10, tx), mix(c01, c11, tx), ty);
+}
+float sample_alpha(vec3 rel, uint mirrored) {
+    if (AP.enabled == 0u) return 1.0;
+    vec3 tang = AP.tangent; vec3 bitan = AP.bitangent;
+    if (mirrored != 0u) { tang.x = -tang.x; bitan.x = -bitan.x; }
+    float u = dot(rel, tang) * AP.inv_diameter + 0.5;
+    float v = dot(rel, bitan) * AP.inv_diameter + 0.5;
+    if (u < 0.0 || u > 1.0 || v < 0.0 || v > 1.0) return 0.0;
+    return alpha_bilinear(u, v);
+}
+// --- end shared brush-alpha stamp ---
+
+float brush_falloff(float dist, float radius) {
+    float t = dist / radius;
+    float inner = 0.15 + P.hardness * 0.55;
+    if (t <= inner) return 1.0;
+    float blend = (t - inner) / (1.0 - inner + 1e-6);
+    blend = blend * blend * (3.0 - 2.0 * blend);
+    return 1.0 - blend;
+}
+
+void try_paint(uint v, vec3 anchor, vec3 vp, uint mirrored) {
+    if (P.use_b != 0u && anchor.x * vp.x < 0.0) return;
+    float dist = length(vp - anchor);
+    if (dist >= P.world_radius) return;
+    float w = brush_falloff(dist, P.world_radius);
+    w *= sample_alpha(vp - anchor, mirrored);
+    if (w <= 0.0) return;
+
+    float delta = P.paint_strength * w;
+    float old_val = density_buf[v];
+    float new_val = clamp(old_val + delta, 0.0, 1.0);
+    if (new_val == old_val) return;
+
+    density_buf[v] = new_val;
+    uint idx = atomicAdd(dirty.count, 1u);
+    dirty.ids[idx] = v;
+}
+
+void main() {
+    uint v = gl_GlobalInvocationID.x;
+    if (v >= P.vertex_count) return;
+
+    vec3 vp = vec3(positions[v*3u], positions[v*3u + 1u], positions[v*3u + 2u]);
+    try_paint(v, P.anchor_a, vp, 0u);
+    if (P.use_b != 0u) try_paint(v, P.anchor_b, vp, 1u);
+}

@@ -49,6 +49,7 @@ struct MultiresStack {
     // snapshots — paint has its own undo category.
     std::vector<uint32_t> color;
     std::vector<float>    mask;
+    std::vector<float>    density;   // remesh-density field; empty = unpainted (0.5 neutral)
 
     // midpoint_parents[k]: for each midpoint vertex of the mesh at level
     // (base_level + k + 1), its two parent vertex ids at level (base_level + k)

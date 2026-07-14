@@ -121,7 +121,7 @@ struct BrushStroke {
     // snap/normals bookkeeping that used to happen synchronously per dab. The CPU
     // mesh stays pen-down-stale for the whole stroke, so the delayed snapshot
     // captures the same pre-stroke values it always did.
-    enum : uint8_t { DAB_GEO = 0, DAB_MASK = 1, DAB_COLOR = 2 };
+    enum : uint8_t { DAB_GEO = 0, DAB_MASK = 1, DAB_COLOR = 2, DAB_DENSITY = 3 };
     struct PendingDab {
         gpu::ReadTicket tk = 0;
         uint32_t words = 0;
@@ -150,6 +150,7 @@ struct BrushStroke {
     MoveState move;
     MaskState mask;
     ColorState color;
+    MaskState density;   // density-field stroke state — same scalar shape as mask
 
     // RETAINED: Adjacency flood for Move capture + Mask (delete when both get GPU shaders)
 
@@ -182,6 +183,10 @@ struct BrushStroke {
     // Set true when GPU paint shader wrote to vbo_color directly. mesh.color is
     // stale until finalize reads back the changed values (display VAO + undo).
     bool gpu_color_deferred;
+
+    // Set true when the GPU density brush wrote to vbo_density directly. mesh.density
+    // is stale until finalize reads back the changed values for undo commit.
+    bool gpu_density_deferred;
 
     StrokePhase phase = StrokePhase::NONE;
     bool needs_mesh_update = false;
@@ -262,6 +267,12 @@ struct BrushStroke {
     // GPU paint-smooth: the smooth gesture (shift / double-shift) while a paint
     // brush is active — blends vertex colours toward their neighbour average
     // instead of smoothing geometry. Shares the paint undo-snap path.
+    void apply_density_gpu(DabContext& ctx, float dab_x, float dab_y,
+                           float strength, float hardness, bool invert);
+
+    void apply_density_smooth_gpu(DabContext& ctx, float dab_x, float dab_y,
+                                  float strength, float hardness);
+
     void apply_color_smooth_gpu(DabContext& ctx, float dab_x, float dab_y,
                                 float strength, float hardness);
 
@@ -283,8 +294,9 @@ struct BrushStroke {
     bool fin_ring_captured = false;
     BrushType fin_brush_type = BrushType::DRAW;   // captured at the first tick —
     bool      fin_autosmooth = false;             // input can change mid-reconcile
-    gpu::ReadTicket fin_pos_tk = 0, fin_mask_tk = 0, fin_color_tk = 0, fin_norm_tk = 0;
-    std::vector<float>    fin_pos_buf, fin_mask_buf, fin_norm_buf;  // persistent
+    gpu::ReadTicket fin_pos_tk = 0, fin_mask_tk = 0, fin_color_tk = 0, fin_norm_tk = 0,
+                    fin_density_tk = 0;
+    std::vector<float>    fin_pos_buf, fin_mask_buf, fin_norm_buf, fin_density_buf;  // persistent
     std::vector<uint32_t> fin_color_buf;
     std::vector<float>    fin_gpu_diff_chk;   // CHISEL_DEBUG_MULTIRES stage-1 snapshot
 
@@ -300,6 +312,7 @@ struct BrushStroke {
 
     // Commit paint stroke as an undo entry. Call before end().
     void commit_color_undo(const Mesh& mesh, UndoStack& stack);
+    void commit_density_undo(const Mesh& mesh, UndoStack& stack);
 
     // Apply accumulated mask changes to the mesh, return list of dirty vertices
     void apply_mask_changes(Mesh& mesh, std::vector<uint32_t>& dirty_verts_out);

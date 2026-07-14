@@ -49,6 +49,7 @@ enum ComputeBinding : GLuint {
     BIND_SDF_FWN_NODES     = 38, // FwnNode[] BVH+dipole tree for the fast winding-number sign pass
     BIND_SDF_FWN_TRIORDER  = 39, // uint   leaf-contiguous triangle order (sign pass exact-leaf fetch)
     BIND_ALPHA_TEX         = 40, // float  brush-alpha bitmap (w*h, row-major, 0..1) — shared dab stamp
+    BIND_DENSITY           = 41, // float  per-vertex remesh-density field (0=coarse .. 1=dense, 0.5 neutral)
     BIND_ALPHA_PARAMS      = 62, // 48-byte AlphaParams UBO (per-dab stamp frame) — shared dab stamp
     // Reserved high slot for the per-dispatch std140 Params UBO that replaces loose
     // GL uniforms on the gpu:: seam (see webgpu-port-plan.md / CONVENTIONS.md). Every
@@ -266,6 +267,17 @@ struct ComputeState {
     gpu::Buffer          mask_params_ubo;
     gpu::Buffer          mask_smooth_ubo;    // 48-byte block, same shape as mask_paint's
 
+    // Density brush — the remesh-density field painted in Paint mode (density
+    // target). Kernel pair cloned from the mask brush (same Params shape, buffer
+    // swapped to BIND_DENSITY); density_colormap writes colormap(density) into the
+    // display colour VBO for the field view. has_density_kernels() reports readiness.
+    gpu::ComputePipeline density_pipeline;
+    gpu::ComputePipeline density_smooth_pipeline;
+    gpu::ComputePipeline density_colormap_pipeline;
+    gpu::Buffer          density_params_ubo;
+    gpu::Buffer          density_smooth_ubo;
+    gpu::Buffer          density_colormap_ubo;   // 16-byte {vertex_count}
+
     // Paint brush — ported onto the gpu:: seam (Seam Step 2b). Buffer-only: writes the
     // colour VBO/SSBO directly (lerp-to-colour) and the paint-smooth blends each vertex
     // colour toward its 1-ring neighbour average. paint carries a 64-byte std140 Params
@@ -373,6 +385,10 @@ struct ComputeState {
     // writes packed RGBA8 directly into the display VBO. Same refresh contract as
     // mask_ssbo; not owned here.
     gpu::Buffer color_ssbo;
+
+    // Density SSBO: alias (non-owning copy) of renderer.vbo_density. Same refresh
+    // contract as mask_ssbo; not owned here.
+    gpu::Buffer density_ssbo;
 
     // Dirty vertex list SSBO (uploaded per dispatch, used by compute_normals) — seam-owned (Step 2 cont)
     gpu::Buffer dirty_verts_ssbo;
@@ -582,12 +598,15 @@ struct ComputeState {
 
     // Compile the mask brush compute shader. Called once at init.
     bool init_mask();
+    bool init_density();
     bool init_color();
 
     // Is the mask kernel compiled and ready? (replaces the old `mask_paint_program`
     // truthiness check now that the program lives behind the gpu:: seam.)
     bool has_mask() const { return mask_pipeline.handle != 0; }
     bool has_mask_smooth() const { return mask_smooth_pipeline.handle != 0; }
+    bool has_density_kernels() const { return density_pipeline.handle != 0; }
+    bool has_density_smooth() const { return density_smooth_pipeline.handle != 0; }
 
     // Draw-brush readiness (replaces draw_*_program truthiness checks). has_draw()
     // gates the whole draw path; has_draw_symmetrize() gates the mirror-symmetry pass.
@@ -629,6 +648,12 @@ struct ComputeState {
     // Mask-smooth: reuses MaskPaintParams (paint_strength = blend amount). Averages
     // neighbour mask values via CSR adjacency; geometry untouched.
     void dispatch_mask_smooth(const MaskPaintParams& params, const gpu::Buffer& pos_vbo, const gpu::Buffer& index_ebo);
+    // Density brush: same Params shape as the mask pair (paint_strength sign = raise
+    // vs lower). dispatch_density_colormap paints colormap(density) into the display
+    // colour VBO (full pass — the density-view refresh, run per dab and on entry).
+    void dispatch_density_paint(const MaskPaintParams& params, const gpu::Buffer& pos_vbo);
+    void dispatch_density_smooth(const MaskPaintParams& params, const gpu::Buffer& pos_vbo, const gpu::Buffer& index_ebo);
+    void dispatch_density_colormap(uint32_t vertex_count);
     void dispatch_color_paint(const ColorPaintParams& params, const gpu::Buffer& pos_vbo);
     // Paint-smooth: reuses ColorPaintParams (paint_strength = blend amount,
     // paint_r/g/b ignored). Averages neighbour colours via CSR adjacency.

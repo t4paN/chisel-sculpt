@@ -233,6 +233,7 @@ add_executable(chisel
     src/compute_move.cpp
     src/compute_limb.cpp
     src/compute_mask.cpp
+    src/compute_density.cpp
     src/compute_color.cpp
     src/compute_alpha.cpp
     src/compute_remesh.cpp

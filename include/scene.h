@@ -63,6 +63,8 @@ public:
                              const std::vector<uint32_t>& local_dirty);
 
     // Partial mask sync: active → patch working mask buffer; inactive → display.
+    void sync_density_partial_entity(uint32_t entity_id,
+                                     const std::vector<uint32_t>& local_dirty);
     void sync_mask_partial_entity(uint32_t entity_id,
                                   const std::vector<uint32_t>& local_dirty);
 

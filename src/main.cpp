@@ -518,6 +518,7 @@ int main(int argc, char* argv[]) {
         compute.init_move();
         compute.init_limb();
         compute.init_mask();
+        compute.init_density();
         compute.init_color();
         compute.init_compute_normals();
         compute.init_multires_diff();
@@ -655,6 +656,9 @@ int main(int argc, char* argv[]) {
     // level-switch input (D mashed during the freeze) is swallowed once, so a
     // slow build can't queue a pile of further builds.
     bool swallow_level_switch = false;
+    // True while the viewport shows colormap(density) instead of albedo (paint
+    // brush with the density target). Tracks the enter/exit edge for the restore.
+    bool density_view_active = false;
     // Undo history is per-model: each MeshEntity owns its UndoStack. Undo/redo
     // always act on the active entity via scene.active_undo(), resolved fresh at
     // each use so a mid-frame selection change targets the right stack.
@@ -1073,6 +1077,24 @@ int main(int argc, char* argv[]) {
             }
             input.snap_view_requested = InputState::SnapView::NONE;
             screen_buffers_dirty = true;
+        }
+
+        // ---- Density-view colour swap ----
+        // While the paint brush targets the density field, the colour VBO shows
+        // colormap(density). Re-dispatched every frame while active: one fixed
+        // micro-dispatch (no readback, no alloc) that self-heals every path that
+        // rewrites the colour VBO under us — level switches, undo, entity rebinds.
+        // On exit, albedo restores from mesh.color (authoritative outside strokes).
+        {
+            const bool want = input.current_brush == BrushType::PAINT
+                           && input.paint_target_density
+                           && compute.supported && compute.has_density_kernels();
+            if (want) {
+                compute.dispatch_density_colormap(mesh->vertex_count());
+            } else if (density_view_active) {
+                renderer.update_color(*mesh);
+            }
+            density_view_active = want;
         }
 
         // ---- Brush-alpha upload-on-change ----
@@ -1843,6 +1865,10 @@ int main(int argc, char* argv[]) {
                         // current_brush == MASK) records only mask deltas, leaving an
                         // un-undoable geometry edit on the mesh.
                         if (input.current_brush == BrushType::PAINT &&
+                            input.paint_target_density &&
+                            compute.supported && compute.has_density_smooth()) {
+                            brush_stroke.apply_density_smooth_gpu(ctx, dab_x, dab_y, eff_strength, eff_hardness);
+                        } else if (input.current_brush == BrushType::PAINT &&
                             compute.supported && compute.has_color_smooth()) {
                             brush_stroke.apply_color_smooth_gpu(ctx, dab_x, dab_y, eff_strength, eff_hardness);
                         } else if (input.current_brush == BrushType::MASK &&
@@ -1882,7 +1908,13 @@ int main(int argc, char* argv[]) {
                             }
                         }
                     } else if (input.current_brush == BrushType::PAINT) {
-                        if (compute.supported && compute.has_color()) {
+                        if (input.paint_target_density) {
+                            if (compute.supported && compute.has_density_kernels()) {
+                                brush_stroke.apply_density_gpu(ctx, dab_x, dab_y,
+                                                               eff_strength, eff_hardness,
+                                                               input.is_subtract_active());
+                            }
+                        } else if (compute.supported && compute.has_color()) {
                             brush_stroke.apply_color_gpu(ctx, dab_x, dab_y,
                                                          eff_strength, eff_hardness,
                                                          input.is_subtract_active());

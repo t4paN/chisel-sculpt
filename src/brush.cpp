@@ -255,7 +255,7 @@ void BrushStroke::drain_dab_readbacks(DabContext& ctx) {
                     mask.snap_list.push_back(v);
                 }
             }
-        } else {   // DAB_COLOR
+        } else if (pd.kind == DAB_COLOR) {
             if (color.snap_flag.empty()) {
                 color.snap_flag.assign(vertex_count, false);
                 color.snap.assign(vertex_count, 0xFFFFFFFFu);
@@ -266,6 +266,19 @@ void BrushStroke::drain_dab_readbacks(DabContext& ctx) {
                     color.snap_flag[v] = true;
                     color.snap[v] = (v < (uint32_t)ctx.mesh.color.size()) ? ctx.mesh.color[v] : 0xFFFFFFFFu;
                     color.snap_list.push_back(v);
+                }
+            }
+        } else {   // DAB_DENSITY — unpainted verts default to the neutral 0.5
+            if (density.snap_flag.empty()) {
+                density.snap_flag.assign(vertex_count, false);
+                density.snap.assign(vertex_count, 0.5f);
+            }
+            for (uint32_t v : dirty_verts) {
+                if (v >= vertex_count) continue;
+                if (!density.snap_flag[v]) {
+                    density.snap_flag[v] = true;
+                    density.snap[v] = (v < (uint32_t)ctx.mesh.density.size()) ? ctx.mesh.density[v] : 0.5f;
+                    density.snap_list.push_back(v);
                 }
             }
         }
@@ -289,6 +302,7 @@ BrushStroke::BrushStroke()
     , gpu_positions_deferred(false)
     , gpu_mask_deferred(false)
     , gpu_color_deferred(false)
+    , gpu_density_deferred(false)
     , phase(StrokePhase::NONE), needs_mesh_update(false), vertex_count(0)
 {
     pending_dabs.reserve(64);   // dabs in flight ≈ dabs/frame × readback latency — tiny
@@ -455,6 +469,7 @@ void BrushStroke::begin(Renderer& renderer, const Camera& cam,
 
     mask.reset();
     color.reset();
+    density.reset();
 
     // The sculpt latch normally guarantees the idle path just rendered these for
     // this exact camera/mesh — reuse them (and the landed plane cache). Only a
@@ -1050,6 +1065,71 @@ void BrushStroke::apply_mask_smooth_gpu(DabContext& ctx, float dab_x, float dab_
     needs_mesh_update = true;
 }
 
+void BrushStroke::apply_density_gpu(DabContext& ctx, float dab_x, float dab_y,
+                                    float strength, float hardness, bool invert) {
+    if (!is_active()) return;
+    if (!ctx.compute.supported || !ctx.compute.has_density_kernels()) return;
+
+    set_anchor(ctx.mesh, ctx.cam, dab_x, dab_y, ctx.eff_brush_size, ctx.win_h, ctx.renderer);
+    if (!anchor_valid) return;
+
+    MaskPaintParams p{};
+    p.anchor_a_x = anchor_pos.x;
+    p.anchor_a_y = anchor_pos.y;
+    p.anchor_a_z = anchor_pos.z;
+    p.anchor_b_x = -anchor_pos.x;
+    p.anchor_b_y =  anchor_pos.y;
+    p.anchor_b_z =  anchor_pos.z;
+    p.use_b = ctx.input.mirror_x ? 1 : 0;
+    p.world_radius = anchor_world_radius;
+    p.hardness = hardness;
+    p.paint_strength = invert ? -strength : strength;   // paint raises, Ctrl lowers
+    p.vertex_count = ctx.mesh.vertex_count();
+
+    set_alpha_dab(ctx, true);
+    ctx.compute.dispatch_density_paint(p, ctx.renderer.vbo_pos);
+    // The density view shows colormap(field) in the colour VBO — refresh it in the
+    // same batch cadence as the dab (full pass; micro work).
+    ctx.compute.dispatch_density_colormap(p.vertex_count);
+
+    // Dirty list lands async → density first-touch snapshots in drain_dab_readbacks.
+    kick_dab_readback(ctx, DAB_DENSITY);
+
+    gpu_density_deferred = true;
+    needs_mesh_update = true;
+}
+
+void BrushStroke::apply_density_smooth_gpu(DabContext& ctx, float dab_x, float dab_y,
+                                           float strength, float hardness) {
+    if (!is_active()) return;
+    if (!ctx.compute.supported || !ctx.compute.has_density_smooth()) return;
+
+    set_anchor(ctx.mesh, ctx.cam, dab_x, dab_y, ctx.eff_brush_size, ctx.win_h, ctx.renderer);
+    if (!anchor_valid) return;
+
+    MaskPaintParams p{};
+    p.anchor_a_x = anchor_pos.x;
+    p.anchor_a_y = anchor_pos.y;
+    p.anchor_a_z = anchor_pos.z;
+    p.anchor_b_x = -anchor_pos.x;
+    p.anchor_b_y =  anchor_pos.y;
+    p.anchor_b_z =  anchor_pos.z;
+    p.use_b = ctx.input.mirror_x ? 1 : 0;
+    p.world_radius = anchor_world_radius;
+    p.hardness = hardness;
+    p.paint_strength = strength;        // blend amount toward neighbour average
+    p.vertex_count = ctx.mesh.vertex_count();
+
+    ctx.compute.dispatch_density_smooth(p, ctx.renderer.vbo_pos, ctx.renderer.ebo);
+    ctx.compute.dispatch_density_colormap(p.vertex_count);
+
+    // Dirty list lands async → density first-touch snapshots in drain_dab_readbacks.
+    kick_dab_readback(ctx, DAB_DENSITY);
+
+    gpu_density_deferred = true;
+    needs_mesh_update = true;
+}
+
 void BrushStroke::apply_color_gpu(DabContext& ctx, float dab_x, float dab_y,
                                   float strength, float hardness, bool erase) {
     if (!is_active()) return;
@@ -1241,6 +1321,25 @@ void BrushStroke::commit_color_undo(const Mesh& mesh, UndoStack& stack) {
     stack.push(std::move(e));
 }
 
+void BrushStroke::commit_density_undo(const Mesh& mesh, UndoStack& stack) {
+    if (density.snap_list.empty()) return;
+
+    UndoEntry e;
+    e.kind = UndoEntry::Kind::DENSITY;
+
+    for (uint32_t v : density.snap_list) {
+        float old_val = density.snap[v];
+        float new_val = (v < (uint32_t)mesh.density.size()) ? mesh.density[v] : 0.5f;
+        if (old_val == new_val) continue;
+        e.verts.push_back(v);
+        e.old_mask.push_back(old_val);   // DENSITY reuses the MASK float pair
+        e.new_mask.push_back(new_val);
+    }
+
+    if (e.verts.empty()) return;
+    stack.push(std::move(e));
+}
+
 void BrushStroke::apply_mask_changes(Mesh& mesh, std::vector<uint32_t>& dirty_verts_out) {
     dirty_verts_out.clear();
 
@@ -1405,6 +1504,9 @@ bool BrushStroke::finalize(DabContext& ctx, Mesh& mesh, UndoStack& stack,
         if (gpu_color_deferred && !color.snap_list.empty() && compute)
             fin_color_tk = gpu::read_buffer_async(compute->gpu_dev, renderer.vbo_color,
                                                   0, (uint64_t)vertex_count * sizeof(uint32_t));
+        if (gpu_density_deferred && !density.snap_list.empty() && compute)
+            fin_density_tk = gpu::read_buffer_async(compute->gpu_dev, renderer.vbo_density,
+                                                    0, (uint64_t)vertex_count * sizeof(float));
         if (gpu_normals_deferred && !snap_list.empty() && compute)
             fin_norm_tk = gpu::read_buffer_async(compute->gpu_dev, renderer.vbo_norm,
                                                  0, (uint64_t)vertex_count * 3 * sizeof(float));
@@ -1413,10 +1515,11 @@ bool BrushStroke::finalize(DabContext& ctx, Mesh& mesh, UndoStack& stack,
     }
 
     // ---- Stage 2: land the reads, sync CPU state, commit the undo entry ----
-    if (fin_pos_tk || fin_mask_tk || fin_color_tk || fin_norm_tk) {
+    if (fin_pos_tk || fin_mask_tk || fin_color_tk || fin_norm_tk || fin_density_tk) {
         gpu::Device& dev = compute->gpu_dev;
         if (!gpu::ticket_ready(dev, fin_pos_tk) || !gpu::ticket_ready(dev, fin_mask_tk)
-            || !gpu::ticket_ready(dev, fin_color_tk) || !gpu::ticket_ready(dev, fin_norm_tk))
+            || !gpu::ticket_ready(dev, fin_color_tk) || !gpu::ticket_ready(dev, fin_norm_tk)
+            || !gpu::ticket_ready(dev, fin_density_tk))
             return false;   // tick again next frame
     }
 
@@ -1569,6 +1672,19 @@ bool BrushStroke::finalize(DabContext& ctx, Mesh& mesh, UndoStack& stack,
         gpu_color_deferred = false;
     }
 
+    if (gpu_density_deferred && !density.snap_list.empty()) {
+        if (mesh.density.empty()) mesh.density.assign(mesh.vertex_count(), 0.5f);
+        else if (mesh.density.size() < mesh.vertex_count())
+            mesh.density.resize(mesh.vertex_count(), 0.5f);
+        fin_density_buf.resize(vc);
+        gpu::ticket_take(compute->gpu_dev, fin_density_tk, fin_density_buf.data(),
+                         (uint64_t)vc * sizeof(float));
+        fin_density_tk = 0;
+        for (uint32_t v : density.snap_list)
+            if (v < vc) mesh.density[v] = fin_density_buf[v];
+        gpu_density_deferred = false;
+    }
+
     // Commit whatever the stroke actually changed, not what the brush type claims:
     // a smooth gesture during a mask/paint stroke (or a compute degrade path) can
     // touch a different category than fin_brush_type, and an entry keyed on the
@@ -1579,6 +1695,8 @@ bool BrushStroke::finalize(DabContext& ctx, Mesh& mesh, UndoStack& stack,
         commit_mask_undo(mesh, stack);
     if (!color.snap_list.empty())
         commit_color_undo(mesh, stack);
+    if (!density.snap_list.empty())
+        commit_density_undo(mesh, stack);
     if (!snap_list.empty()) {
         for (int fi = stroke_disp_index + 1; fi < (int)multires.frames.size(); fi++)
             multires.frames[fi].clear();
@@ -1627,4 +1745,5 @@ void BrushStroke::end() {
     snap_list.clear();
     mask.clear();
     color.clear();
+    density.clear();
 }

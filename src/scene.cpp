@@ -200,8 +200,9 @@ void Scene::bind_active_(uint32_t id) {
     // vbo_mask/vbo_color (new handle on a vertex-count change — the WebGPU-correct
     // path has no in-place resize), so the compute alias must be re-pointed here
     // rather than cached once at startup (Step 3a).
-    compute_.mask_ssbo  = renderer_.vbo_mask;
-    compute_.color_ssbo = renderer_.vbo_color;
+    compute_.mask_ssbo    = renderer_.vbo_mask;
+    compute_.color_ssbo   = renderer_.vbo_color;
+    compute_.density_ssbo = renderer_.vbo_density;
     // Brush/pick FBO mesh.
     renderer_.upload_screen_mesh(in->mesh);
 
@@ -262,6 +263,18 @@ void Scene::sync_mask_partial_entity(uint32_t eid,
         renderer_.update_mask_verts(e->mesh, local_dirty);
     else
         renderer_.upload_display(e->gpu, e->mesh);
+}
+
+void Scene::sync_density_partial_entity(uint32_t eid,
+                                        const std::vector<uint32_t>& local_dirty) {
+    MeshEntity* e = find_entity(eid);
+    if (!e || local_dirty.empty()) return;
+
+    // Density is never displayed on inactive entities (the field view colormaps
+    // the ACTIVE entity's colour VBO), so only the active working buffer syncs;
+    // an inactive entity's mesh.density re-uploads whole at its next bind.
+    if (eid == active_id_)
+        renderer_.update_density_verts(e->mesh, local_dirty);
 }
 
 void Scene::sync_color_partial_entity(uint32_t eid,
@@ -609,8 +622,9 @@ void Scene::splice_active(const Mesh& replacement) {
     // plane-derived (or caller-restored) arrays, and an empty one means "none".
     // Copying unconditionally also drops stale wrong-sized arrays after a
     // multi-entity level change (colour previously kept the old level's array).
-    e->mesh.mask  = replacement.mask;
-    e->mesh.color = replacement.color;
+    e->mesh.mask    = replacement.mask;
+    e->mesh.color   = replacement.color;
+    e->mesh.density = replacement.density;
     e->mesh.build_adjacency();
     e->mesh.recompute_normals();
     // sync() → bind_active_ re-uploads the working buffers + adjacency/mirror

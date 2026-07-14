@@ -10,7 +10,7 @@ struct MeshEntity;
 struct ComputeState;
 
 struct UndoEntry {
-    enum class Kind { STROKE, PROJECTION, MASK, LEVEL, PAINT };
+    enum class Kind { STROKE, PROJECTION, MASK, LEVEL, PAINT, DENSITY };
     Kind kind = Kind::STROKE;
 
     // --- STROKE fields ---
@@ -19,7 +19,7 @@ struct UndoEntry {
     std::vector<float> old_x, old_y, old_z;
     std::vector<float> new_x, new_y, new_z;
 
-    // --- MASK fields ---
+    // --- MASK fields --- (DENSITY entries reuse the same float pair; kind disambiguates)
     std::vector<float> old_mask, new_mask;
 
     // --- PAINT fields --- (packed RGBA8, parallel to verts; level-agnostic like mask)
@@ -119,7 +119,8 @@ private:
         if (e.kind == UndoEntry::Kind::PROJECTION ||
             e.kind == UndoEntry::Kind::LEVEL) {
             b = e.before.bytes();
-        } else if (e.kind == UndoEntry::Kind::MASK) {
+        } else if (e.kind == UndoEntry::Kind::MASK ||
+                   e.kind == UndoEntry::Kind::DENSITY) {
             b = e.verts.size() * (sizeof(uint32_t) + 2 * sizeof(float));
         } else if (e.kind == UndoEntry::Kind::PAINT) {
             b = e.verts.size() * (sizeof(uint32_t) + 2 * sizeof(uint32_t));

@@ -609,13 +609,26 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
     // Paint colour boxes: active (left) + alternate (right). Q/E swap them. Only
     // shown in paint mode. Drives input.paint_color / paint_color_alt.
     if (paint_on) {
-        ImGui::ColorEdit3("##paintA", input.paint_color,
-                          ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel);
+        // Target selector: Colour paints albedo, Density paints the remesh-density
+        // field (viewport shows green→red colormap while active; Ctrl lowers).
+        bool color_target = !input.paint_target_density;
+        if (squircle_button("PaintTgtC", "Colour", "Paint albedo",
+                            ImVec2(calc_btn_w("Colour"), btn_h), color_target))
+            input.paint_target_density = false;
         ImGui::SameLine();
-        ImGui::ColorEdit3("##paintB", input.paint_color_alt,
-                          ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel);
-        ImGui::SameLine();
-        ImGui::TextUnformatted("Q/E swap");
+        if (squircle_button("PaintTgtD", "Density",
+                            "Paint remesh density (green = coarse, red = dense; Ctrl lowers)",
+                            ImVec2(calc_btn_w("Density"), btn_h), !color_target))
+            input.paint_target_density = true;
+        if (!input.paint_target_density) {
+            ImGui::ColorEdit3("##paintA", input.paint_color,
+                              ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel);
+            ImGui::SameLine();
+            ImGui::ColorEdit3("##paintB", input.paint_color_alt,
+                              ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel);
+            ImGui::SameLine();
+            ImGui::TextUnformatted("Q/E swap");
+        }
     }
 
     // Brush-alpha (stamp) picker: Round + built-ins + custom, then a "＋" to load an

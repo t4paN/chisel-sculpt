@@ -907,6 +907,7 @@ Renderer::~Renderer() {
     gpu::release_buffer(vbo_norm);
     gpu::release_buffer(vbo_mask);
     gpu::release_buffer(vbo_color);
+    gpu::release_buffer(vbo_density);
     gpu::release_buffer(ebo);
     gpu::release_render_pipeline(bg_pipeline);
     gpu::release_buffer(bg_vbuf);
@@ -1243,6 +1244,14 @@ void Renderer::upload_mesh(const Mesh& mesh) {
                   gpu::Usage::Vertex | gpu::Usage::Storage);
     ensure_buffer(gpu_dev, vbo_color, col_buf.data(), (uint64_t)col_buf.size()*sizeof(uint32_t),
                   gpu::Usage::Vertex | gpu::Usage::Storage);
+
+    // Density field rides the same lifecycle as mask/color (compute.density_ssbo
+    // aliases it); unpainted verts default to the neutral 0.5.
+    std::vector<float> dens_buf(vc);
+    for (uint32_t i = 0; i < vc; i++)
+        dens_buf[i] = (i < mesh.density.size()) ? mesh.density[i] : 0.5f;
+    ensure_buffer(gpu_dev, vbo_density, dens_buf.data(), (uint64_t)dens_buf.size()*sizeof(float),
+                  gpu::Usage::Vertex | gpu::Usage::Storage);
 }
 
 void Renderer::update_mask(const Mesh& mesh) {
@@ -1364,6 +1373,52 @@ void Renderer::update_mask_verts(const Mesh& mesh, const std::vector<uint32_t>& 
             buf[k] = (v < mesh.mask.size()) ? mesh.mask[v] : 0.0f;
         }
         gpu::write_buffer(gpu_dev, vbo_mask, (uint64_t)start * sizeof(float),
+                          buf.data(), (uint64_t)run * sizeof(float));
+        i = j;
+    }
+}
+
+// Density field uploaders, mirror of the mask pair. Missing entries default to
+// the neutral 0.5 (unpainted = uniform remesh).
+void Renderer::update_density(const Mesh& mesh) {
+    uint32_t vc = mesh.vertex_count();
+    std::vector<float> buf(vc);
+    for (uint32_t i = 0; i < vc; i++)
+        buf[i] = (i < mesh.density.size()) ? mesh.density[i] : 0.5f;
+    gpu::write_buffer(gpu_dev, vbo_density, 0, buf.data(), (uint64_t)vc * sizeof(float));
+}
+
+void Renderer::update_density_verts(const Mesh& mesh, const std::vector<uint32_t>& verts) {
+    if (verts.empty()) return;
+    std::vector<uint32_t> sorted = verts;
+    std::sort(sorted.begin(), sorted.end());
+    sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
+
+    // Same OOB clamp as the mask/color uploaders: ids past the current level's
+    // vertex count are stale, and an OOB writeBuffer can kill a WebGPU device.
+    const uint32_t vc = mesh.vertex_count();
+    if (sorted.back() >= vc) {
+        size_t keep = std::lower_bound(sorted.begin(), sorted.end(), vc) - sorted.begin();
+        std::printf("[paint-audit] density upload CLAMP: %zu/%zu ids >= vcount %u (max %u)\n",
+                    sorted.size() - keep, sorted.size(), vc, sorted.back());
+        sorted.resize(keep);
+        if (sorted.empty()) return;
+    }
+
+    static std::vector<float> buf;
+    size_t i = 0, n = sorted.size();
+    while (i < n) {
+        uint32_t start = sorted[i], end = start;
+        size_t j = i + 1;
+        while (j < n && sorted[j] == end + 1) { end = sorted[j]; ++j; }
+        uint32_t run = end - start + 1;
+
+        buf.resize(run);
+        for (uint32_t k = 0; k < run; k++) {
+            uint32_t v = start + k;
+            buf[k] = (v < mesh.density.size()) ? mesh.density[v] : 0.5f;
+        }
+        gpu::write_buffer(gpu_dev, vbo_density, (uint64_t)start * sizeof(float),
                           buf.data(), (uint64_t)run * sizeof(float));
         i = j;
     }
