@@ -431,6 +431,22 @@ int main(int argc, char* argv[]) {
     g_device = dr.device;
     WGPUQueue queue = wgpuDeviceGetQueue(g_device);
     gpu::set_app_device(gpu::device_from_webgpu(g_device, queue));
+    // Capture what the device actually granted (the request above raises the two
+    // buffer-size fields to the adapter's maxima) — the subdivision guard sizes
+    // predicted level buffers against these.
+    {
+        WGPULimits granted = WGPU_LIMITS_INIT;
+        if (wgpuDeviceGetLimits(g_device, &granted) == WGPUStatus_Success) {
+            gpu::DeviceLimits dl;
+            dl.max_buffer_size          = granted.maxBufferSize;
+            dl.max_storage_binding_size = granted.maxStorageBufferBindingSize;
+            gpu::set_device_limits(dl);
+        }
+        gpu::DeviceLimits dl = gpu::device_limits();
+        std::printf("[gpu] device limits: maxBuffer %llu MB, maxStorageBinding %llu MB\n",
+                    (unsigned long long)(dl.max_buffer_size >> 20),
+                    (unsigned long long)(dl.max_storage_binding_size >> 20));
+    }
 
     WGPUSurfaceCapabilities caps = {};
     if (wgpuSurfaceGetCapabilities(g_surface, ar.adapter, &caps) != WGPUStatus_Success
@@ -471,6 +487,20 @@ int main(int argc, char* argv[]) {
 
     chisel_init_gl_debug();   // synchronous KHR_debug output (CHISEL_DEBUG builds only)
     gpu::set_app_device(gpu::gl_device());
+    // Capture SSBO size limits for the subdivision guard. GL 4.3 enum: on a plain
+    // 3.3 context the query fails silently (GL_INVALID_ENUM) and the value keeps
+    // its conservative fallback — matching compute being unavailable there anyway.
+    {
+        GLint64 ssbo_max = (GLint64)(128ll << 20);
+        glGetInteger64v(GL_MAX_SHADER_STORAGE_BLOCK_SIZE, &ssbo_max);
+        gpu::DeviceLimits dl;
+        dl.max_buffer_size          = (uint64_t)ssbo_max;
+        dl.max_storage_binding_size = (uint64_t)ssbo_max;
+        gpu::set_device_limits(dl);
+        dl = gpu::device_limits();  // re-read: the dev-hook clamp may have applied
+        std::printf("[gpu] device limits: maxStorageBlock %llu MB\n",
+                    (unsigned long long)(dl.max_storage_binding_size >> 20));
+    }
 #endif
 
     ComputeState compute;
@@ -621,6 +651,10 @@ int main(int argc, char* argv[]) {
     AlphaLibrary alpha_lib;
     alpha_lib.init_builtins();
     int last_uploaded_alpha = -1;
+    // Set after a level switch that froze the frame; the next frame's queued
+    // level-switch input (D mashed during the freeze) is swallowed once, so a
+    // slow build can't queue a pile of further builds.
+    bool swallow_level_switch = false;
     // Undo history is per-model: each MeshEntity owns its UndoStack. Undo/redo
     // always act on the active entity via scene.active_undo(), resolved fresh at
     // each use so a mid-frame selection change targets the right stack.
@@ -925,12 +959,43 @@ int main(int argc, char* argv[]) {
         // Multires level switch (D / Shift-D post-lock). Recorded on the undo
         // timeline as a LEVEL entry so Ctrl-Z retraces the literal action sequence
         // (…draw, subd-up, draw, subd-down…) with the view level following along.
+        if (input.level_switch_delta != 0 && swallow_level_switch) {
+            // Drop input queued while the previous switch froze the frame —
+            // keymashing D must not stack further multi-second builds.
+            input.level_switch_delta = 0;
+        }
+        swallow_level_switch = false;
         if (input.level_switch_delta != 0) {
             int delta = input.level_switch_delta;
             input.level_switch_delta = 0;
             const int from   = multires->current_level;
             const int target = from + delta;
-            if (target >= multires->base_level && target <= MULTIRES_MAX_LEVEL) {
+            // Subdivision guard: before going up a level, predict the largest
+            // resulting GPU buffer against the limits the device actually granted.
+            // Subdividing quadruples tris; the index SSBO and CSR adjacency both
+            // weigh tris x 12 bytes and are the biggest allocations. Refusing here
+            // beats attempting the build and losing the device (WebGPU treats an
+            // over-limit buffer as a validation error -> device loss).
+            if (delta > 0) {
+                const uint64_t tris_next  = (uint64_t)mesh->tri_count() * 4ull;
+                const uint64_t bytes_next = tris_next * 12ull;
+                const gpu::DeviceLimits dl = gpu::device_limits();
+                const uint64_t budget = dl.max_buffer_size < dl.max_storage_binding_size
+                                      ? dl.max_buffer_size : dl.max_storage_binding_size;
+                if (bytes_next > budget) {
+                    std::snprintf(input.notification, sizeof(input.notification),
+                                  "Subdivision would exceed GPU limits (%.1fM tris)",
+                                  (double)tris_next / 1e6);
+                    input.notification_timer = 4.0f;
+                    std::printf("[multires] refused L%d -> L%d: %.1fM tris needs %llu MB, device grants %llu MB\n",
+                                from, target, (double)tris_next / 1e6,
+                                (unsigned long long)(bytes_next >> 20),
+                                (unsigned long long)(budget >> 20));
+                    delta = 0;
+                }
+            }
+            const double switch_t0 = glfwGetTime();
+            if (delta != 0 && target >= multires->base_level && target <= MULTIRES_MAX_LEVEL) {
                 scene.materialize_active_cpu();  // 2b: projection/cascade read disp/base
                 UndoEntry lvl_e;
                 lvl_e.kind       = UndoEntry::Kind::LEVEL;
@@ -966,6 +1031,10 @@ int main(int argc, char* argv[]) {
                 std::printf("[multires] switched to level %d (%u verts, %u tris)\n",
                             target, mesh->vertex_count(), mesh->tri_count());
                 print_undo_top("level-switch");
+                // A switch slow enough to freeze the frame has stale input queued
+                // behind it (GLFW delivers it all in the next poll) — swallow it.
+                if (glfwGetTime() - switch_t0 > 0.15)
+                    swallow_level_switch = true;
             }
         }
 
@@ -2124,6 +2193,21 @@ int main(int argc, char* argv[]) {
                         do_import_path(auto_path);
                     }
                 }
+            }
+        }
+
+        // Dev hook: CHISEL_AUTO_SUBD=<n> requests one level-up per frame for the
+        // first n frames — drives the subdivision guard without the UI (pair with
+        // CHISEL_LIMITS_MB to watch it refuse). No-op when unset.
+        {
+            static int auto_subd_left = -1;
+            if (auto_subd_left < 0) {
+                const char* env = std::getenv("CHISEL_AUTO_SUBD");
+                auto_subd_left = env ? std::atoi(env) : 0;
+            }
+            if (auto_subd_left > 0) {
+                --auto_subd_left;
+                input.level_switch_delta = +1;
             }
         }
 

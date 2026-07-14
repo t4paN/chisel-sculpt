@@ -77,6 +77,19 @@ Device gl_device();
 void set_app_device(const Device&);
 Device app_device();
 
+// Limits actually granted to the created device, captured once at startup by the
+// windowing code (WebGPU: wgpuDeviceGetLimits on the created device; GL: GL 4.3
+// glGetInteger64v queries, left at defaults when compute is unavailable). Sizing
+// guards — e.g. the subdivision guard — check predicted buffer sizes against
+// these instead of guessing VRAM, which keeps them correct on both discrete
+// cards and UMA iGPUs. Defaults are the WebGPU baseline (conservative if unset).
+struct DeviceLimits {
+    uint64_t max_buffer_size          = 256ull << 20;
+    uint64_t max_storage_binding_size = 128ull << 20;
+};
+void set_device_limits(const DeviceLimits&);
+DeviceLimits device_limits();
+
 struct Buffer {
     uint64_t size = 0;
 #if defined(CHISEL_BACKEND_WEBGPU)

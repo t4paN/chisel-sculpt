@@ -2,6 +2,24 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-14 — Subdivision guard: refuse over-limit levels instead of crashing
+
+- Going up a subdivision level now predicts the largest resulting GPU buffer
+  (index/adjacency, tris × 12 B) against the limits the device actually
+  granted, and refuses with a notification ("Subdivision would exceed GPU
+  limits") instead of attempting the allocation. On WebGPU an over-limit
+  buffer is a validation error that kills the whole device — this was the
+  "browser tab dies at high subdivision" failure.
+- Level-switch input queued while a slow level build froze the frame is now
+  dropped: keymashing Ctrl+D can no longer stack a pile of multi-second
+  builds behind the freeze.
+- The granted device limits are captured at startup on both backends
+  (`gpu::device_limits()`), logged at boot, and are what the guard checks —
+  correct on discrete cards and UMA iGPUs alike. Dev hooks for testing:
+  `CHISEL_LIMITS_MB=<n>` clamps the limits, `CHISEL_AUTO_SUBD=<n>` requests
+  level-ups without the UI; verified live on GL and WebGPU (guard refuses
+  L7→L8 under a 4 MB clamp, app keeps running).
+
 ## 2026-07-14 — Web: `~` debug console now works on itch
 
 - The on-page debug console (quake-style `~` toggle) was gated behind a

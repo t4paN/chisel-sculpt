@@ -11,6 +11,7 @@
 #endif
 #include <cstring>
 #include <cstdio>
+#include <cstdlib>
 #include <vector>
 #include <unordered_map>
 
@@ -58,6 +59,24 @@ Device device_from_webgpu(WGPUDevice device, WGPUQueue queue) {
 static Device g_app_device;
 void set_app_device(const Device& d) { g_app_device = d; }
 Device app_device() { return g_app_device; }
+
+static DeviceLimits g_device_limits;
+void set_device_limits(const DeviceLimits& l) {
+    g_device_limits = l;
+    // Dev hook: CHISEL_LIMITS_MB clamps both limits — lets sizing guards (the
+    // subdivision guard) be exercised on hardware whose real limits are too
+    // big to hit. No effect when unset (and on web, where getenv is empty).
+    if (const char* env = std::getenv("CHISEL_LIMITS_MB")) {
+        const uint64_t cap = (uint64_t)std::strtoull(env, nullptr, 10) << 20;
+        if (cap > 0) {
+            if (g_device_limits.max_buffer_size          > cap) g_device_limits.max_buffer_size          = cap;
+            if (g_device_limits.max_storage_binding_size > cap) g_device_limits.max_storage_binding_size = cap;
+            std::printf("[gpu] CHISEL_LIMITS_MB dev clamp: %llu MB\n",
+                        (unsigned long long)(cap >> 20));
+        }
+    }
+}
+DeviceLimits device_limits() { return g_device_limits; }
 
 // The WGPUInstance (set once at startup). Needed only on the web build: the async
 // map callbacks use AllowProcessEvents mode, so they're delivered from
