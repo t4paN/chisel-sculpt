@@ -2,6 +2,17 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-14 — Web: `~` debug console now works on itch
+
+- The on-page debug console (quake-style `~` toggle) was gated behind a
+  `?debug=1` URL param that itch's iframe never passes through, so it was
+  dead exactly where devtools are least handy. The overlay is now always
+  wired (hidden until `~`); `?debug=1` just auto-opens it at boot, and the
+  panel keeps only the last 400 lines. Deployed to itch as 0.1.19-dbg with
+  the paint-audit instrumentation baked in — a colour-jumble repro attempt
+  on this build came back clean (native and web), so it stays live as a
+  tripwire.
+
 ## 2026-07-12 — Colour-jumble hunt prep: upload clamp + paint audit logs
 
 - Partial colour/mask VBO uploads now skip vertex ids beyond the current
