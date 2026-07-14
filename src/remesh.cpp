@@ -201,7 +201,8 @@ static uint32_t split_long_edges(Mesh& m, EdgeTable& et,
                                  std::vector<uint32_t>& tri_selected,
                                  std::vector<uint32_t>& pinned,
                                  float high, float seam_tol,
-                                 std::vector<float>* sel_mask) {
+                                 std::vector<float>* sel_mask,
+                                 std::vector<float>* tlen) {
     uint32_t total_split = 0;
     // Sub-pass cap. Each sub-pass rebuilds adjacency at the top, so this directly
     // bounds wall-time. The touched_tris guard defers edges that share a tri with
@@ -252,7 +253,12 @@ static uint32_t split_long_edges(Mesh& m, EdgeTable& et,
 
                 uint64_t k = edge_key(va, vb);
                 if (edge_map.count(k)) continue;
-                if (edge_length(m, va, vb) <= high) continue;  // was high*1.1 (1.54t) — left tris large
+                // Adaptive: per-edge threshold from the graded target-length
+                // field (mean of endpoint targets, spec §4.1). Uniform otherwise.
+                float hi_local = high;
+                if (tlen && va < (uint32_t)tlen->size() && vb < (uint32_t)tlen->size())
+                    hi_local = 1.4f * 0.5f * ((*tlen)[va] + (*tlen)[vb]);
+                if (edge_length(m, va, vb) <= hi_local) continue;  // was high*1.1 (1.54t) — left tris large
 
                 // Find the (up to two) triangles sharing this edge.
                 uint32_t tri_a = INVALID, tri_b = INVALID;
@@ -374,6 +380,11 @@ static uint32_t split_long_edges(Mesh& m, EdgeTable& et,
                 float db = (vb < (uint32_t)m.density.size()) ? m.density[vb] : 0.5f;
                 m.density.push_back((da + db) * 0.5f);
             }
+            if (tlen && !tlen->empty()) {
+                float ta = (va < (uint32_t)tlen->size()) ? (*tlen)[va] : high / 1.4f;
+                float tb = (vb < (uint32_t)tlen->size()) ? (*tlen)[vb] : high / 1.4f;
+                tlen->push_back((ta + tb) * 0.5f);
+            }
 
             uint32_t tris_to_split[2] = { se.tri_a, se.tri_b };
             for (uint32_t tri : tris_to_split) {
@@ -431,7 +442,8 @@ static uint32_t split_long_edges(Mesh& m, EdgeTable& et,
 // Pass 2: Collapse short edges
 // ---------------------------------------------------------------------------
 
-static void compact_mesh(Mesh& m, std::vector<float>* aux = nullptr); // forward declaration — defined after flip/smooth
+static void compact_mesh(Mesh& m, std::vector<float>* aux = nullptr,
+                         std::vector<float>* aux2 = nullptr); // forward declaration — defined after flip/smooth
 
 static bool collapse_would_invert(const Mesh& m, const EdgeTable& et,
                                   uint32_t v_keep, uint32_t v_remove, Vec3 new_pos) {
@@ -522,7 +534,8 @@ static uint32_t collapse_short_edges(Mesh& m, EdgeTable& et,
                                      std::vector<uint32_t>& tri_selected,
                                      std::vector<uint32_t>& pinned,
                                      float low, float seam_tol,
-                                     std::vector<float>* sel_mask) {
+                                     std::vector<float>* sel_mask,
+                                     std::vector<float>* tlen) {
     uint32_t total_collapse = 0;
     static constexpr int MAX_ITERS = 20;
     // Minimum angle for triangles after collapse. ~15°.
@@ -557,8 +570,13 @@ static uint32_t collapse_short_edges(Mesh& m, EdgeTable& et,
             bool sel_b = (e.tri_b != INVALID && e.tri_b < (uint32_t)tri_selected.size() && tri_selected[e.tri_b]);
             if (!sel_a && !sel_b) continue;
 
+            // Adaptive: per-edge threshold from the graded target-length field
+            // (mean of endpoint targets, spec §4.1). Uniform otherwise.
+            float lo_local = low;
+            if (tlen && e.v0 < (uint32_t)tlen->size() && e.v1 < (uint32_t)tlen->size())
+                lo_local = 0.8f * 0.5f * ((*tlen)[e.v0] + (*tlen)[e.v1]);
             float len = edge_length(m, e.v0, e.v1);
-            if (len >= low) continue;
+            if (len >= lo_local) continue;
 
             uint32_t va = e.v0, vb = e.v1;
 
@@ -765,7 +783,7 @@ static uint32_t collapse_short_edges(Mesh& m, EdgeTable& et,
                 new_pinned.push_back(v < (uint32_t)pinned.size() ? pinned[v] : 0u);
             }
 
-            compact_mesh(m, sel_mask);
+            compact_mesh(m, sel_mask, tlen);
             tri_selected = std::move(new_ts);
             pinned       = std::move(new_pinned);
         }
@@ -903,7 +921,7 @@ static uint32_t flip_edges(Mesh& m, EdgeTable& et,
 // Compaction: remove degenerate tris and orphaned verts
 // ---------------------------------------------------------------------------
 
-static void compact_mesh(Mesh& m, std::vector<float>* aux) {
+static void compact_mesh(Mesh& m, std::vector<float>* aux, std::vector<float>* aux2) {
     uint32_t tc = m.tri_count();
 
     // Remove degenerate triangles
@@ -999,6 +1017,15 @@ static void compact_mesh(Mesh& m, std::vector<float>* aux) {
             new_aux[remap[i]] = (*aux)[i];
         }
         *aux = std::move(new_aux);
+    }
+
+    if (aux2 && !aux2->empty()) {
+        std::vector<float> new_aux(new_count, 0.0f);
+        for (uint32_t i = 0; i < vc && i < (uint32_t)aux2->size(); i++) {
+            if (remap[i] == INVALID) continue;
+            new_aux[remap[i]] = (*aux2)[i];
+        }
+        *aux2 = std::move(new_aux);
     }
 }
 
@@ -1218,6 +1245,11 @@ static void mirror_positive_half(Mesh& m, float seam_tol, float target_edge, Com
                 uint32_t ca = (a < (uint32_t)m.color.size()) ? m.color[a] : 0xFFFFFFFFu;
                 uint32_t cb = (b < (uint32_t)m.color.size()) ? m.color[b] : 0xFFFFFFFFu;
                 m.color.push_back(color_lerp(ca, cb, t));
+            }
+            if (!m.density.empty()) {
+                float da = (a < (uint32_t)m.density.size()) ? m.density[a] : 0.5f;
+                float db = (b < (uint32_t)m.density.size()) ? m.density[b] : 0.5f;
+                m.density.push_back(da + t * (db - da));
             }
 
             split_cache[k] = nv;
@@ -1498,6 +1530,17 @@ static void mirror_positive_half(Mesh& m, float seam_tol, float target_edge, Com
         }
     }
 
+    // Mirror the density field onto the newly created mirror verts (neutral
+    // fill). Without this the -x half resets to 0.5 on every remesh.
+    if (!m.density.empty()) {
+        m.density.resize(m.vertex_count(), 0.5f);
+        for (uint32_t v = 0; v < vc; v++) {
+            if (side[v] == 1 && vert_mirror[v] != INVALID &&
+                vert_mirror[v] >= vc && v < (uint32_t)m.density.size())
+                m.density[vert_mirror[v]] = m.density[v];
+        }
+    }
+
     // Create mirrored triangles with flipped winding.
     // Skip fully-masked tris — they're already present on both sides.
     tc = m.tri_count();
@@ -1754,7 +1797,8 @@ static void audit_open_edges(const Mesh& m, float seam_tol, const char* stage) {
 
 RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
                             float target_edge_length, int iterations,
-                            ComputeState* cs) {
+                            ComputeState* cs,
+                            float density_coarse_mult, float density_fine_mult) {
     RemeshResult r;
     r.old_verts = mesh.vertex_count();
     r.old_tris  = mesh.tri_count();
@@ -1778,6 +1822,54 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
     // Build edge table
     EdgeTable et;
     et.build(mesh);
+
+    // ---- Adaptive sizing (spec §4): painted density field → per-vertex
+    // target edge length. The field maps log-space (edge lengths are
+    // multiplicative): density 0 → L_base×coarse_mult, 1 → L_base×fine_mult,
+    // 0.5 → exactly L_base when coarse×fine == 1. Empty field = uniform path,
+    // byte-identical to before the feature existed.
+    std::vector<float> target_len;   // per-vert; empty = uniform
+    const bool adaptive = !mesh.density.empty() &&
+                          density_coarse_mult != density_fine_mult;
+    if (adaptive) {
+        const float lc = std::log(std::max(0.01f, density_coarse_mult));
+        const float lf = std::log(std::max(0.01f, density_fine_mult));
+        const uint32_t vc = mesh.vertex_count();
+        target_len.resize(vc);
+        for (uint32_t v = 0; v < vc; v++) {
+            float d = (v < (uint32_t)mesh.density.size()) ? mesh.density[v] : 0.5f;
+            d = std::min(1.0f, std::max(0.0f, d));
+            target_len[v] = target_edge_length * std::exp(lc + d * (lf - lc));
+        }
+        // Gradient limiting (spec §4.2, required): a hard green→red boundary
+        // is a 4× target jump on one edge — walls of degenerate transition
+        // tris. Sweep the WORKING COPY (the paint itself is never mutated)
+        // until no adjacent pair exceeds factor g; this manufactures the
+        // yellow buffer bands automatically. Denser (shorter) side wins.
+        static constexpr float GRADE_G = 1.3f;
+        int sweeps = 0;
+        for (; sweeps < 64; sweeps++) {
+            bool changed = false;
+            for (const auto& e : et.edges) {
+                if (e.dead) continue;
+                float& la = target_len[e.v0];
+                float& lb = target_len[e.v1];
+                if (la > GRADE_G * lb)      { la = GRADE_G * lb; changed = true; }
+                else if (lb > GRADE_G * la) { lb = GRADE_G * la; changed = true; }
+            }
+            if (!changed) break;
+        }
+        std::printf("[remesh] adaptive: density field drives sizing "
+                    "(coarse x%.2f, fine x%.2f), graded in %d sweeps\n",
+                    density_coarse_mult, density_fine_mult, sweeps);
+    }
+    std::vector<float>* tlen = adaptive ? &target_len : nullptr;
+
+    // With a painted field every tri is a sizing candidate (its local band
+    // decides what happens) — the stretched-only heuristic would skip painted
+    // regions whose edges look fine against the GLOBAL target. target 0 ⇒ the
+    // select kernel flags everything.
+    const float select_target = adaptive ? 0.0f : target_edge_length;
 
     // Decide selection strategy: mask-driven or auto-detect.
     // tri_selected mirrors remesh_trisel_ssbo on GPU; we only readback when CPU
@@ -1813,7 +1905,7 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
         cs->dispatch_select_stretched(mesh.vertex_count(), mesh.tri_count(),
             mesh.indices.data(),
             mesh.pos_x.data(), mesh.pos_y.data(), mesh.pos_z.data(),
-            target_edge_length);
+            select_target);
     }
 
     // For both paths, readback once so CPU can count + drive split/collapse/flip.
@@ -1908,7 +2000,7 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
 
     // Helper: full rebuild of all transient state after topology changes
     auto rebuild_all = [&]() {
-        compact_mesh(mesh, &sel_mask);
+        compact_mesh(mesh, &sel_mask, tlen);
         mesh.mirror_x_map.clear();
         mesh.build_adjacency();
         cs->upload_adjacency(mesh.vert_tri_offset.data(),
@@ -1926,7 +2018,7 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
             cs->dispatch_select_stretched(mesh.vertex_count(), mesh.tri_count(),
                 mesh.indices.data(),
                 mesh.pos_x.data(), mesh.pos_y.data(), mesh.pos_z.data(),
-                target_edge_length);
+                select_target);
             cs->dispatch_grow_selection(mesh.vertex_count(), mesh.tri_count(), 8);
         }
 
@@ -1975,10 +2067,10 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
     // 10 iters for 1-2 trivial ops.
     int iters_done = 0;
     for (int iter = 0; iter < iterations; iter++) {
-        uint32_t n_split = split_long_edges(mesh, et, tri_selected, pinned, high, seam_tol, &sel_mask);
+        uint32_t n_split = split_long_edges(mesh, et, tri_selected, pinned, high, seam_tol, &sel_mask, tlen);
         rebuild_all();
 
-        uint32_t n_collapse = collapse_short_edges(mesh, et, tri_selected, pinned, low, seam_tol, &sel_mask);
+        uint32_t n_collapse = collapse_short_edges(mesh, et, tri_selected, pinned, low, seam_tol, &sel_mask, tlen);
         et.build(mesh);
         rebuild_all();
 
@@ -2057,4 +2149,33 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
                 r.old_verts, r.old_tris, r.new_verts, r.new_tris,
                 r.elapsed_ms, target_edge_length, iterations);
     return r;
+}
+
+uint64_t predict_adaptive_tris(const Mesh& mesh, float target_edge_length,
+                               float coarse_mult, float fine_mult) {
+    if (target_edge_length <= 0.0f)
+        target_edge_length = compute_mean_edge_length(mesh);
+    const float lc = std::log(std::max(0.01f, coarse_mult));
+    const float lf = std::log(std::max(0.01f, fine_mult));
+    const uint32_t tc = mesh.tri_count();
+    const uint32_t dc = (uint32_t)mesh.density.size();
+    double pred = 0.0;
+    for (uint32_t t = 0; t < tc; t++) {
+        uint32_t i0 = mesh.indices[t*3+0];
+        uint32_t i1 = mesh.indices[t*3+1];
+        uint32_t i2 = mesh.indices[t*3+2];
+        float le = (edge_length(mesh, i0, i1) +
+                    edge_length(mesh, i1, i2) +
+                    edge_length(mesh, i2, i0)) * (1.0f / 3.0f);
+        float d0 = (i0 < dc) ? mesh.density[i0] : 0.5f;
+        float d1 = (i1 < dc) ? mesh.density[i1] : 0.5f;
+        float d2 = (i2 < dc) ? mesh.density[i2] : 0.5f;
+        float d = std::min(1.0f, std::max(0.0f, (d0 + d1 + d2) * (1.0f / 3.0f)));
+        float lt = target_edge_length * std::exp(lc + d * (lf - lc));
+        float ratio = (lt > 1e-12f) ? le / lt : 1.0f;
+        // A tri whose edges exceed its local target splits into ~ratio² pieces;
+        // never credit collapses (conservative — this is a device-loss guard).
+        pred += std::max(1.0f, ratio * ratio);
+    }
+    return (uint64_t)pred;
 }

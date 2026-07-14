@@ -628,6 +628,21 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
                               ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel);
             ImGui::SameLine();
             ImGui::TextUnformatted("Q/E swap");
+        } else {
+            // What the painted extremes mean to the adaptive remesher, as
+            // multipliers on the auto target edge length. Defaults (2.0 / 0.5)
+            // multiply to 1, so unpainted 0.5 remeshes exactly as today.
+            float w = calc_btn_w("Colour") + calc_btn_w("Density") + 8.0f;
+            ImGui::SetNextItemWidth(w);
+            ImGui::SliderFloat("##densCoarse", &input.density_coarse_mult,
+                               1.0f, 4.0f, "green: edge x%.2f");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Remesh edge length where painted green (coarse)");
+            ImGui::SetNextItemWidth(w);
+            ImGui::SliderFloat("##densFine", &input.density_fine_mult,
+                               0.2f, 1.0f, "red: edge x%.2f");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Remesh edge length where painted red (dense)");
         }
     }
 

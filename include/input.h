@@ -66,6 +66,11 @@ struct InputState {
     // While true the viewport shows colormap(density) instead of albedo (green =
     // coarse, red = dense); main.cpp owns the enter/exit colour-VBO swap.
     bool paint_target_density = false;
+    // What the painted extremes mean to the adaptive remesher, as multipliers
+    // on the auto target edge length: green (0) → coarse ×, red (1) → fine ×.
+    // Defaults multiply to 1 so neutral 0.5 lands exactly on the uniform target.
+    float density_coarse_mult = 2.0f;
+    float density_fine_mult   = 0.5f;
 
     // Slider drag mode (S/W/A/O key held + dragging)
     enum class SliderMode { NONE, SIZE, STRENGTH, HARDNESS, SPACING };

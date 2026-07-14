@@ -2,6 +2,31 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-14 — Density paint (chunk 2 of 3): the adaptive remesher
+
+- **Remesh now obeys the painted density field.** Target edge length becomes
+  local: green (0) → auto target × coarse mult (default 2.0), red (1) → ×
+  fine mult (default 0.5), interpolated in log-space so unpainted 0.5 lands
+  exactly on today's uniform target. Split/collapse thresholds localize to
+  the mean of the endpoints' targets; flips and relaxation are unchanged.
+- **Gradient limiting**: before sizing, a grading pass (factor 1.3) sweeps a
+  working copy of the field until no edge jumps more than 30% in target
+  length — hard green/red boundaries get their yellow transition band
+  manufactured automatically. The paint itself is never mutated.
+- Two sliders in the density paint panel set what the painted extremes mean
+  (green ×1–4, red ×0.2–1).
+- **Guard**: before an adaptive remesh, the predicted triangle count is
+  checked against granted GPU buffer limits (same check + toast as the
+  subdivision guard) — a red-everywhere field can't crash the device.
+- Fixed a chunk-1 gap: the remesh mirror step now carries density across
+  seam-crossing splits and onto reflected verts (previously the -x half
+  reset to neutral 0.5 on every remesh).
+- Verified headless (new `CHISEL_AUTO_DENSITY_REMESH` dev hook): half-red
+  half-green sphere remeshes watertight, dense/coarse halves differentiate
+  ~2.8× in mean edge length with a smooth mid band, mirror stays fully
+  paired, 311 ms for 5.1k→8.6k tris; refusal path verified under
+  `CHISEL_LIMITS_MB=1`. An unpainted mesh remeshes exactly as before.
+
 ## 2026-07-14 — Density paint (chunk 1 of 3): the field + painting
 
 - Paint mode gains a **Colour | Density** target. Density paints a per-vertex

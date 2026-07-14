@@ -1120,10 +1120,39 @@ int main(int argc, char* argv[]) {
             input.remesh_in_progress = true;
 
             scene.materialize_active_cpu();  // 2b: remesh reads the live surface (mesh.pos)
+
+            // Adaptive-remesh guard (density spec Q2): a red-heavy field at a
+            // small fine-mult can explode tri counts the same way keymashed
+            // subdivision does. Same predicted-size check, same refusal toast.
+            bool remesh_refused = false;
+            if (!mesh->density.empty()) {
+                const uint64_t tris_pred = predict_adaptive_tris(
+                    *mesh, 0.0f, input.density_coarse_mult, input.density_fine_mult);
+                const uint64_t bytes_pred = tris_pred * 12ull;  // index/CSR SSBOs
+                const gpu::DeviceLimits dl = gpu::device_limits();
+                const uint64_t budget = dl.max_buffer_size < dl.max_storage_binding_size
+                                      ? dl.max_buffer_size : dl.max_storage_binding_size;
+                if (bytes_pred > budget) {
+                    std::snprintf(input.notification, sizeof(input.notification),
+                                  "Adaptive remesh would exceed GPU limits (%.1fM tris)",
+                                  (double)tris_pred / 1e6);
+                    input.notification_timer = 4.0f;
+                    std::printf("[remesh] refused adaptive: %.1fM predicted tris needs %llu MB, device grants %llu MB\n",
+                                (double)tris_pred / 1e6,
+                                (unsigned long long)(bytes_pred >> 20),
+                                (unsigned long long)(budget >> 20));
+                    remesh_refused = true;
+                }
+            }
+
             // Destructive remesh breaks topology mirror — switch to spatial
             // mode afterward. Mirror setting (input.mirror_x) is preserved.
-            auto result = perform_remesh(*mesh, *multires, 0.0f, 10,
-                                         compute.supported ? &compute : nullptr);
+            RemeshResult result;
+            if (!remesh_refused)
+                result = perform_remesh(*mesh, *multires, 0.0f, 10,
+                                        compute.supported ? &compute : nullptr,
+                                        input.density_coarse_mult,
+                                        input.density_fine_mult);
 
             if (result.success) {
                 mesh->mask.clear();
@@ -1154,7 +1183,7 @@ int main(int argc, char* argv[]) {
                               result.old_verts, result.old_tris,
                               result.new_verts, result.new_tris);
                 input.notification_timer = 4.0f;
-            } else {
+            } else if (!remesh_refused) {
                 std::printf("[remesh] FAILED: %s\n", result.error.c_str());
                 std::snprintf(input.notification, sizeof(input.notification),
                               "Remesh FAILED — check console");
@@ -2240,6 +2269,66 @@ int main(int argc, char* argv[]) {
             if (auto_subd_left > 0) {
                 --auto_subd_left;
                 input.level_switch_delta = +1;
+            }
+        }
+
+        // Dev hook: CHISEL_AUTO_DENSITY_REMESH=1 paints a hard half-and-half
+        // density field on the active mesh (y above centroid ⇒ red 1.0, below
+        // ⇒ green 0.0) and fires one remesh — drives the adaptive remesher
+        // headless, then prints per-bucket edge-length means so the split can
+        // be verified from the log (red mean ≈ fine_mult/coarse_mult × green
+        // mean). No-op when unset.
+        {
+            static int auto_density_state = -1;
+            static int auto_density_warmup = 0;
+            if (auto_density_state < 0) {
+                const char* env = std::getenv("CHISEL_AUTO_DENSITY_REMESH");
+                auto_density_state = (env && std::atoi(env) != 0) ? 1 : 0;
+            }
+            // Warmup lets a CHISEL_AUTO_SUBD ladder finish first (composable:
+            // subdivide N levels, then paint + adaptive-remesh the result).
+            if (auto_density_state == 1 && ++auto_density_warmup > 10 &&
+                app_state == AppState::IDLE &&
+                input.level_switch_delta == 0 && !input.remesh_in_progress) {
+                const uint32_t vc = mesh->vertex_count();
+                double cy = 0.0;
+                for (uint32_t v = 0; v < vc; v++) cy += mesh->pos_y[v];
+                cy = (vc > 0) ? cy / vc : 0.0;
+                mesh->density.assign(vc, 0.0f);
+                for (uint32_t v = 0; v < vc; v++)
+                    if (mesh->pos_y[v] > cy) mesh->density[v] = 1.0f;
+                std::printf("[auto-density] painted half/half field (centroid y=%.4f), requesting remesh\n", cy);
+                input.remesh_requested = true;
+                auto_density_state = 2;
+            } else if (auto_density_state == 2 && !input.remesh_requested &&
+                       !input.remesh_in_progress) {
+                double sum[3] = {0, 0, 0};
+                uint64_t cnt[3] = {0, 0, 0};
+                const uint32_t tc = mesh->tri_count();
+                const uint32_t dc = (uint32_t)mesh->density.size();
+                for (uint32_t t = 0; t < tc; t++) {
+                    for (int e = 0; e < 3; e++) {
+                        uint32_t a = mesh->indices[t*3+e];
+                        uint32_t b = mesh->indices[t*3+(e+1)%3];
+                        float da = (a < dc) ? mesh->density[a] : 0.5f;
+                        float db = (b < dc) ? mesh->density[b] : 0.5f;
+                        float d = 0.5f * (da + db);
+                        int bucket = (d > 0.75f) ? 2 : (d < 0.25f) ? 0 : 1;
+                        float dx = mesh->pos_x[a] - mesh->pos_x[b];
+                        float dy = mesh->pos_y[a] - mesh->pos_y[b];
+                        float dz = mesh->pos_z[a] - mesh->pos_z[b];
+                        sum[bucket] += std::sqrt(dx*dx + dy*dy + dz*dz);
+                        cnt[bucket]++;
+                    }
+                }
+                std::printf("[auto-density] post-remesh edge means: "
+                            "green=%.5f (n=%llu) mid=%.5f (n=%llu) red=%.5f (n=%llu), green/red=%.2f\n",
+                            cnt[0] ? sum[0]/cnt[0] : 0.0, (unsigned long long)cnt[0],
+                            cnt[1] ? sum[1]/cnt[1] : 0.0, (unsigned long long)cnt[1],
+                            cnt[2] ? sum[2]/cnt[2] : 0.0, (unsigned long long)cnt[2],
+                            (cnt[0] && cnt[2] && sum[2] > 0.0)
+                                ? (sum[0]/cnt[0]) / (sum[2]/cnt[2]) : 0.0);
+                auto_density_state = 3;
             }
         }
 
