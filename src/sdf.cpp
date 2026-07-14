@@ -61,14 +61,17 @@ uint32_t gather_soup(const Scene& scene,
                      std::vector<uint32_t>& idx,
                      std::vector<uint32_t>& vcol,  // per-source-vertex colour (white if unpainted)
                      bool&                  any_paint,
+                     std::vector<float>&    vdens, // per-source-vertex remesh density (0.5 if unpainted)
+                     bool&                  any_density,
                      bool                   subtract,
                      uint32_t&              n_additive,
                      uint32_t&              n_cutter,
                      size_t&                additive_floats)
 {
-    n_additive = 0;
-    n_cutter   = 0;
-    any_paint  = false;
+    n_additive  = 0;
+    n_cutter    = 0;
+    any_paint   = false;
+    any_density = false;
 
     auto add_entity = [&](const MeshEntity* e, bool cutter) -> bool {
         if (!e) return false;
@@ -77,15 +80,19 @@ uint32_t gather_soup(const Scene& scene,
 
         const bool painted = !m.color.empty();
         if (painted) any_paint = true;
+        const bool has_dens = !m.density.empty();
+        if (has_dens) any_density = true;
 
         uint32_t base = (uint32_t)(pos.size() / 3);
         pos.reserve(pos.size() + m.vertex_count() * 3);
         vcol.reserve(vcol.size() + m.vertex_count());
+        vdens.reserve(vdens.size() + m.vertex_count());
         for (uint32_t v = 0; v < m.vertex_count(); v++) {
             pos.push_back(m.pos_x[v]);
             pos.push_back(m.pos_y[v]);
             pos.push_back(m.pos_z[v]);
             vcol.push_back((painted && v < m.color.size()) ? m.color[v] : 0xFFFFFFFFu);
+            vdens.push_back((has_dens && v < m.density.size()) ? m.density[v] : 0.5f);
         }
         idx.reserve(idx.size() + m.indices.size());
         if (cutter) {
@@ -1164,22 +1171,30 @@ static void validate_seam_loop(Mesh& m, float voxel, std::vector<uint8_t>& seam)
 
 // ============================================================================
 
-// ---- Vertex-paint transfer (world-space nearest source vertex) ------------
+// ---- Vertex-attribute transfer (world-space nearest source vertex) ---------
 // The voxel merge mints brand-new MC topology with no correspondence to the
 // source meshes, so paint can't ride along an index map the way it does through
-// remesh. Instead we reproject it: each output vertex copies the colour of the
-// nearest SOURCE vertex in world space. A uniform grid (cell = voxel) over the
-// source verts keeps it near-linear; the expanding Chebyshev-ring search stops
-// once no unscanned cell can hold a closer vertex. One-shot op — heavier CPU is
-// allowed (the no-readback / zero-alloc rules are stroke-only).
-static void transfer_colors_world(Mesh& out,
-                                  const std::vector<float>&    src_pos,  // 3 per vert
-                                  const std::vector<uint32_t>& src_col,
-                                  Vec3 origin, float cell, uint32_t R) {
-    const uint32_t ns = (uint32_t)src_col.size();
+// remesh. Instead we reproject it: each output vertex copies the colour and
+// remesh density of the nearest SOURCE vertex in world space (each attribute
+// only if some source had it — an unpainted merge stays attribute-free).
+// Unpainted sources contribute neutral values (white / 0.5), so bridge surface
+// between a painted and an unpainted blob lands neutral by construction. A
+// uniform grid (cell = voxel) over the source verts keeps it near-linear; the
+// expanding Chebyshev-ring search stops once no unscanned cell can hold a
+// closer vertex. One-shot op — heavier CPU is allowed (the no-readback /
+// zero-alloc rules are stroke-only).
+static void transfer_attrs_world(Mesh& out,
+                                 const std::vector<float>&    src_pos,   // 3 per vert
+                                 const std::vector<uint32_t>& src_col,
+                                 bool                         carry_col,
+                                 const std::vector<float>&    src_dens,
+                                 bool                         carry_dens,
+                                 Vec3 origin, float cell, uint32_t R) {
+    const uint32_t ns = (uint32_t)(src_pos.size() / 3);
     const uint32_t vc = out.vertex_count();
-    out.color.assign(vc, 0xFFFFFFFFu);
-    if (ns == 0 || cell <= 0.0f) return;
+    if (carry_col)  out.color.assign(vc, 0xFFFFFFFFu);
+    if (carry_dens) out.density.assign(vc, 0.5f);
+    if (ns == 0 || cell <= 0.0f || (!carry_col && !carry_dens)) return;
 
     const float inv = 1.0f / cell;
     auto cell_of = [&](float x, float y, float z, int& i, int& j, int& k) {
@@ -1206,8 +1221,8 @@ static void transfer_colors_world(Mesh& out,
     for (uint32_t v = 0; v < vc; v++) {
         const float px = out.pos_x[v], py = out.pos_y[v], pz = out.pos_z[v];
         int ci, cj, ck; cell_of(px, py, pz, ci, cj, ck);
-        float    best     = std::numeric_limits<float>::max();
-        uint32_t best_col = 0xFFFFFFFFu;
+        float    best   = std::numeric_limits<float>::max();
+        uint32_t best_s = UINT32_MAX;
         for (int r = 0; r <= RMAX; r++) {
             for (int dk = -r; dk <= r; dk++)
             for (int dj = -r; dj <= r; dj++)
@@ -1221,7 +1236,7 @@ static void transfer_colors_world(Mesh& out,
                                 dy = py - src_pos[s*3+1],
                                 dz = pz - src_pos[s*3+2];
                     const float d2 = dx*dx + dy*dy + dz*dz;
-                    if (d2 < best) { best = d2; best_col = src_col[s]; }
+                    if (d2 < best) { best = d2; best_s = s; }
                 }
             }
             // The nearest point of any cell at Chebyshev radius r+1 is >= r*cell
@@ -1231,7 +1246,10 @@ static void transfer_colors_world(Mesh& out,
                 if (reach * reach >= best) break;
             }
         }
-        out.color[v] = best_col;
+        if (best_s != UINT32_MAX) {
+            if (carry_col)  out.color[v]   = src_col[best_s];
+            if (carry_dens) out.density[v] = src_dens[best_s];
+        }
     }
 }
 
@@ -1325,6 +1343,8 @@ struct VoxelMergeJob {
     std::vector<float>    pos;     // source soup, kept for relax + paint transfer
     std::vector<uint32_t> vcol;    // per-source-vertex paint
     bool                  any_paint = false;
+    std::vector<float>    vdens;   // per-source-vertex remesh density
+    bool                  any_density = false;
 
     std::vector<float> field_cpu;  // post-flood signed field (read once, reused by relax)
     std::vector<float> soup;       // MC output triangle soup (read once in Mesh)
@@ -1407,6 +1427,7 @@ VoxelMergeJob* voxel_merge_begin(Scene& scene, ComputeState& cs,
     uint32_t n_additive = 0, n_cutter = 0;
     size_t   additive_floats = 0;
     job->res.in_entities = gather_soup(scene, job->pos, idx, job->vcol, job->any_paint,
+                                       job->vdens, job->any_density,
                                        subtract, n_additive, n_cutter, additive_floats);
     job->res.in_tris     = (uint32_t)(idx.size() / 3);
     if (idx.empty()) return fail("selection has no triangles");
@@ -1917,9 +1938,12 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
         welded.build_adjacency();
         welded.recompute_normals();   // clean per-vertex normals (GPU normals were orientation-only)
 
-        // Reproject vertex paint from the source meshes (skipped if nothing painted).
-        if (j.any_paint)
-            transfer_colors_world(welded, j.pos, j.vcol, grid.origin, grid.voxel, grid.R);
+        // Reproject vertex paint + remesh density from the source meshes
+        // (skipped entirely if no source carries either attribute).
+        if (j.any_paint || j.any_density)
+            transfer_attrs_world(welded, j.pos, j.vcol, j.any_paint,
+                                 j.vdens, j.any_density,
+                                 grid.origin, grid.voxel, grid.R);
 
         j.res.out_tris  = welded.tri_count();
         j.res.out_verts = welded.vertex_count();

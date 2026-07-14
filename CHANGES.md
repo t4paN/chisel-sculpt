@@ -2,6 +2,21 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-15 — Density paint (chunk 3 of 3): carry through the voxel merge
+
+- **Painted density now survives the SDF voxel merge.** The merged mesh's
+  vertices copy density from the nearest source vertex, riding the same
+  world-space lookup that already carries vertex paint (one search, both
+  attributes). Unpainted sources contribute neutral 0.5, so bridge surface
+  between a painted and an unpainted blob comes out neutral. Merge a painted
+  blob, hit remesh: the adaptive remesher takes over from there — red zones
+  keep the merge's full resolution, green zones collapse to coarse.
+- Merges with no density painted anywhere stay exactly as before (no field
+  is created).
+- Dev hook `CHISEL_AUTO_DENSITY_MERGE=1`: paints half/half, fires a mirror
+  merge, prints the merged mesh's density means above/below the centroid
+  (verified 0.981 / 0.006 on the default sphere at R=128).
+
 ## 2026-07-14 — Density paint (chunk 2 of 3): the adaptive remesher
 
 - **Remesh now obeys the painted density field.** Target edge length becomes

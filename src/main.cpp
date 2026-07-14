@@ -2277,19 +2277,30 @@ int main(int argc, char* argv[]) {
         // ⇒ green 0.0) and fires one remesh — drives the adaptive remesher
         // headless, then prints per-bucket edge-length means so the split can
         // be verified from the log (red mean ≈ fine_mult/coarse_mult × green
-        // mean). No-op when unset.
+        // mean). CHISEL_AUTO_DENSITY_MERGE=1 paints the same field but fires a
+        // voxel merge instead (mirror MC, default R), then prints the merged
+        // mesh's mean density above/below the centroid — verifies the
+        // nearest-source carry spatially (above ≈ 1, below ≈ 0). No-op when
+        // both are unset.
         {
-            static int auto_density_state = -1;
-            static int auto_density_warmup = 0;
+            static int  auto_density_state = -1;
+            static int  auto_density_warmup = 0;
+            static bool auto_density_merge = false;
             if (auto_density_state < 0) {
                 const char* env = std::getenv("CHISEL_AUTO_DENSITY_REMESH");
                 auto_density_state = (env && std::atoi(env) != 0) ? 1 : 0;
+                const char* menv = std::getenv("CHISEL_AUTO_DENSITY_MERGE");
+                if (menv && std::atoi(menv) != 0) {
+                    auto_density_state = 1;
+                    auto_density_merge = true;
+                }
             }
             // Warmup lets a CHISEL_AUTO_SUBD ladder finish first (composable:
             // subdivide N levels, then paint + adaptive-remesh the result).
             if (auto_density_state == 1 && ++auto_density_warmup > 10 &&
                 app_state == AppState::IDLE &&
-                input.level_switch_delta == 0 && !input.remesh_in_progress) {
+                input.level_switch_delta == 0 && !input.remesh_in_progress &&
+                !input.voxel_merge_in_progress && !vmerge_job) {
                 const uint32_t vc = mesh->vertex_count();
                 double cy = 0.0;
                 for (uint32_t v = 0; v < vc; v++) cy += mesh->pos_y[v];
@@ -2297,11 +2308,38 @@ int main(int argc, char* argv[]) {
                 mesh->density.assign(vc, 0.0f);
                 for (uint32_t v = 0; v < vc; v++)
                     if (mesh->pos_y[v] > cy) mesh->density[v] = 1.0f;
-                std::printf("[auto-density] painted half/half field (centroid y=%.4f), requesting remesh\n", cy);
-                input.remesh_requested = true;
+                std::printf("[auto-density] painted half/half field (centroid y=%.4f), requesting %s\n",
+                            cy, auto_density_merge ? "voxel merge" : "remesh");
+                if (auto_density_merge) {
+                    input.voxel_merge_mirror       = true;
+                    input.voxel_merge_subtract     = false;
+                    input.voxel_merge_surface_nets = false;
+                    input.voxel_merge_requested    = true;
+                } else {
+                    input.remesh_requested = true;
+                }
                 auto_density_state = 2;
-            } else if (auto_density_state == 2 && !input.remesh_requested &&
-                       !input.remesh_in_progress) {
+            } else if (auto_density_state == 2 && auto_density_merge &&
+                       !input.voxel_merge_requested && !input.voxel_merge_in_progress) {
+                const uint32_t vc = mesh->vertex_count();
+                const uint32_t dc = (uint32_t)mesh->density.size();
+                double cy = 0.0;
+                for (uint32_t v = 0; v < vc; v++) cy += mesh->pos_y[v];
+                cy = (vc > 0) ? cy / vc : 0.0;
+                double sum[2] = {0, 0}; uint64_t cnt[2] = {0, 0}; uint64_t mid = 0;
+                for (uint32_t v = 0; v < vc && v < dc; v++) {
+                    int b = (mesh->pos_y[v] > cy) ? 1 : 0;
+                    sum[b] += mesh->density[v]; cnt[b]++;
+                    if (mesh->density[v] > 0.25f && mesh->density[v] < 0.75f) mid++;
+                }
+                std::printf("[auto-density] post-merge density means: "
+                            "above=%.3f (n=%llu) below=%.3f (n=%llu) mid-band=%llu, field %u/%u verts\n",
+                            cnt[1] ? sum[1]/cnt[1] : -1.0, (unsigned long long)cnt[1],
+                            cnt[0] ? sum[0]/cnt[0] : -1.0, (unsigned long long)cnt[0],
+                            (unsigned long long)mid, dc, vc);
+                auto_density_state = 3;
+            } else if (auto_density_state == 2 && !auto_density_merge &&
+                       !input.remesh_requested && !input.remesh_in_progress) {
                 double sum[3] = {0, 0, 0};
                 uint64_t cnt[3] = {0, 0, 0};
                 const uint32_t tc = mesh->tri_count();
