@@ -1250,6 +1250,15 @@ int main(int argc, char* argv[]) {
                                   watertight ? "watertight" : "NOT watertight",
                                   vm.components, vm.boundary_edges, vm.nonmanifold_edges);
                     input.notification_timer = 6.0f;
+                    // Chain the adaptive remesh: the merge output is uniform-dense
+                    // MC soup; when it carries a painted density field the user
+                    // wants the topology to follow it right away (D in the merge
+                    // dialog opts out). Runs through the normal remesh block next
+                    // frame — same GPU-limit guard, same notification.
+                    if (input.voxel_merge_adaptive && !mesh->density.empty()) {
+                        std::printf("[voxel-merge] density field present -> chaining adaptive remesh\n");
+                        input.remesh_requested = true;
+                    }
                 } else {
                     std::printf("[voxel-merge] FAILED: %s\n", vm.error.c_str());
                     std::snprintf(input.notification, sizeof(input.notification),
@@ -2099,9 +2108,18 @@ int main(int argc, char* argv[]) {
                     if (sid == up->id) { sel = true; break; }
                 if (!sel) n_unselected++;
             }
+            // Density field on any selected mesh → the merge output will carry
+            // the heatmap; offer the chained adaptive remesh line.
+            bool merge_has_density = false;
+            for (uint32_t sid : scene.selected_ids()) {
+                const MeshEntity* e = scene.find_entity(sid);
+                if (e && e->alive && !e->mesh.density.empty()) { merge_has_density = true; break; }
+            }
             draw_voxel_merge_confirm(text, input.voxel_merge_resolution,
                                      (int)scene.selected_ids().size(), n_unselected,
-                                     input.voxel_merge_surface_nets, win_w, win_h);
+                                     input.voxel_merge_surface_nets,
+                                     merge_has_density, input.voxel_merge_adaptive,
+                                     win_w, win_h);
         }
         if (input.remesh_in_progress)
             draw_remesh_progress(text, win_w, win_h);

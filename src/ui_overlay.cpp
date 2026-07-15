@@ -61,7 +61,8 @@ void draw_remesh_progress(TextOverlay& text, int win_w, int win_h) {
 }
 
 void draw_voxel_merge_confirm(TextOverlay& text, int resolution, int n_selected,
-                             int n_unselected, bool surface_nets, int win_w, int win_h) {
+                             int n_unselected, bool surface_nets,
+                             bool has_density, bool adaptive, int win_w, int win_h) {
     text.draw_panel(0, 0, (float)win_w, (float)win_h,
                    win_w, win_h, 0.0f, 0.0f, 0.0f, 0.5f);
 
@@ -89,11 +90,22 @@ void draw_voxel_merge_confirm(TextOverlay& text, int resolution, int n_selected,
                   scale, win_w, win_h, CGA(yellow), 1.0f);
 
     // Subtract option: carve the unselected (red) meshes out of the selected union.
+    float oy = 100.0f;
     if (n_unselected > 0) {
         std::snprintf(line, sizeof(line), "- subtract %d red mesh%s (carve)",
                       n_unselected, n_unselected == 1 ? "" : "es");
-        text.draw_text(line, cx - 360.0f, cy + 100.0f, scale, win_w, win_h,
+        text.draw_text(line, cx - 360.0f, cy + oy, scale, win_w, win_h,
                       CGA(light_red), 1.0f);
+        oy += 30.0f;
+    }
+
+    // Density paint present: offer the chained adaptive remesh so the merge
+    // output follows the heatmap without a separate '/' press.
+    if (has_density) {
+        std::snprintf(line, sizeof(line), "Adaptive remesh after: %s   ( D toggles )",
+                      adaptive ? "ON" : "OFF");
+        text.draw_text(line, cx - 360.0f, cy + oy, scale, win_w, win_h,
+                      CGA(light_cyan), 1.0f);
     }
 }
 

@@ -62,6 +62,7 @@ InputState::InputState()
     , voxel_merge_mirror(false)
     , voxel_merge_surface_nets(false)
     , voxel_merge_subtract(false)
+    , voxel_merge_adaptive(true)
     , voxel_merge_resolution(128)
     , mask_invert_requested(false)
     , mask_clear_requested(false)
@@ -414,16 +415,23 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
         // ...and '-' to confirm a subtract merge (carve the unselected reds).
         bool merge_subtract_key = g_input->voxel_merge_confirm_pending
                                && key == GLFW_KEY_MINUS;
+        // ...and D to toggle the chained adaptive remesh (density field only).
+        bool merge_adaptive_key = g_input->voxel_merge_confirm_pending
+                               && key == GLFW_KEY_D;
         bool allow = (key == GLFW_KEY_ESCAPE)
                   || (is_yn_dialog && (key == GLFW_KEY_Y || key == GLFW_KEY_N))
-                  || res_keys || merge_mirror_key || merge_nets_key || merge_subtract_key;
+                  || res_keys || merge_mirror_key || merge_nets_key || merge_subtract_key
+                  || merge_adaptive_key;
         if (!allow) return;
     }
 
     if (action == GLFW_PRESS) {
         switch (key) {
             case GLFW_KEY_D:
-                if (g_input->ctrl_held && !g_input->shift_held && g_input->mesh_locked) {
+                if (g_input->voxel_merge_confirm_pending) {
+                    // In the merge dialog, D flips the chained adaptive remesh.
+                    g_input->voxel_merge_adaptive = !g_input->voxel_merge_adaptive;
+                } else if (g_input->ctrl_held && !g_input->shift_held && g_input->mesh_locked) {
                     g_input->level_switch_delta = +1;    // Ctrl+D: level up
                 } else if (g_input->shift_held && !g_input->ctrl_held && g_input->mesh_locked) {
                     g_input->level_switch_delta = -1;    // Shift+D: level down

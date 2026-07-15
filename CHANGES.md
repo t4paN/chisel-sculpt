@@ -2,6 +2,22 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-15 — Voxel merge chains the adaptive remesh
+
+- **Merge output now follows the heatmap directly.** When any merged mesh
+  carries a painted density field, the merge automatically chains the
+  adaptive remesh — paint the heatmap, merge, and the result comes out
+  density-adaptive in one go (no separate `/` press). Works for the
+  single-mesh "SDF as auto-remesher" workflow too.
+- New line in the merge dialog when density is painted: "Adaptive remesh
+  after: ON/OFF (D toggles)" — defaults ON, opt out per merge.
+- The chained pass runs through the normal remesh path: same GPU-limit
+  guard (refuses with a toast instead of crashing the device), same
+  spatial-mirror handoff. Merges with no paint anywhere are unchanged.
+- Verified via `CHISEL_AUTO_DENSITY_MERGE=1`: merge carries the field
+  (0.983/0.004 above/below), chained remesh restructures 135k → 202k tris
+  following the paint, 0 unpaired mirror verts throughout.
+
 ## 2026-07-15 — Density paint (chunk 3 of 3): carry through the voxel merge
 
 - **Painted density now survives the SDF voxel merge.** The merged mesh's
