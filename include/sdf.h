@@ -28,6 +28,7 @@ struct VoxelMergeResult {
     double      elapsed_ms = 0.0;
     uint32_t    in_entities = 0, in_tris = 0, out_verts = 0, out_tris = 0;
     uint32_t    R = 0;
+    float       voxel = 0.0f;   // grid cell edge length (world units)
     // Manifold report (chunk 4): surfaced so a bad merge is visible before print.
     uint32_t    boundary_edges = 0, nonmanifold_edges = 0, components = 0;
 };
@@ -92,3 +93,30 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
 float voxel_merge_progress(const VoxelMergeJob& job);
 
 void voxel_merge_destroy(VoxelMergeJob* job);
+
+// ---- Flow field (retopologizer chunk 1) ------------------------------------
+// The smoothed 4-RoSy cross field on a sculpt's vertices: per-vertex principal-
+// curvature direction from the SDF Hessian, Jacobi-smoothed so poles migrate to
+// curvature concentrations. This is the orientation half of field-guided quad
+// extraction; chunk 1 only builds and displays it.
+struct FlowField {
+    std::vector<Vec3>  dir;   // unit principal-curvature direction, in the tangent plane
+    std::vector<Vec3>  nrm;   // unit field gradient (surface normal) at build time
+    std::vector<float> conf;  // anisotropy confidence [0,1) — 0 = umbilic/flat, no say
+};
+
+// Field-only job on the ACTIVE entity: voxelize it exactly like the merge
+// (splat + budgeted winding sign + flood), but stop at the signed field — no
+// extraction, no scene splice — then build + smooth the cross field on the
+// entity's current-level vertices (also budgeted). Drive it with
+// voxel_merge_tick / voxel_merge_progress / voxel_merge_destroy like a merge;
+// on Done, move the field out with flow_field_take. If the entity is
+// mirror-paired the SDF is symmetrised about x=0 first, so mirrored vertices
+// get mirror-consistent directions (modulo the 4-RoSy symmetry).
+VoxelMergeJob* flow_field_begin(Scene& scene, ComputeState& cs, int resolution);
+void flow_field_take(VoxelMergeJob& job, FlowField& out);
+
+// Dev-hook audit (CHISEL_AUTO_FLOW): prints the chunk-1 headless gates as
+// [flow-audit] lines — unit length, tangency, mirror-pair consistency (modulo
+// the 4-RoSy symmetry), and re-run stability when `prev` is given.
+void flow_field_audit(const Mesh& m, const FlowField& ff, const FlowField* prev);

@@ -635,6 +635,10 @@ int main(int argc, char* argv[]) {
     // Tick-driven voxel merge: non-null while a merge job is in flight (advanced one
     // budgeted step per frame so the window stays responsive). See sdf.h / CHANGES.
     VoxelMergeJob* vmerge_job = nullptr;
+    VoxelMergeJob* flow_job   = nullptr;  // field-only SDF job (flow overlay, retopo chunk 1)
+    FlowField      flow_field;            // last built cross field (active mesh)
+    uint32_t       flow_entity_id = 0;    // entity + vcount it was built against —
+    uint32_t       flow_vcount    = 0;    // the draw-time staleness check
 
     Vec3 mesh_center;
     float mesh_radius;
@@ -1265,6 +1269,69 @@ int main(int argc, char* argv[]) {
                                   "Voxel merge failed: %.200s", vm.error.c_str());
                     input.notification_timer = 4.0f;
                 }
+            }
+        }
+
+        // ---- Flow-field overlay build (retopo chunk 1) ----
+        // R builds the smoothed 4-RoSy cross field on the active mesh: the same
+        // SDF voxelization as the merge, stopped at the signed field, then the
+        // Hessian cross-field build + Jacobi smooth — all tick-driven so the
+        // window stays live. One SDF job at a time (they share GL state habits).
+        if (input.flow_field_requested) {
+            input.flow_field_requested = false;
+            if (!compute.supported) {
+                std::snprintf(input.notification, sizeof(input.notification),
+                              "Flow field needs GPU compute (unavailable)");
+                input.notification_timer = 4.0f;
+            } else if (!vmerge_job && !flow_job) {
+                scene.materialize_active_cpu();   // field build reads the live surface
+                flow_job = flow_field_begin(scene, compute, input.voxel_merge_resolution);
+                input.voxel_merge_in_progress = true;   // reuse the merge progress HUD
+            }
+        }
+        if (flow_job) {
+            VoxelMergeResult fr;
+            VoxelMergeStatus st = voxel_merge_tick(scene, compute, *flow_job, fr);
+            if (st != VoxelMergeStatus::Working) {
+                input.voxel_merge_in_progress = false;
+                if (st == VoxelMergeStatus::Done && fr.success) {
+                    flow_field_take(*flow_job, flow_field);
+                    flow_entity_id = scene.active_mesh_id();
+                    flow_vcount    = mesh->vertex_count();
+                    renderer.build_flow_overlay(*mesh, flow_field, 0.45f * fr.voxel);
+                    input.show_flow_field = true;
+                    std::snprintf(input.notification, sizeof(input.notification),
+                                  "Flow field: %u verts (R=%u, %.0f ms) — R hides",
+                                  fr.out_verts, fr.R, fr.elapsed_ms);
+                    input.notification_timer = 4.0f;
+
+                    // Dev hook CHISEL_AUTO_FLOW: print the chunk-1 gates for the
+                    // fresh field, then re-run once so the second pass can print
+                    // the stability gate against the first.
+                    static int auto_flow_runs = -1;
+                    if (auto_flow_runs < 0) {
+                        const char* env = std::getenv("CHISEL_AUTO_FLOW");
+                        auto_flow_runs = (env && std::atoi(env) != 0) ? 0 : 99;
+                    }
+                    static FlowField auto_flow_prev;
+                    if (auto_flow_runs == 0) {
+                        flow_field_audit(*mesh, flow_field, nullptr);
+                        auto_flow_prev = flow_field;
+                        input.flow_field_requested = true;
+                        auto_flow_runs = 1;
+                    } else if (auto_flow_runs == 1) {
+                        flow_field_audit(*mesh, flow_field, &auto_flow_prev);
+                        auto_flow_prev = FlowField();
+                        auto_flow_runs = 2;
+                    }
+                } else {
+                    std::printf("[flow-field] FAILED: %s\n", fr.error.c_str());
+                    std::snprintf(input.notification, sizeof(input.notification),
+                                  "Flow field failed: %.200s", fr.error.c_str());
+                    input.notification_timer = 4.0f;
+                }
+                voxel_merge_destroy(flow_job);
+                flow_job = nullptr;
             }
         }
 
@@ -2070,6 +2137,15 @@ int main(int argc, char* argv[]) {
             renderer.invalidate_debug_mesh();
             prev_show_debug_mesh = input.show_debug_mesh;
         }
+        if (input.show_flow_field) {
+            // Hide rather than draw garbage when topology or entity changed under
+            // the cached overlay (level switch, remesh, merge, undo). R rebuilds.
+            if (mesh->vertex_count() != flow_vcount
+                || scene.active_mesh_id() != flow_entity_id)
+                input.show_flow_field = false;
+            else
+                renderer.draw_flow_field(camera, win_w, win_h);
+        }
         if (input.show_debug_mesh) {
             renderer.draw_debug_mesh(camera, *mesh, win_w, win_h);
         }
@@ -2125,7 +2201,8 @@ int main(int argc, char* argv[]) {
             draw_remesh_progress(text, win_w, win_h);
         if (input.voxel_merge_in_progress)
             draw_voxel_merge_progress(text, win_w, win_h,
-                                      vmerge_job ? voxel_merge_progress(*vmerge_job) : 0.0f);
+                                      vmerge_job ? voxel_merge_progress(*vmerge_job)
+                                    : flow_job   ? voxel_merge_progress(*flow_job) : 0.0f);
         if (input.toolbar_visible)
             draw_toolbar(text, input, mesh->tri_count(), mesh->vertex_count(), CHISEL_VERSION, win_w, win_h);
         if (input.slider_mode != InputState::SliderMode::NONE)
@@ -2287,6 +2364,26 @@ int main(int argc, char* argv[]) {
             if (auto_subd_left > 0) {
                 --auto_subd_left;
                 input.level_switch_delta = +1;
+            }
+        }
+
+        // Dev hook: CHISEL_AUTO_FLOW=1 builds the flow field headless after
+        // warmup (composable with CHISEL_AUTO_IMPORT / CHISEL_AUTO_SUBD) and
+        // prints the chunk-1 [flow-audit] gates; the completion block re-runs
+        // the build once so the second audit carries the stability line.
+        {
+            static int auto_flow_state = -1;
+            static int auto_flow_warmup = 0;
+            if (auto_flow_state < 0) {
+                const char* env = std::getenv("CHISEL_AUTO_FLOW");
+                auto_flow_state = (env && std::atoi(env) != 0) ? 1 : 0;
+            }
+            if (auto_flow_state == 1 && ++auto_flow_warmup > 10 &&
+                app_state == AppState::IDLE && input.level_switch_delta == 0 &&
+                !vmerge_job && !flow_job) {
+                std::printf("[auto-flow] requesting flow-field build\n");
+                input.flow_field_requested = true;
+                auto_flow_state = 2;
             }
         }
 

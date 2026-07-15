@@ -1,4 +1,5 @@
 #include "renderer.h"
+#include "sdf.h"     // FlowField (flow overlay, retopo chunk 1)
 #include <cstdio>
 #include <cstring>
 #include <cmath>
@@ -569,6 +570,56 @@ void main() {
 }
 )";
 
+// Flow-field overlay (retopo chunk 1): the same screen-space ribbon expansion,
+// but the segment endpoints come straight out of their own SSBO (vec4 = world
+// xyz + confidence) instead of indexing mesh positions — the dashes are
+// synthetic geometry (crosses at sampled vertices), not mesh edges. Confidence
+// rides the endpoint w and fades the dash so flat/umbilic regions (where the
+// field direction is meaningless) recede instead of shouting noise.
+static const char* flow_vert_src =
+"#version 430 core\n"
+"layout(std430, binding = 0) readonly buffer SegIn { vec4 sp[]; };\n"
+DEBUG_PARAMS_BLOCK
+R"(
+out float vLat;
+flat out float vConf;
+void main() {
+    uint vid = uint(gl_VertexID);
+    uint s = vid / 6u;
+    uint c = vid % 6u;
+    vec4 A = sp[s*2u+0u], B = sp[s*2u+1u];
+    vec4 ca = uProj * uView * vec4(A.xyz, 1.0);
+    vec4 cb = uProj * uView * vec4(B.xyz, 1.0);
+    vec2 sa = (ca.xy / ca.w * 0.5 + 0.5) * uViewport;
+    vec2 sb = (cb.xy / cb.w * 0.5 + 0.5) * uViewport;
+    vec2 d  = sb - sa;
+    vec2 n  = vec2(-d.y, d.x) / max(length(d), 1e-4);
+    // 6 verts -> 2 tris over ribbon corners 0:A+ 1:A- 2:B+ 3:B-
+    uint corner = (c == 0u) ? 0u : (c == 1u || c == 4u) ? 1u : (c == 5u) ? 3u : 2u;
+    bool  atB  = corner >= 2u;
+    float side = (corner == 1u || corner == 3u) ? -1.0 : 1.0;
+    vec4 clip = atB ? cb : ca;
+    vec2 sp2  = (atB ? sb : sa) + n * (side * uHalfW);
+    vec2 ndc  = sp2 / uViewport * 2.0 - 1.0;
+    gl_Position = vec4(ndc * clip.w, clip.z - uBias * clip.w, clip.w);
+    vLat  = side;
+    vConf = A.w;
+}
+)";
+
+static const char* flow_frag_src =
+"#version 430 core\n"
+DEBUG_PARAMS_BLOCK
+R"(
+in float vLat;
+flat in float vConf;
+out vec4 fragColor;
+void main() {
+    float aa = clamp((1.0 - abs(vLat)) * uHalfW, 0.0, 1.0);
+    fragColor = vec4(0.95, 0.58, 0.15, aa * (0.25 + 0.75 * vConf));   // amber
+}
+)";
+
 // ---- WGSL render shaders (WebGPU backend) ----
 // One module per program, vs_main + fs_main (the names the seam hardcodes). The
 // std140 Params blocks mirror the *ParamsGPU structs above byte-for-byte — WGSL's
@@ -892,12 +943,62 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
 }
 )WGSL";
 
+// WGSL twin of flow_vert_src/flow_frag_src (see the GLSL comment).
+static const char* flow_wgsl_src = R"WGSL(
+struct Params {
+    view: mat4x4<f32>, proj: mat4x4<f32>,
+    viewport: vec2<f32>, half_w: f32, bias: f32,
+};
+@group(0) @binding(63) var<uniform> P: Params;
+@group(0) @binding(0) var<storage, read> sp: array<vec4<f32>>;
+struct VSOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) lat: f32,
+    @location(1) @interpolate(flat) conf: f32,
+};
+@vertex
+fn vs_main(@builtin(vertex_index) vid: u32) -> VSOut {
+    let s = vid / 6u;
+    let c = vid % 6u;
+    let A = sp[s*2u+0u]; let B = sp[s*2u+1u];
+    let ca = P.proj * P.view * vec4<f32>(A.xyz, 1.0);
+    let cb = P.proj * P.view * vec4<f32>(B.xyz, 1.0);
+    let sa = (ca.xy / ca.w * 0.5 + vec2<f32>(0.5)) * P.viewport;
+    let sb = (cb.xy / cb.w * 0.5 + vec2<f32>(0.5)) * P.viewport;
+    let d  = sb - sa;
+    let n  = vec2<f32>(-d.y, d.x) / max(length(d), 1e-4);
+    // 6 verts -> 2 tris over ribbon corners 0:A+ 1:A- 2:B+ 3:B-
+    var corner = 2u;
+    if (c == 0u) { corner = 0u; }
+    else if (c == 1u || c == 4u) { corner = 1u; }
+    else if (c == 5u) { corner = 3u; }
+    let atB  = corner >= 2u;
+    var side = 1.0;
+    if (corner == 1u || corner == 3u) { side = -1.0; }
+    var clip = ca; var spx = sa;
+    if (atB) { clip = cb; spx = sb; }
+    spx = spx + n * (side * P.half_w);
+    let ndc = spx / P.viewport * 2.0 - vec2<f32>(1.0);
+    var o: VSOut;
+    o.pos  = vec4<f32>(ndc * clip.w, clip.z - P.bias * clip.w, clip.w);
+    o.lat  = side;
+    o.conf = A.w;
+    return o;
+}
+@fragment
+fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
+    let aa = clamp((1.0 - abs(in.lat)) * P.half_w, 0.0, 1.0);
+    return vec4<f32>(0.95, 0.58, 0.15, aa * (0.25 + 0.75 * in.conf));
+}
+)WGSL";
+
 // ---- Renderer ----
 
 Renderer::Renderer()
     : debug_edge_count(0)
     , debug_edge_src_tris(0)
     , debug_mesh_radius(1.0f)
+    , flow_seg_count(0)
     , screen_tri_count(0)
     , initialized(false)
 {}
@@ -925,6 +1026,9 @@ Renderer::~Renderer() {
     gpu::release_render_pipeline(debug_edge_pipeline);
     gpu::release_buffer(debug_edge_ubo);
     gpu::release_buffer(debug_edge_vbo);
+    gpu::release_render_pipeline(flow_pipeline);
+    gpu::release_buffer(flow_ubo);
+    gpu::release_buffer(flow_seg_vbo);
     gpu::release_render_pipeline(pick_pipeline);
     for (auto& bg : pick_bgs) gpu::release_bind_group(bg);
     for (auto& ubo : pick_ubos) gpu::release_buffer(ubo);
@@ -1204,6 +1308,26 @@ void Renderer::init() {
         debug_edge_ubo = gpu::create_buffer(gpu_dev, nullptr, sizeof(DebugParamsGPU), gpu::Usage::Uniform);
     }
     // debug_edge_vbo (edge index buffer) is created lazily in draw_debug_mesh.
+
+    // Flow-field overlay — same ribbon pipeline shape, endpoints in their own
+    // SSBO (binding 0), own Params UBO so it never races the wireframe's writes.
+    {
+        gpu::BindEntry binds[] = {
+            { 0,  gpu::Bind::StorageRead, 0 },
+            { 63, gpu::Bind::Uniform, sizeof(DebugParamsGPU) },
+        };
+        gpu::RenderPipelineDesc d;
+        d.shaders.wgsl = flow_wgsl_src;
+        d.shaders.vert_glsl = flow_vert_src;
+        d.shaders.frag_glsl = flow_frag_src;
+        d.binds = binds; d.bind_count = 2;
+        d.topology = gpu::Topology::Triangles;
+        d.depth_test = true; d.depth_write = false; d.blend = true;
+        flow_pipeline = gpu::create_render_pipeline(gpu_dev, d);
+        if (!flow_pipeline.handle) std::fprintf(stderr, "[renderer] flow overlay pipeline failed\n");
+        flow_ubo = gpu::create_buffer(gpu_dev, nullptr, sizeof(DebugParamsGPU), gpu::Usage::Uniform);
+    }
+    // flow_seg_vbo is created on the first build_flow_overlay.
 
     initialized = true;
 }
@@ -2031,6 +2155,67 @@ void Renderer::draw_debug_mesh(const Camera& cam, const Mesh& mesh, int w, int h
     gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, debug_edge_pipeline, be, 3);
     gpu::set_bind_group(rp, debug_edge_pipeline, grp);
     gpu::draw(rp, (debug_edge_count / 2u) * 6u);
+    gpu::end_render_pass(rp);
+    gpu::release_bind_group(grp);
+}
+
+void Renderer::build_flow_overlay(const Mesh& mesh, const FlowField& field, float dash_half) {
+    flow_seg_count = 0;
+    uint32_t nv = mesh.vertex_count();
+    if (nv == 0 || field.dir.size() < nv || field.nrm.size() < nv || field.conf.size() < nv)
+        return;
+
+    // Cap the cross count — past ~60k crosses the view is solid paint and the
+    // buffer balloons; a strided sample reads the same on a dense sculpt.
+    uint32_t step = std::max(1u, nv / 60000u);
+    std::vector<float> segs;
+    segs.reserve(((size_t)nv / step + 1) * 16);
+    for (uint32_t v = 0; v < nv; v += step) {
+        Vec3 d1 = field.dir[v];
+        Vec3 n  = field.nrm[v];
+        if (d1.length() < 0.5f || n.length() < 0.5f) continue;  // degenerate build (conf 0)
+        float conf = field.conf[v];
+        // Confidence scales the dash too: flat regions show small crosses,
+        // confident anisotropy shows long ones. Lift off the surface a little
+        // so the ribbon isn't half-buried (the NDC bias handles the rest).
+        float h  = dash_half * (0.35f + 0.65f * conf);
+        Vec3  p  = Vec3(mesh.pos_x[v], mesh.pos_y[v], mesh.pos_z[v]) + n * (dash_half * 0.3f);
+        Vec3  d2 = n.cross(d1);
+        auto seg = [&](const Vec3& a, const Vec3& b) {
+            segs.insert(segs.end(), { a.x, a.y, a.z, conf, b.x, b.y, b.z, conf });
+        };
+        seg(p - d1 * h, p + d1 * h);   // the cross: both 4-RoSy axes, same weight
+        seg(p - d2 * h, p + d2 * h);   // (which is "primary" is arbitrary per vertex)
+    }
+    if (segs.empty()) return;
+    ensure_buffer(gpu_dev, flow_seg_vbo, segs.data(),
+                  segs.size() * sizeof(float), gpu::Usage::Storage);
+    flow_seg_count = (uint32_t)(segs.size() / 8);
+}
+
+void Renderer::draw_flow_field(const Camera& cam, int w, int h) {
+    if (flow_seg_count == 0 || !flow_pipeline.handle) return;
+
+    DebugParamsGPU p;
+    cam.get_view_matrix(p.view);
+    cam.get_projection_matrix(p.proj, (float)w / (float)h);
+    p.viewport[0] = (float)w;
+    p.viewport[1] = (float)h;
+    p.half_width_px  = 1.5f;      // dash length carries the signal; width stays thin
+    p.depth_bias_ndc = 2.5e-4f;   // same toward-viewer nudge as the wireframe
+    gpu::write_buffer(gpu_dev, flow_ubo, 0, &p, sizeof p);
+
+    gpu::RenderTarget target;      // fbo 0 (default framebuffer), no clear
+    target.width = w; target.height = h;
+    gpu::RenderPass rp = gpu::begin_render_pass(gpu_dev, target);
+    gpu::set_pipeline(rp, flow_pipeline);
+    gpu::BindBufferEntry be[] = {
+        { 0,  &flow_seg_vbo, flow_seg_vbo.size },
+        { 63, &flow_ubo,     sizeof(DebugParamsGPU) },
+    };
+    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, flow_pipeline, be, 2);
+    gpu::set_bind_group(rp, flow_pipeline, grp);
+    gpu::draw(rp, flow_seg_count * 6u);
     gpu::end_render_pass(rp);
     gpu::release_bind_group(grp);
 }

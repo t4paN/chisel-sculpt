@@ -6,6 +6,8 @@
 #include "entity_gpu.h"
 #include "gpu/gpu.h"
 
+struct FlowField;   // sdf.h — smoothed 4-RoSy cross field (retopo chunk 1)
+
 struct Renderer {
     // gpu:: seam device (== gpu::gl_device() on GL). All render programs and their
     // buffers are now on the seam (mirrors the compute Seam 2b port).
@@ -81,6 +83,16 @@ struct Renderer {
     uint32_t debug_edge_count;     // u32 entries in it (2 per unique edge)
     uint32_t debug_edge_src_tris;  // tri count it was built from (stale-cache check)
     float    debug_mesh_radius;    // bounding radius at build (zoom-adaptive width)
+
+    // Flow-field overlay (retopo chunk 1) — same fat-line ribbon trick as the
+    // wireframe, but the endpoints live in their own SSBO (vec4 = xyz +
+    // confidence): two dashes per sampled vertex along the cross axes. Built
+    // once per field by build_flow_overlay; the caller owns staleness (main
+    // hides it when topology changes under it).
+    gpu::RenderPipeline flow_pipeline;
+    gpu::Buffer         flow_ubo;
+    gpu::Buffer         flow_seg_vbo;
+    uint32_t            flow_seg_count;    // segments (2 vec4 endpoints each)
 
     // Screen-buffer MRT for the brush pipeline — on the gpu:: seam. A 4-attachment
     // offscreen target (R32F depth / RGB16F normal / R32UI triid / RG16F bary) +
@@ -197,4 +209,7 @@ struct Renderer {
     // Debug visualization
     void draw_debug_mesh(const Camera& cam, const Mesh& mesh, int w, int h);
     void invalidate_debug_mesh() { debug_edge_count = 0; debug_edge_src_tris = 0; }
+    void build_flow_overlay(const Mesh& mesh, const FlowField& field, float dash_half);
+    void draw_flow_field(const Camera& cam, int w, int h);
+    void clear_flow_overlay() { flow_seg_count = 0; }
 };

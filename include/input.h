@@ -160,6 +160,12 @@ struct InputState {
     // Debug: Y key toggles mesh verts+edges overlay
     bool show_debug_mesh;
 
+    // Flow-field overlay (retopo chunk 1): R builds + shows the smoothed 4-RoSy
+    // cross field on the active mesh; R while shown hides it. The build is a
+    // tick-driven SDF job (same machinery as the voxel merge, field-only).
+    bool flow_field_requested;
+    bool show_flow_field;
+
     // Manual projection trigger (P post-lock): projects current truth down onto current level
     bool project_requested;
 

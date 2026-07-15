@@ -66,7 +66,8 @@ uint32_t gather_soup(const Scene& scene,
                      bool                   subtract,
                      uint32_t&              n_additive,
                      uint32_t&              n_cutter,
-                     size_t&                additive_floats)
+                     size_t&                additive_floats,
+                     const MeshEntity*      solo = nullptr)  // gather ONLY this entity (flow-field job)
 {
     n_additive  = 0;
     n_cutter    = 0;
@@ -107,7 +108,12 @@ uint32_t gather_soup(const Scene& scene,
         return true;
     };
 
-    // Additive: the current selection.
+    // Additive: the solo entity if given, else the current selection.
+    if (solo) {
+        if (add_entity(solo, /*cutter=*/false)) n_additive++;
+        additive_floats = pos.size();
+        return n_additive;
+    }
     for (uint32_t id : scene.selected_ids())
         if (add_entity(scene.find_entity(id), /*cutter=*/false)) n_additive++;
     additive_floats = pos.size();
@@ -507,11 +513,7 @@ float sample_field(const std::vector<float>& f, const SdfGrid& g, Vec3 p) {
 // their 1-ring edges hug the cross axes; every pass still reprojects onto the
 // zero level set, so shape and watertightness are untouched by construction)
 // and (b) a valence-flip pass consolidates the leftover irregular vertices.
-struct CrossField {
-    std::vector<Vec3>  dir;   // unit principal-curvature direction, in the tangent plane
-    std::vector<Vec3>  nrm;   // unit field gradient (surface normal) at build time
-    std::vector<float> conf;  // anisotropy confidence [0,1) — 0 = umbilic/flat, no say
-};
+using CrossField = FlowField;   // public name in sdf.h (retopo chunk 1 reads it out)
 
 // Principal curvature direction per vertex from the SDF Hessian: the shape
 // operator restricted to the tangent plane is S = (P H P)/|∇f| (P = I − nnᵀ);
@@ -1326,11 +1328,15 @@ static void sdf_gl_check(const char* stage) {
 // + uniforms before dispatching. Phases advance one step per tick (Sign — the
 // dominant pass — is budgeted across several ticks).
 struct VoxelMergeJob {
-    enum class Phase { Splat, Sign, Mesh, Finish, Done, Failed };
+    enum class Phase { Splat, Sign, Mesh, Flow, Finish, Done, Failed };
     Phase phase = Phase::Splat;
 
     bool     mirror = false;
     bool     use_nets = false;     // Surface Nets extractor chosen (vs Marching Cubes)
+    bool     field_only = false;   // flow-field job: stop at the signed field, no extraction
+    uint32_t flow_entity = 0;      // field_only: entity whose vertices get the cross field
+    int      flow_iters = 0;       // field_only: smoothing iterations done so far
+    FlowField flow;                // field_only: the result (taken by flow_field_take)
     SdfGrid  grid;
     int      band = 0;
     uint32_t tri_count    = 0;
@@ -1407,9 +1413,9 @@ static void symmetrise_field_x(std::vector<float>& field, const SdfGrid& grid) {
         }
 }
 
-VoxelMergeJob* voxel_merge_begin(Scene& scene, ComputeState& cs,
-                                 int resolution, bool mirror, bool surface_nets,
-                                 bool subtract) {
+static VoxelMergeJob* sdf_job_begin(Scene& scene, ComputeState& cs,
+                                    int resolution, bool mirror, bool surface_nets,
+                                    bool subtract, const MeshEntity* solo) {
     VoxelMergeJob* job = new VoxelMergeJob();
     job->mirror = mirror;
     job->t0 = std::chrono::high_resolution_clock::now();
@@ -1428,7 +1434,8 @@ VoxelMergeJob* voxel_merge_begin(Scene& scene, ComputeState& cs,
     size_t   additive_floats = 0;
     job->res.in_entities = gather_soup(scene, job->pos, idx, job->vcol, job->any_paint,
                                        job->vdens, job->any_density,
-                                       subtract, n_additive, n_cutter, additive_floats);
+                                       subtract, n_additive, n_cutter, additive_floats,
+                                       solo);
     job->res.in_tris     = (uint32_t)(idx.size() / 3);
     if (idx.empty()) return fail("selection has no triangles");
     if (subtract && n_additive == 0)
@@ -1463,7 +1470,8 @@ VoxelMergeJob* voxel_merge_begin(Scene& scene, ComputeState& cs,
     grid.R     = (uint32_t)R;
     grid.voxel = ext / (float)(R - 2 * GRID_PAD);     // R-2*PAD cells span the AABB
     grid.origin = lo - Vec3(grid.voxel, grid.voxel, grid.voxel) * (float)GRID_PAD;
-    job->res.R = grid.R;
+    job->res.R     = grid.R;
+    job->res.voxel = grid.voxel;
 
     // Sign band thickness is a constant ABSOLUTE width, not a constant voxel count:
     // the flood fill assumes the band is a closed separating shell, so at a fixed
@@ -1608,6 +1616,105 @@ VoxelMergeJob* voxel_merge_begin(Scene& scene, ComputeState& cs,
     sdf_gl_check("pre-merge (stale)");   // drain inherited errors so attribution is clean
     job->phase = VoxelMergeJob::Phase::Splat;
     return job;
+}
+
+VoxelMergeJob* voxel_merge_begin(Scene& scene, ComputeState& cs,
+                                 int resolution, bool mirror, bool surface_nets,
+                                 bool subtract) {
+    return sdf_job_begin(scene, cs, resolution, mirror, surface_nets, subtract, nullptr);
+}
+
+VoxelMergeJob* flow_field_begin(Scene& scene, ComputeState& cs, int resolution) {
+    MeshEntity* e = &scene.active_entity();
+    // Mirror-paired sculpt -> symmetric grid window + x=0 corner layer, so the
+    // Mesh phase can symmetrise the field and mirrored verts read identical
+    // curvature. An unpaired mesh keeps the faithful asymmetric field.
+    bool mirrored = !e->mesh.mirror_x_map.empty();
+    VoxelMergeJob* job = sdf_job_begin(scene, cs, resolution, mirrored,
+                                       /*surface_nets=*/false, /*subtract=*/false, e);
+    job->field_only  = true;
+    job->flow_entity = scene.active_mesh_id();
+    return job;
+}
+
+void flow_field_take(VoxelMergeJob& job, FlowField& out) {
+    out.dir  = std::move(job.flow.dir);
+    out.nrm  = std::move(job.flow.nrm);
+    out.conf = std::move(job.flow.conf);
+}
+
+// Smallest angle between direction `a` and the 4-RoSy class of `b` in the plane
+// with normal `n`: a is projected into the plane, then compared against b and
+// n×b with sign folded away. 0° = same class; 45° = maximally disagreeing.
+static float rosy_angle_deg(Vec3 a, const Vec3& b, const Vec3& n) {
+    a = a - n * a.dot(n);
+    float al = a.length();
+    if (al < 1e-6f) return 0.0f;    // a was (near) normal to the plane: no verdict
+    a = a * (1.0f / al);
+    Vec3 b2 = n.cross(b);
+    float c = std::max(std::fabs(a.dot(b)), std::fabs(a.dot(b2)));
+    return std::acos(std::min(c, 1.0f)) * 57.29578f;
+}
+
+void flow_field_audit(const Mesh& m, const FlowField& ff, const FlowField* prev) {
+    const uint32_t nv = m.vertex_count();
+    if (ff.dir.size() < nv || ff.nrm.size() < nv || ff.conf.size() < nv) {
+        std::printf("[flow-audit] SIZE MISMATCH: dir=%zu nrm=%zu conf=%zu verts=%u\n",
+                    ff.dir.size(), ff.nrm.size(), ff.conf.size(), nv);
+        return;
+    }
+
+    // Gate 1+2: every built direction is unit-length and tangent to its normal.
+    uint32_t built = 0;
+    float len_min = 1e9f, len_max = 0.0f, tan_max = 0.0f;
+    double conf_sum = 0.0;
+    for (uint32_t v = 0; v < nv; v++) {
+        float l = ff.dir[v].length();
+        if (l < 0.5f) continue;                    // degenerate build (conf 0), excluded
+        built++;
+        len_min = std::min(len_min, l);
+        len_max = std::max(len_max, l);
+        tan_max = std::max(tan_max, std::fabs(ff.dir[v].dot(ff.nrm[v])));
+        conf_sum += ff.conf[v];
+    }
+    std::printf("[flow-audit] built %u/%u verts | len [%.6f, %.6f] | max |dir.n| %.6f | mean conf %.3f\n",
+                built, nv, (built ? len_min : 0.0f), len_max, tan_max,
+                built ? conf_sum / built : 0.0);
+
+    // Gate 3: mirror pairs carry x-mirrored directions, modulo 4-RoSy.
+    if (!m.mirror_x_map.empty()) {
+        double ang_sum = 0.0; float ang_max = 0.0f; uint32_t pairs = 0;
+        for (uint32_t v = 0; v < nv && v < m.mirror_x_map.size(); v++) {
+            uint32_t mv = m.mirror_x_map[v];
+            if (mv >= nv || mv <= v) continue;     // unpaired sentinel / on-plane / counted
+            const Vec3& a = ff.dir[v];
+            const Vec3& b = ff.dir[mv];
+            if (a.length() < 0.5f || b.length() < 0.5f) continue;
+            float ang = rosy_angle_deg(Vec3(-a.x, a.y, a.z), b, ff.nrm[mv]);
+            ang_sum += ang; ang_max = std::max(ang_max, ang); pairs++;
+        }
+        std::printf("[flow-audit] mirror: %u pairs | angle mean %.3f deg, max %.3f deg (mod 4-RoSy)\n",
+                    pairs, pairs ? ang_sum / pairs : 0.0, ang_max);
+    } else {
+        std::printf("[flow-audit] mirror: mesh has no mirror map, gate skipped\n");
+    }
+
+    // Gate 4: stability — the re-run field agrees with the previous one.
+    if (prev) {
+        if (prev->dir.size() != ff.dir.size()) {
+            std::printf("[flow-audit] rerun: SIZE CHANGED %zu -> %zu\n",
+                        prev->dir.size(), ff.dir.size());
+            return;
+        }
+        double ang_sum = 0.0; float ang_max = 0.0f; uint32_t cnt = 0;
+        for (uint32_t v = 0; v < nv; v++) {
+            if (prev->dir[v].length() < 0.5f || ff.dir[v].length() < 0.5f) continue;
+            float ang = rosy_angle_deg(prev->dir[v], ff.dir[v], ff.nrm[v]);
+            ang_sum += ang; ang_max = std::max(ang_max, ang); cnt++;
+        }
+        std::printf("[flow-audit] rerun: %u verts | angle mean %.4f deg, max %.4f deg\n",
+                    cnt, cnt ? ang_sum / cnt : 0.0, ang_max);
+    }
 }
 
 VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
@@ -1796,8 +1903,17 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
         // Surface-Nets mirror: make the field exactly symmetric here, so the SN
         // dispatch below extracts a continuous mirror-paired surface (no seam to
         // close). MC's mirror path leaves the field as-is and seams at extraction.
-        if (j.mirror && j.use_nets)
+        // The flow-field job symmetrises too: mirrored verts must sample identical
+        // curvature or the cross field drifts apart across x=0.
+        if (j.mirror && (j.use_nets || j.field_only))
             symmetrise_field_x(j.field_cpu, grid);
+
+        // Flow-field job stops here: the signed field is all it wanted. No
+        // extraction, no re-upload — the cross field is built on the CPU copy.
+        if (j.field_only) {
+            j.phase = Phase::Flow;
+            return done(VoxelMergeStatus::Working);
+        }
         gpu::write_buffer(cs.gpu_dev, j.field, 0, j.field_cpu.data(),
                           (uint64_t)j.corner_count*sizeof(float));
 
@@ -1976,6 +2092,33 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
         return done(VoxelMergeStatus::Done);
     }
 
+    case Phase::Flow: {
+        // Flow-field job tail (CPU): build the cross field on the source entity's
+        // current vertices, then smooth it a few Jacobi iterations per tick so a
+        // big sculpt doesn't freeze the window. (smooth_cross_field rebuilds its
+        // neighbour lists per call — a per-tick cost comparable to the iterations
+        // themselves; acceptable for a user-paced debug build, revisit if it drags.)
+        MeshEntity* e = scene.find_entity(j.flow_entity);
+        if (!e) return fail("flow field: entity vanished mid-build");
+        Mesh& m = e->mesh;
+        if (j.flow.dir.empty()) {
+            build_cross_field(m, j.field_cpu, grid, j.flow);
+            if (j.flow.dir.empty()) return fail("flow field: no vertices");
+            return done(VoxelMergeStatus::Working);
+        }
+        const int FLOW_ITERS = 24, ITERS_PER_TICK = 6;
+        smooth_cross_field(m, j.flow, std::min(ITERS_PER_TICK, FLOW_ITERS - j.flow_iters));
+        j.flow_iters += ITERS_PER_TICK;
+        if (j.flow_iters >= FLOW_ITERS) {
+            j.res.success    = true;
+            j.res.out_verts  = m.vertex_count();
+            j.res.elapsed_ms = std::chrono::duration<double, std::milli>(
+                std::chrono::high_resolution_clock::now() - j.t0).count();
+            j.phase = Phase::Done;
+        }
+        return done(VoxelMergeStatus::Working);
+    }
+
     case Phase::Done:   return done(VoxelMergeStatus::Done);
     case Phase::Failed: return done(VoxelMergeStatus::Failed);
     }
@@ -1989,6 +2132,7 @@ float voxel_merge_progress(const VoxelMergeJob& j) {
                                                ? 0.10f + 0.70f * ((float)j.sign_off / (float)j.corner_count)
                                                : 0.10f;
         case VoxelMergeJob::Phase::Mesh:   return 0.85f;
+        case VoxelMergeJob::Phase::Flow:   return 0.85f + 0.14f * (float)j.flow_iters / 24.0f;
         case VoxelMergeJob::Phase::Finish: return 0.95f;
         case VoxelMergeJob::Phase::Done:   return 1.0f;
         case VoxelMergeJob::Phase::Failed: return 1.0f;

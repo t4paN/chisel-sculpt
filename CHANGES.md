@@ -2,6 +2,24 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-15 — Flow-field overlay (retopologizer chunk 1, `retopologizer` branch)
+
+- **R shows the quad flow field on the active mesh.** Press R: the sculpt is
+  voxelized (same SDF machinery as the merge, stopped at the signed field),
+  a 4-RoSy cross field is built from the SDF Hessian and Jacobi-smoothed, and
+  amber crosses appear at the vertices — each cross is the two directions
+  quad edges would flow there, with length/brightness = confidence. R again
+  hides it. First visible piece of the 0.2 retopologizer; no output mesh yet.
+- Build is tick-driven with the merge progress HUD (winding-sign pass and the
+  field smoothing are both budgeted across frames — no freeze).
+- Mirror-aware: on a mirror-paired mesh the SDF is symmetrised about x=0
+  first, so mirrored vertices get mirror-consistent directions.
+- Overlay hides itself when topology changes under it (level switch, remesh,
+  merge, undo) — R rebuilds fresh each time it's shown.
+- Headless gates via `CHISEL_AUTO_FLOW=1` on the startup sphere: unit length
+  exact, tangency 0.000000, mirror pairs ≤0.028° apart (mod 4-RoSy), re-run
+  stability ≤0.028°. User-verified visually (build + toggle + progress HUD).
+
 ## 2026-07-15 — Voxel merge chains the adaptive remesh
 
 - **Merge output now follows the heatmap directly.** When any merged mesh

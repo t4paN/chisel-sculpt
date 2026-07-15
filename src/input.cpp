@@ -52,6 +52,8 @@ InputState::InputState()
     , debug_stride_cycle_requested(false)
     , debug_pick_vertex_requested(false)
     , show_debug_mesh(false)
+    , flow_field_requested(false)
+    , show_flow_field(false)
     , project_requested(false)
     , remesh_requested(false)
     , remesh_in_progress(false)
@@ -748,6 +750,17 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
                     g_input->key_y_pressed = true;
                     if (g_input->interaction_mode != InputState::InteractionMode::INSERT)
                         g_input->show_debug_mesh = !g_input->show_debug_mesh;
+                }
+                break;
+
+            case GLFW_KEY_R:
+                // Flow-field overlay (retopo chunk 1): build fresh + show; while
+                // shown, hide. Always rebuilds on show — the field is a snapshot
+                // and sculpting between presses would leave it silently stale.
+                if (g_input->show_flow_field) {
+                    g_input->show_flow_field = false;
+                } else if (g_input->interaction_mode != InputState::InteractionMode::INSERT) {
+                    g_input->flow_field_requested = true;
                 }
                 break;
 
