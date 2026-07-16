@@ -2127,7 +2127,8 @@ int main(int argc, char* argv[]) {
             draw_voxel_merge_progress(text, win_w, win_h,
                                       vmerge_job ? voxel_merge_progress(*vmerge_job) : 0.0f);
         if (input.toolbar_visible)
-            draw_toolbar(text, input, mesh->tri_count(), mesh->vertex_count(), CHISEL_VERSION, win_w, win_h);
+            draw_toolbar(text, input, mesh->tri_count(), mesh->vertex_count(), CHISEL_VERSION,
+                         current_project_path.c_str(), win_w, win_h);
         if (input.slider_mode != InputState::SliderMode::NONE)
             draw_slider(text, input, win_w, win_h);
         if (input.interaction_mode == InputState::InteractionMode::SELECT)

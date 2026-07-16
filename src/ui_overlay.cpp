@@ -122,7 +122,7 @@ void draw_voxel_merge_progress(TextOverlay& text, int win_w, int win_h, float pr
 
 void draw_toolbar(TextOverlay& text, const InputState& input,
                   uint32_t tri_count, uint32_t vert_count, const char* ver,
-                  int win_w, int win_h) {
+                  const char* project_path, int win_w, int win_h) {
     float panel_w = 220.0f;
     float panel_h = 300.0f;
     float panel_x = (float)win_w - panel_w - 10.0f;
@@ -214,6 +214,39 @@ void draw_toolbar(TextOverlay& text, const InputState& input,
     text.draw_text(input.autosmooth ? "Autosmooth: ON" : "Autosmooth: OFF",
                   tx, ty, scale, win_w, win_h,
                   CGA(light_cyan), 1.0f);
+    ty += line_h + 6;
+
+    // Sculpt name at the bottom of the panel: basename without the .chisel
+    // suffix, or the never-saved placeholder. Truncated to the panel width
+    // (glyphs are 8px * scale wide).
+    {
+        const float nscale = 1.25f;
+        text.draw_text("Filename:", tx, ty, scale, win_w, win_h,
+                      CGA(light_gray), 1.0f);
+        ty += line_h;
+        char nbuf[32];
+        const char* name = "Unsaved Project";
+        if (project_path && *project_path) {
+            const char* base = std::strrchr(project_path, '/');
+            base = base ? base + 1 : project_path;
+            size_t len = std::strlen(base);
+            if (len > 7 && std::strcmp(base + len - 7, ".chisel") == 0)
+                len -= 7;
+            size_t max_chars =
+                (size_t)((panel_w - 24.0f) / (8.0f * nscale));
+            if (max_chars > sizeof(nbuf) - 1) max_chars = sizeof(nbuf) - 1;
+            if (len > max_chars) {
+                len = max_chars - 2;
+                std::memcpy(nbuf, base, len);
+                nbuf[len] = '.'; nbuf[len + 1] = '.'; nbuf[len + 2] = '\0';
+            } else {
+                std::memcpy(nbuf, base, len);
+                nbuf[len] = '\0';
+            }
+            name = nbuf;
+        }
+        text.draw_text(name, tx, ty, nscale, win_w, win_h, CGA(white), 1.0f);
+    }
 }
 
 void draw_slider(TextOverlay& text, const InputState& input, int win_w, int win_h) {

@@ -14,7 +14,7 @@ void draw_voxel_merge_confirm(TextOverlay& text, int resolution, int n_selected,
 void draw_voxel_merge_progress(TextOverlay& text, int win_w, int win_h, float progress);
 void draw_toolbar(TextOverlay& text, const InputState& input,
                   uint32_t tri_count, uint32_t vert_count, const char* ver,
-                  int win_w, int win_h);
+                  const char* project_path, int win_w, int win_h);
 void draw_slider(TextOverlay& text, const InputState& input, int win_w, int win_h);
 void draw_notification(TextOverlay& text, InputState& input, int win_w, int win_h);
 void draw_fps(TextOverlay& text, float fps, int win_w, int win_h);

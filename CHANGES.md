@@ -2,6 +2,14 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-16 — Sculpt name in the info panel
+
+- The bottom-right info panel now shows the current sculpt's filename at the
+  bottom of the list under a "Filename:" label (basename, `.chisel` suffix
+  stripped, truncated to fit). A never-saved sculpt reads
+  **"Unsaved Project"**; the name updates on save/load and resets with a
+  new sculpt.
+
 ## 2026-07-15 — Voxel merge chains the adaptive remesh
 
 - **Merge output now follows the heatmap directly.** When any merged mesh
