@@ -34,7 +34,6 @@ InputState::InputState()
     , save_dialog_active(false)
     , drop_confirm_pending(false)
     , drop_open_requested(false)
-    , drop_save_open_requested(false)
     , notification()
     , notification_timer(0.0f)
     , focus_requested(false)
@@ -426,13 +425,10 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
         // ...and D to toggle the chained adaptive remesh (density field only).
         bool merge_adaptive_key = g_input->voxel_merge_confirm_pending
                                && key == GLFW_KEY_D;
-        // The drop dialog also takes S (save current project, then open).
-        bool drop_save_key = g_input->drop_confirm_pending
-                          && key == GLFW_KEY_S;
         bool allow = (key == GLFW_KEY_ESCAPE)
                   || (is_yn_dialog && (key == GLFW_KEY_Y || key == GLFW_KEY_N))
                   || res_keys || merge_mirror_key || merge_nets_key || merge_subtract_key
-                  || merge_adaptive_key || drop_save_key;
+                  || merge_adaptive_key;
         if (!allow) return;
     }
 
@@ -510,11 +506,7 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
                 break;
 
             case GLFW_KEY_S:
-                if (g_input->drop_confirm_pending) {
-                    // In the drop dialog, S = save current project, then open.
-                    g_input->drop_confirm_pending = false;
-                    g_input->drop_save_open_requested = true;
-                } else if (g_input->voxel_merge_confirm_pending) {
+                if (g_input->voxel_merge_confirm_pending) {
                     // In the merge dialog, S flips the extractor (Surface Nets / MC).
                     g_input->voxel_merge_surface_nets = !g_input->voxel_merge_surface_nets;
                 } else if (g_input->ctrl_held && g_input->shift_held) {

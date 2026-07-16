@@ -59,7 +59,7 @@ void draw_drop_confirm(TextOverlay& text, const char* path, int win_w, int win_h
     text.draw_text("Current sculpt will be replaced.", cx - 360.0f, cy - 20.0f, scale,
                   win_w, win_h, CGA(light_gray), 1.0f);
 
-    text.draw_text("S save & open   Y open, don't save   N / ESC cancel",
+    text.draw_text("Y open, don't save   N / ESC cancel",
                   cx - 360.0f, cy + 20.0f, scale, win_w, win_h, CGA(yellow), 1.0f);
 }
 

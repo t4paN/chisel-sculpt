@@ -696,9 +696,6 @@ int main(int argc, char* argv[]) {
         }
     }
     std::string current_project_path;
-    // Drag-and-drop "S save & open" on a never-saved sculpt: the Save-As dialog
-    // runs first, and the dropped file opens only after that save succeeds.
-    bool drop_open_after_save = false;
 #ifdef __EMSCRIPTEN__
     // Filename fields for the web save/export prompts (remember the last name).
     char web_save_name[96]   = "sculpt";
@@ -2554,24 +2551,12 @@ int main(int argc, char* argv[]) {
                 error_popup_msg = std::string("Save failed: ") + result_string(sr) + "\n" + path;
                 error_popup_trigger = true;
             }
-            return sr == SaveResult::OK;
         };
 
         // ---- Drag-and-drop open (prompt was answered in the key callback) ----
         if (input.drop_open_requested) {
             input.drop_open_requested = false;
             do_import_path(input.drop_path);
-        }
-        if (input.drop_save_open_requested) {
-            input.drop_save_open_requested = false;
-            if (current_project_path.empty()) {
-                // Never saved: Save-As first, open the drop after it succeeds.
-                input.save_dialog_active = true;
-                drop_open_after_save = true;
-            } else if (do_save_project(current_project_path)) {
-                do_import_path(input.drop_path);
-            }
-            // Save failed → error popup is up, the drop is abandoned.
         }
 
         if (input.save_requested) {
@@ -2597,18 +2582,13 @@ int main(int argc, char* argv[]) {
 
         if (fd->Display("SaveKey", ImGuiWindowFlags_NoCollapse, ImVec2(600, 400))) {
             if (fd->IsOk()) {
-                bool saved = do_save_project(fd->GetFilePathName());
-                if (saved && drop_open_after_save)
-                    do_import_path(input.drop_path);
+                do_save_project(fd->GetFilePathName());
             }
             fd->Close();
             input.save_dialog_active = false;
-            drop_open_after_save = false;
         }
-        if (!input.save_dialog_active && fd->IsOpened("SaveKey")) {
+        if (!input.save_dialog_active && fd->IsOpened("SaveKey"))
             fd->Close();
-            drop_open_after_save = false;
-        }
 #else
         // ---- Web dialogs: name prompt + browser download; picker for open ----
         // (same *_dialog_active flags as native, so the sculpt-input and hotkey

@@ -101,10 +101,9 @@ struct InputState {
     bool save_dialog_active;
 
     // Drag-and-drop open (native only): a file dropped on the window parks
-    // here while the "save & open / open / cancel" prompt is up.
+    // here while the "open / cancel" prompt is up.
     bool drop_confirm_pending;
     bool drop_open_requested;       // Y: open, discarding current changes
-    bool drop_save_open_requested;  // S: save current project first, then open
     char drop_path[1024];
 
     // Notification (brief on-screen message)
