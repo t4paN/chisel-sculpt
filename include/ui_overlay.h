@@ -6,6 +6,7 @@ struct InputState;
 struct AlphaLibrary;
 
 void draw_quit_dialog(TextOverlay& text, int win_w, int win_h);
+void draw_drop_confirm(TextOverlay& text, const char* path, int win_w, int win_h);
 void draw_remesh_confirm(TextOverlay& text, int win_w, int win_h);
 void draw_remesh_progress(TextOverlay& text, int win_w, int win_h);
 void draw_voxel_merge_confirm(TextOverlay& text, int resolution, int n_selected,

@@ -2,6 +2,19 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-17 — Drag-and-drop open
+
+- **Drop a `.chisel` / `.obj` / `.ply` onto the window** (native builds) to
+  open it. A prompt guards the current sculpt: **S** saves it first (Save-As
+  dialog if it was never saved), **Y** opens without saving, **N**/**ESC**
+  cancel. Unsupported files get a notification instead of a prompt, and
+  drops are ignored while another dialog is up.
+- **No prompt on an untouched scene**: a drop on the default sphere (empty
+  undo record, single mesh, never saved) opens instantly — there is nothing
+  to protect.
+- Verified end-to-end with a scripted XDND drop: open-discard, cancel, and
+  save-then-open all pass; instant-open on fresh confirmed by hand.
+
 ## 2026-07-16 — CLI open + subdivision cap flag
 
 - **Open a file from the command line**: `chisel foo.chisel` (or `.obj`)

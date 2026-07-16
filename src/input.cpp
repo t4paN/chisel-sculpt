@@ -1,6 +1,8 @@
 #include "input.h"
 #include <cmath>
 #include <cstdio>
+#include <cstring>
+#include <cctype>
 #include <algorithm>
 #if defined(__EMSCRIPTEN__)
 #include <emscripten.h>
@@ -30,6 +32,9 @@ InputState::InputState()
     , save_requested(false)
     , save_as_requested(false)
     , save_dialog_active(false)
+    , drop_confirm_pending(false)
+    , drop_open_requested(false)
+    , drop_save_open_requested(false)
     , notification()
     , notification_timer(0.0f)
     , focus_requested(false)
@@ -83,6 +88,7 @@ InputState::InputState()
     per_brush[(int)BrushType::PAINT].strength = 0.5f;     // soft build-up by default
     per_brush[(int)BrushType::PAINT].hardness = 0.5f;
 
+    drop_path[0] = '\0';
     paint_color[0] = 0.85f; paint_color[1] = 0.25f; paint_color[2] = 0.30f;      // warm red
     paint_color_alt[0] = 0.25f; paint_color_alt[1] = 0.45f; paint_color_alt[2] = 0.85f; // cool blue
     paint_visible = true;
@@ -398,11 +404,13 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
                      || g_input->import_dialog_active
                      || g_input->save_dialog_active
                      || g_input->remesh_confirm_pending
-                     || g_input->voxel_merge_confirm_pending;
+                     || g_input->voxel_merge_confirm_pending
+                     || g_input->drop_confirm_pending;
     if (modal_active) {
         bool is_yn_dialog = g_input->quit_requested
                          || g_input->remesh_confirm_pending
-                         || g_input->voxel_merge_confirm_pending;
+                         || g_input->voxel_merge_confirm_pending
+                         || g_input->drop_confirm_pending;
         // The voxel-merge dialog also takes [ / ] to nudge the resolution.
         bool res_keys = g_input->voxel_merge_confirm_pending
                      && (key == GLFW_KEY_LEFT_BRACKET || key == GLFW_KEY_RIGHT_BRACKET);
@@ -418,10 +426,13 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
         // ...and D to toggle the chained adaptive remesh (density field only).
         bool merge_adaptive_key = g_input->voxel_merge_confirm_pending
                                && key == GLFW_KEY_D;
+        // The drop dialog also takes S (save current project, then open).
+        bool drop_save_key = g_input->drop_confirm_pending
+                          && key == GLFW_KEY_S;
         bool allow = (key == GLFW_KEY_ESCAPE)
                   || (is_yn_dialog && (key == GLFW_KEY_Y || key == GLFW_KEY_N))
                   || res_keys || merge_mirror_key || merge_nets_key || merge_subtract_key
-                  || merge_adaptive_key;
+                  || merge_adaptive_key || drop_save_key;
         if (!allow) return;
     }
 
@@ -499,7 +510,11 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
                 break;
 
             case GLFW_KEY_S:
-                if (g_input->voxel_merge_confirm_pending) {
+                if (g_input->drop_confirm_pending) {
+                    // In the drop dialog, S = save current project, then open.
+                    g_input->drop_confirm_pending = false;
+                    g_input->drop_save_open_requested = true;
+                } else if (g_input->voxel_merge_confirm_pending) {
                     // In the merge dialog, S flips the extractor (Surface Nets / MC).
                     g_input->voxel_merge_surface_nets = !g_input->voxel_merge_surface_nets;
                 } else if (g_input->ctrl_held && g_input->shift_held) {
@@ -647,7 +662,9 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
                 break;
 
             case GLFW_KEY_ESCAPE:
-                if (g_input->voxel_merge_confirm_pending) {
+                if (g_input->drop_confirm_pending) {
+                    g_input->drop_confirm_pending = false;
+                } else if (g_input->voxel_merge_confirm_pending) {
                     g_input->voxel_merge_confirm_pending = false;
                 } else if (g_input->remesh_confirm_pending) {
                     g_input->remesh_confirm_pending = false;
@@ -734,7 +751,11 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
                 break;
 
             case GLFW_KEY_Y:
-                if (g_input->voxel_merge_confirm_pending) {
+                if (g_input->drop_confirm_pending) {
+                    // In the drop dialog, Y = open without saving.
+                    g_input->drop_confirm_pending = false;
+                    g_input->drop_open_requested = true;
+                } else if (g_input->voxel_merge_confirm_pending) {
                     g_input->voxel_merge_confirm_pending = false;
                     g_input->voxel_merge_mirror = false;   // faithful (asymmetric) merge
                     g_input->voxel_merge_subtract = false;
@@ -766,7 +787,9 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
                 break;
 
             case GLFW_KEY_N:
-                if (g_input->voxel_merge_confirm_pending) {
+                if (g_input->drop_confirm_pending) {
+                    g_input->drop_confirm_pending = false;
+                } else if (g_input->voxel_merge_confirm_pending) {
                     g_input->voxel_merge_confirm_pending = false;
                 } else if (g_input->remesh_confirm_pending) {
                     g_input->remesh_confirm_pending = false;
@@ -855,6 +878,38 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
     }
 }
 
+#ifndef __EMSCRIPTEN__
+static void drop_callback(GLFWwindow* w, int count, const char** paths) {
+    (void)w;
+    if (!g_input || count < 1) return;
+    // One prompt at a time — ignore drops while any modal is already up.
+    if (g_input->quit_requested || g_input->export_dialog_active ||
+        g_input->import_dialog_active || g_input->save_dialog_active ||
+        g_input->remesh_confirm_pending || g_input->voxel_merge_confirm_pending ||
+        g_input->drop_confirm_pending)
+        return;
+    // Only project/model files; anything else gets a notification, not a prompt.
+    const char* path = paths[0];
+    const char* dot = std::strrchr(path, '.');
+    char ext[16] = {0};
+    if (dot) {
+        for (int i = 0; dot[i] && i < (int)sizeof(ext) - 1; i++)
+            ext[i] = (char)std::tolower((unsigned char)dot[i]);
+    }
+    bool known = std::strcmp(ext, ".chisel") == 0 ||
+                 std::strcmp(ext, ".obj") == 0 ||
+                 std::strcmp(ext, ".ply") == 0;
+    if (!known) {
+        snprintf(g_input->notification, sizeof(g_input->notification),
+                 "Can't open dropped file (want .chisel / .obj / .ply)");
+        g_input->notification_timer = 3.0f;
+        return;
+    }
+    snprintf(g_input->drop_path, sizeof(g_input->drop_path), "%s", path);
+    g_input->drop_confirm_pending = true;
+}
+#endif
+
 void setup_input_callbacks(GLFWwindow* window, InputState* state) {
     g_input = state;
     g_window = window;
@@ -862,6 +917,9 @@ void setup_input_callbacks(GLFWwindow* window, InputState* state) {
     glfwSetMouseButtonCallback(window, mouse_button_callback);
     glfwSetScrollCallback(window, scroll_cb_internal);
     glfwSetKeyCallback(window, key_callback);
+#ifndef __EMSCRIPTEN__
+    glfwSetDropCallback(window, drop_callback);
+#endif
 }
 
 void char_callback(GLFWwindow* w, unsigned int codepoint) {
