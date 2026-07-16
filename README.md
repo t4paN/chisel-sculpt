@@ -68,6 +68,21 @@ emcmake cmake -B build-web -DCHISEL_GPU_BACKEND=webgpu && cmake --build build-we
 
 CI builds a Linux AppImage and a Windows zip on every tagged release.
 
+## Command line (native builds)
+
+```
+chisel [file] [flags]
+```
+
+- `file` — a `.chisel` project or `.obj` model to open on launch.
+- `--max-level=N` — raise the subdivision cap (default 9, max 12). Levels
+  past 9 get heavy on the CPU (level switches, merge, remesh roughly 4x per
+  level); the GPU-limit guard still refuses what your card can't hold.
+- `--mirror=spatial` — use the spatial-hash mirror pairing instead of the
+  topology map.
+- `--toaster` — shrink the undo history budgets for low-memory machines.
+- `--ring-mb=N` — debug: cap the GPU undo ring at N MB.
+
 ## Acknowledgments
 
 Chisel was vibecoded with Anthropic's Claude — the models did the lifting:

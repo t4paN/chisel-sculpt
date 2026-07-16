@@ -2,6 +2,18 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-16 — CLI open + subdivision cap flag
+
+- **Open a file from the command line**: `chisel foo.chisel` (or `.obj`)
+  loads it on launch, replacing the default sphere — the functional half of
+  double-click file association. Rides the same first-frame import as the
+  `CHISEL_AUTO_IMPORT` dev hook; a bad path shows a notification instead.
+- **`--max-level=N`** raises the subdivision cap past L9 (up to 12) on
+  native builds. Level switches, merge, and remesh get roughly 4x heavier
+  per level, and the GPU-limit guard still refuses what the device can't
+  hold. Verified: with `--max-level=5` the auto-subd hook stops at L5.
+- README gains a "Command line" section documenting all flags.
+
 ## 2026-07-16 — Sculpt name in the info panel
 
 - The bottom-right info panel now shows the current sculpt's filename at the

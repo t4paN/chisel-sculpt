@@ -280,6 +280,8 @@ static bool sample_on_model(Renderer& renderer, int x, int y, int screen_h, bool
 
 int main(int argc, char* argv[]) {
     bool cli_use_topology = true;
+    int max_level = MULTIRES_MAX_LEVEL;
+    std::string cli_open_path;
 #ifdef CHISEL_DEBUG_MULTIRES
     // Debug builds default to a tiny GPU undo ring so the wrap/evict path gets
     // exercised in a few big strokes (no flags needed). --toaster/--ring-mb still override.
@@ -297,7 +299,19 @@ int main(int argc, char* argv[]) {
             unsigned long mb = std::strtoul(argv[i] + 10, nullptr, 10);
             if (mb > 0) UndoStack::ring_max_bytes = (size_t)mb * 1024ull * 1024ull;
         }
+        else if (std::strncmp(argv[i], "--max-level=", 12) == 0) {
+            // Raise (or lower) the subdivision-level cap. Levels past 9 are
+            // CPU-heavy (switches/merge/remesh ~4x per level) and the GPU
+            // guard still refuses what the device can't hold.
+            long lv = std::strtol(argv[i] + 12, nullptr, 10);
+            if (lv >= 1 && lv <= 12) max_level = (int)lv;
+            else std::printf("[cli] ignoring --max-level=%s (want 1..12)\n", argv[i] + 12);
+        }
+        else if (argv[i][0] != '-')
+            cli_open_path = argv[i];  // project/model to open once the scene is up
     }
+    if (max_level != MULTIRES_MAX_LEVEL)
+        std::printf("[multires] subdivision cap: L%d (--max-level)\n", max_level);
     if (!cli_use_topology)
         std::printf("[mirror] using spatial-hash fallback (--mirror=spatial)\n");
     std::printf("[undo] history budget: %zu MB CPU / %zu MB GPU ring%s\n",
@@ -999,7 +1013,7 @@ int main(int argc, char* argv[]) {
                 }
             }
             const double switch_t0 = glfwGetTime();
-            if (delta != 0 && target >= multires->base_level && target <= MULTIRES_MAX_LEVEL) {
+            if (delta != 0 && target >= multires->base_level && target <= max_level) {
                 scene.materialize_active_cpu();  // 2b: projection/cascade read disp/base
                 UndoEntry lvl_e;
                 lvl_e.kind       = UndoEntry::Kind::LEVEL;
@@ -2262,15 +2276,24 @@ int main(int argc, char* argv[]) {
 
         // Dev hook: CHISEL_AUTO_IMPORT=<path> imports a file on the first frame
         // (headless load-path testing without driving the UI). No-op when unset.
+        // A bare path on the command line ("Open With" / chisel foo.chisel)
+        // rides the same first-frame import; CLI path wins over the env hook.
         {
             static bool auto_import_done = false;
             if (!auto_import_done) {
                 auto_import_done = true;
-                if (const char* auto_path = std::getenv("CHISEL_AUTO_IMPORT")) {
+                const char* auto_path = cli_open_path.empty()
+                                      ? std::getenv("CHISEL_AUTO_IMPORT")
+                                      : cli_open_path.c_str();
+                if (auto_path) {
                     if (FILE* tf = std::fopen(auto_path, "rb")) {
                         std::fclose(tf);
                         std::printf("[auto-import] loading %s\n", auto_path);
                         do_import_path(auto_path);
+                    } else {
+                        std::snprintf(input.notification, sizeof(input.notification),
+                                      "Cannot open: %.400s", auto_path);
+                        input.notification_timer = 4.0f;
                     }
                 }
             }
