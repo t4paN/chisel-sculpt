@@ -685,8 +685,10 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
         ImGui::SameLine();
         if (squircle_button("PaintTgtD", "Density",
                             "Paint remesh density (green = coarse, red = dense; Ctrl lowers)",
-                            ImVec2(calc_btn_w("Density"), btn_h), !color_target))
+                            ImVec2(calc_btn_w("Density"), btn_h), !color_target)) {
             input.paint_target_density = true;
+            input.color_pick_active = false;    // no colour to pick on the heatmap
+        }
         if (!input.paint_target_density) {
             ImGui::ColorEdit3("##paintA", input.paint_color,
                               ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel);
@@ -694,7 +696,8 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
             ImGui::ColorEdit3("##paintB", input.paint_color_alt,
                               ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel);
             ImGui::SameLine();
-            ImGui::TextUnformatted("Q/E swap");
+            ImGui::TextUnformatted(input.color_pick_active ? "C: picking..."
+                                                          : "Q/E swap - C pick");
         } else {
             // What the painted extremes mean to the adaptive remesher, as
             // multipliers on the auto target edge length. Defaults (2.0 / 0.5)
@@ -811,4 +814,31 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
     ImGui::End();
     ImGui::PopStyleColor();
     ImGui::PopStyleVar(3);
+}
+
+void draw_pick_cursor(float x, float y, bool on_model) {
+    ImDrawList* dl = ImGui::GetForegroundDrawList();
+    int a = on_model ? 235 : 110;
+    ImU32 fill = IM_COL32(255, 255, 255, a);
+    ImU32 line = IM_COL32(25, 25, 25, a);
+    // Glyph points are placed in barrel coordinates: `along` runs from the tip
+    // (the exact hotspot at x,y) up the axis toward the bulb, `side` is lateral.
+    // Axis points up-right on screen, the classic eyedropper pose.
+    const float ax = 0.7071f, ay = -0.7071f;
+    auto at = [&](float along, float side) {
+        return ImVec2(x + along * ax - side * ay, y + along * ay + side * ax);
+    };
+    // Needle tip.
+    dl->AddTriangleFilled(ImVec2(x, y), at(7.0f, 2.6f), at(7.0f, -2.6f), fill);
+    dl->AddTriangle(ImVec2(x, y), at(7.0f, 2.6f), at(7.0f, -2.6f), line, 1.2f);
+    // Barrel (outline drawn as a fatter dark line underneath).
+    dl->AddLine(at(6.5f, 0), at(17.0f, 0), line, 7.4f);
+    dl->AddLine(at(6.5f, 0), at(17.0f, 0), fill, 4.8f);
+    // Collar where the glass meets the bulb.
+    dl->AddLine(at(15.5f, 0), at(18.0f, 0), line, 10.4f);
+    dl->AddLine(at(15.5f, 0), at(18.0f, 0), fill, 7.6f);
+    // Rubber bulb.
+    ImVec2 c = at(22.5f, 0);
+    dl->AddCircleFilled(c, 4.8f, fill);
+    dl->AddCircle(c, 4.8f, line, 0, 1.4f);
 }

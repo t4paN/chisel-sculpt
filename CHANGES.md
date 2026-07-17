@@ -2,6 +2,24 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-18 — Colour picker (eyedropper)
+
+- **C in paint mode toggles a colour picker**: click the model and the pure
+  stored albedo under the cursor (barycentric mix of the vertex colours — no
+  matcap/shading baked in) becomes the active paint colour, then the picker
+  disarms and the paint brush is back. C again or ESC cancels; the toolbar
+  hint shows "C pick" / "C: picking...", and a "Picked #RRGGBB" toast confirms.
+  Density target unaffected (no colour to pick on the heatmap — C is a no-op
+  there). Outside paint mode C still switches to Crease — first deliberate
+  per-mode shortcut split.
+- While armed, the cursor becomes an **eyedropper glyph** (tip on the pick
+  point, dimmed off-model) in place of the brush ring; the ring returns the
+  moment the pick lands. Drawn via ImGui's foreground list, so it's identical
+  on GL / WebGPU / web with no OS-cursor plumbing.
+- Verified end-to-end with a scripted XTest run: paint red, pick white →
+  #FFFFFF exact, pick the blob → its unshaded red, C-after-1 → Crease again;
+  rerun after the cursor change confirmed dropper while armed, ring after.
+
 ## 2026-07-17 — Drag-and-drop open
 
 - **Drop a `.chisel` / `.obj` / `.ply` onto the window** (native builds) to

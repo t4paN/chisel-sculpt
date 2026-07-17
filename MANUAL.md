@@ -183,7 +183,8 @@ spacing, and pressure all apply.
 |---|---|
 | LMB | Paint with the active colour |
 | Shift + LMB | Blend/smooth colours |
-| RMB | Pick the colour under the cursor |
+| RMB | Open the colour palette at the cursor |
+| C | Colour picker: click the model to grab the colour under the cursor (pure paint, shading excluded); ESC or C cancels |
 | Q / E | Swap active / alternate colour |
 | `[ ]` toggle (toolbar) | Hide vertex colour while sculpting (Paint mode always shows it) |
 

@@ -25,3 +25,8 @@ void draw_mode_indicator(TextOverlay& text, const char* mode_text, int win_w, in
 // Returns true if any button was clicked (caller should check input flags).
 void draw_button_islands(InputState& input, int win_w, int win_h,
                          const AlphaLibrary* alpha_lib = nullptr);
+
+// Eyedropper cursor while the colour picker is armed (tip at x,y; dimmed when
+// the cursor is off the model). ImGui foreground draw list — identical on all
+// backends, replaces the brush ring for that state.
+void draw_pick_cursor(float x, float y, bool on_model);

@@ -91,9 +91,12 @@ InputState::InputState()
     paint_color[0] = 0.85f; paint_color[1] = 0.25f; paint_color[2] = 0.30f;      // warm red
     paint_color_alt[0] = 0.25f; paint_color_alt[1] = 0.45f; paint_color_alt[2] = 0.85f; // cool blue
     paint_visible = true;
+    color_pick_active = false;
+    color_pick_click = false;
 }
 
 void InputState::switch_brush(BrushType to) {
+    if (to != BrushType::PAINT) color_pick_active = false;
     if (to == current_brush) return;
     per_brush[(int)current_brush].strength = brush_strength;
     per_brush[(int)current_brush].hardness = brush_hardness;
@@ -136,6 +139,7 @@ void InputState::end_frame() {
     key_n_pressed = false;
     debug_stride_cycle_requested = false;
     debug_pick_vertex_requested  = false;
+    color_pick_click = false;
 }
 
 bool InputState::is_smooth_active() const {
@@ -325,6 +329,12 @@ static void mouse_button_callback(GLFWwindow* w, int button, int action, int mod
                 // scene.render_pick over every entity) once drag_mode is SCULPT, so
                 // latch unconditionally here and let that pick sort out hit vs. miss.
                 g_input->drag_mode = InputState::DragMode::SCULPT;
+            } else if (g_input->on_model && g_input->color_pick_active
+                       && g_input->current_brush == BrushType::PAINT
+                       && g_input->interaction_mode == InputState::InteractionMode::EDIT) {
+                // Colour picker consumes this click: sample instead of sculpt
+                // (main loop reads the albedo under the cursor and disarms).
+                g_input->color_pick_click = true;
             } else if (g_input->on_model) {
                 g_input->drag_mode = InputState::DragMode::SCULPT;
             } else {
@@ -450,9 +460,21 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
                 break;
 
             case GLFW_KEY_C:
-                g_input->clear_smooth_lock();
-                g_input->switch_brush(BrushType::CREASE);
-                g_input->subtract_locked = false;
+                if (g_input->current_brush == BrushType::PAINT) {
+                    // Paint mode: C toggles the colour picker instead of crease.
+                    // Density target has no colour to pick — C is a no-op there.
+                    if (g_input->paint_target_density) break;
+                    g_input->color_pick_active = !g_input->color_pick_active;
+                    snprintf(g_input->notification, sizeof(g_input->notification),
+                             g_input->color_pick_active
+                                 ? "Colour picker: click the model (C/ESC cancels)"
+                                 : "Colour picker off");
+                    g_input->notification_timer = 1.5f;
+                } else {
+                    g_input->clear_smooth_lock();
+                    g_input->switch_brush(BrushType::CREASE);
+                    g_input->subtract_locked = false;
+                }
                 break;
 
             case GLFW_KEY_V:
@@ -668,6 +690,8 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
                     g_input->save_dialog_active = false;
                 } else if (g_input->quit_requested) {
                     g_input->quit_requested = false;
+                } else if (g_input->color_pick_active) {
+                    g_input->color_pick_active = false;
                 } else {
                     g_input->quit_requested = true;
                 }
@@ -806,11 +830,13 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
                 break;
             case GLFW_KEY_2:
                 g_input->interaction_mode = InputState::InteractionMode::INSERT;
+                g_input->color_pick_active = false;
                 snprintf(g_input->notification, sizeof(g_input->notification), "Insert mode");
                 g_input->notification_timer = 1.5f;
                 break;
             case GLFW_KEY_3:
                 g_input->interaction_mode = InputState::InteractionMode::SELECT;
+                g_input->color_pick_active = false;
                 snprintf(g_input->notification, sizeof(g_input->notification), "Select");
                 g_input->notification_timer = 1.0f;
                 break;

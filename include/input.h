@@ -59,6 +59,13 @@ struct InputState {
     // the paint brush is active. RMB swatch / toolbar boxes edit both.
     float paint_color[3];
     float paint_color_alt[3];
+    // Colour picker (C while the paint brush is active). While armed, LMB over
+    // the model samples the stored vertex albedo under the cursor into
+    // paint_color — pure colour mix, no shading — then disarms, leaving the
+    // paint brush active. C again / ESC / leaving paint mode cancel it.
+    // color_pick_click is the one-shot "sample now" event the main loop consumes.
+    bool color_pick_active;
+    bool color_pick_click;
     // Show vertex paint in the viewport. Toggle (next to the Paint icon) lets you
     // hide albedo while sculpting; the paint brush always forces it visible.
     bool paint_visible;

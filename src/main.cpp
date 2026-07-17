@@ -951,6 +951,45 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        // Colour picker (C in paint mode): sample the stored albedo under the
+        // click — tri + barycentrics from the screen FBO, colours from the CPU
+        // mesh (synced at pen-up), so shading/matcap never leaks into the pick.
+        if (input.color_pick_click) {
+            input.color_pick_click = false;
+            int cx = (int)input.mouse_x;
+            int cy = (int)input.mouse_y;
+            if (cx >= 0 && cx < win_w && cy >= 0 && cy < win_h) {
+                uint32_t tid;
+                renderer.read_triid_region(cx, cy, 1, 1, &tid);
+                const Mesh& pm = scene.active_mesh();   // screen FBO holds the active entity
+                if (tid != 0xFFFFFFFF && tid < pm.tri_count()) {
+                    float bary[2];
+                    renderer.read_bary_region(cx, cy, 1, 1, bary);
+                    float bu = bary[0], bv = bary[1], bw = 1.0f - bu - bv;
+                    uint32_t i0 = pm.indices[tid*3+0];
+                    uint32_t i1 = pm.indices[tid*3+1];
+                    uint32_t i2 = pm.indices[tid*3+2];
+                    auto vcol = [&](uint32_t v) {
+                        return v < pm.color.size() ? pm.color[v] : 0xFFFFFFFFu;
+                    };
+                    uint32_t c0 = vcol(i0), c1 = vcol(i1), c2 = vcol(i2);
+                    for (int ch = 0; ch < 3; ch++) {
+                        float f0 = (float)((c0 >> (ch*8)) & 0xFF);
+                        float f1 = (float)((c1 >> (ch*8)) & 0xFF);
+                        float f2 = (float)((c2 >> (ch*8)) & 0xFF);
+                        input.paint_color[ch] = (bu*f0 + bv*f1 + bw*f2) / 255.0f;
+                    }
+                    input.color_pick_active = false;
+                    snprintf(input.notification, sizeof(input.notification),
+                             "Picked #%02X%02X%02X",
+                             (int)(input.paint_color[0]*255.0f + 0.5f),
+                             (int)(input.paint_color[1]*255.0f + 0.5f),
+                             (int)(input.paint_color[2]*255.0f + 0.5f));
+                    input.notification_timer = 1.5f;
+                }
+            }
+        }
+
         // Debug helper: print undo stack top after key operations
         auto print_undo_top = [&](const char* tag) {
             UndoStack& undo_stack = scene.active_undo();
@@ -2111,13 +2150,19 @@ int main(int argc, char* argv[]) {
                 cursor_x = (float)input.mouse_x;
                 cursor_y = (float)input.mouse_y;
             }
-            renderer.draw_cursor(
-                camera,
-                cursor_x, cursor_y,
-                input.brush_size,
-                input.cursor_nx, input.cursor_ny, input.cursor_nz,
-                input.brush_hardness,
-                win_w, win_h, input.on_model);
+            if (input.color_pick_active) {
+                // Armed colour picker: eyedropper glyph instead of the brush
+                // ring — the ring's size/hardness reading is meaningless here.
+                draw_pick_cursor(cursor_x, cursor_y, input.on_model);
+            } else {
+                renderer.draw_cursor(
+                    camera,
+                    cursor_x, cursor_y,
+                    input.brush_size,
+                    input.cursor_nx, input.cursor_ny, input.cursor_nz,
+                    input.brush_hardness,
+                    win_w, win_h, input.on_model);
+            }
         }
 
         // ---- Overlays ----
