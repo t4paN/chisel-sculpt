@@ -2,6 +2,21 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-18 — Web: fix session-bricking crash on project load (itch)
+
+- **Fixed the `bufferOnUnmaps ... is undefined` TypeError** that killed the frame
+  when loading models on the itch web build and left the session broken until a
+  hard reload. Root cause: dropping an in-flight readback ticket (screen-plane
+  re-kicks during load/level-switch) unmap-aborted a pending `mapAsync`; the
+  emdawnwebgpu glue's late rejection handler then deleted the map-tracking entry
+  of whatever buffer had reused that pointer, poisoning it permanently. Tickets
+  dropped/taken mid-flight are now orphaned and reaped after the map settles
+  (`webgpu_backend.cpp`) — no more aborts.
+- **Post-link glue hardening** (`cmake/patch_webgpu_glue.py`, auto-run on the web
+  build): the generated `chisel.js` mapped-range getter now recreates a missing
+  tracking entry instead of throwing, so any residual glue race self-heals
+  instead of frame-crashing.
+
 ## 2026-07-18 — Colour picker (eyedropper)
 
 - **C in paint mode toggles a colour picker**: click the model and the pure

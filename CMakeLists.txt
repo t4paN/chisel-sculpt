@@ -286,6 +286,14 @@ if(EMSCRIPTEN)
         --shell-file ${CMAKE_SOURCE_DIR}/packaging/web/shell.html)
     set_target_properties(chisel PROPERTIES SUFFIX ".html"
         LINK_DEPENDS ${CMAKE_SOURCE_DIR}/packaging/web/shell.html)
+    # Harden the emitted WebGPU glue against the late map-abort rejection wiping a
+    # reused buffer's bufferOnUnmaps entry (frame-killing TypeError on itch) — see
+    # cmake/patch_webgpu_glue.py for the full story.
+    add_custom_command(TARGET chisel POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E env python3
+            ${CMAKE_SOURCE_DIR}/cmake/patch_webgpu_glue.py
+            $<TARGET_FILE_DIR:chisel>/chisel.js
+        COMMENT "Patching WebGPU glue (bufferOnUnmaps hardening)")
 endif()
 
 # Version: an explicit -DCHISEL_VERSION (CI injects the tag) wins; otherwise

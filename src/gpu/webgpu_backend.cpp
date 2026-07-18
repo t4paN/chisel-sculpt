@@ -851,6 +851,13 @@ struct AsyncRead {
     uint64_t   map_size = 0;       // bytes copied into the staging
     uint64_t   out_size = 0;       // bytes the caller receives after reconciliation
     bool done = false, ok = false;
+    // Dropped/taken while the map was still in flight. Teardown is deferred to the
+    // settle sweep in process_events(): unmap-aborting a pending map makes the
+    // emdawnwebgpu glue's late rejection handler delete the JS-side map-tracking
+    // entry for whatever buffer owns this pointer *by then* — after a release +
+    // pointer reuse that wipes a live buffer's entry, and every later
+    // getMappedRange on it throws (web frame-killer, unrecoverable until reload).
+    bool orphaned = false;
     // target-region reconciliation (padded rows / half→float expand); w==0 for
     // plain buffer reads (straight memcpy).
     uint32_t w = 0, h = 0, wgpu_bpt = 0, halfs = 0, out_bpt = 0, padded_row = 0;
@@ -981,6 +988,19 @@ void process_events(Device& dev) {
 #else
     wgpuDevicePoll(dev.device, /*wait=*/false, nullptr);
 #endif
+    // Reap orphaned tickets whose map has settled (see AsyncRead::orphaned).
+    // Swept here — not in on_ticket_map — so no wgpu call runs inside a wgpu
+    // callback. Never pooled: rare, and the abort-teardown hazard from
+    // ticket_drop's old destroy path applies to anything dropped mid-flight.
+    for (auto it = g_tickets.begin(); it != g_tickets.end(); ) {
+        if (it->second.orphaned && it->second.done) {
+            wgpuBufferUnmap(it->second.staging);
+            wgpuBufferRelease(it->second.staging);
+            it = g_tickets.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 bool ticket_ready(Device&, ReadTicket t) {
@@ -996,7 +1016,15 @@ bool ticket_take(Device&, ReadTicket t, void* out, uint64_t out_size) {
         return false;
     }
     AsyncRead& r = it->second;
-    bool good = r.done && r.ok && out_size == r.out_size;
+    if (!r.done || r.orphaned) {
+        // Taken before the map callback landed (or double-taken after an orphan):
+        // do NOT unmap — aborting the pending map is the poison path described on
+        // AsyncRead::orphaned. Zero-fill and leave it for the settle sweep.
+        std::memset(out, 0, (size_t)out_size);
+        r.orphaned = true;
+        return false;
+    }
+    bool good = r.ok && out_size == r.out_size;
     const uint8_t* mapped = nullptr;
     if (good) {
         mapped = (const uint8_t*)wgpuBufferGetConstMappedRange(r.staging, 0, r.map_size);
@@ -1024,14 +1052,8 @@ bool ticket_take(Device&, ReadTicket t, void* out, uint64_t out_size) {
             }
         }
     }
-    wgpuBufferUnmap(r.staging);              // also aborts a still-pending map
-    if (r.done) {
-        staging_release(r.staging, r.staging_size);
-    } else {
-        // Taken before the map callback landed: same teardown hazard as ticket_drop
-        // — the abort may still be in flight, so destroy instead of pooling.
-        wgpuBufferRelease(r.staging);
-    }
+    wgpuBufferUnmap(r.staging);
+    staging_release(r.staging, r.staging_size);
     g_tickets.erase(it);
     return good;
 }
@@ -1040,17 +1062,16 @@ void ticket_drop(Device&, ReadTicket t) {
     auto it = g_tickets.find(t);
     if (it == g_tickets.end()) return;
     AsyncRead& r = it->second;
-    wgpuBufferUnmap(r.staging);               // aborts a still-pending map
-    if (r.done) {
-        // Map resolved: buffer is genuinely idle, safe to reuse.
-        staging_release(r.staging, r.staging_size);
-    } else {
-        // Map callback not yet delivered (dropped mid-flight: aborted stroke, mode
-        // switch, plane re-kick). Unmapping does NOT make it reusable this frame under
-        // Dawn — pooling it would hand the next kick a buffer whose map is still being
-        // torn down, tripping "used in submit while mapped". Destroy it instead.
-        wgpuBufferRelease(r.staging);
+    if (!r.done) {
+        // Dropped mid-flight (aborted stroke, mode switch, plane re-kick): defer
+        // teardown until the map settles — see AsyncRead::orphaned for why an
+        // abort here can poison a reused buffer pointer on web.
+        r.orphaned = true;
+        return;
     }
+    // Map resolved: unmap and pool — the buffer is genuinely idle.
+    wgpuBufferUnmap(r.staging);
+    staging_release(r.staging, r.staging_size);
     g_tickets.erase(it);
 }
 
