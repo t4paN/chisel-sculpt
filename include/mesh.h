@@ -101,12 +101,30 @@ struct Mesh {
 // operates as a free function so multires_stack can call it on the base cage.
 void build_mirror_spatial(const Mesh& m, std::vector<uint32_t>& out);
 
+// Topology stencil captured by loop_subdivide under canonical numbering:
+// everything needed to recompute the subdivided level's positions from new
+// coarse positions without re-extracting edges. `mid` holds 4 ids per midpoint
+// vertex, in midpoint numbering order: v0, v1, opp0, opp1 (opp1 == UINT32_MAX
+// on a boundary edge). The bnd_* tables are the coarse verts' resolved
+// boundary neighbors for the Pass-3 relocation rule; all three stay empty when
+// the coarse mesh is closed (the common case). Relocation of interior verts
+// additionally reads the coarse mesh's indices + CSR adjacency — cache those
+// alongside this struct.
+struct SubdivStencil {
+    std::vector<uint32_t> mid;              // 4 per midpoint: v0, v1, opp0, opp1
+    std::vector<uint8_t>  is_bnd;           // per coarse vert; empty = closed mesh
+    std::vector<uint32_t> bnd_a, bnd_b;     // boundary neighbors, valid where is_bnd
+};
+
 // legacy_numbering: pre-v4 midpoint-vertex numbering (stdlib hash-map iteration
 // order — platform-specific). Only the v<=3 project loader may pass true; every
 // live path uses the canonical sorted-edge-key numbering, identical on all
 // platforms. Multires disp layers are indexed by these vertex numbers and
 // persist in .chisel files, so the numbering is effectively on-disk ABI.
-Mesh loop_subdivide(const Mesh& input, bool legacy_numbering = false);
+// stencil: when non-null (canonical numbering only), receives the subdivision
+// stencil so callers can replay this level's positions without a re-subdivide.
+Mesh loop_subdivide(const Mesh& input, bool legacy_numbering = false,
+                    SubdivStencil* stencil = nullptr);
 Mesh icosahedron();
 Mesh icosphere(int subdivisions);
 

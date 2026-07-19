@@ -51,6 +51,22 @@ struct MultiresStack {
     std::vector<float>    mask;
     std::vector<float>    density;   // remesh-density field; empty = unpainted (0.5 neutral)
 
+    // Per-level topology cache: the parts of the subdivision chain that are a
+    // pure function of base topology (positions never enter). topo_cache[k]
+    // describes the mesh at absolute level (base_level + k + 1): its indices,
+    // CSR adjacency, and the stencil that replays its positions from the level
+    // below. Warmed by the first cascade through a level; valid for the whole
+    // locked lifetime (base topology never changes after lock); cleared on
+    // lock. Once warm, cascade_to_level skips loop_subdivide/build_adjacency.
+    struct LevelTopo {
+        std::vector<uint32_t> indices;
+        std::vector<uint32_t> vt_offset, vt_list;   // CSR adjacency
+        SubdivStencil stencil;                      // (level below) -> this level
+        uint32_t vcount = 0;
+        bool     ready  = false;
+    };
+    std::vector<LevelTopo> topo_cache;
+
     // midpoint_parents[k]: for each midpoint vertex of the mesh at level
     // (base_level + k + 1), its two parent vertex ids at level (base_level + k)
     // — 2 ids per midpoint, midpoints indexed from V_k. Topology-only, built

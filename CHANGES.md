@@ -2,6 +2,26 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-19 — Multires level-switch fast path (topology cache)
+
+- **Warm level switches no longer replay the subdivision chain.** The stack now
+  caches per-level topology — indices, CSR adjacency, and subdivision stencils
+  (a pure function of base topology, so valid for the whole locked lifetime;
+  warmed by the first slow cascade, cleared on lock). A warm Ctrl+D/Shift+D
+  cascade replays positions through the stencils: no `loop_subdivide` edge
+  hash-map, no `build_adjacency`, bit-identical output (verified: the
+  `CHISEL_DEBUG_MULTIRES` build cross-checks fast vs slow on every switch —
+  `topo OK, 0 pos differ, max |d| 0` at every level tested, up to 1.3M tris).
+  Measured on build-gl: L8 (1.3M tris) 1479 → ~217 ms; L9 (5.2M tris)
+  6323 → 1292 ms.
+- **Shift+D auto-projection rides the same cache.** `project_down_to_level`'s
+  capture and rebuild phases replay through cached stencils instead of
+  re-subdividing (≈2.5× faster like-for-like; L9→L8 at 5.2M tris ≈ 3.2 s).
+  Remaining cost is position-dependent work (normals, frames, disp rewrites) —
+  candidate for threading/SIMD later if still felt.
+- `loop_subdivide` can now emit a `SubdivStencil` (canonical numbering only)
+  for cached replay; behavior unchanged when the out-param is null.
+
 ## 2026-07-18 — Web: fix session-bricking crash on project load (itch)
 
 - **Fixed the `bufferOnUnmaps ... is undefined` TypeError** that killed the frame

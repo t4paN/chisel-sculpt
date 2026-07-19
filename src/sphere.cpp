@@ -7,7 +7,7 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-Mesh loop_subdivide(const Mesh& input, bool legacy_numbering) {
+Mesh loop_subdivide(const Mesh& input, bool legacy_numbering, SubdivStencil* stencil) {
     const uint32_t V = input.vertex_count();
     const uint32_t F = input.tri_count();
 
@@ -106,6 +106,7 @@ Mesh loop_subdivide(const Mesh& input, bool legacy_numbering) {
     };
     uint32_t next_vert = V;
     if (legacy_numbering) {
+        stencil = nullptr;  // stencil capture is canonical-numbering only
         for (auto& [key, d] : edge_map)
             assign_midpoint(key, d, next_vert++);
     } else {
@@ -113,8 +114,20 @@ Mesh loop_subdivide(const Mesh& input, bool legacy_numbering) {
         sorted_keys.reserve(edge_map.size());
         for (auto& [key, d] : edge_map) sorted_keys.push_back(key);
         std::sort(sorted_keys.begin(), sorted_keys.end());
-        for (uint64_t key : sorted_keys)
-            assign_midpoint(key, edge_map.at(key), next_vert++);
+        if (stencil) {
+            stencil->mid.clear();
+            stencil->mid.reserve((size_t)E * 4);
+        }
+        for (uint64_t key : sorted_keys) {
+            EdgeData& d = edge_map.at(key);
+            assign_midpoint(key, d, next_vert++);
+            if (stencil) {
+                stencil->mid.push_back((uint32_t)(key >> 32));
+                stencil->mid.push_back((uint32_t)(key & 0xFFFFFFFF));
+                stencil->mid.push_back(d.opp[0]);
+                stencil->mid.push_back(d.opp_count == 2 ? d.opp[1] : UINT32_MAX);
+            }
+        }
     }
 
     // Pass 3: move original vertices with Loop weights
@@ -130,6 +143,23 @@ Mesh loop_subdivide(const Mesh& input, bool legacy_numbering) {
         else if (bnd_cnt[v0] == 1) { bnd_b[v0] = v1; bnd_cnt[v0]++; }
         if (bnd_cnt[v1] == 0) { bnd_a[v1] = v0; bnd_cnt[v1]++; }
         else if (bnd_cnt[v1] == 1) { bnd_b[v1] = v0; bnd_cnt[v1]++; }
+    }
+
+    // Capture the RESOLVED boundary tables: which neighbor landed in bnd_a vs
+    // bnd_b depends on hash-map iteration order, so a replay must reuse these
+    // exact tables to reproduce this pass bit-for-bit. Closed mesh → all empty.
+    if (stencil) {
+        stencil->is_bnd.clear();
+        stencil->bnd_a.clear();
+        stencil->bnd_b.clear();
+        bool any_bnd = false;
+        for (uint32_t i = 0; i < V; i++) if (is_boundary[i]) { any_bnd = true; break; }
+        if (any_bnd) {
+            stencil->is_bnd.resize(V);
+            for (uint32_t i = 0; i < V; i++) stencil->is_bnd[i] = is_boundary[i] ? 1 : 0;
+            stencil->bnd_a = bnd_a;
+            stencil->bnd_b = bnd_b;
+        }
     }
 
     for (uint32_t i = 0; i < V; i++) {

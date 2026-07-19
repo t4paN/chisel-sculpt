@@ -276,6 +276,7 @@ void multires_stack_init_from_lock(MultiresStack& stack,
     stack.frames.clear();
     stack.mirror.clear();
     stack.midpoint_parents.clear();
+    stack.topo_cache.clear();   // pure function of base topology — new base, new chain
     stack.locked = true;
 
     // Paint lives in the finest-level planes, not in base — at lock the
@@ -351,17 +352,34 @@ void compute_frames(const Mesh& m, std::vector<Frame>& out) {
     }
 }
 
-void cascade_to_level(MultiresStack& stack, Mesh& out, int K) {
+// Slow replay: full subdivision chain from base. Warms the topology cache as
+// it goes; still the only path for a cold cache (and the truth reference for
+// the fast path under CHISEL_DEBUG_MULTIRES).
+static void cascade_replay_slow(MultiresStack& stack, Mesh& out, int passes) {
     Mesh m = stack.base;
-    const int passes = K - stack.base_level;
 
     for (int i = 0; i < passes; i++) {
         // Save coarse topology before subdivision for mirror propagation.
         uint32_t V_coarse = m.vertex_count();
         std::vector<uint32_t> coarse_idx = m.indices;
 
+        // Topology-cache warm: capture the stencil + fine topology while the
+        // slow replay computes them anyway. ready entries are consumed by the
+        // fast path; a miss here costs one extra build_adjacency at most.
+        if ((int)stack.topo_cache.size() <= i) stack.topo_cache.emplace_back();
+        MultiresStack::LevelTopo& tc = stack.topo_cache[i];
+        const bool tc_miss = !tc.ready;
+
         m.build_adjacency();        // loop_subdivide reads CSR for vertex relocation
-        m = loop_subdivide(m);
+        m = loop_subdivide(m, false, tc_miss ? &tc.stencil : nullptr);
+        if (tc_miss) {
+            m.build_adjacency();
+            tc.indices   = m.indices;
+            tc.vt_offset = m.vert_tri_offset;
+            tc.vt_list   = m.vert_tri_list;
+            tc.vcount    = m.vertex_count();
+            tc.ready     = true;
+        }
 
         if ((int)stack.disp.size() <= i)
             stack.disp.emplace_back(m.vertex_count(), Vec3{0.0f, 0.0f, 0.0f});
@@ -371,7 +389,7 @@ void cascade_to_level(MultiresStack& stack, Mesh& out, int K) {
         // Compute local frames from the pre-displacement surface at this level.
         // m right now is the subdivided base before any displacements — exactly right.
         if (stack.frames[i].empty()) {
-            m.build_adjacency();    // needed for tangent (lowest-neighbor) lookup
+            if (!tc_miss) m.build_adjacency();  // fresh already on a cache miss
             m.recompute_normals();  // frame normals from subdivided base
             compute_frames(m, stack.frames[i]);
         }
@@ -405,6 +423,193 @@ void cascade_to_level(MultiresStack& stack, Mesh& out, int K) {
     m.recompute_normals();
     m.build_adjacency();    // CSR for post-switch brush ops
     out = std::move(m);
+}
+
+// Positions-only replay of one cached subdivision pass. Mirrors loop_subdivide
+// Pass 3 (relocation) and Pass 2 (midpoints) — same expressions, same iteration
+// order, so the output is bit-identical to a real subdivide — reading topology
+// from the cache instead of re-extracting edges through the hash map.
+static void apply_stencil_positions(
+        const std::vector<float>& cpx, const std::vector<float>& cpy,
+        const std::vector<float>& cpz,
+        const std::vector<uint32_t>& c_indices,
+        const std::vector<uint32_t>& c_off, const std::vector<uint32_t>& c_list,
+        const MultiresStack::LevelTopo& tc,
+        std::vector<float>& fpx, std::vector<float>& fpy, std::vector<float>& fpz)
+{
+    const uint32_t Vc = (uint32_t)cpx.size();
+    fpx.resize(tc.vcount); fpy.resize(tc.vcount); fpz.resize(tc.vcount);
+
+    auto cpos = [&](uint32_t i) -> Vec3 { return {cpx[i], cpy[i], cpz[i]}; };
+    auto fset = [&](uint32_t i, Vec3 p) { fpx[i]=p.x; fpy[i]=p.y; fpz[i]=p.z; };
+
+    // Relocate original verts with Loop weights (loop_subdivide Pass 3).
+    const bool has_bnd = !tc.stencil.is_bnd.empty();
+    for (uint32_t i = 0; i < Vc; i++) {
+        Vec3 p = cpos(i);
+        Vec3 new_pos;
+        if (has_bnd && tc.stencil.is_bnd[i]) {
+            Vec3 pb0 = cpos(tc.stencil.bnd_a[i]);
+            Vec3 pb1 = cpos(tc.stencil.bnd_b[i]);
+            new_pos = p * 0.75f + (pb0 + pb1) * (1.0f/8.0f);
+        } else {
+            uint32_t n = c_off[i+1] - c_off[i];
+            float beta = (n == 3) ? (3.0f/16.0f) : (3.0f / (8.0f * (float)n));
+            Vec3 nbr_sum = {0, 0, 0};
+            for (uint32_t tj = c_off[i]; tj < c_off[i+1]; tj++) {
+                uint32_t tri = c_list[tj];
+                uint32_t a = c_indices[tri*3+0];
+                uint32_t b = c_indices[tri*3+1];
+                uint32_t c = c_indices[tri*3+2];
+                if      (a == i) { nbr_sum += cpos(b); nbr_sum += cpos(c); }
+                else if (b == i) { nbr_sum += cpos(a); nbr_sum += cpos(c); }
+                else             { nbr_sum += cpos(a); nbr_sum += cpos(b); }
+            }
+            new_pos = p * (1.0f - (float)n * beta) + nbr_sum * (beta * 0.5f);
+        }
+        fset(i, new_pos);
+    }
+
+    // Midpoints, in canonical numbering order (loop_subdivide Pass 2).
+    const uint32_t E = (uint32_t)(tc.stencil.mid.size() / 4);
+    for (uint32_t e = 0; e < E; e++) {
+        const uint32_t* s = &tc.stencil.mid[(size_t)e * 4];
+        Vec3 p0 = cpos(s[0]);
+        Vec3 p1 = cpos(s[1]);
+        Vec3 pos;
+        if (s[3] != UINT32_MAX) {
+            Vec3 p2 = cpos(s[2]);
+            Vec3 p3 = cpos(s[3]);
+            pos = (p0 + p1) * (3.0f/8.0f) + (p2 + p3) * (1.0f/8.0f);
+        } else {
+            pos = (p0 + p1) * 0.5f;
+        }
+        fset(Vc + e, pos);
+    }
+}
+
+// Fast replay: positions-only cascade over the warmed topology cache — no
+// loop_subdivide, no build_adjacency, no hash maps. Requires topo_cache[0..
+// passes-1].ready (caller checks). Lazy structures (disp, frames, parent maps,
+// mirrors) fill exactly like the slow path; the frames rebuild after a
+// projection is the one case that still materializes a temp mesh (for normals).
+static void cascade_replay_fast(MultiresStack& stack, Mesh& out, int passes) {
+    if (stack.base.vert_tri_offset.size() != stack.base.vertex_count() + 1)
+        stack.base.build_adjacency();   // base immutable after lock — build once
+
+    std::vector<float> ax = stack.base.pos_x, ay = stack.base.pos_y,
+                       az = stack.base.pos_z;
+    std::vector<float> bx, by, bz;
+    const std::vector<uint32_t>* c_idx  = &stack.base.indices;
+    const std::vector<uint32_t>* c_off  = &stack.base.vert_tri_offset;
+    const std::vector<uint32_t>* c_list = &stack.base.vert_tri_list;
+
+    for (int i = 0; i < passes; i++) {
+        MultiresStack::LevelTopo& tc = stack.topo_cache[i];
+        const uint32_t V_coarse = (uint32_t)ax.size();
+
+        apply_stencil_positions(ax, ay, az, *c_idx, *c_off, *c_list,
+                                tc, bx, by, bz);
+
+        if ((int)stack.disp.size() <= i)
+            stack.disp.emplace_back(tc.vcount, Vec3{0.0f, 0.0f, 0.0f});
+        if ((int)stack.frames.size() <= i)
+            stack.frames.emplace_back();
+
+        // Frames stale (post-projection): rebuild from the pre-displacement
+        // surface. compute_frames needs a Mesh with normals + CSR — borrow the
+        // cached topology into a temp. Rare; the steady state skips this.
+        if (stack.frames[i].empty()) {
+            Mesh tmp;
+            tmp.pos_x = bx; tmp.pos_y = by; tmp.pos_z = bz;
+            tmp.norm_x.resize(tc.vcount); tmp.norm_y.resize(tc.vcount);
+            tmp.norm_z.resize(tc.vcount);
+            tmp.indices = tc.indices;
+            tmp.vert_tri_offset = tc.vt_offset;
+            tmp.vert_tri_list   = tc.vt_list;
+            tmp.recompute_normals();
+            compute_frames(tmp, stack.frames[i]);
+        }
+
+        if ((int)stack.midpoint_parents.size() <= i) stack.midpoint_parents.emplace_back();
+        if (stack.midpoint_parents[i].empty())
+            build_parent_map(V_coarse, *c_idx, tc.indices,
+                             tc.vcount, stack.midpoint_parents[i]);
+
+        if ((int)stack.mirror.size() <= i) stack.mirror.emplace_back();
+        if (stack.mirror[i].empty() && !stack.base_mirror.empty()) {
+            const std::vector<uint32_t>& cm =
+                (i == 0) ? stack.base_mirror : stack.mirror[i - 1];
+            if (!cm.empty())
+                build_fine_mirror(V_coarse, *c_idx, cm,
+                                  tc.vcount, tc.indices, stack.mirror[i]);
+        }
+
+        // Apply displacements: local frame -> world (same expression as slow).
+        for (uint32_t v = 0; v < tc.vcount; v++) {
+            const Frame& f = stack.frames[i][v];
+            const Vec3&  d = stack.disp[i][v];
+            Vec3 p = Vec3{bx[v], by[v], bz[v]} + f.t * d.x + f.b * d.y + f.n * d.z;
+            bx[v] = p.x; by[v] = p.y; bz[v] = p.z;
+        }
+
+        std::swap(ax, bx); std::swap(ay, by); std::swap(az, bz);
+        c_idx  = &tc.indices;
+        c_off  = &tc.vt_offset;
+        c_list = &tc.vt_list;
+    }
+
+    const MultiresStack::LevelTopo& top = stack.topo_cache[passes - 1];
+    out = Mesh();
+    out.pos_x = std::move(ax); out.pos_y = std::move(ay); out.pos_z = std::move(az);
+    out.norm_x.resize(top.vcount); out.norm_y.resize(top.vcount);
+    out.norm_z.resize(top.vcount);
+    out.indices         = top.indices;
+    out.vert_tri_offset = top.vt_offset;
+    out.vert_tri_list   = top.vt_list;
+    out.topo_version    = 1;   // fresh mesh; mirror stamp is synced by the caller
+    out.recompute_normals();
+}
+
+void cascade_to_level(MultiresStack& stack, Mesh& out, int K) {
+    const int passes = K - stack.base_level;
+
+    bool fast = passes > 0 && (int)stack.topo_cache.size() >= passes;
+    for (int i = 0; fast && i < passes; i++)
+        if (!stack.topo_cache[i].ready) fast = false;
+
+    const auto t0 = std::chrono::steady_clock::now();
+    if (fast) {
+        cascade_replay_fast(stack, out, passes);
+#ifdef CHISEL_DEBUG_MULTIRES
+        {
+            // Truth check: the slow replay must agree bit-for-bit — the fast
+            // path repeats its arithmetic in the same order.
+            Mesh chk;
+            cascade_replay_slow(stack, chk, passes);
+            const bool topo_ok = chk.indices == out.indices
+                              && chk.vert_tri_offset == out.vert_tri_offset
+                              && chk.vert_tri_list   == out.vert_tri_list;
+            uint32_t bad = 0; float maxd = 0.0f;
+            for (uint32_t v = 0; v < chk.vertex_count(); v++) {
+                float dx = std::fabs(chk.pos_x[v] - out.pos_x[v]);
+                float dy = std::fabs(chk.pos_y[v] - out.pos_y[v]);
+                float dz = std::fabs(chk.pos_z[v] - out.pos_z[v]);
+                float dm = dx > dy ? (dx > dz ? dx : dz) : (dy > dz ? dy : dz);
+                if (dm > 0.0f) bad++;
+                if (dm > maxd) maxd = dm;
+            }
+            std::printf("[cascade-check] L%d fast vs slow: topo %s, %u/%u pos differ, max |d| %.3g\n",
+                        K, topo_ok ? "OK" : "MISMATCH",
+                        bad, chk.vertex_count(), (double)maxd);
+        }
+#endif
+    } else {
+        cascade_replay_slow(stack, out, passes);
+    }
+    const double cascade_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - t0).count();
+    std::printf("[cascade] L%d %s %.1f ms\n", K, fast ? "fast" : "slow", cascade_ms);
 
     // Paint rides the finest-level planes: the working array at level K is the
     // [0, V_K) prefix. Extend first — the pass loop above may have grown disp.
@@ -666,6 +871,42 @@ static void inverse_loop_one_step(const Mesh& coarse_mesh,
     }
 }
 
+// One subdivision step for the projection paths: cached stencil replay when
+// warm (bit-identical to a real subdivide, no edge extraction), real
+// loop_subdivide otherwise — warming the cache exactly like cascade does.
+// Returns the fine mesh with positions + indices + CSR; normals are zeroed —
+// callers recompute them only where actually consumed (compute_frames).
+static Mesh subdiv_step_cached(MultiresStack& stack, Mesh& coarse, int i) {
+    if ((int)stack.topo_cache.size() <= i) stack.topo_cache.emplace_back();
+    MultiresStack::LevelTopo& tc = stack.topo_cache[i];
+    Mesh fine;
+    if (tc.ready) {
+        if (coarse.vert_tri_offset.size() != coarse.vertex_count() + 1)
+            coarse.build_adjacency();
+        apply_stencil_positions(coarse.pos_x, coarse.pos_y, coarse.pos_z,
+                                coarse.indices, coarse.vert_tri_offset,
+                                coarse.vert_tri_list, tc,
+                                fine.pos_x, fine.pos_y, fine.pos_z);
+        fine.indices         = tc.indices;
+        fine.vert_tri_offset = tc.vt_offset;
+        fine.vert_tri_list   = tc.vt_list;
+        fine.norm_x.resize(tc.vcount);
+        fine.norm_y.resize(tc.vcount);
+        fine.norm_z.resize(tc.vcount);
+        fine.topo_version    = coarse.topo_version + 1;
+    } else {
+        coarse.build_adjacency();
+        fine = loop_subdivide(coarse, false, &tc.stencil);
+        fine.build_adjacency();
+        tc.indices   = fine.indices;
+        tc.vt_offset = fine.vert_tri_offset;
+        tc.vt_list   = fine.vert_tri_list;
+        tc.vcount    = fine.vertex_count();
+        tc.ready     = true;
+    }
+    return fine;
+}
+
 ProjectionStats project_down_to_level(MultiresStack& stack, int target_level) {
     ProjectionStats stats;
     stats.target_level = target_level;
@@ -692,19 +933,19 @@ ProjectionStats project_down_to_level(MultiresStack& stack, int target_level) {
     mesh_at[0] = m;
 
     for (int i = 0; i < passes; i++) {
-        m.build_adjacency();
-        m = loop_subdivide(m);
-        m.build_adjacency();
-        m.recompute_normals();
+        m = subdiv_step_cached(stack, mesh_at[i], i);
         if ((int)stack.frames.size() <= i) stack.frames.emplace_back();
-        if (stack.frames[i].empty()) compute_frames(m, stack.frames[i]);
+        if (stack.frames[i].empty()) {
+            m.recompute_normals();   // frame normals from the pre-disp surface
+            compute_frames(m, stack.frames[i]);
+        }
         const uint32_t vc = m.vertex_count();
         for (uint32_t v = 0; v < vc; v++) {
             const Frame& f = stack.frames[i][v];
             const Vec3&  d = stack.disp[i][v];
             m.set_pos(v, m.get_pos(v) + f.t*d.x + f.b*d.y + f.n*d.z);
         }
-        mesh_at[i + 1] = m;   // includes topology + post-disp positions
+        mesh_at[i + 1] = std::move(m);   // topology + post-disp positions
     }
 
     // ---- Phase 2: inverse Loop from L_max down to target_level. Walk the
@@ -742,14 +983,12 @@ ProjectionStats project_down_to_level(MultiresStack& stack, int target_level) {
         // which still holds the unchanged lower-layer cascade). frames at
         // this layer depend only on disp[0..k_start_disp-1] (unchanged), so
         // they stay valid — we use them but do not rewrite them.
-        Mesh pre_disp = mesh_at[k_target - 1];
-        pre_disp.build_adjacency();
-        pre_disp = loop_subdivide(pre_disp);
-        pre_disp.build_adjacency();
-        pre_disp.recompute_normals();
+        Mesh pre_disp = subdiv_step_cached(stack, mesh_at[k_target - 1], k_target - 1);
         if ((int)stack.frames.size() <= k_start_disp) stack.frames.resize(k_start_disp + 1);
-        if (stack.frames[k_start_disp].empty())
+        if (stack.frames[k_start_disp].empty()) {
+            pre_disp.recompute_normals();   // only consumer of these normals
             compute_frames(pre_disp, stack.frames[k_start_disp]);
+        }
         const auto& frames_at = stack.frames[k_start_disp];
         const auto& target_pos = mesh_at[k_target];
         uint32_t vc = pre_disp.vertex_count();
@@ -776,10 +1015,8 @@ ProjectionStats project_down_to_level(MultiresStack& stack, int target_level) {
                               ? 0
                               : (k_start_disp + 1);
     for (int kk = first_up_disp_idx; kk < passes; kk++) {
-        rebuild.build_adjacency();
-        rebuild = loop_subdivide(rebuild);
-        rebuild.build_adjacency();
-        rebuild.recompute_normals();
+        rebuild = subdiv_step_cached(stack, rebuild, kk);
+        rebuild.recompute_normals();   // compute_frames below reads them
         stack.frames[kk].clear();
         compute_frames(rebuild, stack.frames[kk]);
 
