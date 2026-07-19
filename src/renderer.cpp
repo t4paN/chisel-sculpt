@@ -491,7 +491,10 @@ layout(std430, binding = 4) writeonly buffer NormOut { float out_norm[]; };
 layout(std140, binding = 63) uniform Params { uint tri_count; };
 
 void main() {
-    uint t = gl_GlobalInvocationID.x;
+    // 2D group grid: 1D would exceed the 65535 per-dim dispatch limit past
+    // ~4.2M tris (multires L9). Same recovery as the SDF kernels.
+    uint t = gl_GlobalInvocationID.x
+           + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * 64u;
     if (t >= tri_count) return;
 
     uint i0 = in_idx[t*3+0];
@@ -832,8 +835,10 @@ static const char* screen_expand_wgsl_src = R"WGSL(
 struct Params { tri_count: u32 };
 @group(0) @binding(63) var<uniform> P: Params;
 @compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let t = gid.x;
+fn main(@builtin(global_invocation_id) gid: vec3<u32>,
+        @builtin(num_workgroups)        nwg: vec3<u32>) {
+    // 2D group grid past the 65535 per-dim dispatch limit (multires L9).
+    let t = gid.x + gid.y * nwg.x * 64u;
     if (t >= P.tri_count) { return; }
     let i0 = in_idx[t*3u+0u];
     let i1 = in_idx[t*3u+1u];
@@ -1837,8 +1842,13 @@ void Renderer::update_screen_mesh_gpu() {
     gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, screen_expand_pipeline, be, 6);
 
     gpu::ComputeBatch batch = gpu::begin_compute(gpu_dev);
+    // 2D grid past 65535 groups (5.2M tris at multires L9 -> 81920): WebGPU
+    // hard-caps each dispatch dimension; the kernel recovers the linear index.
     uint32_t groups = (screen_tri_count + 63) / 64;
-    gpu::dispatch(batch, screen_expand_pipeline, grp, groups);
+    uint32_t gx = groups, gy = 1u;
+    const uint32_t MAXG = 65535u;
+    if (groups > MAXG) { gx = MAXG; gy = (groups + MAXG - 1u) / MAXG; }
+    gpu::dispatch(batch, screen_expand_pipeline, grp, gx, gy);
     gpu::submit(batch);   // issues the vertex-attrib + buffer-update barriers
     gpu::release_bind_group(grp);
 }

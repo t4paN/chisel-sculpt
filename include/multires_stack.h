@@ -5,6 +5,8 @@
 
 constexpr int MULTIRES_MAX_LEVEL = 9;
 
+struct ComputeState;   // optional GPU replay for cascade_to_level
+
 // Per-vertex tangent frame derived from the subdivided-base surface (pre-displacement).
 // Stored in local coordinates so that lower-level edits reorient upper-level detail.
 struct Frame {
@@ -67,6 +69,13 @@ struct MultiresStack {
     };
     std::vector<LevelTopo> topo_cache;
 
+    // Identity of the warmed topology chain, for the GPU cascade's VRAM table
+    // cache (ComputeState::cascade_levels). 0 = unassigned; lazily given a
+    // process-unique value on the first GPU replay, reset alongside topo_cache
+    // at lock — so a stamp match guarantees the cached tables describe this
+    // exact chain.
+    uint64_t lock_stamp = 0;
+
     // midpoint_parents[k]: for each midpoint vertex of the mesh at level
     // (base_level + k + 1), its two parent vertex ids at level (base_level + k)
     // — 2 ids per midpoint, midpoints indexed from V_k. Topology-only, built
@@ -109,7 +118,12 @@ void multires_sync_paint(MultiresStack& stack, const Mesh& working);
 // finest-level paint planes ([0, V_K) prefix; extended first if disp grew) —
 // cleared when the corresponding plane is empty.
 // Rebuilds CSR adjacency on `out`. Mirror map NOT rebuilt — caller must do that.
-void cascade_to_level(MultiresStack& stack, Mesh& out, int K);
+// `compute` (optional): when the topology cache is warm and the GPU cascade is
+// available/eligible, the position replay runs as compute kernels with one
+// readback (see compute_cascade.cpp); any ineligibility falls back to the CPU
+// fast/slow replay silently. Pass nullptr to force the CPU path (load paths).
+void cascade_to_level(MultiresStack& stack, Mesh& out, int K,
+                      ComputeState* compute = nullptr);
 
 // Re-encode a v<=3 stack (legacy platform-specific midpoint numbering, see
 // mesh.h) into canonical numbering, validating the legacy replay against the

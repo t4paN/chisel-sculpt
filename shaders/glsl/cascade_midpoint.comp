@@ -1,0 +1,47 @@
+// cascade_midpoint.comp — GLSL 430 sibling of shaders/wgsl/cascade_midpoint.wgsl.
+// GPU level-switch replay, pass 2 of 3 (mirrors apply_stencil_positions' Pass-2
+// midpoint loop): compute each midpoint vertex from the cached SubdivStencil mid
+// table (4 ids per edge: v0, v1, opp0, opp1 — opp1 == 0xFFFFFFFF on a boundary
+// edge, kept for safety though the GPU path only runs on closed meshes). One
+// thread per midpoint; reads coarse positions, writes dst_pos[vcoarse + e].
+#version 430
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 42) readonly buffer SrcPos  { float src_pos[]; };
+layout(std430, binding = 43) writeonly buffer DstPos { float dst_pos[]; };
+layout(std430, binding = 44) readonly buffer MidTab  { uint mid[]; };
+
+layout(std140, binding = 63) uniform Params {
+    uint edge_count;    // number of midpoint verts this pass
+    uint vcoarse;       // coarse vertex count (write offset)
+    uint _pad0;
+    uint _pad1;         // struct rounds to 16
+} P;
+
+vec3 fetch(uint v) {
+    return vec3(src_pos[v*3u], src_pos[v*3u+1u], src_pos[v*3u+2u]);
+}
+
+void main() {
+    uint e = gl_GlobalInvocationID.x;
+    if (e >= P.edge_count) return;
+
+    uint s0 = mid[e*4u];
+    uint s1 = mid[e*4u+1u];
+    uint s2 = mid[e*4u+2u];
+    uint s3 = mid[e*4u+3u];
+
+    vec3 p0 = fetch(s0);
+    vec3 p1 = fetch(s1);
+    vec3 pos;
+    if (s3 != 0xFFFFFFFFu) {
+        pos = (p0 + p1) * (3.0 / 8.0) + (fetch(s2) + fetch(s3)) * (1.0 / 8.0);
+    } else {
+        pos = (p0 + p1) * 0.5;
+    }
+
+    uint o = (P.vcoarse + e) * 3u;
+    dst_pos[o]     = pos.x;
+    dst_pos[o+1u]  = pos.y;
+    dst_pos[o+2u]  = pos.z;
+}

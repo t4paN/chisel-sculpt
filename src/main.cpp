@@ -537,6 +537,7 @@ int main(int argc, char* argv[]) {
         compute.init_compute_normals();
         compute.init_multires_diff();
         compute.init_multires_apply();
+        compute.init_cascade();
         compute.init_alpha();   // shared brush-alpha stamp buffers (all dab kernels)
         compute.undo_ring_set_budget(UndoStack::ring_max_bytes);  // blood-moon 3b-iv (decoupled)
         compute.undo_ring_selftest();                        // no-op in release
@@ -1035,6 +1036,12 @@ int main(int argc, char* argv[]) {
             input.level_switch_delta = 0;
         }
         swallow_level_switch = false;
+        if (input.level_switch_delta != 0 && app_state != AppState::IDLE) {
+            // Mid-stroke D: the cascade would rebuild the mesh under the live
+            // brush (pen-down FBO cache, GPU accumulators, dirty lists all
+            // reference the old buffers) — crash. Level switch is idle-only.
+            input.level_switch_delta = 0;
+        }
         if (input.level_switch_delta != 0) {
             int delta = input.level_switch_delta;
             input.level_switch_delta = 0;
@@ -1086,12 +1093,12 @@ int main(int argc, char* argv[]) {
                 if (scene.alive_count() <= 1) {
                     // Paint/mask ride the cascade (finest-level planes) — no
                     // save/restore needed across the rebuild.
-                    cascade_to_level(*multires, *mesh, target);
+                    cascade_to_level(*multires, *mesh, target, &compute);
                     scene.refresh_mirror_map();
                     scene.sync();  // rebinds active: rebuilds adjacency from new topology
                 } else {
                     Mesh solo;
-                    cascade_to_level(*multires, solo, target);
+                    cascade_to_level(*multires, solo, target, &compute);
                     scene.splice_active(solo);  // splice_active marks topo dirty
                     scene.refresh_mirror_map();
                 }
@@ -1768,7 +1775,7 @@ int main(int argc, char* argv[]) {
                 // rebuild (exact — no fold/interpolate round-trip blur).
                 auto saved_mask = std::move(ent.mesh.mask);
                 Mesh solo;
-                cascade_to_level(ent.multires, solo, ent.multires.current_level);
+                cascade_to_level(ent.multires, solo, ent.multires.current_level, &compute);
                 if (!saved_mask.empty() && saved_mask.size() == solo.vertex_count())
                     solo.mask = std::move(saved_mask);
                 scene.splice_active(solo);  // rebuilds adjacency + full sync
@@ -1830,7 +1837,7 @@ int main(int argc, char* argv[]) {
                     multires_sync_paint(*multires, *mesh);
                     if (scene.alive_count() <= 1) {
                         auto saved_mask = std::move(mesh->mask);
-                        cascade_to_level(*multires, *mesh, multires->current_level);
+                        cascade_to_level(*multires, *mesh, multires->current_level, &compute);
                         if (!saved_mask.empty() && saved_mask.size() == mesh->vertex_count())
                             mesh->mask = std::move(saved_mask);
                         scene.refresh_mirror_map();
@@ -1840,7 +1847,7 @@ int main(int argc, char* argv[]) {
                         // the undo cascade above).
                         auto saved_mask = std::move(mesh->mask);
                         Mesh solo;
-                        cascade_to_level(*multires, solo, multires->current_level);
+                        cascade_to_level(*multires, solo, multires->current_level, &compute);
                         if (!saved_mask.empty() && saved_mask.size() == solo.vertex_count())
                             solo.mask = std::move(saved_mask);
                         scene.splice_active(solo);

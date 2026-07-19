@@ -1,0 +1,62 @@
+// cascade_normals.comp — GLSL 430 sibling of shaders/wgsl/cascade_normals.wgsl.
+// Full-mesh vertex normals after a GPU cascade: the sequential-id variant of
+// compute_normals.comp (no dirty list — every vertex is "dirty" after a level
+// switch). One thread per vertex: sum area-weighted face normals via CSR
+// adjacency, normalize. Reads the final cascade positions at the SRC slot,
+// writes an interleaved float3 normals buffer for readback + display.
+#version 430
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 42) readonly buffer SrcPos    { float positions[]; };
+layout(std430, binding = 1)  writeonly buffer NormBuf  { float normals[]; };
+layout(std430, binding = 2)  readonly buffer IdxBuf    { uint indices[]; };
+layout(std430, binding = 4)  readonly buffer AdjOffset { uint adj_offset[]; };
+layout(std430, binding = 5)  readonly buffer AdjList   { uint adj_list[]; };
+
+layout(std140, binding = 63) uniform Params {
+    uint vcount;
+    uint _pad0;
+    uint _pad1;
+    uint _pad2;         // struct rounds to 16
+} P;
+
+void main() {
+    uint v = gl_GlobalInvocationID.x;
+    if (v >= P.vcount) return;
+
+    float nx = 0.0, ny = 0.0, nz = 0.0;
+
+    uint start = adj_offset[v];
+    uint end   = adj_offset[v + 1u];
+
+    for (uint j = start; j < end; j++) {
+        uint t = adj_list[j];
+        uint i0 = indices[t*3u];
+        uint i1 = indices[t*3u+1u];
+        uint i2 = indices[t*3u+2u];
+
+        vec3 p0 = vec3(positions[i0*3u], positions[i0*3u+1u], positions[i0*3u+2u]);
+        vec3 p1 = vec3(positions[i1*3u], positions[i1*3u+1u], positions[i1*3u+2u]);
+        vec3 p2 = vec3(positions[i2*3u], positions[i2*3u+1u], positions[i2*3u+2u]);
+
+        vec3 fn = cross(p1 - p0, p2 - p0);
+        if (length(fn) < 1e-7) continue;
+
+        nx += fn.x;
+        ny += fn.y;
+        nz += fn.z;
+    }
+
+    float len = sqrt(nx*nx + ny*ny + nz*nz);
+    if (len > 1e-8) {
+        float inv = 1.0 / len;
+        nx *= inv; ny *= inv; nz *= inv;
+    } else {
+        nx = 0.0; ny = 0.0; nz = 0.0;
+    }
+
+    uint o = v * 3u;
+    normals[o]     = nx;
+    normals[o+1u]  = ny;
+    normals[o+2u]  = nz;
+}

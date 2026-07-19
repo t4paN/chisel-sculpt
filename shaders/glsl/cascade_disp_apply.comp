@@ -1,0 +1,33 @@
+// cascade_disp_apply.comp — GLSL 430 sibling of shaders/wgsl/cascade_disp_apply.wgsl.
+// GPU level-switch replay, pass 3 of 3 (mirrors cascade_replay_fast's displacement
+// loop): pos += t*d.x + b*d.y + n*d.z in the level's local tangent frames. One
+// thread per fine vertex, in place on the fine position buffer. disp/frames are
+// this pass's layer, uploaded by the driver (CPU stays the storage authority).
+#version 430
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 43) buffer DstPos           { float pos[]; };
+layout(std430, binding = 30) readonly buffer DispBuf { float disp[]; };
+layout(std430, binding = 31) readonly buffer FrameBuf{ float frames[]; };
+
+layout(std140, binding = 63) uniform Params {
+    uint vcount;        // fine vertex count
+    uint _pad0;
+    uint _pad1;
+    uint _pad2;         // struct rounds to 16
+} P;
+
+void main() {
+    uint v = gl_GlobalInvocationID.x;
+    if (v >= P.vcount) return;
+
+    float dx = disp[v*3u];
+    float dy = disp[v*3u+1u];
+    float dz = disp[v*3u+2u];
+
+    uint f = v * 9u;    // Frame = t(3) b(3) n(3)
+    // Same per-component expression order as the CPU loop.
+    pos[v*3u]    = pos[v*3u]    + frames[f]     * dx + frames[f+3u] * dy + frames[f+6u] * dz;
+    pos[v*3u+1u] = pos[v*3u+1u] + frames[f+1u]  * dx + frames[f+4u] * dy + frames[f+7u] * dz;
+    pos[v*3u+2u] = pos[v*3u+2u] + frames[f+2u]  * dx + frames[f+5u] * dy + frames[f+8u] * dz;
+}

@@ -2,6 +2,35 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-20 — Multires level switch replays on the GPU
+
+- **Warm level switches now run as compute kernels** (both backends, GLSL +
+  WGSL): per pass, Loop relocation + stencil midpoints + displacement apply
+  over the cached topology, full-mesh normals at the top, one readback of the
+  final level. Per-level topology tables stay VRAM-resident for the locked
+  lifetime (keyed by a new `lock_stamp`); disp/frames/base re-upload each
+  switch, so the CPU stays the storage authority and projection/undo/load need
+  no GPU invalidation. The GPU replay itself runs ~70–120 ms at L8 (1.3M tris)
+  vs 400–1400 ms for the CPU replay; remaining switch cost is CPU-side lazies
+  (post-projection mirror rebuild, topology copies, rebind uploads).
+- **Tangent frames rebuild on the GPU when stale.** Sculpting at a level
+  invalidates the frames of every level above; the cascade now recomputes them
+  in-flight (pre-displacement normals pass + a `compute_frames` twin) instead
+  of falling back to CPU — so the core "block low, ascend for detail" flow
+  stays on the GPU. Only the target level's frames read back (brush disp
+  encoding stays consistent with the built surface).
+- **Fallbacks preserved**: cold cache, open meshes (boundary stencils),
+  compute unavailable, or over device buffer limits silently use the existing
+  CPU fast/slow replay (each prints a `[cascade-gpu] fallback:` reason). The
+  `CHISEL_DEBUG_MULTIRES` build cross-checks GPU vs CPU replay every switch —
+  epsilon-based now (GPU FMA rounding): `topo OK, max |d| ≤ 5e-7` at every
+  level tested up to L9 (5.2M tris) on radeonsi.
+- **Fixed a WebGPU crash at L9**: `screen_expand` (picking-soup rebuild)
+  dispatched >65535 workgroups in one dimension at 5.2M tris — WebGPU's hard
+  cap, tolerated by GL. Now splits into a 2D grid like the SDF kernels.
+- **Fixed a crash on D/Shift+D mid-stroke**: level switches are now ignored
+  unless the app is idle (the cascade rebuilt the mesh under the live brush).
+
 ## 2026-07-19 — Multires level-switch fast path (topology cache)
 
 - **Warm level switches no longer replay the subdivision chain.** The stack now

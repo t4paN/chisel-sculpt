@@ -1,0 +1,58 @@
+// cascade_relocate.comp — GLSL 430 sibling of shaders/wgsl/cascade_relocate.wgsl.
+// GPU level-switch replay, pass 1 of 3 (mirrors apply_stencil_positions' Pass-3
+// relocation loop in multires_stack.cpp): move each coarse vertex to its Loop
+// position on the subdivided surface. One thread per coarse vertex; reads the
+// coarse level's indices + CSR adjacency, writes dst_pos[0..vcount). Closed
+// meshes only — the boundary tables never upload; the CPU path keeps open meshes.
+// Same accumulation order as the CPU loop (sequential over adjacent tris), so the
+// result matches to float rounding (FMA contraction aside — validated by epsilon
+// under CHISEL_DEBUG_MULTIRES, not bit-compare).
+#version 430
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 42) readonly buffer SrcPos    { float src_pos[]; };
+layout(std430, binding = 43) writeonly buffer DstPos   { float dst_pos[]; };
+layout(std430, binding = 2)  readonly buffer IdxBuf    { uint indices[]; };
+layout(std430, binding = 4)  readonly buffer AdjOffset { uint adj_offset[]; };
+layout(std430, binding = 5)  readonly buffer AdjList   { uint adj_list[]; };
+
+layout(std140, binding = 63) uniform Params {
+    uint vcount;        // coarse vertex count
+    uint _pad0;
+    uint _pad1;
+    uint _pad2;         // struct rounds to 16
+} P;
+
+vec3 fetch(uint v) {
+    return vec3(src_pos[v*3u], src_pos[v*3u+1u], src_pos[v*3u+2u]);
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= P.vcount) return;
+
+    vec3 p = fetch(i);
+
+    uint start = adj_offset[i];
+    uint end   = adj_offset[i + 1u];
+    uint n     = end - start;
+    float beta = (n == 3u) ? (3.0 / 16.0) : (3.0 / (8.0 * float(n)));
+
+    // Each neighbor vertex appears in two adjacent tris, hence the 0.5 factor
+    // on the sum (same trick as the CPU loop).
+    vec3 nbr_sum = vec3(0.0);
+    for (uint j = start; j < end; j++) {
+        uint t = adj_list[j];
+        uint a = indices[t*3u];
+        uint b = indices[t*3u+1u];
+        uint c = indices[t*3u+2u];
+        if (a == i)      { nbr_sum += fetch(b); nbr_sum += fetch(c); }
+        else if (b == i) { nbr_sum += fetch(a); nbr_sum += fetch(c); }
+        else             { nbr_sum += fetch(a); nbr_sum += fetch(b); }
+    }
+
+    vec3 np = p * (1.0 - float(n) * beta) + nbr_sum * (beta * 0.5);
+    dst_pos[i*3u]    = np.x;
+    dst_pos[i*3u+1u] = np.y;
+    dst_pos[i*3u+2u] = np.z;
+}

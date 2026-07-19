@@ -1,4 +1,5 @@
 #include "multires_stack.h"
+#include "compute.h"   // optional GPU cascade replay (compute_cascade.cpp)
 #include <cassert>
 #include <chrono>
 #include <climits>
@@ -277,6 +278,7 @@ void multires_stack_init_from_lock(MultiresStack& stack,
     stack.mirror.clear();
     stack.midpoint_parents.clear();
     stack.topo_cache.clear();   // pure function of base topology — new base, new chain
+    stack.lock_stamp = 0;       // new chain identity; GPU cascade tables re-key lazily
     stack.locked = true;
 
     // Paint lives in the finest-level planes, not in base — at lock the
@@ -571,7 +573,69 @@ static void cascade_replay_fast(MultiresStack& stack, Mesh& out, int passes) {
     out.recompute_normals();
 }
 
-void cascade_to_level(MultiresStack& stack, Mesh& out, int K) {
+// GPU replay: same contract as cascade_replay_fast, positions + normals via the
+// compute kernels (compute_cascade.cpp) with one readback. Handles the same
+// lazy structure fills — but only the topology-only ones; a stale frames layer
+// (post-projection) needs pre-displacement positions the GPU flow doesn't keep
+// on the CPU, so that one switch falls back to the CPU fast path (which
+// rebuilds + caches the frames; the GPU path resumes on the next switch).
+// Returns false with `out` untouched when ineligible — caller falls back.
+static bool cascade_replay_gpu(MultiresStack& stack, ComputeState& cs,
+                               Mesh& out, int passes) {
+    if (!cs.has_cascade()) return false;
+
+    for (int i = 0; i < passes; i++) {
+        MultiresStack::LevelTopo& tc = stack.topo_cache[i];
+        if (!tc.stencil.is_bnd.empty()) {
+            std::printf("[cascade-gpu] fallback: open mesh (boundary stencil at pass %d)\n", i);
+            return false;   // open mesh — CPU keeps it
+        }
+        const uint32_t V_coarse = (i == 0) ? stack.base.vertex_count()
+                                           : stack.topo_cache[i - 1].vcount;
+        const std::vector<uint32_t>& c_idx =
+            (i == 0) ? stack.base.indices : stack.topo_cache[i - 1].indices;
+
+        if ((int)stack.disp.size() <= i)
+            stack.disp.emplace_back(tc.vcount, Vec3{0.0f, 0.0f, 0.0f});
+        if ((int)stack.frames.size() <= i)
+            stack.frames.emplace_back();
+        // Stale frames (a sculpt below cleared them) are NOT a bail: the GPU
+        // replay rebuilds them on the GPU from the pre-disp surface and reads
+        // the target level's back for the brush residency (compute_cascade.cpp).
+        if (stack.disp[i].size() != (size_t)tc.vcount) {
+            std::printf("[cascade-gpu] fallback: disp[%d] size %zu != %u\n",
+                        i, stack.disp[i].size(), tc.vcount);
+            return false;
+        }
+
+        if ((int)stack.midpoint_parents.size() <= i) stack.midpoint_parents.emplace_back();
+        if (stack.midpoint_parents[i].empty())
+            build_parent_map(V_coarse, c_idx, tc.indices,
+                             tc.vcount, stack.midpoint_parents[i]);
+
+        if ((int)stack.mirror.size() <= i) stack.mirror.emplace_back();
+        if (stack.mirror[i].empty() && !stack.base_mirror.empty()) {
+            const std::vector<uint32_t>& cm =
+                (i == 0) ? stack.base_mirror : stack.mirror[i - 1];
+            if (!cm.empty())
+                build_fine_mirror(V_coarse, c_idx, cm,
+                                  tc.vcount, tc.indices, stack.mirror[i]);
+        }
+    }
+
+    Mesh fresh;
+    if (!cs.gpu_cascade_replay(stack, fresh, passes)) return false;
+
+    const MultiresStack::LevelTopo& top = stack.topo_cache[passes - 1];
+    fresh.indices         = top.indices;
+    fresh.vert_tri_offset = top.vt_offset;
+    fresh.vert_tri_list   = top.vt_list;
+    fresh.topo_version    = 1;   // fresh mesh; mirror stamp is synced by the caller
+    out = std::move(fresh);
+    return true;
+}
+
+void cascade_to_level(MultiresStack& stack, Mesh& out, int K, ComputeState* compute) {
     const int passes = K - stack.base_level;
 
     bool fast = passes > 0 && (int)stack.topo_cache.size() >= passes;
@@ -579,37 +643,70 @@ void cascade_to_level(MultiresStack& stack, Mesh& out, int K) {
         if (!stack.topo_cache[i].ready) fast = false;
 
     const auto t0 = std::chrono::steady_clock::now();
+    const char* mode = "slow";
     if (fast) {
-        cascade_replay_fast(stack, out, passes);
+        bool gpu_done = false;
+        if (compute && compute->supported)
+            gpu_done = cascade_replay_gpu(stack, *compute, out, passes);
+        if (gpu_done) {
+            mode = "gpu";
 #ifdef CHISEL_DEBUG_MULTIRES
-        {
-            // Truth check: the slow replay must agree bit-for-bit — the fast
-            // path repeats its arithmetic in the same order.
-            Mesh chk;
-            cascade_replay_slow(stack, chk, passes);
-            const bool topo_ok = chk.indices == out.indices
-                              && chk.vert_tri_offset == out.vert_tri_offset
-                              && chk.vert_tri_list   == out.vert_tri_list;
-            uint32_t bad = 0; float maxd = 0.0f;
-            for (uint32_t v = 0; v < chk.vertex_count(); v++) {
-                float dx = std::fabs(chk.pos_x[v] - out.pos_x[v]);
-                float dy = std::fabs(chk.pos_y[v] - out.pos_y[v]);
-                float dz = std::fabs(chk.pos_z[v] - out.pos_z[v]);
-                float dm = dx > dy ? (dx > dz ? dx : dz) : (dy > dz ? dy : dz);
-                if (dm > 0.0f) bad++;
-                if (dm > maxd) maxd = dm;
+            {
+                // Truth check: the CPU fast replay must agree to float rounding.
+                // Not bit-exact — the kernels repeat the same per-thread
+                // accumulation order but GPU FMA contraction rounds differently.
+                Mesh chk;
+                cascade_replay_fast(stack, chk, passes);
+                const bool topo_ok = chk.indices == out.indices
+                                  && chk.vert_tri_offset == out.vert_tri_offset
+                                  && chk.vert_tri_list   == out.vert_tri_list;
+                uint32_t bad = 0; float maxd = 0.0f;
+                for (uint32_t v = 0; v < chk.vertex_count(); v++) {
+                    float dx = std::fabs(chk.pos_x[v] - out.pos_x[v]);
+                    float dy = std::fabs(chk.pos_y[v] - out.pos_y[v]);
+                    float dz = std::fabs(chk.pos_z[v] - out.pos_z[v]);
+                    float dm = dx > dy ? (dx > dz ? dx : dz) : (dy > dz ? dy : dz);
+                    if (dm > 1e-5f) bad++;
+                    if (dm > maxd) maxd = dm;
+                }
+                std::printf("[cascade-check] L%d gpu vs fast: topo %s, %u/%u pos beyond 1e-5, max |d| %.3g\n",
+                            K, topo_ok ? "OK" : "MISMATCH",
+                            bad, chk.vertex_count(), (double)maxd);
             }
-            std::printf("[cascade-check] L%d fast vs slow: topo %s, %u/%u pos differ, max |d| %.3g\n",
-                        K, topo_ok ? "OK" : "MISMATCH",
-                        bad, chk.vertex_count(), (double)maxd);
-        }
 #endif
+        } else {
+            mode = "fast";
+            cascade_replay_fast(stack, out, passes);
+#ifdef CHISEL_DEBUG_MULTIRES
+            {
+                // Truth check: the slow replay must agree bit-for-bit — the fast
+                // path repeats its arithmetic in the same order.
+                Mesh chk;
+                cascade_replay_slow(stack, chk, passes);
+                const bool topo_ok = chk.indices == out.indices
+                                  && chk.vert_tri_offset == out.vert_tri_offset
+                                  && chk.vert_tri_list   == out.vert_tri_list;
+                uint32_t bad = 0; float maxd = 0.0f;
+                for (uint32_t v = 0; v < chk.vertex_count(); v++) {
+                    float dx = std::fabs(chk.pos_x[v] - out.pos_x[v]);
+                    float dy = std::fabs(chk.pos_y[v] - out.pos_y[v]);
+                    float dz = std::fabs(chk.pos_z[v] - out.pos_z[v]);
+                    float dm = dx > dy ? (dx > dz ? dx : dz) : (dy > dz ? dy : dz);
+                    if (dm > 0.0f) bad++;
+                    if (dm > maxd) maxd = dm;
+                }
+                std::printf("[cascade-check] L%d fast vs slow: topo %s, %u/%u pos differ, max |d| %.3g\n",
+                            K, topo_ok ? "OK" : "MISMATCH",
+                            bad, chk.vertex_count(), (double)maxd);
+            }
+#endif
+        }
     } else {
         cascade_replay_slow(stack, out, passes);
     }
     const double cascade_ms = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - t0).count();
-    std::printf("[cascade] L%d %s %.1f ms\n", K, fast ? "fast" : "slow", cascade_ms);
+    std::printf("[cascade] L%d %s %.1f ms\n", K, mode, cascade_ms);
 
     // Paint rides the finest-level planes: the working array at level K is the
     // [0, V_K) prefix. Extend first — the pass loop above may have grown disp.

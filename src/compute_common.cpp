@@ -251,6 +251,7 @@ void ComputeState::cleanup() {
     gpu::release_buffer(multires_apply_ubo);
     gpu::release_buffer(multires_stage_ssbo);
     multires_stage_capacity = 0;
+    cleanup_cascade();
     gpu::release_buffer(undo_ring_ssbo);
     undo_ring_bytes = 0;
     undo_ring_head  = 0;

@@ -1,0 +1,82 @@
+// cascade_frames.comp — GLSL 430 sibling of shaders/wgsl/cascade_frames.wgsl.
+// GPU twin of compute_frames (multires_stack.cpp): per-vertex tangent frame on
+// the pre-displacement subdivided surface. Runs mid-cascade when a level's CPU
+// frames cache is stale (a sculpt below cleared it); reads the pre-disp
+// positions + the normals just computed by cascade_normals, writes t,b,n
+// (9 floats per vert). Tangent = direction to the lowest-indexed CSR neighbor,
+// projected onto the tangent plane — deterministic, same order as the CPU loop.
+#version 430
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 42) readonly buffer SrcPos    { float positions[]; };
+layout(std430, binding = 1)  readonly buffer NormBuf   { float normals[]; };
+layout(std430, binding = 2)  readonly buffer IdxBuf    { uint indices[]; };
+layout(std430, binding = 4)  readonly buffer AdjOffset { uint adj_offset[]; };
+layout(std430, binding = 5)  readonly buffer AdjList   { uint adj_list[]; };
+layout(std430, binding = 31) writeonly buffer FrameBuf { float frames[]; };
+
+layout(std140, binding = 63) uniform Params {
+    uint vcount;
+    uint _pad0;
+    uint _pad1;
+    uint _pad2;         // struct rounds to 16
+} P;
+
+void main() {
+    uint v = gl_GlobalInvocationID.x;
+    if (v >= P.vcount) return;
+
+    // Mesh normals are ~unit already; re-normalize like the CPU (Vec3::normalized
+    // zero-guards at 1e-8).
+    vec3 nr = vec3(normals[v*3u], normals[v*3u+1u], normals[v*3u+2u]);
+    float nl = length(nr);
+    vec3 n = (nl < 1e-8) ? vec3(0.0) : nr / nl;
+
+    // Lowest-indexed neighbor via CSR for a deterministic tangent.
+    uint best_nbr = 0xFFFFFFFFu;
+    uint start = adj_offset[v];
+    uint end   = adj_offset[v + 1u];
+    for (uint j = start; j < end; j++) {
+        uint t  = adj_list[j];
+        uint i0 = indices[t*3u];
+        uint i1 = indices[t*3u+1u];
+        uint i2 = indices[t*3u+2u];
+        if (i0 != v && i0 < best_nbr) best_nbr = i0;
+        if (i1 != v && i1 < best_nbr) best_nbr = i1;
+        if (i2 != v && i2 < best_nbr) best_nbr = i2;
+    }
+
+    vec3 t_raw;
+    if (best_nbr != 0xFFFFFFFFu) {
+        t_raw = vec3(positions[best_nbr*3u]    - positions[v*3u],
+                     positions[best_nbr*3u+1u] - positions[v*3u+1u],
+                     positions[best_nbr*3u+2u] - positions[v*3u+2u]);
+    } else {
+        t_raw = vec3(1.0, 0.0, 0.0);
+    }
+
+    // Project onto tangent plane.
+    float dn = dot(t_raw, n);
+    vec3 t_proj = t_raw - n * dn;
+    float t_len = length(t_proj);
+    if (t_len < 1e-6) {
+        // Axis-aligned fallback: world axis most perpendicular to n.
+        float ax = abs(n.x), ay = abs(n.y), az = abs(n.z);
+        vec3 axis = (ax <= ay && ax <= az) ? vec3(1.0, 0.0, 0.0)
+                  : (ay <= az)             ? vec3(0.0, 1.0, 0.0)
+                                           : vec3(0.0, 0.0, 1.0);
+        float d2 = dot(axis, n);
+        t_proj = axis - n * d2;
+        t_len  = length(t_proj);
+    }
+
+    vec3 t_final = t_proj / t_len;
+    vec3 b_raw = cross(n, t_final);
+    float bl = length(b_raw);
+    vec3 b_final = (bl < 1e-8) ? vec3(0.0) : b_raw / bl;
+
+    uint f = v * 9u;
+    frames[f]     = t_final.x; frames[f+1u] = t_final.y; frames[f+2u] = t_final.z;
+    frames[f+3u]  = b_final.x; frames[f+4u] = b_final.y; frames[f+5u] = b_final.z;
+    frames[f+6u]  = n.x;       frames[f+7u] = n.y;       frames[f+8u] = n.z;
+}

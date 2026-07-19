@@ -4,6 +4,9 @@
 #include <cstdint>
 #include <vector>
 
+struct Mesh;            // gpu_cascade_replay fills pos/norm SOA arrays
+struct MultiresStack;   // gpu_cascade_replay reads topo_cache/disp/frames
+
 // SSBO binding points (shared between C++ and GLSL)
 enum ComputeBinding : GLuint {
     BIND_POSITIONS   = 0,
@@ -50,6 +53,10 @@ enum ComputeBinding : GLuint {
     BIND_SDF_FWN_TRIORDER  = 39, // uint   leaf-contiguous triangle order (sign pass exact-leaf fetch)
     BIND_ALPHA_TEX         = 40, // float  brush-alpha bitmap (w*h, row-major, 0..1) — shared dab stamp
     BIND_DENSITY           = 41, // float  per-vertex remesh-density field (0=coarse .. 1=dense, 0.5 neutral)
+    // GPU level-switch cascade replay (see compute_cascade.cpp / subdiv-switch-perf-spec.md #4).
+    BIND_CASCADE_SRC       = 42, // float3 coarse positions (replay pass input / final pos for normals)
+    BIND_CASCADE_DST       = 43, // float3 fine positions (replay pass output, disp applied in place)
+    BIND_CASCADE_MID       = 44, // uint4 per midpoint: v0,v1,opp0,opp1 (cached SubdivStencil mid table)
     BIND_ALPHA_PARAMS      = 62, // 48-byte AlphaParams UBO (per-dab stamp frame) — shared dab stamp
     // Reserved high slot for the per-dispatch std140 Params UBO that replaces loose
     // GL uniforms on the gpu:: seam (see webgpu-port-plan.md / CONVENTIONS.md). Every
@@ -351,6 +358,41 @@ struct ComputeState {
     // (writable+read alias in one compute pass → dropped submit); this distinct buffer
     // is never read/written by the shader for the idle mode, so a small size is fine.
     gpu::Buffer multires_filler_ssbo;
+
+    // GPU level-switch cascade (subdiv-switch-perf #4): replay the warmed topology
+    // cache on the GPU — relocate + midpoint + disp-apply per pass, normals at the
+    // top, one readback of the final level. Per-level static tables (indices, CSR,
+    // stencil mid) live in VRAM keyed by the stack's lock_stamp (valid for the whole
+    // locked lifetime, evicted on stamp change — relock, entity switch, load).
+    // disp/frames/base upload fresh each replay: CPU stays the storage authority,
+    // so projection/undo/load need no GPU-side invalidation hooks. has_cascade()
+    // reports readiness. All in compute_cascade.cpp.
+    gpu::ComputePipeline cascade_relocate_pipeline;
+    gpu::ComputePipeline cascade_midpoint_pipeline;
+    gpu::ComputePipeline cascade_disp_pipeline;
+    gpu::ComputePipeline cascade_normals_pipeline;
+    gpu::ComputePipeline cascade_frames_pipeline;   // stale-frames rebuild (sculpt below)
+    gpu::Buffer cascade_relocate_ubo;   // 16-byte {vcount}
+    gpu::Buffer cascade_midpoint_ubo;   // 16-byte {edge_count, vcoarse}
+    gpu::Buffer cascade_disp_ubo;       // 16-byte {vcount}
+    gpu::Buffer cascade_normals_ubo;    // 16-byte {vcount}
+    gpu::Buffer cascade_frames_ubo;     // 16-byte {vcount}
+    struct CascadeLevelGPU {
+        gpu::Buffer indices;            // uint3 per tri
+        gpu::Buffer adj_offset;         // CSR offsets (V+1)
+        gpu::Buffer adj_list;           // CSR tri list
+        gpu::Buffer mid;                // uint4 per midpoint ((level below) -> this); empty for [0]
+        uint32_t vcount = 0;
+    };
+    uint64_t cascade_stamp = 0;                    // lock_stamp the tables belong to
+    std::vector<CascadeLevelGPU> cascade_levels;   // [0] = base, [k+1] = topo_cache[k]
+    gpu::Buffer cascade_pos_a, cascade_pos_b;      // interleaved float3 ping-pong (V_top)
+    gpu::Buffer cascade_norm_ssbo;                 // interleaved float3 result normals
+    uint32_t    cascade_pos_capacity = 0;          // verts the ping-pong/normals hold
+    gpu::Buffer cascade_disp_ssbo;                 // per-pass layer upload scratch (float3 * V)
+    gpu::Buffer cascade_frames_ssbo;               // per-pass layer upload scratch (float9 * V)
+    uint32_t    cascade_layer_capacity = 0;
+    std::vector<float> cascade_stage;              // interleave/deinterleave CPU staging
 
     // GPU-resident undo ring (blood-moon 3b-ii). PERSISTENT history of per-vert
     // (old,new) STROKE deltas — float6 per recorded vert — so pen-up can capture
@@ -734,6 +776,21 @@ struct ComputeState {
                                  const float* stage, uint32_t count, bool targets_base,
                                  bool ring_ssbo = false, uint32_t ring_base_floats = 0,
                                  bool forward = false);
+
+    // ---- GPU level-switch cascade (compute_cascade.cpp) -----------------------
+    // Compile the four cascade replay pipelines. Called once at init.
+    bool init_cascade();
+    bool has_cascade() const { return cascade_relocate_pipeline.handle != 0; }
+    // Replay `passes` warmed subdivision passes of `stack` on the GPU and fill
+    // out.pos_* / out.norm_* (SOA, resized here) with the final level's surface.
+    // Preconditions (caller checks): topo_cache[0..passes-1].ready, closed mesh
+    // (no boundary stencil tables), disp[i]/frames[i] present and sized for every
+    // pass. Uploads static per-level tables on first use per lock_stamp; assigns
+    // stack.lock_stamp if unset. Returns false with `out` untouched when
+    // unsupported or over device buffer limits — caller falls back to the CPU
+    // replay. Blocking readback at the end (legal: level switch is a one-shot).
+    bool gpu_cascade_replay(MultiresStack& stack, Mesh& out, int passes);
+    void cleanup_cascade();   // release cascade pipelines/tables (called by cleanup())
 
     // ---- GPU-resident undo ring (blood-moon 3b-ii) ----------------------------
     // Set the ring's hard ceiling. Call once at startup from UndoStack::ring_max_bytes.

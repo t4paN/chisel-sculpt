@@ -238,6 +238,7 @@ add_executable(chisel
     src/compute_alpha.cpp
     src/compute_remesh.cpp
     src/compute_multires.cpp
+    src/compute_cascade.cpp
     src/brush_alpha.cpp
     src/sdf.cpp
     src/ui_overlay.cpp
