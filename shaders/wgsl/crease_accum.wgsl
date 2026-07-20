@@ -25,9 +25,9 @@ struct Params {
     anchor_normal_b  : vec3<f32>,   //  80..91
     use_b            : u32,         //  92
     vertex_count     : u32,         //  96
-    _pad0            : u32,         // 100
-    _pad1            : u32,         // 104
-    _pad2            : u32,         // 108  (struct rounds to 112)
+    stroke_dir_x     : f32,         // 100  \ loose scalars, not a vec3: a vec3 would
+    stroke_dir_y     : f32,         // 104   > need 16-byte alignment and push this
+    stroke_dir_z     : f32,         // 108  / block to 128. Zero length = no axis yet.
 };
 
 @group(0) @binding(0)  var<storage, read>       positions : array<f32>;
@@ -131,7 +131,20 @@ fn deposit(v : u32, anchor : vec3<f32>, view : vec3<f32>, anchor_n : vec3<f32>,
 
     if (dist > 1e-6) {
         let to_anchor = anchor - vp;
-        let tangent = to_anchor - dot(to_anchor, anchor_n) * anchor_n;
+        var tangent = to_anchor - dot(to_anchor, anchor_n) * anchor_n;
+
+        // Squeeze across the stroke, not toward the dab centre. Pulling at the anchor
+        // point means each successive dab yanks the same vertices further down the
+        // path, which drags topology along the stroke. Removing the stroke-parallel
+        // component leaves a pure pinch onto the ridge line.
+        var sdir = vec3<f32>(P.stroke_dir_x, P.stroke_dir_y, P.stroke_dir_z);
+        if (mirrored != 0u) {
+            sdir.x = -sdir.x;
+        }
+        if (dot(sdir, sdir) > 0.25) {
+            tangent = tangent - dot(tangent, sdir) * sdir;
+        }
+
         d = d + tangent * (w * P.pinch_amount / P.world_radius);
     }
 

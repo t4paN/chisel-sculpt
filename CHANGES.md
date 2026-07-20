@@ -2,6 +2,33 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-21 — Brush feel: mouse strength offset + crease fixes (road2v2)
+
+- **Mouse strokes no longer land at full nominal strength.** With no tablet the
+  pressure term was pinned to exactly `1.0`, so every mouse dab hit at the brush's
+  full setting — while a pen stroke spends most of its length well under 1.0, which
+  is what the defaults were tuned against. A single `MOUSE_STRENGTH_SCALE` (0.6)
+  now scales the no-tablet path (also taken when pressure is toggled off with `K`).
+  Applied only to the additive-displacement brushes — Draw, Inflate, Crease, Pinch —
+  since they accumulate without bound and overshoot. Move/Limb read strength as a
+  cursor-tracking ratio, and Smooth/Mask/Paint converge on a target, so full strength
+  there just settles sooner rather than going too far. Tablet path is untouched.
+- **Low-strength creases keep their edge.** Crease depth and its tangential pinch
+  both scaled linearly with strength, so a weak stroke came out shallow *and* wide —
+  a Draw-like dent. Sharpness is depth over width, and the width is set by how far
+  the pinch gathers vertices in absolute terms, so it was silently riding on
+  strength. Pinch now follows `sqrt(strength)`: the profile survives down low and
+  still fades to nothing at zero. Full strength is mathematically unchanged.
+- **The crease brush no longer drags topology along its own path.** The pinch pulled
+  each vertex toward the current dab's *centre point*, so as dabs marched along the
+  stroke they kept yanking the same vertices further down it — catching existing
+  detail and reshaping it along the path. The stroke axis (from the previous dab's
+  anchor, flattened into the tangent plane) is now projected out of the pinch, leaving
+  a pure squeeze onto the ridge line. `stroke_dir` rides in the crease UBO's three
+  old pad words as loose scalars, so the block stays 112 B; `crease_accum.comp` and
+  `.wgsl` updated lockstep. First dab of a stroke has no axis yet and falls back to
+  the old behaviour.
+
 ## 2026-07-20 — Level-switch residency dedupe (GPU→GPU copies)
 
 - **The re-upload half of a warm level switch is gone.** After a GPU cascade

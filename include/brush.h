@@ -104,6 +104,12 @@ struct BrushStroke {
     Vec3 anchor_pos;
     float anchor_world_radius;
     bool anchor_valid;
+
+    // Previous dab's anchor, for the crease stroke axis. The crease pinch must pull
+    // across the stroke, not toward the dab centre, or a stroke drags topology along
+    // its own path. Invalid on the first dab of a stroke (no direction yet).
+    Vec3 crease_prev_anchor;
+    bool crease_prev_valid;
     float cyl_axis_x, cyl_axis_y, cyl_axis_z;
     float screen_slack;  // screen bbox expansion for grazing angles (1.0 facing, up to 3.0 at silhouette)
 

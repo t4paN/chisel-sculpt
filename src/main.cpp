@@ -66,6 +66,9 @@ static constexpr float PRESSURE_STR_FLOOR  = 0.05f;
 static constexpr float PRESSURE_SIZE_FLOOR = 0.40f;
 static constexpr float PRESSURE_GAMMA      = 1.0f;
 
+// Mouse (or pressure disabled) strength offset — see the block in the dab loop.
+static constexpr float MOUSE_STRENGTH_SCALE = 0.6f;
+
 // From input.cpp
 extern float input_consume_scroll();
 void setup_char_callback(GLFWwindow* window);
@@ -1912,10 +1915,26 @@ int main(int argc, char* argv[]) {
 
                 // Pen pressure → strength & size (independent floors). 1.0 when no
                 // tablet / disabled, so mouse behaviour is unchanged.
-                float pressure = (input.pressure_enabled && tablet.available())
-                                 ? tablet.pressure() : 1.0f;
+                bool pressure_is_synthetic = !(input.pressure_enabled && tablet.available());
+                float pressure = pressure_is_synthetic ? 1.0f : tablet.pressure();
                 float p_shaped = std::pow(pressure, PRESSURE_GAMMA);
                 eff_strength *= PRESSURE_STR_FLOOR + (1.0f - PRESSURE_STR_FLOOR) * p_shaped;
+
+                // Mouse has no pressure, so every dab lands at full nominal strength
+                // while a pen stroke spends most of its length well under 1.0 — which
+                // is what the defaults were tuned against. Scale the mouse path back.
+                // Only the additive-displacement brushes: they accumulate without
+                // bound, so full-strength dabs overshoot. Move/Limb read strength as a
+                // cursor-tracking ratio, and Smooth/Mask/Paint converge on a target
+                // (neighbour average, mask=1, a colour) — those just settle sooner.
+                if (pressure_is_synthetic) {
+                    BrushType bt = is_smooth ? BrushType::SMOOTH : input.current_brush;
+                    if (bt == BrushType::DRAW || bt == BrushType::INFLATE ||
+                        bt == BrushType::CREASE || bt == BrushType::PINCH) {
+                        eff_strength *= MOUSE_STRENGTH_SCALE;
+                    }
+                }
+
                 float eff_brush_size = input.brush_size *
                     (PRESSURE_SIZE_FLOOR + (1.0f - PRESSURE_SIZE_FLOOR) * p_shaped);
 

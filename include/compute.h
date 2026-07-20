@@ -109,6 +109,7 @@ struct CreaseAccumParams {
     float view_b_x, view_b_y, view_b_z;
     float anchor_normal_a_x, anchor_normal_a_y, anchor_normal_a_z;
     float anchor_normal_b_x, anchor_normal_b_y, anchor_normal_b_z;
+    float stroke_dir_x, stroke_dir_y, stroke_dir_z;  // zero length = no axis yet
     uint32_t vertex_count;
 };
 

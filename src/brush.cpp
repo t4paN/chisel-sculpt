@@ -460,6 +460,7 @@ void BrushStroke::begin(Renderer& renderer, const Camera& cam,
     gpu_dirty.clear();
 
     anchor_valid = false;
+    crease_prev_valid = false;
 
     snap_flag.assign(vert_count, false);
     snap_x.assign(vert_count, 0.0f);
@@ -601,8 +602,26 @@ void BrushStroke::apply_crease(DabContext& ctx, float dab_x, float dab_y,
     float sign = subtract ? 1.0f : -1.0f;
     float base_disp = anchor_world_radius;
     float disp_amount = base_disp * strength * sign * 0.15f;
-    float pinch_amount = base_disp * strength * 0.35f;
+    // Pinch gathers vertices into a narrow band — that gathering is what reads as
+    // sharpness, and it's an absolute width, not a ratio. Scaled linearly it made a
+    // low-strength crease shallow AND wide (i.e. a Draw dent), because the band never
+    // tightened. Compressed so the profile survives down low; still fades out at 0.
+    float pinch_amount = base_disp * std::sqrt(strength) * 0.35f;
     Vec3 view_dir = ctx.cam.get_view_direction();
+
+    // Stroke axis from the previous dab, flattened into the anchor's tangent plane.
+    // Zero length = first dab of the stroke; the kernel reads that as "no axis" and
+    // falls back to the old pull-toward-anchor behaviour for that one dab.
+    float sdx = 0.0f, sdy = 0.0f, sdz = 0.0f;
+    if (crease_prev_valid) {
+        Vec3 d = anchor_pos - crease_prev_anchor;
+        float dn = d.x * cyl_axis_x + d.y * cyl_axis_y + d.z * cyl_axis_z;
+        d.x -= dn * cyl_axis_x; d.y -= dn * cyl_axis_y; d.z -= dn * cyl_axis_z;
+        float len = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
+        if (len > 1e-6f) { sdx = d.x / len; sdy = d.y / len; sdz = d.z / len; }
+    }
+    crease_prev_anchor = anchor_pos;
+    crease_prev_valid = true;
 
     ctx.compute.ensure_accum_buffer(ctx.vertex_count);
 
@@ -626,6 +645,9 @@ void BrushStroke::apply_crease(DabContext& ctx, float dab_x, float dab_y,
     params.view_b_y =  view_dir.y;
     params.view_b_z =  view_dir.z;
     set_area_normal(params, cyl_axis_x, cyl_axis_y, cyl_axis_z);
+    params.stroke_dir_x = sdx;
+    params.stroke_dir_y = sdy;
+    params.stroke_dir_z = sdz;
     params.vertex_count = ctx.mesh.vertex_count();
 
     set_alpha_dab(ctx, false);
