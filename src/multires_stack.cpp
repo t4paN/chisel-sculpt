@@ -638,6 +638,10 @@ static bool cascade_replay_gpu(MultiresStack& stack, ComputeState& cs,
 void cascade_to_level(MultiresStack& stack, Mesh& out, int K, ComputeState* compute) {
     const int passes = K - stack.base_level;
 
+    // A CPU replay leaves the GPU cascade scratch holding a previous switch's
+    // output — make sure no one copies it (gpu_cascade_replay re-arms on success).
+    if (compute) compute->cascade_out_valid = false;
+
     bool fast = passes > 0 && (int)stack.topo_cache.size() >= passes;
     for (int i = 0; fast && i < passes; i++)
         if (!stack.topo_cache[i].ready) fast = false;

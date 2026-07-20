@@ -165,9 +165,12 @@ void ComputeState::cleanup_cascade() {
     gpu::release_buffer(cascade_disp_ssbo);
     gpu::release_buffer(cascade_frames_ssbo);
     cascade_layer_capacity = 0;
+    cascade_out_valid = false;
+    cascade_out_pos = nullptr;
 }
 
 bool ComputeState::gpu_cascade_replay(MultiresStack& stack, Mesh& out, int passes) {
+    cascade_out_valid = false;   // scratch is about to be overwritten (or absent)
     if (!has_cascade() || passes <= 0) return false;
 
     // Base CSR must exist (immutable post-lock; built once — same guard as the
@@ -439,7 +442,42 @@ bool ComputeState::gpu_cascade_replay(MultiresStack& stack, Mesh& out, int passe
     }
     const double t_readback = ms_since(tr);
 
+    // Arm the VRAM handoff: the switch driver's residency refresh copies the
+    // surface/disp/frames/tables GPU→GPU instead of re-uploading from CPU, then
+    // consumes the flag. src holds the final surface after the last swap.
+    cascade_out_valid  = true;
+    cascade_out_passes = passes;
+    cascade_out_vcount = V_top;
+    cascade_out_pos    = src;
+
     std::printf("[cascade-gpu] %d passes to %u verts (%d frames on gpu): tables %.1f, layers %.1f, kernels %.1f, readback %.1f ms\n",
                 passes, V_top, frames_gpu_count, t_tables, t_layers, t_kernels, t_readback);
+    return true;
+}
+
+bool ComputeState::cascade_adjacency_copy(uint32_t offset_count, uint32_t list_count) {
+    if (!cascade_out_valid) return false;
+    if (cascade_out_passes < 0 || cascade_out_passes >= (int)cascade_levels.size()) return false;
+    const CascadeLevelGPU& lv = cascade_levels[cascade_out_passes];
+    const uint64_t off_bytes  = (uint64_t)offset_count * sizeof(uint32_t);
+    const uint64_t list_bytes = (uint64_t)list_count * sizeof(uint32_t);
+    // The level tables are created at exact size, so equality is the identity
+    // check: same vcount, same CSR — the caller's arrays came from the same
+    // topo_cache entry these buffers were uploaded from.
+    if (!lv.adj_offset.handle || lv.adj_offset.size != off_bytes) return false;
+    if (!lv.adj_list.handle   || lv.adj_list.size   != list_bytes) return false;
+
+    if (!adjacency_offset_ssbo.handle || adjacency_offset_ssbo.size != off_bytes) {
+        gpu::release_buffer(adjacency_offset_ssbo);
+        adjacency_offset_ssbo = gpu::create_buffer(gpu_dev, nullptr, off_bytes, gpu::Usage::Storage);
+    }
+    if (!adjacency_list_ssbo.handle || adjacency_list_ssbo.size != list_bytes) {
+        gpu::release_buffer(adjacency_list_ssbo);
+        adjacency_list_ssbo = gpu::create_buffer(gpu_dev, nullptr, list_bytes, gpu::Usage::Storage);
+    }
+    gpu::copy_buffer(gpu_dev, lv.adj_offset, 0, adjacency_offset_ssbo, 0, off_bytes);
+    gpu::copy_buffer(gpu_dev, lv.adj_list,   0, adjacency_list_ssbo,   0, list_bytes);
+    adjacency_vertex_count = offset_count - 1;
+    std::printf("[residency] adjacency via gpu copy (%u verts)\n", adjacency_vertex_count);
     return true;
 }

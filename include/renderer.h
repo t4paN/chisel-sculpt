@@ -98,6 +98,10 @@ struct Renderer {
     gpu::Buffer screen_vbo_triid;
     gpu::Buffer screen_vbo_bary;
     uint32_t screen_tri_count;
+    // Tris the triid/bary attribute buffers are filled for. Their content is a
+    // pure function of tri index (t,t,t / fixed bary pattern), so the buffers are
+    // grow-only: a level revisit re-uploads nothing, growth fills only the tail.
+    uint32_t screen_static_tris = 0;
 
     // GPU-side indexed→flat expansion — on the gpu:: compute seam.
     gpu::ComputePipeline screen_expand_pipeline;
@@ -110,6 +114,25 @@ struct Renderer {
 
     void init();
     void upload_mesh(const Mesh& mesh);
+
+    // One-shot GPU-side geometry source for the NEXT upload_mesh (residency
+    // dedupe): set right before the scene sync that follows a GPU cascade
+    // replay, so pos/norm/ebo fill by GPU→GPU copy from the replay scratch
+    // instead of interleave + CPU upload. upload_mesh consumes it whether or
+    // not it matches (sizes are re-checked there; mismatch falls back to CPU).
+    struct GeometrySource {
+        const gpu::Buffer* pos  = nullptr;   // interleaved float3 * vcount
+        const gpu::Buffer* norm = nullptr;   // interleaved float3 * vcount
+        const gpu::Buffer* ebo  = nullptr;   // uint32 * index_count (exact size)
+        uint32_t vcount = 0;
+        uint32_t index_count = 0;
+        bool valid = false;
+    };
+    GeometrySource geom_src;
+    void set_geometry_source(const gpu::Buffer* pos, const gpu::Buffer* norm,
+                             const gpu::Buffer* ebo, uint32_t vcount, uint32_t index_count) {
+        geom_src = { pos, norm, ebo, vcount, index_count, true };
+    }
     void update_mask(const Mesh& mesh);
     void update_mask_partial(const Mesh& mesh, const std::vector<uint32_t>& dirty_verts);
     void update_density(const Mesh& mesh);

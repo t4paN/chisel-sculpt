@@ -64,7 +64,8 @@ void MultiresGPU::ensure(uint32_t vertex_count, uint32_t base_vertex_count) {
     }
 }
 
-void MultiresGPU::upload_level(const MultiresStack& stack, int abs_level) {
+void MultiresGPU::upload_level(const MultiresStack& stack, int abs_level,
+                               const gpu::Buffer* disp_src, const gpu::Buffer* frames_src) {
     if (!supported || !dev || !stack.locked) return;
 
     uint32_t base_vc = stack.base.vertex_count();
@@ -85,13 +86,19 @@ void MultiresGPU::upload_level(const MultiresStack& stack, int abs_level) {
     uint32_t vc = (uint32_t)stack.disp[k].size();
     ensure(vc, base_vc);
 
-    gpu::write_buffer(*dev, disp_ssbo, 0, stack.disp[k].data(),
-                      (uint64_t)vc * 3 * sizeof(float));
+    const uint64_t disp_bytes = (uint64_t)vc * 3 * sizeof(float);
+    if (disp_src && disp_src->handle && disp_src->size >= disp_bytes)
+        gpu::copy_buffer(*dev, *disp_src, 0, disp_ssbo, 0, disp_bytes);
+    else
+        gpu::write_buffer(*dev, disp_ssbo, 0, stack.disp[k].data(), disp_bytes);
 
     // frames[k] is lazily populated by cascade; upload only when present.
     if (k < (int)stack.frames.size() && stack.frames[k].size() == vc) {
-        gpu::write_buffer(*dev, frames_ssbo, 0, stack.frames[k].data(),
-                          (uint64_t)vc * 9 * sizeof(float));
+        const uint64_t frame_bytes = (uint64_t)vc * 9 * sizeof(float);
+        if (frames_src && frames_src->handle && frames_src->size >= frame_bytes)
+            gpu::copy_buffer(*dev, *frames_src, 0, frames_ssbo, 0, frame_bytes);
+        else
+            gpu::write_buffer(*dev, frames_ssbo, 0, stack.frames[k].data(), frame_bytes);
     }
     level = abs_level;
 

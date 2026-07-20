@@ -1024,7 +1024,34 @@ int main(int argc, char* argv[]) {
             MeshEntity& ent = scene.active_entity();
             ent.multires_gpu.supported = compute.supported;
             ent.multires_gpu.dev       = &compute.gpu_dev;
-            ent.multires_gpu.upload_level(ent.multires, ent.multires.current_level);
+            // Residency dedupe: right after a GPU cascade replay, the target
+            // level's disp/frames still sit in the replay's layer scratch —
+            // upload_level copies them device-local instead of re-sending from
+            // CPU. The handoff is consumed here (one switch only) so no later
+            // refresh can copy stale scratch.
+            const gpu::Buffer* dsrc = nullptr;
+            const gpu::Buffer* fsrc = nullptr;
+            if (compute.cascade_out_valid &&
+                compute.cascade_out_passes ==
+                    ent.multires.current_level - ent.multires.base_level) {
+                dsrc = &compute.cascade_disp_ssbo;
+                fsrc = &compute.cascade_frames_ssbo;
+                std::printf("[residency] disp/frames via gpu copy\n");
+            }
+            ent.multires_gpu.upload_level(ent.multires, ent.multires.current_level, dsrc, fsrc);
+            compute.cascade_out_valid = false;
+        };
+        // Arm the renderer's one-shot geometry handoff for the sync following a
+        // GPU cascade replay: the working VBOs/EBO then fill by GPU→GPU copy from
+        // the replay scratch (positions/normals) and the VRAM level tables
+        // (indices). No-op when the replay didn't run (CPU fallback).
+        auto arm_geometry_handoff = [&](const Mesh& m) {
+            if (!compute.cascade_out_valid || !compute.cascade_out_pos) return;
+            if (compute.cascade_out_passes <= 0 ||
+                compute.cascade_out_passes >= (int)compute.cascade_levels.size()) return;
+            renderer.set_geometry_source(compute.cascade_out_pos, &compute.cascade_norm_ssbo,
+                                         &compute.cascade_levels[compute.cascade_out_passes].indices,
+                                         m.vertex_count(), (uint32_t)m.indices.size());
         };
 
         // Multires level switch (D / Shift-D post-lock). Recorded on the undo
@@ -1094,19 +1121,22 @@ int main(int argc, char* argv[]) {
                     // Paint/mask ride the cascade (finest-level planes) — no
                     // save/restore needed across the rebuild.
                     cascade_to_level(*multires, *mesh, target, &compute);
+                    arm_geometry_handoff(*mesh);
                     scene.refresh_mirror_map();
                     scene.sync();  // rebinds active: rebuilds adjacency from new topology
                 } else {
                     Mesh solo;
                     cascade_to_level(*multires, solo, target, &compute);
+                    arm_geometry_handoff(solo);
                     scene.splice_active(solo);  // splice_active marks topo dirty
                     scene.refresh_mirror_map();
                 }
                 refresh_active_gpu_residency();
                 mesh->compute_bounding_sphere(mesh_center, mesh_radius);
                 screen_buffers_dirty = true;
-                std::printf("[multires] switched to level %d (%u verts, %u tris)\n",
-                            target, mesh->vertex_count(), mesh->tri_count());
+                std::printf("[multires] switched to level %d (%u verts, %u tris) in %.1f ms\n",
+                            target, mesh->vertex_count(), mesh->tri_count(),
+                            (glfwGetTime() - switch_t0) * 1000.0);
                 print_undo_top("level-switch");
                 // A switch slow enough to freeze the frame has stale input queued
                 // behind it (GLFW delivers it all in the next poll) — swallow it.
@@ -1778,7 +1808,8 @@ int main(int argc, char* argv[]) {
                 cascade_to_level(ent.multires, solo, ent.multires.current_level, &compute);
                 if (!saved_mask.empty() && saved_mask.size() == solo.vertex_count())
                     solo.mask = std::move(saved_mask);
-                scene.splice_active(solo);  // rebuilds adjacency + full sync
+                arm_geometry_handoff(solo);
+                scene.splice_active(solo);  // reuses cascade CSR/normals + full sync
                 mesh     = &scene.active_mesh();
                 multires = &scene.active_multires();
                 scene.refresh_mirror_map();
@@ -1840,6 +1871,7 @@ int main(int argc, char* argv[]) {
                         cascade_to_level(*multires, *mesh, multires->current_level, &compute);
                         if (!saved_mask.empty() && saved_mask.size() == mesh->vertex_count())
                             mesh->mask = std::move(saved_mask);
+                        arm_geometry_handoff(*mesh);
                         scene.refresh_mirror_map();
                         scene.sync();
                     } else {
@@ -1850,6 +1882,7 @@ int main(int argc, char* argv[]) {
                         cascade_to_level(*multires, solo, multires->current_level, &compute);
                         if (!saved_mask.empty() && saved_mask.size() == solo.vertex_count())
                             solo.mask = std::move(saved_mask);
+                        arm_geometry_handoff(solo);
                         scene.splice_active(solo);
                         scene.refresh_mirror_map();
                     }

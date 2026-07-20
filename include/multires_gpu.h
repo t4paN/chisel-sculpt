@@ -52,7 +52,13 @@ struct MultiresGPU {
 
     // Full re-upload of the active layer (`abs_level`) from CPU storage.
     // Call after lock, level switch, projection — any wholesale CPU mutation.
-    void upload_level(const MultiresStack& stack, int abs_level);
+    // Residency dedupe: when the GPU cascade replay just ran, `disp_src` /
+    // `frames_src` point at its layer scratch (which holds exactly this level's
+    // disp/frames) and the upload becomes two GPU→GPU copies instead of a CPU
+    // round-trip. Pass nullptr (the default everywhere else) for the CPU path.
+    void upload_level(const MultiresStack& stack, int abs_level,
+                      const gpu::Buffer* disp_src = nullptr,
+                      const gpu::Buffer* frames_src = nullptr);
 
     // Partial re-upload of just the listed verts of the active layer, after a
     // pen-up disp writeback or an undo/redo storage edit. `verts` need not be

@@ -394,6 +394,19 @@ struct ComputeState {
     uint32_t    cascade_layer_capacity = 0;
     std::vector<float> cascade_stage;              // interleave/deinterleave CPU staging
 
+    // Post-replay VRAM handoff (residency dedupe): after a successful
+    // gpu_cascade_replay the target level's surface (cascade_out_pos, interleaved
+    // float3), normals (cascade_norm_ssbo), disp/frames layer scratch, and the
+    // level tables all still hold exactly the data the switch is about to
+    // re-upload from CPU — consumers copy GPU→GPU instead. Valid only between the
+    // replay and the residency refresh that ends the same switch; the refresh
+    // consumes it (main.cpp clears the flag), and any CPU-path cascade clears it
+    // too, so a stale scratch can never be copied into a later rebind.
+    bool         cascade_out_valid  = false;
+    int          cascade_out_passes = 0;        // pass count == target - base_level
+    uint32_t     cascade_out_vcount = 0;        // V_top the scratch holds
+    gpu::Buffer* cascade_out_pos    = nullptr;  // final ping-pong side (a or b)
+
     // GPU-resident undo ring (blood-moon 3b-ii). PERSISTENT history of per-vert
     // (old,new) STROKE deltas — float6 per recorded vert — so pen-up can capture
     // undo data on the GPU without a CPU readback. Bump-allocated, grow-only
@@ -791,6 +804,11 @@ struct ComputeState {
     // replay. Blocking readback at the end (legal: level switch is a one-shot).
     bool gpu_cascade_replay(MultiresStack& stack, Mesh& out, int passes);
     void cleanup_cascade();   // release cascade pipelines/tables (called by cleanup())
+    // Residency dedupe: refill adjacency_offset/list_ssbo by GPU→GPU copy from the
+    // VRAM-cached level tables of the just-replayed level, instead of a CPU
+    // upload_adjacency. Only fires when cascade_out_valid and the byte sizes match
+    // the caller's CSR exactly; returns false otherwise (caller falls back).
+    bool cascade_adjacency_copy(uint32_t offset_count, uint32_t list_count);
 
     // ---- GPU-resident undo ring (blood-moon 3b-ii) ----------------------------
     // Set the ring's hard ceiling. Call once at startup from UndoStack::ring_max_bytes.

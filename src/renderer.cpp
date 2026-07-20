@@ -1221,13 +1221,32 @@ void Renderer::upload_mesh(const Mesh& mesh) {
     // it rebuilds against the new indices even when the tri count is unchanged.
     invalidate_debug_mesh();
 
-    // Interleave SoA → AoS for VBO upload
-    std::vector<float> pos(vc * 3), norm(vc * 3), mask_buf(vc);
+    // Consume the one-shot GPU geometry source (set only between a GPU cascade
+    // replay and the sync that follows it). Sizes re-checked here: a mismatch
+    // means the source is not this mesh — fall back to the CPU path.
+    GeometrySource src = geom_src;
+    geom_src = GeometrySource{};
+    const uint64_t pn_bytes  = (uint64_t)vc * 3 * sizeof(float);
+    const uint64_t ebo_bytes = (uint64_t)mesh.indices.size() * sizeof(uint32_t);
+    const bool gpu_geom = src.valid
+        && src.vcount == vc && src.index_count == (uint32_t)mesh.indices.size()
+        && src.pos  && src.pos->handle  && src.pos->size  >= pn_bytes
+        && src.norm && src.norm->handle && src.norm->size >= pn_bytes
+        && src.ebo  && src.ebo->handle  && src.ebo->size  == ebo_bytes;
+
+    // Interleave SoA → AoS for VBO upload (positions/normals skipped when they
+    // arrive by GPU copy below).
+    std::vector<float> pos, norm, mask_buf(vc);
     std::vector<uint32_t> col_buf(vc);
     bool has_color = !mesh.color.empty();
+    if (!gpu_geom) {
+        pos.resize((size_t)vc * 3); norm.resize((size_t)vc * 3);
+        for (uint32_t i = 0; i < vc; i++) {
+            pos[i*3+0] = mesh.pos_x[i]; pos[i*3+1] = mesh.pos_y[i]; pos[i*3+2] = mesh.pos_z[i];
+            norm[i*3+0] = mesh.norm_x[i]; norm[i*3+1] = mesh.norm_y[i]; norm[i*3+2] = mesh.norm_z[i];
+        }
+    }
     for (uint32_t i = 0; i < vc; i++) {
-        pos[i*3+0] = mesh.pos_x[i]; pos[i*3+1] = mesh.pos_y[i]; pos[i*3+2] = mesh.pos_z[i];
-        norm[i*3+0] = mesh.norm_x[i]; norm[i*3+1] = mesh.norm_y[i]; norm[i*3+2] = mesh.norm_z[i];
         mask_buf[i] = (i < mesh.mask.size()) ? mesh.mask[i] : 0.0f;
         col_buf[i] = (has_color && i < mesh.color.size()) ? mesh.color[i] : 0xFFFFFFFFu;
     }
@@ -1238,13 +1257,37 @@ void Renderer::upload_mesh(const Mesh& mesh) {
     // owns the draw-time VAO), so no vertex-attribute pointers are configured here.
     // A size change releases+recreates (new handle) → Scene::bind_active_ refreshes the
     // compute.mask_ssbo / color_ssbo aliases right after this call.
-    ensure_buffer(gpu_dev, vbo_pos, pos.data(), (uint64_t)pos.size()*sizeof(float),
-                  gpu::Usage::Vertex | gpu::Usage::Storage);
-    ensure_buffer(gpu_dev, vbo_norm, norm.data(), (uint64_t)norm.size()*sizeof(float),
-                  gpu::Usage::Vertex | gpu::Usage::Storage);
-    ensure_buffer(gpu_dev, ebo, mesh.indices.data(),
-                  (uint64_t)mesh.indices.size()*sizeof(uint32_t),
-                  gpu::Usage::Index | gpu::Usage::Storage);
+    if (gpu_geom) {
+        // Residency dedupe: the working geometry is already in VRAM (cascade
+        // replay output) — allocate-on-size-change like ensure_buffer, then
+        // device-local copies instead of dragging ~V*24B + T*12B across the bus.
+        if (!vbo_pos.handle || vbo_pos.size != pn_bytes) {
+            gpu::release_buffer(vbo_pos);
+            vbo_pos = gpu::create_buffer(gpu_dev, nullptr, pn_bytes,
+                                         gpu::Usage::Vertex | gpu::Usage::Storage);
+        }
+        if (!vbo_norm.handle || vbo_norm.size != pn_bytes) {
+            gpu::release_buffer(vbo_norm);
+            vbo_norm = gpu::create_buffer(gpu_dev, nullptr, pn_bytes,
+                                          gpu::Usage::Vertex | gpu::Usage::Storage);
+        }
+        if (!ebo.handle || ebo.size != ebo_bytes) {
+            gpu::release_buffer(ebo);
+            ebo = gpu::create_buffer(gpu_dev, nullptr, ebo_bytes,
+                                     gpu::Usage::Index | gpu::Usage::Storage);
+        }
+        gpu::copy_buffer(gpu_dev, *src.pos,  0, vbo_pos,  0, pn_bytes);
+        gpu::copy_buffer(gpu_dev, *src.norm, 0, vbo_norm, 0, pn_bytes);
+        gpu::copy_buffer(gpu_dev, *src.ebo,  0, ebo,      0, ebo_bytes);
+        std::printf("[residency] display pos/norm/ebo via gpu copy (%u verts)\n", vc);
+    } else {
+        ensure_buffer(gpu_dev, vbo_pos, pos.data(), pn_bytes,
+                      gpu::Usage::Vertex | gpu::Usage::Storage);
+        ensure_buffer(gpu_dev, vbo_norm, norm.data(), pn_bytes,
+                      gpu::Usage::Vertex | gpu::Usage::Storage);
+        ensure_buffer(gpu_dev, ebo, mesh.indices.data(), ebo_bytes,
+                      gpu::Usage::Index | gpu::Usage::Storage);
+    }
     ensure_buffer(gpu_dev, vbo_mask, mask_buf.data(), (uint64_t)mask_buf.size()*sizeof(float),
                   gpu::Usage::Vertex | gpu::Usage::Storage);
     ensure_buffer(gpu_dev, vbo_color, col_buf.data(), (uint64_t)col_buf.size()*sizeof(uint32_t),
@@ -1792,30 +1835,59 @@ void Renderer::upload_screen_mesh(const Mesh& mesh) {
     screen_tri_count = tc;
     uint32_t flat_vc = tc * 3;
 
-    // pos/norm are filled by the expand compute (Vertex|Storage); allocate them empty,
-    // reallocating only when the flat vertex count changes (contents aren't preserved).
+    // pos/norm are filled by the expand compute (Vertex|Storage); allocate them
+    // empty, grow-only (contents aren't preserved — the expand kernel rewrites the
+    // live tc*3 verts every call, and draws read exactly screen_tri_count*3 verts,
+    // so an oversized buffer is harmless on both backends).
     uint64_t pn_bytes = (uint64_t)flat_vc * 3 * sizeof(float);
-    if (screen_vbo_pos.size != pn_bytes) {
+    if (screen_vbo_pos.size < pn_bytes) {
         gpu::release_buffer(screen_vbo_pos);
         screen_vbo_pos = gpu::create_buffer(gpu_dev, nullptr, pn_bytes, gpu::Usage::Vertex | gpu::Usage::Storage);
     }
-    if (screen_vbo_norm.size != pn_bytes) {
+    if (screen_vbo_norm.size < pn_bytes) {
         gpu::release_buffer(screen_vbo_norm);
         screen_vbo_norm = gpu::create_buffer(gpu_dev, nullptr, pn_bytes, gpu::Usage::Vertex | gpu::Usage::Storage);
     }
 
-    // Triid and bary are static per topology — build on CPU.
-    std::vector<float> triid(flat_vc);
-    std::vector<float> bary(flat_vc * 2);
-    for (uint32_t t = 0; t < tc; t++) {
-        uint32_t base = t * 3;
-        triid[base+0] = (float)t; triid[base+1] = (float)t; triid[base+2] = (float)t;
-        bary[(base+0)*2+0] = 1.0f; bary[(base+0)*2+1] = 0.0f;
-        bary[(base+1)*2+0] = 0.0f; bary[(base+1)*2+1] = 1.0f;
-        bary[(base+2)*2+0] = 0.0f; bary[(base+2)*2+1] = 0.0f;
+    // Triid and bary are a pure function of the triangle index (t,t,t / fixed
+    // bary pattern) — no mesh data involved. Grow-only with tail fill: revisiting
+    // a level the buffers already cover uploads nothing (at multires L8 the pair
+    // is ~47 MB, previously re-sent on every level switch), and growth uploads
+    // only the [screen_static_tris, tc) range.
+    if (tc > screen_static_tris || !screen_vbo_triid.handle || !screen_vbo_bary.handle) {
+        const uint32_t old_tc = (screen_vbo_triid.handle && screen_vbo_bary.handle)
+                              ? screen_static_tris : 0u;
+        const uint64_t triid_bytes = (uint64_t)flat_vc * sizeof(float);
+        const uint64_t bary_bytes  = (uint64_t)flat_vc * 2 * sizeof(float);
+        // A grow reallocates (no in-place resize on WebGPU) and refills from 0;
+        // otherwise only the tail is new.
+        const uint32_t fill_from = (screen_vbo_triid.size < triid_bytes ||
+                                    screen_vbo_bary.size < bary_bytes) ? 0u : old_tc;
+        if (screen_vbo_triid.size < triid_bytes) {
+            gpu::release_buffer(screen_vbo_triid);
+            screen_vbo_triid = gpu::create_buffer(gpu_dev, nullptr, triid_bytes, gpu::Usage::Vertex);
+        }
+        if (screen_vbo_bary.size < bary_bytes) {
+            gpu::release_buffer(screen_vbo_bary);
+            screen_vbo_bary = gpu::create_buffer(gpu_dev, nullptr, bary_bytes, gpu::Usage::Vertex);
+        }
+        const uint32_t fill_tc = tc - fill_from;
+        std::vector<float> triid((size_t)fill_tc * 3);
+        std::vector<float> bary((size_t)fill_tc * 6);
+        for (uint32_t i = 0; i < fill_tc; i++) {
+            const float t = (float)(fill_from + i);
+            uint32_t base = i * 3;
+            triid[base+0] = t; triid[base+1] = t; triid[base+2] = t;
+            bary[(base+0)*2+0] = 1.0f; bary[(base+0)*2+1] = 0.0f;
+            bary[(base+1)*2+0] = 0.0f; bary[(base+1)*2+1] = 1.0f;
+            bary[(base+2)*2+0] = 0.0f; bary[(base+2)*2+1] = 0.0f;
+        }
+        gpu::write_buffer(gpu_dev, screen_vbo_triid, (uint64_t)fill_from * 3 * sizeof(float),
+                          triid.data(), (uint64_t)triid.size() * sizeof(float));
+        gpu::write_buffer(gpu_dev, screen_vbo_bary, (uint64_t)fill_from * 6 * sizeof(float),
+                          bary.data(), (uint64_t)bary.size() * sizeof(float));
+        screen_static_tris = tc;
     }
-    ensure_buffer(gpu_dev, screen_vbo_triid, triid.data(), triid.size()*sizeof(float), gpu::Usage::Vertex);
-    ensure_buffer(gpu_dev, screen_vbo_bary, bary.data(), bary.size()*sizeof(float), gpu::Usage::Vertex);
 
     // Fill positions/normals via GPU expansion.
     update_screen_mesh_gpu();

@@ -210,11 +210,17 @@ void Scene::bind_active_(uint32_t id) {
     // mirror map live on the entity's own mesh; re-uploaded on every bind so a
     // re-selection (or post-cascade sync) reflects the entity's current topology.
     if (compute_.supported) {
-        if (compute_.has_normals() && !in->mesh.vert_tri_offset.empty())
-            compute_.upload_adjacency(in->mesh.vert_tri_offset.data(),
-                                      (uint32_t)in->mesh.vert_tri_offset.size(),
-                                      in->mesh.vert_tri_list.data(),
-                                      (uint32_t)in->mesh.vert_tri_list.size());
+        if (compute_.has_normals() && !in->mesh.vert_tri_offset.empty()) {
+            // Residency dedupe: right after a GPU cascade replay the level's CSR
+            // is already VRAM-resident in the cascade tables — copy device-local
+            // instead of re-sending ~T*15B. Falls back on any size mismatch.
+            if (!compute_.cascade_adjacency_copy((uint32_t)in->mesh.vert_tri_offset.size(),
+                                                 (uint32_t)in->mesh.vert_tri_list.size()))
+                compute_.upload_adjacency(in->mesh.vert_tri_offset.data(),
+                                          (uint32_t)in->mesh.vert_tri_offset.size(),
+                                          in->mesh.vert_tri_list.data(),
+                                          (uint32_t)in->mesh.vert_tri_list.size());
+        }
         if (!in->mesh.mirror_x_map.empty())
             compute_.upload_mirror_map(in->mesh.mirror_x_map);
         compute_.ensure_accum_buffer(in->mesh.vertex_count());
@@ -625,8 +631,20 @@ void Scene::splice_active(const Mesh& replacement) {
     e->mesh.mask    = replacement.mask;
     e->mesh.color   = replacement.color;
     e->mesh.density = replacement.density;
-    e->mesh.build_adjacency();
-    e->mesh.recompute_normals();
+    // The cascade output already carries the level's CSR (copied from the topo
+    // cache) and its normals (computed by the replay) — rebuilding both here was
+    // a full O(V+T) CPU pass each, and recompute_normals threw the replay's
+    // normals away. Reuse them when sized right; other callers still rebuild.
+    const uint32_t vc = e->mesh.vertex_count();
+    if (replacement.vert_tri_offset.size() == (size_t)vc + 1 &&
+        replacement.vert_tri_list.size() == replacement.indices.size()) {
+        e->mesh.vert_tri_offset = replacement.vert_tri_offset;
+        e->mesh.vert_tri_list   = replacement.vert_tri_list;
+    } else {
+        e->mesh.build_adjacency();
+    }
+    if (replacement.norm_x.size() != (size_t)vc)
+        e->mesh.recompute_normals();
     // sync() → bind_active_ re-uploads the working buffers + adjacency/mirror
     // SSBOs from the new topology, and refreshes inactive display VAOs.
     sync();

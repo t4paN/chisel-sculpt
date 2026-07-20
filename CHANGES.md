@@ -2,6 +2,29 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-20 — Level-switch residency dedupe (GPU→GPU copies)
+
+- **The re-upload half of a warm level switch is gone.** After a GPU cascade
+  replay, the target level's positions, normals, indices, CSR adjacency, disp,
+  and frames were all re-uploaded from CPU into the working VBOs and compute
+  SSBOs — ~80 MB per switch at L8 that was already sitting in VRAM. They now
+  fill by device-local `copy_buffer` from the replay scratch and the cached
+  level tables (`[residency] ... via gpu copy` prints). A one-shot handoff
+  token guards every copy (armed by the replay, consumed by the same switch,
+  size-checked, cleared by any CPU-path cascade), so a stale scratch can never
+  reach a later rebind; CPU stays the storage authority everywhere.
+- **Pick-mesh static attributes are grow-only.** The screen soup's triid/bary
+  arrays are a pure function of the triangle index — revisiting a level now
+  uploads nothing (previously ~47 MB re-sent per switch at L8), growth fills
+  only the tail.
+- **`splice_active` reuses the cascade's CSR + normals** instead of a full
+  CPU `build_adjacency` + `recompute_normals` (which threw the replay's
+  normals away).
+- Measured warm ascents (Vega 8, wgpu): L6→L7 124 ms, L7→L8 488 ms, L8→L9
+  2.7 s end-to-end; the debug build confirms the copied disp mirror is
+  bit-identical to CPU truth (`max|err|=0`) and the replay epsilon check is
+  unchanged. The `[multires] switched` line now prints total switch time.
+
 ## 2026-07-20 — Multires level switch replays on the GPU
 
 - **Warm level switches now run as compute kernels** (both backends, GLSL +
