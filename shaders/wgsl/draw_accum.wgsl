@@ -103,6 +103,9 @@ fn atomicAddFloat(idx : u32, val : f32) {
     }
 }
 
+// Ramp width for the facing gate, in cosine terms. See deposit().
+const FACING_BAND : f32 = 0.25;
+
 fn brush_falloff(dist : f32, radius : f32) -> f32 {
     let t = dist / radius;
     let inner = 0.15 + P.hardness * 0.55;
@@ -123,14 +126,27 @@ fn deposit(v : u32, anchor : vec3<f32>, view : vec3<f32>, anchor_n : vec3<f32>,
     // Draw only deposits on verts facing the viewer (one-sided bump). Inflate is
     // a volumetric swell: every vert in the dab pushes along its OWN normal
     // regardless of facing, so the surface explodes outward in all directions.
+    //
+    // The gate is a RAMP, not a wall. facing == 0 is exactly the silhouette, so a
+    // hard cutoff puts a full-strength/zero cliff along the horizon of the form. Head
+    // on that sits harmlessly out at the model's edge, but tilt the camera against a
+    // deep ridge and the horizon runs down the middle of the stroke: the flank facing
+    // you takes the whole dab, the flank whose normals have swung toward the horizon
+    // takes nothing, and the far wall is left behind as a one-vertex-wide sharp pit.
+    // Verts below the threshold still deposit nothing (no back-face sculpting); the
+    // band only fades the ones just above it in. FACING_BAND is in cosine terms —
+    // 0.25 is roughly 15 degrees of ramp either side of the silhouette.
+    var facing_w = 1.0;
     if (P.inflate == 0u) {
         let facing = -dot(vn, view);
-        if (facing < P.facing_threshold) {
+        facing_w = smoothstep(P.facing_threshold, P.facing_threshold + FACING_BAND, facing);
+        if (facing_w <= 0.0) {
             return;
         }
     }
     var w = brush_falloff(dist, P.world_radius);
     w = w * sample_alpha(vp - anchor, mirrored);
+    w = w * facing_w;
     if (w <= 0.0) {
         return;
     }

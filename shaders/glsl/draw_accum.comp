@@ -86,12 +86,25 @@ float brush_falloff(float dist, float radius) {
 void deposit(uint v, vec3 anchor, vec3 view, vec3 anchor_n, vec3 vp, vec3 vn, uint mirrored) {
     float dist = length(vp - anchor);
     if (dist >= P.world_radius) return;
+    // Facing gate — a RAMP, not a wall. facing == 0 is exactly the silhouette, so a
+    // hard cutoff puts a full-strength/zero cliff along the horizon of the form. Head
+    // on that sits harmlessly out at the model's edge, but tilt the camera against a
+    // deep ridge and the horizon runs down the middle of the stroke: the flank facing
+    // you takes the whole dab, the flank whose normals have swung toward the horizon
+    // takes nothing, and the far wall is left behind as a one-vertex-wide sharp pit.
+    // Verts below the threshold still deposit nothing (no back-face sculpting); the
+    // band only fades the ones just above it in. FACING_BAND is in cosine terms —
+    // 0.25 is roughly 15 degrees of ramp either side of the silhouette.
+    const float FACING_BAND = 0.25;
+    float facing_w = 1.0;
     if (P.inflate == 0u) {
         float facing = -dot(vn, view);
-        if (facing < P.facing_threshold) return;
+        facing_w = smoothstep(P.facing_threshold, P.facing_threshold + FACING_BAND, facing);
+        if (facing_w <= 0.0) return;
     }
     float w = brush_falloff(dist, P.world_radius);
     w *= sample_alpha(vp - anchor, mirrored);
+    w *= facing_w;
     if (w <= 0.0) return;
     vec3 dir = (P.inflate != 0u) ? vn : anchor_n;
 

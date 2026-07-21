@@ -2,6 +2,29 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-21 — Facing gate is a ramp, not a wall (⚠️ UNTESTED)
+
+- **Grazing-angle strokes tore sharp one-vertex pits along ridges.** Brushing across a deep
+  V with the camera tilted against it left hard little holes on the flank whose normals had
+  swung toward the horizon. Cause: the facing gate was a hard cutoff —
+  `if (facing < facing_threshold) return;` — and `facing_threshold` defaults to **0.0**,
+  which is *exactly the silhouette*. Head-on that boundary sits harmlessly out at the edge
+  of the model, but tilt against a ridge and it runs straight down the middle of the stroke:
+  the near flank takes the full dab, the far flank takes literally nothing, and the pit is
+  the untouched vertices left behind while everything around them rose. One vertex wide,
+  hence the sharpness.
+- Now a `smoothstep` ramp over `FACING_BAND = 0.25` (cosine terms, ~15° either side of the
+  silhouette) multiplied into the dab weight. Verts below the threshold still deposit
+  nothing, so no back-face sculpting creeps in — only the ones just above it fade in.
+- **Draw/Clay/Inflate only.** `crease_accum` and `pinch_accum` carry the identical binary
+  test and were deliberately left alone (Crease was tuned the day before). That makes Crease
+  a useful control: if it still tears on a grazing ridge while Draw doesn't, the diagnosis is
+  confirmed and those two can be ramped the same way.
+- **Not yet verified in-app** — shipped to itch as v30 (`v0.1.28`) but not sculpt-tested.
+  Both shader compilers accept it (Tint clean in-browser, glslang clean on GL). Expected
+  trade-off to watch for: strokes fade slightly as they approach any silhouette. Too soft →
+  lower the band; pits still appear → raise it, or the facing gate wasn't the whole story.
+
 ## 2026-07-21 — Undo/redo clamped to Edit mode
 
 - Undo/redo is **per-entity sculpt history**, so outside Edit mode there's nothing it can
