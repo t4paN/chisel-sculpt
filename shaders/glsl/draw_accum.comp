@@ -103,10 +103,12 @@ void deposit(uint v, vec3 anchor, vec3 view, vec3 anchor_n, vec3 vp, vec3 vn, ui
     // instead of being amplified), and repeat strokes settle at the plane rather
     // than growing without bound.
     if (P.clay != 0u) {
-        float target = P.disp_amount;
+        // Named target_h, not target, to stay lockstep with the WGSL twin — `target`
+        // is a WGSL reserved keyword (GLSL doesn't care, Tint rejects the module).
+        float target_h = P.disp_amount;
         float h = dot(vp - anchor, dir);
-        float delta = (target - h) * w;
-        delta = (target >= 0.0) ? max(delta, 0.0) : min(delta, 0.0);
+        float delta = (target_h - h) * w;
+        delta = (target_h >= 0.0) ? max(delta, 0.0) : min(delta, 0.0);
         vec3 dc = dir * delta;
         uint basec = v * 4u;
         atomicAddFloat(basec + 0u, dc.x);

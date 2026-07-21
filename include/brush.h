@@ -111,6 +111,13 @@ struct BrushStroke {
     Vec3 crease_prev_anchor;
     bool crease_prev_valid;
     float cyl_axis_x, cyl_axis_y, cyl_axis_z;
+    // The real area normal: normals averaged over a disc around the cursor, not the
+    // single texel under it. cyl_axis snaps to whichever facet the cursor pixel lands
+    // on, which is what makes Clay fold a crease where two differently-directioned
+    // strokes cross — the plane tilts to one of them instead of levelling across both.
+    // Kept separate rather than replacing cyl_axis so Draw/Crease/Pinch and the alpha
+    // stamp orientation stay exactly as tuned; only Clay reads it for now.
+    float area_normal_x, area_normal_y, area_normal_z;
     float screen_slack;  // screen bbox expansion for grazing angles (1.0 facing, up to 3.0 at silhouette)
 
     // Accumulated displacement per vertex (sparse: only affected verts)

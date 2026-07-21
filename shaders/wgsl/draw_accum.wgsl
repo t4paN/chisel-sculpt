@@ -149,10 +149,12 @@ fn deposit(v : u32, anchor : vec3<f32>, view : vec3<f32>, anchor_n : vec3<f32>,
     // instead of being amplified), and repeat strokes settle at the plane rather
     // than growing without bound.
     if (P.clay != 0u) {
-        let target = P.disp_amount;
+        // NB: not `target` — that's a WGSL reserved keyword and Tint rejects the
+        // whole module for it (naga/glslang don't, so GL builds stay silent).
+        let target_h = P.disp_amount;
         let h = dot(vp - anchor, dir);
-        var delta = (target - h) * w;
-        if (target >= 0.0) {
+        var delta = (target_h - h) * w;
+        if (target_h >= 0.0) {
             delta = max(delta, 0.0);
         } else {
             delta = min(delta, 0.0);

@@ -2035,6 +2035,74 @@ void Renderer::read_depth_region(int x, int y, int w, int h, float* out) {
     gpu::read_target_region(gpu_dev, screen_target, 0, x, y, w, h, out);
 }
 
+bool Renderer::sample_area_normal(int cx, int cy, int radius_px, float out[3]) {
+    // Sampling radius is deliberately smaller than the dab (the caller scales it):
+    // averaged over the FULL dab the plane stops following real curvature and Clay
+    // starts flattening spheres. Capped so a huge brush doesn't turn the GL region
+    // read into a multi-megabyte stall.
+    int r = radius_px;
+    if (r < 2) r = 2;
+    if (r > 48) r = 48;
+
+    int x0 = cx - r, y0 = cy - r;
+    int side = 2 * r + 1;
+
+    // Clip to the buffer, then read/index whatever survives.
+    int bw, bh;
+#if defined(CHISEL_BACKEND_WEBGPU)
+    if (!plane_valid) return false;
+    bw = plane_w; bh = plane_h;
+#else
+    bw = screen_target.width; bh = screen_target.height;
+#endif
+    if (x0 < 0) { side += x0; x0 = 0; }
+    if (y0 < 0) { side += y0; y0 = 0; }
+    int side_x = side, side_y = side;
+    if (x0 + side_x > bw) side_x = bw - x0;
+    if (y0 + side_y > bh) side_y = bh - y0;
+    if (side_x <= 0 || side_y <= 0) return false;
+
+    const float* src;
+#if defined(CHISEL_BACKEND_WEBGPU)
+    src = nullptr;   // indexed straight out of plane_norm below
+#else
+    area_norm_scratch.resize((size_t)side_x * side_y * 3);
+    read_normal_region(x0, y0, side_x, side_y, area_norm_scratch.data());
+    src = area_norm_scratch.data();
+#endif
+
+    float inv_r = 1.0f / (float)r;
+    float ax = 0.0f, ay = 0.0f, az = 0.0f;
+    int hits = 0;
+    for (int y = 0; y < side_y; y++) {
+        for (int x = 0; x < side_x; x++) {
+            float dx = (float)(x0 + x - cx) * inv_r;
+            float dy = (float)(y0 + y - cy) * inv_r;
+            float d2 = dx * dx + dy * dy;
+            if (d2 > 1.0f) continue;                 // disc, not box
+            float nx, ny, nz;
+#if defined(CHISEL_BACKEND_WEBGPU)
+            size_t i = ((size_t)(y0 + y) * plane_w + (x0 + x)) * 3;
+            nx = plane_norm[i]; ny = plane_norm[i + 1]; nz = plane_norm[i + 2];
+#else
+            size_t i = ((size_t)y * side_x + x) * 3;
+            nx = src[i]; ny = src[i + 1]; nz = src[i + 2];
+#endif
+            // Background clears to zero, so length is the on-model test — no second
+            // region read of the triid attachment just to reject off-mesh texels.
+            if (nx * nx + ny * ny + nz * nz < 0.25f) continue;
+            float w = 1.0f - d2;                     // smooth, centre-weighted
+            ax += nx * w; ay += ny * w; az += nz * w;
+            hits++;
+        }
+    }
+    if (hits == 0) return false;
+    float len = std::sqrt(ax * ax + ay * ay + az * az);
+    if (len < 1e-6f) return false;                   // taps cancelled out (fold/edge)
+    out[0] = ax / len; out[1] = ay / len; out[2] = az / len;
+    return true;
+}
+
 void Renderer::read_normal_region(int x, int y, int w, int h, float* out) {
     gpu::read_target_region(gpu_dev, screen_target, 1, x, y, w, h, out);
 }

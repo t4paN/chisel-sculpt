@@ -180,6 +180,18 @@ struct Renderer {
     bool sample_depth(int x, int y, float* out);      // attachment 0, linear distance
     bool sample_normal(int x, int y, float out[3]);   // attachment 1, raw normal texel
     bool sample_triid(int x, int y, uint32_t* out);   // attachment 2
+    // Falloff-weighted average of the normal texels inside radius_px of (cx, cy) —
+    // the true area normal, as opposed to the single-texel normal sample_normal
+    // returns. Background texels (zero-length normal) are skipped, so a dab hanging
+    // off the silhouette still averages only what it actually covers. Returns false
+    // if nothing on-model was hit; the caller then keeps the point normal.
+    //
+    // Cost is backend-shaped and deliberately NOT a per-tap sample_normal loop: on
+    // WebGPU the taps come free out of the landed plane cache, while on GL each 1×1
+    // sample is its own glReadPixels sync, so that path takes ONE region read into a
+    // persistent scratch buffer and indexes it. No per-dab allocation on either.
+    bool sample_area_normal(int cx, int cy, int radius_px, float out[3]);
+    std::vector<float> area_norm_scratch;             // GL region-read scratch (persistent)
 #if defined(CHISEL_BACKEND_WEBGPU)
     std::vector<float>    plane_depth;
     std::vector<float>    plane_norm;                 // 3 floats per pixel

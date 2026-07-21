@@ -2,6 +2,42 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-21 — Clay fixes: WGSL keyword, cold start, real area normal
+
+- **Draw / Clay / Inflate were dead on the web build** (itch v27). Clay's new branch
+  opened with `let target = ...` and **`target` is a reserved keyword in WGSL** — Tint
+  threw out the whole `draw_accum` module, and those three brushes are the only ones
+  that dispatch it. glslang and naga both accept the word, so the GL build *and* the
+  native wgpu-native build were clean: **only a browser can catch this class of bug.**
+  Renamed to `target_h` in both shaders (lockstep).
+  - Worth remembering how it hid: on WebGPU an invalid shader still returns a *non-null*
+    pipeline handle (an error object), so `has_draw()` stayed true and the app logged
+    `draw_accum pipeline compiled` while dispatching into a dead module. The "handle
+    stays 0 → silent early return" reasoning only holds on GL.
+- **Clay did nothing until another brush had been used.** `BrushStroke::begin()` only
+  snapshotted the stroke normals for DRAW/INFLATE/CREASE/PINCH; Clay wasn't on the list.
+  That call is what *creates* the buffer, and `dispatch_draw_accum` bails when its handle
+  is 0 — so Clay was inert from a cold start, then ran on another brush's **stale** frozen
+  normals once one existed. Added `BrushType::CLAY` to the snapshot list.
+- **The area normal is now an actual area normal.** `cyl_axis` was documented as one but
+  came from a *single* normal texel under the cursor, so Clay's plane snapped to whichever
+  facet that pixel hit — which is what folded a crease where two differently-directioned
+  strokes crossed. New `Renderer::sample_area_normal()` averages the normal texels over a
+  disc at **0.6× brush radius**, falloff-weighted, skipping background texels; Clay levels
+  across both strokes instead of picking one. Sampling deliberately smaller than the dab:
+  averaged over the full footprint the plane stops following curvature and large dabs
+  flatten what they should follow.
+  - Draw/Inflate/Crease and the alpha-stamp orientation still use the point normal — they
+    displace *along* it rather than measuring height *against* it, so averaging would only
+    soften the tip. One line to widen it later.
+  - Free on the web path (taps come from the already-resident plane cache). On GL it's one
+    **region** read per dab into a persistent scratch buffer, capped at 48 px — not a
+    per-tap loop, since each `sample_normal` there is its own `glReadPixels` sync. No
+    per-dab allocation on either path.
+  - Not done: the area *centre*. The plane's tilt is stable now but it still anchors at the
+    exact hit point, so its height wobbles slightly per dab. Next lever if repeat passes
+    don't settle flat.
+
 ## 2026-07-21 — Clay brush (road2v2)
 
 - **New Clay brush (`T`)** — builds volume in flat layers instead of amplifying the

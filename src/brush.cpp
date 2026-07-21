@@ -368,6 +368,16 @@ void BrushStroke::set_anchor(const Mesh& mesh, const Camera& cam,
         cyl_axis_x = 0.0f; cyl_axis_y = 1.0f; cyl_axis_z = 0.0f;
     }
 
+    // Area normal over ~0.6 of the dab. Smaller than the brush on purpose: averaged
+    // over the whole footprint the plane stops tracking curvature and large dabs
+    // flatten what they should follow. Falls back to the point normal off-model.
+    float an[3];
+    if (renderer.sample_area_normal(cx, cy, (int)(brush_radius * 0.6f), an)) {
+        area_normal_x = an[0]; area_normal_y = an[1]; area_normal_z = an[2];
+    } else {
+        area_normal_x = cyl_axis_x; area_normal_y = cyl_axis_y; area_normal_z = cyl_axis_z;
+    }
+
     float fov_rad = cam.fov * 3.14159265358979323846f / 180.0f;
     float view_plane_h = 2.0f * cam.distance * std::tan(fov_rad * 0.5f);
     float world_per_pixel = view_plane_h / (float)screen_h;
@@ -486,6 +496,7 @@ void BrushStroke::begin(Renderer& renderer, const Camera& cam,
     // on long strokes near silhouettes.
     if (compute && compute->supported
         && (brush_type == BrushType::DRAW
+            || brush_type == BrushType::CLAY
             || brush_type == BrushType::INFLATE
             || brush_type == BrushType::CREASE
             || brush_type == BrushType::PINCH)) {
@@ -770,7 +781,14 @@ void BrushStroke::apply_draw(DabContext& ctx, float dab_x, float dab_y,
     params.view_b_x = -view_dir.x;
     params.view_b_y =  view_dir.y;
     params.view_b_z =  view_dir.z;
-    set_area_normal(params, cyl_axis_x, cyl_axis_y, cyl_axis_z);
+    // Clay levels TO this direction's plane, so a per-pixel normal reads as a fold
+    // wherever the dab straddles two strokes. Draw/Inflate keep the point normal —
+    // they displace along it rather than measuring height against it, and averaging
+    // there would just soften the tip.
+    if (clay)
+        set_area_normal(params, area_normal_x, area_normal_y, area_normal_z);
+    else
+        set_area_normal(params, cyl_axis_x, cyl_axis_y, cyl_axis_z);
     params.vertex_count = ctx.mesh.vertex_count();
     params.inflate = inflate ? 1 : 0;
     params.clay = clay ? 1 : 0;
