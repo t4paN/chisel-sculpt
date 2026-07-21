@@ -2,6 +2,14 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-21 — Undo/redo clamped to Edit mode
+
+- Undo/redo is **per-entity sculpt history**, so outside Edit mode there's nothing it can
+  correctly revert — insert placement, selection and object transforms push no entries,
+  and firing anyway reverted an unrelated older stroke. `Ctrl+Z`/`Ctrl+Shift+Z` outside
+  Edit mode are now a no-op with a short "Undo only works in Edit mode (1)" notification.
+  Inside Edit mode nothing changes. Real scene-level undo is road2v2 backlog item 4.
+
 ## 2026-07-21 — Clay fixes: WGSL keyword, cold start, real area normal
 
 - **Draw / Clay / Inflate were dead on the web build** (itch v27). Clay's new branch

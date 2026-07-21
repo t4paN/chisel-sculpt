@@ -1818,6 +1818,19 @@ int main(int argc, char* argv[]) {
                 scene.refresh_mirror_map();
                 refresh_active_gpu_residency();
             };
+            // Undo/redo are per-entity sculpt history, so outside Edit mode there is
+            // nothing they can correctly revert — insert placement, selection and
+            // object transforms push no entries. Reverting an unrelated older stroke
+            // instead is worse than doing nothing, so clamp it to a no-op until
+            // scene-level undo exists (road2v2 backlog item 4).
+            bool undo_allowed = input.interaction_mode == InputState::InteractionMode::EDIT;
+            if ((input.undo_requested || input.redo_requested) && !undo_allowed) {
+                input.undo_requested = false;
+                input.redo_requested = false;
+                std::snprintf(input.notification, sizeof(input.notification),
+                              "Undo only works in Edit mode (1)");
+                input.notification_timer = 1.5f;
+            }
             if (input.undo_requested) {
                 input.undo_requested = false;
                 cascade_active(scene.active_undo().undo(scene.active_entity(), scene));
