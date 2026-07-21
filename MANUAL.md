@@ -29,7 +29,7 @@ mesh to sculpt; left-drag off the mesh to orbit. That's 90% of the app right the
 
 - **Top toolbar** — Subdiv −/+, Undo, Redo, Export, Save, Load, Merge.
 - **Mode row** — Edit, Insert, Select, Paint, plus the `[ ]` paint-visibility toggle.
-- **Brush column** (Edit mode) — Draw, Inflate, Crease, Pinch, Move, Limb, Smooth, Mask.
+- **Brush column** (Edit mode) — Draw, Clay, Inflate, Crease, Pinch, Move, Limb, Smooth, Mask.
 - **HUD panel** (bottom left) — active brush and its size / strength / hardness /
   spacing, triangle and vertex counts, subdivision level, mirror axis, normals mode,
   autosmooth state.
@@ -55,6 +55,7 @@ the camera, so you never have to switch tools just to look around.
 | Key | Brush | Behaviour |
 |---|---|---|
 | D | **Draw** | The bread-and-butter brush: pushes the surface out along its normal. |
+| T | **Clay** | Builds volume in flat layers: levels the surface up to a plane just above it, filling hollows instead of amplifying what's already there. Ctrl shaves layers back off. |
 | I | **Inflate** | Swells vertices along their own local normals — great for fattening limbs and rounding forms. |
 | C | **Crease** | Pinches while cutting in: sharp valleys and fold lines. |
 | V | **Pinch** | Pulls vertices toward the stroke centre — tightens edges and detail. |

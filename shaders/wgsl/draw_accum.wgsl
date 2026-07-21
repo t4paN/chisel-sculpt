@@ -28,7 +28,7 @@ struct Params {
     anchor_normal_b  : vec3<f32>,   //  80..91
     inflate          : u32,         //  92
     vertex_count     : u32,         //  96
-    _pad0            : u32,         // 100
+    clay             : u32,         // 100
     _pad1            : u32,         // 104
     _pad2            : u32,         // 108     (struct rounds to 112)
 };
@@ -140,6 +140,32 @@ fn deposit(v : u32, anchor : vec3<f32>, view : vec3<f32>, anchor_n : vec3<f32>,
     if (P.inflate != 0u) {
         dir = vn;
     }
+
+    // Clay displaces TO a plane instead of BY a fixed amount. The plane sits
+    // disp_amount above the anchor along anchor_n; a vert's signed height above it
+    // is h, so (target - h) is the gap left to fill. Clamping that to the stroke's
+    // direction is what makes clay build in layers: verts below the plane rise to
+    // meet it (hollows fill), verts already proud of it don't move (detail survives
+    // instead of being amplified), and repeat strokes settle at the plane rather
+    // than growing without bound.
+    if (P.clay != 0u) {
+        let target = P.disp_amount;
+        let h = dot(vp - anchor, dir);
+        var delta = (target - h) * w;
+        if (target >= 0.0) {
+            delta = max(delta, 0.0);
+        } else {
+            delta = min(delta, 0.0);
+        }
+        let dc = dir * delta;
+        let basec = v * 4u;
+        atomicAddFloat(basec + 0u, dc.x);
+        atomicAddFloat(basec + 1u, dc.y);
+        atomicAddFloat(basec + 2u, dc.z);
+        atomicMax(&accum[basec + 3u], bitcast<u32>(1.0));
+        return;
+    }
+
     let d = dir * (P.disp_amount * w);
     let base = v * 4u;
     atomicAddFloat(base + 0u, d.x);

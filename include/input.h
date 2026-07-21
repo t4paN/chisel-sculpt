@@ -3,6 +3,7 @@
 
 enum class BrushType {
     DRAW,
+    CLAY,
     INFLATE,
     CREASE,
     PINCH,

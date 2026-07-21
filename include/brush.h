@@ -231,9 +231,11 @@ struct BrushStroke {
     // inflate=false: push the dab along the cursor's surface normal (Draw).
     // inflate=true:  push each vert along its own normal (Inflate) — reuses the
     // entire draw accum/symmetrize/apply/mirror/mask/undo pipeline.
+    // clay=true:     displace to a plane offset above the anchor rather than by a
+    // fixed amount, so material builds in layers instead of amplifying what's there.
     void apply_draw(DabContext& ctx, float dab_x, float dab_y,
                     float strength, float hardness, bool subtract,
-                    bool inflate = false);
+                    bool inflate = false, bool clay = false);
 
     void apply_move_gpu(DabContext& ctx, float cursor_dx, float cursor_dy,
                         float strength, float hardness);

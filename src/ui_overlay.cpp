@@ -721,7 +721,7 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
     // every other brush (their dabs force the stamp off; see set_alpha_dab).
     // Selection drives input.active_alpha; the main loop uploads on change.
     bool alpha_brush = current == BrushType::DRAW || current == BrushType::MASK ||
-                       current == BrushType::PAINT;
+                       current == BrushType::PAINT || current == BrushType::CLAY;
     if (mode == InputState::InteractionMode::EDIT && alpha_brush
         && alpha_lib && alpha_lib->count() > 0) {
         const float sw = btn_h;
@@ -755,6 +755,7 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
     struct BrushBtn { const char* id; const char* display; const char* tooltip; BrushType type; };
     BrushBtn brushes[] = {
         {"Draw",    "Draw",    "Shortcut: D",                    BrushType::DRAW},
+        {"Clay",    "Clay",    "Builds volume in flat layers. Shortcut: T", BrushType::CLAY},
         {"Inflate", "Inflate", "Shortcut: I",                    BrushType::INFLATE},
         {"Crease",  "Crease",  "Shortcut: C",                    BrushType::CREASE},
         {"Pinch",   "Pinch",   "Shortcut: V",                    BrushType::PINCH},

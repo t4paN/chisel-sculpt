@@ -86,6 +86,10 @@ InputState::InputState()
     per_brush[(int)BrushType::MASK].hardness = 0.64f;     // 64% hardness
     per_brush[(int)BrushType::PAINT].strength = 0.5f;     // soft build-up by default
     per_brush[(int)BrushType::PAINT].hardness = 0.5f;
+    // Clay levels up to a plane, so a high hardness (wide flat core) is what makes
+    // it read as a packed slab rather than a domed one.
+    per_brush[(int)BrushType::CLAY].strength = 0.6f;
+    per_brush[(int)BrushType::CLAY].hardness = 0.85f;
 
     drop_path[0] = '\0';
     paint_color[0] = 0.85f; paint_color[1] = 0.25f; paint_color[2] = 0.30f;      // warm red
@@ -480,6 +484,12 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
             case GLFW_KEY_V:
                 g_input->clear_smooth_lock();
                 g_input->switch_brush(BrushType::PINCH);
+                g_input->subtract_locked = false;
+                break;
+
+            case GLFW_KEY_T:
+                g_input->clear_smooth_lock();
+                g_input->switch_brush(BrushType::CLAY);
                 g_input->subtract_locked = false;
                 break;
 

@@ -730,7 +730,7 @@ void BrushStroke::apply_pinch(DabContext& ctx, float dab_x, float dab_y,
 
 void BrushStroke::apply_draw(DabContext& ctx, float dab_x, float dab_y,
                               float strength, float hardness, bool subtract,
-                              bool inflate) {
+                              bool inflate, bool clay) {
     dirty_verts.clear();
 
     set_anchor(ctx.mesh, ctx.cam, dab_x, dab_y, ctx.eff_brush_size, ctx.win_h, ctx.renderer);
@@ -741,7 +741,11 @@ void BrushStroke::apply_draw(DabContext& ctx, float dab_x, float dab_y,
     if (stroke_sign == 0)
         stroke_sign = subtract ? -1 : 1;
     float base_disp = anchor_world_radius;
-    float disp_amount = base_disp * strength * (float)stroke_sign * 0.5f;
+    // Clay reads disp_amount as the layer's thickness — the height of the plane it
+    // levels up to — not as a per-dab push, so it wants a smaller number for the
+    // same visual weight. Draw's 0.5 lands as a very thick slab here.
+    float disp_scale = clay ? 0.12f : 0.5f;
+    float disp_amount = base_disp * strength * (float)stroke_sign * disp_scale;
 
     Vec3 view_dir = ctx.cam.get_view_direction();
 
@@ -769,6 +773,7 @@ void BrushStroke::apply_draw(DabContext& ctx, float dab_x, float dab_y,
     set_area_normal(params, cyl_axis_x, cyl_axis_y, cyl_axis_z);
     params.vertex_count = ctx.mesh.vertex_count();
     params.inflate = inflate ? 1 : 0;
+    params.clay = clay ? 1 : 0;
 
     set_alpha_dab(ctx, !inflate);   // Inflate shares this dab; alphas are Draw-only
     ctx.compute.dispatch_draw_accum(params, ctx.renderer.vbo_pos);

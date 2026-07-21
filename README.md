@@ -17,7 +17,7 @@ identically in the native build, and vice versa.
 
 ## Features
 
-- **Eight brushes** — draw, inflate, crease, pinch, move, limb (snakehook), smooth, mask
+- **Nine brushes** — draw, clay, inflate, crease, pinch, move, limb (snakehook), smooth, mask
 - **Vertex paint mode** with colour picking; paint survives subdivision, remeshing, and merges
 - **Multiple objects** — insert, select, move, scale, delete; per-object undo and subdivision
 - **Multires displacement stack** — step down to edit forms, back up for detail

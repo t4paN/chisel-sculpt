@@ -2,6 +2,27 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-21 — Clay brush (road2v2)
+
+- **New Clay brush (`T`)** — builds volume in flat layers instead of amplifying the
+  form that's already there. Draw is a *relative* displacement ("move by `disp * w`"),
+  so a hollow under the dab stays a hollow and existing curvature rides bodily upward.
+  Clay is *absolute*: it takes the plane sitting `disp_amount` above the anchor along
+  the anchor normal, measures each vert's signed height `h` above it, and moves by
+  `(target - h) * w` **clamped to the stroke direction**. Verts below the plane rise to
+  meet it (hollows fill), verts already proud of it don't move (detail survives), and
+  repeat passes settle at the plane rather than growing without bound. Ctrl inverts the
+  clamp to shave flat layers off.
+- Because it converges on a target it can't overshoot, so it's deliberately **excluded
+  from `MOUSE_STRENGTH_SCALE`** — same reasoning as Smooth/Mask/Paint.
+- Rides the existing draw kernel end to end: same accum/symmetrize/apply/mirror/mask/
+  undo path, no new pipeline. The `clay` flag took the draw UBO's `_pad0` word, so the
+  block stays 112 B; `draw_accum.comp` and `.wgsl` updated lockstep.
+- Strength reads as layer **thickness**, scaled `0.12` against Draw's `0.5` (a plane
+  height wants a much smaller number than a per-dab push). Defaults: strength 0.6,
+  hardness 0.85 — the wide flat core is what makes it read as a packed slab.
+  Brush-alpha enabled, so stamped/square alphas stack on top.
+
 ## 2026-07-21 — Brush feel: mouse strength offset + crease fixes (road2v2)
 
 - **Mouse strokes no longer land at full nominal strength.** With no tablet the
