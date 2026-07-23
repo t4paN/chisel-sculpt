@@ -86,9 +86,23 @@ float brush_falloff(float dist, float radius) {
 void deposit(uint v, vec3 anchor, vec3 view, vec3 anchor_n, vec3 vp, vec3 vn, uint mirrored) {
     float dist = length(vp - anchor);
     if (dist >= P.world_radius) return;
+    // Position-based gate (draw/clay; inflate self-limits by pushing every vert
+    // along its OWN normal). The old facing gate dug one-vertex pits along deep
+    // creases: vertex normals FLIP across a valley line (facing +0.4 → −0.6 between
+    // neighbours), and no angular test — hard or feathered — survives that
+    // discontinuity. Gate on position instead: reject verts significantly BEHIND
+    // the anchor surface along the view (that's a thin sheet's far side), feathered
+    // in position space (0.25R..0.45R) so bulgy forms don't get a hard wall. A
+    // crease's far flank sits at ≈ the anchor's depth, so it deposits — no pit.
+    // Far-backfacing verts (facing < ~−0.5, well below anything visible, crease
+    // flanks included) are still cut as belt-and-suspenders for sheets thinner
+    // than the window. P.facing_threshold is unused here for now.
+    float gate_w = 1.0;
     if (P.inflate == 0u) {
-        float facing = -dot(vn, view);
-        if (facing < P.facing_threshold) return;
+        float behind = dot(vp - anchor, view);
+        gate_w = 1.0 - smoothstep(0.25 * P.world_radius, 0.45 * P.world_radius, behind);
+        gate_w *= smoothstep(-0.6, -0.4, -dot(vn, view));
+        if (gate_w <= 0.0) return;
     }
     // Clay's stamp IS its edge: skip the radial falloff so the layer face is flat
     // and the square's corners don't fade out toward the dab rim (the radial fade
@@ -96,6 +110,7 @@ void deposit(uint v, vec3 anchor, vec3 view, vec3 anchor_n, vec3 vp, vec3 vn, ui
     float w = (P.clay != 0u && AP.enabled != 0u)
                   ? 1.0 : brush_falloff(dist, P.world_radius);
     w *= sample_alpha(vp - anchor, mirrored);
+    w *= gate_w;
     if (w <= 0.0) return;
     vec3 dir = (P.inflate != 0u) ? vn : anchor_n;
 

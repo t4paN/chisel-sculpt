@@ -120,12 +120,23 @@ fn deposit(v : u32, anchor : vec3<f32>, view : vec3<f32>, anchor_n : vec3<f32>,
     if (dist >= P.world_radius) {
         return;
     }
-    // Draw only deposits on verts facing the viewer (one-sided bump). Inflate is
-    // a volumetric swell: every vert in the dab pushes along its OWN normal
-    // regardless of facing, so the surface explodes outward in all directions.
+    // Position-based gate (draw/clay; inflate self-limits by pushing every vert
+    // along its OWN normal). The old facing gate dug one-vertex pits along deep
+    // creases: vertex normals FLIP across a valley line (facing +0.4 → −0.6 between
+    // neighbours), and no angular test — hard or feathered — survives that
+    // discontinuity. Gate on position instead: reject verts significantly BEHIND
+    // the anchor surface along the view (that's a thin sheet's far side), feathered
+    // in position space (0.25R..0.45R) so bulgy forms don't get a hard wall. A
+    // crease's far flank sits at ≈ the anchor's depth, so it deposits — no pit.
+    // Far-backfacing verts (facing < ~−0.5, well below anything visible, crease
+    // flanks included) are still cut as belt-and-suspenders for sheets thinner
+    // than the window. P.facing_threshold is unused here for now.
+    var gate_w = 1.0;
     if (P.inflate == 0u) {
-        let facing = -dot(vn, view);
-        if (facing < P.facing_threshold) {
+        let behind = dot(vp - anchor, view);
+        gate_w = 1.0 - smoothstep(0.25 * P.world_radius, 0.45 * P.world_radius, behind);
+        gate_w = gate_w * smoothstep(-0.6, -0.4, -dot(vn, view));
+        if (gate_w <= 0.0) {
             return;
         }
     }
@@ -137,6 +148,7 @@ fn deposit(v : u32, anchor : vec3<f32>, view : vec3<f32>, anchor_n : vec3<f32>,
         w = brush_falloff(dist, P.world_radius);
     }
     w = w * sample_alpha(vp - anchor, mirrored);
+    w = w * gate_w;
     if (w <= 0.0) {
         return;
     }

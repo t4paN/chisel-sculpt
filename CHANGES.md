@@ -2,6 +2,21 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-24 — Depth-window gate replaces the facing gate (⚠️ UNTESTED)
+
+- **Draw/Clay now gate by position, not normals** (`draw_accum` GLSL + WGSL): a vert
+  deposits unless it sits significantly *behind* the anchor surface along the view —
+  `dot(vp − anchor, view)`, feathered over 0.25R..0.45R so bulgy forms don't get a hard
+  wall. A deep crease's far flank sits at ≈ the anchor's depth, so it now takes the dab
+  like its neighbours → the grazing-angle pits should be gone at the root.
+- Far-backfacing verts (facing < ~−0.5, well below anything visible including crease
+  flanks) are still cut, protecting sheets *thinner* than the depth window.
+- **Known trade-off to test:** a very thin sheet under a brush much fatter than the sheet
+  is thick could take deposits on its back side from the window alone. If that shows up
+  in practice, the proper fix is the occlusion gate (test verts against the pen-down
+  depth buffer). `facing_threshold` is currently unused; mirror unaffected (the b-anchor
+  pass carries its own mirrored view). Inflate never gated, still doesn't.
+
 ## 2026-07-24 — Facing gate: ramp reverted (pits survived it)
 
 - **Reverted the 2026-07-21 facing-gate ramp** (`b9234f7`) — sculpt-testing showed the
