@@ -110,6 +110,16 @@ struct BrushStroke {
     // its own path. Invalid on the first dab of a stroke (no direction yet).
     Vec3 crease_prev_anchor;
     bool crease_prev_valid;
+    // Stamp rake: smoothed in-plane angle that turns the alpha stamp to follow the
+    // stroke direction (Clay only for now). Travel between dab anchors, projected
+    // into the stamp plane, gives a target angle; the current angle eases a quarter
+    // of the way there per dab (shortest arc) so curves steer the square instead of
+    // snapping it. Invalid until the first dab with real movement — the stamp sits
+    // screen-upright, then snaps straight to the first direction. See set_alpha_dab.
+    Vec3  stamp_prev_anchor;
+    bool  stamp_prev_valid;
+    float stamp_rake_angle;
+    bool  stamp_rake_valid;
     float cyl_axis_x, cyl_axis_y, cyl_axis_z;
     // The real area normal: normals averaged over a disc around the cursor, not the
     // single texel under it. cyl_axis snaps to whichever facet the cursor pixel lands

@@ -2,6 +2,30 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-24 — Clay: fixed sharp square stamp that rakes with the stroke (⚠️ UNTESTED)
+
+- **Clay no longer shows the alpha picker** — it always stamps the Square builtin. The
+  main loop uploads Square whenever Clay is current and swaps back to the user's own
+  selection on leaving; Draw/Mask/Paint keep the full picker unchanged.
+- **Squircle mystery solved:** the square stamp spans the full dab diameter, so its
+  corners sat at ~1.3× the dab radius — past the kernels' `dist >= radius` gate, which
+  cut them off — and the radial falloff faded whatever corner area survived.
+- Fixes, two-pronged: the Square preset is now **inscribed in the dab circle** (outer
+  extent 0.70, corners at 0.99R) with a tight ~2.5-texel anti-aliased edge at 256²
+  (was a wide blur at 128²); and Clay **skips the radial falloff entirely when
+  stamping** (`draw_accum` GLSL + WGSL, gated on `P.clay && AP.enabled`) so the layer
+  face is flat and the corners don't fade at the rim. Trade-offs: hardness no longer
+  affects Clay's edge (the stamp *is* the edge), and the square reads slightly smaller
+  vs the cursor circle — the price of real corners.
+- **Rake:** the square turns to follow the stroke direction — travel between dab
+  anchors projected into the stamp plane gives a target angle, eased 25% per dab along
+  the shortest arc so curves steer it instead of snapping it. Sub-2%-of-radius moves
+  keep the last angle (no resting-pen jitter); the first dab snaps straight to the
+  first real direction. Clay-only, CPU-side (one atan2 + one cos/sin per dab).
+- Scaffold: `InputState::stamp_spin_deg` — a fixed rotation offset on top of the rake
+  (0° = edge leads like a trowel, 45° = corner leads like a plough). No UI yet; the
+  spin dials come later.
+
 ## 2026-07-21 — Facing gate is a ramp, not a wall (⚠️ UNTESTED)
 
 - **Grazing-angle strokes tore sharp one-vertex pits along ridges.** Brushing across a deep

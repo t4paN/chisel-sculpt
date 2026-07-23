@@ -22,6 +22,10 @@ struct AlphaEntry {
 struct AlphaLibrary {
     std::vector<AlphaEntry> entries;
 
+    // Builtin order: 0 Round, 1 Soft, 2 Ring, 3 Square, 4 Grunge. Clay ignores the
+    // picker and always stamps Square (see the upload-on-change block in main.cpp).
+    static constexpr int kSquareIndex = 3;
+
     // Populate index 0 (Round) + the procedural presets. Call once at startup.
     void init_builtins();
 

@@ -48,12 +48,17 @@ struct InputState {
 
     // Brush-alpha (stamp) selection. Index into the AlphaLibrary pool; 0 = Round
     // (no stamp). One shared selection, but it only affects Draw, Mask and Paint —
-    // every other brush forces the stamp off per dab (set_alpha_dab). The main loop
-    // uploads the selected bitmap to ComputeState when this changes; each alpha-
+    // every other brush forces the stamp off per dab (set_alpha_dab), except Clay,
+    // which ignores the picker and always stamps the Square builtin. The main loop
+    // uploads the effective bitmap to ComputeState when it changes; each alpha-
     // capable dab modulates its falloff by the sampled alpha. load_alpha_dialog_active
     // pops the custom-image file picker (mirrors import_dialog_active).
     int  active_alpha = 0;
     bool load_alpha_dialog_active = false;
+    // Stamp spin: rotates the alpha stamp about its normal, degrees CCW as seen from
+    // the camera. Scaffold for the spin dials to come (fixed set value for now, no
+    // UI); 0 = screen-upright, behavior-neutral. Applied in set_alpha_dab.
+    float stamp_spin_deg = 0.0f;
 
     // Paint brush albedo (RGB, [0,1]). paint_color is the active colour used by
     // the brush; paint_color_alt is a stashed second colour. Q/E swap them while

@@ -100,10 +100,13 @@ void AlphaLibrary::init_builtins() {
         return 1.0f - smoothstep01(0.0f, 0.28f, d);
     }));
 
-    // Square: soft-edged filled square (chisel/stamp shape).
-    entries.push_back(make_preset("Square", 128, [](float u, float v) {
+    // Square: filled square (chisel/stamp shape), inscribed in the dab circle so the
+    // corners survive the kernels' dist < radius gate (corner distance is m*sqrt(2) of
+    // the half-diameter — outer extent must stay under 0.707). Edge band is ~2.5 texels
+    // at 256; bilinear sampling in the kernel turns that into clean anti-aliasing.
+    entries.push_back(make_preset("Square", 256, [](float u, float v) {
         float m = std::fmax(std::fabs(u), std::fabs(v));
-        return 1.0f - smoothstep01(0.72f, 0.92f, m);
+        return 1.0f - smoothstep01(0.685f, 0.705f, m);
     }));
 
     // Grunge: value noise, edge-faded so it stays inside the dab.

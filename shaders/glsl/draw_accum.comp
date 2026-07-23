@@ -102,7 +102,11 @@ void deposit(uint v, vec3 anchor, vec3 view, vec3 anchor_n, vec3 vp, vec3 vn, ui
         facing_w = smoothstep(P.facing_threshold, P.facing_threshold + FACING_BAND, facing);
         if (facing_w <= 0.0) return;
     }
-    float w = brush_falloff(dist, P.world_radius);
+    // Clay's stamp IS its edge: skip the radial falloff so the layer face is flat
+    // and the square's corners don't fade out toward the dab rim (the radial fade
+    // is what rounded them into a squircle). Every other brush keeps falloff*alpha.
+    float w = (P.clay != 0u && AP.enabled != 0u)
+                  ? 1.0 : brush_falloff(dist, P.world_radius);
     w *= sample_alpha(vp - anchor, mirrored);
     w *= facing_w;
     if (w <= 0.0) return;

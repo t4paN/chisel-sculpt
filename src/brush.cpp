@@ -403,11 +403,15 @@ float BrushStroke::falloff(float dist, float radius, float hardness) const {
 }
 
 void BrushStroke::set_alpha_dab(DabContext& ctx, bool allow) {
-    // Round brush unless the calling brush supports alphas (draw/mask/paint only)
+    // Round brush unless the calling brush supports alphas (draw/clay/mask/paint)
     // AND a stamp is selected AND uploaded (tex_w > 1 means the 1x1 dummy has been
-    // replaced). Writing enabled=false keeps the kernels' sample_alpha returning
-    // 1.0, so nothing changes for the default brush.
-    bool enabled = allow && ctx.input.active_alpha > 0 && ctx.compute.alpha_tex_w > 1;
+    // replaced). Clay ignores the picker — it always stamps Square (the main loop
+    // keeps that uploaded while Clay is current), so active_alpha doesn't gate it.
+    // Writing enabled=false keeps the kernels' sample_alpha returning 1.0, so
+    // nothing changes for the default brush.
+    bool is_clay = ctx.input.current_brush == BrushType::CLAY;
+    bool enabled = allow && (is_clay || ctx.input.active_alpha > 0)
+                   && ctx.compute.alpha_tex_w > 1;
     if (!enabled || anchor_world_radius <= 0.0f) {
         float t[3] = {1.0f, 0.0f, 0.0f}, b[3] = {0.0f, 1.0f, 0.0f};
         ctx.compute.set_alpha_frame(t, b, 0.0f, false);
@@ -426,6 +430,40 @@ void BrushStroke::set_alpha_dab(DabContext& ctx, bool allow) {
     if (t.length() < 1e-5f) t = up - n * up.dot(n);
     t = t.normalized();
     Vec3 b = n.cross(t).normalized();
+
+    // Rake (Clay): ease the stamp toward the stroke's travel direction. One atan2
+    // and a lerp per dab — dabs closer than 2% of the radius keep the last angle
+    // so a resting pen doesn't jitter the square.
+    if (is_clay && stamp_prev_valid) {
+        Vec3 d = anchor_pos - stamp_prev_anchor;
+        float du = d.dot(t), dv = d.dot(b);
+        float min_step = 0.02f * anchor_world_radius;
+        if (du * du + dv * dv > min_step * min_step) {
+            float target = std::atan2(dv, du);
+            if (!stamp_rake_valid) {
+                stamp_rake_angle = target;
+                stamp_rake_valid = true;
+            } else {
+                float diff = target - stamp_rake_angle;  // shortest arc, wrapped to [-pi, pi)
+                diff -= 6.2831853f * std::floor((diff + 3.14159265f) / 6.2831853f);
+                stamp_rake_angle += diff * 0.25f;
+            }
+        }
+    }
+    stamp_prev_anchor = anchor_pos;
+    stamp_prev_valid = true;
+
+    // Stamp spin: rotate the frame about n by rake + the fixed spin offset. The
+    // kernel's mirror-X pass flips tang.x/bitan.x after this, so mirrored dabs get
+    // the reflected rotation for free.
+    float total = (is_clay && stamp_rake_valid ? stamp_rake_angle : 0.0f)
+                  + ctx.input.stamp_spin_deg * 3.14159265f / 180.0f;
+    if (total != 0.0f) {
+        float cs = std::cos(total), sn = std::sin(total);
+        Vec3 tr = t * cs + b * sn;
+        b = b * cs - t * sn;
+        t = tr;
+    }
 
     float inv_diam = 0.5f / anchor_world_radius;
     float tf[3] = {t.x, t.y, t.z};
@@ -471,6 +509,9 @@ void BrushStroke::begin(Renderer& renderer, const Camera& cam,
 
     anchor_valid = false;
     crease_prev_valid = false;
+    stamp_prev_valid = false;
+    stamp_rake_valid = false;
+    stamp_rake_angle = 0.0f;
 
     snap_flag.assign(vert_count, false);
     snap_x.assign(vert_count, 0.0f);

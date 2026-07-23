@@ -144,7 +144,13 @@ fn deposit(v : u32, anchor : vec3<f32>, view : vec3<f32>, anchor_n : vec3<f32>,
             return;
         }
     }
-    var w = brush_falloff(dist, P.world_radius);
+    // Clay's stamp IS its edge: skip the radial falloff so the layer face is flat
+    // and the square's corners don't fade out toward the dab rim (the radial fade
+    // is what rounded them into a squircle). Every other brush keeps falloff*alpha.
+    var w = 1.0;
+    if (P.clay == 0u || AP.enabled == 0u) {
+        w = brush_falloff(dist, P.world_radius);
+    }
     w = w * sample_alpha(vp - anchor, mirrored);
     w = w * facing_w;
     if (w <= 0.0) {

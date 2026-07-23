@@ -1206,15 +1206,19 @@ int main(int argc, char* argv[]) {
         // ---- Brush-alpha upload-on-change ----
         // Push the selected stamp to the compute state when it changes (cheap: only
         // on selection, not per frame). Index 0 (Round) uploads a null → alpha off.
+        // Clay overrides the selection with the Square builtin (its stamp is fixed),
+        // so switching Clay ↔ other brushes swaps the upload back and forth.
         if (input.active_alpha < 0 || input.active_alpha >= alpha_lib.count())
             input.active_alpha = 0;
-        if (input.active_alpha != last_uploaded_alpha) {
-            const AlphaEntry& ae = alpha_lib.get(input.active_alpha);
+        int want_alpha = (input.current_brush == BrushType::CLAY)
+                             ? AlphaLibrary::kSquareIndex : input.active_alpha;
+        if (want_alpha != last_uploaded_alpha) {
+            const AlphaEntry& ae = alpha_lib.get(want_alpha);
             if (ae.is_round || ae.data.empty())
                 compute.upload_alpha(nullptr, 0, 0);
             else
                 compute.upload_alpha(ae.data.data(), ae.w, ae.h);
-            last_uploaded_alpha = input.active_alpha;
+            last_uploaded_alpha = want_alpha;
         }
 
         // ---- File dialogs (ImGuiFileDialog) ----
