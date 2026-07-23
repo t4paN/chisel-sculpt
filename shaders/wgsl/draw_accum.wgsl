@@ -29,7 +29,7 @@ struct Params {
     inflate          : u32,         //  92
     vertex_count     : u32,         //  96
     clay             : u32,         // 100
-    _pad1            : u32,         // 104
+    clay_sign        : i32,         // 104     (+1 build / -1 carve; clay's fill-clamp direction)
     _pad2            : u32,         // 108     (struct rounds to 112)
 };
 
@@ -176,7 +176,9 @@ fn deposit(v : u32, anchor : vec3<f32>, view : vec3<f32>, anchor_n : vec3<f32>,
         let target_h = P.disp_amount;
         let h = dot(vp - anchor, dir);
         var delta = (target_h - h) * w;
-        if (target_h >= 0.0) {
+        // Clamp by the stroke's direction, not target_h's sign — the area-plane
+        // bias can put the plane below the anchor (target_h < 0) mid-build.
+        if (P.clay_sign >= 0) {
             delta = max(delta, 0.0);
         } else {
             delta = min(delta, 0.0);

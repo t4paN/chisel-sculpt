@@ -85,6 +85,11 @@ struct DrawAccumParams {
     // BY disp_amount. Clamped to one direction so it fills hollows and levels up to
     // the plane without carving away detail that already sits proud of it.
     int clay;
+    // Clamp direction for that one-way fill: +1 building, -1 carving. Carried
+    // separately from disp_amount's sign because the area-plane bias can push
+    // target_h past zero (anchor on a ridge, averaged plane below it) — the sign of
+    // target_h no longer tells the kernel which way the stroke is going.
+    int clay_sign;
 };
 
 struct SmoothAccumParams {

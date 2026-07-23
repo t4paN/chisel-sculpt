@@ -2,6 +2,30 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-24 — Clay: area-averaged deposition plane (⚠️ UNTESTED)
+
+- **Crossing an earlier clay stroke stepped instead of blending** — half the new stroke
+  stacked a full layer on top of the old ridge, the other half sat at base level. Cause:
+  the plane's *orientation* was area-sampled but its *height* came from the single depth
+  texel under the cursor, so the plane teleported one layer up the moment the cursor pixel
+  crossed onto the ridge. (This is what ZBrush's Clay gets right: it anchors the plane to
+  a surface sample across the brush footprint, so a footprint half on a ridge produces a
+  plane at the blended height and crossings merge into one level.)
+- Now the `sample_area_normal` disc also averages depth (optional out param; Clay-only —
+  other brushes pay nothing). The mean `{px, py, depth}` unprojects to the mean surface
+  point (legit under the orthographic camera: unprojection is linear, the mean commutes),
+  and Clay biases its `target_h` by that point's height above the anchor along the area
+  normal, capped at ±0.5× brush radius. Plane height now rises smoothly with ridge
+  coverage. WebGPU indexes the existing CPU plane cache (zero extra GPU work); GL adds
+  one capped depth region read per clay dab from the pen-down FBO.
+- The average reads the **pen-down** plane cache, so a stroke never rides its own fresh
+  deposit — no staircase drift along your own line.
+- Kernel safety that turned out load-bearing: clay's fill/carve clamp keyed off
+  `target_h`'s sign, and the bias can legitimately push `target_h` negative (anchor on a
+  tall ridge, plane below it) — which would have flipped an additive stroke into carving
+  mid-stroke. The stroke's sign now travels in a spare pad slot (`clay_sign`, Params
+  still 112 B) and the clamp keys off that (`draw_accum` GLSL + WGSL, lockstep).
+
 ## 2026-07-24 — Clay: fixed sharp square stamp that rakes with the stroke (⚠️ UNTESTED)
 
 - **Clay no longer shows the alpha picker** — it always stamps the Square builtin. The

@@ -2035,7 +2035,8 @@ void Renderer::read_depth_region(int x, int y, int w, int h, float* out) {
     gpu::read_target_region(gpu_dev, screen_target, 0, x, y, w, h, out);
 }
 
-bool Renderer::sample_area_normal(int cx, int cy, int radius_px, float out[3]) {
+bool Renderer::sample_area_normal(int cx, int cy, int radius_px, float out[3],
+                                  float out_avg[3]) {
     // Sampling radius is deliberately smaller than the dab (the caller scales it):
     // averaged over the FULL dab the plane stops following real curvature and Clay
     // starts flattening spheres. Capped so a huge brush doesn't turn the GL region
@@ -2063,16 +2064,23 @@ bool Renderer::sample_area_normal(int cx, int cy, int radius_px, float out[3]) {
     if (side_x <= 0 || side_y <= 0) return false;
 
     const float* src;
+    const float* dsrc = nullptr;
 #if defined(CHISEL_BACKEND_WEBGPU)
-    src = nullptr;   // indexed straight out of plane_norm below
+    src = nullptr;   // indexed straight out of plane_norm / plane_depth below
 #else
     area_norm_scratch.resize((size_t)side_x * side_y * 3);
     read_normal_region(x0, y0, side_x, side_y, area_norm_scratch.data());
     src = area_norm_scratch.data();
+    if (out_avg) {
+        area_depth_scratch.resize((size_t)side_x * side_y);
+        read_depth_region(x0, y0, side_x, side_y, area_depth_scratch.data());
+        dsrc = area_depth_scratch.data();
+    }
 #endif
 
     float inv_r = 1.0f / (float)r;
     float ax = 0.0f, ay = 0.0f, az = 0.0f;
+    float apx = 0.0f, apy = 0.0f, ad = 0.0f, wsum = 0.0f;
     int hits = 0;
     for (int y = 0; y < side_y; y++) {
         for (int x = 0; x < side_x; x++) {
@@ -2093,6 +2101,18 @@ bool Renderer::sample_area_normal(int cx, int cy, int radius_px, float out[3]) {
             if (nx * nx + ny * ny + nz * nz < 0.25f) continue;
             float w = 1.0f - d2;                     // smooth, centre-weighted
             ax += nx * w; ay += ny * w; az += nz * w;
+            if (out_avg) {
+                float depth;
+#if defined(CHISEL_BACKEND_WEBGPU)
+                depth = plane_depth[(size_t)(y0 + y) * plane_w + (x0 + x)];
+#else
+                depth = dsrc[(size_t)y * side_x + x];
+#endif
+                apx += (float)(x0 + x) * w;
+                apy += (float)(y0 + y) * w;
+                ad  += depth * w;
+                wsum += w;
+            }
             hits++;
         }
     }
@@ -2100,6 +2120,10 @@ bool Renderer::sample_area_normal(int cx, int cy, int radius_px, float out[3]) {
     float len = std::sqrt(ax * ax + ay * ay + az * az);
     if (len < 1e-6f) return false;                   // taps cancelled out (fold/edge)
     out[0] = ax / len; out[1] = ay / len; out[2] = az / len;
+    if (out_avg) {
+        if (wsum < 1e-6f) return false;
+        out_avg[0] = apx / wsum; out_avg[1] = apy / wsum; out_avg[2] = ad / wsum;
+    }
     return true;
 }
 

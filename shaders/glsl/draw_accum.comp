@@ -29,7 +29,7 @@ layout(std140, binding = 63) uniform Params {
     uint  inflate;          //  92
     uint  vertex_count;     //  96
     uint  clay;             // 100
-    uint  _pad1;            // 104
+    int   clay_sign;        // 104  (+1 build / -1 carve; clay's fill-clamp direction)
     uint  _pad2;            // 108  (struct rounds to 112)
 } P;
 
@@ -125,7 +125,9 @@ void deposit(uint v, vec3 anchor, vec3 view, vec3 anchor_n, vec3 vp, vec3 vn, ui
         float target_h = P.disp_amount;
         float h = dot(vp - anchor, dir);
         float delta = (target_h - h) * w;
-        delta = (target_h >= 0.0) ? max(delta, 0.0) : min(delta, 0.0);
+        // Clamp by the stroke's direction, not target_h's sign — the area-plane
+        // bias can put the plane below the anchor (target_h < 0) mid-build.
+        delta = (P.clay_sign >= 0) ? max(delta, 0.0) : min(delta, 0.0);
         vec3 dc = dir * delta;
         uint basec = v * 4u;
         atomicAddFloat(basec + 0u, dc.x);

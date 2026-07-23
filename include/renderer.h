@@ -190,8 +190,16 @@ struct Renderer {
     // WebGPU the taps come free out of the landed plane cache, while on GL each 1×1
     // sample is its own glReadPixels sync, so that path takes ONE region read into a
     // persistent scratch buffer and indexes it. No per-dab allocation on either.
-    bool sample_area_normal(int cx, int cy, int radius_px, float out[3]);
+    // Disc-averaged surface sample around a cursor pixel (centre-weighted, on-model
+    // texels only, same pen-down plane cache as sample_normal/depth). Always fills
+    // out[3] with the averaged normal. When out_avg is non-null, additionally reads
+    // the depth attachment and fills {avg_px, avg_py, avg_depth} — the weighted mean
+    // screen position + linear depth of the sampled surface, for unprojecting an
+    // area-averaged anchor (Clay's deposition plane).
+    bool sample_area_normal(int cx, int cy, int radius_px, float out[3],
+                            float out_avg[3] = nullptr);
     std::vector<float> area_norm_scratch;             // GL region-read scratch (persistent)
+    std::vector<float> area_depth_scratch;            // GL region-read scratch (persistent)
 #if defined(CHISEL_BACKEND_WEBGPU)
     std::vector<float>    plane_depth;
     std::vector<float>    plane_norm;                 // 3 floats per pixel

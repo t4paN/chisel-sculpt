@@ -128,6 +128,14 @@ struct BrushStroke {
     // Kept separate rather than replacing cyl_axis so Draw/Crease/Pinch and the alpha
     // stamp orientation stay exactly as tuned; only Clay reads it for now.
     float area_normal_x, area_normal_y, area_normal_z;
+    // Disc-averaged surface point over the same area sample (pen-down plane cache,
+    // so the current stroke's own deposit is invisible to it). Clay anchors its
+    // deposition plane's HEIGHT here instead of the single texel under the cursor —
+    // that texel jumps by a full layer when the cursor crosses an earlier stroke,
+    // which is what stepped crossings instead of blending them. Valid only when
+    // set_anchor ran with want_area_depth.
+    Vec3 area_plane_point;
+    bool area_plane_valid;
     float screen_slack;  // screen bbox expansion for grazing angles (1.0 facing, up to 3.0 at silhouette)
 
     // Accumulated displacement per vertex (sparse: only affected verts)
@@ -423,9 +431,12 @@ struct BrushStroke {
     // after each accumulation pass. Set by F10 (picks vertex under cursor). -1 = disabled.
     static int debug_test_vertex;
 
+    // want_area_depth additionally samples the disc-averaged surface point around
+    // the cursor (area_plane_point / area_plane_valid) — Clay's deposition-plane
+    // origin. Off by default: it costs an extra depth region read per dab on GL.
     void set_anchor(const Mesh& mesh, const Camera& cam,
                     float cursor_x, float cursor_y, float brush_radius,
-                    int screen_h, Renderer& renderer);
+                    int screen_h, Renderer& renderer, bool want_area_depth = false);
 
     // Build this dab's brush-alpha stamp frame (screen-aligned tangent/bitangent in
     // the surface tangent plane) and push it to the compute state's shared alpha UBO.

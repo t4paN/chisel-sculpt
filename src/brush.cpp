@@ -310,8 +310,9 @@ BrushStroke::BrushStroke()
 
 void BrushStroke::set_anchor(const Mesh& mesh, const Camera& cam,
                               float cursor_x, float cursor_y, float brush_radius,
-                              int screen_h, Renderer& renderer) {
+                              int screen_h, Renderer& renderer, bool want_area_depth) {
     anchor_valid = false;
+    area_plane_valid = false;
     int cx = (int)cursor_x;
     int cy = (int)cursor_y;
     if (cx < 0 || cx >= screen_w || cy < 0 || cy >= screen_h) return;
@@ -371,9 +372,20 @@ void BrushStroke::set_anchor(const Mesh& mesh, const Camera& cam,
     // Area normal over ~0.6 of the dab. Smaller than the brush on purpose: averaged
     // over the whole footprint the plane stops tracking curvature and large dabs
     // flatten what they should follow. Falls back to the point normal off-model.
-    float an[3];
-    if (renderer.sample_area_normal(cx, cy, (int)(brush_radius * 0.6f), an)) {
+    // When asked (Clay), the same disc also averages depth: unprojecting the mean
+    // {px, py, depth} gives the mean surface point — valid because the projection is
+    // orthographic, so unprojection is linear and the mean commutes through it.
+    float an[3], avg[3];
+    if (renderer.sample_area_normal(cx, cy, (int)(brush_radius * 0.6f), an,
+                                    want_area_depth ? avg : nullptr)) {
         area_normal_x = an[0]; area_normal_y = an[1]; area_normal_z = an[2];
+        if (want_area_depth) {
+            float andc_x = 2.0f * avg[0] / (float)screen_w - 1.0f;
+            float andc_y = 1.0f - 2.0f * avg[1] / (float)screen_h;
+            area_plane_point = cam_pos + fwd * avg[2]
+                             + right * (andc_x * half_w) + up * (andc_y * half_h);
+            area_plane_valid = true;
+        }
     } else {
         area_normal_x = cyl_axis_x; area_normal_y = cyl_axis_y; area_normal_z = cyl_axis_z;
     }
@@ -785,7 +797,8 @@ void BrushStroke::apply_draw(DabContext& ctx, float dab_x, float dab_y,
                               bool inflate, bool clay) {
     dirty_verts.clear();
 
-    set_anchor(ctx.mesh, ctx.cam, dab_x, dab_y, ctx.eff_brush_size, ctx.win_h, ctx.renderer);
+    set_anchor(ctx.mesh, ctx.cam, dab_x, dab_y, ctx.eff_brush_size, ctx.win_h, ctx.renderer,
+               /*want_area_depth=*/clay);
     if (!ctx.compute.supported || !ctx.compute.has_draw() || !anchor_valid) {
         return;
     }
@@ -798,6 +811,23 @@ void BrushStroke::apply_draw(DabContext& ctx, float dab_x, float dab_y,
     // same visual weight. Draw's 0.5 lands as a very thick slab here.
     float disp_scale = clay ? 0.12f : 0.5f;
     float disp_amount = base_disp * strength * (float)stroke_sign * disp_scale;
+
+    // Clay's plane height comes from the disc-AVERAGED surface, not the texel under
+    // the cursor: bias the target by the averaged point's height above the anchor
+    // along the area normal. Crossing an earlier stroke then raises the plane
+    // smoothly with ridge coverage instead of teleporting it a full layer up the
+    // moment the cursor pixel lands on the ridge (half-too-high/half-too-low steps).
+    // The average reads the pen-down plane cache, so the current stroke's own
+    // deposit never lifts its own plane. Capped so a footprint hanging over a deep
+    // drop can't yank the plane; the kernel clamps fill/carve by clay_sign, since
+    // the bias can legitimately push target_h past zero (anchor on a tall ridge).
+    if (clay && area_plane_valid) {
+        float bias = (area_plane_point - anchor_pos).dot(
+            Vec3(area_normal_x, area_normal_y, area_normal_z));
+        float cap = 0.5f * anchor_world_radius;
+        bias = bias < -cap ? -cap : (bias > cap ? cap : bias);
+        disp_amount += bias;
+    }
 
     Vec3 view_dir = ctx.cam.get_view_direction();
 
@@ -833,6 +863,7 @@ void BrushStroke::apply_draw(DabContext& ctx, float dab_x, float dab_y,
     params.vertex_count = ctx.mesh.vertex_count();
     params.inflate = inflate ? 1 : 0;
     params.clay = clay ? 1 : 0;
+    params.clay_sign = stroke_sign;
 
     set_alpha_dab(ctx, !inflate);   // Inflate shares this dab; alphas are Draw-only
     ctx.compute.dispatch_draw_accum(params, ctx.renderer.vbo_pos);
