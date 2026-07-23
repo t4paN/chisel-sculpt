@@ -2,7 +2,14 @@
 
 Short, chronological log of notable changes. Newest on top.
 
-## 2026-07-24 — Depth-window gate replaces the facing gate (⚠️ UNTESTED)
+## 2026-07-24 — v0.1.29
+
+- Released: annotated tag `v0.1.29` pushed (GH Linux + Windows release CI), web build to
+  itch as userversion 0.1.29. The whole clay + gate batch below is sculpt-tested
+  (user: "feels pretty decent"); keep an eye on the thin-sheet trade-off noted under
+  the depth-window entry.
+
+## 2026-07-24 — Depth-window gate replaces the facing gate
 
 - **Draw/Clay now gate by position, not normals** (`draw_accum` GLSL + WGSL): a vert
   deposits unless it sits significantly *behind* the anchor surface along the view —
@@ -27,7 +34,7 @@ Short, chronological log of notable changes. Newest on top.
   no angular feather bridges a jump. The ramp's only actual effect was fading deposits
   within ~15° of silhouettes; that fade is gone again.
 
-## 2026-07-24 — Clay: area-averaged deposition plane (⚠️ UNTESTED)
+## 2026-07-24 — Clay: area-averaged deposition plane
 
 - **Crossing an earlier clay stroke stepped instead of blending** — half the new stroke
   stacked a full layer on top of the old ridge, the other half sat at base level. Cause:
@@ -51,7 +58,7 @@ Short, chronological log of notable changes. Newest on top.
   mid-stroke. The stroke's sign now travels in a spare pad slot (`clay_sign`, Params
   still 112 B) and the clamp keys off that (`draw_accum` GLSL + WGSL, lockstep).
 
-## 2026-07-24 — Clay: fixed sharp square stamp that rakes with the stroke (⚠️ UNTESTED)
+## 2026-07-24 — Clay: fixed sharp square stamp that rakes with the stroke
 
 - **Clay no longer shows the alpha picker** — it always stamps the Square builtin. The
   main loop uploads Square whenever Clay is current and swaps back to the user's own
@@ -75,7 +82,7 @@ Short, chronological log of notable changes. Newest on top.
   (0° = edge leads like a trowel, 45° = corner leads like a plough). No UI yet; the
   spin dials come later.
 
-## 2026-07-21 — Facing gate is a ramp, not a wall (⚠️ UNTESTED)
+## 2026-07-21 — Facing gate is a ramp, not a wall (reverted 2026-07-24 — pits survived)
 
 - **Grazing-angle strokes tore sharp one-vertex pits along ridges.** Brushing across a deep
   V with the camera tilted against it left hard little holes on the flank whose normals had
