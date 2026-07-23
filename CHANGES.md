@@ -2,6 +2,16 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-24 — Facing gate: ramp reverted (pits survived it)
+
+- **Reverted the 2026-07-21 facing-gate ramp** (`b9234f7`) — sculpt-testing showed the
+  grazing-angle pits are still there, so the ramp bought nothing and went back to the
+  original hard cutoff (`if (facing < facing_threshold) return;`) in `draw_accum`
+  GLSL + WGSL. Why it couldn't work: a deep crease is a *discontinuity* in normal
+  space — adjacent verts across the valley line jump from facing ≈ +0.4 to ≈ −0.6, and
+  no angular feather bridges a jump. The ramp's only actual effect was fading deposits
+  within ~15° of silhouettes; that fade is gone again.
+
 ## 2026-07-24 — Clay: area-averaged deposition plane (⚠️ UNTESTED)
 
 - **Crossing an earlier clay stroke stepped instead of blending** — half the new stroke
