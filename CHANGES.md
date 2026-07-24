@@ -2,6 +2,23 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-24 — Clay: wall-fill relax (⚠️ web-unverified)
+
+- **Clay slab walls were triangle-sparse.** Clay raises slabs without adding verts, so
+  the near-vertical walls between the raised top and the base are spanned by a thin ring
+  of stretched verts → long skinny triangles, while top and base keep normal density.
+- New pen-up **`clay_relax`** pass (own kernel, isolated from autosmooth): a normal-
+  stripped (tangential) Laplacian over the stroke's dirty set. Normal-strip = slides
+  verts along the surface into the walls without deflating the slab (same trick as
+  limb_relax). Two mechanisms feed the walls: an **anisotropy gate** (only stretched
+  triangles relax; near-isotropic flat top/rim stay put, keeping the crisp square edge),
+  and a **length-weighted centroid** (`fill_bias`) that pulls verts toward longer-than-
+  average edges, so they drift *into* the sparse wall instead of just evening in place.
+- **New "wall fill" slider** (0..1, clay-only, next to melt); 0 = off (behavior-neutral).
+  Redistribution only — no new triangles (that's remesh, deliberately not used here).
+  Host knobs: `ANISO_LO` 1.3 (gate floor; raise to protect the rim, lower to feed
+  harder), `FILL_BIAS` 1.5, `ITERS` 5. WGSL twin **not browser-tested yet**.
+
 ## 2026-07-24 — Clay: phase-2 melt (even crossings, ⚠️ web-unverified)
 
 - **Clay can now melt what it builds across.** Phase-1 froze any vert already proud of

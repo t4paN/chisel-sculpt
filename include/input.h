@@ -63,6 +63,10 @@ struct InputState {
     // plane back down, evening crossings instead of stacking them. 0 = off (proud
     // detail frozen, the phase-1 default). Slider shows only while Clay is active.
     float clay_melt = 0.0f;
+    // Clay wall-fill (0..1): pen-up tangential relax strength that redistributes verts
+    // into the stretched, triangle-sparse walls of raised clay slabs. 0 = off. Slides
+    // existing verts (no new triangles); anisotropy-gated to spare the crisp rim.
+    float clay_wall_fill = 0.0f;
 
     // Paint brush albedo (RGB, [0,1]). paint_color is the active colour used by
     // the brush; paint_color_alt is a stashed second colour. Q/E swap them while

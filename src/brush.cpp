@@ -1557,6 +1557,38 @@ bool BrushStroke::finalize(DabContext& ctx, Mesh& mesh, UndoStack& stack,
             gpu_positions_deferred = true;
         }
 
+        // Clay wall-fill: pen-up tangential relax that slides verts down into the
+        // sparse, stretched walls of the raised slab (see clay_relax.comp). Gated on
+        // the wall-fill slider (0 = off) and clay strokes only; anisotropy gate in the
+        // kernel keeps the crisp rim. Runs before the undo/readback below so the
+        // redistributed positions land in the undo entry and the mesh sync.
+        static constexpr float CLAY_RELAX_ANISO_LO = 1.3f;  // gate floor: lower feeds walls harder
+        static constexpr float CLAY_RELAX_FILL_BIAS = 1.5f;  // long-edge pull: verts drift into walls
+        static constexpr int   CLAY_RELAX_ITERS    = 5;
+        if (ctx.input.clay_wall_fill > 0.0f
+            && fin_brush_type == BrushType::CLAY
+            && !snap_list.empty()
+            && compute && compute->supported
+            && compute->has_clay_relax()
+            && compute->adjacency_vertex_count > 0) {
+            compute->dispatch_clay_relax(snap_list.data(), (uint32_t)snap_list.size(),
+                                         ctx.input.clay_wall_fill, CLAY_RELAX_ITERS,
+                                         CLAY_RELAX_ANISO_LO, CLAY_RELAX_FILL_BIAS,
+                                         renderer.vbo_pos, renderer.vbo_norm, renderer.ebo);
+            if (ctx.input.mirror_x)
+                compute->dispatch_mirror_project_ids(renderer.vbo_pos,
+                                                     mesh.vertex_count(),
+                                                     (uint32_t)snap_list.size());
+            if (compute->has_normals()) {
+                compute->dispatch_compute_normals(snap_list.data(),
+                                                   (uint32_t)snap_list.size(),
+                                                   renderer.vbo_pos, renderer.vbo_norm,
+                                                   renderer.ebo);
+                gpu_normals_deferred = true;
+            }
+            gpu_positions_deferred = true;
+        }
+
         if (gpu_positions_deferred && !snap_list.empty()) {
             // Phase 2b (GPU-resident undo): reproject the stroke delta into the
             // resident disp/base layer on the GPU, from the pen-down snapshots.

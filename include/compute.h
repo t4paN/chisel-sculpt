@@ -260,6 +260,12 @@ struct ComputeState {
     gpu::ComputePipeline stroke_smooth_apply_pipeline;
     gpu::Buffer          stroke_smooth_ubo;   // 16-byte {dirty_count, strength} block
 
+    // Clay wall-fill: pen-up normal-stripped (tangential) Laplacian over a vert-ID
+    // list, anisotropy-gated so only stretched wall triangles redistribute (the crisp
+    // rim/top are left alone). Slides verts down into the sparse walls of clay slabs.
+    gpu::ComputePipeline clay_relax_pipeline;
+    gpu::Buffer          clay_relax_ubo;   // 16-byte {dirty_count, strength, aniso_lo, aniso_hi}
+
     // Mirror constraint projection: after each geometry dab (and the pen-up
     // autosmooth) re-imposes exact X-mirror symmetry over the touched verts —
     // seam verts snap to x=0, pairs average with the reflected twin. One sink
@@ -637,6 +643,15 @@ struct ComputeState {
                                       float strength,
                                       const gpu::Buffer& pos_vbo, const gpu::Buffer& index_ebo);
 
+    bool init_clay_relax();
+    // Tangential (normal-stripped) Laplacian over the given vertex IDs, anisotropy-
+    // gated. `iters` host-looped passes at `strength`; aniso_lo sets the gate floor,
+    // fill_bias (>0) up-weights long edges so verts drift into the sparse walls.
+    void dispatch_clay_relax(const uint32_t* vert_ids, uint32_t count,
+                             float strength, int iters, float aniso_lo, float fill_bias,
+                             const gpu::Buffer& pos_vbo, const gpu::Buffer& norm_vbo,
+                             const gpu::Buffer& index_ebo);
+
     // Compile the mirror constraint-projection shader. Called once at init.
     bool init_mirror_project();
     bool has_mirror_project() const { return mirror_project_pipeline.handle != 0; }
@@ -708,6 +723,7 @@ struct ComputeState {
 
     // Stroke-autosmooth readiness (replaces stroke_smooth_apply_program checks).
     bool has_stroke_smooth() const { return stroke_smooth_apply_pipeline.handle != 0; }
+    bool has_clay_relax() const { return clay_relax_pipeline.handle != 0; }
 
     // Dispatch the mask paint shader: per-vertex distance check, writes mask VBO
     // directly. Uses smooth_dirty_ssbo for the compact dirty list. Caller reads

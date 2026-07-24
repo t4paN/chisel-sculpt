@@ -1,0 +1,93 @@
+// clay_relax.comp — GLSL 430 sibling of shaders/wgsl/clay_relax.wgsl.
+// Pen-up wall-fill for the clay brush: a normal-stripped (tangential) Laplacian over
+// the stroke's dirty-vert id list, gated to STRETCHED triangles only. Clay raises
+// slabs without adding verts, so the near-vertical walls between the raised top and
+// the base are spanned by a thin ring of stretched verts → long skinny triangles.
+// This slides verts DOWN into those walls to even the spacing, without (a) deflating
+// the form (normal component is stripped, like limb_relax) or (b) rounding the crisp
+// square rim (the anisotropy gate skips isotropic top/rim verts, only the stretched
+// wall verts move). Redistribution only — no new triangles. In-place RW like the
+// autosmooth pass; a few host-looped iterations. 16-byte std140 Params UBO.
+#version 430
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0)  buffer PosBuf    { float positions[]; };
+layout(std430, binding = 1)  readonly buffer NormBuf   { float normals[]; };
+layout(std430, binding = 2)  readonly buffer IdxBuf    { uint indices[]; };
+layout(std430, binding = 4)  readonly buffer AdjOffset { uint adj_offset[]; };
+layout(std430, binding = 5)  readonly buffer AdjList   { uint adj_list[]; };
+layout(std430, binding = 6)  readonly buffer DirtyBuf  { uint dirty_verts[]; };
+layout(std430, binding = 12) readonly buffer MaskBuf   { float mask[]; };
+
+layout(std140, binding = 63) uniform Params {
+    uint  dirty_count;   // 0
+    float strength;      // 4   per-iter tangential step
+    float aniso_lo;      // 8   edge max/min below this → no relax (isotropic top/rim kept)
+    float fill_bias;     // 12  >0 up-weights long edges → verts drift INTO the wall
+} P;
+
+vec3 getp(uint i) { return vec3(positions[i*3u], positions[i*3u+1u], positions[i*3u+2u]); }
+
+void main() {
+    uint di = gl_GlobalInvocationID.x;
+    if (di >= P.dirty_count) return;
+    uint v = dirty_verts[di];
+
+    float mscale = 1.0 - mask[v];
+    if (mscale <= 0.0) return;
+
+    vec3 p = getp(v);
+    uint start = adj_offset[v];
+    uint end   = adj_offset[v + 1u];
+
+    // Pass 1: edge stats. emean feeds the length-weighting; emax/emin the gate.
+    float emin = 1e30, emax = 0.0, esum = 0.0, ecount = 0.0;
+    for (uint j = start; j < end; j++) {
+        uint t = adj_list[j];
+        uint i0 = indices[t*3u]; uint i1 = indices[t*3u+1u]; uint i2 = indices[t*3u+2u];
+        uint a = (i0 == v) ? i1 : i0;
+        uint b = (i2 == v) ? i1 : i2;
+        float la = length(getp(a) - p), lb = length(getp(b) - p);
+        emin = min(emin, min(la, lb)); emax = max(emax, max(la, lb));
+        esum += la + lb; ecount += 2.0;
+    }
+    if (ecount <= 0.0 || emin >= 1e29) return;
+
+    // Anisotropy gate: stretched wall triangles have a long (vertical) and a short
+    // (horizontal) edge → high max/min. Flat top / base / rim triangles are near
+    // isotropic → ~1. The gate ramps over a fixed span above aniso_lo, so verts on
+    // the stretched walls (and the rim quads bordering them) relax while the flat
+    // crisp faces stay put.
+    float aniso = emax / max(emin, 1e-8);
+    float gate = smoothstep(P.aniso_lo, P.aniso_lo + 1.5, aniso);
+    if (gate <= 0.0) return;
+
+    // Pass 2: length-weighted centroid. Neighbours across LONGER-than-average edges
+    // (the sparse, stretched direction — down the wall) pull harder, so the vert
+    // drifts toward the sparse side instead of just evening in place. That's what
+    // actually feeds verts into the wall. fill_bias == 0 → plain umbrella Laplacian.
+    float emean = esum / ecount;
+    vec3 sum = vec3(0.0);
+    float wsum = 0.0;
+    for (uint j = start; j < end; j++) {
+        uint t = adj_list[j];
+        uint i0 = indices[t*3u]; uint i1 = indices[t*3u+1u]; uint i2 = indices[t*3u+2u];
+        uint a = (i0 == v) ? i1 : i0;
+        uint b = (i2 == v) ? i1 : i2;
+        vec3 qa = getp(a); vec3 qb = getp(b);
+        float wa = 1.0 + P.fill_bias * max(0.0, length(qa - p) / emean - 1.0);
+        float wb = 1.0 + P.fill_bias * max(0.0, length(qb - p) / emean - 1.0);
+        sum += qa * wa + qb * wb; wsum += wa + wb;
+    }
+    if (wsum <= 0.0) return;
+
+    vec3 delta = sum / wsum - p;
+    // Strip the normal component → slide along the surface only (a full Laplacian
+    // would deflate the slab, the same way the smooth brush shrinks form).
+    vec3 n = vec3(normals[v*3u], normals[v*3u+1u], normals[v*3u+2u]);
+    float nl = length(n);
+    if (nl > 1e-8) { n /= nl; delta -= n * dot(delta, n); }
+
+    vec3 np = p + P.strength * mscale * gate * delta;
+    positions[v*3u] = np.x; positions[v*3u+1u] = np.y; positions[v*3u+2u] = np.z;
+}

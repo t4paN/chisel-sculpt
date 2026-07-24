@@ -725,6 +725,11 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Clay melt: eases ridges you build across back down "
                               "(0 = keep proud detail)");
+        ImGui::SetNextItemWidth(calc_btn_w("Colour") + calc_btn_w("Density") + 8.0f);
+        ImGui::SliderFloat("##clayWall", &input.clay_wall_fill, 0.0f, 1.0f, "wall fill %.2f");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Wall fill: pen-up relax that slides verts into the sparse "
+                              "walls of raised slabs (0 = off; redistributes, no new tris)");
     }
 
     // Brush-alpha (stamp) picker: Round + built-ins + custom, then a "＋" to load an
