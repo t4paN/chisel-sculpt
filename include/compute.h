@@ -90,6 +90,9 @@ struct DrawAccumParams {
     // target_h past zero (anchor on a ridge, averaged plane below it) — the sign of
     // target_h no longer tells the kernel which way the stroke is going.
     int clay_sign;
+    // Phase-2 melt: 0 preserves proud detail (freeze); >0 eases verts past the plane
+    // partway back to it, evening crossings instead of stacking them. See draw_accum.
+    float clay_melt;
 };
 
 struct SmoothAccumParams {

@@ -864,6 +864,7 @@ void BrushStroke::apply_draw(DabContext& ctx, float dab_x, float dab_y,
     params.inflate = inflate ? 1 : 0;
     params.clay = clay ? 1 : 0;
     params.clay_sign = stroke_sign;
+    params.clay_melt = clay ? ctx.input.clay_melt : 0.0f;
 
     set_alpha_dab(ctx, !inflate);   // Inflate shares this dab; alphas are Draw-only
     ctx.compute.dispatch_draw_accum(params, ctx.renderer.vbo_pos);

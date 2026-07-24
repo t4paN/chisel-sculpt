@@ -716,6 +716,17 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
         }
     }
 
+    // Clay phase-2 melt: how strongly clay eases proud verts back to its plane, so
+    // building across an old stroke evens out instead of stacking. 0 = off (proud
+    // detail frozen). Only shown while Clay is the active brush.
+    if (current == BrushType::CLAY) {
+        ImGui::SetNextItemWidth(calc_btn_w("Colour") + calc_btn_w("Density") + 8.0f);
+        ImGui::SliderFloat("##clayMelt", &input.clay_melt, 0.0f, 1.0f, "melt %.2f");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Clay melt: eases ridges you build across back down "
+                              "(0 = keep proud detail)");
+    }
+
     // Brush-alpha (stamp) picker: Round + built-ins + custom, then a "＋" to load an
     // image. Alphas apply to Draw, Mask and Paint only — the picker is hidden for
     // every other brush (their dabs force the stamp off; see set_alpha_dab). Clay

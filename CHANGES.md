@@ -2,6 +2,22 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-24 — Clay: phase-2 melt (even crossings, ⚠️ web-unverified)
+
+- **Clay can now melt what it builds across.** Phase-1 froze any vert already proud of
+  the deposition plane (that's what kept detail), so building a stroke over an old one
+  still stacked a small ridge at the crossing. Phase-2 instead eases proud verts *partway*
+  back to the plane at a `clay_melt` strength — feathered by how far proud they are
+  (`smoothstep(0.12, 0.35, past/radius)`), so fine surface detail near the plane survives
+  and only pronounced ridges (old strokes) settle down. Crossings even out instead of
+  ridging up.
+- **New "melt" slider** (0..1), shown only while Clay is active. `melt = 0` reproduces
+  phase-1 exactly (default, behavior-neutral). Sweet spot in testing ~0.3–0.5.
+- Free: reuses the spare `_pad2` word in the 112-byte `draw_accum` Params (now `clay_melt`)
+  — no new buffers/dispatch, a few ALU ops. Symmetric for carve-clay (fills verts sunk
+  past a carve plane). GLSL + WGSL lockstep; **WGSL not browser-tested yet** (`select`/
+  `smoothstep` should be Tint-clean but verify before any itch push).
+
 ## 2026-07-24 — v0.1.29
 
 - Released: annotated tag `v0.1.29` pushed (GH Linux + Windows release CI), web build to

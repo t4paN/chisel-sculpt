@@ -59,6 +59,10 @@ struct InputState {
     // the camera. Scaffold for the spin dials to come (fixed set value for now, no
     // UI); 0 = screen-upright, behavior-neutral. Applied in set_alpha_dab.
     float stamp_spin_deg = 0.0f;
+    // Clay phase-2 melt (0..1): how strongly clay eases verts already proud of its
+    // plane back down, evening crossings instead of stacking them. 0 = off (proud
+    // detail frozen, the phase-1 default). Slider shows only while Clay is active.
+    float clay_melt = 0.0f;
 
     // Paint brush albedo (RGB, [0,1]). paint_color is the active colour used by
     // the brush; paint_color_alt is a stashed second colour. Q/E swap them while

@@ -30,7 +30,7 @@ struct Params {
     vertex_count     : u32,         //  96
     clay             : u32,         // 100
     clay_sign        : i32,         // 104     (+1 build / -1 carve; clay's fill-clamp direction)
-    _pad2            : u32,         // 108     (struct rounds to 112)
+    clay_melt        : f32,         // 108     (0 = phase-1 preserve; >0 melts proud verts)
 };
 
 @group(0) @binding(0)  var<storage, read>       positions : array<f32>;
@@ -171,13 +171,22 @@ fn deposit(v : u32, anchor : vec3<f32>, view : vec3<f32>, anchor_n : vec3<f32>,
         // whole module for it (naga/glslang don't, so GL builds stay silent).
         let target_h = P.disp_amount;
         let h = dot(vp - anchor, dir);
-        var delta = (target_h - h) * w;
-        // Clamp by the stroke's direction, not target_h's sign — the area-plane
-        // bias can put the plane below the anchor (target_h < 0) mid-build.
-        if (P.clay_sign >= 0) {
-            delta = max(delta, 0.0);
-        } else {
-            delta = min(delta, 0.0);
+        let raw = (target_h - h) * w;
+        // "Wrong side" = past the plane (proud on a build, sunk on a carve). Phase-1
+        // froze these (delta 0) so proud detail survived. Phase-2 MELT eases them
+        // partway back to the plane at clay_melt strength, feathered by how far past
+        // they are (past/radius): fine detail near the plane is kept, only pronounced
+        // ridges — old strokes you're building across — settle down, evening the
+        // crossing instead of stacking it. clay_melt == 0 reproduces phase-1 exactly.
+        // Direction test uses clay_sign, not raw's sign: the area-plane bias can put
+        // the plane below the anchor (target_h < 0) mid-build.
+        let wrong = select(raw > 0.0, raw < 0.0, P.clay_sign >= 0);
+        var delta = 0.0;
+        if (!wrong) {
+            delta = raw;
+        } else if (P.clay_melt > 0.0) {
+            let past = abs(h - target_h) / max(P.world_radius, 1e-5);
+            delta = raw * P.clay_melt * smoothstep(0.12, 0.35, past);
         }
         let dc = dir * delta;
         let basec = v * 4u;

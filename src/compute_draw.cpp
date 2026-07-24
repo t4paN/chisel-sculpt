@@ -20,7 +20,7 @@ struct DrawAccumParamsGPU {
     float    view_b[3];          float facing_threshold;
     float    anchor_normal_a[3]; uint32_t use_b;
     float    anchor_normal_b[3]; uint32_t inflate;
-    uint32_t vertex_count;       uint32_t clay; int32_t clay_sign; uint32_t _pad2;
+    uint32_t vertex_count;       uint32_t clay; int32_t clay_sign; float clay_melt;
 };
 static_assert(sizeof(DrawAccumParamsGPU) == 112, "draw_accum Params UBO must be 112 bytes");
 
@@ -217,6 +217,7 @@ void ComputeState::dispatch_draw_accum(const DrawAccumParams& p, const gpu::Buff
     u.inflate = (uint32_t)p.inflate;
     u.clay = (uint32_t)p.clay;
     u.clay_sign = p.clay_sign;
+    u.clay_melt = p.clay_melt;
     u.vertex_count = vc;
     gpu::write_buffer(gpu_dev, draw_accum_ubo, 0, &u, sizeof(u));
 
