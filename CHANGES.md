@@ -2,6 +2,32 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-24 — Clay: standard deposition + stamp roll (⚠️ web-unverified)
+
+- **Clay deposition standardized** (Blender-style, sculpt-tested): each dab now moves
+  verts a **fraction (0.5) of the remaining gap** to the plane instead of teleporting
+  them onto it — overlapping dabs still converge to a flat layer, but the leading edge
+  and a spinning stamp lay soft increments instead of full-height cliffs. Per-dab move
+  capped at 0.5R (Blender's plane-trim) so footprints over deep hollows / tall old
+  strokes can't yank verts in one violent step.
+- **Melt reworked as the standard two-sided pull**: wrong-side verts (proud on a build)
+  move toward the plane at linear `melt` strength — feather dropped. `melt = 1` is full
+  Blender clay (flattens raised areas to the plane — terraces them, sculpt-tested and
+  rejected as default); **default is now 0 = ride over**: raised areas get nothing added
+  and nothing cut, so strokes cross them smoothly.
+- **Wall-fill relax removed** (yesterday's `clay_relax`): the redistribution fought the
+  spinning stamp and churned vertex density on the slab top. Kernel, slider, and all
+  plumbing deleted — sparse walls are the remesher's job, as in ZBrush/Blender.
+  Recoverable at 997f6a5.
+- **New "spin roll" slider** (0..1, clay-only): the square spins as the stroke travels
+  (rate 1 ≈ one revolution per brush-diameter; angular speed scales with stroke speed),
+  composing on top of rake + spin. Travel pools in a pending vector behind the rake's
+  2%-radius deadband, so a resting pen's jitter can't ratchet the spin.
+- **Clay dab spacing tightened to 0.10** (from the 0.25 global): at 0.25 a rolling stamp
+  jumps ~45°/dab — a quarter turn of a 4-fold-symmetric square, reading as separate
+  stamps. 0.10 stamps the in-between angles so the roll interpolates.
+- GLSL + WGSL lockstep; **WGSL not browser-tested yet**.
+
 ## 2026-07-24 — Clay: wall-fill relax (⚠️ web-unverified)
 
 - **Clay slab walls were triangle-sparse.** Clay raises slabs without adding verts, so

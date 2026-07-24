@@ -59,14 +59,18 @@ struct InputState {
     // the camera. Scaffold for the spin dials to come (fixed set value for now, no
     // UI); 0 = screen-upright, behavior-neutral. Applied in set_alpha_dab.
     float stamp_spin_deg = 0.0f;
-    // Clay phase-2 melt (0..1): how strongly clay eases verts already proud of its
-    // plane back down, evening crossings instead of stacking them. 0 = off (proud
-    // detail frozen, the phase-1 default). Slider shows only while Clay is active.
+    // Stamp roll (0..1): the stamp spins as the stroke travels — angle accumulates
+    // with distance (rate 1 ≈ one revolution per brush-diameter). Angular speed =
+    // rate × stroke speed, so faster strokes spin faster. 0 = off. Composes on top of
+    // spin/rake; resets each stroke. Slider shows while Clay is active.
+    float stamp_roll_rate = 0.0f;
+    // Clay melt (0..1): how strongly clay pulls verts on the WRONG side of its plane
+    // (proud on a build, sunk on a carve) back toward it. 0 (default) = ride over:
+    // raised areas get nothing added and nothing cut, so a stroke crosses them
+    // smoothly instead of terracing them down to the plane. 1 = fully two-sided
+    // Blender-style clay (flattens as it builds — steps raised areas to the stroke
+    // plane). Slider shows only while Clay is active.
     float clay_melt = 0.0f;
-    // Clay wall-fill (0..1): pen-up tangential relax strength that redistributes verts
-    // into the stretched, triangle-sparse walls of raised clay slabs. 0 = off. Slides
-    // existing verts (no new triangles); anisotropy-gated to spare the crisp rim.
-    float clay_wall_fill = 0.0f;
 
     // Paint brush albedo (RGB, [0,1]). paint_color is the active colour used by
     // the brush; paint_color_alt is a stashed second colour. Q/E swap them while

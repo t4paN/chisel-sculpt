@@ -159,35 +159,37 @@ fn deposit(v : u32, anchor : vec3<f32>, view : vec3<f32>, anchor_n : vec3<f32>,
         dir = vn;
     }
 
-    // Clay displaces TO a plane instead of BY a fixed amount. The plane sits
+    // Clay displaces TOWARD a plane instead of BY a fixed amount. The plane sits
     // disp_amount above the anchor along anchor_n; a vert's signed height above it
-    // is h, so (target - h) is the gap left to fill. Clamping that to the stroke's
-    // direction is what makes clay build in layers: verts below the plane rise to
-    // meet it (hollows fill), verts already proud of it don't move (detail survives
-    // instead of being amplified), and repeat strokes settle at the plane rather
-    // than growing without bound.
+    // is h, so (target - h) is the gap left to fill. Pulling toward the plane from
+    // both sides is what makes clay build in flat layers: hollows fill, ridges past
+    // the plane settle (melt-scaled), and repeat strokes converge at the plane
+    // rather than growing without bound.
     if (P.clay != 0u) {
         // NB: not `target` — that's a WGSL reserved keyword and Tint rejects the
         // whole module for it (naga/glslang don't, so GL builds stay silent).
         let target_h = P.disp_amount;
         let h = dot(vp - anchor, dir);
-        let raw = (target_h - h) * w;
-        // "Wrong side" = past the plane (proud on a build, sunk on a carve). Phase-1
-        // froze these (delta 0) so proud detail survived. Phase-2 MELT eases them
-        // partway back to the plane at clay_melt strength, feathered by how far past
-        // they are (past/radius): fine detail near the plane is kept, only pronounced
-        // ridges — old strokes you're building across — settle down, evening the
-        // crossing instead of stacking it. clay_melt == 0 reproduces phase-1 exactly.
-        // Direction test uses clay_sign, not raw's sign: the area-plane bias can put
-        // the plane below the anchor (target_h < 0) mid-build.
+        // Standard-clay approach (Blender-style): each dab moves verts a FRACTION of
+        // the remaining gap to the plane instead of teleporting them onto it. The
+        // overlapping dabs of a stroke still converge onto a flat layer behind the
+        // leading edge, but each individual dab lays a soft increment — a spinning
+        // or fast-moving stamp deposits blended steps instead of full-height cliffs.
+        let raw = (target_h - h) * w * 0.5;
+        // "Wrong side" = past the plane (proud on a build, sunk on a carve). Standard
+        // clay pulls BOTH sides toward the plane — that's what makes it flatten as it
+        // builds and even out crossings. clay_melt scales the wrong-side pull:
+        // 1 = fully two-sided (Blender's clay), 0 = freeze proud detail (preserve
+        // mode, the old phase-1 behavior). Direction test uses clay_sign, not raw's
+        // sign: the area-plane bias can put the plane below the anchor (target_h < 0)
+        // mid-build.
         let wrong = select(raw > 0.0, raw < 0.0, P.clay_sign >= 0);
-        var delta = 0.0;
-        if (!wrong) {
-            delta = raw;
-        } else if (P.clay_melt > 0.0) {
-            let past = abs(h - target_h) / max(P.world_radius, 1e-5);
-            delta = raw * P.clay_melt * smoothstep(0.12, 0.35, past);
-        }
+        var delta = select(raw, raw * P.clay_melt, wrong);
+        // Plane trim (Blender's plane_trim): cap the per-dab move so a footprint
+        // hanging over a deep hollow or a tall old stroke can't yank verts in one
+        // violent step.
+        let trim = 0.5 * P.world_radius;
+        delta = clamp(delta, -trim, trim);
         let dc = dir * delta;
         let basec = v * 4u;
         atomicAddFloat(basec + 0u, dc.x);

@@ -529,7 +529,6 @@ int main(int argc, char* argv[]) {
         compute.init_draw_accum_symmetrize();
         compute.init_smooth();
         compute.init_stroke_smooth();
-        compute.init_clay_relax();
         compute.init_mirror_project();
         compute.init_crease();
         compute.init_pinch();

@@ -443,12 +443,14 @@ void BrushStroke::set_alpha_dab(DabContext& ctx, bool allow) {
     t = t.normalized();
     Vec3 b = n.cross(t).normalized();
 
-    // Rake (Clay): ease the stamp toward the stroke's travel direction. One atan2
-    // and a lerp per dab — dabs closer than 2% of the radius keep the last angle
-    // so a resting pen doesn't jitter the square.
+    // Travel since the previous dab, projected into the stamp plane (du along t,
+    // dv along b). Drives both rake (direction) and roll (accumulated spin).
+    Vec3 d = stamp_prev_valid ? (anchor_pos - stamp_prev_anchor) : Vec3(0.0f, 0.0f, 0.0f);
+    float du = d.dot(t), dv = d.dot(b);
+
+    // Rake (Clay): ease the stamp toward the stroke's travel direction. Dabs closer
+    // than 2% of the radius keep the last angle so a resting pen doesn't jitter it.
     if (is_clay && stamp_prev_valid) {
-        Vec3 d = anchor_pos - stamp_prev_anchor;
-        float du = d.dot(t), dv = d.dot(b);
         float min_step = 0.02f * anchor_world_radius;
         if (du * du + dv * dv > min_step * min_step) {
             float target = std::atan2(dv, du);
@@ -462,14 +464,40 @@ void BrushStroke::set_alpha_dab(DabContext& ctx, bool allow) {
             }
         }
     }
+
+    // Roll: the stamp spins as it travels, like a rolling wheel — angle accumulates
+    // with in-plane distance (rate 1 ≈ one revolution per brush-diameter). Angular
+    // speed = rate × linear speed, so a fast flick spins more than a slow nudge over
+    // the same instant, while a given path length always turns the same total.
+    // Travel pools in the pending vector until it clears the same 2%-of-radius
+    // deadband the rake uses: a resting pen's jitter sums to ~zero there instead of
+    // ratcheting the spin (sqrt of noise is always positive), and slow strokes keep
+    // their full distance because real motion doesn't cancel.
+    if (is_clay && ctx.input.stamp_roll_rate > 0.0f && stamp_prev_valid) {
+        stamp_roll_pend_u += du;
+        stamp_roll_pend_v += dv;
+        float pend2 = stamp_roll_pend_u * stamp_roll_pend_u
+                    + stamp_roll_pend_v * stamp_roll_pend_v;
+        float min_step = 0.02f * anchor_world_radius;
+        float diameter = 2.0f * anchor_world_radius;
+        if (pend2 > min_step * min_step && diameter > 1e-6f) {
+            stamp_roll_angle -= (std::sqrt(pend2) / diameter)
+                                * ctx.input.stamp_roll_rate * 6.2831853f;
+            stamp_roll_angle = std::fmod(stamp_roll_angle, 6.2831853f);
+            stamp_roll_pend_u = 0.0f;
+            stamp_roll_pend_v = 0.0f;
+        }
+    }
+
     stamp_prev_anchor = anchor_pos;
     stamp_prev_valid = true;
 
-    // Stamp spin: rotate the frame about n by rake + the fixed spin offset. The
-    // kernel's mirror-X pass flips tang.x/bitan.x after this, so mirrored dabs get
-    // the reflected rotation for free.
+    // Stamp spin: rotate the frame about n by rake + the fixed spin offset + the
+    // accumulated roll. The kernel's mirror-X pass flips tang.x/bitan.x after this,
+    // so mirrored dabs get the reflected rotation for free.
     float total = (is_clay && stamp_rake_valid ? stamp_rake_angle : 0.0f)
-                  + ctx.input.stamp_spin_deg * 3.14159265f / 180.0f;
+                  + ctx.input.stamp_spin_deg * 3.14159265f / 180.0f
+                  + (is_clay && ctx.input.stamp_roll_rate > 0.0f ? stamp_roll_angle : 0.0f);
     if (total != 0.0f) {
         float cs = std::cos(total), sn = std::sin(total);
         Vec3 tr = t * cs + b * sn;
@@ -524,6 +552,9 @@ void BrushStroke::begin(Renderer& renderer, const Camera& cam,
     stamp_prev_valid = false;
     stamp_rake_valid = false;
     stamp_rake_angle = 0.0f;
+    stamp_roll_angle = 0.0f;
+    stamp_roll_pend_u = 0.0f;
+    stamp_roll_pend_v = 0.0f;
 
     snap_flag.assign(vert_count, false);
     snap_x.assign(vert_count, 0.0f);
@@ -1554,38 +1585,6 @@ bool BrushStroke::finalize(DabContext& ctx, Mesh& mesh, UndoStack& stack,
             }
             // Smoothing changed positions on the VBO; force the deferred-readback
             // path below so mesh.pos_* / multires sync to the new state.
-            gpu_positions_deferred = true;
-        }
-
-        // Clay wall-fill: pen-up tangential relax that slides verts down into the
-        // sparse, stretched walls of the raised slab (see clay_relax.comp). Gated on
-        // the wall-fill slider (0 = off) and clay strokes only; anisotropy gate in the
-        // kernel keeps the crisp rim. Runs before the undo/readback below so the
-        // redistributed positions land in the undo entry and the mesh sync.
-        static constexpr float CLAY_RELAX_ANISO_LO = 1.3f;  // gate floor: lower feeds walls harder
-        static constexpr float CLAY_RELAX_FILL_BIAS = 1.5f;  // long-edge pull: verts drift into walls
-        static constexpr int   CLAY_RELAX_ITERS    = 5;
-        if (ctx.input.clay_wall_fill > 0.0f
-            && fin_brush_type == BrushType::CLAY
-            && !snap_list.empty()
-            && compute && compute->supported
-            && compute->has_clay_relax()
-            && compute->adjacency_vertex_count > 0) {
-            compute->dispatch_clay_relax(snap_list.data(), (uint32_t)snap_list.size(),
-                                         ctx.input.clay_wall_fill, CLAY_RELAX_ITERS,
-                                         CLAY_RELAX_ANISO_LO, CLAY_RELAX_FILL_BIAS,
-                                         renderer.vbo_pos, renderer.vbo_norm, renderer.ebo);
-            if (ctx.input.mirror_x)
-                compute->dispatch_mirror_project_ids(renderer.vbo_pos,
-                                                     mesh.vertex_count(),
-                                                     (uint32_t)snap_list.size());
-            if (compute->has_normals()) {
-                compute->dispatch_compute_normals(snap_list.data(),
-                                                   (uint32_t)snap_list.size(),
-                                                   renderer.vbo_pos, renderer.vbo_norm,
-                                                   renderer.ebo);
-                gpu_normals_deferred = true;
-            }
             gpu_positions_deferred = true;
         }
 

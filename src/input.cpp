@@ -90,6 +90,10 @@ InputState::InputState()
     // it read as a packed slab rather than a domed one.
     per_brush[(int)BrushType::CLAY].strength = 0.6f;
     per_brush[(int)BrushType::CLAY].hardness = 0.85f;
+    // Tight spacing so the square's spin interpolates: at the default 0.25 a rolling
+    // stamp (rate 1) jumps ~45° between dabs — a quarter turn of a 4-fold-symmetric
+    // square, so dabs read as separate stamps. 0.10 stamps the in-between angles.
+    per_brush[(int)BrushType::CLAY].spacing = 0.10f;
 
     drop_path[0] = '\0';
     paint_color[0] = 0.85f; paint_color[1] = 0.25f; paint_color[2] = 0.30f;      // warm red

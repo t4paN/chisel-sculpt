@@ -723,13 +723,13 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
         ImGui::SetNextItemWidth(calc_btn_w("Colour") + calc_btn_w("Density") + 8.0f);
         ImGui::SliderFloat("##clayMelt", &input.clay_melt, 0.0f, 1.0f, "melt %.2f");
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Clay melt: eases ridges you build across back down "
-                              "(0 = keep proud detail)");
+            ImGui::SetTooltip("How strongly clay cuts raised areas down to its plane "
+                              "(0 = ride over them untouched, 1 = flatten to the plane)");
         ImGui::SetNextItemWidth(calc_btn_w("Colour") + calc_btn_w("Density") + 8.0f);
-        ImGui::SliderFloat("##clayWall", &input.clay_wall_fill, 0.0f, 1.0f, "wall fill %.2f");
+        ImGui::SliderFloat("##clayRoll", &input.stamp_roll_rate, 0.0f, 1.0f, "spin roll %.2f");
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Wall fill: pen-up relax that slides verts into the sparse "
-                              "walls of raised slabs (0 = off; redistributes, no new tris)");
+            ImGui::SetTooltip("Square spins as the stroke travels (0 = off; "
+                              "1 ≈ one turn per brush-diameter; faster strokes spin faster)");
     }
 
     // Brush-alpha (stamp) picker: Round + built-ins + custom, then a "＋" to load an
