@@ -202,6 +202,147 @@ struct EdgeTable {
 };
 
 // ---------------------------------------------------------------------------
+// Topology defect tracer (CHISEL_DEBUG_REMESH)
+// ---------------------------------------------------------------------------
+//
+// The audit at the end of perform_remesh reports that the output carries a
+// handful of non-manifold and flipped-winding edges, but not WHERE they were
+// born. This walks the same directed-use rule after every sub-pass and prints
+// only when a count moves, so a defect gets pinned to one pass of one
+// iteration. Two hypotheses it exists to separate:
+//
+//   1. Batched collapse. consumed[] marks only the two endpoints of a
+//      collapsed edge, so two vertex-disjoint ops can still share a
+//      neighbouring triangle or a link-condition neighbour — an earlier op in
+//      the batch can invalidate a later one's link_condition, and nothing
+//      re-validates after apply. The `ring` figure below counts, per sub-pass,
+//      how many accepted ops had a 1-ring vertex already consumed by an
+//      earlier op. Defects correlating with a nonzero `ring` confirms this.
+//
+//   2. flip_edges' edge-table fixup. After a flip it repairs only the (va,vd)
+//      and (vb,vc) entries and assumes (va,vc)/(vb,vd) stay put. Its own
+//      MAX_PASSES loop then reads that patched table. Defects appearing in
+//      flip pass >= 1 rather than pass 0 confirms this.
+//
+// O(E) per checkpoint with a hash insert per directed edge — roughly a
+// collapse sub-pass's worth of work each time, hence the compile gate.
+#ifdef CHISEL_DEBUG_REMESH
+
+static float edge_length(const Mesh& m, uint32_t a, uint32_t b);  // defined below
+
+struct TopoCount { uint32_t nonmanifold = 0, bad_winding = 0, open_edges = 0; };
+
+static TopoCount topo_defects(const Mesh& m, std::vector<uint64_t>* offenders = nullptr) {
+    EdgeMap seen;
+    const uint32_t tc = m.tri_count();
+    const uint32_t vc = m.vertex_count();
+    seen.reset((size_t)tc * 2);
+    std::vector<uint32_t> fwd, bwd;
+    std::vector<uint64_t> keys;
+    fwd.reserve((size_t)tc * 2); bwd.reserve((size_t)tc * 2);
+    keys.reserve((size_t)tc * 2);
+
+    for (uint32_t t = 0; t < tc; t++) {
+        for (int e = 0; e < 3; e++) {
+            uint32_t a = m.indices[t*3+e], b = m.indices[t*3+(e+1)%3];
+            if (a >= vc || b >= vc || a == b) continue;
+            uint32_t lo = std::min(a, b), hi = std::max(a, b);
+            uint64_t k = ((uint64_t)lo << 32) | (uint64_t)hi;
+            uint32_t idx = seen.find(k);
+            if (idx == INVALID) {
+                idx = (uint32_t)fwd.size();
+                fwd.push_back(0); bwd.push_back(0); keys.push_back(k);
+                seen.insert(k, idx);
+            }
+            if (a == lo) fwd[idx]++; else bwd[idx]++;
+        }
+    }
+
+    TopoCount c;
+    for (size_t i = 0; i < fwd.size(); i++) {
+        uint32_t uses = fwd[i] + bwd[i];
+        bool bad = false;
+        if (uses > 2)       { c.nonmanifold++; bad = true; }
+        else if (uses == 2) { if (fwd[i] != 1) { c.bad_winding++; bad = true; } }
+        else                  c.open_edges++;
+        if (bad && offenders) offenders->push_back(keys[i]);
+    }
+    return c;
+}
+
+// Print the triangles sharing each offending edge. Two identical index triples
+// means the defect is a DUPLICATE TRIANGLE (both traverse every shared edge the
+// same way); three distinct triples on one edge is a genuine non-manifold fin.
+// Only runs on a rise, so the O(F) scan per offender is paid rarely.
+static void topo_dump_offenders(const Mesh& m, const std::vector<uint64_t>& offenders) {
+    static constexpr int MAX_DUMP = 3;
+    const uint32_t tc = m.tri_count();
+    int shown = 0;
+    for (uint64_t k : offenders) {
+        if (shown >= MAX_DUMP) break;
+        uint32_t v0 = (uint32_t)(k >> 32), v1 = (uint32_t)(k & 0xFFFFFFFFu);
+        std::printf("[topo-trace]   edge (%u,%u) len=%.6f at (%.4f,%.4f,%.4f)\n",
+                    v0, v1, edge_length(m, v0, v1),
+                    m.pos_x[v0], m.pos_y[v0], m.pos_z[v0]);
+        for (uint32_t t = 0; t < tc; t++) {
+            uint32_t i0 = m.indices[t*3+0];
+            uint32_t i1 = m.indices[t*3+1];
+            uint32_t i2 = m.indices[t*3+2];
+            bool h0 = (i0 == v0 || i1 == v0 || i2 == v0);
+            bool h1 = (i0 == v1 || i1 == v1 || i2 == v1);
+            if (!h0 || !h1) continue;
+            std::printf("[topo-trace]     tri %u = (%u, %u, %u)%s\n", t, i0, i1, i2,
+                        (i0 == i1 || i1 == i2 || i0 == i2) ? "  DEGENERATE" : "");
+        }
+        shown++;
+    }
+}
+
+static TopoCount g_topo_prev;
+static bool      g_topo_armed = false;
+
+static void topo_trace_reset(const Mesh& m) {
+    g_topo_prev  = topo_defects(m);
+    g_topo_armed = true;
+    std::printf("[topo-trace] baseline: nonmanifold=%u winding=%u open=%u\n",
+                g_topo_prev.nonmanifold, g_topo_prev.bad_winding,
+                g_topo_prev.open_edges);
+}
+
+// `a` / `b` are stage-specific counters (sub-pass index, ops applied, ...);
+// `extra` is the collapse ring-overlap count, -1 where it doesn't apply.
+static void topo_trace(const Mesh& m, const char* stage, int a, int b, int extra) {
+    if (!g_topo_armed) return;
+    std::vector<uint64_t> offenders;
+    TopoCount c = topo_defects(m, &offenders);
+    const bool rose = (c.nonmanifold > g_topo_prev.nonmanifold ||
+                       c.bad_winding > g_topo_prev.bad_winding);
+    if (c.nonmanifold != g_topo_prev.nonmanifold ||
+        c.bad_winding != g_topo_prev.bad_winding ||
+        c.open_edges  != g_topo_prev.open_edges) {
+        std::printf("[topo-trace] %s %d (n=%d", stage, a, b);
+        if (extra >= 0) std::printf(", ring=%d", extra);
+        std::printf("): nonmanifold %u->%u (%+d), winding %u->%u (%+d), "
+                    "open %u->%u (%+d)\n",
+                    g_topo_prev.nonmanifold, c.nonmanifold,
+                    (int)c.nonmanifold - (int)g_topo_prev.nonmanifold,
+                    g_topo_prev.bad_winding, c.bad_winding,
+                    (int)c.bad_winding - (int)g_topo_prev.bad_winding,
+                    g_topo_prev.open_edges, c.open_edges,
+                    (int)c.open_edges - (int)g_topo_prev.open_edges);
+        if (rose) topo_dump_offenders(m, offenders);
+    }
+    g_topo_prev = c;
+}
+
+#define REMESH_TOPO_RESET(m)                topo_trace_reset(m)
+#define REMESH_TOPO_TRACE(m, s, a, b, x)    topo_trace((m), (s), (a), (b), (x))
+#else
+#define REMESH_TOPO_RESET(m)                ((void)0)
+#define REMESH_TOPO_TRACE(m, s, a, b, x)    ((void)0)
+#endif
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -265,6 +406,90 @@ static Vec3 tri_normal(const Mesh& m, uint32_t tri) {
 }
 
 
+
+// ---------------------------------------------------------------------------
+// Doubled-triangle removal
+// ---------------------------------------------------------------------------
+//
+// The topology tracer showed every persistent non-manifold site in the output
+// is the same structure: two triangles over the SAME three vertices wound in
+// opposite directions — a zero-volume two-sided fin. Its three edges each carry
+// two extra uses, which reads as non-manifold on the edge the fin shares with
+// the real surface and as inconsistent winding elsewhere. Deleting both halves
+// drops those edges back to exactly two triangles, consistently wound, and
+// removes nothing a viewer could see: the pair encloses no volume.
+//
+// A same-winding duplicate is the degenerate cousin (two identical triangles);
+// there only one copy goes.
+//
+// Nothing else in the pipeline can see these — they are geometrically
+// coincident, so the angle, area and normal-inversion gates all pass them.
+static bool tri_same_winding(uint32_t a0, uint32_t a1, uint32_t a2,
+                             uint32_t b0, uint32_t b1, uint32_t b2) {
+    return (a0 == b0 && a1 == b1 && a2 == b2) ||
+           (a0 == b1 && a1 == b2 && a2 == b0) ||
+           (a0 == b2 && a1 == b0 && a2 == b1);
+}
+
+static uint32_t remove_doubled_tris(Mesh& m) {
+    const uint32_t tc = m.tri_count();
+    if (tc == 0) return 0;
+
+    EdgeMap seen;
+    seen.reset((size_t)tc * 2);
+    std::vector<uint8_t> drop(tc, 0);
+    uint32_t removed = 0;
+
+    for (uint32_t t = 0; t < tc; t++) {
+        uint32_t i0 = m.indices[t*3+0], i1 = m.indices[t*3+1], i2 = m.indices[t*3+2];
+        if (i0 == i1 || i1 == i2 || i0 == i2) continue;   // compact_mesh's job
+
+        uint32_t s0 = i0, s1 = i1, s2 = i2;
+        if (s0 > s1) std::swap(s0, s1);
+        if (s1 > s2) std::swap(s1, s2);
+        if (s0 > s1) std::swap(s0, s1);
+        uint64_t k = ((uint64_t)s0 * 0x9E3779B97F4A7C15ull) ^
+                     ((uint64_t)s1 * 0xC2B2AE3D27D4EB4Full) ^
+                     ((uint64_t)s2 * 0x165667B19E3779F9ull);
+        if (k == EdgeMap::EMPTY || k == EdgeMap::TOMB) k ^= 1ull;
+
+        uint32_t prev = seen.find(k);
+        if (prev == INVALID) { seen.insert(k, t); continue; }
+        if (drop[prev]) continue;
+
+        // Verify the actual vertex sets — the key above is a hash, so a
+        // collision must not be allowed to delete unrelated geometry.
+        uint32_t p0 = m.indices[prev*3+0];
+        uint32_t p1 = m.indices[prev*3+1];
+        uint32_t p2 = m.indices[prev*3+2];
+        uint32_t q0 = p0, q1 = p1, q2 = p2;
+        if (q0 > q1) std::swap(q0, q1);
+        if (q1 > q2) std::swap(q1, q2);
+        if (q0 > q1) std::swap(q0, q1);
+        if (q0 != s0 || q1 != s1 || q2 != s2) continue;
+
+        if (tri_same_winding(i0, i1, i2, p0, p1, p2)) {
+            drop[t] = 1;                    // exact duplicate — keep one
+            removed += 1;
+        } else {
+            drop[t] = 1; drop[prev] = 1;    // opposing fin — both go
+            removed += 2;
+        }
+    }
+
+    if (removed == 0) return 0;
+
+    std::vector<uint32_t> kept;
+    kept.reserve(m.indices.size());
+    for (uint32_t t = 0; t < tc; t++) {
+        if (drop[t]) continue;
+        kept.push_back(m.indices[t*3+0]);
+        kept.push_back(m.indices[t*3+1]);
+        kept.push_back(m.indices[t*3+2]);
+    }
+    m.indices = std::move(kept);
+    return removed;
+}
 
 // ---------------------------------------------------------------------------
 // Pass 1: Split long edges
@@ -520,6 +745,7 @@ static uint32_t split_long_edges(Mesh& m, EdgeTable& et,
         total_split += num_split;
         std::printf("[split] sub-pass %d: split %u edges, mesh now %u verts %u tris\n",
                     iter, num_split, m.vertex_count(), m.tri_count());
+        REMESH_TOPO_TRACE(m, "split sub-pass", iter, (int)num_split, -1);
     }
 
     // Rebuild edge table once now that topology is final.
@@ -678,6 +904,9 @@ static uint32_t collapse_short_edges(Mesh& m, EdgeTable& et,
         uint32_t vc_now = m.vertex_count();
         consumed.assign(vc_now, 0);
         ops.clear();
+        // Accepted ops whose 1-ring already held a vertex claimed by an earlier
+        // op in this batch — precisely the case consumed[] does NOT guard.
+        [[maybe_unused]] uint32_t ring_overlaps = 0;
 
         // Valence for every vertex in one O(E) sweep. vertex_valence() walks
         // the CSR per query and got called twice per candidate edge. Every
@@ -861,6 +1090,25 @@ static uint32_t collapse_short_edges(Mesh& m, EdgeTable& et,
             }
             if (!angle_ok) continue;
 
+#ifdef CHISEL_DEBUG_REMESH
+            {
+                bool overlap = false;
+                uint32_t ends[2] = { v_keep, v_remove };
+                for (int q = 0; q < 2 && !overlap; q++) {
+                    uint32_t rs = m.vert_tri_offset[ends[q]];
+                    uint32_t re = m.vert_tri_offset[ends[q] + 1];
+                    for (uint32_t j = rs; j < re && !overlap; j++) {
+                        uint32_t tri = m.vert_tri_list[j];
+                        for (int k = 0; k < 3; k++) {
+                            uint32_t nv = m.indices[tri*3+k];
+                            if (nv == va || nv == vb) continue;
+                            if (nv < vc_now && consumed[nv]) { overlap = true; break; }
+                        }
+                    }
+                }
+                if (overlap) ring_overlaps++;
+            }
+#endif
             consumed[va] = 1;
             consumed[vb] = 1;
             ops.push_back({v_keep, v_remove, new_pos});
@@ -917,6 +1165,9 @@ static uint32_t collapse_short_edges(Mesh& m, EdgeTable& et,
             tri_selected = std::move(new_ts);
             pinned       = std::move(new_pinned);
         }
+
+        REMESH_TOPO_TRACE(m, "collapse sub-pass", iter, (int)ops.size(),
+                          (int)ring_overlaps);
     }
     return total_collapse;
 }
@@ -1057,6 +1308,7 @@ static uint32_t flip_edges(Mesh& m, EdgeTable& et,
             changed = true;
             ++total_flip;
         }
+        REMESH_TOPO_TRACE(m, "flip pass", pass, (int)total_flip, -1);
         pass++;
     }
     return total_flip;
@@ -1622,6 +1874,7 @@ static void mirror_positive_half(Mesh& m, float seam_tol, float target_edge, Com
             std::printf("[mirror] dropped %u degenerate post-split tris\n", dropped);
         m.indices = std::move(filtered);
     }
+    REMESH_TOPO_TRACE(m, "mirror seam-split", 0, 0, -1);
 
     // Re-snapshot counts after splitting
     vc = m.vertex_count();
@@ -1675,6 +1928,7 @@ static void mirror_positive_half(Mesh& m, float seam_tol, float target_edge, Com
     // Snap near-seam +x verts onto x=0 and weld, so the seam is a clean single
     // edge-loop before we reflect. Kills the clip slivers (see consolidate_seam).
     consolidate_seam(m, seam_tol, target_edge);
+    REMESH_TOPO_TRACE(m, "mirror consolidate-seam", 0, 0, -1);
 
     // Re-snapshot after compaction
     vc = m.vertex_count();
@@ -1843,6 +2097,7 @@ static void mirror_positive_half(Mesh& m, float seam_tol, float target_edge, Com
     std::printf("[mirror] geometry mirror: %u paired, %u seam, %u unpaired, "
                 "%u verts %u tris\n",
                 paired, seam, unpaired, m.vertex_count(), m.tri_count());
+    REMESH_TOPO_TRACE(m, "mirror reflect", 0, 0, -1);
 
     // --- Connected-component cleanup ---
     // Union-find over triangle connectivity. Discard all components except the
@@ -2446,6 +2701,10 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
                    std::chrono::steady_clock::now() - a).count();
     };
 
+    // Baseline BEFORE any edge op, so a defect present in the incoming mesh is
+    // attributed to the input rather than to whichever pass runs first.
+    REMESH_TOPO_RESET(mesh);
+
     for (int iter = 0; iter < iterations; iter++) {
         auto ts = tick();
         uint32_t n_split = split_long_edges(mesh, et, tri_selected, pinned, high, seam_tol, &sel_mask, tlen);
@@ -2463,7 +2722,14 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
         uint32_t n_collapse = collapse_short_edges(mesh, et, tri_selected, pinned, low, seam_tol, &sel_mask, tlen);
         t_collapse += since(ts);
 
-        if (n_collapse > 0) {
+        // Sweep fins before they propagate: split refines them into more fins,
+        // and every later pass is blind to them.
+        uint32_t n_doubled = remove_doubled_tris(mesh);
+        if (n_doubled > 0)
+            std::printf("[remesh] iter %d: removed %u doubled tris\n", iter, n_doubled);
+        REMESH_TOPO_TRACE(mesh, "dedup iter", iter, (int)n_doubled, -1);
+
+        if (n_collapse > 0 || n_doubled > 0) {
             ts = tick();
             rebuild_all();
             // Rebuilt AFTER rebuild_all, not before: rebuild_all compacts, and
@@ -2488,6 +2754,9 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
                 0.8f, seam_tol,
                 mesh.pos_x.data(), mesh.pos_y.data(), mesh.pos_z.data());
         }
+        // Control point: smoothing moves positions only, so this must never
+        // fire. If it does, the smooth kernel is corrupting indices.
+        REMESH_TOPO_TRACE(mesh, "smooth iter", iter, 0, -1);
 
         uint32_t total_ops = n_split + n_collapse + n_flip;
         uint32_t threshold = std::max<uint32_t>(8, mesh.tri_count() / 1000);
@@ -2504,6 +2773,14 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
     std::printf("[remesh] outer loop: %d/%d iters (split %.0f ms, collapse %.0f ms, "
                 "flip %.0f ms, rebuild %.0f ms)\n",
                 iters_done, iterations, t_split, t_collapse, t_flip, t_rebuild);
+
+    // Final sweep before the mirror — the reflection duplicates whatever it is
+    // handed, so a fin that survives to here comes out as two fins.
+    {
+        uint32_t n_doubled = remove_doubled_tris(mesh);
+        if (n_doubled > 0)
+            std::printf("[remesh] pre-mirror: removed %u doubled tris\n", n_doubled);
+    }
 
     // Final compaction and rebuild
     compact_mesh(mesh);

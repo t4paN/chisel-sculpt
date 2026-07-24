@@ -373,6 +373,11 @@ if(CHISEL_DEBUG_MULTIRES)
     target_compile_definitions(chisel PRIVATE CHISEL_DEBUG_MULTIRES)
 endif()
 
+option(CHISEL_DEBUG_REMESH "Trace where the remesher introduces topology defects" OFF)
+if(CHISEL_DEBUG_REMESH)
+    target_compile_definitions(chisel PRIVATE CHISEL_DEBUG_REMESH)
+endif()
+
 option(CHISEL_DEBUG "Enable Chisel debug asserts + synchronous GL debug output" OFF)
 if(CHISEL_DEBUG)
     target_compile_definitions(chisel PRIVATE CHISEL_DEBUG)

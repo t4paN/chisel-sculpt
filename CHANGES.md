@@ -2,6 +2,39 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-25 — Remesh: doubled-triangle removal + topology tracer
+
+- **Found what the non-manifold edges actually were.** Added `CHISEL_DEBUG_REMESH`, a
+  compile-gated `[topo-trace]` that re-counts directed edge uses after every sub-pass and
+  prints only on a change, so a defect gets pinned to one pass of one iteration. Baseline was
+  clean (`nonmanifold=0 winding=0 open=0`) on every input tried, so the remesher was
+  manufacturing all of it. Attribution: non-manifold edges born in `collapse`, flipped-winding
+  in `flip` (always exactly +4 — the four ring edges of one flipped quad) and `split`. The
+  mirror was **exonerated**: it drops the -x half's defects and faithfully doubles whatever
+  survives, inventing nothing.
+- **The structure, from the offender dumps:** every persistent site is two triangles over the
+  SAME three vertices wound in opposite directions — a zero-volume two-sided fin. Six
+  independent sites, one shape. Tracking positions across iterations showed ~3 sites drifting
+  with the relaxation and surviving all 10 iterations; split and collapse *propagate* them
+  rather than making new ones. Nothing else in the pipeline can see them: they are
+  geometrically coincident, so the angle, area and normal-inversion gates all pass.
+- **`remove_doubled_tris`**: hashes each triangle's sorted vertex triple, verifies the actual
+  vertex set on a hit (a hash collision must never delete unrelated geometry), then deletes
+  both halves of an opposing pair (encloses no volume — nothing visible is lost) or one copy
+  of a same-winding duplicate. Runs after collapse each outer iteration, before split can
+  refine a fin into more fins, and once more before the mirror, since reflection would turn
+  one surviving fin into two. Deleting the pair drops the shared edge back to exactly two
+  consistently-wound triangles — verified by hand against three dumps.
+- Result on the SDF-merge path: `pre-mirror` and `post-mirror` both **watertight, manifold,
+  consistent winding**, and `[repair] no flipped tris`. Note the dedup pass did not fire on
+  that input, so it is confirmed non-destructive but not yet confirmed as the fin fix.
+- `repair_flipped_tris` also stops once the flipped count stops falling instead of dragging
+  verts around for a fixed 5 iterations against defects relaxation cannot touch.
+- **Still open:** something upstream still creates fins on the subdivided-icosphere path
+  (unproven whether it is batched collapse invalidating its own `link_condition`, or the flip
+  rewrite); and "triangles within triangles" near the seam persists with topology fully
+  clean, so that one is geometric, not topological.
+
 ## 2026-07-25 — Remesh: subdiv-up crash, error handling, seam quality, perf
 
 - **Fix: `std::bad_alloc` on subdivide-after-remesh.** `perform_remesh` hand-rolls its own
