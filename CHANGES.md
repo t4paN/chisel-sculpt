@@ -2,8 +2,24 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-24 — Fix: Draw/Inflate/Clay dead on web (WGSL template-list parse)
+
+- **Root cause:** the clay rework's `select(raw > 0.0, raw < 0.0, P.clay_sign >= 0)` in
+  `draw_accum.wgsl` — Tint parses the `<` in `raw < 0.0` as a template-list opener and the
+  `>` in `>= 0` as its close, so the whole module fails to compile. naga/glslang skip that
+  disambiguation, so GL/native stayed silent; only the browser (Tint) rejected it. Draw,
+  Inflate and Clay are the only three brushes dispatching `draw_accum`, hence exactly those
+  three deposited nothing (empty stroke commits). Same class as the old `target` keyword bug.
+- **Fix:** split the comparisons onto their own `let` statements so no `>` follows the `<`
+  on the same parse. Verified clean in Chrome/Tint (browser rig) — strokes commit non-empty.
+
 ## 2026-07-24 — Clay: standard deposition + stamp roll (⚠️ web-unverified)
 
+- **Deployed:** pushed clay batch (`af84802..b2d7e1c`) to chisel-sculpt (Linux + Windows
+  CI) and rebuilt the emscripten web build, pushed to itch (`tpn/chisel-sculpt:html5`).
+  Still web-unverified — needs a Chrome check on the live build.
+- **build: wgpu-native native release bumped** `v29.0.0.0 → v29.0.1.1` (native-only,
+  no effect on the emscripten/web path).
 - **Clay deposition standardized** (Blender-style, sculpt-tested): each dab now moves
   verts a **fraction (0.5) of the remaining gap** to the plane instead of teleporting
   them onto it — overlapping dabs still converge to a flat layer, but the leading edge

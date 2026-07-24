@@ -183,7 +183,15 @@ fn deposit(v : u32, anchor : vec3<f32>, view : vec3<f32>, anchor_n : vec3<f32>,
         // mode, the old phase-1 behavior). Direction test uses clay_sign, not raw's
         // sign: the area-plane bias can put the plane below the anchor (target_h < 0)
         // mid-build.
-        let wrong = select(raw > 0.0, raw < 0.0, P.clay_sign >= 0);
+        // NB: keep each comparison on its own line. Inlining `raw < 0.0` as a
+        // select() arg makes Tint read the `<` as a template-list opener and the
+        // `>` in `clay_sign >= 0` as its close — the whole module fails to parse
+        // (naga/glslang don't disambiguate, so GL/native stay silent). See
+        // webgpudrawbug.md — this is the same trap as the `target` keyword.
+        let proud = raw > 0.0;
+        let sunk  = raw < 0.0;
+        let build = P.clay_sign >= 0;
+        let wrong = select(proud, sunk, build);
         var delta = select(raw, raw * P.clay_melt, wrong);
         // Plane trim (Blender's plane_trim): cap the per-dab move so a footprint
         // hanging over a deep hollow or a tall old stroke can't yank verts in one
