@@ -95,7 +95,7 @@ endif()
 # ---------------------------------------------------------------------------
 if(NOT EMSCRIPTEN AND CHISEL_GPU_BACKEND STREQUAL "webgpu")
     include(FetchContent)
-    set(WGPU_NATIVE_VERSION "v29.0.0.0" CACHE STRING "wgpu-native release tag")
+    set(WGPU_NATIVE_VERSION "v29.0.1.1" CACHE STRING "wgpu-native release tag")
     set(_wgpu_base "https://github.com/gfx-rs/wgpu-native/releases/download/${WGPU_NATIVE_VERSION}")
     if(WIN32)
         set(_wgpu_url "${_wgpu_base}/wgpu-windows-x86_64-msvc-release.zip")
