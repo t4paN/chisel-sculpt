@@ -2,6 +2,68 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-25 — Remesh: subdiv-up crash, error handling, seam quality, perf
+
+- **Fix: `std::bad_alloc` on subdivide-after-remesh.** `perform_remesh` hand-rolls its own
+  multires stack reset instead of calling `multires_stack_init_from_lock`, and cleared 5 of
+  the 7 things that function clears — it missed `topo_cache` and `lock_stamp`. So after a
+  remesh the topology cache still described the **old** subdivision chain, still flagged
+  `ready`. The next subdivide-up fed that stale `tc.vcount` to `build_parent_map` as the
+  fine-level count against the new base's `V_coarse`; both `uint32_t`, so `V_fine - V_coarse`
+  underflowed to ~4.3e9 and `out.assign(that * 2, ...)` asked for ~34 GB. The stale
+  `lock_stamp` was the same bug on the GPU side — it keys the cascade's VRAM tables to a
+  chain identity, so a carried-over stamp lets the GPU replay reuse tables built for the
+  pre-remesh topology. `build_parent_map` now also refuses a `V_fine < V_coarse` pair with a
+  log line instead of underflowing into a multi-gigabyte allocation far from the cause.
+- **Remesh had no failure path at all.** `RemeshResult::error` was never written by anyone,
+  yet `main.cpp` prints it and toasts "Remesh FAILED"; and `main.cpp` passes `nullptr` for
+  `cs` when compute is unsupported while `perform_remesh` dereferenced it unconditionally —
+  a guaranteed null deref on a compute-less device, where the whole point was graceful
+  degradation. Added entry validation (null/unsupported compute, empty mesh, index count not
+  a multiple of 3, out-of-range indices) that leaves the mesh untouched and reports through
+  `r.error`. `pinned[]` is now clamped to vertex count after each `find_pinned` readback —
+  split/collapse index it raw, unlike `tri_selected`.
+- **`compact_mesh` left `INVALID` (`UINT32_MAX`) in `mirror_x_map`** for any vert whose
+  partner was culled; consumers index that map raw. Now falls back to self, which is what
+  "unpaired" means everywhere else.
+- **`repair_flipped_tris` could teleport a vertex to the origin**: the gather loop bails on
+  `n == 0` but the apply loop re-tested only `bad_vert` + mask — a weaker predicate — so it
+  wrote back a default-constructed `Vec3`. Now tracked with an explicit flag. It also stops
+  when the flipped count stops falling, instead of dragging verts around for 5 iterations
+  against defects that are topological, not geometric.
+- **Seam slivers, two independent causes.** (1) The weld pass was gated behind
+  `if (snapped == 0) return;` — skipped in exactly the case that needs it, since the plane
+  clip alone drops coincident cut verts when two straddling edges meet x=0 at the same point.
+  Now unconditional. (2) *Nothing ever decimated the seam*: the clip mints cut verts at
+  whatever spacing the old triangulation had, and `collapse_short_edges` ran back when those
+  verts did not exist and treats seam verts as pinned anyway. Added a decimation stage
+  (merge along seam edges under `0.5 x target`, one merge per vertex, guarded on normal
+  inversion) running on the +x half before reflection, so the result stays symmetric by
+  construction.
+- **The watertightness audit was blind to two of three defect classes.** It built an
+  `EdgeTable`, which stores only `tri_a`/`tri_b` and silently overwrites `tri_b` on a third
+  triangle — so non-manifold edges reported as watertight, and winding was never checked.
+  Rewritten to count directed edge uses: 1 = crack, >2 = non-manifold fin, 2-in-the-same-
+  direction = flipped winding (the actual "broken normals" case). Plus a needle-triangle
+  count split by seam proximity. **This immediately found real defects in the output —
+  4-6 non-manifold and 3-11 flipped-winding edges per remesh. Still open.**
+- **Perf: ~4x less bookkeeping overhead.** `EdgeTable::lookup` was a
+  `std::unordered_map<uint64_t,uint32_t>`, which heap-allocates a node per insert, rebuilt at
+  the top of every collapse sub-pass (<=20) inside every outer iteration (<=10) at ~1.5
+  inserts per triangle. Replaced with a flat open-addressed map (power-of-two capacity,
+  linear probing, buffers reused across rebuilds — verified against `std::unordered_map` over
+  200 randomized trials including forced growth). Same treatment for `consumed_verts`, both
+  `touched_tris` sets and split's `edge_map`. Valence is now snapshot once per collapse
+  sub-pass (O(E)) and maintained incrementally in flip (a flip is exactly -1/-1/+1/+1) rather
+  than re-walking the CSR per candidate; `link_condition` uses a stack array instead of
+  allocating an `unordered_set` per candidate edge. The seam weld's all-pairs sweep is now
+  sorted-by-y with an early break. The outer loop skipped its unconditional double
+  `rebuild_all()` — two GPU readback stalls each — when a pass did zero ops. On a 320k-tri
+  model rebuild fell to 656 ms of 15015 ms total (~4%).
+- **Latent ordering bug:** `et.build(mesh)` ran *before* `rebuild_all()`, which compacts —
+  renumbering verts and tris out from under the edge table `flip_edges` then walks. Safe only
+  because that compaction happened to be a no-op right after collapse's own. Swapped.
+
 ## 2026-07-24 — Fix: Draw/Inflate/Clay dead on web (WGSL template-list parse)
 
 - **Root cause:** the clay rework's `select(raw > 0.0, raw < 0.0, P.clay_sign >= 0)` in

@@ -105,6 +105,16 @@ static void build_parent_map(uint32_t                     V_coarse,
                              const std::vector<uint32_t>& fine_idx,
                              uint32_t                     V_fine,
                              std::vector<uint32_t>&       out) {
+    // Subdivision only ever adds verts, so V_fine < V_coarse means the caller
+    // handed us a level pair from two different topology chains — a stale
+    // topo_cache. Left to the unsigned subtraction below that underflows into
+    // a multi-gigabyte assign and dies as std::bad_alloc, miles from the cause.
+    if (V_fine < V_coarse) {
+        std::printf("[multires] build_parent_map: fine level has %u verts, coarse has "
+                    "%u - mismatched topology chains, refusing\n", V_fine, V_coarse);
+        out.clear();
+        return;
+    }
     out.assign((size_t)(V_fine - V_coarse) * 2, UINT32_MAX);
     const uint32_t F = (uint32_t)(coarse_idx.size() / 3);
     for (uint32_t t = 0; t < F; t++) {

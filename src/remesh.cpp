@@ -7,7 +7,6 @@
 #include <cstring>
 #include <unordered_map>
 #include <functional>
-#include <unordered_set>
 #include <vector>
 
 // ---------------------------------------------------------------------------
@@ -22,9 +21,91 @@ struct EdgeEntry {
     bool dead;
 };
 
+// Open-addressed uint64 -> uint32 map, linear probing, power-of-two capacity.
+//
+// std::unordered_map allocates a node per insert. The edge table gets rebuilt
+// at the top of every collapse sub-pass (up to 20 per outer iteration, up to
+// 10 outer iterations) and does ~1.5 inserts per triangle, so those node
+// allocations were the bulk of remesh's CPU time. Buffers here are reused
+// across rebuilds — `reset` only reallocates when the mesh outgrows them.
+//
+// Erase leaves a tombstone and insert never claims one: every caller verifies
+// absence first (a probe that walks to EMPTY), so refusing to reuse tombstones
+// costs a little probing and removes any chance of a duplicate key.
+struct EdgeMap {
+    static constexpr uint64_t EMPTY = ~0ull;
+    static constexpr uint64_t TOMB  = ~0ull - 1;
+
+    std::vector<uint64_t> keys;
+    std::vector<uint32_t> vals;
+    uint32_t cap_mask = 0;
+    uint32_t occupied = 0;   // live + tombstoned slots
+
+    static uint64_t mix(uint64_t k) {
+        k ^= k >> 33; k *= 0xff51afd7ed558ccdULL;
+        k ^= k >> 33; k *= 0xc4ceb9fe1a85ec53ULL;
+        k ^= k >> 33;
+        return k;
+    }
+
+    void reset(size_t expected) {
+        size_t want = 64;
+        while (want < expected * 2) want <<= 1;
+        if (keys.size() != want) { keys.resize(want); vals.resize(want); }
+        std::fill(keys.begin(), keys.end(), EMPTY);
+        cap_mask = (uint32_t)(want - 1);
+        occupied = 0;
+    }
+
+    void grow() {
+        std::vector<uint64_t> old_keys = keys;
+        std::vector<uint32_t> old_vals = vals;
+        size_t want = keys.size() * 2;
+        keys.assign(want, EMPTY);
+        vals.resize(want);
+        cap_mask = (uint32_t)(want - 1);
+        occupied = 0;
+        for (size_t i = 0; i < old_keys.size(); i++)
+            if (old_keys[i] != EMPTY && old_keys[i] != TOMB)
+                insert(old_keys[i], old_vals[i]);
+    }
+
+    void insert(uint64_t k, uint32_t v) {
+        // Keep load under 0.7 so probe chains stay short.
+        if ((uint64_t)(occupied + 1) * 10 > (uint64_t)keys.size() * 7) grow();
+        uint32_t i = (uint32_t)mix(k) & cap_mask;
+        while (true) {
+            uint64_t cur = keys[i];
+            if (cur == k) { vals[i] = v; return; }
+            if (cur == EMPTY) { keys[i] = k; vals[i] = v; occupied++; return; }
+            i = (i + 1) & cap_mask;
+        }
+    }
+
+    uint32_t find(uint64_t k) const {
+        uint32_t i = (uint32_t)mix(k) & cap_mask;
+        while (true) {
+            uint64_t cur = keys[i];
+            if (cur == k) return vals[i];
+            if (cur == EMPTY) return INVALID;
+            i = (i + 1) & cap_mask;
+        }
+    }
+
+    void erase(uint64_t k) {
+        uint32_t i = (uint32_t)mix(k) & cap_mask;
+        while (true) {
+            uint64_t cur = keys[i];
+            if (cur == k) { keys[i] = TOMB; return; }
+            if (cur == EMPTY) return;
+            i = (i + 1) & cap_mask;
+        }
+    }
+};
+
 struct EdgeTable {
     std::vector<EdgeEntry> edges;
-    std::unordered_map<uint64_t, uint32_t> lookup; // (v0,v1) -> edge index
+    EdgeMap lookup; // (v0,v1) -> edge index
 
     // CSR vert→edge_id: built by `build()`, immutable until the next build.
     // vert_edge_offset has size vc+1; vert_edge_list has size sum(valence).
@@ -42,11 +123,12 @@ struct EdgeTable {
 
     void build(const Mesh& m) {
         edges.clear();
-        lookup.clear();
         vert_edge_extra.clear();
         uint32_t vc = m.vertex_count();
         uint32_t tc = m.tri_count();
-        lookup.reserve(tc * 3);
+        // A closed manifold has ~1.5 edges per triangle; 2x that is ample and
+        // keeps the map from growing mid-build.
+        lookup.reset((size_t)tc * 2);
         edges.reserve(tc * 3 / 2);
 
         for (uint32_t t = 0; t < tc; t++) {
@@ -54,14 +136,14 @@ struct EdgeTable {
             for (int e = 0; e < 3; e++) {
                 uint32_t a = idx[e], b = idx[(e+1)%3];
                 uint64_t k = key(a, b);
-                auto it = lookup.find(k);
-                if (it == lookup.end()) {
+                uint32_t found = lookup.find(k);
+                if (found == INVALID) {
                     uint32_t ei = (uint32_t)edges.size();
                     uint32_t lo = std::min(a, b), hi = std::max(a, b);
                     edges.push_back({lo, hi, t, INVALID, false});
-                    lookup[k] = ei;
+                    lookup.insert(k, ei);
                 } else {
-                    edges[it->second].tri_b = t;
+                    edges[found].tri_b = t;
                 }
             }
         }
@@ -98,15 +180,14 @@ struct EdgeTable {
     }
 
     uint32_t find_edge(uint32_t a, uint32_t b) const {
-        auto it = lookup.find(key(a, b));
-        return (it != lookup.end()) ? it->second : INVALID;
+        return lookup.find(key(a, b));
     }
 
     void add_edge(uint32_t v0_, uint32_t v1_, uint32_t ta, uint32_t tb) {
         uint32_t lo = std::min(v0_, v1_), hi = std::max(v0_, v1_);
         uint32_t ei = (uint32_t)edges.size();
         edges.push_back({lo, hi, ta, tb, false});
-        lookup[key(lo, hi)] = ei;
+        lookup.insert(key(lo, hi), ei);
         // Append to the per-vert extras (CSR is fixed once built).
         if (lo >= vert_edge_extra.size()) vert_edge_extra.resize(lo + 1);
         vert_edge_extra[lo].push_back(ei);
@@ -183,14 +264,6 @@ static Vec3 tri_normal(const Mesh& m, uint32_t tri) {
     return (v1 - v0).cross(v2 - v0);
 }
 
-static int vertex_valence(const EdgeTable& et, uint32_t v) {
-    int val = 0;
-    et.for_edges_at(v, [&](uint32_t ei) {
-        if (!et.edges[ei].dead) val++;
-        return true;
-    });
-    return val;
-}
 
 
 // ---------------------------------------------------------------------------
@@ -234,6 +307,16 @@ static uint32_t split_long_edges(Mesh& m, EdgeTable& et,
 
     struct SplitEdge { uint32_t va, vb, tri_a, tri_b; };
 
+    // Candidate buffers, reused across sub-passes so nothing reallocates per
+    // pass. `cands` also replaces the old unordered_map's iteration order with
+    // discovery order (ascending triangle index) — which edge wins the
+    // touched_tris race changes, but the deferred ones are picked up by the
+    // next sub-pass exactly as before, and this order is both deterministic
+    // and cache-friendly.
+    EdgeMap edge_seen;
+    std::vector<SplitEdge> cands;
+    std::vector<uint8_t> touched;
+
     for (int iter = 0; iter < MAX_ITERS; iter++) {
         // Rebuild adjacency so vert_tri_offset/vert_tri_list are current.
         m.build_adjacency();
@@ -242,7 +325,8 @@ static uint32_t split_long_edges(Mesh& m, EdgeTable& et,
         // edge table) to find both tris sharing each edge so the lookup is
         // never stale.
         uint32_t tc = m.tri_count();
-        std::unordered_map<uint64_t, SplitEdge> edge_map;
+        edge_seen.reset((size_t)tc * 2);
+        cands.clear();
 
         for (uint32_t t = 0; t < tc; t++) {
             if (t >= (uint32_t)tri_selected.size() || !tri_selected[t]) continue;
@@ -252,7 +336,7 @@ static uint32_t split_long_edges(Mesh& m, EdgeTable& et,
                 uint32_t va = idx[e], vb = idx[(e+1)%3];
 
                 uint64_t k = edge_key(va, vb);
-                if (edge_map.count(k)) continue;
+                if (edge_seen.find(k) != INVALID) continue;
                 // Adaptive: per-edge threshold from the graded target-length
                 // field (mean of endpoint targets, spec §4.1). Uniform otherwise.
                 float hi_local = high;
@@ -277,14 +361,24 @@ static uint32_t split_long_edges(Mesh& m, EdgeTable& et,
                 if (!sel_a && !sel_b) continue;
 
                 uint32_t lo = std::min(va, vb), hi_v = std::max(va, vb);
-                edge_map[k] = {lo, hi_v, tri_a, tri_b};
+                edge_seen.insert(k, (uint32_t)cands.size());
+                cands.push_back({lo, hi_v, tri_a, tri_b});
             }
         }
 
-        if (edge_map.empty()) break;
+        if (cands.empty()) break;
 
         uint32_t num_split = 0;
-        std::unordered_set<uint32_t> touched_tris;
+        // Stamp array instead of a set. Splits append triangles, so it grows
+        // on demand past the pre-split triangle count.
+        touched.assign(tc, 0);
+        auto mark_touched = [&](uint32_t t) {
+            if (t >= touched.size()) touched.resize(t + 1, 0);
+            touched[t] = 1;
+        };
+        auto is_touched = [&](uint32_t t) {
+            return t < touched.size() && touched[t] != 0;
+        };
 
         // Batch-split all found edges.  Two long edges that share a triangle
         // cannot both be split in the same sub-pass — the first split rewrites
@@ -293,9 +387,9 @@ static uint32_t split_long_edges(Mesh& m, EdgeTable& et,
         // Guard: skip any edge whose adjacent triangles were already touched by
         // an earlier split in this batch; the outer loop's next sub-pass will
         // catch the deferred edges with fresh adjacency.
-        for (auto& [k, se] : edge_map) {
-            if (se.tri_a != INVALID && touched_tris.count(se.tri_a)) continue;
-            if (se.tri_b != INVALID && touched_tris.count(se.tri_b)) continue;
+        for (const SplitEdge& se : cands) {
+            if (se.tri_a != INVALID && is_touched(se.tri_a)) continue;
+            if (se.tri_b != INVALID && is_touched(se.tri_b)) continue;
 
             uint32_t va = se.va, vb = se.vb;
 
@@ -401,7 +495,7 @@ static uint32_t split_long_edges(Mesh& m, EdgeTable& et,
                 uint32_t vc_ = m.indices[tri*3+vc_pos];
 
                 m.indices[tri*3+vb_pos] = vm;
-                touched_tris.insert(tri);
+                mark_touched(tri);
 
                 uint32_t new_tri = m.tri_count();
                 if ((va_pos + 1) % 3 == vb_pos) {
@@ -416,7 +510,7 @@ static uint32_t split_long_edges(Mesh& m, EdgeTable& et,
                     m.indices.push_back(vc_);
                 }
                 tri_selected.push_back(1u);
-                touched_tris.insert(new_tri);
+                mark_touched(new_tri);
             }
         }
 
@@ -508,22 +602,39 @@ static bool collapse_would_invert(const Mesh& m, const EdgeTable& et,
 
 // Link condition: v0 and v1 must share exactly 2 neighbor vertices (the diamond tips).
 // If they share more, collapse creates non-manifold topology.
+// Neighbours are gathered into a fixed stack array rather than an
+// unordered_set: this runs for every short edge that clears the earlier gates,
+// and a heap allocation per candidate was pure overhead. The caller already
+// rejected val_a + val_b - 4 > 12, so a 1-ring can't reach MAX_LINK_NBRS here;
+// overflowing it anyway means the mesh is degenerate, and refusing the collapse
+// is the conservative answer.
 static bool link_condition(const EdgeTable& et, uint32_t v0, uint32_t v1) {
-    std::unordered_set<uint32_t> nbrs0;
+    static constexpr int MAX_LINK_NBRS = 32;
+    uint32_t nbrs0[MAX_LINK_NBRS];
+    int n0 = 0;
+    bool overflow = false;
     et.for_edges_at(v0, [&](uint32_t ei) {
         const auto& e = et.edges[ei];
         if (!e.dead) {
             uint32_t other = (e.v0 == v0) ? e.v1 : e.v0;
-            if (other != v1) nbrs0.insert(other);
+            if (other != v1) {
+                if (n0 >= MAX_LINK_NBRS) { overflow = true; return false; }
+                nbrs0[n0++] = other;
+            }
         }
         return true;
     });
+    if (overflow) return false;
+
     int shared = 0;
     et.for_edges_at(v1, [&](uint32_t ei) {
         const auto& e = et.edges[ei];
         if (!e.dead) {
             uint32_t other = (e.v0 == v1) ? e.v1 : e.v0;
-            if (other != v0 && nbrs0.count(other)) shared++;
+            if (other != v0) {
+                for (int i = 0; i < n0; i++)
+                    if (nbrs0[i] == other) { shared++; break; }
+            }
         }
         return true;
     });
@@ -554,12 +665,30 @@ static uint32_t collapse_short_edges(Mesh& m, EdgeTable& et,
 
     struct CollapseOp { uint32_t v_keep, v_remove; Vec3 new_pos; };
 
+    // Hoisted out of the sub-pass loop so the scratch buffers are allocated
+    // once for the whole collapse, not once per sub-pass (up to 20 of them).
+    std::vector<uint8_t> consumed;
+    std::vector<int32_t> valence;
+    std::vector<CollapseOp> ops;
+
     for (int iter = 0; iter < MAX_ITERS; iter++) {
         m.build_adjacency();
         et.build(m);
 
-        std::unordered_set<uint32_t> consumed_verts;
-        std::vector<CollapseOp> ops;
+        uint32_t vc_now = m.vertex_count();
+        consumed.assign(vc_now, 0);
+        ops.clear();
+
+        // Valence for every vertex in one O(E) sweep. vertex_valence() walks
+        // the CSR per query and got called twice per candidate edge. Every
+        // collapse decision in this sub-pass is made before any op is applied,
+        // so a snapshot taken here returns exactly what those calls did.
+        valence.assign(vc_now, 0);
+        for (const auto& e : et.edges) {
+            if (e.dead) continue;
+            if (e.v0 < vc_now) valence[e.v0]++;
+            if (e.v1 < vc_now) valence[e.v1]++;
+        }
 
         uint32_t num_edges = (uint32_t)et.edges.size();
         for (uint32_t ei = 0; ei < num_edges; ei++) {
@@ -580,7 +709,8 @@ static uint32_t collapse_short_edges(Mesh& m, EdgeTable& et,
 
             uint32_t va = e.v0, vb = e.v1;
 
-            if (consumed_verts.count(va) || consumed_verts.count(vb)) continue;
+            if (va >= vc_now || vb >= vc_now) continue;
+            if (consumed[va] || consumed[vb]) continue;
 
             // Pinned-pinned edges may only collapse when BOTH pins sit on the
             // mirror seam (that decimates the seam line to target spacing and
@@ -612,8 +742,8 @@ static uint32_t collapse_short_edges(Mesh& m, EdgeTable& et,
             if (pinned[vb] && !pinned[va] && std::fabs(m.pos_x[va]) < seam_tol) continue;
             if (e.tri_a == INVALID || e.tri_b == INVALID) continue;
 
-            int val_a = vertex_valence(et, va);
-            int val_b = vertex_valence(et, vb);
+            int val_a = valence[va];
+            int val_b = valence[vb];
             if (val_a + val_b - 4 > 12) continue;
             if (val_a <= 3 || val_b <= 3) continue;
 
@@ -731,8 +861,8 @@ static uint32_t collapse_short_edges(Mesh& m, EdgeTable& et,
             }
             if (!angle_ok) continue;
 
-            consumed_verts.insert(va);
-            consumed_verts.insert(vb);
+            consumed[va] = 1;
+            consumed[vb] = 1;
             ops.push_back({v_keep, v_remove, new_pos});
         }
 
@@ -741,7 +871,7 @@ static uint32_t collapse_short_edges(Mesh& m, EdgeTable& et,
 
         // Apply all collected collapses.  Use vert_tri_offset/vert_tri_list
         // (built fresh at the top of this sub-pass) rather than the edge
-        // table — consumed_verts guarantees no two ops share a vertex, so
+        // table — consumed[] guarantees no two ops share a vertex, so
         // the pre-collapse adjacency for each v_remove is still valid when
         // we reach it here.
         for (const auto& op : ops) {
@@ -802,14 +932,26 @@ static uint32_t flip_edges(Mesh& m, EdgeTable& et,
     // iteration leaves wins on the table — an edge that becomes flippable only
     // after its neighbor flips never gets caught in the same sweep.
     static constexpr int MAX_PASSES = 5;
-    std::unordered_set<uint32_t> touched_tris;
+    uint32_t vcount = m.vertex_count();
+    std::vector<uint8_t> touched_tris(m.tri_count(), 0);
+
+    // Valence snapshot, maintained incrementally. A flip drops edge (va,vb)
+    // and adds (vc,vd), so it is exactly -1/-1/+1/+1 on those four verts —
+    // the same deltas dev_after already models. Beats calling vertex_valence()
+    // four times per candidate edge, each of which walks the CSR.
+    std::vector<int32_t> valence(vcount, 0);
+    for (const auto& e : et.edges) {
+        if (e.dead) continue;
+        if (e.v0 < vcount) valence[e.v0]++;
+        if (e.v1 < vcount) valence[e.v1]++;
+    }
 
     uint32_t total_flip = 0;
     int pass = 0;
     bool changed = true;
     while (changed && pass < MAX_PASSES) {
         changed = false;
-        touched_tris.clear();
+        std::fill(touched_tris.begin(), touched_tris.end(), 0);
         uint32_t num_edges = (uint32_t)et.edges.size();
         for (uint32_t ei = 0; ei < num_edges; ei++) {
             const auto& e = et.edges[ei];
@@ -817,7 +959,8 @@ static uint32_t flip_edges(Mesh& m, EdgeTable& et,
             if (e.tri_a == INVALID || e.tri_b == INVALID) continue;
 
             // Skip if either tri was already rewritten by an earlier flip this pass.
-            if (touched_tris.count(e.tri_a) || touched_tris.count(e.tri_b)) continue;
+            if (e.tri_a >= touched_tris.size() || e.tri_b >= touched_tris.size()) continue;
+            if (touched_tris[e.tri_a] || touched_tris[e.tri_b]) continue;
 
             bool sel_a = (e.tri_a < (uint32_t)tri_selected.size() && tri_selected[e.tri_a]);
             bool sel_b = (e.tri_b < (uint32_t)tri_selected.size() && tri_selected[e.tri_b]);
@@ -846,10 +989,11 @@ static uint32_t flip_edges(Mesh& m, EdgeTable& et,
             if (et.find_edge(vc, vd) != INVALID) continue;
 
             // Valence improvement check
-            int val_a = vertex_valence(et, va);
-            int val_b = vertex_valence(et, vb);
-            int val_c = vertex_valence(et, vc);
-            int val_d = vertex_valence(et, vd);
+            if (vc >= vcount || vd >= vcount || va >= vcount || vb >= vcount) continue;
+            int val_a = valence[va];
+            int val_b = valence[vb];
+            int val_c = valence[vc];
+            int val_d = valence[vd];
 
             int dev_before = std::abs(val_a - 6) + std::abs(val_b - 6) +
                              std::abs(val_c - 6) + std::abs(val_d - 6);
@@ -906,8 +1050,10 @@ static uint32_t flip_edges(Mesh& m, EdgeTable& et,
                 else if (ee.tri_b == ta) ee.tri_b = tb;
             }
 
-            touched_tris.insert(ta);
-            touched_tris.insert(tb);
+            valence[va]--; valence[vb]--; valence[vc]++; valence[vd]++;
+
+            touched_tris[ta] = 1;
+            touched_tris[tb] = 1;
             changed = true;
             ++total_flip;
         }
@@ -970,10 +1116,15 @@ static void compact_mesh(Mesh& m, std::vector<float>* aux, std::vector<float>* a
     for (uint32_t& idx : m.indices)
         idx = remap[idx];
 
-    // Remap mirror_x_map through compaction
+    // Remap mirror_x_map through compaction. A vert whose partner was culled
+    // falls back to SELF, not INVALID: consumers index this map raw, so a
+    // UINT32_MAX left sitting in it is an out-of-bounds read later. Self is
+    // also what the unpaired convention already means everywhere else.
     if (!m.mirror_x_map.empty()) {
-        std::vector<uint32_t> new_mirror(new_count, INVALID);
-        for (uint32_t i = 0; i < vc; i++) {
+        std::vector<uint32_t> new_mirror(new_count);
+        for (uint32_t i = 0; i < new_count; i++) new_mirror[i] = i;
+        uint32_t mm = (uint32_t)m.mirror_x_map.size();
+        for (uint32_t i = 0; i < vc && i < mm; i++) {
             if (remap[i] == INVALID) continue;
             uint32_t mi = m.mirror_x_map[i];
             if (mi < vc && remap[mi] != INVALID) {
@@ -1046,23 +1197,62 @@ static void compact_mesh(Mesh& m, std::vector<float>* aux, std::vector<float>* a
 // reflection makes the seam a clean single edge-loop, so the mirror is symmetric
 // by construction — no twin-chasing through mirror_x_map.
 static uint32_t consolidate_seam(Mesh& m, float seam_tol, float target_edge) {
-    float snap_band = target_edge * 0.45f;   // how close to the plane counts as "should be on it"
-    float max_edge  = target_edge * 0.6f;    // only snap across genuinely short seam edges (= `low`)
-    float weld_tol  = target_edge * 0.0625f; // matches the GPU weld pass
-    float weld_sq   = weld_tol * weld_tol;
+    float snap_band  = target_edge * 0.45f;   // how close to the plane counts as "should be on it"
+    float max_edge   = target_edge * 0.6f;    // only snap across genuinely short seam edges (= `low`)
+    float weld_tol   = target_edge * 0.0625f; // matches the GPU weld pass
+    float weld_sq    = weld_tol * weld_tol;
+    float short_seam = target_edge * 0.5f;    // seam edges under this get decimated (stage 3)
     bool has_mask = !m.mask.empty();
     auto masked = [&](uint32_t v) -> bool {
         return has_mask && v < (uint32_t)m.mask.size() && m.mask[v] >= 1.0f;
+    };
+
+    // Drop tris that went degenerate, or that collapsed flat onto the seam
+    // (all three verts at x=0 — planar sails that survive as fins), then
+    // renumber. Shared by the weld and decimate stages below.
+    auto cull_and_compact = [&]() -> uint32_t {
+        uint32_t tc = m.tri_count();
+        std::vector<uint32_t> kept;
+        kept.reserve(m.indices.size());
+        uint32_t culled = 0;
+        for (uint32_t t = 0; t < tc; t++) {
+            uint32_t i0 = m.indices[t*3+0];
+            uint32_t i1 = m.indices[t*3+1];
+            uint32_t i2 = m.indices[t*3+2];
+            if (i0 == i1 || i1 == i2 || i0 == i2) { culled++; continue; }
+            bool all_seam = std::fabs(m.pos_x[i0]) < seam_tol &&
+                            std::fabs(m.pos_x[i1]) < seam_tol &&
+                            std::fabs(m.pos_x[i2]) < seam_tol;
+            // Preserve fully-masked tris — they're carried across as-is.
+            if (all_seam && !(masked(i0) && masked(i1) && masked(i2))) { culled++; continue; }
+            kept.push_back(i0); kept.push_back(i1); kept.push_back(i2);
+        }
+        m.indices = std::move(kept);
+        compact_mesh(m);
+        return culled;
+    };
+
+    // Recompute the seam set against current vertex numbering.
+    std::vector<uint8_t> at_seam;
+    auto mark_seam = [&]() -> uint32_t {
+        uint32_t n = m.vertex_count();
+        at_seam.assign(n, 0);
+        uint32_t count = 0;
+        for (uint32_t v = 0; v < n; v++)
+            if (std::fabs(m.pos_x[v]) < seam_tol) { at_seam[v] = 1; count++; }
+        return count;
     };
 
     m.build_adjacency();
     uint32_t vc = m.vertex_count();
 
     // Seam verts = exactly on x=0 (cut verts + pinned seam, post-clip).
-    std::vector<uint8_t> at_seam(vc, 0);
-    for (uint32_t v = 0; v < vc; v++)
-        if (std::fabs(m.pos_x[v]) < seam_tol) at_seam[v] = 1;
+    if (mark_seam() == 0) {
+        std::printf("[seam-consolidate] no seam verts\n");
+        return 0;
+    }
 
+    // --- 1. Snap near-seam verts onto the plane ---
     uint32_t snapped = 0;
     for (uint32_t v = 0; v < vc; v++) {
         float ax = std::fabs(m.pos_x[v]);
@@ -1087,16 +1277,26 @@ static uint32_t consolidate_seam(Mesh& m, float seam_tol, float target_edge) {
         snapped++;
     }
 
-    if (snapped == 0) {
-        std::printf("[seam-consolidate] no near-seam verts to snap\n");
-        return 0;
-    }
-
-    // Weld coincident seam verts in (y,z) within weld_tol. Brute-force over the
-    // seam set only — small relative to vc.
+    // --- 2. Weld coincident seam verts in (y,z) within weld_tol ---
+    // Brute-force over the seam set only — small relative to vc.
+    //
+    // This runs unconditionally. It used to be gated behind `snapped > 0`,
+    // which skipped it in exactly the case that needs it most: the plane clip
+    // on its own can drop two cut verts on the same spot with nothing to snap
+    // (two straddling edges meeting x=0 at the same point), and those
+    // coincident pairs are the seed of the needle tris hugging the seam.
     std::vector<uint32_t> seam_verts;
     for (uint32_t v = 0; v < vc; v++)
         if (at_seam[v]) seam_verts.push_back(v);
+
+    // Sorted by y so the inner scan stops as soon as the y gap alone exceeds
+    // weld_tol. The seam is a 1-D loop, so this turns the all-pairs sweep into
+    // roughly linear work — it was the one quadratic left in the pipeline, and
+    // a dense seam is exactly where it bit hardest. Which vertex of a
+    // coincident pair survives changes (y order, not index order); they are
+    // within weld_tol of each other, so nothing downstream can tell.
+    std::sort(seam_verts.begin(), seam_verts.end(),
+              [&](uint32_t a, uint32_t b) { return m.pos_y[a] < m.pos_y[b]; });
 
     std::vector<uint32_t> remap(vc);
     for (uint32_t v = 0; v < vc; v++) remap[v] = v;
@@ -1107,37 +1307,89 @@ static uint32_t consolidate_seam(Mesh& m, float seam_tol, float target_edge) {
         if (remap[a] != a || masked(a)) continue;
         for (size_t j = i + 1; j < seam_verts.size(); j++) {
             uint32_t b = seam_verts[j];
+            float dy = m.pos_y[b] - m.pos_y[a];   // >= 0, sorted
+            if (dy > weld_tol) break;
             if (remap[b] != b || masked(b)) continue;
-            float dy = m.pos_y[a] - m.pos_y[b];
             float dz = m.pos_z[a] - m.pos_z[b];
             if (dy*dy + dz*dz < weld_sq) { remap[b] = a; welded++; }
         }
     }
-    for (uint32_t& idx : m.indices) idx = remap[idx];
+    if (welded > 0)
+        for (uint32_t& idx : m.indices) idx = remap[idx];
+    uint32_t culled = cull_and_compact();
 
-    // Drop tris that welded to degenerate or collapsed onto the seam (all three
-    // verts at x=0). Preserve fully-masked tris — they're carried across as-is.
-    uint32_t tc = m.tri_count();
-    std::vector<uint32_t> kept;
-    kept.reserve(m.indices.size());
-    uint32_t culled = 0;
-    for (uint32_t t = 0; t < tc; t++) {
-        uint32_t i0 = m.indices[t*3+0];
-        uint32_t i1 = m.indices[t*3+1];
-        uint32_t i2 = m.indices[t*3+2];
-        if (i0 == i1 || i1 == i2 || i0 == i2) { culled++; continue; }
-        bool all_seam = std::fabs(m.pos_x[i0]) < seam_tol &&
-                        std::fabs(m.pos_x[i1]) < seam_tol &&
-                        std::fabs(m.pos_x[i2]) < seam_tol;
-        if (all_seam && !(masked(i0) && masked(i1) && masked(i2))) { culled++; continue; }
-        kept.push_back(i0); kept.push_back(i1); kept.push_back(i2);
+    // --- 3. Decimate over-short seam edges ---
+    // The seam-crossing clip mints cut verts wherever an edge meets x=0, at
+    // whatever spacing the old triangulation happened to have — and nothing
+    // downstream thins them: collapse_short_edges ran back when those verts
+    // did not exist yet, and it treats seam verts as pinned anyway. Left alone
+    // they are the second source of needle triangles at the mirror plane, the
+    // one welding can't reach (these pairs are apart by more than weld_tol,
+    // just far less than the target edge length).
+    //
+    // Merge b into a with a held fixed, one merge per vertex, guarded on
+    // normal inversion. Doing it here — on the +x half, before reflection —
+    // keeps the result symmetric by construction.
+    m.build_adjacency();
+    mark_seam();
+    uint32_t nvc = m.vertex_count();
+
+    auto merge_inverts = [&](uint32_t a, uint32_t b) -> bool {
+        Vec3 pa = m.get_pos(a);
+        uint32_t s = m.vert_tri_offset[b], e = m.vert_tri_offset[b + 1];
+        for (uint32_t j = s; j < e; j++) {
+            uint32_t tri = m.vert_tri_list[j];
+            if (tri_contains_vert(m, tri, a)) continue;  // dies with the merge
+            uint32_t i0 = m.indices[tri*3+0];
+            uint32_t i1 = m.indices[tri*3+1];
+            uint32_t i2 = m.indices[tri*3+2];
+            Vec3 p0 = (i0 == b) ? pa : m.get_pos(i0);
+            Vec3 p1 = (i1 == b) ? pa : m.get_pos(i1);
+            Vec3 p2 = (i2 == b) ? pa : m.get_pos(i2);
+            if (tri_normal(m, tri).dot((p1 - p0).cross(p2 - p0)) <= 0.0f) return true;
+        }
+        return false;
+    };
+
+    std::vector<uint32_t> dec(nvc);
+    for (uint32_t v = 0; v < nvc; v++) dec[v] = v;
+    // A vert that is either end of an accepted merge is off-limits for the
+    // rest of the pass, so the pre-merge adjacency stays valid for every op
+    // (same rule as consumed[] in collapse_short_edges).
+    std::vector<uint8_t> touched(nvc, 0);
+    uint32_t decimated = 0;
+
+    for (uint32_t a = 0; a < nvc; a++) {
+        if (!at_seam[a] || touched[a] || masked(a)) continue;
+        uint32_t s = m.vert_tri_offset[a], e = m.vert_tri_offset[a + 1];
+        bool merged = false;
+        for (uint32_t j = s; j < e && !merged; j++) {
+            uint32_t tri = m.vert_tri_list[j];
+            for (int k = 0; k < 3; k++) {
+                uint32_t b = m.indices[tri*3+k];
+                if (b == a || b >= nvc) continue;
+                if (!at_seam[b] || touched[b] || masked(b)) continue;
+                if (edge_length(m, a, b) >= short_seam) continue;
+                if (merge_inverts(a, b)) continue;
+                dec[b] = a;
+                touched[a] = touched[b] = 1;
+                decimated++;
+                merged = true;
+                break;
+            }
+        }
     }
-    m.indices = std::move(kept);
-    compact_mesh(m);
 
-    std::printf("[seam-consolidate] snapped %u, welded %u, culled %u sliver tris\n",
-                snapped, welded, culled);
-    return snapped;
+    uint32_t culled2 = 0;
+    if (decimated > 0) {
+        for (uint32_t& idx : m.indices) idx = dec[idx];
+        culled2 = cull_and_compact();
+    }
+
+    std::printf("[seam-consolidate] snapped %u, welded %u, decimated %u short seam "
+                "edges, culled %u sliver tris\n",
+                snapped, welded, decimated, culled + culled2);
+    return snapped + welded + decimated;
 }
 
 // ---------------------------------------------------------------------------
@@ -1669,6 +1921,7 @@ static uint32_t repair_flipped_tris(Mesh& m, float seam_tol,
                                     int max_iters = 5, float alpha = 0.5f) {
     bool has_mask = !m.mask.empty();
     uint32_t total_relaxed = 0;
+    uint32_t prev_flipped = UINT32_MAX;
 
     m.build_adjacency();
 
@@ -1697,8 +1950,27 @@ static uint32_t repair_flipped_tris(Mesh& m, float seam_tol,
             if (iter == 0) std::printf("[repair] no flipped tris\n");
             break;
         }
+        // Relaxation only fixes tris that are geometrically tangled. A count
+        // that stops falling means what's left is TOPOLOGICAL — an edge with
+        // three triangles on it, or two that disagree on winding — and no
+        // amount of centroid-averaging will touch it. Keep iterating and we
+        // just drag verts around for nothing.
+        if (flipped_count >= prev_flipped) {
+            std::printf("[repair] stalled at %u flipped tris after %d iters - "
+                        "topological, not geometric (see the remesh-audit "
+                        "non-manifold / flipped-winding counts)\n",
+                        flipped_count, iter);
+            break;
+        }
+        prev_flipped = flipped_count;
 
         std::vector<Vec3> new_pos(vc);
+        // Which verts the gather loop actually produced a position for. The
+        // apply loop used to re-test bad_vert+mask, which is a WEAKER predicate
+        // than the gather loop's (that one also bails on n == 0) — so a vert
+        // with no 1-ring got written back a default-constructed Vec3, i.e.
+        // teleported to the origin. Track it explicitly instead.
+        std::vector<uint8_t> relaxed(vc, 0);
         uint32_t n_moved = 0;
         for (uint32_t v = 0; v < vc; v++) {
             if (!bad_vert[v]) continue;
@@ -1722,14 +1994,12 @@ static uint32_t repair_flipped_tris(Mesh& m, float seam_tol,
             // Seam-respecting: a vert sitting on x=0 must stay there.
             if (std::fabs(cur.x) < seam_tol) moved.x = 0.0f;
             new_pos[v] = moved;
+            relaxed[v] = 1;
             n_moved++;
         }
 
-        for (uint32_t v = 0; v < vc; v++) {
-            if (!bad_vert[v]) continue;
-            if (has_mask && v < (uint32_t)m.mask.size() && m.mask[v] >= 1.0f) continue;
-            m.set_pos(v, new_pos[v]);
-        }
+        for (uint32_t v = 0; v < vc; v++)
+            if (relaxed[v]) m.set_pos(v, new_pos[v]);
         total_relaxed += n_moved;
         std::printf("[repair] iter %d: %u flipped tris, relaxed %u verts\n",
                     iter, flipped_count, n_moved);
@@ -1742,20 +2012,49 @@ static uint32_t repair_flipped_tris(Mesh& m, float seam_tol,
 // ---------------------------------------------------------------------------
 // Watertightness audit (diagnostic)
 // ---------------------------------------------------------------------------
-// A closed mesh must have two tris on every edge at every stage. Any open edge
-// is a crack; classify by mask value + seam proximity to localize the culprit.
-static void audit_open_edges(const Mesh& m, float seam_tol, const char* stage) {
-    EdgeTable et;
-    et.build(m);
+// A closed, consistently-wound mesh uses every edge exactly twice, once in each
+// direction. Each way that can fail is a defect we can name:
+//   1 use          -> crack (open edge)
+//   >2 uses        -> non-manifold fin
+//   2 the same way -> flipped winding; shading inverts across that edge
+// The old version built an EdgeTable, which stores only tri_a/tri_b and
+// silently overwrites tri_b on a third triangle — so non-manifold edges read
+// back as watertight, and winding was never checked at all. Count directed
+// uses directly instead. Open edges are still classified by mask value + seam
+// proximity to localize the culprit. Also reports needle triangles, which is
+// the seam-sliver symptom stated as a number.
+static void audit_open_edges(const Mesh& m, float seam_tol, const char* stage,
+                             float target_edge) {
+    struct EdgeUse { uint32_t v0, v1; uint16_t fwd, bwd; };
+    std::unordered_map<uint64_t, EdgeUse> use;
+    uint32_t tc = m.tri_count();
+    uint32_t vc = m.vertex_count();
+    use.reserve(tc * 3);
+    for (uint32_t t = 0; t < tc; t++) {
+        for (int e = 0; e < 3; e++) {
+            uint32_t a = m.indices[t*3+e], b = m.indices[t*3+(e+1)%3];
+            if (a >= vc || b >= vc || a == b) continue;
+            uint32_t lo = std::min(a, b), hi = std::max(a, b);
+            uint64_t k = ((uint64_t)lo << 32) | (uint64_t)hi;
+            auto& u = use.try_emplace(k, EdgeUse{lo, hi, 0, 0}).first->second;
+            if (a == lo) u.fwd++; else u.bwd++;
+        }
+    }
+
     uint32_t open_total = 0, open_seam = 0;
     uint32_t open_masked = 0, open_falloff = 0, open_unmasked = 0;
+    uint32_t nonmanifold = 0, bad_winding = 0;
     uint32_t n_sample = 0;
     static constexpr uint32_t MAX_SAMPLES = 6;
     struct { float x, y, z, m0, m1; } samples[MAX_SAMPLES];
 
-    for (const auto& e : et.edges) {
-        if (e.dead) continue;
-        if (e.tri_a != INVALID && e.tri_b != INVALID) continue;
+    for (const auto& [k, e] : use) {
+        uint32_t uses = (uint32_t)e.fwd + (uint32_t)e.bwd;
+        if (uses > 2) { nonmanifold++; continue; }
+        if (uses == 2) {
+            if (e.fwd != 1) bad_winding++;   // both tris traverse it the same way
+            continue;
+        }
         open_total++;
         bool seam_edge = std::fabs(m.pos_x[e.v0]) < seam_tol &&
                          std::fabs(m.pos_x[e.v1]) < seam_tol;
@@ -1776,14 +2075,46 @@ static void audit_open_edges(const Mesh& m, float seam_tol, const char* stage) {
         }
     }
 
-    if (open_total == 0) {
-        std::printf("[remesh-audit] %s: watertight\n", stage);
+    // Needle triangles: shortest edge far under target. Split out by seam
+    // proximity — a seam-heavy count is the mirror-clip sliver signature,
+    // a spread-out count means the edge ops themselves are leaving junk.
+    uint32_t needles = 0, needles_seam = 0;
+    if (target_edge > 0.0f) {
+        const float needle_len = target_edge * 0.15f;
+        for (uint32_t t = 0; t < tc; t++) {
+            uint32_t i0 = m.indices[t*3+0];
+            uint32_t i1 = m.indices[t*3+1];
+            uint32_t i2 = m.indices[t*3+2];
+            if (i0 >= vc || i1 >= vc || i2 >= vc) continue;
+            float shortest = std::min({ edge_length(m, i0, i1),
+                                        edge_length(m, i1, i2),
+                                        edge_length(m, i2, i0) });
+            if (shortest >= needle_len) continue;
+            needles++;
+            if (std::fabs(m.pos_x[i0]) < seam_tol ||
+                std::fabs(m.pos_x[i1]) < seam_tol ||
+                std::fabs(m.pos_x[i2]) < seam_tol) needles_seam++;
+        }
+    }
+
+    if (open_total == 0 && nonmanifold == 0 && bad_winding == 0 && needles == 0) {
+        std::printf("[remesh-audit] %s: watertight, manifold, consistent winding\n", stage);
         return;
     }
-    std::printf("[remesh-audit] %s: %u OPEN EDGES (on-seam=%u, masked=%u, "
-                "falloff=%u, unmasked=%u)\n",
-                stage, open_total, open_seam, open_masked, open_falloff,
-                open_unmasked);
+    if (open_total > 0)
+        std::printf("[remesh-audit] %s: %u OPEN EDGES (on-seam=%u, masked=%u, "
+                    "falloff=%u, unmasked=%u)\n",
+                    stage, open_total, open_seam, open_masked, open_falloff,
+                    open_unmasked);
+    if (nonmanifold > 0)
+        std::printf("[remesh-audit] %s: %u NON-MANIFOLD edges (>2 tris)\n",
+                    stage, nonmanifold);
+    if (bad_winding > 0)
+        std::printf("[remesh-audit] %s: %u FLIPPED-WINDING edges (normals invert "
+                    "across these)\n", stage, bad_winding);
+    if (needles > 0)
+        std::printf("[remesh-audit] %s: %u needle tris (%u touching the seam)\n",
+                    stage, needles, needles_seam);
     for (uint32_t i = 0; i < n_sample; i++)
         std::printf("[remesh-audit]   open edge at (%.4f, %.4f, %.4f) "
                     "mask=(%.3f, %.3f)\n",
@@ -1802,6 +2133,43 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
     RemeshResult r;
     r.old_verts = mesh.vertex_count();
     r.old_tris  = mesh.tri_count();
+
+    // --- Entry validation ---
+    // Every bail below leaves `mesh` untouched and reports through r.error,
+    // which main.cpp already prints + toasts. Without these the first cs->
+    // call was a null deref on a compute-less device (main.cpp passes nullptr
+    // there), and r.error — the only thing the failure toast has to say —
+    // was never written by anyone.
+    if (cs == nullptr || !cs->supported) {
+        r.error = "GPU compute unavailable - remesh needs a compute-capable device";
+        std::printf("[remesh] abort: %s\n", r.error.c_str());
+        return r;
+    }
+    if (r.old_verts == 0 || r.old_tris == 0) {
+        r.error = "mesh is empty";
+        std::printf("[remesh] abort: %s\n", r.error.c_str());
+        return r;
+    }
+    if (mesh.indices.size() % 3 != 0) {
+        r.error = "index buffer is not a whole number of triangles";
+        std::printf("[remesh] abort: %s (%zu indices)\n",
+                    r.error.c_str(), mesh.indices.size());
+        return r;
+    }
+    {
+        // One linear scan for out-of-range indices. Everything downstream
+        // indexes pos_*/mask/pinned raw, so a single bad index is a silent
+        // OOB read that only surfaces later as garbage geometry.
+        uint32_t bad = INVALID;
+        for (uint32_t idx : mesh.indices)
+            if (idx >= r.old_verts) { bad = idx; break; }
+        if (bad != INVALID) {
+            r.error = "index buffer references out-of-range vertices";
+            std::printf("[remesh] abort: %s (index %u >= %u verts)\n",
+                        r.error.c_str(), bad, r.old_verts);
+            return r;
+        }
+    }
 
     auto t0 = std::chrono::steady_clock::now();
 
@@ -1962,6 +2330,10 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
                              seam_tol, pinned);
     {
         uint32_t vc = mesh.vertex_count();
+        // split/collapse index pinned[] raw (unlike tri_selected, which they
+        // bounds-check). Keep it at least vertex_count long so an under-filled
+        // readback can't turn into an OOB read deep in the edge ops.
+        if (pinned.size() < vc) pinned.resize(vc, 0u);
         for (uint32_t v = 0; v < vc; v++)
             if (pinned[v] && std::fabs(mesh.pos_x[v]) < seam_tol)
                 mesh.pos_x[v] = 0.0f;
@@ -2031,6 +2403,7 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
                                  mesh.pos_x.data(), mesh.pos_y.data(), mesh.pos_z.data(),
                                  seam_tol, pinned);
         uint32_t vc = mesh.vertex_count();
+        if (pinned.size() < vc) pinned.resize(vc, 0u);
         for (uint32_t v = 0; v < vc; v++)
             if (pinned[v] && std::fabs(mesh.pos_x[v]) < seam_tol)
                 mesh.pos_x[v] = 0.0f;
@@ -2066,16 +2439,44 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
     // run a final smooth and bail. Floor of 8 prevents tiny meshes from doing all
     // 10 iters for 1-2 trivial ops.
     int iters_done = 0;
+    double t_split = 0.0, t_collapse = 0.0, t_flip = 0.0, t_rebuild = 0.0;
+    auto tick = [] { return std::chrono::steady_clock::now(); };
+    auto since = [](std::chrono::steady_clock::time_point a) {
+        return std::chrono::duration<double, std::milli>(
+                   std::chrono::steady_clock::now() - a).count();
+    };
+
     for (int iter = 0; iter < iterations; iter++) {
+        auto ts = tick();
         uint32_t n_split = split_long_edges(mesh, et, tri_selected, pinned, high, seam_tol, &sel_mask, tlen);
-        rebuild_all();
+        t_split += since(ts);
 
+        // Skip the rebuild when a pass changed nothing. split_long_edges and
+        // collapse_short_edges both rebuild adjacency and the edge table
+        // internally, so with zero ops the topology, normals and GPU-side CSR
+        // are already exactly what rebuild_all would reproduce. Every skipped
+        // call saves two GPU readback stalls plus a full-mesh reselect — and
+        // the late iterations, which is most of them, do little or nothing.
+        if (n_split > 0) { ts = tick(); rebuild_all(); t_rebuild += since(ts); }
+
+        ts = tick();
         uint32_t n_collapse = collapse_short_edges(mesh, et, tri_selected, pinned, low, seam_tol, &sel_mask, tlen);
-        et.build(mesh);
-        rebuild_all();
+        t_collapse += since(ts);
 
+        if (n_collapse > 0) {
+            ts = tick();
+            rebuild_all();
+            // Rebuilt AFTER rebuild_all, not before: rebuild_all compacts, and
+            // a compaction renumbers verts and tris out from under the edge
+            // table that flip_edges is about to walk.
+            et.build(mesh);
+            t_rebuild += since(ts);
+        }
+
+        ts = tick();
         uint32_t n_flip = flip_edges(mesh, et, tri_selected, pinned);
-        rebuild_after_flip();
+        t_flip += since(ts);
+        if (n_flip > 0) rebuild_after_flip();
 
         if (cs->has_remesh_smooth()) {
             cs->dispatch_remesh_smooth(
@@ -2100,19 +2501,27 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
         }
         if (iter + 1 < iterations) rebuild_after_smooth();
     }
-    std::printf("[remesh] outer loop: %d/%d iters\n", iters_done, iterations);
+    std::printf("[remesh] outer loop: %d/%d iters (split %.0f ms, collapse %.0f ms, "
+                "flip %.0f ms, rebuild %.0f ms)\n",
+                iters_done, iterations, t_split, t_collapse, t_flip, t_rebuild);
 
     // Final compaction and rebuild
     compact_mesh(mesh);
 
-    audit_open_edges(mesh, seam_tol, "pre-mirror");
+    audit_open_edges(mesh, seam_tol, "pre-mirror", target_edge_length);
 
     mirror_positive_half(mesh, seam_tol, target_edge_length, cs);
 
     mesh.build_adjacency();
     mesh.recompute_normals();
 
-    audit_open_edges(mesh, seam_tol, "post-mirror");
+    audit_open_edges(mesh, seam_tol, "post-mirror", target_edge_length);
+
+    // The mirror step is the last thing that can leave inverted geometry: the
+    // reflected half is emitted with reversed winding, and the component cull
+    // can strip a tri that was propping up its neighbours. Everything before
+    // here got a repair pass at entry; this one had none.
+    repair_flipped_tris(mesh, seam_tol);
 
     // Replace multires stack (fresh level-0 lock on the new topology). Paint
     // planes restart from the remeshed surface: colour survived the remesh
@@ -2126,6 +2535,16 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
     stack.mirror.clear();
     stack.base_mirror.clear();
     stack.midpoint_parents.clear();
+    // Remesh is a relock onto brand-new topology, so it owes everything
+    // multires_stack_init_from_lock() clears. These two were being missed:
+    // topo_cache still described the OLD subdivision chain (and is flagged
+    // ready), so the next subdivide-up fed a stale tc.vcount into
+    // build_parent_map as the fine-level count — underflowing V_fine -
+    // V_coarse into a ~34 GB allocation. lock_stamp keys the GPU cascade's
+    // VRAM tables to a chain identity, so a carried-over stamp would let the
+    // GPU replay reuse tables built for the pre-remesh topology.
+    stack.topo_cache.clear();
+    stack.lock_stamp = 0;
     stack.color = mesh.color;
     if (!stack.color.empty()) stack.color.resize(mesh.vertex_count(), 0xFFFFFFFFu);
     stack.mask.clear();
