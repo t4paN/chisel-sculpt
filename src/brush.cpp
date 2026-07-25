@@ -292,6 +292,8 @@ BrushStroke::BrushStroke()
     , screen_w(0), screen_h(0)
     , anchor_valid(false)
     , anchor_world_radius(0.0f)
+    , anchor_cos_tilt(1.0f)
+    , crease_axis_valid(false)
     , cyl_axis_x(0.0f), cyl_axis_y(0.0f), cyl_axis_z(0.0f)
     , screen_slack(1.0f)
     , last_stroke_valid(false)
@@ -345,21 +347,8 @@ void BrushStroke::set_anchor(const Mesh& mesh, const Camera& cam,
     // world_to_screen) — the lateral screen scale is fixed by the orbit `distance`, NOT
     // by the per-pixel depth. So the in-plane offset uses `distance`; `hit_depth` only
     // places the point along the view axis. (linear depth = fwd · (world − cam_pos).)
-    float hit_depth = 0.0f;
-    if (!renderer.sample_depth(cx, cy, &hit_depth)) return;
-    float ndc_x  = 2.0f * (float)cx / (float)screen_w - 1.0f;
-    float ndc_y  = 1.0f - 2.0f * (float)cy / (float)screen_h;
-    float aspect = (float)screen_w / (float)screen_h;
-    Vec3 fwd      = cam.get_view_direction();
-    Vec3 world_up = {0.0f, 1.0f, 0.0f};
-    Vec3 right    = fwd.cross(world_up).normalized();
-    Vec3 up       = right.cross(fwd).normalized();
-    float half_h  = cam.distance * std::tan(cam.fov * 3.14159265358979323846f / 360.0f);
-    float half_w  = half_h * aspect;
-    Vec3 cam_pos  = cam.get_position();
-    anchor_pos = cam_pos + fwd * hit_depth
-               + right * (ndc_x * half_w) + up * (ndc_y * half_h);
-
+    // Surface normal first: the tilt it implies sizes the sub-pixel depth tap's
+    // discontinuity guard below, so it has to be known before the depth is read.
     float nlen = std::sqrt(nx*nx + ny*ny + nz*nz);
     if (nlen > 1e-6f) {
         cyl_axis_x = nx / nlen;
@@ -368,6 +357,47 @@ void BrushStroke::set_anchor(const Mesh& mesh, const Camera& cam,
     } else {
         cyl_axis_x = 0.0f; cyl_axis_y = 1.0f; cyl_axis_z = 0.0f;
     }
+
+    float aspect = (float)screen_w / (float)screen_h;
+    Vec3 fwd      = cam.get_view_direction();
+    Vec3 world_up = {0.0f, 1.0f, 0.0f};
+    Vec3 right    = fwd.cross(world_up).normalized();
+    Vec3 up       = right.cross(fwd).normalized();
+    float half_h  = cam.distance * std::tan(cam.fov * 3.14159265358979323846f / 360.0f);
+    float half_w  = half_h * aspect;
+    Vec3 cam_pos  = cam.get_position();
+
+    float world_per_pixel = (2.0f * half_h) / (float)screen_h;
+    anchor_world_radius = brush_radius * world_per_pixel;
+
+    // How far the surface is turned away from the view plane. Drives the sub-pixel
+    // guard here, the scan-box slack below, and (via anchor_cos_tilt) the caller's
+    // choice of push direction.
+    anchor_cos_tilt = std::abs(fwd.x * cyl_axis_x + fwd.y * cyl_axis_y + fwd.z * cyl_axis_z);
+    screen_slack = std::min(3.0f, 1.0f / std::max(anchor_cos_tilt, 0.33f));
+
+    // Sub-pixel depth. Nearest-tapping at (int)cursor quantised the anchor onto
+    // pixel centres; unprojected onto a surface tilted t away, that error becomes
+    // (1 px)/cos(t) of travel ALONG the surface — for a 50 px brush at 80 deg it is
+    // ~12% of the brush radius, re-rolled every dab. Crease then differences two
+    // consecutive anchors ~0.25 R apart to get its squeeze axis, which turns that
+    // 12% into tens of degrees of axis swing. This is the wobble at its source.
+    //
+    // The guard scales with tilt: a continuous surface legitimately changes depth by
+    // world_per_pixel*tan(t) per pixel, so allow several of those before declaring a
+    // discontinuity and falling back to the nearest tap.
+    float ct        = std::max(anchor_cos_tilt, 0.05f);
+    float tan_tilt  = std::sqrt(std::max(0.0f, 1.0f - ct * ct)) / ct;
+    float max_spread = world_per_pixel * (4.0f + 4.0f * tan_tilt);
+
+    float hit_depth = 0.0f;
+    if (!renderer.sample_depth_bilinear(cursor_x, cursor_y, &hit_depth, max_spread)) return;
+
+    // NDC from the true float cursor, not the truncated pixel — the whole point.
+    float ndc_x  = 2.0f * cursor_x / (float)screen_w - 1.0f;
+    float ndc_y  = 1.0f - 2.0f * cursor_y / (float)screen_h;
+    anchor_pos = cam_pos + fwd * hit_depth
+               + right * (ndc_x * half_w) + up * (ndc_y * half_h);
 
     // Area normal over ~0.6 of the dab. Smaller than the brush on purpose: averaged
     // over the whole footprint the plane stops tracking curvature and large dabs
@@ -390,18 +420,31 @@ void BrushStroke::set_anchor(const Mesh& mesh, const Camera& cam,
         area_normal_x = cyl_axis_x; area_normal_y = cyl_axis_y; area_normal_z = cyl_axis_z;
     }
 
-    float fov_rad = cam.fov * 3.14159265358979323846f / 180.0f;
-    float view_plane_h = 2.0f * cam.distance * std::tan(fov_rad * 0.5f);
-    float world_per_pixel = view_plane_h / (float)screen_h;
-    anchor_world_radius = brush_radius * world_per_pixel;
-
-    Vec3 vd = cam.get_view_direction();
-    float cos_theta = std::abs(vd.x * cyl_axis_x + vd.y * cyl_axis_y + vd.z * cyl_axis_z);
-    screen_slack = std::min(3.0f, 1.0f / std::max(cos_theta, 0.33f));
-
+    // (anchor_world_radius / anchor_cos_tilt / screen_slack are computed above — the
+    // sub-pixel depth guard needs them before the depth tap.)
     anchor_valid = true;
     last_stroke_pos = anchor_pos;
     last_stroke_valid = true;
+}
+
+void BrushStroke::blended_push_normal(float out[3]) const {
+    // smoothstep(0.30 -> 0.70) on cos(tilt), inverted: 0 face-on, 1 edge-on.
+    float t = (0.70f - anchor_cos_tilt) / (0.70f - 0.30f);
+    t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
+    float k = t * t * (3.0f - 2.0f * t);
+
+    float bx = cyl_axis_x + (area_normal_x - cyl_axis_x) * k;
+    float by = cyl_axis_y + (area_normal_y - cyl_axis_y) * k;
+    float bz = cyl_axis_z + (area_normal_z - cyl_axis_z) * k;
+
+    float len = std::sqrt(bx*bx + by*by + bz*bz);
+    if (len > 1e-6f) {
+        out[0] = bx / len; out[1] = by / len; out[2] = bz / len;
+    } else {
+        // Point and area normal cancelled (the disc straddled a fold). The point
+        // normal is at least a real surface direction.
+        out[0] = cyl_axis_x; out[1] = cyl_axis_y; out[2] = cyl_axis_z;
+    }
 }
 
 float BrushStroke::falloff(float dist, float radius, float hardness) const {
@@ -549,6 +592,7 @@ void BrushStroke::begin(Renderer& renderer, const Camera& cam,
 
     anchor_valid = false;
     crease_prev_valid = false;
+    crease_axis_valid = false;
     stamp_prev_valid = false;
     stamp_rake_valid = false;
     stamp_rake_angle = 0.0f;
@@ -707,13 +751,55 @@ void BrushStroke::apply_crease(DabContext& ctx, float dab_x, float dab_y,
     // Stroke axis from the previous dab, flattened into the anchor's tangent plane.
     // Zero length = first dab of the stroke; the kernel reads that as "no axis" and
     // falls back to the old pull-toward-anchor behaviour for that one dab.
+    // ...and smoothed across the stroke. Differencing two anchors ~0.25 R apart is a
+    // noise amplifier: a few percent of R of anchor jitter swings the raw direction
+    // by tens of degrees, and since the kernel squeezes ACROSS this axis, that swing
+    // IS the ridge wandering. Sub-pixel anchoring cut the jitter at source; the EMA
+    // takes what survives. Weight 0.35 tracks a deliberate curve within a few dabs
+    // while averaging out per-dab rattle.
     float sdx = 0.0f, sdy = 0.0f, sdz = 0.0f;
     if (crease_prev_valid) {
         Vec3 d = anchor_pos - crease_prev_anchor;
         float dn = d.x * cyl_axis_x + d.y * cyl_axis_y + d.z * cyl_axis_z;
         d.x -= dn * cyl_axis_x; d.y -= dn * cyl_axis_y; d.z -= dn * cyl_axis_z;
         float len = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
-        if (len > 1e-6f) { sdx = d.x / len; sdy = d.y / len; sdz = d.z / len; }
+        // Ignore steps far below the dab spacing — a near-stationary pen produces a
+        // pure-noise direction, and feeding that in would corrupt a good axis.
+        if (len > 0.02f * anchor_world_radius) {
+            float ux = d.x / len, uy = d.y / len, uz = d.z / len;
+            if (!crease_axis_valid) {
+                crease_axis = Vec3(ux, uy, uz);
+                crease_axis_valid = true;
+            } else {
+                // Flip the incoming sample onto the current axis's hemisphere first:
+                // the axis is an orientation, not a heading, and a 180-degree
+                // disagreement would otherwise cancel it to zero.
+                float dp = crease_axis.x * ux + crease_axis.y * uy + crease_axis.z * uz;
+                if (dp < 0.0f) { ux = -ux; uy = -uy; uz = -uz; }
+                const float a = 0.35f;
+                crease_axis.x += (ux - crease_axis.x) * a;
+                crease_axis.y += (uy - crease_axis.y) * a;
+                crease_axis.z += (uz - crease_axis.z) * a;
+            }
+            float al = std::sqrt(crease_axis.x * crease_axis.x +
+                                 crease_axis.y * crease_axis.y +
+                                 crease_axis.z * crease_axis.z);
+            if (al > 1e-6f) {
+                crease_axis.x /= al; crease_axis.y /= al; crease_axis.z /= al;
+            } else {
+                crease_axis_valid = false;
+            }
+        }
+        if (crease_axis_valid) {
+            // Re-flatten into THIS dab's tangent plane — the smoothed axis carries a
+            // little of the previous dabs' orientation, and on a curving surface that
+            // would tip it out of the local plane.
+            Vec3 a2 = crease_axis;
+            float an2 = a2.x * cyl_axis_x + a2.y * cyl_axis_y + a2.z * cyl_axis_z;
+            a2.x -= an2 * cyl_axis_x; a2.y -= an2 * cyl_axis_y; a2.z -= an2 * cyl_axis_z;
+            float l2 = std::sqrt(a2.x * a2.x + a2.y * a2.y + a2.z * a2.z);
+            if (l2 > 1e-6f) { sdx = a2.x / l2; sdy = a2.y / l2; sdz = a2.z / l2; }
+        }
     }
     crease_prev_anchor = anchor_pos;
     crease_prev_valid = true;
@@ -739,7 +825,14 @@ void BrushStroke::apply_crease(DabContext& ctx, float dab_x, float dab_y,
     params.view_b_x = -view_dir.x;
     params.view_b_y =  view_dir.y;
     params.view_b_z =  view_dir.z;
-    set_area_normal(params, cyl_axis_x, cyl_axis_y, cyl_axis_z);
+    // Tilt-blended push direction — see blended_push_normal. Crease leans on this
+    // twice (it displaces along it AND projects the pinch tangent against it), so a
+    // rattling normal costs double here.
+    {
+        float pn[3];
+        blended_push_normal(pn);
+        set_area_normal(params, pn[0], pn[1], pn[2]);
+    }
     params.stroke_dir_x = sdx;
     params.stroke_dir_y = sdy;
     params.stroke_dir_z = sdz;
@@ -799,7 +892,13 @@ void BrushStroke::apply_pinch(DabContext& ctx, float dab_x, float dab_y,
     params.view_b_x = -view_dir.x;
     params.view_b_y =  view_dir.y;
     params.view_b_z =  view_dir.z;
-    set_area_normal(params, cyl_axis_x, cyl_axis_y, cyl_axis_z);
+    // Tilt-blended push direction — see blended_push_normal. Reverse pinch measures
+    // vertex HEIGHT against this vector, so a noisy one moves the cut plane per dab.
+    {
+        float pn[3];
+        blended_push_normal(pn);
+        set_area_normal(params, pn[0], pn[1], pn[2]);
+    }
     params.vertex_count = ctx.mesh.vertex_count();
 
     set_alpha_dab(ctx, false);
@@ -889,8 +988,13 @@ void BrushStroke::apply_draw(DabContext& ctx, float dab_x, float dab_y,
     // there would just soften the tip.
     if (clay)
         set_area_normal(params, area_normal_x, area_normal_y, area_normal_z);
-    else
-        set_area_normal(params, cyl_axis_x, cyl_axis_y, cyl_axis_z);
+    else {
+        // Tilt-blended: point normal face-on (unchanged), area normal edge-on where
+        // the single texel gets too noisy to displace along. See blended_push_normal.
+        float pn[3];
+        blended_push_normal(pn);
+        set_area_normal(params, pn[0], pn[1], pn[2]);
+    }
     params.vertex_count = ctx.mesh.vertex_count();
     params.inflate = inflate ? 1 : 0;
     params.clay = clay ? 1 : 0;

@@ -2006,6 +2006,64 @@ bool Renderer::sample_depth(int x, int y, float* out) {
 #endif
 }
 
+bool Renderer::sample_depth_bilinear(float fx, float fy, float* out, float max_spread) {
+    // Tap origin: the 2x2 whose centres bracket the sample point. Pixel centres sit
+    // at +0.5, hence the shift before the floor.
+    float sx = fx - 0.5f;
+    float sy = fy - 0.5f;
+    int x0 = (int)std::floor(sx);
+    int y0 = (int)std::floor(sy);
+    float tx = sx - (float)x0;
+    float ty = sy - (float)y0;
+
+    int bw, bh;
+#if defined(CHISEL_BACKEND_WEBGPU)
+    if (!plane_valid) return false;
+    bw = plane_w; bh = plane_h;
+#else
+    bw = screen_target.width; bh = screen_target.height;
+#endif
+    if (x0 < 0 || y0 < 0 || x0 + 1 >= bw || y0 + 1 >= bh) {
+        // Against the buffer edge — no 2x2 available. Nearest, clamped.
+        int cx = (int)fx, cy = (int)fy;
+        return sample_depth(cx, cy, out);
+    }
+
+    float d[4];   // (x0,y0) (x1,y0) (x0,y1) (x1,y1)
+#if defined(CHISEL_BACKEND_WEBGPU)
+    d[0] = plane_depth[(size_t)y0       * plane_w + x0];
+    d[1] = plane_depth[(size_t)y0       * plane_w + x0 + 1];
+    d[2] = plane_depth[(size_t)(y0 + 1) * plane_w + x0];
+    d[3] = plane_depth[(size_t)(y0 + 1) * plane_w + x0 + 1];
+#else
+    // ONE readback for the quad — four sample_depth calls would be four
+    // glReadPixels syncs per dab.
+    read_depth_region(x0, y0, 2, 2, d);
+#endif
+
+    // Discontinuity guard: if the quad straddles two surfaces, interpolating lands
+    // between them (on neither). Fall back to the nearest tap, which is at least a
+    // real point on a real surface.
+    if (max_spread > 0.0f) {
+        float dmin = d[0], dmax = d[0];
+        for (int i = 1; i < 4; ++i) {
+            if (d[i] < dmin) dmin = d[i];
+            if (d[i] > dmax) dmax = d[i];
+        }
+        if (dmax - dmin > max_spread) {
+            int nx = (tx < 0.5f) ? 0 : 1;
+            int ny = (ty < 0.5f) ? 0 : 1;
+            *out = d[ny * 2 + nx];
+            return true;
+        }
+    }
+
+    float top = d[0] + (d[1] - d[0]) * tx;
+    float bot = d[2] + (d[3] - d[2]) * tx;
+    *out = top + (bot - top) * ty;
+    return true;
+}
+
 bool Renderer::sample_normal(int x, int y, float out[3]) {
 #if defined(CHISEL_BACKEND_WEBGPU)
     if (!plane_valid || x < 0 || y < 0 || x >= plane_w || y >= plane_h) return false;

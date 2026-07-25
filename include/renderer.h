@@ -178,6 +178,19 @@ struct Renderer {
     // glReadPixels as before and the cache machinery is a no-op.
     void poll_plane_reads();                          // call once per frame
     bool sample_depth(int x, int y, float* out);      // attachment 0, linear distance
+
+    // Sub-pixel depth at a float cursor. sample_depth's nearest tap quantises the
+    // unprojected anchor onto pixel centres, and on a surface tilted away from the
+    // viewer that error is amplified along the surface by 1/cos(tilt) — several
+    // percent of the brush radius, re-rolled every dab, which reads as a wobbling
+    // stroke. Bilinear removes it.
+    //
+    // max_spread guards the interpolation: across a depth discontinuity (a
+    // silhouette, or the far wall of an existing groove) a blend of the 2x2 lands on
+    // NEITHER surface, so if the tap spread exceeds it we return the nearest tap
+    // instead. Pass the dab's world radius scaled small; <= 0 disables the guard.
+    // One region read on GL, direct plane-cache indexing on WebGPU — never 4 taps.
+    bool sample_depth_bilinear(float fx, float fy, float* out, float max_spread);
     bool sample_normal(int x, int y, float out[3]);   // attachment 1, raw normal texel
     bool sample_triid(int x, int y, uint32_t* out);   // attachment 2
     // Falloff-weighted average of the normal texels inside radius_px of (cx, cy) —

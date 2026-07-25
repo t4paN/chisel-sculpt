@@ -104,12 +104,23 @@ struct BrushStroke {
     Vec3 anchor_pos;
     float anchor_world_radius;
     bool anchor_valid;
+    // |view . surface normal| at the anchor. 1 = facing the viewer, 0 = edge-on.
+    // Set by set_anchor; drives the sub-pixel depth guard, screen_slack, and how far
+    // the push direction leans on the area normal instead of the point normal.
+    float anchor_cos_tilt;
 
     // Previous dab's anchor, for the crease stroke axis. The crease pinch must pull
     // across the stroke, not toward the dab centre, or a stroke drags topology along
     // its own path. Invalid on the first dab of a stroke (no direction yet).
     Vec3 crease_prev_anchor;
     bool crease_prev_valid;
+    // Smoothed crease squeeze axis. The raw difference of two consecutive anchors is
+    // a poor direction estimate — successive dabs sit ~0.25 R apart, so a few percent
+    // of R in anchor noise swings it by tens of degrees, and the kernel squeezes
+    // ACROSS this axis, so a flailing axis is a wandering ridge. An EMA over the
+    // stroke keeps the direction while dropping the per-dab noise.
+    Vec3 crease_axis;
+    bool crease_axis_valid;
     // Stamp rake: smoothed in-plane angle that turns the alpha stamp to follow the
     // stroke direction (Clay only for now). Travel between dab anchors, projected
     // into the stamp plane, gives a target angle; the current angle eases a quarter
@@ -455,5 +466,20 @@ struct BrushStroke {
 
 private:
     float falloff(float dist, float radius, float hardness) const;
+
+    // Push direction for the displacement brushes, blended between the single-texel
+    // point normal and the disc-averaged area normal by how much the surface is
+    // turned away.
+    //
+    // Face-on, the point normal is the right answer and averaging only softens the
+    // tip (the reason draw/crease were left on it when Clay got the area normal).
+    // At a grazing angle it stops being: one texel spans a lot of surface, its normal
+    // rattles between neighbouring dabs, and every brush here displaces ALONG this
+    // vector — so the direction rattles with it and the stroke waves. The area normal
+    // is stable there because it averages the same disc each time.
+    //
+    // Blend is 0 (pure point) at cos >= 0.70 and 1 (pure area) at cos <= 0.30, so
+    // nothing about the face-on feel changes. Writes the normalized result to out[3].
+    void blended_push_normal(float out[3]) const;
 
 };

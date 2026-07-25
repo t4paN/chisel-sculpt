@@ -86,8 +86,11 @@ void deposit(uint v, vec3 anchor, vec3 view, vec3 anchor_n, vec3 vp, vec3 vn, ui
     // discontinuously across a crease line and along a receding surface, which is
     // what broke oblique strokes into wandering beads. Gate on position instead.
     // P.facing_threshold is unused now — kept for the 112 B std140 layout.
+    // Band widens with tilt — see draw_accum.wgsl (keep in lockstep).
+    float ct = max(abs(dot(view, anchor_n)), 0.30);
     float behind = dot(vp - anchor, view);
-    float gate_w = 1.0 - smoothstep(0.25 * P.world_radius, 0.45 * P.world_radius, behind);
+    float gate_w = 1.0 - smoothstep(0.25 * P.world_radius / ct,
+                                    0.45 * P.world_radius / ct, behind);
     gate_w *= smoothstep(-0.6, -0.4, -dot(vn, view));
     if (gate_w <= 0.0) return;
 

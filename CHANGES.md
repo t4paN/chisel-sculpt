@@ -2,6 +2,43 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-25 — Brush: the oblique-stroke wobble (second pass)
+
+Beading was the spacing bug (below). The *wander* riding on top of it was four
+separate noise sources, all amplified by the same 1/cos(tilt) factor — each one
+invisible face-on and ugly edge-on.
+
+- **Sub-pixel anchor.** `set_anchor` unprojected the depth tap at `(int)cursor`, so the
+  anchor was quantised onto pixel centres. Unprojected onto a surface tilted `t` away,
+  that sub-pixel error becomes `(1 px)/cos(t)` of travel *along* the surface — ~12% of
+  the brush radius for a 50 px brush at 80°, re-rolled every dab. New
+  `Renderer::sample_depth_bilinear` samples at the true float cursor, with a
+  tilt-adaptive discontinuity guard: a continuous surface changes depth by
+  `world_per_pixel*tan(t)` per pixel, so a 2×2 spread far past that means the quad
+  straddles a silhouette or a groove wall, and it falls back to the nearest tap rather
+  than interpolating to a point on neither surface. One region read on GL (not four
+  `glReadPixels` syncs), direct plane-cache indexing on WebGPU.
+- **Crease's squeeze axis is smoothed.** It came from `anchor_pos - crease_prev_anchor`
+  — a difference of two anchors only ~0.25 R apart, which is a noise amplifier: a few
+  percent of R of anchor jitter swings it by tens of degrees, and the kernel squeezes
+  *across* that axis, so the swing **is** the ridge wandering. Tightening the spacing
+  in the first pass made the baseline shorter and the differencing noisier. Now an EMA
+  (weight 0.35) with hemisphere alignment, a dead zone under 0.02 R so a near-stationary
+  pen can't feed pure noise in, and a re-flatten into each dab's own tangent plane.
+- **Push direction blends to the area normal with tilt.** Draw/Crease/Pinch displaced
+  along a *single* normal texel. Face-on that's correct and averaging only softens the
+  tip (why they were left on it when Clay got the area normal), but edge-on one texel
+  spans a lot of surface and rattles between dabs — and everything here displaces along
+  that vector. `blended_push_normal` is pure point normal at cos ≥ 0.70 and pure area
+  normal at cos ≤ 0.30, so the face-on feel is untouched. The disc average was already
+  being computed every dab; this costs nothing new.
+- **The behind-gate band now widens with tilt.** Fixed 0.25R..0.45R thresholds are right
+  face-on (the whole footprint sits at `behind ≈ 0`) but edge-on the *legitimate*
+  surface inside the dab spans nearly ±R of `behind`, so the band amputated its receding
+  half — dragging the deposit centroid toward the camera by an amount that varies with
+  tilt, i.e. varying along a curved stroke. Scaled by `1/cos(t)` with the same 0.30
+  floor as the dab spacing, in all six accum kernels (draw/crease/pinch × WGSL/GLSL).
+
 ## 2026-07-25 — Brush: oblique strokes no longer break into beads
 
 - **Foreshortening-corrected dab spacing.** The step between dabs was measured in screen

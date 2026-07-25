@@ -131,8 +131,13 @@ fn deposit(v : u32, anchor : vec3<f32>, view : vec3<f32>, anchor_n : vec3<f32>,
     // belt-and-suspenders for sheets thinner than the window.
     // P.facing_threshold is unused now — kept in the block so the 112 B std140
     // layout stays byte-identical to the C++ upload struct.
+    // Band widens with tilt — see draw_accum.wgsl. Fixed thresholds amputate the
+    // receding half of a grazing footprint, dragging the deposit centroid toward the
+    // camera by an amount that varies along a curved stroke.
+    let ct = max(abs(dot(view, anchor_n)), 0.30);
     let behind = dot(vp - anchor, view);
-    var gate_w = 1.0 - smoothstep(0.25 * P.world_radius, 0.45 * P.world_radius, behind);
+    var gate_w = 1.0 - smoothstep(0.25 * P.world_radius / ct,
+                                  0.45 * P.world_radius / ct, behind);
     gate_w = gate_w * smoothstep(-0.6, -0.4, -dot(vn, view));
     if (gate_w <= 0.0) {
         return;

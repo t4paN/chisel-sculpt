@@ -118,8 +118,11 @@ fn deposit(v : u32, anchor : vec3<f32>, view : vec3<f32>, anchor_n : vec3<f32>,
     // surface, which is what broke oblique strokes into wandering beads.
     // P.facing_threshold is unused now — kept so the std140 block stays byte-
     // identical to the C++ upload struct.
+    // Band widens with tilt — see draw_accum.wgsl.
+    let ct = max(abs(dot(view, anchor_n)), 0.30);
     let behind = dot(vp - anchor, view);
-    var gate_w = 1.0 - smoothstep(0.25 * P.world_radius, 0.45 * P.world_radius, behind);
+    var gate_w = 1.0 - smoothstep(0.25 * P.world_radius / ct,
+                                  0.45 * P.world_radius / ct, behind);
     gate_w = gate_w * smoothstep(-0.6, -0.4, -dot(vn, view));
     if (gate_w <= 0.0) {
         return;

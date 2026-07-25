@@ -99,8 +99,13 @@ void deposit(uint v, vec3 anchor, vec3 view, vec3 anchor_n, vec3 vp, vec3 vn, ui
     // than the window. P.facing_threshold is unused here for now.
     float gate_w = 1.0;
     if (P.inflate == 0u) {
+        // Tilt-widened band — see draw_accum.wgsl for the rationale (keep in
+        // lockstep). Fixed thresholds amputate the receding half of a grazing
+        // footprint and drag the deposit centroid toward the camera.
+        float ct = max(abs(dot(view, anchor_n)), 0.30);
         float behind = dot(vp - anchor, view);
-        gate_w = 1.0 - smoothstep(0.25 * P.world_radius, 0.45 * P.world_radius, behind);
+        gate_w = 1.0 - smoothstep(0.25 * P.world_radius / ct,
+                                  0.45 * P.world_radius / ct, behind);
         gate_w *= smoothstep(-0.6, -0.4, -dot(vn, view));
         if (gate_w <= 0.0) return;
     }

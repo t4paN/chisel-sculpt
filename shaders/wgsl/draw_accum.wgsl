@@ -133,8 +133,17 @@ fn deposit(v : u32, anchor : vec3<f32>, view : vec3<f32>, anchor_n : vec3<f32>,
     // than the window. P.facing_threshold is unused here for now.
     var gate_w = 1.0;
     if (P.inflate == 0u) {
+        // The band widens as the surface tilts away. Face-on the whole footprint sits
+        // at behind ~= 0 and 0.25R..0.45R is right; edge-on the LEGITIMATE surface
+        // inside the dab spans nearly +-R of `behind`, so a fixed band amputates its
+        // receding half. That missing half drags the deposit centroid toward the
+        // camera, and since tilt varies along a curved stroke the drag varies with it
+        // — which is the groove wandering sideways. Floor matches the CPU-side dab
+        // spacing correction (DAB_SPACING_MIN_COS).
+        let ct = max(abs(dot(view, anchor_n)), 0.30);
         let behind = dot(vp - anchor, view);
-        gate_w = 1.0 - smoothstep(0.25 * P.world_radius, 0.45 * P.world_radius, behind);
+        gate_w = 1.0 - smoothstep(0.25 * P.world_radius / ct,
+                                  0.45 * P.world_radius / ct, behind);
         gate_w = gate_w * smoothstep(-0.6, -0.4, -dot(vn, view));
         if (gate_w <= 0.0) {
             return;
