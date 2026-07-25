@@ -2,6 +2,19 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-25 — Clay: drop spin roll (⚠️ deploy-then-test, remote session)
+
+- **Spin roll removed** (slider + mechanics): the "spin roll" slider and the whole
+  roll accumulator (`stamp_roll_*`) are gone, along with the `stamp_spin_deg` scaffold
+  that was parked for future spin dials. The square now only **rakes** — it turns to
+  follow the stroke direction, nothing else rotates it.
+- Note: the other simplification asked for — the wall-fill vert redistribution lifted
+  from Limb — was already removed in `b2d7e1c` (2026-07-24) and is not in v0.2.0; no
+  code change needed.
+- Clay spacing stays at 0.10 (still earns its keep: it's what keeps the raking square
+  turning smoothly through curves rather than stamping visibly discrete angles).
+- CPU-side only, no shader changes (WGSL/GLSL untouched).
+
 ## 2026-07-25 — v0.2.0
 
 **Milestone release — the road2v2 arc closes.** v0.2 was scoped as a feature freeze and a

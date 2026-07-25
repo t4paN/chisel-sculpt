@@ -131,14 +131,6 @@ struct BrushStroke {
     bool  stamp_prev_valid;
     float stamp_rake_angle;
     bool  stamp_rake_valid;
-    // Accumulated roll angle: the stamp spins as it travels (stamp_roll_rate × the
-    // in-plane distance since the last dab). Reset to 0 at pen-down, so a single
-    // click (no travel) sits at the base orientation. Per-dab travel collects in the
-    // pending vector and only commits to the angle once it clears the rake's deadband —
-    // a resting pen's sensor noise mostly cancels vectorially instead of ratcheting
-    // the spin, while slow real strokes still roll their full distance. See set_alpha_dab.
-    float stamp_roll_angle = 0.0f;
-    float stamp_roll_pend_u = 0.0f, stamp_roll_pend_v = 0.0f;
     float cyl_axis_x, cyl_axis_y, cyl_axis_z;
     // The real area normal: normals averaged over a disc around the cursor, not the
     // single texel under it. cyl_axis snaps to whichever facet the cursor pixel lands

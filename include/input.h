@@ -55,15 +55,6 @@ struct InputState {
     // pops the custom-image file picker (mirrors import_dialog_active).
     int  active_alpha = 0;
     bool load_alpha_dialog_active = false;
-    // Stamp spin: rotates the alpha stamp about its normal, degrees CCW as seen from
-    // the camera. Scaffold for the spin dials to come (fixed set value for now, no
-    // UI); 0 = screen-upright, behavior-neutral. Applied in set_alpha_dab.
-    float stamp_spin_deg = 0.0f;
-    // Stamp roll (0..1): the stamp spins as the stroke travels — angle accumulates
-    // with distance (rate 1 ≈ one revolution per brush-diameter). Angular speed =
-    // rate × stroke speed, so faster strokes spin faster. 0 = off. Composes on top of
-    // spin/rake; resets each stroke. Slider shows while Clay is active.
-    float stamp_roll_rate = 0.0f;
     // Clay melt (0..1): how strongly clay pulls verts on the WRONG side of its plane
     // (proud on a build, sunk on a carve) back toward it. 0 (default) = ride over:
     // raised areas get nothing added and nothing cut, so a stroke crosses them

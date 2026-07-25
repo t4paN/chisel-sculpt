@@ -725,11 +725,6 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("How strongly clay cuts raised areas down to its plane "
                               "(0 = ride over them untouched, 1 = flatten to the plane)");
-        ImGui::SetNextItemWidth(calc_btn_w("Colour") + calc_btn_w("Density") + 8.0f);
-        ImGui::SliderFloat("##clayRoll", &input.stamp_roll_rate, 0.0f, 1.0f, "spin roll %.2f");
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Square spins as the stroke travels (0 = off; "
-                              "1 ≈ one turn per brush-diameter; faster strokes spin faster)");
     }
 
     // Brush-alpha (stamp) picker: Round + built-ins + custom, then a "＋" to load an
