@@ -112,13 +112,22 @@ fn deposit(v : u32, anchor : vec3<f32>, view : vec3<f32>, anchor_n : vec3<f32>,
         return;
     }
 
-    let facing = -dot(vn, view);
-    if (facing < P.facing_threshold) {
+    // Position-based gate — see crease_accum.wgsl for the full rationale (keep all
+    // four accum kernels in lockstep). Short version: the old binary facing cutoff
+    // rejected verts discontinuously across a crease line and along a receding
+    // surface, which is what broke oblique strokes into wandering beads.
+    // P.facing_threshold is unused now — kept so the std140 block stays byte-
+    // identical to the C++ upload struct.
+    let behind = dot(vp - anchor, view);
+    var gate_w = 1.0 - smoothstep(0.25 * P.world_radius, 0.45 * P.world_radius, behind);
+    gate_w = gate_w * smoothstep(-0.6, -0.4, -dot(vn, view));
+    if (gate_w <= 0.0) {
         return;
     }
 
     var w = brush_falloff(dist, P.world_radius);
     w = w * sample_alpha(vp - anchor, mirrored);
+    w = w * gate_w;
     if (w <= 0.0) {
         return;
     }

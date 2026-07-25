@@ -69,6 +69,14 @@ static constexpr float PRESSURE_GAMMA      = 1.0f;
 // Mouse (or pressure disabled) strength offset — see the block in the dab loop.
 static constexpr float MOUSE_STRENGTH_SCALE = 0.6f;
 
+// Dab spacing is stepped in SCREEN pixels but every dab deposits into a WORLD-space
+// sphere, so the step has to be foreshortening-corrected — see the block in the dab
+// loop. MIN_COS floors the correction (at most 1/0.30 ≈ 3.3x the dab count near a
+// silhouette); DAB_COUNT_MAX is a hard budget on top of that, since each dab is a
+// full-vertex-array dispatch.
+static constexpr float DAB_SPACING_MIN_COS = 0.30f;
+static constexpr int   DAB_COUNT_MAX       = 64;
+
 // From input.cpp
 extern float input_consume_scroll();
 void setup_char_callback(GLFWwindow* window);
@@ -1976,13 +1984,57 @@ int main(int argc, char* argv[]) {
                 float dab_dist = std::sqrt(dab_dx*dab_dx + dab_dy*dab_dy);
                 // eff.spacing (not the live global): transient shift-smooth doesn't
                 // swap the live globals, so this is what makes it use Smooth's spacing.
-                float spacing = input.brush_size * eff.spacing;
+                //
+                // Scale off eff_brush_size, NOT input.brush_size: the dab that gets
+                // dispatched has the pressure-scaled radius, so pairing the step with
+                // the raw slider left a light-pressure stroke stepping up to 1/0.40 =
+                // 2.5x its own footprint — gaps at nothing but a soft touch.
+                float spacing = eff_brush_size * eff.spacing;
+
+                // Foreshortening. This step is in screen pixels, but the dab deposits
+                // into a world-space SPHERE of a radius fixed by the orbit distance
+                // (BrushStroke::anchor_world_radius). On a surface tilted t away from
+                // the view plane, a d-pixel screen step lands d/cos(t) apart in 3D, so
+                // a fixed screen step spreads the spheres until they stop overlapping
+                // (past ~1.0 R) and a continuous stroke breaks into discrete beads —
+                // the long-standing "choppy at oblique angles" bug. Multiply the step
+                // by cos(t) so the WORLD spacing stays put.
+                //
+                // The point normal is enough here: it only scales the step, so texel
+                // noise perturbs spacing slightly rather than placing anything. This
+                // is the same cosine set_anchor already inverts for screen_slack — the
+                // scan box was foreshortening-corrected all along, the step never was.
+                // Falls back to 1.0 (old behaviour) whenever the plane cache can't
+                // answer, so a not-yet-landed webgpu readback can't stall the stroke.
+                {
+                    float n[3];
+                    if (renderer.sample_normal((int)cur_x, (int)cur_y, n)) {
+                        float nl = std::sqrt(n[0]*n[0] + n[1]*n[1] + n[2]*n[2]);
+                        if (nl > 1e-6f) {
+                            Vec3 vd = camera.get_view_direction();
+                            float c = std::fabs((vd.x*n[0] + vd.y*n[1] + vd.z*n[2]) / nl);
+                            spacing *= std::max(c, DAB_SPACING_MIN_COS);
+                        }
+                    }
+                }
+                spacing = std::max(spacing, 1.0f);   // never sub-pixel
 
                 int dab_count = 0;
                 if (is_grab || brush_stroke.phase == StrokePhase::BEGIN) {
                     dab_count = 1;
                 } else if (dab_dist >= spacing) {
                     dab_count = (int)(dab_dist / spacing);
+                }
+
+                // Budget. Every dab dispatches over the WHOLE vertex array, so the
+                // count is linear GPU cost and the correction above can multiply it by
+                // 3.3x. Stretch the step to fit rather than dropping dabs: dropping
+                // them would leave last_dab behind the cursor and the stroke would
+                // rubber-band for frames afterwards. Only bites on a fast flick, where
+                // the spacing was already coarser than the tuning anyway.
+                if (dab_count > DAB_COUNT_MAX) {
+                    dab_count = DAB_COUNT_MAX;
+                    spacing = dab_dist / (float)DAB_COUNT_MAX;
                 }
 
                 if (dab_count > 0) {

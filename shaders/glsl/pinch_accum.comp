@@ -77,11 +77,17 @@ void deposit(uint v, vec3 anchor, vec3 view, vec3 anchor_n, vec3 vp, vec3 vn, ui
     float dist = length(vp - anchor);
     if (dist >= P.world_radius) return;
 
-    float facing = -dot(vn, view);
-    if (facing < P.facing_threshold) return;
+    // Position-based gate — see crease_accum.wgsl for the full rationale (keep all
+    // four accum kernels in lockstep). P.facing_threshold is unused now; kept for
+    // the std140 layout.
+    float behind = dot(vp - anchor, view);
+    float gate_w = 1.0 - smoothstep(0.25 * P.world_radius, 0.45 * P.world_radius, behind);
+    gate_w *= smoothstep(-0.6, -0.4, -dot(vn, view));
+    if (gate_w <= 0.0) return;
 
     float w = brush_falloff(dist, P.world_radius);
     w *= sample_alpha(vp - anchor, mirrored);
+    w *= gate_w;
     if (w <= 0.0) return;
 
     vec3 d;

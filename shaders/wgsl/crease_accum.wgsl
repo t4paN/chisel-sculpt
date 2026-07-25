@@ -116,13 +116,31 @@ fn deposit(v : u32, anchor : vec3<f32>, view : vec3<f32>, anchor_n : vec3<f32>,
         return;
     }
 
-    let facing = -dot(vn, view);
-    if (facing < P.facing_threshold) {
+    // Position-based gate, ported from draw_accum (which got it 2026-07-21; crease
+    // and pinch were left on the old test as the control, and this is that control
+    // coming back positive). The binary `facing < facing_threshold` cutoff tore
+    // grazing strokes apart two ways: vertex normals FLIP across a crease line
+    // (+0.4 → −0.6 between neighbours), so an angular test accepts one flank and
+    // rejects the other mid-dab; and with the default threshold at 0.0 — exactly
+    // the silhouette — the accepted SET changes discontinuously from dab to dab as
+    // the surface turns away, which is what makes an oblique stroke wander.
+    // Gate on position instead: reject verts significantly BEHIND the anchor
+    // surface along the view (that's a thin sheet's far side), feathered in
+    // position space so bulgy forms don't hit a wall. A crease's far flank sits at
+    // ≈ the anchor's depth, so it deposits. Far-backfacing verts are still cut as
+    // belt-and-suspenders for sheets thinner than the window.
+    // P.facing_threshold is unused now — kept in the block so the 112 B std140
+    // layout stays byte-identical to the C++ upload struct.
+    let behind = dot(vp - anchor, view);
+    var gate_w = 1.0 - smoothstep(0.25 * P.world_radius, 0.45 * P.world_radius, behind);
+    gate_w = gate_w * smoothstep(-0.6, -0.4, -dot(vn, view));
+    if (gate_w <= 0.0) {
         return;
     }
 
     var w = brush_falloff(dist, P.world_radius);
     w = w * sample_alpha(vp - anchor, mirrored);
+    w = w * gate_w;
     if (w <= 0.0) {
         return;
     }

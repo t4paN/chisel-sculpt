@@ -2,6 +2,34 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-25 — Brush: oblique strokes no longer break into beads
+
+- **Foreshortening-corrected dab spacing.** The step between dabs was measured in screen
+  pixels while every dab deposits into a *world-space* sphere, and nothing reconciled the
+  two: on a surface tilted `t` from the view plane a `d`-pixel step lands `d/cos(t)` apart
+  in 3D, so the dab spheres spread until they stopped overlapping (past ~1.0 R) and a
+  continuous stroke came apart into discrete beads. At the default 0.25 spacing that's
+  0.97 R at 75° and 1.8 R at 82° — which is exactly where strokes went choppy. The step is
+  now scaled by `cos(t)` sampled from the plane-cache normal, floored at 0.30 so a
+  near-silhouette dab can't multiply the count by more than ~3.3x. This is the same cosine
+  `set_anchor` already inverted for `screen_slack` — the scan box had been foreshortening-
+  corrected all along, the step never was.
+- **Spacing follows the pressure-scaled radius.** It was computed off the raw `brush_size`
+  slider while the dab dispatches at `eff_brush_size`, so a light pen touch stepped up to
+  1/`PRESSURE_SIZE_FLOOR` = 2.5x its own footprint — gaps from nothing but a soft touch,
+  before any tilt. Pen-only bug; a mouse never hit it.
+- **Dab budget.** Each dab dispatches over the whole vertex array, so the count is linear
+  GPU cost and the correction above can raise it. `DAB_COUNT_MAX = 64` stretches the step
+  to fit rather than dropping dabs — dropping them would leave `last_dab` behind the cursor
+  and rubber-band the stroke for frames after a fast flick.
+- **Crease and Pinch got Draw's position gate.** They were still on the binary
+  `facing < facing_threshold` cutoff that Draw shed on 2026-07-21 — with the default
+  threshold at 0.0, *exactly* the silhouette. Vertex normals flip across a crease line, so
+  the accepted vertex set changed discontinuously from dab to dab as a surface turned away:
+  the lateral wander riding on top of the beading. Now the same feathered
+  0.25R..0.45R behind-the-anchor test, in all four accum kernels (WGSL + GLSL twins).
+  `facing_threshold` is left in the std140 blocks so the 112 B layout stays byte-identical.
+
 ## 2026-07-25 — Remesh: doubled-triangle removal + topology tracer
 
 - **Found what the non-manifold edges actually were.** Added `CHISEL_DEBUG_REMESH`, a
