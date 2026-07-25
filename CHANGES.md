@@ -2,6 +2,21 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-25 — Clay: hardness = stamp edge feather (⚠️ deploy-then-test, remote session)
+
+- **Hardness was a dead knob for Clay** — it only ever acted through the radial falloff,
+  which clay skips whenever its square stamp is on (i.e. always). The UBO carried it;
+  the clay branch never read it. User noticed ("feels like hardness doesn't affect it").
+- **Now it feathers the square's edge:** new `clay_square()` in `draw_accum`
+  (GLSL + WGSL, lockstep) computes the square's coverage analytically in the stamp
+  frame — Chebyshev distance, smoothstep from `0.705·hardness` to the 0.705 outer
+  extent. Hardness 1 ≈ the bitmap's old crisp AA rim; 0 feathers to the centre.
+  Clay no longer samples the Square bitmap at all (other brushes unchanged).
+  Analytic ⇒ per-dab response, no texture re-upload. Motivation beyond the dead
+  slider: user reports the crisp edge feels jittery — default 0.85 now lays a small
+  blending feather.
+- Chrome WGSL gate run: clean (no Tint parse errors, `draw_accum` compiled, web).
+
 ## 2026-07-25 — Clay: drop spin roll (⚠️ deploy-then-test, remote session)
 
 - **Spin roll removed** (slider + mechanics): the "spin roll" slider and the whole

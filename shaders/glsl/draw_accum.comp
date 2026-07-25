@@ -64,6 +64,23 @@ float sample_alpha(vec3 rel, uint mirrored) {
 }
 // --- end shared brush-alpha stamp ---
 
+// Clay-only: analytic square coverage in the stamp frame, replacing the bitmap
+// sample. The stamp IS clay's brush edge, so hardness lives here: 1 = crisp
+// chisel rim (the bitmap's old fixed AA band), 0 = the rim feathers all the way
+// to the centre. Analytic rather than baked into the bitmap so the slider
+// answers per dab — no texture re-upload, no resolution tie. Outer extent 0.705
+// keeps the corners inside the kernels' dist < radius gate (inscribed square,
+// see brush_alpha.cpp).
+float clay_square(vec3 rel, uint mirrored) {
+    vec3 tang = AP.tangent; vec3 bitan = AP.bitangent;
+    if (mirrored != 0u) { tang.x = -tang.x; bitan.x = -bitan.x; }
+    float u = dot(rel, tang) * AP.inv_diameter * 2.0;
+    float v = dot(rel, bitan) * AP.inv_diameter * 2.0;
+    float m = max(abs(u), abs(v));
+    float inner = min(0.705 * P.hardness, 0.70);
+    return 1.0 - smoothstep(inner, 0.705, m);
+}
+
 void atomicAddFloat(uint idx, float val) {
     uint expected = accum[idx];
     for (int i = 0; i < 128; i++) {
@@ -109,12 +126,13 @@ void deposit(uint v, vec3 anchor, vec3 view, vec3 anchor_n, vec3 vp, vec3 vn, ui
         gate_w *= smoothstep(-0.6, -0.4, -dot(vn, view));
         if (gate_w <= 0.0) return;
     }
-    // Clay's stamp IS its edge: skip the radial falloff so the layer face is flat
-    // and the square's corners don't fade out toward the dab rim (the radial fade
-    // is what rounded them into a squircle). Every other brush keeps falloff*alpha.
+    // Clay's stamp IS its edge: skip the radial falloff (it rounded the square's
+    // corners into a squircle) and weight by the analytic square instead — that's
+    // where clay's hardness applies (edge feather, see clay_square). Every other
+    // brush keeps falloff*alpha.
     float w = (P.clay != 0u && AP.enabled != 0u)
-                  ? 1.0 : brush_falloff(dist, P.world_radius);
-    w *= sample_alpha(vp - anchor, mirrored);
+                  ? clay_square(vp - anchor, mirrored)
+                  : brush_falloff(dist, P.world_radius) * sample_alpha(vp - anchor, mirrored);
     w *= gate_w;
     if (w <= 0.0) return;
     vec3 dir = (P.inflate != 0u) ? vn : anchor_n;

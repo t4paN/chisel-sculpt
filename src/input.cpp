@@ -86,8 +86,9 @@ InputState::InputState()
     per_brush[(int)BrushType::MASK].hardness = 0.64f;     // 64% hardness
     per_brush[(int)BrushType::PAINT].strength = 0.5f;     // soft build-up by default
     per_brush[(int)BrushType::PAINT].hardness = 0.5f;
-    // Clay levels up to a plane, so a high hardness (wide flat core) is what makes
-    // it read as a packed slab rather than a domed one.
+    // Clay's hardness is the square stamp's edge feather (clay_square in
+    // draw_accum): 1 = crisp chisel rim, lower melts the rim toward the centre.
+    // 0.85 = mostly crisp with just enough feather to blend dab seams.
     per_brush[(int)BrushType::CLAY].strength = 0.6f;
     per_brush[(int)BrushType::CLAY].hardness = 0.85f;
     // Tight spacing so the raking square turns smoothly through curves: at the

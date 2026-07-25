@@ -89,6 +89,27 @@ fn sample_alpha(rel : vec3<f32>, mirrored : u32) -> f32 {
 }
 // --- end shared brush-alpha stamp ---
 
+// Clay-only: analytic square coverage in the stamp frame, replacing the bitmap
+// sample. The stamp IS clay's brush edge, so hardness lives here: 1 = crisp
+// chisel rim (the bitmap's old fixed AA band), 0 = the rim feathers all the way
+// to the centre. Analytic rather than baked into the bitmap so the slider
+// answers per dab — no texture re-upload, no resolution tie. Outer extent 0.705
+// keeps the corners inside the kernels' dist < radius gate (inscribed square,
+// see brush_alpha.cpp).
+fn clay_square(rel : vec3<f32>, mirrored : u32) -> f32 {
+    var tang = AP.tangent;
+    var bitan = AP.bitangent;
+    if (mirrored != 0u) {
+        tang.x = -tang.x;
+        bitan.x = -bitan.x;
+    }
+    let u = dot(rel, tang) * AP.inv_diameter * 2.0;
+    let v = dot(rel, bitan) * AP.inv_diameter * 2.0;
+    let m = max(abs(u), abs(v));
+    let inner = min(0.705 * P.hardness, 0.70);
+    return 1.0 - smoothstep(inner, 0.705, m);
+}
+
 // Portable float accumulate: CAS the float-bits until our add lands. Matches the
 // atomicAddFloat in compute_draw.cpp (atomicCompSwap loop), capped the same way.
 fn atomicAddFloat(idx : u32, val : f32) {
@@ -149,14 +170,16 @@ fn deposit(v : u32, anchor : vec3<f32>, view : vec3<f32>, anchor_n : vec3<f32>,
             return;
         }
     }
-    // Clay's stamp IS its edge: skip the radial falloff so the layer face is flat
-    // and the square's corners don't fade out toward the dab rim (the radial fade
-    // is what rounded them into a squircle). Every other brush keeps falloff*alpha.
+    // Clay's stamp IS its edge: skip the radial falloff (it rounded the square's
+    // corners into a squircle) and weight by the analytic square instead — that's
+    // where clay's hardness applies (edge feather, see clay_square). Every other
+    // brush keeps falloff*alpha.
     var w = 1.0;
-    if (P.clay == 0u || AP.enabled == 0u) {
-        w = brush_falloff(dist, P.world_radius);
+    if (P.clay != 0u && AP.enabled != 0u) {
+        w = clay_square(vp - anchor, mirrored);
+    } else {
+        w = brush_falloff(dist, P.world_radius) * sample_alpha(vp - anchor, mirrored);
     }
-    w = w * sample_alpha(vp - anchor, mirrored);
     w = w * gate_w;
     if (w <= 0.0) {
         return;
