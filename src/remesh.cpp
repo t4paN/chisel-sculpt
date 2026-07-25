@@ -2378,6 +2378,244 @@ static void audit_open_edges(const Mesh& m, float seam_tol, const char* stage,
 }
 
 // ---------------------------------------------------------------------------
+// Geometric quality audit (diagnostic)
+// ---------------------------------------------------------------------------
+// audit_open_edges answers one question: is the connectivity a valid closed
+// manifold. It can come back perfectly clean on a mesh that still looks broken,
+// because every defect it knows how to name is a connectivity defect. The seam
+// artifact that outlives it — small triangles sitting inside larger ones — is
+// therefore geometric: the connectivity is a legal 2-manifold, the embedding of
+// that manifold into 3-space is not. Three shapes produce it, listed in the
+// order they are worth suspecting:
+//
+//   fold   two triangles sharing an edge whose normals point back at each
+//          other. A vertex snapped onto the mirror plane travels up to
+//          0.45 * target_edge in x under no quality guard at all
+//          (consolidate_seam stage 1, and the GPU snap in
+//          mirror_positive_half) — far enough to drag its triangles back
+//          across their own neighbours. Renders as one triangle lying on top
+//          of another.
+//   cap    a triangle carrying an angle near 180 degrees. Flat, near-zero
+//          area, yet all three edges can be long enough that the needle test
+//          (which looks at the SHORTEST edge) never sees it.
+//   tetra  a valence-3 vertex whose three neighbours already form a triangle.
+//          That is a tetrahedron embedded in the surface: four triangles,
+//          every edge used exactly twice, wound consistently, enclosing
+//          almost no volume. Textbook "triangle within a triangle", and
+//          textbook invisible to a connectivity audit. Note that
+//          collapse_short_edges cannot clear one even in principle — it
+//          refuses any edge with a valence-3 endpoint.
+//
+// One hash pass, O(E + F), so this runs unconditionally next to the
+// watertightness audit rather than behind CHISEL_DEBUG_REMESH.
+static void audit_geometry(const Mesh& m, float seam_tol, const char* stage,
+                           float target_edge) {
+    const uint32_t tc = m.tri_count();
+    const uint32_t vc = m.vertex_count();
+    if (tc == 0 || vc == 0) return;
+
+    // Folds born of a seam snap sit a ring or two off the plane, not on it, so
+    // "near the seam" has to be measured in target edges — seam_tol is far too
+    // tight to catch the neighbourhood that the snap actually disturbs.
+    const float seam_band = (target_edge > 0.0f) ? target_edge * 1.5f
+                                                 : seam_tol * 50.0f;
+    auto near_seam = [&](uint32_t v) -> bool {
+        return std::fabs(m.pos_x[v]) < seam_band;
+    };
+
+    // --- edge -> its (up to two) triangles --------------------------------
+    struct EUse { uint32_t t0, t1, uses; };
+    EdgeMap emap;
+    emap.reset((size_t)tc * 2);
+    std::vector<EUse>     eu;
+    std::vector<uint64_t> ekey;
+    eu.reserve((size_t)tc * 2);
+    ekey.reserve((size_t)tc * 2);
+
+    for (uint32_t t = 0; t < tc; t++) {
+        for (int e = 0; e < 3; e++) {
+            uint32_t a = m.indices[t*3+e], b = m.indices[t*3+(e+1)%3];
+            if (a >= vc || b >= vc || a == b) continue;
+            uint32_t lo = std::min(a, b), hi = std::max(a, b);
+            uint64_t k = ((uint64_t)lo << 32) | (uint64_t)hi;
+            uint32_t idx = emap.find(k);
+            if (idx == INVALID) {
+                idx = (uint32_t)eu.size();
+                eu.push_back({t, INVALID, 1});
+                ekey.push_back(k);
+                emap.insert(k, idx);
+            } else {
+                if (eu[idx].uses == 1) eu[idx].t1 = t;
+                eu[idx].uses++;
+            }
+        }
+    }
+
+    auto unit_normal = [&](uint32_t t, Vec3& out) -> bool {
+        Vec3 n = tri_normal(m, t);
+        float l = n.length();
+        if (l < 1e-20f) return false;
+        out = n * (1.0f / l);
+        return true;
+    };
+
+    // --- 1. Folds ---------------------------------------------------------
+    // dot < -0.5 is a dihedral under 60 degrees: sharper than any sculpted
+    // crease the brushes can leave, so anything here is a defect, not detail.
+    // dot < -0.9 is folded flat back on itself, which is the visible artifact.
+    static constexpr float FOLD_COS = -0.5f;
+    static constexpr float HARD_COS = -0.9f;
+    static constexpr uint32_t MAX_SAMPLES = 4;
+    uint32_t folds = 0, folds_hard = 0, folds_seam = 0, n_fs = 0;
+    struct { float x, y, z, dot; } fsample[MAX_SAMPLES];
+
+    for (size_t i = 0; i < eu.size(); i++) {
+        if (eu[i].uses != 2 || eu[i].t1 == INVALID) continue;
+        Vec3 na, nb;
+        if (!unit_normal(eu[i].t0, na) || !unit_normal(eu[i].t1, nb)) continue;
+        float d = na.dot(nb);
+        if (d >= FOLD_COS) continue;
+        uint32_t v0 = (uint32_t)(ekey[i] >> 32);
+        uint32_t v1 = (uint32_t)(ekey[i] & 0xFFFFFFFFu);
+        folds++;
+        if (d < HARD_COS) folds_hard++;
+        if (near_seam(v0) || near_seam(v1)) folds_seam++;
+        if (n_fs < MAX_SAMPLES) {
+            fsample[n_fs] = { (m.pos_x[v0] + m.pos_x[v1]) * 0.5f,
+                              (m.pos_y[v0] + m.pos_y[v1]) * 0.5f,
+                              (m.pos_z[v0] + m.pos_z[v1]) * 0.5f, d };
+            n_fs++;
+        }
+    }
+
+    // --- 2. Cap triangles -------------------------------------------------
+    // cos < -0.985 is an angle over 170 degrees.
+    static constexpr float CAP_COS = -0.985f;
+    uint32_t caps = 0, caps_seam = 0;
+    for (uint32_t t = 0; t < tc; t++) {
+        uint32_t i0 = m.indices[t*3+0], i1 = m.indices[t*3+1], i2 = m.indices[t*3+2];
+        if (i0 >= vc || i1 >= vc || i2 >= vc) continue;
+        if (i0 == i1 || i1 == i2 || i0 == i2) continue;
+        Vec3 p0 = m.get_pos(i0), p1 = m.get_pos(i1), p2 = m.get_pos(i2);
+        float l01 = (p1-p0).length(), l12 = (p2-p1).length(), l02 = (p2-p0).length();
+        if (l01 < 1e-12f || l12 < 1e-12f || l02 < 1e-12f) continue;
+        float c0 = (p1-p0).dot(p2-p0) / (l01*l02);
+        float c1 = (p0-p1).dot(p2-p1) / (l01*l12);
+        float c2 = (p0-p2).dot(p1-p2) / (l02*l12);
+        if (std::min({c0, c1, c2}) > CAP_COS) continue;
+        caps++;
+        if (near_seam(i0) || near_seam(i1) || near_seam(i2)) caps_seam++;
+    }
+
+    // --- 3. Embedded tetrahedra ------------------------------------------
+    // Valence and the first three neighbours per vertex, straight off the edge
+    // list. Valence saturates so a high-valence vertex costs nothing extra.
+    std::vector<uint8_t>  val(vc, 0);
+    std::vector<uint32_t> nbr((size_t)vc * 3, INVALID);
+    auto push_nbr = [&](uint32_t v, uint32_t o) {
+        if (val[v] < 3) nbr[(size_t)v*3 + val[v]] = o;
+        if (val[v] < 255) val[v]++;
+    };
+    for (size_t i = 0; i < eu.size(); i++) {
+        uint32_t v0 = (uint32_t)(ekey[i] >> 32);
+        uint32_t v1 = (uint32_t)(ekey[i] & 0xFFFFFFFFu);
+        push_nbr(v0, v1);
+        push_nbr(v1, v0);
+    }
+
+    // Sorted-triple hash of every triangle, so "do these three verts already
+    // span a face" is a lookup. Same key shape remove_doubled_tris uses.
+    auto tri_key = [](uint32_t a, uint32_t b, uint32_t c) -> uint64_t {
+        if (a > b) std::swap(a, b);
+        if (b > c) std::swap(b, c);
+        if (a > b) std::swap(a, b);
+        uint64_t k = ((uint64_t)a * 0x9E3779B97F4A7C15ull) ^
+                     ((uint64_t)b * 0xC2B2AE3D27D4EB4Full) ^
+                     ((uint64_t)c * 0x165667B19E3779F9ull);
+        if (k == EdgeMap::EMPTY || k == EdgeMap::TOMB) k ^= 1ull;
+        return k;
+    };
+    EdgeMap tmap;
+    tmap.reset(tc);
+    for (uint32_t t = 0; t < tc; t++) {
+        uint32_t i0 = m.indices[t*3+0], i1 = m.indices[t*3+1], i2 = m.indices[t*3+2];
+        if (i0 == i1 || i1 == i2 || i0 == i2) continue;
+        tmap.insert(tri_key(i0, i1, i2), t);
+    }
+
+    uint32_t tetras = 0, tetras_seam = 0, n_ts = 0;
+    struct { float x, y, z; uint32_t v; } tsample[MAX_SAMPLES];
+    for (uint32_t v = 0; v < vc; v++) {
+        if (val[v] != 3) continue;
+        uint32_t a = nbr[(size_t)v*3+0], b = nbr[(size_t)v*3+1], c = nbr[(size_t)v*3+2];
+        if (a == INVALID || b == INVALID || c == INVALID) continue;
+        uint32_t t = tmap.find(tri_key(a, b, c));
+        if (t == INVALID) continue;
+        // Hash hit must be confirmed against the real vertex set — a collision
+        // here would invent a defect that isn't there.
+        uint32_t q0 = m.indices[t*3+0], q1 = m.indices[t*3+1], q2 = m.indices[t*3+2];
+        bool ha = (q0 == a || q1 == a || q2 == a);
+        bool hb = (q0 == b || q1 == b || q2 == b);
+        bool hc = (q0 == c || q1 == c || q2 == c);
+        if (!ha || !hb || !hc) continue;
+        tetras++;
+        if (near_seam(v)) tetras_seam++;
+        if (n_ts < MAX_SAMPLES) {
+            tsample[n_ts] = { m.pos_x[v], m.pos_y[v], m.pos_z[v], v };
+            n_ts++;
+        }
+    }
+
+    // --- 4. Connected components -----------------------------------------
+    // A stray shard reads as clean topology on its own. mirror_positive_half
+    // culls all but the largest component, so anything above 1 here at
+    // post-mirror means the cull let something through.
+    std::vector<uint32_t> parent(tc);
+    for (uint32_t t = 0; t < tc; t++) parent[t] = t;
+    auto find_root = [&](uint32_t x) -> uint32_t {
+        while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; }
+        return x;
+    };
+    for (size_t i = 0; i < eu.size(); i++) {
+        if (eu[i].t1 == INVALID) continue;
+        uint32_t ra = find_root(eu[i].t0), rb = find_root(eu[i].t1);
+        if (ra != rb) parent[ra] = rb;
+    }
+    std::vector<uint32_t> csize(tc, 0);
+    for (uint32_t t = 0; t < tc; t++) csize[find_root(t)]++;
+    uint32_t components = 0, largest = 0;
+    for (uint32_t t = 0; t < tc; t++) {
+        if (csize[t] == 0) continue;
+        components++;
+        largest = std::max(largest, csize[t]);
+    }
+
+    if (folds == 0 && caps == 0 && tetras == 0 && components == 1) {
+        std::printf("[remesh-geom] %s: no folds, caps or embedded tetrahedra\n", stage);
+        return;
+    }
+    if (folds > 0)
+        std::printf("[remesh-geom] %s: %u FOLD edges (%u folded flat, %u within "
+                    "%.4f of the seam)\n", stage, folds, folds_hard, folds_seam,
+                    seam_band);
+    if (caps > 0)
+        std::printf("[remesh-geom] %s: %u CAP tris, angle >170 deg (%u near seam)\n",
+                    stage, caps, caps_seam);
+    if (tetras > 0)
+        std::printf("[remesh-geom] %s: %u EMBEDDED TETRAHEDRA, valence-3 vert over an "
+                    "existing tri (%u near seam)\n", stage, tetras, tetras_seam);
+    if (components != 1)
+        std::printf("[remesh-geom] %s: %u components, largest holds %u/%u tris\n",
+                    stage, components, largest, tc);
+    for (uint32_t i = 0; i < n_fs; i++)
+        std::printf("[remesh-geom]   fold at (%.4f, %.4f, %.4f) n.n=%.3f\n",
+                    fsample[i].x, fsample[i].y, fsample[i].z, fsample[i].dot);
+    for (uint32_t i = 0; i < n_ts; i++)
+        std::printf("[remesh-geom]   tetra tip v%u at (%.4f, %.4f, %.4f)\n",
+                    tsample[i].v, tsample[i].x, tsample[i].y, tsample[i].z);
+}
+
+// ---------------------------------------------------------------------------
 // Top-level entry point
 // ---------------------------------------------------------------------------
 
@@ -2441,6 +2679,11 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
 
     // Repair brush-induced flipped tris before the edge ops can amplify them.
     repair_flipped_tris(mesh, seam_tol);
+
+    // Baseline on the incoming mesh. Sculpting can fold a surface on its own,
+    // so without this line every fold at pre-mirror looks like the remesher's
+    // doing and there is no way to tell inherited from minted.
+    audit_geometry(mesh, seam_tol, "entry", target_edge_length);
 
     // Build edge table
     EdgeTable et;
@@ -2786,6 +3029,7 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
     compact_mesh(mesh);
 
     audit_open_edges(mesh, seam_tol, "pre-mirror", target_edge_length);
+    audit_geometry(mesh, seam_tol, "pre-mirror", target_edge_length);
 
     mirror_positive_half(mesh, seam_tol, target_edge_length, cs);
 
@@ -2793,6 +3037,10 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
     mesh.recompute_normals();
 
     audit_open_edges(mesh, seam_tol, "post-mirror", target_edge_length);
+    // Run on both sides of the mirror: the seam snap, the plane clip and the
+    // reflection all live inside mirror_positive_half, so a defect that appears
+    // only in the second line was minted there.
+    audit_geometry(mesh, seam_tol, "post-mirror", target_edge_length);
 
     // The mirror step is the last thing that can leave inverted geometry: the
     // reflected half is emitted with reversed winding, and the component cull
