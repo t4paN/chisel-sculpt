@@ -88,9 +88,9 @@ InputState::InputState()
     per_brush[(int)BrushType::PAINT].hardness = 0.5f;
     // Clay's hardness is the square stamp's edge feather (clay_square in
     // draw_accum): 1 = crisp chisel rim, lower melts the rim toward the centre.
-    // 0.85 = mostly crisp with just enough feather to blend dab seams.
+    // 0.3 = generous feather by default (user-tuned; crisper felt jittery).
     per_brush[(int)BrushType::CLAY].strength = 0.6f;
-    per_brush[(int)BrushType::CLAY].hardness = 0.85f;
+    per_brush[(int)BrushType::CLAY].hardness = 0.3f;
     // Tight spacing so the raking square turns smoothly through curves: at the
     // default 0.25 the between-dab angle steps are big enough that dabs read as
     // separate stamps; 0.10 stamps the in-between angles.
