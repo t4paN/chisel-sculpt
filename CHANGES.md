@@ -2,6 +2,22 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-25 — v0.2.0
+
+**Milestone release — the road2v2 arc closes.** v0.2 was scoped as a feature freeze and a
+polish pass, and it ends with the oldest standing defect in the app removed.
+
+- Released: annotated tag `v0.2.0` (GH Linux + Windows release CI), web build to itch as
+  userversion 0.2.0.
+- **The headline:** strokes going choppy and wavy at oblique angles — present since the
+  very beginning — is fixed. One root cause wearing five hats: the brush is *driven* in
+  screen space but *deposits* in world space, and nothing reconciled the two, with
+  `1/cos(tilt)` amplifying whatever noise it met. The three entries below are that fix,
+  landed in order: beading, then wobble, then the strength coupling the first two exposed.
+- Sculpt-tested and confirmed by the user across all three passes — final verdict at 25%
+  spacing: "ridiculously clean and polished, even the worbly wavey stuff is gone".
+- Brush work is considered **complete** as of this release.
+
 ## 2026-07-25 — Brush: strength decoupled from dab density
 
 - **Material laid per unit of stroke length no longer depends on dab spacing.** The
