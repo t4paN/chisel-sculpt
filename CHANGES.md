@@ -2,6 +2,28 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-25 — Brush: strength decoupled from dab density
+
+- **Material laid per unit of stroke length no longer depends on dab spacing.** The
+  additive brushes deposit per dab, so deposition per unit length is
+  `(per-dab amount)/spacing` — meaning every change to spacing silently rescaled stroke
+  strength. That coupling is old, but the foreshortening fix earlier today made it bite:
+  taking spacing off `eff_brush_size` packs dabs `1/(0.40 + 0.60·pressure)` tighter, up to
+  2.5× at the pressure floor, so mid-pressure pen strokes began depositing ~1.4–2.5× more
+  than the defaults were tuned against. It read as the brush-strength reduction having
+  been reverted — it wasn't (verified: `brush_strength(0.5f)` unchanged since the initial
+  public release, and `MOUSE_STRENGTH_SCALE` only ever fires on the no-tablet path, so it
+  never applied to a pen user at all). Per-dab displacement is now normalised against the
+  reference spacing — face-on, full pressure, which is what the defaults were tuned on —
+  so strength means what it says regardless of pen pressure *or* viewing angle. A grazing
+  stroke lays the same bead as a face-on one instead of the old thin, gappy one. Applied
+  to Draw/Inflate/Crease/Pinch only, matching `MOUSE_STRENGTH_SCALE`'s existing reasoning:
+  those accumulate without bound, while Move/Limb track the cursor and
+  Smooth/Mask/Paint/Clay converge on a target and merely settle sooner. Capped at 1.0 so
+  the dab-budget branch can't turn a fast flick into a gouge.
+- Side effect, intended: the spacing slider is now a pure **smoothness** control rather
+  than a smoothness-and-strength one.
+
 ## 2026-07-25 — Brush: the oblique-stroke wobble (second pass)
 
 Beading was the spacing bug (below). The *wander* riding on top of it was four

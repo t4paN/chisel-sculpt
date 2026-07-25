@@ -2037,6 +2037,42 @@ int main(int argc, char* argv[]) {
                     spacing = dab_dist / (float)DAB_COUNT_MAX;
                 }
 
+                // Decouple stroke strength from dab DENSITY.
+                //
+                // The additive brushes deposit per dab, so material laid per unit of
+                // stroke length is (per-dab amount)/spacing — which means every change
+                // to spacing silently rescaled strength. That coupling predates all of
+                // this, but the foreshortening fix made it bite: taking spacing off
+                // eff_brush_size packs dabs 1/(0.40+0.60*pressure) tighter, up to 2.5x
+                // at the pressure floor, so mid-pressure pen strokes started depositing
+                // ~1.4-2.5x more per unit length than the defaults were tuned against.
+                // It read as "the brush strength reduction got reverted".
+                //
+                // Normalise against the reference spacing — face-on, full pressure,
+                // which is what the defaults were tuned on — so material per unit length
+                // is what strength says it is, independent of pressure-size AND of
+                // viewing angle. A grazing stroke now lays the same bead as a face-on
+                // one instead of the old thin, gappy one.
+                //
+                // Same brush set as MOUSE_STRENGTH_SCALE above, for the same reason:
+                // these accumulate without bound. Move/Limb track the cursor, and
+                // Smooth/Mask/Paint/Clay converge on a target, so denser dabs make those
+                // settle sooner rather than pile up.
+                //
+                // Capped at 1.0 so the budget branch above can't turn a fast flick into
+                // a gouge; floored so a near-silhouette dab still registers.
+                {
+                    BrushType bt = is_smooth ? BrushType::SMOOTH : input.current_brush;
+                    bool additive = (bt == BrushType::DRAW  || bt == BrushType::INFLATE ||
+                                     bt == BrushType::CREASE || bt == BrushType::PINCH);
+                    float ref_spacing = input.brush_size * eff.spacing;
+                    if (additive && ref_spacing > 1e-6f) {
+                        float comp = spacing / ref_spacing;
+                        comp = comp < 0.20f ? 0.20f : (comp > 1.0f ? 1.0f : comp);
+                        eff_strength *= comp;
+                    }
+                }
+
                 if (dab_count > 0) {
                 if (brush_stroke.phase == StrokePhase::BEGIN)
                     brush_stroke.phase = StrokePhase::ACTIVE;
