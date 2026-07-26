@@ -711,7 +711,11 @@ void BrushStroke::apply_crease(DabContext& ctx, float dab_x, float dab_y,
 
     float sign = subtract ? 1.0f : -1.0f;
     float base_disp = anchor_world_radius;
-    float disp_amount = base_disp * strength * sign * 0.15f;
+    // 0.15 made crease deepen ~3.3x slower than Draw's 0.5 for the same strength and
+    // spacing, which read as the brush being weak rather than being a different brush.
+    // Kept below Draw's 0.5: the pinch pull below already contributes apparent depth by
+    // gathering the band, so matching Draw's constant outright would overshoot.
+    float disp_amount = base_disp * strength * sign * 0.30f;
     // Pinch gathers vertices into a narrow band — that gathering is what reads as
     // sharpness, and it's an absolute width, not a ratio. Scaled linearly it made a
     // low-strength crease shallow AND wide (i.e. a Draw dent), because the band never

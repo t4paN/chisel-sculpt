@@ -2,6 +2,28 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-26 — Crease: deepen at Draw's rate (⚠️ deploy-then-test)
+
+- **Crease deposited 3.3x less than Draw for the same settings.** User read it as the
+  brush being slow rather than being a different brush. It was one hardcoded constant:
+  Draw's normal push is `base_disp · strength · 0.5`, Crease's was `· 0.15`. Everything
+  else about the two paths is identical — same default spacing (0.25), same membership in
+  the `additive` set that gets the spacing/strength normalisation, same dispatch shape
+  (accum → barrier → optional symmetrize → shared `draw_apply` → async readback). So the
+  gap was pure deposition rate, not cost and not falloff.
+- **Now 0.30.** Deliberately still under Draw's 0.5: the pinch pull contributes apparent
+  depth by gathering the band, so matching Draw's constant outright would overshoot.
+- CPU-side only, one line — no shader change, so no WGSL/Tint gate applies.
+- **Caveat carried forward:** the ridge *flanks* still build slower than the tip, because
+  the tangential pull is distance-proportional (exponential convergence in the core, a
+  fraction of an already-small step out on the shoulders). Deepening the normal push makes
+  that split *more* visible, not less. That's the parked crease/pinch profile thread —
+  attempted in `v0.2.3` (`16b14ad`, wedge blend + tip floor), verdict "better but at the
+  same time worse", reset off `main` and kept alive only by that tag. Handoff:
+  `~/CHISEL/pinch-profile-handoff.md`.
+- Note: this build does **not** contain the `v0.2.3` wedge rework, so crease profile on
+  itch steps back to the pre-0.2.3 shape while the depth goes up.
+
 ## 2026-07-25 — Clay: hardness = stamp edge feather (⚠️ deploy-then-test, remote session)
 
 - **Hardness was a dead knob for Clay** — it only ever acted through the radial falloff,
