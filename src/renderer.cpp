@@ -6,14 +6,15 @@
 #include <unordered_set>
 
 // Matcap Params UBO payload — byte-identical to the std140 `Params` block in the
-// matcap shaders (two mat4 = 128 B, then three floats + 4 B pad = 16 B).
+// matcap shaders (two mat4 = 128 B, then four floats = 16 B). The fourth float was
+// the std140 tail pad; matcap_contrast took it, so the size never moved.
 struct MatcapParamsGPU {
     float view[16];
     float proj[16];
     float facing_threshold;
     float obj_mask;
     float paint_visible;
-    float _pad0;
+    float matcap_contrast;
 };
 static_assert(sizeof(MatcapParamsGPU) == 144, "matcap Params UBO must be 144 bytes (std140)");
 
@@ -143,6 +144,7 @@ layout(std140, binding=63) uniform Params {
     float uFacingThreshold;
     float uObjMask;
     float uPaintVisible;
+    float uMatcapContrast;
 };
 
 out vec3 vNormView;
@@ -171,23 +173,48 @@ layout(std140, binding=63) uniform Params {
     float uFacingThreshold;
     float uObjMask;
     float uPaintVisible;
+    float uMatcapContrast;
 };
 
 void main() {
     vec3 n = normalize(vNormView);
     float rim = 1.0 - abs(n.z);
-    float top = n.y * 0.5 + 0.5;
-    float base = 0.35 + 0.45 * top + 0.15 * (1.0 - rim * rim);
+    float rim2 = rim * rim;
 
-    float cavity = 1.0 - rim * rim * 0.3;
-    float val = base * cavity;
+    // Flat ramp (uMatcapContrast = 0): the original look. Keys off n.y alone, so
+    // it is flat in z — a bulge and a plane facing the same way shade alike.
+    float top = n.y * 0.5 + 0.5;
+    float val_flat = (0.35 + 0.45 * top + 0.15 * (1.0 - rim2)) * (1.0 - rim2 * 0.3);
+
+    // Keyed ramp (uMatcapContrast = 1). Key light up-left and tilted toward the
+    // viewer — the z term is what makes curvature read.
+    vec3 L = normalize(vec3(-0.30, 0.62, 0.72));
+    // Wrapped diffuse (soft terminator), squared. The square is the contrast:
+    // it pulls the mid-greys apart without crushing the lit side.
+    float key = mix(0.35, 1.0, max(dot(n, L), 0.0));
+    key *= key;
+    float fill = n.y * 0.5 + 0.5;                  // sky/ground ambient
+    // Silhouette falloff, deeper than the flat ramp's — this is what gives the
+    // form a dark edge to sit against instead of fading into uniform grey.
+    // Peak diffuse stops at 0.85, not ~1: the sheen below is additive, so the lit
+    // side needs headroom or a smooth sphere clips to a white plastic blob.
+    float val_key = (0.05 + 0.66 * key + 0.14 * fill) * (1.0 - rim2 * 0.45);
+
+    float val = mix(val_flat, val_key, uMatcapContrast);
 
     // Sculpt mask: unmasked (0) = normal, masked (1) = dark
-    val *= mix(1.0, 0.4, vMask);
+    float shade = mix(1.0, 0.4, vMask);
+    val *= shade;
+
+    // Narrow sheen, added untinted: paint gets a clay highlight rather than just
+    // a brighter version of its own hue. Fades out with the dial — the flat ramp
+    // had none, so at 0 the old look must come back exactly.
+    vec3 H = normalize(L + vec3(0.0, 0.0, 1.0));
+    float spec = pow(max(dot(n, H), 0.0), 90.0) * 0.16 * shade * uMatcapContrast;
 
     // Lit albedo: white (default) == matcap grey exactly; paint tints it.
     // uPaintVisible folds the albedo out to white when paint is hidden.
-    vec3 col = vec3(val) * mix(vec3(1.0), vColor.rgb, uPaintVisible);
+    vec3 col = vec3(val) * mix(vec3(1.0), vColor.rgb, uPaintVisible) + vec3(spec);
 
     // Object selection mask: deselected objects get dark muted tint
     if (uObjMask > 0.0) {
@@ -604,7 +631,7 @@ struct Params {
     facing_threshold: f32,
     obj_mask: f32,
     paint_visible: f32,
-    _pad0: f32,
+    matcap_contrast: f32,
 };
 @group(0) @binding(63) var<uniform> P: Params;
 struct VSOut {
@@ -628,12 +655,20 @@ fn vs_main(@location(0) aPos: vec3<f32>, @location(1) aNorm: vec3<f32>,
 fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let n = normalize(in.nrm);
     let rim = 1.0 - abs(n.z);
+    let rim2 = rim * rim;
     let top = n.y * 0.5 + 0.5;
-    let base = 0.35 + 0.45 * top + 0.15 * (1.0 - rim * rim);
-    let cavity = 1.0 - rim * rim * 0.3;
-    var val = base * cavity;
-    val = val * mix(1.0, 0.4, in.mask);
-    var col = vec3<f32>(val) * mix(vec3<f32>(1.0), in.color.rgb, P.paint_visible);
+    let val_flat = (0.35 + 0.45 * top + 0.15 * (1.0 - rim2)) * (1.0 - rim2 * 0.3);
+    let L = normalize(vec3<f32>(-0.30, 0.62, 0.72));
+    var key = mix(0.35, 1.0, max(dot(n, L), 0.0));
+    key = key * key;
+    let fill = n.y * 0.5 + 0.5;
+    let val_key = (0.05 + 0.66 * key + 0.14 * fill) * (1.0 - rim2 * 0.45);
+    var val = mix(val_flat, val_key, P.matcap_contrast);
+    let shade = mix(1.0, 0.4, in.mask);
+    val = val * shade;
+    let H = normalize(L + vec3<f32>(0.0, 0.0, 1.0));
+    let spec = pow(max(dot(n, H), 0.0), 90.0) * 0.16 * shade * P.matcap_contrast;
+    var col = vec3<f32>(val) * mix(vec3<f32>(1.0), in.color.rgb, P.paint_visible) + vec3<f32>(spec);
     if (P.obj_mask > 0.0) {
         let tint = vec3<f32>(0.35, 0.12, 0.18);
         col = mix(col, col * tint, P.obj_mask);
@@ -1570,7 +1605,7 @@ void Renderer::upload_matcap_params(const Camera& cam, int w, int h,
     p.facing_threshold = facing_threshold;
     p.obj_mask = selected ? 0.0f : 1.0f;
     p.paint_visible = paint_visible;
-    p._pad0 = 0.0f;
+    p.matcap_contrast = matcap_contrast;
     gpu::write_buffer(gpu_dev, matcap_ubo, 0, &p, sizeof p);
 }
 

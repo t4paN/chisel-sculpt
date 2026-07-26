@@ -1156,6 +1156,72 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        // Delete the highest subdivision level (burger menu -> Y/N confirm).
+        // Destructive and deliberately NOT undoable: the whole point is to hand
+        // the top layer's memory back, and an undo entry holding it would give
+        // exactly none of that back. The history is cleared instead — its STROKE
+        // entries carry vert ids from a level that no longer exists, and a LEVEL
+        // entry replaying upward would resurrect the level as a flat zero layer.
+        if (input.drop_level_requested) {
+            input.drop_level_requested = false;
+            const int L_max = multires->base_level + (int)multires->disp.size();
+            if (!multires->locked || multires->disp.empty()) {
+                std::snprintf(input.notification, sizeof(input.notification),
+                              "No subdivision level to delete");
+                input.notification_timer = 2.5f;
+            } else if (app_state != AppState::IDLE) {
+                // Same reason the level switch is idle-only: the cascade would
+                // rebuild the mesh out from under a live stroke.
+                std::snprintf(input.notification, sizeof(input.notification),
+                              "Finish the stroke first");
+                input.notification_timer = 2.0f;
+            } else {
+                const double drop_t0 = glfwGetTime();
+                const int target = L_max - 1;
+                scene.materialize_active_cpu();  // projection/cascade read disp/base
+
+                // Bake first, then drop: the same inverse-Loop projection a level-down
+                // does, so the form survives into the layer below and only the
+                // residual detail dies with the layer.
+                ProjectionStats ps = project_down_to_level(*multires, target);
+                // Only forced down if the view was ON the layer being removed —
+                // deleting L5 while editing at L3 must leave you at L3.
+                if (multires->current_level > target) multires->current_level = target;
+                const int view = multires->current_level;
+                multires_sync_paint(*multires, *mesh);   // fold paint in BEFORE the planes shrink
+                multires_drop_top_level(*multires);
+
+                scene.active_undo().clear(&compute);
+                // Grow-only GPU mirror still sized for the removed level; drop it
+                // so the refresh below re-allocates at the new (smaller) level.
+                scene.active_entity().multires_gpu.cleanup();
+
+                if (scene.alive_count() <= 1) {
+                    cascade_to_level(*multires, *mesh, view, &compute);
+                    arm_geometry_handoff(*mesh);
+                    scene.refresh_mirror_map();
+                    scene.sync();
+                } else {
+                    Mesh solo;
+                    cascade_to_level(*multires, solo, view, &compute);
+                    arm_geometry_handoff(solo);
+                    scene.splice_active(solo);
+                    scene.refresh_mirror_map();
+                }
+                refresh_active_gpu_residency();
+                mesh->compute_bounding_sphere(mesh_center, mesh_radius);
+                screen_buffers_dirty = true;
+                std::snprintf(input.notification, sizeof(input.notification),
+                              "Deleted subdiv level %d - max is now L%d (%.2fM tris here)",
+                              L_max, target, (double)mesh->tri_count() / 1e6);
+                input.notification_timer = 3.0f;
+                std::printf("[multires] delete L%d: projected in %.2f ms, max now L%d, "
+                            "viewing L%d (%u verts, %u tris), total %.1f ms\n",
+                            L_max, ps.elapsed_ms, target, view, mesh->vertex_count(),
+                            mesh->tri_count(), (glfwGetTime() - drop_t0) * 1000.0);
+            }
+        }
+
         // Handle focus request (F key)
         if (input.focus_requested) {
             input.focus_requested = false;
@@ -2273,6 +2339,7 @@ int main(int argc, char* argv[]) {
         // toggle, so you can always see what you're laying down.
         renderer.paint_visible =
             (input.paint_visible || input.current_brush == BrushType::PAINT) ? 1.0f : 0.0f;
+        renderer.matcap_contrast = input.matcap_contrast;
 
         // Mesh: N draws. The active entity is drawn from the working VAO; every
         // other alive entity from its static display VAO. Depth test composes them.
@@ -2339,6 +2406,9 @@ int main(int argc, char* argv[]) {
             draw_drop_confirm(text, input.drop_path, win_w, win_h);
         if (input.remesh_confirm_pending)
             draw_remesh_confirm(text, win_w, win_h);
+        if (input.drop_level_confirm_pending)
+            draw_drop_level_confirm(text, multires->base_level + (int)multires->disp.size(),
+                                    win_w, win_h);
         if (input.voxel_merge_confirm_pending) {
             // Count unselected (red) committed entities — candidate cutters for subtract.
             int n_unselected = 0;
@@ -2377,7 +2447,8 @@ int main(int argc, char* argv[]) {
         else if (input.interaction_mode == InputState::InteractionMode::INSERT)
             draw_mode_indicator(text, "INSERT", win_w, win_h);
         draw_notification(text, input, win_w, win_h);
-        draw_fps(text, fps_display, win_w, win_h);
+        if (input.show_fps)
+            draw_fps(text, fps_display, win_w, win_h);
 
         // ---- Open/import a path (shared by the native dialog and the web picker) ----
         auto do_import_path = [&](const std::string& path) {
@@ -2917,7 +2988,11 @@ int main(int argc, char* argv[]) {
 #endif // __EMSCRIPTEN__
 
         // ---- Button islands (brush selection + ops) ----
-        draw_button_islands(input, win_w, win_h, &alpha_lib);
+        MultiresInfo mres_info;
+        mres_info.locked     = multires->locked;
+        mres_info.base_level = multires->base_level;
+        mres_info.lmax       = multires->base_level + (int)multires->disp.size();
+        draw_button_islands(input, win_w, win_h, &alpha_lib, mres_info);
 
         // ---- Error popup ----
         if (error_popup_trigger) {

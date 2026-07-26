@@ -166,6 +166,18 @@ void capture_projection_snapshot(const MultiresStack& stack,
 void restore_projection_snapshot(MultiresStack& stack,
                                  const MultiresSnapshot& snap);
 
+// Discard the finest displacement layer, lowering L_max by one. Destructive: the
+// detail that layer carried is gone. Callers should project_down_to_level(L_max-1)
+// FIRST so the form bakes into the layer below and only the residual is lost.
+// Truncates the paint planes to the new finest vertex count and resets lock_stamp,
+// which makes the next GPU cascade evict its per-level VRAM tables (they still
+// describe the removed level). Parallel arrays are resized rather than popped —
+// frames/mirror/topo_cache grow lazily and can be SHORTER than disp, where a
+// pop_back would silently delete the wrong level's entry.
+// Returns false (no-op) when unlocked, when there is no layer above the base, or
+// when current_level still sits on the layer being removed.
+bool multires_drop_top_level(MultiresStack& stack);
+
 // Inverse-Loop projection from L_max down onto target_level. Destructively
 // rewrites stack.base (iff target == base_level) or disp[target - base - 1]
 // (iff target > base_level), plus disp[...] and frames[...] above, such that

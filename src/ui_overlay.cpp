@@ -5,6 +5,7 @@
 #include "imgui.h"
 #include <cstdio>
 #include <cstring>
+#include <cmath>
 #include <algorithm>
 
 // CGA 16-color palette (IBM PC, 1981). Hex values mapped to 0..1 floats.
@@ -320,6 +321,25 @@ void draw_slider(TextOverlay& text, const InputState& input, int win_w, int win_
                   win_w, win_h, CGA(yellow), 1.0f);
 }
 
+void draw_drop_level_confirm(TextOverlay& text, int level, int win_w, int win_h) {
+    text.draw_panel(0, 0, (float)win_w, (float)win_h,
+                   win_w, win_h, 0.0f, 0.0f, 0.0f, 0.5f);
+
+    char buf[96];
+    std::snprintf(buf, sizeof(buf), "Delete subdiv level %d? (Y/N)", level);
+    float msg_scale = 3.0f;
+    float cx = (float)win_w * 0.5f;
+    float msg_y = (float)win_h * 0.5f - 40.0f;
+    text.draw_text(buf, cx - std::strlen(buf) * 8.0f * msg_scale * 0.5f, msg_y,
+                  msg_scale, win_w, win_h, CGA(yellow), 1.0f);
+
+    // The two consequences worth naming: the fine detail is gone for good, and
+    // the history goes with it (its entries point at a level that won't exist).
+    const char* sub = "Detail bakes down one level. Cannot be undone - clears history.";
+    text.draw_text(sub, cx - std::strlen(sub) * 8.0f * 1.5f * 0.5f, msg_y + 40.0f,
+                  1.5f, win_w, win_h, CGA(light_gray), 1.0f);
+}
+
 void draw_notification(TextOverlay& text, InputState& input, int win_w, int win_h) {
     if (input.notification_timer > 0.0f) {
         input.notification_timer -= 1.0f / 60.0f;
@@ -341,6 +361,8 @@ void draw_fps(TextOverlay& text, float fps, int win_w, int win_h) {
     char buf[32];
     std::snprintf(buf, sizeof(buf), "FPS: %.0f", fps);
     float tw = std::strlen(buf) * 8.0f * 2.0f;
+    // Top-right corner; the burger menu stacks underneath at margin + this line's
+    // height (kept in sync in draw_button_islands).
     text.draw_text(buf, (float)win_w - tw - 12.0f, 12.0f, 2.0f,
                   win_w, win_h, CGA(light_gray), 0.8f);
 }
@@ -534,8 +556,63 @@ static bool alpha_swatch(const char* label, const float* preview, const char* to
     return clicked;
 }
 
+// Small sun glyph: disc + eight rays, drawn inline as a label for the lighting
+// slider. Not a button — it reserves its own box and paints into it. Brightens
+// with `t` (the dial value) so the icon itself previews what the slider does.
+static void sun_glyph(float box, float t) {
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 pos = ImGui::GetCursorScreenPos();
+    ImGui::Dummy(ImVec2(box, box));
+
+    float cx = pos.x + box * 0.5f, cy = pos.y + box * 0.5f;
+    float r  = box * 0.22f;
+    int   g  = (int)(120.0f + 135.0f * t);
+    ImU32 col = IM_COL32(g, g, (int)(g * 0.82f), 255);
+
+    dl->AddCircleFilled(ImVec2(cx, cy), r, col, 16);
+    for (int i = 0; i < 8; i++) {
+        float a = (float)i * 0.7853982f;               // 2pi/8
+        float ca = std::cos(a), sa = std::sin(a);
+        dl->AddLine(ImVec2(cx + ca * r * 1.55f, cy + sa * r * 1.55f),
+                    ImVec2(cx + ca * r * 2.30f, cy + sa * r * 2.30f), col, 1.5f);
+    }
+}
+
+// Hamburger button: three bars in a squircle, same 4-state background as the
+// other swatches so it reads as part of the set. Returns true on click.
+static bool hamburger_button(float size, bool open) {
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 pos = ImGui::GetCursorScreenPos();
+
+    ImGui::PushID("BurgerMenu");
+    bool clicked = ImGui::InvisibleButton("burger", ImVec2(size, size));
+    bool hovered = ImGui::IsItemHovered();
+    bool active  = ImGui::IsItemActive();
+    if (hovered) ImGui::SetTooltip("Menu");
+
+    ImU32 bg;
+    if (open)         bg = ImGui::GetColorU32(col_btn_act);
+    else if (active)  bg = ImGui::GetColorU32(ImVec4(0.45f, 0.30f, 0.60f, 1.0f));
+    else if (hovered) bg = ImGui::GetColorU32(col_btn_hover);
+    else              bg = ImGui::GetColorU32(col_btn);
+    float rounding = size * 0.28f;
+    dl->AddRectFilled(ImVec2(pos.x + 2, pos.y + 2), ImVec2(pos.x + size + 2, pos.y + size + 2),
+                      IM_COL32(0, 0, 0, 80), rounding);
+    dl->AddRectFilled(pos, ImVec2(pos.x + size, pos.y + size), bg, rounding);
+
+    const float bar_w = size * 0.52f, gap = size * 0.17f;
+    float x0 = pos.x + (size - bar_w) * 0.5f;
+    float cy = pos.y + size * 0.5f;
+    ImU32 col = ImGui::GetColorU32(open ? col_text_sel : col_text);
+    for (int i = -1; i <= 1; i++)
+        dl->AddLine(ImVec2(x0, cy + i * gap), ImVec2(x0 + bar_w, cy + i * gap), col, 1.8f);
+
+    ImGui::PopID();
+    return clicked;
+}
+
 void draw_button_islands(InputState& input, int win_w, int win_h,
-                         const AlphaLibrary* alpha_lib) {
+                         const AlphaLibrary* alpha_lib, MultiresInfo mres) {
     const float btn_h    = 38.0f;
     const float btn_gap  = 6.0f;
     const float row_gap  = 10.0f;
@@ -825,6 +902,60 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
     }
 
     ImGui::End();
+
+    // === Island 4 — Burger menu, top-right under the FPS readout ===
+    // Right-pivoted so it hugs the corner at any window width. Sits below the FPS
+    // line when that is shown, and slides up into its place when it is hidden —
+    // no floating gap. draw_fps owns the matching 12 px top margin.
+    {
+        const float burger = 28.0f;
+        const float fps_h  = input.show_fps ? 16.0f + 8.0f : 0.0f;   // 8 px glyphs at 2x
+        ImGui::SetNextWindowPos(ImVec2((float)win_w - margin, margin + fps_h),
+                                ImGuiCond_Always, ImVec2(1.0f, 0.0f));
+        ImGui::Begin("##IslandMenu", nullptr, island_flags);
+        if (hamburger_button(burger, ImGui::IsPopupOpen("##burgermenu")))
+            ImGui::OpenPopup("##burgermenu");
+
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10, 10));
+        if (ImGui::BeginPopup("##burgermenu")) {
+            // Lighting dial: sun label + the matcap blend (0 = flat, 1 = keyed).
+            sun_glyph(ImGui::GetFrameHeight(), input.matcap_contrast);
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(150.0f);
+            ImGui::SliderFloat("##matcapLight", &input.matcap_contrast, 0.0f, 1.0f,
+                               "light %.2f");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Viewport lighting: 0 = flat shading, 1 = keyed "
+                                  "light with contrast and sheen (display only)");
+
+            ImGui::Checkbox("Show FPS", &input.show_fps);
+
+            ImGui::Separator();
+
+            // Destructive: arms the Y/N confirm rather than firing directly.
+            // Disabled with no stack, or when the only level left IS the base.
+            bool can_drop = mres.locked && mres.lmax > mres.base_level;
+            char lbl[64];
+            if (can_drop) std::snprintf(lbl, sizeof(lbl), "Delete subdiv level %d", mres.lmax);
+            else          std::snprintf(lbl, sizeof(lbl), "Delete subdiv level");
+            if (!can_drop) ImGui::BeginDisabled();
+            if (ImGui::Selectable(lbl)) {
+                input.drop_level_confirm_pending = true;
+                ImGui::CloseCurrentPopup();
+            }
+            if (!can_drop) ImGui::EndDisabled();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                ImGui::SetTooltip(can_drop
+                    ? "Drop the finest subdivision level and reclaim its memory.\n"
+                      "Detail bakes down one level; cannot be undone."
+                    : "No subdivision level above the base cage to delete");
+            }
+            ImGui::EndPopup();
+        }
+        ImGui::PopStyleVar();
+        ImGui::End();
+    }
+
     ImGui::PopStyleColor();
     ImGui::PopStyleVar(3);
 }

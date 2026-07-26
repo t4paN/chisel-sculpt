@@ -37,6 +37,10 @@ struct Renderer {
     // Vertex-paint visibility (1 = show albedo, 0 = plain matcap). Set per frame.
     float paint_visible = 1.0f;
 
+    // Matcap lighting dial (0 = old flat ramp, 1 = keyed/contrasty). Set per frame
+    // from InputState::matcap_contrast; the shader lerps between both formulations.
+    float matcap_contrast = 1.0f;
+
     // Entity-id pick pass — on the gpu:: seam. Renders into the shared screen
     // offscreen target writing linear depth (attachment 0) + entity id (attachment
     // 2). The pass spans pick_begin → N×pick_draw → pick_end.

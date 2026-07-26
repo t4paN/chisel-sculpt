@@ -423,11 +423,13 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
                      || g_input->save_dialog_active
                      || g_input->remesh_confirm_pending
                      || g_input->voxel_merge_confirm_pending
+                     || g_input->drop_level_confirm_pending
                      || g_input->drop_confirm_pending;
     if (modal_active) {
         bool is_yn_dialog = g_input->quit_requested
                          || g_input->remesh_confirm_pending
                          || g_input->voxel_merge_confirm_pending
+                         || g_input->drop_level_confirm_pending
                          || g_input->drop_confirm_pending;
         // The voxel-merge dialog also takes [ / ] to nudge the resolution.
         bool res_keys = g_input->voxel_merge_confirm_pending
@@ -695,6 +697,8 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
                     g_input->drop_confirm_pending = false;
                 } else if (g_input->voxel_merge_confirm_pending) {
                     g_input->voxel_merge_confirm_pending = false;
+                } else if (g_input->drop_level_confirm_pending) {
+                    g_input->drop_level_confirm_pending = false;
                 } else if (g_input->remesh_confirm_pending) {
                     g_input->remesh_confirm_pending = false;
                 } else if (g_input->export_dialog_active) {
@@ -791,6 +795,9 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
                     g_input->voxel_merge_mirror = false;   // faithful (asymmetric) merge
                     g_input->voxel_merge_subtract = false;
                     g_input->voxel_merge_requested = true;
+                } else if (g_input->drop_level_confirm_pending) {
+                    g_input->drop_level_confirm_pending = false;
+                    g_input->drop_level_requested = true;
                 } else if (g_input->remesh_confirm_pending) {
                     g_input->remesh_confirm_pending = false;
                     g_input->remesh_requested = true;
@@ -822,6 +829,8 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
                     g_input->drop_confirm_pending = false;
                 } else if (g_input->voxel_merge_confirm_pending) {
                     g_input->voxel_merge_confirm_pending = false;
+                } else if (g_input->drop_level_confirm_pending) {
+                    g_input->drop_level_confirm_pending = false;
                 } else if (g_input->remesh_confirm_pending) {
                     g_input->remesh_confirm_pending = false;
                 } else if (g_input->quit_requested) {
@@ -919,7 +928,7 @@ static void drop_callback(GLFWwindow* w, int count, const char** paths) {
     if (g_input->quit_requested || g_input->export_dialog_active ||
         g_input->import_dialog_active || g_input->save_dialog_active ||
         g_input->remesh_confirm_pending || g_input->voxel_merge_confirm_pending ||
-        g_input->drop_confirm_pending)
+        g_input->drop_level_confirm_pending || g_input->drop_confirm_pending)
         return;
     // Only project/model files; anything else gets a notification, not a prompt.
     const char* path = paths[0];

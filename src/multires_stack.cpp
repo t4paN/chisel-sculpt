@@ -1018,6 +1018,42 @@ static Mesh subdiv_step_cached(MultiresStack& stack, Mesh& coarse, int i) {
     return fine;
 }
 
+bool multires_drop_top_level(MultiresStack& stack) {
+    if (!stack.locked || stack.disp.empty()) return false;
+    const int L_max = stack.base_level + (int)stack.disp.size();
+    if (stack.current_level >= L_max) return false;   // caller must descend first
+
+    stack.disp.pop_back();
+    const size_t n = stack.disp.size();
+
+    // resize(n), not pop_back(): these grow lazily, so any of them can already be
+    // shorter than disp — popping such a one removes a level that still exists.
+    if (stack.frames.size()           > n) stack.frames.resize(n);
+    if (stack.mirror.size()           > n) stack.mirror.resize(n);
+    if (stack.topo_cache.size()       > n) stack.topo_cache.resize(n);
+    if (stack.midpoint_parents.size() > n) stack.midpoint_parents.resize(n);
+
+    // Paint planes are sized for L_max (cascade reads the [0, V_K) prefix), so
+    // they have to follow L_max down or plane_vcount stops matching.
+    const uint32_t vc = plane_vcount(stack);
+    if (!stack.color.empty())   { stack.color.resize(vc);   stack.color.shrink_to_fit(); }
+    if (!stack.mask.empty())    { stack.mask.resize(vc);    stack.mask.shrink_to_fit(); }
+    if (!stack.density.empty()) { stack.density.resize(vc); stack.density.shrink_to_fit(); }
+
+    stack.disp.shrink_to_fit();
+    stack.frames.shrink_to_fit();
+
+    // The GPU cascade caches per-level VRAM tables under this stamp. The chain is
+    // now shorter, so force a fresh stamp — the next replay releases the old set
+    // (which still holds index/adjacency buffers for the level just removed)
+    // instead of keeping it resident under a stamp that appears to still match.
+    stack.lock_stamp = 0;
+
+    std::printf("[multires] dropped top level: L_max %d -> %d (%zu layers, %u verts at finest)\n",
+                L_max, stack.base_level + (int)n, n, vc);
+    return true;
+}
+
 ProjectionStats project_down_to_level(MultiresStack& stack, int target_level) {
     ProjectionStats stats;
     stats.target_level = target_level;

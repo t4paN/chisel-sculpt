@@ -63,6 +63,22 @@ struct InputState {
     // plane). Slider shows only while Clay is active.
     float clay_melt = 0.0f;
 
+    // Matcap lighting dial (0..1): blends the viewport shading between the old flat
+    // ramp (0, keyed off n.y alone) and the keyed/contrasty one (1, directional key
+    // + deeper silhouette + sheen). A look preference, not a sculpting parameter —
+    // the sun slider in the burger menu drives it. Purely display, nothing reads
+    // it back.
+    float matcap_contrast = 0.5f;
+
+    // FPS readout visibility (burger menu toggle). Display only.
+    bool show_fps = true;
+
+    // Delete the highest subdivision level (burger menu). The menu item arms the
+    // confirm; Y sets the request, which the main loop consumes once. Destructive
+    // and not undoable — see the handler in main.cpp.
+    bool drop_level_confirm_pending = false;
+    bool drop_level_requested = false;
+
     // Paint brush albedo (RGB, [0,1]). paint_color is the active colour used by
     // the brush; paint_color_alt is a stashed second colour. Q/E swap them while
     // the paint brush is active. RMB swatch / toolbar boxes edit both.

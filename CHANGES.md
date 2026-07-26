@@ -2,6 +2,54 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-07-26 — Matcap lighting dial + burger menu + delete-subdiv-level
+
+- **Matcap got a keyed light.** The old ramp shaded off `n.y` alone — flat in z, so a
+  bulge and a plane facing the same way came out identical. Added a directional key
+  (`normalize(-0.30, 0.62, 0.72)` view-space, up-left and tilted at the viewer), wrapped
+  diffuse squared for contrast, a deeper silhouette falloff (`rim²·0.45`, was `0.3`) and a
+  narrow untinted sheen so paint gets a clay highlight instead of a brighter version of
+  its own hue. Range goes ~0.25–0.95 → ~0.07–0.85.
+- **It's a dial, not a swap.** Both formulations live in the fragment shader and
+  `uMatcapContrast` lerps between them; the sheen is multiplied by the dial so 0 returns
+  the old look *exactly*, with no residue. Default 0.5. Rode the matcap UBO's existing
+  std140 tail pad, so the block is still 144 bytes and the `static_assert` never moved.
+  Twinned GLSL/WGSL as usual.
+- **First tuning pass was too hot** — peak diffuse ~0.98 plus an additive 0.25 spec clips
+  to white on a smooth sphere (a bare default sphere being the worst case for it). Peak
+  diffuse now stops at 0.85 to leave the sheen headroom, exponent 42 → 90, strength
+  0.25 → 0.16.
+- **Burger menu, top-right under the FPS line** (Island 4). Holds the light slider, a
+  Show-FPS toggle, and the delete-level item. With FPS hidden the burger slides up into
+  its place so there's no floating gap.
+- **Delete highest subdiv level** — `multires_drop_top_level()`. Motivated by a 5M-tri
+  L5 that had served its purpose. **Projects down first, then drops**: the same
+  inverse-Loop projection a level-down runs, so the form bakes into the layer below and
+  only the residual detail dies with the layer.
+  - Parallel arrays are `resize(n)`d, never `pop_back`ed — `frames`/`mirror`/`topo_cache`/
+    `midpoint_parents` grow lazily and can already be shorter than `disp`, where a pop
+    would silently delete a level that still exists.
+  - Paint planes follow L_max down (cascade reads the `[0, V_K)` prefix, so
+    `plane_vcount` has to keep matching).
+  - `lock_stamp = 0` forces the next GPU cascade to evict its per-level VRAM tables —
+    they still describe the removed level, and the stamp would otherwise still "match".
+    `MultiresGPU::cleanup()` likewise drops the grow-only mirror so it re-allocates at
+    the smaller level. Reclaiming the memory is the whole point; leaving it resident
+    under a stale key would have made the feature cosmetic.
+  - **Not undoable, and it clears the history.** An undo entry holding the deleted layer
+    gives back none of the memory. Worse, stale entries are unsafe: a `LEVEL` entry
+    replaying upward resurrects the level as a flat zero-displacement layer, and `STROKE`
+    entries carry vert ids for a level that no longer exists. Y/N confirm says so.
+  - Deleting L5 while editing at L3 leaves you at L3 — only a view sitting *on* the
+    doomed layer is forced down. (Caught on review; the first cut cascaded to `target`
+    unconditionally and silently moved the view level.)
+- Keys route through the existing modal machinery, so Y/N/Esc match the remesh and merge
+  dialogs and a file drop won't stack a second prompt.
+- Both native trees build clean; matcap pipeline compiles on GL (authoritative there).
+  **Web/Tint gate not yet run** — needed before any itch push. Matcap tuning is
+  user-confirmed at the earlier hotter values; the menu and delete-level paths are
+  **not yet exercised**.
+
 ## 2026-07-26 — Crease: deepen at Draw's rate (⚠️ deploy-then-test)
 
 - **Crease deposited 3.3x less than Draw for the same settings.** User read it as the
