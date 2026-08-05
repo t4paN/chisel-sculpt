@@ -1,6 +1,7 @@
 #include "ui_overlay.h"
 #include "text_overlay.h"
 #include "input.h"
+#include "settings.h"
 #include "brush_alpha.h"
 #include "imgui.h"
 #include <cstdio>
@@ -916,8 +917,53 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
         if (hamburger_button(burger, ImGui::IsPopupOpen("##burgermenu")))
             ImGui::OpenPopup("##burgermenu");
 
+        // Read AFTER OpenPopup so the opening frame is the one that syncs. The profile
+        // tab bar below stores its selection by ID and defaults to the first tab, so
+        // without a one-shot nudge it would report "Mouse" to a Tablet user the moment
+        // the menu opens — and that read is what drives switch_profile.
+        static bool prev_menu_open = false;
+        bool menu_open = ImGui::IsPopupOpen("##burgermenu");
+        bool sync_tabs = menu_open && !prev_menu_open;
+        prev_menu_open = menu_open;
+        // Freezes the device auto-switch for as long as the menu is up, so reaching for
+        // a slider with the mouse doesn't yank you off the profile you came here to edit.
+        input.settings_menu_open = menu_open;
+
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10, 10));
         if (ImGui::BeginPopup("##burgermenu")) {
+            // Brush-feel profile. Both stay loaded and the active one follows whichever
+            // device you are actually using (main.cpp arbitrates); these tabs are how you
+            // *edit* the one that isn't in your hand — while this menu is open the
+            // auto-switch is frozen, so picking a tab holds until you close it.
+            if (ImGui::BeginTabBar("##profiles")) {
+                const char* names[(int)InputProfile::COUNT] = { "Mouse", "Tablet" };
+                for (int i = 0; i < (int)InputProfile::COUNT; i++) {
+                    // SetSelected only on the opening frame (see sync_tabs above);
+                    // forcing it every frame would override the user's own clicks.
+                    ImGuiTabItemFlags f = (sync_tabs && input.active_profile == (InputProfile)i)
+                                        ? ImGuiTabItemFlags_SetSelected : 0;
+                    if (ImGui::BeginTabItem(names[i], nullptr, f)) {
+                        if (input.active_profile != (InputProfile)i)
+                            input.switch_profile((InputProfile)i);
+                        ImGui::EndTabItem();
+                    }
+                }
+                ImGui::EndTabBar();
+            }
+            ImGui::TextDisabled("(?) follows the device you're using");
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Both profiles stay loaded. Touch the pen and the tablet\n"
+                                  "profile takes over; move the mouse and the mouse profile\n"
+                                  "does. Never mid-stroke.\n\n"
+                                  "Per profile: brush size, strength, hardness, spacing,\n"
+                                  "autosmooth, pen pressure and the facing threshold.\n"
+                                  "Shared: lighting, colours, mirror, density.\n\n"
+                                  "Pick a tab here to edit the other profile — switching\n"
+                                  "is paused while this menu is open.");
+            }
+
+            ImGui::Separator();
+
             // Lighting dial: sun label + the matcap blend (0 = flat, 1 = keyed).
             sun_glyph(ImGui::GetFrameHeight(), input.matcap_contrast);
             ImGui::SameLine();
@@ -929,6 +975,36 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
                                   "light with contrast and sheen (display only)");
 
             ImGui::Checkbox("Show FPS", &input.show_fps);
+
+            ImGui::Separator();
+
+            // The escape hatch persistence makes necessary: before settings were saved,
+            // any value you dragged somewhere unusable was one restart away from gone.
+            // Now it comes back, so there has to be a way out that is not "hunt down the
+            // config file". Not destructive to the scene, so no Y/N confirm.
+            if (ImGui::Selectable("Reset settings to defaults")) {
+                settings_reset(input);
+                std::snprintf(input.notification, sizeof(input.notification),
+                              "Settings reset to defaults");
+                input.notification_timer = 2.0f;
+                ImGui::CloseCurrentPopup();
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Both profiles, colours and display options back to\n"
+                                  "factory values, and clears the saved copy.\n"
+                                  "Does not touch your sculpt.");
+
+            // Only surfaces when a sink has actually refused us — otherwise silence.
+            // Most likely on itch: the game runs in a cross-origin iframe, and a browser
+            // set to block third-party storage rejects localStorage outright.
+            if (!settings_storage_available()) {
+                ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.25f, 1.0f),
+                                   "Settings can't be saved");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Storage was refused, so settings will reset when\n"
+                                      "you close the tab. Usually third-party cookies or\n"
+                                      "site data being blocked, or a private window.");
+            }
 
             ImGui::Separator();
 

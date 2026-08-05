@@ -32,6 +32,7 @@
 #include "camera.h"
 #include "renderer.h"
 #include "input.h"
+#include "settings.h"
 #include "text_overlay.h"
 #include "brush.h"
 #include "tablet.h"
@@ -151,6 +152,17 @@ void makeDepth(int w, int h) {
 // write through the normal writers into MEMFS and the bytes leave as a browser
 // download; open/import goes through an <input type=file> picker whose bytes
 // land back in MEMFS for the normal loaders. No IDBFS persistence by design.
+
+// Settings autosave backstop. The frame loop's debounced write is not enough on its own
+// here: a browser can discard a tab without ever running an exit path, and native's
+// shutdown flush has no web equivalent (emscripten_set_main_loop_arg never returns).
+// pagehide/visibilitychange are the last events that reliably fire — beforeunload does
+// not on mobile. Points at main()'s InputState, which outlives every frame (the
+// simulate_infinite_loop throw keeps main's stack frame alive).
+static InputState* g_settings_input = nullptr;
+extern "C" EMSCRIPTEN_KEEPALIVE void chisel_flush_settings() {
+    if (g_settings_input) settings_save(*g_settings_input);
+}
 
 // Set async by the picker's JS callback; the frame loop consumes it. Safe to
 // assign from JS mid-ASYNCIFY-suspend: plain reentry, nothing here suspends.
@@ -563,6 +575,12 @@ int main(int argc, char* argv[]) {
 
     // Init systems
     InputState input;
+    // Before anything reads the brush fields. Missing/corrupt storage is a no-op that
+    // leaves the constructor defaults standing, so there is nothing to check here.
+    settings_load(input);
+#ifdef __EMSCRIPTEN__
+    g_settings_input = &input;   // arms the pagehide flush above
+#endif
     setup_input_callbacks(window, &input);
     setup_char_callback(window);
 
@@ -630,6 +648,9 @@ int main(int argc, char* argv[]) {
         input.notification_timer = 2.0f;
     }
     bool prev_tablet_avail = tablet.available();
+    // Device-profile arbiter state (see the switch block in the frame loop).
+    unsigned long prev_pen_samples = tablet.sample_count();
+    double last_pen_input_time = -1e9;   // "no pen ever" without special-casing
 
     // GPU sculpt shaders read the mask buffer to gate locked vertices; the paint
     // shader writes the color VBO directly. compute.mask_ssbo / color_ssbo alias the
@@ -723,6 +744,10 @@ int main(int argc, char* argv[]) {
     int fps_frame_count = 0;
     float fps_display = 0.0f;
 
+    // Settings autosave clock. Its own timebase because the FPS counter resets its
+    // reference every second, which would hand settings_tick a bogus delta.
+    double settings_last_time = glfwGetTime();
+
     // Store windowed position/size for fullscreen restore
     int windowed_x = 0, windowed_y = 0, windowed_w = init_w, windowed_h = init_h;
     glfwGetWindowPos(window, &windowed_x, &windowed_y);
@@ -791,6 +816,46 @@ int main(int argc, char* argv[]) {
             input.notification_timer = 2.0f;
         }
         prev_tablet_avail = tablet.available();
+
+        // Device-driven profile switch. Both profiles stay loaded; whichever device is
+        // actually producing input owns the live brush settings.
+        //
+        // The pen wins on evidence (its sample counter moved), the mouse only on evidence
+        // PLUS a quiet window, because on X11 the stylus also drives the core pointer —
+        // every pen motion is indistinguishable from a mouse motion at the GLFW layer, so
+        // without the quiet window a pen stroke would flip to Mouse on its own cursor
+        // movement. The web pen path has the same shape (chisel_set_pointer fires for pen
+        // events too), so one rule covers both.
+        //
+        // Latching on the *other* device rather than on pen idleness is deliberate:
+        // a timeout-to-mouse would change brush size every time you lifted the pen to
+        // think, which reads as the app glitching.
+        if (!input.sculpting && !input.settings_menu_open &&
+            input.drag_mode == InputState::DragMode::NONE &&
+            input.slider_mode == InputState::SliderMode::NONE) {
+            const double kPenHoldSec = 0.25;
+            double now = glfwGetTime();
+            unsigned long samples = tablet.sample_count();
+            bool pen_reported = (samples != prev_pen_samples);
+            if (pen_reported) { prev_pen_samples = samples; last_pen_input_time = now; }
+
+            bool cursor_moved = (input.mouse_x != input.prev_mouse_x ||
+                                 input.mouse_y != input.prev_mouse_y);
+            InputProfile want = input.active_profile;
+            if (pen_reported)
+                want = InputProfile::TABLET;
+            else if (cursor_moved && now - last_pen_input_time > kPenHoldSec)
+                want = InputProfile::MOUSE;
+
+            if (want != input.active_profile) {
+                input.switch_profile(want);
+                std::snprintf(input.notification, sizeof(input.notification),
+                              want == InputProfile::TABLET ? "Tablet settings"
+                                                           : "Mouse settings");
+                input.notification_timer = 1.2f;
+            }
+        }
+
         mesh = &scene.active_mesh();
         multires = &scene.active_multires();
 
@@ -830,6 +895,14 @@ int main(int argc, char* argv[]) {
             fps_display = (float)fps_frame_count / (float)(fps_now - fps_last_time);
             fps_frame_count = 0;
             fps_last_time = fps_now;
+        }
+
+        // Persisted settings: notice edits, write them out once they settle. Self-gated
+        // to skip strokes entirely, so this never lands in the hot path.
+        {
+            double now = glfwGetTime();
+            settings_tick(input, (float)(now - settings_last_time));
+            settings_last_time = now;
         }
 
         // Handle borderless toggle (Space)
@@ -3059,9 +3132,22 @@ int main(int argc, char* argv[]) {
             // under pointer lock, where clientX freezes).
             Module._chisel_set_pointer(e.clientX - r.left, e.clientY - r.top,
                                        e.movementX || 0);
+            // Same event carries stylus force, which GLFW never surfaces — this is the
+            // web build's entire tablet path (see the __EMSCRIPTEN__ branch of
+            // tablet.cpp). Guarded on pointerType because a mouse reports a fixed 0.5.
+            if (e.pointerType === 'pen')
+                Module._chisel_set_pen(1, e.pressure);
         };
         c.addEventListener('pointermove', feed);
         c.addEventListener('pointerdown', feed);
+
+        // Last-chance settings write. visibilitychange->hidden is the reliable one on
+        // mobile (a backgrounded tab may never get pagehide before it is discarded);
+        // pagehide covers desktop navigation away. Both are cheap and idempotent.
+        window.addEventListener('pagehide', function() { Module._chisel_flush_settings(); });
+        document.addEventListener('visibilitychange', function() {
+            if (document.visibilityState === 'hidden') Module._chisel_flush_settings();
+        });
 
         // Keep app-owned shortcuts away from the browser: Emscripten's GLFW only
         // preventDefault()s Backspace/Tab, so F1 opened help, Ctrl+D bookmarked,
@@ -3098,6 +3184,11 @@ int main(int argc, char* argv[]) {
 #endif
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();
+
+    // Catch anything still inside the autosave debounce window on the way out. Native
+    // only — on web this line is unreachable (see the main-loop note above), which is
+    // what chisel_flush_settings/pagehide exists to cover.
+    settings_save(input);
 
     tablet.shutdown();
     glfwDestroyWindow(window);

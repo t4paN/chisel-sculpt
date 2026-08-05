@@ -20,6 +20,9 @@ InputState::InputState()
     , smooth_locked(false), subtract_locked(false)
     , brush_size(50.0f), brush_strength(0.5f), brush_hardness(0.5f), brush_spacing(0.25f)
     , per_brush{}
+    , active_profile(InputProfile::MOUSE)
+    , profiles{}
+    , settings_menu_open(false)
     , slider_mode(SliderMode::NONE)
     , slider_start_x(0), slider_start_y(0), slider_start_value(0), slider_accum(0)
     , toolbar_visible(true)
@@ -102,6 +105,14 @@ InputState::InputState()
     paint_visible = true;
     color_pick_active = false;
     color_pick_click = false;
+
+    // Seed BOTH profiles from the same defaults rather than shipping invented pen
+    // numbers — the whole point of the split is that the user tunes each to their
+    // own hand, and a guessed tablet preset would just be a wrong starting point
+    // that looks deliberate. flush_profile fills the active one; copy it across.
+    flush_profile();
+    for (int i = 0; i < (int)InputProfile::COUNT; i++)
+        profiles[i] = profiles[(int)active_profile];
 }
 
 void InputState::switch_brush(BrushType to) {
@@ -114,6 +125,53 @@ void InputState::switch_brush(BrushType to) {
     brush_strength = per_brush[(int)to].strength;
     brush_hardness = per_brush[(int)to].hardness;
     brush_spacing  = per_brush[(int)to].spacing;
+}
+
+// Which per_brush slot the live brush_strength/hardness/spacing currently mirror. The
+// double-tap smooth LOCK swaps smooth's numbers into the live fields (see the shift
+// handler); a merely-held Shift does not. So smooth_locked — not is_smooth_active() —
+// is the discriminator, and getting it wrong writes smooth's settings over the real
+// brush's on every flush.
+BrushType InputState::live_brush_slot() const {
+    return smooth_locked ? BrushType::SMOOTH : current_brush;
+}
+
+void InputState::flush_profile() {
+    // Fold the live copy back into its slot first, or the active brush's edits are lost.
+    const int slot = (int)live_brush_slot();
+    per_brush[slot].strength = brush_strength;
+    per_brush[slot].hardness = brush_hardness;
+    per_brush[slot].spacing  = brush_spacing;
+
+    ProfileSettings& p = profiles[(int)active_profile];
+    p.brush_size       = brush_size;
+    p.facing_threshold = facing_threshold;
+    p.autosmooth       = autosmooth;
+    p.pressure_enabled = pressure_enabled;
+    for (int i = 0; i < (int)BrushType::COUNT; i++) p.per_brush[i] = per_brush[i];
+}
+
+void InputState::switch_profile(InputProfile to) {
+    if (to == active_profile || to == InputProfile::COUNT) return;
+    // Deliberately does NOT clear the smooth lock. This runs on every device swap, and
+    // silently dropping a sticky lock the user set by double-tapping Shift would read as
+    // the app losing state. flush/restore route through live_brush_slot() instead, so the
+    // lock rides across the switch untouched.
+    flush_profile();
+
+    active_profile = to;
+    const ProfileSettings& p = profiles[(int)to];
+    brush_size       = p.brush_size;
+    facing_threshold = p.facing_threshold;
+    autosmooth       = p.autosmooth;
+    pressure_enabled = p.pressure_enabled;
+    for (int i = 0; i < (int)BrushType::COUNT; i++) per_brush[i] = p.per_brush[i];
+
+    // Same slot the flush used, so a live smooth lock keeps showing smooth's numbers.
+    const int slot = (int)live_brush_slot();
+    brush_strength = per_brush[slot].strength;
+    brush_hardness = per_brush[slot].hardness;
+    brush_spacing  = per_brush[slot].spacing;
 }
 
 void InputState::clear_smooth_lock() {

@@ -21,6 +21,33 @@ struct BrushSettings {
     float spacing;
 };
 
+// Which input device the brush-feel settings are tuned for. Switched by hand from
+// the burger menu, NOT auto-detected: a pen and a mouse can both be live at once
+// (and on web every pen is also a mouse), so any auto-switch has to guess, and
+// guessing wrong mid-stroke changes the brush under your hand. See switch_profile.
+enum class InputProfile {
+    MOUSE,
+    TABLET,
+    COUNT
+};
+
+// The stash for one profile. Holds only the settings whose *right value depends on
+// what you are holding* — a pen needs lighter strength and tighter spacing than a
+// mouse because pressure already modulates both. Everything else (matcap, colours,
+// mirror, density mults) is a look/scene preference that has nothing to do with the
+// input device, so it stays single-valued on InputState and is saved once.
+//
+// These duplicate live InputState fields; the live copy is the truth for the ACTIVE
+// profile and the stash is written back on switch — the same save/restore shape
+// per_brush[] already uses for brush_strength (see switch_brush).
+struct ProfileSettings {
+    float brush_size;
+    float facing_threshold;
+    bool  autosmooth;
+    bool  pressure_enabled;
+    BrushSettings per_brush[(int)BrushType::COUNT];
+};
+
 struct InputState {
     // Mouse
     double mouse_x, mouse_y;
@@ -45,6 +72,18 @@ struct InputState {
     float brush_hardness;   // 0..1 (per-brush, synced via switch_brush)
     float brush_spacing;    // fraction of brush radius between dabs (0.05..1.0, per-brush)
     BrushSettings per_brush[(int)BrushType::COUNT];
+
+    // Mouse/tablet brush-feel profiles. The live fields above are the active
+    // profile's working copy; profiles[] holds the other one's parked values.
+    // profiles[active_profile] is stale by design between switches — never read it
+    // for the active profile, call flush_profile() first (settings save does).
+    InputProfile     active_profile;
+    ProfileSettings  profiles[(int)InputProfile::COUNT];
+    // Set by the burger menu while its popup is up. Suspends the device auto-switch:
+    // you tune the tablet profile with the mouse in your hand, and without this the
+    // very act of reaching for a slider would swap you back to the mouse profile and
+    // send the edit to the wrong one.
+    bool             settings_menu_open;
 
     // Brush-alpha (stamp) selection. Index into the AlphaLibrary pool; 0 = Round
     // (no stamp). One shared selection, but it only affects Draw, Mask and Paint —
@@ -239,6 +278,9 @@ struct InputState {
 
     void switch_brush(BrushType to);
     void clear_smooth_lock();  // save smooth's settings, restore current brush's
+    void switch_profile(InputProfile to);  // park the live brush feel, load the other profile's
+    void flush_profile();      // live fields -> profiles[active_profile] (call before saving)
+    BrushType live_brush_slot() const;     // which per_brush slot the live fields mirror
     bool is_smooth_active() const;
     bool is_subtract_active() const;
     const char* brush_name() const;

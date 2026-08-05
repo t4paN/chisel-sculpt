@@ -23,6 +23,11 @@ struct Tablet {
     void  poll(bool stroke_active = false);
     float pressure() const;    // latest sample in [0,1], or 1.0 when unavailable
     bool  available() const;   // a pressure device is present
+    // Monotonic count of reports from the stylus itself. available() only says a tablet
+    // is plugged in; this says the pen is what is moving *now* — the caller watches it
+    // for change between frames. Needed because on X11 the pen also drives the core
+    // pointer, so cursor motion alone cannot tell pen from mouse.
+    unsigned long sample_count() const;
     void  shutdown();
 
     Tablet(const Tablet&) = delete;

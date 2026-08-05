@@ -1,6 +1,52 @@
 #include "tablet.h"
 
-#if defined(__linux__) && !defined(CHISEL_NO_TABLET)
+#if defined(__EMSCRIPTEN__)
+
+// ---- Web: pen pressure via PointerEvent ----
+//
+// Must come before the __linux__ branch: the Emscripten target has no X11 to dlopen.
+//
+// There is no device to open and nothing to drain — the browser delivers pressure on the
+// same pointermove/pointerdown events the app already listens to for cursor position, so
+// the DOM pushes into chisel_set_pen and poll() is a no-op.
+//
+// pointerType is the discriminator, NOT pressure: a mouse reports a constant 0.5 while
+// held (0 while up), which is indistinguishable from a pen at half force. Availability
+// therefore latches on the first 'pen' event and stays true — a stylus that has touched
+// the tablet once is still present while the user's hand is back on the mouse.
+//
+// init() returns false because at startup nothing has touched the tablet yet. That is
+// not a failure: the main loop already polls available() every frame to catch native
+// hotplug, so the first pen contact lights up the same "tablet connected" path for free.
+
+#include <emscripten.h>
+
+namespace {
+bool          g_web_pen_seen  = false;
+float         g_web_pressure  = 1.0f;
+unsigned long g_web_pen_count = 0;
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE void chisel_set_pen(int is_pen, double pressure) {
+    if (!is_pen) return;               // mouse/touch events carry no usable force
+    g_web_pen_seen = true;
+    g_web_pen_count++;
+    float p = (float)pressure;
+    g_web_pressure = p < 0.0f ? 0.0f : (p > 1.0f ? 1.0f : p);
+}
+
+struct Tablet::Impl { int unused; };
+
+Tablet::Tablet() {}
+Tablet::~Tablet() {}
+bool  Tablet::init()            { return false; }
+void  Tablet::poll(bool)        {}
+float Tablet::pressure() const  { return g_web_pen_seen ? g_web_pressure : 1.0f; }
+bool  Tablet::available() const { return g_web_pen_seen; }
+void  Tablet::shutdown()        {}
+unsigned long Tablet::sample_count() const { return g_web_pen_count; }
+
+#elif defined(__linux__) && !defined(CHISEL_NO_TABLET)
 
 #include <X11/Xlib.h>
 #include <X11/extensions/XInput2.h>
@@ -33,6 +79,7 @@ struct Tablet::Impl {
     bool  has_device    = false;
     float last_pressure = 0.0f;
     int   last_sourceid = -1;       // tool the raw stream last attributed motion to
+    unsigned long samples = 0;      // bumped on any stylus motion, pressure axis or not
 
     bool scan_devices();
     void query_pressure();          // read live valuator state (grab-independent)
@@ -177,6 +224,9 @@ void Tablet::poll(bool stroke_active) {
             for (const auto& p : m->pens) {
                 if (p.sourceid != re->sourceid) continue;
                 m->last_sourceid = re->sourceid;
+                // Before the pressure-axis checks below: a hover with no pressure
+                // change is still the pen driving, and that is what this counts.
+                m->samples++;
                 const unsigned char* vmask = re->valuators.mask;
                 int mask_len = re->valuators.mask_len;
                 // Pressure only present in events where that axis actually moved.
@@ -206,6 +256,10 @@ float Tablet::pressure() const {
 
 bool Tablet::available() const {
     return impl && impl->has_device;
+}
+
+unsigned long Tablet::sample_count() const {
+    return impl ? impl->samples : 0;
 }
 
 void Tablet::shutdown() {
@@ -261,6 +315,8 @@ struct Tablet::Impl {
     double press_min = 0.0, press_max = 1.0;   // pressure axis range, from the driver
     bool   has_device    = false;
     float  last_pressure = 0.0f;
+    unsigned long samples = 0;   // WinTab only queues packets for the pen, so any
+                                 // packet at all means the stylus is what is moving
 };
 
 Tablet::Tablet() {}
@@ -337,6 +393,7 @@ void Tablet::poll(bool /*stroke_active*/) {
     PACKET pkts[32];
     int n = m->WTPacketsGet(m->ctx, 32, pkts);
     if (n > 0) {
+        m->samples += (unsigned long)n;
         double norm = ((double)pkts[n - 1].pkNormalPressure - m->press_min)
                     / (m->press_max - m->press_min);
         norm = norm < 0.0 ? 0.0 : (norm > 1.0 ? 1.0 : norm);
@@ -350,6 +407,10 @@ float Tablet::pressure() const {
 
 bool Tablet::available() const {
     return impl && impl->has_device;
+}
+
+unsigned long Tablet::sample_count() const {
+    return impl ? impl->samples : 0;
 }
 
 void Tablet::shutdown() {
@@ -370,5 +431,6 @@ void  Tablet::poll(bool)        {}
 float Tablet::pressure() const  { return 1.0f; }
 bool  Tablet::available() const { return false; }
 void  Tablet::shutdown()        {}
+unsigned long Tablet::sample_count() const { return 0; }
 
 #endif

@@ -2,6 +2,53 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-08-06 — Settings persist; mouse/tablet profiles; pen pressure on the web
+
+- **Settings survive a restart.** New `settings.h/.cpp`: one versioned `key=value`
+  serializer behind two sinks — `localStorage['chisel.settings']` on web,
+  `$XDG_CONFIG_HOME/chisel/settings.cfg` (`%APPDATA%` on Windows) on native, written
+  temp-and-rename so a crash can't leave a half-file. IDBFS was the obvious-looking
+  choice and the wrong one: it's a file tree needing async `FS.syncfs` at both ends for
+  under a kilobyte of scalars. Unknown keys are ignored and missing ones keep their
+  `InputState()` default, so adding a setting never needs a migration; everything is
+  clamped to its slider range on load. Saved: brush feel, matcap, colours, mirror,
+  density mults, builtin alpha. Not saved: `subdiv_level`, `interaction_mode`,
+  `mesh_locked`, dialog/`*_requested` flags — restoring those lands the app in a mode
+  the scene doesn't support. Writes are debounced ~1s after edits settle and skipped
+  entirely while `sculpting`.
+- **Brush feel splits into Mouse and Tablet profiles**, both loaded at once, the active
+  one following whichever device is actually producing input. Per profile: size,
+  strength, hardness, spacing, autosmooth, pen pressure, facing threshold. Shared:
+  everything else. Both seed from identical defaults — a guessed tablet preset is just a
+  wrong starting point that looks deliberate.
+- **The arbitration is asymmetric on purpose.** The pen switches on evidence (a new
+  `Tablet::sample_count()` on the seam — `available()` only says a tablet is *plugged
+  in*); the mouse needs evidence **plus** a 250 ms quiet window, because on X11 the
+  stylus also drives the core pointer and at the GLFW layer a pen stroke is
+  indistinguishable from mouse motion. Without the window a pen stroke flips itself to
+  Mouse on its own cursor movement. It latches on the *other* device rather than timing
+  out: a timeout-to-mouse changes your brush size every time you lift the pen to think.
+  Blocked mid-stroke, mid-orbit and mid-slider-drag.
+- **Pen pressure works in the browser for the first time.** `pointerType`/`pressure` off
+  the PointerEvents `main.cpp` already handled for cursor position, behind a new
+  `__EMSCRIPTEN__` branch of the Tablet seam (which had been Linux/XInput2 + Win/WinTab
+  only, so every pen on itch was a pressureless mouse). `pointerType` is the
+  discriminator, not pressure — a mouse reports a constant 0.5 while held. Availability
+  latches on first pen contact, which lights up the existing hotplug notification path
+  for free.
+- **Burger menu:** profile tabs, plus "Reset settings to defaults". The tabs are for
+  editing the profile *not* in your hand — auto-switching freezes while the menu is open,
+  or reaching for a slider with the mouse would yank you off the profile you came to
+  edit. The reset exists because persistence makes a bad value permanent: that class of
+  bug used to die on restart and no longer does. A "Settings can't be saved" line appears
+  only when a sink actually refuses (itch runs in a cross-origin iframe; a browser
+  blocking third-party storage rejects `localStorage` outright).
+- **Caught in review:** the smooth lock is a *sticky* double-tap toggle, and the first cut
+  had `switch_profile` clear it — which would have silently dropped the lock on every
+  device change and written smooth's numbers over the real brush's slot. Flush/restore
+  now route through `live_brush_slot()`; `smooth_locked`, not `is_smooth_active()`, is the
+  discriminator, since a merely-held Shift doesn't swap the live fields.
+
 ## 2026-07-26 — Matcap lighting dial + burger menu + delete-subdiv-level
 
 - **Matcap got a keyed light.** The old ramp shaded off `n.y` alone — flat in z, so a

@@ -218,6 +218,7 @@ add_executable(chisel
     src/renderer.cpp
     src/camera.cpp
     src/input.cpp
+    src/settings.cpp
     src/sphere.cpp
     src/text_overlay.cpp
     src/brush.cpp
@@ -279,8 +280,9 @@ if(EMSCRIPTEN)
         -sASYNCIFY=1
         -sALLOW_MEMORY_GROWTH=1
         # ccall backs the file-picker JS→C callback (chisel_web_import_done);
-        # without the export it gets DCE'd out of the runtime.
-        -sEXPORTED_RUNTIME_METHODS=ccall
+        # stringToNewUTF8 hands the stored settings blob back out of localStorage
+        # (settings.cpp). Without the export they get DCE'd out of the runtime.
+        -sEXPORTED_RUNTIME_METHODS=ccall,stringToNewUTF8
         # Custom full-window shell: canvas is 100vw x 100vh (no logo/spinner/textarea,
         # no stock "Resize canvas" button). The app reads clientWidth/clientHeight and
         # sizes the surface/depth to match, so attachments never diverge (see main.cpp).
