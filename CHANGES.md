@@ -2,6 +2,52 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-08-05 — Mouse effect slider + spacing decoupled from strength
+
+- **Mouse effect ceiling is a slider now**, in the burger menu under the light dial. The
+  additive brushes have always scaled the mouse path back by a hardcoded `0.6` — a mouse
+  has no pressure, so every dab lands at full nominal strength while a pen stroke spends
+  most of its length well under 1.0, which is what the defaults were tuned against. That
+  constant is now `InputState::mouse_strength_scale`, driven over 0.10–0.60. Default is
+  0.60, i.e. exactly the old behaviour.
+  - **Numberless by design.** The underlying value is an internal multiplier that means
+    nothing to a user, so the label reads `mouse effect  min` / `mouse effect  max` at the
+    ends and plain `mouse effect` between — the grab position is the only readout. Tuned
+    by feel, which is the only way it *can* be tuned.
+  - Gating is unchanged: synthetic-pressure path only (mouse, or pen with pressure
+    disabled), and only Draw/Inflate/Crease/Pinch. Pen strokes are untouched — pressure
+    already scales those — and Move/Limb track the cursor while Smooth/Mask/Paint
+    converge on a target, so neither wants a ceiling.
+
+- **Spacing no longer doubles as a strength knob.** The dab-density compensation added
+  during the oblique-stroke work normalised against `input.brush_size * eff.spacing` —
+  which put `eff.spacing` in both the numerator and the denominator, where it **cancelled
+  exactly**. So the block compensated pressure-size and viewing angle (its actual job)
+  while spacing passed through completely uncompensated. Material per unit length went as
+  `1/spacing`, precisely linear, which across the slider's 0.05–1.0 range is a **20x**
+  swing in deposition — dwarfing every other strength control in the app. Reported as
+  "spacing seems to affect strength effect too much"; it did.
+  - Reference is pinned to `REF_SPACING = 0.25` (the default the brushes were tuned at),
+    so the ratio survives instead of cancelling. Spacing is now a pure quality knob — how
+    smooth the bead is — and bite belongs to the strength slider alone.
+  - **At the default 0.25 the ratio is exactly 1.0**, so a default-spacing stroke is
+    bit-identical to the previous build. The change only shows when the slider moves.
+  - **The clamp had to change shape, not just widen.** Full decoupling wants `comp` up to
+    4x at the coarse end, but strength is a linear displacement multiplier with nothing
+    saturating it downstream (`disp = world_radius · strength · 0.5`), so a 4x dab at
+    strength 1.0 would push twice the brush radius in one hit and spike through the
+    surface. Bound the **product** instead: a compensated dab may never bite harder than
+    the strength slider's own maximum. Low strength gets the full 4x it needs; high
+    strength gets the headroom that's left, under-depositing at the coarse end on
+    purpose. This also inherits the old `1.0` cap's job of stopping the `DAB_COUNT_MAX`
+    budget branch from turning a fast flick into a gouge, so dropping that cap reopened
+    nothing.
+  - `COMP_MIN` 0.20 → 0.05: the old floor sat right on top of the fine end
+    (`0.05/0.25 = 0.2` before the pressure-size and foreshortening terms multiply in) and
+    would have silently blocked the decoupling it was meant to allow.
+  - `comp` is computed from the same `spacing` that produced `dab_count`, after the 1 px
+    floor and the budget branch, so compensation is exact rather than approximate.
+
 ## 2026-07-26 — Matcap lighting dial + burger menu + delete-subdiv-level
 
 - **Matcap got a keyed light.** The old ramp shaded off `n.y` alone — flat in z, so a

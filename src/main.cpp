@@ -66,8 +66,8 @@ static constexpr float PRESSURE_STR_FLOOR  = 0.05f;
 static constexpr float PRESSURE_SIZE_FLOOR = 0.40f;
 static constexpr float PRESSURE_GAMMA      = 1.0f;
 
-// Mouse (or pressure disabled) strength offset — see the block in the dab loop.
-static constexpr float MOUSE_STRENGTH_SCALE = 0.6f;
+// Mouse (or pressure disabled) strength offset lives on InputState now — see
+// mouse_strength_scale in input.h and the block in the dab loop.
 
 // Dab spacing is stepped in SCREEN pixels but every dab deposits into a WORLD-space
 // sphere, so the step has to be foreshortening-corrected — see the block in the dab
@@ -76,6 +76,16 @@ static constexpr float MOUSE_STRENGTH_SCALE = 0.6f;
 // full-vertex-array dispatch.
 static constexpr float DAB_SPACING_MIN_COS = 0.30f;
 static constexpr int   DAB_COUNT_MAX       = 64;
+
+// Dab-density compensation reference — see the decoupling block in the dab loop.
+// REF_SPACING is InputState's default brush_spacing: the density the brush defaults
+// were tuned at, and the fixed point the compensation normalises to. COMP_MAX covers
+// the coarse end of the 0.05..1.0 spacing slider (1.0/0.25 = 4x); COMP_MIN is low
+// enough not to bind at the fine end (0.05/0.25 = 0.2, times the pressure-size and
+// foreshortening terms) while still keeping a near-silhouette dab from vanishing.
+static constexpr float REF_SPACING = 0.25f;
+static constexpr float COMP_MIN    = 0.05f;
+static constexpr float COMP_MAX    = 4.0f;
 
 // From input.cpp
 extern float input_consume_scroll();
@@ -2022,7 +2032,7 @@ int main(int argc, char* argv[]) {
                     BrushType bt = is_smooth ? BrushType::SMOOTH : input.current_brush;
                     if (bt == BrushType::DRAW || bt == BrushType::INFLATE ||
                         bt == BrushType::CREASE || bt == BrushType::PINCH) {
-                        eff_strength *= MOUSE_STRENGTH_SCALE;
+                        eff_strength *= input.mouse_strength_scale;
                     }
                 }
 
@@ -2114,27 +2124,46 @@ int main(int argc, char* argv[]) {
                 // ~1.4-2.5x more per unit length than the defaults were tuned against.
                 // It read as "the brush strength reduction got reverted".
                 //
-                // Normalise against the reference spacing — face-on, full pressure,
-                // which is what the defaults were tuned on — so material per unit length
-                // is what strength says it is, independent of pressure-size AND of
-                // viewing angle. A grazing stroke now lays the same bead as a face-on
-                // one instead of the old thin, gappy one.
+                // Normalise against a FIXED reference — face-on, full pressure, default
+                // spacing, which is what the defaults were tuned on — so material per
+                // unit length is what strength says it is, independent of pressure-size,
+                // viewing angle AND the spacing slider. A grazing stroke now lays the
+                // same bead as a face-on one instead of the old thin, gappy one.
                 //
-                // Same brush set as MOUSE_STRENGTH_SCALE above, for the same reason:
+                // The reference used to be `input.brush_size * eff.spacing`, which put
+                // eff.spacing in both numerator and denominator — it cancelled exactly,
+                // so spacing passed through uncompensated and doubled as a strength
+                // knob: 20x deposition across its 0.05..1.0 range. Pinning it to
+                // REF_SPACING makes spacing a pure quality knob (how smooth is the
+                // bead) and leaves bite to the strength slider alone. At the default
+                // 0.25 the ratio is 1.0, so a default-spacing stroke is bit-identical
+                // to before.
+                //
+                // Same brush set as the mouse-strength scale above, for the same reason:
                 // these accumulate without bound. Move/Limb track the cursor, and
                 // Smooth/Mask/Paint/Clay converge on a target, so denser dabs make those
                 // settle sooner rather than pile up.
-                //
-                // Capped at 1.0 so the budget branch above can't turn a fast flick into
-                // a gouge; floored so a near-silhouette dab still registers.
                 {
                     BrushType bt = is_smooth ? BrushType::SMOOTH : input.current_brush;
                     bool additive = (bt == BrushType::DRAW  || bt == BrushType::INFLATE ||
                                      bt == BrushType::CREASE || bt == BrushType::PINCH);
-                    float ref_spacing = input.brush_size * eff.spacing;
+                    float ref_spacing = input.brush_size * REF_SPACING;
                     if (additive && ref_spacing > 1e-6f) {
                         float comp = spacing / ref_spacing;
-                        comp = comp < 0.20f ? 0.20f : (comp > 1.0f ? 1.0f : comp);
+                        comp = comp < COMP_MIN ? COMP_MIN : (comp > COMP_MAX ? COMP_MAX : comp);
+                        // Safety cap, and the reason this isn't a plain clamp. comp
+                        // reaches 4x at the coarse end of the slider, and strength is a
+                        // linear displacement multiplier with nothing saturating it
+                        // downstream (disp = world_radius * strength * 0.5) — so a 4x
+                        // dab at strength 1.0 would push 2x the brush radius in one hit
+                        // and spike through the surface. Bound the PRODUCT instead: a
+                        // compensated dab may never bite harder than the strength
+                        // slider's own maximum. Low strength gets the full 4x it needs
+                        // for real decoupling; high strength gets what's left. This
+                        // also subsumes the old cap's job of stopping the budget branch
+                        // from turning a fast flick into a gouge.
+                        if (eff_strength > 1e-6f && eff_strength * comp > 1.0f)
+                            comp = 1.0f / eff_strength;
                         eff_strength *= comp;
                     }
                 }

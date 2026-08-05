@@ -928,6 +928,23 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
                 ImGui::SetTooltip("Viewport lighting: 0 = flat shading, 1 = keyed "
                                   "light with contrast and sheen (display only)");
 
+            // Mouse effect ceiling. Deliberately numberless: the underlying scale is
+            // an internal multiplier, so the label reads min..max and the user tunes
+            // it by feel. Max is the tuned default, i.e. today's behaviour.
+            ImGui::SetNextItemWidth(150.0f + ImGui::GetFrameHeight() +
+                                    ImGui::GetStyle().ItemSpacing.x);
+            ImGui::SliderFloat("##mousestrength", &input.mouse_strength_scale,
+                               InputState::MOUSE_STRENGTH_MIN,
+                               InputState::MOUSE_STRENGTH_MAX,
+                               input.mouse_strength_scale <= InputState::MOUSE_STRENGTH_MIN
+                                   ? "mouse effect  min"
+                                   : (input.mouse_strength_scale >= InputState::MOUSE_STRENGTH_MAX
+                                          ? "mouse effect  max"
+                                          : "mouse effect"));
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("How hard a mouse stroke bites. Pen strokes are "
+                                  "unaffected — pressure already scales those.");
+
             ImGui::Checkbox("Show FPS", &input.show_fps);
 
             ImGui::Separator();

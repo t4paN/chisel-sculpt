@@ -73,6 +73,17 @@ struct InputState {
     // FPS readout visibility (burger menu toggle). Display only.
     bool show_fps = true;
 
+    // Mouse-path strength ceiling for the additive brushes (see the dab loop in
+    // main.cpp). A mouse has no pressure, so every dab lands at full nominal strength;
+    // 0.60 is the tuned default and the top of the range. Lowering it gives a mouse
+    // user a gentler stroke without touching each brush's strength slider. Pen strokes
+    // are unaffected — this only multiplies the synthetic-pressure path. The burger
+    // menu drives it as an unlabelled min..max slider; the number is meaningless to a
+    // user, the feel is not.
+    static constexpr float MOUSE_STRENGTH_MIN = 0.10f;
+    static constexpr float MOUSE_STRENGTH_MAX = 0.60f;
+    float mouse_strength_scale = MOUSE_STRENGTH_MAX;
+
     // Delete the highest subdivision level (burger menu). The menu item arms the
     // confirm; Y sets the request, which the main loop consumes once. Destructive
     // and not undoable — see the handler in main.cpp.
