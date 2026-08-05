@@ -19,6 +19,16 @@ Short, chronological log of notable changes. Newest on top.
     already scales those — and Move/Limb track the cursor while Smooth/Mask/Paint
     converge on a target, so neither wants a ceiling.
 
+- **Matcap dial stops charging for a look that's turned off.** The lighting dial computed
+  *both* shading formulations plus a `pow(…, 90.0)` sheen on every pixel and then blended
+  between them — no branch — so at dial 0 the GPU built the entire keyed ramp and the
+  specular, mixed one out and multiplied the other by zero. Now both sit behind
+  `if (uMatcapContrast > 0.0)`. The condition is a uniform, so it's wave-invariant: a
+  scalar branch, not a divergent one. Output is algebraically identical at every dial
+  value — `shade` just moved to after the branch, since it used to be folded into `spec`.
+  Twinned GLSL/WGSL. Small win (it's bounded by the model's screen coverage, not the full
+  screen), but it was pure waste.
+
 - **Spacing no longer doubles as a strength knob.** The dab-density compensation added
   during the oblique-stroke work normalised against `input.brush_size * eff.spacing` —
   which put `eff.spacing` in both the numerator and the denominator, where it **cancelled

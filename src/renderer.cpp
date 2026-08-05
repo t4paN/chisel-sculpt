@@ -184,33 +184,42 @@ void main() {
     // Flat ramp (uMatcapContrast = 0): the original look. Keys off n.y alone, so
     // it is flat in z — a bulge and a plane facing the same way shade alike.
     float top = n.y * 0.5 + 0.5;
-    float val_flat = (0.35 + 0.45 * top + 0.15 * (1.0 - rim2)) * (1.0 - rim2 * 0.3);
+    float val = (0.35 + 0.45 * top + 0.15 * (1.0 - rim2)) * (1.0 - rim2 * 0.3);
+    float spec = 0.0;
 
-    // Keyed ramp (uMatcapContrast = 1). Key light up-left and tilted toward the
-    // viewer — the z term is what makes curvature read.
-    vec3 L = normalize(vec3(-0.30, 0.62, 0.72));
-    // Wrapped diffuse (soft terminator), squared. The square is the contrast:
-    // it pulls the mid-greys apart without crushing the lit side.
-    float key = mix(0.35, 1.0, max(dot(n, L), 0.0));
-    key *= key;
-    float fill = n.y * 0.5 + 0.5;                  // sky/ground ambient
-    // Silhouette falloff, deeper than the flat ramp's — this is what gives the
-    // form a dark edge to sit against instead of fading into uniform grey.
-    // Peak diffuse stops at 0.85, not ~1: the sheen below is additive, so the lit
-    // side needs headroom or a smooth sphere clips to a white plastic blob.
-    float val_key = (0.05 + 0.66 * key + 0.14 * fill) * (1.0 - rim2 * 0.45);
+    // The keyed ramp and its sheen are the dial's entire cost: a second full shading
+    // formulation plus a pow(), every pixel. Both mix/multiply out at dial 0, so
+    // computing them there was pure waste — branch past instead. uMatcapContrast is
+    // a uniform, so the condition is wave-invariant and this is a scalar branch, not
+    // a divergent one. Output is unchanged on both sides.
+    if (uMatcapContrast > 0.0) {
+        // Keyed ramp (uMatcapContrast = 1). Key light up-left and tilted toward the
+        // viewer — the z term is what makes curvature read.
+        vec3 L = normalize(vec3(-0.30, 0.62, 0.72));
+        // Wrapped diffuse (soft terminator), squared. The square is the contrast:
+        // it pulls the mid-greys apart without crushing the lit side.
+        float key = mix(0.35, 1.0, max(dot(n, L), 0.0));
+        key *= key;
+        float fill = n.y * 0.5 + 0.5;                  // sky/ground ambient
+        // Silhouette falloff, deeper than the flat ramp's — this is what gives the
+        // form a dark edge to sit against instead of fading into uniform grey.
+        // Peak diffuse stops at 0.85, not ~1: the sheen below is additive, so the lit
+        // side needs headroom or a smooth sphere clips to a white plastic blob.
+        float val_key = (0.05 + 0.66 * key + 0.14 * fill) * (1.0 - rim2 * 0.45);
+        val = mix(val, val_key, uMatcapContrast);
 
-    float val = mix(val_flat, val_key, uMatcapContrast);
+        // Narrow sheen, added untinted: paint gets a clay highlight rather than just
+        // a brighter version of its own hue. Fades out with the dial — the flat ramp
+        // had none, so at 0 the old look must come back exactly.
+        vec3 H = normalize(L + vec3(0.0, 0.0, 1.0));
+        spec = pow(max(dot(n, H), 0.0), 90.0) * 0.16 * uMatcapContrast;
+    }
 
-    // Sculpt mask: unmasked (0) = normal, masked (1) = dark
+    // Sculpt mask: unmasked (0) = normal, masked (1) = dark. Applied to the sheen
+    // too — it was folded into spec before the branch split them apart.
     float shade = mix(1.0, 0.4, vMask);
     val *= shade;
-
-    // Narrow sheen, added untinted: paint gets a clay highlight rather than just
-    // a brighter version of its own hue. Fades out with the dial — the flat ramp
-    // had none, so at 0 the old look must come back exactly.
-    vec3 H = normalize(L + vec3(0.0, 0.0, 1.0));
-    float spec = pow(max(dot(n, H), 0.0), 90.0) * 0.16 * shade * uMatcapContrast;
+    spec *= shade;
 
     // Lit albedo: white (default) == matcap grey exactly; paint tints it.
     // uPaintVisible folds the albedo out to white when paint is hidden.
@@ -657,17 +666,23 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let rim = 1.0 - abs(n.z);
     let rim2 = rim * rim;
     let top = n.y * 0.5 + 0.5;
-    let val_flat = (0.35 + 0.45 * top + 0.15 * (1.0 - rim2)) * (1.0 - rim2 * 0.3);
-    let L = normalize(vec3<f32>(-0.30, 0.62, 0.72));
-    var key = mix(0.35, 1.0, max(dot(n, L), 0.0));
-    key = key * key;
-    let fill = n.y * 0.5 + 0.5;
-    let val_key = (0.05 + 0.66 * key + 0.14 * fill) * (1.0 - rim2 * 0.45);
-    var val = mix(val_flat, val_key, P.matcap_contrast);
+    var val = (0.35 + 0.45 * top + 0.15 * (1.0 - rim2)) * (1.0 - rim2 * 0.3);
+    var spec = 0.0;
+    // Keyed ramp + sheen are the dial's whole per-pixel cost and both vanish at 0 —
+    // branch past them. P.matcap_contrast is uniform, so this is a scalar branch.
+    if (P.matcap_contrast > 0.0) {
+        let L = normalize(vec3<f32>(-0.30, 0.62, 0.72));
+        var key = mix(0.35, 1.0, max(dot(n, L), 0.0));
+        key = key * key;
+        let fill = n.y * 0.5 + 0.5;
+        let val_key = (0.05 + 0.66 * key + 0.14 * fill) * (1.0 - rim2 * 0.45);
+        val = mix(val, val_key, P.matcap_contrast);
+        let H = normalize(L + vec3<f32>(0.0, 0.0, 1.0));
+        spec = pow(max(dot(n, H), 0.0), 90.0) * 0.16 * P.matcap_contrast;
+    }
     let shade = mix(1.0, 0.4, in.mask);
     val = val * shade;
-    let H = normalize(L + vec3<f32>(0.0, 0.0, 1.0));
-    let spec = pow(max(dot(n, H), 0.0), 90.0) * 0.16 * shade * P.matcap_contrast;
+    spec = spec * shade;
     var col = vec3<f32>(val) * mix(vec3<f32>(1.0), in.color.rgb, P.paint_visible) + vec3<f32>(spec);
     if (P.obj_mask > 0.0) {
         let tint = vec3<f32>(0.35, 0.12, 0.18);
