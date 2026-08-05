@@ -865,6 +865,19 @@ int main(int argc, char* argv[]) {
         ImGui_ImplOpenGL3_NewFrame();
 #endif
         ImGui_ImplGlfw_NewFrame();
+#ifdef __EMSCRIPTEN__
+        // Re-take DisplaySize from the canvas, for the same reason win_w is read from
+        // clientWidth up top: ImGui_ImplGlfw_NewFrame sources it from glfwGetWindowSize,
+        // which tracks the backing GLFW *believes* it has, and the shell resizes the
+        // canvas outside GLFW's knowledge. The stale value is what loses the burger menu
+        // after a window resize — it is the only right-anchored island, positioned at
+        // win_w - margin, and SetNextWindowPos(ImGuiCond_Always) counts as API-set, which
+        // makes ImGui skip its clamp-into-viewport rescue. So once win_w outruns a stale
+        // DisplaySize the island is placed past the edge with nothing to pull it back.
+        // Scale is 1:1 because configureSurface sets the canvas backing at dpr=1.
+        ImGui::GetIO().DisplaySize = ImVec2((float)win_w, (float)win_h);
+        ImGui::GetIO().DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
+#endif
         ImGui::NewFrame();
 
         // A drop on an untouched scene — the default sphere with an empty

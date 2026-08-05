@@ -43,6 +43,17 @@ Short, chronological log of notable changes. Newest on top.
   bug used to die on restart and no longer does. A "Settings can't be saved" line appears
   only when a sink actually refuses (itch runs in a cross-origin iframe; a browser
   blocking third-party storage rejects `localStorage` outright).
+- **Fixed: the burger menu vanished after a window resize on web.** Pre-existing since
+  v0.2.5, not from this work. `ImGui_ImplGlfw_NewFrame` takes `DisplaySize` from
+  `glfwGetWindowSize`, which on web tracks the backing GLFW *believes* it has — the same
+  value `win_w` is deliberately read from `canvas.clientWidth` to avoid (see the
+  cursor-offset comment in `main.cpp`). The burger island is the only right-anchored UI
+  (`win_w - margin`), and because it sets its position with `ImGuiCond_Always`, ImGui
+  counts that as API-set and **skips its clamp-into-viewport rescue** — so once `win_w`
+  outran the stale `DisplaySize` the island was placed past the edge with nothing to pull
+  it back. Every other island is left-anchored at `margin`, hence the lone casualty.
+  `DisplaySize` is now re-taken from the canvas each frame, scale pinned 1:1 (the surface
+  is configured at dpr=1).
 - **Caught in review:** the smooth lock is a *sticky* double-tap toggle, and the first cut
   had `switch_profile` clear it — which would have silently dropped the lock on every
   device change and written smooth's numbers over the real brush's slot. Flush/restore

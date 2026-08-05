@@ -205,7 +205,10 @@ struct InputState {
     bool mirror_x;          // X-axis symmetry, on by default
 
     // Autosmooth: light Laplacian pass on draw-brush strokes at pen-up.
-    // Per-session, defaults ON, toggled with B.
+    // Defaults ON, toggled with B. Persisted since 2026-08-06 (was per-session).
+    // Currently lives in ProfileSettings; slated to become global — it is a sculpting
+    // preference, not a device trait, so a mouse-side toggle should not flip back when
+    // you pick up the pen. See ~/CHISEL/settings-profiles-handoff.md.
     bool autosmooth;
 
     // Pen-pressure response. Defaults ON; toggled with K. No effect without a tablet.
