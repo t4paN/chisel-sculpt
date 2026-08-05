@@ -101,6 +101,81 @@ struct Mesh {
 // operates as a free function so multires_stack can call it on the base cage.
 void build_mirror_spatial(const Mesh& m, std::vector<uint32_t>& out);
 
+// ---------------------------------------------------------------------------
+// Vertex blocks — brush dispatch culling.
+//
+// Every dab kernel used to dispatch (vertex_count + 255) / 256 workgroups, i.e.
+// the WHOLE mesh, and read 6 floats per vertex before the sphere test rejected
+// almost all of them. With clear/accum/apply that is ~70 B of traffic per vertex
+// per dab; a small brush on a dense mesh spends nearly all of it discovering that
+// a vertex is nowhere near the cursor. This is the "partial operations only" rule
+// being honoured inside the kernel but not at the dispatch.
+//
+// Fix: bucket vertices into fixed runs of VERTEX_BLOCK_SIZE and keep a world AABB
+// per block. The CPU tests blocks against the dab spheres, writes the survivors'
+// indices into `active`, and the kernel dispatches ONE WORKGROUP PER ACTIVE BLOCK
+// — workgroup_id.x indexes the list, local_invocation_id.x is the offset inside
+// the block. No GPU compaction and no indirect dispatch (the gpu:: seam has none),
+// because the CPU already knows the count it just produced.
+//
+// Blocks are runs of vertex INDEX, not a spatial partition, so culling only pays
+// off to the extent that neighbouring indices are neighbouring in space. Loop
+// subdivision appends midpoints in edge order, which keeps that broadly true; a
+// pathological ordering costs efficiency, never correctness.
+//
+// Staleness is handled by STICKINESS, not by inflating boxes. mesh.pos is not
+// reliably current during a stroke — GPU-resident undo defers the CPU writeback
+// (MultiresGPU::cpu_dirty) and the only sync path does readbacks, which the stroke
+// rule forbids — so a box cannot be re-tightened mid-stroke, and a box built around
+// stale positions would be too SMALL, the one error that drops vertices out of a dab.
+//
+// The first attempt inflated every selected block by the dab's displacement bound.
+// That was correct but self-defeating: a selected block grew every dab, which made
+// it get selected again, which grew it again, so after a few dozen dabs the boxes
+// swallowed the mesh and culling collapsed. Denser spacing hit it sooner, so tighter
+// spacing actually got SLOWER than no culling at all.
+//
+// Instead, boxes never move, and a block that has ever been selected during this
+// stroke stays in the list until pen-up. That is exactly as conservative and it is
+// bounded by the stroke's own footprint: any vertex that moved was inside a dab
+// sphere when it moved, so its block was selected then and is dispatched forever
+// after; any vertex that never moved is still at its built position, where the box
+// is exact. `begin_stroke` clears the sticky set, `build` re-tightens the boxes and
+// is only safe where the CPU copy is authoritative.
+// ---------------------------------------------------------------------------
+
+// Must equal the compute workgroup size: one workgroup owns exactly one block,
+// which is what lets the active-block list double as the dispatch list.
+static constexpr uint32_t VERTEX_BLOCK_SIZE = 256;
+
+struct DabSphere { float x, y, z, r; };
+
+struct VertexBlocks {
+    uint32_t vertex_count = 0;       // vertex count the boxes were built for
+    uint32_t block_count  = 0;
+    std::vector<float> min_x, min_y, min_z;
+    std::vector<float> max_x, max_y, max_z;
+    std::vector<uint32_t> active;    // scratch: compact block indices, preallocated
+    uint32_t active_count = 0;       // live entries in `active` (its size() is capacity)
+    std::vector<uint8_t> touched;    // sticky: block was selected earlier this stroke
+    bool list_dirty = false;         // `active` changed on the last select()
+
+    bool valid(uint32_t vc) const { return block_count != 0 && vertex_count == vc; }
+
+    // O(V) retighten from CPU positions. Only call where mesh.pos is authoritative.
+    void build(const Mesh& m);
+
+    // Drop the sticky set. Call once per stroke, at pen-down.
+    void begin_stroke();
+
+    // Add every block whose box intersects ANY of the spheres to the sticky set, and
+    // rewrite `active` as the whole set. Taking all spheres at once (the mirror
+    // anchor, and later a whole batch of dabs) means one pass and no dedupe.
+    // Sets list_dirty only when the set actually gained a block, so an unchanged
+    // list can skip its re-upload. Returns the active count.
+    uint32_t select(const DabSphere* spheres, uint32_t sphere_count);
+};
+
 // Topology stencil captured by loop_subdivide under canonical numbering:
 // everything needed to recompute the subdivided level's positions from new
 // coarse positions without re-extracting edges. `mid` holds 4 ids per midpoint

@@ -104,6 +104,22 @@ struct BrushStroke {
     Vec3 anchor_pos;
     float anchor_world_radius;
     bool anchor_valid;
+
+    // Brush dispatch culling (VertexBlocks, mesh.h). `blocks` holds the per-block
+    // world AABBs; setup_block_dispatch() selects the ones this dab can reach and
+    // uploads the list the accum/symmetrize/apply kernels dispatch over.
+    //
+    // Rebuild is only safe where mesh.pos is authoritative, which during sculpting it
+    // often is not — GPU-resident undo defers the CPU writeback. begin() therefore
+    // arms this from MultiresGPU::cpu_dirty and the first dab of the stroke does the
+    // O(V) pass; the rest of the time the boxes are kept conservative by growing them
+    // (too big is slow, too small drops vertices out of a dab).
+    VertexBlocks blocks;
+    bool blocks_rebuild_pending = false;
+    bool blocks_new_stroke = false;    // clear the sticky set on the next dab
+    bool blocks_log_pending = false;   // print the culling ratio once per stroke
+
+    uint32_t setup_block_dispatch(DabContext& ctx);
     // |view . surface normal| at the anchor. 1 = facing the viewer, 0 = edge-on.
     // Set by set_anchor; drives the sub-pixel depth guard, screen_slack, and how far
     // the push direction leans on the area normal instead of the point normal.

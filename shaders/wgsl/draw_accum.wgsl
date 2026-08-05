@@ -36,6 +36,9 @@ struct Params {
 @group(0) @binding(0)  var<storage, read>       positions : array<f32>;
 @group(0) @binding(1)  var<storage, read>       normals   : array<f32>;
 @group(0) @binding(3)  var<storage, read_write> accum     : array<atomic<u32>>;
+// Dispatch culling: one workgroup per ACTIVE 256-vertex block, so this maps
+// workgroup -> block. See VertexBlocks in mesh.h.
+@group(0) @binding(45) var<storage, read>       block_list : array<u32>;
 @group(0) @binding(63) var<uniform>             P         : Params;
 
 // --- shared brush-alpha stamp (keep byte-identical across every dab kernel) ---
@@ -250,8 +253,9 @@ fn deposit(v : u32, anchor : vec3<f32>, view : vec3<f32>, anchor_n : vec3<f32>,
 }
 
 @compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-    let v = gid.x;
+fn main(@builtin(workgroup_id) wg : vec3<u32>,
+        @builtin(local_invocation_id) lid : vec3<u32>) {
+    let v = block_list[wg.x] * 256u + lid.x;
     if (v >= P.vertex_count) {
         return;
     }

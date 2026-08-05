@@ -57,6 +57,10 @@ enum ComputeBinding : GLuint {
     BIND_CASCADE_SRC       = 42, // float3 coarse positions (replay pass input / final pos for normals)
     BIND_CASCADE_DST       = 43, // float3 fine positions (replay pass output, disp applied in place)
     BIND_CASCADE_MID       = 44, // uint4 per midpoint: v0,v1,opp0,opp1 (cached SubdivStencil mid table)
+    // Brush dispatch culling (see VertexBlocks in mesh.h). Compact list of active
+    // 256-vertex block indices; one workgroup per entry, so workgroup_id.x indexes
+    // this and local_invocation_id.x is the offset inside the block.
+    BIND_BLOCK_LIST        = 45, // uint   active block indices for this dab
     BIND_ALPHA_PARAMS      = 62, // 48-byte AlphaParams UBO (per-dab stamp frame) — shared dab stamp
     // Reserved high slot for the per-dispatch std140 Params UBO that replaces loose
     // GL uniforms on the gpu:: seam (see webgpu-port-plan.md / CONVENTIONS.md). Every
@@ -199,6 +203,16 @@ struct ComputeState {
     // Accumulation buffer: 4 uints per vertex (dx, dy, dz, weight as float-bits)
     gpu::Buffer accum_ssbo;
     uint32_t accum_vertex_count;
+
+    // Active-block list for brush dispatch culling (VertexBlocks, mesh.h). Refilled
+    // and re-uploaded per dab; sized to the block count so a full-coverage dab still
+    // fits. block_list_dispatch is the workgroup count that goes with the current
+    // contents — a dab that culls nothing dispatches exactly what the old full-mesh
+    // path did, so the worst case is unchanged.
+    gpu::Buffer block_list_ssbo;
+    uint32_t    block_list_capacity = 0;   // in entries
+    uint32_t    block_list_dispatch = 0;   // active blocks currently uploaded
+    void upload_block_list(const uint32_t* blocks, uint32_t count);
 
     // Brush alpha (stamp) — SHARED across every falloff-computing dab kernel. The
     // selected grayscale bitmap lives in alpha_tex_ssbo (row-major float 0..1); the

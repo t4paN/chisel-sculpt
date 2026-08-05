@@ -48,9 +48,10 @@ gpu::BindGroup make_accum_bind_group(ComputeState& cs, gpu::ComputePipeline& pip
         { BIND_ACCUM,        &accumView, accumView.size },
         { BIND_ALPHA_TEX,    &cs.alpha_tex_ssbo,   (uint64_t)cs.alpha_tex_w * cs.alpha_tex_h * sizeof(float) },
         { BIND_ALPHA_PARAMS, &cs.alpha_params_ubo, 48 },
+        { BIND_BLOCK_LIST,   &cs.block_list_ssbo,  (uint64_t)cs.block_list_dispatch * sizeof(uint32_t) },
         { BIND_PARAMS,       &ubo,       ubo_size },
     };
-    return gpu::create_bind_group(cs.gpu_dev, pipe, bg, 6);
+    return gpu::create_bind_group(cs.gpu_dev, pipe, bg, 7);
 }
 }
 
@@ -66,10 +67,11 @@ bool ComputeState::init_crease() {
         { BIND_ACCUM,        gpu::Bind::StorageReadWrite, 0 },
         { BIND_ALPHA_TEX,    gpu::Bind::StorageRead,      0 },
         { BIND_ALPHA_PARAMS, gpu::Bind::Uniform,          48 },
+        { BIND_BLOCK_LIST,   gpu::Bind::StorageRead,      0 },
         { BIND_PARAMS,       gpu::Bind::Uniform,          sizeof(CreaseParamsGPU) },
     };
     crease_accum_pipeline = gpu::create_compute_pipeline(gpu_dev,
-                                gpu::embedded_shader("crease_accum"), layout, 6);
+                                gpu::embedded_shader("crease_accum"), layout, 7);
     if (!crease_accum_pipeline.handle) {
         std::printf("[compute] crease_accum pipeline failed to compile\n");
         return false;
@@ -84,6 +86,10 @@ void ComputeState::dispatch_crease_accum(const CreaseAccumParams& p, const gpu::
     const uint32_t vc = p.vertex_count;
 
     clear_accum_buffer();   // raw GL (GL-owned accum buffer)
+    // No reachable block -> nothing to dispatch. Return before the bind group: a
+    // zero-size binding is a WebGPU validation error. The accum clear above still
+    // ran, so apply sees a zeroed buffer either way.
+    if (block_list_dispatch == 0 || !block_list_ssbo.handle) return;
 
     CreaseParamsGPU u = {};
     u.anchor_a[0] = p.anchor_a_x; u.anchor_a[1] = p.anchor_a_y; u.anchor_a[2] = p.anchor_a_z;
@@ -109,7 +115,7 @@ void ComputeState::dispatch_crease_accum(const CreaseAccumParams& p, const gpu::
                                                crease_ubo, sizeof(CreaseParamsGPU));
 
     gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
-    gpu::dispatch(b, crease_accum_pipeline, grp, (vc + 255u) / 256u);
+    gpu::dispatch(b, crease_accum_pipeline, grp, block_list_dispatch);
     gpu::submit(b);
     gpu::release_bind_group(grp);
 }
@@ -126,10 +132,11 @@ bool ComputeState::init_pinch() {
         { BIND_ACCUM,        gpu::Bind::StorageReadWrite, 0 },
         { BIND_ALPHA_TEX,    gpu::Bind::StorageRead,      0 },
         { BIND_ALPHA_PARAMS, gpu::Bind::Uniform,          48 },
+        { BIND_BLOCK_LIST,   gpu::Bind::StorageRead,      0 },
         { BIND_PARAMS,       gpu::Bind::Uniform,          sizeof(PinchParamsGPU) },
     };
     pinch_accum_pipeline = gpu::create_compute_pipeline(gpu_dev,
-                               gpu::embedded_shader("pinch_accum"), layout, 6);
+                               gpu::embedded_shader("pinch_accum"), layout, 7);
     if (!pinch_accum_pipeline.handle) {
         std::printf("[compute] pinch_accum pipeline failed to compile\n");
         return false;
@@ -144,6 +151,10 @@ void ComputeState::dispatch_pinch_accum(const PinchAccumParams& p, const gpu::Bu
     const uint32_t vc = p.vertex_count;
 
     clear_accum_buffer();   // raw GL (GL-owned accum buffer)
+    // No reachable block -> nothing to dispatch. Return before the bind group: a
+    // zero-size binding is a WebGPU validation error. The accum clear above still
+    // ran, so apply sees a zeroed buffer either way.
+    if (block_list_dispatch == 0 || !block_list_ssbo.handle) return;
 
     PinchParamsGPU u = {};
     u.anchor_a[0] = p.anchor_a_x; u.anchor_a[1] = p.anchor_a_y; u.anchor_a[2] = p.anchor_a_z;
@@ -165,7 +176,7 @@ void ComputeState::dispatch_pinch_accum(const PinchAccumParams& p, const gpu::Bu
                                                pinch_ubo, sizeof(PinchParamsGPU));
 
     gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
-    gpu::dispatch(b, pinch_accum_pipeline, grp, (vc + 255u) / 256u);
+    gpu::dispatch(b, pinch_accum_pipeline, grp, block_list_dispatch);
     gpu::submit(b);
     gpu::release_bind_group(grp);
 }

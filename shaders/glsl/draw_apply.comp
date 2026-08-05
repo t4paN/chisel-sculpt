@@ -9,6 +9,9 @@ layout(std430, binding = 0)  buffer PosBuf   { float positions[]; };
 layout(std430, binding = 3)  readonly buffer AccumBuf { uint accum[]; };
 layout(std430, binding = 6)  buffer DirtyBuf { uint count; uint ids[]; } dirty;
 layout(std430, binding = 12) readonly buffer MaskBuf { float mask[]; };
+// One workgroup per ACTIVE 256-vertex block — same list draw_accum ran on, so
+// apply visits exactly the vertices accum could have touched. See mesh.h.
+layout(std430, binding = 45) readonly buffer BlockBuf { uint block_list[]; };
 
 layout(std140, binding = 63) uniform Params {
     uint vertex_count;  // 0
@@ -18,7 +21,7 @@ layout(std140, binding = 63) uniform Params {
 } P;
 
 void main() {
-    uint v = gl_GlobalInvocationID.x;
+    uint v = block_list[gl_WorkGroupID.x] * 256u + gl_LocalInvocationID.x;
     if (v >= P.vertex_count) return;
 
     uint base = v * 4u;

@@ -60,6 +60,23 @@ void ComputeState::clear_accum_buffer() {
     gpu::clear_buffer(gpu_dev, accum_ssbo, 0);
 }
 
+// Active-block list upload. Grows monotonically; the contents are whatever the
+// caller's VertexBlocks::select() just produced, and block_list_dispatch is the
+// workgroup count that must accompany them.
+void ComputeState::upload_block_list(const uint32_t* blocks, uint32_t count) {
+    block_list_dispatch = count;
+    if (count == 0) return;
+    if (block_list_capacity < count || !block_list_ssbo.handle) {
+        gpu::release_buffer(block_list_ssbo);
+        block_list_ssbo = gpu::create_buffer(gpu_dev, nullptr,
+                                             (uint64_t)count * sizeof(uint32_t),
+                                             gpu::Usage::Storage);
+        block_list_capacity = count;
+    }
+    gpu::write_buffer(gpu_dev, block_list_ssbo, 0, blocks,
+                      (uint64_t)count * sizeof(uint32_t));
+}
+
 void ComputeState::snapshot_stroke_normals(const gpu::Buffer& norm_vbo, uint32_t vertex_count) {
     // Working buffer holds only the active entity at offset 0 — copy [0, vertex_count).
     if (stroke_norm_capacity < vertex_count || !stroke_norm_ssbo.handle) {
@@ -119,10 +136,11 @@ bool ComputeState::init_draw_accum() {
         { BIND_ACCUM,        gpu::Bind::StorageReadWrite, 0 },
         { BIND_ALPHA_TEX,    gpu::Bind::StorageRead,      0 },
         { BIND_ALPHA_PARAMS, gpu::Bind::Uniform,          48 },
+        { BIND_BLOCK_LIST,   gpu::Bind::StorageRead,      0 },
         { BIND_PARAMS,       gpu::Bind::Uniform,          sizeof(DrawAccumParamsGPU) },
     };
     draw_accum_pipeline = gpu::create_compute_pipeline(gpu_dev, gpu::embedded_shader("draw_accum"),
-                                                       layout, 6);
+                                                       layout, 7);
     if (!draw_accum_pipeline.handle) {
         std::printf("[compute] draw_accum pipeline failed to compile\n");
         return false;
@@ -140,10 +158,11 @@ bool ComputeState::init_draw_apply() {
         { BIND_ACCUM,       gpu::Bind::StorageRead,      0 },
         { BIND_DIRTY_VERTS, gpu::Bind::StorageReadWrite, 0 },
         { BIND_MASK,        gpu::Bind::StorageRead,      0 },
+        { BIND_BLOCK_LIST,  gpu::Bind::StorageRead,      0 },
         { BIND_PARAMS,      gpu::Bind::Uniform,          sizeof(VCountParamsGPU) },
     };
     draw_apply_pipeline = gpu::create_compute_pipeline(gpu_dev, gpu::embedded_shader("draw_apply"),
-                                                       layout, 5);
+                                                       layout, 6);
     if (!draw_apply_pipeline.handle) {
         std::printf("[compute] draw_apply pipeline failed to compile\n");
         return false;
@@ -159,10 +178,11 @@ bool ComputeState::init_draw_accum_symmetrize() {
         { BIND_ACCUM,       gpu::Bind::StorageRead,      0 },
         { BIND_ACCUM_SYM,   gpu::Bind::StorageReadWrite, 0 },
         { BIND_MIRROR_MAP,  gpu::Bind::StorageRead,      0 },
+        { BIND_BLOCK_LIST,  gpu::Bind::StorageRead,      0 },
         { BIND_PARAMS,      gpu::Bind::Uniform,          sizeof(VCountParamsGPU) },
     };
     draw_symmetrize_pipeline = gpu::create_compute_pipeline(gpu_dev,
-                                   gpu::embedded_shader("draw_accum_symmetrize"), layout, 4);
+                                   gpu::embedded_shader("draw_accum_symmetrize"), layout, 5);
     if (!draw_symmetrize_pipeline.handle) {
         std::printf("[compute] draw_accum_symmetrize pipeline failed to compile\n");
         return false;
@@ -200,6 +220,10 @@ bool ComputeState::init_draw_mirror_apply() {
 
 void ComputeState::dispatch_draw_accum(const DrawAccumParams& p, const gpu::Buffer& pos_vbo) {
     if (!has_draw() || !accum_ssbo.handle || !stroke_norm_ssbo.handle) return;
+    // A dab that reaches no block dispatches nothing. Return before the bind group:
+    // a zero-size binding is a WebGPU validation error, and the buffer may not even
+    // exist yet on the first dab.
+    if (block_list_dispatch == 0 || !block_list_ssbo.handle) return;
     const uint32_t vc = p.vertex_count;
 
     DrawAccumParamsGPU u = {};
@@ -227,18 +251,23 @@ void ComputeState::dispatch_draw_accum(const DrawAccumParams& p, const gpu::Buff
         { BIND_ACCUM,        &accum_ssbo,       (uint64_t)vc * 4u * sizeof(uint32_t) },
         { BIND_ALPHA_TEX,    &alpha_tex_ssbo,   (uint64_t)alpha_tex_w * alpha_tex_h * sizeof(float) },
         { BIND_ALPHA_PARAMS, &alpha_params_ubo, 48 },
+        { BIND_BLOCK_LIST,   &block_list_ssbo,  (uint64_t)block_list_dispatch * sizeof(uint32_t) },
         { BIND_PARAMS,       &draw_accum_ubo,   sizeof(DrawAccumParamsGPU) },
     };
-    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, draw_accum_pipeline, bg, 6);
+    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, draw_accum_pipeline, bg, 7);
 
     gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
-    gpu::dispatch(b, draw_accum_pipeline, grp, (vc + 255u) / 256u);
+    gpu::dispatch(b, draw_accum_pipeline, grp, block_list_dispatch);
     gpu::submit(b);
     gpu::release_bind_group(grp);
 }
 
 void ComputeState::dispatch_draw_accum_symmetrize(uint32_t vertex_count) {
     if (!has_draw_symmetrize() || !accum_ssbo.handle || !accum_sym_ssbo.handle) return;
+    // A dab that reaches no block dispatches nothing. Return before the bind group:
+    // a zero-size binding is a WebGPU validation error, and the buffer may not even
+    // exist yet on the first dab.
+    if (block_list_dispatch == 0 || !block_list_ssbo.handle) return;
     if (!mirror_map_ssbo.handle || mirror_map_vertex_count == 0) return;
     const uint32_t vc = vertex_count;
 
@@ -249,12 +278,13 @@ void ComputeState::dispatch_draw_accum_symmetrize(uint32_t vertex_count) {
         { BIND_ACCUM,      &accum_ssbo,      (uint64_t)vc * 4u * sizeof(uint32_t) },
         { BIND_ACCUM_SYM,  &accum_sym_ssbo,  (uint64_t)vc * 4u * sizeof(uint32_t) },
         { BIND_MIRROR_MAP, &mirror_map_ssbo, (uint64_t)mirror_map_vertex_count * sizeof(uint32_t) },
+        { BIND_BLOCK_LIST, &block_list_ssbo, (uint64_t)block_list_dispatch * sizeof(uint32_t) },
         { BIND_PARAMS,     &draw_vcount_ubo, sizeof(VCountParamsGPU) },
     };
-    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, draw_symmetrize_pipeline, bg, 4);
+    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, draw_symmetrize_pipeline, bg, 5);
 
     gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
-    gpu::dispatch(b, draw_symmetrize_pipeline, grp, (vc + 255u) / 256u);
+    gpu::dispatch(b, draw_symmetrize_pipeline, grp, block_list_dispatch);
     gpu::submit(b);
     gpu::release_bind_group(grp);
 }
@@ -262,6 +292,10 @@ void ComputeState::dispatch_draw_accum_symmetrize(uint32_t vertex_count) {
 void ComputeState::dispatch_draw_apply(const gpu::Buffer& pos_vbo, uint32_t vertex_count,
                                         const gpu::Buffer& accum_override) {
     if (!draw_apply_pipeline.handle || !mask_ssbo.handle) return;
+    // A dab that reaches no block dispatches nothing. Return before the bind group:
+    // a zero-size binding is a WebGPU validation error, and the buffer may not even
+    // exist yet on the first dab.
+    if (block_list_dispatch == 0 || !block_list_ssbo.handle) return;
     const uint32_t vc = vertex_count;
 
     ensure_smooth_dirty_buffer(vc);
@@ -280,12 +314,13 @@ void ComputeState::dispatch_draw_apply(const gpu::Buffer& pos_vbo, uint32_t vert
         { BIND_ACCUM,       &accum_src,         (uint64_t)vc * 4u * sizeof(uint32_t) },
         { BIND_DIRTY_VERTS, &smooth_dirty_ssbo, (uint64_t)(vc + 1u) * sizeof(uint32_t) },
         { BIND_MASK,        &mask_ssbo,         (uint64_t)vc * sizeof(float) },
+        { BIND_BLOCK_LIST,  &block_list_ssbo,   (uint64_t)block_list_dispatch * sizeof(uint32_t) },
         { BIND_PARAMS,      &draw_vcount_ubo,   sizeof(VCountParamsGPU) },
     };
-    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, draw_apply_pipeline, bg, 5);
+    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, draw_apply_pipeline, bg, 6);
 
     gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
-    gpu::dispatch(b, draw_apply_pipeline, grp, (vc + 255u) / 256u);
+    gpu::dispatch(b, draw_apply_pipeline, grp, block_list_dispatch);
     gpu::submit(b);
     gpu::release_bind_group(grp);
 }

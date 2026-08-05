@@ -19,11 +19,16 @@ struct Params {
 @group(0) @binding(3)  var<storage, read>       accum_in   : array<u32>;
 @group(0) @binding(20) var<storage, read_write> accum_out  : array<u32>;
 @group(0) @binding(7)  var<storage, read>       mirror_map : array<u32>;
+// One workgroup per ACTIVE 256-vertex block. Reading accum_in at the MIRROR twin
+// is safe under culling: the caller selects with both the anchor sphere and its
+// mirror, so a twin's block is active too — and accum is cleared in full anyway.
+@group(0) @binding(45) var<storage, read>       block_list : array<u32>;
 @group(0) @binding(63) var<uniform>             P          : Params;
 
 @compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-    let v = gid.x;
+fn main(@builtin(workgroup_id) wg : vec3<u32>,
+        @builtin(local_invocation_id) lid : vec3<u32>) {
+    let v = block_list[wg.x] * 256u + lid.x;
     if (v >= P.vertex_count) {
         return;
     }

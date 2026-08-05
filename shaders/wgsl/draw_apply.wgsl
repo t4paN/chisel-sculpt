@@ -27,11 +27,15 @@ struct Dirty {
 @group(0) @binding(3)  var<storage, read>       accum     : array<u32>;
 @group(0) @binding(6)  var<storage, read_write> dirty     : Dirty;
 @group(0) @binding(12) var<storage, read>       mask      : array<f32>;
+// One workgroup per ACTIVE 256-vertex block — same list draw_accum ran on, so
+// apply visits exactly the vertices accum could have touched. See mesh.h.
+@group(0) @binding(45) var<storage, read>       block_list : array<u32>;
 @group(0) @binding(63) var<uniform>             P         : Params;
 
 @compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-    let v = gid.x;
+fn main(@builtin(workgroup_id) wg : vec3<u32>,
+        @builtin(local_invocation_id) lid : vec3<u32>) {
+    let v = block_list[wg.x] * 256u + lid.x;
     if (v >= P.vertex_count) {
         return;
     }

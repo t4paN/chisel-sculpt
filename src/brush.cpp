@@ -553,6 +553,14 @@ void BrushStroke::begin(Renderer& renderer, const Camera& cam,
     last_dab_x = screen_x;
     last_dab_y = screen_y;
 
+    // Retighten the brush-culling boxes at pen-down, but only when the CPU copy of
+    // the surface is the truth. If the GPU holds it (cpu_dirty), building from
+    // mesh.pos would produce boxes around stale positions — too small, which is the
+    // one error mode that drops vertices out of a dab. Leave the grown boxes alone
+    // in that case; they are conservative by construction.
+    if (!mgpu.cpu_dirty) blocks_rebuild_pending = true;
+    blocks_new_stroke = true;   // the sticky set is per-stroke, rebuild or not
+
     screen_w = screen_w_in;
     screen_h = screen_h_in;
 
@@ -651,6 +659,58 @@ void BrushStroke::begin(Renderer& renderer, const Camera& cam,
     }
 }
 
+
+// Pick the vertex blocks this dab can reach, upload them, and pre-grow them by the
+// displacement the dab is about to apply. Every accum/symmetrize/apply dispatch that
+// follows runs one workgroup per entry, so this REPLACES the old whole-mesh dispatch.
+//
+// The mirror anchor goes in as a second sphere on purpose: the symmetrize pass reads
+// its twin's accum, and folding both spheres into one select keeps that twin's block
+// in the list (and dedupes for free, since a block is emitted at most once).
+//
+// Returns the active block count. Zero means the dab reaches nothing and every
+// dispatch below it becomes a no-op — which is correct, not a failure.
+uint32_t BrushStroke::setup_block_dispatch(DabContext& ctx) {
+    uint32_t vc = ctx.vertex_count;
+
+    if (blocks_rebuild_pending || !blocks.valid(vc)) {
+        blocks.build(ctx.mesh);
+        blocks_rebuild_pending = false;
+        blocks_new_stroke = true;      // fresh boxes ⇒ the sticky set must start empty
+    }
+    if (blocks_new_stroke) {
+        blocks.begin_stroke();
+        blocks_new_stroke = false;
+        blocks_log_pending = true;
+    }
+
+    DabSphere spheres[2];
+    uint32_t n = 0;
+    spheres[n++] = { anchor_pos.x, anchor_pos.y, anchor_pos.z, anchor_world_radius };
+    if (ctx.input.mirror_x)
+        spheres[n++] = { -anchor_pos.x, anchor_pos.y, anchor_pos.z, anchor_world_radius };
+
+    uint32_t count = blocks.select(spheres, n);
+    // Re-upload only when the set grew — select() reports that. A stroke that dwells
+    // keeps the same list, and pushing an identical one every dab is a pure stall.
+    if (blocks.list_dirty)
+        ctx.compute.upload_block_list(blocks.active.data(), count);
+    else
+        ctx.compute.block_list_dispatch = count;
+
+    // One line per stroke: how much of the mesh the dab dispatch actually covers.
+    // This is the whole point of the structure, and index-run blocks only cull well
+    // to the extent vertex numbering is spatially coherent — so it needs to be
+    // visible rather than assumed. Logged on the FIRST dab: phase is already ACTIVE
+    // by the time the dab loop calls in, so it cannot be gated on BEGIN.
+    if (blocks_log_pending && blocks.block_count) {
+        blocks_log_pending = false;
+        std::printf("[blocks] verts=%u blocks=%u active=%u (%.1f%% dispatched)\n",
+                    vc, blocks.block_count, count,
+                    100.0f * (float)count / (float)blocks.block_count);
+    }
+    return count;
+}
 
 // --- GPU dispatch methods ---
 
@@ -814,6 +874,7 @@ void BrushStroke::apply_crease(DabContext& ctx, float dab_x, float dab_y,
     params.vertex_count = ctx.mesh.vertex_count();
 
     set_alpha_dab(ctx, false);
+    setup_block_dispatch(ctx);
     ctx.compute.dispatch_crease_accum(params, ctx.renderer.vbo_pos);
 
     gpu::barrier(ctx.compute.gpu_dev);
@@ -877,6 +938,7 @@ void BrushStroke::apply_pinch(DabContext& ctx, float dab_x, float dab_y,
     params.vertex_count = ctx.mesh.vertex_count();
 
     set_alpha_dab(ctx, false);
+    setup_block_dispatch(ctx);
     ctx.compute.dispatch_pinch_accum(params, ctx.renderer.vbo_pos);
 
     gpu::barrier(ctx.compute.gpu_dev);
@@ -977,6 +1039,7 @@ void BrushStroke::apply_draw(DabContext& ctx, float dab_x, float dab_y,
     params.clay_melt = clay ? ctx.input.clay_melt : 0.0f;
 
     set_alpha_dab(ctx, !inflate);   // Inflate shares this dab; alphas are Draw-only
+    setup_block_dispatch(ctx);
     ctx.compute.dispatch_draw_accum(params, ctx.renderer.vbo_pos);
 
     gpu::barrier(ctx.compute.gpu_dev);

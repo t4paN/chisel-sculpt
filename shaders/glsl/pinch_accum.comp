@@ -9,6 +9,9 @@ layout(local_size_x = 256) in;
 layout(std430, binding = 0) readonly buffer PosBuf  { float positions[]; };
 layout(std430, binding = 1) readonly buffer NormBuf { float normals[];   };
 layout(std430, binding = 3)          buffer AccumBuf { uint accum[]; };
+// One workgroup per ACTIVE 256-vertex block (VertexBlocks, mesh.h). Must stay in
+// lockstep with draw_apply: it commits exactly this block set.
+layout(std430, binding = 45) readonly buffer BlockBuf { uint block_list[]; };
 
 layout(std140, binding = 63) uniform Params {
     vec3  anchor_a;         //   0..11
@@ -119,7 +122,7 @@ void deposit(uint v, vec3 anchor, vec3 view, vec3 anchor_n, vec3 vp, vec3 vn, ui
 }
 
 void main() {
-    uint v = gl_GlobalInvocationID.x;
+    uint v = block_list[gl_WorkGroupID.x] * 256u + gl_LocalInvocationID.x;
     if (v >= P.vertex_count) return;
 
     vec3 vp = vec3(positions[v*3u + 0u], positions[v*3u + 1u], positions[v*3u + 2u]);

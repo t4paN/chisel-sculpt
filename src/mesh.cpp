@@ -66,6 +66,79 @@ void Mesh::compute_bounding_sphere(Vec3& center, float& radius) const {
     }
 }
 
+// ---------------------------------------------------------------------------
+// VertexBlocks — see the contract in mesh.h.
+// ---------------------------------------------------------------------------
+
+void VertexBlocks::build(const Mesh& m) {
+    uint32_t vc = m.vertex_count();
+    uint32_t bc = (vc + VERTEX_BLOCK_SIZE - 1) / VERTEX_BLOCK_SIZE;
+    min_x.resize(bc); min_y.resize(bc); min_z.resize(bc);
+    max_x.resize(bc); max_y.resize(bc); max_z.resize(bc);
+    active.resize(bc);              // worst case is every block; size once, never in the hot path
+    block_count = bc;
+    vertex_count = vc;
+
+    for (uint32_t b = 0; b < bc; b++) {
+        uint32_t v0 = b * VERTEX_BLOCK_SIZE;
+        uint32_t v1 = v0 + VERTEX_BLOCK_SIZE;
+        if (v1 > vc) v1 = vc;
+        float nx =  1e30f, ny =  1e30f, nz =  1e30f;
+        float xx = -1e30f, xy = -1e30f, xz = -1e30f;
+        for (uint32_t v = v0; v < v1; v++) {
+            float px = m.pos_x[v], py = m.pos_y[v], pz = m.pos_z[v];
+            if (px < nx) nx = px;   if (px > xx) xx = px;
+            if (py < ny) ny = py;   if (py > xy) xy = py;
+            if (pz < nz) nz = pz;   if (pz > xz) xz = pz;
+        }
+        min_x[b] = nx; min_y[b] = ny; min_z[b] = nz;
+        max_x[b] = xx; max_y[b] = xy; max_z[b] = xz;
+    }
+}
+
+void VertexBlocks::begin_stroke() {
+    if (touched.size() != block_count) touched.assign(block_count, 0);
+    else std::fill(touched.begin(), touched.end(), (uint8_t)0);
+    active_count = 0;
+    list_dirty = true;
+}
+
+uint32_t VertexBlocks::select(const DabSphere* spheres, uint32_t sphere_count) {
+    if (touched.size() != block_count) touched.assign(block_count, 0);
+
+    bool gained = false;
+    for (uint32_t b = 0; b < block_count; b++) {
+        if (touched[b]) continue;       // already sticky — no test needed
+        float nx = min_x[b], ny = min_y[b], nz = min_z[b];
+        float xx = max_x[b], xy = max_y[b], xz = max_z[b];
+        for (uint32_t s = 0; s < sphere_count; s++) {
+            const DabSphere& sp = spheres[s];
+            // Squared distance from the sphere centre to the closest point on the
+            // box — the standard cheap sphere/AABB overlap test.
+            float dx = sp.x < nx ? nx - sp.x : (sp.x > xx ? sp.x - xx : 0.0f);
+            float dy = sp.y < ny ? ny - sp.y : (sp.y > xy ? sp.y - xy : 0.0f);
+            float dz = sp.z < nz ? nz - sp.z : (sp.z > xz ? sp.z - xz : 0.0f);
+            if (dx*dx + dy*dy + dz*dz < sp.r * sp.r) {
+                touched[b] = 1;
+                gained = true;
+                break;                  // one hit is enough
+            }
+        }
+    }
+
+    // Only rewrite (and re-upload) the list when the set actually grew. A stroke
+    // dwelling in one place keeps dispatching the same blocks, and re-uploading an
+    // identical list every dab is a pure CPU->GPU stall.
+    list_dirty = gained;
+    if (gained) {
+        uint32_t n = 0;
+        for (uint32_t b = 0; b < block_count; b++)
+            if (touched[b]) active[n++] = b;
+        active_count = n;
+    }
+    return active_count;
+}
+
 void build_mirror_spatial(const Mesh& m, std::vector<uint32_t>& out) {
     uint32_t vc = m.vertex_count();
     out.resize(vc);
