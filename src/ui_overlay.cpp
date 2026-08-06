@@ -955,10 +955,9 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
                 ImGui::SetTooltip("Both profiles stay loaded. Touch the pen and the tablet\n"
                                   "profile takes over; move the mouse and the mouse profile\n"
                                   "does. Never mid-stroke.\n\n"
-                                  "Per profile: brush size, strength, hardness, spacing,\n"
-                                  "max effect, autosmooth, pen pressure and the facing\n"
-                                  "threshold.\n"
-                                  "Shared: lighting, colours, mirror, density.\n\n"
+                                  "Per profile: strength, hardness, spacing, max effect.\n"
+                                  "Shared: brush size, autosmooth, lighting, colours,\n"
+                                  "mirror, density.\n\n"
                                   "Pick a tab here to edit the other profile — switching\n"
                                   "is paused while this menu is open.");
             }

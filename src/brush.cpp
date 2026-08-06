@@ -793,7 +793,6 @@ void BrushStroke::apply_crease(DabContext& ctx, float dab_x, float dab_y,
     params.disp_amount = disp_amount;
     params.pinch_amount = pinch_amount;
     params.hardness = hardness;
-    params.facing_threshold = ctx.input.facing_threshold;
     params.view_a_x = view_dir.x;
     params.view_a_y = view_dir.y;
     params.view_a_z = view_dir.z;
@@ -860,7 +859,6 @@ void BrushStroke::apply_pinch(DabContext& ctx, float dab_x, float dab_y,
     params.world_radius = anchor_world_radius;
     params.pinch_amount = pinch_amount * strength * sign;
     params.hardness = hardness;
-    params.facing_threshold = ctx.input.facing_threshold;
     params.view_a_x = view_dir.x;
     params.view_a_y = view_dir.y;
     params.view_a_z = view_dir.z;
@@ -950,7 +948,6 @@ void BrushStroke::apply_draw(DabContext& ctx, float dab_x, float dab_y,
     params.world_radius = anchor_world_radius;
     params.disp_amount = disp_amount;
     params.hardness = hardness;
-    params.facing_threshold = ctx.input.facing_threshold;
     params.view_a_x = view_dir.x;
     params.view_a_y = view_dir.y;
     params.view_a_z = view_dir.z;

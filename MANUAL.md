@@ -89,12 +89,21 @@ No sliders to find, no panels to open: hold the key, drag, watch the cursor ring
 On the web build these drags use pointer lock — your browser will show its standard
 "cursor hidden" notice; that's expected.
 
+**`[` and `]`** step the brush size down and up, holding to repeat. The step is
+proportional, so it feels the same at 8 px as at 400. Handy when dragging isn't —
+on a trackpad, or when you just want to nudge a size you already like.
+
+Brush size is shared: strength, hardness and spacing are remembered per brush and
+per input profile, but size is one number everywhere.
+
 ### Pen pressure
 
-Plug in a tablet and pressure drives both strength and size automatically. Toggle it
-with **K**. Sources: XInput2 on Linux (same as Krita), WinTab on Windows, the Pointer
-Events pressure channel in the browser. Chisel is designed to work fine with a mouse
-— a tablet is nice, never necessary.
+Plug in a tablet and pressure drives both strength and size automatically — no
+switch to flip, it's on whenever a tablet is present. Sources: XInput2 on Linux
+(same as Krita), WinTab on Windows, the Pointer Events pressure channel in the
+browser. How hard a full-pressure press actually hits is the **max effect** slider
+in the burger menu. Chisel is designed to work fine with a mouse — a tablet is nice,
+never necessary.
 
 ## Symmetry
 

@@ -32,20 +32,21 @@ enum class InputProfile {
 };
 
 // The stash for one profile. Holds only the settings whose *right value depends on
-// what you are holding* — a pen needs lighter strength and tighter spacing than a
-// mouse because pressure already modulates both. Everything else (matcap, colours,
-// mirror, density mults) is a look/scene preference that has nothing to do with the
-// input device, so it stays single-valued on InputState and is saved once.
+// what you are holding* — a pen needs lighter strength and a lower ceiling than a
+// mouse because pressure already modulates both. Everything else (brush size,
+// autosmooth, matcap, colours, mirror, density mults) is a sculpting or look
+// preference that has nothing to do with the input device, so it stays
+// single-valued on InputState and is saved once.
+//
+// Brush size used to live here and was moved out on 2026-08-07: reaching for the
+// mouse to orbit and finding a different-sized brush reads as the app losing your
+// place, not as a thoughtful per-device default.
 //
 // These duplicate live InputState fields; the live copy is the truth for the ACTIVE
 // profile and the stash is written back on switch — the same save/restore shape
 // per_brush[] already uses for brush_strength (see switch_brush).
 struct ProfileSettings {
-    float brush_size;
-    float facing_threshold;
     float max_effect;
-    bool  autosmooth;
-    bool  pressure_enabled;
     BrushSettings per_brush[(int)BrushType::COUNT];
 };
 
@@ -68,7 +69,7 @@ struct InputState {
     BrushType current_brush;
     bool smooth_locked;
     bool subtract_locked;
-    float brush_size;       // pixels (shared across all brushes)
+    float brush_size;       // pixels (shared across all brushes AND both profiles)
     float brush_strength;   // 0..1 (per-brush, synced via switch_brush)
     float brush_hardness;   // 0..1 (per-brush, synced via switch_brush)
     float brush_spacing;    // fraction of brush radius between dabs (0.05..1.0, per-brush)
@@ -206,18 +207,10 @@ struct InputState {
     bool mirror_x;          // X-axis symmetry, on by default
 
     // Autosmooth: light Laplacian pass on draw-brush strokes at pen-up.
-    // Defaults ON, toggled with B. Persisted since 2026-08-06 (was per-session).
-    // Currently lives in ProfileSettings; slated to become global — it is a sculpting
-    // preference, not a device trait, so a mouse-side toggle should not flip back when
-    // you pick up the pen. See ~/CHISEL/settings-profiles-handoff.md.
+    // Defaults ON, toggled with B. Persisted since 2026-08-06, global since
+    // 2026-08-07 — it is a sculpting preference, not a device trait, so a
+    // mouse-side toggle must not flip back when you pick up the pen.
     bool autosmooth;
-
-    // Pen-pressure response. Defaults ON; toggled with K. No effect without a tablet.
-    bool pressure_enabled;
-
-    // Facing threshold: skip brush pixels whose dot(normal, -view) < this value.
-    // Prevents distortion near the silhouette. Adjusted with [ / ].
-    float facing_threshold;
 
     // Max brush effect: the strength multiplier at FULL input — a mouse dab, or a pen
     // pressed to the stop. It is the ceiling of the pressure ramp, not a separate scale,

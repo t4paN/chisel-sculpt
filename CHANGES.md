@@ -2,6 +2,59 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-08-07 — Profiles trimmed to brush feel; `[` / `]` are brush size
+
+Closes the global-vs-per-profile question left open by 2026-08-06. The rule that fell out
+of it: **a profile holds only what genuinely differs between a pen and a mouse.** Feel —
+strength, hardness, spacing, max effect. Nothing else. `ProfileSettings` is now those two
+members and nothing more.
+
+- **Brush size is global.** It was per-profile, which meant reaching for the mouse to
+  orbit and finding a different-sized brush. That reads as the app losing your place, not
+  as a thoughtful per-device default. One number everywhere now.
+
+- **Autosmooth is global.** Same argument, and the one already agreed: it's a sculpting
+  preference, not a device trait, so a mouse-side `B` must not flip back when you pick up
+  the pen. Its declaration used to say "Per-session" before persistence landed — it was
+  never really wanting to be per-device.
+
+- **`[` and `]` step the brush size** down and up, repeating on hold. The step is
+  proportional (8% of current, floored at 1 px) rather than fixed: a flat step is a jump
+  at 5 px and imperceptible at 500, and this range spans two decades. The `S`-drag is
+  still the fast way across the whole range; this is the keyboard path, for trackpads and
+  for nudging a size you already like.
+  - Guarded on `voxel_merge_confirm_pending` — those same two keys nudge the merge
+    resolution while that dialog is up, and the modal gate lets them through on purpose,
+    so without the guard one press would do both.
+
+- **The `K` pen-pressure toggle is gone,** and with it `pressure_enabled`. The max-effect
+  slider already sets the ceiling a full-pressure press reaches, which is what the toggle
+  was actually being used for; "tablet plugged in, pressure off" was a state nobody
+  wanted. Pressure is now simply on whenever a tablet is present.
+
+- **The facing threshold is gone** — the knob, not a behaviour. It defaulted to `0.0` and
+  the binary `facing < facing_threshold` cutoff it drove was shed back on 2026-07-21, so
+  at its shipped value it had done nothing for weeks; only the renderer's silhouette-band
+  branch still read it, and that branch is inert at 0. Removed from `InputState`, from the
+  three `*AccumParams`, and from the `draw_mesh`/`draw_display`/`upload_matcap_params`
+  signatures.
+  - **The shaders were deliberately not touched.** `facing_threshold` stays in all four
+    twinned std140 blocks (`draw_accum`, `crease_accum`, `pinch_accum`) and in the matcap
+    uniform; the C++ side now writes a literal `0.0f` into those slots. Editing eight
+    shader files to delete a field that already documents itself as layout padding would
+    have bought nothing and put the `112 B` / `96 B` `static_assert`s and a Tint round
+    trip at risk for it.
+
+**Migration is the format design working, not a special case.** An existing stored blob
+keeps `brush_size` / `autosmooth` under `[mouse]`/`[tablet]`, where they are now ignored,
+and `[global]` doesn't carry them yet — so both fall back to their constructor default
+exactly once. Anyone who had autosmooth off gets it back ON on the first launch. No
+migration code. The round-trip harness now feeds a blob with `brush_size` in *both*
+sections to pin that behaviour down.
+
+Verified: `build-gl`, `build-wgpu` and `build-web` all build clean;
+`~/CHISEL/settings-roundtrip-test.cpp` (now 7 sections) passes.
+
 ## 2026-08-06 — Settings persist; mouse/tablet profiles; pen pressure on the web
 
 - **Settings survive a restart.** New `settings.h/.cpp`: one versioned `key=value`

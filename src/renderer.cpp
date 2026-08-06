@@ -1597,12 +1597,15 @@ void Renderer::draw_background(int w, int h) {
 
 // Fill + upload the matcap Params UBO from the camera and per-draw flags. Shared
 // by draw_mesh (active entity) and draw_display (inactive entities).
-void Renderer::upload_matcap_params(const Camera& cam, int w, int h,
-                                    float facing_threshold, bool selected) {
+void Renderer::upload_matcap_params(const Camera& cam, int w, int h, bool selected) {
     MatcapParamsGPU p;
     cam.get_view_matrix(p.view);
     cam.get_projection_matrix(p.proj, (float)w / (float)h);
-    p.facing_threshold = facing_threshold;
+    // The user-adjustable facing threshold was removed on 2026-08-07 ([ / ] became
+    // brush size). The field stays in the UBO — and its silhouette-band branch stays
+    // in both shaders — so the std140 block keeps its layout; 0 is the value the
+    // knob shipped with and the branch is inert there.
+    p.facing_threshold = 0.0f;
     p.obj_mask = selected ? 0.0f : 1.0f;
     p.paint_visible = paint_visible;
     p.matcap_contrast = matcap_contrast;
@@ -1610,8 +1613,8 @@ void Renderer::upload_matcap_params(const Camera& cam, int w, int h,
 }
 
 void Renderer::draw_mesh(const Camera& cam, int w, int h, uint32_t index_count,
-                          float facing_threshold, bool selected) {
-    upload_matcap_params(cam, w, h, facing_threshold, selected);
+                          bool selected) {
+    upload_matcap_params(cam, w, h, selected);
 
     gpu::RenderTarget target; target.width = w; target.height = h;
     gpu::RenderPass rp = gpu::begin_render_pass(gpu_dev, target);
@@ -1666,10 +1669,9 @@ void Renderer::free_display(EntityGpu& g) {
     g = EntityGpu();
 }
 
-void Renderer::draw_display(const Camera& cam, EntityGpu& g, int w, int h,
-                            float facing_threshold, bool selected) {
+void Renderer::draw_display(const Camera& cam, EntityGpu& g, int w, int h, bool selected) {
     if (g.index_count == 0) return;
-    upload_matcap_params(cam, w, h, facing_threshold, selected);
+    upload_matcap_params(cam, w, h, selected);
 
     gpu::RenderTarget target; target.width = w; target.height = h;
     gpu::RenderPass rp = gpu::begin_render_pass(gpu_dev, target);

@@ -71,7 +71,6 @@ struct DrawAccumParams {
     float world_radius;
     float disp_amount;
     float hardness;
-    float facing_threshold;
     float view_a_x, view_a_y, view_a_z;
     float view_b_x, view_b_y, view_b_z;
     // Anchor surface normal at the cursor pixel. Each dab blends the vert's
@@ -116,7 +115,6 @@ struct CreaseAccumParams {
     float disp_amount;
     float pinch_amount;
     float hardness;
-    float facing_threshold;
     float view_a_x, view_a_y, view_a_z;
     float view_b_x, view_b_y, view_b_z;
     float anchor_normal_a_x, anchor_normal_a_y, anchor_normal_a_z;
@@ -132,7 +130,6 @@ struct PinchAccumParams {
     float world_radius;
     float pinch_amount;
     float hardness;
-    float facing_threshold;
     float view_a_x, view_a_y, view_a_z;
     float view_b_x, view_b_y, view_b_z;
     float anchor_normal_a_x, anchor_normal_a_y, anchor_normal_a_z;

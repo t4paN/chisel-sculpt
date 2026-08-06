@@ -2095,9 +2095,12 @@ int main(int argc, char* argv[]) {
                 float eff_strength = eff.strength;
                 float eff_hardness = eff.hardness;
 
-                // Pen pressure → strength & size (independent floors). 1.0 when no
-                // tablet / disabled, so mouse behaviour is unchanged.
-                bool pressure_is_synthetic = !(input.pressure_enabled && tablet.available());
+                // Pen pressure → strength & size (independent floors). 1.0 when there is
+                // no tablet, so mouse behaviour is unchanged. There is no on/off toggle
+                // any more (K, removed 2026-08-07): the max-effect slider already gives
+                // the ceiling a pen can reach, which is what the toggle was really used
+                // for, and "pressure off, tablet plugged in" was a state nobody wanted.
+                bool pressure_is_synthetic = !tablet.available();
                 float pressure = pressure_is_synthetic ? 1.0f : tablet.pressure();
                 float p_shaped = std::pow(pressure, PRESSURE_GAMMA);
 
@@ -2462,10 +2465,9 @@ int main(int argc, char* argv[]) {
                 if (up->id == active_id)
                     renderer.draw_mesh(camera, win_w, win_h,
                                        (uint32_t)scene.active_mesh().indices.size(),
-                                       input.facing_threshold, selected);
+                                       selected);
                 else
-                    renderer.draw_display(camera, up->gpu, win_w, win_h,
-                                          input.facing_threshold, selected);
+                    renderer.draw_display(camera, up->gpu, win_w, win_h, selected);
             }
         }
 

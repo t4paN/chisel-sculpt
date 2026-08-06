@@ -49,8 +49,6 @@ InputState::InputState()
     , mesh_locked(false)
     , mirror_x(true)
     , autosmooth(true)
-    , pressure_enabled(true)
-    , facing_threshold(0.0f)
     , max_effect(0.6f)          // mouse default; the tablet profile is raised to 1.0 below
     , fast_normals(false)
     , current_lod(0)
@@ -153,11 +151,7 @@ void InputState::flush_profile() {
     per_brush[slot].spacing  = brush_spacing;
 
     ProfileSettings& p = profiles[(int)active_profile];
-    p.brush_size       = brush_size;
-    p.facing_threshold = facing_threshold;
-    p.max_effect       = max_effect;
-    p.autosmooth       = autosmooth;
-    p.pressure_enabled = pressure_enabled;
+    p.max_effect = max_effect;
     for (int i = 0; i < (int)BrushType::COUNT; i++) p.per_brush[i] = per_brush[i];
 }
 
@@ -171,11 +165,7 @@ void InputState::switch_profile(InputProfile to) {
 
     active_profile = to;
     const ProfileSettings& p = profiles[(int)to];
-    brush_size       = p.brush_size;
-    facing_threshold = p.facing_threshold;
-    max_effect       = p.max_effect;
-    autosmooth       = p.autosmooth;
-    pressure_enabled = p.pressure_enabled;
+    max_effect = p.max_effect;
     for (int i = 0; i < (int)BrushType::COUNT; i++) per_brush[i] = p.per_brush[i];
 
     // Same slot the flush used, so a live smooth lock keeps showing smooth's numbers.
@@ -886,13 +876,6 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
                 g_input->notification_timer = 1.5f;
                 break;
 
-            case GLFW_KEY_K:
-                g_input->pressure_enabled = !g_input->pressure_enabled;
-                snprintf(g_input->notification, sizeof(g_input->notification),
-                         g_input->pressure_enabled ? "Pen pressure ON" : "Pen pressure OFF");
-                g_input->notification_timer = 1.5f;
-                break;
-
             case GLFW_KEY_N:
                 if (g_input->drop_confirm_pending) {
                     g_input->drop_confirm_pending = false;
@@ -950,20 +933,29 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
         }
     }
 
-    if (action == GLFW_PRESS || action == GLFW_REPEAT) {
-        switch (key) {
-            case GLFW_KEY_LEFT_BRACKET:
-                g_input->facing_threshold = std::max(0.0f, g_input->facing_threshold - 0.01f);
-                snprintf(g_input->notification, sizeof(g_input->notification),
-                         "Facing threshold: %.2f", g_input->facing_threshold);
-                g_input->notification_timer = 1.5f;
-                break;
-            case GLFW_KEY_RIGHT_BRACKET:
-                g_input->facing_threshold = std::min(1.0f, g_input->facing_threshold + 0.01f);
-                snprintf(g_input->notification, sizeof(g_input->notification),
-                         "Facing threshold: %.2f", g_input->facing_threshold);
-                g_input->notification_timer = 1.5f;
-                break;
+    // Brush size on [ / ], repeating. The S-drag is still the fast way to cross the
+    // whole 5..500 range; this is the keyboard path for machines without a comfortable
+    // drag (trackpads) and for nudging a size you already like.
+    //
+    // The step is proportional, not fixed: 8% of the current size keeps the felt
+    // increment constant across two decades, where a flat step would be a jump at 5 px
+    // and imperceptible at 500. The 1 px floor keeps it moving at the bottom, where 8%
+    // would round away under the "%.0f" readout.
+    //
+    // Guarded on voxel_merge_confirm_pending because those same two keys nudge the merge
+    // resolution while that dialog is up (handled in the PRESS block above) — the modal
+    // gate lets them through on purpose, so without this they would do both.
+    if ((action == GLFW_PRESS || action == GLFW_REPEAT) &&
+        !g_input->voxel_merge_confirm_pending) {
+        const bool down = (key == GLFW_KEY_LEFT_BRACKET);
+        const bool up   = (key == GLFW_KEY_RIGHT_BRACKET);
+        if (down || up) {
+            float step = std::max(1.0f, g_input->brush_size * 0.08f);
+            g_input->brush_size = std::max(5.0f, std::min(500.0f,
+                g_input->brush_size + (up ? step : -step)));
+            snprintf(g_input->notification, sizeof(g_input->notification),
+                     "Size: %.0f", g_input->brush_size);
+            g_input->notification_timer = 1.0f;
         }
     }
 

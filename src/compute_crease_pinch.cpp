@@ -95,7 +95,10 @@ void ComputeState::dispatch_crease_accum(const CreaseAccumParams& p, const gpu::
     u.view_b[0] = p.view_b_x; u.view_b[1] = p.view_b_y; u.view_b[2] = p.view_b_z;
     u.hardness = p.hardness;
     u.anchor_normal_a[0] = p.anchor_normal_a_x; u.anchor_normal_a[1] = p.anchor_normal_a_y; u.anchor_normal_a[2] = p.anchor_normal_a_z;
-    u.facing_threshold = p.facing_threshold;
+    // Retained std140 slot only — the user-facing facing threshold was removed on
+    // 2026-08-07. The shaders already ignore it (see the twinned .wgsl/.comp);
+    // zeroing here keeps the block byte-identical without a shader edit.
+    u.facing_threshold = 0.0f;
     u.anchor_normal_b[0] = p.anchor_normal_b_x; u.anchor_normal_b[1] = p.anchor_normal_b_y; u.anchor_normal_b[2] = p.anchor_normal_b_z;
     u.use_b = (uint32_t)p.use_b;
     u.stroke_dir_x = p.stroke_dir_x;
@@ -153,7 +156,10 @@ void ComputeState::dispatch_pinch_accum(const PinchAccumParams& p, const gpu::Bu
     u.view_a[0] = p.view_a_x; u.view_a[1] = p.view_a_y; u.view_a[2] = p.view_a_z;
     u.hardness = p.hardness;
     u.view_b[0] = p.view_b_x; u.view_b[1] = p.view_b_y; u.view_b[2] = p.view_b_z;
-    u.facing_threshold = p.facing_threshold;
+    // Retained std140 slot only — the user-facing facing threshold was removed on
+    // 2026-08-07. The shaders already ignore it (see the twinned .wgsl/.comp);
+    // zeroing here keeps the block byte-identical without a shader edit.
+    u.facing_threshold = 0.0f;
     u.anchor_normal_a[0] = p.anchor_normal_a_x; u.anchor_normal_a[1] = p.anchor_normal_a_y; u.anchor_normal_a[2] = p.anchor_normal_a_z;
     u.use_b = (uint32_t)p.use_b;
     u.anchor_normal_b[0] = p.anchor_normal_b_x; u.anchor_normal_b[1] = p.anchor_normal_b_y; u.anchor_normal_b[2] = p.anchor_normal_b_z;

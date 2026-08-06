@@ -231,16 +231,14 @@ struct Renderer {
     void draw_background(int w, int h);
     // Fill + upload the matcap Params UBO (camera + per-draw flags); shared by
     // draw_mesh and draw_display.
-    void upload_matcap_params(const Camera& cam, int w, int h,
-                              float facing_threshold, bool selected);
+    void upload_matcap_params(const Camera& cam, int w, int h, bool selected);
     void draw_mesh(const Camera& cam, int w, int h, uint32_t index_count,
-                    float facing_threshold, bool selected);
+                    bool selected);
 
     // Per-entity static display buffers (inactive entities).
     void upload_display(EntityGpu& g, const Mesh& mesh);
     void free_display(EntityGpu& g);
-    void draw_display(const Camera& cam, EntityGpu& g, int w, int h,
-                      float facing_threshold, bool selected);
+    void draw_display(const Camera& cam, EntityGpu& g, int w, int h, bool selected);
 
     // Entity-id pick pass. Draw all entities (active working VAO + inactive
     // display VAOs) into the screen FBO writing linear depth (attachment 0) and
