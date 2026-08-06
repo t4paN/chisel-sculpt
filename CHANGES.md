@@ -18,9 +18,10 @@ Short, chronological log of notable changes. Newest on top.
   entirely while `sculpting`.
 - **Brush feel splits into Mouse and Tablet profiles**, both loaded at once, the active
   one following whichever device is actually producing input. Per profile: size,
-  strength, hardness, spacing, autosmooth, pen pressure, facing threshold. Shared:
-  everything else. Both seed from identical defaults — a guessed tablet preset is just a
-  wrong starting point that looks deliberate.
+  strength, hardness, spacing, max effect, autosmooth, pen pressure, facing threshold.
+  Shared: everything else. Both seed from identical defaults — a guessed tablet preset is
+  just a wrong starting point that looks deliberate — with exactly one exception, noted
+  below under max brush effect.
 - **The arbitration is asymmetric on purpose.** The pen switches on evidence (a new
   `Tablet::sample_count()` on the seam — `available()` only says a tablet is *plugged
   in*); the mouse needs evidence **plus** a 250 ms quiet window, because on X11 the
@@ -59,6 +60,44 @@ Short, chronological log of notable changes. Newest on top.
   device change and written smooth's numbers over the real brush's slot. Flush/restore
   now route through `live_brush_slot()`; `smooth_locked`, not `is_smooth_active()`, is the
   discriminator, since a merely-held Shift doesn't swap the live fields.
+- **Max brush effect is a slider now**, per profile, saved. It was the hardcoded
+  `MOUSE_STRENGTH_SCALE = 0.6f`. Implemented as the **ceiling of the pressure ramp**
+  rather than a scale applied after it, so one number means the same thing on both tabs:
+  a mouse dab lands on it directly, a pen reaches it at full press. Simply moving the
+  constant into `ProfileSettings` would have left a dead knob on the Tablet tab, since the
+  old scale only applied when pressure was synthetic. Still limited to the additive
+  brushes (Draw/Inflate/Crease/Pinch) — the ones that accumulate without bound, which is
+  the whole reason a ceiling exists; Move/Smooth/Mask/Paint converge on a target and keep
+  the full 1.0. Defaults are **0.6 mouse / 1.0 tablet**, the only per-profile split in the
+  defaults and not a guess: they are exactly the two constants this replaced (the old
+  scale, and the implicit 1.0 top of the ramp), so shipped feel is unchanged. One knock-on:
+  on the Tablet profile *with pen pressure switched off* strokes now use the tablet
+  ceiling (1.0) where they previously got the hardcoded 0.6.
+- **Fixed: the spacing slider was secretly a second strength slider.** Deposit per unit
+  length ran as `1/spacing` — a **20x swing** from 0.05 to 1.00 — so tightening spacing
+  dug in visibly harder at unchanged nominal strength. The dab-density compensation added
+  in the oblique-stroke work normalised against `input.brush_size * eff.spacing`, i.e. the
+  *live* setting, so `eff.spacing` appeared in both the actual step and the reference and
+  cancelled itself out of the ratio: the correction covered pressure and tilt but never
+  the user's own slider. It now references a fixed `SPACING_REF` (0.25, the ctor default),
+  which leaves the ratio proportional to `eff.spacing` — exactly what cancels the
+  `1/spacing` in dabs-per-unit-length. Verified flat across the whole spacing range under
+  both full and partial pressure, and identical to the old numbers at 0.25, so the default
+  feel is preserved. The `[0.20, 1.0]` clamp had to scale with the setting: a flat 1.0
+  ceiling clips the very boost that does the decoupling, which would have quietly disabled
+  the fix above 0.25. At the default the window is still exactly `[0.20, 1.0]`.
+- **Web pen pressure is bound to `window` in the capture phase**, not to the canvas. It
+  is a separate handler from the position feed on purpose: that one passes `e.movementX`
+  to `chisel_set_pointer`, which *accumulates* into the slider drag, so running one event
+  through both listeners would double every slider's speed. Capture runs window -> target,
+  so pressure now survives anything upstream that swallows the event before the canvas
+  sees it (itch serves the game inside its own iframe wrapper).
+- **Known, not a bug:** pen pressure needs the browser to report `pointerType: 'pen'`.
+  Chrome does on X11 (it reads the XInput2 stylus devices); **Firefox on X11 does not** —
+  it folds the stylus into the core pointer and reports `mouse` with a constant 0.5
+  pressure, which is why the discriminator is `pointerType` and not the pressure value.
+  Nothing app-side can recover that. The degrade is correct: undetected pen = full
+  strength, i.e. a normal mouse-feel app, not a half-strength one.
 
 ## 2026-07-26 — Matcap lighting dial + burger menu + delete-subdiv-level
 

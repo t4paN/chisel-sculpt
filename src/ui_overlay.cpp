@@ -956,11 +956,34 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
                                   "profile takes over; move the mouse and the mouse profile\n"
                                   "does. Never mid-stroke.\n\n"
                                   "Per profile: brush size, strength, hardness, spacing,\n"
-                                  "autosmooth, pen pressure and the facing threshold.\n"
+                                  "max effect, autosmooth, pen pressure and the facing\n"
+                                  "threshold.\n"
                                   "Shared: lighting, colours, mirror, density.\n\n"
                                   "Pick a tab here to edit the other profile — switching\n"
                                   "is paused while this menu is open.");
             }
+
+            // Max brush effect: the ceiling of the strength ramp for the profile whose
+            // tab is selected. Lives above the Separator because everything below it is
+            // shared, and this is the one slider that belongs to the tab you just picked.
+            // Edited through the LIVE field (not profiles[]) like every other per-profile
+            // control — flush_profile parks it in the right slot on the next switch/save.
+            //
+            // Shown as a percentage because that is how it reads to the user ("60%"),
+            // while the stored value stays 0..1 like the rest of the settings. Floor is
+            // 0.10, not 0: this is a ramp ceiling and PRESSURE_STR_FLOOR (0.05) is its
+            // floor, so going below that would turn the pressure curve upside down.
+            float max_pct = input.max_effect * 100.0f;
+            ImGui::SetNextItemWidth(150.0f);
+            if (ImGui::SliderFloat("##maxEffect", &max_pct, 10.0f, 100.0f, "max effect %.0f%%"))
+                input.max_effect = max_pct * 0.01f;
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("How hard Draw/Inflate/Crease/Pinch hit at FULL input —\n"
+                                  "a mouse dab, or the pen pressed to the stop.\n\n"
+                                  "Those brushes pile up without bound, so the cap is what\n"
+                                  "stops a stroke overshooting. Move, Smooth, Mask and\n"
+                                  "Paint aim at a target instead and ignore it.\n\n"
+                                  "Defaults: 60%% mouse, 100%% tablet.");
 
             ImGui::Separator();
 

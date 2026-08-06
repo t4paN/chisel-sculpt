@@ -43,6 +43,7 @@ enum class InputProfile {
 struct ProfileSettings {
     float brush_size;
     float facing_threshold;
+    float max_effect;
     bool  autosmooth;
     bool  pressure_enabled;
     BrushSettings per_brush[(int)BrushType::COUNT];
@@ -217,6 +218,22 @@ struct InputState {
     // Facing threshold: skip brush pixels whose dot(normal, -view) < this value.
     // Prevents distortion near the silhouette. Adjusted with [ / ].
     float facing_threshold;
+
+    // Max brush effect: the strength multiplier at FULL input — a mouse dab, or a pen
+    // pressed to the stop. It is the ceiling of the pressure ramp, not a separate scale,
+    // so one number means the same thing on both profiles (a per-profile copy that only
+    // bit when pressure was off would be a dead knob on the Tablet tab).
+    //
+    // Applies to the additive-displacement brushes only (Draw/Inflate/Crease/Pinch) —
+    // those accumulate without bound, so a ceiling is what stops full-strength dabs from
+    // overshooting. Move/Limb read strength as a cursor-tracking ratio and
+    // Smooth/Mask/Paint converge on a target, so capping those would just make them take
+    // longer to reach the same place.
+    //
+    // Defaults differ by profile on purpose, and that is NOT a guessed preset: 0.6 mouse
+    // / 1.0 tablet are exactly the constants this replaced (the old MOUSE_STRENGTH_SCALE
+    // and the implicit 1.0 top of the pressure ramp), so the shipped feel is unchanged.
+    float max_effect;
 
     // Fast draw mode: skip per-pixel normal interpolation, use vertex normals directly
     bool fast_normals;      // N key toggle, off by default

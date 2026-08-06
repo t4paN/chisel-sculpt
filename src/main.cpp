@@ -67,9 +67,8 @@ static constexpr float PRESSURE_STR_FLOOR  = 0.05f;
 static constexpr float PRESSURE_SIZE_FLOOR = 0.40f;
 static constexpr float PRESSURE_GAMMA      = 1.0f;
 
-// Mouse (or pressure disabled) strength offset — see the block in the dab loop.
-static constexpr float MOUSE_STRENGTH_SCALE = 0.6f;
-
+// The old MOUSE_STRENGTH_SCALE (0.6) lived here. It is now the per-profile "max brush
+// effect" slider (InputState::max_effect) — same number, same defaults, but reachable.
 // Dab spacing is stepped in SCREEN pixels but every dab deposits into a WORLD-space
 // sphere, so the step has to be foreshortening-corrected — see the block in the dab
 // loop. MIN_COS floors the correction (at most 1/0.30 ≈ 3.3x the dab count near a
@@ -77,6 +76,12 @@ static constexpr float MOUSE_STRENGTH_SCALE = 0.6f;
 // full-vertex-array dispatch.
 static constexpr float DAB_SPACING_MIN_COS = 0.30f;
 static constexpr int   DAB_COUNT_MAX       = 64;
+
+// The spacing the strength defaults were tuned at, and the fixed reference the dab-
+// density compensation normalises against. Must track BrushSettings::spacing's
+// constructor default: at s == SPACING_REF the compensation is exactly 1.0, so the
+// shipped feel is the thing being preserved.
+static constexpr float SPACING_REF = 0.25f;
 
 // From input.cpp
 extern float input_consume_scroll();
@@ -2095,22 +2100,25 @@ int main(int argc, char* argv[]) {
                 bool pressure_is_synthetic = !(input.pressure_enabled && tablet.available());
                 float pressure = pressure_is_synthetic ? 1.0f : tablet.pressure();
                 float p_shaped = std::pow(pressure, PRESSURE_GAMMA);
-                eff_strength *= PRESSURE_STR_FLOOR + (1.0f - PRESSURE_STR_FLOOR) * p_shaped;
 
-                // Mouse has no pressure, so every dab lands at full nominal strength
-                // while a pen stroke spends most of its length well under 1.0 — which
-                // is what the defaults were tuned against. Scale the mouse path back.
-                // Only the additive-displacement brushes: they accumulate without
-                // bound, so full-strength dabs overshoot. Move/Limb read strength as a
-                // cursor-tracking ratio, and Smooth/Mask/Paint converge on a target
-                // (neighbour average, mask=1, a colour) — those just settle sooner.
-                if (pressure_is_synthetic) {
-                    BrushType bt = is_smooth ? BrushType::SMOOTH : input.current_brush;
-                    if (bt == BrushType::DRAW || bt == BrushType::INFLATE ||
-                        bt == BrushType::CREASE || bt == BrushType::PINCH) {
-                        eff_strength *= MOUSE_STRENGTH_SCALE;
-                    }
-                }
+                // Max brush effect (per-profile slider) is the CEILING of this ramp, not
+                // a scale applied after it: at full input the dab lands on exactly
+                // max_effect × nominal strength, and the floor stays where it is so a
+                // feather-light pen touch still fades to near-nothing.
+                //
+                // Only the additive-displacement brushes are capped. They accumulate
+                // without bound, so an uncapped full-strength dab overshoots — that is
+                // the whole reason the mouse path was held back to 0.6 in the first
+                // place. Move/Limb read strength as a cursor-tracking ratio, and
+                // Smooth/Mask/Paint converge on a target (neighbour average, mask=1, a
+                // colour); capping those would only make them take longer to arrive at
+                // the same result, so they keep the full 1.0 ceiling.
+                BrushType bt = is_smooth ? BrushType::SMOOTH : input.current_brush;
+                bool additive_brush = (bt == BrushType::DRAW  || bt == BrushType::INFLATE ||
+                                       bt == BrushType::CREASE || bt == BrushType::PINCH);
+                float ceiling = additive_brush ? input.max_effect : 1.0f;
+                eff_strength *= PRESSURE_STR_FLOOR +
+                                (ceiling - PRESSURE_STR_FLOOR) * p_shaped;
 
                 float eff_brush_size = input.brush_size *
                     (PRESSURE_SIZE_FLOOR + (1.0f - PRESSURE_SIZE_FLOOR) * p_shaped);
@@ -2200,27 +2208,39 @@ int main(int argc, char* argv[]) {
                 // ~1.4-2.5x more per unit length than the defaults were tuned against.
                 // It read as "the brush strength reduction got reverted".
                 //
-                // Normalise against the reference spacing — face-on, full pressure,
-                // which is what the defaults were tuned on — so material per unit length
-                // is what strength says it is, independent of pressure-size AND of
-                // viewing angle. A grazing stroke now lays the same bead as a face-on
-                // one instead of the old thin, gappy one.
+                // Normalise against a FIXED reference — face-on, full pressure, at the
+                // default spacing — so material per unit length is what strength says it
+                // is, independent of pressure-size, viewing angle AND the spacing slider.
+                // A grazing stroke lays the same bead as a face-on one instead of the old
+                // thin, gappy one.
                 //
-                // Same brush set as MOUSE_STRENGTH_SCALE above, for the same reason:
-                // these accumulate without bound. Move/Limb track the cursor, and
-                // Smooth/Mask/Paint/Clay converge on a target, so denser dabs make those
-                // settle sooner rather than pile up.
+                // The reference used to be `input.brush_size * eff.spacing`, i.e. it
+                // tracked the live spacing setting — so eff.spacing appeared in both the
+                // actual step and the reference and cancelled itself out of the ratio.
+                // The correction covered pressure and tilt but not the user's own slider,
+                // leaving deposit per unit length scaling as 1/spacing: tighten the
+                // spacing and the same nominal strength dug in visibly harder. Referencing
+                // SPACING_REF instead leaves the ratio proportional to eff.spacing, which
+                // is exactly what cancels the 1/spacing in dabs-per-unit-length.
                 //
-                // Capped at 1.0 so the budget branch above can't turn a fast flick into
-                // a gouge; floored so a near-silhouette dab still registers.
+                // Same brush set as the max-effect ceiling above (additive_brush), for
+                // the same reason: these accumulate without bound. Move/Limb track the
+                // cursor, and Smooth/Mask/Paint/Clay converge on a target, so denser dabs
+                // make those settle sooner rather than pile up.
+                //
+                // The clamp scales with the spacing setting rather than sitting at a flat
+                // [0.20, 1.0]. Its job is unchanged — the ceiling stops the budget branch
+                // above turning a fast flick into a gouge, the floor keeps a
+                // near-silhouette dab registering — but a flat 1.0 ceiling would clip the
+                // very boost that decouples wide spacing, undoing the fix above 0.25. At
+                // s == SPACING_REF the window is [0.20, 1.0], i.e. exactly what it was.
                 {
-                    BrushType bt = is_smooth ? BrushType::SMOOTH : input.current_brush;
-                    bool additive = (bt == BrushType::DRAW  || bt == BrushType::INFLATE ||
-                                     bt == BrushType::CREASE || bt == BrushType::PINCH);
-                    float ref_spacing = input.brush_size * eff.spacing;
-                    if (additive && ref_spacing > 1e-6f) {
-                        float comp = spacing / ref_spacing;
-                        comp = comp < 0.20f ? 0.20f : (comp > 1.0f ? 1.0f : comp);
+                    float ref_spacing = input.brush_size * SPACING_REF;
+                    if (additive_brush && ref_spacing > 1e-6f) {
+                        float window = eff.spacing / SPACING_REF;
+                        float comp   = spacing / ref_spacing;
+                        float lo = 0.20f * window, hi = window;
+                        comp = comp < lo ? lo : (comp > hi ? hi : comp);
                         eff_strength *= comp;
                     }
                 }
@@ -3145,14 +3165,28 @@ int main(int argc, char* argv[]) {
             // under pointer lock, where clientX freezes).
             Module._chisel_set_pointer(e.clientX - r.left, e.clientY - r.top,
                                        e.movementX || 0);
-            // Same event carries stylus force, which GLFW never surfaces — this is the
-            // web build's entire tablet path (see the __EMSCRIPTEN__ branch of
-            // tablet.cpp). Guarded on pointerType because a mouse reports a fixed 0.5.
-            if (e.pointerType === 'pen')
-                Module._chisel_set_pen(1, e.pressure);
         };
         c.addEventListener('pointermove', feed);
         c.addEventListener('pointerdown', feed);
+
+        // Stylus force, which GLFW never surfaces — this is the web build's entire
+        // tablet path (see the __EMSCRIPTEN__ branch of tablet.cpp). Guarded on
+        // pointerType because a mouse reports a fixed 0.5 while held, which is
+        // indistinguishable from a pen at half force.
+        //
+        // Bound to window in the CAPTURE phase, not to the canvas: capture runs
+        // window -> target, so this sees every pointer event that exists, including
+        // ones an upstream handler swallows with stopPropagation before they reach
+        // the canvas (itch serves us inside its own iframe wrapper). It must stay a
+        // SEPARATE handler from feed() above — feed passes e.movementX to
+        // chisel_set_pointer, which *accumulates* into the slider drag, so running
+        // the same event through both listeners would double every slider's speed.
+        var feedPen = function(e) {
+            if (e.pointerType === 'pen')
+                Module._chisel_set_pen(1, e.pressure);
+        };
+        window.addEventListener('pointermove', feedPen, true);
+        window.addEventListener('pointerdown', feedPen, true);
 
         // Last-chance settings write. visibilitychange->hidden is the reliable one on
         // mobile (a backgrounded tab may never get pagehide before it is discarded);

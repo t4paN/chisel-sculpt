@@ -51,6 +51,7 @@ InputState::InputState()
     , autosmooth(true)
     , pressure_enabled(true)
     , facing_threshold(0.0f)
+    , max_effect(0.6f)          // mouse default; the tablet profile is raised to 1.0 below
     , fast_normals(false)
     , current_lod(0)
     , subdiv_level(4)
@@ -113,6 +114,14 @@ InputState::InputState()
     flush_profile();
     for (int i = 0; i < (int)InputProfile::COUNT; i++)
         profiles[i] = profiles[(int)active_profile];
+
+    // The one deliberate exception to that. max_effect is the ceiling of the strength
+    // ramp, and the two devices genuinely arrive at it differently: a mouse dab is always
+    // at full input (hence the 0.6 hold-back that keeps additive brushes from piling up),
+    // while a pen only reaches the ceiling when you press it to the stop and spends most
+    // of a stroke well below. 1.0 here is not a guess about tablets — it is the number
+    // the pressure ramp already used implicitly, so pen feel is bit-for-bit unchanged.
+    profiles[(int)InputProfile::TABLET].max_effect = 1.0f;
 }
 
 void InputState::switch_brush(BrushType to) {
@@ -146,6 +155,7 @@ void InputState::flush_profile() {
     ProfileSettings& p = profiles[(int)active_profile];
     p.brush_size       = brush_size;
     p.facing_threshold = facing_threshold;
+    p.max_effect       = max_effect;
     p.autosmooth       = autosmooth;
     p.pressure_enabled = pressure_enabled;
     for (int i = 0; i < (int)BrushType::COUNT; i++) p.per_brush[i] = per_brush[i];
@@ -163,6 +173,7 @@ void InputState::switch_profile(InputProfile to) {
     const ProfileSettings& p = profiles[(int)to];
     brush_size       = p.brush_size;
     facing_threshold = p.facing_threshold;
+    max_effect       = p.max_effect;
     autosmooth       = p.autosmooth;
     pressure_enabled = p.pressure_enabled;
     for (int i = 0; i < (int)BrushType::COUNT; i++) per_brush[i] = p.per_brush[i];

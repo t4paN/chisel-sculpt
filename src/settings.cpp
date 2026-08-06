@@ -171,6 +171,7 @@ void append_profile(std::string& s, const ProfileSettings& p, const char* name) 
     s += "]\n";
     append_kv(s, "brush_size",       p.brush_size);
     append_kv(s, "facing_threshold", p.facing_threshold);
+    append_kv(s, "max_effect",       p.max_effect);
     append_kv(s, "autosmooth",       p.autosmooth);
     append_kv(s, "pressure_enabled", p.pressure_enabled);
     for (int i = 0; i < (int)BrushType::COUNT; i++) {
@@ -243,6 +244,9 @@ void apply_brush(const std::string& v, BrushSettings& b) {
 void apply_profile_key(ProfileSettings& p, const std::string& key, const std::string& val) {
     if      (key == "brush_size")       p.brush_size       = clampf(std::strtof(val.c_str(), nullptr), 5.0f, 500.0f);
     else if (key == "facing_threshold") p.facing_threshold = clampf(std::strtof(val.c_str(), nullptr), 0.0f, 1.0f);
+    // Low end is the slider's 0.10, NOT 0: max_effect is the ceiling of a ramp whose
+    // floor is PRESSURE_STR_FLOOR (0.05), and a ceiling below the floor would invert it.
+    else if (key == "max_effect")       p.max_effect       = clampf(std::strtof(val.c_str(), nullptr), 0.10f, 1.0f);
     else if (key == "autosmooth")       p.autosmooth       = parse_bool(val);
     else if (key == "pressure_enabled") p.pressure_enabled = parse_bool(val);
     else if (key.compare(0, 6, "brush.") == 0) {
@@ -322,6 +326,7 @@ void deserialize(const std::string& blob, InputState& in) {
     const ProfileSettings& p = in.profiles[(int)in.active_profile];
     in.brush_size       = p.brush_size;
     in.facing_threshold = p.facing_threshold;
+    in.max_effect       = p.max_effect;
     in.autosmooth       = p.autosmooth;
     in.pressure_enabled = p.pressure_enabled;
     for (int i = 0; i < (int)BrushType::COUNT; i++) in.per_brush[i] = p.per_brush[i];
@@ -402,6 +407,7 @@ void settings_reset(InputState& input) {
     const ProfileSettings& p = input.profiles[(int)input.active_profile];
     input.brush_size       = p.brush_size;
     input.facing_threshold = p.facing_threshold;
+    input.max_effect       = p.max_effect;
     input.autosmooth       = p.autosmooth;
     input.pressure_enabled = p.pressure_enabled;
     for (int i = 0; i < (int)BrushType::COUNT; i++) input.per_brush[i] = p.per_brush[i];
