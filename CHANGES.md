@@ -55,6 +55,11 @@ sections to pin that behaviour down.
 Verified: `build-gl`, `build-wgpu` and `build-web` all build clean;
 `~/CHISEL/settings-roundtrip-test.cpp` (now 7 sections) passes.
 
+With the subsystem settled, `~/CHISEL/persistence-handoff.md` is now the cold-start map
+for it — what's saved, what's global vs per profile, the two-line procedure for adding a
+setting, and the invariants (flush before reading the stash; never write mid-stroke;
+smooth lock survives a device switch). Worth reading before building anything on top.
+
 ## 2026-08-06 — Settings persist; mouse/tablet profiles; pen pressure on the web
 
 - **Settings survive a restart.** New `settings.h/.cpp`: one versioned `key=value`

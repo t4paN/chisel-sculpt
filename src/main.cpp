@@ -833,8 +833,10 @@ int main(int argc, char* argv[]) {
         // events too), so one rule covers both.
         //
         // Latching on the *other* device rather than on pen idleness is deliberate:
-        // a timeout-to-mouse would change brush size every time you lifted the pen to
-        // think, which reads as the app glitching.
+        // a timeout-to-mouse would re-tune strength/hardness/spacing every time you
+        // lifted the pen to think, which reads as the app glitching. (Brush size used
+        // to be the loudest symptom of that; it went global on 2026-08-07, but the
+        // brush-feel fields it still swaps make the same argument.)
         if (!input.sculpting && !input.settings_menu_open &&
             input.drag_mode == InputState::DragMode::NONE &&
             input.slider_mode == InputState::SliderMode::NONE) {
