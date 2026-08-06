@@ -2097,12 +2097,22 @@ int main(int argc, char* argv[]) {
                 float eff_strength = eff.strength;
                 float eff_hardness = eff.hardness;
 
-                // Pen pressure → strength & size (independent floors). 1.0 when there is
-                // no tablet, so mouse behaviour is unchanged. There is no on/off toggle
-                // any more (K, removed 2026-08-07): the max-effect slider already gives
-                // the ceiling a pen can reach, which is what the toggle was really used
-                // for, and "pressure off, tablet plugged in" was a state nobody wanted.
-                bool pressure_is_synthetic = !tablet.available();
+                // Pen pressure → strength & size (independent floors). Synthetic 1.0
+                // unless the PEN is the device currently driving input.
+                //
+                // tablet.available() alone is the wrong question, and asking it was a
+                // real regression: it only says a tablet is plugged in. Tablet::pressure()
+                // is sticky — it holds the last stylus sample — so with the pen resting on
+                // the desk it reads ~0, and every mouse stroke came out at the ramp floor
+                // (0.05x strength, all brushes). The K toggle used to be the escape hatch
+                // for exactly that; removing K on 2026-08-07 exposed it.
+                //
+                // active_profile is the signal that was already correct: the arbiter
+                // switches to TABLET on stylus samples and back to MOUSE on cursor motion
+                // after a 250 ms quiet window, and it is frozen mid-stroke, so this cannot
+                // flip under a stroke in progress.
+                bool pressure_is_synthetic = !(tablet.available() &&
+                                               input.active_profile == InputProfile::TABLET);
                 float pressure = pressure_is_synthetic ? 1.0f : tablet.pressure();
                 float p_shaped = std::pow(pressure, PRESSURE_GAMMA);
 

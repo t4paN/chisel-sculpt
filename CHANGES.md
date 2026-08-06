@@ -2,6 +2,44 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-08-07 — Mouse strokes no longer crushed by a resting pen
+
+Pen pressure is now gated on **the pen actually driving input**, not on a tablet merely
+being plugged in.
+
+`Tablet::pressure()` is sticky: it holds the last stylus sample, so with the pen resting
+on the desk it reads ~0. The old test was `tablet.available()`, which only asks whether a
+tablet exists — so on any machine with one connected, every *mouse* stroke went through
+the pressure ramp at zero pressure and came out at its floor:
+
+```
+eff_strength *= PRESSURE_STR_FLOOR + (ceiling - PRESSURE_STR_FLOOR) * p_shaped;
+                0.05              + (…) * 0        =  0.05x
+```
+
+0.05× strength on **every brush** — visible, but barely. The fix is one clause:
+
+```cpp
+bool pressure_is_synthetic = !(tablet.available() &&
+                               input.active_profile == InputProfile::TABLET);
+```
+
+`active_profile` was already the right signal and already correct — the device arbiter
+flips it to TABLET on stylus samples and back to MOUSE on cursor motion after a 250 ms
+quiet window, and it is frozen mid-stroke, so pressure cannot change under a stroke in
+progress.
+
+**This is older than it looks.** It was not introduced by removing `K` the same day —
+removing `K` only took away the workaround. `pressure_enabled` defaulted ON, so any user
+with a tablet connected who never found that toggle had been sculpting at 0.05× with the
+mouse the whole time. The people who escaped were the ones who turned pressure off by
+hand. Gating on the active device fixes it for everyone rather than restoring the
+escape hatch.
+
+Worth knowing if a saved profile looks strange: settings tuned *around* this bug will
+read hot now. A `max_effect` of 1.0 on the Mouse profile, or brush strengths pinned at
+1.0, are the fingerprints of compensating for it.
+
 ## 2026-08-07 — Profiles trimmed to brush feel; `[` / `]` are brush size
 
 Closes the global-vs-per-profile question left open by 2026-08-06. The rule that fell out
