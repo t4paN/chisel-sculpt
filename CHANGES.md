@@ -2,6 +2,26 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-08-11 — Incremental save
+
+A square **+** button next to Save in the top toolbar writes the *next numbered copy*
+instead of overwriting: `bust.chisel` → `bust_001.chisel` → `bust_002.chisel`. The new
+file becomes the current project, so a following Ctrl+S lands on the newest one.
+
+Two details that decide whether it's usable rather than annoying:
+
+- **A trailing `_NNN` is the counter, not part of the name.** Without that, the second
+  press produces `bust_001_001` and the third `bust_001_001_001`. The stem is parsed
+  back off each time, so repeated presses walk one series.
+- **Numbers already on disk are skipped**, so an incremental save can never clobber an
+  earlier version — the whole point of the button is that the previous state survives.
+  Deleting a middle number doesn't make it get reused; the walk starts from the current
+  file's number and only goes up.
+
+Never-saved project → **+** opens the name prompt, same as plain Save. On web there is
+no persistent filesystem to check, so each press just counts up from the last name used
+and downloads it.
+
 ## 2026-08-10 — Perspective viewport (opt-in), and a real foreshortening seam
 
 The camera can now be **perspective**, from a `Perspective` checkbox + FOV slider

@@ -663,13 +663,16 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
         {"Redo",     "Redo",      "Shortcut: Ctrl+Shift+Z"},
         {"Export",   "Export",    "Shortcut: Ctrl+E"},
         {"Save",     "Save",      "Shortcut: Ctrl+S"},
+        {"SaveInc",  "+",         "Save incremental: next numbered copy (name_001, name_002, ...)"},
         {"Load",     "Load",      "Shortcut: Ctrl+O"},
         {"Merge",    "Merge",     "Voxel-merge selection for print (Shortcut: J)"},
     };
+    const int ops_count = (int)(sizeof(ops) / sizeof(ops[0]));
+    const int ops_save_inc = 6;   // square, so it reads as a modifier hanging off Save
 
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < ops_count; i++) {
         if (i > 0) ImGui::SameLine();
-        float w = calc_btn_w(ops[i].display);
+        float w = (i == ops_save_inc) ? btn_h : calc_btn_w(ops[i].display);
         bool enabled = (i < 2) ? input.mesh_locked : true;
         if (squircle_button(ops[i].id, ops[i].display, ops[i].tooltip,
                             ImVec2(w, btn_h), false, enabled)) {
@@ -680,8 +683,9 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
                 case 3: input.redo_requested = true; break;
                 case 4: input.export_dialog_active = true; break;
                 case 5: input.save_requested = true; break;
-                case 6: input.import_dialog_active = true; break;
-                case 7: input.voxel_merge_confirm_pending = true; break;
+                case 6: input.save_incremental_requested = true; break;
+                case 7: input.import_dialog_active = true; break;
+                case 8: input.voxel_merge_confirm_pending = true; break;
             }
         }
     }

@@ -3012,6 +3012,48 @@ int main(int argc, char* argv[]) {
             input.save_dialog_active = true;
         }
 
+        // ---- Incremental save ("+"): sculpt.chisel -> sculpt_001.chisel -> _002 ----
+        // A trailing _NNN is treated as the counter rather than part of the stem, so
+        // repeated presses walk the series instead of nesting suffixes. Existing files
+        // are skipped, so an incremental save can never overwrite a previous version
+        // (on web nothing persists in MEMFS, so it just counts up from the last name).
+        auto next_incremental_path = [&](const std::string& path) -> std::string {
+            const std::string ext = ".chisel";
+            std::string stem = path;
+            if (stem.size() >= ext.size()
+                && stem.compare(stem.size() - ext.size(), ext.size(), ext) == 0)
+                stem.resize(stem.size() - ext.size());
+            int n = 0;
+            size_t us = stem.find_last_of('_');
+            if (us != std::string::npos && us + 1 < stem.size()) {
+                bool all_digits = true;
+                for (size_t i = us + 1; i < stem.size(); i++)
+                    if (!std::isdigit((unsigned char)stem[i])) { all_digits = false; break; }
+                if (all_digits) {
+                    n = std::atoi(stem.c_str() + us + 1);
+                    stem.resize(us);
+                }
+            }
+            char suffix[16];
+            for (int i = n + 1; i <= 9999; i++) {
+                std::snprintf(suffix, sizeof(suffix), "_%03d", i);
+                std::string cand = stem + suffix + ext;
+                std::error_code ec;
+                if (!std::filesystem::exists(cand, ec)) return cand;
+            }
+            return stem + "_9999" + ext;   // series exhausted: overwrite the last one
+        };
+
+        if (input.save_incremental_requested) {
+            input.save_incremental_requested = false;
+            if (current_project_path.empty()) {
+                // Nothing to number off yet — ask for a name first, like plain save.
+                input.save_dialog_active = true;
+            } else {
+                do_save_project(next_incremental_path(current_project_path));
+            }
+        }
+
 #ifndef __EMSCRIPTEN__
         if (input.save_dialog_active && !fd->IsOpened("SaveKey")) {
             IGFD::FileDialogConfig cfg;

@@ -180,6 +180,7 @@ struct InputState {
     bool import_append;           // import dialog checkbox: add as new entity vs replace scene
     bool save_requested;
     bool save_as_requested;
+    bool save_incremental_requested;   // "+" button: save the next numbered copy
     bool save_dialog_active;
 
     // Drag-and-drop open (native only): a file dropped on the window parks

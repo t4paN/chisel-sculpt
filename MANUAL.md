@@ -27,7 +27,7 @@ mesh to sculpt; left-drag off the mesh to orbit. That's 90% of the app right the
 
 ## The interface
 
-- **Top toolbar** — Subdiv −/+, Undo, Redo, Export, Save, Load, Merge.
+- **Top toolbar** — Subdiv −/+, Undo, Redo, Export, Save, **+** (incremental save), Load, Merge.
 - **Mode row** — Edit, Insert, Select, Paint, plus the `[ ]` paint-visibility toggle.
 - **Brush column** (Edit mode) — Draw, Clay, Inflate, Crease, Pinch, Move, Limb, Smooth, Mask.
 - **HUD panel** (bottom left) — active brush and its size / strength / hardness /
@@ -245,6 +245,12 @@ all undoable.
 **Ctrl+S** saves, **Ctrl+Shift+S** saves under a new name, **Ctrl+O** / the Load
 button opens. A project stores every object with its full multires stack, masks,
 paint, selection, camera, and mirror settings.
+
+The **+** button beside Save is an incremental save: it writes the next numbered
+copy instead of overwriting — `bust.chisel` → `bust_001.chisel` → `bust_002.chisel`
+— and keeps working on that newest file. Numbers already on disk are skipped, so an
+incremental save never clobbers an earlier version. If the project has never been
+saved, **+** asks for a name first.
 
 **Cross-platform:** current files (format v4) open identically on native and web —
 sculpt on the itch build at lunch, open the same file at home on native. Files saved
