@@ -603,8 +603,8 @@ void main() {
 // One module per program, vs_main + fs_main (the names the seam hardcodes). The
 // std140 Params blocks mirror the *ParamsGPU structs above byte-for-byte — WGSL's
 // uniform layout matches std140 for these flat scalar/vec/mat members. No clip-Z
-// remap: the camera is orthographic with a symmetric (-100,100) near/far, so clip-z
-// = 0.01*depth stays inside both GL's [-1,1] and WebGPU's [0,1] (see camera.cpp).
+// remap in the shaders: get_projection_matrix already bakes the GL[-1,1] → WebGPU[0,1]
+// z remap into the matrix on this backend, for both projections (see camera.cpp).
 
 static const char* bg_wgsl_src = R"WGSL(
 struct VSOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
@@ -2275,8 +2275,10 @@ void Renderer::draw_debug_mesh(const Camera& cam, const Mesh& mesh, int w, int h
     p.viewport[1] = (float)h;
     // Zoom-adaptive width: 3px while the model fills the view, swelling up to
     // 2.5× as its projected diameter shrinks below ~600px so the wireframe
-    // stays readable from afar. ppwu from the ortho proj (m00 = 2/world-width).
-    float ppwu    = 0.5f * p.proj[0] * (float)w;
+    // stays readable from afar. ppwu measured at the orbit target — algebraically the
+    // old `0.5*proj[0]*w` under ortho, but that identity breaks under perspective
+    // (proj[0] there is the scale at depth 1, not at the model).
+    float ppwu    = 0.5f * (float)h / cam.half_height();
     float diam_px = std::max(2.0f * debug_mesh_radius * ppwu, 1.0f);
     float swell   = std::min(std::max(600.0f / diam_px, 1.0f), 2.5f);
     p.half_width_px  = 1.5f * swell;

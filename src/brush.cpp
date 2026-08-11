@@ -343,10 +343,11 @@ void BrushStroke::set_anchor(const Mesh& mesh, const Camera& cam,
     // pen-down, so it tracks the GPU surface; mesh.pos no longer will. Behavior-neutral
     // while mesh.pos is still fresh — depth and mesh.pos describe the same surface point.
     //
-    // NOTE: this camera is ORTHOGRAPHIC (see Camera::get_projection_matrix /
-    // world_to_screen) — the lateral screen scale is fixed by the orbit `distance`, NOT
-    // by the per-pixel depth. So the in-plane offset uses `distance`; `hit_depth` only
-    // places the point along the view axis. (linear depth = fwd · (world − cam_pos).)
+    // NOTE: the lateral screen scale depends on the projection — fixed by the orbit
+    // `distance` under ortho, proportional to the per-pixel depth under perspective.
+    // Both live behind cam.half_height_at(), so the in-plane offset asks it for the
+    // scale AT `hit_depth`; `hit_depth` also places the point along the view axis.
+    // (linear depth = fwd · (world − cam_pos), what the pick FBO writes.)
     // Surface normal first: the tilt it implies sizes the sub-pixel depth tap's
     // discontinuity guard below, so it has to be known before the depth is read.
     float nlen = std::sqrt(nx*nx + ny*ny + nz*nz);
@@ -363,11 +364,14 @@ void BrushStroke::set_anchor(const Mesh& mesh, const Camera& cam,
     Vec3 world_up = {0.0f, 1.0f, 0.0f};
     Vec3 right    = fwd.cross(world_up).normalized();
     Vec3 up       = right.cross(fwd).normalized();
-    float half_h  = cam.distance * std::tan(cam.fov * 3.14159265358979323846f / 360.0f);
-    float half_w  = half_h * aspect;
     Vec3 cam_pos  = cam.get_position();
 
-    float world_per_pixel = (2.0f * half_h) / (float)screen_h;
+    // Provisional scale, taken at the orbit target. Under ortho this IS the scale at
+    // every depth and nothing below revises it. Under perspective the real scale needs
+    // hit_depth, which is not sampled yet — but the only consumer before that point is
+    // the discontinuity guard, a tolerance that a target-depth estimate serves fine.
+    // It also stands as the fallback radius on the guard's early-out path below.
+    float world_per_pixel = (2.0f * cam.half_height()) / (float)screen_h;
     anchor_world_radius = brush_radius * world_per_pixel;
 
     // How far the surface is turned away from the view plane. Drives the sub-pixel
@@ -393,6 +397,15 @@ void BrushStroke::set_anchor(const Mesh& mesh, const Camera& cam,
     float hit_depth = 0.0f;
     if (!renderer.sample_depth_bilinear(cursor_x, cursor_y, &hit_depth, max_spread)) return;
 
+    // The depth is known now, so re-take the lateral scale where the dab actually
+    // lands. Under ortho half_height_at() ignores its argument and both of these are
+    // byte-identical to the provisional pair above; under perspective this is the
+    // foreshortening that keeps a dab the same *world* size as the surface recedes.
+    float half_h = cam.half_height_at(hit_depth);
+    float half_w = half_h * aspect;
+    world_per_pixel = (2.0f * half_h) / (float)screen_h;
+    anchor_world_radius = brush_radius * world_per_pixel;
+
     // NDC from the true float cursor, not the truncated pixel — the whole point.
     float ndc_x  = 2.0f * cursor_x / (float)screen_w - 1.0f;
     float ndc_y  = 1.0f - 2.0f * cursor_y / (float)screen_h;
@@ -403,8 +416,13 @@ void BrushStroke::set_anchor(const Mesh& mesh, const Camera& cam,
     // over the whole footprint the plane stops tracking curvature and large dabs
     // flatten what they should follow. Falls back to the point normal off-model.
     // When asked (Clay), the same disc also averages depth: unprojecting the mean
-    // {px, py, depth} gives the mean surface point — valid because the projection is
-    // orthographic, so unprojection is linear and the mean commutes through it.
+    // {px, py, depth} gives the mean surface point — exactly, under ortho, because
+    // unprojection is linear there and the mean commutes through it. Under perspective
+    // it does not: the lateral term is ndc*depth, so the mean of the products is off by
+    // the covariance between the two. That vanishes on a flat or symmetric footprint
+    // and stays second-order on a curved one over a disc this small (0.6 R), which is
+    // why this is left as an average of samples rather than an average of unprojections
+    // — the latter would mean unprojecting every pixel in the disc, in the hot path.
     float an[3], avg[3];
     if (renderer.sample_area_normal(cx, cy, (int)(brush_radius * 0.6f), an,
                                     want_area_depth ? avg : nullptr)) {
@@ -412,8 +430,10 @@ void BrushStroke::set_anchor(const Mesh& mesh, const Camera& cam,
         if (want_area_depth) {
             float andc_x = 2.0f * avg[0] / (float)screen_w - 1.0f;
             float andc_y = 1.0f - 2.0f * avg[1] / (float)screen_h;
+            float ahalf_h = cam.half_height_at(avg[2]);
+            float ahalf_w = ahalf_h * aspect;
             area_plane_point = cam_pos + fwd * avg[2]
-                             + right * (andc_x * half_w) + up * (andc_y * half_h);
+                             + right * (andc_x * ahalf_w) + up * (andc_y * ahalf_h);
             area_plane_valid = true;
         }
     } else {
@@ -1050,10 +1070,12 @@ void BrushStroke::apply_move_gpu(DabContext& ctx, float cursor_dx, float cursor_
     const bool capture_pending = move.capture_tk != 0;
     if (!capture_pending && move.affected_list.empty()) return;
 
-    // Accumulate cursor delta → world-space total
-    float fov_rad = ctx.cam.fov * 3.14159265358979323846f / 180.0f;
-    float view_plane_h = 2.0f * ctx.cam.distance * std::tan(fov_rad * 0.5f);
-    float scale = view_plane_h / (float)ctx.win_h;
+    // Accumulate cursor delta → world-space total. The drag plane is the one the
+    // grabbed surface sits on, so the pixels→world scale is taken at the anchor's
+    // depth — under perspective a grab far from the orbit target would otherwise
+    // travel at the wrong rate. Ortho ignores the depth and this is the old `distance`.
+    float scale = 2.0f * ctx.cam.half_height_at(ctx.cam.view_depth(anchor_pos))
+                / (float)ctx.win_h;
 
     Vec3 pos = ctx.cam.get_position();
     Vec3 fwd = (ctx.cam.target - pos).normalized();
@@ -1148,9 +1170,9 @@ void BrushStroke::apply_limb_gpu(DabContext& ctx, float cursor_dx, float cursor_
 
     // This dab's world-space drag increment (screen delta → view plane). Unlike
     // move this is applied incrementally so the relax accumulates frame to frame.
-    float fov_rad = ctx.cam.fov * 3.14159265358979323846f / 180.0f;
-    float view_plane_h = 2.0f * ctx.cam.distance * std::tan(fov_rad * 0.5f);
-    float scale = view_plane_h / (float)ctx.win_h;
+    // Scale taken at the anchor's depth for the same reason as apply_move_gpu.
+    float scale = 2.0f * ctx.cam.half_height_at(ctx.cam.view_depth(anchor_pos))
+                / (float)ctx.win_h;
 
     Vec3 pos = ctx.cam.get_position();
     Vec3 fwd = (ctx.cam.target - pos).normalized();

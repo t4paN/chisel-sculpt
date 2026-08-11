@@ -996,6 +996,31 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
                 ImGui::SetTooltip("Viewport lighting: 0 = flat shading, 1 = keyed "
                                   "light with contrast and sheen (display only)");
 
+            // Viewport projection. Off = the orthographic camera the app has always
+            // used and the one the brush feel was tuned against, so it stays default;
+            // the slider only bites once perspective is on, hence the disable.
+            ImGui::Checkbox("Perspective", &input.camera_perspective);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Off: orthographic — parallel lines stay parallel and a\n"
+                                  "shape reads the same wherever it sits on screen. The\n"
+                                  "default, and what the brushes were tuned against.\n\n"
+                                  "On: perspective — nearer parts of the model read larger,\n"
+                                  "which is how the eye actually sees volume. Worth a look\n"
+                                  "when you are judging proportion; ortho is easier to\n"
+                                  "sculpt precise detail in.");
+
+            if (!input.camera_perspective) ImGui::BeginDisabled();
+            ImGui::SetNextItemWidth(150.0f);
+            ImGui::SliderFloat("##cameraFov", &input.camera_fov, 15.0f, 80.0f, "fov %.0f\xc2\xb0");
+            if (!input.camera_perspective) ImGui::EndDisabled();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("Lens angle. Low = long lens, flat and near-orthographic.\n"
+                                  "High = wide lens, strong convergence and more distortion\n"
+                                  "toward the edges of the view.\n\n"
+                                  "The model keeps its on-screen size as you drag this —\n"
+                                  "the camera dollies to compensate — so you are changing\n"
+                                  "the perspective, not zooming.");
+
             ImGui::Checkbox("Show FPS", &input.show_fps);
 
             ImGui::Separator();

@@ -822,6 +822,37 @@ int main(int argc, char* argv[]) {
         }
         prev_tablet_avail = tablet.available();
 
+        // Burger-menu projection settings → camera. Pushed every frame rather than on
+        // edit, so a project load (which overwrites the whole camera, fov included)
+        // cannot strand the view on a projection the menu no longer shows.
+        {
+            // Ortho keeps the historical 45: it is only a framing scale there, and
+            // holding it fixed means toggling perspective at 45 changes nothing but
+            // the convergence, which is what makes the two comparable at a glance.
+            static float prev_eff_fov = 45.0f;
+            float eff_fov = input.camera_perspective ? input.camera_fov : 45.0f;
+            if (eff_fov != prev_eff_fov) {
+                // Dolly-compensate. Framing is distance*tan(fov/2) in BOTH projections,
+                // so holding that product fixed keeps the model the same size on screen
+                // while the lens angle changes — a lens change, not a zoom. Without it
+                // the slider just scales the view and reads as a duplicate of scroll.
+                const float kDeg2Half = 3.14159265358979323846f / 360.0f;
+                float ta = std::tan(prev_eff_fov * kDeg2Half);
+                float tb = std::tan(eff_fov * kDeg2Half);
+                camera.distance = std::max(0.05f, std::min(200.0f, camera.distance * ta / tb));
+                prev_eff_fov = eff_fov;
+            }
+            // The projection changed, so the cached screen buffers (depth/normal/triid)
+            // describe a view that no longer exists — same invalidation orbit/pan/zoom
+            // do. Without this the next pen-down unprojects against a stale plane cache
+            // and lands its first dab in the wrong place; it self-heals on any camera
+            // move, which is exactly what makes it easy to miss in testing.
+            if (camera.fov != eff_fov || camera.perspective != input.camera_perspective)
+                screen_buffers_dirty = true;
+            camera.perspective = input.camera_perspective;
+            camera.fov = eff_fov;
+        }
+
         // Device-driven profile switch. Both profiles stay loaded; whichever device is
         // actually producing input owns the live brush settings.
         //
@@ -959,8 +990,12 @@ int main(int argc, char* argv[]) {
                           || input.drag_mode == InputState::DragMode::ZOOM
                           || input.mouse2_down || input.mouse3_down;
 
-        // Refresh screen buffers whenever idle and dirty.
-        if (!camera_moving && !brush_stroke.is_active()) {
+        // Refresh screen buffers whenever idle and dirty. The menu counts as not-idle:
+        // the FOV slider dirties these every frame it moves, and unlike an orbit drag
+        // (which camera_moving already defers) nothing else would hold the refresh off,
+        // so a heavy mesh would eat a full extra MRT pass per slider frame. Nothing can
+        // sculpt while the menu is up, so deferring to the frame after it closes is free.
+        if (!camera_moving && !brush_stroke.is_active() && !input.settings_menu_open) {
             if (screen_buffers_dirty) {
                 renderer.render_screen_buffers(camera, win_w, win_h);
                 screen_buffers_dirty = false;
@@ -1732,7 +1767,9 @@ int main(int argc, char* argv[]) {
 
             // Object move: drag selected meshes in view-plane
             if (input.drag_mode == InputState::DragMode::MOVE_OBJECT) {
-                float scale = camera.distance * 0.002f;
+                // Framing-relative, matching Camera::pan — see the note there for why
+                // this is not keyed off camera.distance.
+                float scale = camera.half_height() * 0.0048284f;
                 Vec3 cam_pos = camera.get_position();
                 Vec3 fwd = (camera.target - cam_pos).normalized();
                 Vec3 world_up = {0, 1, 0};

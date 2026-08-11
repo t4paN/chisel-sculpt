@@ -2,6 +2,89 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-08-10 — Perspective viewport (opt-in), and a real foreshortening seam
+
+The camera can now be **perspective**, from a `Perspective` checkbox + FOV slider
+(15–80°) in the burger menu. Ortho stays the default and is unchanged.
+
+**The camera was never perspective.** `Camera::fov` existed and read 45°, but
+`get_projection_matrix` built a pure orthographic box where `half_h = distance *
+tan(fov/2)` — `fov` was only a framing multiplier on the orbit distance. A slider on it
+alone would have been a second zoom control.
+
+The reason so much brush code could read `cam.distance` directly is that under ortho the
+lateral world-per-pixel scale is *the same at every depth*. That is exactly the
+screen-vs-world boundary the 2026-07-25 entry warns about, so the fix is one seam rather
+than a per-site `if`:
+
+```cpp
+float Camera::half_height_at(float d) const {       // THE foreshortening term
+    return (perspective ? d : distance) * tan(fov * M_PI / 360.0f);
+}
+```
+
+Ortho ignores `d`, so every converted site is byte-identical to before with the checkbox
+off. Sites moved onto it:
+
+- `set_anchor` — the dab's world radius and unprojected `anchor_pos` now take their scale
+  at `hit_depth`, not at the orbit distance. (The sub-pixel discontinuity guard still uses
+  a target-depth estimate; it runs *before* the depth sample and is only a tolerance.)
+- `set_anchor` area-plane point (Clay) — scale at the sampled mean depth.
+- Move / Limb drag — pixels→world taken at the **anchor's** depth, so a grab away from the
+  orbit target drags at the right rate.
+- `insert_controller` spawn point, `world_to_screen`, and the wireframe's zoom-adaptive
+  width (`ppwu` came off `proj[0]`, an identity that only holds under ortho).
+
+**Bug found on the way:** the insert spawn point was already unprojecting with
+`hit_depth * tan(fov/2)` while the camera was orthographic — a perspective formula under
+an ortho projection. It misplaced the spawn laterally whenever the click landed nearer or
+farther than the orbit target. Now correct in both modes.
+
+Two supporting changes:
+
+- **The slider dollies to compensate.** Framing is `distance * tan(fov/2)` in *both*
+  projections, so the FOV change holds that product fixed and adjusts `distance`. The
+  model keeps its on-screen size and only the convergence changes — a lens change, not a
+  zoom.
+- **Pan is now framing-relative** (`half_height() * 0.0048284`, exactly the old
+  `distance * 0.002` at 45°). Keyed off raw `distance` it would have changed speed every
+  time the dolly fired.
+
+Perspective near/far are derived per frame (`near = distance*0.01`, `far = distance+100`)
+— ortho's stored `(-100, 100)` cannot be reused because a perspective near plane must be
+positive. `near` is deliberately loose: it spends depth precision we have in abundance
+(Depth24Plus still leaves ~200k levels across the model) to buy margin against geometry
+crossing the near plane as you zoom in, which is the failure this code has actually hit
+before on WebGPU. The GL→WebGPU clip-z remap was already written as a row combine, so it
+stays correct for a non-constant w row.
+
+Projection is a **view preference, not project state**: it lives in settings next to the
+lighting dial, and is pushed onto the camera every frame so loading a project (which
+overwrites the whole camera, `fov` included) cannot strand the view. No project-file
+format change. No shader changed.
+
+**Performance: no measurable cost.** Per dab this adds one `tan()` — invisible next to the
+disc scan in `sample_area_normal` that dominates the same function. The GPU side is
+unchanged: same draw calls, same vertex work, same `Depth24Plus`, and the perspective
+divide is fixed-function that runs under ortho too. Nothing new allocates and no sync was
+added.
+
+Two things that *would* have cost, both handled:
+
+- Changing the projection now marks `screen_buffers_dirty`. It has to — the depth/normal/
+  triid cache is rendered from the camera, so without it the next pen-down unprojects
+  against a plane cache built for the old projection and misplaces its first dab. It
+  self-heals on any camera move, which is what makes it easy to miss.
+- …but that dirty fires *every frame the slider moves*, and unlike an orbit drag (which
+  `camera_moving` already defers) nothing was holding the refresh off — a heavy mesh would
+  have eaten a full extra MRT pass per slider frame. The refresh now also defers while the
+  settings menu is open, which is free because nothing can sculpt there.
+
+Verified numerically rather than by eye: `world_to_screen` agrees with the actual matrix,
+unproject→project round-trips to the source pixel across depths at 15/45/80°, ortho
+`half_height_at` is depth-invariant, and remapped clip-z stays in [0,1] and monotonic on
+the WebGPU path.
+
 ## 2026-08-07 — Mouse strokes no longer crushed by a resting pen
 
 Pen pressure is now gated on **the pen actually driving input**, not on a tablet merely

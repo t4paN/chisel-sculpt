@@ -114,6 +114,15 @@ struct InputState {
     // FPS readout visibility (burger menu toggle). Display only.
     bool show_fps = true;
 
+    // Viewport projection. Orthographic is the default and stays that way: it is what
+    // every version shipped and what the brush feel was tuned against. Perspective is
+    // opt-in; camera_fov is its vertical FOV in degrees and is ignored while the
+    // checkbox is off (ortho framing keeps the historical 45). A view preference, so
+    // it lives in settings rather than the project file — main.cpp pushes both onto
+    // the camera each frame, which also stops a project load stranding a stale one.
+    bool  camera_perspective = false;
+    float camera_fov = 45.0f;
+
     // Delete the highest subdivision level (burger menu). The menu item arms the
     // confirm; Y sets the request, which the main loop consumes once. Destructive
     // and not undoable — see the handler in main.cpp.

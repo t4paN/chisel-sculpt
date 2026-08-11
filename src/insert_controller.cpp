@@ -236,15 +236,18 @@ void InsertController::tick(InputState& input, Camera& camera,
 
             if (hit_id != 0) {
                 // Unproject pixel + linear depth → exact world hit point. Same view
-                // basis as the off-model branch, distance = the sampled depth.
-                float half_h = hit_depth * std::tan(camera.fov * M_PI / 360.0f);
+                // basis as the off-model branch; the lateral scale is taken at the
+                // sampled depth, which is where the primitive is about to sit.
+                float half_h = camera.half_height_at(hit_depth);
                 float half_w = half_h * aspect;
                 Vec3 cam_pos = camera.get_position();
                 spawn = cam_pos + fwd * hit_depth
                       + right * (ndc_x * half_w) + up * (ndc_y * half_h);
                 valid = true;
             } else {
-                float half_h = camera.distance * std::tan(camera.fov * M_PI / 360.0f);
+                // Off-model: the primitive lands on the orbit target's plane, so the
+                // scale is the one at the target in both projections.
+                float half_h = camera.half_height();
                 float half_w = half_h * aspect;
                 spawn = camera.target + right * (ndc_x * half_w) + up * (ndc_y * half_h);
                 valid = true;

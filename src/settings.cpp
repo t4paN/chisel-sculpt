@@ -195,6 +195,8 @@ std::string serialize(const InputState& in) {
     append_kv(s, "autosmooth",          in.autosmooth);
     append_kv(s, "matcap_contrast",     in.matcap_contrast);
     append_kv(s, "show_fps",            in.show_fps);
+    append_kv(s, "camera_perspective",  in.camera_perspective);
+    append_kv(s, "camera_fov",          in.camera_fov);
     append_kv(s, "mirror_x",            in.mirror_x);
     append_kv(s, "fast_normals",        in.fast_normals);
     append_kv(s, "paint_visible",       in.paint_visible);
@@ -257,7 +259,9 @@ void apply_global_key(InputState& in, const std::string& key, const std::string&
     else if (key == "density_coarse_mult") in.density_coarse_mult = clampf(std::strtof(val.c_str(), nullptr), 1.0f, 4.0f);
     else if (key == "density_fine_mult")   in.density_fine_mult   = clampf(std::strtof(val.c_str(), nullptr), 0.2f, 1.0f);
     else if (key == "autosmooth")          in.autosmooth          = parse_bool(val);
+    else if (key == "camera_fov")          in.camera_fov          = clampf(std::strtof(val.c_str(), nullptr), 15.0f, 80.0f);
     else if (key == "show_fps")            in.show_fps            = parse_bool(val);
+    else if (key == "camera_perspective")  in.camera_perspective  = parse_bool(val);
     else if (key == "mirror_x")            in.mirror_x            = parse_bool(val);
     else if (key == "fast_normals")        in.fast_normals        = parse_bool(val);
     else if (key == "paint_visible")       in.paint_visible       = parse_bool(val);
@@ -386,6 +390,8 @@ void settings_reset(InputState& input) {
     input.autosmooth         = fresh.autosmooth;
     input.matcap_contrast    = fresh.matcap_contrast;
     input.show_fps           = fresh.show_fps;
+    input.camera_perspective = fresh.camera_perspective;
+    input.camera_fov         = fresh.camera_fov;
     input.mirror_x           = fresh.mirror_x;
     input.fast_normals       = fresh.fast_normals;
     input.paint_visible      = fresh.paint_visible;

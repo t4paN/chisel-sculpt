@@ -203,8 +203,8 @@ subdivision, remeshing, and voxel merges. PLY export carries it out of the app.
 
 ## Camera
 
-The camera is orthographic — zoom is magnification, so you can zoom as deep as you
-like and never clip inside the model.
+The camera is orthographic by default — zoom is magnification, so you can zoom as deep
+as you like and never clip inside the model.
 
 | Input | Action |
 |---|---|
@@ -214,6 +214,22 @@ like and never clip inside the model.
 | F | Reframe to the active mesh |
 | F1 / F2 / F3 | Snap to front / side / top |
 | Space | Toggle fullscreen |
+
+### Perspective
+
+The burger menu has a **Perspective** toggle and a **fov** slider (15–80°). Orthographic
+keeps parallel lines parallel, so a shape reads the same wherever it sits on screen —
+easier for precise detail, and the default. Perspective makes nearer parts read larger,
+which is closer to how the eye sees volume and useful when you are judging proportion.
+
+Dragging the fov slider does not zoom: the camera dollies to keep the model the same size
+on screen, so you are changing the amount of convergence, not the framing. Low fov is a
+long lens (flat, near-orthographic), high fov is a wide one (strong convergence, more
+distortion toward the edges).
+
+In perspective the near plane is real, so zooming far enough into the surface will
+eventually clip into it — orthographic never does. The setting is remembered between
+sessions and is not stored per project.
 
 ## Undo / redo
 
