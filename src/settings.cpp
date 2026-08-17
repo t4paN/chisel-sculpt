@@ -191,7 +191,10 @@ std::string serialize(const InputState& in) {
     s += "\n";
 
     s += "\n[global]\n";
-    append_kv(s, "brush_size",          in.brush_size);
+    // brush_size is deliberately absent — see InputState::brush_size. Because the
+    // change check is "serialize and compare", leaving it out also means dragging the
+    // size slider no longer marks settings dirty at all.
+    append_kv(s, "per_brush_sizes",     in.per_brush_sizes);
     append_kv(s, "autosmooth",          in.autosmooth);
     append_kv(s, "matcap_contrast",     in.matcap_contrast);
     append_kv(s, "show_fps",            in.show_fps);
@@ -253,11 +256,14 @@ void apply_profile_key(ProfileSettings& p, const std::string& key, const std::st
 }
 
 void apply_global_key(InputState& in, const std::string& key, const std::string& val) {
-    if      (key == "brush_size")          in.brush_size          = clampf(std::strtof(val.c_str(), nullptr), 5.0f, 500.0f);
-    else if (key == "matcap_contrast")     in.matcap_contrast     = clampf(std::strtof(val.c_str(), nullptr), 0.0f, 1.0f);
+    // No "brush_size" case: a stored blob from before 2026-08-17 still carries the key,
+    // and it falls through as an unknown key — which is exactly the desired migration
+    // (the value is dropped, and the next write stops emitting it).
+    if      (key == "matcap_contrast")     in.matcap_contrast     = clampf(std::strtof(val.c_str(), nullptr), 0.0f, 1.0f);
     else if (key == "clay_melt")           in.clay_melt           = clampf(std::strtof(val.c_str(), nullptr), 0.0f, 1.0f);
     else if (key == "density_coarse_mult") in.density_coarse_mult = clampf(std::strtof(val.c_str(), nullptr), 1.0f, 4.0f);
     else if (key == "density_fine_mult")   in.density_fine_mult   = clampf(std::strtof(val.c_str(), nullptr), 0.2f, 1.0f);
+    else if (key == "per_brush_sizes")     in.per_brush_sizes     = parse_bool(val);
     else if (key == "autosmooth")          in.autosmooth          = parse_bool(val);
     else if (key == "camera_fov")          in.camera_fov          = clampf(std::strtof(val.c_str(), nullptr), 15.0f, 80.0f);
     else if (key == "show_fps")            in.show_fps            = parse_bool(val);
@@ -386,7 +392,10 @@ void settings_reset(InputState& input) {
     InputState fresh;   // the single source of defaults — no second copy to drift
     for (int i = 0; i < (int)InputProfile::COUNT; i++) input.profiles[i] = fresh.profiles[i];
     input.active_profile     = fresh.active_profile;
-    input.brush_size         = fresh.brush_size;
+    // brush_size is session state now, so Reset leaves it where the user put it —
+    // same as it leaves the current brush and the smooth lock alone.
+    input.per_brush_sizes    = fresh.per_brush_sizes;
+    input.seed_brush_sizes();
     input.autosmooth         = fresh.autosmooth;
     input.matcap_contrast    = fresh.matcap_contrast;
     input.show_fps           = fresh.show_fps;

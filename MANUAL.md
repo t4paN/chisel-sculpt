@@ -64,6 +64,15 @@ the camera, so you never have to switch tools just to look around.
 | Shift | **Smooth** | Hold Shift with any brush to smooth instead. In Paint mode it blends colours instead of geometry. |
 | M | **Mask** | Paints a protection mask (see Masking below). |
 
+### Clay's own controls
+
+**melt** is a slider that appears in the toolbar only while Clay is active: how hard clay
+cuts raised areas back down to its plane. 0 (default) rides over them untouched, so a
+stroke crosses earlier work smoothly; 1 flattens everything to the stroke plane.
+
+Clay's **hardness** is its stamp's edge feather rather than a radial falloff: high is a
+crisp chisel rim, low melts the rim toward the centre.
+
 ### Stroke modifiers
 
 | Key | Effect |
@@ -93,8 +102,14 @@ On the web build these drags use pointer lock — your browser will show its sta
 proportional, so it feels the same at 8 px as at 400. Handy when dragging isn't —
 on a trackpad, or when you just want to nudge a size you already like.
 
-Brush size is shared: strength, hardness and spacing are remembered per brush and
-per input profile, but size is one number everywhere.
+Strength, hardness and spacing are remembered per brush and per input profile. Size
+is one number shared by every brush — unless you turn on **Individual brush sizes**
+in the burger menu, which gives each brush its own (handy when Move and Smooth want
+to be large while Paint and Crease stay small).
+
+Brush size is deliberately **not** remembered between sessions, on or off: the right
+size depends on the model in front of you, not on what you were doing last week. The
+toggle itself is remembered; the sizes it stashes last for the session.
 
 ### Pen pressure
 

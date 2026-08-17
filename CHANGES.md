@@ -2,6 +2,43 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-08-17 — Brush size stops persisting, and goes per-brush
+
+Two changes to how brush size is remembered.
+
+**Brush size no longer survives a restart.** It was persisted on 2026-08-06 along with
+everything else. Wrong call: where the size wants to be is a property of the model in
+front of you, so restoring last session's number hands you a brush scaled for something
+you are no longer looking at. The key is gone from the writer and the parser — an existing
+stored blob still carries `brush_size=`, and it now falls through as an unknown key, which
+is exactly the migration we want (dropped on read, not re-emitted on the next write).
+
+**The default went 50 → 70 px** as a direct consequence. That number used to be a
+first-run value almost nobody saw twice; now it is what *every* session opens on, so it
+had to be a comfortable working size rather than a cold start.
+
+A side effect worth having: the change check is "serialize and compare", so a setting that
+is not serialized cannot mark settings dirty. Dragging the size slider no longer schedules
+a settings write at all.
+
+`Reset settings to defaults` also stops touching it, on the same logic that it does not
+reset the current brush or the smooth lock — size is session state now.
+
+**"Individual brush sizes" (burger menu, off by default).** On, each brush remembers its
+own size, exactly the way strength/hardness/spacing already do through `switch_brush` —
+Move and Smooth can sit large while Paint and Crease stay small. Three details:
+
+- It is a **separate array on InputState, not a field in `BrushSettings`**. That struct is
+  what `ProfileSettings` stashes per input device, and size is not a device trait — that
+  was settled on 2026-08-07 when size was moved *out* of the profiles.
+- The **toggle persists, the sizes do not**, for the same reason the shared size no longer
+  does.
+- The stash is written on every brush switch **whether or not the toggle is on**, and
+  re-seeded from the live size when the checkbox changes. Between them, flipping the toggle
+  can never make the brush under the cursor jump, and turning it on starts from the sizes
+  you were actually just using. The smooth lock routes through the same save/restore
+  (double-tap Shift and its release), so Smooth gets its own size too.
+
 ## 2026-08-11 — Incremental save
 
 A square **+** button next to Save in the top toolbar writes the *next numbered copy*

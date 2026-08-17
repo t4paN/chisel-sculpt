@@ -807,6 +807,7 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("How strongly clay cuts raised areas down to its plane "
                               "(0 = ride over them untouched, 1 = flatten to the plane)");
+
     }
 
     // Brush-alpha (stamp) picker: Round + built-ins + custom, then a "＋" to load an
@@ -960,8 +961,9 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
                                   "profile takes over; move the mouse and the mouse profile\n"
                                   "does. Never mid-stroke.\n\n"
                                   "Per profile: strength, hardness, spacing, max effect.\n"
-                                  "Shared: brush size, autosmooth, lighting, colours,\n"
-                                  "mirror, density.\n\n"
+                                  "Shared: brush size (per brush if you turn that on\n"
+                                  "below), autosmooth, lighting, colours, mirror,\n"
+                                  "density.\n\n"
                                   "Pick a tab here to edit the other profile — switching\n"
                                   "is paused while this menu is open.");
             }
@@ -989,6 +991,19 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
                                   "Defaults: 60%% mouse, 100%% tablet.");
 
             ImGui::Separator();
+
+            // Per-brush sizes. Seeded from the live size on the frame the box changes, so
+            // flipping it never moves the brush that is currently under the cursor —
+            // the divergence starts from where you already were.
+            if (ImGui::Checkbox("Individual brush sizes", &input.per_brush_sizes))
+                input.seed_brush_sizes();
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Off: one brush size for every brush.\n\n"
+                                  "On: each brush remembers its own, the way strength and\n"
+                                  "spacing already do — Move and Smooth can sit large\n"
+                                  "while Paint and Crease stay small, and switching\n"
+                                  "between them keeps both.\n\n"
+                                  "Sizes last for the session only; they are not saved.");
 
             // Lighting dial: sun label + the matcap blend (0 = flat, 1 = keyed).
             sun_glyph(ImGui::GetFrameHeight(), input.matcap_contrast);

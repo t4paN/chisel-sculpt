@@ -18,7 +18,10 @@ InputState::InputState()
     , shift_held(false), ctrl_held(false), alt_held(false)
     , current_brush(BrushType::DRAW)
     , smooth_locked(false), subtract_locked(false)
-    , brush_size(50.0f), brush_strength(0.5f), brush_hardness(0.5f), brush_spacing(0.25f)
+    // 70, not the historical 50: since 2026-08-17 the size is no longer restored from
+    // the last session, so this number is what every session actually opens on rather
+    // than a one-time first-run value — worth it being a comfortable working size.
+    , brush_size(70.0f), brush_strength(0.5f), brush_hardness(0.5f), brush_spacing(0.25f)
     , per_brush{}
     , active_profile(InputProfile::MOUSE)
     , profiles{}
@@ -85,6 +88,7 @@ InputState::InputState()
         per_brush[i].hardness = brush_hardness;
         per_brush[i].spacing  = brush_spacing;
     }
+    seed_brush_sizes();
     per_brush[(int)BrushType::MASK].strength = 1.0f;      // 100% strength
     per_brush[(int)BrushType::MASK].hardness = 0.64f;     // 64% hardness
     per_brush[(int)BrushType::PAINT].strength = 0.5f;     // soft build-up by default
@@ -123,16 +127,25 @@ InputState::InputState()
     profiles[(int)InputProfile::TABLET].max_effect = 1.0f;
 }
 
+void InputState::seed_brush_sizes() {
+    for (int i = 0; i < (int)BrushType::COUNT; i++) brush_size_of[i] = brush_size;
+}
+
 void InputState::switch_brush(BrushType to) {
     if (to != BrushType::PAINT) color_pick_active = false;
     if (to == current_brush) return;
     per_brush[(int)current_brush].strength = brush_strength;
     per_brush[(int)current_brush].hardness = brush_hardness;
     per_brush[(int)current_brush].spacing  = brush_spacing;
+    // The size stash is kept up to date whether or not the toggle is on, so turning it
+    // on mid-session starts from the sizes you were actually using rather than from
+    // whatever they were when you last flipped it. Only the restore is gated.
+    brush_size_of[(int)current_brush] = brush_size;
     current_brush = to;
     brush_strength = per_brush[(int)to].strength;
     brush_hardness = per_brush[(int)to].hardness;
     brush_spacing  = per_brush[(int)to].spacing;
+    if (per_brush_sizes) brush_size = brush_size_of[(int)to];
 }
 
 // Which per_brush slot the live brush_strength/hardness/spacing currently mirror. The
@@ -181,9 +194,11 @@ void InputState::clear_smooth_lock() {
     per_brush[(int)BrushType::SMOOTH].strength = brush_strength;
     per_brush[(int)BrushType::SMOOTH].hardness = brush_hardness;
     per_brush[(int)BrushType::SMOOTH].spacing  = brush_spacing;
+    brush_size_of[(int)BrushType::SMOOTH] = brush_size;
     brush_strength = per_brush[(int)current_brush].strength;
     brush_hardness = per_brush[(int)current_brush].hardness;
     brush_spacing  = per_brush[(int)current_brush].spacing;
+    if (per_brush_sizes) brush_size = brush_size_of[(int)current_brush];
     smooth_locked = false;
 }
 
@@ -694,9 +709,12 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
                         g_input->per_brush[(int)g_input->current_brush].strength = g_input->brush_strength;
                         g_input->per_brush[(int)g_input->current_brush].hardness = g_input->brush_hardness;
                         g_input->per_brush[(int)g_input->current_brush].spacing  = g_input->brush_spacing;
+                        g_input->brush_size_of[(int)g_input->current_brush] = g_input->brush_size;
                         g_input->brush_strength = g_input->per_brush[(int)BrushType::SMOOTH].strength;
                         g_input->brush_hardness = g_input->per_brush[(int)BrushType::SMOOTH].hardness;
                         g_input->brush_spacing  = g_input->per_brush[(int)BrushType::SMOOTH].spacing;
+                        if (g_input->per_brush_sizes)
+                            g_input->brush_size = g_input->brush_size_of[(int)BrushType::SMOOTH];
                         g_input->smooth_locked = true;
                     } else {
                         g_input->clear_smooth_lock();

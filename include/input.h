@@ -69,11 +69,30 @@ struct InputState {
     BrushType current_brush;
     bool smooth_locked;
     bool subtract_locked;
-    float brush_size;       // pixels (shared across all brushes AND both profiles)
+    // Pixels. Shared across both profiles, and — unless per_brush_sizes is on — across
+    // every brush. NOT persisted (dropped 2026-08-17): where the size wants to be is a
+    // property of what you are sculpting right now, so restoring last session's number
+    // hands you a brush scaled for a model you are no longer looking at.
+    float brush_size;
     float brush_strength;   // 0..1 (per-brush, synced via switch_brush)
     float brush_hardness;   // 0..1 (per-brush, synced via switch_brush)
     float brush_spacing;    // fraction of brush radius between dabs (0.05..1.0, per-brush)
     BrushSettings per_brush[(int)BrushType::COUNT];
+
+    // "Individual brush sizes" (burger menu). On: brush_size saves/restores per brush
+    // exactly the way brush_strength does, so Move can sit at 200px while Paint sits at
+    // 40 and neither disturbs the other. Off (default): one shared size, the historical
+    // behaviour.
+    //
+    // The TOGGLE persists but the sizes it stashes do not, for the same reason
+    // brush_size itself does not. Deliberately NOT folded into BrushSettings: that
+    // struct is what ProfileSettings stashes per input device, and size is not a device
+    // trait (see the 2026-08-07 note above).
+    bool  per_brush_sizes = false;
+    float brush_size_of[(int)BrushType::COUNT];
+    // Point every slot at the live brush_size. Called when the toggle flips and on
+    // settings reset, so neither can make the brush under the cursor jump.
+    void seed_brush_sizes();
 
     // Mouse/tablet brush-feel profiles. The live fields above are the active
     // profile's working copy; profiles[] holds the other one's parked values.
