@@ -18,4 +18,8 @@ struct EntityRecord {
     // be migrated to canonical numbering before the stack is usable. Transient —
     // never persisted.
     bool          legacy_numbering = false;
+    // Vertex count the file recorded for the working mesh. v7 omits the surface
+    // of a locked entity and regenerates it from the stack, so this is the only
+    // cross-check that the regeneration matched what was saved. Transient.
+    uint32_t      stored_vertex_count = 0;
 };

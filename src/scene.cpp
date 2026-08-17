@@ -439,6 +439,15 @@ void Scene::load_entities(std::vector<EntityRecord>& records,
                 multires_stack_init_from_lock(up->multires, up->mesh, lvl);
                 load_flattened_++;
             }
+            // v7 files omit the cached surface entirely, so the cascade above is
+            // the only source of geometry — say so loudly if it disagrees with
+            // what the file recorded. The regenerated mesh stays ground truth
+            // (same as for older files); this is an alarm, not a failure.
+            if (rec.stored_vertex_count &&
+                rec.stored_vertex_count != up->mesh.vertex_count())
+                std::printf("[load] entity %u: cascade produced %u verts, file "
+                            "recorded %u\n",
+                            up->id, up->mesh.vertex_count(), rec.stored_vertex_count);
             if (!saved_mask.empty() && saved_mask.size() == up->mesh.vertex_count())
                 up->mesh.mask = std::move(saved_mask);
             if (!saved_color.empty() && saved_color.size() == up->mesh.vertex_count())

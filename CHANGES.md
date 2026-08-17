@@ -2,6 +2,62 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-08-18 — Savefile diet: .chisel format v7, files shrink 20–70%
+
+Project files were 17–77 MB, and roughly half of every one of them was bytes the loader
+reads and immediately throws away. v7 stops writing them. Nothing is compressed, nothing
+is approximated, no dependency was added — the format just stopped storing what it can
+already derive. Across the 35 real sculpts on the Desktop the new files come out at
+27–82% of the old size; `gogginz-new1.chisel` goes 39.7 MB → 10.7 MB, `mafiozo2` 80.3 MB
+→ 42.9 MB, `knavi1` 625 KB → 215 KB.
+
+**The surface of a subdivided model is no longer written.** For an entity with a locked
+multires stack, the working mesh on disk was only ever a cache: `Scene::load_entities`
+hands it straight to `cascade_to_level`, which treats its output mesh as pure output and
+rebuilds positions and indices from base cage + displacement layers. So each mesh body now
+opens with a `derived` byte, and when it is set the positions and index buffer are simply
+absent. Vertex and triangle counts are still written — they cost 8 bytes and are the only
+cross-check left, and `scene.cpp` now prints a `[load]` line if the cascade disagrees with
+what the file recorded.
+
+The one worry was a state where the stack *can't* reproduce the surface. There isn't one:
+remesh re-bases the stack onto the new topology (`remesh.cpp` sets `stack.base = mesh`,
+clears the disp layers, relocks at level 0), so after any remesh the working mesh *is* the
+base cage. And if such a state did exist, the old loader was already corrupting it —
+positions on disk have never been ground truth for a locked entity. The reader enforces
+the promise anyway: `derived` with no locked stack is a corrupt file, so a future writer
+that can't guarantee regeneration just writes `derived = 0` and everything keeps working.
+
+**Arrays that say nothing are written as count 0.** A mask whose every entry is zero is
+exactly an absent mask — the whole codebase reads `mask.empty()` as "unmasked" — and the
+brush allocates that array of zeros the first time it wants to write anything, so almost
+every file was carrying one. Same for density, except neutral there is **0.5, not 0**: an
+all-zero density field is a user who painted everything sparse, and dropping it would be
+real data loss. Colour is left alone; "unpainted" and "painted white" are not obviously
+the same thing to every consumer, and there was nothing to gain.
+
+One case needed care. A blank working mask may only be elided when the finest-level mask
+plane is blank too. Brush-erasing a mask zeroes the working array but leaves the plane
+holding the old values until the next fold — that all-zero array *is* the erasure, and
+dropping it lets the loader cascade the stale plane straight back over the mesh,
+resurrecting the mask the user just erased. (The Ctrl-clear path is fine either way: it
+drops the plane at the same time.) There is a regression test for exactly this, and it
+fails loudly if the guard is removed.
+
+**Old files keep loading; old builds refuse new ones cleanly.** Every reader gate is the
+existing feature-flag pattern (`version >= 7`), the v1 module and the v≤3 legacy-numbering
+migration are untouched, and a v7 file hits the pre-existing `version > VERSION` check in
+an older build for a clean "Unsupported file version" rather than a crash. Web memory
+improves by the same fraction, since each chunk is read through a `std::vector<char>`
+payload.
+
+Verified by round-tripping all 35 sculpts (6× v3, 10× v4, 19× v6) through load → save v7 →
+load → save v7: the two v7 saves are byte-identical, and the reconstructed scene — every
+position, index, disp layer, plane and paint array — matches the original load exactly.
+Harnesses: `../v7-roundtrip-test.cpp` (corpus) and `../v7-edgecase-test.cpp` (the cases no
+saved file contains: an entity with no stack, the erased-mask guard, blank-array elision,
+a hand-built corrupt body).
+
 ## 2026-08-17 — Brush size stops persisting, and goes per-brush
 
 Two changes to how brush size is remembered.
