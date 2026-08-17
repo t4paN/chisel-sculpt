@@ -3023,6 +3023,22 @@ int main(int argc, char* argv[]) {
             if (stem.size() >= ext.size()
                 && stem.compare(stem.size() - ext.size(), ext.size(), ext) == 0)
                 stem.resize(stem.size() - ext.size());
+            // A browser renames a colliding download to "bust_001 (1).chisel", and
+            // opening that file makes it the current project. Strip the marker before
+            // reading the counter below, or "bust_001 (1)" parses as an un-numbered
+            // stem and the next save compounds into "bust_001 (1)_001".
+            if (!stem.empty() && stem.back() == ')') {
+                size_t op = stem.find_last_of('(');
+                if (op != std::string::npos && op + 1 < stem.size() - 1) {
+                    bool all_digits = true;
+                    for (size_t i = op + 1; i + 1 < stem.size(); i++)
+                        if (!std::isdigit((unsigned char)stem[i])) { all_digits = false; break; }
+                    if (all_digits) {
+                        while (op > 0 && stem[op - 1] == ' ') op--;   // Chrome " (1)", Firefox "(1)"
+                        stem.resize(op);
+                    }
+                }
+            }
             int n = 0;
             size_t us = stem.find_last_of('_');
             if (us != std::string::npos && us + 1 < stem.size()) {
