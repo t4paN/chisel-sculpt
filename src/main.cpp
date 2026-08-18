@@ -2194,7 +2194,15 @@ int main(int argc, char* argv[]) {
                 // dispatched has the pressure-scaled radius, so pairing the step with
                 // the raw slider left a light-pressure stroke stepping up to 1/0.40 =
                 // 2.5x its own footprint — gaps at nothing but a soft touch.
-                float spacing = eff_brush_size * eff.spacing;
+                // Ceiling enforced HERE, not just on the slider: eff comes straight out
+                // of per_brush[], which load, profile-switch and brush-switch all write.
+                // Clay shipped a visible stamp lattice once because one of those paths
+                // handed it another brush's spacing, so the invariant lives at the point
+                // of use where nothing can route around it. See max_spacing_for.
+                float eff_spacing = std::min(eff.spacing,
+                                             max_spacing_for(is_smooth ? BrushType::SMOOTH
+                                                                       : input.current_brush));
+                float spacing = eff_brush_size * eff_spacing;
 
                 // Foreshortening. This step is in screen pixels, but the dab deposits
                 // into a world-space SPHERE of a radius fixed by the orbit distance

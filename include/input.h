@@ -21,6 +21,21 @@ struct BrushSettings {
     float spacing;
 };
 
+// Clay's stamp is a raking SQUARE, not a radial falloff, so it needs its dabs to
+// overlap heavily: consecutive stamps have to blend into a continuous band and the
+// frame has to turn a little at a time. Past ~0.15 the individual square footprints
+// stop overlapping enough to merge and the stroke prints a lattice of separate
+// stamps — diagonal, because a low-hardness clay_square is a max-norm pyramid whose
+// creases run corner to corner. Clay's own default is 0.10 (see seed_brush_sizes).
+//
+// This is a CEILING, not a default, and it is enforced at the point of use as well
+// as on the slider: the lattice shipped once already because a persistence path
+// handed clay a spacing from another brush, and a value that only the UI clamps is
+// one refactor away from coming back.
+inline float max_spacing_for(BrushType b) {
+    return b == BrushType::CLAY ? 0.15f : 1.0f;
+}
+
 // Which input device the brush-feel settings are tuned for. Switched by hand from
 // the burger menu, NOT auto-detected: a pen and a mouse can both be live at once
 // (and on web every pen is also a mouse), so any auto-switch has to guess, and

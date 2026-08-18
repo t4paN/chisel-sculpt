@@ -297,8 +297,12 @@ static void apply_slider_delta(float dx) {
             }
             case InputState::SliderMode::SPACING: {
                 float delta = g_input->slider_accum * 0.001f;
+                // Ceiling is per-brush: clay's raking square needs overlapping dabs
+                // and breaks up into a stamp lattice above 0.15 (see max_spacing_for).
+                int sb = g_input->smooth_locked ? (int)BrushType::SMOOTH
+                                                : (int)g_input->current_brush;
                 float min_delta = 0.05f - g_input->slider_start_value;
-                float max_delta = 1.0f - g_input->slider_start_value;
+                float max_delta = max_spacing_for((BrushType)sb) - g_input->slider_start_value;
                 delta = std::max(min_delta, std::min(max_delta, delta));
                 g_input->slider_accum = delta / 0.001f;
                 g_input->brush_spacing = g_input->slider_start_value + delta;

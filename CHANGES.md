@@ -2,7 +2,37 @@
 
 Short, chronological log of notable changes. Newest on top.
 
-## 2026-08-18 — GL backend: plane cache replaces per-dab readbacks (⚠️ awaiting native sculpt test)
+## 2026-08-18 — v0.2.8 — Clay: spacing ceiling kills the diagonal stamp lattice
+
+Clay strokes had been printing a regular lattice of diagonal ticks — an X raked across
+the stroke edges, most visible on soft (low-hardness) strokes. It read as a brush
+regression and it was not one: **clay's kernel is byte-identical to v0.2.5.** The brush
+was simply being handed the wrong dab spacing.
+
+- **Clay needs overlapping dabs.** Its stamp is a raking *square*, not a radial falloff,
+  so consecutive stamps have to blend into a continuous band and the frame has to turn a
+  little at a time. Its tuned default is **0.10** (dropped from 0.25 during the clay arc
+  for exactly this reason). Past ~0.15 the individual square footprints stop overlapping
+  enough to merge and the stroke prints each stamp separately.
+- **Why the lattice is diagonal.** At low hardness `clay_square`'s `max(|u|,|v|)` has a
+  gradient crease wherever `|u| == |v|` — four ridges running corner to corner — so the
+  stamp is a *pyramid* with an X moulded into it. High hardness hides this: the flat top
+  swallows the creases. Low hardness plus wide spacing prints one X per dab.
+- **Spacing is now ceilinged per brush** (`max_spacing_for`, `include/input.h`): 0.15 for
+  Clay, 1.0 for everything else. Enforced in three places — the slider (so the UI can't
+  display a value Clay won't honour), settings load (so a stored out-of-range value is
+  retired rather than reloaded every launch), and **at the point of use in the dab-step
+  loop**, which is the one nothing can route around.
+
+The point-of-use guard is the load-bearing one. The on-disk blob was already in range
+(`brush.clay=0.994 0.023 0.114`) while the live value read 36% with Clay active — so
+something at runtime, not the file, was substituting another brush's spacing.
+
+**Still open:** that live-vs-stored mismatch. The ceiling makes the symptom unreachable
+for Clay, but whatever path drops the per-brush value is presumably also mis-assigning
+strength and hardness, where there is no visible tell.
+
+## 2026-08-18 — GL backend: plane cache replaces per-dab readbacks
 
 Native GL only — the web/WebGPU build already did all of this and is untouched.
 

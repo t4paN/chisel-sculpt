@@ -236,12 +236,16 @@ void parse_rgb(const std::string& v, float* out) {
 // Every value is clamped to its slider's range on the way in. The blob is user-visible
 // (a file on native, devtools-editable on web) and a persisted out-of-range value would
 // come back every launch — the one bug class persistence newly makes permanent.
-void apply_brush(const std::string& v, BrushSettings& b) {
+void apply_brush(const std::string& v, BrushSettings& b, BrushType which) {
     float st, hd, sp;
     if (std::sscanf(v.c_str(), "%f %f %f", &st, &hd, &sp) != 3) return;
     b.strength = clampf(st, 0.01f, 1.0f);
     b.hardness = clampf(hd, 0.01f, 1.0f);
-    b.spacing  = clampf(sp, 0.05f, 1.0f);
+    // Per-brush spacing ceiling, not a flat 1.0 — clay breaks up into a stamp lattice
+    // above 0.15 (see max_spacing_for). A blob written before this clamp existed can
+    // carry clay a spacing from another brush, which is exactly how the lattice
+    // shipped; clamping on the way in retires that blob instead of reloading it.
+    b.spacing  = clampf(sp, 0.05f, max_spacing_for(which));
 }
 
 void apply_profile_key(ProfileSettings& p, const std::string& key, const std::string& val) {
@@ -251,7 +255,7 @@ void apply_profile_key(ProfileSettings& p, const std::string& key, const std::st
     else if (key.compare(0, 6, "brush.") == 0) {
         std::string name = key.substr(6);
         for (int i = 0; i < (int)BrushType::COUNT; i++)
-            if (name == kBrushKey[i]) { apply_brush(val, p.per_brush[i]); return; }
+            if (name == kBrushKey[i]) { apply_brush(val, p.per_brush[i], (BrushType)i); return; }
     }
 }
 
