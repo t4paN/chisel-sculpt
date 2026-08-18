@@ -2,6 +2,34 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-08-18 — GL backend: plane cache replaces per-dab readbacks (⚠️ awaiting native sculpt test)
+
+Native GL only — the web/WebGPU build already did all of this and is untouched.
+
+- **Every brush dab on GL was doing 4–5 blocking `glReadPixels` syncs** inside
+  `set_anchor`: three 1×1 cursor samples (tri-id / normal / depth) plus the area-normal
+  region read (up to 97×97), and for Clay a fifth (area depth). The architecture rule —
+  no GPU readback during strokes, sample the pen-down plane cache instead — was obeyed
+  by WebGPU and quietly violated by GL (see `~/CHISEL/dab-readback-perf-handoff.md`).
+- **Now both backends share the one plane-cache path.** `render_screen_buffers` kicks
+  the same async full-plane reads on GL; GL tickets resolve synchronously, so the cache
+  lands inside the call — one full-screen read per screen-buffer refresh (idle/pen-down)
+  instead of 4–5 stalls per dab. All the `#if CHISEL_BACKEND_WEBGPU` forks in
+  `sample_depth/normal/triid/bilinear/area_normal` are gone, along with the GL scratch
+  buffers. The per-frame swapchain depth read in `sample_on_model` went the same way.
+- **Seam contract fix underneath:** GL's `read_target_region` returned multi-row reads
+  bottom-up (raw `glReadPixels` order) while WebGPU returned them top-down. GL now
+  row-swaps to top-down, matching the documented `gpu.h` convention. The CPU mask
+  fallback's compensating flip in `walk_brush_region` is removed with it — which also
+  fixes that fallback having been vertically flipped had it ever run on WebGPU, and two
+  latent GL flips: the bilinear 2×2 quad and the off-anchor screen-space falloff.
+- Behavior note: GL cursor samples now read the pen-down/idle-refresh snapshot, not the
+  live FBO — so an entity-pick pass overwriting the shared target no longer corrupts
+  brush anchoring on GL (it already couldn't on WebGPU).
+
+Both native targets build. No shader changes, so no Tint exposure; the web build is
+bit-for-bit unaffected in behavior.
+
 ## 2026-08-18 — Savefile diet: .chisel format v7, files shrink 20–70%
 
 Project files were 17–77 MB, and roughly half of every one of them was bytes the loader

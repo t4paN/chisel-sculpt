@@ -438,7 +438,8 @@ struct OffscreenPassDesc {
 RenderPass begin_offscreen_pass(Device&, OffscreenTarget&, const OffscreenPassDesc&);
 
 // Read a w×h region of colour `attachment` back to `out` (pixel layout implied by
-// that attachment's TexFormat). `y` is top-left origin (flipped to GL internally).
+// that attachment's TexFormat). `y` is top-left origin (flipped to GL internally),
+// and rows land top-down on BOTH backends: out row 0 = the requested `y`.
 // Synchronous — legal only at the discrete readback points, never mid-stroke.
 // (GL: glReadBuffer+glReadPixels. WebGPU: copyTextureToBuffer + map, like map_read.)
 void read_target_region(Device&, OffscreenTarget&, uint32_t attachment,

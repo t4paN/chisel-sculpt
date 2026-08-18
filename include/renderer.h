@@ -173,13 +173,15 @@ struct Renderer {
     void read_triid_region(int x, int y, int w, int h, uint32_t* out);
     void read_bary_region(int x, int y, int w, int h, float* out);
 
-    // Cursor-sample plane cache — the in-frame read path for the screen buffers.
-    // On WebGPU a 1×1 readback is a full GPU sync (and a fatal suspend on web), so
-    // render_screen_buffers kicks an async full-plane read of depth/normal/triid,
-    // poll_plane_reads() lands it a frame or two later, and sample_* index the CPU
-    // copy (false = cache not landed yet / out of bounds — caller keeps its last
-    // value or skips the dab). On GL sample_* are the same cheap immediate 1×1
-    // glReadPixels as before and the cache machinery is a no-op.
+    // Cursor-sample plane cache — the in-frame read path for the screen buffers,
+    // on BOTH backends. render_screen_buffers kicks an async full-plane read of
+    // depth/normal/triid and every sample_* indexes the CPU copy (false = cache not
+    // landed yet / out of bounds — caller keeps its last value or skips the dab).
+    // On WebGPU poll_plane_reads() lands it a frame or two later (a blocking read
+    // is a full GPU sync, and a fatal suspend on web). On GL the tickets resolve
+    // synchronously, so the cache lands inside render_screen_buffers itself — one
+    // full-screen read per refresh instead of 4–5 glReadPixels stalls per dab
+    // (which is what set_anchor used to cost, see dab-readback-perf-handoff.md).
     void poll_plane_reads();                          // call once per frame
     bool sample_depth(int x, int y, float* out);      // attachment 0, linear distance
 
@@ -193,7 +195,6 @@ struct Renderer {
     // silhouette, or the far wall of an existing groove) a blend of the 2x2 lands on
     // NEITHER surface, so if the tap spread exceeds it we return the nearest tap
     // instead. Pass the dab's world radius scaled small; <= 0 disables the guard.
-    // One region read on GL, direct plane-cache indexing on WebGPU — never 4 taps.
     bool sample_depth_bilinear(float fx, float fy, float* out, float max_spread);
     bool sample_normal(int x, int y, float out[3]);   // attachment 1, raw normal texel
     bool sample_triid(int x, int y, uint32_t* out);   // attachment 2
@@ -202,11 +203,6 @@ struct Renderer {
     // returns. Background texels (zero-length normal) are skipped, so a dab hanging
     // off the silhouette still averages only what it actually covers. Returns false
     // if nothing on-model was hit; the caller then keeps the point normal.
-    //
-    // Cost is backend-shaped and deliberately NOT a per-tap sample_normal loop: on
-    // WebGPU the taps come free out of the landed plane cache, while on GL each 1×1
-    // sample is its own glReadPixels sync, so that path takes ONE region read into a
-    // persistent scratch buffer and indexes it. No per-dab allocation on either.
     // Disc-averaged surface sample around a cursor pixel (centre-weighted, on-model
     // texels only, same pen-down plane cache as sample_normal/depth). Always fills
     // out[3] with the averaged normal. When out_avg is non-null, additionally reads
@@ -215,9 +211,6 @@ struct Renderer {
     // area-averaged anchor (Clay's deposition plane).
     bool sample_area_normal(int cx, int cy, int radius_px, float out[3],
                             float out_avg[3] = nullptr);
-    std::vector<float> area_norm_scratch;             // GL region-read scratch (persistent)
-    std::vector<float> area_depth_scratch;            // GL region-read scratch (persistent)
-#if defined(CHISEL_BACKEND_WEBGPU)
     std::vector<float>    plane_depth;
     std::vector<float>    plane_norm;                 // 3 floats per pixel
     std::vector<uint32_t> plane_triid;
@@ -226,7 +219,6 @@ struct Renderer {
     gpu::ReadTicket plane_tk[3] = {0, 0, 0};
     bool plane_pending = false;
     bool plane_valid   = false;
-#endif
 
     void draw_background(int w, int h);
     // Fill + upload the matcap Params UBO (camera + per-draw flags); shared by

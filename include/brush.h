@@ -384,11 +384,10 @@ struct BrushStroke {
 
         int stride = (debug_stride_override >= 1) ? debug_stride_override : 1;
 
-        int cached_base_row = cached_h - region_y - region_h;
         uint32_t tc  = mesh.tri_count();
 
         for (int py = 0; py < region_h; py += stride) {
-            int cached_row = cached_base_row + py;
+            int cached_row = region_y + py;   // read_*_region rows are top-down (gpu.h)
             for (int px = 0; px < region_w; px += stride) {
                 int idx = cached_row * cached_w + (region_x + px);
                 uint32_t tri_id = cached_triid[idx];

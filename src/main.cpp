@@ -288,22 +288,15 @@ bool wrap_cursor(GLFWwindow* window, InputState& input, int win_w, int win_h) {
 // after the screen-buffer render; forcing false there would drop the sculpt latch
 // between rapid consecutive strokes).
 static bool sample_on_model(Renderer& renderer, int x, int y, int screen_h, bool* on_model) {
-#ifdef CHISEL_BACKEND_WEBGPU
-    // No cheap read of the swapchain depth on WebGPU, so the on-model latch samples
-    // the screen-target's linear-depth attachment (0, `-viewPos.z`, cleared to 1000)
-    // via the renderer's CPU plane cache — no in-frame readback.
+    // The on-model latch samples the screen-target's linear-depth attachment
+    // (0, `-viewPos.z`, cleared to 1000) via the renderer's CPU plane cache — no
+    // in-frame readback on either backend. (GL used to glReadPixels the swapchain
+    // depth here: one more per-frame sync, gone with the shared plane cache.)
     (void)screen_h;
     float d = 1000.0f;
     if (!renderer.sample_depth(x, y, &d)) return false;
     *on_model = d < 500.0f;  // clear = 1000; geometry linear-depth is « far plane (~100)
     return true;
-#else
-    (void)renderer;
-    float d;
-    glReadPixels(x, screen_h - y, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &d);
-    *on_model = d < 1.0f; // 1.0 = clear value = no geometry
-    return true;
-#endif
 }
 
 int main(int argc, char* argv[]) {

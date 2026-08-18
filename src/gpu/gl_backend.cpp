@@ -509,6 +509,23 @@ void read_target_region(Device&, OffscreenTarget& t, uint32_t attachment,
     glReadBuffer(GL_COLOR_ATTACHMENT0 + attachment);
     glReadPixels(x, t.height - y - h, w, h, fmt, type, out);  // GL origin is bottom-left
     glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+
+    // glReadPixels fills rows bottom-up; the seam contract (and the webgpu backend)
+    // is top-down, row 0 = the requested y. Swap in place so multi-row consumers
+    // (the plane cache, the CPU mask fallback) can index both backends identically.
+    if (h > 1) {
+        size_t row = (size_t)texformat_out_bpp(t.color_fmt[attachment]) * (size_t)w;
+        static std::vector<uint8_t> tmp;
+        tmp.resize(row);
+        uint8_t* p = (uint8_t*)out;
+        for (int i = 0; i < h / 2; ++i) {
+            uint8_t* a = p + (size_t)i * row;
+            uint8_t* b = p + (size_t)(h - 1 - i) * row;
+            std::memcpy(tmp.data(), a, row);
+            std::memcpy(a, b, row);
+            std::memcpy(b, tmp.data(), row);
+        }
+    }
 }
 
 // ---- Async readback tickets ----------------------------------------------------

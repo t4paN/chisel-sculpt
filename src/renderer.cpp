@@ -1996,7 +1996,6 @@ void Renderer::render_screen_buffers(const Camera& cam, int w, int h) {
     gpu::end_render_pass(rp);   // rebinds the default framebuffer
     gpu::release_bind_group(grp);
 
-#if defined(CHISEL_BACKEND_WEBGPU)
     // Kick the async plane reads right behind the render (queue order guarantees the
     // copies see this pass's output even if a pick pass overwrites the FBO later).
     // poll_plane_reads() lands them; until then sample_* report not-ready.
@@ -2008,11 +2007,14 @@ void Renderer::render_screen_buffers(const Camera& cam, int w, int h) {
     plane_tk[2] = gpu::read_target_region_async(gpu_dev, screen_target, 2, 0, 0, w, h);
     plane_kick_w = w; plane_kick_h = h;
     plane_pending = true;
-#endif
+
+    // On GL the tickets resolved synchronously at kick, so land them now — the cache
+    // is valid before this returns and a pen-down press never sees a not-ready gap.
+    // On WebGPU nothing is ready yet; this no-ops and the per-frame poll lands them.
+    poll_plane_reads();
 }
 
 void Renderer::poll_plane_reads() {
-#if defined(CHISEL_BACKEND_WEBGPU)
     if (!plane_pending) return;
     for (int i = 0; i < 3; ++i)
         if (!gpu::ticket_ready(gpu_dev, plane_tk[i])) return;
@@ -2028,19 +2030,12 @@ void Renderer::poll_plane_reads() {
     plane_pending = false;
     plane_w = plane_kick_w; plane_h = plane_kick_h;
     plane_valid = ok;
-#endif
 }
 
 bool Renderer::sample_depth(int x, int y, float* out) {
-#if defined(CHISEL_BACKEND_WEBGPU)
     if (!plane_valid || x < 0 || y < 0 || x >= plane_w || y >= plane_h) return false;
     *out = plane_depth[(size_t)y * plane_w + x];
     return true;
-#else
-    if (x < 0 || y < 0 || x >= screen_target.width || y >= screen_target.height) return false;
-    read_depth_region(x, y, 1, 1, out);
-    return true;
-#endif
 }
 
 bool Renderer::sample_depth_bilinear(float fx, float fy, float* out, float max_spread) {
@@ -2053,30 +2048,18 @@ bool Renderer::sample_depth_bilinear(float fx, float fy, float* out, float max_s
     float tx = sx - (float)x0;
     float ty = sy - (float)y0;
 
-    int bw, bh;
-#if defined(CHISEL_BACKEND_WEBGPU)
     if (!plane_valid) return false;
-    bw = plane_w; bh = plane_h;
-#else
-    bw = screen_target.width; bh = screen_target.height;
-#endif
-    if (x0 < 0 || y0 < 0 || x0 + 1 >= bw || y0 + 1 >= bh) {
+    if (x0 < 0 || y0 < 0 || x0 + 1 >= plane_w || y0 + 1 >= plane_h) {
         // Against the buffer edge — no 2x2 available. Nearest, clamped.
         int cx = (int)fx, cy = (int)fy;
         return sample_depth(cx, cy, out);
     }
 
     float d[4];   // (x0,y0) (x1,y0) (x0,y1) (x1,y1)
-#if defined(CHISEL_BACKEND_WEBGPU)
     d[0] = plane_depth[(size_t)y0       * plane_w + x0];
     d[1] = plane_depth[(size_t)y0       * plane_w + x0 + 1];
     d[2] = plane_depth[(size_t)(y0 + 1) * plane_w + x0];
     d[3] = plane_depth[(size_t)(y0 + 1) * plane_w + x0 + 1];
-#else
-    // ONE readback for the quad — four sample_depth calls would be four
-    // glReadPixels syncs per dab.
-    read_depth_region(x0, y0, 2, 2, d);
-#endif
 
     // Discontinuity guard: if the quad straddles two surfaces, interpolating lands
     // between them (on neither). Fall back to the nearest tap, which is at least a
@@ -2102,28 +2085,16 @@ bool Renderer::sample_depth_bilinear(float fx, float fy, float* out, float max_s
 }
 
 bool Renderer::sample_normal(int x, int y, float out[3]) {
-#if defined(CHISEL_BACKEND_WEBGPU)
     if (!plane_valid || x < 0 || y < 0 || x >= plane_w || y >= plane_h) return false;
     size_t i = ((size_t)y * plane_w + x) * 3;
     out[0] = plane_norm[i + 0]; out[1] = plane_norm[i + 1]; out[2] = plane_norm[i + 2];
     return true;
-#else
-    if (x < 0 || y < 0 || x >= screen_target.width || y >= screen_target.height) return false;
-    read_normal_region(x, y, 1, 1, out);
-    return true;
-#endif
 }
 
 bool Renderer::sample_triid(int x, int y, uint32_t* out) {
-#if defined(CHISEL_BACKEND_WEBGPU)
     if (!plane_valid || x < 0 || y < 0 || x >= plane_w || y >= plane_h) return false;
     *out = plane_triid[(size_t)y * plane_w + x];
     return true;
-#else
-    if (x < 0 || y < 0 || x >= screen_target.width || y >= screen_target.height) return false;
-    read_triid_region(x, y, 1, 1, out);
-    return true;
-#endif
 }
 
 void Renderer::read_depth_region(int x, int y, int w, int h, float* out) {
@@ -2134,8 +2105,8 @@ bool Renderer::sample_area_normal(int cx, int cy, int radius_px, float out[3],
                                   float out_avg[3]) {
     // Sampling radius is deliberately smaller than the dab (the caller scales it):
     // averaged over the FULL dab the plane stops following real curvature and Clay
-    // starts flattening spheres. Capped so a huge brush doesn't turn the GL region
-    // read into a multi-megabyte stall.
+    // starts flattening spheres. Capped so a huge brush doesn't scan a multi-
+    // megapixel disc of the plane cache per dab.
     int r = radius_px;
     if (r < 2) r = 2;
     if (r > 48) r = 48;
@@ -2143,35 +2114,14 @@ bool Renderer::sample_area_normal(int cx, int cy, int radius_px, float out[3],
     int x0 = cx - r, y0 = cy - r;
     int side = 2 * r + 1;
 
-    // Clip to the buffer, then read/index whatever survives.
-    int bw, bh;
-#if defined(CHISEL_BACKEND_WEBGPU)
+    // Clip to the buffer, then index whatever survives.
     if (!plane_valid) return false;
-    bw = plane_w; bh = plane_h;
-#else
-    bw = screen_target.width; bh = screen_target.height;
-#endif
     if (x0 < 0) { side += x0; x0 = 0; }
     if (y0 < 0) { side += y0; y0 = 0; }
     int side_x = side, side_y = side;
-    if (x0 + side_x > bw) side_x = bw - x0;
-    if (y0 + side_y > bh) side_y = bh - y0;
+    if (x0 + side_x > plane_w) side_x = plane_w - x0;
+    if (y0 + side_y > plane_h) side_y = plane_h - y0;
     if (side_x <= 0 || side_y <= 0) return false;
-
-    const float* src;
-    const float* dsrc = nullptr;
-#if defined(CHISEL_BACKEND_WEBGPU)
-    src = nullptr;   // indexed straight out of plane_norm / plane_depth below
-#else
-    area_norm_scratch.resize((size_t)side_x * side_y * 3);
-    read_normal_region(x0, y0, side_x, side_y, area_norm_scratch.data());
-    src = area_norm_scratch.data();
-    if (out_avg) {
-        area_depth_scratch.resize((size_t)side_x * side_y);
-        read_depth_region(x0, y0, side_x, side_y, area_depth_scratch.data());
-        dsrc = area_depth_scratch.data();
-    }
-#endif
 
     float inv_r = 1.0f / (float)r;
     float ax = 0.0f, ay = 0.0f, az = 0.0f;
@@ -2184,25 +2134,15 @@ bool Renderer::sample_area_normal(int cx, int cy, int radius_px, float out[3],
             float d2 = dx * dx + dy * dy;
             if (d2 > 1.0f) continue;                 // disc, not box
             float nx, ny, nz;
-#if defined(CHISEL_BACKEND_WEBGPU)
             size_t i = ((size_t)(y0 + y) * plane_w + (x0 + x)) * 3;
             nx = plane_norm[i]; ny = plane_norm[i + 1]; nz = plane_norm[i + 2];
-#else
-            size_t i = ((size_t)y * side_x + x) * 3;
-            nx = src[i]; ny = src[i + 1]; nz = src[i + 2];
-#endif
             // Background clears to zero, so length is the on-model test — no second
             // region read of the triid attachment just to reject off-mesh texels.
             if (nx * nx + ny * ny + nz * nz < 0.25f) continue;
             float w = 1.0f - d2;                     // smooth, centre-weighted
             ax += nx * w; ay += ny * w; az += nz * w;
             if (out_avg) {
-                float depth;
-#if defined(CHISEL_BACKEND_WEBGPU)
-                depth = plane_depth[(size_t)(y0 + y) * plane_w + (x0 + x)];
-#else
-                depth = dsrc[(size_t)y * side_x + x];
-#endif
+                float depth = plane_depth[(size_t)(y0 + y) * plane_w + (x0 + x)];
                 apx += (float)(x0 + x) * w;
                 apy += (float)(y0 + y) * w;
                 ad  += depth * w;
