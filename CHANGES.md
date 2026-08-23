@@ -2,6 +2,37 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-08-23 — Held Shift/Ctrl now show on the cursor before you click
+
+The brush cursor only flipped to Smooth once you pressed the button, so you could not
+see what a shift-smooth stroke was going to do until you were already doing it. Same
+tell on Ctrl for subtract.
+
+Not a cursor bug — the modifier state itself was wrong. GLFW takes `mods` from the X11
+modifier state as it was *before* the event, so a modifier key's own press/release is
+inverted. Measured on GLFW 3.3.10 X11:
+
+```
+SHIFT PRESS    mods&SHIFT = 0
+SHIFT RELEASE  mods&SHIFT = 1
+```
+
+So holding Shift left `shift_held` false, and the cursor kept showing the base brush
+until some *other* event arrived to correct it — usually the click, whose mouse-button
+event does carry the right bitfield. Releasing Shift set `shift_held` **true** and left
+it stuck there until the next event, so `brush_name()` briefly reported "Smooth" after
+you had let go.
+
+A modifier key's own event is unambiguous in `action` where it is not in `mods`, so
+those three are now derived from the action (REPEAT counts as held) and `mods` is left
+to describe every other key. `sync_live_settings()` already re-aimed size and hardness
+off `live_brush_slot()` each frame, so with the state finally correct the ring previews
+Smooth's hardness (its colour ramp) and, with *Individual brush sizes* on, its radius —
+the moment you hold Shift.
+
+Web is built but unverified: emscripten's GLFW shim may never have had the X11 quirk,
+in which case nothing changes there.
+
 ## 2026-08-23 — Imported meshes rebuilt their mirror map from sculpted positions
 
 ⚠️ **Not hand-tested yet.** Separate defect from the quad/subdivide one below, found

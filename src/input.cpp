@@ -509,6 +509,28 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
     g_input->ctrl_held = (mods & GLFW_MOD_CONTROL) != 0;
     g_input->alt_held = (mods & GLFW_MOD_ALT) != 0;
 
+    // ...except for a modifier key's OWN event, where `mods` is not just stale but
+    // inverted. X11 hands GLFW the modifier state from BEFORE the event, so pressing
+    // Shift reports mods&SHIFT = 0 and releasing it reports 1 (measured on GLFW
+    // 3.3.10 X11). Taken at face value, merely holding Shift left shift_held false —
+    // so the brush stayed visibly on the base brush until some *other* event arrived
+    // to correct it, and the first one usually was the click. That is why the cursor
+    // only flipped to Smooth once you pressed, instead of previewing it on the hold.
+    // Ctrl (subtract) had the identical tell. The action is unambiguous where the
+    // bitfield is not, so derive these three from it. REPEAT counts as held.
+    switch (key) {
+        case GLFW_KEY_LEFT_SHIFT:
+        case GLFW_KEY_RIGHT_SHIFT:
+            g_input->shift_held = (action != GLFW_RELEASE); break;
+        case GLFW_KEY_LEFT_CONTROL:
+        case GLFW_KEY_RIGHT_CONTROL:
+            g_input->ctrl_held = (action != GLFW_RELEASE); break;
+        case GLFW_KEY_LEFT_ALT:
+        case GLFW_KEY_RIGHT_ALT:
+            g_input->alt_held = (action != GLFW_RELEASE); break;
+        default: break;
+    }
+
     // Modal UI steals keypresses from sculpting. ImGui file dialogs handle
     // their own keyboard input via ImGui IO — only ESC passes through here
     // to close the dialog flag. Y/N dialogs (quit, remesh) still route keys.
