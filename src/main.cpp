@@ -2701,8 +2701,15 @@ int main(int argc, char* argv[]) {
                     mesh->mask.clear();
 
                     scene.set_mirror_topology(false);
-                    scene.refresh_mirror_map();
+                    // build_adjacency FIRST: it bumps topo_version, and
+                    // refresh_mirror_map stamps mirror_topo_version with whatever
+                    // topo_version reads at the time. Refreshing first left the
+                    // stamp permanently one behind, so the guard in
+                    // refresh_mirror_map never short-circuited again and every later
+                    // call rebuilt the map from *sculpted* positions — exactly the
+                    // reclassification that guard exists to prevent.
                     mesh->build_adjacency();
+                    scene.refresh_mirror_map();
 
                     input.mesh_locked = true;
                     multires_stack_init_from_lock(*multires, *mesh, 0);

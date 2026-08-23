@@ -2,6 +2,30 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-08-23 — Imported meshes rebuilt their mirror map from sculpted positions
+
+⚠️ **Not hand-tested yet.** Separate defect from the quad/subdivide one below, found
+while chasing a report of mirror "going fucky" after alpha strokes on an imported sphere.
+
+`refresh_mirror_map` stamps `mirror_topo_version` with whatever `topo_version` reads at
+the time, and its guard short-circuits only while the two agree. The replace-import path
+called it *before* `mesh->build_adjacency()` — which bumps `topo_version` — so the stamp
+was left permanently one behind and the guard never fired again. Every later
+`refresh_mirror_map()` on an imported mesh therefore rebuilt the pairing from current
+positions, which is exactly what that guard's comment forbids:
+
+> Rebuilding from sculpted positions reclassifies drifted verts (paired → unpaired),
+> which bakes seam asymmetry in permanently — never do it for position-only edits.
+
+Worst on a heavily displacing brush (a spiky alpha), where drifted verts fall outside the
+pairing tolerance and go unpaired for good. Order swapped so the stamp is taken last.
+The X key itself never triggered this — it only flips a flag — which is why it felt
+random: the rebuild came from whatever *else* called refresh in between.
+
+The append-import path was already correct (it does not re-run `build_adjacency`), and
+`import_obj` builds adjacency itself, so the call at the old site was redundant as well
+as mis-ordered.
+
 ## 2026-08-23 — Mirror ate imported quad meshes after a subdivide
 
 ✅ **User-confirmed fixed 2026-08-23** — hand-tested on the reported sphere.
