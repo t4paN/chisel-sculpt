@@ -6,8 +6,10 @@
 #include <unordered_set>
 
 // Matcap Params UBO payload — byte-identical to the std140 `Params` block in the
-// matcap shaders (two mat4 = 128 B, then four floats = 16 B). The fourth float was
-// the std140 tail pad; matcap_contrast took it, so the size never moved.
+// matcap shaders (two mat4 = 128 B, then the float tail). The first four floats fit
+// the 144-byte block exactly; flat_shading opened a fifth 16-byte row, so the three
+// pads are what keep the block a multiple of 16 (std140 rounds the size up anyway —
+// they are spelled out so the C++ side and the shader agree by inspection).
 struct MatcapParamsGPU {
     float view[16];
     float proj[16];
@@ -15,8 +17,10 @@ struct MatcapParamsGPU {
     float obj_mask;
     float paint_visible;
     float matcap_contrast;
+    float flat_shading;
+    float _pad[3];
 };
-static_assert(sizeof(MatcapParamsGPU) == 144, "matcap Params UBO must be 144 bytes (std140)");
+static_assert(sizeof(MatcapParamsGPU) == 160, "matcap Params UBO must be 160 bytes (std140)");
 
 // ---- Brush-cursor overlay Params UBOs (std140 at binding 63) ----
 // The cursor ring, the footprint shadow disc and the centre crosshair each ride a
@@ -145,9 +149,12 @@ layout(std140, binding=63) uniform Params {
     float uObjMask;
     float uPaintVisible;
     float uMatcapContrast;
+    float uFlatShading;
+    float uPad0; float uPad1; float uPad2;
 };
 
 out vec3 vNormView;
+out vec3 vPosView;
 out float vMask;
 out vec4 vColor;
 
@@ -156,13 +163,21 @@ void main() {
     vNormView = normalize(normalMat * aNorm);
     vMask = aMask;
     vColor = aColor;
-    gl_Position = uProj * uView * vec4(aPos, 1.0);
+    vec4 posView = uView * vec4(aPos, 1.0);
+    // Carried for the flat-shading branch only: the fragment stage differentiates it
+    // across the quad to recover the true face plane. Interpolating the position is
+    // the only way to get a *geometric* normal here — the mesh is indexed and its
+    // vertex normals are averaged, so `flat` on vNormView would just pick one
+    // neighbour's average, not the facet.
+    vPosView = posView.xyz;
+    gl_Position = uProj * posView;
 }
 )";
 
 static const char* matcap_frag_src = R"(
 #version 430 core
 in vec3 vNormView;
+in vec3 vPosView;
 in float vMask;
 in vec4 vColor;
 out vec4 fragColor;
@@ -174,10 +189,26 @@ layout(std140, binding=63) uniform Params {
     float uObjMask;
     float uPaintVisible;
     float uMatcapContrast;
+    float uFlatShading;
+    float uPad0; float uPad1; float uPad2;
 };
 
 void main() {
-    vec3 n = normalize(vNormView);
+    vec3 ns = normalize(vNormView);
+
+    // Flat shading: the facet normal straight off the interpolated view-space
+    // position. Derivatives must be taken in uniform control flow, so they are
+    // computed unconditionally and only the *choice* branches. The cross product's
+    // sign follows the framebuffer's y direction (GL up, WebGPU down) and the
+    // triangle winding, so it is flipped into the smooth normal's hemisphere
+    // rather than assumed — same line works on both backends.
+    vec3 gface = cross(dFdx(vPosView), dFdy(vPosView));
+    float glen = length(gface);
+    vec3 n = ns;
+    if (uFlatShading > 0.5 && glen > 1e-20) {
+        gface /= glen;
+        n = (dot(gface, ns) < 0.0) ? -gface : gface;
+    }
     float rim = 1.0 - abs(n.z);
     float rim2 = rim * rim;
 
@@ -632,6 +663,10 @@ struct Params {
     obj_mask: f32,
     paint_visible: f32,
     matcap_contrast: f32,
+    flat_shading: f32,
+    pad0: f32,
+    pad1: f32,
+    pad2: f32,
 };
 @group(0) @binding(63) var<uniform> P: Params;
 struct VSOut {
@@ -639,6 +674,7 @@ struct VSOut {
     @location(0) nrm: vec3<f32>,
     @location(1) mask: f32,
     @location(2) color: vec4<f32>,
+    @location(3) posView: vec3<f32>,
 };
 @vertex
 fn vs_main(@location(0) aPos: vec3<f32>, @location(1) aNorm: vec3<f32>,
@@ -648,12 +684,29 @@ fn vs_main(@location(0) aPos: vec3<f32>, @location(1) aNorm: vec3<f32>,
     o.nrm = normalize(nm * aNorm);
     o.mask = aMask;
     o.color = aColor;
-    o.pos = P.proj * P.view * vec4<f32>(aPos, 1.0);
+    let posView = P.view * vec4<f32>(aPos, 1.0);
+    o.posView = posView.xyz;
+    o.pos = P.proj * posView;
     return o;
 }
 @fragment
 fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
-    let n = normalize(in.nrm);
+    let ns = normalize(in.nrm);
+    // Flat shading — see the GLSL twin for why the facet normal comes from the
+    // position derivatives and why its sign is resolved against ns.
+    var gface = cross(dpdx(in.posView), dpdy(in.posView));
+    let glen = length(gface);
+    var n = ns;
+    let want_flat = P.flat_shading > 0.5;
+    let usable = glen > 1e-20;
+    if (want_flat && usable) {
+        gface = gface / glen;
+        // Comparison kept on its own let line, and written as `>` — Tint reads a
+        // bare `<` in an expression as the start of a template list.
+        let facing_viewer = dot(gface, ns) > 0.0;
+        if (!facing_viewer) { gface = -gface; }
+        n = gface;
+    }
     let rim = 1.0 - abs(n.z);
     let rim2 = rim * rim;
     let top = n.y * 0.5 + 0.5;
@@ -1609,6 +1662,8 @@ void Renderer::upload_matcap_params(const Camera& cam, int w, int h, bool select
     p.obj_mask = selected ? 0.0f : 1.0f;
     p.paint_visible = paint_visible;
     p.matcap_contrast = matcap_contrast;
+    p.flat_shading = flat_shading;
+    p._pad[0] = p._pad[1] = p._pad[2] = 0.0f;
     gpu::write_buffer(gpu_dev, matcap_ubo, 0, &p, sizeof p);
 }
 

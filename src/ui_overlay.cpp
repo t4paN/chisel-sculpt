@@ -1003,15 +1003,31 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
                                   "between them keeps both.\n\n"
                                   "Sizes last for the session only; they are not saved.");
 
-            // Lighting dial: sun label + the matcap blend (0 = flat, 1 = keyed).
+            // Lighting dial: sun label + the matcap blend (0 = even, 1 = keyed). Worded
+            // as "even light" now that "flat shading" means the facet toggle below.
             sun_glyph(ImGui::GetFrameHeight(), input.matcap_contrast);
             ImGui::SameLine();
             ImGui::SetNextItemWidth(150.0f);
             ImGui::SliderFloat("##matcapLight", &input.matcap_contrast, 0.0f, 1.0f,
                                "light %.2f");
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Viewport lighting: 0 = flat shading, 1 = keyed "
+                ImGui::SetTooltip("Viewport lighting: 0 = even, ambient light, 1 = keyed "
                                   "light with contrast and sheen (display only)");
+
+            // Shading. Stored as flat_shading (default false = the historical look, so an
+            // older settings blob with no key lands on smooth), shown inverted because
+            // "Smooth shading, on" is how it reads to the user.
+            bool smooth = !input.flat_shading;
+            if (ImGui::Checkbox("Smooth shading", &smooth))
+                input.flat_shading = !smooth;
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("On: normals are averaged across each vertex, so the\n"
+                                  "surface reads as one continuous form. The default.\n\n"
+                                  "Off: every triangle is shaded by its own facet, so you\n"
+                                  "see the actual polygons — useful for judging topology,\n"
+                                  "density and what a remesh really did.\n\n"
+                                  "Display only: the mesh, the brush and the saved file\n"
+                                  "are identical either way.");
 
             // Viewport projection. Off = the orthographic camera the app has always
             // used and the one the brush feel was tuned against, so it stays default;

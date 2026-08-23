@@ -197,6 +197,7 @@ std::string serialize(const InputState& in) {
     append_kv(s, "per_brush_sizes",     in.per_brush_sizes);
     append_kv(s, "autosmooth",          in.autosmooth);
     append_kv(s, "matcap_contrast",     in.matcap_contrast);
+    append_kv(s, "flat_shading",        in.flat_shading);
     append_kv(s, "show_fps",            in.show_fps);
     append_kv(s, "camera_perspective",  in.camera_perspective);
     append_kv(s, "camera_fov",          in.camera_fov);
@@ -270,6 +271,7 @@ void apply_global_key(InputState& in, const std::string& key, const std::string&
     else if (key == "per_brush_sizes")     in.per_brush_sizes     = parse_bool(val);
     else if (key == "autosmooth")          in.autosmooth          = parse_bool(val);
     else if (key == "camera_fov")          in.camera_fov          = clampf(std::strtof(val.c_str(), nullptr), 15.0f, 80.0f);
+    else if (key == "flat_shading")        in.flat_shading        = parse_bool(val);
     else if (key == "show_fps")            in.show_fps            = parse_bool(val);
     else if (key == "camera_perspective")  in.camera_perspective  = parse_bool(val);
     else if (key == "mirror_x")            in.mirror_x            = parse_bool(val);
@@ -399,6 +401,7 @@ void settings_reset(InputState& input) {
     input.seed_brush_sizes();
     input.autosmooth         = fresh.autosmooth;
     input.matcap_contrast    = fresh.matcap_contrast;
+    input.flat_shading       = fresh.flat_shading;
     input.show_fps           = fresh.show_fps;
     input.camera_perspective = fresh.camera_perspective;
     input.camera_fov         = fresh.camera_fov;

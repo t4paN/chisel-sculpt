@@ -41,6 +41,11 @@ struct Renderer {
     // from InputState::matcap_contrast; the shader lerps between both formulations.
     float matcap_contrast = 1.0f;
 
+    // Faceted shading (0 = smooth vertex normals, 1 = per-facet). Set per frame from
+    // InputState::flat_shading. Display only — the screen-buffer pass the brush reads
+    // back keeps its smooth world normals, so shading this way cannot change a stroke.
+    float flat_shading = 0.0f;
+
     // Entity-id pick pass — on the gpu:: seam. Renders into the shared screen
     // offscreen target writing linear depth (attachment 0) + entity id (attachment
     // 2). The pass spans pick_begin → N×pick_draw → pick_end.

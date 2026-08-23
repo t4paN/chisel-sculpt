@@ -230,6 +230,17 @@ as you like and never clip inside the model.
 | F1 / F2 / F3 | Snap to front / side / top |
 | Space | Toggle fullscreen |
 
+### Smooth shading
+
+The burger menu has a **Smooth shading** checkbox, on by default. On, normals are
+averaged across each vertex and the surface reads as one continuous form — the look
+Chisel has always shipped. Turn it off and every triangle is shaded by its own facet,
+so you see the actual polygons: the fastest way to read topology, check where density
+is piling up, or see what a remesh really did to a region.
+
+It is display only. The mesh, the brush behaviour and the saved file are identical
+either way, and the setting is remembered between sessions.
+
 ### Perspective
 
 The burger menu has a **Perspective** toggle and a **fov** slider (15–80°). Orthographic

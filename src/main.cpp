@@ -2501,6 +2501,7 @@ int main(int argc, char* argv[]) {
         renderer.paint_visible =
             (input.paint_visible || input.current_brush == BrushType::PAINT) ? 1.0f : 0.0f;
         renderer.matcap_contrast = input.matcap_contrast;
+        renderer.flat_shading = input.flat_shading ? 1.0f : 0.0f;
 
         // Mesh: N draws. The active entity is drawn from the working VAO; every
         // other alive entity from its static display VAO. Depth test composes them.

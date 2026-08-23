@@ -2,6 +2,39 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-08-23 — Smooth-shading toggle (see the polygons)
+
+New **Smooth shading** checkbox in the burger menu, on by default. Off shades every
+triangle by its own facet, so the actual topology is visible — for reading density,
+checking what a remesh did to a region, or just looking at the cage.
+
+**Why derivatives and not a `flat` qualifier.** The mesh is indexed and its vertex
+normals are averaged, so interpolation-qualifying the normal would have shaded each
+triangle with one arbitrary neighbour's *average* — faceted-looking, but not the facet.
+The fragment stage instead takes the true geometric normal from the screen derivatives
+of the interpolated view-space position, which is exact regardless of indexing and costs
+one extra varying.
+
+**The sign is resolved, not assumed.** `cross(dFdx, dFdy)` points toward or away from the
+viewer depending on the framebuffer's y direction — GL's origin is bottom-left, WebGPU's
+top-left — and on the winding. Rather than special-case per backend, the facet normal is
+flipped into the smooth normal's hemisphere; one line, correct on both. Degenerate
+triangles (zero-length cross) fall back to the smooth normal instead of producing NaN.
+
+Display only. The screen-buffer pass the brush reads back keeps its smooth world normals,
+so the toggle cannot change how a stroke behaves, and the mesh and saved file are
+untouched either way. Persisted in settings, covered by Reset.
+
+Also reworded the light slider's tooltip from "flat shading" to "even, ambient light" —
+"flat shading" now means the checkbox.
+
+Matcap Params UBO grew 144 → 160 bytes (`flat_shading` + three explicit std140 pads,
+declared identically in the GLSL pair, the WGSL module and the C++ struct).
+
+Gated: builds on all three targets, naga accepts the module natively, and Chrome's Tint
+compiled the matcap pipeline with no `parsing WGSL` / `Invalid ShaderModule` lines.
+Visual/feel verification is still owed.
+
 ## 2026-08-23 — Brush settings: one slot instead of two (the live-vs-stored mismatch)
 
 ⚠️ **Not hand-tested yet** — user owes a test drive, recipe in

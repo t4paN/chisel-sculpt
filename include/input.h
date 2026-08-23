@@ -150,6 +150,13 @@ struct InputState {
     // it back.
     float matcap_contrast = 0.5f;
 
+    // Faceted viewport shading (burger menu toggle, shown inverted as "Smooth
+    // shading"). Off = the interpolated vertex normals every version has shipped;
+    // on = the true facet normal, so the polygons read individually. Display only —
+    // nothing about the mesh or the brush changes, it is a way to *see* the
+    // topology the smooth normals hide.
+    bool flat_shading = false;
+
     // FPS readout visibility (burger menu toggle). Display only.
     bool show_fps = true;
 
