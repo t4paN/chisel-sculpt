@@ -4,8 +4,7 @@ Short, chronological log of notable changes. Newest on top.
 
 ## 2026-08-23 — Mirror ate imported quad meshes after a subdivide
 
-⚠️ **Not hand-tested yet** — automated evidence below is strong, but the feel of a
-mirrored stroke on an imported mesh is unverified.
+✅ **User-confirmed fixed 2026-08-23** — hand-tested on the reported sphere.
 
 Reported as: a UV sphere exported from Blender sculpts fine unmirrored, sculpts fine
 mirrored at the base level, and gets destroyed by mirrored strokes the moment you
