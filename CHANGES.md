@@ -2,7 +2,7 @@
 
 Short, chronological log of notable changes. Newest on top.
 
-## 2026-08-23 — Held Shift/Ctrl now show on the cursor before you click
+## 2026-08-23 — v0.2.9 — Held Shift/Ctrl now show on the cursor before you click
 
 The brush cursor only flipped to Smooth once you pressed the button, so you could not
 see what a shift-smooth stroke was going to do until you were already doing it. Same
