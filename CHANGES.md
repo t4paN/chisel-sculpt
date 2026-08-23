@@ -2,6 +2,69 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-08-23 — Mirror ate imported quad meshes after a subdivide
+
+⚠️ **Not hand-tested yet** — automated evidence below is strong, but the feel of a
+mirrored stroke on an imported mesh is unverified.
+
+Reported as: a UV sphere exported from Blender sculpts fine unmirrored, sculpts fine
+mirrored at the base level, and gets destroyed by mirrored strokes the moment you
+subdivide. Two defects compounding, and it took both to do the damage.
+
+**The eater: `build_fine_mirror` conflated "unresolvable" with "seam".** The function
+used `UINT32_MAX` as its private "not reached yet" marker — which is the *same value* as
+`Mesh::MIRROR_UNPAIRED`. Any subdivision midpoint whose mirrored edge could not be found
+fell through to `out[mid] = mid`, a self-map. And a self-map means seam to
+`mirror_project`:
+
+```wgsl
+if (mv == v) {                    // Seam vertex: constrained to the mirror plane.
+    positions[v * 3u] = 0.0;
+```
+
+So "I could not work out this vertex's mirror" silently became "weld this vertex onto the
+x = 0 plane". Unresolvable now yields `MIRROR_UNPAIRED`, which every kernel already
+treats as a no-op, and the self-mapping fallback is gone. Genuine seam edges still
+produce seam midpoints — that mapping was always correct and is unchanged.
+
+**The trigger: `import_obj` fan-triangulated quads asymmetrically.** The fan ran from
+`face_verts[0]`, so the diagonal depended on which corner the exporter happened to write
+first — not a mirror-symmetric property. Every quad therefore contributed a diagonal edge
+whose mirror image did not exist, so the midpoint on it could not resolve.
+
+Quads now pick their diagonal by a key that is **invariant under x-mirroring**: the
+`(|x|, y, z)` of the diagonal's midpoint. Reflection negates x and fixes y/z, so a quad
+and its mirror image necessarily choose the mirrored diagonal. Shortest-diagonal was
+tried first and is not enough — UV-sphere quads are isosceles trapezoids whose two
+diagonals are near-equal, so float noise picks a different winner on each side (448 → 212
+misses, not 0). n-gons past 4 corners keep the plain fan; they are rare and a
+mirror-stable general polygon triangulation is a much bigger problem than this one.
+
+Measured on the reported file (482 v, 448 quads + 64 pole tris), through the real
+importer and the real spatial mirror builder:
+
+```
+                       base level                subdiv +1
+before   450 paired / 32 seam / 0 unpaired    992 of 1440 midpoints resolved, 448 PINNED
+after    450 paired / 32 seam / 0 unpaired   1440 of 1440 midpoints resolved,   0 pinned
+```
+
+448 is exactly the quad count. The base map was always perfect — which is why base level
+sculpted correctly and only subdividing showed the damage.
+
+The two fixes are independent and both needed: the triangulation fix removes the only
+known trigger, the sentinel fix means any *other* asymmetric mesh degrades to "does not
+mirror there" instead of "gets destroyed". A deliberately unpairable mesh (12 verts
+nudged off-mirror) produces 18 unpaired at base and 108 unresolvable midpoints at
+subdiv +1 — every one of which the old code would have snapped to the mirror plane.
+
+Also worth knowing, found while reading and **not fixed here**: `import_obj` assigns OBJ
+`vn` normals positionally when the `vn` count happens to equal the `v` count, but OBJ
+indexes normals separately via the `v/vt/vn` triplets, which the parser discards. Wrong
+whenever the counts coincide by luck. It does not fire on the reported file (512 vn vs
+482 v, so it recomputes instead) and is a display-only error, so it is left alone rather
+than widened into this fix.
+
 ## 2026-08-23 — Smooth-shading toggle (see the polygons)
 
 New **Smooth shading** checkbox in the burger menu, on by default. Off shades every

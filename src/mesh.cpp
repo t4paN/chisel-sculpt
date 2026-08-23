@@ -527,6 +527,13 @@ bool Mesh::import_obj(const char* filename, Mesh& out) {
     std::vector<float> nx, ny, nz;
     std::vector<uint32_t> idxs;
 
+    // Faces are collected as polygons and triangulated after the whole file is
+    // read, because the diagonal rule below needs vertex positions and a file is
+    // not obliged to declare every `v` before the first `f`.
+    std::vector<uint32_t> poly_v;       // flat corner list
+    std::vector<uint32_t> poly_start;   // offsets into poly_v, size = faces + 1
+    poly_start.push_back(0);
+
     char line[512];
     while (std::fgets(line, sizeof(line), f)) {
         if (line[0] == 'v' && line[1] == ' ') {
@@ -558,14 +565,73 @@ bool Mesh::import_obj(const char* filename, Mesh& out) {
                     }
                 }
             }
-            for (int i = 1; i + 1 < count; i++) {
-                idxs.push_back(face_verts[0]);
-                idxs.push_back(face_verts[i]);
-                idxs.push_back(face_verts[i + 1]);
+            if (count >= 3) {
+                for (int i = 0; i < count; i++) poly_v.push_back(face_verts[i]);
+                poly_start.push_back((uint32_t)poly_v.size());
             }
         }
     }
     std::fclose(f);
+
+    // ---- Triangulation ----
+    // Quads get their diagonal chosen by a key that is INVARIANT under
+    // x-mirroring, so a quad and its mirror image necessarily pick the mirrored
+    // diagonal. Reflection negates x and leaves y/z alone, so (|x|, y, z) of a
+    // diagonal's midpoint is unchanged by it. The old rule — fan from the
+    // first-listed corner — depended on which corner the exporter happened to
+    // write first, which is not a mirror-symmetric property.
+    //
+    // This is not cosmetic. An asymmetric diagonal is an edge whose mirror image
+    // does not exist, so the subdivision midpoint sitting on it has no mirror
+    // either — and build_fine_mirror used to answer that by self-mapping it,
+    // which mirror_project reads as "seam" and snaps to x = 0. A Blender UV
+    // sphere (448 quads) lost 448 vertices to the mirror plane on the first
+    // mirrored stroke after a subdivide. See CHANGES.md 2026-08-23.
+    //
+    // n-gons past 4 corners keep the plain fan: they are rare in practice and a
+    // mirror-stable general polygon triangulation is a much bigger problem than
+    // the one actually being solved here.
+    const uint32_t nv_parsed = (uint32_t)vx.size();
+    uint32_t n_quads = 0;
+    for (size_t fi = 0; fi + 1 < poly_start.size(); fi++) {
+        const uint32_t b = poly_start[fi], e = poly_start[fi + 1];
+        const int count = (int)(e - b);
+        const uint32_t* fv = &poly_v[b];
+
+        bool in_range = true;
+        for (int i = 0; i < count; i++)
+            if (fv[i] >= nv_parsed) { in_range = false; break; }
+
+        if (count == 4 && in_range) {
+            const uint32_t a = fv[0], b2 = fv[1], c = fv[2], d = fv[3];
+            auto key = [&](uint32_t i, uint32_t j, float& kx, float& ky, float& kz) {
+                kx = std::fabs((vx[i] + vx[j]) * 0.5f);
+                ky = (vy[i] + vy[j]) * 0.5f;
+                kz = (vz[i] + vz[j]) * 0.5f;
+            };
+            float ax, ay, az, bx, by, bz;
+            key(a,  c,  ax, ay, az);
+            key(b2, d,  bx, by, bz);
+            bool use_ac;
+            if      (ax != bx) use_ac = (ax < bx);
+            else if (ay != by) use_ac = (ay < by);
+            else               use_ac = (az <= bz);
+            if (use_ac) {
+                idxs.push_back(a);  idxs.push_back(b2); idxs.push_back(c);
+                idxs.push_back(a);  idxs.push_back(c);  idxs.push_back(d);
+            } else {
+                idxs.push_back(b2); idxs.push_back(c);  idxs.push_back(d);
+                idxs.push_back(b2); idxs.push_back(d);  idxs.push_back(a);
+            }
+            n_quads++;
+        } else {
+            for (int i = 1; i + 1 < count; i++) {
+                idxs.push_back(fv[0]);
+                idxs.push_back(fv[i]);
+                idxs.push_back(fv[i + 1]);
+            }
+        }
+    }
 
     if (vx.empty() || idxs.empty()) return false;
 
@@ -592,8 +658,9 @@ bool Mesh::import_obj(const char* filename, Mesh& out) {
 
     out.build_adjacency();
 
-    std::printf("[import] loaded %u verts, %u tris from %s\n",
-                out.vertex_count(), out.tri_count(), filename);
+    std::printf("[import] loaded %u verts, %u tris (%u quads split on the "
+                "mirror-stable diagonal) from %s\n",
+                out.vertex_count(), out.tri_count(), n_quads, filename);
     return true;
 }
 

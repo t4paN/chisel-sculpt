@@ -26,9 +26,20 @@ static void build_fine_mirror(
     const std::vector<uint32_t>&    fine_idx,
     std::vector<uint32_t>&          out)
 {
-    out.assign(V_fine, UINT32_MAX);
+    // Default is UNPAIRED, and that is also the answer for anything this function
+    // cannot resolve. It must NEVER fall back to a self-map: a self-map means
+    // "seam" to mirror_project.wgsl, which snaps the vertex's x to 0 — so
+    // "I could not work out this vertex's mirror" would silently become "weld it
+    // onto the mirror plane". That is what ate imported quad meshes before
+    // 2026-08-23. UNPAIRED, by contrast, is a documented no-op in every kernel.
+    //
+    // Note MIRROR_UNPAIRED == UINT32_MAX, which this function used to use as its
+    // private "not reached yet" marker. The two meanings collided, and the
+    // not-reached fallback converted genuine unpaired verts into seams.
+    out.assign(V_fine, Mesh::MIRROR_UNPAIRED);
 
-    // Old vertices: inherit mirror from coarse level.
+    // Old vertices: inherit mirror from coarse level (UNPAIRED included — a
+    // vertex with no mirror at the coarse level still has none here).
     for (uint32_t i = 0; i < V_coarse; i++)
         out[i] = coarse_mirror[i];
 
@@ -56,21 +67,31 @@ static void build_fine_mirror(
         uint32_t ab = fine_idx[t*12+1],   bc = fine_idx[t*12+4],  ca = fine_idx[t*12+7];
 
         auto set = [&](uint32_t mid, uint32_t ea, uint32_t eb) {
+            // An endpoint with no mirror cannot name a mirrored edge, and a
+            // mirrored edge that does not exist (asymmetric triangulation)
+            // cannot name a midpoint. Both are UNPAIRED, not seam.
+            if (ea == Mesh::MIRROR_UNPAIRED || eb == Mesh::MIRROR_UNPAIRED) {
+                out[mid] = Mesh::MIRROR_UNPAIRED;
+                return;
+            }
             auto it = edge_to_mid.find(ekey(ea, eb));
-            out[mid] = (it != edge_to_mid.end()) ? it->second : mid;
+            out[mid] = (it != edge_to_mid.end()) ? it->second : Mesh::MIRROR_UNPAIRED;
         };
         set(ab, ma, mb);
         set(bc, mb, mc);
         set(ca, mc, ma);
     }
 
-    // Fallback: self-map any vertex that wasn't reached (degenerate topology).
-    for (uint32_t i = 0; i < V_fine; i++)
-        if (out[i] == UINT32_MAX) out[i] = i;
+    // No unreached-vertex fallback: the UNPAIRED default above is already the
+    // right answer for one, and self-mapping it would pin it to x = 0.
 
 #ifndef NDEBUG
-    for (uint32_t i = 0; i < V_fine; i++)
+    // The map must still be an involution over everything it did resolve.
+    for (uint32_t i = 0; i < V_fine; i++) {
+        if (out[i] == Mesh::MIRROR_UNPAIRED) continue;
+        assert(out[i] < V_fine);
         assert(out[out[i]] == i);
+    }
 #endif
 }
 
