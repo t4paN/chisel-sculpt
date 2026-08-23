@@ -150,12 +150,12 @@ declared identically in the GLSL pair, the WGSL module and the C++ struct).
 
 Gated: builds on all three targets, naga accepts the module natively, and Chrome's Tint
 compiled the matcap pipeline with no `parsing WGSL` / `Invalid ShaderModule` lines.
-Visual/feel verification is still owed.
+In daily use since, no issues reported; the look was never formally signed off.
 
 ## 2026-08-23 — Brush settings: one slot instead of two (the live-vs-stored mismatch)
 
-⚠️ **Not hand-tested yet** — user owes a test drive, recipe in
-`~/CHISEL/brush-slot-handoff.md`. Automated harness passes (below); feel is unverified.
+✅ **User-confirmed 2026-08-23** — test drive done on a clean settings reset, feel
+reported good. Automated harness passes (below), 16/16.
 
 Closes the item left open by v0.2.8: the on-disk blob said one thing and the live value
 said another, and the ceiling added there only made the symptom unreachable for Clay.
