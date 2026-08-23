@@ -2,6 +2,71 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-08-23 — Brush settings: one slot instead of two (the live-vs-stored mismatch)
+
+⚠️ **Not hand-tested yet** — user owes a test drive, recipe in
+`~/CHISEL/brush-slot-handoff.md`. Automated harness passes (below); feel is unverified.
+
+Closes the item left open by v0.2.8: the on-disk blob said one thing and the live value
+said another, and the ceiling added there only made the symptom unreachable for Clay.
+
+**Root cause: two different definitions of "which brush is under your hand", disagreeing
+exactly while Shift is held.** The dab loop used `is_smooth_active() || current_brush ==
+SMOOTH` — a merely-held Shift counts as Smooth. Everything else (`live_brush_slot()`, the
+slider write-back, `flush_profile`) keyed off `smooth_locked` alone — a held Shift does
+not count. With Shift down the stroke therefore ran on `per_brush[SMOOTH]` while the HUD
+still displayed the underlying brush's numbers, under a `brush_name()` label that already
+read "Smooth". The label and the numbers beneath it described different brushes.
+
+Three ways that leaked a brush's settings into another brush's slot:
+
+- **Sliders.** Hold Shift, press `O`, drag: the value you were watching was written to
+  `per_brush[current_brush]` — Clay — while the stroke you were making ignored it. Before
+  the 0.15 ceiling existed it could go anywhere, which is how Clay came to hold a spacing
+  nobody set on it. Strength and hardness leak identically, with no visible tell.
+- **`switch_brush`.** It copied the live fields into the *outgoing* brush's slot, which is
+  correct only while the mirror is aimed at that slot — and a held Shift aims it at
+  Smooth. Pressing `D` mid-Shift stamped Smooth's feel onto whatever you were leaving.
+- **`flush_profile`.** It folded the same mirror back into `per_brush[]`, and
+  `settings_tick` calls it **four times a second**.
+
+**Fix: `per_brush[]` is the sole truth.** `brush_strength/hardness/spacing` are now a
+documented read-only *mirror* of `per_brush[live_brush_slot()]`, re-aimed once a frame by
+a new `sync_live_settings()` from `begin_frame` — the only place the invariant can be
+restored, since Shift going down or up runs no handler that observes the transition.
+`live_brush_slot()` now includes transient shift-smooth, so the HUD, the sliders and the
+dab loop address the same slot by construction rather than by three hand-kept copies of
+one rule. `switch_brush`, `clear_smooth_lock`, `switch_profile` and both smooth-lock
+handlers lose their save/restore dances; `flush_profile` no longer folds; `main.cpp`'s
+`eff`, its spacing ceiling and its pressure-ceiling `bt` all route through the accessor.
+
+Sliders latch their target slot at key-down (`slider_slot`) instead of re-deriving it per
+motion event, so letting go of Shift mid-drag cannot redirect a write that started with
+another brush's start value.
+
+**Two adjacent bugs in the same family, fixed with it:**
+
+- The size slider and `[` / `]` updated only the live `brush_size`, never
+  `brush_size_of[]` — so with **Individual brush sizes** on, every resize was silently
+  reverted by the next brush switch.
+- The toolbar's Smooth button omitted the size stash that the keyboard double-Shift path
+  had, so locking Smooth from the mouse and from the keyboard did different things.
+
+**Visible behaviour change:** holding Shift now flips the HUD numbers and the cursor
+ring's hardness to Smooth's, matching the "Smooth" label that was already there.
+
+**Verification.** `~/CHISEL/brush-slot-test.cpp` links `src/input.cpp` directly (no
+window, no GL) and checks the invariant across six scenarios — 16/16 pass. The same
+scenarios rebuilt against the pre-fix API fail 5/5, including "shift-drag did NOT land in
+Clay's slot" and "40x flush_profile mid-Shift left Clay alone", so the harness
+discriminates rather than merely agreeing with the new code. All three targets build; no
+shader changes, so no Tint exposure.
+
+**Not repaired:** an existing `settings.cfg` still holds whatever the bug put there.
+Ours has `brush.clay` hardness at 0.023 where the clay arc records the tuned value as 0.3,
+and draw/move at 0.013. Consistent with the leak, but indistinguishable from deliberate
+tuning, so nothing was overwritten — burger menu → Reset clears it if wanted.
+
 ## 2026-08-18 — v0.2.8 — Clay: spacing ceiling kills the diagonal stamp lattice
 
 Clay strokes had been printing a regular lattice of diagonal ticks — an X raked across

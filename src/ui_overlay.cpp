@@ -865,13 +865,11 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
             if (squircle_button(brushes[i].id, brushes[i].display, brushes[i].tooltip,
                                 ImVec2(brush_w, btn_h), smooth_on)) {
                 if (!input.smooth_locked) {
-                    input.per_brush[(int)input.current_brush].strength = input.brush_strength;
-                    input.per_brush[(int)input.current_brush].hardness = input.brush_hardness;
-                    input.per_brush[(int)input.current_brush].spacing  = input.brush_spacing;
-                    input.brush_strength = input.per_brush[(int)BrushType::SMOOTH].strength;
-                    input.brush_hardness = input.per_brush[(int)BrushType::SMOOTH].hardness;
-                    input.brush_spacing  = input.per_brush[(int)BrushType::SMOOTH].spacing;
+                    // Same two lines as the double-tap-Shift path in input.cpp — this
+                    // copy used to omit the size stash, so locking smooth from the
+                    // toolbar and from the keyboard did different things.
                     input.smooth_locked = true;
+                    input.sync_live_settings();
                 } else {
                     input.clear_smooth_lock();
                 }

@@ -336,10 +336,7 @@ void deserialize(const std::string& blob, InputState& in) {
     const ProfileSettings& p = in.profiles[(int)in.active_profile];
     in.max_effect = p.max_effect;
     for (int i = 0; i < (int)BrushType::COUNT; i++) in.per_brush[i] = p.per_brush[i];
-    const int slot = (int)in.live_brush_slot();
-    in.brush_strength = in.per_brush[slot].strength;
-    in.brush_hardness = in.per_brush[slot].hardness;
-    in.brush_spacing  = in.per_brush[slot].spacing;
+    in.sync_live_settings();
 }
 
 } // namespace
@@ -416,15 +413,12 @@ void settings_reset(InputState& input) {
         input.paint_color[i]     = fresh.paint_color[i];
         input.paint_color_alt[i] = fresh.paint_color_alt[i];
     }
-    // Live brush fields come back from the restored active profile.
+    // Live brush fields come back from the restored active profile. sync_live_settings,
+    // not current_brush: reset can fire while a smooth lock is held (or Shift is down).
     const ProfileSettings& p = input.profiles[(int)input.active_profile];
     input.max_effect = p.max_effect;
     for (int i = 0; i < (int)BrushType::COUNT; i++) input.per_brush[i] = p.per_brush[i];
-    // live_brush_slot(), not current_brush: reset can fire while a smooth lock is held.
-    const int slot = (int)input.live_brush_slot();
-    input.brush_strength = input.per_brush[slot].strength;
-    input.brush_hardness = input.per_brush[slot].hardness;
-    input.brush_spacing  = input.per_brush[slot].spacing;
+    input.sync_live_settings();
 
     storage_clear();
     g_last_blob = serialize(input);

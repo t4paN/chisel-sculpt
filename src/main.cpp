@@ -2121,9 +2121,12 @@ int main(int argc, char* argv[]) {
                 // live cursor, no spline interpolation, no dab-spacing advance.
                 bool is_grab = is_move || is_limb;
 
-                const BrushSettings& eff = is_smooth
-                    ? input.per_brush[(int)BrushType::SMOOTH]
-                    : input.per_brush[(int)input.current_brush];
+                // live_brush_slot() rather than a second copy of the same rule: it is
+                // now defined as exactly `is_smooth ? SMOOTH : current_brush`, and the
+                // HUD and the sliders address that same slot. Two hand-kept copies of
+                // this rule is what let the slider edit one brush while the dab loop
+                // read another (CHANGES 2026-08-23).
+                const BrushSettings& eff = input.per_brush[(int)input.live_brush_slot()];
                 float eff_strength = eff.strength;
                 float eff_hardness = eff.hardness;
 
@@ -2158,7 +2161,7 @@ int main(int argc, char* argv[]) {
                 // Smooth/Mask/Paint converge on a target (neighbour average, mask=1, a
                 // colour); capping those would only make them take longer to arrive at
                 // the same result, so they keep the full 1.0 ceiling.
-                BrushType bt = is_smooth ? BrushType::SMOOTH : input.current_brush;
+                BrushType bt = input.live_brush_slot();
                 bool additive_brush = (bt == BrushType::DRAW  || bt == BrushType::INFLATE ||
                                        bt == BrushType::CREASE || bt == BrushType::PINCH);
                 float ceiling = additive_brush ? input.max_effect : 1.0f;
@@ -2200,8 +2203,7 @@ int main(int argc, char* argv[]) {
                 // handed it another brush's spacing, so the invariant lives at the point
                 // of use where nothing can route around it. See max_spacing_for.
                 float eff_spacing = std::min(eff.spacing,
-                                             max_spacing_for(is_smooth ? BrushType::SMOOTH
-                                                                       : input.current_brush));
+                                             max_spacing_for(input.live_brush_slot()));
                 float spacing = eff_brush_size * eff_spacing;
 
                 // Foreshortening. This step is in screen pixels, but the dab deposits

@@ -28,6 +28,7 @@ InputState::InputState()
     , settings_menu_open(false)
     , slider_mode(SliderMode::NONE)
     , slider_start_x(0), slider_start_y(0), slider_start_value(0), slider_accum(0)
+    , slider_slot(BrushType::DRAW)
     , toolbar_visible(true)
     , sculpting(false), on_model(false)
     , drag_mode(DragMode::NONE)
@@ -134,36 +135,50 @@ void InputState::seed_brush_sizes() {
 void InputState::switch_brush(BrushType to) {
     if (to != BrushType::PAINT) color_pick_active = false;
     if (to == current_brush) return;
-    per_brush[(int)current_brush].strength = brush_strength;
-    per_brush[(int)current_brush].hardness = brush_hardness;
-    per_brush[(int)current_brush].spacing  = brush_spacing;
-    // The size stash is kept up to date whether or not the toggle is on, so turning it
-    // on mid-session starts from the sizes you were actually using rather than from
-    // whatever they were when you last flipped it. Only the restore is gated.
-    brush_size_of[(int)current_brush] = brush_size;
+    // Nothing to save on the way out: per_brush[] and brush_size_of[] are written at
+    // the point of edit, so they are already current. This used to copy the live
+    // fields into the OUTGOING brush's slot, which is fine only while the mirror is
+    // guaranteed to be aimed at that slot — and it is not, because a held Shift aims
+    // it at Smooth. Switching brushes mid-Shift therefore stamped Smooth's feel onto
+    // whatever you were leaving. See CHANGES 2026-08-23.
     current_brush = to;
-    brush_strength = per_brush[(int)to].strength;
-    brush_hardness = per_brush[(int)to].hardness;
-    brush_spacing  = per_brush[(int)to].spacing;
-    if (per_brush_sizes) brush_size = brush_size_of[(int)to];
+    sync_live_settings();
 }
 
-// Which per_brush slot the live brush_strength/hardness/spacing currently mirror. The
-// double-tap smooth LOCK swaps smooth's numbers into the live fields (see the shift
-// handler); a merely-held Shift does not. So smooth_locked — not is_smooth_active() —
-// is the discriminator, and getting it wrong writes smooth's settings over the real
-// brush's on every flush.
+// Which per_brush slot the mirror reflects — and the single definition of "the brush
+// under your hand". The HUD reads the mirror, the sliders drag it, and the dab loop
+// reads per_brush[] directly, so all three have to name the same slot or you end up
+// tuning one brush while sculpting with another.
+//
+// Transient shift-smooth COUNTS, and that is the fix. The dab loop has always treated a
+// merely-held Shift as Smooth (see is_smooth in main.cpp); this used to key off
+// smooth_locked alone, so with Shift down the mirror kept showing the underlying brush
+// while the stroke used Smooth's numbers. Dragging a slider in that state wrote the
+// value you were watching into the underlying brush's slot, silently — which is how
+// Clay ended up holding a spacing nobody set on it.
 BrushType InputState::live_brush_slot() const {
-    return smooth_locked ? BrushType::SMOOTH : current_brush;
+    return (is_smooth_active() || current_brush == BrushType::SMOOTH)
+         ? BrushType::SMOOTH : current_brush;
+}
+
+// Re-aim the mirror. Idempotent and cheap (three floats), so it can be called from the
+// top of every frame — which is what makes the invariant hold across Shift going down
+// or up between frames, an edge no key handler observes.
+void InputState::sync_live_settings() {
+    const BrushSettings& b = per_brush[(int)live_brush_slot()];
+    brush_strength = b.strength;
+    brush_hardness = b.hardness;
+    brush_spacing  = b.spacing;
+    // Size is only mirrored when the per-brush toggle is on; off, one shared size is
+    // the whole point. The stash is still kept current at the point of edit either way,
+    // so flipping the toggle mid-session starts from the sizes you were actually using.
+    if (per_brush_sizes) brush_size = brush_size_of[(int)live_brush_slot()];
 }
 
 void InputState::flush_profile() {
-    // Fold the live copy back into its slot first, or the active brush's edits are lost.
-    const int slot = (int)live_brush_slot();
-    per_brush[slot].strength = brush_strength;
-    per_brush[slot].hardness = brush_hardness;
-    per_brush[slot].spacing  = brush_spacing;
-
+    // No fold from the mirror: per_brush[] is written at the point of edit and is
+    // already the truth. Folding a mirror that may be aimed at Smooth was the other
+    // half of the slot-confusion bug — it ran four times a second from settings_tick.
     ProfileSettings& p = profiles[(int)active_profile];
     p.max_effect = max_effect;
     for (int i = 0; i < (int)BrushType::COUNT; i++) p.per_brush[i] = per_brush[i];
@@ -181,28 +196,23 @@ void InputState::switch_profile(InputProfile to) {
     const ProfileSettings& p = profiles[(int)to];
     max_effect = p.max_effect;
     for (int i = 0; i < (int)BrushType::COUNT; i++) per_brush[i] = p.per_brush[i];
-
-    // Same slot the flush used, so a live smooth lock keeps showing smooth's numbers.
-    const int slot = (int)live_brush_slot();
-    brush_strength = per_brush[slot].strength;
-    brush_hardness = per_brush[slot].hardness;
-    brush_spacing  = per_brush[slot].spacing;
+    sync_live_settings();
 }
 
 void InputState::clear_smooth_lock() {
     if (!smooth_locked) return;
-    per_brush[(int)BrushType::SMOOTH].strength = brush_strength;
-    per_brush[(int)BrushType::SMOOTH].hardness = brush_hardness;
-    per_brush[(int)BrushType::SMOOTH].spacing  = brush_spacing;
-    brush_size_of[(int)BrushType::SMOOTH] = brush_size;
-    brush_strength = per_brush[(int)current_brush].strength;
-    brush_hardness = per_brush[(int)current_brush].hardness;
-    brush_spacing  = per_brush[(int)current_brush].spacing;
-    if (per_brush_sizes) brush_size = brush_size_of[(int)current_brush];
     smooth_locked = false;
+    sync_live_settings();
 }
 
 void InputState::begin_frame() {
+    // Re-aim the settings mirror before anything reads it. Shift going down or up is
+    // what makes live_brush_slot() move, and no handler runs on that transition, so
+    // this is the only place the invariant can be restored. Skipped mid-drag: a slider
+    // owns the live value while it is being dragged and writes through to its latched
+    // slot itself.
+    if (slider_mode == SliderMode::NONE) sync_live_settings();
+
     // One-shot event flags are cleared in end_frame, NOT here. On the web,
     // GLFW callbacks fire from DOM handlers *between* rAF frames (glfwPollEvents
     // is a no-op), so a top-of-frame clear would eat every press/keydown before
@@ -299,10 +309,9 @@ static void apply_slider_delta(float dx) {
                 float delta = g_input->slider_accum * 0.001f;
                 // Ceiling is per-brush: clay's raking square needs overlapping dabs
                 // and breaks up into a stamp lattice above 0.15 (see max_spacing_for).
-                int sb = g_input->smooth_locked ? (int)BrushType::SMOOTH
-                                                : (int)g_input->current_brush;
                 float min_delta = 0.05f - g_input->slider_start_value;
-                float max_delta = max_spacing_for((BrushType)sb) - g_input->slider_start_value;
+                float max_delta = max_spacing_for(g_input->slider_slot)
+                                - g_input->slider_start_value;
                 delta = std::max(min_delta, std::min(max_delta, delta));
                 g_input->slider_accum = delta / 0.001f;
                 g_input->brush_spacing = g_input->slider_start_value + delta;
@@ -310,10 +319,17 @@ static void apply_slider_delta(float dx) {
             }
             default: break;
     }
-    int save_brush = g_input->smooth_locked ? (int)BrushType::SMOOTH : (int)g_input->current_brush;
+    // Write through to the latched slot — per_brush[] is the truth, the live fields are
+    // only the thing being dragged. slider_slot, not a fresh live_brush_slot(): see the
+    // field's comment for why letting go of Shift mid-drag must not change the target.
+    const int save_brush = (int)g_input->slider_slot;
     g_input->per_brush[save_brush].strength = g_input->brush_strength;
     g_input->per_brush[save_brush].hardness = g_input->brush_hardness;
     g_input->per_brush[save_brush].spacing  = g_input->brush_spacing;
+    // Size lives outside BrushSettings but stashes the same way, and the SIZE drag used
+    // to update only the live value — so with per-brush sizes on, every resize was
+    // reverted by the next brush switch.
+    g_input->brush_size_of[save_brush] = g_input->brush_size;
     // Don't update mouse_x/y — keep cursor visually locked
 }
 
@@ -636,6 +652,7 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
                     g_input->slider_start_x = g_input->mouse_x;
                     g_input->slider_start_y = g_input->mouse_y;
                     g_input->slider_start_value = g_input->brush_size;
+                    g_input->slider_slot = g_input->live_brush_slot();
                     g_input->slider_accum = 0;
                     g_slider_last_raw_x = g_input->mouse_x;
                     web_pointer_lock(true);
@@ -647,6 +664,7 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
                 g_input->slider_start_x = g_input->mouse_x;
                 g_input->slider_start_y = g_input->mouse_y;
                 g_input->slider_start_value = g_input->brush_strength;
+                g_input->slider_slot = g_input->live_brush_slot();
                 g_input->slider_accum = 0;
                 g_slider_last_raw_x = g_input->mouse_x;
                 web_pointer_lock(true);
@@ -662,6 +680,7 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
                     g_input->slider_start_x = g_input->mouse_x;
                     g_input->slider_start_y = g_input->mouse_y;
                     g_input->slider_start_value = g_input->brush_hardness;
+                    g_input->slider_slot = g_input->live_brush_slot();
                     g_input->slider_accum = 0;
                     g_slider_last_raw_x = g_input->mouse_x;
                     web_pointer_lock(true);
@@ -678,6 +697,7 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
                     g_input->slider_start_x = g_input->mouse_x;
                     g_input->slider_start_y = g_input->mouse_y;
                     g_input->slider_start_value = g_input->brush_spacing;
+                    g_input->slider_slot = g_input->live_brush_slot();
                     g_input->slider_accum = 0;
                     g_slider_last_raw_x = g_input->mouse_x;
                     web_pointer_lock(true);
@@ -709,17 +729,9 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
                 // Double-tap shift detection
                 if (now - g_last_shift_time < 0.3) {
                     if (!g_input->smooth_locked) {
-                        // Save current brush settings, load smooth's
-                        g_input->per_brush[(int)g_input->current_brush].strength = g_input->brush_strength;
-                        g_input->per_brush[(int)g_input->current_brush].hardness = g_input->brush_hardness;
-                        g_input->per_brush[(int)g_input->current_brush].spacing  = g_input->brush_spacing;
-                        g_input->brush_size_of[(int)g_input->current_brush] = g_input->brush_size;
-                        g_input->brush_strength = g_input->per_brush[(int)BrushType::SMOOTH].strength;
-                        g_input->brush_hardness = g_input->per_brush[(int)BrushType::SMOOTH].hardness;
-                        g_input->brush_spacing  = g_input->per_brush[(int)BrushType::SMOOTH].spacing;
-                        if (g_input->per_brush_sizes)
-                            g_input->brush_size = g_input->brush_size_of[(int)BrushType::SMOOTH];
+                        // Nothing to save: per_brush[] is written at the point of edit.
                         g_input->smooth_locked = true;
+                        g_input->sync_live_settings();
                     } else {
                         g_input->clear_smooth_lock();
                     }
@@ -976,6 +988,8 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
             float step = std::max(1.0f, g_input->brush_size * 0.08f);
             g_input->brush_size = std::max(5.0f, std::min(500.0f,
                 g_input->brush_size + (up ? step : -step)));
+            // Stash it too, or with per-brush sizes on the next switch_brush undoes this.
+            g_input->brush_size_of[(int)g_input->live_brush_slot()] = g_input->brush_size;
             snprintf(g_input->notification, sizeof(g_input->notification),
                      "Size: %.0f", g_input->brush_size);
             g_input->notification_timer = 1.0f;

@@ -89,9 +89,14 @@ struct InputState {
     // property of what you are sculpting right now, so restoring last session's number
     // hands you a brush scaled for a model you are no longer looking at.
     float brush_size;
-    float brush_strength;   // 0..1 (per-brush, synced via switch_brush)
-    float brush_hardness;   // 0..1 (per-brush, synced via switch_brush)
-    float brush_spacing;    // fraction of brush radius between dabs (0.05..1.0, per-brush)
+    // These three are a READ-ONLY MIRROR of per_brush[live_brush_slot()], re-pointed
+    // once a frame by sync_live_settings(). per_brush[] is the truth; the mirror exists
+    // so the HUD and the sliders have a single scalar to read and drag. Anything that
+    // edits a brush's feel writes per_brush[] and then re-syncs — never the mirror
+    // alone, and never per_brush[] from the mirror. See sync_live_settings.
+    float brush_strength;   // 0..1  (mirror of per_brush[live_brush_slot()].strength)
+    float brush_hardness;   // 0..1  (mirror of ....hardness)
+    float brush_spacing;    // fraction of brush radius between dabs, 0.05..1.0 (mirror)
     BrushSettings per_brush[(int)BrushType::COUNT];
 
     // "Individual brush sizes" (burger menu). On: brush_size saves/restores per brush
@@ -195,6 +200,11 @@ struct InputState {
     double slider_start_y;
     float slider_start_value;
     float slider_accum;          // accumulated horizontal delta
+    // Which brush slot this drag edits, latched at key-down. Latched rather than
+    // re-derived per motion event because live_brush_slot() moves when Shift goes
+    // down or up: without the latch, letting go of Shift mid-drag would carry a
+    // start value belonging to Smooth into whatever brush is underneath.
+    BrushType slider_slot;
 
     // UI
     bool toolbar_visible;
@@ -334,10 +344,14 @@ struct InputState {
     void end_frame();
 
     void switch_brush(BrushType to);
-    void clear_smooth_lock();  // save smooth's settings, restore current brush's
+    void clear_smooth_lock();  // drop the sticky smooth lock, re-aim the mirror
     void switch_profile(InputProfile to);  // park the live brush feel, load the other profile's
-    void flush_profile();      // live fields -> profiles[active_profile] (call before saving)
-    BrushType live_brush_slot() const;     // which per_brush slot the live fields mirror
+    void flush_profile();      // per_brush[] -> profiles[active_profile] (call before saving)
+    // Re-point brush_strength/hardness/spacing (and the size, when per-brush sizes are
+    // on) at per_brush[live_brush_slot()]. Idempotent; call it after anything that can
+    // change which slot is live.
+    void sync_live_settings();
+    BrushType live_brush_slot() const;     // which per_brush slot the mirror reflects
     bool is_smooth_active() const;
     bool is_subtract_active() const;
     const char* brush_name() const;
