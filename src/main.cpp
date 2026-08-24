@@ -661,9 +661,18 @@ int main(int argc, char* argv[]) {
 
     Camera camera;
 
-    Scene scene(icosphere(input.subdiv_level), renderer, compute, input.subdiv_level);
+    // The opening ball. settings_load ran back at startup, so sphere_kind is the
+    // user's persisted choice by now. A UV sphere is a base cage, not a subdivided
+    // icosahedron: it locks at level 0 and subdiv_level has to say so, or the HUD
+    // reports a level the multires stack never had.
+    const bool uv_start = (input.sphere_kind == InputState::SphereKind::UV);
+    if (uv_start) input.subdiv_level = 0;
+    Scene scene(uv_start ? uv_sphere(32, 16) : icosphere(input.subdiv_level),
+                renderer, compute, input.subdiv_level);
     scene.set_mirror_topology(cli_use_topology);
-    scene.refresh_mirror_map(input.subdiv_level);
+    // -1, not the level: that argument is a key into the icosphere mirror-map cache,
+    // and handing it a UV sphere would park a 482-vert map in the level-0 slot.
+    scene.refresh_mirror_map(uv_start ? -1 : input.subdiv_level);
     scene.sync();
     input.mesh_locked = true;
 

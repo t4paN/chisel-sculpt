@@ -343,6 +343,16 @@ struct InputState {
     // Insert-mode primitive selected in the shape picker (INSERT mode UI).
     enum class InsertShape { SPHERE, BOX, CYLINDER };
     InsertShape insert_shape;
+
+    // Which sphere "sphere" means — persisted, and deliberately ONE setting for both
+    // consumers: the ball the app opens with and the one the INSERT shape picker
+    // spawns. Two knobs would let the two disagree, which is exactly the confusion
+    // the user asked to avoid. Changing it re-aims insert immediately; the startup
+    // mesh follows on the next launch (the current scene is not thrown away).
+    // ICO is default: the icosphere has no pole pinch and is what brush feel was
+    // tuned against. UV is 32x16 = Blender's stock sphere, for edge-loop workflows.
+    enum class SphereKind { ICO, UV };
+    SphereKind sphere_kind;
     bool delete_mesh_requested;   // Delete key
     bool enter_pressed;           // Enter key (consumed per-frame)
     bool key_y_pressed;           // Y key (consumed per-frame, for prompts)

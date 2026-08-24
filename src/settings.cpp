@@ -201,6 +201,7 @@ std::string serialize(const InputState& in) {
     append_kv(s, "show_fps",            in.show_fps);
     append_kv(s, "camera_perspective",  in.camera_perspective);
     append_kv(s, "camera_fov",          in.camera_fov);
+    append_kv(s, "sphere_kind",         (int)in.sphere_kind);
     // mirror_x is deliberately absent — see InputState::mirror_x. Symmetry is session
     // state that starts ON every run, so it must not survive into the next one. As with
     // brush_size, leaving it out of the "serialize and compare" blob also means pressing
@@ -283,6 +284,13 @@ void apply_global_key(InputState& in, const std::string& key, const std::string&
     else if (key == "paint_visible")       in.paint_visible       = parse_bool(val);
     else if (key == "paint_color")         parse_rgb(val, in.paint_color);
     else if (key == "paint_color_alt")     parse_rgb(val, in.paint_color_alt);
+    else if (key == "sphere_kind") {
+        // Range-checked like every other value on the way in: the blob is
+        // user-editable, and an out-of-range enum would come back every launch.
+        int k = (int)std::strtol(val.c_str(), nullptr, 10);
+        if (k >= 0 && k <= (int)InputState::SphereKind::UV)
+            in.sphere_kind = (InputState::SphereKind)k;
+    }
     else if (key == "active_alpha") {
         int a = (int)std::strtol(val.c_str(), nullptr, 10);
         if (a >= 0 && a < kBuiltinAlphaCount) in.active_alpha = a;
@@ -409,6 +417,7 @@ void settings_reset(InputState& input) {
     input.show_fps           = fresh.show_fps;
     input.camera_perspective = fresh.camera_perspective;
     input.camera_fov         = fresh.camera_fov;
+    input.sphere_kind        = fresh.sphere_kind;
     input.mirror_x           = fresh.mirror_x;
     input.fast_normals       = fresh.fast_normals;
     input.paint_visible      = fresh.paint_visible;

@@ -286,6 +286,84 @@ static void finalize_primitive(Mesh& m) {
     m.recompute_normals();
 }
 
+// Latitude/longitude sphere with the poles on Y. (32, 16) reproduces Blender's
+// stock UV sphere vertex-for-vertex: the same cos/sin of the same angles, seam
+// column at -Z, unit radius.
+//
+// The quad diagonals are picked by which side of the x=0 plane the quad sits on,
+// so the triangulation is symmetric under x -> -x BY CONSTRUCTION. That is the
+// whole reason this is generated rather than shipped as an .obj: an imported UV
+// sphere had its quads fan-split from the exporter's first corner, which is not
+// mirror-symmetric, so every quad produced an edge whose mirror image did not
+// exist and mirrored strokes after a subdivide destroyed the mesh (CHANGES.md
+// 2026-08-23). Building it here means the mirror map is clean without leaning on
+// the importer's mirror-invariant diagonal key.
+Mesh uv_sphere(int segments, int rings) {
+    if (segments < 4) segments = 4;
+    if (segments & 1) segments++;   // even: two vertex columns land exactly on x=0
+    if (rings < 2) rings = 2;
+    Mesh m;
+
+    // Latitude rows r = 1..rings-1, stored at row index (r-1); the poles follow.
+    // x = sin(theta), z = -cos(theta) puts segment 0 on -Z with x EXACTLY 0 — the
+    // seam has to be exact, not near-zero, or build_mirror_x_map classifies it by
+    // epsilon instead of by construction.
+    for (int r = 1; r < rings; r++) {
+        float phi = (float)M_PI * (float)r / (float)rings;
+        float y   = std::cos(phi);
+        float rxz = std::sin(phi);
+        for (int a = 0; a < segments; a++) {
+            float th = 2.0f * (float)M_PI * (float)a / (float)segments;
+            m.pos_x.push_back(std::sin(th) * rxz);
+            m.pos_y.push_back(y);
+            m.pos_z.push_back(-std::cos(th) * rxz);
+        }
+    }
+    uint32_t north = m.vertex_count();
+    m.pos_x.push_back(0.0f); m.pos_y.push_back( 1.0f); m.pos_z.push_back(0.0f);
+    uint32_t south = m.vertex_count();
+    m.pos_x.push_back(0.0f); m.pos_y.push_back(-1.0f); m.pos_z.push_back(0.0f);
+
+    auto row = [&](int r, int a) -> uint32_t {
+        return (uint32_t)((r - 1) * segments + (a % segments));
+    };
+
+    // Quad bands. Corners a=upper-left, b=upper-right, c=lower-right, d=lower-left
+    // (upper = nearer the north pole); (a,b,c) winds outward.
+    for (int r = 1; r < rings - 1; r++) {
+        for (int s_ = 0; s_ < segments; s_++) {
+            uint32_t va = row(r,   s_),     vb = row(r,   s_ + 1);
+            uint32_t vc = row(r+1, s_ + 1), vd = row(r+1, s_);
+            // Quad s_ mirrors to quad (segments-1-s_), and under that map corner a
+            // becomes b and d becomes c — so the a-c diagonal on one side is the
+            // b-d diagonal on the other. Splitting the band down the middle hands
+            // each half the diagonal its partner will mirror onto.
+            if (s_ < segments / 2) {
+                m.indices.push_back(va); m.indices.push_back(vb); m.indices.push_back(vc);
+                m.indices.push_back(va); m.indices.push_back(vc); m.indices.push_back(vd);
+            } else {
+                m.indices.push_back(va); m.indices.push_back(vb); m.indices.push_back(vd);
+                m.indices.push_back(vb); m.indices.push_back(vc); m.indices.push_back(vd);
+            }
+        }
+    }
+
+    // Pole fans: the degenerate band where one row collapses to a single vertex.
+    // Triangles have no diagonal to choose, so these are symmetric for free.
+    for (int s_ = 0; s_ < segments; s_++) {
+        m.indices.push_back(north);
+        m.indices.push_back(row(1, s_ + 1));
+        m.indices.push_back(row(1, s_));
+
+        m.indices.push_back(row(rings - 1, s_));
+        m.indices.push_back(row(rings - 1, s_ + 1));
+        m.indices.push_back(south);
+    }
+
+    finalize_primitive(m);
+    return m;
+}
+
 Mesh box_primitive(int seg) {
     if (seg < 1) seg = 1;
     Mesh m;

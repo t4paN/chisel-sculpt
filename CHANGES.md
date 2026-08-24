@@ -2,6 +2,69 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-08-25 — UV sphere, as a base cage you can actually pick
+
+Chisel can now open with — and insert — a UV sphere instead of the icosphere. Burger menu
+→ `Sphere: icosphere / Sphere: UV sphere`, persisted like the other look settings.
+
+**One setting, both consumers.** The same choice drives the startup mesh *and* what the
+INSERT shape picker's sphere swatch spawns, so the two can never disagree. Insert re-aims
+immediately; the opening mesh follows on the next launch, because switching it mid-session
+would mean throwing away the scene you have open. Default stays `ICO` — the icosphere has
+no pole pinch and is what brush feel was tuned against.
+
+**Generated, not shipped as an asset.** `uv_sphere(segments, rings)` in `src/sphere.cpp`,
+alongside `box_primitive` / `cylinder_primitive` and finishing through the same
+`finalize_primitive()`, so it lands on the same unit bounding sphere as every other insert
+primitive. `(32, 16)` reproduces Blender's stock UV sphere vertex-for-vertex — 482 verts,
+448 quads + 64 pole triangles, 960 tris once triangulated. Checked against a real Blender
+4.2.1 export (`~/Desktop/chisel-sculpts/sphere.obj`): every vertex matches to 1.6e-06,
+which is just the OBJ's six-decimal print rounding.
+
+**The diagonals are the point.** Quad triangulation is chosen by which side of the x=0
+plane the quad sits on, so it is symmetric under `x -> -x` *by construction*. Quad `s`
+mirrors onto quad `segments-1-s`, and under that map corner `a` becomes `b` and `d`
+becomes `c` — so an `a-c` diagonal on one side is a `b-d` diagonal on the other, and
+splitting the band down the middle hands each half the diagonal its partner will mirror
+onto. `segments` is forced even so two vertex columns land exactly on x=0, and the seam
+column is built as `x = sin(theta)` at `theta = 0` — exactly zero, not near-zero, so
+`build_mirror_x_map` classifies it by construction rather than by epsilon.
+
+That is the whole reason this is generated rather than embedded as an `.obj` blob. An
+*imported* UV sphere had its quads fan-split from the exporter's first corner, which is
+not mirror-symmetric, and mirrored strokes right after a subdivide destroyed the mesh
+(see 2026-08-23). The importer now handles that with a mirror-invariant diagonal key, but
+generating means this sphere never depends on it — and costs nothing in the wasm.
+
+**Verified before wiring** (harnesses in the session scratchpad, built against the shipped
+`src/sphere.cpp` and `src/mesh.cpp`, with `build_fine_mirror`'s real source text pulled
+out of `src/multires_stack.cpp` rather than transcribed):
+
+- base map 450 paired / 32 seam / **0 unpaired** — the same profile the 2026-08-23
+  diagnosis measured on the imported file
+- 0 triangles whose mirror image is missing from the mesh, at base and through
+  **subdiv +1/+2/+3** (1922 / 7682 / 30722 verts), matching an `icosphere(2)` control
+- 0 off-plane self-maps at every level — a self-map away from x=0 is precisely the
+  "weld it onto the mirror plane" failure that ate the imported sphere
+- watertight (every edge shared by exactly 2 triangles), positive signed volume =
+  outward winding
+
+**Level bookkeeping.** A UV sphere is a base cage, not a subdivided icosahedron: it locks
+at level 0 and `input.subdiv_level` is set to 0 to match, or the HUD would report a level
+the multires stack never had. `refresh_mirror_map(-1)` on that path rather than the level —
+that argument is a key into the icosphere mirror-map cache, and handing it a 482-vert map
+would park it in the level-0 slot.
+
+Insert needed nothing beyond the primitive swap: that path already locks at level 0 and
+builds its mirror map from scratch.
+
+Not touched: the HUD's `Subdiv level` line still reads `input.subdiv_level`, which nothing
+updates as you step levels — pre-existing staleness, out of scope here.
+
+Files: `src/sphere.cpp`, `include/mesh.h`, `include/input.h`, `src/input.cpp`,
+`src/settings.cpp`, `src/insert_controller.cpp`, `src/main.cpp`, `src/ui_overlay.cpp`.
+No shader changes. All three targets build (gl, wgpu, web).
+
 ## 2026-08-24 — X mirror always starts ON
 
 Symmetry is now the one setting that deliberately does **not** persist: every launch

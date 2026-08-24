@@ -135,8 +135,11 @@ Mesh icosphere(int subdivisions);
 //   box:      subdivided cube, `seg` quads per edge (seg >= 1).
 //   cylinder: axis along Y, `radial` segments around, `height_seg` along the axis,
 //             triangle-fan caps sharing the rim ring.
+//   uv sphere: latitude/longitude sphere, poles on Y. (32, 16) reproduces
+//             Blender's stock UV sphere vertex-for-vertex.
 Mesh box_primitive(int seg);
 Mesh cylinder_primitive(int radial, int height_seg);
+Mesh uv_sphere(int segments, int rings);
 
 // Packed-RGBA8 vertex-colour blending used to carry paint across topology
 // changes (subdivide / remesh). Alpha is forced to 0xFF — the paint model

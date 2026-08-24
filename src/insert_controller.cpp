@@ -275,8 +275,16 @@ void InsertController::tick(InputState& input, Camera& camera,
                         break;
                     case InputState::InsertShape::SPHERE:
                     default:
-                        prim = icosphere(state_.subdiv_level);
-                        prim.recompute_normals();
+                        // One setting decides what "sphere" means everywhere — the
+                        // startup ball and this swatch never disagree. 32x16 is
+                        // Blender's stock UV sphere; it ships as a base cage, so it
+                        // does not take subdiv_level the way the icosphere does.
+                        if (input.sphere_kind == InputState::SphereKind::UV) {
+                            prim = uv_sphere(32, 16);   // normals baked by finalize_primitive
+                        } else {
+                            prim = icosphere(state_.subdiv_level);
+                            prim.recompute_normals();
+                        }
                         break;
                 }
                 uint32_t svc = prim.vertex_count();

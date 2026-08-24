@@ -1058,6 +1058,25 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
 
             ImGui::Separator();
 
+            // What "sphere" means, for both consumers at once: the ball the app opens
+            // with and the one the INSERT shape picker spawns. Deliberately not two
+            // settings — a startup ball that disagrees with the insert swatch is the
+            // confusing half of this feature.
+            int sk = (int)input.sphere_kind;
+            ImGui::SetNextItemWidth(150.0f);
+            if (ImGui::Combo("##sphereKind", &sk, "Sphere: icosphere\0Sphere: UV sphere\0"))
+                input.sphere_kind = (InputState::SphereKind)sk;
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Which sphere you get — as the opening mesh AND from the\n"
+                                  "Insert shape picker.\n\n"
+                                  "Icosphere: even triangles all over, no poles. The default,\n"
+                                  "and what the brushes were tuned against.\n\n"
+                                  "UV sphere: Blender's stock 32x16 latitude/longitude ball,\n"
+                                  "482 verts. Familiar edge loops, at the cost of 32 triangles\n"
+                                  "converging at each pole.\n\n"
+                                  "Insert changes immediately; the opening mesh changes on\n"
+                                  "the next launch — your current sculpt is left alone.");
+
             // The escape hatch persistence makes necessary: before settings were saved,
             // any value you dragged somewhere unusable was one restart away from gone.
             // Now it comes back, so there has to be a way out that is not "hunt down the
