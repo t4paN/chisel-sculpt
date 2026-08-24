@@ -2,7 +2,7 @@
 // Port of src/compute_smooth.cpp (compute_normals_src). After a deforming brush
 // moves positions, recompute the vertex normals for the touched vertices so the
 // matcap shading tracks the new surface. One thread per dirty vertex: sum the
-// (area-weighted) face normals of its adjacent triangles via CSR adjacency, then
+// (Max-weighted) face normals of its adjacent triangles via CSR adjacency, then
 // normalize. REFERENCE TRANSLATION — see CONVENTIONS.md.
 //
 // Bindings mirror the ComputeBinding enum in include/compute.h:
@@ -52,12 +52,34 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
         let p1 = vec3<f32>(positions[i1 * 3u], positions[i1 * 3u + 1u], positions[i1 * 3u + 2u]);
         let p2 = vec3<f32>(positions[i2 * 3u], positions[i2 * 3u + 1u], positions[i2 * 3u + 2u]);
 
-        // un-normalized cross = 2*area*unit_normal → summing area-weights for free
+        // cross(next-k, prev-k) is the SAME vector at all three corners, so one face
+        // normal serves the triangle; only the weight depends on which corner v is.
         let fn_ = cross(p1 - p0, p2 - p0);
         if (length(fn_) < 1e-7) {
             continue;
         }
-        n = n + fn_;
+
+        // Nelson Max weighting: w = 1/(|a|^2 * |b|^2) on the two edges leaving v.
+        // Plain area weighting biases a vertex normal toward its largest neighbour,
+        // which on an anisotropic mesh (a UV sphere near the poles) tilts the normal
+        // off-radial by degrees. MUST match max_corner_weight() in src/mesh.cpp — a
+        // GPU-touched vertex and a CPU-touched one sit side by side on the same
+        // surface. Plain if/else, not select(): Tint reads an inline `<` in select()
+        // as a template-list opener (see CONVENTIONS.md).
+        var ea = vec3<f32>(0.0, 0.0, 0.0);
+        var eb = vec3<f32>(0.0, 0.0, 0.0);
+        if (v == i0) {
+            ea = p1 - p0; eb = p2 - p0;
+        } else if (v == i1) {
+            ea = p2 - p1; eb = p0 - p1;
+        } else {
+            ea = p0 - p2; eb = p1 - p2;
+        }
+        let denom = dot(ea, ea) * dot(eb, eb);
+        if (denom <= 0.0) {
+            continue;
+        }
+        n = n + fn_ * (1.0 / denom);
     }
 
     let len = length(n);

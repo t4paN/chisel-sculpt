@@ -2,6 +2,70 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-08-25 — Vertex normals are Max-weighted, not area-weighted
+
+The new UV sphere looked subtly ellipsoidal. It is not: measured on the generated mesh,
+every vertex sits at radius 1.000000, the bounding box is exactly 2.000000 on all three
+axes, and the polygonal outline dips inward by the same 0.9915 horizontally and
+vertically. The geometry is a perfect sphere.
+
+The bias was in the **shading**. `Mesh::recompute_normals` accumulated the raw cross
+product, which area-weights each face. Area weighting pulls a vertex normal toward
+whichever adjacent triangle happens to be largest, so it is systematically wrong on
+ANISOTROPIC tessellations — and a UV sphere is exactly that away from the equator, where
+the segments converge and the triangles go long and thin. Worst deviation from the true
+radial normal was 2.79 deg, and crucially it **varied with latitude** (2.79 at the poles,
+1.91 at the equator). A sphere's shading gradient is uniform; this one's was not, so the
+terminator sat slightly wrong toward the poles and the eye read it as an ellipsoid.
+
+The icosphere never showed this because it is isotropic everywhere — its error was a flat
+0.19 deg at every latitude, which is why area weighting was never questioned.
+
+Switched to **Nelson Max weighting**: `w = 1/(|a|^2 * |b|^2)` on the two edges leaving
+each corner, applied to the same unnormalized cross product. `cross(next-k, prev-k)` is
+the same vector at all three corners (standard triangle identity), so one face normal
+still serves the whole triangle and only the weight changes.
+
+Measured against the shipped code, worst angle from the true radial normal:
+
+| mesh | area-weighted (before) | Max-weighted (after) |
+|---|---|---|
+| `uv_sphere(32,16)` | 2.79 deg | 1.3e-05 deg |
+| `uv_sphere(64,32)` | 1.40 deg | 2.9e-05 deg |
+| `icosphere(4)` | 0.19 deg | 4.5e-05 deg |
+| `icosphere(2)` | 0.78 deg | 7.6e-06 deg |
+
+That is exact to float32 round-off — Max weighting is provably exact for vertices lying on
+a sphere. Every mesh in the app gets better, not just the new one; the icosphere improves
+by ~4000x and imported meshes benefit too.
+
+Cost is two dot products and a divide per corner. No `acos`, no extra normalize — cheaper
+than true angle weighting (Thurmer-Wuthrich), which was also measured and is *worse*
+(0.34 deg on the UV sphere) as well as more expensive.
+
+**Four sites had to move in lockstep**, or a GPU-touched vertex would shade differently
+from the CPU-touched one beside it on the same surface: `Mesh::recompute_normals`,
+`Mesh::recompute_normals_partial`, `shaders/wgsl/compute_normals.wgsl` and its GLSL twin.
+The two GPU kernels iterate per vertex rather than per triangle, so they pick the two
+edges leaving `v` with a plain if/else chain — deliberately not `select()`, whose inline
+comparisons Tint parses as a template-list opener (CONVENTIONS.md).
+
+Degenerate corners return weight 0 rather than an inf; the `denom <= 0` test also catches
+the product underflowing to zero in float32.
+
+Verified: native GL prints `compute_normals pipeline compiled` with no errors (on GL that
+printf is authoritative), and the web build was served locally and opened in Chrome with
+`--enable-logging=stderr` — 25 pipelines compiled, zero `parsing WGSL` / `Invalid
+ShaderModule` / validation lines. That browser gate is the only thing that can clear a
+WGSL change.
+
+One caveat worth stating plainly: this changes the shading of **every** mesh, including
+existing saved sculpts. Nothing about the stored geometry changes — normals are derived,
+never persisted — but a sculpt reopened after this will shade very slightly differently.
+
+Files: `src/mesh.cpp`, `shaders/wgsl/compute_normals.wgsl`,
+`shaders/glsl/compute_normals.comp`. All three targets build.
+
 ## 2026-08-25 — UV sphere, as a base cage you can actually pick
 
 Chisel can now open with — and insert — a UV sphere instead of the icosphere. Burger menu

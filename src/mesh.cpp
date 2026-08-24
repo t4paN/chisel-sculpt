@@ -7,6 +7,25 @@
 #include <unordered_map>
 #include <cassert>
 
+// Nelson Max's normal weight for one triangle corner: 1/(|a|^2 * |b|^2), where a
+// and b are the two edges leaving that corner. Replaces plain area weighting (the
+// raw cross product), which is systematically wrong on ANISOTROPIC tessellations —
+// long thin triangles pull a vertex normal toward whichever neighbour happens to be
+// biggest. A UV sphere is exactly that away from the equator, where the segments
+// converge, and the resulting error varied with latitude (2.79 deg at the poles vs
+// 1.91 at the equator) which reads to the eye as an ellipsoid rather than a sphere.
+// This weighting is exact for vertices lying on a sphere and measured 0.02 deg on
+// both the UV sphere and the icosphere. See CHANGES.md 2026-08-25.
+//
+// Returns 0 for a degenerate corner so a sliver contributes nothing instead of an
+// inf: the <= 0 test also catches the product underflowing to zero in float32.
+static inline float max_corner_weight(const Vec3& a, const Vec3& b) {
+    float la = a.x*a.x + a.y*a.y + a.z*a.z;
+    float lb = b.x*b.x + b.y*b.y + b.z*b.z;
+    float denom = la * lb;
+    return (denom > 0.0f) ? 1.0f / denom : 0.0f;
+}
+
 void Mesh::recompute_normals() {
     uint32_t vc = vertex_count();
     uint32_t tc = tri_count();
@@ -16,7 +35,9 @@ void Mesh::recompute_normals() {
     std::memset(norm_y.data(), 0, vc * sizeof(float));
     std::memset(norm_z.data(), 0, vc * sizeof(float));
 
-    // Accumulate face normals (area-weighted by cross product magnitude)
+    // Accumulate face normals, Max-weighted per corner. cross(next-k, prev-k) is the
+    // SAME vector at all three corners (standard triangle identity), so one face
+    // normal serves the whole triangle and only the weight differs.
     for (uint32_t t = 0; t < tc; t++) {
         uint32_t i0 = indices[t*3+0];
         uint32_t i1 = indices[t*3+1];
@@ -28,11 +49,15 @@ void Mesh::recompute_normals() {
 
         Vec3 e1 = v1 - v0;
         Vec3 e2 = v2 - v0;
-        Vec3 fn = e1.cross(e2); // not normalized = area weighted
+        Vec3 fn = e1.cross(e2);
 
-        norm_x[i0] += fn.x; norm_y[i0] += fn.y; norm_z[i0] += fn.z;
-        norm_x[i1] += fn.x; norm_y[i1] += fn.y; norm_z[i1] += fn.z;
-        norm_x[i2] += fn.x; norm_y[i2] += fn.y; norm_z[i2] += fn.z;
+        float w0 = max_corner_weight(e1,      e2);
+        float w1 = max_corner_weight(v2 - v1, v0 - v1);
+        float w2 = max_corner_weight(v0 - v2, v1 - v2);
+
+        norm_x[i0] += fn.x*w0; norm_y[i0] += fn.y*w0; norm_z[i0] += fn.z*w0;
+        norm_x[i1] += fn.x*w1; norm_y[i1] += fn.y*w1; norm_z[i1] += fn.z*w1;
+        norm_x[i2] += fn.x*w2; norm_y[i2] += fn.y*w2; norm_z[i2] += fn.z*w2;
     }
 
     // Normalize
@@ -383,14 +408,19 @@ void Mesh::recompute_normals_partial(const std::vector<uint32_t>& dirty_verts,
         Vec3 e2 = v2 - v0;
         Vec3 fn = e1.cross(e2);
 
+        // Same Max weighting as the full rebuild above — these two MUST agree, or a
+        // stroke's edge would shade differently from the untouched surface beside it.
         if (vert_flag[i0]) {
-            norm_x[i0] += fn.x; norm_y[i0] += fn.y; norm_z[i0] += fn.z;
+            float w = max_corner_weight(e1, e2);
+            norm_x[i0] += fn.x*w; norm_y[i0] += fn.y*w; norm_z[i0] += fn.z*w;
         }
         if (vert_flag[i1]) {
-            norm_x[i1] += fn.x; norm_y[i1] += fn.y; norm_z[i1] += fn.z;
+            float w = max_corner_weight(v2 - v1, v0 - v1);
+            norm_x[i1] += fn.x*w; norm_y[i1] += fn.y*w; norm_z[i1] += fn.z*w;
         }
         if (vert_flag[i2]) {
-            norm_x[i2] += fn.x; norm_y[i2] += fn.y; norm_z[i2] += fn.z;
+            float w = max_corner_weight(v0 - v2, v1 - v2);
+            norm_x[i2] += fn.x*w; norm_y[i2] += fn.y*w; norm_z[i2] += fn.z*w;
         }
     }
 

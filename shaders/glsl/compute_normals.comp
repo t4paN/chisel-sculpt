@@ -1,7 +1,7 @@
 // compute_normals.comp — GLSL 430 sibling of shaders/wgsl/compute_normals.wgsl.
 // After a deforming brush moves positions, recompute the vertex normals for the
 // touched vertices so the matcap shading tracks the new surface. One thread per dirty
-// vertex: sum the (area-weighted) face normals of its adjacent triangles via CSR
+// vertex: sum the (Max-weighted) face normals of its adjacent triangles via CSR
 // adjacency, then normalize. 16-byte std140 Params UBO at binding 63.
 //
 // binding 6 here is the plain id list (no count header) — the count rides in the
@@ -44,15 +44,35 @@ void main() {
         vec3 p1 = vec3(positions[i1*3u], positions[i1*3u+1u], positions[i1*3u+2u]);
         vec3 p2 = vec3(positions[i2*3u], positions[i2*3u+1u], positions[i2*3u+2u]);
 
+        // cross(next-k, prev-k) is the SAME vector at all three corners, so one face
+        // normal serves the triangle; only the weight depends on which corner v is.
         vec3 e1 = p1 - p0;
         vec3 e2 = p2 - p0;
         vec3 fn = cross(e1, e2);
         float area2 = length(fn);
         if (area2 < 1e-7) continue;
 
-        nx += fn.x;
-        ny += fn.y;
-        nz += fn.z;
+        // Nelson Max weighting: w = 1/(|a|^2 * |b|^2) on the two edges leaving v.
+        // Plain area weighting biases a vertex normal toward its largest neighbour,
+        // which on an anisotropic mesh (a UV sphere near the poles) tilts the normal
+        // off-radial by degrees. MUST match max_corner_weight() in src/mesh.cpp and
+        // the WGSL twin — a GPU-touched vertex and a CPU-touched one sit side by
+        // side on the same surface.
+        vec3 ea, eb;
+        if (v == i0) {
+            ea = p1 - p0; eb = p2 - p0;
+        } else if (v == i1) {
+            ea = p2 - p1; eb = p0 - p1;
+        } else {
+            ea = p0 - p2; eb = p1 - p2;
+        }
+        float denom = dot(ea, ea) * dot(eb, eb);
+        if (denom <= 0.0) continue;
+        float w = 1.0 / denom;
+
+        nx += fn.x * w;
+        ny += fn.y * w;
+        nz += fn.z * w;
     }
 
     float len = sqrt(nx*nx + ny*ny + nz*nz);
