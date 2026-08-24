@@ -2,6 +2,34 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-08-24 — X mirror always starts ON
+
+Symmetry is now the one setting that deliberately does **not** persist: every launch
+starts with X mirror on, whatever state the last session ended in. Requested behaviour —
+mirror-off is a temporary thing you do, not a mode you want to inherit from yesterday
+without noticing.
+
+Implemented the way `brush_size` stopped persisting in 2026-08-17: `mirror_x` is no longer
+written by `serialize()` and no longer has a case in `apply_global_key()`, so a stored key
+from an older build falls through as unknown and is dropped. That covers both sinks — the
+native config file and the web build's `localStorage` blob — since they carry the same
+serialized text. `InputState::mirror_x` (already `true`) is the sole default, and burger
+menu → Reset still restores it, because Reset reads that same default.
+
+Side effect, and a welcome one: because the dirty check is "serialize and compare",
+pressing X no longer marks settings dirty at all — a symmetry toggle stops causing a
+settings write.
+
+`~/CHISEL/settings-roundtrip-test.cpp` gained the sharp case: a blob containing
+`mirror_x=0` next to a real global key must load the neighbour and ignore the mirror. Note
+three of that harness's per-brush assertions were already failing at `HEAD` before this
+change — the harness is stale against the brush-slot rework (`13db1af`), where `per_brush[]`
+became the sole truth and setting a live field alone no longer marks the stored brush.
+
+Unchanged on purpose: a `.chisel` project still stores and restores its own mirror state
+on load (`src/main.cpp:2625`). Opening a project saved with symmetry off will still turn it
+off mid-session — this change is about how the app *starts*.
+
 ## 2026-08-23 — v0.2.9 — Held Shift/Ctrl now show on the cursor before you click
 
 The brush cursor only flipped to Smooth once you pressed the button, so you could not

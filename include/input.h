@@ -265,7 +265,10 @@ struct InputState {
     bool mesh_locked;       // true after first brush contact
 
     // Mirror
-    bool mirror_x;          // X-axis symmetry, on by default
+    // X-axis symmetry. Session state, never persisted: every run starts with it ON
+    // regardless of how the last one ended (settings.cpp neither writes nor reads it).
+    // Reset still restores it, since that reads this default.
+    bool mirror_x;
 
     // Autosmooth: light Laplacian pass on draw-brush strokes at pen-up.
     // Defaults ON, toggled with B. Persisted since 2026-08-06, global since

@@ -201,7 +201,10 @@ std::string serialize(const InputState& in) {
     append_kv(s, "show_fps",            in.show_fps);
     append_kv(s, "camera_perspective",  in.camera_perspective);
     append_kv(s, "camera_fov",          in.camera_fov);
-    append_kv(s, "mirror_x",            in.mirror_x);
+    // mirror_x is deliberately absent — see InputState::mirror_x. Symmetry is session
+    // state that starts ON every run, so it must not survive into the next one. As with
+    // brush_size, leaving it out of the "serialize and compare" blob also means pressing
+    // X no longer marks settings dirty.
     append_kv(s, "fast_normals",        in.fast_normals);
     append_kv(s, "paint_visible",       in.paint_visible);
     append_kv(s, "clay_melt",           in.clay_melt);
@@ -263,7 +266,9 @@ void apply_profile_key(ProfileSettings& p, const std::string& key, const std::st
 void apply_global_key(InputState& in, const std::string& key, const std::string& val) {
     // No "brush_size" case: a stored blob from before 2026-08-17 still carries the key,
     // and it falls through as an unknown key — which is exactly the desired migration
-    // (the value is dropped, and the next write stops emitting it).
+    // (the value is dropped, and the next write stops emitting it). Same for "mirror_x"
+    // as of 2026-08-24 — a stored `mirror_x=0` must not be able to start a session with
+    // symmetry off.
     if      (key == "matcap_contrast")     in.matcap_contrast     = clampf(std::strtof(val.c_str(), nullptr), 0.0f, 1.0f);
     else if (key == "clay_melt")           in.clay_melt           = clampf(std::strtof(val.c_str(), nullptr), 0.0f, 1.0f);
     else if (key == "density_coarse_mult") in.density_coarse_mult = clampf(std::strtof(val.c_str(), nullptr), 1.0f, 4.0f);
@@ -274,7 +279,6 @@ void apply_global_key(InputState& in, const std::string& key, const std::string&
     else if (key == "flat_shading")        in.flat_shading        = parse_bool(val);
     else if (key == "show_fps")            in.show_fps            = parse_bool(val);
     else if (key == "camera_perspective")  in.camera_perspective  = parse_bool(val);
-    else if (key == "mirror_x")            in.mirror_x            = parse_bool(val);
     else if (key == "fast_normals")        in.fast_normals        = parse_bool(val);
     else if (key == "paint_visible")       in.paint_visible       = parse_bool(val);
     else if (key == "paint_color")         parse_rgb(val, in.paint_color);
