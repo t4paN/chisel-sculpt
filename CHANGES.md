@@ -59,6 +59,11 @@ printf is authoritative), and the web build was served locally and opened in Chr
 ShaderModule` / validation lines. That browser gate is the only thing that can clear a
 WGSL change.
 
+**Hand-confirmed 2026-08-28:** the user eyeballed the new shading in the app and reports it
+reads correctly — the ellipsoid illusion is gone and nothing else regressed. Shipped in
+v0.2.10. That closes the one gap the harness could not: every measurement above is a number,
+and "does the sphere look like a sphere" is not a number.
+
 One caveat worth stating plainly: this changes the shading of **every** mesh, including
 existing saved sculpts. Nothing about the stored geometry changes — normals are derived,
 never persisted — but a sculpt reopened after this will shade very slightly differently.
