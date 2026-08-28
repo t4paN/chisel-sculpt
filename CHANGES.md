@@ -2,7 +2,7 @@
 
 Short, chronological log of notable changes. Newest on top.
 
-## 2026-08-25 — Vertex normals are Max-weighted, not area-weighted
+## 2026-08-25 — v0.2.10 — Vertex normals are Max-weighted, not area-weighted
 
 The new UV sphere looked subtly ellipsoidal. It is not: measured on the generated mesh,
 every vertex sits at radius 1.000000, the bounding box is exactly 2.000000 on all three
