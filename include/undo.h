@@ -51,6 +51,12 @@ struct UndoEntry {
     // for a descend that auto-projected; empty for a non-destructive ascend.
     int from_level = 0;
     int to_level   = 0;
+
+    // Position on the scene-wide edit clock, stamped by UndoStack::push. Object
+    // transforms (object_xform.h) stamp from the same clock, and Ctrl+Z pops
+    // whichever of the two stacks has the newer top — see the header note there
+    // for why the two histories must interleave rather than sit side by side.
+    uint64_t seq = 0;
 };
 
 class UndoStack {
@@ -73,6 +79,11 @@ public:
     // working there — which is just as much "they moved on" as stroking this one.
     static uint64_t global_pushes;
 
+    // Advance the clock and hand back the new value. push() uses it to stamp
+    // UndoEntry::seq; ObjectXformStack::commit uses it for the same purpose, so
+    // the two stacks share one strictly increasing ordering.
+    static uint64_t next_seq() { return ++global_pushes; }
+
     void push(UndoEntry&& e);
     bool can_undo() const { return !undo_stack.empty(); }
     bool can_redo() const { return !redo_stack.empty(); }
@@ -90,6 +101,11 @@ public:
     // ONLY when clearing the ACTIVE entity's stack, since the ring caches the active
     // entity. A non-active clear must pass nullptr so it doesn't wipe the live ring.
     void clear(ComputeState* c = nullptr);
+
+    // Drop just the redo arm. Called when an object transform (object_xform.h)
+    // lands on this entity: the two stacks share one timeline, so a new step on
+    // either of them branches away from anything the other had queued to redo.
+    void clear_redo();
 
     // GPU undo ring (blood-moon 3b-iv part 2). Called from brush finalize right
     // after a new stroke's ring span [byte_off, byte_off+byte_len) is reserved and

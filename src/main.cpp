@@ -56,6 +56,7 @@
 #include "brush_alpha.h"
 #include "project_file.h"
 #include "scene_snapshot.h"
+#include "object_xform.h"
 #include <string>
 #include <filesystem>
 
@@ -703,9 +704,21 @@ int main(int argc, char* argv[]) {
     // per frame — the sync wants a full dirty list and this runs every frame a key
     // is down.
     Vec3  rot_pivot = {0, 0, 0};
+    // The view axis is latched with the pivot for the same reason: nudging the
+    // camera mid-turn would otherwise bend the axis under the spin, and the undo
+    // record could no longer be one angle about one line.
+    Vec3  rot_axis  = {0, 0, 1};
     bool  rot_active = false;
     double rot_last_time = 0.0;
     std::vector<uint32_t> rot_dirty;
+    // Same latch, same reason, for the first frame of an RMB scale drag.
+    Vec3  scale_pivot = {0, 0, 0};
+    // Undo for the Select-mode object transforms (move / scale / Q-E spin). A
+    // separate stack because UndoStack is per-entity and one gesture can turn
+    // several selected meshes; interleaved with it by sequence number, not
+    // siloed, because UndoEntry holds ABSOLUTE positions and undoing a stroke
+    // that predates a transform would teleport its vertices. See object_xform.h.
+    ObjectXformStack xforms;
     // Set when a merge chains its adaptive remesh: that remesh must not take its
     // own snapshot, or it would overwrite the merge's with the post-merge state,
     // and the merge is the step the user wants back.
@@ -1391,6 +1404,7 @@ int main(int argc, char* argv[]) {
                 multires_drop_top_level(*multires);
 
                 scene.active_undo().clear(&compute);
+                xforms.clear();          // history wiped means history wiped
                 // Grow-only GPU mirror still sized for the removed level; drop it
                 // so the refresh below re-allocates at the new (smaller) level.
                 scene.active_entity().multires_gpu.cleanup();
@@ -1564,7 +1578,7 @@ int main(int argc, char* argv[]) {
                 brush_stroke.vertex_count = 0;
                 brush_stroke.phase = StrokePhase::NONE;
                 app_state = AppState::IDLE;
-                if (result.selected_tris > 0) scene.active_undo().clear(&compute);
+                if (result.selected_tris > 0) { scene.active_undo().clear(&compute); xforms.clear(); }
                 std::snprintf(input.notification, sizeof(input.notification),
                               "Remesh: %u sel, %u/%u -> %u/%u v/t (spatial mirror)",
                               result.selected_tris,
@@ -1908,6 +1922,23 @@ int main(int argc, char* argv[]) {
                         bool lock_x = centered && spans_seam;
                         bool mirror_lobes = centered && !spans_seam && input.mirror_x;
 
+                        // Record it. The X rule is latched on this entity's first
+                        // frame of the drag and reused for the rest of it, so the
+                        // undo replays the same split it was moved with even if a
+                        // lobe drifts close enough to the seam to re-classify.
+                        xforms.begin(ObjectXform::Kind::MOVE, scene);
+                        ObjectXformTarget& xt = xforms.target(sel_id);
+                        if (xt.delta.x == 0.0f && xt.delta.y == 0.0f && xt.delta.z == 0.0f) {
+                            xt.lock_x       = lock_x;
+                            xt.mirror_lobes = mirror_lobes;
+                            xt.seam_eps     = seam_eps;
+                        } else {
+                            lock_x       = xt.lock_x;
+                            mirror_lobes = xt.mirror_lobes;
+                            seam_eps     = xt.seam_eps;
+                        }
+                        xt.delta += delta;
+
                         auto move_mesh = [&](Mesh& m) {
                             uint32_t n = m.vertex_count();
                             for (uint32_t v = 0; v < n; v++) {
@@ -1924,9 +1955,15 @@ int main(int argc, char* argv[]) {
                             }
                         };
                         move_mesh(e->mesh);
-                        // Also shift multires base if this is the active entity
-                        if (sel_id == scene.active_mesh_id() && multires->locked)
-                            move_mesh(multires->base);
+                        // The base cage follows for EVERY moved entity, not just
+                        // the active one. It used to be active-only, which left a
+                        // non-active locked mesh with a moved surface over a base
+                        // still at the old spot — invisible until you selected it
+                        // and switched level, at which point the cascade snapped it
+                        // back. Spin already did it this way; move and scale now
+                        // agree, which is also what makes their undo an honest
+                        // inverse rather than an over-correction.
+                        if (e->multires.locked) move_mesh(e->multires.base);
 
                         std::vector<uint32_t> local_dirty(vc);
                         for (uint32_t i = 0; i < vc; i++) local_dirty[i] = i;
@@ -1965,6 +2002,18 @@ int main(int argc, char* argv[]) {
 
                         float f = std::exp(dx * 0.005f);
 
+                        // Record it, and latch the pivot on the drag's first
+                        // frame for the LIVE scale too: a bounding centre is
+                        // invariant under a scale about itself in exact
+                        // arithmetic only, so letting it drift per frame would
+                        // both creep the object and put the undo somewhere the
+                        // forward pass never was.
+                        const bool scale_first = !(xforms.gesture_open()
+                            && xforms.gesture_kind() == ObjectXform::Kind::SCALE);
+                        xforms.begin(ObjectXform::Kind::SCALE, scene);
+                        if (scale_first) scale_pivot = pivot;
+                        else             pivot       = scale_pivot;
+
                         auto scale_mesh = [&](Mesh& m) {
                             uint32_t n = m.vertex_count();
                             for (uint32_t v = 0; v < n; v++) {
@@ -1978,9 +2027,11 @@ int main(int argc, char* argv[]) {
                             MeshEntity* e = scene.find_entity(sel_id);
                             if (!e) continue;
                             uint32_t vc = e->mesh.vertex_count();
+                            ObjectXformTarget& xt = xforms.target(sel_id);
+                            xt.pivot   = pivot;
+                            xt.factor *= f;
                             scale_mesh(e->mesh);
-                            if (sel_id == scene.active_mesh_id() && multires->locked)
-                                scale_mesh(multires->base);
+                            if (e->multires.locked) scale_mesh(e->multires.base);   // see move
 
                             std::vector<uint32_t> local_dirty(vc);
                             for (uint32_t i = 0; i < vc; i++) local_dirty[i] = i;
@@ -2001,8 +2052,9 @@ int main(int argc, char* argv[]) {
             // the OS auto-repeat, which is a delay followed by discrete jumps, and
             // no rate you pick makes that feel continuous. Polling with a real dt is
             // smooth at any frame rate and cannot get stuck on a release the modal
-            // gate swallowed. Constant rate, no ramp. Like move and scale this is
-            // not undoable — object transforms push no undo entries.
+            // gate swallowed. Constant rate, no ramp. Like move and scale the whole
+            // press-to-release is recorded as ONE step on the object-transform
+            // stack (object_xform.h), which Ctrl+Z reaches from Select mode.
             {
                 const bool modal = input.quit_requested || input.remesh_confirm_pending
                                 || input.voxel_merge_confirm_pending
@@ -2041,8 +2093,13 @@ int main(int argc, char* argv[]) {
                         }
                         if (np > 0) { p.x /= np; p.y /= np; p.z /= np; }
                         rot_pivot     = p;
+                        // get_view_direction() runs camera -> target, i.e. INTO
+                        // the screen. A right-handed positive turn about an axis
+                        // pointing away from the viewer reads clockwise, so E is +.
+                        rot_axis      = camera.get_view_direction().normalized();
                         rot_last_time = now;
                         rot_active    = true;
+                        xforms.begin(ObjectXform::Kind::SPIN, scene);
                     }
 
                     // Clamped so a hitch (a cascade, a window drag) cannot bank up
@@ -2053,10 +2110,7 @@ int main(int argc, char* argv[]) {
 
                     const float ang = (float)dir * 1.5707963f * dt;   // 90 deg/sec
                     if (dt > 0.0f && ang != 0.0f) {
-                        // get_view_direction() runs camera -> target, i.e. INTO the
-                        // screen. A right-handed positive turn about an axis pointing
-                        // away from the viewer reads clockwise, so E is +.
-                        const Vec3 k = camera.get_view_direction().normalized();
+                        const Vec3 k = rot_axis;
                         const float cs = std::cos(ang), sn = std::sin(ang);
                         const float omc = 1.0f - cs;
                         const Vec3 pivot = rot_pivot;
@@ -2082,6 +2136,10 @@ int main(int argc, char* argv[]) {
                             MeshEntity* e = scene.find_entity(sel_id);
                             if (!e) continue;
                             uint32_t vc = e->mesh.vertex_count();
+                            ObjectXformTarget& xt = xforms.target(sel_id);
+                            xt.pivot  = rot_pivot;
+                            xt.axis   = rot_axis;
+                            xt.angle += ang;
                             rotate_mesh(e->mesh);
                             if (e->multires.locked) {
                                 // The base cage has to turn with the surface or the
@@ -2110,6 +2168,15 @@ int main(int argc, char* argv[]) {
                     }
                 }
             }
+
+            // Close the object-transform gesture the frame the drag or the key
+            // ends. One press-to-release is one step back: hold E for two
+            // seconds and that is a single Ctrl+Z, not a hundred. Sited here so
+            // all three paths share it and none can leak a half-open gesture.
+            if (input.drag_mode != InputState::DragMode::MOVE_OBJECT
+                && input.drag_mode != InputState::DragMode::SCALE_OBJECT
+                && !rot_active)
+                xforms.commit(scene);
 
             // One-shot actions (IDLE only)
 
@@ -2228,11 +2295,12 @@ int main(int argc, char* argv[]) {
                 scene.refresh_mirror_map();
                 refresh_active_gpu_residency();
             };
-            // Undo/redo are per-entity sculpt history, so outside Edit mode there is
-            // nothing they can correctly revert — insert placement, selection and
-            // object transforms push no entries. Reverting an unrelated older stroke
-            // instead is worse than doing nothing, so clamp it to a no-op until
-            // scene-level undo exists (road2v2 backlog item 4).
+            // UndoStack is per-entity sculpt history, so outside Edit mode there is
+            // still nothing IT can correctly revert — insert placement and selection
+            // push no entries. Reverting an unrelated older stroke instead is worse
+            // than doing nothing, so that side stays clamped to a no-op. Object
+            // transforms are the exception and are handled below: they have their
+            // own scene-level stack now, so Ctrl+Z reaches them from Select mode.
             // Revert the last remesh. Deliberately ahead of the Edit-mode clamp
             // below: that clamp exists because per-entity sculpt history cannot
             // correctly revert scene-level work, and this snapshot is exactly the
@@ -2241,7 +2309,7 @@ int main(int argc, char* argv[]) {
             // one case it was built for. Only fires once the entity's own history
             // is exhausted, so it is always the LAST step back, never a shortcut.
             if (input.undo_requested && rescue.valid() && rescue.edits_left() > 0
-                && !scene.active_undo().can_undo()) {
+                && !scene.active_undo().can_undo() && !xforms.can_undo()) {
                 input.undo_requested = false;
                 const char* what = rescue.op;
                 snapshot_restore(rescue, scene);
@@ -2259,6 +2327,7 @@ int main(int argc, char* argv[]) {
                 // user put it while they were inspecting the remesh.
                 mesh->compute_bounding_sphere(mesh_center, mesh_radius);
                 scene.active_undo().clear(&compute);   // ring cached the dead topology
+                xforms.clear();                        // and this scene is a rebuilt one
                 brush_stroke.vertex_count = 0;
                 brush_stroke.phase = StrokePhase::NONE;
                 app_state = AppState::IDLE;
@@ -2269,7 +2338,36 @@ int main(int argc, char* argv[]) {
                 input.notification_timer = 3.0f;
             }
 
+            // Which of the two histories does this Ctrl+Z belong to? Both stamp
+            // their entries from UndoStack's scene-wide clock, so undo takes
+            // whichever top is NEWER and redo whichever is OLDER — strict
+            // last-in-first-out across the pair. That ordering is not a nicety:
+            // UndoEntry stores absolute positions, so undoing a stroke that
+            // predates an object transform would drop those vertices back into
+            // the pre-transform frame and tear the mesh. Interleaving makes it
+            // impossible to undo *through* a transform.
+            //
+            // A push on either stack kills the other's redo arm, since the user
+            // has branched off that timeline. The xform side clears the entity
+            // stacks it touches at commit; this clock check covers the reverse.
+            if (input.redo_requested && xforms.can_redo()
+                && UndoStack::global_pushes != xforms.redo_clock)
+                xforms.clear_redo();
+
+            const UndoEntry* utop = scene.active_undo().peek_undo();
+            const UndoEntry* rtop = scene.active_undo().peek_redo();
+            const bool xform_undo_next = xforms.can_undo()
+                && (!utop || xforms.undo_seq() > utop->seq);
+            const bool xform_redo_next = xforms.can_redo()
+                && (!rtop || xforms.redo_seq() < rtop->seq);
+
+            // Per-entity sculpt history still can't correctly revert scene-level
+            // work outside Edit mode, so the old clamp stands — but an object
+            // transform IS scene-level, and it is driven from Select mode, so it
+            // has to stay reachable there.
             bool undo_allowed = input.interaction_mode == InputState::InteractionMode::EDIT;
+            if (input.undo_requested && !undo_allowed && xform_undo_next) undo_allowed = true;
+            if (input.redo_requested && !undo_allowed && xform_redo_next) undo_allowed = true;
             if ((input.undo_requested || input.redo_requested) && !undo_allowed) {
                 input.undo_requested = false;
                 input.redo_requested = false;
@@ -2279,14 +2377,39 @@ int main(int argc, char* argv[]) {
             }
             if (input.undo_requested) {
                 input.undo_requested = false;
-                cascade_active(scene.active_undo().undo(scene.active_entity(), scene));
-                print_undo_top("ctrl-z");
+                uint32_t xform_blocker = xform_undo_next ? xforms.newer_edit_entity(scene) : 0;
+                if (xform_blocker) {
+                    // See newer_edit_entity(): a sibling of this transform has been
+                    // sculpted since, and its stroke positions are absolute.
+                    std::snprintf(input.notification, sizeof(input.notification),
+                                  "Undo the newer edits on mesh %u first", xform_blocker);
+                    input.notification_timer = 2.5f;
+                } else if (xform_undo_next) {
+                    xforms.undo(scene);
+                    if (xforms.last_was_spin()) refresh_active_gpu_residency();
+                    mesh->compute_bounding_sphere(mesh_center, mesh_radius);
+                    std::snprintf(input.notification, sizeof(input.notification),
+                                  "Undid object %s", xforms.last_label());
+                    input.notification_timer = 1.5f;
+                } else {
+                    cascade_active(scene.active_undo().undo(scene.active_entity(), scene));
+                    print_undo_top("ctrl-z");
+                }
                 screen_buffers_dirty = true;
             }
             if (input.redo_requested) {
                 input.redo_requested = false;
-                cascade_active(scene.active_undo().redo(scene.active_entity(), scene));
-                print_undo_top("ctrl-shift-z");
+                if (xform_redo_next) {
+                    xforms.redo(scene);
+                    if (xforms.last_was_spin()) refresh_active_gpu_residency();
+                    mesh->compute_bounding_sphere(mesh_center, mesh_radius);
+                    std::snprintf(input.notification, sizeof(input.notification),
+                                  "Redid object %s", xforms.last_label());
+                    input.notification_timer = 1.5f;
+                } else {
+                    cascade_active(scene.active_undo().redo(scene.active_entity(), scene));
+                    print_undo_top("ctrl-shift-z");
+                }
                 screen_buffers_dirty = true;
             }
 
@@ -2879,6 +3002,7 @@ int main(int argc, char* argv[]) {
                     scene.set_mirror_topology(proj.mirror_use_topology);
                     scene.load_entities(proj.entities, proj.active_id,
                                         proj.selected_ids, proj.next_id);
+                    xforms.clear();      // records point at the outgoing scene
                     scene.refresh_mirror_map(input.subdiv_level);
                     scene.sync();
 
@@ -2969,6 +3093,7 @@ int main(int argc, char* argv[]) {
                     current_project_path.clear();
 
                     scene.active_undo().clear(&compute);
+                    xforms.clear();
                     brush_stroke.vertex_count = 0;
                     brush_stroke.phase = StrokePhase::NONE;
                     app_state = AppState::IDLE;

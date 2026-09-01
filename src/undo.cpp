@@ -61,8 +61,8 @@ void UndoStack::push(UndoEntry&& e) {
     for (const auto& r : redo_stack) total_bytes -= entry_bytes(r);
     redo_stack.clear();
     total_bytes += entry_bytes(e);
+    e.seq = next_seq();       // scene-wide edit clock; SceneSnapshot ages against it
     undo_stack.push_back(std::move(e));
-    global_pushes++;          // scene-wide edit clock; SceneSnapshot ages against it
     evict_to_budget();
 }
 
@@ -71,6 +71,11 @@ void UndoStack::evict_to_budget() {
         total_bytes -= entry_bytes(undo_stack.front());
         undo_stack.pop_front();
     }
+}
+
+void UndoStack::clear_redo() {
+    for (const auto& r : redo_stack) total_bytes -= entry_bytes(r);
+    redo_stack.clear();
 }
 
 void UndoStack::clear(ComputeState* c) {

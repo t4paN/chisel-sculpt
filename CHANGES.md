@@ -2,6 +2,75 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-09-01 — v0.2.14 — Spin objects in Select mode, and undo object transforms
+
+### Q / E spin the selection about the view axis
+
+Select mode had move and scale. It now has rotation: **Q** turns the selection
+anticlockwise, **E** clockwise, about the axis you are looking down. Face the model from
+any angle and the turn always reads the way it looks on screen — there is no world axis
+to think about.
+
+Hold either key and it turns continuously at 90°/sec with no acceleration. The key is
+**polled**, not driven off key events: events hand you the OS auto-repeat, which is a
+delay followed by discrete jumps, and no rate you pick makes that feel like turning
+something. Polling against a real frame delta is smooth at any frame rate, and it cannot
+get stuck on a release that a modal dialog swallowed. The delta is clamped at 0.1 s so a
+hitch — a cascade, a window drag — cannot bank up into one violent jump afterwards.
+
+The pivot and the axis are both latched when the spin starts and held until the key comes
+up. A bounding centre is invariant under a turn about itself in exact arithmetic only, so
+recomputing it per frame lets the object wander as it spins; and re-reading the camera per
+frame lets a mid-turn pan bend the axis underneath the rotation.
+
+For a locked multires entity the base cage turns with the surface, and the tangent frames
+are dropped. Frames are *directions* on the base surface and the displacement layers are
+expressed in them — translation and uniform scale leave them valid, which is why move and
+scale ignore them, but a rotation does not. Leave them and your detail comes back in the
+old orientation one subdiv step later.
+
+### Object transforms are undoable
+
+Move, scale and spin now go on their own scene-level undo stack, reachable with **Ctrl+Z
+from inside Select mode**.
+
+**They store the transform, not the vertices.** A brush moves an arbitrary subset in an
+arbitrary way, so its undo entry has to hold positions. An object transform is the same
+map applied to every vertex, so it holds a handful of parameters: about 50 bytes per mesh
+per gesture, against the 24 MB a position snapshot of a million-vertex mesh would need.
+Undo is the exact parametric inverse — negate the delta, reciprocate the factor, negate
+the angle. A two-second hold of E would have emitted dozens of the other kind.
+
+Move is the one that could not have been a matrix even if the cost allowed it: the
+mirror-lobe rule is piecewise in x (a lobe on the +x side moves right, its twin moves
+left), and no single affine describes that. The record keeps the rule and the seam
+threshold it was latched with, so the replay splits the lobes exactly where the drag did.
+
+**One gesture is one step.** Press to release, not frame by frame. Holding E for two
+seconds is a single Ctrl+Z.
+
+**The two histories interleave rather than sit side by side**, and that is a correctness
+fix, not a convenience. Sculpt undo entries store *absolute* positions. Before this,
+sculpting, then moving the mesh in Select mode, then undoing the stroke would restore
+those vertices into their pre-move frame and tear the mesh. Both stacks now stamp their
+entries from one scene-wide clock, so Ctrl+Z takes whichever top is newer and you can
+never undo *past* a transform to reach a stroke underneath it.
+
+Undo still refuses a *stroke* outside Edit mode, unchanged. The one case it cannot order
+is a transform that moved several meshes where a sibling has been sculpted since — Ctrl+Z
+only ever pops the active entity's stack, so there is no scene-wide order to appeal to.
+That is detected and refused with a message naming the mesh to clear first, rather than
+silently stranding the stroke.
+
+### Also
+
+Move and scale updated only the **active** entity's multires base cage. A non-active
+locked mesh came out with its surface moved over a base still at the old spot — invisible
+until you selected it and switched level, at which point the cascade snapped it back to
+where it started. Spin already handled every entity; move and scale now agree.
+
+---
+
 ## 2026-09-01 — v0.2.13 — The remesh rescue snapshot, rebuilt after it crashed itch
 
 v0.2.11 gave `/` and `J` a rescue copy so Ctrl+Z could take a remesh back. v0.2.12

@@ -168,7 +168,14 @@ own undo history and subdivision stack.
 | LMB + drag | Move the selected object in the view plane |
 | RMB + drag | Scale the selected object (Ctrl+RMB stays camera zoom) |
 | Q / E | Spin the selection anticlockwise / clockwise **about the view axis** — hold to turn continuously (90°/sec, no acceleration). Face the model from any angle and the turn always reads the way it looks on screen |
+| Ctrl + Z | Undo the last move / scale / spin — works right here in Select mode |
 | Delete | Delete the selected object |
+
+Move, scale and spin are undoable. One press-to-release is one step back, so holding
+**E** for two seconds costs a single **Ctrl+Z**, not a hundred. They share their
+running order with the sculpt history: you cannot undo *past* a transform to reach a
+stroke underneath it, which is what keeps a stroke from being restored into the wrong
+frame.
 
 The selection also drives the voxel merge: selected meshes are the merge set,
 deselected (red-tinted) meshes are bystanders — or carving tools (see Subtract).
@@ -266,6 +273,12 @@ sessions and is not stored per project.
 each object has its own history, and on capable GPUs the ring lives GPU-resident —
 undoing a stroke never stalls the app. Mask inversion, level switches, and merges are
 all undoable.
+
+Select-mode object transforms (move, scale, **Q**/**E** spin) go on a separate
+scene-wide stack, because one gesture can turn several meshes at once. They store the
+transform itself rather than a copy of every vertex, so a spin on a million-vertex
+mesh costs bytes. The two stacks share one running order, so **Ctrl+Z** always takes
+back whatever you did last, whichever kind it was.
 
 ## Files
 
