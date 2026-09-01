@@ -65,7 +65,7 @@ void draw_drop_confirm(TextOverlay& text, const char* path, int win_w, int win_h
                   cx - 360.0f, cy + 20.0f, scale, win_w, win_h, CGA(yellow), 1.0f);
 }
 
-void draw_remesh_confirm(TextOverlay& text, int win_w, int win_h) {
+void draw_remesh_confirm(TextOverlay& text, bool can_snapshot, int win_w, int win_h) {
     text.draw_panel(0, 0, (float)win_w, (float)win_h,
                    win_w, win_h, 0.0f, 0.0f, 0.0f, 0.5f);
 
@@ -74,6 +74,12 @@ void draw_remesh_confirm(TextOverlay& text, int win_w, int win_h) {
     float msg_y = (float)win_h * 0.5f - 20.0f;
     text.draw_text("Remesh stretched regions? Wipes stack. (Y/N)", msg_x, msg_y, msg_scale,
                   win_w, win_h, CGA(yellow), 1.0f);
+    // A remesh normally leaves a rescue copy that Ctrl+Z can fall back to. Past
+    // the memory budget there is none, and the user should know BEFORE saying Y —
+    // a bad remesh does not look bad until you have been working on it a while.
+    if (!can_snapshot)
+        text.draw_text("Too big to stash a revert - SAVE FIRST (Ctrl+S)",
+                      msg_x, msg_y + 34.0f, msg_scale, win_w, win_h, CGA(light_red), 1.0f);
 }
 
 void draw_remesh_progress(TextOverlay& text, int win_w, int win_h) {
@@ -86,7 +92,8 @@ void draw_remesh_progress(TextOverlay& text, int win_w, int win_h) {
 
 void draw_voxel_merge_confirm(TextOverlay& text, int resolution, int n_selected,
                              int n_unselected, bool surface_nets,
-                             bool has_density, bool adaptive, int win_w, int win_h) {
+                             bool has_density, bool adaptive, bool can_snapshot,
+                             int win_w, int win_h) {
     text.draw_panel(0, 0, (float)win_w, (float)win_h,
                    win_w, win_h, 0.0f, 0.0f, 0.0f, 0.5f);
 
@@ -130,7 +137,14 @@ void draw_voxel_merge_confirm(TextOverlay& text, int resolution, int n_selected,
                       adaptive ? "ON" : "OFF");
         text.draw_text(line, cx - 360.0f, cy + oy, scale, win_w, win_h,
                       CGA(light_cyan), 1.0f);
+        oy += 30.0f;
     }
+
+    // See draw_remesh_confirm: no rescue copy past the memory budget, and the
+    // merge is the op you are least likely to notice went wrong in time.
+    if (!can_snapshot)
+        text.draw_text("Too big to stash a revert - SAVE FIRST (Ctrl+S)",
+                      cx - 360.0f, cy + oy, scale, win_w, win_h, CGA(light_red), 1.0f);
 }
 
 void draw_voxel_merge_progress(TextOverlay& text, int win_w, int win_h, float progress) {

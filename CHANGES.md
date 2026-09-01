@@ -2,6 +2,78 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-09-01 — v0.2.11 — Ctrl+Z can take back a remesh
+
+The two remeshers wipe undo, because every undo entry addresses vertices by index and
+every index dies with the topology. That was survivable for the ops that announce their
+damage immediately — Ctrl+O and drop-subdiv are pressed with intent, and you see the
+result the instant they land. It was not survivable for `/` and `J`. **A remesh you
+cannot judge until the old model is already gone:** it reports a healthy-looking vertex
+count, and the silhouette going soft only registers after you have been sculpting on it
+for a minute. By then there is nothing to go back to.
+
+So both now stash a **rescue copy of the whole scene in RAM** first, and Ctrl+Z falls
+back to it.
+
+Deliberately NOT part of UndoStack — the index problem is exactly what a whole-scene
+copy sidesteps. `EntityRecord` was already the GPU-free, undo-free description of an
+entity that the project-file layer and the scene-rebuild path share, so capture is the
+loop out of `do_save_project` minus the file write and restore is `Scene::load_entities`
+minus the file read. No new format, no version bump, both halves already proven by
+every save and load the app has ever done.
+
+**It survives three edits, not one.** Dropping the snapshot on the first stroke would
+throw it away at precisely the moment it is wanted, because stroking a fresh remesh is
+*how* you evaluate one. `UndoStack::global_pushes` is a scene-wide monotonic edit clock
+(scene-wide on purpose: switching to another mesh and working there is just as much
+"moved on" as stroking this one), and the snapshot ages against it. Undo walks back
+through those strokes normally and only falls through to the snapshot once the entity's
+own history is exhausted — always the last step back, never a shortcut past your work.
+
+The countdown is a readout, not a mechanism; it changes nothing but when the copy is
+freed. Its messages wait for a clear notification line so they never stomp the remesh's
+own result line, which carries the counts you are judging by:
+
+    Remesh: 4210 sel, 128k/256k -> 96k/192k v/t (spatial mirror)
+    Ctrl+Z reverts the remesh - 3 strokes left
+    Ctrl+Z reverts the remesh - 2 strokes left
+    Ctrl+Z reverts the remesh - 1 stroke left
+    Undo can no longer reach the remesh
+
+**Two judgement calls worth knowing about.**
+
+The revert sits *ahead* of the Edit-mode undo clamp. That clamp exists because
+per-entity sculpt history cannot correctly revert scene-level work — and this snapshot
+is precisely the scene-level undo it was missing. A merge is usually driven from Select
+mode, so gating it on Edit would have put the rescue out of reach in the one case it
+was built for.
+
+The **camera is not restored**. You will have orbited around to inspect the result, and
+snapping the view back reads as a bug rather than an undo. Bounding-sphere bounds do
+refresh, so F still frames the restored mesh.
+
+**Too big to snapshot.** The gate is pre-flight — it sums container sizes without
+copying — because on web the 32-bit WASM heap grows with no ceiling and a growth that
+fails **aborts the tab** rather than returning a null we could back out of. Budget is
+512 MB native, 96 MB web; roughly 270 bytes per vertex, so ~67 MB at 500k triangles.
+Past the budget both confirm prompts gain a red line and the operation still runs if
+you say yes:
+
+    Too big to stash a revert - SAVE FIRST (Ctrl+S)
+
+A second remesh replaces the first's snapshot — one step back means the LAST remesh —
+but a merge's chained adaptive remesh leaves the merge's snapshot standing, since the
+merge is the step you actually want back.
+
+Ships alongside the (i) shortcut card below. All three targets build clean; hand-tested
+on native GL by the user.
+
+**Known, parked:** a few older saved models show odd normals when stepped DOWN to a low
+subdivision level. Newer models are unaffected, and so are those same models at their
+own level. Prime suspect is v0.2.10's Max normal weighting on a coarse, irregular,
+never-remeshed base cage. Not chased yet — the next step is a bisect against the v0.2.9
+release, not a code read. Write-up in `old-model-normals-note.md`.
+
 ## 2026-09-01 — Shortcut card behind an (i) button
 
 Chisel has no menus and never will, but that left new users with nothing between the
