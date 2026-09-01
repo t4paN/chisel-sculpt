@@ -32,6 +32,36 @@ namespace cga {
 
 #define CGA(c) cga::c[0], cga::c[1], cga::c[2]
 
+// The bitmap font has no weight, so "bold" is the usual trick: the same string
+// twice, offset a couple of pixels horizontally. At scale 3 that reads as a real
+// weight; offsetting vertically as well just smears it.
+static void draw_text_bold(TextOverlay& text, const char* str, float x, float y,
+                           float scale, int win_w, int win_h,
+                           float r, float g, float b, float a) {
+    text.draw_text(str, x, y, scale, win_w, win_h, r, g, b, a);
+    text.draw_text(str, x + 2.0f, y, scale, win_w, win_h, r, g, b, a);
+}
+
+// Shared tail of both remesh prompts: what the rescue snapshot will and will not
+// do for this scene. The Y keypress is the user's consent to the bake, so the
+// cost has to be on screen before they press it.
+static void draw_rescue_line(TextOverlay& text, int levels_to_bake, float x, float y,
+                             float scale, int win_w, int win_h) {
+    char line[128];
+    if (levels_to_bake < 0) {
+        draw_text_bold(text, "Too big to stash a revert - SAVE FIRST (Ctrl+S)",
+                       x, y, scale, win_w, win_h, CGA(light_red), 1.0f);
+    } else if (levels_to_bake > 0) {
+        std::snprintf(line, sizeof(line),
+                      "Bakes down %d subdiv level%s first, then Ctrl+Z can revert",
+                      levels_to_bake, levels_to_bake == 1 ? "" : "s");
+        draw_text_bold(text, line, x, y, scale, win_w, win_h, CGA(yellow), 1.0f);
+    } else {
+        draw_text_bold(text, "Ctrl+Z reverts this for 3 strokes",
+                       x, y, scale, win_w, win_h, CGA(light_green), 1.0f);
+    }
+}
+
 void draw_quit_dialog(TextOverlay& text, int win_w, int win_h) {
     text.draw_panel(0, 0, (float)win_w, (float)win_h,
                    win_w, win_h, 0.0f, 0.0f, 0.0f, 0.5f);
@@ -65,7 +95,7 @@ void draw_drop_confirm(TextOverlay& text, const char* path, int win_w, int win_h
                   cx - 360.0f, cy + 20.0f, scale, win_w, win_h, CGA(yellow), 1.0f);
 }
 
-void draw_remesh_confirm(TextOverlay& text, int win_w, int win_h) {
+void draw_remesh_confirm(TextOverlay& text, int levels_to_bake, int win_w, int win_h) {
     text.draw_panel(0, 0, (float)win_w, (float)win_h,
                    win_w, win_h, 0.0f, 0.0f, 0.0f, 0.5f);
 
@@ -74,6 +104,7 @@ void draw_remesh_confirm(TextOverlay& text, int win_w, int win_h) {
     float msg_y = (float)win_h * 0.5f - 20.0f;
     text.draw_text("Remesh stretched regions? Wipes stack. (Y/N)", msg_x, msg_y, msg_scale,
                   win_w, win_h, CGA(yellow), 1.0f);
+    draw_rescue_line(text, levels_to_bake, msg_x, msg_y + 34.0f, msg_scale, win_w, win_h);
 }
 
 void draw_remesh_progress(TextOverlay& text, int win_w, int win_h) {
@@ -86,7 +117,8 @@ void draw_remesh_progress(TextOverlay& text, int win_w, int win_h) {
 
 void draw_voxel_merge_confirm(TextOverlay& text, int resolution, int n_selected,
                              int n_unselected, bool surface_nets,
-                             bool has_density, bool adaptive, int win_w, int win_h) {
+                             bool has_density, bool adaptive, int levels_to_bake,
+                             int win_w, int win_h) {
     text.draw_panel(0, 0, (float)win_w, (float)win_h,
                    win_w, win_h, 0.0f, 0.0f, 0.0f, 0.5f);
 
@@ -100,8 +132,7 @@ void draw_voxel_merge_confirm(TextOverlay& text, int resolution, int n_selected,
                   n_selected, n_selected == 1 ? "" : "es");
     text.draw_text(line, cx - 360.0f, cy - 60.0f, scale, win_w, win_h, CGA(yellow), 1.0f);
 
-    text.draw_text("Wipes their multires.", cx - 360.0f, cy - 30.0f, scale,
-                  win_w, win_h, CGA(light_gray), 1.0f);
+    draw_rescue_line(text, levels_to_bake, cx - 360.0f, cy - 30.0f, scale, win_w, win_h);
 
     std::snprintf(line, sizeof(line), "Resolution: %d   ( [ - / + ] )", resolution);
     text.draw_text(line, cx - 360.0f, cy + 4.0f, scale, win_w, win_h, CGA(light_cyan), 1.0f);

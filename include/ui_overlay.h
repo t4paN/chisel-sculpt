@@ -7,11 +7,15 @@ struct AlphaLibrary;
 
 void draw_quit_dialog(TextOverlay& text, int win_w, int win_h);
 void draw_drop_confirm(TextOverlay& text, const char* path, int win_w, int win_h);
-void draw_remesh_confirm(TextOverlay& text, int win_w, int win_h);
+// levels_to_bake: subdivision levels the rescue snapshot will bake down first to
+// get the scene under its triangle cap (0 = none, -1 = cannot fit, no rescue).
+// Shown in the prompt because baking is destructive and the Y is the consent.
+void draw_remesh_confirm(TextOverlay& text, int levels_to_bake, int win_w, int win_h);
 void draw_remesh_progress(TextOverlay& text, int win_w, int win_h);
 void draw_voxel_merge_confirm(TextOverlay& text, int resolution, int n_selected,
                              int n_unselected, bool surface_nets,
-                             bool has_density, bool adaptive, int win_w, int win_h);
+                             bool has_density, bool adaptive, int levels_to_bake,
+                             int win_w, int win_h);
 void draw_voxel_merge_progress(TextOverlay& text, int win_w, int win_h, float progress);
 void draw_toolbar(TextOverlay& text, const InputState& input,
                   uint32_t tri_count, uint32_t vert_count, const char* ver,

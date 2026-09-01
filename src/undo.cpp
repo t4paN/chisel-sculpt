@@ -11,6 +11,7 @@
 size_t UndoStack::max_bytes = 1024ull * 1024ull * 1024ull;
 // GPU undo ring budget: 256 MB. Overridden at startup by --toaster (64 MB).
 size_t UndoStack::ring_max_bytes = 256ull * 1024ull * 1024ull;
+uint64_t UndoStack::global_pushes = 0;
 
 // Spill a resident STROKE entry's (old,new) out of the GPU ring into its CPU arrays.
 // The ring packs 6 floats per vert at slot k: old.xyz then new.xyz, aligned with
@@ -61,6 +62,7 @@ void UndoStack::push(UndoEntry&& e) {
     redo_stack.clear();
     total_bytes += entry_bytes(e);
     undo_stack.push_back(std::move(e));
+    global_pushes++;          // scene-wide edit clock; SceneSnapshot ages against it
     evict_to_budget();
 }
 

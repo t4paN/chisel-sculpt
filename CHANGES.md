@@ -2,6 +2,63 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-09-01 — v0.2.13 — The remesh rescue snapshot, rebuilt after it crashed itch
+
+v0.2.11 gave `/` and `J` a rescue copy so Ctrl+Z could take a remesh back. v0.2.12
+raised its budget to 512 MB on every platform. **v0.2.12 crashed the itch build**, and
+this is the rebuild. Reverted first (d3b871e) rather than patched, so the second attempt
+started from a clean base instead of accreting fixes onto a design that did not hold.
+
+**What went wrong.** The copy was a whole-scene deep copy — working surface, normals,
+CSR adjacency, mirror maps, tangent frames, topo cache *and* the multires stack — at
+roughly 270 bytes per vertex. It landed in a 32-bit WASM heap, next to the live scene
+and up to 1 GB of undo history. `ALLOW_MEMORY_GROWTH` has no way to report failure, so
+the growth it could not satisfy took the page down instead of refusing the operation.
+The gate was measuring bytes against a budget that was never the real constraint.
+
+**What it stores now: the multires stack, and nothing else.** Base cage, displacement
+layers, and the paint / mask / density planes. Every other thing v1 copied is derived
+from those — `Scene::load_entities` cascades the surface back out of the stack and
+rebuilds normals, adjacency and mirror maps for every entity, which is the same path a
+`.chisel` load has always taken. That is **~28 bytes per finest-level vertex instead of
+~270**.
+
+**The undo history is freed before anything is allocated.** It was the single largest
+block in the process and it was sitting alongside the copy. The operation about to run
+wipes it regardless, so spending it first costs nothing and takes up to 1 GB out of the
+peak.
+
+**The cap is 1M triangles, and past it the scene is baked down rather than refused.**
+Same two steps as the burger menu's "delete highest subdiv" — inverse-Loop the top
+layer's form into the one below, then drop the layer — applied to whichever entity is
+heaviest, repeated until the scene fits. Then it snapshots, then it remeshes. Ctrl+Z
+returns the stack, the paint, the mask, the selection and the mirror mode, with every
+undo history empty.
+
+Both prompts now say which of the three cases you are in, because Y is the consent to a
+destructive bake and the cost has to be on screen before it is given:
+
+    Ctrl+Z reverts this for 3 strokes                          (green, fits)
+    Bakes down 2 subdiv levels first, then Ctrl+Z can revert   (yellow, over cap)
+    Too big to stash a revert - SAVE FIRST (Ctrl+S)            (red, cannot fit)
+
+All bold, replacing the grey "Wipes their multires." The bitmap font has no weight, so
+`draw_text_bold` draws the string twice two pixels apart.
+
+**Two consequences worth knowing.** A bake is *not* undone by the revert — the snapshot
+is taken after baking, because the pre-bake state is precisely the thing that does not
+fit, so those top levels are gone for good even if you undo. And baking changes what
+gets remeshed: a 4M-tri model reduced to under 1M is remeshed at that lower resolution.
+
+Everything else carries over from v0.2.11 unchanged: the three-edit grace window against
+`UndoStack::global_pushes`, the countdown that waits for a clear notification line, the
+revert sitting ahead of the Edit-mode undo clamp (this snapshot IS the scene-level undo
+that clamp was missing), and the camera deliberately left where the user put it.
+
+One bug caught before it shipped: `snapshot_prepare` was passing `scene.selected_ids()`
+straight into `load_entities`, which clears the scene's own selection and then iterates
+the vector it was handed — the same one. It takes a copy now.
+
 ## 2026-09-01 — Shortcut card behind an (i) button
 
 Chisel has no menus and never will, but that left new users with nothing between the
