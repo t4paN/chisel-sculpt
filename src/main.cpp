@@ -55,7 +55,6 @@
 #include "ImGuiFileDialog.h"
 #include "brush_alpha.h"
 #include "project_file.h"
-#include "scene_snapshot.h"
 #include <string>
 #include <filesystem>
 
@@ -691,16 +690,6 @@ int main(int argc, char* argv[]) {
     // budgeted step per frame so the window stays responsive). See sdf.h / CHANGES.
     VoxelMergeJob* vmerge_job = nullptr;
 
-    // Pre-remesh rescue copy (scene_snapshot.h). Held only for the two ops you
-    // cannot judge until the old model is gone: '/' and 'J'. rescue_shown is the
-    // last countdown figure put on screen, -1 meaning "not announced yet".
-    SceneSnapshot rescue;
-    int rescue_shown = -1;
-    // Set when a merge chains its adaptive remesh (below): that remesh must NOT
-    // take its own snapshot, or it would overwrite the merge's with the
-    // post-merge state — and the merge is the step the user wants back.
-    bool remesh_chained_from_merge = false;
-
     Vec3 mesh_center;
     float mesh_radius;
     mesh->compute_bounding_sphere(mesh_center, mesh_radius);
@@ -950,31 +939,6 @@ int main(int argc, char* argv[]) {
             input.drag_mode = InputState::DragMode::NONE;
             input.mouse1_just_pressed = false;
             input_consume_scroll();
-        }
-
-        // Age the rescue snapshot. It is purely a message — the countdown changes
-        // nothing but when the copy is freed. Messages wait for a clear
-        // notification line so they never stomp the remesh's own result line,
-        // which carries the vertex/triangle counts the user is judging by.
-        if (rescue.valid()) {
-            int left = rescue.edits_left();
-            if (left <= 0) {
-                std::printf("[snapshot] %s rescue expired after %d edits\n",
-                            rescue.op, SceneSnapshot::GRACE_EDITS);
-                if (input.notification_timer <= 0.0f) {
-                    std::snprintf(input.notification, sizeof(input.notification),
-                                  "Undo can no longer reach the %s", rescue.op);
-                    input.notification_timer = 2.0f;
-                }
-                rescue.clear();
-                rescue_shown = -1;
-            } else if (left != rescue_shown && input.notification_timer <= 0.0f) {
-                rescue_shown = left;
-                std::snprintf(input.notification, sizeof(input.notification),
-                              "Ctrl+Z reverts the %s - %d stroke%s left",
-                              rescue.op, left, left == 1 ? "" : "s");
-                input.notification_timer = 2.5f;
-            }
         }
 
         // FPS counter
@@ -1495,21 +1459,6 @@ int main(int argc, char* argv[]) {
                 }
             }
 
-            // Rescue copy before the topology goes. A second remesh replaces the
-            // first's snapshot — one step back means the LAST remesh — but a
-            // remesh chained off a merge leaves the merge's snapshot alone.
-            if (!remesh_refused && !remesh_chained_from_merge) {
-                if (snapshot_affordable(scene)) {
-                    snapshot_capture(rescue, scene, "remesh");
-                    rescue_shown = -1;
-                } else {
-                    std::printf("[snapshot] scene needs %.1f MB, budget is %.1f MB "
-                                "— remeshing unprotected\n",
-                                (double)snapshot_bytes(scene) / (1024.0 * 1024.0),
-                                (double)snapshot_budget() / (1024.0 * 1024.0));
-                }
-            }
-
             // Destructive remesh breaks topology mirror — switch to spatial
             // mode afterward. Mirror setting (input.mirror_x) is preserved.
             RemeshResult result;
@@ -1549,16 +1498,12 @@ int main(int argc, char* argv[]) {
                               result.new_verts, result.new_tris);
                 input.notification_timer = 4.0f;
             } else if (!remesh_refused) {
-                // Nothing changed, so there is nothing this remesh can rescue —
-                // but a chained one must leave the merge's snapshot standing.
-                if (!remesh_chained_from_merge) rescue.clear();
                 std::printf("[remesh] FAILED: %s\n", result.error.c_str());
                 std::snprintf(input.notification, sizeof(input.notification),
                               "Remesh FAILED — check console");
                 input.notification_timer = 4.0f;
             }
 
-            remesh_chained_from_merge = false;
             input.remesh_in_progress = false;
         }
 
@@ -1574,16 +1519,6 @@ int main(int argc, char* argv[]) {
                               "SDF remesh needs GPU compute (unavailable)");
                 input.notification_timer = 4.0f;
             } else if (!vmerge_job) {
-                if (snapshot_affordable(scene)) {
-                    snapshot_capture(rescue, scene, "SDF remesh");
-                    rescue_shown = -1;
-                } else {
-                    rescue.clear();
-                    std::printf("[snapshot] scene needs %.1f MB, budget is %.1f MB "
-                                "— merging unprotected\n",
-                                (double)snapshot_bytes(scene) / (1024.0 * 1024.0),
-                                (double)snapshot_budget() / (1024.0 * 1024.0));
-                }
                 scene.materialize_active_cpu();  // 2b: merge reads the live surface (mesh.pos)
                 vmerge_job = voxel_merge_begin(scene, compute,
                                                input.voxel_merge_resolution,
@@ -1637,10 +1572,8 @@ int main(int argc, char* argv[]) {
                     if (input.voxel_merge_adaptive && !mesh->density.empty()) {
                         std::printf("[voxel-merge] density field present -> chaining adaptive remesh\n");
                         input.remesh_requested = true;
-                        remesh_chained_from_merge = true;
                     }
                 } else {
-                    rescue.clear();   // scene untouched, nothing to revert to
                     std::printf("[voxel-merge] FAILED: %s\n", vm.error.c_str());
                     std::snprintf(input.notification, sizeof(input.notification),
                                   "SDF remesh failed: %.200s", vm.error.c_str());
@@ -2100,43 +2033,6 @@ int main(int argc, char* argv[]) {
             // object transforms push no entries. Reverting an unrelated older stroke
             // instead is worse than doing nothing, so clamp it to a no-op until
             // scene-level undo exists (road2v2 backlog item 4).
-            // Revert the last remesh. Deliberately ahead of the Edit-mode clamp
-            // below: that clamp exists because per-entity sculpt history cannot
-            // correctly revert scene-level work, and this snapshot is exactly the
-            // scene-level undo it is missing. A merge is usually driven from Select
-            // mode, so gating it on Edit would put the rescue out of reach in the
-            // one case it was built for. Only fires once the entity's own history
-            // is exhausted, so it is always the LAST step back, never a shortcut.
-            if (input.undo_requested && rescue.valid() && rescue.edits_left() > 0
-                && !scene.active_undo().can_undo()) {
-                input.undo_requested = false;
-                const char* what = rescue.op;
-                snapshot_restore(rescue, scene);
-                rescue_shown = -1;
-                // Same fixups the .chisel load path runs: the scene was rebuilt
-                // wholesale, so every cached pointer and GPU mirror is stale.
-                // No level hint: that argument is only an icosphere mirror-map cache
-                // lookup, and a restored scene is arbitrary geometry. load_entities
-                // has already rebuilt each entity's map anyway.
-                scene.refresh_mirror_map();
-                scene.sync();
-                mesh     = &scene.active_mesh();
-                multires = &scene.active_multires();
-                refresh_active_gpu_residency();
-                // Framing bounds only — the CAMERA is deliberately left where the
-                // user put it while they were inspecting the remesh.
-                mesh->compute_bounding_sphere(mesh_center, mesh_radius);
-                scene.active_undo().clear(&compute);   // ring cached the dead topology
-                brush_stroke.vertex_count = 0;
-                brush_stroke.phase = StrokePhase::NONE;
-                app_state = AppState::IDLE;
-                screen_buffers_dirty = true;
-                std::snprintf(input.notification, sizeof(input.notification),
-                              "Reverted the %s (%u v, %u t)", what,
-                              mesh->vertex_count(), mesh->tri_count());
-                input.notification_timer = 3.0f;
-            }
-
             bool undo_allowed = input.interaction_mode == InputState::InteractionMode::EDIT;
             if ((input.undo_requested || input.redo_requested) && !undo_allowed) {
                 input.undo_requested = false;
@@ -2679,7 +2575,7 @@ int main(int argc, char* argv[]) {
         if (input.drop_confirm_pending)
             draw_drop_confirm(text, input.drop_path, win_w, win_h);
         if (input.remesh_confirm_pending)
-            draw_remesh_confirm(text, snapshot_affordable(scene), win_w, win_h);
+            draw_remesh_confirm(text, win_w, win_h);
         if (input.drop_level_confirm_pending)
             draw_drop_level_confirm(text, multires->base_level + (int)multires->disp.size(),
                                     win_w, win_h);
@@ -2704,7 +2600,7 @@ int main(int argc, char* argv[]) {
                                      (int)scene.selected_ids().size(), n_unselected,
                                      input.voxel_merge_surface_nets,
                                      merge_has_density, input.voxel_merge_adaptive,
-                                     snapshot_affordable(scene), win_w, win_h);
+                                     win_w, win_h);
         }
         if (input.remesh_in_progress)
             draw_remesh_progress(text, win_w, win_h);

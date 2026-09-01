@@ -67,12 +67,6 @@ public:
     // 64 MB with --toaster. Deep history beyond the ring lives in CPU RAM.
     static size_t ring_max_bytes;
 
-    // Monotonic count of undo entries pushed across EVERY entity this session.
-    // Scene-wide on purpose: SceneSnapshot expires after a few edits, and a
-    // per-entity counter would miss the user switching to another mesh and
-    // working there — which is just as much "they moved on" as stroking this one.
-    static uint64_t global_pushes;
-
     void push(UndoEntry&& e);
     bool can_undo() const { return !undo_stack.empty(); }
     bool can_redo() const { return !redo_stack.empty(); }

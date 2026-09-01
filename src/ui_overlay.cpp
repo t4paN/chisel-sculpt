@@ -32,16 +32,6 @@ namespace cga {
 
 #define CGA(c) cga::c[0], cga::c[1], cga::c[2]
 
-// The bitmap font has no weight, so "bold" is the usual trick: the same string
-// twice, offset a couple of pixels horizontally. At scale 3 that reads as a real
-// weight; offsetting vertically as well just smears it.
-static void draw_text_bold(TextOverlay& text, const char* str, float x, float y,
-                           float scale, int win_w, int win_h,
-                           float r, float g, float b, float a) {
-    text.draw_text(str, x, y, scale, win_w, win_h, r, g, b, a);
-    text.draw_text(str, x + 2.0f, y, scale, win_w, win_h, r, g, b, a);
-}
-
 void draw_quit_dialog(TextOverlay& text, int win_w, int win_h) {
     text.draw_panel(0, 0, (float)win_w, (float)win_h,
                    win_w, win_h, 0.0f, 0.0f, 0.0f, 0.5f);
@@ -75,7 +65,7 @@ void draw_drop_confirm(TextOverlay& text, const char* path, int win_w, int win_h
                   cx - 360.0f, cy + 20.0f, scale, win_w, win_h, CGA(yellow), 1.0f);
 }
 
-void draw_remesh_confirm(TextOverlay& text, bool can_snapshot, int win_w, int win_h) {
+void draw_remesh_confirm(TextOverlay& text, int win_w, int win_h) {
     text.draw_panel(0, 0, (float)win_w, (float)win_h,
                    win_w, win_h, 0.0f, 0.0f, 0.0f, 0.5f);
 
@@ -84,12 +74,6 @@ void draw_remesh_confirm(TextOverlay& text, bool can_snapshot, int win_w, int wi
     float msg_y = (float)win_h * 0.5f - 20.0f;
     text.draw_text("Remesh stretched regions? Wipes stack. (Y/N)", msg_x, msg_y, msg_scale,
                   win_w, win_h, CGA(yellow), 1.0f);
-    // A remesh normally leaves a rescue copy that Ctrl+Z can fall back to. Past
-    // the memory budget there is none, and the user should know BEFORE saying Y —
-    // a bad remesh does not look bad until you have been working on it a while.
-    if (!can_snapshot)
-        text.draw_text("Too big to stash a revert - SAVE FIRST (Ctrl+S)",
-                      msg_x, msg_y + 34.0f, msg_scale, win_w, win_h, CGA(light_red), 1.0f);
 }
 
 void draw_remesh_progress(TextOverlay& text, int win_w, int win_h) {
@@ -102,8 +86,7 @@ void draw_remesh_progress(TextOverlay& text, int win_w, int win_h) {
 
 void draw_voxel_merge_confirm(TextOverlay& text, int resolution, int n_selected,
                              int n_unselected, bool surface_nets,
-                             bool has_density, bool adaptive, bool can_snapshot,
-                             int win_w, int win_h) {
+                             bool has_density, bool adaptive, int win_w, int win_h) {
     text.draw_panel(0, 0, (float)win_w, (float)win_h,
                    win_w, win_h, 0.0f, 0.0f, 0.0f, 0.5f);
 
@@ -117,8 +100,8 @@ void draw_voxel_merge_confirm(TextOverlay& text, int resolution, int n_selected,
                   n_selected, n_selected == 1 ? "" : "es");
     text.draw_text(line, cx - 360.0f, cy - 60.0f, scale, win_w, win_h, CGA(yellow), 1.0f);
 
-    draw_text_bold(text, "Operation not undoable, save first", cx - 360.0f, cy - 30.0f,
-                   scale, win_w, win_h, CGA(light_green), 1.0f);
+    text.draw_text("Wipes their multires.", cx - 360.0f, cy - 30.0f, scale,
+                  win_w, win_h, CGA(light_gray), 1.0f);
 
     std::snprintf(line, sizeof(line), "Resolution: %d   ( [ - / + ] )", resolution);
     text.draw_text(line, cx - 360.0f, cy + 4.0f, scale, win_w, win_h, CGA(light_cyan), 1.0f);
@@ -147,14 +130,7 @@ void draw_voxel_merge_confirm(TextOverlay& text, int resolution, int n_selected,
                       adaptive ? "ON" : "OFF");
         text.draw_text(line, cx - 360.0f, cy + oy, scale, win_w, win_h,
                       CGA(light_cyan), 1.0f);
-        oy += 30.0f;
     }
-
-    // See draw_remesh_confirm: no rescue copy past the memory budget, and the
-    // merge is the op you are least likely to notice went wrong in time.
-    if (!can_snapshot)
-        text.draw_text("Too big to stash a revert - SAVE FIRST (Ctrl+S)",
-                      cx - 360.0f, cy + oy, scale, win_w, win_h, CGA(light_red), 1.0f);
 }
 
 void draw_voxel_merge_progress(TextOverlay& text, int win_w, int win_h, float progress) {

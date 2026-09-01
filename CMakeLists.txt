@@ -214,7 +214,6 @@ add_executable(chisel
     src/main.cpp
     src/mesh.cpp
     src/scene.cpp
-    src/scene_snapshot.cpp
     src/insert_controller.cpp
     src/renderer.cpp
     src/camera.cpp
