@@ -126,6 +126,11 @@ struct InputState {
     // send the edit to the wrong one.
     bool             settings_menu_open;
 
+    // Set by the (i) shortcut card while it is up. The card is a plain ImGui popup,
+    // so the click that dismisses it lands on the canvas too — this makes main.cpp
+    // swallow that click instead of laying down a stray dab or starting an orbit.
+    bool             help_popup_open;
+
     // Brush-alpha (stamp) selection. Index into the AlphaLibrary pool; 0 = Round
     // (no stamp). One shared selection, but it only affects Draw, Mask and Paint —
     // every other brush forces the stamp off per dab (set_alpha_dab), except Clay,

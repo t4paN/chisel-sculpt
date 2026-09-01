@@ -2,6 +2,54 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-09-01 — Shortcut card behind an (i) button
+
+Chisel has no menus and never will, but that left new users with nothing between the
+canvas and the manual on itch. Added an **(i) button immediately left of the burger** in
+the top-right island, which opens a **centred shortcut card**.
+
+It is a plain `BeginPopup`, so clicking anywhere outside dismisses it — no OK button, no
+second modal state to get stuck in. Two columns, one screenful, no scrolling: MOUSE,
+MODES, BRUSHES, SIZE + FEEL down the left; SHAPE, MASK, VIEW, FILES down the right. Key
+column in yellow, section heads in violet, everything a single key-and-verb line.
+Anything that needs a sentence to explain stays in MANUAL.md — the card is a reminder,
+not documentation.
+
+Font is scaled **1.40x for that popup only** (`SetWindowFontScale`), so the letters are
+readable at arm's length without touching the size of any other widget. Column alignment
+is a plain `%-9s` pad rather than a table: the default ImGui font (ProggyClean) is
+monospaced, so that is all the layout this needs.
+
+The (i) glyph is hand-drawn into the draw list — disc outline, dot, stem — for the same
+reason the hamburger's bars are: at 28 px the font's lowercase `i` is a single grey pixel
+column and reads as dirt on the button.
+
+**The non-obvious part.** An ImGui popup does *not* consume the click that dismisses it.
+WantCaptureMouse is only true while the cursor is over the popup itself, so the click that
+closes the card lands on the canvas underneath — a stray dab, or the start of an orbit.
+Added `InputState::help_popup_open`, set by the overlay pass and folded into main.cpp's
+existing `dialog_open` gate alongside the export/import/merge prompts. While the card is
+up the brush ring is hidden, the OS cursor is shown, and the dismissing click is swallowed.
+
+Also in this pass:
+
+- **Brush tooltips trimmed to shortcuts only.** Clay ("Builds volume in flat layers.") and
+  Limb ("Snakehook: pull + redistribute.") were the only two carrying an explanation; every
+  other brush button just names its key. Now they all do.
+- **F is called "Focus", not "Reframe"** — in the card and in MANUAL.md. Behaviour is
+  unchanged, it is the word people already expect.
+- **J is "SDF Remesh" throughout its own flow** — the card, the confirm headline, its
+  Y/M action line, the progress screen, and the success/failure notifications. The
+  console `[voxel-merge]` tags are deliberately left alone: they are what you grep when
+  it goes wrong. The **toolbar button reads "SDF Merge"** for now — the split between
+  the button and the prompt is a parked decision, not an oversight.
+- **Wording pass on the card.** `Ctrl` is "Invert stroke" rather than "Carve inward" (it
+  flips Mask and Clay as much as it carves Draw), and `S W A O` now lists
+  "Size, Strength, Hardness, Spacing" in the same order as the four keys, with
+  "(Hold + Drag)" underneath — the old phrasing buried the mapping.
+
+All three targets build clean (GL, wgpu-native, web). No shader touched, so no Tint risk.
+
 ## 2026-08-25 — v0.2.10 — Vertex normals are Max-weighted, not area-weighted
 
 The new UV sphere looked subtly ellipsoidal. It is not: measured on the generated mesh,

@@ -35,6 +35,8 @@ mesh to sculpt; left-drag off the mesh to orbit. That's 90% of the app right the
   autosmooth state.
 - **Notifications** appear briefly at the top of the canvas (selection counts, load
   results, merge status, warnings).
+- **(i) shortcut card** — top right, beside the burger menu: every key on one screen.
+  Click anywhere outside it to dismiss.
 
 ## Modes
 
@@ -226,7 +228,7 @@ as you like and never clip inside the model.
 | LMB off mesh / Alt + LMB | Orbit |
 | MMB | Pan |
 | Scroll | Zoom |
-| F | Reframe to the active mesh |
+| F | Focus on the active mesh |
 | F1 / F2 / F3 | Snap to front / side / top |
 | Space | Toggle fullscreen |
 

@@ -26,6 +26,7 @@ InputState::InputState()
     , active_profile(InputProfile::MOUSE)
     , profiles{}
     , settings_menu_open(false)
+    , help_popup_open(false)
     , slider_mode(SliderMode::NONE)
     , slider_start_x(0), slider_start_y(0), slider_start_value(0), slider_accum(0)
     , slider_slot(BrushType::DRAW)

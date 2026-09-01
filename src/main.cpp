@@ -934,7 +934,7 @@ int main(int argc, char* argv[]) {
         }
 
         bool imgui_wants_mouse = ImGui::GetIO().WantCaptureMouse;
-        bool dialog_open = input.export_dialog_active || input.import_dialog_active || input.save_dialog_active || input.voxel_merge_confirm_pending || input.drop_confirm_pending;
+        bool dialog_open = input.export_dialog_active || input.import_dialog_active || input.save_dialog_active || input.voxel_merge_confirm_pending || input.drop_confirm_pending || input.help_popup_open;
         if ((imgui_wants_mouse || dialog_open) && app_state != AppState::SCULPTING) {
             input.drag_mode = InputState::DragMode::NONE;
             input.mouse1_just_pressed = false;
@@ -1516,7 +1516,7 @@ int main(int argc, char* argv[]) {
             input.voxel_merge_requested = false;
             if (!compute.supported) {
                 std::snprintf(input.notification, sizeof(input.notification),
-                              "Voxel merge needs GPU compute (unavailable)");
+                              "SDF remesh needs GPU compute (unavailable)");
                 input.notification_timer = 4.0f;
             } else if (!vmerge_job) {
                 scene.materialize_active_cpu();  // 2b: merge reads the live surface (mesh.pos)
@@ -1558,7 +1558,7 @@ int main(int argc, char* argv[]) {
                     app_state = AppState::IDLE;
                     bool watertight = (vm.boundary_edges == 0 && vm.nonmanifold_edges == 0);
                     std::snprintf(input.notification, sizeof(input.notification),
-                                  "Merged %u -> %u v / %u t (R=%u, %.0f ms) | %s: %u comp, %u bnd, %u nonmf",
+                                  "SDF remesh %u -> %u v / %u t (R=%u, %.0f ms) | %s: %u comp, %u bnd, %u nonmf",
                                   vm.in_entities, vm.out_verts, vm.out_tris,
                                   vm.R, vm.elapsed_ms,
                                   watertight ? "watertight" : "NOT watertight",
@@ -1576,7 +1576,7 @@ int main(int argc, char* argv[]) {
                 } else {
                     std::printf("[voxel-merge] FAILED: %s\n", vm.error.c_str());
                     std::snprintf(input.notification, sizeof(input.notification),
-                                  "Voxel merge failed: %.200s", vm.error.c_str());
+                                  "SDF remesh failed: %.200s", vm.error.c_str());
                     input.notification_timer = 4.0f;
                 }
             }
@@ -2470,7 +2470,7 @@ int main(int argc, char* argv[]) {
         // ---- Cursor visibility ----
         bool non_edit_mode = input.interaction_mode != InputState::InteractionMode::EDIT;
         // Hide the OS cursor while sculpting (we draw our own brush cursor).
-        bool show_os_cursor = input.quit_requested || input.export_dialog_active || input.import_dialog_active || input.save_dialog_active || input.remesh_confirm_pending || input.voxel_merge_confirm_pending || input.drop_confirm_pending || imgui_wants_mouse || non_edit_mode;
+        bool show_os_cursor = input.quit_requested || input.export_dialog_active || input.import_dialog_active || input.save_dialog_active || input.remesh_confirm_pending || input.voxel_merge_confirm_pending || input.drop_confirm_pending || input.help_popup_open || imgui_wants_mouse || non_edit_mode;
 #ifndef __EMSCRIPTEN__
         glfwSetInputMode(window, GLFW_CURSOR, show_os_cursor ? GLFW_CURSOR_NORMAL : GLFW_CURSOR_HIDDEN);
 #else
@@ -2545,7 +2545,7 @@ int main(int argc, char* argv[]) {
         }
 
         // Brush cursor — draw at locked position during slider, normal position otherwise
-        if (!input.quit_requested && !input.export_dialog_active && !input.import_dialog_active && !input.save_dialog_active && !input.remesh_confirm_pending && !input.voxel_merge_confirm_pending && !input.drop_confirm_pending && !imgui_wants_mouse && !non_edit_mode) {
+        if (!input.quit_requested && !input.export_dialog_active && !input.import_dialog_active && !input.save_dialog_active && !input.remesh_confirm_pending && !input.voxel_merge_confirm_pending && !input.drop_confirm_pending && !input.help_popup_open && !imgui_wants_mouse && !non_edit_mode) {
             float cursor_x, cursor_y;
             if (input.slider_mode != InputState::SliderMode::NONE) {
                 cursor_x = (float)input.slider_start_x;

@@ -96,7 +96,7 @@ void draw_voxel_merge_confirm(TextOverlay& text, int resolution, int n_selected,
 
     char line[160];
     std::snprintf(line, sizeof(line),
-                  "Voxel-merge %d mesh%s into one watertight mesh?",
+                  "SDF-remesh %d mesh%s into one watertight mesh?",
                   n_selected, n_selected == 1 ? "" : "es");
     text.draw_text(line, cx - 360.0f, cy - 60.0f, scale, win_w, win_h, CGA(yellow), 1.0f);
 
@@ -110,7 +110,7 @@ void draw_voxel_merge_confirm(TextOverlay& text, int resolution, int n_selected,
                   surface_nets ? "Surface Nets" : "Marching Cubes");
     text.draw_text(line, cx - 360.0f, cy + 34.0f, scale, win_w, win_h, CGA(light_cyan), 1.0f);
 
-    text.draw_text("Y merge   M mirror-merge   N / ESC cancel", cx - 360.0f, cy + 70.0f,
+    text.draw_text("Y remesh   M mirror-remesh   N / ESC cancel", cx - 360.0f, cy + 70.0f,
                   scale, win_w, win_h, CGA(yellow), 1.0f);
 
     // Subtract option: carve the unselected (red) meshes out of the selected union.
@@ -138,7 +138,7 @@ void draw_voxel_merge_progress(TextOverlay& text, int win_w, int win_h, float pr
     float msg_x = (float)win_w * 0.5f - 200.0f;
     float msg_y = (float)win_h * 0.5f - 20.0f;
     char buf[48];
-    std::snprintf(buf, sizeof(buf), "Voxel-merging... %d%%",
+    std::snprintf(buf, sizeof(buf), "SDF-remeshing... %d%%",
                   (int)(progress * 100.0f + 0.5f));
     text.draw_text(buf, msg_x, msg_y, msg_scale,
                   win_w, win_h, CGA(light_green), 1.0f);
@@ -612,6 +612,124 @@ static bool hamburger_button(float size, bool open) {
     return clicked;
 }
 
+// Info button: an (i) in a disc, same 4-state squircle background as the
+// hamburger so the pair reads as one set. Returns true on click.
+static bool info_button(float size, bool open) {
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 pos = ImGui::GetCursorScreenPos();
+
+    ImGui::PushID("HelpButton");
+    bool clicked = ImGui::InvisibleButton("info", ImVec2(size, size));
+    bool hovered = ImGui::IsItemHovered();
+    bool active  = ImGui::IsItemActive();
+    if (hovered) ImGui::SetTooltip("Shortcuts");
+
+    ImU32 bg;
+    if (open)         bg = ImGui::GetColorU32(col_btn_act);
+    else if (active)  bg = ImGui::GetColorU32(ImVec4(0.45f, 0.30f, 0.60f, 1.0f));
+    else if (hovered) bg = ImGui::GetColorU32(col_btn_hover);
+    else              bg = ImGui::GetColorU32(col_btn);
+    float rounding = size * 0.28f;
+    dl->AddRectFilled(ImVec2(pos.x + 2, pos.y + 2), ImVec2(pos.x + size + 2, pos.y + size + 2),
+                      IM_COL32(0, 0, 0, 80), rounding);
+    dl->AddRectFilled(pos, ImVec2(pos.x + size, pos.y + size), bg, rounding);
+
+    // Hand-drawn glyph rather than a font "i": at 28 px the default font's
+    // lowercase i is a single grey pixel column and reads as dirt.
+    float cx = pos.x + size * 0.5f, cy = pos.y + size * 0.5f;
+    float r  = size * 0.31f;
+    ImU32 col = ImGui::GetColorU32(open ? col_text_sel : col_text);
+    dl->AddCircle(ImVec2(cx, cy), r, col, 20, 1.6f);
+    dl->AddCircleFilled(ImVec2(cx, cy - r * 0.46f), 1.3f, col, 8);
+    dl->AddLine(ImVec2(cx, cy - r * 0.10f), ImVec2(cx, cy + r * 0.50f), col, 1.8f);
+
+    ImGui::PopID();
+    return clicked;
+}
+
+// One "KEY   what it does" line of the shortcut card. The default ImGui font
+// (ProggyClean) is monospaced, so a %-9s pad is all the column alignment this
+// needs — no table, no per-cell sizing.
+static void help_row(const char* key, const char* desc) {
+    ImGui::TextColored(ImVec4(1.00f, 1.00f, 0.40f, 1.0f), "%-9s", key);
+    ImGui::SameLine(0.0f, 0.0f);
+    ImGui::TextColored(ImVec4(0.84f, 0.84f, 0.88f, 1.0f), "%s", desc);
+}
+
+static void help_head(const char* title) {
+    ImGui::Dummy(ImVec2(0.0f, 6.0f));
+    ImGui::TextColored(ImVec4(0.72f, 0.58f, 0.95f, 1.0f), "%s", title);
+}
+
+// The shortcut card itself. Deliberately a single screenful: two columns, no
+// scrolling, no prose. Anything that needs a sentence lives in MANUAL.md.
+static void draw_help_popup(InputState& input, int win_w, int win_h) {
+    input.help_popup_open = ImGui::IsPopupOpen("##helppopup");
+    ImGui::SetNextWindowPos(ImVec2(win_w * 0.5f, win_h * 0.5f),
+                            ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(28, 22));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8, 5));
+    ImGui::PushStyleColor(ImGuiCol_PopupBg, ImVec4(0.10f, 0.10f, 0.13f, 0.97f));
+    if (ImGui::BeginPopup("##helppopup")) {
+        // Big letters: the default font is 13 px, which is a squint at arm's
+        // length. Per-window scale, so it does not disturb the rest of the UI.
+        ImGui::SetWindowFontScale(1.40f);
+
+        ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.40f, 1.0f), "CHISEL - SHORTCUTS");
+        ImGui::Separator();
+
+        ImGui::BeginGroup();
+        help_head("MOUSE");
+        help_row("LMB",      "Sculpt  (off mesh: Orbit)");
+        help_row("MMB",      "Pan  ~  Scroll: Zoom");
+        help_row("Shift",    "Smooth");
+        help_row("Ctrl",     "Invert stroke");
+        help_row("RMB",      "Colour palette (Paint)");
+        help_head("MODES");
+        help_row("1 2 3 4",  "Edit Insert Select Paint");
+        help_head("BRUSHES");
+        help_row("D T I",    "Draw  Clay  Inflate");
+        help_row("C V G",    "Crease  Pinch  Move");
+        help_row("H M",      "Limb  Mask");
+        help_row("Q E",      "Cycle brush");
+        help_head("SIZE + FEEL");
+        help_row("[ ]",      "Brush size");
+        help_row("S W A O",  "Size, Strength, Hardness, Spacing");
+        help_row("",         "(Hold + Drag)");
+        ImGui::EndGroup();
+
+        ImGui::SameLine(0.0f, 44.0f);
+
+        ImGui::BeginGroup();
+        help_head("SHAPE");
+        help_row("Ctrl+D",   "Subdiv up  (Shift+D: Down)");
+        help_row("P",        "Project detail down");
+        help_row("X",        "Mirror");
+        help_row("/",        "Remesh");
+        help_row("J",        "SDF Remesh");
+        help_row("B",        "Autosmooth");
+        help_head("MASK");
+        help_row("Ctrl+I",   "Invert  ~  Ctrl+A: Clear");
+        help_head("VIEW");
+        help_row("F",        "Focus");
+        help_row("F1 F2 F3", "Front  Side  Top");
+        help_row("Space",    "Fullscreen");
+        help_head("FILES");
+        help_row("Ctrl+Z",   "Undo  (+Shift: Redo)");
+        help_row("Ctrl+S",   "Save  (+Shift: Save as)");
+        help_row("Ctrl+O",   "Open  ~  Ctrl+E: Export");
+        ImGui::EndGroup();
+
+        ImGui::Dummy(ImVec2(0.0f, 6.0f));
+        ImGui::Separator();
+        ImGui::TextDisabled("Click anywhere outside to close");
+
+        ImGui::EndPopup();
+    }
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(2);
+}
+
 void draw_button_islands(InputState& input, int win_w, int win_h,
                          const AlphaLibrary* alpha_lib, MultiresInfo mres) {
     const float btn_h    = 38.0f;
@@ -665,7 +783,7 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
         {"Save",     "Save",      "Shortcut: Ctrl+S"},
         {"SaveInc",  "+",         "Save incremental: next numbered copy (name_001, name_002, ...)"},
         {"Load",     "Load",      "Shortcut: Ctrl+O"},
-        {"Merge",    "Merge",     "Voxel-merge selection for print (Shortcut: J)"},
+        {"Merge",    "SDF Merge", "SDF remesh selection (Shortcut: J)"},
     };
     const int ops_count = (int)(sizeof(ops) / sizeof(ops[0]));
     const int ops_save_inc = 6;   // square, so it reads as a modifier hanging off Save
@@ -850,12 +968,12 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
     struct BrushBtn { const char* id; const char* display; const char* tooltip; BrushType type; };
     BrushBtn brushes[] = {
         {"Draw",    "Draw",    "Shortcut: D",                    BrushType::DRAW},
-        {"Clay",    "Clay",    "Builds volume in flat layers. Shortcut: T", BrushType::CLAY},
+        {"Clay",    "Clay",    "Shortcut: T",                    BrushType::CLAY},
         {"Inflate", "Inflate", "Shortcut: I",                    BrushType::INFLATE},
         {"Crease",  "Crease",  "Shortcut: C",                    BrushType::CREASE},
         {"Pinch",   "Pinch",   "Shortcut: V",                    BrushType::PINCH},
         {"Move",    "Move",    "Shortcut: G",                    BrushType::MOVE},
-        {"Limb",    "Limb",    "Snakehook: pull + redistribute. Shortcut: H", BrushType::LIMB},
+        {"Limb",    "Limb",    "Shortcut: H",                    BrushType::LIMB},
         {"Smooth",  "Smooth",  "Shortcut: double-press Shift",   BrushType::SMOOTH},
         {"Mask",    "Mask",    "Shortcut: M",                    BrushType::MASK},
     };
@@ -917,6 +1035,11 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
         ImGui::SetNextWindowPos(ImVec2((float)win_w - margin, margin + fps_h),
                                 ImGuiCond_Always, ImVec2(1.0f, 0.0f));
         ImGui::Begin("##IslandMenu", nullptr, island_flags);
+        // (i) sits to the LEFT of the burger; the island is right-pivoted, so it
+        // grows leftward and both stay glued to the corner at any window width.
+        if (info_button(burger, ImGui::IsPopupOpen("##helppopup")))
+            ImGui::OpenPopup("##helppopup");
+        ImGui::SameLine();
         if (hamburger_button(burger, ImGui::IsPopupOpen("##burgermenu")))
             ImGui::OpenPopup("##burgermenu");
 
@@ -1128,6 +1251,10 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
             ImGui::EndPopup();
         }
         ImGui::PopStyleVar();
+
+        // Opened from this window so it inherits the island's popup stack; drawn
+        // last so it lands on top of the menu if both were somehow up.
+        draw_help_popup(input, win_w, win_h);
         ImGui::End();
     }
 
