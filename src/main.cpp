@@ -696,6 +696,16 @@ int main(int argc, char* argv[]) {
     // last countdown figure put on screen, -1 meaning "not announced yet".
     SceneSnapshot rescue;
     int rescue_shown = -1;
+    // Q/E object spin (SELECT mode). The pivot is latched when the spin STARTS and
+    // held until the key comes up: a bounding-sphere centre is rotation-invariant
+    // in exact arithmetic but not in floating point, and recomputing it every frame
+    // lets the object wander while it turns. rot_dirty is reused rather than rebuilt
+    // per frame — the sync wants a full dirty list and this runs every frame a key
+    // is down.
+    Vec3  rot_pivot = {0, 0, 0};
+    bool  rot_active = false;
+    double rot_last_time = 0.0;
+    std::vector<uint32_t> rot_dirty;
     // Set when a merge chains its adaptive remesh: that remesh must not take its
     // own snapshot, or it would overwrite the merge's with the post-merge state,
     // and the merge is the step the user wants back.
@@ -1980,6 +1990,125 @@ int main(int argc, char* argv[]) {
                     }
                 }
                 wrap_cursor(window, input, win_w, win_h);
+            }
+
+            // Object spin: Q/E in SELECT mode turn the selection about the VIEW
+            // axis, so the turn follows what you are looking at rather than a world
+            // axis — face the model from any angle and Q/E always read as
+            // anticlockwise/clockwise on screen.
+            //
+            // The key is POLLED rather than driven off key events: events give you
+            // the OS auto-repeat, which is a delay followed by discrete jumps, and
+            // no rate you pick makes that feel continuous. Polling with a real dt is
+            // smooth at any frame rate and cannot get stuck on a release the modal
+            // gate swallowed. Constant rate, no ramp. Like move and scale this is
+            // not undoable — object transforms push no undo entries.
+            {
+                const bool modal = input.quit_requested || input.remesh_confirm_pending
+                                || input.voxel_merge_confirm_pending
+                                || input.drop_level_confirm_pending
+                                || input.drop_confirm_pending
+                                || input.export_dialog_active || input.import_dialog_active
+                                || input.save_dialog_active;
+                int dir = 0;
+                if (input.interaction_mode == InputState::InteractionMode::SELECT
+                    && !modal && !input.ctrl_held && !scene.selected_ids().empty()) {
+                    if (glfwGetKey(window, GLFW_KEY_E) == GLFW_PRESS) dir += 1;
+                    if (glfwGetKey(window, GLFW_KEY_Q) == GLFW_PRESS) dir -= 1;
+                }
+
+                const double now = glfwGetTime();
+                if (dir == 0) {
+                    rot_active = false;
+                } else {
+                    const auto& sel = scene.selected_ids();
+                    scene.materialize_active_cpu();
+
+                    if (!rot_active) {
+                        // Latch the pivot: centroid of the selected bounding centres,
+                        // same as scale uses. NOT snapped to x=0 under mirror the way
+                        // scale's is — that snap keeps a uniform scale symmetric, but
+                        // for a rotation it would shove the object sideways.
+                        Vec3 p = {0, 0, 0};
+                        uint32_t np = 0;
+                        for (uint32_t sel_id : sel) {
+                            MeshEntity* e = scene.find_entity(sel_id);
+                            if (!e) continue;
+                            Vec3 c; float r;
+                            e->mesh.compute_bounding_sphere(c, r);
+                            p.x += c.x; p.y += c.y; p.z += c.z;
+                            np++;
+                        }
+                        if (np > 0) { p.x /= np; p.y /= np; p.z /= np; }
+                        rot_pivot     = p;
+                        rot_last_time = now;
+                        rot_active    = true;
+                    }
+
+                    // Clamped so a hitch (a cascade, a window drag) cannot bank up
+                    // into one violent jump on the frame after it.
+                    float dt = (float)(now - rot_last_time);
+                    rot_last_time = now;
+                    if (dt > 0.1f) dt = 0.1f;
+
+                    const float ang = (float)dir * 1.5707963f * dt;   // 90 deg/sec
+                    if (dt > 0.0f && ang != 0.0f) {
+                        // get_view_direction() runs camera -> target, i.e. INTO the
+                        // screen. A right-handed positive turn about an axis pointing
+                        // away from the viewer reads clockwise, so E is +.
+                        const Vec3 k = camera.get_view_direction().normalized();
+                        const float cs = std::cos(ang), sn = std::sin(ang);
+                        const float omc = 1.0f - cs;
+                        const Vec3 pivot = rot_pivot;
+
+                        // Rodrigues: v' = v cos + (k x v) sin + k (k.v)(1 - cos)
+                        auto rotate_mesh = [&](Mesh& m) {
+                            uint32_t n = m.vertex_count();
+                            for (uint32_t v = 0; v < n; v++) {
+                                float px = m.pos_x[v] - pivot.x;
+                                float py = m.pos_y[v] - pivot.y;
+                                float pz = m.pos_z[v] - pivot.z;
+                                float kd = k.x * px + k.y * py + k.z * pz;
+                                float cx = k.y * pz - k.z * py;
+                                float cy = k.z * px - k.x * pz;
+                                float cz = k.x * py - k.y * px;
+                                m.pos_x[v] = pivot.x + px * cs + cx * sn + k.x * kd * omc;
+                                m.pos_y[v] = pivot.y + py * cs + cy * sn + k.y * kd * omc;
+                                m.pos_z[v] = pivot.z + pz * cs + cz * sn + k.z * kd * omc;
+                            }
+                        };
+
+                        for (uint32_t sel_id : sel) {
+                            MeshEntity* e = scene.find_entity(sel_id);
+                            if (!e) continue;
+                            uint32_t vc = e->mesh.vertex_count();
+                            rotate_mesh(e->mesh);
+                            if (e->multires.locked) {
+                                // The base cage has to turn with the surface or the
+                                // next cascade regenerates the mesh unrotated.
+                                rotate_mesh(e->multires.base);
+                                // Tangent frames are DIRECTIONS on the base surface and
+                                // the disp layers are expressed in them. Translation and
+                                // uniform scale leave them valid — which is why move and
+                                // scale ignore them — but a rotation does not. Mark every
+                                // level stale so the next cascade rebuilds them on the
+                                // turned surface; leaving them re-applies your detail in
+                                // the old orientation, one subdiv step later. Sizes stay
+                                // (frames.size() must track disp.size()), contents go.
+                                for (auto& lvl : e->multires.frames) lvl.clear();
+                                e->multires_gpu.cleanup();   // VRAM mirror holds stale frames
+                            }
+                            if (rot_dirty.size() != vc) {
+                                rot_dirty.resize(vc);
+                                for (uint32_t i = 0; i < vc; i++) rot_dirty[i] = i;
+                            }
+                            scene.sync_partial_entity(sel_id, rot_dirty);
+                        }
+                        refresh_active_gpu_residency();
+                        mesh->compute_bounding_sphere(mesh_center, mesh_radius);
+                        screen_buffers_dirty = true;
+                    }
+                }
             }
 
             // One-shot actions (IDLE only)

@@ -633,6 +633,11 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
                 break;
 
             case GLFW_KEY_Q:
+                // In SELECT mode Q/E spin the selection instead. The main loop polls
+                // the key directly for that (continuous, frame-rate independent), so
+                // there is nothing to latch here — just don't cycle the brush too.
+                if (g_input->interaction_mode == InputState::InteractionMode::SELECT)
+                    break;
                 if (g_input->current_brush == BrushType::PAINT) {
                     // In paint mode Q/E swap the active colour with the alternate.
                     for (int c = 0; c < 3; c++)
@@ -650,6 +655,8 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
                 if (g_input->ctrl_held) {
                     g_input->export_dialog_active = true;
                     g_input->quit_requested = false;
+                } else if (g_input->interaction_mode == InputState::InteractionMode::SELECT) {
+                    break;   // see GLFW_KEY_Q above
                 } else if (g_input->current_brush == BrushType::PAINT) {
                     // In paint mode Q/E swap the active colour with the alternate.
                     for (int c = 0; c < 3; c++)

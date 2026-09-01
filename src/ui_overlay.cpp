@@ -718,6 +718,7 @@ static void draw_help_popup(InputState& input, int win_w, int win_h) {
         help_row("RMB",      "Colour palette (Paint)");
         help_head("MODES");
         help_row("1 2 3 4",  "Edit Insert Select Paint");
+        help_row("Q E",      "Rotate object (Select mode)");
         help_head("BRUSHES");
         help_row("D T I",    "Draw  Clay  Inflate");
         help_row("C V G",    "Crease  Pinch  Move");

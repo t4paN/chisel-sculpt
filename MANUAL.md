@@ -167,6 +167,7 @@ own undo history and subdivision stack.
 | Ctrl + LMB | Add / remove from the selection — including the active mesh; peeling out the last one deselects the whole scene |
 | LMB + drag | Move the selected object in the view plane |
 | RMB + drag | Scale the selected object (Ctrl+RMB stays camera zoom) |
+| Q / E | Spin the selection anticlockwise / clockwise **about the view axis** — hold to turn continuously (90°/sec, no acceleration). Face the model from any angle and the turn always reads the way it looks on screen |
 | Delete | Delete the selected object |
 
 The selection also drives the voxel merge: selected meshes are the merge set,
