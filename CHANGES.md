@@ -2,6 +2,34 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-09-01 — v0.2.12 — One snapshot budget everywhere, blunter J prompt
+
+Two small follow-ups to v0.2.11.
+
+**The rescue-snapshot budget is 512 MB on every platform**, web included. It was 96 MB
+on web. The user's call: "nobody has fewer than 2gb nowadays, if it crashes it crashes
+and they learn the limits of the app on their system."
+
+Recorded because the web trade is genuinely different from the native one, and the next
+person to touch `snapshot_budget()` should know it rather than rediscover it. The
+snapshot lives in the **WASM heap, not VRAM** — a 32-bit address space with a hard ~2 GB
+ceiling no matter how much memory the machine has. Emscripten's `ALLOW_MEMORY_GROWTH`
+has no way to report failure, so a growth it cannot satisfy **aborts the page**: on web
+the failure mode is a dead tab and a lost sculpt, where native would simply swap. The
+pre-flight gate and both prompt warnings still work exactly as before; this only moves
+where the line sits.
+
+**The J prompt's second line** is now bold light-green "Operation not undoable, save
+first", replacing the grey "Wipes their multires." The bitmap font has no weight, so
+`draw_text_bold` draws the string twice two pixels apart — at scale 3 that reads as
+weight rather than blur.
+
+Note for whoever revisits that string: it is deliberately blunter than the truth. Since
+v0.2.11 a merge IS undoable for three strokes whenever a snapshot fits, which after the
+budget change is nearly always. `can_snapshot` is already passed into
+`draw_voxel_merge_confirm`, so making the line conditional is a two-line change — it was
+offered and declined in favour of the flat warning.
+
 ## 2026-09-01 — v0.2.11 — Ctrl+Z can take back a remesh
 
 The two remeshers wipe undo, because every undo entry addresses vertices by index and

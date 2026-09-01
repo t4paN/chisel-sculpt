@@ -58,11 +58,20 @@ size_t snapshot_bytes(const Scene& scene) {
 }
 
 size_t snapshot_budget() {
-#ifdef __EMSCRIPTEN__
-    return 96ull * 1024ull * 1024ull;
-#else
+    // One budget for every platform, web included — the user's explicit call
+    // (2026-09-01): "nobody has fewer than 2gb nowadays, if it crashes it crashes
+    // and they learn the limits of the app on their system".
+    //
+    // Worth knowing what that means on web specifically, because it is not the
+    // same trade as native. The snapshot lives in the WASM heap, which is 32-bit:
+    // the ceiling is ~2 GB of ADDRESS SPACE regardless of how much RAM or VRAM the
+    // machine has, and emscripten's ALLOW_MEMORY_GROWTH cannot return failure —
+    // a growth it cannot satisfy aborts the page. So the web failure mode is a
+    // dead tab and a lost sculpt, not a refused operation. Native just swaps.
+    //
+    // The pre-flight gate still runs and the prompts still warn past the budget;
+    // this only sets where that line sits.
     return 512ull * 1024ull * 1024ull;
-#endif
 }
 
 bool snapshot_affordable(const Scene& scene) {

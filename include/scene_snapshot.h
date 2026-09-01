@@ -47,7 +47,9 @@ struct SceneSnapshot {
 // ALLOW_MEMORY_GROWTH with no ceiling, and a growth that fails aborts the whole
 // tab rather than returning a null we could back out of.
 size_t snapshot_bytes(const Scene& scene);
-// 512 MB native, 96 MB web (shared heap, and running it dry kills the page).
+// 512 MB on every platform. Web used to get a smaller share, but the user's call
+// (2026-09-01) is to run the same budget everywhere and let a machine that cannot
+// take it find out — see snapshot_budget() for what that costs on web.
 size_t snapshot_budget();
 bool   snapshot_affordable(const Scene& scene);
 

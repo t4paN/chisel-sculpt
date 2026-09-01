@@ -32,6 +32,16 @@ namespace cga {
 
 #define CGA(c) cga::c[0], cga::c[1], cga::c[2]
 
+// The bitmap font has no weight, so "bold" is the usual trick: the same string
+// twice, offset a couple of pixels horizontally. At scale 3 that reads as a real
+// weight; offsetting vertically as well just smears it.
+static void draw_text_bold(TextOverlay& text, const char* str, float x, float y,
+                           float scale, int win_w, int win_h,
+                           float r, float g, float b, float a) {
+    text.draw_text(str, x, y, scale, win_w, win_h, r, g, b, a);
+    text.draw_text(str, x + 2.0f, y, scale, win_w, win_h, r, g, b, a);
+}
+
 void draw_quit_dialog(TextOverlay& text, int win_w, int win_h) {
     text.draw_panel(0, 0, (float)win_w, (float)win_h,
                    win_w, win_h, 0.0f, 0.0f, 0.0f, 0.5f);
@@ -107,8 +117,8 @@ void draw_voxel_merge_confirm(TextOverlay& text, int resolution, int n_selected,
                   n_selected, n_selected == 1 ? "" : "es");
     text.draw_text(line, cx - 360.0f, cy - 60.0f, scale, win_w, win_h, CGA(yellow), 1.0f);
 
-    text.draw_text("Wipes their multires.", cx - 360.0f, cy - 30.0f, scale,
-                  win_w, win_h, CGA(light_gray), 1.0f);
+    draw_text_bold(text, "Operation not undoable, save first", cx - 360.0f, cy - 30.0f,
+                   scale, win_w, win_h, CGA(light_green), 1.0f);
 
     std::snprintf(line, sizeof(line), "Resolution: %d   ( [ - / + ] )", resolution);
     text.draw_text(line, cx - 360.0f, cy + 4.0f, scale, win_w, win_h, CGA(light_cyan), 1.0f);
