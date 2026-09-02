@@ -167,7 +167,7 @@ own undo history and subdivision stack.
 | Ctrl + LMB | Add / remove from the selection — including the active mesh; peeling out the last one deselects the whole scene |
 | LMB + drag | Move the selected object in the view plane |
 | RMB + drag | Scale the selected object (Ctrl+RMB stays camera zoom) |
-| Q / E | Spin the selection anticlockwise / clockwise **about the view axis** — hold to turn continuously (90°/sec, no acceleration). Face the model from any angle and the turn always reads the way it looks on screen |
+| Q / E | Spin the selection anticlockwise / clockwise **about the view axis** — hold to turn continuously (90°/sec, no acceleration). Face the model from any angle and the turn always reads the way it looks on screen. Every selected piece turns about **its own centre**, so a selection spins in place rather than orbiting a shared point |
 | Ctrl + Z | Undo the last move / scale / spin — works right here in Select mode |
 | Delete | Delete the selected object |
 
@@ -176,6 +176,14 @@ Move, scale and spin are undoable. One press-to-release is one step back, so hol
 running order with the sculpt history: you cannot undo *past* a transform to reach a
 stroke underneath it, which is what keeps a stroke from being restored into the wrong
 frame.
+
+**Spinning under X symmetry.** A symmetrized *pair* — two separate lobes, like a pair of
+ears — turns as a mirrored pair: the right lobe goes clockwise while the left goes
+anticlockwise, and the pair stays an exact mirror of itself. A piece that is *continuous*
+across the mirror plane cannot do that (its two halves would shear apart at the seam), so
+it turns as one piece and comes off the plane. You are allowed to do it — you just lose
+symmetry on that mesh while it is turned, and Chisel says so once rather than letting you
+find out from a torn seam. Turn it back and symmetry returns.
 
 The selection also drives the voxel merge: selected meshes are the merge set,
 deselected (red-tinted) meshes are bystanders — or carving tools (see Subtract).

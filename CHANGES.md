@@ -4,6 +4,9 @@ Short, chronological log of notable changes. Newest on top.
 
 ## 2026-09-02 — v0.2.16 — Spin turns the normals too
 
+*Hand-confirmed by the user on itch the same day: the shading stays put in the world while
+the form turns under it, and mirrored strokes no longer crunch a turned mesh.*
+
 ### The shading was welded to the mesh
 
 Spin rotated every position and left every **normal** pointing where it pointed before
