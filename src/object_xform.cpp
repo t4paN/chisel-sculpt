@@ -16,32 +16,54 @@ void spin_apply_mesh(Mesh& m, const Vec3& pivot, const Vec3& axis,
     const Vec3& k = axis;
     const float cs = std::cos(angle), sn = std::sin(angle);
     const float omc = 1.0f - cs;
+
+    // Rodrigues about the ORIGIN: v' = v cos + (k x v) sin + k (k.v)(1 - cos).
+    // Positions bracket it with the pivot; directions use it bare.
+    auto rot = [&](float& x, float& y, float& z) {
+        const float kd = k.x * x + k.y * y + k.z * z;
+        const float cx = k.y * z - k.z * y;
+        const float cy = k.z * x - k.x * z;
+        const float cz = k.x * y - k.y * x;
+        const float rx = x * cs + cx * sn + k.x * kd * omc;
+        const float ry = y * cs + cy * sn + k.y * kd * omc;
+        const float rz = z * cs + cz * sn + k.z * kd * omc;
+        x = rx; y = ry; z = rz;
+    };
+
+    // A mesh mid-load can have positions without normals; never index past them.
+    const bool has_norm = (m.norm_x.size() == m.pos_x.size());
     const uint32_t n = m.vertex_count();
     for (uint32_t v = 0; v < n; v++) {
-        float x = m.pos_x[v], y = m.pos_y[v], z = m.pos_z[v];
         // -x lobe: reflect in, turn, reflect out. The two flips ARE the whole
         // conjugation — no second rotation matrix, no negated angle to keep in
-        // step with the first one.
-        const bool neg = mirror_lobes && (x < 0.0f);
+        // step with the first one. Read the side BEFORE the position is written.
+        const bool neg = mirror_lobes && (m.pos_x[v] < 0.0f);
+
+        float x = m.pos_x[v], y = m.pos_y[v], z = m.pos_z[v];
         if (neg) x = -x;
+        x -= pivot.x; y -= pivot.y; z -= pivot.z;
+        rot(x, y, z);
+        x += pivot.x; y += pivot.y; z += pivot.z;
+        if (neg) x = -x;
+        m.pos_x[v] = x; m.pos_y[v] = y; m.pos_z[v] = z;
 
-        const float px = x - pivot.x;
-        const float py = y - pivot.y;
-        const float pz = z - pivot.z;
-        // Rodrigues: v' = v cos + (k x v) sin + k (k.v)(1 - cos)
-        const float kd = k.x * px + k.y * py + k.z * pz;
-        const float cx = k.y * pz - k.z * py;
-        const float cy = k.z * px - k.x * pz;
-        const float cz = k.x * py - k.y * px;
-        float nx = pivot.x + px * cs + cx * sn + k.x * kd * omc;
-        float ny = pivot.y + py * cs + cy * sn + k.y * kd * omc;
-        float nz = pivot.z + pz * cs + cz * sn + k.z * kd * omc;
-
+        // Normals are DIRECTIONS: same map, no pivot — they turn with the surface
+        // but do not translate. Leaving them is not a subtle error: the renderer
+        // uploads mesh.norm_* verbatim (Renderer::update_mesh_verts), so a turned
+        // mesh comes out lit as though it were still in its old orientation, and
+        // the shading looks welded to the geometry. Only a rotation does this,
+        // which is why move and scale ignore normals — translation and uniform
+        // scale leave a unit normal valid. Under mirror_lobes the map is M R M,
+        // whose determinant is +1, so it is a plain rotation here too: no winding
+        // flip, no renormalisation needed.
+        if (!has_norm) continue;
+        float nx = m.norm_x[v], ny = m.norm_y[v], nz = m.norm_z[v];
         if (neg) nx = -nx;
-        m.pos_x[v] = nx;
-        m.pos_y[v] = ny;
-        m.pos_z[v] = nz;
+        rot(nx, ny, nz);
+        if (neg) nx = -nx;
+        m.norm_x[v] = nx; m.norm_y[v] = ny; m.norm_z[v] = nz;
     }
+
     // A turn about anything but world X leaves the mesh off the mirror plane, so
     // the cached symmetry verdict has to be re-measured. Topology did not change,
     // so nothing else would ever trigger that. The lobe path lands back on exact

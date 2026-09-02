@@ -2770,7 +2770,7 @@ int main(int argc, char* argv[]) {
                                                     eff_brush_size, eff_strength,
                                                     eff_hardness,
                                                     input.is_subtract_active(),
-                                                    input.mirror_x,
+                                                    ctx.mirror_x,   // gated, like every other mirror consumer
                                                     win_w, win_h);
 
                             std::vector<uint32_t> mask_dirty;

@@ -2,6 +2,34 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-09-02 — v0.2.16 — Spin turns the normals too
+
+### The shading was welded to the mesh
+
+Spin rotated every position and left every **normal** pointing where it pointed before
+the turn. `Renderer::update_mesh_verts` uploads `mesh.norm_*` verbatim, so a turned mesh
+came out lit as though it were still in its old orientation — the shading looked stuck to
+the geometry rather than to the light. A remesh cleaned it up, because remesh recomputes
+normals from scratch.
+
+`spin_apply_mesh()` now applies the same map to the normals, minus the pivot: they are
+directions, so they turn but do not translate. Under the mirrored-lobe rule the map is
+`M R M`, whose determinant is +1 — a plain rotation — so there is no winding flip and
+nothing needs renormalising. Doing it in `spin_apply_mesh` means the live Q/E path, the
+undo replay and the multires base cage all get it from one place.
+
+Move and scale are untouched and stay that way: translation and uniform scale leave a
+unit normal valid. Only a rotation invalidates one, which is why this only ever showed on
+spin. Present since v0.2.14, found by test-driving v0.2.15.
+
+### Also
+
+The CPU-fallback mask path was passing `input.mirror_x` raw instead of the gated flag, so
+it was the one mirror consumer v0.2.15's symmetry gate did not cover. Only reachable
+without compute mask kernels, but it was a real hole.
+
+---
+
 ## 2026-09-02 — v0.2.15 — Spin turns each piece where it sits, and keeps mirrors mirrored
 
 Two things v0.2.14's Q/E spin got wrong, both found by test-driving it on a mirrored
