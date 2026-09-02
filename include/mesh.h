@@ -45,6 +45,18 @@ struct Mesh {
     uint32_t topo_version = 0;
     uint32_t mirror_topo_version = 0xFFFFFFFFu;
 
+    // Is this mesh still an exact mirror of itself about the WORLD x=0 plane?
+    // The whole mirror machinery assumes it is: two of the four passes write
+    // ABSOLUTE positions derived from that assumption (mirror_project averages
+    // each pair onto the plane and snaps seam verts to x=0; smooth_mirror_apply
+    // writes the twin outright), so on a mesh that has been turned off the plane
+    // by a Select-mode spin they do not merely paint in the wrong place — they
+    // tear it. Measured lazily off the pair map, cached against topo_version;
+    // object transforms call invalidate_mirror_symmetry() because a turn changes
+    // no topology and so would never re-trigger the measurement on its own.
+    uint32_t mirror_sym_topo = 0xFFFFFFFFu;
+    bool     mirror_sym_ok   = true;
+
     // Vertex -> triangle adjacency (CSR format)
     // vert_tri_offset[i] .. vert_tri_offset[i+1] indexes into vert_tri_list
     std::vector<uint32_t> vert_tri_offset;  // size = vertex_count + 1
@@ -82,6 +94,14 @@ struct Mesh {
     void build_adjacency();
     void compute_bounding_sphere(Vec3& center, float& radius) const;
     void build_mirror_x_map();
+    // True while the mesh is still world-X symmetric to within a fraction of its
+    // own size. Compares the MEAN residual over a sample of mirror pairs against
+    // 1% of the bounding radius: honest sculpting drift (which mirror_project
+    // exists to correct, every dab) is orders of magnitude under that, while even
+    // a 5 deg turn puts it an order of magnitude over. Cheap enough to be lazy —
+    // it only ever recomputes after a topology change or an object transform.
+    bool mirror_world_symmetric();
+    void invalidate_mirror_symmetry() { mirror_sym_topo = 0xFFFFFFFFu; }
 
     bool export_obj(const char* filename) const;
     // Binary STL for 3D printing: per-tri facet normal + 3 verts, 80-byte header,

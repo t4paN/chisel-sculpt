@@ -11,6 +11,108 @@ namespace {
 constexpr size_t MAX_GESTURES = 64;
 }
 
+void spin_apply_mesh(Mesh& m, const Vec3& pivot, const Vec3& axis,
+                     float angle, bool mirror_lobes) {
+    const Vec3& k = axis;
+    const float cs = std::cos(angle), sn = std::sin(angle);
+    const float omc = 1.0f - cs;
+    const uint32_t n = m.vertex_count();
+    for (uint32_t v = 0; v < n; v++) {
+        float x = m.pos_x[v], y = m.pos_y[v], z = m.pos_z[v];
+        // -x lobe: reflect in, turn, reflect out. The two flips ARE the whole
+        // conjugation — no second rotation matrix, no negated angle to keep in
+        // step with the first one.
+        const bool neg = mirror_lobes && (x < 0.0f);
+        if (neg) x = -x;
+
+        const float px = x - pivot.x;
+        const float py = y - pivot.y;
+        const float pz = z - pivot.z;
+        // Rodrigues: v' = v cos + (k x v) sin + k (k.v)(1 - cos)
+        const float kd = k.x * px + k.y * py + k.z * pz;
+        const float cx = k.y * pz - k.z * py;
+        const float cy = k.z * px - k.x * pz;
+        const float cz = k.x * py - k.y * px;
+        float nx = pivot.x + px * cs + cx * sn + k.x * kd * omc;
+        float ny = pivot.y + py * cs + cy * sn + k.y * kd * omc;
+        float nz = pivot.z + pz * cs + cz * sn + k.z * kd * omc;
+
+        if (neg) nx = -nx;
+        m.pos_x[v] = nx;
+        m.pos_y[v] = ny;
+        m.pos_z[v] = nz;
+    }
+    // A turn about anything but world X leaves the mesh off the mirror plane, so
+    // the cached symmetry verdict has to be re-measured. Topology did not change,
+    // so nothing else would ever trigger that. The lobe path lands back on exact
+    // symmetry and will simply measure ok again.
+    m.invalidate_mirror_symmetry();
+}
+
+void spin_latch_target(const Mesh& m, bool mirror_on, ObjectXformTarget& xt) {
+    Vec3 c; float r;
+    m.compute_bounding_sphere(c, r);
+    const float rr = (r > 0.0f) ? r : 1.0f;
+
+    // Default: this entity turns about its OWN centre. That alone is the fix for
+    // a multi-selection orbiting one shared point instead of each piece turning
+    // where it sits.
+    xt.pivot        = c;
+    xt.mirror_lobes = false;
+    if (!mirror_on) return;
+
+    // Same classification the move block uses, and for the same reason: a bounding
+    // centre at x=0 cannot tell a centred single piece from a symmetrized PAIR,
+    // whose centre is also 0. A piece whose geometry is continuous across the
+    // plane cannot be lobe-turned at all — the two halves would shear apart at the
+    // seam — so only a genuinely disjoint pair qualifies.
+    if (std::fabs(c.x) >= 1e-3f * rr) return;
+    const float band = 1e-3f * rr;
+    for (size_t t = 0; t + 2 < m.indices.size(); t += 3) {
+        bool pos = false, neg = false;
+        for (int i = 0; i < 3; i++) {
+            float x = m.pos_x[m.indices[t + i]];
+            if (x > band) pos = true;
+            else if (x < -band) neg = true;
+            else { pos = true; neg = true; }   // in the seam band
+        }
+        if (pos && neg) return;                // spans the seam: no lobe rule
+    }
+
+    // The +x lobe's own centre and radius. The -x lobe's are the reflection.
+    float mnx = 0, mny = 0, mnz = 0, mxx = 0, mxy = 0, mxz = 0;
+    bool  any = false;
+    const uint32_t n = m.vertex_count();
+    for (uint32_t v = 0; v < n; v++) {
+        if (m.pos_x[v] <= 0.0f) continue;
+        float x = m.pos_x[v], y = m.pos_y[v], z = m.pos_z[v];
+        if (!any) { mnx = mxx = x; mny = mxy = y; mnz = mxz = z; any = true; continue; }
+        if (x < mnx) mnx = x;  if (x > mxx) mxx = x;
+        if (y < mny) mny = y;  if (y > mxy) mxy = y;
+        if (z < mnz) mnz = z;  if (z > mxz) mxz = z;
+    }
+    if (!any) return;
+    Vec3 cp = { 0.5f * (mnx + mxx), 0.5f * (mny + mxy), 0.5f * (mnz + mxz) };
+
+    float rad_sq = 0.0f;
+    for (uint32_t v = 0; v < n; v++) {
+        if (m.pos_x[v] <= 0.0f) continue;
+        float dx = m.pos_x[v] - cp.x, dy = m.pos_y[v] - cp.y, dz = m.pos_z[v] - cp.z;
+        float d = dx * dx + dy * dy + dz * dz;
+        if (d > rad_sq) rad_sq = d;
+    }
+
+    // The guard that makes classifying by the sign of x sound: a lobe turning
+    // about its own centre never leaves the sphere it is already inside, so if
+    // that sphere clears the plane no vertex can cross it and be re-classified
+    // mid-gesture. Fail it and the entity turns as one piece and loses symmetry —
+    // the stroke gate catches that and says so, rather than tearing.
+    if (cp.x <= std::sqrt(rad_sq)) return;
+
+    xt.pivot        = cp;
+    xt.mirror_lobes = true;
+}
+
 void ObjectXformStack::begin(ObjectXform::Kind k, Scene& scene) {
     if (open_ && pending_.kind == k) return;
     commit(scene);               // a kind change ends the previous gesture
@@ -106,24 +208,12 @@ void ObjectXformStack::apply(const ObjectXform& x, bool inverse, Scene& scene) {
             }
         };
 
+        // Same function the live Q/E path calls, including the lobe rule — the
+        // conjugated map is its own inverse under a negated angle, so undoing a
+        // mirrored turn lands the pair back on exact symmetry.
         auto spin_mesh = [&](Mesh& m) {
-            float ang = inverse ? -t.angle : t.angle;
-            const Vec3 k = t.axis;
-            const float cs = std::cos(ang), sn = std::sin(ang);
-            const float omc = 1.0f - cs;
-            uint32_t n = m.vertex_count();
-            for (uint32_t v = 0; v < n; v++) {
-                float px = m.pos_x[v] - t.pivot.x;
-                float py = m.pos_y[v] - t.pivot.y;
-                float pz = m.pos_z[v] - t.pivot.z;
-                float kd = k.x * px + k.y * py + k.z * pz;
-                float cx = k.y * pz - k.z * py;
-                float cy = k.z * px - k.x * pz;
-                float cz = k.x * py - k.y * px;
-                m.pos_x[v] = t.pivot.x + px * cs + cx * sn + k.x * kd * omc;
-                m.pos_y[v] = t.pivot.y + py * cs + cy * sn + k.y * kd * omc;
-                m.pos_z[v] = t.pivot.z + pz * cs + cz * sn + k.z * kd * omc;
-            }
+            spin_apply_mesh(m, t.pivot, t.axis,
+                            inverse ? -t.angle : t.angle, t.mirror_lobes);
         };
 
         auto run = [&](Mesh& m) {
@@ -136,6 +226,11 @@ void ObjectXformStack::apply(const ObjectXform& x, bool inverse, Scene& scene) {
 
         uint32_t vc = e->mesh.vertex_count();
         run(e->mesh);
+        // Any of the three can leave the mesh off the world mirror plane, and none
+        // of them touches topology, so the cached symmetry verdict would otherwise
+        // never be re-measured. (spin_apply_mesh already does this; move and scale
+        // need it here.)
+        e->mesh.invalidate_mirror_symmetry();
         if (e->multires.locked) {
             // The base cage has to follow the surface, or the next cascade
             // regenerates the mesh back where it started.

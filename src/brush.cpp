@@ -151,7 +151,7 @@ static void snap_and_mirror_dirty(BrushStroke& bs, DabContext& ctx, float anchor
             bs.snap_list.push_back(v);
         }
     }
-    if (ctx.input.mirror_x && !ctx.mesh.mirror_x_map.empty()) {
+    if (ctx.mirror_x && !ctx.mesh.mirror_x_map.empty()) {
         size_t n = bs.dirty_verts.size();
         for (size_t i = 0; i < n; i++) {
             uint32_t v = bs.dirty_verts[i];
@@ -197,7 +197,7 @@ void BrushStroke::kick_dab_readback(DabContext& ctx, uint8_t kind) {
     // with this dab's touched verts in the GPU dirty list. Re-impose exact
     // X-mirror symmetry over that set before anything reads positions — one
     // projection instead of per-brush symmetry in every producer kernel.
-    if (kind == DAB_GEO && ctx.input.mirror_x)
+    if (kind == DAB_GEO && ctx.mirror_x)
         ctx.compute.dispatch_mirror_project_header(ctx.renderer.vbo_pos,
                                                    ctx.mesh.vertex_count(),
                                                    ctx.compute.smooth_dirty_ssbo);
@@ -699,7 +699,7 @@ void BrushStroke::apply_smooth(DabContext& ctx, float dab_x, float dab_y,
     sp.iterations = 3;
     sp.vertex_count = ctx.mesh.vertex_count();
     sp.tri_count = ctx.mesh.tri_count();
-    sp.mirror_x = ctx.input.mirror_x;
+    sp.mirror_x = ctx.mirror_x;
 
     BrushRegion rgn = compute_brush_region(dab_x, dab_y, ctx.eff_brush_size, screen_slack, ctx.win_w, ctx.win_h);
     sp.region_x = rgn.x;
@@ -809,7 +809,7 @@ void BrushStroke::apply_crease(DabContext& ctx, float dab_x, float dab_y,
     params.anchor_b_x = -anchor_pos.x;
     params.anchor_b_y =  anchor_pos.y;
     params.anchor_b_z =  anchor_pos.z;
-    params.use_b = ctx.input.mirror_x ? 1 : 0;
+    params.use_b = ctx.mirror_x ? 1 : 0;
     params.world_radius = anchor_world_radius;
     params.disp_amount = disp_amount;
     params.pinch_amount = pinch_amount;
@@ -838,7 +838,7 @@ void BrushStroke::apply_crease(DabContext& ctx, float dab_x, float dab_y,
 
     gpu::barrier(ctx.compute.gpu_dev);
 
-    bool use_sym = ctx.input.mirror_x
+    bool use_sym = ctx.mirror_x
                    && ctx.compute.has_draw_symmetrize()
                    && ctx.compute.mirror_map_vertex_count == ctx.vertex_count;
     if (use_sym) {
@@ -876,7 +876,7 @@ void BrushStroke::apply_pinch(DabContext& ctx, float dab_x, float dab_y,
     params.anchor_b_x = -anchor_pos.x;
     params.anchor_b_y =  anchor_pos.y;
     params.anchor_b_z =  anchor_pos.z;
-    params.use_b = ctx.input.mirror_x ? 1 : 0;
+    params.use_b = ctx.mirror_x ? 1 : 0;
     params.world_radius = anchor_world_radius;
     params.pinch_amount = pinch_amount * strength * sign;
     params.hardness = hardness;
@@ -900,7 +900,7 @@ void BrushStroke::apply_pinch(DabContext& ctx, float dab_x, float dab_y,
 
     gpu::barrier(ctx.compute.gpu_dev);
 
-    bool use_sym = ctx.input.mirror_x
+    bool use_sym = ctx.mirror_x
                    && ctx.compute.has_draw_symmetrize()
                    && ctx.compute.mirror_map_vertex_count == ctx.vertex_count;
     if (use_sym) {
@@ -965,7 +965,7 @@ void BrushStroke::apply_draw(DabContext& ctx, float dab_x, float dab_y,
     params.anchor_b_x = -anchor_pos.x;
     params.anchor_b_y =  anchor_pos.y;
     params.anchor_b_z =  anchor_pos.z;
-    params.use_b = ctx.input.mirror_x ? 1 : 0;
+    params.use_b = ctx.mirror_x ? 1 : 0;
     params.world_radius = anchor_world_radius;
     params.disp_amount = disp_amount;
     params.hardness = hardness;
@@ -1003,7 +1003,7 @@ void BrushStroke::apply_draw(DabContext& ctx, float dab_x, float dab_y,
     // gets out[v] = accum[v] + (-mx, my, mz, mw), so apply produces strictly
     // X-mirror displacements regardless of small tessellation drift between
     // twins. Orphan/seam verts copy through unchanged.
-    bool use_sym = ctx.input.mirror_x
+    bool use_sym = ctx.mirror_x
                    && ctx.compute.has_draw_symmetrize()
                    && ctx.compute.mirror_map_vertex_count == ctx.vertex_count;
     if (use_sym) {
@@ -1045,7 +1045,7 @@ void BrushStroke::apply_move_gpu(DabContext& ctx, float cursor_dx, float cursor_
         cp.anchor_z = anchor_pos.z;
         cp.world_radius = anchor_world_radius;
         cp.hardness = hardness;
-        cp.mirror_x = ctx.input.mirror_x;
+        cp.mirror_x = ctx.mirror_x;
         cp.vertex_count = vc;
         ctx.compute.dispatch_move_capture(cp, ctx.renderer.vbo_pos);
 
@@ -1095,13 +1095,13 @@ void BrushStroke::apply_move_gpu(DabContext& ctx, float cursor_dx, float cursor_
     ap.total_dx = move.total_dx;
     ap.total_dy = move.total_dy;
     ap.total_dz = move.total_dz;
-    ap.mirror_x = ctx.input.mirror_x;
+    ap.mirror_x = ctx.mirror_x;
     ap.vertex_count = ctx.vertex_count;
     ctx.compute.dispatch_move_apply(ap, ctx.renderer.vbo_pos);
 
     // Symmetry sink for move (doesn't route through kick_dab_readback): the
     // captured affected list shares the {count, ids[]} layout.
-    if (ctx.input.mirror_x)
+    if (ctx.mirror_x)
         ctx.compute.dispatch_mirror_project_header(ctx.renderer.vbo_pos, ctx.vertex_count,
                                                    ctx.compute.move_affected_ssbo);
 
@@ -1150,7 +1150,7 @@ void BrushStroke::apply_limb_gpu(DabContext& ctx, float cursor_dx, float cursor_
         cp.anchor_z = anchor_pos.z;
         cp.world_radius = anchor_world_radius;
         cp.hardness = hardness;
-        cp.mirror_x = ctx.input.mirror_x;
+        cp.mirror_x = ctx.mirror_x;
         cp.vertex_count = vc;
         ctx.compute.dispatch_move_capture(cp, ctx.renderer.vbo_pos);
         ctx.compute.dispatch_move_weight_smooth(vc, 3, ctx.renderer.ebo);
@@ -1188,7 +1188,7 @@ void BrushStroke::apply_limb_gpu(DabContext& ctx, float cursor_dx, float cursor_
     dp.dx = right.x * wdx + up.x * wdy;
     dp.dy = right.y * wdx + up.y * wdy;
     dp.dz = right.z * wdx + up.z * wdy;
-    dp.mirror_x = ctx.input.mirror_x;
+    dp.mirror_x = ctx.mirror_x;
     dp.vertex_count = ctx.vertex_count;
     ctx.compute.dispatch_limb_drag(dp, ctx.renderer.vbo_pos);
 
@@ -1207,7 +1207,7 @@ void BrushStroke::apply_limb_gpu(DabContext& ctx, float cursor_dx, float cursor_
                                     ctx.renderer.vbo_pos, ctx.renderer.vbo_norm, ctx.renderer.ebo);
 
     // Symmetry sink for limb (drag + relax both move verts; same affected list).
-    if (ctx.input.mirror_x)
+    if (ctx.mirror_x)
         ctx.compute.dispatch_mirror_project_header(ctx.renderer.vbo_pos, ctx.vertex_count,
                                                    ctx.compute.move_affected_ssbo);
 
@@ -1265,7 +1265,7 @@ void BrushStroke::apply_mask_gpu(DabContext& ctx, float dab_x, float dab_y,
     p.anchor_b_x = -anchor_pos.x;
     p.anchor_b_y =  anchor_pos.y;
     p.anchor_b_z =  anchor_pos.z;
-    p.use_b = ctx.input.mirror_x ? 1 : 0;
+    p.use_b = ctx.mirror_x ? 1 : 0;
     p.world_radius = anchor_world_radius;
     p.hardness = hardness;
     p.paint_strength = paint_strength;
@@ -1298,7 +1298,7 @@ void BrushStroke::apply_mask_smooth_gpu(DabContext& ctx, float dab_x, float dab_
     p.anchor_b_x = -anchor_pos.x;
     p.anchor_b_y =  anchor_pos.y;
     p.anchor_b_z =  anchor_pos.z;
-    p.use_b = ctx.input.mirror_x ? 1 : 0;
+    p.use_b = ctx.mirror_x ? 1 : 0;
     p.world_radius = anchor_world_radius;
     p.hardness = hardness;
     p.paint_strength = strength;        // blend amount toward neighbour average
@@ -1328,7 +1328,7 @@ void BrushStroke::apply_density_gpu(DabContext& ctx, float dab_x, float dab_y,
     p.anchor_b_x = -anchor_pos.x;
     p.anchor_b_y =  anchor_pos.y;
     p.anchor_b_z =  anchor_pos.z;
-    p.use_b = ctx.input.mirror_x ? 1 : 0;
+    p.use_b = ctx.mirror_x ? 1 : 0;
     p.world_radius = anchor_world_radius;
     p.hardness = hardness;
     p.paint_strength = invert ? -strength : strength;   // paint raises, Ctrl lowers
@@ -1362,7 +1362,7 @@ void BrushStroke::apply_density_smooth_gpu(DabContext& ctx, float dab_x, float d
     p.anchor_b_x = -anchor_pos.x;
     p.anchor_b_y =  anchor_pos.y;
     p.anchor_b_z =  anchor_pos.z;
-    p.use_b = ctx.input.mirror_x ? 1 : 0;
+    p.use_b = ctx.mirror_x ? 1 : 0;
     p.world_radius = anchor_world_radius;
     p.hardness = hardness;
     p.paint_strength = strength;        // blend amount toward neighbour average
@@ -1393,7 +1393,7 @@ void BrushStroke::apply_color_gpu(DabContext& ctx, float dab_x, float dab_y,
     p.anchor_b_x = -anchor_pos.x;
     p.anchor_b_y =  anchor_pos.y;
     p.anchor_b_z =  anchor_pos.z;
-    p.use_b = ctx.input.mirror_x ? 1 : 0;
+    p.use_b = ctx.mirror_x ? 1 : 0;
     p.world_radius = anchor_world_radius;
     p.hardness = hardness;
     p.paint_strength = strength;
@@ -1431,7 +1431,7 @@ void BrushStroke::apply_color_smooth_gpu(DabContext& ctx, float dab_x, float dab
     p.anchor_b_x = -anchor_pos.x;
     p.anchor_b_y =  anchor_pos.y;
     p.anchor_b_z =  anchor_pos.z;
-    p.use_b = ctx.input.mirror_x ? 1 : 0;
+    p.use_b = ctx.mirror_x ? 1 : 0;
     p.world_radius = anchor_world_radius;
     p.hardness = hardness;
     p.paint_strength = strength;        // blend amount toward neighbour average
@@ -1669,7 +1669,7 @@ bool BrushStroke::finalize(DabContext& ctx, Mesh& mesh, UndoStack& stack,
             // projection, so project once more before normals / undo capture /
             // multires diff read them. snap_list ids are already resident in
             // dirty_verts_ssbo (uploaded by stroke_smooth above).
-            if (ctx.input.mirror_x)
+            if (ctx.mirror_x)
                 compute->dispatch_mirror_project_ids(renderer.vbo_pos,
                                                      mesh.vertex_count(),
                                                      (uint32_t)snap_list.size());

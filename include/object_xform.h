@@ -40,6 +40,8 @@ struct ObjectXformTarget {
     // lobes keep their sign for the length of a sane drag.
     Vec3  delta        = {0, 0, 0};
     bool  lock_x       = false;
+    // MOVE: the two lobes translate as mirrors (one right, its twin left).
+    // SPIN: the two lobes turn as mirrors — see spin_apply_mesh().
     bool  mirror_lobes = false;
     float seam_eps     = 0.0f;   // latched too, so the replay splits the lobes identically
 
@@ -48,11 +50,38 @@ struct ObjectXformTarget {
     // live code (a bounding centre is invariant under a scale or a turn about
     // itself), but only in exact arithmetic — replaying against the latched one
     // is what keeps undo from walking the object off its start position.
+    // For a SPIN with mirror_lobes set, this is the +X LOBE's centre; the -x
+    // lobe's is its reflection, which is why one Vec3 still describes both.
     Vec3  pivot  = {0, 0, 0};
     float factor = 1.0f;        // SCALE: accumulated exponential factor
     Vec3  axis   = {0, 0, 1};   // SPIN: view axis, latched with the pivot
     float angle  = 0.0f;        // SPIN: total radians
 };
+
+// The ONE definition of what a Select-mode spin does to a mesh. The live Q/E path
+// and the undo replay both call it, so an inverse can never drift from the thing
+// it inverts.
+//
+// Plain case: rotate every vertex about `pivot` by `angle` around `axis`.
+//
+// mirror_lobes: `pivot` is the +x lobe's centre, and the -x lobe gets the
+// CONJUGATED map — reflect, turn, reflect back (M R M, about the reflected
+// centre). That is exactly a turn of -angle about the reflected axis, and it is
+// the only rotation of a mirrored pair that leaves it a mirrored pair: on screen
+// the right lobe goes clockwise while the left goes anticlockwise. Without it a
+// turn about anything but world X breaks the symmetry the mirror machinery
+// assumes, and mirror_project then tears the mesh on the next stroke.
+//
+// The lobe a vertex belongs to is the sign of its x. That is only safe because
+// spin_latch_target() refuses the lobe rule unless each lobe's own bounding
+// sphere clears the plane — a lobe turning about its own centre stays inside
+// that sphere, so no vertex can cross and get re-classified mid-gesture.
+void spin_apply_mesh(Mesh& m, const Vec3& pivot, const Vec3& axis,
+                     float angle, bool mirror_lobes);
+
+// Latch one entity's pivot and lobe rule on the first frame of a spin gesture.
+// Writes xt.pivot and xt.mirror_lobes; leaves angle/axis to the caller.
+void spin_latch_target(const Mesh& m, bool mirror_on, ObjectXformTarget& xt);
 
 struct ObjectXform {
     enum class Kind : uint8_t { MOVE, SCALE, SPIN };

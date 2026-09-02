@@ -2,6 +2,72 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-09-02 — v0.2.15 — Spin turns each piece where it sits, and keeps mirrors mirrored
+
+Two things v0.2.14's Q/E spin got wrong, both found by test-driving it on a mirrored
+model.
+
+### Every piece now turns about its own centre
+
+The spin used ONE pivot for the whole selection — the centroid of the selected bounding
+centres. So selecting a head and a pair of ears and pressing E made the ears **orbit the
+head** instead of turning where they sat. That is not what spin means. Each selected
+entity now latches its own pivot on the gesture's first frame.
+
+### A mirrored pair turns as a mirrored pair
+
+Rotating a symmetrized pair about anything but the world X axis takes it off the mirror
+plane — the left lobe ends up lower than the right, and it is no longer a mirror of
+itself. So a mirrored pair now gets the **conjugated** turn: the +x lobe turns about its
+own centre, and its twin gets the same map reflected — reflect in, turn, reflect back.
+On screen the right lobe goes clockwise while the left goes anticlockwise, and the pair
+comes out an exact mirror of itself again. It is the only rotation of a mirrored pair
+that has that property.
+
+The lobe a vertex belongs to is decided by the sign of its x, which is only sound because
+the rule is refused unless each lobe's own bounding sphere clears the plane: a lobe
+turning about its own centre stays inside that sphere, so no vertex can cross the plane
+and be re-classified halfway through a turn. A piece whose geometry is **continuous**
+across the plane cannot be lobe-turned at all — the two halves would shear apart at the
+seam — so it turns as one piece and loses its symmetry, which the next section is about.
+
+The live path and the undo replay now call the same `spin_apply_mesh()`, so an inverse
+can no longer drift from the thing it inverts.
+
+### Mirrored strokes can no longer tear a mesh that has been turned
+
+Turn a symmetric mesh off the mirror plane and the next mirrored stroke did not paint in
+the wrong place — it **tore the mesh**. Worth spelling out why, because "mirror" is four
+passes and only two of them are dangerous:
+
+- `mirror_project` runs before every geometry dab and **averages each pair onto exact
+  world symmetry**, snapping seam vertices to x=0. On a turned mesh every seam vertex has
+  x≠0 and gets yanked to the plane.
+- `smooth_mirror_apply` writes the twin's position outright as the X-reflection of its
+  partner. Same class: an absolute position derived from a plane the mesh is no longer on.
+- The other two (`draw_accum_symmetrize`, `draw_mirror_apply`) add a *displacement*
+  bounded by the dab. Wrong-looking, but they cannot tear anything.
+
+Symmetry is now measured rather than assumed. `Mesh::mirror_world_symmetric()` takes the
+mean residual over a sample of mirror pairs and compares it against 1% of the bounding
+radius. Honest sculpting drift — which `mirror_project` exists to correct, every single
+dab — sits orders of magnitude under that; even a 5° turn sits an order of magnitude
+over, so the two never compete for the tolerance. It caches against the topology stamp,
+and the object transforms invalidate it explicitly because a turn changes no topology and
+would otherwise never trigger a re-measurement.
+
+When the verdict is negative, **all four passes are dropped for that mesh** and the
+toolbar says so once. You keep the freedom to turn a symmetric head to any angle; you
+lose mirroring on it while it is there, and you get told rather than finding out from a
+torn seam. Every mirror consumer in `brush.cpp` reads one effective flag on `DabContext`,
+so there is a single place the decision is made.
+
+Making mirroring *follow* a turned mesh — deriving the plane from the pair map instead of
+assuming x=0 — is a real and much smaller job than it first looked, and it is written up
+in `owedstuff.md`. It is not v0.2 scope.
+
+---
+
 ## 2026-09-01 — v0.2.14 — Spin objects in Select mode, and undo object transforms
 
 ### Q / E spin the selection about the view axis

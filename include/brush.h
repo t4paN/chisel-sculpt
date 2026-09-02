@@ -31,6 +31,14 @@ struct DabContext {
     int               win_w, win_h;
     uint32_t          vertex_count;  // active entity vertex count (working buffer at offset 0)
     float             eff_brush_size; // input.brush_size * pen-pressure size multiplier (px)
+    // EFFECTIVE X symmetry for this dab — input.mirror_x AND the mesh still being
+    // world-X symmetric. Every mirror consumer in brush.cpp reads THIS, never
+    // input.mirror_x, so one test at the top disarms all four mirror passes at
+    // once. Two of them write absolute positions computed from the world plane
+    // (mirror_project, smooth_mirror_apply), so on a mesh a Select-mode spin has
+    // turned off that plane they would tear it rather than just mirror it wrong.
+    // See Mesh::mirror_world_symmetric().
+    bool              mirror_x;
 };
 
 BrushRegion compute_brush_region(float dab_x, float dab_y,

@@ -697,14 +697,13 @@ int main(int argc, char* argv[]) {
     // last countdown figure put on screen, -1 meaning "not announced yet".
     SceneSnapshot rescue;
     int rescue_shown = -1;
-    // Q/E object spin (SELECT mode). The pivot is latched when the spin STARTS and
-    // held until the key comes up: a bounding-sphere centre is rotation-invariant
-    // in exact arithmetic but not in floating point, and recomputing it every frame
-    // lets the object wander while it turns. rot_dirty is reused rather than rebuilt
-    // per frame — the sync wants a full dirty list and this runs every frame a key
-    // is down.
-    Vec3  rot_pivot = {0, 0, 0};
-    // The view axis is latched with the pivot for the same reason: nudging the
+    // Q/E object spin (SELECT mode). Each entity's pivot is latched in its own
+    // ObjectXformTarget on the gesture's first frame — a bounding centre is
+    // rotation-invariant in exact arithmetic but not in floating point, and
+    // recomputing it every frame lets the piece wander while it turns. rot_dirty is
+    // reused rather than rebuilt per frame — the sync wants a full dirty list and
+    // this runs every frame a key is down.
+    // The view axis is latched for the same reason: nudging the
     // camera mid-turn would otherwise bend the axis under the spin, and the undo
     // record could no longer be one angle about one line.
     Vec3  rot_axis  = {0, 0, 1};
@@ -719,6 +718,9 @@ int main(int argc, char* argv[]) {
     // siloed, because UndoEntry holds ABSOLUTE positions and undoing a stroke
     // that predates a transform would teleport its vertices. See object_xform.h.
     ObjectXformStack xforms;
+    // One-shot arming for the "symmetry is off" notice below, so a mesh that has
+    // been turned off the mirror plane says so once rather than once per frame.
+    bool mirror_warn_armed = true;
     // Set when a merge chains its adaptive remesh: that remesh must not take its
     // own snapshot, or it would overwrite the merge's with the post-merge state,
     // and the merge is the step the user wants back.
@@ -1220,6 +1222,26 @@ int main(int argc, char* argv[]) {
         // Phase 1 GPU residency: full re-upload of the active entity's mirrored
         // level after any wholesale CPU mutation (lock, level switch, projection,
         // cascade). Cheap no-op until the stack is locked / compute supported.
+        // EFFECTIVE X symmetry for a dab on the active mesh. Every mirror pass in
+        // brush.cpp reads DabContext::mirror_x, which comes from here, so this one
+        // test disarms all four at once. Two of them (mirror_project,
+        // smooth_mirror_apply) write absolute positions derived from the world x=0
+        // plane; on a mesh a Select-mode spin has turned off that plane they do not
+        // mirror wrong, they TEAR. So symmetry is dropped rather than applied, and
+        // said once. Mesh::mirror_world_symmetric() caches against topo_version, so
+        // this is a stamp compare on all but the first call after a change.
+        auto mirror_effective = [&]() -> bool {
+            if (!input.mirror_x) { mirror_warn_armed = true; return false; }
+            if (mesh->mirror_world_symmetric()) { mirror_warn_armed = true; return true; }
+            if (mirror_warn_armed) {
+                mirror_warn_armed = false;
+                std::snprintf(input.notification, sizeof(input.notification),
+                              "X symmetry off — this mesh is turned off the mirror plane");
+                input.notification_timer = 2.5f;
+            }
+            return false;
+        };
+
         auto refresh_active_gpu_residency = [&]() {
             MeshEntity& ent = scene.active_entity();
             ent.multires_gpu.supported = compute.supported;
@@ -1830,7 +1852,8 @@ int main(int argc, char* argv[]) {
                 || input.drag_mode != InputState::DragMode::SCULPT)) {
             input.sculpting = false;
             DabContext fctx { renderer, camera, compute, *mesh, *multires, input,
-                              win_w, win_h, brush_stroke.vertex_count, input.brush_size };
+                              win_w, win_h, brush_stroke.vertex_count, input.brush_size,
+                              mirror_effective() };
             bool had_update = false;
             if (brush_stroke.finalize(fctx, *mesh, scene.active_undo(), *multires,
                                       scene.active_entity().multires_gpu,
@@ -1955,6 +1978,7 @@ int main(int argc, char* argv[]) {
                             }
                         };
                         move_mesh(e->mesh);
+                        e->mesh.invalidate_mirror_symmetry();   // see the scale block
                         // The base cage follows for EVERY moved entity, not just
                         // the active one. It used to be active-only, which left a
                         // non-active locked mesh with a moved surface over a base
@@ -2032,6 +2056,10 @@ int main(int argc, char* argv[]) {
                             xt.factor *= f;
                             scale_mesh(e->mesh);
                             if (e->multires.locked) scale_mesh(e->multires.base);   // see move
+                            // Scaling a symmetric piece about an off-plane pivot
+                            // takes it off the mirror plane, and no topology changed,
+                            // so nothing else would re-measure. See the stroke gate.
+                            e->mesh.invalidate_mirror_symmetry();
 
                             std::vector<uint32_t> local_dirty(vc);
                             for (uint32_t i = 0; i < vc; i++) local_dirty[i] = i;
@@ -2077,22 +2105,12 @@ int main(int argc, char* argv[]) {
                     scene.materialize_active_cpu();
 
                     if (!rot_active) {
-                        // Latch the pivot: centroid of the selected bounding centres,
-                        // same as scale uses. NOT snapped to x=0 under mirror the way
-                        // scale's is — that snap keeps a uniform scale symmetric, but
-                        // for a rotation it would shove the object sideways.
-                        Vec3 p = {0, 0, 0};
-                        uint32_t np = 0;
-                        for (uint32_t sel_id : sel) {
-                            MeshEntity* e = scene.find_entity(sel_id);
-                            if (!e) continue;
-                            Vec3 c; float r;
-                            e->mesh.compute_bounding_sphere(c, r);
-                            p.x += c.x; p.y += c.y; p.z += c.z;
-                            np++;
-                        }
-                        if (np > 0) { p.x /= np; p.y /= np; p.z /= np; }
-                        rot_pivot     = p;
+                        // The pivot is now PER ENTITY (latched below, in the record),
+                        // not one centroid for the whole selection. A shared pivot
+                        // made everything ORBIT it — select a head and a pair of ears
+                        // and the ears swung around the head instead of turning where
+                        // they sat, which is not what "spin" means.
+                        //
                         // get_view_direction() runs camera -> target, i.e. INTO
                         // the screen. A right-handed positive turn about an axis
                         // pointing away from the viewer reads clockwise, so E is +.
@@ -2110,36 +2128,26 @@ int main(int argc, char* argv[]) {
 
                     const float ang = (float)dir * 1.5707963f * dt;   // 90 deg/sec
                     if (dt > 0.0f && ang != 0.0f) {
-                        const Vec3 k = rot_axis;
-                        const float cs = std::cos(ang), sn = std::sin(ang);
-                        const float omc = 1.0f - cs;
-                        const Vec3 pivot = rot_pivot;
-
-                        // Rodrigues: v' = v cos + (k x v) sin + k (k.v)(1 - cos)
-                        auto rotate_mesh = [&](Mesh& m) {
-                            uint32_t n = m.vertex_count();
-                            for (uint32_t v = 0; v < n; v++) {
-                                float px = m.pos_x[v] - pivot.x;
-                                float py = m.pos_y[v] - pivot.y;
-                                float pz = m.pos_z[v] - pivot.z;
-                                float kd = k.x * px + k.y * py + k.z * pz;
-                                float cx = k.y * pz - k.z * py;
-                                float cy = k.z * px - k.x * pz;
-                                float cz = k.x * py - k.y * px;
-                                m.pos_x[v] = pivot.x + px * cs + cx * sn + k.x * kd * omc;
-                                m.pos_y[v] = pivot.y + py * cs + cy * sn + k.y * kd * omc;
-                                m.pos_z[v] = pivot.z + pz * cs + cz * sn + k.z * kd * omc;
-                            }
-                        };
-
                         for (uint32_t sel_id : sel) {
                             MeshEntity* e = scene.find_entity(sel_id);
                             if (!e) continue;
                             uint32_t vc = e->mesh.vertex_count();
                             ObjectXformTarget& xt = xforms.target(sel_id);
-                            xt.pivot  = rot_pivot;
+                            // Latch this entity's pivot and lobe rule on its first
+                            // frame and reuse them for the rest of the gesture. Both
+                            // for the reason the axis is latched — recomputing a
+                            // bounding centre per frame lets the piece wander as it
+                            // turns, because the centre is only rotation-invariant
+                            // in exact arithmetic — and so the undo replays the same
+                            // split the turn was made with.
+                            if (xt.angle == 0.0f)
+                                spin_latch_target(e->mesh, input.mirror_x, xt);
                             xt.axis   = rot_axis;
                             xt.angle += ang;
+                            auto rotate_mesh = [&](Mesh& m) {
+                                spin_apply_mesh(m, xt.pivot, rot_axis, ang,
+                                                xt.mirror_lobes);
+                            };
                             rotate_mesh(e->mesh);
                             if (e->multires.locked) {
                                 // The base cage has to turn with the surface or the
@@ -2719,7 +2727,8 @@ int main(int argc, char* argv[]) {
                     }
 
                     DabContext ctx { renderer, camera, compute, *mesh, *multires, input, win_w, win_h,
-                                     brush_stroke.vertex_count, eff_brush_size };
+                                     brush_stroke.vertex_count, eff_brush_size,
+                                     mirror_effective() };
 
                     if (is_smooth) {
                         // Smooth gesture while painting blends colours, not geometry.
@@ -2820,7 +2829,8 @@ int main(int argc, char* argv[]) {
                 // ago — then dispatches partial normals for whatever landed.
                 {
                     DabContext ctx { renderer, camera, compute, *mesh, *multires, input, win_w, win_h,
-                                     brush_stroke.vertex_count, eff_brush_size };
+                                     brush_stroke.vertex_count, eff_brush_size,
+                                     mirror_effective() };
                     brush_stroke.post_frame(ctx);
                 }
             }

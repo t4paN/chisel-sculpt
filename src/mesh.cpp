@@ -1,4 +1,5 @@
 #include "mesh.h"
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -245,6 +246,48 @@ void build_mirror_spatial(const Mesh& m, std::vector<uint32_t>& out) {
 void Mesh::build_mirror_x_map() {
     build_mirror_spatial(*this, mirror_x_map);
     mirror_topo_version = topo_version;
+    invalidate_mirror_symmetry();   // a fresh map means a fresh measurement
+}
+
+bool Mesh::mirror_world_symmetric() {
+    if (mirror_sym_topo == topo_version) return mirror_sym_ok;
+    mirror_sym_topo = topo_version;
+    mirror_sym_ok   = true;
+
+    uint32_t vc = vertex_count();
+    if (mirror_x_map.size() != vc || vc == 0) return mirror_sym_ok;
+
+    Vec3 c; float radius;
+    compute_bounding_sphere(c, radius);
+    if (radius <= 0.0f) return mirror_sym_ok;
+
+    // A few hundred samples spread by stride is plenty: a rotation moves nearly
+    // every vertex, so this is not a needle hunt. Striding rather than taking a
+    // prefix matters — vertex order is spatially clustered, and the first 512
+    // verts of a symmetrized pair can all be on one lobe.
+    constexpr uint32_t WANT = 512;
+    uint32_t stride = (vc > WANT) ? (vc / WANT) : 1u;
+
+    double sum = 0.0;
+    uint32_t n = 0;
+    for (uint32_t v = 0; v < vc; v += stride) {
+        uint32_t mv = mirror_x_map[v];
+        if (mv >= vc) continue;            // MIRROR_UNPAIRED: nothing to compare
+        if (mv == v) {                     // seam vert: must sit on the plane
+            sum += std::fabs(pos_x[v]);
+            n++;
+            continue;
+        }
+        float dx = pos_x[v] + pos_x[mv];   // reflected x should cancel
+        float dy = pos_y[v] - pos_y[mv];
+        float dz = pos_z[v] - pos_z[mv];
+        sum += std::sqrt((double)(dx * dx + dy * dy + dz * dz));
+        n++;
+    }
+    if (n == 0) return mirror_sym_ok;      // no pairs at all — nothing to break
+
+    mirror_sym_ok = ((float)(sum / n) <= 0.01f * radius);
+    return mirror_sym_ok;
 }
 
 void Mesh::build_adjacency() {
