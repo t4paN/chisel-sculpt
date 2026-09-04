@@ -199,6 +199,7 @@ std::string serialize(const InputState& in) {
     append_kv(s, "matcap_contrast",     in.matcap_contrast);
     append_kv(s, "flat_shading",        in.flat_shading);
     append_kv(s, "show_fps",            in.show_fps);
+    append_kv(s, "help_seen",           in.help_seen);
     append_kv(s, "camera_perspective",  in.camera_perspective);
     append_kv(s, "camera_fov",          in.camera_fov);
     append_kv(s, "sphere_kind",         (int)in.sphere_kind);
@@ -206,6 +207,9 @@ std::string serialize(const InputState& in) {
     // state that starts ON every run, so it must not survive into the next one. As with
     // brush_size, leaving it out of the "serialize and compare" blob also means pressing
     // X no longer marks settings dirty.
+    // mirror_topological IS persisted, unlike mirror_x above: which mirror you want
+    // is a preference about how the app works, not per-session state.
+    append_kv(s, "mirror_topological", in.mirror_topological);
     append_kv(s, "fast_normals",        in.fast_normals);
     append_kv(s, "paint_visible",       in.paint_visible);
     append_kv(s, "clay_melt",           in.clay_melt);
@@ -279,7 +283,9 @@ void apply_global_key(InputState& in, const std::string& key, const std::string&
     else if (key == "camera_fov")          in.camera_fov          = clampf(std::strtof(val.c_str(), nullptr), 15.0f, 80.0f);
     else if (key == "flat_shading")        in.flat_shading        = parse_bool(val);
     else if (key == "show_fps")            in.show_fps            = parse_bool(val);
+    else if (key == "help_seen")           in.help_seen           = parse_bool(val);
     else if (key == "camera_perspective")  in.camera_perspective  = parse_bool(val);
+    else if (key == "mirror_topological")  in.mirror_topological  = parse_bool(val);
     else if (key == "fast_normals")        in.fast_normals        = parse_bool(val);
     else if (key == "paint_visible")       in.paint_visible       = parse_bool(val);
     else if (key == "paint_color")         parse_rgb(val, in.paint_color);
@@ -419,6 +425,7 @@ void settings_reset(InputState& input) {
     input.camera_fov         = fresh.camera_fov;
     input.sphere_kind        = fresh.sphere_kind;
     input.mirror_x           = fresh.mirror_x;
+    input.mirror_topological = fresh.mirror_topological;
     input.fast_normals       = fresh.fast_normals;
     input.paint_visible      = fresh.paint_visible;
     input.clay_melt          = fresh.clay_melt;

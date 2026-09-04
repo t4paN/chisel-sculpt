@@ -1,8 +1,13 @@
 // smooth_accum.wgsl
 // Port of src/compute_smooth.cpp (smooth_accum_src). Pass 1 of the smooth brush:
-// world-distance gate. Each vertex inside the brush sphere (anchor-side only when
-// mirror_x) stamps its falloff weight into accum.w and appends itself to the compact
-// dirty list. Buffer-only (the triid/bary pick read is CPU-side back-projection in
+// world-distance gate. Each vertex inside the brush sphere stamps its falloff weight
+// into accum.w and appends itself to the compact dirty list.
+//
+// Mirror comes in two flavours, matching every other dab kernel. GEOMETRIC (use_b):
+// a second gate at the reflected anchor, so the far side is smoothed because it lies
+// under the mirrored brush — no pairing, works on any tessellation. TOPOLOGICAL
+// (mirror_clip): gate only the anchor's own side and let smooth_mirror_apply reflect
+// the result onto the twins between iterations. Buffer-only (the triid/bary pick read is CPU-side back-projection in
 // brush.cpp, not this kernel). See CONVENTIONS.md.
 //
 // Bindings mirror the ComputeBinding enum in include/compute.h:
@@ -10,12 +15,14 @@
 //   63 params UBO (BIND_PARAMS)
 
 struct Params {
-    anchor       : vec3<f32>,   // world_radius packs into .w slot
-    world_radius : f32,
-    hardness     : f32,
-    mirror_x     : u32,
-    vertex_count : u32,
-    _pad0        : u32,
+    anchor       : vec3<f32>,   //  0..11  (world_radius packs into .w slot)
+    world_radius : f32,         // 12
+    hardness     : f32,         // 16
+    mirror_clip  : u32,         // 20
+    vertex_count : u32,         // 24
+    _pad0        : u32,         // 28
+    anchor_b     : vec3<f32>,   // 32..43
+    use_b        : u32,         // 44     (struct rounds to 48)
 };
 
 struct Dirty {
@@ -90,6 +97,14 @@ fn brush_falloff(dist : f32, radius : f32) -> f32 {
     return 1.0 - blend;
 }
 
+fn lobe_weight(p : vec3<f32>, anchor : vec3<f32>, mirrored : u32) -> f32 {
+    let d = distance(p, anchor);
+    if (d >= P.world_radius) {
+        return 0.0;
+    }
+    return brush_falloff(d, P.world_radius) * sample_alpha(p - anchor, mirrored);
+}
+
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     let v = gid.x;
@@ -99,17 +114,17 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 
     let p = vec3<f32>(positions[v*3u], positions[v*3u+1u], positions[v*3u+2u]);
 
-    if (P.mirror_x != 0u && P.anchor.x * p.x < 0.0) {
+    if (P.mirror_clip != 0u && P.anchor.x * p.x < 0.0) {
         return;
     }
 
-    let d = distance(p, P.anchor);
-    if (d >= P.world_radius) {
-        return;
+    var w = lobe_weight(p, P.anchor, 0u);
+    if (P.use_b != 0u) {
+        // max, not sum: this weight is how hard the vert gets smoothed, and a vert
+        // in the overlap where the two lobes meet at x=0 must not be smoothed twice
+        // as hard as its neighbours — that is a crease down the seam.
+        w = max(w, lobe_weight(p, P.anchor_b, 1u));
     }
-
-    var w = brush_falloff(d, P.world_radius);
-    w = w * sample_alpha(p - P.anchor, 0u);
     if (w <= 0.0) {
         return;
     }

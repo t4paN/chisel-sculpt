@@ -2,6 +2,82 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-09-04 — The mirror is now the brush, not the pair map
+
+*User-tested by hand the same day.*
+
+### What was wrong
+
+Smoothing one side of an SDF-merged model pimpled the other side. The measured cause, on
+the user's saved `mirrorduckerry.chisel`:
+
+- **The symmetry guard could never fire.** `build_mirror_spatial` refuses to commit a pair
+  further apart than `0.5 * mean_edge`, so the largest residual `mirror_world_symmetric()`
+  can ever observe is bounded by the pairing tolerance that feeds it — 0.91% of the
+  bounding radius on this model, against a 1%-of-radius threshold. The test was
+  arithmetically incapable of failing on any mesh whose mean edge is under ~2% of its
+  radius, i.e. every real sculpt. It only ever caught a rigid Select-mode spin, which
+  leaves a *stale* map that was never tolerance-clipped.
+- **So the pair-map passes stayed armed on a mesh that was not symmetric.** A typical
+  "twin" sat ~⅓ of an edge from the true reflection and 18% of vertices had no twin at
+  all (18218 paired, 32 seam, 4078 unpaired). `smooth_mirror_apply` *teleports* each twin
+  onto `-position[v]` after every Laplacian iteration, so the far side was yanked
+  per-vertex-randomly while 3958 twinless verts stayed put among them. That is the
+  pimpling. `mirror_project` compounded it on every dab.
+- **The asymmetry came from merging with the mirror checkbox off.** `symmetrise_field_x`
+  is gated on `j.mirror && j.use_nets`, so mirror-off symmetrises nothing; marching cubes
+  bakes a fixed grid-space diagonal, giving mirror-exact vertices (an exactly equal
+  11148/11148 split) on asymmetric triangulation, and `relax_to_field` + `flip_valence`
+  then walk the two lobes apart.
+
+### What changed
+
+Mirroring is now **geometric by default**, the way ZBrush and Blender do it: the dab is
+reflected in the world x=0 plane and applied a second time against whatever geometry is
+actually there. It consults no topology, so there is nothing to pair, nothing to lose, and
+nothing that can tear.
+
+Most of the machinery was already in the tree and already doing this work —
+`anchor_b` / `view_b` / `anchor_normal_b` gated by `use_b` in draw, inflate, clay, crease,
+pinch, mask, paint and density; a two-component weight decomposition in move and limb. The
+pair map was a layer bolted on top of a second dab that was already landing. This change
+makes the reflected dab the whole mechanism and demotes the pair map to an opt-in.
+
+- **Smooth got the world path it never had.** It was the one brush with no B lobe: it
+  clipped the gate to the anchor's own side of x=0 and let `smooth_mirror_apply` teleport
+  the twins. It now takes an `anchor_b` and smooths the far side *because that side is
+  under the mirrored brush*, from that side's own 1-ring. Weights combine with `max`, not
+  a sum — a vertex in the overlap at the seam must not be smoothed twice as hard as its
+  neighbours, which would be a crease down the middle. (`smooth_accum.wgsl` +
+  `smooth_accum.comp`, Params UBO 32 → 48 bytes.)
+- **`DabContext::mirror_x` split in two.** `mirror_x` is now just "mirror is on" and
+  drives the geometric lobes; the new `mirror_pairs` gates the four pair-map consumers —
+  `draw_accum_symmetrize`, `mirror_project`, `smooth_mirror_apply`, and the undo-snap twin
+  push in `snap_and_mirror_dirty`. In geometric mode the far side's vertices report
+  themselves in the GPU dirty list, so undo and normals cover them without a twin lookup.
+- **A live mode toggle in the burger menu**, top of the shared section, persisted and
+  defaulting to the mirrored brush: `Mirror: mirrored brush` / `Mirror: exact pairs`. It
+  is a button rather than a tickbox because the mode is genuinely live — `main.cpp`
+  re-derives it per `DabContext`, so the very next dab uses the new one with no reload,
+  no remesh and no map rebuild, which makes flipping it mid-sculpt to compare the point
+  of it. Clicking also fires a viewport notification, since the open menu is usually
+  covering the model. Exact mode restores the pair-map passes on top of the geometric dab
+  and keeps the symmetry guard — which now costs only exactness when it fires, since the
+  stroke still mirrors geometrically. The notification says so: *"Exact mirror off — mesh
+  isn't symmetric. Still mirroring geometrically."* The HUD reads `Mirror: X (exact)`.
+
+### What it buys, and what it costs
+
+Symmetry now works on an imported mesh with no symmetric tessellation, on an
+asymmetrically remeshed or merged one, and on a mesh whose pair map never resolved. The
+cost is that the two sides can drift, slowly, because two mirrored dabs land on different
+vertices — the trade every other sculpting app makes. Drift scales with how irregular the
+tessellation is, and Chisel's isotropic remesher output is about as regular as it gets.
+The pair map remains for anyone who wants the guarantee.
+
+Not fixed here: `mirrorduckerry.chisel` itself is still an asymmetric mesh, and the false
+comment at `src/sdf.cpp:1924` claiming the relax preserves symmetry still needs correcting.
+
 ## 2026-09-02 — v0.2.16 — Spin turns the normals too
 
 *Hand-confirmed by the user on itch the same day: the shading stays put in the world while

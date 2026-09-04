@@ -151,7 +151,10 @@ static void snap_and_mirror_dirty(BrushStroke& bs, DabContext& ctx, float anchor
             bs.snap_list.push_back(v);
         }
     }
-    if (ctx.mirror_x && !ctx.mesh.mirror_x_map.empty()) {
+    // Pair-map twin push: only the topological mirror needs it. The geometric
+    // mirror's second lobe writes its own vertices, so they arrive in the GPU dirty
+    // list on their own and are snapped by the loop above.
+    if (ctx.mirror_pairs && !ctx.mesh.mirror_x_map.empty()) {
         size_t n = bs.dirty_verts.size();
         for (size_t i = 0; i < n; i++) {
             uint32_t v = bs.dirty_verts[i];
@@ -197,7 +200,7 @@ void BrushStroke::kick_dab_readback(DabContext& ctx, uint8_t kind) {
     // with this dab's touched verts in the GPU dirty list. Re-impose exact
     // X-mirror symmetry over that set before anything reads positions — one
     // projection instead of per-brush symmetry in every producer kernel.
-    if (kind == DAB_GEO && ctx.mirror_x)
+    if (kind == DAB_GEO && ctx.mirror_pairs)
         ctx.compute.dispatch_mirror_project_header(ctx.renderer.vbo_pos,
                                                    ctx.mesh.vertex_count(),
                                                    ctx.compute.smooth_dirty_ssbo);
@@ -699,7 +702,14 @@ void BrushStroke::apply_smooth(DabContext& ctx, float dab_x, float dab_y,
     sp.iterations = 3;
     sp.vertex_count = ctx.mesh.vertex_count();
     sp.tri_count = ctx.mesh.tri_count();
-    sp.mirror_x = ctx.mirror_x;
+    // Geometric mirror: a second smoothing lobe at the reflected anchor. Unlike the
+    // displacement brushes there is no direction to reflect — a Laplacian pulls each
+    // vert toward its own 1-ring — so the reflected anchor is the whole of it.
+    sp.anchor_b_x = -anchor_pos.x;
+    sp.anchor_b_y =  anchor_pos.y;
+    sp.anchor_b_z =  anchor_pos.z;
+    sp.use_b = (ctx.mirror_x && !ctx.mirror_pairs) ? 1 : 0;
+    sp.mirror_pairs = ctx.mirror_pairs;
 
     BrushRegion rgn = compute_brush_region(dab_x, dab_y, ctx.eff_brush_size, screen_slack, ctx.win_w, ctx.win_h);
     sp.region_x = rgn.x;
@@ -711,9 +721,10 @@ void BrushStroke::apply_smooth(DabContext& ctx, float dab_x, float dab_y,
     set_alpha_dab(ctx, false);
     ctx.compute.dispatch_smooth(sp, ctx.renderer.vbo_pos, ctx.renderer.ebo);
 
-    // Mirror reflection is now re-imposed after every smoothing iteration inside
-    // dispatch_smooth (so the seam band relaxes in lockstep), making a separate
-    // end-of-dab dispatch_smooth_mirror_apply redundant.
+    // No end-of-dab mirror pass either way. In topological mode dispatch_smooth
+    // re-imposes the reflection after every iteration (so the seam band relaxes in
+    // lockstep); in geometric mode the far side was smoothed in the same dispatch
+    // and there is nothing to reflect.
 
     // Dirty list lands async (drain_dab_readbacks) → snap + partial normals there.
     kick_dab_readback(ctx, DAB_GEO);
@@ -838,7 +849,7 @@ void BrushStroke::apply_crease(DabContext& ctx, float dab_x, float dab_y,
 
     gpu::barrier(ctx.compute.gpu_dev);
 
-    bool use_sym = ctx.mirror_x
+    bool use_sym = ctx.mirror_pairs
                    && ctx.compute.has_draw_symmetrize()
                    && ctx.compute.mirror_map_vertex_count == ctx.vertex_count;
     if (use_sym) {
@@ -900,7 +911,7 @@ void BrushStroke::apply_pinch(DabContext& ctx, float dab_x, float dab_y,
 
     gpu::barrier(ctx.compute.gpu_dev);
 
-    bool use_sym = ctx.mirror_x
+    bool use_sym = ctx.mirror_pairs
                    && ctx.compute.has_draw_symmetrize()
                    && ctx.compute.mirror_map_vertex_count == ctx.vertex_count;
     if (use_sym) {
@@ -1003,7 +1014,7 @@ void BrushStroke::apply_draw(DabContext& ctx, float dab_x, float dab_y,
     // gets out[v] = accum[v] + (-mx, my, mz, mw), so apply produces strictly
     // X-mirror displacements regardless of small tessellation drift between
     // twins. Orphan/seam verts copy through unchanged.
-    bool use_sym = ctx.mirror_x
+    bool use_sym = ctx.mirror_pairs
                    && ctx.compute.has_draw_symmetrize()
                    && ctx.compute.mirror_map_vertex_count == ctx.vertex_count;
     if (use_sym) {
@@ -1101,7 +1112,7 @@ void BrushStroke::apply_move_gpu(DabContext& ctx, float cursor_dx, float cursor_
 
     // Symmetry sink for move (doesn't route through kick_dab_readback): the
     // captured affected list shares the {count, ids[]} layout.
-    if (ctx.mirror_x)
+    if (ctx.mirror_pairs)
         ctx.compute.dispatch_mirror_project_header(ctx.renderer.vbo_pos, ctx.vertex_count,
                                                    ctx.compute.move_affected_ssbo);
 
@@ -1207,7 +1218,7 @@ void BrushStroke::apply_limb_gpu(DabContext& ctx, float cursor_dx, float cursor_
                                     ctx.renderer.vbo_pos, ctx.renderer.vbo_norm, ctx.renderer.ebo);
 
     // Symmetry sink for limb (drag + relax both move verts; same affected list).
-    if (ctx.mirror_x)
+    if (ctx.mirror_pairs)
         ctx.compute.dispatch_mirror_project_header(ctx.renderer.vbo_pos, ctx.vertex_count,
                                                    ctx.compute.move_affected_ssbo);
 
@@ -1669,7 +1680,7 @@ bool BrushStroke::finalize(DabContext& ctx, Mesh& mesh, UndoStack& stack,
             // projection, so project once more before normals / undo capture /
             // multires diff read them. snap_list ids are already resident in
             // dirty_verts_ssbo (uploaded by stroke_smooth above).
-            if (ctx.mirror_x)
+            if (ctx.mirror_pairs)
                 compute->dispatch_mirror_project_ids(renderer.vbo_pos,
                                                      mesh.vertex_count(),
                                                      (uint32_t)snap_list.size());

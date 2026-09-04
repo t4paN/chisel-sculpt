@@ -131,6 +131,12 @@ struct InputState {
     // swallow that click instead of laying down a stray dab or starting an orbit.
     bool             help_popup_open;
 
+    // False until the shortcut card has been shown once, then persisted. A first-time
+    // user — especially on the itch build, where there is no install step to read a
+    // readme during — has no way to guess that 1-4 are the modes, and no reason to
+    // press a 28 px (i) disc. So the card opens itself exactly once, ever.
+    bool             help_seen;
+
     // Brush-alpha (stamp) selection. Index into the AlphaLibrary pool; 0 = Round
     // (no stamp). One shared selection, but it only affects Draw, Mask and Paint —
     // every other brush forces the stamp off per dab (set_alpha_dab), except Clay,
@@ -274,6 +280,18 @@ struct InputState {
     // regardless of how the last one ended (settings.cpp neither writes nor reads it).
     // Reset still restores it, since that reads this default.
     bool mirror_x;
+
+    // HOW the mirror works, not whether. Off (default) = GEOMETRIC: the dab is
+    // reflected in the world x=0 plane and applied a second time against whatever
+    // geometry is actually there, so symmetry needs nothing from the topology —
+    // it works on an imported mesh, an asymmetrically remeshed one, or one whose
+    // pair map never resolved. On = TOPOLOGICAL: the geometric dab still lands,
+    // and the pair map (mirror_x_map) additionally forces the two sides to stay
+    // byte-identical. Exact, but only meaningful on a mesh whose tessellation IS
+    // mirror-symmetric, and it TEARS one that is not — hence the guard in
+    // Mesh::mirror_world_symmetric(), which only gates this mode.
+    // Persisted: unlike mirror_x, this is a preference, not session state.
+    bool mirror_topological;
 
     // Autosmooth: light Laplacian pass on draw-brush strokes at pen-up.
     // Defaults ON, toggled with B. Persisted since 2026-08-06, global since

@@ -129,6 +129,17 @@ time. The HUD shows the active mirror axis. Meshes inserted while mirroring is o
 be committed as a symmetric pair (see Insert mode). Voxel merge can produce a
 mirror-symmetric result that stays cleanly editable under mirror afterwards.
 
+By default the *brush* is mirrored: the dab is reflected in the centre plane and applied
+again to whatever is there. It asks nothing of the mesh, so it works on imported models,
+on remeshed and merged ones, and on anything whose two halves are built differently.
+
+The menu's **Mirror** button switches that for **exact pairs**, which additionally pairs
+vertices across the plane and forces them to match, so the two sides can never drift
+apart. It needs a mesh that really is built symmetrically; on one that isn't, Chisel says
+so and falls back to the mirrored brush for that stroke. The HUD reads `Mirror: X (exact)`
+when it is on. The button takes effect immediately — the next dab already uses the new
+mode — so you can flip between the two mid-sculpt to compare.
+
 ## Subdivision levels (multires)
 
 Chisel keeps a displacement stack: a base cage plus per-level detail layers.

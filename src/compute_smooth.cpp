@@ -19,10 +19,11 @@ namespace {
 // 32-byte std140 block, byte-identical to smooth_accum.{comp,wgsl}'s Params.
 struct SmoothAccumParamsGPU {
     float    anchor[3];    float world_radius;   // 16
-    float    hardness;     uint32_t mirror_x;
+    float    hardness;     uint32_t mirror_clip;
     uint32_t vertex_count; uint32_t _pad0;       // 16
+    float    anchor_b[3];  uint32_t use_b;       // 16
 };
-static_assert(sizeof(SmoothAccumParamsGPU) == 32, "smooth accum Params UBO must be 32 bytes");
+static_assert(sizeof(SmoothAccumParamsGPU) == 48, "smooth accum Params UBO must be 48 bytes");
 
 // 16-byte std140 block, byte-identical to smooth_apply.{comp,wgsl}'s Params.
 struct SmoothApplyParamsGPU {
@@ -275,8 +276,10 @@ void ComputeState::dispatch_smooth(const SmoothAccumParams& p,
     ua.anchor[0] = p.anchor_x; ua.anchor[1] = p.anchor_y; ua.anchor[2] = p.anchor_z;
     ua.world_radius = p.world_radius;
     ua.hardness = p.hardness;
-    ua.mirror_x = p.mirror_x ? 1u : 0u;
+    ua.mirror_clip = p.mirror_pairs ? 1u : 0u;
     ua.vertex_count = vc;
+    ua.anchor_b[0] = p.anchor_b_x; ua.anchor_b[1] = p.anchor_b_y; ua.anchor_b[2] = p.anchor_b_z;
+    ua.use_b = p.use_b ? 1u : 0u;
     gpu::write_buffer(gpu_dev, smooth_accum_ubo, 0, &ua, sizeof(ua));
 
     {
@@ -312,12 +315,15 @@ void ComputeState::dispatch_smooth(const SmoothAccumParams& p,
     };
     gpu::BindGroup apply_grp = gpu::create_bind_group(gpu_dev, smooth_apply_pipeline, apply_bg, 7);
 
-    // Re-impose the mirror reflection after *each* Laplacian iteration (not just at
-    // the end): the accum pass only weights the anchor-side lobe, so without this a
-    // vert whose 1-ring crosses x=0 averages against a stale wall every pass and the
-    // seam stands proud as a symmetric crease. Reflecting each iteration keeps the
-    // cross-seam neighbours the fresh mirror of the just-smoothed lobe.
-    bool do_mirror = p.mirror_x && smooth_mirror_apply_pipeline.handle
+    // TOPOLOGICAL path only. It clips the accum gate to the anchor's own side, so
+    // the reflection has to be re-imposed after *each* Laplacian iteration, not just
+    // at the end: a vert whose 1-ring crosses x=0 would otherwise average against a
+    // stale wall every pass and the seam would stand proud as a symmetric crease.
+    //
+    // The geometric path needs none of this — its second lobe smooths the far side
+    // in the same dispatch, from that side's own neighbours, so the cross-seam
+    // 1-rings are live on both sides and nothing has to be teleported afterwards.
+    bool do_mirror = p.mirror_pairs && smooth_mirror_apply_pipeline.handle
                      && mirror_map_vertex_count == vc;
     const uint32_t groups = (vc + 255u) / 256u;
     for (int iter = 0; iter < p.iterations; iter++) {

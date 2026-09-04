@@ -31,14 +31,23 @@ struct DabContext {
     int               win_w, win_h;
     uint32_t          vertex_count;  // active entity vertex count (working buffer at offset 0)
     float             eff_brush_size; // input.brush_size * pen-pressure size multiplier (px)
-    // EFFECTIVE X symmetry for this dab — input.mirror_x AND the mesh still being
-    // world-X symmetric. Every mirror consumer in brush.cpp reads THIS, never
-    // input.mirror_x, so one test at the top disarms all four mirror passes at
-    // once. Two of them write absolute positions computed from the world plane
-    // (mirror_project, smooth_mirror_apply), so on a mesh a Select-mode spin has
-    // turned off that plane they would tear it rather than just mirror it wrong.
-    // See Mesh::mirror_world_symmetric().
+    // GEOMETRIC mirror for this dab: apply the dab a second time at the anchor
+    // reflected in world x=0. Every brush kernel carries that second lobe already
+    // (anchor_b / view_b / anchor_normal_b, gated by use_b; move and limb do it with
+    // a two-component weight instead). It reads no topology at all, so it needs no
+    // guard and no pair map — a reflected point is a reflected point on any mesh.
+    // This is just input.mirror_x.
     bool              mirror_x;
+
+    // TOPOLOGICAL mirror for this dab: the pair-map passes that force the two sides
+    // to stay byte-identical on top of the geometric dab — draw_accum_symmetrize,
+    // mirror_project, smooth_mirror_apply, and the undo-snap twin push. True only in
+    // topological mode AND when Mesh::mirror_world_symmetric() still holds, because
+    // two of those passes write absolute positions derived from the world plane and
+    // would TEAR a mesh whose tessellation is not actually symmetric.
+    //
+    // mirror_pairs implies mirror_x; never the reverse.
+    bool              mirror_pairs;
 };
 
 BrushRegion compute_brush_region(float dab_x, float dab_y,

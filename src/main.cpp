@@ -1222,21 +1222,33 @@ int main(int argc, char* argv[]) {
         // Phase 1 GPU residency: full re-upload of the active entity's mirrored
         // level after any wholesale CPU mutation (lock, level switch, projection,
         // cascade). Cheap no-op until the stack is locked / compute supported.
-        // EFFECTIVE X symmetry for a dab on the active mesh. Every mirror pass in
-        // brush.cpp reads DabContext::mirror_x, which comes from here, so this one
-        // test disarms all four at once. Two of them (mirror_project,
-        // smooth_mirror_apply) write absolute positions derived from the world x=0
-        // plane; on a mesh a Select-mode spin has turned off that plane they do not
-        // mirror wrong, they TEAR. So symmetry is dropped rather than applied, and
-        // said once. Mesh::mirror_world_symmetric() caches against topo_version, so
-        // this is a stamp compare on all but the first call after a change.
+        // GEOMETRIC symmetry for a dab: the reflected-anchor second lobe every brush
+        // kernel already carries. It consults no topology, so there is nothing to
+        // check and nothing that can tear — the toggle is the whole answer.
         auto mirror_effective = [&]() -> bool {
-            if (!input.mirror_x) { mirror_warn_armed = true; return false; }
+            if (input.mirror_x) mirror_warn_armed = true;
+            return input.mirror_x;
+        };
+
+        // TOPOLOGICAL symmetry for a dab: the pair-map passes layered on top
+        // (draw_accum_symmetrize, mirror_project, smooth_mirror_apply, the undo-snap
+        // twin push). Opt-in, and additionally gated on the mesh still being world-X
+        // symmetric: two of those passes write absolute positions derived from the
+        // x=0 plane, so on a mesh a Select-mode spin — or an asymmetric SDF merge —
+        // has turned off that plane they do not mirror wrong, they TEAR.
+        //
+        // Failing the guard now costs only exactness: mirror_effective() above keeps
+        // mirroring the stroke geometrically, so the message says what was lost, not
+        // that symmetry stopped. Mesh::mirror_world_symmetric() caches against
+        // topo_version, so this is a stamp compare on all but the first call after a
+        // change.
+        auto mirror_pairs_effective = [&]() -> bool {
+            if (!input.mirror_x || !input.mirror_topological) return false;
             if (mesh->mirror_world_symmetric()) { mirror_warn_armed = true; return true; }
             if (mirror_warn_armed) {
                 mirror_warn_armed = false;
                 std::snprintf(input.notification, sizeof(input.notification),
-                              "X symmetry off — this mesh is turned off the mirror plane");
+                              "Exact mirror off — mesh isn't symmetric. Still mirroring geometrically.");
                 input.notification_timer = 2.5f;
             }
             return false;
@@ -1853,7 +1865,7 @@ int main(int argc, char* argv[]) {
             input.sculpting = false;
             DabContext fctx { renderer, camera, compute, *mesh, *multires, input,
                               win_w, win_h, brush_stroke.vertex_count, input.brush_size,
-                              mirror_effective() };
+                              mirror_effective(), mirror_pairs_effective() };
             bool had_update = false;
             if (brush_stroke.finalize(fctx, *mesh, scene.active_undo(), *multires,
                                       scene.active_entity().multires_gpu,
@@ -2728,7 +2740,7 @@ int main(int argc, char* argv[]) {
 
                     DabContext ctx { renderer, camera, compute, *mesh, *multires, input, win_w, win_h,
                                      brush_stroke.vertex_count, eff_brush_size,
-                                     mirror_effective() };
+                                     mirror_effective(), mirror_pairs_effective() };
 
                     if (is_smooth) {
                         // Smooth gesture while painting blends colours, not geometry.
@@ -2770,7 +2782,7 @@ int main(int argc, char* argv[]) {
                                                     eff_brush_size, eff_strength,
                                                     eff_hardness,
                                                     input.is_subtract_active(),
-                                                    ctx.mirror_x,   // gated, like every other mirror consumer
+                                                    ctx.mirror_pairs,  // no B lobe here — this fallback walks mirror_x_map
                                                     win_w, win_h);
 
                             std::vector<uint32_t> mask_dirty;
@@ -2830,7 +2842,7 @@ int main(int argc, char* argv[]) {
                 {
                     DabContext ctx { renderer, camera, compute, *mesh, *multires, input, win_w, win_h,
                                      brush_stroke.vertex_count, eff_brush_size,
-                                     mirror_effective() };
+                                     mirror_effective(), mirror_pairs_effective() };
                     brush_stroke.post_frame(ctx);
                 }
             }

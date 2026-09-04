@@ -255,7 +255,7 @@ void draw_toolbar(TextOverlay& text, const InputState& input,
 
     const char* mirror_label = "Mirror: Off";
     if (input.mirror_x)
-        mirror_label = "Mirror: X";
+        mirror_label = input.mirror_topological ? "Mirror: X (exact)" : "Mirror: X";
     text.draw_text(mirror_label,
                   tx, ty, scale, win_w, win_h,
                   CGA(light_cyan), 1.0f);
@@ -1071,6 +1071,13 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
         // grows leftward and both stay glued to the corner at any window width.
         if (info_button(burger, ImGui::IsPopupOpen("##helppopup")))
             ImGui::OpenPopup("##helppopup");
+        // First launch ever: open the card unprompted, once. Opened from here rather
+        // than at startup because the popup belongs to this window's stack — the same
+        // reason draw_help_popup is called from inside this Begin/End pair.
+        if (!input.help_seen) {
+            input.help_seen = true;   // persists via the settings blob
+            ImGui::OpenPopup("##helppopup");
+        }
         ImGui::SameLine();
         if (hamburger_button(burger, ImGui::IsPopupOpen("##burgermenu")))
             ImGui::OpenPopup("##burgermenu");
@@ -1142,6 +1149,55 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
                                   "stops a stroke overshooting. Move, Smooth, Mask and\n"
                                   "Paint aim at a target instead and ignore it.\n\n"
                                   "Defaults: 60%% mouse, 100%% tablet.");
+
+            ImGui::Separator();
+
+            // Which mirror. A button rather than a checkbox because this is a two-state
+            // mode, not an option you switch on — and it is genuinely live: main.cpp
+            // re-derives it per DabContext, so the very next dab uses the new mode with
+            // no reload, no remesh and no map rebuild. That makes it worth flipping
+            // mid-sculpt to compare, which is the whole reason it is a button up here
+            // instead of a tickbox at the bottom.
+            //
+            // Geometric is the default, and is what ZBrush and Blender do by default
+            // too; both also keep a topology-mirror option alongside it, which is what
+            // exact mode is.
+            {
+                const bool topo = input.mirror_topological;
+                const ImVec4 on_col  (0.16f, 0.38f, 0.52f, 1.0f);
+                const ImVec4 off_col (0.20f, 0.20f, 0.22f, 1.0f);
+                ImGui::PushStyleColor(ImGuiCol_Button,        topo ? on_col : off_col);
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, topo ? ImVec4(0.22f, 0.48f, 0.64f, 1.0f)
+                                                                   : ImVec4(0.28f, 0.28f, 0.31f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive,  topo ? ImVec4(0.28f, 0.56f, 0.74f, 1.0f)
+                                                                   : ImVec4(0.34f, 0.34f, 0.38f, 1.0f));
+                if (ImGui::Button(topo ? "Mirror: exact pairs" : "Mirror: mirrored brush",
+                                  ImVec2(150.0f, 0.0f))) {
+                    input.mirror_topological = !topo;
+                    // Say it in the viewport, not just on the button: the point of the
+                    // toggle is comparing the two mid-sculpt, and the menu is usually
+                    // covering the model when you click it.
+                    std::snprintf(input.notification, sizeof(input.notification), "%s",
+                                  input.mirror_topological ? "Mirror: exact pairs"
+                                                           : "Mirror: mirrored brush");
+                    input.notification_timer = 2.0f;
+                }
+                ImGui::PopStyleColor(3);
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("How X symmetry works. The X key still turns it on and off;\n"
+                                  "this is which kind you get, and it changes on the fly —\n"
+                                  "the next dab already uses it.\n\n"
+                                  "Mirrored brush: the dab is reflected in the centre plane\n"
+                                  "and applied again to whatever is there. It asks nothing of\n"
+                                  "the mesh, so it works on imported models, on remeshed and\n"
+                                  "merged ones, and on anything whose two halves are built\n"
+                                  "differently. The default.\n\n"
+                                  "Exact pairs: vertices are additionally paired across the\n"
+                                  "plane and forced to match, so the two sides can never drift\n"
+                                  "apart. Only possible on a mesh that really is built\n"
+                                  "symmetrically; on one that isn't, Chisel says so and falls\n"
+                                  "back to the mirrored brush for that stroke.");
 
             ImGui::Separator();
 

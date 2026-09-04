@@ -104,7 +104,15 @@ struct SmoothAccumParams {
     uint32_t vertex_count;
     float strength;
     int iterations;
-    bool mirror_x;
+    // Geometric mirror: smooth a second lobe at the reflected anchor. Independent
+    // of any pairing — the far side is smoothed because it is under the reflected
+    // brush, not because a twin was found for it.
+    float anchor_b_x, anchor_b_y, anchor_b_z;
+    int   use_b;
+    // Topological mirror: clip the gate to the anchor's own side of x=0 and let
+    // smooth_mirror_apply reflect the result onto the twins after every iteration.
+    // Requires a genuinely symmetric tessellation; see DabContext::mirror_pairs.
+    bool  mirror_pairs;
 };
 
 struct CreaseAccumParams {

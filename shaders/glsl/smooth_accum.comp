@@ -1,9 +1,15 @@
 // smooth_accum.comp — GLSL 430 sibling of shaders/wgsl/smooth_accum.wgsl.
 // Pass 1 of the smooth brush: world-distance gate. Each vertex inside the brush
-// sphere (anchor-side only when mirror_x) stamps its falloff weight into accum.w and
-// appends itself to the compact dirty list. Buffer-only (no pick textures — the
-// triid/bary read is CPU-side back-projection in brush.cpp, not this kernel).
-// 32-byte std140 Params UBO at binding 63.
+// sphere stamps its falloff weight into accum.w and appends itself to the compact
+// dirty list. Buffer-only (no pick textures — the triid/bary read is CPU-side
+// back-projection in brush.cpp, not this kernel).
+//
+// Mirror comes in two flavours, matching every other dab kernel. GEOMETRIC (use_b):
+// a second gate at the reflected anchor, so the far side is smoothed because it lies
+// under the mirrored brush — no pairing, works on any tessellation. TOPOLOGICAL
+// (mirror_clip): gate only the anchor's own side and let smooth_mirror_apply reflect
+// the result onto the twins between iterations.
+// 48-byte std140 Params UBO at binding 63.
 #version 430
 layout(local_size_x = 256) in;
 
@@ -15,9 +21,11 @@ layout(std140, binding = 63) uniform Params {
     vec3  anchor;          // 0   (world_radius packs into .w slot)
     float world_radius;    // 12
     float hardness;        // 16
-    uint  mirror_x;        // 20
+    uint  mirror_clip;     // 20
     uint  vertex_count;    // 24
-    uint  _pad0;           // 28  (struct rounds to 32)
+    uint  _pad0;           // 28
+    vec3  anchor_b;        // 32
+    uint  use_b;           // 44  (struct rounds to 48)
 } P;
 
 // --- shared brush-alpha stamp (keep byte-identical across every dab kernel) ---
@@ -58,19 +66,27 @@ float brush_falloff(float dist, float radius) {
     return 1.0 - blend;
 }
 
+float lobe_weight(vec3 p, vec3 anchor, uint mirrored) {
+    float d = distance(p, anchor);
+    if (d >= P.world_radius) return 0.0;
+    return brush_falloff(d, P.world_radius) * sample_alpha(p - anchor, mirrored);
+}
+
 void main() {
     uint v = gl_GlobalInvocationID.x;
     if (v >= P.vertex_count) return;
 
     vec3 p = vec3(positions[v*3u], positions[v*3u+1u], positions[v*3u+2u]);
 
-    if (P.mirror_x != 0u && P.anchor.x * p.x < 0.0) return;
+    if (P.mirror_clip != 0u && P.anchor.x * p.x < 0.0) return;
 
-    float d = distance(p, P.anchor);
-    if (d >= P.world_radius) return;
-
-    float w = brush_falloff(d, P.world_radius);
-    w *= sample_alpha(p - P.anchor, 0u);
+    float w = lobe_weight(p, P.anchor, 0u);
+    if (P.use_b != 0u) {
+        // max, not sum: this weight is how hard the vert gets smoothed, and a vert
+        // in the overlap where the two lobes meet at x=0 must not be smoothed twice
+        // as hard as its neighbours — that is a crease down the seam.
+        w = max(w, lobe_weight(p, P.anchor_b, 1u));
+    }
     if (w <= 0.0) return;
 
     accum[v * 4u + 3u] = floatBitsToUint(w);
