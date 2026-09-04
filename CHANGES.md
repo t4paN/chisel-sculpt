@@ -2,7 +2,7 @@
 
 Short, chronological log of notable changes. Newest on top.
 
-## 2026-09-04 — Alt + right-drag zooms too
+## 2026-09-04 — v0.2.17 — Alt + right-drag zooms too
 
 *User-tested by hand, all four cases.*
 
@@ -23,7 +23,7 @@ of re-deriving it and getting it wrong.
 `MANUAL.md`'s camera table now lists both drag-zoom bindings; it had never listed even the
 Ctrl one.
 
-## 2026-09-04 — The mirror is now the brush, not the pair map
+## 2026-09-04 — v0.2.17 — The mirror is now the brush, not the pair map
 
 *User-tested by hand the same day.*
 
