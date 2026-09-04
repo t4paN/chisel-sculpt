@@ -347,3 +347,27 @@ you want to choose folders on itch.
 - After a *full* undo of many overlapping carve strokes, normals can look slightly
   off where they overlapped — cosmetic; one smooth pass fixes it.
 - Browser pen-pressure fidelity depends on the browser's Pointer Events support.
+
+---
+
+## Acknowledgments
+
+Chisel was vibecoded with Anthropic's Claude. Every line of it was written in
+conversation with a model, and different models built different parts of the app —
+so here is who did what.
+
+| Model | Commits | What it built |
+|---|---:|---|
+| **Claude Opus 4.8** | 122 | The SDF voxel-merge (mirror-symmetric, Fast Winding Number, Surface Nets), and the entire WebGPU port: the gpu:: seam, every WGSL kernel, the render path, and the first browser builds. |
+| **Claude Opus 4.6** | 91 | The core architecture: the multimesh scene (selection, insert mode, mirror logic), cross-entity twin/mirror brushes, the ImGui interface, and the CI / AppImage release pipeline. |
+| **Claude Fable 5** | 54 | The itch.io release sprints (browser save/open, export fix, input bugs), the cross-platform .chisel format (v4 + legacy migration), and the WebGPU camera-clip fix. |
+| **Claude Opus 5** | 43 | The oblique-stroke overhaul that finally killed the choppy, wavy grazing-angle stroke; the settings layer (persistence, mouse/tablet profiles, web pen pressure, max-effect and spacing); the perspective viewport; the matcap dial and burger menu; the .chisel v7 savefile diet; the UV-sphere base cage and Max-weighted normals; the imported-mesh mirror fixes; undo for remeshing and for object move/scale/spin. |
+| **Claude Opus 4.7** | 35 | The remesher's heavy polish (GPU selection, tangential smoothing, seam discipline, convergence), GPU brush mirror-seam fixes, per-entity undo, and OBJ import. |
+| **Claude Haiku 4.5** | 30 | "lil' haiku" — the Big GPU Refactor that moved every brush onto compute shaders, and brought the iso remesher home at a point when bigger models were hamstrung by compute constraints. |
+| **Claude Sonnet 4.6** | 28 | The multires displacement stack, the icosphere / Loop-subdivision base, and the per-entity refactor (MeshEntity, per-object undo, per-entity compute dispatch). |
+| **Claude Sonnet 5** | 4 | Emscripten SSBO-limit blocker, SELECT-mode picking fixes, a WGSL reserved-word crash. |
+
+Commit counts span the project's whole history, including the retired pre-WebGPU
+repository; they are a rough measure of volume, not of difficulty.
+
+Early testing by **Ariadne**.

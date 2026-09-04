@@ -85,19 +85,7 @@ chisel [file] [flags]
 
 ## Acknowledgments
 
-Chisel was vibecoded with Anthropic's Claude — the models did the lifting:
-
-| Model | Commits | What it built |
-|---|---:|---|
-| **Claude Opus 4.8** | 114 | The SDF voxel-merge (mirror-symmetric, Fast Winding Number, Surface Nets), and the entire WebGPU port: the gpu:: seam, every WGSL kernel, the render path, and the first browser builds. |
-| **Claude Opus 4.6** | 91 | The core architecture: the multimesh scene (selection, insert mode, mirror logic), cross-entity twin/mirror brushes, the ImGui interface, and the CI / AppImage release pipeline. |
-| **Claude Opus 4.7** | 35 | The remesher's heavy polish (GPU selection, tangential smoothing, seam discipline, convergence), GPU brush mirror-seam fixes, per-entity undo, and OBJ import. |
-| **Claude Haiku 4.5** | 30 | "lil' haiku" — the Big GPU Refactor that moved every brush onto compute shaders, and brought the iso remesher home at a point when bigger models were hamstrung by compute constraints. |
-| **Claude Sonnet 4.6** | 28 | The multires displacement stack, the icosphere / Loop-subdivision base, and the per-entity refactor (MeshEntity, per-object undo, per-entity compute dispatch). |
-| **Claude Fable 5** | 10 | The itch.io release sprint (browser save/open, export fix, input bugs), the cross-platform .chisel format (v4 + legacy migration), and the WebGPU camera-clip fix. |
-| **Claude Sonnet 5** | 3 | Emscripten SSBO-limit blocker, SELECT-mode picking fixes, a WGSL reserved-word crash. |
-
-Early testing by **Ariadne**.
+Chisel was vibecoded with Anthropic's Claude.
 
 ## License
 
