@@ -1892,7 +1892,7 @@ int main(int argc, char* argv[]) {
                 camera.pan(dx, dy, win_w, win_h);
                 if (dx != 0.0f || dy != 0.0f) screen_buffers_dirty = true;
             }
-            if (input.ctrl_held && input.mouse2_down) {
+            if (input.zoom_modifier_held() && input.mouse2_down) {
                 camera.zoom(-dy * 0.05f);
                 if (dy != 0.0f) screen_buffers_dirty = true;
             }

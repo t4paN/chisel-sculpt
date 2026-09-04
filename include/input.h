@@ -397,6 +397,11 @@ struct InputState {
     BrushType live_brush_slot() const;     // which per_brush slot the mirror reflects
     bool is_smooth_active() const;
     bool is_subtract_active() const;
+    // Right-drag is zoom while either of these is held. A predicate rather than the
+    // test written out three times, because every RMB consumer has to agree with it:
+    // the zoom itself, SELECT mode's scale latch, and the paint swatch popup all have
+    // to stand down, and one of them forgetting is a right-drag that zooms AND scales.
+    bool zoom_modifier_held() const { return ctrl_held || alt_held; }
     const char* brush_name() const;
 };
 

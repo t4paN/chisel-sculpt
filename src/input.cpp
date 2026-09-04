@@ -457,10 +457,10 @@ static void mouse_button_callback(GLFWwindow* w, int button, int action, int mod
     if (button == GLFW_MOUSE_BUTTON_RIGHT) {
         bool was_down = g_input->mouse2_down;
         g_input->mouse2_down = (action == GLFW_PRESS);
-        // SELECT mode: plain RMB drag scales the selected mesh (Ctrl+RMB stays zoom).
+        // SELECT mode: plain RMB drag scales the selected mesh (a modified RMB is zoom).
         if (action == GLFW_PRESS && !was_down
             && g_input->interaction_mode == InputState::InteractionMode::SELECT
-            && !g_input->ctrl_held
+            && !g_input->zoom_modifier_held()
             && g_input->slider_mode == InputState::SliderMode::NONE) {
             g_input->prev_mouse_x = g_input->mouse_x;
             g_input->prev_mouse_y = g_input->mouse_y;

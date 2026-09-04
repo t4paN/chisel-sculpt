@@ -255,6 +255,7 @@ as you like and never clip inside the model.
 | LMB off mesh / Alt + LMB | Orbit |
 | MMB | Pan |
 | Scroll | Zoom |
+| Ctrl + RMB drag / Alt + RMB drag | Zoom |
 | F | Focus on the active mesh |
 | F1 / F2 / F3 | Snap to front / side / top |
 | Space | Toggle fullscreen |

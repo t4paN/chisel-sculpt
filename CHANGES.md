@@ -2,6 +2,27 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-09-04 — Alt + right-drag zooms too
+
+*User-tested by hand, all four cases.*
+
+Zoom-by-right-drag was hardcoded to Ctrl, so Alt+RMB did nothing and Ctrl was the only
+option — awkward with a pen in hand. There was no bug behind it and nothing was eating
+the event: xfwm4's `easy_click` (which defaults to `<Alt>` and would grab Alt+drag for
+window moves) reads `None` here, and nothing in Chisel consumed Alt+RMB. The binding was
+simply never written.
+
+Alt now zooms as well as Ctrl. The change is not the one-word edit it looks like, because
+**three** places decide what a right-drag means and all three have to agree: the zoom
+itself, SELECT mode's scale latch, and the paint colour-swatch popup. The latter two only
+stood down for Ctrl, so widening the zoom alone would have given Alt+RMB a right-drag that
+zoomed *and* scaled, or zoomed *and* popped the picker. They now share one predicate,
+`InputState::zoom_modifier_held()`, so a fourth RMB consumer can ask the question instead
+of re-deriving it and getting it wrong.
+
+`MANUAL.md`'s camera table now lists both drag-zoom bindings; it had never listed even the
+Ctrl one.
+
 ## 2026-09-04 — The mirror is now the brush, not the pair map
 
 *User-tested by hand the same day.*

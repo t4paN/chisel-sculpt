@@ -1043,7 +1043,7 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
     static bool prev_rmb = false;
     bool rmb_edge = input.mouse2_down && !prev_rmb;
     prev_rmb = input.mouse2_down;
-    if (current == BrushType::PAINT && !smooth_on && rmb_edge && !input.ctrl_held) {
+    if (current == BrushType::PAINT && !smooth_on && rmb_edge && !input.zoom_modifier_held()) {
         ImGui::SetNextWindowPos(ImVec2((float)input.mouse_x, (float)input.mouse_y));
         ImGui::OpenPopup("##paintswatch");
     }
