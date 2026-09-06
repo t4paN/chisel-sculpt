@@ -4,7 +4,7 @@ Short, chronological log of notable changes. Newest on top.
 
 ## 2026-09-06 — v0.2.18 — Smooth shares Draw's brush size
 
-*Shipped untested by hand: cut ahead of hardware work on the machine.*
+*User-tested by hand, works as intended.*
 
 With per-brush sizes on, holding Shift to smooth swapped in Smooth's own stored size — so
 the cursor changed diameter under your hand mid-stroke, and any resize you made while
