@@ -2,7 +2,7 @@
 
 Short, chronological log of notable changes. Newest on top.
 
-## 2026-09-06 — Topological mirror is refused on a mesh that cannot supply pairs
+## 2026-09-06 — v0.2.19 — Topological mirror is refused on a mesh that cannot supply pairs
 
 *User-tested by hand.*
 
@@ -49,7 +49,7 @@ session as well as this one. That is deliberate — the stored preference should
 resurrect a mode the last mesh could not honour — but it does mean one asymmetric model
 turns the setting off for good until you switch it back.
 
-## 2026-09-06 — The two mirrors are named Topological and World Space
+## 2026-09-06 — v0.2.19 — The two mirrors are named Topological and World Space
 
 *User-tested by hand.*
 
@@ -68,7 +68,7 @@ renaming it would silently reset the preference for anyone who already has one s
 The HUD no longer prints the axis. `Mirror: X` became `Mirror: World Space`, and since
 `mirror_x` is the only axis there is, the letter was carrying no information.
 
-## 2026-09-06 — The subdiv-level readout follows the level you are editing
+## 2026-09-06 — v0.2.19 — The subdiv-level readout follows the level you are editing
 
 *User-tested by hand.*
 
@@ -89,7 +89,7 @@ chunk and drives both the icosphere rebuild on load and inserted primitives. A c
 comment now gives the real reason the UV-sphere path forces it to 0, which is that Scene()
 hands it to the stack as `base_level`.
 
-## 2026-09-06 — The console banner reports the real version
+## 2026-09-06 — v0.2.19 — The console banner reports the real version
 
 *Verified on both startup paths.*
 
