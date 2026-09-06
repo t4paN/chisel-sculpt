@@ -17,9 +17,12 @@ void draw_voxel_merge_confirm(TextOverlay& text, int resolution, int n_selected,
                              bool has_density, bool adaptive, int levels_to_bake,
                              int win_w, int win_h);
 void draw_voxel_merge_progress(TextOverlay& text, int win_w, int win_h, float progress);
+// level is the multires stack's LIVE editing level, not InputState::subdiv_level —
+// that one is the opening sphere's base-cage subdivision, is written into the save
+// file, and never moves, so the readout sat frozen on it.
 void draw_toolbar(TextOverlay& text, const InputState& input,
                   uint32_t tri_count, uint32_t vert_count, const char* ver,
-                  const char* project_path, int win_w, int win_h);
+                  int level, const char* project_path, int win_w, int win_h);
 void draw_slider(TextOverlay& text, const InputState& input, int win_w, int win_h);
 // Confirm for the burger menu's "delete highest subdiv" — destructive, wipes undo.
 void draw_drop_level_confirm(TextOverlay& text, int level, int win_w, int win_h);

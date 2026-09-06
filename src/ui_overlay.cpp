@@ -177,7 +177,7 @@ void draw_voxel_merge_progress(TextOverlay& text, int win_w, int win_h, float pr
 
 void draw_toolbar(TextOverlay& text, const InputState& input,
                   uint32_t tri_count, uint32_t vert_count, const char* ver,
-                  const char* project_path, int win_w, int win_h) {
+                  int level, const char* project_path, int win_w, int win_h) {
     float panel_w = 220.0f;
     float panel_h = 300.0f;
     float panel_x = (float)win_w - panel_w - 10.0f;
@@ -248,14 +248,18 @@ void draw_toolbar(TextOverlay& text, const InputState& input,
                   CGA(light_green), 1.0f);
     ty += line_h;
 
-    std::snprintf(buf, sizeof(buf), "Subdiv level: %d", input.subdiv_level);
+    // The LIVE editing level. This used to print input.subdiv_level, which is the
+    // OPENING SPHERE's base-cage subdivision — Ctrl+D never touches it, so the readout
+    // sat frozen while the multires stack walked underneath it.
+    std::snprintf(buf, sizeof(buf), "Subdiv level: %d", level);
     text.draw_text(buf, tx, ty, scale, win_w, win_h,
                   CGA(magenta), 1.0f);
     ty += line_h;
 
     const char* mirror_label = "Mirror: Off";
     if (input.mirror_x)
-        mirror_label = input.mirror_topological ? "Mirror: X (exact)" : "Mirror: X";
+        mirror_label = input.mirror_topological ? "Mirror: Topological"
+                                                : "Mirror: World Space";
     text.draw_text(mirror_label,
                   tx, ty, scale, win_w, win_h,
                   CGA(light_cyan), 1.0f);
@@ -1159,9 +1163,9 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
             // mid-sculpt to compare, which is the whole reason it is a button up here
             // instead of a tickbox at the bottom.
             //
-            // Geometric is the default, and is what ZBrush and Blender do by default
+            // World Space is the default, and is what ZBrush and Blender do by default
             // too; both also keep a topology-mirror option alongside it, which is what
-            // exact mode is.
+            // Topological is here.
             {
                 const bool topo = input.mirror_topological;
                 const ImVec4 on_col  (0.16f, 0.38f, 0.52f, 1.0f);
@@ -1171,15 +1175,15 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
                                                                    : ImVec4(0.28f, 0.28f, 0.31f, 1.0f));
                 ImGui::PushStyleColor(ImGuiCol_ButtonActive,  topo ? ImVec4(0.28f, 0.56f, 0.74f, 1.0f)
                                                                    : ImVec4(0.34f, 0.34f, 0.38f, 1.0f));
-                if (ImGui::Button(topo ? "Mirror: exact pairs" : "Mirror: mirrored brush",
+                if (ImGui::Button(topo ? "Mirror: Topological" : "Mirror: World Space",
                                   ImVec2(150.0f, 0.0f))) {
                     input.mirror_topological = !topo;
                     // Say it in the viewport, not just on the button: the point of the
                     // toggle is comparing the two mid-sculpt, and the menu is usually
                     // covering the model when you click it.
                     std::snprintf(input.notification, sizeof(input.notification), "%s",
-                                  input.mirror_topological ? "Mirror: exact pairs"
-                                                           : "Mirror: mirrored brush");
+                                  input.mirror_topological ? "Mirror: Topological"
+                                                           : "Mirror: World Space");
                     input.notification_timer = 2.0f;
                 }
                 ImGui::PopStyleColor(3);
@@ -1188,16 +1192,16 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
                 ImGui::SetTooltip("How X symmetry works. The X key still turns it on and off;\n"
                                   "this is which kind you get, and it changes on the fly —\n"
                                   "the next dab already uses it.\n\n"
-                                  "Mirrored brush: the dab is reflected in the centre plane\n"
+                                  "World Space: the dab is reflected in the centre plane\n"
                                   "and applied again to whatever is there. It asks nothing of\n"
                                   "the mesh, so it works on imported models, on remeshed and\n"
                                   "merged ones, and on anything whose two halves are built\n"
                                   "differently. The default.\n\n"
-                                  "Exact pairs: vertices are additionally paired across the\n"
+                                  "Topological: vertices are additionally paired across the\n"
                                   "plane and forced to match, so the two sides can never drift\n"
                                   "apart. Only possible on a mesh that really is built\n"
                                   "symmetrically; on one that isn't, Chisel says so and falls\n"
-                                  "back to the mirrored brush for that stroke.");
+                                  "back to the World Space mirror for that stroke.");
 
             ImGui::Separator();
 

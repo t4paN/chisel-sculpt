@@ -667,8 +667,8 @@ int main(int argc, char* argv[]) {
 
     // The opening ball. settings_load ran back at startup, so sphere_kind is the
     // user's persisted choice by now. A UV sphere is a base cage, not a subdivided
-    // icosahedron: it locks at level 0 and subdiv_level has to say so, or the HUD
-    // reports a level the multires stack never had.
+    // icosahedron: it locks at level 0 and subdiv_level has to say so, because this is
+    // what Scene() hands multires_stack_init_from_lock as the stack's base_level.
     const bool uv_start = (input.sphere_kind == InputState::SphereKind::UV);
     if (uv_start) input.subdiv_level = 0;
     Scene scene(uv_start ? uv_sphere(32, 16) : icosphere(input.subdiv_level),
@@ -1250,7 +1250,7 @@ int main(int argc, char* argv[]) {
             if (mirror_warn_armed) {
                 mirror_warn_armed = false;
                 std::snprintf(input.notification, sizeof(input.notification),
-                              "Exact mirror off — mesh isn't symmetric. Still mirroring geometrically.");
+                              "Topological mirror off — mesh isn't symmetric. Still mirroring in world space.");
                 input.notification_timer = 2.5f;
             }
             return false;
@@ -2992,6 +2992,7 @@ int main(int argc, char* argv[]) {
                                       vmerge_job ? voxel_merge_progress(*vmerge_job) : 0.0f);
         if (input.toolbar_visible)
             draw_toolbar(text, input, mesh->tri_count(), mesh->vertex_count(), CHISEL_VERSION,
+                         multires->current_level,
                          current_project_path.c_str(), win_w, win_h);
         if (input.slider_mode != InputState::SliderMode::NONE)
             draw_slider(text, input, win_w, win_h);

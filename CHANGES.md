@@ -2,6 +2,46 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-09-06 — The two mirrors are named Topological and World Space
+
+*User-tested by hand.*
+
+The mode the geometric-mirror work introduced on 09-04 was labelled from the inside out.
+The HUD said `Mirror: X (exact)` and the burger button read *exact pairs* / *mirrored
+brush* — three different names for two things, and "exact" describes the *consequence*
+(the sides cannot drift) rather than the *mechanism*, which is what you need to know when
+choosing. **World Space** and **Topological** say what each one actually consults: the
+world x=0 plane, or the vertex pair map.
+
+Renamed at all five user-facing sites — the HUD readout, the button, the notification the
+button fires, the tooltip, and the "mesh isn't symmetric" fallback notice — plus the
+manual. The stored key stays `mirror_topological`: it is also the settings.cfg key, so
+renaming it would silently reset the preference for anyone who already has one saved.
+
+The HUD no longer prints the axis. `Mirror: X` became `Mirror: World Space`, and since
+`mirror_x` is the only axis there is, the letter was carrying no information.
+
+## 2026-09-06 — The subdiv-level readout follows the level you are editing
+
+*User-tested by hand.*
+
+The toolbar printed `input.subdiv_level`, which is the **opening sphere's base-cage
+subdivision** — Ctrl+D never touches it, it moves `multires->current_level`. So the
+readout matched at startup and then sat frozen for the rest of the session while the
+stack walked underneath it.
+
+`draw_toolbar` now takes the live level as a parameter and `main.cpp` passes
+`multires->current_level`, which is correct from the first frame because
+`multires_stack_init_from_lock` seeds it from the icosphere level and the stack is locked
+at Scene construction.
+
+**`input.subdiv_level` was deliberately left alone.** Making it track the level is the
+obvious-looking fix and it corrupts save files: it is written into the `.chisel` OPTS
+chunk and drives both the icosphere rebuild on load and inserted primitives. A comment at
+`main.cpp:668` had already admitted the bug was being papered over at one call site; that
+comment now gives the real reason the UV-sphere path forces it to 0, which is that Scene()
+hands it to the stack as `base_level`.
+
 ## 2026-09-06 — The console banner reports the real version
 
 *Verified on both startup paths.*
