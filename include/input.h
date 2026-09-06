@@ -293,6 +293,11 @@ struct InputState {
     // Persisted: unlike mirror_x, this is a preference, not session state.
     bool mirror_topological;
 
+    // Counts down while the "Topological mirror not available" flash is on screen.
+    // Set only by the enforcement in main.cpp, which reverts mirror_topological at the
+    // same moment — the message and the state change are one event, never two.
+    float mirror_unavailable_timer = 0.0f;
+
     // Autosmooth: light Laplacian pass on draw-brush strokes at pen-up.
     // Defaults ON, toggled with B. Persisted since 2026-08-06, global since
     // 2026-08-07 — it is a sculpting preference, not a device trait, so a

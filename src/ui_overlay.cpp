@@ -393,6 +393,21 @@ void draw_notification(TextOverlay& text, InputState& input, int win_w, int win_
     }
 }
 
+void draw_mirror_unavailable(TextOverlay& text, InputState& input, int win_w, int win_h) {
+    if (input.mirror_unavailable_timer <= 0.0f) return;
+    input.mirror_unavailable_timer -= 1.0f / 60.0f;
+    if (input.mirror_unavailable_timer < 0.0f) input.mirror_unavailable_timer = 0.0f;
+
+    const char* msg = "Topological mirror not available";
+    const float scale = 2.5f;
+    float tw = std::strlen(msg) * 8.0f * scale;
+    float tx = (float)win_w * 0.5f - tw * 0.5f;
+    float ty = (float)win_h * (2.0f / 3.0f);
+    text.draw_panel(tx - 10.0f, ty - 5.0f, tw + 20.0f, 35.0f,
+                    win_w, win_h, CGA(black), 0.85f);
+    text.draw_text(msg, tx, ty, scale, win_w, win_h, CGA(light_red), 1.0f);
+}
+
 void draw_fps(TextOverlay& text, float fps, int win_w, int win_h) {
     char buf[32];
     std::snprintf(buf, sizeof(buf), "FPS: %.0f", fps);

@@ -56,6 +56,11 @@ struct Mesh {
     // no topology and so would never re-trigger the measurement on its own.
     uint32_t mirror_sym_topo = 0xFFFFFFFFu;
     bool     mirror_sym_ok   = true;
+    // The mean edge length build_mirror_spatial measured when it built the map, kept
+    // because the symmetry test has to be judged against the SAME number the pairing
+    // used. Its tolerance is 0.5 * mean_edge, so any threshold looser than that is
+    // arithmetically unfailable — which is exactly the bug this field exists to close.
+    float    mirror_mean_edge = 0.0f;
 
     // Vertex -> triangle adjacency (CSR format)
     // vert_tri_offset[i] .. vert_tri_offset[i+1] indexes into vert_tri_list
@@ -119,7 +124,8 @@ struct Mesh {
 
 // Spatial-hash mirror builder — same logic as Mesh::build_mirror_x_map but
 // operates as a free function so multires_stack can call it on the base cage.
-void build_mirror_spatial(const Mesh& m, std::vector<uint32_t>& out);
+void build_mirror_spatial(const Mesh& m, std::vector<uint32_t>& out,
+                          float* out_mean_edge = nullptr);
 
 // Topology stencil captured by loop_subdivide under canonical numbering:
 // everything needed to recompute the subdivided level's positions from new

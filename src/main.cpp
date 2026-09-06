@@ -720,9 +720,6 @@ int main(int argc, char* argv[]) {
     // siloed, because UndoEntry holds ABSOLUTE positions and undoing a stroke
     // that predates a transform would teleport its vertices. See object_xform.h.
     ObjectXformStack xforms;
-    // One-shot arming for the "symmetry is off" notice below, so a mesh that has
-    // been turned off the mirror plane says so once rather than once per frame.
-    bool mirror_warn_armed = true;
     // Set when a merge chains its adaptive remesh: that remesh must not take its
     // own snapshot, or it would overwrite the merge's with the post-merge state,
     // and the merge is the step the user wants back.
@@ -1228,7 +1225,6 @@ int main(int argc, char* argv[]) {
         // kernel already carries. It consults no topology, so there is nothing to
         // check and nothing that can tear — the toggle is the whole answer.
         auto mirror_effective = [&]() -> bool {
-            if (input.mirror_x) mirror_warn_armed = true;
             return input.mirror_x;
         };
 
@@ -1244,17 +1240,32 @@ int main(int argc, char* argv[]) {
         // that symmetry stopped. Mesh::mirror_world_symmetric() caches against
         // topo_version, so this is a stamp compare on all but the first call after a
         // change.
-        auto mirror_pairs_effective = [&]() -> bool {
-            if (!input.mirror_x || !input.mirror_topological) return false;
-            if (mesh->mirror_world_symmetric()) { mirror_warn_armed = true; return true; }
-            if (mirror_warn_armed) {
-                mirror_warn_armed = false;
-                std::snprintf(input.notification, sizeof(input.notification),
-                              "Topological mirror off — mesh isn't symmetric. Still mirroring in world space.");
-                input.notification_timer = 2.5f;
-            }
-            return false;
+        // ONE check, and it ENFORCES rather than reports: a mesh that cannot supply
+        // pairs switches the setting back to World Space and flashes the notice, so the
+        // button, the HUD and the dab loop can never disagree about what is happening.
+        // Reverting the setting is also what makes this self-limiting — the early-out on
+        // the next frame sees mirror_topological already false, so it fires exactly once
+        // per transition into an unusable mesh rather than every frame.
+        //
+        // Run from the top of the frame rather than off the button, so it also catches
+        // the ways a mesh becomes unpairable without anyone touching the control:
+        // loading a project with the preference persisted on, importing, or spinning a
+        // piece off the plane in Select mode.
+        auto enforce_mirror_mode = [&]() {
+            // Gated on mirror_x as well: with symmetry off there is nothing to override
+            // and nothing to warn about, and the message would arrive detached from any
+            // action. Held back this way it fires on the X keypress instead, which is
+            // the moment it means something.
+            if (!input.mirror_x || !input.mirror_topological) return;
+            if (mesh->mirror_world_symmetric()) return;
+            input.mirror_topological = false;
+            input.mirror_unavailable_timer = 2.5f;
         };
+
+        auto mirror_pairs_effective = [&]() -> bool {
+            return input.mirror_x && input.mirror_topological;
+        };
+        enforce_mirror_mode();
 
         auto refresh_active_gpu_residency = [&]() {
             MeshEntity& ent = scene.active_entity();
@@ -3001,6 +3012,7 @@ int main(int argc, char* argv[]) {
         else if (input.interaction_mode == InputState::InteractionMode::INSERT)
             draw_mode_indicator(text, "INSERT", win_w, win_h);
         draw_notification(text, input, win_w, win_h);
+        draw_mirror_unavailable(text, input, win_w, win_h);
         if (input.show_fps)
             draw_fps(text, fps_display, win_w, win_h);
 

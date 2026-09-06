@@ -92,7 +92,8 @@ void Mesh::compute_bounding_sphere(Vec3& center, float& radius) const {
     }
 }
 
-void build_mirror_spatial(const Mesh& m, std::vector<uint32_t>& out) {
+void build_mirror_spatial(const Mesh& m, std::vector<uint32_t>& out,
+                          float* out_mean_edge) {
     uint32_t vc = m.vertex_count();
     out.resize(vc);
     for (uint32_t i = 0; i < vc; i++) out[i] = i;
@@ -113,6 +114,7 @@ void build_mirror_spatial(const Mesh& m, std::vector<uint32_t>& out) {
         edge_count += 3;
     }
     float mean_edge = (edge_count > 0) ? edge_sum / (float)edge_count : 1e-3f;
+    if (out_mean_edge) *out_mean_edge = mean_edge;
     float tol = mean_edge * 0.5f;
     float tol_sq = tol * tol;
     float seam_tol = std::max(1e-5f, mean_edge * 0.01f);
@@ -244,7 +246,7 @@ void build_mirror_spatial(const Mesh& m, std::vector<uint32_t>& out) {
 }
 
 void Mesh::build_mirror_x_map() {
-    build_mirror_spatial(*this, mirror_x_map);
+    build_mirror_spatial(*this, mirror_x_map, &mirror_mean_edge);
     mirror_topo_version = topo_version;
     invalidate_mirror_symmetry();   // a fresh map means a fresh measurement
 }
@@ -257,9 +259,9 @@ bool Mesh::mirror_world_symmetric() {
     uint32_t vc = vertex_count();
     if (mirror_x_map.size() != vc || vc == 0) return mirror_sym_ok;
 
-    Vec3 c; float radius;
-    compute_bounding_sphere(c, radius);
-    if (radius <= 0.0f) return mirror_sym_ok;
+    // No mean edge recorded means no map was built by us; nothing to judge against.
+    // Also covers the degenerate mesh the bounding-sphere check used to catch here.
+    if (mirror_mean_edge <= 0.0f) return mirror_sym_ok;
 
     // A few hundred samples spread by stride is plenty: a rotation moves nearly
     // every vertex, so this is not a needle hunt. Striding rather than taking a
@@ -268,25 +270,47 @@ bool Mesh::mirror_world_symmetric() {
     constexpr uint32_t WANT = 512;
     uint32_t stride = (vc > WANT) ? (vc / WANT) : 1u;
 
-    double sum = 0.0;
+    // MEDIAN, not mean, and judged against the pairing's own mean edge rather than the
+    // bounding radius. Both halves of that matter:
+    //
+    //   - The MEAN is dragged around by the tail. A handful of badly-paired verts on an
+    //     otherwise-symmetric mesh should not condemn it, and — worse in practice — a
+    //     mesh where MOST pairs are junk still averages down if enough of them are
+    //     exact, because build_mirror_spatial leaves the hopeless ones UNPAIRED and
+    //     they are skipped here entirely.
+    //   - The THRESHOLD has to be tighter than the tolerance that feeds it. The pairing
+    //     refuses to commit anything beyond 0.5 * mean_edge, so no residual this loop
+    //     can ever observe exceeds that. The old test (1% of the bounding radius) sat
+    //     ABOVE it on any mesh whose mean edge is under ~2% of its radius — i.e. every
+    //     real sculpt — and was therefore arithmetically incapable of returning false.
+    //     Measured p50 on mirrorduckerry.chisel: 0.313 edges, against 0.05 here.
+    //
+    // Stack buffer, no allocation: stride caps the sample count at 1023 (worst case is
+    // vc just under 2*WANT, where stride is still 1).
+    constexpr uint32_t MAXS = 1024;
+    float resid[MAXS];
     uint32_t n = 0;
-    for (uint32_t v = 0; v < vc; v += stride) {
+    for (uint32_t v = 0; v < vc && n < MAXS; v += stride) {
         uint32_t mv = mirror_x_map[v];
         if (mv >= vc) continue;            // MIRROR_UNPAIRED: nothing to compare
         if (mv == v) {                     // seam vert: must sit on the plane
-            sum += std::fabs(pos_x[v]);
-            n++;
+            resid[n++] = std::fabs(pos_x[v]);
             continue;
         }
         float dx = pos_x[v] + pos_x[mv];   // reflected x should cancel
         float dy = pos_y[v] - pos_y[mv];
         float dz = pos_z[v] - pos_z[mv];
-        sum += std::sqrt((double)(dx * dx + dy * dy + dz * dz));
-        n++;
+        resid[n++] = std::sqrt(dx * dx + dy * dy + dz * dz);
     }
     if (n == 0) return mirror_sym_ok;      // no pairs at all — nothing to break
 
-    mirror_sym_ok = ((float)(sum / n) <= 0.01f * radius);
+    std::nth_element(resid, resid + n / 2, resid + n);
+    const float p50 = resid[n / 2];
+
+    mirror_sym_ok = (p50 <= 0.05f * mirror_mean_edge);
+    if (!mirror_sym_ok)
+        std::printf("[mirror] not symmetric: p50 residual %.5f > %.5f (0.05 * mean_edge %.5f)\n",
+                    p50, 0.05f * mirror_mean_edge, mirror_mean_edge);
     return mirror_sym_ok;
 }
 

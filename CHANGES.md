@@ -2,6 +2,53 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-09-06 — Topological mirror is refused on a mesh that cannot supply pairs
+
+*User-tested by hand.*
+
+### The guard could not fail
+
+`Mesh::mirror_world_symmetric()` compared the **mean** pair residual against **1% of the
+bounding radius**. But `build_mirror_spatial` refuses to commit a pair further apart than
+`0.5 * mean_edge`, so the largest residual the test can ever observe is bounded by the
+tolerance that feeds it. On any mesh whose mean edge is under ~2% of its radius — that is,
+every real sculpt — the condition was arithmetically incapable of returning false. The
+mean made it worse: hopeless verts are left MIRROR_UNPAIRED and skipped entirely, so a
+mesh where most pairs are junk still averages down.
+
+It now takes the **median** residual against **5% of the pairing's own `mean_edge`**, which
+`build_mirror_spatial` hands back through a new out-param and the mesh stores. Using
+literally the same number is the point: the threshold is guaranteed tighter than the
+tolerance that produced the pairs. Verified across ten cases in
+`~/CHISEL/mirror-guard-test.cpp` — icospheres L1-L5, a UV sphere, a mirror-symmetric
+sculpt and 1e-6 drift all pass; a 0.5 degree spin fails at 4x the threshold, 5 degrees at
+40x, a one-sided displacement at 8x. The dead bounding-sphere pass went with it.
+
+### And failing it now does something
+
+Before, a mesh that failed fell back silently and said so once, in a notification that
+scrolled away — while the button went on claiming Topological was the active mode.
+
+There is now **one check, run at the top of every frame, that enforces rather than
+reports**: if the active mesh cannot supply pairs, `mirror_topological` is switched back
+to World Space and a red **"Topological mirror not available"** flashes centred two thirds
+down the screen. Reverting the setting is also what makes it self-limiting — the next
+frame's early-out sees the mode already off, so it fires once per transition instead of
+once per frame.
+
+Running it per frame rather than off the button is what catches the routes nobody clicks:
+loading a project with the preference persisted on, importing a model, or spinning a piece
+off the plane in Select mode. It is gated on `mirror_x` too, so with symmetry off it stays
+quiet and fires on the X keypress instead, when it means something.
+
+`mirror_pairs_effective()` collapses to `mirror_x && mirror_topological`, and the old
+`mirror_warn_armed` one-shot machinery is gone.
+
+**Note:** `mirror_topological` is persisted, so a revert clears the preference for the next
+session as well as this one. That is deliberate — the stored preference should not
+resurrect a mode the last mesh could not honour — but it does mean one asymmetric model
+turns the setting off for good until you switch it back.
+
 ## 2026-09-06 — The two mirrors are named Topological and World Space
 
 *User-tested by hand.*
