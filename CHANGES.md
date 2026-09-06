@@ -2,6 +2,22 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-09-06 — The console banner reports the real version
+
+*Verified on both startup paths.*
+
+`src/main.cpp` greeted you with a literal `Chisel v0.1` on both the WebGPU and the GL
+path — a string frozen since before the version macro existed. `CHISEL_VERSION` was
+already correct and already feeding the toolbar; only the two `printf`s never got the
+memo. Misleading precisely when you are reading the console to confirm which build you
+are looking at, which is most of what the console is for.
+
+The fix exposed the thing worth knowing: the first rebuild still said **v0.2.17**, because
+`CHISEL_VERSION` is baked at **configure** time from `git describe`, so a build tree
+configured before a tag keeps reporting the old one until you re-run `cmake -B`. That is
+why the itch recipe reconfigures `build-web` before packing, and there is now a comment at
+the banner saying so.
+
 ## 2026-09-06 — v0.2.18 — Smooth shares Draw's brush size
 
 *User-tested by hand, works as intended.*

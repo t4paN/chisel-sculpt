@@ -507,7 +507,9 @@ int main(int argc, char* argv[]) {
     gpu::webgpu_set_surface_format(g_surface_fmt);
     configureSurface(fbw, fbh);
     makeDepth(fbw, fbh);
-    std::printf("Chisel v0.1 (WebGPU)\n");
+    // CHISEL_VERSION is baked at CONFIGURE time from git describe, so a build tree
+    // configured before a tag keeps reporting the old one — reconfigure, do not just rebuild.
+    std::printf("Chisel %s (WebGPU)\n", CHISEL_VERSION);
 #else
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1); // vsync
@@ -518,7 +520,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    std::printf("Chisel v0.1\n");
+    std::printf("Chisel %s\n", CHISEL_VERSION);
     std::printf("OpenGL %s\n", glGetString(GL_VERSION));
     std::printf("Renderer: %s\n", glGetString(GL_RENDERER));
 
