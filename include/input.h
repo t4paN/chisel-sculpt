@@ -395,6 +395,11 @@ struct InputState {
     // change which slot is live.
     void sync_live_settings();
     BrushType live_brush_slot() const;     // which per_brush slot the mirror reflects
+    // Which brush_size_of[] slot to read and write. Same as live_brush_slot(), EXCEPT
+    // that Smooth folds onto Draw so the two always share one size: you smooth what you
+    // just drew, at the scale you drew it, and a held Shift must not resize the cursor
+    // under your hand. Strength/hardness/spacing stay per-brush — only size is shared.
+    BrushType size_slot() const;
     bool is_smooth_active() const;
     bool is_subtract_active() const;
     // Right-drag is zoom while either of these is held. A predicate rather than the

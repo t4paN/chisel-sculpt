@@ -2,6 +2,24 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-09-06 — v0.2.18 — Smooth shares Draw's brush size
+
+*Shipped untested by hand: cut ahead of hardware work on the machine.*
+
+With per-brush sizes on, holding Shift to smooth swapped in Smooth's own stored size — so
+the cursor changed diameter under your hand mid-stroke, and any resize you made while
+Shift was down vanished the moment you let go. Both are wrong for the same reason: Smooth
+is not a brush you *pick*, it is a modifier on the brush you are already using. You smooth
+what you just drew, at the scale you drew it.
+
+`InputState::size_slot()` now names which `brush_size_of[]` slot is live. It is
+`live_brush_slot()` except that Smooth folds onto Draw, and all three places that read or
+write a stored size go through it — the per-frame mirror in `sync_live_settings()`, the
+SIZE slider drag, and the `[` / `]` keys. Missing any one of the three reintroduces the
+bug from a different direction: the drag wrote a slot the mirror never read back.
+
+Strength, hardness and spacing stay genuinely per-brush. Only size is shared.
+
 ## 2026-09-04 — v0.2.17 — Alt + right-drag zooms too
 
 *User-tested by hand, all four cases.*

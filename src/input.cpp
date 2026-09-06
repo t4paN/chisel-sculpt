@@ -165,6 +165,11 @@ BrushType InputState::live_brush_slot() const {
          ? BrushType::SMOOTH : current_brush;
 }
 
+BrushType InputState::size_slot() const {
+    BrushType b = live_brush_slot();
+    return (b == BrushType::SMOOTH) ? BrushType::DRAW : b;
+}
+
 // Re-aim the mirror. Idempotent and cheap (three floats), so it can be called from the
 // top of every frame — which is what makes the invariant hold across Shift going down
 // or up between frames, an edge no key handler observes.
@@ -176,7 +181,7 @@ void InputState::sync_live_settings() {
     // Size is only mirrored when the per-brush toggle is on; off, one shared size is
     // the whole point. The stash is still kept current at the point of edit either way,
     // so flipping the toggle mid-session starts from the sizes you were actually using.
-    if (per_brush_sizes) brush_size = brush_size_of[(int)live_brush_slot()];
+    if (per_brush_sizes) brush_size = brush_size_of[(int)size_slot()];
 }
 
 void InputState::flush_profile() {
@@ -332,8 +337,12 @@ static void apply_slider_delta(float dx) {
     g_input->per_brush[save_brush].spacing  = g_input->brush_spacing;
     // Size lives outside BrushSettings but stashes the same way, and the SIZE drag used
     // to update only the live value — so with per-brush sizes on, every resize was
-    // reverted by the next brush switch.
-    g_input->brush_size_of[save_brush] = g_input->brush_size;
+    // reverted by the next brush switch. Smooth folds onto Draw here for the same
+    // reason it does in size_slot(): writing Smooth's own slot would be read back from
+    // Draw's, and a size drag with Shift held would vanish on release.
+    const int size_brush = (save_brush == (int)BrushType::SMOOTH)
+                         ? (int)BrushType::DRAW : save_brush;
+    g_input->brush_size_of[size_brush] = g_input->brush_size;
     // Don't update mouse_x/y — keep cursor visually locked
 }
 
@@ -1022,7 +1031,7 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
             g_input->brush_size = std::max(5.0f, std::min(500.0f,
                 g_input->brush_size + (up ? step : -step)));
             // Stash it too, or with per-brush sizes on the next switch_brush undoes this.
-            g_input->brush_size_of[(int)g_input->live_brush_slot()] = g_input->brush_size;
+            g_input->brush_size_of[(int)g_input->size_slot()] = g_input->brush_size;
             snprintf(g_input->notification, sizeof(g_input->notification),
                      "Size: %.0f", g_input->brush_size);
             g_input->notification_timer = 1.0f;
