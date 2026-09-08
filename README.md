@@ -1,5 +1,8 @@
 # Chisel
 
+<img src="assets/chisel-banner.png" width="820"
+     alt="Chisel sculpting a chameleon head at 480,960 triangles: brush list down the left edge, mode and alpha toolbars along the top, and a live stats HUD in the bottom-right corner.">
+
 GPU sculpting, anywhere. One C++17 codebase; sculpts natively on WebGPU or OpenGL,
 and in your browser with nothing to install.
 

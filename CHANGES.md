@@ -2,6 +2,15 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-09-08 — Docs: README opens with a screenshot
+
+The README led with prose and carried no image at all, so the repo's front page never
+showed the thing it describes. It now opens with a shot of a 480k-triangle sculpt in
+progress (`assets/chisel-banner.png`, 1100px wide, displayed at 820) directly under the
+title. Same frame, recut, also feeds the itch.io cover and the GitHub social preview —
+both of which have to be uploaded by hand, as neither butler nor the GitHub API can set
+them.
+
 ## 2026-09-06 — v0.2.19 — Topological mirror is refused on a mesh that cannot supply pairs
 
 *User-tested by hand.*

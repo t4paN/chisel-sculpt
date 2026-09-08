@@ -5,6 +5,7 @@ external/instant-meshes/
 *.png
 !packaging/*.png
 !assets/chisel-icon.png
+!assets/chisel-banner.png
 packaging/out/
 packaging/tools/
 
