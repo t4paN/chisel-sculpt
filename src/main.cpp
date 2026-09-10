@@ -2960,6 +2960,51 @@ int main(int argc, char* argv[]) {
                     input.cursor_nx, input.cursor_ny, input.cursor_nz,
                     input.brush_hardness,
                     win_w, win_h, input.on_model);
+
+                // Symmetry lobe marker. Where the second dab lands is a WORLD
+                // fact (reflect the anchor through x=0, same as every brush's
+                // anchor_b), not a screen one — mirroring the cursor pixel about
+                // the window centre would only be right for a centred, axis-on
+                // camera. So unproject the pen through the cached depth plane,
+                // flip X, project back. Off-model there is no anchor to reflect.
+                if (input.mirror_x && input.on_model) {
+                    float hit_depth = 0.0f;
+                    if (renderer.sample_depth_bilinear(cursor_x, cursor_y, &hit_depth, 0.0f)) {
+                        Vec3 cam_pos = camera.get_position();
+                        Vec3 fwd = (camera.target - cam_pos).normalized();
+                        Vec3 wup = {0, 1, 0};
+                        Vec3 right = fwd.cross(wup).normalized();
+                        Vec3 up = right.cross(fwd).normalized();
+                        float half_h = camera.half_height_at(hit_depth);
+                        float half_w = half_h * ((float)win_w / (float)win_h);
+                        float ndc_x = 2.0f * cursor_x / (float)win_w - 1.0f;
+                        float ndc_y = 1.0f - 2.0f * cursor_y / (float)win_h;
+                        Vec3 anchor = cam_pos + fwd * hit_depth
+                                    + right * (ndc_x * half_w) + up * (ndc_y * half_h);
+                        anchor.x = -anchor.x;
+                        float mx, my;
+                        if (camera.world_to_screen(anchor, win_w, win_h, mx, my)) {
+                            // Occlusion: the reflected anchor sits on the mesh's far
+                            // side whenever it is deeper than whatever the depth plane
+                            // already holds at that pixel. Fade rather than hide — you
+                            // still want to know the lobe is there, just not to mistake
+                            // it for something in front. The tolerance is a few pixels'
+                            // worth of world depth, so a point on its OWN near-side
+                            // surface (where the two depths agree to within the plane's
+                            // own quantisation) never counts as hidden.
+                            float alpha = 1.0f;
+                            float front_depth = 0.0f;
+                            if (renderer.sample_depth((int)mx, (int)my, &front_depth)) {
+                                float world_per_pixel = (2.0f * half_h) / (float)win_h;
+                                float tol = world_per_pixel * 6.0f;
+                                if (camera.view_depth(anchor) > front_depth + tol)
+                                    alpha = 0.30f;
+                            }
+                            renderer.draw_mirror_cursor(mx, my, input.brush_hardness,
+                                                        alpha, win_w, win_h);
+                        }
+                    }
+                }
             }
         }
 

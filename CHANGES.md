@@ -2,6 +2,72 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-09-10 — The mirrored stroke gets its own cursor
+
+With symmetry on there was one cursor for two dabs: the ring told you where the pen
+was and nothing at all told you where the second lobe would land. On a three-quarter
+view that is genuinely hard to predict, and it is the same information the brush
+already computes.
+
+The mirror lobe now draws the **centre crosshair alone** — no ring, no footprint
+disc — in the **inverse of the live brush tint**, so it never reads as the cursor you
+are actually driving. The ring is deliberately not repeated: its radius and hardness
+are already under the pen, and a second one competes for the same reading.
+
+The position is a **world** fact, not a screen one. The pen is unprojected through
+the cached depth plane, its X flipped, and the result projected back — exactly the
+`anchor.x = -anchor.x` reflection every brush already does for its B lobe. Mirroring
+the cursor pixel about the window centre would only have been right for a centred,
+axis-on camera; this stays glued to where the dab lands at any orbit angle, and it is
+correct under perspective too. Covers both symmetry modes, since `mirror_x` is the
+master toggle and `mirror_topological` only picks the machinery underneath.
+
+It also **fades to 30% once it wraps around the silhouette** onto the model's far
+side. The test is a single lookup, because the depth plane the brush already samples
+is sitting in CPU memory: if the reflected anchor is deeper than what that plane holds
+at the pixel it lands on, something is in front of it. Fade rather than hide — the
+lobe is still there and you still want to know where, just not to read it as being in
+front. The tolerance is what needs care: on the near side the anchor lies on the very
+surface the plane recorded, so the two depths are nominally equal and only the plane's
+quantisation separates them. Six pixels' worth of world depth before it counts as
+hidden keeps the near-side marker solid instead of strobing against its own surface.
+
+No new shader: it reuses the existing crosshair pipeline and its fixed 8-vertex X, so
+there was nothing to twin between WGSL and GLSL. The hardness colour ramp moved into
+a shared `brush_cursor_rgb()` so the ring and the marker cannot drift apart. Drawn
+on-model only, and only while symmetry is on. All three targets build clean.
+
+## 2026-09-10 — Web: middle-drag and wheel stop scrolling the itch page
+
+Middle-drag is the camera pan, but a middle mousedown is also Firefox's autoscroll
+gesture — and the itch.io page around the iframe scrolls now that it carries
+screenshots, so a pan dragged the host page under the app. The wheel guard is the
+same bug on the zoom gesture. `shell.html` now cancels the browser default for both,
+capture-phase and ahead of GLFW's own listeners; `preventDefault` only stops the
+browser default, so the app still receives both events. Left and right buttons are
+untouched.
+
+## 2026-09-09 — Three shipped defaults changed
+
+Defaults only — no behaviour, no new knobs, and every one of these was already a
+toggle in the burger menu. They change what a **fresh install** comes up with; an
+existing `settings.cfg` already carries all three keys and keeps whatever it has.
+
+- **Individual brush sizes: now ON.** Each brush remembers its own size, the way
+  strength and spacing already did. `seed_brush_sizes()` already ran in the
+  constructor, so the slots start coherent rather than at zero.
+- **Smooth shading: now OFF.** Stored inverted as `flat_shading`, which flips to
+  `true`. Seeing the actual cage while you work beats a smoother surface that hides
+  where the density is. Display only — nothing about the mesh or the brush moves.
+- **FOV 45: already was the standard.** No change. `camera_fov` defaulted to 45,
+  `Camera` seeds at 45, and ortho framing has always used 45, so the perspective
+  toggle is a lens change and not a zoom in either direction.
+
+Verified by launching the GL build against a throwaway `XDG_CONFIG_HOME` and reading
+the `settings.cfg` it wrote: `per_brush_sizes=1`, `flat_shading=1`, `camera_fov=45`.
+Both native targets build clean; the web tree is untouched and still holds the old
+defaults until it is rebuilt for a release.
+
 ## 2026-09-08 — Docs: README opens with a screenshot
 
 The README led with prose and carried no image at all, so the repo's front page never

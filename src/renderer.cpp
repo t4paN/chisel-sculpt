@@ -1799,23 +1799,31 @@ void Renderer::read_id_region(int x, int y, int w, int h, uint32_t* out) {
     read_triid_region(x, y, w, h, out);
 }
 
+// Brush-cursor tint from hardness: pale lime (soft) -> bright orange (mid) ->
+// bluish purple (hard). Shared by the ring and by the mirror crosshair, which
+// inverts it — so the two must come from one place or they drift apart.
+static void brush_cursor_rgb(float hardness, float* out) {
+    float hh = std::max(0.0f, std::min(1.0f, hardness));
+    if (hh < 0.5f) {
+        float t = hh * 2.0f;
+        out[0] = 0.72f * (1.0f - t) + 1.00f * t;
+        out[1] = 1.00f * (1.0f - t) + 0.55f * t;
+        out[2] = 0.58f * (1.0f - t) + 0.10f * t;
+    } else {
+        float t = (hh - 0.5f) * 2.0f;
+        out[0] = 1.00f * (1.0f - t) + 0.55f * t;
+        out[1] = 0.55f * (1.0f - t) + 0.40f * t;
+        out[2] = 0.10f * (1.0f - t) + 0.95f * t;
+    }
+}
+
 void Renderer::draw_cursor(const Camera& cam, float cx, float cy, float radius,
                            float nx, float ny, float nz, float hardness,
                            int w, int h, bool on_model) {
-    // Color: pale lime (soft) -> bright orange (mid) -> bluish purple (hard).
     float hh = std::max(0.0f, std::min(1.0f, hardness));
-    float cr, cg, cb;
-    if (hh < 0.5f) {
-        float t = hh * 2.0f;
-        cr = 0.72f * (1.0f - t) + 1.00f * t;
-        cg = 1.00f * (1.0f - t) + 0.55f * t;
-        cb = 0.58f * (1.0f - t) + 0.10f * t;
-    } else {
-        float t = (hh - 0.5f) * 2.0f;
-        cr = 1.00f * (1.0f - t) + 0.55f * t;
-        cg = 0.55f * (1.0f - t) + 0.40f * t;
-        cb = 0.10f * (1.0f - t) + 0.95f * t;
-    }
+    float rgb[3];
+    brush_cursor_rgb(hardness, rgb);
+    float cr = rgb[0], cg = rgb[1], cb = rgb[2];
     float ca = 0.75f + 0.15f * hh;
 
     // Camera basis in world space (matches brush.cpp apply_move derivation)
@@ -1900,6 +1908,43 @@ void Renderer::draw_cursor(const Camera& cam, float cx, float cy, float radius,
 #endif
         gpu::release_bind_group(grp);
     }
+
+    gpu::end_render_pass(rp);
+}
+
+void Renderer::draw_mirror_cursor(float cx, float cy, float hardness, float alpha,
+                                  int w, int h) {
+    // The symmetry lobe gets the crosshair alone, no ring: it marks where the
+    // second dab lands, but its radius/hardness reading would only duplicate the
+    // ring already under the pen. Inverse tint so it never reads as the live one.
+    float rgb[3];
+    brush_cursor_rgb(hardness, rgb);
+
+    gpu::RenderTarget target;          // fbo 0 (default framebuffer), no clear
+    target.width = w; target.height = h;
+    gpu::RenderPass rp = gpu::begin_render_pass(gpu_dev, target);
+
+    CrosshairParamsGPU xp{};
+    xp.center[0] = cx; xp.center[1] = cy;
+    xp.screenSize[0] = (float)w; xp.screenSize[1] = (float)h;
+    xp.color[0] = 1.0f - rgb[0];
+    xp.color[1] = 1.0f - rgb[1];
+    xp.color[2] = 1.0f - rgb[2];
+    xp.color[3] = alpha;
+    gpu::write_buffer(gpu_dev, crosshair_ubo, 0, &xp, sizeof xp);
+    gpu::set_pipeline(rp, crosshair_pipeline);
+    gpu::BindBufferEntry be[] = {{ 63, &crosshair_ubo, sizeof(CrosshairParamsGPU) }};
+    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, crosshair_pipeline, be, 1);
+    gpu::set_bind_group(rp, crosshair_pipeline, grp);
+    gpu::set_vertex_buffer(rp, 0, crosshair_vbuf);
+#if defined(CHISEL_BACKEND_GL)
+    glLineWidth(3.0f);                    // GL-only nicety (WebGPU ignores line width)
+#endif
+    gpu::draw(rp, 8);
+#if defined(CHISEL_BACKEND_GL)
+    glLineWidth(1.0f);
+#endif
+    gpu::release_bind_group(grp);
 
     gpu::end_render_pass(rp);
 }

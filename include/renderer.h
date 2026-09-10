@@ -248,6 +248,11 @@ struct Renderer {
     void draw_cursor(const Camera& cam, float cx, float cy, float radius,
                      float nx, float ny, float nz, float hardness,
                      int w, int h, bool on_model);
+    // Symmetry lobe marker: the centre crosshair only, in the inverse of the
+    // brush tint. Caller supplies the already-projected screen position of the
+    // mirrored anchor (main.cpp), since only it knows the mirror plane.
+    void draw_mirror_cursor(float cx, float cy, float hardness, float alpha,
+                            int w, int h);
 
     // Debug visualization
     void draw_debug_mesh(const Camera& cam, const Mesh& mesh, int w, int h);
