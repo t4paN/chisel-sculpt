@@ -108,7 +108,7 @@ struct InputState {
     // brush_size itself does not. Deliberately NOT folded into BrushSettings: that
     // struct is what ProfileSettings stashes per input device, and size is not a device
     // trait (see the 2026-08-07 note above).
-    bool  per_brush_sizes = false;
+    bool  per_brush_sizes = true;
     float brush_size_of[(int)BrushType::COUNT];
     // Point every slot at the live brush_size. Called when the toggle flips and on
     // settings reset, so neither can make the brush under the cursor jump.
@@ -162,11 +162,12 @@ struct InputState {
     float matcap_contrast = 0.5f;
 
     // Faceted viewport shading (burger menu toggle, shown inverted as "Smooth
-    // shading"). Off = the interpolated vertex normals every version has shipped;
-    // on = the true facet normal, so the polygons read individually. Display only —
-    // nothing about the mesh or the brush changes, it is a way to *see* the
-    // topology the smooth normals hide.
-    bool flat_shading = false;
+    // shading"). Off = the interpolated vertex normals; on = the true facet normal,
+    // so the polygons read individually. Display only — nothing about the mesh or
+    // the brush changes, it is a way to *see* the topology the smooth normals hide.
+    // Defaults ON (i.e. "Smooth shading" ships unticked) — seeing the actual cage
+    // while you work beats a prettier surface that hides where the density is.
+    bool flat_shading = true;
 
     // FPS readout visibility (burger menu toggle). Display only.
     bool show_fps = true;

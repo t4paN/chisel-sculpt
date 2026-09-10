@@ -92,6 +92,20 @@
     window.addEventListener('keyup', function(e) {
       if (e.key === 'Alt' && appOwnsAlt()) e.preventDefault();
     }, true);
+    // Middle-drag is the camera pan, but a middle mousedown is also Firefox's
+    // autoscroll gesture (and the itch.io page around our iframe scrolls now
+    // that it carries screenshots), so a pan would scroll the host page under
+    // the app. Cancelling the mousedown default kills autoscroll; the wheel
+    // guard is the same bug on the zoom gesture. Capture-phase and ahead of
+    // GLFW's own listeners, and preventDefault only stops the browser default,
+    // so the app still sees both events. Left/right buttons are untouched.
+    window.addEventListener('mousedown', function(e) {
+      if (e.button === 1) e.preventDefault();
+    }, true);
+    window.addEventListener('wheel', function(e) {
+      e.preventDefault();
+    }, { capture: true, passive: false });
+
     var canvasElement = document.getElementById('canvas');
     canvasElement.addEventListener('webglcontextlost', function(e) {
       alert('Graphics context lost — reload the page.'); e.preventDefault();

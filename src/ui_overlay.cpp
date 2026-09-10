@@ -1244,15 +1244,15 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
                 ImGui::SetTooltip("Viewport lighting: 0 = even, ambient light, 1 = keyed "
                                   "light with contrast and sheen (display only)");
 
-            // Shading. Stored as flat_shading (default false = the historical look, so an
-            // older settings blob with no key lands on smooth), shown inverted because
+            // Shading. Stored as flat_shading (defaults true, so a settings blob with
+            // no key lands faceted like a fresh install), shown inverted because
             // "Smooth shading, on" is how it reads to the user.
             bool smooth = !input.flat_shading;
             if (ImGui::Checkbox("Smooth shading", &smooth))
                 input.flat_shading = !smooth;
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("On: normals are averaged across each vertex, so the\n"
-                                  "surface reads as one continuous form. The default.\n\n"
+                                  "surface reads as one continuous form.\n\n"
                                   "Off: every triangle is shaded by its own facet, so you\n"
                                   "see the actual polygons — useful for judging topology,\n"
                                   "density and what a remesh really did.\n\n"
