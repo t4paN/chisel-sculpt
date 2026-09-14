@@ -2,7 +2,9 @@
 
 Short, chronological log of notable changes. Newest on top.
 
-## 2026-09-10 — The mirrored stroke gets its own cursor
+## 2026-09-10 — v0.2.20 — The mirrored stroke gets its own cursor
+
+*User-tested by hand.*
 
 With symmetry on there was one cursor for two dabs: the ring told you where the pen
 was and nothing at all told you where the second lobe would land. On a three-quarter
@@ -37,7 +39,9 @@ there was nothing to twin between WGSL and GLSL. The hardness colour ramp moved 
 a shared `brush_cursor_rgb()` so the ring and the marker cannot drift apart. Drawn
 on-model only, and only while symmetry is on. All three targets build clean.
 
-## 2026-09-10 — Web: middle-drag and wheel stop scrolling the itch page
+## 2026-09-10 — v0.2.20 — Web: middle-drag and wheel stop scrolling the itch page
+
+*User-tested by hand.*
 
 Middle-drag is the camera pan, but a middle mousedown is also Firefox's autoscroll
 gesture — and the itch.io page around the iframe scrolls now that it carries
@@ -47,7 +51,9 @@ capture-phase and ahead of GLFW's own listeners; `preventDefault` only stops the
 browser default, so the app still receives both events. Left and right buttons are
 untouched.
 
-## 2026-09-09 — Three shipped defaults changed
+## 2026-09-09 — v0.2.20 — Three shipped defaults changed
+
+*User-tested by hand.*
 
 Defaults only — no behaviour, no new knobs, and every one of these was already a
 toggle in the burger menu. They change what a **fresh install** comes up with; an
@@ -68,7 +74,7 @@ the `settings.cfg` it wrote: `per_brush_sizes=1`, `flat_shading=1`, `camera_fov=
 Both native targets build clean; the web tree is untouched and still holds the old
 defaults until it is rebuilt for a release.
 
-## 2026-09-08 — Docs: README opens with a screenshot
+## 2026-09-08 — v0.2.20 — Docs: README opens with a screenshot
 
 The README led with prose and carried no image at all, so the repo's front page never
 showed the thing it describes. It now opens with a shot of a 480k-triangle sculpt in
