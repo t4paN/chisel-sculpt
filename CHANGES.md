@@ -2,6 +2,25 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-09-17 — The native WebGPU build starts on Wayland
+
+*Verified by launching both backends; not a hand-sculpted test.*
+
+The native wgpu window only ever built an **X11** surface source. GLFW picks its
+platform at runtime, so on a Wayland desktop `glfwGetX11Display()` hands back NULL,
+and wgpu-native does not report that as an error — it panics inside its Vulkan
+backend with *"Display pointer is not set"* and aborts the process before the first
+frame. There is nothing to gate on after the fact, so the choice has to be made up
+front: expose both native handle sets and select the surface source that matches
+`glfwGetPlatform()`. Same fix in the app and in the standalone window probe, and the
+surface line now names the platform it bound to.
+
+This reached **no users**. The AppImage and Windows builds default to the GL backend,
+which never touches a raw surface handle, and the web build lets the browser own the
+surface. What it blocked was native wgpu development on any Wayland session — which
+is most Linux desktops now, and is why it surfaced the moment the work moved off an
+X11 machine.
+
 ## 2026-09-10 — v0.2.20 — The mirrored stroke gets its own cursor
 
 *User-tested by hand.*

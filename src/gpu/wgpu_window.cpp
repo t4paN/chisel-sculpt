@@ -18,7 +18,9 @@
 //
 // Run live (window stays open until closed) for a screenshot, or set
 // CHISEL_PROBE_FRAMES=N to auto-exit after N presented frames (CI/headless-ish).
+// X11 or Wayland is a runtime choice by GLFW — expose both (see main.cpp).
 #define GLFW_EXPOSE_NATIVE_X11
+#define GLFW_EXPOSE_NATIVE_WAYLAND
 #include <GLFW/glfw3.h>
 #include <GLFW/glfw3native.h>
 #include <webgpu/webgpu.h>
@@ -449,16 +451,28 @@ int main() {
     WGPUInstance instance = wgpuCreateInstance(nullptr);
     if (!instance) { std::printf("[win] wgpuCreateInstance failed\n"); return 1; }
 
-    // ---- surface from the X11 window ----
-    WGPUSurfaceSourceXlibWindow x11 = {};
-    x11.chain.sType = WGPUSType_SurfaceSourceXlibWindow;
-    x11.display = glfwGetX11Display();
-    x11.window  = (uint64_t)glfwGetX11Window(win);
+    // ---- surface from the native window (X11 or Wayland) ----
+    // Must match the platform GLFW chose; a NULL X11 display panics wgpu-native
+    // rather than returning an error. Both live until CreateSurface is called.
+    const bool on_wayland = (glfwGetPlatform() == GLFW_PLATFORM_WAYLAND);
+    WGPUSurfaceSourceXlibWindow     x11 = {};
+    WGPUSurfaceSourceWaylandSurface wl  = {};
     WGPUSurfaceDescriptor surfDesc = {};
-    surfDesc.nextInChain = &x11.chain;
+    if (on_wayland) {
+        wl.chain.sType = WGPUSType_SurfaceSourceWaylandSurface;
+        wl.display     = glfwGetWaylandDisplay();
+        wl.surface     = glfwGetWaylandWindow(win);
+        surfDesc.nextInChain = &wl.chain;
+    } else {
+        x11.chain.sType = WGPUSType_SurfaceSourceXlibWindow;
+        x11.display     = glfwGetX11Display();
+        x11.window      = (uint64_t)glfwGetX11Window(win);
+        surfDesc.nextInChain = &x11.chain;
+    }
     WGPUSurface surface = wgpuInstanceCreateSurface(instance, &surfDesc);
     if (!surface) { std::printf("[win] createSurface failed\n"); return 2; }
-    std::printf("[win] surface created (X11 %dx%d)\n", g_fbw, g_fbh);
+    std::printf("[win] surface created (%s %dx%d)\n",
+                on_wayland ? "Wayland" : "X11", g_fbw, g_fbh);
 
     // ---- adapter (compatible with this surface) ----
     AdapterResult ar;

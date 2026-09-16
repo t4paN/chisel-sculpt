@@ -8,7 +8,11 @@
 #include <emscripten.h>
 #include <emscripten/html5.h>
 #else
+// A Linux desktop session is either X11 or Wayland and GLFW picks at runtime,
+// so expose BOTH native handle sets and choose the matching surface source
+// below. Exposing only X11 builds fine on a Wayland box and fails at runtime.
 #define GLFW_EXPOSE_NATIVE_X11
+#define GLFW_EXPOSE_NATIVE_WAYLAND
 #include <GLFW/glfw3.h>
 #include <GLFW/glfw3native.h>
 #include <webgpu/webgpu.h>
@@ -409,14 +413,32 @@ int main(int argc, char* argv[]) {
     canvasSrc.selector = WGPUStringView{ "#canvas", 7 };
     sd.nextInChain = &canvasSrc.chain;
 #else
-    WGPUSurfaceSourceXlibWindow x11 = {};
-    x11.chain.sType = WGPUSType_SurfaceSourceXlibWindow;
-    x11.display = glfwGetX11Display();
-    x11.window  = (uint64_t)glfwGetX11Window(window);
-    sd.nextInChain = &x11.chain;
+    // The surface source MUST match the platform GLFW actually chose. In a
+    // Wayland session glfwGetX11Display() returns NULL, and wgpu-native does
+    // not report that as an error — it panics inside the Vulkan backend with
+    // "Display pointer is not set" and aborts the process, so there is nothing
+    // to gate on after the fact. Branch up front instead. Both descriptors are
+    // declared out here because the chain must outlive CreateSurface below.
+    WGPUSurfaceSourceXlibWindow     x11 = {};
+    WGPUSurfaceSourceWaylandSurface wl  = {};
+    if (glfwGetPlatform() == GLFW_PLATFORM_WAYLAND) {
+        wl.chain.sType = WGPUSType_SurfaceSourceWaylandSurface;
+        wl.display     = glfwGetWaylandDisplay();
+        wl.surface     = glfwGetWaylandWindow(window);
+        sd.nextInChain = &wl.chain;
+    } else {
+        x11.chain.sType = WGPUSType_SurfaceSourceXlibWindow;
+        x11.display     = glfwGetX11Display();
+        x11.window      = (uint64_t)glfwGetX11Window(window);
+        sd.nextInChain  = &x11.chain;
+    }
 #endif
     g_surface = wgpuInstanceCreateSurface(instance, &sd);
     if (!g_surface) { std::fprintf(stderr, "createSurface failed\n"); return 1; }
+#if !defined(__EMSCRIPTEN__)
+    std::printf("[win] surface created (%s)\n",
+                glfwGetPlatform() == GLFW_PLATFORM_WAYLAND ? "Wayland" : "X11");
+#endif
 
     AdapterResult ar;
     WGPURequestAdapterOptions aopt = {};
