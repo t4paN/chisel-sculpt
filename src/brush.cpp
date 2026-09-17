@@ -505,6 +505,7 @@ void BrushStroke::kick_dab_readback(DabContext& ctx, uint8_t kind) {
     pd.kind = kind;
     pd.cap = dab_cap;
     pd.footprint = dab_footprint;
+    pd.vc = ctx.mesh.vertex_count();
     pending_dabs.push_back(pd);
     dab_region_valid = false;   // the pending dab owns the region until its read lands
 }
@@ -534,6 +535,22 @@ void BrushStroke::drain_dab_readbacks(DabContext& ctx) {
         if (!gpu::ticket_ready(ctx.compute.gpu_dev, pd.tk)) break;
         pending_dabs.erase(pending_dabs.begin());
         dirty_verts.clear();
+
+        // TRIPWIRE: these ids are indices into the mesh as it was when the dab was
+        // issued. If the vertex count has changed since, an undo or level switch has
+        // renumbered everything and the ids are meaningless — applying them displaces
+        // whatever vertices now happen to hold those indices. Drop the dab instead,
+        // and say so: undo is deferred while reads are pending precisely so this
+        // cannot happen, so if this ever prints, that deferral has a hole in it.
+        if (pd.vc != ctx.mesh.vertex_count()) {
+            std::printf("[cull] TRIPWIRE: dab issued at %u verts landed at %u — ids "
+                        "dropped rather than applied to a renumbered mesh\n",
+                        pd.vc, ctx.mesh.vertex_count());
+            ctx.compute.dirty_arena_retire(pd.footprint);
+            dirty_overflowed = true;   // force the exact-but-slow whole-mesh snapshot
+            continue;
+        }
+
         uint32_t total = 0;
         bool took = ctx.compute.take_count_list_read(pd.tk, pd.words, dirty_verts, &total);
         // Retire before any early-out: the region is done either way, and leaving it

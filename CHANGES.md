@@ -2,6 +2,30 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-09-17 — A tripwire for ids that outlive the mesh they describe
+
+*Both backends build, clean startup. Detection, plus a safe fallback.*
+
+Two fixes for the spikes have now shipped on reasoning alone, and the user's report after
+the second was *"broke again, don't even remember how."* That is the real problem: a race
+cannot be debugged from memory, and neither existing alarm can see this one — nothing in
+the arena or the selection is inconsistent, because every part is doing its job correctly
+against a mesh that changed underneath it.
+
+So the mesh change itself is now what gets watched. Each pending dab records the vertex
+count it was ISSUED against. A dirty list is a list of indices, and indices only mean
+anything relative to a numbering; an undo across a level switch renumbers everything, so
+ids landing afterwards describe a mesh that no longer exists. On landing, a dab whose
+stamp no longer matches the live vertex count is **dropped rather than applied**, the
+stroke falls back to the exact-but-slow whole-mesh snapshot, and it prints.
+
+That makes the failure self-reporting instead of dependent on someone remembering what
+they pressed — and it turns the worst case from wrong geometry into a slow stroke.
+
+It also doubles as the test for the previous commit: undo is deferred while readbacks are
+pending precisely so this cannot happen, so **if this line ever prints, that deferral has
+a hole in it** and the log will say so.
+
 ## 2026-09-17 — Undo no longer races the dab readbacks still in flight
 
 *Both native backends build, 36 pipelines, zero device errors. The mechanism is

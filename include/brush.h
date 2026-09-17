@@ -188,6 +188,13 @@ struct BrushStroke {
         uint8_t kind = DAB_GEO;
         uint32_t cap = 0;        // ids its arena region can hold
         uint32_t footprint = 0;  // words it reserved (including any wrap padding)
+        // The vertex count this dab was ISSUED against. A dirty list is a list of
+        // indices, and indices only mean something relative to a numbering: an undo
+        // across a level switch renumbers every vertex, so ids that land afterwards
+        // describe a mesh that no longer exists. Applying them anyway puts arbitrary
+        // vertices in arbitrary directions — the spikes of 2026-09-17. Stamped here
+        // so drain can refuse them instead of trusting that it never happens.
+        uint32_t vc = 0;
     };
     std::vector<PendingDab> pending_dabs;
 
