@@ -32,6 +32,7 @@ enum class Usage : uint32_t {
     Uniform = 1u << 3,
     CopySrc = 1u << 4,
     MapRead = 1u << 5,
+    Indirect = 1u << 6,   // may be the source of a dispatch_indirect args triple
 };
 inline Usage  operator|(Usage a, Usage b) { return (Usage)((uint32_t)a | (uint32_t)b); }
 inline bool   has(Usage set, Usage bit)   { return ((uint32_t)set & (uint32_t)bit) != 0; }
@@ -177,6 +178,12 @@ ComputeBatch begin_compute(Device&);
 // 1D count would exceed the backend's 65535 per-dimension limit (the SDF passes at
 // R>=128); the kernel recovers the linear index from num_workgroups.x itself.
 void dispatch(ComputeBatch&, ComputePipeline&, BindGroup&, uint32_t groups_x, uint32_t groups_y = 1);
+// Dispatch with the workgroup counts read from GPU memory: `args` holds three u32
+// (x, y, z) at `offset`. Lets a dispatch be sized by a count the GPU just produced,
+// without a readback to tell the CPU how big it is — the whole reason the per-dab
+// kernels run over the full mesh today. The args buffer must carry Usage::Indirect.
+void dispatch_indirect(ComputeBatch&, ComputePipeline&, BindGroup&,
+                       const Buffer& args, uint64_t offset = 0);
 void end_compute_pass(ComputeBatch&);                       // call before copy_buffer
 void copy_buffer(ComputeBatch&, const Buffer& src, uint64_t src_off,
                  const Buffer& dst, uint64_t dst_off, uint64_t size);

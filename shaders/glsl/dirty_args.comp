@@ -1,0 +1,24 @@
+// dirty_args.comp — GLSL 430 sibling of shaders/wgsl/dirty_args.wgsl.
+// Writes (ceil(n / 256), 1, 1) for an indirect dispatch over a dab's dirty list,
+// so a list whose length only exists on the GPU can size its own dispatch.
+#version 430
+layout(local_size_x = 1) in;
+
+layout(std430, binding = 6)  readonly buffer DirtyBuf { uint dirty_data[]; };
+layout(std430, binding = 46)          buffer ArgsBuf  { uint args[]; };
+
+layout(std140, binding = 61) uniform DirtyRegion {
+    uint base;
+    uint cap;
+    uint _p0;
+    uint _p1;
+} DR;
+
+void main() {
+    // Clamp for the same reason as the WGSL: an overflowed region's counter runs
+    // past cap and those ids were never written.
+    uint n = min(dirty_data[DR.base], DR.cap);
+    args[0] = (n + 255u) / 256u;
+    args[1] = 1u;
+    args[2] = 1u;
+}

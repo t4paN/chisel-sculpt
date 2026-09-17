@@ -57,6 +57,8 @@ enum ComputeBinding : GLuint {
     BIND_CASCADE_SRC       = 42, // float3 coarse positions (replay pass input / final pos for normals)
     BIND_CASCADE_DST       = 43, // float3 fine positions (replay pass output, disp applied in place)
     BIND_CASCADE_MID       = 44, // uint4 per midpoint: v0,v1,opp0,opp1 (cached SubdivStencil mid table)
+    BIND_BLOCK_LIST        = 45, // uint   (reserved) active block indices for dispatch culling
+    BIND_DISPATCH_ARGS     = 46, // uint3  workgroup counts for dispatch_indirect
     // Per-dab dirty-list region (base word + id capacity) for the arena below. Shared
     // by every kernel that appends to the dirty list, so their own Params blocks stay
     // untouched. Written once per dab by set_dirty_region().
@@ -495,6 +497,13 @@ struct ComputeState {
     // `cap` is a PERFORMANCE knob, not a safety one. Undersizing it is detected (the
     // counter deliberately runs past cap) and recovered from (the stroke snapshots
     // every vertex), so being wrong costs time and never loses a vertex.
+    // One-thread kernel that turns a dab's GPU-side dirty count into an indirect
+    // dispatch triple, so list-consuming kernels stop dispatching over the whole mesh.
+    // The count only exists on the GPU during a stroke — reading it back to size a
+    // dispatch would reintroduce exactly the stall the arena removed.
+    gpu::ComputePipeline dirty_args_pipeline;
+    gpu::Buffer          dispatch_args_ssbo;   // uint3, Storage | Indirect
+
     gpu::Buffer dirty_region_ubo;    // DirtyRegionGPU at BIND_DIRTY_REGION
     gpu::Buffer smooth_dirty_ssbo;   // the arena
     uint32_t smooth_dirty_capacity;  // max ids one region could ever need (= vertex_count)
@@ -652,6 +661,10 @@ struct ComputeState {
     bool take_count_list_read(gpu::ReadTicket t, uint32_t words,
                               std::vector<uint32_t>& out, uint32_t* out_total = nullptr);
     gpu::ReadTicket kick_dirty_read(uint32_t base, uint32_t cap, uint32_t& words);
+
+    bool init_dirty_args();
+    bool has_dirty_args() const { return dirty_args_pipeline.handle != 0
+                                      && dispatch_args_ssbo.handle != 0; }
 
     // Upload the region the next dab's kernels must append into, and zero its counter.
     // Call once per dab BEFORE its dispatches; every dirty-writing kernel reads it at

@@ -2,6 +2,34 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-09-17 — A dispatch can be sized by a count only the GPU knows
+
+*Builds on both native backends, `dirty_args` compiles under naga with zero device
+errors. Not hand-sculpted; no browser/Tint gate yet.*
+
+A dab's touched-vertex count exists only on the GPU while a stroke is running, and
+reading it back mid-stroke is exactly the stall the arena just removed. So every kernel
+that *consumes* the dirty list had to dispatch worst-case threads over the whole mesh and
+let the overshoot early-out — at 5M tris that is ten million invocations to service a few
+hundred real vertices.
+
+`gpu::dispatch_indirect` on the seam takes its workgroup counts from GPU memory instead.
+A one-thread `dirty_args` kernel turns the dab's own count into a `(ceil(n / 256), 1, 1)`
+triple that the command processor reads directly. It clamps with `min(count, cap)` for the
+same reason the CPU side does: an overflowed region's counter deliberately runs past its
+cap and those ids were never written, so dispatching for them would walk uninitialised
+memory.
+
+The args buffer must carry a new `Usage::Indirect`. On WebGPU the write and the read are
+free to sit in one pass; **on GL the command processor needs an explicit
+`GL_COMMAND_BARRIER_BIT`** before it reads args a compute dispatch just wrote, which the
+GL backend now issues inside `dispatch_indirect`. Both dispatches go in one batch.
+
+`mirror_project` is the first consumer and the only one wired so far — it runs on every
+geometry dab with symmetry on, so it is the honest first test of whether the indirect path
+behaves. No behaviour change is intended: the same vertices are visited, just without
+dispatching threads for the ones that are not there.
+
 ## 2026-09-17 — Each dab reads back only its own dirty list
 
 *Builds clean on both native backends and the native wgpu run reports zero device

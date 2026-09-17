@@ -31,6 +31,7 @@ static WGPUBufferUsage to_wgpu_usage(Usage u) {
     if (has(u, Usage::Index))   f |= WGPUBufferUsage_Index;
     if (has(u, Usage::Storage)) f |= WGPUBufferUsage_Storage;
     if (has(u, Usage::Uniform)) f |= WGPUBufferUsage_Uniform;
+    if (has(u, Usage::Indirect)) f |= WGPUBufferUsage_Indirect;
     // Symmetric with the always-on CopyDst: any non-mappable buffer may be a copy or
     // read_buffer source. The gpu:: seam copies freely between buffers (stroke-normal
     // snapshot, undo ring, remesh ping-pong, limb scratch, SDF readbacks, …) and
@@ -189,6 +190,13 @@ void dispatch(ComputeBatch& b, ComputePipeline& pipe, BindGroup& group, uint32_t
     wgpuComputePassEncoderSetPipeline(b.pass, pipe.handle);
     wgpuComputePassEncoderSetBindGroup(b.pass, 0, group.handle, 0, nullptr);
     wgpuComputePassEncoderDispatchWorkgroups(b.pass, groups_x, groups_y, 1);
+}
+
+void dispatch_indirect(ComputeBatch& b, ComputePipeline& pipe, BindGroup& group,
+                       const Buffer& args, uint64_t offset) {
+    wgpuComputePassEncoderSetPipeline(b.pass, pipe.handle);
+    wgpuComputePassEncoderSetBindGroup(b.pass, 0, group.handle, 0, nullptr);
+    wgpuComputePassEncoderDispatchWorkgroupsIndirect(b.pass, args.handle, offset);
 }
 
 void end_compute_pass(ComputeBatch& b) {

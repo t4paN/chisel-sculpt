@@ -219,6 +219,8 @@ void ComputeState::cleanup() {
     gpu::release_compute_pipeline(stroke_smooth_apply_pipeline);
     gpu::release_buffer(stroke_smooth_ubo);
     gpu::release_compute_pipeline(mirror_project_pipeline);
+    gpu::release_compute_pipeline(dirty_args_pipeline);
+    gpu::release_buffer(dispatch_args_ssbo);
     gpu::release_buffer(mirror_project_ubo);
     gpu::release_compute_pipeline(crease_accum_pipeline);
     gpu::release_compute_pipeline(pinch_accum_pipeline);
@@ -452,6 +454,25 @@ struct MirrorProjectParamsGPU {
 };
 static_assert(sizeof(MirrorProjectParamsGPU) == 16, "mirror_project Params UBO must be 16 bytes");
 
+bool ComputeState::init_dirty_args() {
+    if (!supported) return false;
+    const gpu::BindEntry layout[] = {
+        { BIND_DIRTY_VERTS,   gpu::Bind::StorageRead,      0 },
+        { BIND_DISPATCH_ARGS, gpu::Bind::StorageReadWrite, 0 },
+        { BIND_DIRTY_REGION,  gpu::Bind::Uniform,          sizeof(DirtyRegionGPU) },
+    };
+    dirty_args_pipeline = gpu::create_compute_pipeline(gpu_dev,
+                              gpu::embedded_shader("dirty_args"), layout, 3);
+    if (!dirty_args_pipeline.handle) {
+        std::printf("[compute] dirty_args pipeline failed to compile\n");
+        return false;
+    }
+    dispatch_args_ssbo = gpu::create_buffer(gpu_dev, nullptr, 3 * sizeof(uint32_t),
+                                            gpu::Usage::Storage | gpu::Usage::Indirect);
+    std::printf("[compute] dirty_args pipeline compiled (indirect dispatch)\n");
+    return true;
+}
+
 bool ComputeState::init_mirror_project() {
     if (!supported) return false;
     const gpu::BindEntry layout[] = {
@@ -501,12 +522,58 @@ static void dispatch_mirror_project_impl(ComputeState& cs, const gpu::Buffer& po
     gpu::release_bind_group(grp);
 }
 
+// Same bindings as dispatch_mirror_project_impl in list_mode 0, but the workgroup
+// count comes from dirty_args writing the dab's own count into dispatch_args_ssbo.
+// Both dispatches go in ONE batch: the args must be written and visible before the
+// command processor reads them, which is free inside a pass on WebGPU and needs the
+// GL_COMMAND_BARRIER the GL backend issues in dispatch_indirect.
+static void dispatch_mirror_project_indirect(ComputeState& cs, const gpu::Buffer& pos_vbo,
+                                             uint32_t vertex_count,
+                                             const gpu::Buffer& list_buf) {
+    if (!cs.has_mirror_project() || !cs.mask_ssbo.handle) return;
+    if (!cs.mirror_map_ssbo.handle || cs.mirror_map_vertex_count != vertex_count) return;
+    if (!list_buf.handle) return;
+
+    MirrorProjectParamsGPU u = { vertex_count, 0u, 0u, 0 };
+    gpu::write_buffer(cs.gpu_dev, cs.mirror_project_ubo, 0, &u, sizeof(u));
+
+    const gpu::BindBufferEntry args_bg[] = {
+        { BIND_DIRTY_VERTS,   &list_buf,               list_buf.size },
+        { BIND_DISPATCH_ARGS, &cs.dispatch_args_ssbo,  cs.dispatch_args_ssbo.size },
+        { BIND_DIRTY_REGION,  &cs.dirty_region_ubo,    sizeof(DirtyRegionGPU) },
+    };
+    gpu::BindGroup args_grp = gpu::create_bind_group(cs.gpu_dev, cs.dirty_args_pipeline,
+                                                     args_bg, 3);
+
+    const gpu::BindBufferEntry bg[] = {
+        { BIND_POSITIONS,    &pos_vbo,               (uint64_t)vertex_count * 3u * sizeof(float) },
+        { BIND_DIRTY_VERTS,  &list_buf,              list_buf.size },
+        { BIND_MIRROR_MAP,   &cs.mirror_map_ssbo,    (uint64_t)cs.mirror_map_vertex_count * sizeof(uint32_t) },
+        { BIND_MASK,         &cs.mask_ssbo,          (uint64_t)vertex_count * sizeof(float) },
+        { BIND_DIRTY_REGION, &cs.dirty_region_ubo,   sizeof(DirtyRegionGPU) },
+        { BIND_PARAMS,       &cs.mirror_project_ubo, sizeof(MirrorProjectParamsGPU) },
+    };
+    gpu::BindGroup grp = gpu::create_bind_group(cs.gpu_dev, cs.mirror_project_pipeline, bg, 6);
+
+    gpu::ComputeBatch b = gpu::begin_compute(cs.gpu_dev);
+    gpu::dispatch(b, cs.dirty_args_pipeline, args_grp, 1);
+    gpu::dispatch_indirect(b, cs.mirror_project_pipeline, grp, cs.dispatch_args_ssbo, 0);
+    gpu::submit(b);
+    gpu::release_bind_group(args_grp);
+    gpu::release_bind_group(grp);
+}
+
 void ComputeState::dispatch_mirror_project_header(const gpu::Buffer& pos_vbo,
                                                   uint32_t vertex_count,
                                                   const gpu::Buffer& list_buf) {
-    // Entry count lives in list_buf[0] on the GPU; dispatch worst-case threads
-    // (same cost class as the apply kernels, which run full-range per dab) and
-    // let overshoot threads early-out on the count.
+    // The entry count lives in the dab's region header on the GPU. With indirect
+    // dispatch we size the dispatch from that count directly; without it, the only
+    // option was worst-case threads over the whole mesh with the overshoot early-
+    // outing — one full-mesh pass per dab to touch a few hundred vertices.
+    if (has_dirty_args() && &list_buf == &smooth_dirty_ssbo) {
+        dispatch_mirror_project_indirect(*this, pos_vbo, vertex_count, list_buf);
+        return;
+    }
     dispatch_mirror_project_impl(*this, pos_vbo, vertex_count, list_buf,
                                  0u, 0u, (vertex_count + 255u) / 256u);
 }

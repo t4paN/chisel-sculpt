@@ -137,6 +137,20 @@ void dispatch(ComputeBatch&, ComputePipeline& pipe, BindGroup& group, uint32_t g
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
 }
 
+void dispatch_indirect(ComputeBatch&, ComputePipeline& pipe, BindGroup& group,
+                       const Buffer& args, uint64_t offset) {
+    glUseProgram(pipe.handle);
+    for (uint32_t i = 0; i < group.count; ++i)
+        glBindBufferBase(group.target[i], group.binding[i], group.buffer[i]);
+    // The args were written by a compute dispatch in this same batch; GL needs an
+    // explicit barrier before the command processor reads them (WebGPU does it).
+    glMemoryBarrier(GL_COMMAND_BARRIER_BIT);
+    glBindBuffer(GL_DISPATCH_INDIRECT_BUFFER, args.handle);
+    glDispatchComputeIndirect((GLintptr)offset);
+    glBindBuffer(GL_DISPATCH_INDIRECT_BUFFER, 0);
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
+}
+
 void end_compute_pass(ComputeBatch&) { /* no GL pass object */ }
 
 void copy_buffer(ComputeBatch&, const Buffer& src, uint64_t src_off,
