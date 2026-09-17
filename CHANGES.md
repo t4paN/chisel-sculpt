@@ -2,6 +2,30 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-09-17 — Two desktop launchers, so a test session stops costing a setup
+
+*Tooling only; no app change. The scripts live outside the repo, in the working root.*
+
+Testing this arc has repeatedly cost more than it should: a run piped through `head -N`
+silently truncated an entire validation session, and the in-app version banner is baked at
+CMake *configure* time, so a current binary can report an old commit and send everyone
+hunting a stale build that isn't stale.
+
+Two launchers on the desktop now. **`Chisel`** is the plain GL build with no instruments.
+**`Chisel (debug)`** runs it with `CHISEL_DIRTY_HIST=1` and `stdbuf -oL -eL` — the latter
+is not optional, since these printfs are block-buffered when redirected and a run that is
+killed rather than closed loses whatever is still in the buffer. It logs to
+`~/Projects/CHISEL/chisel-debug.log`, keeps one previous run, and fires a desktop
+notification on exit saying **clean** or **N alarms**, so a session that found nothing
+costs no reading. Right-click offers culling OFF for an A/B, and the selection peek
+(which syncs mid-stroke, so it lies about speed — diagnosis only).
+
+The log header prints the real commit from `git`, which is the part the in-app banner
+cannot be trusted for.
+
+Session state, reasoning and the open threads are in
+`~/Projects/CHISEL/perf-rebuild-session3-handoff.md`.
+
 ## 2026-09-17 — Fix: culling wrote to arbitrary vertices after a subdiv switch
 
 *Reported from a live session: "changing subd and undoing at the same time f'd it up,
