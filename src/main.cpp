@@ -2365,7 +2365,23 @@ int main(int argc, char* argv[]) {
             // mode, so gating it on Edit would put the rescue out of reach in the
             // one case it was built for. Only fires once the entity's own history
             // is exhausted, so it is always the LAST step back, never a shortcut.
-            if (input.undo_requested && rescue.valid() && rescue.edits_left() > 0
+            // A dab's dirty list lands ASYNCHRONOUSLY, and an undo can move — or, across
+            // a level switch, RENUMBER — every vertex. Ids still in flight would then be
+            // applied to a mesh they no longer describe, which puts arbitrary vertices
+            // in arbitrary directions: the spikes reported on 2026-09-17. finalize
+            // already refuses to commit while reads are outstanding; undo never did, and
+            // rapid undo presses are exactly how the window gets hit.
+            //
+            // Deferred, not drained in place: on the web the callbacks that land these
+            // reads come from the event loop, so blocking here would deadlock the frame.
+            // The request stays set and fires on a later frame, once the stroke's own
+            // finalize/post_frame drain has emptied the queue.
+            const bool undo_reads_pending =
+                (input.undo_requested || input.redo_requested)
+                && brush_stroke.dab_readbacks_pending();
+
+            if (input.undo_requested && !undo_reads_pending
+                && rescue.valid() && rescue.edits_left() > 0
                 && !scene.active_undo().can_undo() && !xforms.can_undo()) {
                 input.undo_requested = false;
                 const char* what = rescue.op;
@@ -2425,14 +2441,15 @@ int main(int argc, char* argv[]) {
             bool undo_allowed = input.interaction_mode == InputState::InteractionMode::EDIT;
             if (input.undo_requested && !undo_allowed && xform_undo_next) undo_allowed = true;
             if (input.redo_requested && !undo_allowed && xform_redo_next) undo_allowed = true;
-            if ((input.undo_requested || input.redo_requested) && !undo_allowed) {
+            if ((input.undo_requested || input.redo_requested) && !undo_allowed
+                && !undo_reads_pending) {
                 input.undo_requested = false;
                 input.redo_requested = false;
                 std::snprintf(input.notification, sizeof(input.notification),
                               "Undo only works in Edit mode (1)");
                 input.notification_timer = 1.5f;
             }
-            if (input.undo_requested) {
+            if (input.undo_requested && !undo_reads_pending) {
                 input.undo_requested = false;
                 uint32_t xform_blocker = xform_undo_next ? xforms.newer_edit_entity(scene) : 0;
                 if (xform_blocker) {
@@ -2454,7 +2471,7 @@ int main(int argc, char* argv[]) {
                 }
                 screen_buffers_dirty = true;
             }
-            if (input.redo_requested) {
+            if (input.redo_requested && !undo_reads_pending) {
                 input.redo_requested = false;
                 if (xform_redo_next) {
                     xforms.redo(scene);

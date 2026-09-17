@@ -2,6 +2,43 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-09-17 — Undo no longer races the dab readbacks still in flight
+
+*Both native backends build, 36 pipelines, zero device errors. The mechanism is
+confirmed by reading the code; that it is THE cause of the reported spikes is not yet
+confirmed by hand — that needs a test drive.*
+
+The user's own guess, and it was the right one: *"could it happen due to too many undo
+presses at the same time / race conditions?"*
+
+A dab's dirty list lands **asynchronously** — `drain_dab_readbacks` consumes only the
+tickets that are ready and breaks on the first that is not, so dabs stay pending across
+frames. Undo, meanwhile, went straight through: no drain, no check. But an undo moves
+every vertex, and an undo across a level switch **renumbers** them. Ids already in flight
+are then applied to a mesh they no longer describe — arbitrary vertices displaced in
+arbitrary directions, which is exactly the reported "verts pulled down and away, other
+times in other directions."
+
+`finalize` already refuses to commit while reads are outstanding (`if
+(dab_readbacks_pending()) return false; // tick again next frame`). The stroke-commit path
+was written carefully; undo simply never got the same treatment. Rapid undo presses are
+the way to hit the window, which is why it showed up under exactly that.
+
+Undo and redo now defer while readbacks are pending, rather than draining in place: on the
+web the callbacks that land those reads come from the event loop, so blocking there would
+deadlock the frame. The request stays set and fires a frame or two later once the stroke's
+own drain has emptied the queue.
+
+**This is pre-existing, not introduced by dispatch culling** — the undo path never had the
+check. Culling plausibly widened the window rather than opening it, by making dabs cheap
+enough that many more are in flight at once (queue depth was measured at 72 dabs at L9 on
+fast strokes). That also fits the artifact the user parked in session 2 and was unsure was
+pre-existing.
+
+The instruments did NOT catch this: no `[arena]` or `[cull]` line fires, because nothing
+in the arena or the selection is inconsistent — each part is doing its job correctly
+against a mesh that changed underneath it.
+
 ## 2026-09-17 — Two desktop launchers, so a test session stops costing a setup
 
 *Tooling only; no app change. The scripts live outside the repo, in the working root.*
