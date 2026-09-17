@@ -7,9 +7,16 @@ layout(local_size_x = 256) in;
 
 layout(std430, binding = 0)  readonly buffer PosBuf  { float positions[]; };
 layout(std430, binding = 12)          buffer MaskBuf { float mask_buf[]; };
-layout(std430, binding = 6)           buffer DirtyBuf { uint count; uint ids[]; } dirty;
+layout(std430, binding = 6)           buffer DirtyBuf { uint dirty_data[]; } dirty;
 
 // std140 UBO — matches mask_paint.wgsl's Params and the C++ MaskParamsGPU (48 bytes).
+layout(std140, binding = 61) uniform DirtyRegion {
+    uint base;   // word offset of this dab's region inside the arena
+    uint cap;    // ids it can hold; the counter runs past this
+    uint _p0;
+    uint _p1;
+} DR;
+
 layout(std140, binding = 63) uniform Params {
     vec3  anchor_a;        // 0..11
     float world_radius;    // 12
@@ -73,8 +80,11 @@ void try_paint(uint v, vec3 anchor, vec3 vp, uint mirrored) {
     if (new_val == old_val) return;
 
     mask_buf[v] = new_val;
-    uint idx = atomicAdd(dirty.count, 1u);
-    dirty.ids[idx] = v;
+    uint idx = atomicAdd(dirty.dirty_data[DR.base], 1u);
+    // Bounds-checked: the region is sized from a running estimate, so an
+    // unusually large dab can overrun it. The counter still counts, which is
+    // how the CPU detects it and falls back — never silently truncate here.
+    if (idx < DR.cap) dirty.dirty_data[DR.base + 1u + idx] = v;
 }
 
 void main() {

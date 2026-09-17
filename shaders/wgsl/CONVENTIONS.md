@@ -28,6 +28,23 @@ make the translation mechanical.
 - read/write → `var<storage, read_write>`.
 - A buffer with a header + tail array (`buffer Dirty { uint count; uint ids[]; }`) → a WGSL struct
   with the runtime array **last**: `struct Dirty { count : atomic<u32>, ids : array<u32> };`
+- **Exception — the dirty list.** It is no longer one header+array buffer but an *arena* of per-dab
+  regions, so its kernels index it flat and offset from a base instead: bind it as
+  `array<atomic<u32>>` (GLSL `{ uint dirty_data[]; }`) and read the region from the shared
+  `DirtyRegion` UBO at **binding 61** (`BIND_DIRTY_REGION`) rather than growing each kernel's own
+  Params block. The append is always bounds-checked:
+
+      let idx = atomicAdd(&dirty[DR.base], 1u);
+      if (idx < DR.cap) { atomicStore(&dirty[DR.base + 1u + idx], v); }
+
+  The counter deliberately keeps counting past `DR.cap` — that overrun is how the CPU detects a
+  region that was sized too small and falls back to a whole-mesh snapshot. Never clamp it in the
+  shader, and never drop the bounds check: the surplus ids are not written anywhere, so a lost id
+  is a vertex undo will not restore. Anything that *reads* the list (mirror_project's list_mode 0)
+  must clamp with `min(list[DR.base], DR.cap)` for the same reason.
+- Binding the dirty buffer, always pass the **whole** arena (`smooth_dirty_ssbo.size`), never
+  `(vertex_count + 1) * 4`. A short binding puts later regions outside the shader's view; WebGPU
+  drops those writes silently and every dab after the first comes back empty.
 - SOA float arrays stay `array<f32>` indexed `v*3u + k` exactly as in GLSL.
 
 ## Uniforms (the big change)

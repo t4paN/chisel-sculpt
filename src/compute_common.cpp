@@ -21,6 +21,10 @@ ComputeState::ComputeState()
     , mirror_map_vertex_count(0)
     , dirty_verts_capacity(0)
     , smooth_dirty_capacity(0)
+    , dirty_arena_words(0)
+    , dirty_arena_head(0)
+    , dirty_arena_tail(0)
+    , dirty_arena_live(0)
     , remesh_vert_capacity(0)
     , remesh_tri_capacity(0)
 {}
@@ -291,8 +295,11 @@ void ComputeState::cleanup() {
     remesh_vert_capacity = remesh_tri_capacity = 0;
     accum_vertex_count = 0;
     adjacency_vertex_count = 0;
+    gpu::release_buffer(dirty_region_ubo);
     dirty_verts_capacity = 0;
     smooth_dirty_capacity = 0;
+    dirty_arena_words = 0;
+    dirty_arena_reset();
 }
 
 // ---------------------------------------------------------------------------
@@ -300,28 +307,132 @@ void ComputeState::cleanup() {
 // ---------------------------------------------------------------------------
 
 gpu::ReadTicket ComputeState::kick_count_list_read(const gpu::Buffer& buf,
-                                                   uint32_t capacity, uint32_t& words) {
+                                                   uint32_t capacity, uint32_t& words,
+                                                   uint32_t word_offset) {
     if (!buf.handle || capacity == 0) { words = 0; return 0; }
     words = capacity + 1;   // [count, id0, id1, ...]
-    return gpu::read_buffer_async(gpu_dev, buf, 0, (uint64_t)words * sizeof(uint32_t));
+    return gpu::read_buffer_async(gpu_dev, buf,
+                                  (uint64_t)word_offset * sizeof(uint32_t),
+                                  (uint64_t)words * sizeof(uint32_t));
 }
 
 bool ComputeState::take_count_list_read(gpu::ReadTicket t, uint32_t words,
-                                        std::vector<uint32_t>& out) {
+                                        std::vector<uint32_t>& out, uint32_t* out_total) {
     out.clear();
+    if (out_total) *out_total = 0;
     if (!t || words == 0) return true;
     count_list_scratch.resize(words);
     if (!gpu::ticket_take(gpu_dev, t, count_list_scratch.data(),
                           (uint64_t)words * sizeof(uint32_t)))
         return false;
     uint32_t count = count_list_scratch[0];
+    // The counter is GPU-written and deliberately unbounded, so bound it by something
+    // real before it is used as a length: no dab can touch more than the whole mesh.
+    if (count > smooth_dirty_capacity) count = smooth_dirty_capacity;
+    // The kernels let the counter run past the region's cap on purpose: that overrun
+    // is the ONLY evidence the region was too small, and the surplus ids were never
+    // written. Report the true total, then clamp to what is actually readable.
+    if (out_total) *out_total = count;
     if (count > words - 1) count = words - 1;
     out.assign(count_list_scratch.begin() + 1, count_list_scratch.begin() + 1 + count);
     return true;
 }
 
-gpu::ReadTicket ComputeState::kick_dirty_read(uint32_t& words) {
-    return kick_count_list_read(smooth_dirty_ssbo, smooth_dirty_capacity, words);
+gpu::ReadTicket ComputeState::kick_dirty_read(uint32_t base, uint32_t cap, uint32_t& words) {
+    return kick_count_list_read(smooth_dirty_ssbo, cap, words, base);
+}
+
+// ---------------------------------------------------------------------------
+// Dirty-list arena
+// ---------------------------------------------------------------------------
+// A ring of per-dab regions. The accounting is four numbers and one invariant:
+//
+//     tail + live == head   (mod dirty_arena_words)
+//
+// which is checked in alloc() rather than reasoned about, because this exact
+// bookkeeping has been got wrong before: releasing a bailed dab's region through
+// retire() (which frees the OLDEST region) told the ring that a region still being
+// read was free. Once the ring wrapped, two dabs shared one region, a dab's ids were
+// not the ids its own kernels wrote, and undo restored the wrong vertices — surfacing
+// a mile from its cause as corruption after deep undo across subdiv levels. An
+// assertion here turns that whole class into a loud refusal.
+
+void ComputeState::dirty_arena_reset() {
+    dirty_arena_head = dirty_arena_tail = dirty_arena_live = 0;
+}
+
+// Ring positions are logical: position p lives at word 1 + p, because word 0 is the
+// bit bucket reserved for dabs that could not get a region.
+uint32_t ComputeState::dirty_arena_ring_words() const {
+    return dirty_arena_words > 1 ? dirty_arena_words - 1 : 0;
+}
+
+uint32_t ComputeState::dirty_arena_max_cap() const {
+    uint32_t w = dirty_arena_ring_words();
+    return w > 1 ? w - 1 : 0;
+}
+
+bool ComputeState::dirty_arena_alloc(uint32_t cap, uint32_t& base_out,
+                                     uint32_t& footprint_out) {
+    const uint32_t W = dirty_arena_ring_words();
+    if (W == 0) return false;
+    const uint32_t need = cap + 1;                 // counter word + ids
+    if (need > W) return false;
+
+    if ((dirty_arena_tail + dirty_arena_live) % W != dirty_arena_head) {
+        std::printf("[arena] INVARIANT BROKEN: tail %u + live %u != head %u (ring %u) — "
+                    "refusing to allocate\n",
+                    dirty_arena_tail, dirty_arena_live, dirty_arena_head, W);
+        return false;
+    }
+
+    // A region must be contiguous (the shader indexes base + 1 + i with no wrap), so
+    // if it does not fit before the end of the ring the gap is padded and charged to
+    // this region's footprint — that keeps the invariant arithmetic a plain sum.
+    uint32_t base = dirty_arena_head;
+    uint32_t foot = need;
+    if (dirty_arena_head + need > W) {
+        foot = (W - dirty_arena_head) + need;
+        base = 0;
+    }
+    if (foot > W - dirty_arena_live) return false;   // full; caller drains and retries
+
+    dirty_arena_head = (dirty_arena_head + foot) % W;
+    dirty_arena_live += foot;
+    base_out = base + 1;                             // logical -> word
+    footprint_out = foot;
+    return true;
+}
+
+void ComputeState::dirty_arena_retire(uint32_t footprint) {
+    const uint32_t W = dirty_arena_ring_words();
+    if (W == 0 || footprint == 0) return;
+    if (footprint > dirty_arena_live) { dirty_arena_reset(); return; }
+    dirty_arena_tail = (dirty_arena_tail + footprint) % W;
+    dirty_arena_live -= footprint;
+}
+
+void ComputeState::dirty_arena_unalloc(uint32_t footprint) {
+    // For a dab that reserved a region and then bailed before kicking its read. It
+    // gives back the NEWEST region, so it rolls the bump cursor back and leaves the
+    // tail alone — the opposite end from retire().
+    const uint32_t W = dirty_arena_ring_words();
+    if (W == 0 || footprint == 0) return;
+    if (footprint > dirty_arena_live) { dirty_arena_reset(); return; }
+    dirty_arena_head = (dirty_arena_head + W - footprint) % W;
+    dirty_arena_live -= footprint;
+}
+
+void ComputeState::set_dirty_region(uint32_t base, uint32_t cap) {
+    if (!dirty_region_ubo.handle)
+        dirty_region_ubo = gpu::create_buffer(gpu_dev, nullptr, sizeof(DirtyRegionGPU),
+                                              gpu::Usage::Uniform);
+    DirtyRegionGPU dr = { base, cap, 0, 0 };
+    gpu::write_buffer(gpu_dev, dirty_region_ubo, 0, &dr, sizeof(dr));
+    uint32_t zero = 0;
+    if (smooth_dirty_ssbo.handle)
+        gpu::write_buffer(gpu_dev, smooth_dirty_ssbo,
+                          (uint64_t)base * sizeof(uint32_t), &zero, sizeof(zero));
 }
 
 gpu::ReadTicket ComputeState::kick_move_affected_read(uint32_t& words) {
@@ -348,10 +459,11 @@ bool ComputeState::init_mirror_project() {
         { BIND_DIRTY_VERTS, gpu::Bind::StorageRead,      0 },
         { BIND_MIRROR_MAP,  gpu::Bind::StorageRead,      0 },
         { BIND_MASK,        gpu::Bind::StorageRead,      0 },
+        { BIND_DIRTY_REGION, gpu::Bind::Uniform,         sizeof(DirtyRegionGPU) },
         { BIND_PARAMS,      gpu::Bind::Uniform,          sizeof(MirrorProjectParamsGPU) },
     };
     mirror_project_pipeline = gpu::create_compute_pipeline(gpu_dev,
-                                  gpu::embedded_shader("mirror_project"), layout, 5);
+                                  gpu::embedded_shader("mirror_project"), layout, 6);
     if (!mirror_project_pipeline.handle) {
         std::printf("[compute] mirror_project pipeline failed to compile\n");
         return false;
@@ -378,9 +490,10 @@ static void dispatch_mirror_project_impl(ComputeState& cs, const gpu::Buffer& po
         { BIND_DIRTY_VERTS, &list_buf,              list_buf.size },
         { BIND_MIRROR_MAP,  &cs.mirror_map_ssbo,    (uint64_t)cs.mirror_map_vertex_count * sizeof(uint32_t) },
         { BIND_MASK,        &cs.mask_ssbo,          (uint64_t)vertex_count * sizeof(float) },
+        { BIND_DIRTY_REGION, &cs.dirty_region_ubo,  sizeof(DirtyRegionGPU) },
         { BIND_PARAMS,      &cs.mirror_project_ubo, sizeof(MirrorProjectParamsGPU) },
     };
-    gpu::BindGroup grp = gpu::create_bind_group(cs.gpu_dev, cs.mirror_project_pipeline, bg, 5);
+    gpu::BindGroup grp = gpu::create_bind_group(cs.gpu_dev, cs.mirror_project_pipeline, bg, 6);
 
     gpu::ComputeBatch b = gpu::begin_compute(cs.gpu_dev);
     gpu::dispatch(b, cs.mirror_project_pipeline, grp, groups);

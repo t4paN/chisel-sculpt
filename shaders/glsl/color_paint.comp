@@ -10,7 +10,14 @@ layout(local_size_x = 256) in;
 layout(std430, binding = 0)  readonly buffer PosBuf   { float positions[]; };
 layout(std430, binding = 28) buffer ColorBuf          { uint color_buf[]; };
 layout(std430, binding = 12) readonly buffer MaskBuf  { float mask_buf[]; };
-layout(std430, binding = 6)  buffer DirtyBuf          { uint dirty_count; uint dirty_ids[]; };
+layout(std430, binding = 6)  buffer DirtyBuf          { uint dirty_data[]; };
+
+layout(std140, binding = 61) uniform DirtyRegion {
+    uint base;   // word offset of this dab's region inside the arena
+    uint cap;    // ids it can hold; the counter runs past this
+    uint _p0;
+    uint _p1;
+} DR;
 
 layout(std140, binding = 63) uniform Params {
     vec3  anchor_a;       // 0   (world_radius packs into .w)
@@ -82,8 +89,11 @@ void try_paint(uint v, vec3 anchor, vec3 vp, uint mirrored) {
     if (pk_rgba == color_buf[v]) return;
 
     color_buf[v] = pk_rgba;
-    uint idx = atomicAdd(dirty_count, 1u);
-    dirty_ids[idx] = v;
+    uint idx = atomicAdd(dirty_data[DR.base], 1u);
+    // Bounds-checked: the region is sized from a running estimate, so an
+    // unusually large dab can overrun it. The counter still counts, which is
+    // how the CPU detects it and falls back — never silently truncate here.
+    if (idx < DR.cap) dirty_data[DR.base + 1u + idx] = v;
 }
 
 void main() {

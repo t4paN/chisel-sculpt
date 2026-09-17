@@ -187,10 +187,11 @@ bool ComputeState::init_smooth() {
         { BIND_DIRTY_VERTS,  gpu::Bind::StorageReadWrite, 0 },
         { BIND_ALPHA_TEX,    gpu::Bind::StorageRead,      0 },
         { BIND_ALPHA_PARAMS, gpu::Bind::Uniform,          48 },
+        { BIND_DIRTY_REGION, gpu::Bind::Uniform,          sizeof(DirtyRegionGPU) },
         { BIND_PARAMS,       gpu::Bind::Uniform,          sizeof(SmoothAccumParamsGPU) },
     };
     smooth_accum_pipeline = gpu::create_compute_pipeline(gpu_dev,
-                                gpu::embedded_shader("smooth_accum"), accum_layout, 6);
+                                gpu::embedded_shader("smooth_accum"), accum_layout, 7);
     if (!smooth_accum_pipeline.handle) {
         std::printf("[compute] smooth_accum pipeline failed to compile\n");
         return false;
@@ -268,8 +269,6 @@ void ComputeState::dispatch_smooth(const SmoothAccumParams& p,
     // accum clear + dirty-counter reset stay raw GL (GL-owned buffers).
     clear_accum_buffer();
     ensure_smooth_dirty_buffer(vc);
-    uint32_t zero = 0;
-    gpu::write_buffer(gpu_dev, smooth_dirty_ssbo, 0, &zero, sizeof(zero));
 
     // ---- Pass 1: accum (world-distance gate → accum.w + dirty list) ----
     SmoothAccumParamsGPU ua = {};
@@ -289,9 +288,10 @@ void ComputeState::dispatch_smooth(const SmoothAccumParams& p,
             { BIND_DIRTY_VERTS,  &smooth_dirty_ssbo, smooth_dirty_ssbo.size },
             { BIND_ALPHA_TEX,    &alpha_tex_ssbo,   (uint64_t)alpha_tex_w * alpha_tex_h * sizeof(float) },
             { BIND_ALPHA_PARAMS, &alpha_params_ubo, 48 },
+            { BIND_DIRTY_REGION, &dirty_region_ubo,  sizeof(DirtyRegionGPU) },
             { BIND_PARAMS,       &smooth_accum_ubo, sizeof(SmoothAccumParamsGPU) },
         };
-        gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, smooth_accum_pipeline, bg, 6);
+        gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, smooth_accum_pipeline, bg, 7);
         gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
         gpu::dispatch(b, smooth_accum_pipeline, grp, (vc + 255u) / 256u);
         gpu::submit(b);
@@ -338,30 +338,34 @@ void ComputeState::dispatch_smooth(const SmoothAccumParams& p,
     gpu::release_bind_group(apply_grp);
 }
 
-void ComputeState::ensure_smooth_dirty_buffer(uint32_t max_verts) {
-    if (smooth_dirty_ssbo.handle && max_verts <= smooth_dirty_capacity) return;
+// Arena budget. Peak live id volume across a full sculpting session (measured at
+// 5M tris, fast strokes and huge brushes alike) topped out around 23 MB, so 32 MB
+// leaves room and still costs less than the mesh's own position buffer. Running
+// out is not an error — dirty_arena_alloc fails and the caller stalls — so this
+// trades VRAM against how often a very fast stroke has to wait.
+static constexpr uint32_t kDirtyArenaBudgetWords = (32u * 1024u * 1024u) / 4u;
 
+void ComputeState::ensure_smooth_dirty_buffer(uint32_t max_verts) {
     uint32_t alloc = std::max(max_verts, 4096u);
+    // Word 0 is a permanent bit bucket, never part of the ring: a dab that fails to
+    // get a region still runs its kernels, and they will atomically bump whatever word
+    // `base` names. Aiming those writes at word 0 (with cap 0, so no ids are stored)
+    // keeps them away from a region another dab is still reading.
+    //
+    // One region must always be able to hold a worst-case dab (every vertex), so the
+    // arena is at least that big even when the budget is smaller — at which point it
+    // holds exactly one dab and every dab stalls, which is slow but still correct.
+    uint64_t want = std::max((uint64_t)kDirtyArenaBudgetWords, (uint64_t)alloc + 2u);
+    if (smooth_dirty_ssbo.handle && max_verts <= smooth_dirty_capacity
+        && dirty_arena_words >= want)
+        return;
+
     gpu::release_buffer(smooth_dirty_ssbo);
     smooth_dirty_ssbo = gpu::create_buffer(gpu_dev, nullptr,
-                                           (uint64_t)(alloc + 1) * sizeof(uint32_t), gpu::Usage::Storage);
+                                           want * sizeof(uint32_t), gpu::Usage::Storage);
     smooth_dirty_capacity = alloc;
-}
-
-uint32_t ComputeState::readback_smooth_dirty(std::vector<uint32_t>& out) {
-    out.clear();
-    if (!smooth_dirty_ssbo.handle) return 0;
-
-    uint32_t count = 0;
-    gpu::read_buffer(gpu_dev, smooth_dirty_ssbo, 0, sizeof(uint32_t), &count);
-
-    if (count > 0) {
-        if (count > smooth_dirty_capacity) count = smooth_dirty_capacity;
-        out.resize(count);
-        gpu::read_buffer(gpu_dev, smooth_dirty_ssbo, sizeof(uint32_t),
-                         count * sizeof(uint32_t), out.data());
-    }
-    return count;
+    dirty_arena_words = (uint32_t)want;
+    dirty_arena_reset();
 }
 
 uint32_t ComputeState::readback_accum_dirty(uint32_t vertex_count, std::vector<uint32_t>& out) {

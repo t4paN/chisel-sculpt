@@ -21,18 +21,21 @@ struct Params {
     _pad0        : u32,
 };
 
-struct Dirty {
-    count : atomic<u32>,
-    ids   : array<u32>,
+struct DirtyRegion {
+    base : u32,   // word offset of this dab's region inside the arena
+    cap  : u32,   // ids it can hold; the counter deliberately runs past this
+    _p0  : u32,
+    _p1  : u32,
 };
 
 @group(0) @binding(0)  var<storage, read>       positions  : array<f32>;
 @group(0) @binding(2)  var<storage, read>       indices    : array<u32>;
 @group(0) @binding(4)  var<storage, read>       adj_offset : array<u32>;
 @group(0) @binding(5)  var<storage, read>       adj_list   : array<u32>;
-@group(0) @binding(6)  var<storage, read_write> dirty      : Dirty;
+@group(0) @binding(6)  var<storage, read_write> dirty      : array<atomic<u32>>;
 @group(0) @binding(12) var<storage, read>       mask_buf   : array<f32>;
 @group(0) @binding(28) var<storage, read_write> color_buf  : array<u32>;
+@group(0) @binding(61) var<uniform>             DR        : DirtyRegion;
 @group(0) @binding(63) var<uniform>             P          : Params;
 
 fn brush_falloff(dist : f32, radius : f32) -> f32 {
@@ -109,6 +112,11 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     }
 
     color_buf[v] = pk_rgba;
-    let idx = atomicAdd(&dirty.count, 1u);
-    dirty.ids[idx] = v;
+    let idx = atomicAdd(&dirty[DR.base], 1u);
+    // Bounds-checked: the region is sized from a running estimate, so an
+    // unusually large dab can overrun it. The counter still counts, which is
+    // how the CPU detects it and falls back — never silently truncate here.
+    if (idx < DR.cap) {
+        atomicStore(&dirty[DR.base + 1u + idx], v);
+    }
 }

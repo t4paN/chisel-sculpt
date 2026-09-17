@@ -140,10 +140,11 @@ bool ComputeState::init_draw_apply() {
         { BIND_ACCUM,       gpu::Bind::StorageRead,      0 },
         { BIND_DIRTY_VERTS, gpu::Bind::StorageReadWrite, 0 },
         { BIND_MASK,        gpu::Bind::StorageRead,      0 },
+        { BIND_DIRTY_REGION, gpu::Bind::Uniform,          sizeof(DirtyRegionGPU) },
         { BIND_PARAMS,      gpu::Bind::Uniform,          sizeof(VCountParamsGPU) },
     };
     draw_apply_pipeline = gpu::create_compute_pipeline(gpu_dev, gpu::embedded_shader("draw_apply"),
-                                                       layout, 5);
+                                                       layout, 6);
     if (!draw_apply_pipeline.handle) {
         std::printf("[compute] draw_apply pipeline failed to compile\n");
         return false;
@@ -275,17 +276,16 @@ void ComputeState::dispatch_draw_apply(const gpu::Buffer& pos_vbo, uint32_t vert
     VCountParamsGPU u = { vc, 0, 0, 0 };
     gpu::write_buffer(gpu_dev, draw_vcount_ubo, 0, &u, sizeof(u));
 
-    uint32_t zero = 0;
-    gpu::write_buffer(gpu_dev, smooth_dirty_ssbo, 0, &zero, sizeof(zero));
 
     const gpu::BindBufferEntry bg[] = {
         { BIND_POSITIONS,   &pos_vbo,           (uint64_t)vc * 3u * sizeof(float) },
         { BIND_ACCUM,       &accum_src,         (uint64_t)vc * 4u * sizeof(uint32_t) },
-        { BIND_DIRTY_VERTS, &smooth_dirty_ssbo, (uint64_t)(vc + 1u) * sizeof(uint32_t) },
+        { BIND_DIRTY_VERTS, &smooth_dirty_ssbo, smooth_dirty_ssbo.size },
         { BIND_MASK,        &mask_ssbo,         (uint64_t)vc * sizeof(float) },
+        { BIND_DIRTY_REGION, &dirty_region_ubo,  sizeof(DirtyRegionGPU) },
         { BIND_PARAMS,      &draw_vcount_ubo,   sizeof(VCountParamsGPU) },
     };
-    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, draw_apply_pipeline, bg, 5);
+    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, draw_apply_pipeline, bg, 6);
 
     gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
     gpu::dispatch(b, draw_apply_pipeline, grp, (vc + 255u) / 256u);

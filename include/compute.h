@@ -57,11 +57,26 @@ enum ComputeBinding : GLuint {
     BIND_CASCADE_SRC       = 42, // float3 coarse positions (replay pass input / final pos for normals)
     BIND_CASCADE_DST       = 43, // float3 fine positions (replay pass output, disp applied in place)
     BIND_CASCADE_MID       = 44, // uint4 per midpoint: v0,v1,opp0,opp1 (cached SubdivStencil mid table)
+    // Per-dab dirty-list region (base word + id capacity) for the arena below. Shared
+    // by every kernel that appends to the dirty list, so their own Params blocks stay
+    // untouched. Written once per dab by set_dirty_region().
+    BIND_DIRTY_REGION      = 61,
     BIND_ALPHA_PARAMS      = 62, // 48-byte AlphaParams UBO (per-dab stamp frame) — shared dab stamp
     // Reserved high slot for the per-dispatch std140 Params UBO that replaces loose
     // GL uniforms on the gpu:: seam (see webgpu-port-plan.md / CONVENTIONS.md). Every
     // ported kernel binds its *ParamsGPU block here.
     BIND_PARAMS            = 63,
+};
+
+// std140 payload for BIND_DIRTY_REGION — 16 bytes, shared by every dirty-writing
+// kernel. `cap` is how many ids the region can hold; a kernel MUST bounds-check its
+// atomic index against it, and the counter deliberately keeps counting past it so the
+// CPU can detect the overflow (see take_count_list_read's out_total).
+struct DirtyRegionGPU {
+    uint32_t base;   // word offset of the region's counter inside the arena
+    uint32_t cap;    // ids the region can hold (excludes the counter word)
+    uint32_t _pad0;
+    uint32_t _pad1;
 };
 
 struct DrawAccumParams {
@@ -467,9 +482,26 @@ struct ComputeState {
     gpu::Buffer dirty_verts_ssbo;
     uint32_t dirty_verts_capacity;
 
-    // Smooth compact dirty list SSBO: [count, v0, v1, ...] written by smooth_accum — seam-owned (Step 2 cont)
-    gpu::Buffer smooth_dirty_ssbo;
-    uint32_t smooth_dirty_capacity;  // max vertex IDs (excludes counter slot)
+    // Per-dab dirty-list ARENA. Was one [count, v0, v1, ...] buffer sized to
+    // vertex_count and rewritten from index 0 by every dab, which forced each dab's
+    // readback to be sized to the WHOLE capacity rather than to what the dab actually
+    // touched — ~10 MB per dab at 5M tris, and since dab rate rises with cursor speed
+    // the waste scaled with stroke speed.
+    //
+    // Now a ring arena: each dab gets its own region [base, base + 1 + cap), so its
+    // ids survive until its read lands and the read is sized to `cap`. Word 0 of a
+    // region is its atomic counter; ids follow. Regions retire FIFO as reads land.
+    //
+    // `cap` is a PERFORMANCE knob, not a safety one. Undersizing it is detected (the
+    // counter deliberately runs past cap) and recovered from (the stroke snapshots
+    // every vertex), so being wrong costs time and never loses a vertex.
+    gpu::Buffer dirty_region_ubo;    // DirtyRegionGPU at BIND_DIRTY_REGION
+    gpu::Buffer smooth_dirty_ssbo;   // the arena
+    uint32_t smooth_dirty_capacity;  // max ids one region could ever need (= vertex_count)
+    uint32_t dirty_arena_words;      // total words in the arena
+    uint32_t dirty_arena_head;       // bump cursor (next free word)
+    uint32_t dirty_arena_tail;       // oldest live region's first word
+    uint32_t dirty_arena_live;       // words currently reserved by in-flight dabs
 
     // Remesh GPU passes — ported onto the gpu:: seam (Seam Step 2b). One-shot /
     // user-paced ops (not strokes), so CPU readback is allowed. The remesh-specific
@@ -606,20 +638,42 @@ struct ComputeState {
     // Ensure the smooth compact dirty list SSBO is large enough for max_verts IDs.
     void ensure_smooth_dirty_buffer(uint32_t max_verts);
 
-    // Read back the compact dirty list written by smooth_accum.
-    // Returns the count; fills out with vertex IDs.
-    uint32_t readback_smooth_dirty(std::vector<uint32_t>& out);
-
     // Async twins of the count+list readbacks (dirty list / move-affected list):
     // kick right after the dab's dispatches, take on a later frame once the ticket
     // is ready — no in-frame GPU sync. One ticket copies the count word plus the
-    // full capacity; take() trims to the count. `words` echoes the copied u32 count
-    // (capacity can change between kick and take across topology edits).
+    // ids; take() trims to the count. `words` echoes the copied u32 count (capacity
+    // can change between kick and take across topology edits).
     gpu::ReadTicket kick_count_list_read(const gpu::Buffer& buf, uint32_t capacity,
-                                         uint32_t& words);
+                                         uint32_t& words, uint32_t word_offset = 0);
+    // out_total, when given, receives the region's counter — how many ids the dab
+    // TRIED to append. total > out.size() means the region overflowed and the surplus
+    // ids were never written anywhere, so the caller must fall back to a whole-mesh
+    // snapshot for that stroke rather than silently continue.
     bool take_count_list_read(gpu::ReadTicket t, uint32_t words,
-                              std::vector<uint32_t>& out);
-    gpu::ReadTicket kick_dirty_read(uint32_t& words);          // smooth_dirty_ssbo
+                              std::vector<uint32_t>& out, uint32_t* out_total = nullptr);
+    gpu::ReadTicket kick_dirty_read(uint32_t base, uint32_t cap, uint32_t& words);
+
+    // Upload the region the next dab's kernels must append into, and zero its counter.
+    // Call once per dab BEFORE its dispatches; every dirty-writing kernel reads it at
+    // BIND_DIRTY_REGION.
+    void set_dirty_region(uint32_t base, uint32_t cap);
+
+    // ---- dirty arena ----
+    // Reserve a region for one dab. False = no room right now; the caller must drain
+    // an in-flight read and retry rather than proceed without a region.
+    bool dirty_arena_alloc(uint32_t cap, uint32_t& base_out, uint32_t& footprint_out);
+    // Retire the oldest live region. FIFO only — the drain loop lands dabs in order.
+    void dirty_arena_retire(uint32_t footprint);
+    // Give back the region just allocated, for a dab that bailed before kicking a read.
+    // Rolls the bump cursor back; must NOT go through retire(), which frees the far end.
+    void dirty_arena_unalloc(uint32_t footprint);
+    // Drop every reservation (stroke begin/end, topology change).
+    void dirty_arena_reset();
+    // Usable ring size. Word 0 of the arena is a permanent bit bucket (see
+    // ensure_smooth_dirty_buffer), so the ring is one word shorter than the buffer.
+    uint32_t dirty_arena_ring_words() const;
+    // Largest cap a single region can hold given the arena size.
+    uint32_t dirty_arena_max_cap() const;
     gpu::ReadTicket kick_move_affected_read(uint32_t& words);  // move_affected_ssbo
     std::vector<uint32_t> count_list_scratch;                  // take() staging (persistent)
 
@@ -716,7 +770,7 @@ struct ComputeState {
 
     // Dispatch the mask paint shader: per-vertex distance check, writes mask VBO
     // directly. Uses smooth_dirty_ssbo for the compact dirty list. Caller reads
-    // back dirty list via readback_smooth_dirty.
+    // back dirty list via the per-dab arena region (kick_dirty_read).
     void dispatch_mask_paint(const MaskPaintParams& params, const gpu::Buffer& pos_vbo);
     // Mask-smooth: reuses MaskPaintParams (paint_strength = blend amount). Averages
     // neighbour mask values via CSR adjacency; geometry untouched.

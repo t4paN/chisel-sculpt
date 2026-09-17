@@ -2,6 +2,57 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-09-17 — Each dab reads back only its own dirty list
+
+*Builds clean on both native backends and the native wgpu run reports zero device
+errors, but this has **not** been hand-sculpted yet, and the browser/Tint gate has not
+been run. Changelog written while the reasoning was fresh, ahead of the test.*
+
+Every dab read its dirty-vertex list back at the buffer's **full capacity** rather than
+at the count the GPU had just written — about **10 MB per dab at 5M tris**, whether the
+dab touched four hundred vertices or eight hundred thousand. Because dabs are placed by
+distance along the cursor path, dab rate rises with how fast you stroke, so the waste
+scaled with stroke speed: the faster the stroke, the more bus traffic per unit of actual
+sculpting.
+
+The dirty buffer becomes a **ring arena**. A dab reserves `[base, base + 1 + cap)` before
+its kernels run, so its ids survive until its read lands and the read is sized to `cap`
+instead of to the whole mesh. Regions retire in FIFO order as reads land. `cap` is four
+times the largest of the last thirty-two landed counts; the window carries across strokes,
+because recalibrating per stroke made every stroke reopen with full-size reads while the
+window refilled. It rescales by **radius²** when the brush grows — a dab's footprint is an
+area — and is dropped only when `vertex_count` changes, since a level switch or a remesh
+renames every vertex.
+
+**The sizing is a performance knob, not a safety mechanism, and that distinction is the
+whole design.** Two previous attempts at this problem sized a window and let the size *be*
+the safety: too small and ids were silently dropped, and a dropped id is a vertex that
+never gets its pre-stroke snapshot and never reverts, so the surface tears after a few
+undos. Here the kernels bounds-check their append but let the counter **deliberately run
+past `cap`** — that overrun is the only evidence a region was too small, since the surplus
+ids were never written anywhere — and the stroke then falls back to snapshotting every
+vertex. Slow and loud, but exact. Once being wrong cannot corrupt anything, the estimate is
+free to be generous.
+
+The ring's accounting invariant, `tail + live == head`, is **checked in the allocator**
+rather than reasoned about. This bookkeeping has been got wrong before, in a way worth
+recording: releasing a bailed dab's region through the retire path freed from the *tail*,
+which told the ring that the *oldest* region's words were free while a dab was still
+reading them. Once the ring wrapped, two dabs shared one region, a dab's ids were not the
+ids its own kernels wrote, and undo restored the wrong vertices — surfacing a mile from its
+cause as corruption after deep undo across subdiv levels. Dabs that bail now roll the head
+back instead, and the invariant refuses loudly rather than overlapping in silence.
+
+**Word 0 of the arena is a permanent bit bucket.** A dab that cannot get a region still
+runs its kernels, and they will atomically bump whatever word `base` names; aiming those at
+word 0 with a cap of zero keeps them off a region another dab is still reading. Allocation
+never blocks waiting for room — on the web the callbacks that retire regions are delivered
+by the event loop, so spinning there would deadlock the frame. It lands whatever reads are
+already ready, then settles for a smaller region, then takes the snapshot path.
+
+Also lands the `CHISEL_DIRTY_HIST=1` probe, which measures what a dab actually touches
+against what is read back. Diagnostic only, and marked for deletion once the numbers are in.
+
 ## 2026-09-17 — The native WebGPU build starts on Wayland
 
 *Verified by launching both backends; not a hand-sculpted test.*

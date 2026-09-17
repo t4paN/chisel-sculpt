@@ -36,9 +36,10 @@ bool ComputeState::init_density() {
         { BIND_DIRTY_VERTS,  gpu::Bind::StorageReadWrite, 0 },
         { BIND_ALPHA_TEX,    gpu::Bind::StorageRead,      0 },
         { BIND_ALPHA_PARAMS, gpu::Bind::Uniform,          48 },
+        { BIND_DIRTY_REGION, gpu::Bind::Uniform,          sizeof(DirtyRegionGPU) },
         { BIND_PARAMS,       gpu::Bind::Uniform,          sizeof(DensityParamsGPU) },
     };
-    density_pipeline = gpu::create_compute_pipeline(gpu_dev, src, layout, 6);
+    density_pipeline = gpu::create_compute_pipeline(gpu_dev, src, layout, 7);
     if (!density_pipeline.handle) {
         std::printf("[compute] density_paint pipeline failed to compile\n");
         return false;
@@ -53,10 +54,11 @@ bool ComputeState::init_density() {
         { BIND_INDICES,          gpu::Bind::StorageRead,      0 },
         { BIND_ADJACENCY_OFFSET, gpu::Bind::StorageRead,      0 },
         { BIND_ADJACENCY_LIST,   gpu::Bind::StorageRead,      0 },
+        { BIND_DIRTY_REGION, gpu::Bind::Uniform,          sizeof(DirtyRegionGPU) },
         { BIND_PARAMS,           gpu::Bind::Uniform,          sizeof(DensityParamsGPU) },
     };
     density_smooth_pipeline = gpu::create_compute_pipeline(gpu_dev,
-                                  gpu::embedded_shader("density_smooth"), smooth_layout, 7);
+                                  gpu::embedded_shader("density_smooth"), smooth_layout, 8);
     if (density_smooth_pipeline.handle) {
         density_smooth_ubo = gpu::create_buffer(gpu_dev, nullptr, sizeof(DensityParamsGPU),
                                                 gpu::Usage::Uniform);
@@ -88,8 +90,6 @@ void ComputeState::dispatch_density_paint(const MaskPaintParams& p, const gpu::B
 
     const uint32_t vc = p.vertex_count;
 
-    uint32_t zero = 0;
-    gpu::write_buffer(gpu_dev, smooth_dirty_ssbo, 0, &zero, sizeof(zero));
 
     DensityParamsGPU dp = {};
     dp.anchor_a[0] = p.anchor_a_x; dp.anchor_a[1] = p.anchor_a_y; dp.anchor_a[2] = p.anchor_a_z;
@@ -104,12 +104,13 @@ void ComputeState::dispatch_density_paint(const MaskPaintParams& p, const gpu::B
     const gpu::BindBufferEntry bg[] = {
         { BIND_POSITIONS,    &pos_vbo,           (uint64_t)vc * 3u * sizeof(float) },
         { BIND_DENSITY,      &density_ssbo,      (uint64_t)vc * sizeof(float) },
-        { BIND_DIRTY_VERTS,  &smooth_dirty_ssbo, (uint64_t)(vc + 1u) * sizeof(uint32_t) },
+        { BIND_DIRTY_VERTS,  &smooth_dirty_ssbo, smooth_dirty_ssbo.size },
         { BIND_ALPHA_TEX,    &alpha_tex_ssbo,    (uint64_t)alpha_tex_w * alpha_tex_h * sizeof(float) },
         { BIND_ALPHA_PARAMS, &alpha_params_ubo,  48 },
+        { BIND_DIRTY_REGION, &dirty_region_ubo,  sizeof(DirtyRegionGPU) },
         { BIND_PARAMS,       &density_params_ubo, sizeof(DensityParamsGPU) },
     };
-    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, density_pipeline, bg, 6);
+    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, density_pipeline, bg, 7);
 
     gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
     gpu::dispatch(b, density_pipeline, grp, (vc + 255u) / 256u);
@@ -124,8 +125,6 @@ void ComputeState::dispatch_density_smooth(const MaskPaintParams& p, const gpu::
 
     ensure_smooth_dirty_buffer(vc);
 
-    uint32_t zero = 0;
-    gpu::write_buffer(gpu_dev, smooth_dirty_ssbo, 0, &zero, sizeof(zero));
 
     DensityParamsGPU dp = {};
     dp.anchor_a[0] = p.anchor_a_x; dp.anchor_a[1] = p.anchor_a_y; dp.anchor_a[2] = p.anchor_a_z;
@@ -140,13 +139,14 @@ void ComputeState::dispatch_density_smooth(const MaskPaintParams& p, const gpu::
     const gpu::BindBufferEntry bg[] = {
         { BIND_POSITIONS,        &pos_vbo,           (uint64_t)vc * 3u * sizeof(float) },
         { BIND_DENSITY,          &density_ssbo,      (uint64_t)vc * sizeof(float) },
-        { BIND_DIRTY_VERTS,      &smooth_dirty_ssbo, (uint64_t)(vc + 1u) * sizeof(uint32_t) },
+        { BIND_DIRTY_VERTS,      &smooth_dirty_ssbo, smooth_dirty_ssbo.size },
         { BIND_INDICES,          &index_ebo,         index_ebo.size },
         { BIND_ADJACENCY_OFFSET, &adjacency_offset_ssbo, adjacency_offset_ssbo.size },
         { BIND_ADJACENCY_LIST,   &adjacency_list_ssbo,   adjacency_list_ssbo.size },
+        { BIND_DIRTY_REGION, &dirty_region_ubo,  sizeof(DirtyRegionGPU) },
         { BIND_PARAMS,           &density_smooth_ubo, sizeof(DensityParamsGPU) },
     };
-    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, density_smooth_pipeline, bg, 7);
+    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, density_smooth_pipeline, bg, 8);
 
     gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
     gpu::dispatch(b, density_smooth_pipeline, grp, (vc + 255u) / 256u);

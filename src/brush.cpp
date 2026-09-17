@@ -6,8 +6,10 @@
 #include <cstring>
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cassert>
 #include <cstdint>
+#include <vector>
 
 int BrushStroke::debug_stride_override = 0;
 int BrushStroke::debug_test_vertex     = -1;
@@ -195,6 +197,232 @@ static uint32_t mirror_of(uint32_t v, const Mesh& m) {
 
 // --- Per-dab async dirty readbacks ---
 
+// --- Dirty-read histogram (diagnostic, CHISEL_DIRTY_HIST=1) ---------------
+// Measures what a dab ACTUALLY touches, against what kick_dirty_read copies
+// (the buffer's whole capacity, sized to vertex_count). Nobody has ever looked
+// at the real numbers; they size the entire per-dab readback opportunity.
+// Read-only: records counts, changes no behaviour. Delete once the numbers are in.
+namespace {
+struct DirtyHist {
+    bool     on;
+    bool     probed;
+    uint64_t dabs, words_read, ids_got, zero_dabs;
+    uint64_t g_dabs, g_words, g_ids, g_zero;
+    uint32_t vc;
+    std::vector<uint32_t> counts;   // this stroke, for quantiles
+
+    DirtyHist() : on(false), probed(false), dabs(0), words_read(0), ids_got(0),
+                  zero_dabs(0), g_dabs(0), g_words(0), g_ids(0), g_zero(0), vc(0) {
+        counts.reserve(8192);
+    }
+    bool enabled() {
+        if (!probed) {
+            const char* e = getenv("CHISEL_DIRTY_HIST");
+            on = e && *e && *e != '0';
+            probed = true;
+        }
+        return on;
+    }
+    void record(uint32_t count, uint32_t words, uint32_t vertex_count) {
+        if (!enabled()) return;
+        dabs++; words_read += words; ids_got += count;
+        if (count == 0) zero_dabs++;
+        if (vertex_count) vc = vertex_count;
+        counts.push_back(count);
+    }
+    static const char* bucket_name(int i) {
+        static const char* n[] = {"0","1-255","256-511","512-1K","1K-2K","2K-4K",
+                                  "4K-8K","8K-16K","16K-32K","32K-64K","64K-128K",
+                                  "128K-256K","256K-512K","512K-1M",">=1M"};
+        return n[i];
+    }
+    static int bucket_of(uint32_t c) {
+        if (c == 0) return 0;
+        if (c < 256) return 1;
+        int b = 2;
+        for (uint32_t lim = 512; b < 14; lim <<= 1, b++)
+            if (c < lim) return b;
+        return 14;
+    }
+    void report() {
+        if (!enabled() || dabs == 0) return;
+        std::vector<uint32_t> s = counts;
+        std::sort(s.begin(), s.end());
+        uint32_t med = s[s.size() / 2];
+        uint32_t p95 = s[(size_t)(s.size() * 95 / 100)];
+        double read_mb  = (double)words_read * 4.0 / (1024.0 * 1024.0);
+        double used_mb  = (double)ids_got    * 4.0 / (1024.0 * 1024.0);
+        std::printf("[dirty] stroke: %llu dabs over %u verts | read %.1f MB, payload %.3f MB (%.2f%%) | potential %.0fx\n",
+                    (unsigned long long)dabs, vc, read_mb, used_mb,
+                    read_mb > 0 ? 100.0 * used_mb / read_mb : 0.0,
+                    used_mb > 0 ? read_mb / used_mb : 0.0);
+        std::printf("[dirty]   ids/dab: min %u  med %u  p95 %u  max %u  |  empty dabs %llu (%.0f%%)\n",
+                    s.front(), med, p95, s.back(), (unsigned long long)zero_dabs,
+                    100.0 * (double)zero_dabs / (double)dabs);
+        int h[15] = {0};
+        for (uint32_t c : counts) h[bucket_of(c)]++;
+        std::printf("[dirty]   hist:");
+        for (int i = 0; i < 15; i++)
+            if (h[i]) std::printf("  %s:%d", bucket_name(i), h[i]);
+        std::printf("\n");
+        g_dabs += dabs; g_words += words_read; g_ids += ids_got; g_zero += zero_dabs;
+        std::printf("[dirty]   session: %llu dabs, read %.2f GB, payload %.2f MB (%.3f%%)\n",
+                    (unsigned long long)g_dabs,
+                    (double)g_words * 4.0 / (1024.0 * 1024.0 * 1024.0),
+                    (double)g_ids * 4.0 / (1024.0 * 1024.0),
+                    g_words ? 100.0 * (double)g_ids / (double)g_words : 0.0);
+        std::fflush(stdout);
+        dabs = words_read = ids_got = zero_dabs = 0;
+        counts.clear();
+    }
+};
+DirtyHist g_dirty_hist;
+}  // namespace
+
+// Overflow fallback. A dab whose region was too small had its surplus ids dropped on
+// the GPU — they exist nowhere, so there is no way to learn which vertices they were.
+// The only exact recovery is to snapshot the whole channel once, which costs a pass
+// over the mesh and keeps undo correct. Loud on purpose; it should never be routine.
+static void snapshot_whole_mesh(BrushStroke& bs, DabContext& ctx, uint8_t kind) {
+    const uint32_t vc = ctx.mesh.vertex_count();
+    if (kind == BrushStroke::DAB_GEO) {
+        for (uint32_t v = 0; v < vc; v++) {
+            if (bs.snap_flag[v]) continue;
+            bs.snap_flag[v] = true;
+            if (bs.stroke_writes_to_base) {
+                bs.snap_x[v] = ctx.mesh.pos_x[v];
+                bs.snap_y[v] = ctx.mesh.pos_y[v];
+                bs.snap_z[v] = ctx.mesh.pos_z[v];
+            } else {
+                bs.snap_x[v] = ctx.multires.disp[bs.stroke_disp_index][v].x;
+                bs.snap_y[v] = ctx.multires.disp[bs.stroke_disp_index][v].y;
+                bs.snap_z[v] = ctx.multires.disp[bs.stroke_disp_index][v].z;
+            }
+            bs.snap_list.push_back(v);
+        }
+    } else if (kind == BrushStroke::DAB_MASK) {
+        if (bs.mask.snap_flag.empty()) {
+            bs.mask.snap_flag.assign(vc, false);
+            bs.mask.snap.assign(vc, 0.0f);
+        }
+        for (uint32_t v = 0; v < vc; v++) {
+            if (bs.mask.snap_flag[v]) continue;
+            bs.mask.snap_flag[v] = true;
+            bs.mask.snap[v] = (v < (uint32_t)ctx.mesh.mask.size()) ? ctx.mesh.mask[v] : 0.0f;
+            bs.mask.snap_list.push_back(v);
+        }
+    } else if (kind == BrushStroke::DAB_COLOR) {
+        if (bs.color.snap_flag.empty()) {
+            bs.color.snap_flag.assign(vc, false);
+            bs.color.snap.assign(vc, 0xFFFFFFFFu);
+        }
+        for (uint32_t v = 0; v < vc; v++) {
+            if (bs.color.snap_flag[v]) continue;
+            bs.color.snap_flag[v] = true;
+            bs.color.snap[v] = (v < (uint32_t)ctx.mesh.color.size()) ? ctx.mesh.color[v] : 0xFFFFFFFFu;
+            bs.color.snap_list.push_back(v);
+        }
+    } else {
+        if (bs.density.snap_flag.empty()) {
+            bs.density.snap_flag.assign(vc, false);
+            bs.density.snap.assign(vc, 0.5f);
+        }
+        for (uint32_t v = 0; v < vc; v++) {
+            if (bs.density.snap_flag[v]) continue;
+            bs.density.snap_flag[v] = true;
+            bs.density.snap[v] = (v < (uint32_t)ctx.mesh.density.size()) ? ctx.mesh.density[v] : 0.5f;
+            bs.density.snap_list.push_back(v);
+        }
+    }
+}
+
+// Reserve this dab's slice of the dirty arena. Must run before the dab's kernels,
+// because they append into whatever region set_dirty_region last published.
+void BrushStroke::begin_dab(DabContext& ctx) {
+    ComputeState& cs = ctx.compute;
+
+    // A dab can bail after reserving (spacing, no anchor, fully masked) and never kick
+    // a read. Catch that here rather than at every bail site: the region is still the
+    // newest one, so it rolls back off the head.
+    if (dab_region_valid) {
+        cs.dirty_arena_unalloc(dab_footprint);
+        dab_region_valid = false;
+    }
+    dab_base = dab_cap = dab_footprint = 0;
+    if (!cs.supported) return;
+
+    const uint32_t vc = ctx.mesh.vertex_count();
+    if (vc == 0) return;
+    cs.ensure_smooth_dirty_buffer(vc);
+
+    // A level switch or a remesh renames every vertex, so past counts mean nothing.
+    if (recent_vc != vc) {
+        recent_n = recent_head = 0;
+        recent_vc = vc;
+        recent_radius = 0.0f;
+    }
+    // Brush size scales a dab's footprint by AREA, so rescale the window instead of
+    // relearning it — otherwise growing the brush overflows every region until the
+    // window refills, which is the exact failure a previous attempt shipped.
+    if (recent_n && recent_radius > 0.0f && anchor_world_radius > 0.0f) {
+        float ratio = (anchor_world_radius * anchor_world_radius)
+                    / (recent_radius * recent_radius);
+        if (ratio > 1.1f || ratio < 0.9f) {
+            for (uint32_t i = 0; i < recent_n; i++) {
+                double scaled = (double)recent_counts[i] * (double)ratio;
+                recent_counts[i] = (uint32_t)std::min(scaled, (double)vc);
+            }
+        }
+    }
+    if (anchor_world_radius > 0.0f) recent_radius = anchor_world_radius;
+
+    // With no history, assume the worst — one full-size region, which self-corrects
+    // as soon as the first dab lands.
+    uint32_t est = vc;
+    if (recent_n) {
+        uint32_t mx = 0;
+        for (uint32_t i = 0; i < recent_n; i++)
+            if (recent_counts[i] > mx) mx = recent_counts[i];
+        est = (mx > vc / kCapSlack) ? vc : mx * kCapSlack;
+        if (est < 1024u) est = 1024u;
+    }
+    if (est > vc) est = vc;
+    const uint32_t max_cap = cs.dirty_arena_max_cap();
+    if (est > max_cap) est = max_cap;
+    if (est == 0) return;
+
+    // Never block waiting for room: on the web the callbacks that retire regions are
+    // delivered by the event loop, so spinning here deadlocks the frame. Land whatever
+    // is already ready, then settle for a smaller region, then give up.
+    uint32_t got = est;
+    bool ok = cs.dirty_arena_alloc(est, dab_base, dab_footprint);
+    if (!ok) {
+        drain_dab_readbacks(ctx);
+        ok = cs.dirty_arena_alloc(est, dab_base, dab_footprint);
+        if (!ok) {
+            uint32_t smaller = est / 4;
+            if (smaller >= 1024u && cs.dirty_arena_alloc(smaller, dab_base, dab_footprint)) {
+                ok = true;
+                got = smaller;
+            }
+        }
+    }
+    if (!ok) {
+        // No region. The kernels still run, so aim their appends at the bit bucket
+        // (cap 0 stores no ids) and take the exact-but-slow path for this stroke.
+        dirty_overflowed = true;
+        cs.set_dirty_region(0, 0);
+        std::printf("[arena] no room for a dab region (live %u of %u words) — stroke "
+                    "falls back to a whole-mesh snapshot\n",
+                    cs.dirty_arena_live, cs.dirty_arena_words);
+        return;
+    }
+
+    dab_cap = got;
+    dab_region_valid = true;
+    cs.set_dirty_region(dab_base, dab_cap);
+}
+
 void BrushStroke::kick_dab_readback(DabContext& ctx, uint8_t kind) {
     // Symmetry sink: every geometry dab ends here (draw/smooth/crease/pinch),
     // with this dab's touched verts in the GPU dirty list. Re-impose exact
@@ -205,14 +433,24 @@ void BrushStroke::kick_dab_readback(DabContext& ctx, uint8_t kind) {
                                                    ctx.mesh.vertex_count(),
                                                    ctx.compute.smooth_dirty_ssbo);
     uint32_t words = 0;
-    gpu::ReadTicket tk = ctx.compute.kick_dirty_read(words);
-    if (!tk) return;
+    gpu::ReadTicket tk = dab_region_valid
+                       ? ctx.compute.kick_dirty_read(dab_base, dab_cap, words) : 0;
+    if (!tk) {
+        if (dab_region_valid) {
+            ctx.compute.dirty_arena_unalloc(dab_footprint);
+            dab_region_valid = false;
+        }
+        return;
+    }
     PendingDab pd;
     pd.tk = tk;
     pd.words = words;
     pd.anchor_x = anchor_pos.x;
     pd.kind = kind;
+    pd.cap = dab_cap;
+    pd.footprint = dab_footprint;
     pending_dabs.push_back(pd);
+    dab_region_valid = false;   // the pending dab owns the region until its read lands
 }
 
 void BrushStroke::drain_dab_readbacks(DabContext& ctx) {
@@ -240,7 +478,29 @@ void BrushStroke::drain_dab_readbacks(DabContext& ctx) {
         if (!gpu::ticket_ready(ctx.compute.gpu_dev, pd.tk)) break;
         pending_dabs.erase(pending_dabs.begin());
         dirty_verts.clear();
-        if (!ctx.compute.take_count_list_read(pd.tk, pd.words, dirty_verts)) continue;
+        uint32_t total = 0;
+        bool took = ctx.compute.take_count_list_read(pd.tk, pd.words, dirty_verts, &total);
+        // Retire before any early-out: the region is done either way, and leaving it
+        // live is what silently wraps the ring onto a region still being read.
+        ctx.compute.dirty_arena_retire(pd.footprint);
+        if (!took) continue;
+        if (total > pd.cap) {
+            // The region was too small and the surplus ids are gone. Recover exactly,
+            // once, then carry on with the truncated list — the snapshot is what undo
+            // needs; normals re-settle on the next dab.
+            std::printf("[arena] dab overflowed its region: %u ids into a %u-id region "
+                        "— whole-mesh snapshot for this stroke\n", total, pd.cap);
+            dirty_overflowed = true;
+            if (!snapped_whole_mesh) {
+                snapshot_whole_mesh(*this, ctx, pd.kind);
+                snapped_whole_mesh = true;
+            }
+        } else {
+            recent_counts[recent_head] = total;
+            recent_head = (recent_head + 1u) % kCountWindow;
+            if (recent_n < kCountWindow) recent_n++;
+        }
+        g_dirty_hist.record((uint32_t)dirty_verts.size(), pd.words, vertex_count);
         if (dirty_verts.empty()) continue;
         if (pd.kind == DAB_GEO) {
             snap_and_mirror_dirty(*this, ctx, pd.anchor_x);
@@ -561,6 +821,12 @@ void BrushStroke::begin(Renderer& renderer, const Camera& cam,
                         bool screen_buffers_fresh) {
     phase = StrokePhase::BEGIN;
     needs_mesh_update = false;
+    // Per-stroke arena state. The count window is deliberately NOT cleared — it
+    // carries across strokes so a stroke does not reopen with full-size reads.
+    dirty_overflowed = false;
+    snapped_whole_mesh = false;
+    dab_region_valid = false;
+    dab_base = dab_cap = dab_footprint = 0;
 
     // Drop any leftover async dab tickets from an aborted stroke (mode switches can
     // force phase=NONE without finalize); their bookkeeping context is gone.
@@ -680,6 +946,9 @@ void BrushStroke::begin(Renderer& renderer, const Camera& cam,
 
 void BrushStroke::apply_smooth(DabContext& ctx, float dab_x, float dab_y,
                                 float strength, float hardness) {
+
+    // Reserve this dab's dirty-list region before any kernel can append to it.
+    begin_dab(ctx);
     dirty_verts.clear();
 
     if (!ctx.compute.supported || !ctx.compute.has_smooth()
@@ -734,6 +1003,9 @@ void BrushStroke::apply_smooth(DabContext& ctx, float dab_x, float dab_y,
 
 void BrushStroke::apply_crease(DabContext& ctx, float dab_x, float dab_y,
                                 float strength, float hardness, bool subtract) {
+
+    // Reserve this dab's dirty-list region before any kernel can append to it.
+    begin_dab(ctx);
     dirty_verts.clear();
 
     set_anchor(ctx.mesh, ctx.cam, dab_x, dab_y, ctx.eff_brush_size, ctx.win_h, ctx.renderer);
@@ -867,6 +1139,9 @@ void BrushStroke::apply_crease(DabContext& ctx, float dab_x, float dab_y,
 
 void BrushStroke::apply_pinch(DabContext& ctx, float dab_x, float dab_y,
                                float strength, float hardness, bool subtract) {
+
+    // Reserve this dab's dirty-list region before any kernel can append to it.
+    begin_dab(ctx);
     dirty_verts.clear();
 
     set_anchor(ctx.mesh, ctx.cam, dab_x, dab_y, ctx.eff_brush_size, ctx.win_h, ctx.renderer);
@@ -930,6 +1205,9 @@ void BrushStroke::apply_pinch(DabContext& ctx, float dab_x, float dab_y,
 void BrushStroke::apply_draw(DabContext& ctx, float dab_x, float dab_y,
                               float strength, float hardness, bool subtract,
                               bool inflate, bool clay) {
+
+    // Reserve this dab's dirty-list region before any kernel can append to it.
+    begin_dab(ctx);
     dirty_verts.clear();
 
     set_anchor(ctx.mesh, ctx.cam, dab_x, dab_y, ctx.eff_brush_size, ctx.win_h, ctx.renderer,
@@ -1261,6 +1539,9 @@ void BrushStroke::post_frame(DabContext& ctx) {
 
 void BrushStroke::apply_mask_gpu(DabContext& ctx, float dab_x, float dab_y,
                                  float strength, float hardness, bool invert) {
+
+    // Reserve this dab's dirty-list region before any kernel can append to it.
+    begin_dab(ctx);
     if (!is_active()) return;
     if (!ctx.compute.supported || !ctx.compute.has_mask()) return;
 
@@ -1296,6 +1577,9 @@ void BrushStroke::apply_mask_gpu(DabContext& ctx, float dab_x, float dab_y,
 
 void BrushStroke::apply_mask_smooth_gpu(DabContext& ctx, float dab_x, float dab_y,
                                         float strength, float hardness) {
+
+    // Reserve this dab's dirty-list region before any kernel can append to it.
+    begin_dab(ctx);
     if (!is_active()) return;
     if (!ctx.compute.supported || !ctx.compute.has_mask_smooth()) return;
 
@@ -1326,6 +1610,9 @@ void BrushStroke::apply_mask_smooth_gpu(DabContext& ctx, float dab_x, float dab_
 
 void BrushStroke::apply_density_gpu(DabContext& ctx, float dab_x, float dab_y,
                                     float strength, float hardness, bool invert) {
+
+    // Reserve this dab's dirty-list region before any kernel can append to it.
+    begin_dab(ctx);
     if (!is_active()) return;
     if (!ctx.compute.supported || !ctx.compute.has_density_kernels()) return;
 
@@ -1360,6 +1647,9 @@ void BrushStroke::apply_density_gpu(DabContext& ctx, float dab_x, float dab_y,
 
 void BrushStroke::apply_density_smooth_gpu(DabContext& ctx, float dab_x, float dab_y,
                                            float strength, float hardness) {
+
+    // Reserve this dab's dirty-list region before any kernel can append to it.
+    begin_dab(ctx);
     if (!is_active()) return;
     if (!ctx.compute.supported || !ctx.compute.has_density_smooth()) return;
 
@@ -1391,6 +1681,9 @@ void BrushStroke::apply_density_smooth_gpu(DabContext& ctx, float dab_x, float d
 
 void BrushStroke::apply_color_gpu(DabContext& ctx, float dab_x, float dab_y,
                                   float strength, float hardness, bool erase) {
+
+    // Reserve this dab's dirty-list region before any kernel can append to it.
+    begin_dab(ctx);
     if (!is_active()) return;
     if (!ctx.compute.supported || !ctx.compute.has_color()) return;
 
@@ -1429,6 +1722,9 @@ void BrushStroke::apply_color_gpu(DabContext& ctx, float dab_x, float dab_y,
 
 void BrushStroke::apply_color_smooth_gpu(DabContext& ctx, float dab_x, float dab_y,
                                          float strength, float hardness) {
+
+    // Reserve this dab's dirty-list region before any kernel can append to it.
+    begin_dab(ctx);
     if (!is_active()) return;
     if (!ctx.compute.supported || !ctx.compute.has_color_smooth()) return;
 
@@ -1655,6 +1951,9 @@ bool BrushStroke::finalize(DabContext& ctx, Mesh& mesh, UndoStack& stack,
         // dispatches partial normals for the late-landing dabs.
         post_frame(ctx);
         if (dab_readbacks_pending()) return false;   // tick again next frame
+        // Every region has retired by here, so the next stroke starts on a clean ring
+        // rather than inheriting a head part-way down the buffer.
+        ctx.compute.dirty_arena_reset();
 
         // Stage 1b: GPU-side pen-up work, then kick the async buffer reads.
         //
@@ -1984,6 +2283,7 @@ bool BrushStroke::finalize(DabContext& ctx, Mesh& mesh, UndoStack& stack,
 }
 
 void BrushStroke::end() {
+    g_dirty_hist.report();
     phase = StrokePhase::NONE;
     needs_mesh_update = false;
     cached_triid.clear();

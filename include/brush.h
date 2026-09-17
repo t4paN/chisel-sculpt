@@ -186,8 +186,35 @@ struct BrushStroke {
         uint32_t words = 0;
         float anchor_x = 0.0f;   // this dab's anchor (mirror-side snap filter)
         uint8_t kind = DAB_GEO;
+        uint32_t cap = 0;        // ids its arena region can hold
+        uint32_t footprint = 0;  // words it reserved (including any wrap padding)
     };
     std::vector<PendingDab> pending_dabs;
+
+    // --- per-dab dirty region (see the arena in ComputeState) ---------------
+    // begin_dab() reserves one before the dab's kernels run; kick_dab_readback()
+    // then reads back that region at its own size instead of the whole mesh's.
+    uint32_t dab_base = 0, dab_cap = 0, dab_footprint = 0;
+    bool     dab_region_valid = false;
+
+    // Sliding window of landed dab counts; the next region is sized from the largest
+    // of them. It survives across strokes because brush size rarely changes between
+    // them, and recalibrating per stroke made every stroke pay full-size reads while
+    // the window filled.
+    static constexpr uint32_t kCountWindow = 32;
+    static constexpr uint32_t kCapSlack    = 4;    // region = kCapSlack x recent max
+    uint32_t recent_counts[kCountWindow] = {};
+    uint32_t recent_n = 0, recent_head = 0;
+    uint32_t recent_vc = 0;              // window belongs to this topology only
+    float    recent_radius = 0.0f;       // ...and to this world brush radius
+
+    // A dab overflowed its region: the surplus ids were never written, so they cannot
+    // be recovered and this stroke must snapshot every vertex to keep undo exact.
+    // Slow, loud, and should be rare — see drain_dab_readbacks.
+    bool dirty_overflowed = false;
+    bool snapped_whole_mesh = false;   // the fallback above already ran this stroke
+
+    void begin_dab(DabContext& ctx);
     void kick_dab_readback(DabContext& ctx, uint8_t kind);
     void drain_dab_readbacks(DabContext& ctx);
     bool dab_readbacks_pending() const { return !pending_dabs.empty() || move.capture_tk != 0; }
