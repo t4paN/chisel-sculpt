@@ -5,12 +5,21 @@
 // weight > 0 AND the vert sharing the anchor's x sign (straddle tris near the seam
 // don't overwrite anchor-side twins from the far side). 16-byte std140 Params UBO.
 #version 430
-layout(local_size_x = 256) in;
+layout(local_size_x = 64) in;
 
 layout(std430, binding = 0)  buffer PosBuf             { float positions[]; };
 layout(std430, binding = 3)  readonly buffer AccumBuf  { uint accum[]; };
 layout(std430, binding = 7)  readonly buffer MirrorBuf { uint mirror_map[]; };
 layout(std430, binding = 12) readonly buffer MaskBuf   { float mask[]; };
+
+layout(std430, binding = 45) readonly buffer BlockListBuf { uint block_list[]; };
+
+layout(std140, binding = 61) uniform DirtyRegion {
+    uint base;
+    uint cap;
+    uint block_mode;   // 1 = one workgroup per active block
+    uint _p1;
+} DR;
 
 layout(std140, binding = 63) uniform Params {
     uint  vertex_count;   // 0
@@ -20,7 +29,10 @@ layout(std140, binding = 63) uniform Params {
 } P;
 
 void main() {
-    uint v = gl_GlobalInvocationID.x;
+    // Dispatch culling: one workgroup per ACTIVE block; entry 0 is the count, hence +1.
+    uint v = (DR.block_mode == 1u)
+           ? (block_list[1u + gl_WorkGroupID.x] * 64u + gl_LocalInvocationID.x)
+           : gl_GlobalInvocationID.x;
     if (v >= P.vertex_count) return;
 
     float w = uintBitsToFloat(accum[v * 4u + 3u]);

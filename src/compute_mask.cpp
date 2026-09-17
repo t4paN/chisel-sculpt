@@ -36,10 +36,11 @@ bool ComputeState::init_mask() {
         { BIND_DIRTY_VERTS,  gpu::Bind::StorageReadWrite, 0 },
         { BIND_ALPHA_TEX,    gpu::Bind::StorageRead,      0 },
         { BIND_ALPHA_PARAMS, gpu::Bind::Uniform,          48 },
+        { BIND_BLOCK_LIST,   gpu::Bind::StorageRead,      0 },
         { BIND_DIRTY_REGION, gpu::Bind::Uniform,          sizeof(DirtyRegionGPU) },
         { BIND_PARAMS,       gpu::Bind::Uniform,          sizeof(MaskParamsGPU) },
     };
-    mask_pipeline = gpu::create_compute_pipeline(gpu_dev, src, layout, 7);
+    mask_pipeline = gpu::create_compute_pipeline(gpu_dev, src, layout, 8);
     if (!mask_pipeline.handle) {
         std::printf("[compute] mask_paint pipeline failed to compile\n");
         return false;
@@ -57,11 +58,12 @@ bool ComputeState::init_mask() {
         { BIND_INDICES,          gpu::Bind::StorageRead,      0 },
         { BIND_ADJACENCY_OFFSET, gpu::Bind::StorageRead,      0 },
         { BIND_ADJACENCY_LIST,   gpu::Bind::StorageRead,      0 },
+        { BIND_BLOCK_LIST,   gpu::Bind::StorageRead,      0 },
         { BIND_DIRTY_REGION, gpu::Bind::Uniform,          sizeof(DirtyRegionGPU) },
         { BIND_PARAMS,           gpu::Bind::Uniform,          sizeof(MaskParamsGPU) },
     };
     mask_smooth_pipeline = gpu::create_compute_pipeline(gpu_dev,
-                               gpu::embedded_shader("mask_smooth"), smooth_layout, 8);
+                               gpu::embedded_shader("mask_smooth"), smooth_layout, 9);
     if (mask_smooth_pipeline.handle) {
         mask_smooth_ubo = gpu::create_buffer(gpu_dev, nullptr, sizeof(MaskParamsGPU),
                                              gpu::Usage::Uniform);
@@ -89,6 +91,7 @@ void ComputeState::dispatch_mask_smooth(const MaskPaintParams& p, const gpu::Buf
     mp.use_b          = (uint32_t)p.use_b;
     mp.vertex_count   = vc;
     gpu::write_buffer(gpu_dev, mask_smooth_ubo, 0, &mp, sizeof(mp));
+    select_dab_blocks(mp.anchor_a, mp.anchor_b, mp.world_radius, mp.use_b != 0, vc);
 
     const gpu::BindBufferEntry bg[] = {
         { BIND_POSITIONS,        &pos_vbo,           (uint64_t)vc * 3u * sizeof(float) },
@@ -97,13 +100,14 @@ void ComputeState::dispatch_mask_smooth(const MaskPaintParams& p, const gpu::Buf
         { BIND_INDICES,          &index_ebo,         index_ebo.size },
         { BIND_ADJACENCY_OFFSET, &adjacency_offset_ssbo, adjacency_offset_ssbo.size },
         { BIND_ADJACENCY_LIST,   &adjacency_list_ssbo,   adjacency_list_ssbo.size },
+        { BIND_BLOCK_LIST,   &block_list_ssbo,   block_list_ssbo.size },
         { BIND_DIRTY_REGION, &dirty_region_ubo,  sizeof(DirtyRegionGPU) },
         { BIND_PARAMS,           &mask_smooth_ubo,   sizeof(MaskParamsGPU) },
     };
-    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, mask_smooth_pipeline, bg, 8);
+    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, mask_smooth_pipeline, bg, 9);
 
     gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
-    gpu::dispatch(b, mask_smooth_pipeline, grp, (vc + 255u) / 256u);
+    dispatch_blocks_or_full(b, mask_smooth_pipeline, grp, vc);
     gpu::submit(b);
     gpu::release_bind_group(grp);
 }
@@ -126,6 +130,7 @@ void ComputeState::dispatch_mask_paint(const MaskPaintParams& p, const gpu::Buff
     mp.use_b          = (uint32_t)p.use_b;
     mp.vertex_count   = vc;
     gpu::write_buffer(gpu_dev, mask_params_ubo, 0, &mp, sizeof(mp));
+    select_dab_blocks(mp.anchor_a, mp.anchor_b, mp.world_radius, mp.use_b != 0, vc);
 
     const gpu::BindBufferEntry bg[] = {
         { BIND_POSITIONS,    &pos_vbo,           (uint64_t)vc * 3u * sizeof(float) },
@@ -133,14 +138,14 @@ void ComputeState::dispatch_mask_paint(const MaskPaintParams& p, const gpu::Buff
         { BIND_DIRTY_VERTS,  &smooth_dirty_ssbo, smooth_dirty_ssbo.size },
         { BIND_ALPHA_TEX,    &alpha_tex_ssbo,    (uint64_t)alpha_tex_w * alpha_tex_h * sizeof(float) },
         { BIND_ALPHA_PARAMS, &alpha_params_ubo,  48 },
+        { BIND_BLOCK_LIST,   &block_list_ssbo,   block_list_ssbo.size },
         { BIND_DIRTY_REGION, &dirty_region_ubo,  sizeof(DirtyRegionGPU) },
         { BIND_PARAMS,       &mask_params_ubo,   sizeof(MaskParamsGPU) },
     };
-    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, mask_pipeline, bg, 7);
+    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, mask_pipeline, bg, 8);
 
-    uint32_t groups = (vc + 255u) / 256u;
     gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
-    gpu::dispatch(b, mask_pipeline, grp, groups);
+    dispatch_blocks_or_full(b, mask_pipeline, grp, vc);
     gpu::submit(b);   // GL backend issues the storage+vertex-attrib barriers here
 
     gpu::release_bind_group(grp);   // no-op on GL; frees the transient group on WebGPU

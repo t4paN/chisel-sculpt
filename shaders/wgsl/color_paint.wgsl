@@ -25,7 +25,7 @@ struct Params {
 struct DirtyRegion {
     base : u32,   // word offset of this dab's region inside the arena
     cap  : u32,   // ids it can hold; the counter deliberately runs past this
-    _p0  : u32,
+    block_mode : u32,   // 1 = dispatch is one workgroup per active block
     _p1  : u32,
 };
 
@@ -33,6 +33,7 @@ struct DirtyRegion {
 @group(0) @binding(6)  var<storage, read_write> dirty     : array<atomic<u32>>;
 @group(0) @binding(12) var<storage, read>       mask_buf  : array<f32>;
 @group(0) @binding(28) var<storage, read_write> color_buf : array<u32>;
+@group(0) @binding(45) var<storage, read>       block_list : array<u32>;
 @group(0) @binding(61) var<uniform>             DR        : DirtyRegion;
 @group(0) @binding(63) var<uniform>             P         : Params;
 
@@ -135,9 +136,15 @@ fn try_paint(v : u32, anchor : vec3<f32>, vp : vec3<f32>, mirrored : u32) {
     }
 }
 
-@compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-    let v = gid.x;
+@compute @workgroup_size(64)
+fn main(@builtin(workgroup_id) wg : vec3<u32>,
+        @builtin(local_invocation_id) lid : vec3<u32>) {
+    // Dispatch culling: in block mode one workgroup owns one ACTIVE block, so the list
+    // entry is the block index and the lane is the offset inside it. Entry 0 of the
+    // list is the count, hence the +1.
+    let v = select(wg.x * 64u + lid.x,
+                   block_list[1u + wg.x] * 64u + lid.x,
+                   DR.block_mode == 1u);
     if (v >= P.vertex_count) {
         return;
     }

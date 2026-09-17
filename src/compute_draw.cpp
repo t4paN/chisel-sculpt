@@ -55,32 +55,6 @@ void ComputeState::ensure_accum_buffer(uint32_t vertex_count) {
     accum_vertex_count = vertex_count;
 }
 
-// Dispatch over the culled block list when this dab has a selection, else over the
-// whole mesh. Only a path that ran block_select for THIS dab may have set block mode:
-// draw_apply is shared with crease and pinch, which have no selection of their own.
-static void dispatch_blocks_or_full(ComputeState& cs, gpu::ComputeBatch& b,
-                                    gpu::ComputePipeline& pipe, gpu::BindGroup& grp,
-                                    uint32_t vc) {
-    bool blocks = cs.dirty_block_mode == 1u && cs.block_args_ssbo.handle;
-    // A selection belongs to exactly one dab. If block mode is somehow on for a dab
-    // that never ran one, the list still holds someone else's blocks and dispatching
-    // over it would sculpt vertices this dab never touched — so fall back to the
-    // full mesh, which is slow but always right, and say so once.
-    if (blocks && cs.block_sel_serial != cs.dab_serial) {
-        static bool warned = false;
-        if (!warned) {
-            std::printf("[cull] block mode on for a dab with no selection of its own "
-                        "— falling back to full-mesh dispatch\n");
-            warned = true;
-        }
-        blocks = false;
-    }
-    if (blocks)
-        gpu::dispatch_indirect(b, pipe, grp, cs.block_args_ssbo, 0);
-    else
-        gpu::dispatch(b, pipe, grp, (vc + kVertexBlock - 1u) / kVertexBlock);
-}
-
 void ComputeState::clear_accum_buffer() {
     if (!accum_ssbo.handle || accum_vertex_count == 0) return;
     gpu::clear_buffer(gpu_dev, accum_ssbo, 0);
@@ -211,10 +185,12 @@ bool ComputeState::init_draw_mirror_apply() {
         { BIND_ACCUM,      gpu::Bind::StorageRead,      0 },
         { BIND_MIRROR_MAP, gpu::Bind::StorageRead,      0 },
         { BIND_MASK,       gpu::Bind::StorageRead,      0 },
+        { BIND_BLOCK_LIST, gpu::Bind::StorageRead,      0 },
+        { BIND_DIRTY_REGION, gpu::Bind::Uniform,        sizeof(DirtyRegionGPU) },
         { BIND_PARAMS,     gpu::Bind::Uniform,          sizeof(VCountParamsGPU) },
     };
     draw_mirror_apply_pipeline = gpu::create_compute_pipeline(gpu_dev,
-                                     gpu::embedded_shader("draw_mirror_apply"), layout, 5);
+                                     gpu::embedded_shader("draw_mirror_apply"), layout, 7);
     if (!draw_mirror_apply_pipeline.handle) {
         std::printf("[compute] draw_mirror_apply pipeline failed to compile\n");
         return false;
@@ -260,12 +236,10 @@ void ComputeState::dispatch_draw_accum(const DrawAccumParams& p, const gpu::Buff
     // geometric mirror's second anchor displaces its own vertices, so its blocks have
     // to be dispatched too. Everything downstream in this dab (symmetrize, apply,
     // mirror_project) reuses the selection.
-    ensure_block_buffers(vc);
     if (has_block_cull()) {
-        dispatch_block_select(p.anchor_a_x, p.anchor_a_y, p.anchor_a_z, p.world_radius,
-                              p.anchor_b_x, p.anchor_b_y, p.anchor_b_z,
-                              p.use_b ? p.world_radius : 0.0f);
-        set_block_mode(true);
+        const float aa[3] = { p.anchor_a_x, p.anchor_a_y, p.anchor_a_z };
+        const float ab[3] = { p.anchor_b_x, p.anchor_b_y, p.anchor_b_z };
+        select_dab_blocks(aa, ab, p.world_radius, p.use_b != 0, vc);
         // Clear only what this dab will write. The full-buffer clear the caller would
         // otherwise do is 40 MB per dab at 5M tris, and with the dispatches culled it
         // dwarfed the actual work.
@@ -285,7 +259,7 @@ void ComputeState::dispatch_draw_accum(const DrawAccumParams& p, const gpu::Buff
     gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, draw_accum_pipeline, bg, 8);
 
     gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
-    dispatch_blocks_or_full(*this, b, draw_accum_pipeline, grp, vc);
+    dispatch_blocks_or_full(b, draw_accum_pipeline, grp, vc);
     gpu::submit(b);
     gpu::release_bind_group(grp);
 }
@@ -309,7 +283,7 @@ void ComputeState::dispatch_draw_accum_symmetrize(uint32_t vertex_count) {
     gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, draw_symmetrize_pipeline, bg, 6);
 
     gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
-    dispatch_blocks_or_full(*this, b, draw_symmetrize_pipeline, grp, vc);
+    dispatch_blocks_or_full(b, draw_symmetrize_pipeline, grp, vc);
     gpu::submit(b);
     gpu::release_bind_group(grp);
 }
@@ -340,7 +314,7 @@ void ComputeState::dispatch_draw_apply(const gpu::Buffer& pos_vbo, uint32_t vert
     gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, draw_apply_pipeline, bg, 7);
 
     gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
-    dispatch_blocks_or_full(*this, b, draw_apply_pipeline, grp, vc);
+    dispatch_blocks_or_full(b, draw_apply_pipeline, grp, vc);
     gpu::submit(b);
     gpu::release_bind_group(grp);
 }
@@ -358,12 +332,14 @@ void ComputeState::dispatch_draw_mirror_apply(const gpu::Buffer& pos_vbo, uint32
         { BIND_ACCUM,      &accum_ssbo,      (uint64_t)vc * 4u * sizeof(uint32_t) },
         { BIND_MIRROR_MAP, &mirror_map_ssbo, (uint64_t)mirror_map_vertex_count * sizeof(uint32_t) },
         { BIND_MASK,       &mask_ssbo,       (uint64_t)vc * sizeof(float) },
+        { BIND_BLOCK_LIST, &block_list_ssbo, block_list_ssbo.size },
+        { BIND_DIRTY_REGION, &dirty_region_ubo, sizeof(DirtyRegionGPU) },
         { BIND_PARAMS,     &draw_vcount_ubo, sizeof(VCountParamsGPU) },
     };
-    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, draw_mirror_apply_pipeline, bg, 5);
+    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, draw_mirror_apply_pipeline, bg, 7);
 
     gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
-    gpu::dispatch(b, draw_mirror_apply_pipeline, grp, (vc + 255u) / 256u);
+    dispatch_blocks_or_full(b, draw_mirror_apply_pipeline, grp, vc);
     gpu::submit(b);
     gpu::release_bind_group(grp);
 }

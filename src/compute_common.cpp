@@ -799,6 +799,45 @@ void ComputeState::clear_accum_blocks(uint32_t vertex_count) {
     gpu::release_bind_group(grp);
 }
 
+void ComputeState::select_dab_blocks(const float anchor_a[3], const float anchor_b[3],
+                                     float radius, bool use_b, uint32_t vertex_count) {
+    if (!has_block_cull()) return;
+    ensure_block_buffers(vertex_count);
+    // A block whose AABB misses the sphere cannot hold a vertex inside it, so selection
+    // is already exact for everything the dab DEPOSITS into. The margin covers the one
+    // case that is not a deposit: kernels that read a mirror TWIN's accum, which sits
+    // within the pair-matching tolerance of the reflected position rather than exactly
+    // on it. That tolerance is a fraction of one edge; 5% of a brush radius spans many.
+    const float margin = 1.05f;
+    dispatch_block_select(anchor_a[0], anchor_a[1], anchor_a[2], radius * margin,
+                          anchor_b[0], anchor_b[1], anchor_b[2],
+                          use_b ? radius * margin : 0.0f);
+    set_block_mode(true);
+}
+
+void ComputeState::dispatch_blocks_or_full(gpu::ComputeBatch& b,
+                                           gpu::ComputePipeline& pipe,
+                                           gpu::BindGroup& grp, uint32_t vc) {
+    bool blocks = dirty_block_mode == 1u && block_args_ssbo.handle;
+    // A selection belongs to exactly one dab. If block mode is somehow on for a dab
+    // that never ran one, the list still holds someone else's blocks and dispatching
+    // over it would sculpt vertices this dab never touched — so fall back to the full
+    // mesh, which is slow but always right, and say so once.
+    if (blocks && block_sel_serial != dab_serial) {
+        static bool warned = false;
+        if (!warned) {
+            std::printf("[cull] block mode on for a dab with no selection of its own "
+                        "— falling back to full-mesh dispatch\n");
+            warned = true;
+        }
+        blocks = false;
+    }
+    if (blocks)
+        gpu::dispatch_indirect(b, pipe, grp, block_args_ssbo, 0);
+    else
+        gpu::dispatch(b, pipe, grp, (vc + kVertexBlock - 1u) / kVertexBlock);
+}
+
 void ComputeState::set_block_mode(bool on) {
     uint32_t want = on ? 1u : 0u;
     if (want == dirty_block_mode) return;

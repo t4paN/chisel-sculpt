@@ -732,6 +732,16 @@ struct ComputeState {
     // is shared with crease and pinch, and dispatching them over someone else's list
     // silently sculpts the wrong vertices.
     void set_block_mode(bool on);
+    // Select this dab's blocks from a two-lobe brush footprint and switch the dab into
+    // block mode. Every culled brush entry point calls this before its own kernels;
+    // it is a no-op when culling is off, so callers need no branch.
+    void select_dab_blocks(const float anchor_a[3], const float anchor_b[3],
+                           float radius, bool use_b, uint32_t vertex_count);
+    // Dispatch over the culled block list when THIS dab has a selection, else over the
+    // whole mesh. The serial check inside is what stops a kernel running on a
+    // selection that belongs to some other dab.
+    void dispatch_blocks_or_full(gpu::ComputeBatch& b, gpu::ComputePipeline& pipe,
+                                 gpu::BindGroup& grp, uint32_t vertex_count);
     // Zero accum for the active blocks only. Valid because apply reads back exactly
     // the blocks accum wrote, so stale accum elsewhere is never observed.
     void clear_accum_blocks(uint32_t vertex_count);

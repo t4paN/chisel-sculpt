@@ -48,9 +48,11 @@ gpu::BindGroup make_accum_bind_group(ComputeState& cs, gpu::ComputePipeline& pip
         { BIND_ACCUM,        &accumView, accumView.size },
         { BIND_ALPHA_TEX,    &cs.alpha_tex_ssbo,   (uint64_t)cs.alpha_tex_w * cs.alpha_tex_h * sizeof(float) },
         { BIND_ALPHA_PARAMS, &cs.alpha_params_ubo, 48 },
+        { BIND_BLOCK_LIST,   &cs.block_list_ssbo,  cs.block_list_ssbo.size },
+        { BIND_DIRTY_REGION, &cs.dirty_region_ubo, sizeof(DirtyRegionGPU) },
         { BIND_PARAMS,       &ubo,       ubo_size },
     };
-    return gpu::create_bind_group(cs.gpu_dev, pipe, bg, 6);
+    return gpu::create_bind_group(cs.gpu_dev, pipe, bg, 8);
 }
 }
 
@@ -66,10 +68,12 @@ bool ComputeState::init_crease() {
         { BIND_ACCUM,        gpu::Bind::StorageReadWrite, 0 },
         { BIND_ALPHA_TEX,    gpu::Bind::StorageRead,      0 },
         { BIND_ALPHA_PARAMS, gpu::Bind::Uniform,          48 },
+        { BIND_BLOCK_LIST,   gpu::Bind::StorageRead,      0 },
+        { BIND_DIRTY_REGION, gpu::Bind::Uniform,          sizeof(DirtyRegionGPU) },
         { BIND_PARAMS,       gpu::Bind::Uniform,          sizeof(CreaseParamsGPU) },
     };
     crease_accum_pipeline = gpu::create_compute_pipeline(gpu_dev,
-                                gpu::embedded_shader("crease_accum"), layout, 6);
+                                gpu::embedded_shader("crease_accum"), layout, 8);
     if (!crease_accum_pipeline.handle) {
         std::printf("[compute] crease_accum pipeline failed to compile\n");
         return false;
@@ -83,7 +87,16 @@ void ComputeState::dispatch_crease_accum(const CreaseAccumParams& p, const gpu::
     if (!has_crease() || !accum_ssbo.handle || !stroke_norm_ssbo.handle) return;
     const uint32_t vc = p.vertex_count;
 
-    clear_accum_buffer();   // raw GL (GL-owned accum buffer)
+    // Select before anything touches accum, then clear only what this dab will write.
+    // Crease and pinch hand off to draw_apply, which reuses this same selection.
+    const float aa[3] = { p.anchor_a_x, p.anchor_a_y, p.anchor_a_z };
+    const float ab[3] = { p.anchor_b_x, p.anchor_b_y, p.anchor_b_z };
+    if (has_block_cull()) {
+        select_dab_blocks(aa, ab, p.world_radius, p.use_b != 0, vc);
+        clear_accum_blocks(vc);
+    } else {
+        clear_accum_buffer();   // raw GL (GL-owned accum buffer)
+    }
 
     CreaseParamsGPU u = {};
     u.anchor_a[0] = p.anchor_a_x; u.anchor_a[1] = p.anchor_a_y; u.anchor_a[2] = p.anchor_a_z;
@@ -112,7 +125,7 @@ void ComputeState::dispatch_crease_accum(const CreaseAccumParams& p, const gpu::
                                                crease_ubo, sizeof(CreaseParamsGPU));
 
     gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
-    gpu::dispatch(b, crease_accum_pipeline, grp, (vc + 255u) / 256u);
+    dispatch_blocks_or_full(b, crease_accum_pipeline, grp, vc);
     gpu::submit(b);
     gpu::release_bind_group(grp);
 }
@@ -129,10 +142,12 @@ bool ComputeState::init_pinch() {
         { BIND_ACCUM,        gpu::Bind::StorageReadWrite, 0 },
         { BIND_ALPHA_TEX,    gpu::Bind::StorageRead,      0 },
         { BIND_ALPHA_PARAMS, gpu::Bind::Uniform,          48 },
+        { BIND_BLOCK_LIST,   gpu::Bind::StorageRead,      0 },
+        { BIND_DIRTY_REGION, gpu::Bind::Uniform,          sizeof(DirtyRegionGPU) },
         { BIND_PARAMS,       gpu::Bind::Uniform,          sizeof(PinchParamsGPU) },
     };
     pinch_accum_pipeline = gpu::create_compute_pipeline(gpu_dev,
-                               gpu::embedded_shader("pinch_accum"), layout, 6);
+                               gpu::embedded_shader("pinch_accum"), layout, 8);
     if (!pinch_accum_pipeline.handle) {
         std::printf("[compute] pinch_accum pipeline failed to compile\n");
         return false;
@@ -146,7 +161,16 @@ void ComputeState::dispatch_pinch_accum(const PinchAccumParams& p, const gpu::Bu
     if (!has_pinch() || !accum_ssbo.handle || !stroke_norm_ssbo.handle) return;
     const uint32_t vc = p.vertex_count;
 
-    clear_accum_buffer();   // raw GL (GL-owned accum buffer)
+    // Select before anything touches accum, then clear only what this dab will write.
+    // Crease and pinch hand off to draw_apply, which reuses this same selection.
+    const float aa[3] = { p.anchor_a_x, p.anchor_a_y, p.anchor_a_z };
+    const float ab[3] = { p.anchor_b_x, p.anchor_b_y, p.anchor_b_z };
+    if (has_block_cull()) {
+        select_dab_blocks(aa, ab, p.world_radius, p.use_b != 0, vc);
+        clear_accum_blocks(vc);
+    } else {
+        clear_accum_buffer();   // raw GL (GL-owned accum buffer)
+    }
 
     PinchParamsGPU u = {};
     u.anchor_a[0] = p.anchor_a_x; u.anchor_a[1] = p.anchor_a_y; u.anchor_a[2] = p.anchor_a_z;
@@ -171,7 +195,7 @@ void ComputeState::dispatch_pinch_accum(const PinchAccumParams& p, const gpu::Bu
                                                pinch_ubo, sizeof(PinchParamsGPU));
 
     gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
-    gpu::dispatch(b, pinch_accum_pipeline, grp, (vc + 255u) / 256u);
+    dispatch_blocks_or_full(b, pinch_accum_pipeline, grp, vc);
     gpu::submit(b);
     gpu::release_bind_group(grp);
 }

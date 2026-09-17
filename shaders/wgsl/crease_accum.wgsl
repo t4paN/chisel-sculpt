@@ -30,9 +30,18 @@ struct Params {
     stroke_dir_z     : f32,         // 108  / block to 128. Zero length = no axis yet.
 };
 
+struct DirtyRegion {
+    base       : u32,
+    cap        : u32,
+    block_mode : u32,   // 1 = dispatch is one workgroup per active block
+    _p1        : u32,
+};
+
 @group(0) @binding(0)  var<storage, read>       positions : array<f32>;
 @group(0) @binding(1)  var<storage, read>       normals   : array<f32>;
 @group(0) @binding(3)  var<storage, read_write> accum     : array<atomic<u32>>;
+@group(0) @binding(45) var<storage, read>       block_list : array<u32>;
+@group(0) @binding(61) var<uniform>             DR         : DirtyRegion;
 @group(0) @binding(63) var<uniform>             P         : Params;
 
 // --- shared brush-alpha stamp (keep byte-identical across every dab kernel) ---
@@ -178,9 +187,13 @@ fn deposit(v : u32, anchor : vec3<f32>, view : vec3<f32>, anchor_n : vec3<f32>,
     atomicMax(&accum[base + 3u], bitcast<u32>(1.0));
 }
 
-@compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-    let v = gid.x;
+@compute @workgroup_size(64)
+fn main(@builtin(workgroup_id) wg : vec3<u32>,
+        @builtin(local_invocation_id) lid : vec3<u32>) {
+    // Dispatch culling: one workgroup per ACTIVE block; entry 0 is the count, hence +1.
+    let v = select(wg.x * 64u + lid.x,
+                   block_list[1u + wg.x] * 64u + lid.x,
+                   DR.block_mode == 1u);
     if (v >= P.vertex_count) {
         return;
     }

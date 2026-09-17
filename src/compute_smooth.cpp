@@ -205,10 +205,12 @@ bool ComputeState::init_smooth() {
         { BIND_ADJACENCY_OFFSET, gpu::Bind::StorageRead,      0 },
         { BIND_ADJACENCY_LIST,   gpu::Bind::StorageRead,      0 },
         { BIND_MASK,             gpu::Bind::StorageRead,      0 },
+        { BIND_BLOCK_LIST,       gpu::Bind::StorageRead,      0 },
+        { BIND_DIRTY_REGION,     gpu::Bind::Uniform,          sizeof(DirtyRegionGPU) },
         { BIND_PARAMS,           gpu::Bind::Uniform,          sizeof(SmoothApplyParamsGPU) },
     };
     smooth_apply_pipeline = gpu::create_compute_pipeline(gpu_dev,
-                                gpu::embedded_shader("smooth_apply"), apply_layout, 7);
+                                gpu::embedded_shader("smooth_apply"), apply_layout, 9);
     if (!smooth_apply_pipeline.handle) {
         std::printf("[compute] smooth_apply pipeline failed to compile\n");
         gpu::release_compute_pipeline(smooth_accum_pipeline);
@@ -220,10 +222,12 @@ bool ComputeState::init_smooth() {
         { BIND_ACCUM,      gpu::Bind::StorageRead,      0 },
         { BIND_MIRROR_MAP, gpu::Bind::StorageRead,      0 },
         { BIND_MASK,       gpu::Bind::StorageRead,      0 },
+        { BIND_BLOCK_LIST, gpu::Bind::StorageRead,      0 },
+        { BIND_DIRTY_REGION, gpu::Bind::Uniform,        sizeof(DirtyRegionGPU) },
         { BIND_PARAMS,     gpu::Bind::Uniform,          sizeof(SmoothMirrorParamsGPU) },
     };
     smooth_mirror_apply_pipeline = gpu::create_compute_pipeline(gpu_dev,
-                                       gpu::embedded_shader("smooth_mirror_apply"), mirror_layout, 5);
+                                       gpu::embedded_shader("smooth_mirror_apply"), mirror_layout, 7);
     if (!smooth_mirror_apply_pipeline.handle) {
         std::printf("[compute] smooth_mirror_apply pipeline failed to compile\n");
         gpu::release_compute_pipeline(smooth_accum_pipeline);
@@ -252,12 +256,14 @@ void ComputeState::dispatch_smooth_mirror_apply(const gpu::Buffer& pos_vbo, uint
         { BIND_ACCUM,      &accum_ssbo, (uint64_t)vc * 4u * sizeof(uint32_t) },
         { BIND_MIRROR_MAP, &mirror_map_ssbo, (uint64_t)mirror_map_vertex_count * sizeof(uint32_t) },
         { BIND_MASK,       &mask_ssbo,  (uint64_t)vc * sizeof(float) },
+        { BIND_BLOCK_LIST, &block_list_ssbo, block_list_ssbo.size },
+        { BIND_DIRTY_REGION, &dirty_region_ubo, sizeof(DirtyRegionGPU) },
         { BIND_PARAMS,     &smooth_mirror_ubo, sizeof(SmoothMirrorParamsGPU) },
     };
-    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, smooth_mirror_apply_pipeline, bg, 5);
+    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, smooth_mirror_apply_pipeline, bg, 7);
 
     gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
-    gpu::dispatch(b, smooth_mirror_apply_pipeline, grp, (vc + 255u) / 256u);
+    dispatch_blocks_or_full(b, smooth_mirror_apply_pipeline, grp, vc);
     gpu::submit(b);
     gpu::release_bind_group(grp);
 }
@@ -267,8 +273,19 @@ void ComputeState::dispatch_smooth(const SmoothAccumParams& p,
     if (!has_smooth() || !mask_ssbo.handle) return;
     const uint32_t vc = p.vertex_count;
 
-    // accum clear + dirty-counter reset stay raw GL (GL-owned buffers).
-    clear_accum_buffer();
+    // Select first, then clear only what this dab will write. The selection must
+    // cover the far lobe under EITHER mirror mode: the geometric path smooths it with
+    // a second lobe (use_b), while the topological path reaches it through
+    // smooth_mirror_apply's twins. Selecting extra blocks is always safe; missing the
+    // twins' blocks would leave them holding a previous dab's accum.
+    const float sa[3] = { p.anchor_x, p.anchor_y, p.anchor_z };
+    const float sb[3] = { p.anchor_b_x, p.anchor_b_y, p.anchor_b_z };
+    if (has_block_cull()) {
+        select_dab_blocks(sa, sb, p.world_radius, p.use_b != 0 || p.mirror_pairs, vc);
+        clear_accum_blocks(vc);
+    } else {
+        clear_accum_buffer();   // raw GL (GL-owned buffer)
+    }
     ensure_smooth_dirty_buffer(vc);
 
     // ---- Pass 1: accum (world-distance gate → accum.w + dirty list) ----
@@ -295,9 +312,7 @@ void ComputeState::dispatch_smooth(const SmoothAccumParams& p,
         };
         gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, smooth_accum_pipeline, bg, 8);
         gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
-        // smooth_accum's workgroup is kVertexBlock wide so it CAN be block-dispatched;
-        // the smooth path runs no selection yet, so this is still the full-mesh count.
-        gpu::dispatch(b, smooth_accum_pipeline, grp, (vc + kVertexBlock - 1u) / kVertexBlock);
+        dispatch_blocks_or_full(b, smooth_accum_pipeline, grp, vc);
         gpu::submit(b);
         gpu::release_bind_group(grp);
     }
@@ -315,9 +330,11 @@ void ComputeState::dispatch_smooth(const SmoothAccumParams& p,
         { BIND_ADJACENCY_OFFSET, &adjacency_offset_ssbo, adjacency_offset_ssbo.size },
         { BIND_ADJACENCY_LIST,   &adjacency_list_ssbo,   adjacency_list_ssbo.size },
         { BIND_MASK,             &mask_ssbo,  (uint64_t)vc * sizeof(float) },
+        { BIND_BLOCK_LIST,       &block_list_ssbo,  block_list_ssbo.size },
+        { BIND_DIRTY_REGION,     &dirty_region_ubo, sizeof(DirtyRegionGPU) },
         { BIND_PARAMS,           &smooth_apply_ubo, sizeof(SmoothApplyParamsGPU) },
     };
-    gpu::BindGroup apply_grp = gpu::create_bind_group(gpu_dev, smooth_apply_pipeline, apply_bg, 7);
+    gpu::BindGroup apply_grp = gpu::create_bind_group(gpu_dev, smooth_apply_pipeline, apply_bg, 9);
 
     // TOPOLOGICAL path only. It clips the accum gate to the anchor's own side, so
     // the reflection has to be re-imposed after *each* Laplacian iteration, not just
@@ -329,10 +346,9 @@ void ComputeState::dispatch_smooth(const SmoothAccumParams& p,
     // 1-rings are live on both sides and nothing has to be teleported afterwards.
     bool do_mirror = p.mirror_pairs && smooth_mirror_apply_pipeline.handle
                      && mirror_map_vertex_count == vc;
-    const uint32_t groups = (vc + 255u) / 256u;
     for (int iter = 0; iter < p.iterations; iter++) {
         gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
-        gpu::dispatch(b, smooth_apply_pipeline, apply_grp, groups);
+        dispatch_blocks_or_full(b, smooth_apply_pipeline, apply_grp, vc);
         gpu::submit(b);
 
         if (do_mirror) {

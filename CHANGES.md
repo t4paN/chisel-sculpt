@@ -2,6 +2,47 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-09-17 — Culling the other nine brushes, and what that forced
+
+*Both native backends build; all 36 pipelines compile with zero device errors under
+naga. NOT hand-sculpted, no Tint gate. `CHISEL_BLOCK_CULL=0` still disables.*
+
+The first pass culled only the draw kernels. Everything else — crease, pinch, smooth,
+mirror-apply, mask, colour, density — still dispatched over the whole mesh. They do not
+any more. Sixteen kernels now run one workgroup per touched 64-vertex block.
+
+What made this more than repetition is the **accum buffer**. The block-scoped clear only
+zeroes the blocks a dab selected, so any kernel that *reads* accum on a full-mesh
+dispatch would read blocks that were never cleared and pick up the previous dab's
+residue. That is a silent wrong-geometry bug, not a crash. The invariant is therefore
+all-or-nothing, and it was checked rather than assumed: every kernel binding accum —
+ten of them — is now block-dispatched. `stroke_smooth_apply` is the one that looks like
+it belongs and does not; it walks the dirty list and never binds accum.
+
+The same reasoning decided the mirror cases, which the prior handoff flagged as needing
+verification before culling rather than assuming:
+
+- `draw_mirror_apply` and `smooth_mirror_apply` read the accum of the vertex they are
+  indexed by and *write* its twin. The write is a direct index, so the twin's block need
+  not be dispatched — only read coverage matters, and that is the dab's own block.
+- The twin's accum, though, must have been cleared this dab. For draw that is free:
+  `brush.h` states mirror_pairs implies mirror_x, so the reflected lobe is always
+  selected. **Smooth breaks that pattern** — its `use_b` is deliberately off under the
+  topological mirror, so selection there covers the far lobe explicitly whenever either
+  mirror mode is on. Selecting extra blocks is always safe; missing the twins' blocks
+  is not.
+- A 5% margin on the selection radius covers pair-matching tolerance, which places a
+  twin near — not exactly on — the reflected position.
+
+**One real bug caught by the wgpu run, invisible on GL.** Three pipeline layouts had a
+binding added but their entry count left behind. GL bound them happily; wgpu refused with
+`Error matching shader requirements against the pipeline` and aborted. Since eyeballing
+had already missed it three times, every layout and bind-group count in `src/` is now
+checked against its array by script instead — those three were the only ones wrong.
+
+Still full-mesh and correctly so: move and limb (one-shot per-stroke capture, not per-dab),
+remesh, cascade, multires, and `density_colormap`.
+
 ## 2026-09-17 — Only run threads where the dab actually is
 
 *Builds on both native backends; all four new shaders compile with zero device errors

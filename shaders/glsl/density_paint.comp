@@ -3,17 +3,19 @@
 // (byte-identical to MaskParamsGPU). The dual-backend gpu:: seam compiles this on
 // the GL backend and the .wgsl on WebGPU; the two must stay in lockstep.
 #version 430
-layout(local_size_x = 256) in;
+layout(local_size_x = 64) in;
 
 layout(std430, binding = 0)  readonly buffer PosBuf  { float positions[]; };
 layout(std430, binding = 41)          buffer DensityBuf { float density_buf[]; };
 layout(std430, binding = 6)           buffer DirtyBuf { uint dirty_data[]; } dirty;
 
 // std140 UBO — matches density_paint.wgsl's Params and the C++ MaskParamsGPU (48 bytes).
+layout(std430, binding = 45) readonly buffer BlockListBuf { uint block_list[]; };
+
 layout(std140, binding = 61) uniform DirtyRegion {
     uint base;   // word offset of this dab's region inside the arena
     uint cap;    // ids it can hold; the counter runs past this
-    uint _p0;
+    uint block_mode;   // 1 = one workgroup per active block
     uint _p1;
 } DR;
 
@@ -88,7 +90,10 @@ void try_paint(uint v, vec3 anchor, vec3 vp, uint mirrored) {
 }
 
 void main() {
-    uint v = gl_GlobalInvocationID.x;
+    // Dispatch culling: one workgroup per ACTIVE block; entry 0 is the count, hence +1.
+    uint v = (DR.block_mode == 1u)
+           ? (block_list[1u + gl_WorkGroupID.x] * 64u + gl_LocalInvocationID.x)
+           : gl_GlobalInvocationID.x;
     if (v >= P.vertex_count) return;
 
     vec3 vp = vec3(positions[v*3u], positions[v*3u + 1u], positions[v*3u + 2u]);
