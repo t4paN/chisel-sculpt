@@ -2,6 +2,40 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-09-17 — Fix: culling wrote to arbitrary vertices after a subdiv switch
+
+*Reported from a live session: "changing subd and undoing at the same time f'd it up,
+I got spikes everywhere." Two defects, both in the freshness of the block buffers.*
+
+**The spikes.** `ensure_block_buffers` reallocates when the block count grows — which a
+subdiv switch guarantees — and created the buffers with `nullptr`, leaving them
+uninitialised. Word 0 of the block list is the atomic counter the selection appends
+through, so an `atomicAdd` onto garbage returns a garbage slot, and `block_args` then
+reads that garbage count and dispatches over uninitialised list entries. Each of those
+resolves to `v = garbage_block * 64 + lane` — an arbitrary vertex anywhere in the mesh,
+displaced by a dab that never touched it. Both buffers are now cleared on allocation.
+
+**The staleness.** Boxes are supposed to be rebuilt once per frame, re-armed from
+`post_frame` — but `post_frame` is reached from exactly one place, inside the sculpting
+path, so it only runs on frames that actually dispatched dabs. An undo or a level switch
+*between* strokes never re-armed it, leaving the next dab to select against boxes built
+before the change. A stale box is too small, which is the silent-drop failure this design
+went to the GPU to avoid in the first place. Re-arming now also happens at stroke start,
+and on any vertex-count change.
+
+**And it is now checked rather than argued**, like the dab-serial guard before it: the
+boxes record which vertex count they were built for and whether they are fresh, and a
+selection against boxes that fail either test refuses to enable block mode and falls back
+to full-mesh dispatch, loudly. That is the third invariant in this line of work to be
+written down as an assumption and then caught by reality — the pattern is clear enough by
+now that it should be the default.
+
+Also seen in the same session and NOT yet addressed: three `[arena] dab overflowed its
+region` events across 12,859 dabs, one of them a 70,460-id dab landing in a 1,672-id
+region. Correctness is unaffected — that path snapshots the whole mesh — but those
+strokes pay for it. The window is rebuilt from scratch after a vertex-count change, so
+the first big dab at a new subdiv level has no history to size from.
+
 ## 2026-09-17 — Culling the other nine brushes, and what that forced
 
 *Both native backends build; all 36 pipelines compile with zero device errors under

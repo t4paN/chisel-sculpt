@@ -553,6 +553,14 @@ struct ComputeState {
     // run unless the two match.
     uint32_t dab_serial = 0;
     uint32_t block_sel_serial = ~0u;
+    // Boxes describe a specific vertex numbering at a specific moment. A subdiv switch
+    // renames every vertex and an undo moves them, so a selection made against boxes
+    // that predate either is wrong — and a *stale* box is too small, which drops
+    // vertices out of a dab silently. Reallocation is worse still: fresh buffers hold
+    // garbage, and a garbage list count dispatches over garbage block indices, which
+    // writes to arbitrary vertices. So freshness is recorded and checked, never assumed.
+    uint32_t blocks_built_vc = 0;    // vertex count the current boxes were built for
+    bool     blocks_fresh = false;   // boxes built this frame and buffers initialised
 
     gpu::Buffer dirty_region_ubo;    // DirtyRegionGPU at BIND_DIRTY_REGION
     gpu::Buffer smooth_dirty_ssbo;   // the arena

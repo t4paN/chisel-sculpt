@@ -691,6 +691,13 @@ void ComputeState::ensure_block_buffers(uint32_t vertex_count) {
     block_sticky_ssbo = gpu::create_buffer(gpu_dev, nullptr,
                             (uint64_t)alloc * sizeof(uint32_t), gpu::Usage::Storage);
     block_capacity = alloc;
+    // Fresh buffers are uninitialised. The list's word 0 is an atomic counter and the
+    // sticky flags gate selection, so running a selection against garbage dispatches
+    // over garbage block indices — arbitrary vertices, which reads as spikes. Zero
+    // them here, and force a box rebuild before anything is allowed to select.
+    gpu::clear_buffer(gpu_dev, block_list_ssbo, 0);
+    gpu::clear_buffer(gpu_dev, block_sticky_ssbo, 0);
+    blocks_fresh = false;
 }
 
 void ComputeState::dispatch_block_boxes(const gpu::Buffer& pos_vbo, uint32_t vertex_count) {
@@ -711,6 +718,8 @@ void ComputeState::dispatch_block_boxes(const gpu::Buffer& pos_vbo, uint32_t ver
     gpu::dispatch(b, block_boxes_pipeline, grp, (block_count + 63u) / 64u);
     gpu::submit(b);
     gpu::release_bind_group(grp);
+    blocks_built_vc = vertex_count;
+    blocks_fresh = true;
 }
 
 void ComputeState::begin_block_frame() {
@@ -803,6 +812,19 @@ void ComputeState::select_dab_blocks(const float anchor_a[3], const float anchor
                                      float radius, bool use_b, uint32_t vertex_count) {
     if (!has_block_cull()) return;
     ensure_block_buffers(vertex_count);
+    // Boxes must exist, be from this frame, and describe THIS vertex numbering. A
+    // subdiv switch or an undo between strokes invalidates them; selecting anyway
+    // dispatches over the wrong vertices. Full-mesh is slow and always right.
+    if (!blocks_fresh || blocks_built_vc != vertex_count) {
+        static bool warned = false;
+        if (!warned) {
+            std::printf("[cull] boxes stale (built for %u verts, mesh has %u) — "
+                        "full-mesh dispatch for this dab\n", blocks_built_vc, vertex_count);
+            warned = true;
+        }
+        set_block_mode(false);
+        return;
+    }
     // A block whose AABB misses the sphere cannot hold a vertex inside it, so selection
     // is already exact for everything the dab DEPOSITS into. The margin covers the one
     // case that is not a deposit: kernels that read a mirror TWIN's accum, which sits

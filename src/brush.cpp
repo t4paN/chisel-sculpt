@@ -405,7 +405,7 @@ void BrushStroke::begin_dab(DabContext& ctx) {
 
     // Once per frame, before that frame's first dab: rebuild every block's AABB from
     // the GPU's own positions and drop the previous frame's selection.
-    if (blocks_need_rebuild && cs.has_block_cull()) {
+    if ((blocks_need_rebuild || cs.blocks_built_vc != vc) && cs.has_block_cull()) {
         cs.dispatch_block_boxes(ctx.renderer.vbo_pos, vc);
         cs.begin_block_frame();
         blocks_need_rebuild = false;
@@ -880,6 +880,10 @@ void BrushStroke::begin(Renderer& renderer, const Camera& cam,
                         bool screen_buffers_fresh) {
     phase = StrokePhase::BEGIN;
     needs_mesh_update = false;
+    // post_frame is only reached on frames that actually ran dabs, so it cannot be the
+    // only thing that re-arms this: an undo or a subdiv switch between strokes would
+    // leave the next dab selecting against boxes built before the change.
+    blocks_need_rebuild = true;
     // Per-stroke arena state. The count window is deliberately NOT cleared — it
     // carries across strokes so a stroke does not reopen with full-size reads.
     dirty_overflowed = false;
