@@ -2,6 +2,41 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-09-17 — The arena's size estimate could only learn from dabs that fit
+
+*Found by the instruments, in a session the user summarised as "works pretty well".
+Both backends build.*
+
+A hammering session produced **48 consecutive `[arena] dab overflowed its region` events,
+every one of them into the same 1024-id region** — the floor. Correctness was never at
+risk; each of those strokes fell back to snapshotting the whole mesh for undo, which at
+2.6M verts is slow and entirely avoidable.
+
+The cause is a feedback trap. The sizing window is 4x the largest of the last 32 landed
+counts, and it was updated **only in the non-overflow branch**. So once the estimate ran
+short, every dab overflowed, no dab updated the window, and the estimate stayed at the
+floor indefinitely. The information needed to escape was already in hand and being thrown
+away: the region's counter deliberately runs past `cap` precisely so the CPU can see how
+short it was, and `total` is the true count whether the dab fit or not.
+
+Every dab now feeds the window. One line, and it closes a loop that could only ever be
+escaped by a brush-size change or a level switch resetting the window by luck.
+
+The window is still reset outright whenever the vertex count changes, so the first big dab
+at a new subdiv level has no history to size from — that remains open, and a seed estimate
+carried across the switch (scaled by the vertex-count ratio) is the obvious next step.
+
+### Validated in the same session: the undo race fix holds
+
+**96 undo presses across 16 level switches, 63 strokes, and not one `TRIPWIRE` line.** No
+dab landed against a renumbered mesh. That is the first positive evidence for the undo
+deferral rather than an absence of complaints, and it exists only because the detector was
+added — the two earlier spike fixes shipped on reasoning alone and neither could be
+confirmed or refuted at the time.
+
+Dab sizes stayed healthy throughout (median 23K–35K ids at 2.6M verts), so dispatch culling
+is not dropping vertices either.
+
 ## 2026-09-17 — A tripwire for ids that outlive the mesh they describe
 
 *Both backends build, clean startup. Detection, plus a safe fallback.*

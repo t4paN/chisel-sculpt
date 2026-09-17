@@ -568,11 +568,17 @@ void BrushStroke::drain_dab_readbacks(DabContext& ctx) {
                 snapshot_whole_mesh(*this, ctx, pd.kind);
                 snapped_whole_mesh = true;
             }
-        } else {
-            recent_counts[recent_head] = total;
-            recent_head = (recent_head + 1u) % kCountWindow;
-            if (recent_n < kCountWindow) recent_n++;
         }
+        // Feed the window from EVERY dab, overflowed ones included. `total` is the true
+        // count either way — the counter runs past `cap` on purpose so the CPU can see
+        // how short the region was. Learning only from dabs that fit is a trap that
+        // sustains itself: once the estimate is too small every dab overflows, none of
+        // them corrects it, and the region stays at the floor. A session on 2026-09-17
+        // produced 48 consecutive overflows all into the same 1024-id region that way,
+        // each one paying for a whole-mesh snapshot.
+        recent_counts[recent_head] = total;
+        recent_head = (recent_head + 1u) % kCountWindow;
+        if (recent_n < kCountWindow) recent_n++;
         g_dirty_hist.record((uint32_t)dirty_verts.size(), pd.words, vertex_count);
         // On the raw GPU list, before snap_and_mirror_dirty appends pair-map twins —
         // the twins are not what the dab's own kernels dispatched over.
