@@ -211,8 +211,25 @@ struct DirtyHist {
     uint32_t vc;
     std::vector<uint32_t> counts;   // this stroke, for quantiles
 
+    // --- block-span probe ---------------------------------------------------
+    // Derives the CEILING for dispatch culling from lists we already have: how many
+    // fixed-size vertex blocks a dab actually spans. No AABBs, no staleness, nothing
+    // that can be wrong — if this says a dab lights up 4% of blocks, 4% is what
+    // culling can hope to dispatch, and it costs 40 lines instead of a week.
+    //
+    // It measures 64 and 256 side by side because block size MUST equal the workgroup
+    // size, so it is a coordinated change across every culled kernel and worth being
+    // right about. The rescue notes' preference for 64 came from wave64 occupancy on
+    // an RX 560; this is an Intel Arc and schedules differently, so the number has to
+    // be measured here. Lane occupancy is the deciding column: a dab that lights a
+    // block but fills a tenth of it is paying for nine tenths of nothing.
+    std::vector<uint32_t> stamp64, stamp256;
+    uint32_t gen;
+    uint64_t blk64_hit, blk256_hit, blk64_all, blk256_all;
+
     DirtyHist() : on(false), probed(false), dabs(0), words_read(0), ids_got(0),
-                  zero_dabs(0), g_dabs(0), g_words(0), g_ids(0), g_zero(0), vc(0) {
+                  zero_dabs(0), g_dabs(0), g_words(0), g_ids(0), g_zero(0), vc(0),
+                  gen(0), blk64_hit(0), blk256_hit(0), blk64_all(0), blk256_all(0) {
         counts.reserve(8192);
     }
     bool enabled() {
@@ -229,6 +246,26 @@ struct DirtyHist {
         if (count == 0) zero_dabs++;
         if (vertex_count) vc = vertex_count;
         counts.push_back(count);
+    }
+    // Distinct blocks this dab spans, counted with a generation-stamped array so the
+    // probe allocates once per topology rather than per dab.
+    void record_blocks(const std::vector<uint32_t>& ids, uint32_t vertex_count) {
+        if (!enabled() || ids.empty() || vertex_count == 0) return;
+        const uint32_t n64  = (vertex_count + 63u) / 64u;
+        const uint32_t n256 = (vertex_count + 255u) / 256u;
+        if (stamp64.size() != n64)   { stamp64.assign(n64, 0u);   gen = 0; }
+        if (stamp256.size() != n256) { stamp256.assign(n256, 0u); gen = 0; }
+        gen++;
+        uint32_t t64 = 0, t256 = 0;
+        for (uint32_t v : ids) {
+            if (v >= vertex_count) continue;
+            uint32_t b = v >> 6;
+            if (stamp64[b] != gen)  { stamp64[b] = gen;  t64++; }
+            uint32_t c = v >> 8;
+            if (stamp256[c] != gen) { stamp256[c] = gen; t256++; }
+        }
+        blk64_hit  += t64;   blk64_all  += n64;
+        blk256_hit += t256;  blk256_all += n256;
     }
     static const char* bucket_name(int i) {
         static const char* n[] = {"0","1-255","256-511","512-1K","1K-2K","2K-4K",
@@ -265,6 +302,16 @@ struct DirtyHist {
         for (int i = 0; i < 15; i++)
             if (h[i]) std::printf("  %s:%d", bucket_name(i), h[i]);
         std::printf("\n");
+        if (blk64_all && blk256_all) {
+            double d64  = 100.0 * (double)blk64_hit  / (double)blk64_all;
+            double d256 = 100.0 * (double)blk256_hit / (double)blk256_all;
+            double o64  = blk64_hit  ? 100.0 * (double)ids_got / ((double)blk64_hit  *  64.0) : 0.0;
+            double o256 = blk256_hit ? 100.0 * (double)ids_got / ((double)blk256_hit * 256.0) : 0.0;
+            std::printf("[dirty]   blocks@64 : %.2f%% of mesh dispatched (ceiling %.0fx), lane occupancy %.0f%%\n",
+                        d64,  d64  > 0 ? 100.0 / d64  : 0.0, o64);
+            std::printf("[dirty]   blocks@256: %.2f%% of mesh dispatched (ceiling %.0fx), lane occupancy %.0f%%\n",
+                        d256, d256 > 0 ? 100.0 / d256 : 0.0, o256);
+        }
         g_dabs += dabs; g_words += words_read; g_ids += ids_got; g_zero += zero_dabs;
         std::printf("[dirty]   session: %llu dabs, read %.2f GB, payload %.2f MB (%.3f%%)\n",
                     (unsigned long long)g_dabs,
@@ -273,6 +320,7 @@ struct DirtyHist {
                     g_words ? 100.0 * (double)g_ids / (double)g_words : 0.0);
         std::fflush(stdout);
         dabs = words_read = ids_got = zero_dabs = 0;
+        blk64_hit = blk256_hit = blk64_all = blk256_all = 0;
         counts.clear();
     }
 };
@@ -501,6 +549,9 @@ void BrushStroke::drain_dab_readbacks(DabContext& ctx) {
             if (recent_n < kCountWindow) recent_n++;
         }
         g_dirty_hist.record((uint32_t)dirty_verts.size(), pd.words, vertex_count);
+        // On the raw GPU list, before snap_and_mirror_dirty appends pair-map twins —
+        // the twins are not what the dab's own kernels dispatched over.
+        g_dirty_hist.record_blocks(dirty_verts, vertex_count);
         if (dirty_verts.empty()) continue;
         if (pd.kind == DAB_GEO) {
             snap_and_mirror_dirty(*this, ctx, pd.anchor_x);

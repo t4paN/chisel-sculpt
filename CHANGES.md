@@ -2,6 +2,27 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-09-17 — Measuring what dispatch culling is worth, before building it
+
+*Diagnostic only, behind `CHISEL_DIRTY_HIST=1`. Deleted once the numbers are in.*
+
+Dispatch culling means only running threads for the vertex blocks a dab actually lights
+up. Whether that is worth building depends on a number nobody has: how many blocks a real
+dab spans. This counts it, from the dirty lists already landing on the CPU — no bounding
+boxes, no staleness, nothing that can be wrong. If it reports a dab lighting 4% of blocks,
+then 4% is the ceiling, and it cost forty lines to learn instead of a week.
+
+It measures **64- and 256-vertex blocks side by side**, because block size must equal the
+workgroup size — which makes it a coordinated change across every culled kernel, and so
+worth being right about the first time. The prior work's preference for 64 was derived from
+wave64 lane occupancy on an RX 560; this machine is an Intel Arc B570, which schedules
+differently, so the figure has to be measured here rather than inherited. **Lane occupancy
+is the deciding column:** a dab that lights a block but fills a tenth of it is paying for
+nine tenths of nothing.
+
+Counting uses generation-stamped arrays, so the probe allocates once per topology rather
+than once per dab, and stays out of the way of what it is measuring.
+
 ## 2026-09-17 — A dispatch can be sized by a count only the GPU knows
 
 *Builds on both native backends, `dirty_args` compiles under naga with zero device
