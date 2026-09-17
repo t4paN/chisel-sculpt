@@ -212,6 +212,7 @@ struct BrushStroke {
     // be recovered and this stroke must snapshot every vertex to keep undo exact.
     // Slow, loud, and should be rare — see drain_dab_readbacks.
     bool dirty_overflowed = false;
+    bool blocks_need_rebuild = true;   // rebuild block AABBs on this frame's first dab
     bool snapped_whole_mesh = false;   // the fallback above already ran this stroke
 
     void begin_dab(DabContext& ctx);

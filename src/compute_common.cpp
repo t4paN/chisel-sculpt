@@ -2,6 +2,7 @@
 #include "gpu_shaders_generated.h"   // gpu::embedded_shader("mirror_project")
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 
 ComputeState::ComputeState()
     : supported(false)
@@ -221,6 +222,16 @@ void ComputeState::cleanup() {
     gpu::release_compute_pipeline(mirror_project_pipeline);
     gpu::release_compute_pipeline(dirty_args_pipeline);
     gpu::release_buffer(dispatch_args_ssbo);
+    gpu::release_compute_pipeline(block_boxes_pipeline);
+    gpu::release_compute_pipeline(block_select_pipeline);
+    gpu::release_compute_pipeline(block_args_pipeline);
+    gpu::release_compute_pipeline(accum_clear_blocks_pipeline);
+    gpu::release_buffer(block_boxes_ssbo);
+    gpu::release_buffer(block_list_ssbo);
+    gpu::release_buffer(block_sticky_ssbo);
+    gpu::release_buffer(block_args_ssbo);
+    gpu::release_buffer(block_ubo);
+    block_count = block_capacity = 0;
     gpu::release_buffer(mirror_project_ubo);
     gpu::release_compute_pipeline(crease_accum_pipeline);
     gpu::release_compute_pipeline(pinch_accum_pipeline);
@@ -429,7 +440,12 @@ void ComputeState::set_dirty_region(uint32_t base, uint32_t cap) {
     if (!dirty_region_ubo.handle)
         dirty_region_ubo = gpu::create_buffer(gpu_dev, nullptr, sizeof(DirtyRegionGPU),
                                               gpu::Usage::Uniform);
-    DirtyRegionGPU dr = { base, cap, 0, 0 };
+    dirty_region_base = base;
+    dirty_region_cap  = cap;
+    ++dab_serial;            // a selection made for an earlier dab is now stale
+    dirty_block_mode  = 0;   // a new dab has no selection yet; only a path that runs
+                             // block_select for THIS dab may turn it on
+    DirtyRegionGPU dr = { base, cap, dirty_block_mode, 0 };
     gpu::write_buffer(gpu_dev, dirty_region_ubo, 0, &dr, sizeof(dr));
     uint32_t zero = 0;
     if (smooth_dirty_ssbo.handle)
@@ -583,4 +599,211 @@ void ComputeState::dispatch_mirror_project_ids(const gpu::Buffer& pos_vbo,
     if (id_count == 0) return;
     dispatch_mirror_project_impl(*this, pos_vbo, vertex_count, dirty_verts_ssbo,
                                  1u, id_count, (id_count + 255u) / 256u);
+}
+
+// ---------------------------------------------------------------------------
+// Brush dispatch culling — see the contract on ComputeState's block_* members.
+// ---------------------------------------------------------------------------
+
+namespace {
+struct BlockBoxParamsGPU { uint32_t vertex_count, block_count, _p0, _p1; };
+static_assert(sizeof(BlockBoxParamsGPU) == 16, "block box Params UBO must be 16 bytes");
+
+struct BlockSelectParamsGPU {
+    float    anchor_a[3]; float radius_a;            // 16
+    float    anchor_b[3]; float radius_b;            // 16
+    uint32_t block_count; uint32_t _p0, _p1, _p2;    // 16
+};
+static_assert(sizeof(BlockSelectParamsGPU) == 48, "block select Params UBO must be 48 bytes");
+}  // namespace
+
+bool ComputeState::init_block_cull() {
+    if (!supported) return false;
+    // On by default; CHISEL_BLOCK_CULL=0 turns it off for an A/B without a rebuild.
+    const char* e = getenv("CHISEL_BLOCK_CULL");
+    block_cull_on = !(e && *e == '0');
+    if (!block_cull_on) {
+        std::printf("[compute] block culling DISABLED (CHISEL_BLOCK_CULL=0)\n");
+        return false;
+    }
+
+    const gpu::BindEntry box_layout[] = {
+        { BIND_POSITIONS,   gpu::Bind::StorageRead,      0 },
+        { BIND_BLOCK_BOXES, gpu::Bind::StorageReadWrite, 0 },
+        { BIND_PARAMS,      gpu::Bind::Uniform,          sizeof(BlockBoxParamsGPU) },
+    };
+    block_boxes_pipeline = gpu::create_compute_pipeline(gpu_dev,
+                               gpu::embedded_shader("block_boxes"), box_layout, 3);
+
+    const gpu::BindEntry sel_layout[] = {
+        { BIND_BLOCK_LIST,   gpu::Bind::StorageReadWrite, 0 },
+        { BIND_BLOCK_BOXES,  gpu::Bind::StorageRead,      0 },
+        { BIND_BLOCK_STICKY, gpu::Bind::StorageReadWrite, 0 },
+        { BIND_PARAMS,       gpu::Bind::Uniform,          sizeof(BlockSelectParamsGPU) },
+    };
+    block_select_pipeline = gpu::create_compute_pipeline(gpu_dev,
+                                gpu::embedded_shader("block_select"), sel_layout, 4);
+
+    const gpu::BindEntry args_layout[] = {
+        { BIND_BLOCK_LIST,    gpu::Bind::StorageRead,      0 },
+        { BIND_DISPATCH_ARGS, gpu::Bind::StorageReadWrite, 0 },
+        { BIND_PARAMS,        gpu::Bind::Uniform,          sizeof(BlockBoxParamsGPU) },
+    };
+    block_args_pipeline = gpu::create_compute_pipeline(gpu_dev,
+                              gpu::embedded_shader("block_args"), args_layout, 3);
+
+    const gpu::BindEntry clr_layout[] = {
+        { BIND_ACCUM,      gpu::Bind::StorageReadWrite, 0 },
+        { BIND_BLOCK_LIST, gpu::Bind::StorageRead,      0 },
+        { BIND_PARAMS,     gpu::Bind::Uniform,          sizeof(BlockBoxParamsGPU) },
+    };
+    accum_clear_blocks_pipeline = gpu::create_compute_pipeline(gpu_dev,
+                                      gpu::embedded_shader("accum_clear_blocks"),
+                                      clr_layout, 3);
+
+    if (!block_boxes_pipeline.handle || !block_select_pipeline.handle
+        || !block_args_pipeline.handle || !accum_clear_blocks_pipeline.handle) {
+        std::printf("[compute] block-cull pipelines failed to compile — culling off\n");
+        block_cull_on = false;
+        return false;
+    }
+    block_ubo = gpu::create_buffer(gpu_dev, nullptr, sizeof(BlockSelectParamsGPU),
+                                   gpu::Usage::Uniform);
+    block_args_ssbo = gpu::create_buffer(gpu_dev, nullptr, 3 * sizeof(uint32_t),
+                                         gpu::Usage::Storage | gpu::Usage::Indirect);
+    std::printf("[compute] block-cull pipelines compiled (%u-vertex blocks)\n", kVertexBlock);
+    return true;
+}
+
+void ComputeState::ensure_block_buffers(uint32_t vertex_count) {
+    block_count = (vertex_count + kVertexBlock - 1u) / kVertexBlock;
+    if (block_count <= block_capacity && block_boxes_ssbo.handle) return;
+
+    gpu::release_buffer(block_boxes_ssbo);
+    gpu::release_buffer(block_list_ssbo);
+    gpu::release_buffer(block_sticky_ssbo);
+    uint32_t alloc = block_count < 64u ? 64u : block_count;
+    block_boxes_ssbo  = gpu::create_buffer(gpu_dev, nullptr,
+                            (uint64_t)alloc * 6u * sizeof(float), gpu::Usage::Storage);
+    // +1 for the count word the list carries in slot 0.
+    block_list_ssbo   = gpu::create_buffer(gpu_dev, nullptr,
+                            (uint64_t)(alloc + 1u) * sizeof(uint32_t), gpu::Usage::Storage);
+    block_sticky_ssbo = gpu::create_buffer(gpu_dev, nullptr,
+                            (uint64_t)alloc * sizeof(uint32_t), gpu::Usage::Storage);
+    block_capacity = alloc;
+}
+
+void ComputeState::dispatch_block_boxes(const gpu::Buffer& pos_vbo, uint32_t vertex_count) {
+    if (!has_block_cull()) return;
+    ensure_block_buffers(vertex_count);
+    if (!block_boxes_ssbo.handle || block_count == 0) return;
+
+    BlockBoxParamsGPU u = { vertex_count, block_count, 0, 0 };
+    gpu::write_buffer(gpu_dev, block_ubo, 0, &u, sizeof(u));
+
+    const gpu::BindBufferEntry bg[] = {
+        { BIND_POSITIONS,   &pos_vbo,          (uint64_t)vertex_count * 3u * sizeof(float) },
+        { BIND_BLOCK_BOXES, &block_boxes_ssbo, block_boxes_ssbo.size },
+        { BIND_PARAMS,      &block_ubo,        sizeof(BlockBoxParamsGPU) },
+    };
+    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, block_boxes_pipeline, bg, 3);
+    gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
+    gpu::dispatch(b, block_boxes_pipeline, grp, (block_count + 63u) / 64u);
+    gpu::submit(b);
+    gpu::release_bind_group(grp);
+}
+
+void ComputeState::begin_block_frame() {
+    if (!has_block_cull() || !block_list_ssbo.handle) return;
+    uint32_t zero = 0;
+    gpu::write_buffer(gpu_dev, block_list_ssbo, 0, &zero, sizeof(zero));
+    gpu::clear_buffer(gpu_dev, block_sticky_ssbo, 0);
+}
+
+void ComputeState::dispatch_block_select(float ax, float ay, float az, float ra,
+                                         float bx, float by, float bz, float rb) {
+    if (!has_block_cull() || !block_boxes_ssbo.handle || block_count == 0) return;
+
+    BlockSelectParamsGPU u = {};
+    u.anchor_a[0] = ax; u.anchor_a[1] = ay; u.anchor_a[2] = az; u.radius_a = ra;
+    u.anchor_b[0] = bx; u.anchor_b[1] = by; u.anchor_b[2] = bz; u.radius_b = rb;
+    u.block_count = block_count;
+    gpu::write_buffer(gpu_dev, block_ubo, 0, &u, sizeof(u));
+    block_sel_serial = dab_serial;   // this selection belongs to THIS dab
+
+    const gpu::BindBufferEntry bg[] = {
+        { BIND_BLOCK_LIST,   &block_list_ssbo,   block_list_ssbo.size },
+        { BIND_BLOCK_BOXES,  &block_boxes_ssbo,  block_boxes_ssbo.size },
+        { BIND_BLOCK_STICKY, &block_sticky_ssbo, block_sticky_ssbo.size },
+        { BIND_PARAMS,       &block_ubo,         sizeof(BlockSelectParamsGPU) },
+    };
+    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, block_select_pipeline, bg, 4);
+
+    const gpu::BindBufferEntry abg[] = {
+        { BIND_BLOCK_LIST,    &block_list_ssbo,  block_list_ssbo.size },
+        { BIND_DISPATCH_ARGS, &block_args_ssbo,  block_args_ssbo.size },
+        { BIND_PARAMS,        &block_ubo,        16 },
+    };
+
+    gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
+    gpu::dispatch(b, block_select_pipeline, grp, (block_count + 63u) / 64u);
+    gpu::submit(b);
+    gpu::release_bind_group(grp);
+
+    // block_args reads block_count from the FIRST word of its own 16-byte view of this
+    // UBO, where BlockSelectParams keeps anchor_a.x — so rewrite it as a BlockBoxParams
+    // before the args dispatch. Getting this wrong once made workgroup count come out
+    // zero and the draw brush silently do nothing.
+    uint32_t a[4] = { block_count, 0, 0, 0 };
+    gpu::write_buffer(gpu_dev, block_ubo, 0, a, sizeof(a));
+    gpu::BindGroup agrp = gpu::create_bind_group(gpu_dev, block_args_pipeline, abg, 3);
+    gpu::ComputeBatch b2 = gpu::begin_compute(gpu_dev);
+    gpu::dispatch(b2, block_args_pipeline, agrp, 1);
+    gpu::submit(b2);
+    gpu::release_bind_group(agrp);
+
+    // CHISEL_BLOCK_CULL=2: synchronous peek at what the selection produced. A stroke
+    // sync, so debug only — it exists because "nothing was selected" and "nothing was
+    // dispatched" look identical from the dirty counts alone.
+    static int dbg = -1;
+    if (dbg < 0) { const char* e = getenv("CHISEL_BLOCK_CULL"); dbg = (e && *e == '2') ? 24 : 0; }
+    if (dbg > 0) {
+        uint32_t n = 0, args3[3] = {0,0,0};
+        float box6[6] = {0,0,0,0,0,0};
+        gpu::read_buffer(gpu_dev, block_list_ssbo, 0, sizeof(uint32_t), &n);
+        gpu::read_buffer(gpu_dev, block_args_ssbo, 0, sizeof(args3), args3);
+        gpu::read_buffer(gpu_dev, block_boxes_ssbo, 0, sizeof(box6), box6);
+        std::printf("[blockdbg] sel=%u of %u  args=(%u,%u,%u)  anchor=(%.3f,%.3f,%.3f) r=%.4f  box0=[%.3f %.3f %.3f]..[%.3f %.3f %.3f]\n",
+                    n, block_count, args3[0], args3[1], args3[2], ax, ay, az, ra,
+                    box6[0], box6[1], box6[2], box6[3], box6[4], box6[5]);
+        dbg--;
+    }
+}
+
+void ComputeState::clear_accum_blocks(uint32_t vertex_count) {
+    if (!has_block_cull() || !accum_clear_blocks_pipeline.handle) return;
+    if (!accum_ssbo.handle || !block_args_ssbo.handle) return;
+
+    uint32_t u[4] = { vertex_count, 0, 0, 0 };
+    gpu::write_buffer(gpu_dev, block_ubo, 0, u, sizeof(u));
+
+    const gpu::BindBufferEntry bg[] = {
+        { BIND_ACCUM,      &accum_ssbo,      (uint64_t)vertex_count * 4u * sizeof(uint32_t) },
+        { BIND_BLOCK_LIST, &block_list_ssbo, block_list_ssbo.size },
+        { BIND_PARAMS,     &block_ubo,       16 },
+    };
+    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, accum_clear_blocks_pipeline, bg, 3);
+    gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
+    gpu::dispatch_indirect(b, accum_clear_blocks_pipeline, grp, block_args_ssbo, 0);
+    gpu::submit(b);
+    gpu::release_bind_group(grp);
+}
+
+void ComputeState::set_block_mode(bool on) {
+    uint32_t want = on ? 1u : 0u;
+    if (want == dirty_block_mode) return;
+    dirty_block_mode = want;
+    if (!dirty_region_ubo.handle) return;
+    DirtyRegionGPU dr = { dirty_region_base, dirty_region_cap, dirty_block_mode, 0 };
+    gpu::write_buffer(gpu_dev, dirty_region_ubo, 0, &dr, sizeof(dr));
 }

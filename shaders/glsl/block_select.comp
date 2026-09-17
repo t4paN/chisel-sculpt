@@ -1,0 +1,44 @@
+// block_select.comp — GLSL 430 sibling of shaders/wgsl/block_select.wgsl.
+// Appends blocks a dab can reach to the compact dispatch list. Sticky within a FRAME
+// (boxes are rebuilt per frame), so a dab never misses a block an earlier dab moved.
+#version 430
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 45) buffer BlockBuf  { uint blocks[]; };
+layout(std430, binding = 47) readonly buffer BoxBuf { float boxes[]; };
+layout(std430, binding = 48) buffer StickyBuf { uint sticky[]; };
+
+layout(std140, binding = 63) uniform Params {
+    vec3  anchor_a;
+    float radius_a;
+    vec3  anchor_b;
+    float radius_b;      // <= 0 disables the second lobe
+    uint  block_count;
+    uint  _pad0;
+    uint  _pad1;
+    uint  _pad2;
+} P;
+
+bool hits(vec3 lo, vec3 hi, vec3 c, float r) {
+    if (r <= 0.0) return false;
+    vec3 d = max(lo - c, max(vec3(0.0), c - hi));
+    return dot(d, d) < r * r;
+}
+
+void main() {
+    uint b = gl_GlobalInvocationID.x;
+    if (b >= P.block_count) return;
+    if (sticky[b] != 0u) return;
+
+    uint o = b * 6u;
+    vec3 lo = vec3(boxes[o + 0u], boxes[o + 1u], boxes[o + 2u]);
+    vec3 hi = vec3(boxes[o + 3u], boxes[o + 4u], boxes[o + 5u]);
+    if (!hits(lo, hi, P.anchor_a, P.radius_a) && !hits(lo, hi, P.anchor_b, P.radius_b))
+        return;
+
+    uint was = atomicExchange(sticky[b], 1u);
+    if (was != 0u) return;
+
+    uint slot = atomicAdd(blocks[0], 1u);
+    blocks[1u + slot] = b;
+}

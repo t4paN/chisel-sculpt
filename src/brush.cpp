@@ -403,6 +403,14 @@ void BrushStroke::begin_dab(DabContext& ctx) {
     if (vc == 0) return;
     cs.ensure_smooth_dirty_buffer(vc);
 
+    // Once per frame, before that frame's first dab: rebuild every block's AABB from
+    // the GPU's own positions and drop the previous frame's selection.
+    if (blocks_need_rebuild && cs.has_block_cull()) {
+        cs.dispatch_block_boxes(ctx.renderer.vbo_pos, vc);
+        cs.begin_block_frame();
+        blocks_need_rebuild = false;
+    }
+
     // A level switch or a remesh renames every vertex, so past counts mean nothing.
     if (recent_vc != vc) {
         recent_n = recent_head = 0;
@@ -1296,7 +1304,10 @@ void BrushStroke::apply_draw(DabContext& ctx, float dab_x, float dab_y,
     Vec3 view_dir = ctx.cam.get_view_direction();
 
     ctx.compute.ensure_accum_buffer(ctx.vertex_count);
-    ctx.compute.clear_accum_buffer();
+    // With culling on, dispatch_draw_accum clears just this dab's blocks instead —
+    // see clear_accum_blocks. Crease and pinch are not culled and still clear in full.
+    if (!ctx.compute.has_block_cull())
+        ctx.compute.clear_accum_buffer();
 
     DrawAccumParams params{};
     params.anchor_a_x = anchor_pos.x;
@@ -1571,6 +1582,11 @@ void BrushStroke::post_dab(DabContext& ctx) {
 }
 
 void BrushStroke::post_frame(DabContext& ctx) {
+    // Block AABBs are rebuilt once per frame, before that frame's first dab, and the
+    // frame's selection is reset with them. Within a frame the only vertices that move
+    // are ones an earlier dab displaced, and their blocks are already selected — which
+    // is what makes a per-frame sticky set both safe and tight.
+    blocks_need_rebuild = true;
     drain_dab_readbacks(ctx);
 
     if (gpu_dirty.empty()) return;

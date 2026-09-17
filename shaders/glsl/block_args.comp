@@ -1,0 +1,21 @@
+// block_args.comp — GLSL 430 sibling of shaders/wgsl/block_args.wgsl.
+// One workgroup per active block: the block count is the workgroup count.
+#version 430
+layout(local_size_x = 1) in;
+
+layout(std430, binding = 45) readonly buffer BlockBuf { uint blocks[]; };
+layout(std430, binding = 46)          buffer ArgsBuf  { uint args[]; };
+
+layout(std140, binding = 63) uniform Params {
+    uint block_count;
+    uint _p0;
+    uint _p1;
+    uint _p2;
+} P;
+
+void main() {
+    uint n = min(blocks[0], P.block_count);
+    args[0] = n;
+    args[1] = 1u;
+    args[2] = 1u;
+}

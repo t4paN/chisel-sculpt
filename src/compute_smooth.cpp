@@ -187,11 +187,12 @@ bool ComputeState::init_smooth() {
         { BIND_DIRTY_VERTS,  gpu::Bind::StorageReadWrite, 0 },
         { BIND_ALPHA_TEX,    gpu::Bind::StorageRead,      0 },
         { BIND_ALPHA_PARAMS, gpu::Bind::Uniform,          48 },
+        { BIND_BLOCK_LIST,   gpu::Bind::StorageRead,      0 },
         { BIND_DIRTY_REGION, gpu::Bind::Uniform,          sizeof(DirtyRegionGPU) },
         { BIND_PARAMS,       gpu::Bind::Uniform,          sizeof(SmoothAccumParamsGPU) },
     };
     smooth_accum_pipeline = gpu::create_compute_pipeline(gpu_dev,
-                                gpu::embedded_shader("smooth_accum"), accum_layout, 7);
+                                gpu::embedded_shader("smooth_accum"), accum_layout, 8);
     if (!smooth_accum_pipeline.handle) {
         std::printf("[compute] smooth_accum pipeline failed to compile\n");
         return false;
@@ -288,12 +289,15 @@ void ComputeState::dispatch_smooth(const SmoothAccumParams& p,
             { BIND_DIRTY_VERTS,  &smooth_dirty_ssbo, smooth_dirty_ssbo.size },
             { BIND_ALPHA_TEX,    &alpha_tex_ssbo,   (uint64_t)alpha_tex_w * alpha_tex_h * sizeof(float) },
             { BIND_ALPHA_PARAMS, &alpha_params_ubo, 48 },
+            { BIND_BLOCK_LIST,   &block_list_ssbo,   block_list_ssbo.size },
             { BIND_DIRTY_REGION, &dirty_region_ubo,  sizeof(DirtyRegionGPU) },
             { BIND_PARAMS,       &smooth_accum_ubo, sizeof(SmoothAccumParamsGPU) },
         };
-        gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, smooth_accum_pipeline, bg, 7);
+        gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, smooth_accum_pipeline, bg, 8);
         gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
-        gpu::dispatch(b, smooth_accum_pipeline, grp, (vc + 255u) / 256u);
+        // smooth_accum's workgroup is kVertexBlock wide so it CAN be block-dispatched;
+        // the smooth path runs no selection yet, so this is still the full-mesh count.
+        gpu::dispatch(b, smooth_accum_pipeline, grp, (vc + kVertexBlock - 1u) / kVertexBlock);
         gpu::submit(b);
         gpu::release_bind_group(grp);
     }

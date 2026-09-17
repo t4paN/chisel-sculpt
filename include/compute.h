@@ -57,8 +57,10 @@ enum ComputeBinding : GLuint {
     BIND_CASCADE_SRC       = 42, // float3 coarse positions (replay pass input / final pos for normals)
     BIND_CASCADE_DST       = 43, // float3 fine positions (replay pass output, disp applied in place)
     BIND_CASCADE_MID       = 44, // uint4 per midpoint: v0,v1,opp0,opp1 (cached SubdivStencil mid table)
-    BIND_BLOCK_LIST        = 45, // uint   (reserved) active block indices for dispatch culling
+    BIND_BLOCK_LIST        = 45, // uint   [count, b0, b1, ...] active blocks for dispatch culling
     BIND_DISPATCH_ARGS     = 46, // uint3  workgroup counts for dispatch_indirect
+    BIND_BLOCK_BOXES       = 47, // float6 per-block world AABB (dispatch culling)
+    BIND_BLOCK_STICKY      = 48, // uint   per-block "already listed this frame" flag
     // Per-dab dirty-list region (base word + id capacity) for the arena below. Shared
     // by every kernel that appends to the dirty list, so their own Params blocks stay
     // untouched. Written once per dab by set_dirty_region().
@@ -75,11 +77,21 @@ enum ComputeBinding : GLuint {
 // atomic index against it, and the counter deliberately keeps counting past it so the
 // CPU can detect the overflow (see take_count_list_read's out_total).
 struct DirtyRegionGPU {
-    uint32_t base;   // word offset of the region's counter inside the arena
-    uint32_t cap;    // ids the region can hold (excludes the counter word)
-    uint32_t _pad0;
+    uint32_t base;        // word offset of the region's counter inside the arena
+    uint32_t cap;         // ids the region can hold (excludes the counter word)
+    uint32_t block_mode;  // 1 = kernels index vertices through the active-block list
     uint32_t _pad1;
 };
+
+// Vertices bucket into fixed runs for dispatch culling. This length MUST equal the
+// workgroup size of every kernel that dispatches one workgroup per block, because the
+// lane index IS the offset inside the block — change one and you must change both.
+//
+// Measured on this machine (Arc B570) at 2.6M verts: 64-vertex blocks put a dab in
+// 4.4% of the mesh at 45% lane occupancy, against 8.7% at 23% for 256-vertex blocks.
+// Fewer threads dispatched AND better filled, so 64 wins outright; the earlier
+// preference for 256 came from an RX 560, which schedules differently.
+static constexpr uint32_t kVertexBlock = 64u;
 
 struct DrawAccumParams {
     float anchor_a_x, anchor_a_y, anchor_a_z;
@@ -504,6 +516,44 @@ struct ComputeState {
     gpu::ComputePipeline dirty_args_pipeline;
     gpu::Buffer          dispatch_args_ssbo;   // uint3, Storage | Indirect
 
+    // ---- brush dispatch culling ----
+    // Vertices bucket into runs of kVertexBlock (one workgroup's worth) with a world
+    // AABB each. A dab selects the blocks its spheres reach and the brush kernels
+    // dispatch one workgroup per selected block instead of one per block of the whole
+    // mesh.
+    //
+    // Boxes are rebuilt on the GPU once per FRAME, never on the CPU: the CPU's copy of
+    // positions is pen-down-stale by design, and a box built from stale positions is
+    // too SMALL — the one error that silently drops vertices out of a dab.
+    //
+    // Selection is sticky for a FRAME, not a stroke. Within a frame the only vertices
+    // that have moved are ones an earlier dab displaced, whose blocks are already
+    // listed, so the union stays both correct and tight. Letting it persist for a whole
+    // stroke is what made an earlier attempt's culling decay toward the whole mesh.
+    gpu::ComputePipeline block_boxes_pipeline;
+    gpu::ComputePipeline block_select_pipeline;
+    gpu::ComputePipeline block_args_pipeline;
+    gpu::ComputePipeline accum_clear_blocks_pipeline;
+    gpu::Buffer block_boxes_ssbo;    // 6 floats per block
+    gpu::Buffer block_list_ssbo;     // [count, b0, b1, ...]
+    gpu::Buffer block_sticky_ssbo;   // 1 uint per block
+    gpu::Buffer block_args_ssbo;     // uint3, Storage | Indirect
+    gpu::Buffer block_ubo;           // BlockSelectParamsGPU / BlockBoxParamsGPU
+    uint32_t block_count = 0;        // blocks covering the current vertex count
+    uint32_t block_capacity = 0;     // blocks the buffers are sized for
+    bool     block_cull_on = false;  // CHISEL_BLOCK_CULL=0 disables; on by default
+    uint32_t dirty_block_mode = 0;   // mirrored into DirtyRegionGPU::block_mode
+    uint32_t dirty_region_base = 0;  // last set_dirty_region, so set_block_mode can
+    uint32_t dirty_region_cap = 0;   // rewrite the UBO without losing base/cap
+    // Block mode is per-DAB state, and dispatching a kernel over a selection that
+    // belongs to a different dab sculpts the wrong vertices silently. Both bugs this
+    // work shipped before were invariants that were argued instead of checked, so
+    // this one is checked: set_dirty_region bumps the serial once per dab, a
+    // selection stamps the serial it was made for, and a block dispatch refuses to
+    // run unless the two match.
+    uint32_t dab_serial = 0;
+    uint32_t block_sel_serial = ~0u;
+
     gpu::Buffer dirty_region_ubo;    // DirtyRegionGPU at BIND_DIRTY_REGION
     gpu::Buffer smooth_dirty_ssbo;   // the arena
     uint32_t smooth_dirty_capacity;  // max ids one region could ever need (= vertex_count)
@@ -665,6 +715,26 @@ struct ComputeState {
     bool init_dirty_args();
     bool has_dirty_args() const { return dirty_args_pipeline.handle != 0
                                       && dispatch_args_ssbo.handle != 0; }
+    bool init_block_cull();
+    bool has_block_cull() const { return block_cull_on && block_boxes_pipeline.handle != 0
+                                      && block_select_pipeline.handle != 0
+                                      && block_args_pipeline.handle != 0; }
+    void ensure_block_buffers(uint32_t vertex_count);
+    // Rebuild every block's AABB from GPU positions. Once per frame, before its dabs.
+    void dispatch_block_boxes(const gpu::Buffer& pos_vbo, uint32_t vertex_count);
+    // Drop the frame's selection (sticky flags + list count).
+    void begin_block_frame();
+    // Add the blocks these spheres reach. radius_b <= 0 disables the second lobe.
+    void dispatch_block_select(float ax, float ay, float az, float ra,
+                               float bx, float by, float bz, float rb);
+    // Turn block indexing on/off for the kernels that read BIND_BLOCK_LIST. ONLY a
+    // path that has actually run a selection for THIS dab may turn it on — draw_apply
+    // is shared with crease and pinch, and dispatching them over someone else's list
+    // silently sculpts the wrong vertices.
+    void set_block_mode(bool on);
+    // Zero accum for the active blocks only. Valid because apply reads back exactly
+    // the blocks accum wrote, so stale accum elsewhere is never observed.
+    void clear_accum_blocks(uint32_t vertex_count);
 
     // Upload the region the next dab's kernels must append into, and zero its counter.
     // Call once per dab BEFORE its dispatches; every dirty-writing kernel reads it at

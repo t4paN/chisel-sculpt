@@ -575,6 +575,7 @@ int main(int argc, char* argv[]) {
         compute.init_stroke_smooth();
         compute.init_mirror_project();
         compute.init_dirty_args();
+        compute.init_block_cull();
         compute.init_crease();
         compute.init_pinch();
         compute.init_move();

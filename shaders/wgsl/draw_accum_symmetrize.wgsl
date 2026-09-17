@@ -16,14 +16,30 @@ struct Params {
     _pad2 : u32,   // struct rounds to 16
 };
 
+struct DirtyRegion {
+    base       : u32,
+    cap        : u32,
+    block_mode : u32,   // 1 = dispatch is one workgroup per active block
+    _p1        : u32,
+};
+
 @group(0) @binding(3)  var<storage, read>       accum_in   : array<u32>;
 @group(0) @binding(20) var<storage, read_write> accum_out  : array<u32>;
 @group(0) @binding(7)  var<storage, read>       mirror_map : array<u32>;
+@group(0) @binding(45) var<storage, read>       block_list : array<u32>;
+@group(0) @binding(61) var<uniform>             DR         : DirtyRegion;
 @group(0) @binding(63) var<uniform>             P          : Params;
 
-@compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-    let v = gid.x;
+@compute @workgroup_size(64)
+fn main(@builtin(workgroup_id) wg : vec3<u32>,
+        @builtin(local_invocation_id) lid : vec3<u32>) {
+    // Dispatch culling: in block mode one workgroup owns one ACTIVE block, so the
+    // list entry is the block index and the lane is the offset inside it. Entry 0
+    // of the list is the count, hence the +1. Otherwise this is the plain
+    // full-mesh mapping, where wg * 64 + lane is exactly the global id.
+    let v = select(wg.x * 64u + lid.x,
+                   block_list[1u + wg.x] * 64u + lid.x,
+                   DR.block_mode == 1u);
     if (v >= P.vertex_count) {
         return;
     }

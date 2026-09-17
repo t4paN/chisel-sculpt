@@ -8,11 +8,20 @@
 // portable uint-bits + atomicCompSwap CAS path is used (the native float-atomics
 // fast path is dropped — WGSL has no float atomics).
 #version 430
-layout(local_size_x = 256) in;
+layout(local_size_x = 64) in;
 
 layout(std430, binding = 0) readonly buffer PosBuf  { float positions[]; };
 layout(std430, binding = 1) readonly buffer NormBuf { float normals[];   };
 layout(std430, binding = 3)          buffer AccumBuf { uint accum[]; };
+
+layout(std430, binding = 45) readonly buffer BlockListBuf { uint block_list[]; };
+
+layout(std140, binding = 61) uniform DirtyRegion {
+    uint base;
+    uint cap;
+    uint block_mode;   // 1 = one workgroup per active block
+    uint _p1;
+} DR;
 
 layout(std140, binding = 63) uniform Params {
     vec3  anchor_a;         //   0..11
@@ -186,7 +195,12 @@ void deposit(uint v, vec3 anchor, vec3 view, vec3 anchor_n, vec3 vp, vec3 vn, ui
 }
 
 void main() {
-    uint v = gl_GlobalInvocationID.x;
+    // Dispatch culling: in block mode one workgroup owns one ACTIVE block, so the
+    // list entry is the block index and the lane is the offset inside it. Entry 0
+    // of the list is the count, hence the +1.
+    uint v = (DR.block_mode == 1u)
+           ? (block_list[1u + gl_WorkGroupID.x] * 64u + gl_LocalInvocationID.x)
+           : gl_GlobalInvocationID.x;
     if (v >= P.vertex_count) return;
     vec3 vp = vec3(positions[v*3u + 0u], positions[v*3u + 1u], positions[v*3u + 2u]);
     vec3 vn = vec3(normals[v*3u + 0u],   normals[v*3u + 1u],   normals[v*3u + 2u]);

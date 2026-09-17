@@ -1,0 +1,25 @@
+// accum_clear_blocks.comp — GLSL 430 sibling of shaders/wgsl/accum_clear_blocks.wgsl.
+// Zeroes accum for the active blocks only; the full-buffer clear was 40 MB per dab at
+// 5M tris and became the dominant per-dab cost once dispatches were culled.
+#version 430
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 3)  buffer AccumBuf { uint accum[]; };
+layout(std430, binding = 45) readonly buffer BlockListBuf { uint block_list[]; };
+
+layout(std140, binding = 63) uniform Params {
+    uint vertex_count;
+    uint _p0;
+    uint _p1;
+    uint _p2;
+} P;
+
+void main() {
+    uint v = block_list[1u + gl_WorkGroupID.x] * 64u + gl_LocalInvocationID.x;
+    if (v >= P.vertex_count) return;
+    uint b = v * 4u;
+    accum[b + 0u] = 0u;
+    accum[b + 1u] = 0u;
+    accum[b + 2u] = 0u;
+    accum[b + 3u] = 0u;
+}

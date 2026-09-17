@@ -2,6 +2,61 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-09-17 — Only run threads where the dab actually is
+
+*Builds on both native backends; all four new shaders compile with zero device errors
+under naga. NOT hand-sculpted yet, and no browser/Tint gate. On by default —
+`CHISEL_BLOCK_CULL=0` turns it off for an A/B without a rebuild.*
+
+Every brush kernel dispatched over the whole mesh and let the threads that missed the
+dab early-out. At 5M tris that is 2.6 million invocations to move the ~50,000 vertices
+a dab actually touches. The arena fixed what came *back* from the GPU; this fixes what
+was sent to it in the first place.
+
+Vertices bucket into fixed runs of 64 with a world AABB each. `block_select` marks the
+blocks a dab's spheres can reach, `block_args` turns that count into an indirect
+dispatch triple, and the draw kernels run one workgroup per *listed* block, indexing
+`v = block_list[1 + workgroup] * 64 + lane`.
+
+**64 rather than 256, measured on this machine rather than inherited.** The earlier work
+preferred 256 from wave64 occupancy on an RX 560. The probe shipped yesterday counted
+both side by side on the Arc B570 at 2.6M verts: 64-vertex blocks put a dab in 4.4% of
+the mesh at 45% lane occupancy, against 8.7% at 23% for 256. Fewer threads dispatched
+*and* better filled — no trade-off to weigh. Block size must equal workgroup size, since
+the lane index is the offset inside the block, so this moved both together across every
+culled kernel and its CPU dispatch count.
+
+Two things make the boxes trustworthy, and neither is optional:
+
+**They are built on the GPU, from the positions the GPU holds.** The CPU's copy is
+pen-down-stale by design, and a box built from stale positions is too *small* — the one
+error that silently drops vertices out of a dab. Building them where the data already
+lives removes that class outright.
+
+**They are rebuilt every frame, and selection is sticky only within that frame.** Within
+a frame the only vertices that have moved are ones an earlier dab displaced, and their
+blocks are already listed — so the union stays conservative *and* stays tight. Letting
+it persist for a whole stroke is what made an earlier attempt's culling decay toward the
+whole mesh as the stroke went on.
+
+The accum clear is folded in for the same reason it had to be: zeroing the whole 40 MB
+accum buffer per dab was invisible while the kernels also ran full-mesh, and dominant
+the moment they stopped. `accum_clear_blocks` zeroes only the blocks the dab is about to
+write, which is sound because apply reads back exactly the blocks accum wrote.
+
+Block mode is **per-dab state that only a path which ran a selection for THAT dab may
+enable** — `draw_apply` is shared with crease and pinch, which have no selection of their
+own. Rather than argue that invariant, it is checked: `set_dirty_region` bumps a dab
+serial, a selection stamps the serial it was made for, and a block dispatch that finds
+the two disagree falls back to the full mesh and says so. Both bugs this line of work
+shipped previously were invariants that were argued instead of checked.
+
+**Still full-mesh, by omission not by design:** `draw_mirror_apply`, crease, pinch, the
+smooth path, mask, colour and density. `smooth_accum` has the bindings and the shader
+branch but runs no selection yet. `draw_mirror_apply` writes mirror *twins*, whose blocks
+are not necessarily selected under the topological mirror — that needs verifying before
+it can be culled, not assuming.
+
 ## 2026-09-17 — Measuring what dispatch culling is worth, before building it
 
 *Diagnostic only, behind `CHISEL_DIRTY_HIST=1`. Deleted once the numbers are in.*
