@@ -360,6 +360,85 @@ static void web_pointer_lock(bool grab) {
 static void web_pointer_lock(bool) {}
 #endif
 
+// ---- Slider drag pointer capture ----
+//
+// A slider is a RELATIVE drag: only horizontal motion matters, and the pointer belongs
+// back where it started when you let go.
+//
+// Wayland refuses glfwSetCursorPos outright unless the cursor is disabled — GLFW 3.5's
+// own header says it "will only work when the cursor mode is GLFW_CURSOR_DISABLED,
+// otherwise it will emit GLFW_FEATURE_UNAVAILABLE". So the warp-back on release
+// silently did nothing there, while the bookkeeping underneath it ran anyway: the real
+// pointer stayed where the drag ended and Chisel believed it was back at the start, so
+// the ring and the cursor disagreed until the next mouse move. X11 has no such rule,
+// which is why this went unnoticed.
+//
+// Capturing is the right mode regardless: the pointer is locked, so a drag is no longer
+// bounded by the screen edge, and it is exactly what the web build already does with
+// requestPointerLock. Raw motion is deliberately NOT enabled — it bypasses the OS
+// pointer acceleration curve and would change the feel of every slider.
+static void slider_capture(GLFWwindow* w, bool grab) {
+#if defined(__EMSCRIPTEN__)
+    (void)w;
+    web_pointer_lock(grab);
+#else
+    if (!w) return;
+    glfwSetInputMode(w, GLFW_CURSOR, grab ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
+#endif
+}
+
+static void begin_slider_drag(GLFWwindow* w, InputState::SliderMode mode, float start_value) {
+    g_input->slider_mode        = mode;
+    g_input->slider_start_x     = g_input->mouse_x;
+    g_input->slider_start_y     = g_input->mouse_y;
+    g_input->slider_start_value = start_value;
+    g_input->slider_slot        = g_input->live_brush_slot();
+    g_input->slider_accum       = 0;
+    slider_capture(w, true);
+    // Seed the delta baseline AFTER capturing. Disabling the cursor switches GLFW to an
+    // unbounded virtual position that need not start at the window coordinate, so
+    // seeding from mouse_x would make the first motion event a jump of whatever the two
+    // spaces happen to differ by — a visible lurch on the first pixel of the drag.
+    g_slider_last_raw_x = g_input->mouse_x;
+#if !defined(__EMSCRIPTEN__)
+    if (w) {
+        double cx = 0.0, cy = 0.0;
+        glfwGetCursorPos(w, &cx, &cy);
+        g_slider_last_raw_x = cx;
+    }
+#endif
+}
+
+// warp_back = false is the abandon path (focus loss): hand the cursor back where it
+// actually is rather than teleporting it into a window the user has already left.
+static void end_slider_drag(GLFWwindow* w, bool warp_back) {
+    if (!g_input || g_input->slider_mode == InputState::SliderMode::NONE) return;
+    if (warp_back) {
+        // Order matters. The position has to be set while the cursor is STILL disabled,
+        // because that is the only mode Wayland accepts it in — there it records a
+        // cursor-position hint on the locked pointer. Releasing the capture below is
+        // what actually moves the pointer there. (On web the pointer-lock exit restores
+        // the OS cursor to where it was grabbed, which is the same place.)
+        if (w) glfwSetCursorPos(w, g_input->slider_start_x, g_input->slider_start_y);
+        g_input->mouse_x      = g_input->slider_start_x;
+        g_input->mouse_y      = g_input->slider_start_y;
+        g_input->prev_mouse_x = g_input->slider_start_x;
+        g_input->prev_mouse_y = g_input->slider_start_y;
+    }
+    g_input->slider_mode = InputState::SliderMode::NONE;
+    slider_capture(w, false);
+}
+
+#ifndef __EMSCRIPTEN__
+// A slider drag holds the pointer captured and hidden. If focus leaves while the key is
+// still down the release never arrives, so without this the cursor would stay trapped
+// in a window the user has already alt-tabbed away from.
+static void window_focus_callback(GLFWwindow* w, int focused) {
+    if (focused) return;
+    end_slider_drag(w, false);
+}
+#endif
+
 static void cursor_pos_callback(GLFWwindow* w, double x, double y) {
     if (!g_input) return;
     (void)w;
@@ -692,26 +771,14 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
                 } else if (g_input->ctrl_held) {
                     g_input->save_requested = true;
                 } else {
-                    g_input->slider_mode = InputState::SliderMode::SIZE;
-                    g_input->slider_start_x = g_input->mouse_x;
-                    g_input->slider_start_y = g_input->mouse_y;
-                    g_input->slider_start_value = g_input->brush_size;
-                    g_input->slider_slot = g_input->live_brush_slot();
-                    g_input->slider_accum = 0;
-                    g_slider_last_raw_x = g_input->mouse_x;
-                    web_pointer_lock(true);
+                    begin_slider_drag(w, InputState::SliderMode::SIZE,
+                                      g_input->brush_size);
                 }
                 break;
 
             case GLFW_KEY_W:
-                g_input->slider_mode = InputState::SliderMode::STRENGTH;
-                g_input->slider_start_x = g_input->mouse_x;
-                g_input->slider_start_y = g_input->mouse_y;
-                g_input->slider_start_value = g_input->brush_strength;
-                g_input->slider_slot = g_input->live_brush_slot();
-                g_input->slider_accum = 0;
-                g_slider_last_raw_x = g_input->mouse_x;
-                web_pointer_lock(true);
+                begin_slider_drag(w, InputState::SliderMode::STRENGTH,
+                                  g_input->brush_strength);
                 break;
 
             case GLFW_KEY_A:
@@ -720,14 +787,8 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
                     g_input->mask_clear_requested = true;
                 } else {
                     // A: hardness slider
-                    g_input->slider_mode = InputState::SliderMode::HARDNESS;
-                    g_input->slider_start_x = g_input->mouse_x;
-                    g_input->slider_start_y = g_input->mouse_y;
-                    g_input->slider_start_value = g_input->brush_hardness;
-                    g_input->slider_slot = g_input->live_brush_slot();
-                    g_input->slider_accum = 0;
-                    g_slider_last_raw_x = g_input->mouse_x;
-                    web_pointer_lock(true);
+                    begin_slider_drag(w, InputState::SliderMode::HARDNESS,
+                                      g_input->brush_hardness);
                 }
                 break;
 
@@ -737,14 +798,8 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
                     g_input->quit_requested = false;
                     g_input->export_dialog_active = false;
                 } else {
-                    g_input->slider_mode = InputState::SliderMode::SPACING;
-                    g_input->slider_start_x = g_input->mouse_x;
-                    g_input->slider_start_y = g_input->mouse_y;
-                    g_input->slider_start_value = g_input->brush_spacing;
-                    g_input->slider_slot = g_input->live_brush_slot();
-                    g_input->slider_accum = 0;
-                    g_slider_last_raw_x = g_input->mouse_x;
-                    web_pointer_lock(true);
+                    begin_slider_drag(w, InputState::SliderMode::SPACING,
+                                      g_input->brush_spacing);
                 }
                 break;
 
@@ -1060,17 +1115,7 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
             case GLFW_KEY_W:
             case GLFW_KEY_A:
             case GLFW_KEY_O:
-                if (g_input->slider_mode != InputState::SliderMode::NONE) {
-                    // Warp cursor back to where slider started (on web the pointer
-                    // lock release restores the OS cursor there instead)
-                    glfwSetCursorPos(w, g_input->slider_start_x, g_input->slider_start_y);
-                    g_input->mouse_x = g_input->slider_start_x;
-                    g_input->mouse_y = g_input->slider_start_y;
-                    g_input->prev_mouse_x = g_input->slider_start_x;
-                    g_input->prev_mouse_y = g_input->slider_start_y;
-                    g_input->slider_mode = InputState::SliderMode::NONE;
-                    web_pointer_lock(false);
-                }
+                end_slider_drag(w, true);
                 break;
         }
     }
@@ -1116,6 +1161,7 @@ void setup_input_callbacks(GLFWwindow* window, InputState* state) {
     glfwSetScrollCallback(window, scroll_cb_internal);
     glfwSetKeyCallback(window, key_callback);
 #ifndef __EMSCRIPTEN__
+    glfwSetWindowFocusCallback(window, window_focus_callback);
     glfwSetDropCallback(window, drop_callback);
 #endif
 }

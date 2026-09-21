@@ -2,6 +2,55 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-09-22 — Slider drags capture the pointer, so it comes back on Wayland
+
+*User report: "when i scale the brushes the pointer doesn't return to the corrected
+position, is that a wayland thing?" It is.*
+
+Releasing a slider key (S/W/A/O) warped the cursor back to where the drag began with
+`glfwSetCursorPos`. GLFW 3.5's own header rules that out here:
+
+> **Wayland:** This function will only work when the cursor mode is
+> `GLFW_CURSOR_DISABLED`, otherwise it will emit `GLFW_FEATURE_UNAVAILABLE`.
+
+The cursor was in normal mode, so on Wayland the call was refused. X11 has no such rule,
+which is why this survived unnoticed.
+
+The refusal was only half of it. The four lines *under* the warp ran regardless, assigning
+`mouse_x/mouse_y/prev_*` back to the drag origin — so the real pointer stayed where the
+drag ended while Chisel believed it was back at the start, and the brush ring and the
+cursor disagreed until the next mouse move re-synced them. The visible symptom was that
+mismatch, not just a cursor that failed to move.
+
+Slider drags now capture the pointer for their duration (`GLFW_CURSOR_DISABLED`), and the
+position is set **while still captured** — the one mode Wayland accepts it in, where it
+records a cursor-position hint on the locked pointer; releasing the capture is what
+actually moves the pointer there. That is the same thing the web build has always done
+with `requestPointerLock`, so the two paths now agree in shape.
+
+Worth having on every platform, not just Wayland: a captured pointer is not bounded by the
+screen edge, so a long drag no longer runs out of desk.
+
+Details that matter:
+
+- **Raw mouse motion is deliberately not enabled.** It bypasses the OS pointer
+  acceleration curve and would change the feel of every slider — a silent retune of four
+  controls nobody asked to have retuned.
+- **The delta baseline is seeded after capturing, from `glfwGetCursorPos`.** Disabling the
+  cursor switches GLFW to an unbounded virtual position that need not start at the window
+  coordinate; seeding from `mouse_x` would turn the first motion event into a jump of
+  whatever the two spaces differ by — a lurch on the first pixel of every drag.
+- **A window-focus callback ends the drag if focus leaves.** The capture hides and locks
+  the pointer, and a key release never arrives if you alt-tab mid-drag, so without this the
+  cursor would stay trapped in a window you had already left. It abandons rather than warps
+  — teleporting the pointer into an unfocused window is not a courtesy.
+- ImGui's GLFW backend already skips its own cursor-shape updates while
+  `GLFW_CURSOR_DISABLED`, so it does not fight the capture.
+
+The four press sites were identical but for two values and had to grow the same two lines
+each, so they collapsed into `begin_slider_drag`; release and focus-loss share
+`end_slider_drag`.
+
 ## 2026-09-22 — The projection is exact; the cascade that draws the screen was never checked
 
 *User ran the new check against the break: "brush a bunch then drop a few levels, krapow."*
