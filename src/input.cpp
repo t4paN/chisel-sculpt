@@ -1,4 +1,5 @@
 #include "input.h"
+#include "debug_console.h"
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -577,6 +578,7 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
         bool merge_adaptive_key = g_input->voxel_merge_confirm_pending
                                && key == GLFW_KEY_D;
         bool allow = (key == GLFW_KEY_ESCAPE)
+                  || (key == GLFW_KEY_GRAVE_ACCENT)
                   || (is_yn_dialog && (key == GLFW_KEY_Y || key == GLFW_KEY_N))
                   || res_keys || merge_mirror_key || merge_nets_key || merge_subtract_key
                   || merge_adaptive_key;
@@ -865,6 +867,20 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
             case GLFW_KEY_F3:
                 g_input->snap_view_requested = InputState::SnapView::TOP;
                 break;
+            // `~` debug console. Native only — on web the shell.html overlay owns
+            // this key and already mirrors console.log.
+#ifndef __EMSCRIPTEN__
+            case GLFW_KEY_GRAVE_ACCENT:
+                debug_console::toggle();
+                break;
+            case GLFW_KEY_PAGE_UP:
+                debug_console::scroll_lines(8);
+                break;
+            case GLFW_KEY_PAGE_DOWN:
+                debug_console::scroll_lines(-8);
+                break;
+#endif
+
             case GLFW_KEY_F9:
                 g_input->debug_stride_cycle_requested = true;
                 break;

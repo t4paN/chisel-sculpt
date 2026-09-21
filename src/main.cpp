@@ -49,6 +49,7 @@
 #include "sdf.h"
 #include "insert_controller.h"
 #include "ui_overlay.h"
+#include "debug_console.h"
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
 #ifdef CHISEL_BACKEND_WEBGPU
@@ -306,6 +307,7 @@ static bool sample_on_model(Renderer& renderer, int x, int y, int screen_h, bool
 }
 
 int main(int argc, char* argv[]) {
+    debug_console::init();
     bool cli_use_topology = true;
     int max_level = MULTIRES_MAX_LEVEL;
     std::string cli_open_path;
@@ -874,6 +876,7 @@ int main(int argc, char* argv[]) {
         glViewport(0, 0, win_w, win_h);
 #endif
 
+        debug_console::pump();
         glfwPollEvents();
         tablet.poll(brush_stroke.is_active());
         if (tablet.available() && !prev_tablet_avail) {
@@ -3101,6 +3104,7 @@ int main(int argc, char* argv[]) {
         draw_mirror_unavailable(text, input, win_w, win_h);
         if (input.show_fps)
             draw_fps(text, fps_display, win_w, win_h);
+        debug_console::draw(text, win_w, win_h);
 
         // ---- Open/import a path (shared by the native dialog and the web picker) ----
         auto do_import_path = [&](const std::string& path) {
@@ -3851,6 +3855,7 @@ int main(int argc, char* argv[]) {
     settings_save(input);
 
     tablet.shutdown();
+    debug_console::shutdown();
     glfwDestroyWindow(window);
     glfwTerminate();
     return 0;
