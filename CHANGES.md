@@ -2,6 +2,28 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-09-22 — GLFW errors are no longer silent, and the GL build says which platform it got
+
+*The Wayland cursor fix below did not work, and neither of the two things needed to say why
+was observable.*
+
+**GLFW errors went nowhere.** That matters more than it sounds: a number of GLFW calls fail
+by emitting an error and doing nothing, rather than returning a status — `glfwSetCursorPos`
+under Wayland is precisely one of them. A silent no-op is indistinguishable from a working
+call until the symptom surfaces somewhere else entirely. There is now an error callback
+printing `[glfw] error <code>: <desc>`.
+
+**The GL build never said which platform GLFW picked.** `glfwGetPlatform()` was only
+consulted on the wgpu surface path, so the build actually used for sculpting gave no way to
+tell native Wayland from XWayland — and that distinction decides whether the cursor
+diagnosis applies at all. Now printed as `[win] GLFW platform: ...` on every native build.
+
+Also a temporary `[slider]` trace, one line at each end of a slider drag, reporting the
+cursor mode after capture and whether the position took. It exists to separate three
+outcomes that look identical from the outside: the capture never engaging, the capture
+engaging but the warp still being refused, and GLFW's idea of the cursor diverging from the
+compositor's. Remove it once that is settled.
+
 ## 2026-09-22 — Slider drags capture the pointer, so it comes back on Wayland
 
 *User report: "when i scale the brushes the pointer doesn't return to the corrected

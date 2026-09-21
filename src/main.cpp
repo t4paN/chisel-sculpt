@@ -367,10 +367,33 @@ int main(int argc, char* argv[]) {
                 UndoStack::max_bytes < 1024ull * 1024ull * 1024ull ? " (--toaster)" : "");
 
     // Init GLFW
+    // GLFW errors went nowhere before this. That matters more than it sounds: several
+    // GLFW calls fail by emitting an error and doing nothing, rather than returning a
+    // status — glfwSetCursorPos under Wayland is exactly one of those. A silent no-op is
+    // indistinguishable from a working call until the symptom shows up somewhere else.
+    glfwSetErrorCallback([](int code, const char* desc) {
+        std::printf("[glfw] error %d: %s\n", code, desc ? desc : "(none)");
+        std::fflush(stdout);
+    });
+
     if (!glfwInit()) {
         std::fprintf(stderr, "Failed to init GLFW\n");
         return 1;
     }
+
+#if !defined(__EMSCRIPTEN__)
+    // Which platform GLFW actually picked decides what the window system will let the
+    // app do — cursor warping above all. This was only ever printed on the wgpu path,
+    // so the GL build gave no way to tell native Wayland from XWayland.
+    {
+        const int plat = glfwGetPlatform();
+        const char* name = plat == GLFW_PLATFORM_WAYLAND ? "Wayland"
+                         : plat == GLFW_PLATFORM_X11     ? "X11"
+                         : plat == GLFW_PLATFORM_COCOA   ? "Cocoa"
+                         : plat == GLFW_PLATFORM_WIN32   ? "Win32" : "unknown";
+        std::printf("[win] GLFW platform: %s\n", name);
+    }
+#endif
 
 #ifdef CHISEL_BACKEND_WEBGPU
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);  // WebGPU owns the surface; no GL context

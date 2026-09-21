@@ -405,6 +405,14 @@ static void begin_slider_drag(GLFWwindow* w, InputState::SliderMode mode, float 
         double cx = 0.0, cy = 0.0;
         glfwGetCursorPos(w, &cx, &cy);
         g_slider_last_raw_x = cx;
+        // TEMPORARY trace while the Wayland warp-back is being chased — one line per
+        // slider press. Says whether the capture actually engaged, which is the thing
+        // the whole fix depends on and which nothing else reports.
+        std::printf("[slider] begin at (%.1f, %.1f), GLFW cursor (%.1f, %.1f), mode %s\n",
+                    g_input->slider_start_x, g_input->slider_start_y, cx, cy,
+                    glfwGetInputMode(w, GLFW_CURSOR) == GLFW_CURSOR_DISABLED
+                        ? "DISABLED" : "NORMAL (capture FAILED)");
+        std::fflush(stdout);
     }
 #endif
 }
@@ -427,6 +435,21 @@ static void end_slider_drag(GLFWwindow* w, bool warp_back) {
     }
     g_input->slider_mode = InputState::SliderMode::NONE;
     slider_capture(w, false);
+#if !defined(__EMSCRIPTEN__)
+    // TEMPORARY, pairs with the trace in begin_slider_drag. If GLFW reports the asked-for
+    // position here but the pointer still visibly jumps on the next move, then GLFW's
+    // idea of the cursor and the compositor's have diverged — a different bug from the
+    // warp being refused outright.
+    if (w) {
+        double ax = 0.0, ay = 0.0;
+        glfwGetCursorPos(w, &ax, &ay);
+        std::printf("[slider] end: asked (%.1f, %.1f), GLFW now reports (%.1f, %.1f)%s\n",
+                    g_input->slider_start_x, g_input->slider_start_y, ax, ay,
+                    (std::fabs(ax - g_input->slider_start_x) > 1.0)
+                        ? "  <-- WARP DID NOT TAKE" : "");
+        std::fflush(stdout);
+    }
+#endif
 }
 
 #ifndef __EMSCRIPTEN__
