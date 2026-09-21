@@ -2,6 +2,42 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-09-22 — The projection is exact; the cascade that draws the screen was never checked
+
+*User ran the new check against the break: "brush a bunch then drop a few levels, krapow."*
+
+**Eight projections, every one exact** — max reconstruction error 8.4e-07 across drops as
+deep as L9 -> L5, which is float rounding on O(1) coordinates. No `[arena]`, no `[cull]`, no
+`TRIPWIRE`, no `CRASH-GUARD`. `project_down_to_level` keeps its contract, and the suspicion
+that the inverse-Loop projection loses the surface is **closed**.
+
+That result is only as wide as what it compares, and here is the gap it exposed. The check
+calls `cascade_to_level(stack, check, L_max)` with **no `ComputeState`**, so it validates the
+**CPU** replay. The display calls it *with* one and gets the **GPU** replay. The same log
+shows the split plainly:
+
+    [cascade] L9 fast 639.8 ms      <- CPU, and the level the check validates
+    [cascade] L7 gpu 12.5 ms        <- GPU, and the level the user dropped to
+
+So every level the user dropped to was drawn by a path no check had ever looked at, while
+the one level that *was* verified is the one they were not looking at. A comparator for
+exactly this has existed since the multires work landed — `[cascade-check] L%d gpu vs fast`
+— behind `CHISEL_DEBUG_MULTIRES`, the same build gate that shrinks the undo ring, and so
+unusable on a live report for the same reason as before.
+
+It is now runtime-gated with `CHISEL_CASCADE_CHECK=1`, in an ordinary build, covering both
+comparators the file already had: GPU vs CPU-fast (allowed to differ by float rounding,
+since the kernels repeat the accumulation order but FMA contraction rounds differently) and
+CPU-fast vs CPU-slow (**must be bit-identical** — the fast path repeats its arithmetic in
+the same order, so any difference at all is a bug). Both now say `DIVERGED` in words when
+they fail, rather than leaving a number to be interpreted.
+
+`chisel-debug.sh` counts `DIVERGED` and `MISMATCH` toward its exit notification, and the
+`Chisel (debug)` right-click action turns on both truth checks together.
+
+**Still open:** what breaks the model. This narrows it to the GPU cascade replay or to
+something downstream of it, and gives the instrument that separates those two.
+
 ## 2026-09-22 — The projection's exactness contract is now checkable at runtime
 
 *Added while chasing a user report: sculpt high, drop to a low level, smooth there, and

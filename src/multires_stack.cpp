@@ -668,6 +668,25 @@ static bool cascade_replay_gpu(MultiresStack& stack, ComputeState& cs,
     return true;
 }
 
+// The GPU cascade is what draws the screen; the CPU replay is what every truth check
+// in this file compares against. Nothing verified the two agree outside a
+// CHISEL_DEBUG_MULTIRES build, so a projection could check out "exact" against the CPU
+// path while the surface the user is looking at came from the GPU one and was never
+// examined. Runtime gate, for the same reason as CHISEL_PROJECT_CHECK: the debug build
+// also shrinks the undo ring and changes the workflow under test.
+static bool cascade_check_enabled() {
+#ifdef CHISEL_DEBUG_MULTIRES
+    return true;
+#else
+    static int on = -1;
+    if (on < 0) {
+        const char* e = getenv("CHISEL_CASCADE_CHECK");
+        on = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return on != 0;
+#endif
+}
+
 void cascade_to_level(MultiresStack& stack, Mesh& out, int K, ComputeState* compute) {
     const int passes = K - stack.base_level;
 
@@ -687,8 +706,7 @@ void cascade_to_level(MultiresStack& stack, Mesh& out, int K, ComputeState* comp
             gpu_done = cascade_replay_gpu(stack, *compute, out, passes);
         if (gpu_done) {
             mode = "gpu";
-#ifdef CHISEL_DEBUG_MULTIRES
-            {
+            if (cascade_check_enabled()) {
                 // Truth check: the CPU fast replay must agree to float rounding.
                 // Not bit-exact — the kernels repeat the same per-thread
                 // accumulation order but GPU FMA contraction rounds differently.
@@ -706,16 +724,15 @@ void cascade_to_level(MultiresStack& stack, Mesh& out, int K, ComputeState* comp
                     if (dm > 1e-5f) bad++;
                     if (dm > maxd) maxd = dm;
                 }
-                std::printf("[cascade-check] L%d gpu vs fast: topo %s, %u/%u pos beyond 1e-5, max |d| %.3g\n",
+                std::printf("[cascade-check] L%d gpu vs fast: topo %s, %u/%u pos beyond 1e-5, max |d| %.3g%s\n",
                             K, topo_ok ? "OK" : "MISMATCH",
-                            bad, chk.vertex_count(), (double)maxd);
+                            bad, chk.vertex_count(), (double)maxd,
+                            (!topo_ok || maxd > 1e-4f) ? "  <-- DIVERGED, the screen is not the checked surface" : "");
             }
-#endif
         } else {
             mode = "fast";
             cascade_replay_fast(stack, out, passes);
-#ifdef CHISEL_DEBUG_MULTIRES
-            {
+            if (cascade_check_enabled()) {
                 // Truth check: the slow replay must agree bit-for-bit — the fast
                 // path repeats its arithmetic in the same order.
                 Mesh chk;
@@ -732,11 +749,11 @@ void cascade_to_level(MultiresStack& stack, Mesh& out, int K, ComputeState* comp
                     if (dm > 0.0f) bad++;
                     if (dm > maxd) maxd = dm;
                 }
-                std::printf("[cascade-check] L%d fast vs slow: topo %s, %u/%u pos differ, max |d| %.3g\n",
+                std::printf("[cascade-check] L%d fast vs slow: topo %s, %u/%u pos differ, max |d| %.3g%s\n",
                             K, topo_ok ? "OK" : "MISMATCH",
-                            bad, chk.vertex_count(), (double)maxd);
+                            bad, chk.vertex_count(), (double)maxd,
+                            (!topo_ok || maxd > 0.0f) ? "  <-- DIVERGED, these two must be bit-identical" : "");
             }
-#endif
         }
     } else {
         cascade_replay_slow(stack, out, passes);
