@@ -52,10 +52,11 @@ struct StageTimers {
 
     double   ms[S_COUNT], worst[S_COUNT];
     uint64_t calls[S_COUNT];
+    uint64_t expand_in, expand_out;
     clock::time_point t0;
     bool     open;
 
-    StageTimers() : open(false) {
+    StageTimers() : expand_in(0), expand_out(0), open(false) {
         for (int i = 0; i < S_COUNT; i++) { ms[i] = worst[i] = 0.0; calls[i] = 0; }
     }
     // Lazily opened by the stroke's first dab, closed by report(). Measuring from the
@@ -66,6 +67,7 @@ struct StageTimers {
         t0 = clock::now();
         open = true;
     }
+    void count_expand(size_t in, size_t out) { expand_in += in; expand_out += out; }
     void add(int s, double msec) {
         ms[s] += msec;
         calls[s]++;
@@ -97,7 +99,14 @@ struct StageTimers {
         // bottleneck and the next probe belongs elsewhere.
         std::printf("[stage]   unaccounted %.0f ms (%.0f%%) — dispatch, render, UI, input idle\n",
                     wall - sum, wall > 0.0 ? 100.0 * (wall - sum) / wall : 0.0);
+        if (expand_in) {
+            std::printf("[stage]   expand fed %llu ids -> %llu affected verts (%.2fx), "
+                        "which is what the normals sort then chews\n",
+                        (unsigned long long)expand_in, (unsigned long long)expand_out,
+                        (double)expand_out / (double)expand_in);
+        }
         std::fflush(stdout);
+        expand_in = expand_out = 0;
         for (int i = 0; i < S_COUNT; i++) { ms[i] = worst[i] = 0.0; calls[i] = 0; }
     }
 };
@@ -1713,12 +1722,18 @@ void BrushStroke::apply_limb_gpu(DabContext& ctx, float cursor_dx, float cursor_
 // --- Post-dispatch methods ---
 
 void BrushStroke::post_dab(DabContext& ctx) {
+    // main.cpp calls this after every geo dab, but every apply_* clears dirty_verts on
+    // entry, so for the async brushes the list is empty here and the real expansion
+    // happens when the readback lands. Move and limb are the exception: they fill
+    // dirty_verts synchronously from their capture list, and this is their only call.
+    if (dirty_verts.empty()) return;
     ScopedStage _stage(StageTimers::S_EXPAND);
-    if (!dirty_verts.empty()) {
-        static std::vector<uint32_t> dab_affected;
-        ctx.mesh.expand_dirty_to_affected(dirty_verts, dab_affected);
-        gpu_dirty.insert(gpu_dirty.end(), dab_affected.begin(), dab_affected.end());
-    }
+    static std::vector<uint32_t> dab_affected;
+    ctx.mesh.expand_dirty_to_affected(dirty_verts, dab_affected);
+    // Amplification is the number that sizes both this stage and the normals sort that
+    // consumes its output, so count it where it is known rather than inferring it.
+    g_stage.count_expand(dirty_verts.size(), dab_affected.size());
+    gpu_dirty.insert(gpu_dirty.end(), dab_affected.begin(), dab_affected.end());
 }
 
 void BrushStroke::post_frame(DabContext& ctx) {

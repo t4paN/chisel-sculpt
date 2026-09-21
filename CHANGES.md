@@ -37,15 +37,19 @@ makes it a detector rather than four numbers: at 39–88% unaccounted, these fou
 demonstrably not the whole story, and the next probe belongs somewhere else. Wall clock
 only — no GPU sync, nothing that perturbs what it measures.
 
-### Two things the same run exposed, both still open
+### Two things the same run exposed
 
-**`expand` runs exactly twice per dab** in every stroke measured (50 calls/25 dabs,
-84/42, 124/62, 12/6). There are two `post_dab` sites: one fires synchronously in
-`src/main.cpp` right after dispatch, the other when the async dirty list lands. At the
-first, the dab's own list has not arrived, so `dirty_verts` still holds the *previous*
-dab's contents. Whether that call is redundant or is deliberately keeping normals current
-while the real list is in flight has **not** been established — worth ~8–15% of stroke time
-if it is waste.
+**`expand` appeared to run twice per dab — it does not, and the instrument was at
+fault.** The 2:1 call ratio (50 calls/25 dabs, 84/42, 12/6) is real: `main.cpp` calls
+`post_dab` after every geo dab, and the async readback path calls it again when the list
+lands. But every `apply_*` clears `dirty_verts` on entry, so at the `main.cpp` call the
+list is empty and `post_dab` returns immediately. The stopwatch sat *above* that guard,
+counting an early return as a timed call and halving the reported per-call average. Move
+and limb are the real users of that site — they fill `dirty_verts` synchronously from
+their capture list, and for them it is the only call. **No duplicated work, nothing to
+remove.** The timer now sits below the guard, where it can only count work, and records
+the in/out id counts so the expansion's amplification factor is measured rather than
+guessed.
 
 **Every big-brush dab at L10 overflows its arena region, by arithmetic.** Six
 `[arena] dab overflowed` events, five of them into a 2,621,440-id region — which is not an
@@ -61,8 +65,26 @@ The rescale meant to catch a brush-size change reads `anchor_world_radius`, but 
 runs *before* this dab's anchor is set, so on a stroke's first dab it is still the previous
 stroke's radius and no correction happens.
 
-Neither is fixed here. Both have obvious-looking one-line candidates, and that is precisely
-the shape of thing this arc has twice gotten wrong by reasoning instead of measuring.
+The arena one is not fixed here. It has an obvious-looking one-line candidate, and that is
+precisely the shape of thing this arc has twice gotten wrong by reasoning instead of
+measuring.
+
+### The real shape of the expand cost: a GPU -> CPU -> GPU round trip
+
+Chasing `expand` turned up no waste inside it, but the path it sits on is the thing worth
+recording. The dirty list is produced **on the GPU**, read back, expanded to its one-ring
+neighbourhood **on the CPU**, sorted and deduped **on the CPU**, and then written straight
+back **to the GPU** by `dispatch_compute_normals`, which uploads the list into
+`dirty_verts_ssbo` before dispatching. Together those two CPU stages are 37-60% of a
+big-brush stroke at L10.
+
+The CPU genuinely needs the dirty list — the undo snapshot is built from it — but that
+stage costs 1%. The *expansion's* only consumer is the GPU, and the adjacency it walks
+(`adjacency_offset_ssbo` / `adjacency_list_ssbo`) is already resident there. Block culling
+already computes a dirty-block set on the GPU each frame, so a dilated version of that
+selection could drive the normals dispatch with no CPU list, no expansion, no sort and no
+upload. Not attempted, and not costed — the amplification counter added here is the first
+number needed to size it.
 
 ## 2026-09-22 — A `~` console for the native builds
 
