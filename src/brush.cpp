@@ -10,9 +10,115 @@
 #include <cassert>
 #include <cstdint>
 #include <vector>
+#include <chrono>
 
 int BrushStroke::debug_stride_override = 0;
 int BrushStroke::debug_test_vertex     = -1;
+
+// --- Per-stage stroke timers (diagnostic, CHISEL_DIRTY_HIST=1) -------------
+// The L10 telemetry (perf-L10-bottleneck-handoff.md) measured the GPU STARVED, not
+// busy: 87% of its clock ceiling while having work only 36% of the time. That names
+// the CPU as the thing holding the stroke back, but not WHICH stage — and there are
+// four candidates, all per dab and all plausibly the same order of magnitude.
+//
+// This arc has already produced two fixes reasoned from code that could be neither
+// confirmed nor refuted until a detector existed; the detector was what settled it
+// both times. So: measure first, and do it before touching any of them.
+//
+// Wall clock only — no GPU sync, no extra readback, nothing that perturbs what it
+// measures. A stage that sits waiting on the GPU shows up as its own elapsed time,
+// which is precisely the wanted signal. Off, each site costs one cached bool test.
+namespace {
+
+static bool probe_enabled() {
+    static int on = -1;
+    if (on < 0) {
+        const char* e = getenv("CHISEL_DIRTY_HIST");
+        on = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return on != 0;
+}
+
+struct StageTimers {
+    enum { S_TAKE, S_SNAP, S_EXPAND, S_NORMALS, S_COUNT };
+    static const char* name(int s) {
+        static const char* n[] = {"take   (readback copy)",
+                                  "snap   (undo snapshot + mirror twins)",
+                                  "expand (dirty -> affected adjacency)",
+                                  "normals(sort/unique + dispatch)"};
+        return n[s];
+    }
+    typedef std::chrono::steady_clock clock;
+
+    double   ms[S_COUNT], worst[S_COUNT];
+    uint64_t calls[S_COUNT];
+    clock::time_point t0;
+    bool     open;
+
+    StageTimers() : open(false) {
+        for (int i = 0; i < S_COUNT; i++) { ms[i] = worst[i] = 0.0; calls[i] = 0; }
+    }
+    // Lazily opened by the stroke's first dab, closed by report(). Measuring from the
+    // first dab rather than from pen-down keeps the denominator honest: it is the
+    // span over which these stages could possibly have starved anything.
+    void begin_stroke() {
+        if (!probe_enabled() || open) return;
+        t0 = clock::now();
+        open = true;
+    }
+    void add(int s, double msec) {
+        ms[s] += msec;
+        calls[s]++;
+        if (msec > worst[s]) worst[s] = msec;
+    }
+    void report() {
+        if (!probe_enabled() || !open) return;
+        uint64_t dabs = calls[S_TAKE];
+        double wall = std::chrono::duration<double, std::milli>(clock::now() - t0).count();
+        open = false;
+        double sum = 0.0;
+        for (int i = 0; i < S_COUNT; i++) sum += ms[i];
+        std::printf("[stage] stroke wall %.0f ms over %llu dabs (%.1f ms/dab) | "
+                    "these four stages %.0f ms = %.0f%% of it\n",
+                    wall, (unsigned long long)dabs,
+                    dabs ? wall / (double)dabs : 0.0, sum,
+                    wall > 0.0 ? 100.0 * sum / wall : 0.0);
+        for (int i = 0; i < S_COUNT; i++) {
+            if (calls[i] == 0) continue;
+            std::printf("[stage]   %-38s %7.1f ms  %5.0f%% wall  | %6llu calls, "
+                        "avg %5.2f ms, worst %6.2f ms\n",
+                        name(i), ms[i], wall > 0.0 ? 100.0 * ms[i] / wall : 0.0,
+                        (unsigned long long)calls[i],
+                        ms[i] / (double)calls[i], worst[i]);
+        }
+        // The residue is everything else on the main thread between the first dab and
+        // pen-up: dab dispatch itself, the render loop, UI, and any idle waiting for
+        // the next mouse position. A large residue means these four are NOT the
+        // bottleneck and the next probe belongs elsewhere.
+        std::printf("[stage]   unaccounted %.0f ms (%.0f%%) — dispatch, render, UI, input idle\n",
+                    wall - sum, wall > 0.0 ? 100.0 * (wall - sum) / wall : 0.0);
+        std::fflush(stdout);
+        for (int i = 0; i < S_COUNT; i++) { ms[i] = worst[i] = 0.0; calls[i] = 0; }
+    }
+};
+StageTimers g_stage;
+
+// Scoped, so an early return inside a timed stage still records it.
+struct ScopedStage {
+    int s;
+    bool on;
+    StageTimers::clock::time_point t;
+    explicit ScopedStage(int stage) : s(stage), on(probe_enabled()) {
+        if (on) t = StageTimers::clock::now();
+    }
+    ~ScopedStage() {
+        if (!on) return;
+        g_stage.add(s, std::chrono::duration<double, std::milli>(
+                           StageTimers::clock::now() - t).count());
+    }
+};
+}  // namespace
+
 
 // --- Banded pen-up readback ---
 // snap_list / mask.snap_list / color.snap_list are deduped but UNSORTED and
@@ -133,6 +239,7 @@ static void set_area_normal(P& p, float ax, float ay, float az) {
 // bookkeeping now runs when the dab's async dirty readback lands, by which point
 // bs.anchor_pos may already belong to a later dab.
 static void snap_and_mirror_dirty(BrushStroke& bs, DabContext& ctx, float anchor_x) {
+    ScopedStage _stage(StageTimers::S_SNAP);
     uint32_t vc = ctx.mesh.vertex_count();
     for (uint32_t v : bs.dirty_verts) {
         if (v >= vc) {
@@ -387,6 +494,7 @@ static void snapshot_whole_mesh(BrushStroke& bs, DabContext& ctx, uint8_t kind) 
 // Reserve this dab's slice of the dirty arena. Must run before the dab's kernels,
 // because they append into whatever region set_dirty_region last published.
 void BrushStroke::begin_dab(DabContext& ctx) {
+    g_stage.begin_stroke();
     ComputeState& cs = ctx.compute;
 
     // A dab can bail after reserving (spacing, no anchor, fully masked) and never kick
@@ -552,7 +660,11 @@ void BrushStroke::drain_dab_readbacks(DabContext& ctx) {
         }
 
         uint32_t total = 0;
-        bool took = ctx.compute.take_count_list_read(pd.tk, pd.words, dirty_verts, &total);
+        bool took;
+        {
+            ScopedStage _stage(StageTimers::S_TAKE);
+            took = ctx.compute.take_count_list_read(pd.tk, pd.words, dirty_verts, &total);
+        }
         // Retire before any early-out: the region is done either way, and leaving it
         // live is what silently wraps the ring onto a region still being read.
         ctx.compute.dirty_arena_retire(pd.footprint);
@@ -1601,6 +1713,7 @@ void BrushStroke::apply_limb_gpu(DabContext& ctx, float cursor_dx, float cursor_
 // --- Post-dispatch methods ---
 
 void BrushStroke::post_dab(DabContext& ctx) {
+    ScopedStage _stage(StageTimers::S_EXPAND);
     if (!dirty_verts.empty()) {
         static std::vector<uint32_t> dab_affected;
         ctx.mesh.expand_dirty_to_affected(dirty_verts, dab_affected);
@@ -1618,12 +1731,15 @@ void BrushStroke::post_frame(DabContext& ctx) {
 
     if (gpu_dirty.empty()) return;
 
-    std::sort(gpu_dirty.begin(), gpu_dirty.end());
-    gpu_dirty.erase(std::unique(gpu_dirty.begin(), gpu_dirty.end()), gpu_dirty.end());
-    ctx.compute.dispatch_compute_normals(gpu_dirty.data(),
-                                          (uint32_t)gpu_dirty.size(),
-                                          ctx.renderer.vbo_pos, ctx.renderer.vbo_norm,
-                                          ctx.renderer.ebo);
+    {
+        ScopedStage _stage(StageTimers::S_NORMALS);
+        std::sort(gpu_dirty.begin(), gpu_dirty.end());
+        gpu_dirty.erase(std::unique(gpu_dirty.begin(), gpu_dirty.end()), gpu_dirty.end());
+        ctx.compute.dispatch_compute_normals(gpu_dirty.data(),
+                                              (uint32_t)gpu_dirty.size(),
+                                              ctx.renderer.vbo_pos, ctx.renderer.vbo_norm,
+                                              ctx.renderer.ebo);
+    }
     gpu_normals_deferred = true;
     gpu_dirty.clear();
 }
@@ -2377,6 +2493,7 @@ bool BrushStroke::finalize(DabContext& ctx, Mesh& mesh, UndoStack& stack,
 }
 
 void BrushStroke::end() {
+    g_stage.report();
     g_dirty_hist.report();
     phase = StrokePhase::NONE;
     needs_mesh_update = false;
