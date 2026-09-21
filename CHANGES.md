@@ -2,6 +2,51 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-09-22 — The projection's exactness contract is now checkable at runtime
+
+*Added while chasing a user report: sculpt high, drop to a low level, smooth there, and
+after a few subdivisions the detail "couldn't keep up with where the new vertices should
+be." Nothing in the log explained it.*
+
+`project_down_to_level` promises, in its own header comment, that after projecting from
+L_max down to a target level, **a cascade back to L_max reproduces the pre-projection
+surface exactly**. A check for that has existed since the multires work landed — and it was
+behind `CHISEL_DEBUG_MULTIRES`, a separate build that *also* shrinks the undo ring to 4 MB.
+So the one instrument that could confirm or refute a drift report could only be switched on
+by changing the workflow the report came from. It had never been run against this.
+
+It is now runtime-gated with `CHISEL_PROJECT_CHECK=1`, printing
+
+    [project] CHECK reconstruction max error <d> (worst vert <v>)  ok | <-- LOSSY
+
+after every projection, in an ordinary build. The truth mesh it compares against
+(`mesh_at[passes]`) is something the projection already builds for its own arithmetic, so
+the only added cost is one cascade to L_max — which is why it stays opt-in: at L9 that is
+seconds. A vertex-count disagreement is reported separately, since two surfaces of different
+sizes are not comparable at all and that is a louder failure than any distance.
+
+The 1e-4 threshold on the LOSSY marker is a heuristic, not a spec: a few cascade steps of
+float arithmetic on O(1) coordinates land near 1e-6, while a mean edge at L9 is ~5e-3.
+
+`chisel-debug.sh` now counts `LOSSY`, `TRIPWIRE`, `CRASH-GUARD` and `INVARIANT` toward its
+exit notification alongside `[arena]`/`[cull]` — the three correctness tripwires this arc
+added were invisible to it, so a run could end "clean" with a tripwire in the log. A
+`Chisel (debug)` right-click action runs with the check enabled.
+
+### Correction: `[arena] dab overflowed` is not always benign
+
+This log, the session-3 handoff and the launcher's own notification text all say that
+alarm is "slow, never wrong". With **Exact mirror** on it is silently wrong. Every geometry
+dab re-imposes symmetry by dispatching `mirror_project` over the GPU dirty list; on
+overflow `dirty_args.wgsl` correctly clamps that dispatch to `cap` to avoid reading ids
+that were never written, and points at the CPU's whole-mesh snapshot as the recovery — but
+that snapshot is for **undo** and does nothing for symmetry. The vertices past `cap` are
+moved and never mirrored, permanently, and each later subdivision multiplies the error.
+
+Not fixed here and not reproduced on purpose; it was found by reading while chasing an
+unrelated report, whose session had mirror set to World Space, where this path never runs.
+Written up with a repro recipe and a fix shape in `owedstuff.md`.
+
 ## 2026-09-22 — Per-stage stroke timers, and what they refuted
 
 *Measured at L10 (10,485,762 verts / 21M tris) on the Arc B570. Both backends build.*

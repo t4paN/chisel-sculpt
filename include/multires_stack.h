@@ -151,7 +151,14 @@ struct ProjectionStats {
     int    L_max           = 0;
     double elapsed_ms      = 0.0;
     bool   did_anything    = false;
-    double max_reconstruction_error = 0.0; // filled iff CHISEL_DEBUG_MULTIRES
+    // The projection's whole contract is that cascading back to L_max reproduces the
+    // pre-projection surface exactly, and until 2026-09-22 nothing checked that in a
+    // normal build. `checked` says whether the comparison actually ran; the error is
+    // meaningless when it did not. Enable with CHISEL_PROJECT_CHECK=1 (or a
+    // CHISEL_DEBUG_MULTIRES build, which also shrinks the undo ring).
+    bool     checked       = false;
+    double   max_reconstruction_error = 0.0;
+    uint32_t worst_vertex  = 0;
 };
 
 // Snapshot the multires storage that project_down_to_level(target_level) would

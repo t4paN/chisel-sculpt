@@ -5,6 +5,8 @@
 #include <climits>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <algorithm>
 #include <unordered_map>
 
 // ---------------------------------------------------------------------------
@@ -1211,24 +1213,50 @@ ProjectionStats project_down_to_level(MultiresStack& stack, int target_level) {
     build_mirror_spatial(stack.base, stack.base_mirror);
     stack.mirror.clear();
 
+    // Reconstruction check: cascade to L_max and compare to the truth this function
+    // already built in mesh_at[passes], so the only added cost is one cascade. That
+    // cascade is why it is opt-in — at L9 it is seconds, not milliseconds.
+    //
+    // Runtime-gated rather than build-gated: CHISEL_DEBUG_MULTIRES also shrinks the
+    // undo ring to 4 MB, so switching it on to chase a drift report changes the very
+    // workflow the report came from.
+    bool want_check = false;
 #ifdef CHISEL_DEBUG_MULTIRES
-    // Reconstruction check: cascade to L_max and compare to saved truth.
-    double max_err = 0.0;
+    want_check = true;
+#else
     {
+        static int env_on = -1;
+        if (env_on < 0) {
+            const char* e = getenv("CHISEL_PROJECT_CHECK");
+            env_on = (e && *e && *e != '0') ? 1 : 0;
+        }
+        want_check = env_on != 0;
+    }
+#endif
+    if (want_check) {
+        double max_err = 0.0;
+        uint32_t worst_v = 0;
         Mesh check;
         cascade_to_level(stack, check, L_max);
         const auto& truth = mesh_at[passes];
-        uint32_t vc = check.vertex_count();
+        uint32_t vc = std::min(check.vertex_count(), truth.vertex_count());
         for (uint32_t v = 0; v < vc; v++) {
             Vec3 a = check.get_pos(v);
             Vec3 b = truth.get_pos(v);
             double dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
             double e = std::sqrt(dx*dx + dy*dy + dz*dz);
-            if (e > max_err) max_err = e;
+            if (e > max_err) { max_err = e; worst_v = v; }
         }
+        // A vertex-count disagreement means the two surfaces are not even comparable,
+        // which is a louder failure than any distance.
+        if (check.vertex_count() != truth.vertex_count()) {
+            std::printf("[project] CHECK: vertex count %u != truth %u — surfaces not "
+                        "comparable\n", check.vertex_count(), truth.vertex_count());
+        }
+        stats.checked = true;
+        stats.max_reconstruction_error = max_err;
+        stats.worst_vertex = worst_v;
     }
-    stats.max_reconstruction_error = max_err;
-#endif
 
     auto t1 = std::chrono::steady_clock::now();
     stats.elapsed_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();

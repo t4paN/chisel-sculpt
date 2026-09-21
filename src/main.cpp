@@ -306,6 +306,24 @@ static bool sample_on_model(Renderer& renderer, int x, int y, int screen_h, bool
     return true;
 }
 
+// Reports the projection truth check when it ran (CHISEL_PROJECT_CHECK=1, or a
+// CHISEL_DEBUG_MULTIRES build). project_down_to_level promises that cascading back to
+// L_max reproduces the pre-projection surface EXACTLY, so any real distance here is a
+// broken contract, not a tolerance to tune. Silent when the check did not run, so the
+// normal log is unchanged.
+//
+// The 1e-4 line is a heuristic, not a spec: a few cascade steps of float arithmetic on
+// O(1) coordinates land around 1e-6, while a mean edge at L9 is ~5e-3 — so anything at
+// 1e-4 is already far outside rounding and heading for visible.
+static void report_projection_check(const ProjectionStats& ps) {
+    if (!ps.checked) return;
+    const bool bad = ps.max_reconstruction_error > 1e-4;
+    std::printf("[project] CHECK reconstruction max error %.6g (worst vert %u)%s\n",
+                ps.max_reconstruction_error, ps.worst_vertex,
+                bad ? "  <-- LOSSY, cascade does not reproduce the surface" : "  ok");
+    std::fflush(stdout);
+}
+
 int main(int argc, char* argv[]) {
     debug_console::init();
     bool cli_use_topology = true;
@@ -1410,6 +1428,7 @@ int main(int argc, char* argv[]) {
                     capture_projection_snapshot(*multires, target, lvl_e.before);
                     ProjectionStats ps = project_down_to_level(*multires, target);
                     std::printf("[project] auto L%d -> L%d in %.2f ms\n", L_max, target, ps.elapsed_ms);
+                    report_projection_check(ps);
                 }
                 scene.active_undo().push(std::move(lvl_e));
                 multires->current_level = target;
@@ -1470,6 +1489,7 @@ int main(int argc, char* argv[]) {
                 // does, so the form survives into the layer below and only the
                 // residual detail dies with the layer.
                 ProjectionStats ps = project_down_to_level(*multires, target);
+                report_projection_check(ps);
                 // Only forced down if the view was ON the layer being removed —
                 // deleting L5 while editing at L3 must leave you at L3.
                 if (multires->current_level > target) multires->current_level = target;
@@ -2509,6 +2529,7 @@ int main(int argc, char* argv[]) {
                     capture_projection_snapshot(*multires, target, e.before);
 
                     ProjectionStats ps = project_down_to_level(*multires, target);
+                    report_projection_check(ps);
 
                     for (int k = L_max; k > target; k--)
                         std::printf("[project]   inverse-Loop %d -> %d ... done\n", k, k - 1);
