@@ -83,6 +83,19 @@ void init() {
 #else
     if (g_capturing) return;
 
+    // WAYLAND_DEBUG=1 turns stderr into a protocol firehose meant for a terminal and a
+    // grep, not for a 400-line in-app ring. Capturing it would bury every app message
+    // and push a lot of bytes through the per-frame drain for nothing, so stand aside
+    // and let it go straight to the terminal.
+    {
+        const char* wdbg = getenv("WAYLAND_DEBUG");
+        if (wdbg && *wdbg && *wdbg != '0') {
+            std::printf("[console] WAYLAND_DEBUG set — stdout capture disabled, "
+                        "read the terminal instead\n");
+            return;
+        }
+    }
+
     int fds[2];
   #if defined(_WIN32)
     if (_pipe(fds, kPipeBytes, _O_BINARY) != 0) return;
