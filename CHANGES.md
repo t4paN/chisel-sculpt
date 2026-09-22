@@ -2,6 +2,29 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-09-22 — Undo budgets raised, and eviction stopped being silent
+
+*Both native backends build. The raise did NOT fix the bug it was aimed at — see below.*
+
+A level-descend snapshot carries `disp` AND `frames` for every layer the projection
+rewrites: ~165 MB on an L9 model, ~670 MB from L10. An arena overflow turns a stroke into
+a whole-mesh snapshot, which at L10 is a 294 MB undo entry and a 252 MB ring span. Those
+numbers overrun a 1 GB history in a single enthusiastic session.
+
+`evict_to_budget()` drops the OLDEST entries to stay under the cap, and had been doing so
+without a word since it was written. Undoing "everything" then lands on the oldest state
+still in memory rather than the model you started from, which is indistinguishable from
+corruption. It now prints what it dropped.
+
+Budgets: **4 GB** CPU history (was 1 GB), **1 GB** GPU ring (was 256 MB). The ring grows
+lazily toward its cap, so the ceiling costs nothing until it is needed. Both are guarded
+for Emscripten, where `size_t` is 32-bit and a 4 GB literal wraps to ZERO — the web build
+keeps the old caps.
+
+**Result: the budget was innocent.** A follow-up L10 session reproduced the spikes with
+**zero** eviction lines, using roughly 2.6 GB of the 4 GB. Worth keeping (the headroom is
+real and the tripwire now answers the question in one line), but it is not the cause.
+
 ## 2026-09-22 — A tripwire for the one thing no check could see: the tangent frames
 
 *Both backends build clean. Detection only — no behaviour change. Not yet fired in anger.*
