@@ -184,6 +184,21 @@ bool UndoStack::apply_level(const UndoEntry& e, MeshEntity& ent, bool forward) {
 }
 
 bool UndoStack::apply(UndoEntry& e, MeshEntity& ent, Scene& scene, bool forward) {
+    // PROJECTION and LEVEL entries rewrite CPU disp/base (snapshot restore, or a
+    // re-run projection), so any GPU-resident edits must come down FIRST. The caller's
+    // cascade_active materializes too, but only after this returns — and a GPU stroke
+    // undo leaves the active layer's disp_ssbo holding the post-projection values, so
+    // flushing after the restore overwrote the restored layer at every vert those
+    // strokes touched. The layer below then disagreed with the detail above it, and
+    // the next ascend threw it as spikes exactly where the user had sculpted.
+    if ((e.kind == UndoEntry::Kind::PROJECTION || e.kind == UndoEntry::Kind::LEVEL)
+        && scene.active_mesh_id() == ent.id) {
+        if (ent.multires_gpu.cpu_dirty)
+            std::printf("[undo] %s %s: flushing %zu GPU-resident verts before the restore\n",
+                        e.kind == UndoEntry::Kind::LEVEL ? "LEVEL" : "PROJECTION",
+                        forward ? "redo" : "undo", ent.multires_gpu.dirty_verts.size());
+        scene.materialize_active_cpu();
+    }
     if (e.kind == UndoEntry::Kind::PROJECTION) {
         return apply_projection(e, ent, forward);
     }
