@@ -2,6 +2,52 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-09-22 — A tripwire for the one thing no check could see: the tangent frames
+
+*Both backends build clean. Detection only — no behaviour change. Not yet fired in anger.*
+
+The user ran the full truth-check suite over a session that visibly trashed a model, and
+every instrument came back green: the projection exact to 4.8e-07 across ten checks, the
+GPU cascade identical to the CPU one across fifty-four, the CPU fast and slow replays
+bit-identical, and the undo/dab id tripwire silent. That last one also settles an item that
+had been open since 2026-09-17, when the undo-vs-readback race was fixed on reasoning alone
+and its entry said *"not yet confirmed by hand"* — rapid undo presses are exactly how that
+window was hit, and it held.
+
+So every path that *rebuilds* the surface from stored data is now demonstrably correct on
+the very run where the surface came out wrong. The rebuild is faithfully reproducing
+something that was already broken in storage.
+
+`cascade-check` cannot see that, structurally: both replays read the **same** `frames[]`
+buffer, so identical garbage in gives identical positions out and the comparison prints OK.
+Fifty-four green checks on a trashed session is the proof that the frames are a blind spot,
+not an alibi.
+
+Displacements are not stored in world space. Each level keeps a per-vertex tangent frame
+built on the pre-displacement vertex normal, the stroke delta is stored as coordinates in
+that frame, and a later cascade re-applies it in the frame rebuilt from whatever the surface
+is *then*. Where the surface has folded — converging clay strokes at different heights shear
+a ridge sideways, which is the user's own reproduction condition — the incident face normals
+cancel and that vertex normal is meaningless. Two ways it goes wrong, and the tripwire
+reports them apart because their causes differ:
+
+- **FOLD** — the fan's face normals disagree. `|sum of unit face normals| / count` is 1 when
+  every face agrees and 0 when the fan folds back through itself; a crease sits near 0.8, and
+  below 0.5 the normal is noise. A full-length garbage frame re-applies the stored
+  displacement in an arbitrary direction — the spike.
+- **COLLAPSE** — a stored frame that is no longer a basis. `compute_frames` zero-guards the
+  normal at 1e-8 and then takes `b = n x t`, so a zero normal silently yields `b = 0` as
+  well: two of three axes vanish and the detail they carried is multiplied by nothing.
+
+Armed with `CHISEL_FRAME_CHECK=1` (desktop launcher: *"Run with the frame tripwire"*), and it
+runs at the end of `cascade_to_level`, so every path lands there — load, level switch, and
+undo-driven rebuild alike. That matters because the user could not reproduce the fault on
+demand: this does not need the fault to happen live, only to be **present in the file**.
+Costs one adjacency walk, which is why it is gated.
+
+The projection and cascade checks stay, but they have now answered their question. This is
+the one still open.
+
 ## 2026-09-22 — The slider pointer returns: the cursor mode had two owners
 
 *Fixed and confirmed by protocol trace: four drags, four exact returns.*

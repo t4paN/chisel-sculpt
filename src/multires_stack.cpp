@@ -687,6 +687,101 @@ static bool cascade_check_enabled() {
 #endif
 }
 
+// Frame-conditioning tripwire. Armed with CHISEL_FRAME_CHECK=1.
+static bool frame_check_enabled() {
+    static int on = -1;
+    if (on < 0) {
+        const char* e = getenv("CHISEL_FRAME_CHECK");
+        on = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return on != 0;
+}
+
+// Nothing in the cascade-check suite above can see a bad tangent frame. Both replays
+// read the SAME frames[], so identical garbage in gives identical positions out and
+// the comparison prints OK — it did, 54 times, on the 2026-09-22 run where the user's
+// model was visibly trashed. That run also proved the projection exact and the GPU and
+// CPU cascades identical, which leaves the stored data itself as the only suspect.
+// This looks at it. Two failures, reported separately because their causes differ:
+//
+//   FOLD — a vertex whose incident face normals cancel. Its vertex normal is then
+//          meaningless, and compute_frames() builds t/b/n on exactly that normal, so
+//          the displacement stored against this frame gets re-applied in an arbitrary
+//          basis on the next cascade. That is the spike. Measured as
+//          |sum of unit face normals| / face count: 1 = every face agrees, 0 = the fan
+//          folds back through itself. A crease is ~0.8; below 0.5 the normal is noise.
+//
+//   COLLAPSE — a STORED frame that is no longer a basis at all. compute_frames()
+//          zero-guards n at 1e-8 and then takes b = n x t, so a zero normal silently
+//          yields b = 0 too: two of the three axes vanish and whatever displacement
+//          they carried is multiplied by nothing. Visible in the frame by itself.
+//
+// Costs a full adjacency walk (~6 face normals per vertex), which is why it is gated.
+static void check_frames(const MultiresStack& stack, const Mesh& surface, int K) {
+    const auto t0 = std::chrono::steady_clock::now();
+
+    // --- FOLD: fan coherence on the surface this cascade just produced ---
+    const uint32_t vc = surface.vertex_count();
+    uint32_t folded = 0, creased = 0, worst_v = 0;
+    float    worst = 2.0f;
+    for (uint32_t v = 0; v < vc; v++) {
+        const uint32_t start = surface.vert_tri_offset[v];
+        const uint32_t end   = surface.vert_tri_offset[v + 1];
+        Vec3 sum{0.0f, 0.0f, 0.0f};
+        uint32_t faces = 0;
+        for (uint32_t j = start; j < end; j++) {
+            const uint32_t t  = surface.vert_tri_list[j];
+            const Vec3 a  = surface.get_pos(surface.indices[t*3+0]);
+            const Vec3 e1 = surface.get_pos(surface.indices[t*3+1]) - a;
+            const Vec3 e2 = surface.get_pos(surface.indices[t*3+2]) - a;
+            const Vec3 fn = e1.cross(e2);
+            const float L = fn.length();
+            if (L < 1e-20f) continue;   // degenerate triangle carries no direction
+            sum.x += fn.x / L; sum.y += fn.y / L; sum.z += fn.z / L;
+            faces++;
+        }
+        if (!faces) continue;
+        const float coh = sum.length() / (float)faces;
+        if (coh < 0.5f)      folded++;
+        else if (coh < 0.8f) creased++;
+        if (coh < worst) { worst = coh; worst_v = v; }
+    }
+
+    // --- COLLAPSE: stored frames that stopped being an orthonormal basis ---
+    uint32_t stored = 0, collapsed = 0, non_ortho = 0;
+    int bad_level = -1;
+    for (size_t i = 0; i < stack.frames.size(); i++) {
+        const std::vector<Frame>& F = stack.frames[i];
+        for (size_t k = 0; k < F.size(); k++) {
+            const Frame& f = F[k];
+            stored++;
+            if (f.n.length() < 0.5f || f.b.length() < 0.5f || f.t.length() < 0.5f) {
+                if (!collapsed++) bad_level = stack.base_level + (int)i + 1;
+                continue;
+            }
+            if (std::fabs(f.t.dot(f.n)) > 1e-3f || std::fabs(f.t.dot(f.b)) > 1e-3f
+                || std::fabs(f.b.dot(f.n)) > 1e-3f) {
+                if (!non_ortho++ && bad_level < 0) bad_level = stack.base_level + (int)i + 1;
+            }
+        }
+    }
+
+    const double ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - t0).count();
+    std::printf("[frames] CHECK L%d: %u/%u fans folded (coh<0.5), %u creased (<0.8), "
+                "worst coh %.3f at vert %u | %u stored frames: %u collapsed, "
+                "%u non-orthonormal | %.0f ms\n",
+                K, folded, vc, creased, (double)(worst > 1.5f ? 1.0f : worst), worst_v,
+                stored, collapsed, non_ortho, ms);
+    if (folded || collapsed || non_ortho)
+        std::printf("[frames] TRIPWIRE: %u folded fan(s), %u collapsed frame(s), %u "
+                    "non-orthonormal (first bad frame at L%d). A folded fan's normal is "
+                    "noise, and the displacement stored against it is re-applied in an "
+                    "arbitrary direction on the next level change — these are the spikes.\n",
+                    folded, collapsed, non_ortho, bad_level);
+    std::fflush(stdout);
+}
+
 void cascade_to_level(MultiresStack& stack, Mesh& out, int K, ComputeState* compute) {
     const int passes = K - stack.base_level;
 
@@ -800,6 +895,11 @@ void cascade_to_level(MultiresStack& stack, Mesh& out, int K, ComputeState* comp
             out.mirror_topo_version = out.topo_version;
         }
     }
+
+    // Last, on the finished surface: every cascade path lands here, so this fires on
+    // load, on a level switch and on an undo-driven rebuild alike — it does not need
+    // the fault to be reproduced live, only to be present in the file.
+    if (frame_check_enabled()) check_frames(stack, out, K);
 }
 
 // ---------------------------------------------------------------------------
