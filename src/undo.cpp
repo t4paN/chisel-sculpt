@@ -8,9 +8,36 @@
 #include <algorithm>
 
 // Default CPU undo budget: 1 GB. Overridden at startup by --toaster (256 MB).
+// A level-descend snapshot is enormous: it carries disp AND frames for every layer the
+// projection rewrites, measured at ~165 MB on an L9 model (frames alone are 76% of it).
+// Ten descends in one session overran the old 1 GB cap — and eviction is SILENT and
+// drops the OLDEST entries, so undoing "everything" lands on the oldest state still in
+// memory rather than the model you started with. That is what made a trashed model
+// un-rescuable by Ctrl+Z. 4 GB buys roughly 25 descends.
+//
+// Emscripten's size_t is 32 bits and the whole WASM heap is smaller than this, so the
+// 4 GB literal would wrap to ZERO there and evict the history down to one entry. The
+// web build keeps the old cap.
+#if defined(__EMSCRIPTEN__)
 size_t UndoStack::max_bytes = 1024ull * 1024ull * 1024ull;
+#else
+size_t UndoStack::max_bytes = 4096ull * 1024ull * 1024ull;
+#endif
 // GPU undo ring budget: 256 MB. Overridden at startup by --toaster (64 MB).
+// Raised from 256 MB 2026-09-22. The ring grows lazily (copy-preserving doubling)
+// toward this cap, so a bigger ceiling costs nothing until the history actually needs
+// it; what it buys is more strokes staying GPU-resident instead of spilling to the CPU
+// arrays. The B570 reports maxStorageBlock 2047 MB, so 1 GB is a legal single binding.
+//
+// Web keeps 256 MB: browsers commonly cap maxStorageBufferBindingSize at 128 MB, and
+// while the ring already degrades gracefully past that (undo_ring_reserve returns
+// SIZE_MAX and the entry falls back to its CPU arrays), there is nothing to gain by
+// asking for a gigabyte the device will never grant.
+#if defined(__EMSCRIPTEN__)
 size_t UndoStack::ring_max_bytes = 256ull * 1024ull * 1024ull;
+#else
+size_t UndoStack::ring_max_bytes = 1024ull * 1024ull * 1024ull;
+#endif
 uint64_t UndoStack::global_pushes = 0;
 
 // Spill a resident STROKE entry's (old,new) out of the GPU ring into its CPU arrays.
@@ -67,10 +94,22 @@ void UndoStack::push(UndoEntry&& e) {
 }
 
 void UndoStack::evict_to_budget() {
+    size_t dropped = 0, freed = 0;
     while (total_bytes > max_bytes && undo_stack.size() > 1) {
-        total_bytes -= entry_bytes(undo_stack.front());
+        const size_t b = entry_bytes(undo_stack.front());
+        total_bytes -= b;
         undo_stack.pop_front();
+        dropped++;
+        freed += b;
     }
+    // This used to be silent, which is why it cost a model. Losing the OLDEST entries
+    // means Ctrl+Z can no longer reach the state you started from — and when what goes
+    // is a LEVEL entry, the destructive projection it snapshotted can never be undone.
+    if (dropped)
+        std::printf("[undo] TRIPWIRE: evicted %zu oldest entr%s (%zu MB) to stay under "
+                    "the %zu MB budget — undo can no longer reach back that far\n",
+                    dropped, dropped == 1 ? "y" : "ies",
+                    freed >> 20, max_bytes >> 20);
 }
 
 void UndoStack::clear_redo() {
