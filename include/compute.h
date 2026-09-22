@@ -61,6 +61,8 @@ enum ComputeBinding : GLuint {
     BIND_DISPATCH_ARGS     = 46, // uint3  workgroup counts for dispatch_indirect
     BIND_BLOCK_BOXES       = 47, // float6 per-block world AABB (dispatch culling)
     BIND_BLOCK_STICKY      = 48, // uint   per-block "already listed this frame" flag
+    BIND_NORM_MARK         = 49, // uint   per-vertex frame stamp (normals_expand dedupe)
+    BIND_NORM_LIST         = 50, // uint   [count, v0, v1, ...] verts whose normals need recomputing
     // Per-dab dirty-list region (base word + id capacity) for the arena below. Shared
     // by every kernel that appends to the dirty list, so their own Params blocks stay
     // untouched. Written once per dab by set_dirty_region().
@@ -378,6 +380,25 @@ struct ComputeState {
     // readiness.
     gpu::ComputePipeline compute_normals_pipeline;
     gpu::Buffer          compute_normals_ubo;   // 16-byte {dirty_count} block
+
+    // GPU normals expansion — the one-ring expansion ahead of compute_normals, done
+    // where the dirty list and the adjacency already live instead of round-tripping
+    // through the CPU (see normals_expand.wgsl). Each geo dab expands its own arena
+    // region into norm_list, deduped across the frame by a per-vertex stamp; post_frame
+    // then runs compute_normals once over norm_list with an indirect dispatch. Off with
+    // CHISEL_GPU_NORMALS=0, which falls back to the CPU expansion for an A/B.
+    gpu::ComputePipeline normals_expand_pipeline;
+    gpu::Buffer          normals_expand_ubo;     // 16-byte {stamp, vc, use_mirror, out_cap}
+    gpu::Buffer          norm_src_region_ubo;    // {base, cap} of the list being expanded
+    gpu::Buffer          norm_list_region_ubo;   // {0, cap} of norm_list, for dirty_args
+    gpu::Buffer          norm_mark_ssbo;         // uint per vertex
+    gpu::Buffer          norm_list_ssbo;         // {count, ids[]}
+    gpu::Buffer          norm_args_ssbo;         // uint3, Storage | Indirect
+    uint32_t             norm_capacity = 0;      // verts norm_mark/norm_list are sized for
+    uint32_t             norm_stamp    = 1;      // never 0: a zeroed mark means "unclaimed"
+    uint32_t             norm_expands  = 0;      // expansions queued since the last flush
+    uint32_t             norm_vc       = 0;      // vertex count the queued ids belong to
+    bool                 gpu_normals_on = false;
 
     // GPU-resident undo (Phase 2b): pen-up multires diff — ported onto the gpu::
     // seam (Seam Step 2b). Reprojects the world-space stroke delta (live VBO -
@@ -862,6 +883,8 @@ struct ComputeState {
 
     // Compute-normals readiness (replaces compute_normals_program truthiness checks).
     bool has_normals() const { return compute_normals_pipeline.handle != 0; }
+    bool has_gpu_normals() const { return gpu_normals_on && has_normals() && has_dirty_args()
+                                          && normals_expand_pipeline.handle != 0; }
 
     // Remesh tangential-smooth readiness (replaces remesh_smooth_program checks).
     bool has_remesh_smooth() const { return remesh_smooth_pipeline.handle != 0; }
@@ -922,6 +945,17 @@ struct ComputeState {
 
     // Compile the compute normals shader. Called once at init.
     bool init_compute_normals();
+    bool init_normals_expand();
+    // Queue the one-ring of every id in a {count, ids[]} list (header at word `base`,
+    // `cap` ids) for this frame's normals. Pair-map twins are expanded too when
+    // use_mirror is set and the uploaded map matches vertex_count.
+    void expand_normals_from(const gpu::Buffer& list, uint32_t base, uint32_t cap,
+                             uint32_t vertex_count, bool use_mirror,
+                             const gpu::Buffer& index_ebo);
+    // Recompute normals over everything queued since the last flush, then start a new
+    // frame. Returns false when nothing was queued.
+    bool flush_gpu_normals(uint32_t vertex_count, const gpu::Buffer& pos_vbo,
+                           const gpu::Buffer& norm_vbo, const gpu::Buffer& index_ebo);
 
     // Compile the pen-up multires diff shader. Called once at init.
     bool init_multires_diff();

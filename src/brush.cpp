@@ -605,6 +605,12 @@ void BrushStroke::kick_dab_readback(DabContext& ctx, uint8_t kind) {
         ctx.compute.dispatch_mirror_project_header(ctx.renderer.vbo_pos,
                                                    ctx.mesh.vertex_count(),
                                                    ctx.compute.smooth_dirty_ssbo);
+    // Queue this dab's one-ring for the frame's normals, straight from its region —
+    // after the mirror sink, so the twins it moved are in their final place.
+    if (kind == DAB_GEO && dab_region_valid && ctx.compute.has_gpu_normals())
+        ctx.compute.expand_normals_from(ctx.compute.smooth_dirty_ssbo, dab_base, dab_cap,
+                                        ctx.mesh.vertex_count(), ctx.mirror_pairs,
+                                        ctx.renderer.ebo);
     uint32_t words = 0;
     gpu::ReadTicket tk = dab_region_valid
                        ? ctx.compute.kick_dirty_read(dab_base, dab_cap, words) : 0;
@@ -1603,6 +1609,13 @@ void BrushStroke::apply_move_gpu(DabContext& ctx, float cursor_dx, float cursor_
     if (ctx.mirror_pairs)
         ctx.compute.dispatch_mirror_project_header(ctx.renderer.vbo_pos, ctx.vertex_count,
                                                    ctx.compute.move_affected_ssbo);
+    // The captured set moves every dab; its one-ring is expanded on the GPU from the
+    // same list the apply used, so normals don't wait on the capture readback.
+    if (ctx.compute.has_gpu_normals())
+        ctx.compute.expand_normals_from(ctx.compute.move_affected_ssbo, 0,
+                                        ctx.compute.move_buffers_capacity,
+                                        ctx.mesh.vertex_count(), ctx.mirror_pairs,
+                                        ctx.renderer.ebo);
 
     // Bookkeeping needs the CPU list; while the capture readback is in flight the
     // apply is still correct (cumulative total) and drain_dab_readbacks catches up.
@@ -1709,6 +1722,13 @@ void BrushStroke::apply_limb_gpu(DabContext& ctx, float cursor_dx, float cursor_
     if (ctx.mirror_pairs)
         ctx.compute.dispatch_mirror_project_header(ctx.renderer.vbo_pos, ctx.vertex_count,
                                                    ctx.compute.move_affected_ssbo);
+    // The captured set moves every dab; its one-ring is expanded on the GPU from the
+    // same list the apply used, so normals don't wait on the capture readback.
+    if (ctx.compute.has_gpu_normals())
+        ctx.compute.expand_normals_from(ctx.compute.move_affected_ssbo, 0,
+                                        ctx.compute.move_buffers_capacity,
+                                        ctx.mesh.vertex_count(), ctx.mirror_pairs,
+                                        ctx.renderer.ebo);
 
     if (!capture_pending) {
         dirty_verts = move.affected_list;
@@ -1727,6 +1747,8 @@ void BrushStroke::post_dab(DabContext& ctx) {
     // happens when the readback lands. Move and limb are the exception: they fill
     // dirty_verts synchronously from their capture list, and this is their only call.
     if (dirty_verts.empty()) return;
+    // The GPU expands the same lists itself (kick_dab_readback / apply_move_gpu).
+    if (ctx.compute.has_gpu_normals()) return;
     ScopedStage _stage(StageTimers::S_EXPAND);
     static std::vector<uint32_t> dab_affected;
     ctx.mesh.expand_dirty_to_affected(dirty_verts, dab_affected);
@@ -1743,6 +1765,14 @@ void BrushStroke::post_frame(DabContext& ctx) {
     // is what makes a per-frame sticky set both safe and tight.
     blocks_need_rebuild = true;
     drain_dab_readbacks(ctx);
+
+    if (ctx.compute.has_gpu_normals()) {
+        ScopedStage _stage(StageTimers::S_NORMALS);
+        if (ctx.compute.flush_gpu_normals(ctx.mesh.vertex_count(), ctx.renderer.vbo_pos,
+                                          ctx.renderer.vbo_norm, ctx.renderer.ebo))
+            gpu_normals_deferred = true;
+        return;
+    }
 
     if (gpu_dirty.empty()) return;
 

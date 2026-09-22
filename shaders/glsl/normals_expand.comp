@@ -1,0 +1,65 @@
+// normals_expand.comp — GLSL 430 sibling of shaders/wgsl/normals_expand.wgsl.
+// GPU twin of Mesh::expand_dirty_to_affected: for each id in a {count, ids[]} source
+// list, claim every corner of every triangle around it with a per-vertex frame stamp;
+// the first claim this frame appends the vertex to the affected list. Replaces the
+// CPU readback -> expand -> sort/unique -> upload round trip ahead of compute_normals.
+#version 430
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 2)  readonly buffer IdxBuf    { uint indices[]; };
+layout(std430, binding = 4)  readonly buffer AdjOffset { uint adj_offset[]; };
+layout(std430, binding = 5)  readonly buffer AdjList   { uint adj_list[]; };
+layout(std430, binding = 6)  readonly buffer SrcBuf    { uint src[]; };
+layout(std430, binding = 7)  readonly buffer MirrorBuf { uint mirror_map[]; };
+layout(std430, binding = 49)          buffer MarkBuf   { uint mark[]; };
+layout(std430, binding = 50)          buffer AffBuf    { uint affected[]; };
+
+layout(std140, binding = 61) uniform Region {
+    uint base;
+    uint cap;
+    uint _p0;
+    uint _p1;
+} R;
+
+layout(std140, binding = 63) uniform Params {
+    uint stamp;          // this frame's claim value; never 0 (0 = never claimed)
+    uint vertex_count;
+    uint use_mirror;     // 1 = also expand each id's pair-map twin
+    uint out_cap;        // id capacity of the affected list
+} P;
+
+void claim(uint w) {
+    if (w >= P.vertex_count) return;
+    uint prev = atomicExchange(mark[w], P.stamp);
+    if (prev == P.stamp) return;
+    uint slot = atomicAdd(affected[0], 1u);
+    if (slot < P.out_cap) affected[1u + slot] = w;
+}
+
+void expand(uint v) {
+    uint start = adj_offset[v];
+    uint end = adj_offset[v + 1u];
+    for (uint j = start; j < end; j++) {
+        uint t = adj_list[j];
+        claim(indices[t * 3u]);
+        claim(indices[t * 3u + 1u]);
+        claim(indices[t * 3u + 2u]);
+    }
+}
+
+void main() {
+    // Clamp for the same reason as dirty_args: an overflowed region's counter runs
+    // past cap and those ids were never written.
+    uint n = min(src[R.base], R.cap);
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= n) return;
+    uint v = src[R.base + 1u + i];
+    if (v >= P.vertex_count) return;
+    expand(v);
+
+    // Pair-map mirror: mirror_project moved v's twin without listing it.
+    if (P.use_mirror == 1u) {
+        uint mv = mirror_map[v];
+        if (mv != v && mv < P.vertex_count) expand(mv);
+    }
+}

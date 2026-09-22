@@ -222,6 +222,16 @@ void ComputeState::cleanup() {
     gpu::release_compute_pipeline(mirror_project_pipeline);
     gpu::release_compute_pipeline(dirty_args_pipeline);
     gpu::release_buffer(dispatch_args_ssbo);
+    gpu::release_compute_pipeline(normals_expand_pipeline);
+    gpu::release_buffer(normals_expand_ubo);
+    gpu::release_buffer(norm_src_region_ubo);
+    gpu::release_buffer(norm_list_region_ubo);
+    gpu::release_buffer(norm_mark_ssbo);
+    gpu::release_buffer(norm_list_ssbo);
+    gpu::release_buffer(norm_args_ssbo);
+    norm_capacity = 0;
+    norm_expands = 0;
+    gpu_normals_on = false;
     gpu::release_compute_pipeline(block_boxes_pipeline);
     gpu::release_compute_pipeline(block_select_pipeline);
     gpu::release_compute_pipeline(block_args_pipeline);

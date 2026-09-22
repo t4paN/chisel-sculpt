@@ -1,6 +1,7 @@
 #include "compute.h"
 #include "gpu_shaders_generated.h"   // gpu::embedded_shader("smooth_accum" / ...)
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <algorithm>
 
@@ -418,7 +419,7 @@ uint32_t ComputeState::readback_accum_dirty(uint32_t vertex_count, std::vector<u
 namespace {
 // 16-byte std140 block, byte-identical to compute_normals.{comp,wgsl}'s Params.
 struct ComputeNormalsParamsGPU {
-    uint32_t dirty_count; uint32_t _pad0; uint32_t _pad1; uint32_t _pad2;
+    uint32_t dirty_count; uint32_t list_mode; uint32_t header_cap; uint32_t _pad2;
 };
 static_assert(sizeof(ComputeNormalsParamsGPU) == 16, "compute_normals Params UBO must be 16 bytes");
 }
@@ -499,6 +500,174 @@ void ComputeState::dispatch_compute_normals(const uint32_t* dirty_verts, uint32_
     gpu::dispatch(b, compute_normals_pipeline, grp, (dirty_count + 255u) / 256u);
     gpu::submit(b);
     gpu::release_bind_group(grp);
+}
+
+// ---------------------------------------------------------------------------
+// GPU normals expansion (normals_expand + compute_normals list_mode 1)
+// ---------------------------------------------------------------------------
+
+namespace {
+// 16-byte std140 block, byte-identical to normals_expand.{comp,wgsl}'s Params.
+struct NormalsExpandParamsGPU {
+    uint32_t stamp; uint32_t vertex_count; uint32_t use_mirror; uint32_t out_cap;
+};
+static_assert(sizeof(NormalsExpandParamsGPU) == 16, "normals_expand Params UBO must be 16 bytes");
+}
+
+bool ComputeState::init_normals_expand() {
+    if (!supported) return false;
+    // On by default; CHISEL_GPU_NORMALS=0 keeps the CPU expansion for an A/B.
+    const char* e = getenv("CHISEL_GPU_NORMALS");
+    if (e && *e == '0') {
+        std::printf("[compute] GPU normals expansion DISABLED (CHISEL_GPU_NORMALS=0)\n");
+        return false;
+    }
+    const gpu::BindEntry layout[] = {
+        { BIND_INDICES,          gpu::Bind::StorageRead,      0 },
+        { BIND_ADJACENCY_OFFSET, gpu::Bind::StorageRead,      0 },
+        { BIND_ADJACENCY_LIST,   gpu::Bind::StorageRead,      0 },
+        { BIND_DIRTY_VERTS,      gpu::Bind::StorageRead,      0 },
+        { BIND_MIRROR_MAP,       gpu::Bind::StorageRead,      0 },
+        { BIND_NORM_MARK,        gpu::Bind::StorageReadWrite, 0 },
+        { BIND_NORM_LIST,        gpu::Bind::StorageReadWrite, 0 },
+        { BIND_DIRTY_REGION,     gpu::Bind::Uniform,          sizeof(DirtyRegionGPU) },
+        { BIND_PARAMS,           gpu::Bind::Uniform,          sizeof(NormalsExpandParamsGPU) },
+    };
+    normals_expand_pipeline = gpu::create_compute_pipeline(gpu_dev,
+                                  gpu::embedded_shader("normals_expand"), layout, 9);
+    if (!normals_expand_pipeline.handle) {
+        std::printf("[compute] normals_expand pipeline failed to compile\n");
+        return false;
+    }
+    normals_expand_ubo   = gpu::create_buffer(gpu_dev, nullptr, sizeof(NormalsExpandParamsGPU),
+                                              gpu::Usage::Uniform);
+    norm_src_region_ubo  = gpu::create_buffer(gpu_dev, nullptr, sizeof(DirtyRegionGPU),
+                                              gpu::Usage::Uniform);
+    norm_list_region_ubo = gpu::create_buffer(gpu_dev, nullptr, sizeof(DirtyRegionGPU),
+                                              gpu::Usage::Uniform);
+    norm_args_ssbo = gpu::create_buffer(gpu_dev, nullptr, 3 * sizeof(uint32_t),
+                                        gpu::Usage::Storage | gpu::Usage::Indirect);
+    gpu_normals_on = true;
+    std::printf("[compute] normals_expand pipeline compiled (GPU normals expansion on)\n");
+    return true;
+}
+
+void ComputeState::expand_normals_from(const gpu::Buffer& list, uint32_t base, uint32_t cap,
+                                       uint32_t vertex_count, bool use_mirror,
+                                       const gpu::Buffer& index_ebo) {
+    if (!has_gpu_normals() || !list.handle || cap == 0 || vertex_count == 0) return;
+    if (adjacency_vertex_count != vertex_count) return;
+
+    // Sized to the whole mesh: the frame stamp dedupes, so the list can never hold
+    // more than every vertex once. Grow-only, zeroed on (re)allocation — a zeroed mark
+    // is "unclaimed", which is why the stamp starts at 1.
+    if (norm_capacity < vertex_count || !norm_mark_ssbo.handle) {
+        gpu::release_buffer(norm_mark_ssbo);
+        gpu::release_buffer(norm_list_ssbo);
+        norm_mark_ssbo = gpu::create_buffer(gpu_dev, nullptr, (uint64_t)vertex_count * sizeof(uint32_t),
+                                            gpu::Usage::Storage);
+        norm_list_ssbo = gpu::create_buffer(gpu_dev, nullptr, ((uint64_t)vertex_count + 1) * sizeof(uint32_t),
+                                            gpu::Usage::Storage);
+        gpu::clear_buffer(gpu_dev, norm_mark_ssbo, 0);
+        gpu::clear_buffer(gpu_dev, norm_list_ssbo, 0);
+        norm_capacity = vertex_count;
+        norm_stamp = 1;
+        norm_expands = 0;
+    }
+
+    // The pair-map twin is only meaningful when the uploaded map is this mesh's.
+    const bool mirror = use_mirror && mirror_map_ssbo.handle
+                        && mirror_map_vertex_count == vertex_count;
+
+    DirtyRegionGPU src = { base, cap, 0, 0 };
+    gpu::write_buffer(gpu_dev, norm_src_region_ubo, 0, &src, sizeof(src));
+    NormalsExpandParamsGPU u = { norm_stamp, vertex_count, mirror ? 1u : 0u, norm_capacity };
+    gpu::write_buffer(gpu_dev, normals_expand_ubo, 0, &u, sizeof(u));
+
+    // The count lives in the list's header on the GPU, so dirty_args turns it into the
+    // expand's workgroup count (both at 256 per group) — same pattern as the mirror sink.
+    const gpu::BindBufferEntry args_bg[] = {
+        { BIND_DIRTY_VERTS,   &list,                list.size },
+        { BIND_DISPATCH_ARGS, &norm_args_ssbo,      norm_args_ssbo.size },
+        { BIND_DIRTY_REGION,  &norm_src_region_ubo, sizeof(DirtyRegionGPU) },
+    };
+    gpu::BindGroup args_grp = gpu::create_bind_group(gpu_dev, dirty_args_pipeline, args_bg, 3);
+
+    // With no mirror the map binding is never read, but it must still be bound; the
+    // index buffer is read-only here already, so it stands in without a usage clash.
+    const gpu::Buffer& map = mirror ? mirror_map_ssbo : index_ebo;
+    const gpu::BindBufferEntry bg[] = {
+        { BIND_INDICES,          &index_ebo,             index_ebo.size },
+        { BIND_ADJACENCY_OFFSET, &adjacency_offset_ssbo, adjacency_offset_ssbo.size },
+        { BIND_ADJACENCY_LIST,   &adjacency_list_ssbo,   adjacency_list_ssbo.size },
+        { BIND_DIRTY_VERTS,      &list,                  list.size },
+        { BIND_MIRROR_MAP,       &map,                   map.size },
+        { BIND_NORM_MARK,        &norm_mark_ssbo,        norm_mark_ssbo.size },
+        { BIND_NORM_LIST,        &norm_list_ssbo,        norm_list_ssbo.size },
+        { BIND_DIRTY_REGION,     &norm_src_region_ubo,   sizeof(DirtyRegionGPU) },
+        { BIND_PARAMS,           &normals_expand_ubo,    sizeof(NormalsExpandParamsGPU) },
+    };
+    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, normals_expand_pipeline, bg, 9);
+
+    gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
+    gpu::dispatch(b, dirty_args_pipeline, args_grp, 1);
+    gpu::dispatch_indirect(b, normals_expand_pipeline, grp, norm_args_ssbo, 0);
+    gpu::submit(b);
+    gpu::release_bind_group(args_grp);
+    gpu::release_bind_group(grp);
+    norm_expands++;
+    norm_vc = vertex_count;
+}
+
+bool ComputeState::flush_gpu_normals(uint32_t vertex_count, const gpu::Buffer& pos_vbo,
+                                     const gpu::Buffer& norm_vbo, const gpu::Buffer& index_ebo) {
+    if (!has_gpu_normals() || norm_expands == 0 || !norm_list_ssbo.handle) return false;
+    norm_expands = 0;
+
+    // Ids queued against a different mesh (an aborted stroke, then a level switch)
+    // would index past the new adjacency — drop them; the rebuild recomputed normals.
+    if (norm_vc == vertex_count && adjacency_vertex_count == vertex_count) {
+        DirtyRegionGPU lr = { 0, norm_capacity, 0, 0 };
+        gpu::write_buffer(gpu_dev, norm_list_region_ubo, 0, &lr, sizeof(lr));
+        ComputeNormalsParamsGPU u = {};
+        u.list_mode  = 1;
+        u.header_cap = norm_capacity;
+        gpu::write_buffer(gpu_dev, compute_normals_ubo, 0, &u, sizeof(u));
+
+        const gpu::BindBufferEntry args_bg[] = {
+            { BIND_DIRTY_VERTS,   &norm_list_ssbo,       norm_list_ssbo.size },
+            { BIND_DISPATCH_ARGS, &norm_args_ssbo,       norm_args_ssbo.size },
+            { BIND_DIRTY_REGION,  &norm_list_region_ubo, sizeof(DirtyRegionGPU) },
+        };
+        gpu::BindGroup args_grp = gpu::create_bind_group(gpu_dev, dirty_args_pipeline, args_bg, 3);
+        const gpu::BindBufferEntry bg[] = {
+            { BIND_POSITIONS,        &pos_vbo,   pos_vbo.size },
+            { BIND_NORMALS,          &norm_vbo,  norm_vbo.size },
+            { BIND_INDICES,          &index_ebo, index_ebo.size },
+            { BIND_ADJACENCY_OFFSET, &adjacency_offset_ssbo, adjacency_offset_ssbo.size },
+            { BIND_ADJACENCY_LIST,   &adjacency_list_ssbo,   adjacency_list_ssbo.size },
+            { BIND_DIRTY_VERTS,      &norm_list_ssbo,        norm_list_ssbo.size },
+            { BIND_PARAMS,           &compute_normals_ubo, sizeof(ComputeNormalsParamsGPU) },
+        };
+        gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, compute_normals_pipeline, bg, 7);
+
+        gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
+        gpu::dispatch(b, dirty_args_pipeline, args_grp, 1);
+        gpu::dispatch_indirect(b, compute_normals_pipeline, grp, norm_args_ssbo, 0);
+        gpu::submit(b);
+        gpu::release_bind_group(args_grp);
+        gpu::release_bind_group(grp);
+    }
+
+    // New frame: empty the list and move the stamp on, so every vertex is claimable
+    // again without touching the mark buffer. Queue-ordered after the submit above.
+    uint32_t zero = 0;
+    gpu::write_buffer(gpu_dev, norm_list_ssbo, 0, &zero, sizeof(zero));
+    if (++norm_stamp == 0) {
+        gpu::clear_buffer(gpu_dev, norm_mark_ssbo, 0);
+        norm_stamp = 1;
+    }
+    return true;
 }
 
 // ---------------------------------------------------------------------------

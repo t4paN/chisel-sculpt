@@ -4,8 +4,9 @@
 // vertex: sum the (Max-weighted) face normals of its adjacent triangles via CSR
 // adjacency, then normalize. 16-byte std140 Params UBO at binding 63.
 //
-// binding 6 here is the plain id list (no count header) — the count rides in the
-// Params UBO, exactly like the old u_dirty_count uniform.
+// binding 6 is either the plain id list with the count in the Params UBO (list_mode
+// 0), or a {count, ids[]} list whose count only exists on the GPU (list_mode 1,
+// normals_expand's output — dispatched indirect, count clamped to header_cap).
 #version 430
 layout(local_size_x = 256) in;
 
@@ -17,17 +18,23 @@ layout(std430, binding = 5) readonly buffer AdjList    { uint adj_list[]; };
 layout(std430, binding = 6) readonly buffer DirtyVerts { uint dirty_verts[]; };
 
 layout(std140, binding = 63) uniform Params {
-    uint dirty_count;   // 0
-    uint _pad0;
-    uint _pad1;
+    uint dirty_count;   // 0 — list_mode 0 only
+    uint list_mode;     // 0 = plain ids, 1 = {count, ids[]} header
+    uint header_cap;    // list_mode 1: id capacity of the list
     uint _pad2;         // struct rounds to 16
 } P;
 
 void main() {
     uint di = gl_GlobalInvocationID.x;
-    if (di >= P.dirty_count) return;
+    uint count = P.dirty_count;
+    uint first = 0u;
+    if (P.list_mode == 1u) {
+        count = min(dirty_verts[0], P.header_cap);
+        first = 1u;
+    }
+    if (di >= count) return;
 
-    uint v = dirty_verts[di];
+    uint v = dirty_verts[first + di];
 
     float nx = 0.0, ny = 0.0, nz = 0.0;
 

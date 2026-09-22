@@ -10,13 +10,14 @@
 //   4  adj_offset (read)  5 adj_list (read)         6 dirty verts (read)
 //   63 params UBO (BIND_PARAMS)
 //
-// binding 6 here is the plain id list (no count header) — the caller passes the
-// count in the params UBO, exactly like the GL u_dirty_count uniform.
+// binding 6 is either the plain id list with the count in the params UBO (list_mode
+// 0, CPU-built lists), or a {count, ids[]} list whose count only exists on the GPU
+// (list_mode 1, normals_expand's output — dispatched indirect, count clamped to cap).
 
 struct Params {
-    dirty_count : u32,   // byte 0
-    _pad0       : u32,
-    _pad1       : u32,
+    dirty_count : u32,   // byte 0 — list_mode 0 only
+    list_mode   : u32,   // 0 = plain ids, 1 = {count, ids[]} header
+    header_cap  : u32,   // list_mode 1: id capacity of the list
     _pad2       : u32,   // struct rounds to 16
 };
 
@@ -31,11 +32,17 @@ struct Params {
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     let di = gid.x;
-    if (di >= P.dirty_count) {
+    var count = P.dirty_count;
+    var first = 0u;
+    if (P.list_mode == 1u) {
+        count = min(dirty_verts[0], P.header_cap);
+        first = 1u;
+    }
+    if (di >= count) {
         return;
     }
 
-    let v = dirty_verts[di];
+    let v = dirty_verts[first + di];
 
     var n = vec3<f32>(0.0, 0.0, 0.0);
 
