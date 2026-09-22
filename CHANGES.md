@@ -2,6 +2,78 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-09-23 — Undo spikes after level changes: the flush ran after the restore
+
+*GL build, hand-tested on the user's own repro: could not reproduce. Both backends build.
+Treat it as probably fixed, not proven — this bug has had three convincing explanations
+that turned out wrong.*
+
+The repro: sculpt high, drop a few levels, sculpt, drop again, then undo back up. Spikes
+appeared on the ascent, exactly where the strokes at the lower level had been.
+
+The 2026-09-22 frame tripwire finally caught it on that exact sequence: 0 folded on the way
+down and while sculpting at L8, then **39,014 folded fans** the instant Ctrl+Z undid the
+L9→L8 descend, after all three L8 strokes had already been undone.
+
+The order of two steps was wrong:
+
+1. A GPU stroke undo (`undo.cpp` Case 1) writes the working VBO and `disp_ssbo` and only
+   marks the CPU copy stale.
+2. Undoing the descend restores the pre-projection snapshot into CPU `disp[k_start]`.
+3. **Then** `cascade_active` ran its "materialize before reading CPU storage" flush, which
+   copied `disp_ssbo` (still holding the *post*-projection layer) over the layer step 2 had
+   just restored, at every vertex the strokes touched.
+
+That left the lower layer disagreeing with the detail stored above it, under the stroke
+footprint only. The next ascent re-applied that detail in the wrong frames, producing
+spikes. It also explains the open clue in `undo-spikes-handoff.md`, that the damage sat
+exactly in the projection's `k_start` layer and survived a full undo.
+
+**Fix:** `UndoStack::apply` materializes *before* applying a PROJECTION or LEVEL entry, in
+both directions. When the hazard is live it now says so:
+`[undo] LEVEL undo: flushing N GPU-resident verts before the restore`. The verification
+run printed it seven times (122 to 6.3M verts), and every `[frames] CHECK` on the way back
+up read 0 folded.
+
+## 2026-09-23 — Normals expansion moved onto the GPU
+
+*Both native backends build; GL hand-tested at L10 ("feels pretty snappy"). WebGPU native
+compiles with zero device errors but has not been sculpted on. No emsdk on this machine,
+so it is NOT Tint-gated and must not go to itch until it is.*
+
+After a dab moves vertices, their normals, and those of the one-ring around them, have to be
+recomputed. That expansion ran on the CPU. Every dab's dirty list was read back, the
+one-ring walked, the result sorted and deduplicated, then uploaded straight back for
+`compute_normals`. The list and the adjacency both already lived on the GPU, and the result's
+only consumer was the GPU. The 2026-09-22 stage timers put that round trip at **37–60% of a
+big-brush L10 stroke** (expand 17–29% + normals 20–31%).
+
+New kernel `normals_expand` (WGSL + GLSL twins) is the GPU twin of
+`Mesh::expand_dirty_to_affected`:
+
+- Each geometry dab expands its own arena region at the end of `kick_dab_readback`, after
+  the mirror sink. Move and limb expand their captured affected list every dab.
+- Corners are claimed with `atomicExchange` on a per-vertex **frame stamp**. The first
+  claim in a frame appends the vertex to `norm_list`, and later claims are no-ops, so the
+  dedupe the CPU needed a sort for is free. The stamp advances once per frame, so the mark
+  buffer is never cleared.
+- Pair-map mirror twins are expanded too, since `mirror_project` moves them without listing
+  them.
+- `post_frame` runs `compute_normals` once over `norm_list` through an indirect dispatch.
+  The shader gained `list_mode 1` for a `{count, ids[]}` list whose length exists only on
+  the GPU. The count comes from `dirty_args`, the same pattern as the mirror sink.
+
+Result on the L10 run: the `normals` stage reads **0.01 ms/call**, down from a 176 ms
+average and 422 ms worst per big-brush pass, and `expand` no longer runs. Side effect:
+normals now land in the **same frame** as the dab. The CPU path ran them 1–2 frames late,
+when the readback arrived.
+
+**Not measured:** stroke wall time against the old path. The timers only show that the CPU
+work is gone. `CHISEL_GPU_NORMALS=0` restores the CPU path for that A/B without a rebuild.
+
+The per-dab dirty readback still runs, because the undo snapshot needs the id list. It was
+the 1% stage.
+
 ## 2026-09-22 — Undo budgets raised, and eviction stopped being silent
 
 *Both native backends build. The raise did NOT fix the bug it was aimed at — see below.*
