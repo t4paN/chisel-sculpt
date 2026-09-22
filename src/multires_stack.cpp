@@ -773,12 +773,17 @@ static void check_frames(const MultiresStack& stack, const Mesh& surface, int K)
                 "%u non-orthonormal | %.0f ms\n",
                 K, folded, vc, creased, (double)(worst > 1.5f ? 1.0f : worst), worst_v,
                 stored, collapsed, non_ortho, ms);
-    if (folded || collapsed || non_ortho)
+    if (folded || collapsed || non_ortho) {
         std::printf("[frames] TRIPWIRE: %u folded fan(s), %u collapsed frame(s), %u "
-                    "non-orthonormal (first bad frame at L%d). A folded fan's normal is "
-                    "noise, and the displacement stored against it is re-applied in an "
-                    "arbitrary direction on the next level change — these are the spikes.\n",
-                    folded, collapsed, non_ortho, bad_level);
+                    "non-orthonormal. A folded fan's normal is noise, and the displacement "
+                    "stored against it is re-applied in an arbitrary direction on the next "
+                    "level change — these are the spikes.\n",
+                    folded, collapsed, non_ortho);
+        // Only the collapse/orthonormality arms know a level; a fold is a property of
+        // the surface, not of one stored layer, so don't print a level it cannot mean.
+        if (bad_level >= 0)
+            std::printf("[frames]   first non-basis frame at L%d\n", bad_level);
+    }
     std::fflush(stdout);
 }
 
