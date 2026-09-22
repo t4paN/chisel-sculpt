@@ -2954,7 +2954,14 @@ int main(int argc, char* argv[]) {
         // Hide the OS cursor while sculpting (we draw our own brush cursor).
         bool show_os_cursor = input.quit_requested || input.export_dialog_active || input.import_dialog_active || input.save_dialog_active || input.remesh_confirm_pending || input.voxel_merge_confirm_pending || input.drop_confirm_pending || input.help_popup_open || imgui_wants_mouse || non_edit_mode;
 #ifndef __EMSCRIPTEN__
-        glfwSetInputMode(window, GLFW_CURSOR, show_os_cursor ? GLFW_CURSOR_NORMAL : GLFW_CURSOR_HIDDEN);
+        // A slider drag owns the cursor mode while it runs: it holds GLFW_CURSOR_DISABLED
+        // to capture the pointer. This line ran unconditionally every frame and put the
+        // mode straight back to NORMAL/HIDDEN, which destroys the compositor's pointer
+        // lock ~50us after the drag created it. Two owners of one piece of state, and
+        // this one won sixty times a second — so the capture never actually held, the
+        // pointer really did travel, and glfwSetCursorPos was refused for want of a lock.
+        if (input.slider_mode == InputState::SliderMode::NONE)
+            glfwSetInputMode(window, GLFW_CURSOR, show_os_cursor ? GLFW_CURSOR_NORMAL : GLFW_CURSOR_HIDDEN);
 #else
         // Emscripten's GLFW has no GLFW_CURSOR_HIDDEN (warns every frame) —
         // drive the canvas CSS cursor instead, only on state change.

@@ -2,6 +2,68 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-09-22 — The slider pointer returns: the cursor mode had two owners
+
+*Fixed and confirmed by protocol trace: four drags, four exact returns.*
+
+The real cause was ours, not Wayland's. `src/main.cpp` ran this **every frame**:
+
+    glfwSetInputMode(window, GLFW_CURSOR, show_os_cursor ? GLFW_CURSOR_NORMAL : GLFW_CURSOR_HIDDEN);
+
+Never `DISABLED`. So the moment a slider drag captured the pointer, the same frame's
+cursor-visibility logic put the mode straight back and KWin tore the lock down. The
+`WAYLAND_DEBUG` trace showed it precisely:
+
+    -> zwp_pointer_constraints_v1#10.lock_pointer(... #50 ..., lifetime 2)
+    -> zwp_locked_pointer_v1#50.destroy()        <- 53 microseconds later
+    (zwp_locked_pointer_v1#50.locked() never arrives)
+
+Two owners of one piece of state, and the per-frame one won sixty times a second. Every
+symptom followed from that: the lock never held, so the pointer really did travel, so
+`glfwSetCursorPos` had no lock to act on and was refused. The capture reported
+`GLFW_CURSOR_DISABLED` at the API level the whole time, which is why reading GLFW's own
+state could not find this — only the protocol traffic could.
+
+Gating that line on `slider_mode == NONE` gives the drag ownership of the cursor while it
+runs. The trace after:
+
+    -> lock_pointer(... #50 ...)
+       zwp_locked_pointer_v1#50.locked()         <- 12 ms later, held
+    ...drag...
+    -> zwp_locked_pointer_v1#50.destroy()        <- ~400 ms later, on release
+    [slider] end: asked (963.3, 471.1), GLFW now reports (963.3, 471.1)
+
+**No warp is needed at all.** A locked pointer does not move, so on release it is already
+where the drag began — which is what `495a513`'s capture was really for, even though the
+reasoning that produced it was about making `glfwSetCursorPos` legal.
+
+### What was wrong in the earlier diagnosis
+
+`glfwSetCursorPos` under Wayland is genuinely restricted, and GLFW 3.5.1's header remark
+about `GLFW_CURSOR_DISABLED` is documented-but-unimplemented upstream (PRs #2496 and #2772
+are still open). But that was a red herring for this bug: with the lock actually held, the
+call is not needed and does not error. Two real constraints stacked, and the outer one hid
+an ordinary self-inflicted bug underneath.
+
+`wp_pointer_warp_v1` — which KWin advertises here on Plasma 6.7.5 — turned out to be
+unnecessary. It stays documented in the handoff as the route for any future case that
+really does need to move a pointer that is not locked.
+
+### Instrumentation kept
+
+- **`[glfw] error ...`** — GLFW errors were previously discarded. Several GLFW calls fail
+  by emitting an error and doing nothing; this is how `FEATURE_UNAVAILABLE` was caught.
+- **`[win] GLFW platform: ...`** on every native build, so Wayland and XWayland can be told
+  apart in the build actually used for sculpting.
+- **`[slider] POINTER DID NOT RETURN`** — the per-drag trace is now silent unless the
+  pointer fails to come home, i.e. a permanent tripwire for exactly this regression, with
+  the cause named in the message.
+- The `~` console stands aside when `WAYLAND_DEBUG` is set, so the protocol firehose goes
+  to the terminal rather than a 400-line ring.
+
+`~/Projects/CHISEL/wayland-probe.sh` reproduces the whole diagnosis in one drag and keeps
+the full raw trace.
+
 ## 2026-09-22 — GLFW errors are no longer silent, and the GL build says which platform it got
 
 *The Wayland cursor fix below did not work, and neither of the two things needed to say why
