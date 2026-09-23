@@ -2,6 +2,34 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-09-23 — Pen-up no longer reads the whole normal buffer back
+
+*GL build, hand-tested at L10: shading looked right after undo/redo, level switches and a
+save/reopen. Every `[frames] CHECK` read 0 folded. All three targets build.*
+
+The first `[penup]` runs showed a flat **~205 ms freeze at every L10 pen-up**, up to 580 ms
+(~50 ms at L9, the 4× vertex ratio). Pen-up read the **whole** normal buffer back from the
+GPU, which is 120 MB at L10, to update the normals of the snap-list verts. On GL,
+`read_buffer_async` is a blocking read, so all of it landed inside the frame.
+
+On the usual path, where the stroke's undo lives in the GPU ring, the CPU positions are
+left stale on purpose, and `materialize_cpu()` recomputes the 1-ring normals from the
+positions it pulls. So those read-back normals were always overwritten without being used.
+The read now happens only when positions come down at pen-up too, which is the
+ring-overflow/degrade path.
+
+The earlier guess from the same probe was wrong: the pen-up readbacks looked cheap at
+2–10 ms only because GL does the real copy at the kick, so the take/scatter timer saw
+nothing but a memcpy.
+
+| L10 | before | after |
+|---|---|---|
+| pen-up → committed | 205–580 ms | **1–32 ms** |
+| read back per stroke | 120 MB | **0 MB** |
+
+The web build's reads were already asynchronous, but it still moved the 120 MB into the
+WASM heap every stroke. That's gone too.
+
 ## 2026-09-23 — L10 big-brush dabs no longer overflow the dirty arena; pen-up timer
 
 *All three targets build (GL, wgpu native, web). **Committed before a hand test**, on the

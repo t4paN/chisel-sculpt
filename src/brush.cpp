@@ -2446,7 +2446,13 @@ bool BrushStroke::finalize(DabContext& ctx, Mesh& mesh, UndoStack& stack,
                                                     0, (uint64_t)vertex_count * sizeof(float));
             g_penup.read((uint64_t)vertex_count * sizeof(float));
         }
-        if (gpu_normals_deferred && !snap_list.empty() && compute) {
+        // Normals only when the positions come down too. On the flipped path the CPU
+        // positions stay stale and materialize_cpu() recomputes the 1-ring normals from
+        // them once they are pulled — so a copy read here was always overwritten
+        // unused. It was also the biggest thing pen-up did: the WHOLE normal buffer
+        // (vc x 12 B, 120 MB at L10) for a snap-list-sized write, and on GL a blocking
+        // read, ~205 ms of every L10 stroke (2026-09-23 [penup] run).
+        if (gpu_normals_deferred && !snap_list.empty() && compute && !fin_ring_captured) {
             fin_norm_tk = gpu::read_buffer_async(compute->gpu_dev, renderer.vbo_norm,
                                                  0, (uint64_t)vertex_count * 3 * sizeof(float));
             g_penup.read((uint64_t)vertex_count * 3 * sizeof(float));
@@ -2656,7 +2662,7 @@ bool BrushStroke::finalize(DabContext& ctx, Mesh& mesh, UndoStack& stack,
 
     if (gpu_normals_deferred) {
         ScopedPen _p(PenUpProbe::P_NORMALS);
-        if (!snap_list.empty()) {
+        if (!snap_list.empty() && fin_norm_tk) {
             fin_norm_buf.resize((size_t)vc * 3);
             gpu::ticket_take(compute->gpu_dev, fin_norm_tk, fin_norm_buf.data(),
                              (uint64_t)vc * 3 * sizeof(float));
