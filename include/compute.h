@@ -724,7 +724,9 @@ struct ComputeState {
                          const gpu::Buffer& pos_vbo, const gpu::Buffer& index_ebo);
 
     // Ensure the smooth compact dirty list SSBO is large enough for max_verts IDs.
-    void ensure_smooth_dirty_buffer(uint32_t max_verts);
+    // ring_words_hint asks for a bigger arena (brush.cpp sizes it from measured dab
+    // demand); it is honoured only while no region is live, and capped by the device.
+    void ensure_smooth_dirty_buffer(uint32_t max_verts, uint64_t ring_words_hint = 0);
 
     // Async twins of the count+list readbacks (dirty list / move-affected list):
     // kick right after the dab's dispatches, take on a later frame once the ticket
@@ -796,6 +798,8 @@ struct ComputeState {
     uint32_t dirty_arena_ring_words() const;
     // Largest cap a single region can hold given the arena size.
     uint32_t dirty_arena_max_cap() const;
+    // Largest cap dirty_arena_alloc would grant RIGHT NOW, given what is live.
+    uint32_t dirty_arena_max_free_cap() const;
     gpu::ReadTicket kick_move_affected_read(uint32_t& words);  // move_affected_ssbo
     std::vector<uint32_t> count_list_scratch;                  // take() staging (persistent)
 

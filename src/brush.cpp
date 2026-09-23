@@ -126,6 +126,86 @@ struct ScopedStage {
                            StageTimers::clock::now() - t).count());
     }
 };
+
+// Pen-up cost, per stroke, behind the same flag. The stage timers above stop at the
+// last dab; everything finalize() does after the pen lifts — draining late dabs, the
+// ring diff, the whole-buffer reads of mask/colour/density/normals, and committing
+// the undo entry — was estimated (~126 MB of normals alone at L10) but never timed.
+// finalize() spans several frames, so this reports both the main-thread time it
+// actually spent and the wall time until the stroke was fully committed.
+struct PenUpProbe {
+    enum { P_DRAIN, P_KICK, P_POS, P_MASK, P_COLOR, P_DENSITY, P_UNDO, P_NORMALS, P_COUNT };
+    static const char* name(int s) {
+        static const char* n[] = {"drain  (late dabs + their normals)",
+                                  "kick   (autosmooth, ring diff, read kicks)",
+                                  "pos    (take + scatter, ring overflow only)",
+                                  "mask   (take + scatter)",
+                                  "color  (take + scatter)",
+                                  "density(take + scatter)",
+                                  "undo   (commit entries)",
+                                  "normals(take + scatter)"};
+        return n[s];
+    }
+    double   ms[P_COUNT];
+    uint64_t bytes = 0;
+    uint32_t ticks = 0;
+    double   main_ms = 0.0;
+    StageTimers::clock::time_point t_up, tick_t0;
+    bool     open = false;
+
+    void begin() {
+        if (!probe_enabled()) return;
+        for (int i = 0; i < P_COUNT; i++) ms[i] = 0.0;
+        bytes = 0; ticks = 0; main_ms = 0.0;
+        t_up = StageTimers::clock::now();
+        open = true;
+    }
+    void read(uint64_t n) { if (open) bytes += n; }
+    void report(uint32_t vc, size_t snapped) {
+        if (!open) return;
+        auto now = StageTimers::clock::now();
+        main_ms += std::chrono::duration<double, std::milli>(now - tick_t0).count();
+        double wall = std::chrono::duration<double, std::milli>(now - t_up).count();
+        open = false;
+        std::printf("[penup] %.0f ms pen-up -> committed over %u frames | main thread "
+                    "%.1f ms | read back %.1f MB for %zu touched of %u verts\n",
+                    wall, ticks, main_ms, (double)bytes / (1024.0 * 1024.0), snapped, vc);
+        for (int i = 0; i < P_COUNT; i++) {
+            if (ms[i] < 0.005) continue;
+            std::printf("[penup]   %-44s %7.2f ms\n", name(i), ms[i]);
+        }
+        std::fflush(stdout);
+    }
+};
+PenUpProbe g_penup;
+
+struct ScopedPen {
+    int s;
+    bool on;
+    StageTimers::clock::time_point t;
+    explicit ScopedPen(int stage) : s(stage), on(g_penup.open) {
+        if (on) t = StageTimers::clock::now();
+    }
+    ~ScopedPen() {
+        if (!on || !g_penup.open) return;
+        g_penup.ms[s] += std::chrono::duration<double, std::milli>(
+                             StageTimers::clock::now() - t).count();
+    }
+};
+
+// One per finalize() call: counts the frames the pen-up spans and the main-thread
+// time inside them. The final call's share is closed out by report() itself.
+struct PenTick {
+    bool on;
+    explicit PenTick() : on(g_penup.open) {
+        if (on) { g_penup.tick_t0 = StageTimers::clock::now(); g_penup.ticks++; }
+    }
+    ~PenTick() {
+        if (!on || !g_penup.open) return;
+        g_penup.main_ms += std::chrono::duration<double, std::milli>(
+                               StageTimers::clock::now() - g_penup.tick_t0).count();
+    }
+};
 }  // namespace
 
 
@@ -528,18 +608,33 @@ void BrushStroke::begin_dab(DabContext& ctx) {
         blocks_need_rebuild = false;
     }
 
-    // A level switch or a remesh renames every vertex, so past counts mean nothing.
+    // A level switch or a remesh renumbers every vertex, so past counts no longer
+    // name anything — but their SIZE still carries: a dab of the same brush covers the
+    // same surface, and the vertex count of that surface scales with the mesh's. So
+    // rescale the window rather than drop it. Dropping it made the first dab after
+    // every level switch reserve a whole-mesh region, which at L10 is the entire ring.
     if (recent_vc != vc) {
-        recent_n = recent_head = 0;
+        if (recent_vc && recent_n) {
+            double ratio = (double)vc / (double)recent_vc;
+            for (uint32_t i = 0; i < recent_n; i++)
+                recent_counts[i] = (uint32_t)std::min((double)recent_counts[i] * ratio,
+                                                      (double)vc);
+        }
         recent_vc = vc;
-        recent_radius = 0.0f;
     }
     // Brush size scales a dab's footprint by AREA, so rescale the window instead of
     // relearning it — otherwise growing the brush overflows every region until the
     // window refills, which is the exact failure a previous attempt shipped.
-    if (recent_n && recent_radius > 0.0f && anchor_world_radius > 0.0f) {
-        float ratio = (anchor_world_radius * anchor_world_radius)
-                    / (recent_radius * recent_radius);
+    //
+    // This runs BEFORE the dab's set_anchor, so anchor_world_radius still holds the
+    // previous stroke's radius here (a stroke's first dab got a 6,800-id region that
+    // way). Take the radius set_anchor would start from instead: brush pixels at the
+    // orbit target's scale. Under perspective that is not where the dab lands, but it
+    // is compared only against itself, so the depth error cancels.
+    const float r_now = ctx.win_h > 0
+        ? ctx.eff_brush_size * (2.0f * ctx.cam.half_height()) / (float)ctx.win_h : 0.0f;
+    if (recent_n && recent_radius > 0.0f && r_now > 0.0f) {
+        float ratio = (r_now * r_now) / (recent_radius * recent_radius);
         if (ratio > 1.1f || ratio < 0.9f) {
             for (uint32_t i = 0; i < recent_n; i++) {
                 double scaled = (double)recent_counts[i] * (double)ratio;
@@ -547,36 +642,53 @@ void BrushStroke::begin_dab(DabContext& ctx) {
             }
         }
     }
-    if (anchor_world_radius > 0.0f) recent_radius = anchor_world_radius;
+    if (r_now > 0.0f) recent_radius = r_now;
 
-    // With no history, assume the worst — one full-size region, which self-corrects
-    // as soon as the first dab lands.
-    uint32_t est = vc;
+    // Two sizes. `est` is the comfortable region, kCapSlack over the largest recent
+    // dab. `need` is the least worth taking — the largest recent dab plus half again,
+    // enough to ride out stroke-to-stroke variation. With no history, assume the
+    // worst: one full-size region, which self-corrects as soon as the first dab lands.
+    uint32_t est = vc, need = vc;
     if (recent_n) {
         uint32_t mx = 0;
         for (uint32_t i = 0; i < recent_n; i++)
             if (recent_counts[i] > mx) mx = recent_counts[i];
         est = (mx > vc / kCapSlack) ? vc : mx * kCapSlack;
+        need = std::min(vc, mx + mx / 2);
         if (est < 1024u) est = 1024u;
+        if (need < 1024u) need = 1024u;
     }
     if (est > vc) est = vc;
+    if (need > est) need = est;
+
+    // The ring must hold several dabs in flight, not one: readbacks land a frame or
+    // two late and dabs are batched per frame. Ask for kDabsInFlight `need`-sized
+    // regions; the arena only grows between reads, and never past the device limit.
+    cs.ensure_smooth_dirty_buffer(vc, (uint64_t)kDabsInFlight * (need + 1u));
     const uint32_t max_cap = cs.dirty_arena_max_cap();
+    if (need > max_cap) need = max_cap;
+    // Don't let one comfortable region crowd out the next dab: past a share of the
+    // ring, settle for `need`.
+    const uint32_t share = cs.dirty_arena_ring_words() / kDabsInFlight;
+    if (est > share) est = std::max(need, share);
     if (est > max_cap) est = max_cap;
     if (est == 0) return;
 
     // Never block waiting for room: on the web the callbacks that retire regions are
     // delivered by the event loop, so spinning here deadlocks the frame. Land whatever
-    // is already ready, then settle for a smaller region, then give up.
+    // is already ready, then take the largest gap that still holds `need`, then give up.
+    // (A fixed est/4 retry used to live here. At L10 it handed big dabs a region a
+    // third short of their real demand, so every one of them overflowed.)
     uint32_t got = est;
     bool ok = cs.dirty_arena_alloc(est, dab_base, dab_footprint);
     if (!ok) {
         drain_dab_readbacks(ctx);
         ok = cs.dirty_arena_alloc(est, dab_base, dab_footprint);
         if (!ok) {
-            uint32_t smaller = est / 4;
-            if (smaller >= 1024u && cs.dirty_arena_alloc(smaller, dab_base, dab_footprint)) {
+            uint32_t gap = std::min(cs.dirty_arena_max_free_cap(), est);
+            if (gap >= need && cs.dirty_arena_alloc(gap, dab_base, dab_footprint)) {
                 ok = true;
-                got = smaller;
+                got = gap;
             }
         }
     }
@@ -585,9 +697,9 @@ void BrushStroke::begin_dab(DabContext& ctx) {
         // (cap 0 stores no ids) and take the exact-but-slow path for this stroke.
         dirty_overflowed = true;
         cs.set_dirty_region(0, 0);
-        std::printf("[arena] no room for a dab region (live %u of %u words) — stroke "
-                    "falls back to a whole-mesh snapshot\n",
-                    cs.dirty_arena_live, cs.dirty_arena_words);
+        std::printf("[arena] no room for a dab region (need %u, live %u of %u words) — "
+                    "stroke falls back to a whole-mesh snapshot\n",
+                    need, cs.dirty_arena_live, cs.dirty_arena_words);
         return;
     }
 
@@ -2198,14 +2310,20 @@ bool BrushStroke::finalize(DabContext& ctx, Mesh& mesh, UndoStack& stack,
         fin_autosmooth = autosmooth;
         fin_ring_captured = false;
         stroke_ring_base = SIZE_MAX;   // set below iff the pen-up diff captured into the ring (3b-iv)
+        g_penup.begin();
     }
+    PenTick _pen_tick;
 
     if (fin_state == FinState::DRAIN) {
         // Stage 1a: land every in-flight dab readback — snap_list must be complete
         // before autosmooth spans it and the ring diff sizes off it. post_frame also
         // dispatches partial normals for the late-landing dabs.
-        post_frame(ctx);
+        {
+            ScopedPen _p(PenUpProbe::P_DRAIN);
+            post_frame(ctx);
+        }
         if (dab_readbacks_pending()) return false;   // tick again next frame
+        ScopedPen _kick(PenUpProbe::P_KICK);
         // Every region has retired by here, so the next stroke starts on a clean ring
         // rather than inheriting a head part-way down the buffer.
         ctx.compute.dirty_arena_reset();
@@ -2304,25 +2422,35 @@ bool BrushStroke::finalize(DabContext& ctx, Mesh& mesh, UndoStack& stack,
             // down lazily). The degrade path (ring overflow OR no compute / level
             // mismatch) keeps the authoritative readback — kicked async here, landed
             // in stage 2.
-            if (!fin_ring_captured)
+            if (!fin_ring_captured) {
                 fin_pos_tk = gpu::read_buffer_async(compute->gpu_dev, renderer.vbo_pos,
                                                     0, (uint64_t)vertex_count * 3 * sizeof(float));
+                g_penup.read((uint64_t)vertex_count * 3 * sizeof(float));
+            }
         }
 
         // Full working-range copies, one ticket per deferred buffer. One map beats
         // the old per-run blocking reads; stage 2 indexes only the snap verts.
-        if (gpu_mask_deferred && !mask.snap_list.empty() && compute)
+        if (gpu_mask_deferred && !mask.snap_list.empty() && compute) {
             fin_mask_tk = gpu::read_buffer_async(compute->gpu_dev, renderer.vbo_mask,
                                                  0, (uint64_t)vertex_count * sizeof(float));
-        if (gpu_color_deferred && !color.snap_list.empty() && compute)
+            g_penup.read((uint64_t)vertex_count * sizeof(float));
+        }
+        if (gpu_color_deferred && !color.snap_list.empty() && compute) {
             fin_color_tk = gpu::read_buffer_async(compute->gpu_dev, renderer.vbo_color,
                                                   0, (uint64_t)vertex_count * sizeof(uint32_t));
-        if (gpu_density_deferred && !density.snap_list.empty() && compute)
+            g_penup.read((uint64_t)vertex_count * sizeof(uint32_t));
+        }
+        if (gpu_density_deferred && !density.snap_list.empty() && compute) {
             fin_density_tk = gpu::read_buffer_async(compute->gpu_dev, renderer.vbo_density,
                                                     0, (uint64_t)vertex_count * sizeof(float));
-        if (gpu_normals_deferred && !snap_list.empty() && compute)
+            g_penup.read((uint64_t)vertex_count * sizeof(float));
+        }
+        if (gpu_normals_deferred && !snap_list.empty() && compute) {
             fin_norm_tk = gpu::read_buffer_async(compute->gpu_dev, renderer.vbo_norm,
                                                  0, (uint64_t)vertex_count * 3 * sizeof(float));
+            g_penup.read((uint64_t)vertex_count * 3 * sizeof(float));
+        }
 
         fin_state = FinState::READS;   // fall through — GL tickets are ready already
     }
@@ -2339,6 +2467,7 @@ bool BrushStroke::finalize(DabContext& ctx, Mesh& mesh, UndoStack& stack,
     const uint32_t vc = vertex_count;
 
     if (gpu_positions_deferred && !snap_list.empty()) {
+        ScopedPen _p(PenUpProbe::P_POS);
         if (!fin_ring_captured) {
             // Invariant: this baseline (mesh.pos) is the pre-stroke surface. Staleness
             // only ever comes from a prior flipped stroke, and the flip requires
@@ -2462,6 +2591,7 @@ bool BrushStroke::finalize(DabContext& ctx, Mesh& mesh, UndoStack& stack,
     }
 
     if (gpu_mask_deferred && !mask.snap_list.empty()) {
+        ScopedPen _p(PenUpProbe::P_MASK);
         if (mesh.mask.empty()) mesh.mask.assign(mesh.vertex_count(), 0.0f);
         fin_mask_buf.resize(vc);
         gpu::ticket_take(compute->gpu_dev, fin_mask_tk, fin_mask_buf.data(),
@@ -2473,6 +2603,7 @@ bool BrushStroke::finalize(DabContext& ctx, Mesh& mesh, UndoStack& stack,
     }
 
     if (gpu_color_deferred && !color.snap_list.empty()) {
+        ScopedPen _p(PenUpProbe::P_COLOR);
         if (mesh.color.empty()) mesh.color.assign(mesh.vertex_count(), 0xFFFFFFFFu);
         else if (mesh.color.size() < mesh.vertex_count())
             mesh.color.resize(mesh.vertex_count(), 0xFFFFFFFFu);
@@ -2486,6 +2617,7 @@ bool BrushStroke::finalize(DabContext& ctx, Mesh& mesh, UndoStack& stack,
     }
 
     if (gpu_density_deferred && !density.snap_list.empty()) {
+        ScopedPen _p(PenUpProbe::P_DENSITY);
         if (mesh.density.empty()) mesh.density.assign(mesh.vertex_count(), 0.5f);
         else if (mesh.density.size() < mesh.vertex_count())
             mesh.density.resize(mesh.vertex_count(), 0.5f);
@@ -2504,19 +2636,26 @@ bool BrushStroke::finalize(DabContext& ctx, Mesh& mesh, UndoStack& stack,
     // wrong category records nothing — leaving an un-undoable edit on the mesh.
     // Each non-empty snap set gets its own entry; commit_*_undo self-filter
     // unchanged verts and push() drops empties, so pure strokes still push one.
-    if (!mask.snap_list.empty())
-        commit_mask_undo(mesh, stack);
-    if (!color.snap_list.empty())
-        commit_color_undo(mesh, stack);
-    if (!density.snap_list.empty())
-        commit_density_undo(mesh, stack);
-    if (!snap_list.empty()) {
-        for (int fi = stroke_disp_index + 1; fi < (int)multires.frames.size(); fi++)
-            multires.frames[fi].clear();
-        commit_undo(mesh, stack, multires);
+    // Counted before the commits, which may consume the lists.
+    const size_t pen_touched = snap_list.size() + mask.snap_list.size()
+                             + color.snap_list.size() + density.snap_list.size();
+    {
+        ScopedPen _p(PenUpProbe::P_UNDO);
+        if (!mask.snap_list.empty())
+            commit_mask_undo(mesh, stack);
+        if (!color.snap_list.empty())
+            commit_color_undo(mesh, stack);
+        if (!density.snap_list.empty())
+            commit_density_undo(mesh, stack);
+        if (!snap_list.empty()) {
+            for (int fi = stroke_disp_index + 1; fi < (int)multires.frames.size(); fi++)
+                multires.frames[fi].clear();
+            commit_undo(mesh, stack, multires);
+        }
     }
 
     if (gpu_normals_deferred) {
+        ScopedPen _p(PenUpProbe::P_NORMALS);
         if (!snap_list.empty()) {
             fin_norm_buf.resize((size_t)vc * 3);
             gpu::ticket_take(compute->gpu_dev, fin_norm_tk, fin_norm_buf.data(),
@@ -2533,6 +2672,7 @@ bool BrushStroke::finalize(DabContext& ctx, Mesh& mesh, UndoStack& stack,
 
     had_update = needs_mesh_update;
     fin_state = FinState::IDLE;
+    g_penup.report(vc, pen_touched);
     end();
     return true;
 }

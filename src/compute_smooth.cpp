@@ -366,7 +366,7 @@ void ComputeState::dispatch_smooth(const SmoothAccumParams& p,
 // trades VRAM against how often a very fast stroke has to wait.
 static constexpr uint32_t kDirtyArenaBudgetWords = (32u * 1024u * 1024u) / 4u;
 
-void ComputeState::ensure_smooth_dirty_buffer(uint32_t max_verts) {
+void ComputeState::ensure_smooth_dirty_buffer(uint32_t max_verts, uint64_t ring_words_hint) {
     uint32_t alloc = std::max(max_verts, 4096u);
     // Word 0 is a permanent bit bucket, never part of the ring: a dab that fails to
     // get a region still runs its kernels, and they will atomically bump whatever word
@@ -377,8 +377,19 @@ void ComputeState::ensure_smooth_dirty_buffer(uint32_t max_verts) {
     // arena is at least that big even when the budget is smaller — at which point it
     // holds exactly one dab and every dab stalls, which is slow but still correct.
     uint64_t want = std::max((uint64_t)kDirtyArenaBudgetWords, (uint64_t)alloc + 2u);
-    if (smooth_dirty_ssbo.handle && max_verts <= smooth_dirty_capacity
-        && dirty_arena_words >= want)
+    // Past ~8M verts that floor is ALSO the ceiling: a ring one mesh wide holds one
+    // big dab, so the next dab in flight got a scrap region and overflowed — at L10
+    // every big-brush dab did, each forcing a whole-mesh undo snapshot. The caller
+    // asks for room for several of its measured dabs; grant it only while nothing is
+    // live (a live region's ids would be lost with the old buffer), and never past
+    // what the device can bind (128 MB on the WebGPU baseline).
+    const bool must = !smooth_dirty_ssbo.handle || max_verts > smooth_dirty_capacity
+                   || dirty_arena_words < want;
+    if (ring_words_hint + 1u > want && (must || dirty_arena_live == 0)) {
+        uint64_t limit = gpu::device_limits().max_storage_binding_size / sizeof(uint32_t);
+        want = std::max(want, std::min(ring_words_hint + 1u, limit));
+    }
+    if (!must && dirty_arena_words >= want)
         return;
 
     gpu::release_buffer(smooth_dirty_ssbo);

@@ -2,6 +2,56 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-09-23 — L10 big-brush dabs no longer overflow the dirty arena; pen-up timer
+
+*All three targets build (GL, wgpu native, web). **Committed before a hand test**, on the
+user's call — the test recipe is below. No shader changed, so there is no new Tint risk.*
+
+Every big-brush dab at L10 overflowed its dirty-list region and forced a whole-mesh undo
+snapshot (all 10.5M verts), which is the likely source of the L10 undo exhaustion. The
+cause was arithmetic, not bad luck:
+
+- Past ~8M verts the arena's floor (one region must hold a whole-mesh dab) is also its
+  ceiling, so the ring was **one mesh wide**. A big dab asked for a full-size region, took
+  the whole ring, and the next dab in flight got nothing.
+- The fallback was a fixed `est / 4` retry, which is 2.6M ids, against a real demand of
+  3.4–4.2M. So every fallback region was too small by construction.
+
+**Fix** (`begin_dab`, `ensure_smooth_dirty_buffer`, new `dirty_arena_max_free_cap`):
+- Each dab now has two sizes: the comfortable `est` (4× the largest recent dab) and the
+  minimum it will accept, `need` (1.5× the largest recent dab).
+- The arena grows to hold `kDabsInFlight` (4) `need`-sized regions. It grows only while
+  no region is live, and never past the device's storage-binding limit (128 MB on the
+  WebGPU baseline). The cost at L10 is roughly 100–170 MB of VRAM, up from 42 MB.
+- One region can't take more than a quarter of the ring when `need` would fit in less.
+- When `est` doesn't fit, the dab takes the largest free gap that still holds `need`
+  rather than a fixed quarter.
+- An empty ring restarts at word 0, so a full-size region no longer depends on the head
+  happening to sit at the front.
+
+**Two smaller sizing bugs fixed along the way:**
+- The brush-size rescale read `anchor_world_radius` before this dab's `set_anchor`, so a
+  stroke's first dab was sized with the *previous* stroke's radius. That's where a
+  6,800-id region came from. It now uses the provisional radius `set_anchor` starts from,
+  the brush's pixel size at the orbit target's scale.
+- A vertex-count change (level switch, remesh) used to drop the count window, so the first
+  dab after every level switch reserved the whole ring. The window is now **scaled by the
+  vertex-count ratio**. This closes the open "seed the arena window across level switches"
+  item.
+
+**Pen-up probe:** `[penup]` lines behind `CHISEL_DIRTY_HIST=1`, which `chisel-debug.sh`
+sets. The stage timers stopped at the last dab, and the pen-up whole-buffer reads were only
+an estimate (~126 MB of normals at L10). Each stroke now reports:
+- wall time from pen-up to commit, and how many frames it spanned
+- main-thread milliseconds
+- MB read back against touched verts
+- per-section times: drain, kick, pos, mask, color, density, undo commit, normals
+
+**Test recipe:** launch via `chisel-debug.sh`, go to L10, and do 5–6 big-brush strokes and
+a couple of undos. Drop to L9, climb back to L10, and stroke once more. Expect no
+`[arena] dab overflowed`. A single `[arena] no room` on the very first stroke after launch
+is expected, since there's no history yet. Anything repeating is a bug.
+
 ## 2026-09-23 — v0.2.22 — Linux CI builds again: the platform log line needs GLFW 3.4
 
 v0.2.21's Linux job failed to compile: the 2026-09-22 `[win] GLFW platform:` line calls

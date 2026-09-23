@@ -1,5 +1,6 @@
 #include "compute.h"
 #include "gpu_shaders_generated.h"   // gpu::embedded_shader("mirror_project")
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -402,6 +403,10 @@ bool ComputeState::dirty_arena_alloc(uint32_t cap, uint32_t& base_out,
     const uint32_t need = cap + 1;                 // counter word + ids
     if (need > W) return false;
 
+    // An empty ring can start over at the front. Otherwise a region as large as the
+    // ring only fits when head happens to sit at 0, which pipelined dabs never allow.
+    if (dirty_arena_live == 0) dirty_arena_head = dirty_arena_tail = 0;
+
     if ((dirty_arena_tail + dirty_arena_live) % W != dirty_arena_head) {
         std::printf("[arena] INVARIANT BROKEN: tail %u + live %u != head %u (ring %u) — "
                     "refusing to allocate\n",
@@ -425,6 +430,19 @@ bool ComputeState::dirty_arena_alloc(uint32_t cap, uint32_t& base_out,
     base_out = base + 1;                             // logical -> word
     footprint_out = foot;
     return true;
+}
+
+// Mirrors dirty_arena_alloc's placement: a region either runs from head toward the
+// tail / ring end, or wraps to 0 and pays the padding to the end.
+uint32_t ComputeState::dirty_arena_max_free_cap() const {
+    const uint32_t W = dirty_arena_ring_words();
+    if (W < 2) return 0;
+    if (dirty_arena_live == 0) return W - 1;
+    const uint32_t h = dirty_arena_head, t = dirty_arena_tail;
+    uint32_t need = 0;
+    if (h > t) need = std::max(W - h, t);   // up to the ring end, or wrapped up to tail
+    else       need = t - h;                // the gap between head and tail (0 = full)
+    return need > 1 ? need - 1 : 0;         // one word is the region's counter
 }
 
 void ComputeState::dirty_arena_retire(uint32_t footprint) {
