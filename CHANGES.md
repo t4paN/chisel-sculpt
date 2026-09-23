@@ -2,7 +2,7 @@
 
 Short, chronological log of notable changes. Newest on top.
 
-## 2026-09-23 — Undo spikes after level changes: the flush ran after the restore
+## 2026-09-23 — v0.2.21 — Undo spikes after level changes: the flush ran after the restore
 
 *GL build, hand-tested on the user's own repro: could not reproduce. Both backends build.
 Treat it as probably fixed, not proven — this bug has had three convincing explanations
@@ -35,7 +35,7 @@ both directions. When the hazard is live it now says so:
 run printed it seven times (122 to 6.3M verts), and every `[frames] CHECK` on the way back
 up read 0 folded.
 
-## 2026-09-23 — Normals expansion moved onto the GPU
+## 2026-09-23 — v0.2.21 — Normals expansion moved onto the GPU
 
 *Both native backends build; GL hand-tested at L10 ("feels pretty snappy"). WebGPU native
 compiles with zero device errors but has not been sculpted on. No emsdk on this machine,
@@ -74,7 +74,7 @@ work is gone. `CHISEL_GPU_NORMALS=0` restores the CPU path for that A/B without 
 The per-dab dirty readback still runs, because the undo snapshot needs the id list. It was
 the 1% stage.
 
-## 2026-09-22 — Undo budgets raised, and eviction stopped being silent
+## 2026-09-22 — v0.2.21 — Undo budgets raised, and eviction stopped being silent
 
 *Both native backends build. The raise did NOT fix the bug it was aimed at — see below.*
 
@@ -97,7 +97,7 @@ keeps the old caps.
 **zero** eviction lines, using roughly 2.6 GB of the 4 GB. Worth keeping (the headroom is
 real and the tripwire now answers the question in one line), but it is not the cause.
 
-## 2026-09-22 — A tripwire for the one thing no check could see: the tangent frames
+## 2026-09-22 — v0.2.21 — A tripwire for the one thing no check could see: the tangent frames
 
 *Both backends build clean. Detection only — no behaviour change. Not yet fired in anger.*
 
@@ -143,7 +143,7 @@ Costs one adjacency walk, which is why it is gated.
 The projection and cascade checks stay, but they have now answered their question. This is
 the one still open.
 
-## 2026-09-22 — The slider pointer returns: the cursor mode had two owners
+## 2026-09-22 — v0.2.21 — The slider pointer returns: the cursor mode had two owners
 
 *Fixed and confirmed by protocol trace: four drags, four exact returns.*
 
@@ -205,7 +205,7 @@ really does need to move a pointer that is not locked.
 `~/Projects/CHISEL/wayland-probe.sh` reproduces the whole diagnosis in one drag and keeps
 the full raw trace.
 
-## 2026-09-22 — GLFW errors are no longer silent, and the GL build says which platform it got
+## 2026-09-22 — v0.2.21 — GLFW errors are no longer silent, and the GL build says which platform it got
 
 *The Wayland cursor fix below did not work, and neither of the two things needed to say why
 was observable.*
@@ -227,7 +227,7 @@ outcomes that look identical from the outside: the capture never engaging, the c
 engaging but the warp still being refused, and GLFW's idea of the cursor diverging from the
 compositor's. Remove it once that is settled.
 
-## 2026-09-22 — Slider drags capture the pointer, so it comes back on Wayland
+## 2026-09-22 — v0.2.21 — Slider drags capture the pointer, so it comes back on Wayland
 
 *User report: "when i scale the brushes the pointer doesn't return to the corrected
 position, is that a wayland thing?" It is.*
@@ -276,7 +276,7 @@ The four press sites were identical but for two values and had to grow the same 
 each, so they collapsed into `begin_slider_drag`; release and focus-loss share
 `end_slider_drag`.
 
-## 2026-09-22 — The projection is exact; the cascade that draws the screen was never checked
+## 2026-09-22 — v0.2.21 — The projection is exact; the cascade that draws the screen was never checked
 
 *User ran the new check against the break: "brush a bunch then drop a few levels, krapow."*
 
@@ -312,7 +312,7 @@ they fail, rather than leaving a number to be interpreted.
 **Still open:** what breaks the model. This narrows it to the GPU cascade replay or to
 something downstream of it, and gives the instrument that separates those two.
 
-## 2026-09-22 — The projection's exactness contract is now checkable at runtime
+## 2026-09-22 — v0.2.21 — The projection's exactness contract is now checkable at runtime
 
 *Added while chasing a user report: sculpt high, drop to a low level, smooth there, and
 after a few subdivisions the detail "couldn't keep up with where the new vertices should
@@ -357,7 +357,7 @@ Not fixed here and not reproduced on purpose; it was found by reading while chas
 unrelated report, whose session had mirror set to World Space, where this path never runs.
 Written up with a repro recipe and a fix shape in `owedstuff.md`.
 
-## 2026-09-22 — Per-stage stroke timers, and what they refuted
+## 2026-09-22 — v0.2.21 — Per-stage stroke timers, and what they refuted
 
 *Measured at L10 (10,485,762 verts / 21M tris) on the Arc B570. Both backends build.*
 
@@ -441,7 +441,7 @@ selection could drive the normals dispatch with no CPU list, no expansion, no so
 upload. Not attempted, and not costed — the amplification counter added here is the first
 number needed to size it.
 
-## 2026-09-22 — A `~` console for the native builds
+## 2026-09-22 — v0.2.21 — A `~` console for the native builds
 
 The web build has had a quake-style `~` console since 2026-07-03 — an overlay in
 `packaging/web/shell.html` that wraps `console.log`, because on web that is where printf
@@ -472,7 +472,7 @@ Compiled out on web, where `shell.html` already owns the key. Windows uses `Peek
 before reading, since anonymous pipes there have no non-blocking mode and a blocking read on
 an empty pipe would freeze the frame.
 
-## 2026-09-17 — The arena's size estimate could only learn from dabs that fit
+## 2026-09-17 — v0.2.21 — The arena's size estimate could only learn from dabs that fit
 
 *Found by the instruments, in a session the user summarised as "works pretty well".
 Both backends build.*
@@ -507,7 +507,7 @@ confirmed or refuted at the time.
 Dab sizes stayed healthy throughout (median 23K–35K ids at 2.6M verts), so dispatch culling
 is not dropping vertices either.
 
-## 2026-09-17 — A tripwire for ids that outlive the mesh they describe
+## 2026-09-17 — v0.2.21 — A tripwire for ids that outlive the mesh they describe
 
 *Both backends build, clean startup. Detection, plus a safe fallback.*
 
@@ -531,7 +531,7 @@ It also doubles as the test for the previous commit: undo is deferred while read
 pending precisely so this cannot happen, so **if this line ever prints, that deferral has
 a hole in it** and the log will say so.
 
-## 2026-09-17 — Undo no longer races the dab readbacks still in flight
+## 2026-09-17 — v0.2.21 — Undo no longer races the dab readbacks still in flight
 
 *Both native backends build, 36 pipelines, zero device errors. The mechanism is
 confirmed by reading the code; that it is THE cause of the reported spikes is not yet
@@ -568,7 +568,7 @@ The instruments did NOT catch this: no `[arena]` or `[cull]` line fires, because
 in the arena or the selection is inconsistent — each part is doing its job correctly
 against a mesh that changed underneath it.
 
-## 2026-09-17 — Two desktop launchers, so a test session stops costing a setup
+## 2026-09-17 — v0.2.21 — Two desktop launchers, so a test session stops costing a setup
 
 *Tooling only; no app change. The scripts live outside the repo, in the working root.*
 
@@ -592,7 +592,7 @@ cannot be trusted for.
 Session state, reasoning and the open threads are in
 `~/Projects/CHISEL/perf-rebuild-session3-handoff.md`.
 
-## 2026-09-17 — Fix: culling wrote to arbitrary vertices after a subdiv switch
+## 2026-09-17 — v0.2.21 — Fix: culling wrote to arbitrary vertices after a subdiv switch
 
 *Reported from a live session: "changing subd and undoing at the same time f'd it up,
 I got spikes everywhere." Two defects, both in the freshness of the block buffers.*
@@ -626,7 +626,7 @@ region. Correctness is unaffected — that path snapshots the whole mesh — but
 strokes pay for it. The window is rebuilt from scratch after a vertex-count change, so
 the first big dab at a new subdiv level has no history to size from.
 
-## 2026-09-17 — Culling the other nine brushes, and what that forced
+## 2026-09-17 — v0.2.21 — Culling the other nine brushes, and what that forced
 
 *Both native backends build; all 36 pipelines compile with zero device errors under
 naga. NOT hand-sculpted, no Tint gate. `CHISEL_BLOCK_CULL=0` still disables.*
@@ -667,7 +667,7 @@ checked against its array by script instead — those three were the only ones w
 Still full-mesh and correctly so: move and limb (one-shot per-stroke capture, not per-dab),
 remesh, cascade, multires, and `density_colormap`.
 
-## 2026-09-17 — Only run threads where the dab actually is
+## 2026-09-17 — v0.2.21 — Only run threads where the dab actually is
 
 *Builds on both native backends; all four new shaders compile with zero device errors
 under naga. NOT hand-sculpted yet, and no browser/Tint gate. On by default —
@@ -722,7 +722,7 @@ branch but runs no selection yet. `draw_mirror_apply` writes mirror *twins*, who
 are not necessarily selected under the topological mirror — that needs verifying before
 it can be culled, not assuming.
 
-## 2026-09-17 — Measuring what dispatch culling is worth, before building it
+## 2026-09-17 — v0.2.21 — Measuring what dispatch culling is worth, before building it
 
 *Diagnostic only, behind `CHISEL_DIRTY_HIST=1`. Deleted once the numbers are in.*
 
@@ -743,7 +743,7 @@ nine tenths of nothing.
 Counting uses generation-stamped arrays, so the probe allocates once per topology rather
 than once per dab, and stays out of the way of what it is measuring.
 
-## 2026-09-17 — A dispatch can be sized by a count only the GPU knows
+## 2026-09-17 — v0.2.21 — A dispatch can be sized by a count only the GPU knows
 
 *Builds on both native backends, `dirty_args` compiles under naga with zero device
 errors. Not hand-sculpted; no browser/Tint gate yet.*
@@ -771,7 +771,7 @@ geometry dab with symmetry on, so it is the honest first test of whether the ind
 behaves. No behaviour change is intended: the same vertices are visited, just without
 dispatching threads for the ones that are not there.
 
-## 2026-09-17 — Each dab reads back only its own dirty list
+## 2026-09-17 — v0.2.21 — Each dab reads back only its own dirty list
 
 *Builds clean on both native backends and the native wgpu run reports zero device
 errors, but this has **not** been hand-sculpted yet, and the browser/Tint gate has not
@@ -822,7 +822,7 @@ already ready, then settles for a smaller region, then takes the snapshot path.
 Also lands the `CHISEL_DIRTY_HIST=1` probe, which measures what a dab actually touches
 against what is read back. Diagnostic only, and marked for deletion once the numbers are in.
 
-## 2026-09-17 — The native WebGPU build starts on Wayland
+## 2026-09-17 — v0.2.21 — The native WebGPU build starts on Wayland
 
 *Verified by launching both backends; not a hand-sculpted test.*
 
