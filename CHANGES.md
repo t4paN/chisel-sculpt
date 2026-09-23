@@ -2,7 +2,7 @@
 
 Short, chronological log of notable changes. Newest on top.
 
-## 2026-09-23 — Level switches after sculpting: 20 s → 1 s in the browser; arena sized to the real queue
+## 2026-09-23 — v0.2.23 — Level switches after sculpting: 20 s → 1 s in the browser; arena sized to the real queue
 
 *Browser-tested in Chromium 153 with a no-cache server; the build is confirmed by
 `materialize … in 3 runs`. There were no WGSL/Tint errors, no `[arena]` lines, and no folded
@@ -36,7 +36,7 @@ between reads and capped by the device.
 file heuristically. Serve the web build with `Cache-Control: no-store` when testing, and
 confirm the build from a log line that only the new code prints.
 
-## 2026-09-23 — GL readbacks are asynchronous; the materialize list is deduped
+## 2026-09-23 — v0.2.23 — GL readbacks are asynchronous; the materialize list is deduped
 
 *GL build, hand-tested at L10: big and small strokes, undo right after quick strokes,
 undo across levels, save/reopen, and shading. User verdict: "performance is unreal… undo
@@ -72,7 +72,7 @@ back inside the sphere. Edge length is sampled from 256 triangles spread over th
 buffer, not taken from the mirror's cached mean edge, which can belong to another level.
 The guess never enters the window; the first real count replaces it.
 
-## 2026-09-23 — Pen-up no longer reads the whole normal buffer back
+## 2026-09-23 — v0.2.23 — Pen-up no longer reads the whole normal buffer back
 
 *GL build, hand-tested at L10: shading looked right after undo/redo, level switches and a
 save/reopen. Every `[frames] CHECK` read 0 folded. All three targets build.*
@@ -100,7 +100,7 @@ nothing but a memcpy.
 The web build's reads were already asynchronous, but it still moved the 120 MB into the
 WASM heap every stroke. That's gone too.
 
-## 2026-09-23 — L10 big-brush dabs no longer overflow the dirty arena; pen-up timer
+## 2026-09-23 — v0.2.23 — L10 big-brush dabs no longer overflow the dirty arena; pen-up timer
 
 *All three targets build (GL, wgpu native, web). **Committed before a hand test**, on the
 user's call — the test recipe is below. No shader changed, so there is no new Tint risk.*
