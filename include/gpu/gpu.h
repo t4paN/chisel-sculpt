@@ -458,7 +458,8 @@ void read_target_region(Device&, OffscreenTarget&, uint32_t attachment,
 // The frame callback must never block or suspend on a readback (the web build dies
 // on it under JSPI), so per-dab / per-frame readers go through tickets; the blocking
 // read_buffer / read_target_region stay legal only at one-shot user-paced points.
-//   GL:          the read happens synchronously at kick; tickets are ready at once.
+//   GL:          buffer reads: copy to staging + fence, polled; texture reads are
+//                still synchronous at kick (once per stroke, not per dab).
 //   wgpu-native: copy + mapAsync; process_events polls the device (non-blocking).
 //   web:         copy + mapAsync; process_events pumps the instance — no suspend.
 using ReadTicket = uint32_t;                        // 0 = invalid / none

@@ -649,10 +649,45 @@ void BrushStroke::begin_dab(DabContext& ctx) {
     // enough to ride out stroke-to-stroke variation. With no history, assume the
     // worst: one full-size region, which self-corrects as soon as the first dab lands.
     uint32_t est = vc, need = vc;
-    if (recent_n) {
-        uint32_t mx = 0;
-        for (uint32_t i = 0; i < recent_n; i++)
-            if (recent_counts[i] > mx) mx = recent_counts[i];
+    uint32_t mx = 0;
+    for (uint32_t i = 0; i < recent_n; i++)
+        if (recent_counts[i] > mx) mx = recent_counts[i];
+    // Cold start (fresh session, nothing sculpted yet): guess from geometry instead of
+    // reserving the whole mesh. A vertex owns about sqrt(3)/2 * edge^2 of surface, so a
+    // dab of radius r covers pi r^2 / that; doubled for surface that folds back inside
+    // the sphere. The guess never enters the window — the first real count replaces it.
+    // It matters because the whole-mesh first region fills the ring on its own, and
+    // with reads landing a frame late (GL tickets are asynchronous too now) every dab
+    // behind it found no room: 23 whole-mesh fallbacks on one stroke, 2026-09-23.
+    // Edge length is sampled from up to 256 triangles spread over the index buffer,
+    // so this costs nothing at any level (the mirror's cached mean edge can belong to
+    // a previous level, which would under-guess 4x per level).
+    double e = 0.0;
+    if (!recent_n && r_now > 0.0f) {
+        const Mesh& m = ctx.mesh;
+        const uint32_t tc = m.tri_count();
+        const uint32_t step = std::max(1u, tc / 256u);
+        double sum = 0.0;
+        uint32_t n = 0;
+        for (uint32_t t = 0; t < tc && n < 256u * 3u; t += step) {
+            for (int k = 0; k < 3; k++) {
+                uint32_t a = m.indices[t * 3 + k], b = m.indices[t * 3 + (k + 1) % 3];
+                if (a >= vc || b >= vc) continue;
+                double dx = m.pos_x[a] - m.pos_x[b], dy = m.pos_y[a] - m.pos_y[b],
+                       dz = m.pos_z[a] - m.pos_z[b];
+                sum += std::sqrt(dx * dx + dy * dy + dz * dz);
+                n++;
+            }
+        }
+        if (n) e = sum / n;
+    }
+    if (!recent_n && r_now > 0.0f && e > 0.0) {
+        const double guess = 2.0 * 3.14159265 * (double)r_now * (double)r_now
+                           / (0.8660254 * e * e);
+        mx = (uint32_t)std::min(guess, (double)vc);
+        if (mx == 0) mx = 1;
+    }
+    if (mx) {
         est = (mx > vc / kCapSlack) ? vc : mx * kCapSlack;
         need = std::min(vc, mx + mx / 2);
         if (est < 1024u) est = 1024u;
@@ -2458,7 +2493,7 @@ bool BrushStroke::finalize(DabContext& ctx, Mesh& mesh, UndoStack& stack,
             g_penup.read((uint64_t)vertex_count * 3 * sizeof(float));
         }
 
-        fin_state = FinState::READS;   // fall through — GL tickets are ready already
+        fin_state = FinState::READS;   // fall through — a ticket that has already landed is taken this frame
     }
 
     // ---- Stage 2: land the reads, sync CPU state, commit the undo entry ----

@@ -89,6 +89,10 @@ struct MultiresGPU {
     // the `mesh`/`vbo_pos` arms; still inert until 2c-iv starts marking dirty.
     bool cpu_dirty = false;
     std::vector<uint32_t> dirty_verts;   // active-level verts whose CPU disp/base/pos is stale
+    // One byte per vertex: already in dirty_verts? Strokes mark whatever they touched,
+    // and repeated strokes over the same area used to append it again every time — a
+    // 10.5M-vert mesh reached 23.7M entries, all of which materialize then sorted.
+    std::vector<uint8_t> dirty_flag;
 
     // Accumulate verts whose GPU disp/base/pos now diverges from the CPU copy. Cheap;
     // no readback. Called at pen-up (and undo/redo) in place of the CPU writeback.

@@ -2,6 +2,42 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-09-23 — GL readbacks are asynchronous; the materialize list is deduped
+
+*GL build, hand-tested at L10: big and small strokes, undo right after quick strokes,
+undo across levels, save/reopen, and shading. User verdict: "performance is unreal… undo
+is *instant*". The spike bug didn't return. All three targets build. The cold-start seed
+(third item) landed after that test session, so it has **not** been hand-run yet.*
+
+**GL buffer reads no longer stall the pipeline.** On GL, `read_buffer_async` used to be a
+`glGetBufferSubData` at kick time. That drains the GPU and then copies, and it ran once per
+brush dab, because every dab reads its dirty list back. Now it works like this:
+- The kick copies the range into a pooled `GL_STREAM_READ` staging buffer on the GPU
+  timeline and drops a fence behind it.
+- `ticket_ready` polls that fence without waiting.
+- `ticket_take` reads a buffer the GPU has already finished with.
+
+The app side was already written for asynchronous tickets, because the web build needs
+them. The only change is timing: on GL, dab lists now land a frame or so late, as they
+always have on WebGPU. Texture reads (the pen-down plane cache) stay synchronous, since
+they run once per stroke. At L10, `take` now runs 0.05–2 ms per dab on the main thread.
+
+**The materialize list no longer collects duplicates.** `MultiresGPU::mark_cpu_dirty`
+appended every stroke's touched list, so repeated strokes over one area piled up. A
+10.5M-vert mesh reached **23.7M** entries, and materialize sorted all of them. A per-vertex
+flag now keeps each vertex once, and the flags are cleared in O(dirty) time. Large flushes
+now print a line: `[mgpu] materialize: N verts in R runs, X ms`. It had never been timed;
+the first run shows 5.6M verts in 1.5 s and 0.45M in 0.24 s.
+
+**Cold-start dab estimate.** With no count history (a fresh session), `begin_dab` sized
+the first region as the whole mesh. Once reads started landing a frame late, those
+whole-mesh regions filled the ring, and every dab behind them fell back to a whole-mesh
+snapshot: 23–90 fallbacks on a session's first L10 stroke. The first estimate is now
+geometric: π r² over the per-vertex area (√3/2 · edge²), doubled for surface that folds
+back inside the sphere. Edge length is sampled from 256 triangles spread over the index
+buffer, not taken from the mirror's cached mean edge, which can belong to another level.
+The guess never enters the window; the first real count replaces it.
+
 ## 2026-09-23 — Pen-up no longer reads the whole normal buffer back
 
 *GL build, hand-tested at L10: shading looked right after undo/redo, level switches and a

@@ -543,19 +543,102 @@ void read_target_region(Device&, OffscreenTarget& t, uint32_t attachment,
 }
 
 // ---- Async readback tickets ----------------------------------------------------
-// GL is immediate-mode: the read happens synchronously at kick and the ticket just
-// carries the bytes until the caller takes them. Keeps the app-side code on one
-// cross-backend path; only the WebGPU backends are actually asynchronous.
+// Buffer reads are genuinely asynchronous here too: the kick copies the range into a
+// staging buffer on the GPU's own timeline and drops a fence behind it; ticket_ready
+// polls the fence without waiting; ticket_take then copies out of a buffer the GPU has
+// already finished with.
+//
+// This used to be a plain glGetBufferSubData at kick, which drains the whole GPU
+// pipeline and then copies — once per brush dab, since every dab reads its dirty
+// list back. The app side was already written for asynchronous tickets (the web
+// build needs them), so only the timing changes: dab lists now land a frame or so
+// later on GL, exactly as they always have on WebGPU.
+//
+// Texture reads (read_target_region_async, the pen-down plane cache) stay
+// synchronous: they run once per stroke, not per dab, and a texture needs a pixel
+// pack buffer rather than a buffer copy.
 
-static std::unordered_map<uint32_t, std::vector<uint8_t>> g_gl_tickets;
-static uint32_t g_gl_next_ticket = 1;
+namespace {
+struct GlTicket {
+    std::vector<uint8_t> data;    // synchronous tickets: the bytes, already here
+    GLuint   staging = 0;         // asynchronous tickets: the copy's destination
+    uint64_t staging_cap = 0;
+    GLsync   fence = nullptr;     // ...and the point the GPU must pass first
+    uint64_t size = 0;
+};
+std::unordered_map<uint32_t, GlTicket> g_gl_tickets;
+uint32_t g_gl_next_ticket = 1;
 
-ReadTicket read_buffer_async(Device& dev, const Buffer& src, uint64_t offset, uint64_t size) {
-    std::vector<uint8_t> data((size_t)size);
-    read_buffer(dev, src, offset, size, data.data());
+// Staging buffers are recycled: dabs kick a read every few milliseconds, and a fresh
+// glBufferData per read would allocate driver memory in the stroke loop. The pool is
+// bounded in bytes so one whole-mesh read (pen-up fallback, 120 MB at L10) is not
+// kept alive forever.
+struct Staging { GLuint buf; uint64_t cap; };
+std::vector<Staging> g_gl_staging_pool;
+constexpr uint64_t kStagingPoolBytes = 256ull << 20;
+
+Staging staging_acquire(uint64_t size) {
+    int best = -1;
+    for (int i = 0; i < (int)g_gl_staging_pool.size(); i++) {
+        if (g_gl_staging_pool[i].cap < size) continue;
+        if (best < 0 || g_gl_staging_pool[i].cap < g_gl_staging_pool[best].cap) best = i;
+    }
+    if (best >= 0) {
+        Staging st = g_gl_staging_pool[best];
+        g_gl_staging_pool.erase(g_gl_staging_pool.begin() + best);
+        return st;
+    }
+    Staging st = { 0, size };
+    glGenBuffers(1, &st.buf);
+    glBindBuffer(GL_COPY_WRITE_BUFFER, st.buf);
+    // STREAM_READ: written once by the GPU, read once by the CPU — the hint that puts
+    // it where a CPU read after the fence is a memcpy, not another GPU round trip.
+    glBufferData(GL_COPY_WRITE_BUFFER, (GLsizeiptr)size, nullptr, GL_STREAM_READ);
+    glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
+    return st;
+}
+
+void staging_release(GLuint buf, uint64_t cap) {
+    if (!buf) return;
+    uint64_t pooled = 0;
+    for (const Staging& st : g_gl_staging_pool) pooled += st.cap;
+    if (pooled + cap > kStagingPoolBytes) { glDeleteBuffers(1, &buf); return; }
+    g_gl_staging_pool.push_back({ buf, cap });
+}
+
+void ticket_free(GlTicket& tk) {
+    if (tk.fence) glDeleteSync(tk.fence);
+    tk.fence = nullptr;
+    staging_release(tk.staging, tk.staging_cap);
+    tk.staging = 0;
+}
+
+uint32_t ticket_new_id() {
     uint32_t id = g_gl_next_ticket++;
     if (!g_gl_next_ticket) g_gl_next_ticket = 1;
-    g_gl_tickets.emplace(id, std::move(data));
+    return id;
+}
+}  // namespace
+
+ReadTicket read_buffer_async(Device&, const Buffer& src, uint64_t offset, uint64_t size) {
+    if (!src.handle || size == 0) return 0;
+    Staging st = staging_acquire(size);
+    glBindBuffer(GL_COPY_READ_BUFFER,  src.handle);
+    glBindBuffer(GL_COPY_WRITE_BUFFER, st.buf);
+    glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER,
+                        (GLintptr)offset, 0, (GLsizeiptr)size);
+    glBindBuffer(GL_COPY_READ_BUFFER,  0);
+    glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
+    GlTicket tk;
+    tk.staging = st.buf;
+    tk.staging_cap = st.cap;
+    tk.size = size;
+    tk.fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    // Without a flush the fence can sit in the driver's queue indefinitely and every
+    // non-waiting poll in ticket_ready would say "not yet".
+    glFlush();
+    uint32_t id = ticket_new_id();
+    g_gl_tickets.emplace(id, std::move(tk));
     return id;
 }
 
@@ -567,34 +650,61 @@ ReadTicket read_target_region_async(Device& dev, OffscreenTarget& t, uint32_t at
         x < 0 || y < 0 || w <= 0 || h <= 0 ||
         x + w > t.width || y + h > t.height)
         return 0;
-    std::vector<uint8_t> data((size_t)texformat_out_bpp(t.color_fmt[attachment]) * w * h);
-    read_target_region(dev, t, attachment, x, y, w, h, data.data());
-    uint32_t id = g_gl_next_ticket++;
-    if (!g_gl_next_ticket) g_gl_next_ticket = 1;
-    g_gl_tickets.emplace(id, std::move(data));
+    GlTicket tk;
+    tk.data.resize((size_t)texformat_out_bpp(t.color_fmt[attachment]) * w * h);
+    tk.size = tk.data.size();
+    read_target_region(dev, t, attachment, x, y, w, h, tk.data.data());
+    uint32_t id = ticket_new_id();
+    g_gl_tickets.emplace(id, std::move(tk));
     return id;
 }
 
 void process_events(Device&) {}
 
 bool ticket_ready(Device&, ReadTicket t) {
-    return t == 0 || g_gl_tickets.count(t) != 0;   // invalid tickets are "ready" (failed)
+    if (t == 0) return true;                        // invalid tickets are "ready" (failed)
+    auto it = g_gl_tickets.find(t);
+    if (it == g_gl_tickets.end()) return true;      // unknown: ready, and take will fail
+    GlTicket& tk = it->second;
+    if (!tk.fence) return true;
+    GLenum r = glClientWaitSync(tk.fence, 0, 0);    // poll, never wait
+    return r == GL_ALREADY_SIGNALED || r == GL_CONDITION_SATISFIED;
 }
 
 bool ticket_take(Device&, ReadTicket t, void* out, uint64_t out_size) {
     auto it = g_gl_tickets.find(t);
-    if (it == g_gl_tickets.end() || it->second.size() != (size_t)out_size) {
+    if (it == g_gl_tickets.end() || it->second.size != out_size) {
         std::memset(out, 0, (size_t)out_size);
-        if (it != g_gl_tickets.end()) g_gl_tickets.erase(it);
+        if (it != g_gl_tickets.end()) { ticket_free(it->second); g_gl_tickets.erase(it); }
         return false;
     }
-    std::memcpy(out, it->second.data(), (size_t)out_size);
+    GlTicket& tk = it->second;
+    bool ok = true;
+    if (tk.fence) {
+        // Callers poll ticket_ready first, so this normally returns at once. If one
+        // didn't, waiting is still correct here — just not free.
+        GLenum r = glClientWaitSync(tk.fence, GL_SYNC_FLUSH_COMMANDS_BIT, 5000000000ull);
+        ok = (r == GL_ALREADY_SIGNALED || r == GL_CONDITION_SATISFIED);
+        if (ok) {
+            glBindBuffer(GL_COPY_READ_BUFFER, tk.staging);
+            glGetBufferSubData(GL_COPY_READ_BUFFER, 0, (GLsizeiptr)out_size, out);
+            glBindBuffer(GL_COPY_READ_BUFFER, 0);
+        } else {
+            std::memset(out, 0, (size_t)out_size);
+        }
+    } else {
+        std::memcpy(out, tk.data.data(), (size_t)out_size);
+    }
+    ticket_free(tk);
     g_gl_tickets.erase(it);
-    return true;
+    return ok;
 }
 
 void ticket_drop(Device&, ReadTicket t) {
-    g_gl_tickets.erase(t);
+    auto it = g_gl_tickets.find(t);
+    if (it == g_gl_tickets.end()) return;
+    ticket_free(it->second);
+    g_gl_tickets.erase(it);
 }
 
 } // namespace gpu

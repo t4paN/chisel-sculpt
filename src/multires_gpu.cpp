@@ -1,6 +1,7 @@
 #include "multires_gpu.h"
 #include "multires_stack.h"
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 
@@ -170,11 +171,26 @@ void MultiresGPU::snapshot_positions(const gpu::Buffer& pos_vbo, uint32_t vertex
 void MultiresGPU::mark_cpu_dirty(const std::vector<uint32_t>& verts) {
     if (!supported || verts.empty()) return;
     cpu_dirty = true;
-    dirty_verts.insert(dirty_verts.end(), verts.begin(), verts.end());
+    for (uint32_t v : verts) {
+        if (v >= dirty_flag.size()) dirty_flag.resize((size_t)v + 1, 0);
+        if (dirty_flag[v]) continue;
+        dirty_flag[v] = 1;
+        dirty_verts.push_back(v);
+    }
+}
+
+// Forget the dirty set. O(dirty), not O(vertex count): only the flags that were set
+// get cleared.
+static void clear_dirty(std::vector<uint32_t>& verts, std::vector<uint8_t>& flag) {
+    for (uint32_t v : verts)
+        if (v < flag.size()) flag[v] = 0;
+    verts.clear();
 }
 
 void MultiresGPU::materialize_cpu(MultiresStack& stack, Mesh& mesh, const gpu::Buffer& vbo_pos) {
     if (!supported || !cpu_dirty) return;
+    const auto t0 = std::chrono::steady_clock::now();
+    const size_t n_dirty = dirty_verts.size();
 
     // Inverse of upload_disp_partial: read the mirrored level's GPU storage back
     // into CPU disp/base for the dirty verts, in coalesced runs. After this the CPU
@@ -241,7 +257,16 @@ void MultiresGPU::materialize_cpu(MultiresStack& stack, Mesh& mesh, const gpu::B
     }
 
     cpu_dirty = false;
-    dirty_verts.clear();
+    clear_dirty(dirty_verts, dirty_flag);
+
+    // User-paced, but it is what an undo across levels, a save or an object switch
+    // waits on, and it had never been timed. Quiet for the small everyday flushes.
+    if (n_dirty >= 100000) {
+        double ms = std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - t0).count();
+        std::printf("[mgpu] materialize: %zu verts in %zu runs, %.1f ms\n",
+                    n_dirty, runs.size(), ms);
+    }
 }
 
 void MultiresGPU::cleanup() {
@@ -252,5 +277,5 @@ void MultiresGPU::cleanup() {
     capacity = base_capacity = snap_pos_capacity = 0;
     level = -1;
     cpu_dirty = false;
-    dirty_verts.clear();
+    clear_dirty(dirty_verts, dirty_flag);
 }
