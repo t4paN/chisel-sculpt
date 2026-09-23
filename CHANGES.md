@@ -2,6 +2,40 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-09-23 — Level switches after sculpting: 20 s → 1 s in the browser; arena sized to the real queue
+
+*Browser-tested in Chromium 153 with a no-cache server; the build is confirmed by
+`materialize … in 3 runs`. There were no WGSL/Tint errors, no `[arena]` lines, and no folded
+fans. GL and wgpu build, but neither has been hand-run with these two changes.*
+
+**Materialize reads in a few big chunks.** Before a level switch, save or undo across
+levels, `materialize_cpu()` pulls the GPU-resident edits back. It made one blocking read
+per coalesced run (the 256-vert gap bridge), and a blocking read is a full GPU round trip.
+In the browser that's a suspended frame, about 16 ms each, so a sculpted L9 took **19.4 s
+for 526K verts in 1,174 runs**, and the L9→L8 switch took 20 s. On GL it was 1.5 s for
+2,860 runs. Runs are now merged into chunks of up to 1M verts, whatever the gaps between
+them. This is safe for the same reason the 256-vert bridge is: at the active level, the
+GPU copy is the truth for every vertex. The chunk cap keeps the de-interleave scratch at
+12 MB, since the web heap is 32-bit.
+
+| browser, sculpted L9 | before | after |
+|---|---|---|
+| materialize | 19.4 s (1,174 runs) | **0.25 s** (3 runs) |
+| L9 → L8 switch | 20.1 s | **1.0 s** |
+| L8 → L9 switch | 4.6 s | **1.1 s** |
+
+**The arena is sized from the deepest read queue actually seen.** The ring was sized for
+4 dabs in flight, but in the browser dozens wait on their reads at once. On the first
+browser run at L9, every dab after the fourth found no room and fell back to a whole-mesh
+snapshot. `begin_dab` now tracks the peak queue depth, which persists across strokes. It
+sizes the ring as that many `need`-sized regions, never fewer than 4, still grown only
+between reads and capped by the device.
+
+**Testing note:** two earlier browser runs today silently ran a **cached older
+`chisel.wasm`**. `python -m http.server` sends no cache headers, so Chromium reused the
+file heuristically. Serve the web build with `Cache-Control: no-store` when testing, and
+confirm the build from a log line that only the new code prints.
+
 ## 2026-09-23 — GL readbacks are asynchronous; the materialize list is deduped
 
 *GL build, hand-tested at L10: big and small strokes, undo right after quick strokes,

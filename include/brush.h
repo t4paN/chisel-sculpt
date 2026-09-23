@@ -210,7 +210,8 @@ struct BrushStroke {
     // the window filled.
     static constexpr uint32_t kCountWindow = 32;
     static constexpr uint32_t kCapSlack    = 4;    // region = kCapSlack x recent max
-    static constexpr uint32_t kDabsInFlight = 4;   // arena sized to hold this many
+    static constexpr uint32_t kDabsInFlight = 4;   // arena sized to hold at least this many
+    uint32_t peak_in_flight = 0;       // deepest read queue seen; survives strokes
     uint32_t recent_counts[kCountWindow] = {};
     uint32_t recent_n = 0, recent_head = 0;
     uint32_t recent_vc = 0;              // window belongs to this topology only

@@ -198,6 +198,24 @@ void MultiresGPU::materialize_cpu(MultiresStack& stack, Mesh& mesh, const gpu::B
     static std::vector<Run> runs;
     coalesce(dirty_verts, runs);
 
+    // Then merge the runs into chunks of up to kChunkVerts, bridging any gap. Each run
+    // is one blocking read, and a blocking read is a full GPU round trip — in the
+    // browser a suspended frame. Hundreds of small runs made one flush cost seconds
+    // (146K verts in 385 runs: 6.4 s on the web, 5.6M in 2860 runs: 1.5 s on GL).
+    // Bridging is safe for the same reason RUN_GAP is: at the active level the GPU
+    // copy is the truth for every vertex, so the unchanged ones read back equal.
+    // The chunk cap bounds the de-interleave scratch (12 MB) — the web heap is 32-bit.
+    constexpr uint32_t kChunkVerts = 1u << 20;
+    if (runs.size() > 1) {
+        size_t w = 0;
+        for (size_t i = 1; i < runs.size(); i++) {
+            const uint32_t end = runs[i].first + runs[i].count;
+            if (end - runs[w].first <= kChunkVerts) runs[w].count = end - runs[w].first;
+            else runs[++w] = runs[i];
+        }
+        runs.resize(w + 1);
+    }
+
     // Surface sync (2c-i): pull the working VBO positions back into mesh.pos for the
     // same runs — the GPU brush wrote the VBO in place and the pen-up readback no
     // longer copies it down (2c-iv), so the live surface readers need it here.

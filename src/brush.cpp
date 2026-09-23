@@ -696,15 +696,21 @@ void BrushStroke::begin_dab(DabContext& ctx) {
     if (est > vc) est = vc;
     if (need > est) need = est;
 
-    // The ring must hold several dabs in flight, not one: readbacks land a frame or
-    // two late and dabs are batched per frame. Ask for kDabsInFlight `need`-sized
-    // regions; the arena only grows between reads, and never past the device limit.
-    cs.ensure_smooth_dirty_buffer(vc, (uint64_t)kDabsInFlight * (need + 1u));
+    // The ring must hold every dab still waiting on its read, not one: reads land a
+    // frame or more late and dabs are batched per frame. How many that is depends on
+    // the backend — a handful on GL, dozens in the browser, where the first measured
+    // L9 session (2026-09-23) filled a 4-dab sizing and fell back on every dab after.
+    // So size from the deepest queue actually seen, never below kDabsInFlight. The
+    // arena only grows between reads, and never past the device limit.
+    const uint32_t depth = (uint32_t)pending_dabs.size() + 2u;
+    if (depth > peak_in_flight) peak_in_flight = depth;
+    const uint32_t slots = std::max(kDabsInFlight, peak_in_flight);
+    cs.ensure_smooth_dirty_buffer(vc, (uint64_t)slots * (need + 1u));
     const uint32_t max_cap = cs.dirty_arena_max_cap();
     if (need > max_cap) need = max_cap;
-    // Don't let one comfortable region crowd out the next dab: past a share of the
-    // ring, settle for `need`.
-    const uint32_t share = cs.dirty_arena_ring_words() / kDabsInFlight;
+    // Don't let one comfortable region crowd out the dabs queued behind it: past a
+    // share of the ring, settle for `need`.
+    const uint32_t share = cs.dirty_arena_ring_words() / slots;
     if (est > share) est = std::max(need, share);
     if (est > max_cap) est = max_cap;
     if (est == 0) return;
