@@ -2,6 +2,15 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-09-23 — v0.2.22 — Linux CI builds again: the platform log line needs GLFW 3.4
+
+v0.2.21's Linux job failed to compile: the 2026-09-22 `[win] GLFW platform:` line calls
+`glfwGetPlatform()`, which only exists from GLFW 3.4, and the CI image (Ubuntu 20.04)
+ships 3.3. The desktop has 3.4 and Windows vendors its own, so nothing local caught it.
+The line is now compiled only against GLFW 3.4+. The other `glfwGetPlatform` calls sit in
+WebGPU-only code, which CI does not build. v0.2.21 carries the Windows zip only; v0.2.22
+is the same code plus this guard.
+
 ## 2026-09-23 — v0.2.21 — Undo spikes after level changes: the flush ran after the restore
 
 *GL build, hand-tested on the user's own repro: could not reproduce. Both backends build.

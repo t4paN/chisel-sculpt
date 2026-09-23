@@ -381,7 +381,8 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-#if !defined(__EMSCRIPTEN__)
+// glfwGetPlatform is GLFW 3.4+; the Linux CI image (Ubuntu 20.04) ships 3.3.
+#if !defined(__EMSCRIPTEN__) && (GLFW_VERSION_MAJOR > 3 || GLFW_VERSION_MINOR >= 4)
     // Which platform GLFW actually picked decides what the window system will let the
     // app do — cursor warping above all. This was only ever printed on the wgpu path,
     // so the GL build gave no way to tell native Wayland from XWayland.
