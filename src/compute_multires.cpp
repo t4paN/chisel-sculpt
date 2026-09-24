@@ -79,23 +79,22 @@ void ComputeState::dispatch_multires_diff(const gpu::Buffer& pos_vbo, const gpu:
                                           const gpu::Buffer& base_ssbo,
                                           const uint32_t* verts, uint32_t count,
                                           bool writes_to_base,
-                                          bool ring_ssbo, uint32_t ring_base_floats) {
+                                          bool ring_ssbo, uint32_t ring_base_floats,
+                                          const gpu::Buffer* ring_override) {
     if (!has_multires_diff() || count == 0) return;
     if (!pos_vbo.handle || !snap_pos_ssbo.handle) return;
     if (!writes_to_base && (!disp_ssbo.handle || !frames_ssbo.handle)) return;
     if (writes_to_base && !base_ssbo.handle) return;
 
-    // Upload the touched-vert list (same lazy-grow idiom as the other list-driven
-    // kernels). dirty_verts_ssbo is free at pen-up — the only prior consumer this
-    // frame is the autosmooth compute_normals pass, which has already run. Seam-owned.
-    if (!dirty_verts_ssbo.handle || count > dirty_verts_capacity) {
-        uint32_t alloc_count = std::max(count, 4096u);
-        gpu::release_buffer(dirty_verts_ssbo);
-        dirty_verts_ssbo = gpu::create_buffer(gpu_dev, nullptr,
-                                              (uint64_t)alloc_count * sizeof(uint32_t), gpu::Usage::Storage);
-        dirty_verts_capacity = alloc_count;
+    // Upload the touched-vert list. dirty_verts_ssbo is free at pen-up — the only
+    // prior consumer this frame is the autosmooth pass, which has already run. A null
+    // list means the ids are already there (copied GPU-side from the touched list).
+    if (verts) {
+        ensure_dirty_verts(count);
+        gpu::write_buffer(gpu_dev, dirty_verts_ssbo, 0, verts, (uint64_t)count * sizeof(uint32_t));
+    } else if (count > dirty_verts_capacity) {
+        return;
     }
-    gpu::write_buffer(gpu_dev, dirty_verts_ssbo, 0, verts, (uint64_t)count * sizeof(uint32_t));
 
     MultiresDiffParamsGPU u = {};
     u.count          = count;
@@ -114,7 +113,8 @@ void ComputeState::dispatch_multires_diff(const gpu::Buffer& pos_vbo, const gpu:
     const gpu::Buffer* base_b  = base_ssbo.handle   ? &base_ssbo   : &pos_vbo;
 
     const bool ring_on = (ring_ssbo != 0);
-    const gpu::Buffer* ring_b = ring_on ? &undo_ring_ssbo : disp_b;
+    const gpu::Buffer* ring_b = ring_on ? (ring_override ? ring_override : &undo_ring_ssbo)
+                                        : disp_b;
 
     const gpu::BindBufferEntry bg[] = {
         { BIND_POSITIONS,         &pos_vbo,   pos_vbo.size },
@@ -178,15 +178,14 @@ void ComputeState::dispatch_multires_apply(const gpu::Buffer& pos_vbo, const gpu
     // CPU stage upload. Stage mode: upload the (target,source) pairs as before.
     const bool ring_mode = (ring_ssbo != 0);
 
-    // Upload the touched-vert list (reuse dirty_verts_ssbo, as the diff does). Seam-owned.
-    if (!dirty_verts_ssbo.handle || count > dirty_verts_capacity) {
-        uint32_t alloc_count = std::max(count, 4096u);
-        gpu::release_buffer(dirty_verts_ssbo);
-        dirty_verts_ssbo = gpu::create_buffer(gpu_dev, nullptr,
-                                              (uint64_t)alloc_count * sizeof(uint32_t), gpu::Usage::Storage);
-        dirty_verts_capacity = alloc_count;
+    // Upload the touched-vert list (reuse dirty_verts_ssbo, as the diff does). A null
+    // list means the ids are already there (copied GPU-side out of the undo ring).
+    if (verts) {
+        ensure_dirty_verts(count);
+        gpu::write_buffer(gpu_dev, dirty_verts_ssbo, 0, verts, (uint64_t)count * sizeof(uint32_t));
+    } else if (count > dirty_verts_capacity) {
+        return;
     }
-    gpu::write_buffer(gpu_dev, dirty_verts_ssbo, 0, verts, (uint64_t)count * sizeof(uint32_t));
 
     // Upload the (target, source) staging pairs (stage mode only). Seam-owned scratch (Step 3b).
     if (!ring_mode && stage) {

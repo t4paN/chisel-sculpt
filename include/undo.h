@@ -1,6 +1,7 @@
 #pragma once
 #include "mesh.h"
 #include "multires_stack.h"
+#include <algorithm>
 #include <cstdint>
 #include <deque>
 #include <vector>
@@ -39,6 +40,14 @@ struct UndoEntry {
     // they're the spill target once Part 2 drops the pen-up readback.
     size_t   ring_offset = SIZE_MAX;
     uint32_t ring_vcount = 0;
+    // The span also carries the vertex ids: 7 floats per vert, (old,new) for all of
+    // them first and then the ids as raw u32 bits (ring_offset + 6 * ring_vcount).
+    // Set for strokes whose touched list never came to the CPU (CHISEL_GPU_TOUCHED);
+    // `verts` is then EMPTY until a spill fills it from the ring. The stroke's size is
+    // ring_vcount, never verts.size() — see stroke_verts().
+    bool     ring_has_ids = false;
+    size_t   ring_span_floats() const { return (size_t)ring_vcount * (ring_has_ids ? 7 : 6); }
+    size_t   stroke_verts() const { return std::max(verts.size(), (size_t)ring_vcount); }
 
     // --- PROJECTION fields ---
     // Pre-projection snapshot of the affected storage. On undo, restore this.
@@ -147,7 +156,9 @@ private:
         } else if (e.kind == UndoEntry::Kind::PAINT) {
             b = e.verts.size() * (sizeof(uint32_t) + 2 * sizeof(uint32_t));
         } else {
-            b = e.verts.size() * (sizeof(uint32_t) + 6 * sizeof(float));
+            // What the entry costs once it is CPU-backed: a ring-resident entry has
+            // no CPU arrays yet, but a spill will give it exactly these.
+            b = e.stroke_verts() * (sizeof(uint32_t) + 6 * sizeof(float));
         }
         return b;
     }

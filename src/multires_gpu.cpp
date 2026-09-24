@@ -179,6 +179,70 @@ void MultiresGPU::mark_cpu_dirty(const std::vector<uint32_t>& verts) {
     }
 }
 
+void MultiresGPU::ensure_stale(uint32_t vertex_count) {
+    if (!supported || !dev || vertex_count == 0) return;
+    if (stale_capacity >= vertex_count && stale_mark_ssbo.handle) {
+        // Ids are indices into ONE numbering. Nothing may be pending across a level
+        // switch (materialize runs first), so a new vertex count only needs the list
+        // restarted — but say so if that invariant was broken.
+        if (stale_vc != vertex_count) {
+            if (stale_pending)
+                std::printf("[mgpu] TRIPWIRE: stale list held ids for %u verts, now %u — "
+                            "dropped unmaterialized\n", stale_vc, vertex_count);
+            const uint32_t header[2] = { 0, 0 };
+            gpu::write_buffer(*dev, stale_list_ssbo, 0, header, sizeof(header));
+            if (++stale_stamp == 0) { gpu::clear_buffer(*dev, stale_mark_ssbo, 0); stale_stamp = 1; }
+            stale_pending = false;
+            stale_vc = vertex_count;
+        }
+        return;
+    }
+    if (stale_pending)
+        std::printf("[mgpu] TRIPWIRE: stale list regrown with ids pending — dropped\n");
+    gpu::release_buffer(stale_mark_ssbo);
+    gpu::release_buffer(stale_list_ssbo);
+    stale_mark_ssbo = gpu::create_buffer(*dev, nullptr, (uint64_t)vertex_count * sizeof(uint32_t),
+                                         gpu::Usage::Storage);
+    stale_list_ssbo = gpu::create_buffer(*dev, nullptr, ((uint64_t)vertex_count + 2) * sizeof(uint32_t),
+                                         gpu::Usage::Storage);
+    gpu::clear_buffer(*dev, stale_mark_ssbo, 0);
+    gpu::clear_buffer(*dev, stale_list_ssbo, 0);
+    stale_capacity = vertex_count;
+    stale_stamp = 1;
+    stale_vc = vertex_count;
+    stale_pending = false;
+}
+
+// Pull the GPU-side stale list into dirty_verts, then empty it. Blocking, but it only
+// runs inside materialize_cpu, which is already a waiting point (level switch, save,
+// remesh, object switch). The ids come down in 1M-id chunks to bound the scratch —
+// the web heap is 32-bit.
+static void pull_stale_list(MultiresGPU& m, uint32_t vertex_count) {
+    if (!m.stale_pending || !m.stale_list_ssbo.handle) return;
+    m.stale_pending = false;
+    uint32_t header[2] = { 0, 0 };
+    gpu::read_buffer(*m.dev, m.stale_list_ssbo, 0, sizeof(header), header);
+    uint32_t n = header[1];
+    if (n > m.stale_capacity) n = m.stale_capacity;
+    if (m.stale_vc != vertex_count) {
+        std::printf("[mgpu] TRIPWIRE: stale list holds %u ids for %u verts, mesh has %u — "
+                    "not applied\n", n, m.stale_vc, vertex_count);
+        n = 0;
+    }
+    static std::vector<uint32_t> ids;
+    constexpr uint32_t kChunk = 1u << 20;
+    for (uint32_t off = 0; off < n; off += kChunk) {
+        const uint32_t c = std::min(kChunk, n - off);
+        ids.resize(c);
+        gpu::read_buffer(*m.dev, m.stale_list_ssbo, (uint64_t)(2 + off) * sizeof(uint32_t),
+                         (uint64_t)c * sizeof(uint32_t), ids.data());
+        m.mark_cpu_dirty(ids);
+    }
+    const uint32_t zero[2] = { 0, 0 };
+    gpu::write_buffer(*m.dev, m.stale_list_ssbo, 0, zero, sizeof(zero));
+    if (++m.stale_stamp == 0) { gpu::clear_buffer(*m.dev, m.stale_mark_ssbo, 0); m.stale_stamp = 1; }
+}
+
 // Forget the dirty set. O(dirty), not O(vertex count): only the flags that were set
 // get cleared.
 static void clear_dirty(std::vector<uint32_t>& verts, std::vector<uint8_t>& flag) {
@@ -190,6 +254,7 @@ static void clear_dirty(std::vector<uint32_t>& verts, std::vector<uint8_t>& flag
 void MultiresGPU::materialize_cpu(MultiresStack& stack, Mesh& mesh, const gpu::Buffer& vbo_pos) {
     if (!supported || !cpu_dirty) return;
     const auto t0 = std::chrono::steady_clock::now();
+    pull_stale_list(*this, mesh.vertex_count());
     const size_t n_dirty = dirty_verts.size();
 
     // Inverse of upload_disp_partial: read the mirrored level's GPU storage back
@@ -292,6 +357,10 @@ void MultiresGPU::cleanup() {
     gpu::release_buffer(frames_ssbo);
     gpu::release_buffer(base_ssbo);
     gpu::release_buffer(snap_pos_ssbo);
+    gpu::release_buffer(stale_mark_ssbo);
+    gpu::release_buffer(stale_list_ssbo);
+    stale_capacity = 0;
+    stale_pending = false;
     capacity = base_capacity = snap_pos_capacity = 0;
     level = -1;
     cpu_dirty = false;

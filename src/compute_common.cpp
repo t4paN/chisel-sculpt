@@ -228,6 +228,14 @@ void ComputeState::cleanup() {
     gpu::release_buffer(norm_src_region_ubo);
     gpu::release_buffer(norm_list_region_ubo);
     gpu::release_buffer(norm_mark_ssbo);
+    gpu::release_compute_pipeline(touched_fold_pipeline);
+    gpu::release_buffer(touched_fold_ubo);
+    gpu::release_buffer(touched_region_ubo);
+    gpu::release_buffer(touched_args_ssbo);
+    gpu::release_buffer(touched_mark_ssbo);
+    gpu::release_buffer(touched_list_ssbo);
+    touched_capacity = 0;
+    gpu_touched_on = false;
     gpu::release_buffer(norm_list_ssbo);
     gpu::release_buffer(norm_args_ssbo);
     norm_capacity = 0;

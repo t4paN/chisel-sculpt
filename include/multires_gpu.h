@@ -98,6 +98,21 @@ struct MultiresGPU {
     // no readback. Called at pen-up (and undo/redo) in place of the CPU writeback.
     void mark_cpu_dirty(const std::vector<uint32_t>& verts);
 
+    // The same dirty set, kept on the GPU for strokes whose touched list never came
+    // to the CPU (CHISEL_GPU_TOUCHED). Layout [flag, count, ids...], deduped by a
+    // per-vertex stamp that advances at each materialize. Producers fold into it with
+    // ComputeState::dispatch_touched_fold and then call mark_gpu_dirty();
+    // materialize_cpu() reads it — the only point its ids cross to the CPU.
+    gpu::Buffer stale_mark_ssbo;
+    gpu::Buffer stale_list_ssbo;
+    uint32_t    stale_capacity = 0;
+    uint32_t    stale_stamp    = 1;
+    uint32_t    stale_vc       = 0;     // vertex count the listed ids belong to
+    bool        stale_pending  = false; // something was folded since the last read
+    // Size the stale list for vertex_count. Call before folding into it.
+    void ensure_stale(uint32_t vertex_count);
+    void mark_gpu_dirty() { if (supported) { cpu_dirty = true; stale_pending = true; } }
+
     // Pull the GPU disp/base (from the SSBOs) AND mesh.pos (from `vbo_pos`, the active
     // working VBO) for the dirty verts of the mirrored level back into CPU storage
     // (banded readback, inverse of upload_disp_partial), then clear the dirty set.

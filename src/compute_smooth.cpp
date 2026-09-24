@@ -682,6 +682,148 @@ bool ComputeState::flush_gpu_normals(uint32_t vertex_count, const gpu::Buffer& p
 }
 
 // ---------------------------------------------------------------------------
+// GPU touched list (touched_fold)
+// ---------------------------------------------------------------------------
+
+namespace {
+// 16-byte std140 block, byte-identical to touched_fold.{comp,wgsl}'s Params.
+struct TouchedFoldParamsGPU {
+    uint32_t stamp; uint32_t vertex_count; uint32_t use_mirror; uint32_t _pad;
+};
+static_assert(sizeof(TouchedFoldParamsGPU) == 16, "touched_fold Params UBO must be 16 bytes");
+}
+
+bool ComputeState::init_touched_fold() {
+    if (!supported || !has_dirty_args()) return false;
+    // On by default; CHISEL_GPU_TOUCHED=0 keeps the per-dab dirty readbacks for an A/B.
+    const char* e = getenv("CHISEL_GPU_TOUCHED");
+    if (e && *e == '0') {
+        std::printf("[compute] GPU touched list DISABLED (CHISEL_GPU_TOUCHED=0)\n");
+        return false;
+    }
+    const gpu::BindEntry layout[] = {
+        { BIND_DIRTY_VERTS,  gpu::Bind::StorageRead,      0 },
+        { BIND_MIRROR_MAP,   gpu::Bind::StorageRead,      0 },
+        { BIND_NORM_MARK,    gpu::Bind::StorageReadWrite, 0 },
+        { BIND_NORM_LIST,    gpu::Bind::StorageReadWrite, 0 },
+        { BIND_DIRTY_REGION, gpu::Bind::Uniform,          sizeof(DirtyRegionGPU) },
+        { BIND_PARAMS,       gpu::Bind::Uniform,          sizeof(TouchedFoldParamsGPU) },
+    };
+    touched_fold_pipeline = gpu::create_compute_pipeline(gpu_dev,
+                                gpu::embedded_shader("touched_fold"), layout, 6);
+    if (!touched_fold_pipeline.handle) {
+        std::printf("[compute] touched_fold pipeline failed to compile\n");
+        return false;
+    }
+    touched_fold_ubo   = gpu::create_buffer(gpu_dev, nullptr, sizeof(TouchedFoldParamsGPU),
+                                            gpu::Usage::Uniform);
+    touched_region_ubo = gpu::create_buffer(gpu_dev, nullptr, sizeof(DirtyRegionGPU),
+                                            gpu::Usage::Uniform);
+    touched_args_ssbo  = gpu::create_buffer(gpu_dev, nullptr, 3 * sizeof(uint32_t),
+                                            gpu::Usage::Storage | gpu::Usage::Indirect);
+    gpu_touched_on = true;
+    std::printf("[compute] touched_fold pipeline compiled (GPU touched list on)\n");
+    return true;
+}
+
+void ComputeState::dispatch_touched_fold(const gpu::Buffer& src, uint32_t base, uint32_t cap,
+                                         const gpu::Buffer& mark, const gpu::Buffer& dst,
+                                         uint32_t stamp, uint32_t vertex_count, bool use_mirror) {
+    if (!has_gpu_touched() || !src.handle || !mark.handle || !dst.handle) return;
+    if (cap == 0 || vertex_count == 0) return;
+
+    const bool mirror = use_mirror && mirror_map_ssbo.handle
+                        && mirror_map_vertex_count == vertex_count;
+
+    DirtyRegionGPU r = { base, cap, 0, 0 };
+    gpu::write_buffer(gpu_dev, touched_region_ubo, 0, &r, sizeof(r));
+    TouchedFoldParamsGPU u = { stamp, vertex_count, mirror ? 1u : 0u, 0 };
+    gpu::write_buffer(gpu_dev, touched_fold_ubo, 0, &u, sizeof(u));
+
+    // The source count lives on the GPU; dirty_args turns it into the workgroup count.
+    const gpu::BindBufferEntry args_bg[] = {
+        { BIND_DIRTY_VERTS,   &src,               src.size },
+        { BIND_DISPATCH_ARGS, &touched_args_ssbo, touched_args_ssbo.size },
+        { BIND_DIRTY_REGION,  &touched_region_ubo, sizeof(DirtyRegionGPU) },
+    };
+    gpu::BindGroup args_grp = gpu::create_bind_group(gpu_dev, dirty_args_pipeline, args_bg, 3);
+
+    // The map binding must be live even when unused; the source list is read-only
+    // here already, so it stands in without a usage clash.
+    const gpu::Buffer& map = mirror ? mirror_map_ssbo : src;
+    const gpu::BindBufferEntry bg[] = {
+        { BIND_DIRTY_VERTS,  &src,                src.size },
+        { BIND_MIRROR_MAP,   &map,                map.size },
+        { BIND_NORM_MARK,    &mark,               mark.size },
+        { BIND_NORM_LIST,    &dst,                dst.size },
+        { BIND_DIRTY_REGION, &touched_region_ubo, sizeof(DirtyRegionGPU) },
+        { BIND_PARAMS,       &touched_fold_ubo,   sizeof(TouchedFoldParamsGPU) },
+    };
+    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, touched_fold_pipeline, bg, 6);
+
+    gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
+    // A zero-count region dispatches no groups and so skips the overflow check —
+    // harmless, a region that received nothing cannot have overflowed.
+    gpu::dispatch(b, dirty_args_pipeline, args_grp, 1);
+    gpu::dispatch_indirect(b, touched_fold_pipeline, grp, touched_args_ssbo, 0);
+    gpu::submit(b);
+    gpu::release_bind_group(args_grp);
+    gpu::release_bind_group(grp);
+}
+
+void ComputeState::begin_touched_stroke(uint32_t vertex_count) {
+    if (!has_gpu_touched() || vertex_count == 0) return;
+    // Sized to the whole mesh: the stamp dedupes, so the list never holds a vertex
+    // twice. Grow-only; zeroed on (re)allocation, which is why the stamp starts at 1.
+    if (touched_capacity < vertex_count || !touched_mark_ssbo.handle) {
+        gpu::release_buffer(touched_mark_ssbo);
+        gpu::release_buffer(touched_list_ssbo);
+        touched_mark_ssbo = gpu::create_buffer(gpu_dev, nullptr,
+                                               (uint64_t)vertex_count * sizeof(uint32_t),
+                                               gpu::Usage::Storage);
+        touched_list_ssbo = gpu::create_buffer(gpu_dev, nullptr,
+                                               ((uint64_t)vertex_count + 2) * sizeof(uint32_t),
+                                               gpu::Usage::Storage);
+        gpu::clear_buffer(gpu_dev, touched_mark_ssbo, 0);
+        touched_capacity = vertex_count;
+        touched_stamp = 0;   // advanced to 1 below
+    }
+    if (++touched_stamp == 0) {
+        gpu::clear_buffer(gpu_dev, touched_mark_ssbo, 0);
+        touched_stamp = 1;
+    }
+    const uint32_t header[2] = { 0, 0 };
+    gpu::write_buffer(gpu_dev, touched_list_ssbo, 0, header, sizeof(header));
+    touched_vc = vertex_count;
+}
+
+void ComputeState::copy_touched_ids(const gpu::Buffer& dst, uint64_t dst_off, uint32_t count) {
+    if (count == 0 || !touched_list_ssbo.handle || !dst.handle) return;
+    gpu::copy_buffer(gpu_dev, touched_list_ssbo, 2 * sizeof(uint32_t), dst, dst_off,
+                     (uint64_t)count * sizeof(uint32_t));
+}
+
+void ComputeState::load_touched_ids(const gpu::Buffer& src, uint64_t src_off, uint32_t count,
+                                    uint32_t vertex_count) {
+    if (count == 0 || count > vertex_count || !src.handle) return;
+    begin_touched_stroke(vertex_count);
+    if (!touched_list_ssbo.handle) return;
+    const uint32_t header[2] = { 0, count };
+    gpu::write_buffer(gpu_dev, touched_list_ssbo, 0, header, sizeof(header));
+    gpu::copy_buffer(gpu_dev, src, src_off, touched_list_ssbo, 2 * sizeof(uint32_t),
+                     (uint64_t)count * sizeof(uint32_t));
+}
+
+void ComputeState::ensure_dirty_verts(uint32_t count) {
+    if (dirty_verts_ssbo.handle && count <= dirty_verts_capacity) return;
+    uint32_t alloc_count = std::max(count, 4096u);
+    gpu::release_buffer(dirty_verts_ssbo);
+    dirty_verts_ssbo = gpu::create_buffer(gpu_dev, nullptr,
+                                          (uint64_t)alloc_count * sizeof(uint32_t), gpu::Usage::Storage);
+    dirty_verts_capacity = alloc_count;
+}
+
+// ---------------------------------------------------------------------------
 // Stroke autosmooth methods
 // ---------------------------------------------------------------------------
 
@@ -721,15 +863,14 @@ void ComputeState::dispatch_stroke_smooth_apply(const uint32_t* vert_ids, uint32
     if (!stroke_smooth_apply_pipeline.handle || count == 0 || !mask_ssbo.handle) return;
 
     // Upload the dirty-vert id list — seam-owned buffer (shared with compute_normals /
-    // multires). Grow-only (release + create); partial fill via write_buffer.
-    if (!dirty_verts_ssbo.handle || count > dirty_verts_capacity) {
-        uint32_t alloc_count = std::max(count, 4096u);
-        gpu::release_buffer(dirty_verts_ssbo);
-        dirty_verts_ssbo = gpu::create_buffer(gpu_dev, nullptr,
-                                              (uint64_t)alloc_count * sizeof(uint32_t), gpu::Usage::Storage);
-        dirty_verts_capacity = alloc_count;
+    // multires). A null list means the ids are already there (copied GPU-side from
+    // the touched list), so there is nothing to upload.
+    if (vert_ids) {
+        ensure_dirty_verts(count);
+        gpu::write_buffer(gpu_dev, dirty_verts_ssbo, 0, vert_ids, (uint64_t)count * sizeof(uint32_t));
+    } else if (count > dirty_verts_capacity) {
+        return;
     }
-    gpu::write_buffer(gpu_dev, dirty_verts_ssbo, 0, vert_ids, (uint64_t)count * sizeof(uint32_t));
 
     StrokeSmoothParamsGPU u = {};
     u.dirty_count = count;

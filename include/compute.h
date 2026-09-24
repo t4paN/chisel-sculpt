@@ -400,6 +400,22 @@ struct ComputeState {
     uint32_t             norm_vc       = 0;      // vertex count the queued ids belong to
     bool                 gpu_normals_on = false;
 
+    // GPU touched list — the stroke's deduped touched-vertex set, built on the GPU
+    // from each geo dab's arena region (touched_fold.wgsl) instead of reading every
+    // region back. Layout [overflow flag, count, ids...]: a {count, ids[]} list at
+    // base 1. Pen-up reads only the two header words; the ids go straight into the
+    // undo ring. Off with CHISEL_GPU_TOUCHED=0, which keeps the per-dab reads.
+    gpu::ComputePipeline touched_fold_pipeline;
+    gpu::Buffer          touched_fold_ubo;       // 16-byte {stamp, vc, use_mirror, _}
+    gpu::Buffer          touched_region_ubo;     // {base, cap} of the source list
+    gpu::Buffer          touched_args_ssbo;      // uint3, Storage | Indirect
+    gpu::Buffer          touched_mark_ssbo;      // uint per vertex (stroke stamp)
+    gpu::Buffer          touched_list_ssbo;      // [flag, count, ids...]
+    uint32_t             touched_capacity = 0;   // verts the stroke list is sized for
+    uint32_t             touched_stamp    = 1;   // never 0: a zeroed mark means "unclaimed"
+    uint32_t             touched_vc       = 0;   // vertex count of the current stroke list
+    bool                 gpu_touched_on   = false;
+
     // GPU-resident undo (Phase 2b): pen-up multires diff — ported onto the gpu::
     // seam (Seam Step 2b). Reprojects the world-space stroke delta (live VBO -
     // pen-down snapshot) into the active level's tangent frames and accumulates
@@ -961,6 +977,30 @@ struct ComputeState {
     bool flush_gpu_normals(uint32_t vertex_count, const gpu::Buffer& pos_vbo,
                            const gpu::Buffer& norm_vbo, const gpu::Buffer& index_ebo);
 
+    // GPU touched list (touched_fold.wgsl). init after init_dirty_args.
+    bool init_touched_fold();
+    bool has_gpu_touched() const { return gpu_touched_on && has_dirty_args()
+                                          && touched_fold_pipeline.handle != 0; }
+    // Fold the {count, ids[]} list at word `base` of `src` (cap ids) into the list
+    // `dst` = [flag, count, ids...] deduped by `mark`/`stamp`. Pair-map twins are
+    // claimed too when use_mirror is set and the uploaded map matches vertex_count.
+    void dispatch_touched_fold(const gpu::Buffer& src, uint32_t base, uint32_t cap,
+                               const gpu::Buffer& mark, const gpu::Buffer& dst,
+                               uint32_t stamp, uint32_t vertex_count, bool use_mirror);
+    // Start a new stroke list: size it for vertex_count, zero its header, advance the
+    // stamp (clearing the marks only when it wraps).
+    void begin_touched_stroke(uint32_t vertex_count);
+    // Copy `count` ids of the stroke list into `dst` at byte offset dst_off.
+    void copy_touched_ids(const gpu::Buffer& dst, uint64_t dst_off, uint32_t count);
+    // The reverse: make the stroke list hold `count` plain ids copied from `src` at
+    // byte offset src_off (an undo entry's ids in the ring), as a {count, ids[]} list
+    // at base 1. Only between strokes — it overwrites the stroke list.
+    void load_touched_ids(const gpu::Buffer& src, uint64_t src_off, uint32_t count,
+                          uint32_t vertex_count);
+    // Make dirty_verts_ssbo hold at least `count` ids (the pen-up kernels read their
+    // list from there; a null `verts` in the dispatches below means "already there").
+    void ensure_dirty_verts(uint32_t count);
+
     // Compile the pen-up multires diff shader. Called once at init.
     bool init_multires_diff();
     bool has_multires_diff() const { return multires_diff_pipeline.handle != 0; }
@@ -979,7 +1019,8 @@ struct ComputeState {
                                 const gpu::Buffer& base_ssbo,
                                 const uint32_t* verts, uint32_t count,
                                 bool writes_to_base,
-                                bool ring_ssbo, uint32_t ring_base_floats);
+                                bool ring_ssbo, uint32_t ring_base_floats,
+                                const gpu::Buffer* ring_override = nullptr);
 
     // Compile the undo/redo multires apply shader. Called once at init.
     bool init_multires_apply();

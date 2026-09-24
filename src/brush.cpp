@@ -383,6 +383,18 @@ static void snap_and_mirror_dirty(BrushStroke& bs, DabContext& ctx, float anchor
     }
 }
 
+// Move/limb on the GPU touched list: fold the captured affected set (and its pair-map
+// twins, which the mirror sink moves) into the stroke list, once per stroke.
+static void fold_move_capture(BrushStroke& bs, DabContext& ctx) {
+    if (bs.move.capture_booked) return;
+    ComputeState& cs = ctx.compute;
+    cs.dispatch_touched_fold(cs.move_affected_ssbo, 0, cs.move_buffers_capacity,
+                             cs.touched_mark_ssbo, cs.touched_list_ssbo, cs.touched_stamp,
+                             ctx.mesh.vertex_count(), ctx.mirror_pairs);
+    bs.move.capture_booked = true;
+    bs.touched_any = true;
+}
+
 static uint32_t mirror_of(uint32_t v, const Mesh& m) {
     if (!m.mirror_x_map.empty() && v < (uint32_t)m.mirror_x_map.size()) {
         uint32_t mv = m.mirror_x_map[v];
@@ -582,7 +594,7 @@ static void snapshot_whole_mesh(BrushStroke& bs, DabContext& ctx, uint8_t kind) 
 
 // Reserve this dab's slice of the dirty arena. Must run before the dab's kernels,
 // because they append into whatever region set_dirty_region last published.
-void BrushStroke::begin_dab(DabContext& ctx) {
+void BrushStroke::begin_dab(DabContext& ctx, uint8_t kind) {
     g_stage.begin_stroke();
     ComputeState& cs = ctx.compute;
 
@@ -606,6 +618,31 @@ void BrushStroke::begin_dab(DabContext& ctx) {
         cs.dispatch_block_boxes(ctx.renderer.vbo_pos, vc);
         cs.begin_block_frame();
         blocks_need_rebuild = false;
+    }
+
+    // GPU touched list: nothing reads this region back, so it costs nothing to make it
+    // whole-mesh — which means it can never overflow, and no estimate is needed. The
+    // fold in kick_dab_readback consumes it and hands it straight back to the ring, so
+    // only one geometry region is ever live.
+    if (gpu_touched && kind == DAB_GEO) {
+        const uint32_t cap = std::min(vc, cs.dirty_arena_max_cap());
+        bool ok = cs.dirty_arena_alloc(cap, dab_base, dab_footprint);
+        if (!ok) {
+            drain_dab_readbacks(ctx);   // a mask/paint region may still be live
+            ok = cs.dirty_arena_alloc(cap, dab_base, dab_footprint);
+        }
+        if (!ok) {
+            touched_lost = true;
+            cs.set_dirty_region(0, 0);
+            std::printf("[arena] no room for a whole-mesh geometry region (live %u of %u "
+                        "words) — stroke falls back to a whole-mesh undo entry\n",
+                        cs.dirty_arena_live, cs.dirty_arena_words);
+            return;
+        }
+        dab_cap = cap;
+        dab_region_valid = true;
+        cs.set_dirty_region(dab_base, dab_cap);
+        return;
     }
 
     // A level switch or a remesh renumbers every vertex, so past counts no longer
@@ -764,6 +801,22 @@ void BrushStroke::kick_dab_readback(DabContext& ctx, uint8_t kind) {
         ctx.compute.expand_normals_from(ctx.compute.smooth_dirty_ssbo, dab_base, dab_cap,
                                         ctx.mesh.vertex_count(), ctx.mirror_pairs,
                                         ctx.renderer.ebo);
+    // GPU touched list: fold the region into the stroke list and hand it straight
+    // back. Queue order makes the reuse safe — the next dab's counter reset and appends
+    // are submitted after this fold.
+    if (kind == DAB_GEO && gpu_touched) {
+        if (dab_region_valid) {
+            ComputeState& cs = ctx.compute;
+            cs.dispatch_touched_fold(cs.smooth_dirty_ssbo, dab_base, dab_cap,
+                                     cs.touched_mark_ssbo, cs.touched_list_ssbo,
+                                     cs.touched_stamp, ctx.mesh.vertex_count(),
+                                     ctx.mirror_pairs);
+            cs.dirty_arena_unalloc(dab_footprint);
+            dab_region_valid = false;
+            touched_any = true;
+        }
+        return;
+    }
     uint32_t words = 0;
     gpu::ReadTicket tk = dab_region_valid
                        ? ctx.compute.kick_dirty_read(dab_base, dab_cap, words) : 0;
@@ -795,7 +848,7 @@ void BrushStroke::drain_dab_readbacks(DabContext& ctx) {
                                          move.affected_list);
         move.capture_tk = 0;
     }
-    if (move.captured && move.capture_tk == 0 && !move.capture_booked
+    if (!gpu_touched && move.captured && move.capture_tk == 0 && !move.capture_booked
         && !move.affected_list.empty()) {
         dirty_verts = move.affected_list;
         snap_and_mirror_dirty(*this, ctx, anchor_pos.x);
@@ -1227,11 +1280,32 @@ void BrushStroke::begin(Renderer& renderer, const Camera& cam,
     stamp_rake_valid = false;
     stamp_rake_angle = 0.0f;
 
-    snap_flag.assign(vert_count, false);
-    snap_x.assign(vert_count, 0.0f);
-    snap_y.assign(vert_count, 0.0f);
-    snap_z.assign(vert_count, 0.0f);
+    // GPU touched list: the stroke's touched set is built on the GPU and its undo
+    // capture never leaves it. Needs everything the pen-up GPU path uses — the diff
+    // against the resident level, the adjacency, and the GPU normals expansion (the
+    // undo apply expands normals from ids it never sees on the CPU). Anything missing
+    // keeps the per-dab reads for this stroke.
+    gpu_touched = compute && compute->supported && compute->has_gpu_touched()
+                  && compute->has_gpu_normals() && compute->has_multires_diff()
+                  && mgpu.supported && mgpu.level == stroke_level
+                  && compute->adjacency_vertex_count == vert_count
+                  && brush_type != BrushType::MASK && brush_type != BrushType::PAINT;
+    touched_any = touched_lost = false;
     snap_list.clear();
+    if (gpu_touched) {
+        compute->begin_touched_stroke(vert_count);
+        // Nothing reads the per-vertex snapshots on this path. Filling them cost four
+        // whole-mesh arrays per pen-down (~136 MB of writes at L10).
+        snap_flag.clear();
+        snap_x.clear();
+        snap_y.clear();
+        snap_z.clear();
+    } else {
+        snap_flag.assign(vert_count, false);
+        snap_x.assign(vert_count, 0.0f);
+        snap_y.assign(vert_count, 0.0f);
+        snap_z.assign(vert_count, 0.0f);
+    }
 
     mask.reset();
     color.reset();
@@ -1770,9 +1844,12 @@ void BrushStroke::apply_move_gpu(DabContext& ctx, float cursor_dx, float cursor_
                                         ctx.mesh.vertex_count(), ctx.mirror_pairs,
                                         ctx.renderer.ebo);
 
-    // Bookkeeping needs the CPU list; while the capture readback is in flight the
-    // apply is still correct (cumulative total) and drain_dab_readbacks catches up.
-    if (!capture_pending) {
+    // GPU touched list: the captured set is fixed for the stroke, so fold it once.
+    // Otherwise the bookkeeping needs the CPU list; while the capture readback is in
+    // flight the apply is still correct (cumulative total) and drain catches up.
+    if (gpu_touched) {
+        fold_move_capture(*this, ctx);
+    } else if (!capture_pending) {
         dirty_verts = move.affected_list;
         snap_and_mirror_dirty(*this, ctx, anchor_pos.x);
         move.capture_booked = true;
@@ -1883,7 +1960,9 @@ void BrushStroke::apply_limb_gpu(DabContext& ctx, float cursor_dx, float cursor_
                                         ctx.mesh.vertex_count(), ctx.mirror_pairs,
                                         ctx.renderer.ebo);
 
-    if (!capture_pending) {
+    if (gpu_touched) {
+        fold_move_capture(*this, ctx);
+    } else if (!capture_pending) {
         dirty_verts = move.affected_list;
         snap_and_mirror_dirty(*this, ctx, anchor_pos.x);
         move.capture_booked = true;
@@ -1949,7 +2028,7 @@ void BrushStroke::apply_mask_gpu(DabContext& ctx, float dab_x, float dab_y,
                                  float strength, float hardness, bool invert) {
 
     // Reserve this dab's dirty-list region before any kernel can append to it.
-    begin_dab(ctx);
+    begin_dab(ctx, DAB_MASK);
     if (!is_active()) return;
     if (!ctx.compute.supported || !ctx.compute.has_mask()) return;
 
@@ -1987,7 +2066,7 @@ void BrushStroke::apply_mask_smooth_gpu(DabContext& ctx, float dab_x, float dab_
                                         float strength, float hardness) {
 
     // Reserve this dab's dirty-list region before any kernel can append to it.
-    begin_dab(ctx);
+    begin_dab(ctx, DAB_MASK);
     if (!is_active()) return;
     if (!ctx.compute.supported || !ctx.compute.has_mask_smooth()) return;
 
@@ -2020,7 +2099,7 @@ void BrushStroke::apply_density_gpu(DabContext& ctx, float dab_x, float dab_y,
                                     float strength, float hardness, bool invert) {
 
     // Reserve this dab's dirty-list region before any kernel can append to it.
-    begin_dab(ctx);
+    begin_dab(ctx, DAB_DENSITY);
     if (!is_active()) return;
     if (!ctx.compute.supported || !ctx.compute.has_density_kernels()) return;
 
@@ -2057,7 +2136,7 @@ void BrushStroke::apply_density_smooth_gpu(DabContext& ctx, float dab_x, float d
                                            float strength, float hardness) {
 
     // Reserve this dab's dirty-list region before any kernel can append to it.
-    begin_dab(ctx);
+    begin_dab(ctx, DAB_DENSITY);
     if (!is_active()) return;
     if (!ctx.compute.supported || !ctx.compute.has_density_smooth()) return;
 
@@ -2091,7 +2170,7 @@ void BrushStroke::apply_color_gpu(DabContext& ctx, float dab_x, float dab_y,
                                   float strength, float hardness, bool erase) {
 
     // Reserve this dab's dirty-list region before any kernel can append to it.
-    begin_dab(ctx);
+    begin_dab(ctx, DAB_COLOR);
     if (!is_active()) return;
     if (!ctx.compute.supported || !ctx.compute.has_color()) return;
 
@@ -2132,7 +2211,7 @@ void BrushStroke::apply_color_smooth_gpu(DabContext& ctx, float dab_x, float dab
                                          float strength, float hardness) {
 
     // Reserve this dab's dirty-list region before any kernel can append to it.
-    begin_dab(ctx);
+    begin_dab(ctx, DAB_COLOR);
     if (!is_active()) return;
     if (!ctx.compute.supported || !ctx.compute.has_color_smooth()) return;
 
@@ -2199,12 +2278,34 @@ void BrushStroke::apply_mask(Renderer& renderer, const Camera& cam,
 }
 
 void BrushStroke::commit_undo(const Mesh& mesh, UndoStack& stack, const MultiresStack& multires) {
-    if (snap_list.empty()) return;
+    if (snap_list.empty() && !fin_touched_n) return;
 
     UndoEntry e;
     e.level        = stroke_level;
     e.targets_base = stroke_writes_to_base;
     e.disp_index   = stroke_disp_index;
+
+    // GPU touched list: the ring span holds (old,new) AND the ids, so the entry
+    // carries no CPU arrays at all until something spills it.
+    if (fin_touched_n) {
+        if (fin_cpu_entry) {
+            const size_t n = fin_cpu_ids.size();
+            e.verts = fin_cpu_ids;
+            e.old_x.resize(n); e.old_y.resize(n); e.old_z.resize(n);
+            e.new_x.resize(n); e.new_y.resize(n); e.new_z.resize(n);
+            for (size_t k = 0; k < n; k++) {
+                const float* p = &fin_cpu_pairs[k * 6];
+                e.old_x[k] = p[0]; e.old_y[k] = p[1]; e.old_z[k] = p[2];
+                e.new_x[k] = p[3]; e.new_y[k] = p[4]; e.new_z[k] = p[5];
+            }
+        } else {
+            e.ring_offset  = stroke_ring_base;
+            e.ring_vcount  = fin_touched_n;
+            e.ring_has_ids = true;
+        }
+        stack.push(std::move(e));
+        return;
+    }
 
     size_t n = snap_list.size();
 
@@ -2215,11 +2316,9 @@ void BrushStroke::commit_undo(const Mesh& mesh, UndoStack& stack, const Multires
     if (ring) {
         // The flip dropped the pen-up readback, so mesh.pos/disp are stale here — do
         // NOT read them. Record the unfiltered snap_list (verts[k] aligns with ring
-        // slot k) and SIZE old_*/new_* to vcount as placeholders so entry_bytes counts
-        // them; the evict/park/cross-level spill writes the real values from the ring.
+        // slot k). old_*/new_* stay empty: entry_bytes counts the entry by its vertex
+        // count, and every CPU reader spills the real values from the ring first.
         e.verts = snap_list;
-        e.old_x.assign(n, 0.0f); e.old_y.assign(n, 0.0f); e.old_z.assign(n, 0.0f);
-        e.new_x.assign(n, 0.0f); e.new_y.assign(n, 0.0f); e.new_z.assign(n, 0.0f);
         e.ring_offset = stroke_ring_base;
         e.ring_vcount = (uint32_t)n;
     } else {
@@ -2364,10 +2463,50 @@ bool BrushStroke::finalize(DabContext& ctx, Mesh& mesh, UndoStack& stack,
             post_frame(ctx);
         }
         if (dab_readbacks_pending()) return false;   // tick again next frame
-        ScopedPen _kick(PenUpProbe::P_KICK);
         // Every region has retired by here, so the next stroke starts on a clean ring
         // rather than inheriting a head part-way down the buffer.
         ctx.compute.dirty_arena_reset();
+
+        // GPU touched list: the one thing pen-up needs from it is its size — the ring
+        // span is reserved from the count. Two header words, read async; finalize
+        // already spans frames, so this costs one extra tick at most.
+        fin_touched_n = 0;
+        fin_cpu_entry = false;
+        if (gpu_touched && (touched_any || touched_lost) && compute
+            && compute->touched_list_ssbo.handle) {
+            fin_touched_tk = gpu::read_buffer_async(compute->gpu_dev, compute->touched_list_ssbo,
+                                                    0, 2 * sizeof(uint32_t));
+            g_penup.read(2 * sizeof(uint32_t));
+        }
+        fin_state = FinState::COUNT;
+    }
+
+    if (fin_state == FinState::COUNT) {
+        if (fin_touched_tk) {
+            if (!gpu::ticket_ready(compute->gpu_dev, fin_touched_tk)) return false;
+            uint32_t header[2] = { 0, 0 };
+            const bool ok = gpu::ticket_take(compute->gpu_dev, fin_touched_tk, header,
+                                             sizeof(header));
+            fin_touched_tk = 0;
+            fin_touched_n = std::min(header[1], vertex_count);
+            // A region overflowed (flag) or a dab got none (lost): some changed ids were
+            // never recorded, so the only exact entry covers every vertex. Loud; the
+            // whole-mesh regions make it unreachable short of a failed read.
+            if (!ok || header[0] || touched_lost) {
+                std::printf("[touched] %s — whole-mesh undo entry for this stroke\n",
+                            !ok ? "header read FAILED" : header[0] ? "a region overflowed"
+                                                                   : "a dab had no region");
+                static std::vector<uint32_t> all;
+                all.resize((size_t)vertex_count + 2);
+                all[0] = 0;
+                all[1] = vertex_count;
+                for (uint32_t v = 0; v < vertex_count; v++) all[(size_t)v + 2] = v;
+                gpu::write_buffer(compute->gpu_dev, compute->touched_list_ssbo, 0, all.data(),
+                                  ((uint64_t)vertex_count + 2) * sizeof(uint32_t));
+                fin_touched_n = vertex_count;
+            }
+        }
+        ScopedPen _kick(PenUpProbe::P_KICK);
 
         // Stage 1b: GPU-side pen-up work, then kick the async buffer reads.
         //
@@ -2377,6 +2516,31 @@ bool BrushStroke::finalize(DabContext& ctx, Mesh& mesh, UndoStack& stack,
         // tuning. Mask gating is built into the shader.
         static constexpr float AUTOSMOOTH_STRENGTH   = 0.3f;
         static constexpr int   AUTOSMOOTH_ITERATIONS = 1;
+        // GPU touched list: the pen-up kernels read their ids from dirty_verts_ssbo;
+        // put the stroke list there GPU-side instead of uploading snap_list.
+        const uint32_t tn = fin_touched_n;
+        if (tn) {
+            compute->ensure_dirty_verts(tn);
+            compute->copy_touched_ids(compute->dirty_verts_ssbo, 0, tn);
+        }
+        if (tn && fin_autosmooth
+            && fin_brush_type == BrushType::DRAW
+            && compute->has_stroke_smooth()
+            && compute->adjacency_vertex_count > 0) {
+            const uint32_t vc_now = mesh.vertex_count();
+            for (int it = 0; it < AUTOSMOOTH_ITERATIONS; it++)
+                compute->dispatch_stroke_smooth_apply(nullptr, tn, AUTOSMOOTH_STRENGTH,
+                                                       renderer.vbo_pos, renderer.ebo);
+            if (ctx.mirror_pairs)
+                compute->dispatch_mirror_project_ids(renderer.vbo_pos, vc_now, tn);
+            // One-ring normals of the smoothed set, expanded from the list on the GPU.
+            compute->expand_normals_from(compute->touched_list_ssbo, 1, vc_now, vc_now,
+                                         ctx.mirror_pairs, renderer.ebo);
+            compute->flush_gpu_normals(vc_now, renderer.vbo_pos, renderer.vbo_norm,
+                                       renderer.ebo);
+            gpu_normals_deferred = true;
+            gpu_positions_deferred = true;
+        }
         if (fin_autosmooth
             && fin_brush_type == BrushType::DRAW
             && !snap_list.empty()
@@ -2409,6 +2573,65 @@ bool BrushStroke::finalize(DabContext& ctx, Mesh& mesh, UndoStack& stack,
             // Smoothing changed positions on the VBO; force the deferred-readback
             // path below so mesh.pos_* / multires sync to the new state.
             gpu_positions_deferred = true;
+        }
+
+        if (gpu_positions_deferred && tn) {
+            // GPU touched list: the same diff, fed from the list. The ring span is 7
+            // floats per vert — (old,new) as before, then the ids themselves — so the
+            // entry needs nothing on the CPU. Nothing is read back.
+            size_t ring_base = compute->undo_ring_reserve((size_t)tn * 7);
+            if (ring_base != SIZE_MAX) {
+                stroke_ring_base = ring_base;
+                stack.ring_evict_overlap(ring_base * sizeof(float),
+                                         (size_t)tn * 7 * sizeof(float), *compute);
+                compute->dispatch_multires_diff(renderer.vbo_pos, mgpu.disp_ssbo,
+                                                mgpu.frames_ssbo, mgpu.snap_pos_ssbo,
+                                                mgpu.base_ssbo, nullptr, tn,
+                                                stroke_writes_to_base,
+                                                compute->undo_ring_ssbo.handle != 0,
+                                                (uint32_t)ring_base);
+                compute->copy_touched_ids(compute->undo_ring_ssbo,
+                                          (ring_base + (size_t)tn * 6) * sizeof(float), tn);
+                fin_ring_captured = true;
+            } else {
+                // Larger than the whole ring. Run the diff in chunks into a scratch
+                // buffer and bring (id, old, new) down for a CPU-backed entry. Blocking,
+                // but only a stroke that outgrows the ring budget (hundreds of MB) can
+                // land here.
+                std::printf("[touched] stroke of %u verts outgrows the undo ring — "
+                            "chunked readback for a CPU entry\n", tn);
+                constexpr uint32_t kChunk = 1u << 20;
+                gpu::Buffer scratch = gpu::create_buffer(compute->gpu_dev, nullptr,
+                                          (uint64_t)kChunk * 6 * sizeof(float),
+                                          gpu::Usage::Storage);
+                fin_cpu_ids.resize(tn);
+                fin_cpu_pairs.resize((size_t)tn * 6);
+                for (uint32_t off = 0; off < tn; off += kChunk) {
+                    const uint32_t c = std::min(kChunk, tn - off);
+                    gpu::copy_buffer(compute->gpu_dev, compute->touched_list_ssbo,
+                                     (uint64_t)(2 + off) * sizeof(uint32_t),
+                                     compute->dirty_verts_ssbo, 0,
+                                     (uint64_t)c * sizeof(uint32_t));
+                    compute->dispatch_multires_diff(renderer.vbo_pos, mgpu.disp_ssbo,
+                                                    mgpu.frames_ssbo, mgpu.snap_pos_ssbo,
+                                                    mgpu.base_ssbo, nullptr, c,
+                                                    stroke_writes_to_base, true, 0, &scratch);
+                    gpu::read_buffer(compute->gpu_dev, scratch, 0,
+                                     (uint64_t)c * 6 * sizeof(float),
+                                     &fin_cpu_pairs[(size_t)off * 6]);
+                    gpu::read_buffer(compute->gpu_dev, compute->dirty_verts_ssbo, 0,
+                                     (uint64_t)c * sizeof(uint32_t), &fin_cpu_ids[off]);
+                }
+                gpu::release_buffer(scratch);
+                fin_cpu_entry = true;
+            }
+            // Either way the GPU now holds the truth and the CPU copy is stale for
+            // these verts: record them in the entity's GPU-side stale list.
+            mgpu.ensure_stale(vertex_count);
+            compute->dispatch_touched_fold(compute->touched_list_ssbo, 1, vertex_count,
+                                           mgpu.stale_mark_ssbo, mgpu.stale_list_ssbo,
+                                           mgpu.stale_stamp, vertex_count, false);
+            mgpu.mark_gpu_dirty();
         }
 
         if (gpu_positions_deferred && !snap_list.empty()) {
@@ -2512,6 +2735,11 @@ bool BrushStroke::finalize(DabContext& ctx, Mesh& mesh, UndoStack& stack,
     }
 
     const uint32_t vc = vertex_count;
+
+    // GPU touched list: stage 1 already left the GPU authoritative and folded the
+    // stroke into the stale list — there is nothing to land or sync here.
+    if (gpu_positions_deferred && fin_touched_n)
+        gpu_positions_deferred = false;
 
     if (gpu_positions_deferred && !snap_list.empty()) {
         ScopedPen _p(PenUpProbe::P_POS);
@@ -2684,7 +2912,7 @@ bool BrushStroke::finalize(DabContext& ctx, Mesh& mesh, UndoStack& stack,
     // Each non-empty snap set gets its own entry; commit_*_undo self-filter
     // unchanged verts and push() drops empties, so pure strokes still push one.
     // Counted before the commits, which may consume the lists.
-    const size_t pen_touched = snap_list.size() + mask.snap_list.size()
+    const size_t pen_touched = snap_list.size() + fin_touched_n + mask.snap_list.size()
                              + color.snap_list.size() + density.snap_list.size();
     {
         ScopedPen _p(PenUpProbe::P_UNDO);
@@ -2694,7 +2922,7 @@ bool BrushStroke::finalize(DabContext& ctx, Mesh& mesh, UndoStack& stack,
             commit_color_undo(mesh, stack);
         if (!density.snap_list.empty())
             commit_density_undo(mesh, stack);
-        if (!snap_list.empty()) {
+        if (!snap_list.empty() || fin_touched_n) {
             for (int fi = stroke_disp_index + 1; fi < (int)multires.frames.size(); fi++)
                 multires.frames[fi].clear();
             commit_undo(mesh, stack, multires);
@@ -2748,4 +2976,8 @@ void BrushStroke::end() {
     mask.clear();
     color.clear();
     density.clear();
+    fin_touched_n = 0;
+    fin_cpu_entry = false;
+    std::vector<uint32_t>().swap(fin_cpu_ids);     // only the rare chunked path fills
+    std::vector<float>().swap(fin_cpu_pairs);      // these, and they can be huge
 }

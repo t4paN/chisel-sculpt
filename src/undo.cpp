@@ -45,9 +45,20 @@ uint64_t UndoStack::global_pushes = 0;
 // e.verts[k]. This is the one amortized readback 2c-iii moved off the pen-up path —
 // it runs only when the ring evicts/parks/cross-level-applies the entry, never per
 // stroke. After it the entry is fully CPU-backed and applies via the CPU stage.
+// Pull just the vertex ids of a ring_has_ids entry into e.verts. They are raw u32
+// bits in a float array, so they are copied as bytes, never through a float.
+static void read_ids_from_ring(UndoEntry& e, ComputeState& c) {
+    const uint32_t n = e.ring_vcount;
+    if (!e.ring_has_ids || n == 0 || e.ring_offset == SIZE_MAX || !e.verts.empty()) return;
+    e.verts.resize(n);
+    c.undo_ring_read((e.ring_offset + (size_t)n * 6) * sizeof(float), n,
+                     reinterpret_cast<float*>(e.verts.data()));
+}
+
 static void spill_entry_from_ring(UndoEntry& e, ComputeState& c) {
     const uint32_t n = e.ring_vcount;
     if (n == 0 || e.ring_offset == SIZE_MAX) return;
+    read_ids_from_ring(e, c);
     e.old_x.resize(n); e.old_y.resize(n); e.old_z.resize(n);
     e.new_x.resize(n); e.new_y.resize(n); e.new_z.resize(n);
     static std::vector<float> sp;
@@ -59,21 +70,27 @@ static void spill_entry_from_ring(UndoEntry& e, ComputeState& c) {
     }
 }
 
+// Drop an entry's ring residency. After a spill it is fully CPU-backed.
+static void unring(UndoEntry& e) {
+    e.ring_offset = SIZE_MAX;
+    e.ring_vcount = 0;
+    e.ring_has_ids = false;
+}
+
 void UndoStack::ring_evict_overlap(size_t byte_off, size_t byte_len, ComputeState& c) {
     if (byte_len == 0) return;
 
     auto evict = [&](UndoEntry& e) {
         if (e.kind != UndoEntry::Kind::STROKE || e.ring_offset == SIZE_MAX) return;
         const size_t so = e.ring_offset * sizeof(float);
-        const size_t sl = (size_t)e.ring_vcount * 6 * sizeof(float);
+        const size_t sl = e.ring_span_floats() * sizeof(float);
         // Half-open interval intersection in the circular ring's byte space. Spans
         // never straddle the end (reserve wraps to 0 first), so this is a plain test.
         if (!(so < byte_off + byte_len && byte_off < so + sl)) return;
         // 2c-iii: the ring bytes are about to be overwritten by a new stroke — spill
         // (old,new) back into the CPU entry so it can still apply via the CPU stage.
         spill_entry_from_ring(e, c);
-        e.ring_offset = SIZE_MAX;   // fall back to the CPU stage on a future apply
-        e.ring_vcount = 0;
+        unring(e);   // fall back to the CPU stage on a future apply
     };
 
     for (auto& e : undo_stack) evict(e);
@@ -81,7 +98,7 @@ void UndoStack::ring_evict_overlap(size_t byte_off, size_t byte_len, ComputeStat
 }
 
 void UndoStack::push(UndoEntry&& e) {
-    if (e.kind == UndoEntry::Kind::STROKE && e.verts.empty()) return;
+    if (e.kind == UndoEntry::Kind::STROKE && e.stroke_verts() == 0) return;
     if (e.kind == UndoEntry::Kind::MASK && e.verts.empty()) return;
     if (e.kind == UndoEntry::Kind::PAINT && e.verts.empty()) return;
     if (e.kind == UndoEntry::Kind::PROJECTION && e.before.empty()) return;
@@ -136,8 +153,7 @@ void UndoStack::ring_park_all(ComputeState& c) {
     auto park = [&](UndoEntry& e) {
         if (e.kind == UndoEntry::Kind::STROKE && e.ring_offset != SIZE_MAX) {
             spill_entry_from_ring(e, c);
-            e.ring_offset = SIZE_MAX;
-            e.ring_vcount = 0;
+            unring(e);
         }
     };
     for (auto& e : undo_stack) park(e);
@@ -279,7 +295,45 @@ bool UndoStack::apply(UndoEntry& e, MeshEntity& ent, Scene& scene, bool forward)
     const bool inplace_gpu_ring =
         gpu_avail && ent.multires_gpu.level == e.level && e.level == cur
         && e.ring_offset != SIZE_MAX && scene.compute().undo_ring_ssbo.handle
-        && e.ring_vcount == (uint32_t)e.verts.size();
+        && (e.ring_has_ids || e.ring_vcount == (uint32_t)e.verts.size());
+    // A stroke whose ids live only in the ring: stay entirely on the GPU. The ids are
+    // copied out of the ring GPU-side; nothing crosses to the CPU.
+    if (inplace_gpu_ring && e.ring_has_ids && e.verts.empty()) {
+        ComputeState& c = scene.compute();
+        if (c.has_gpu_touched() && c.has_gpu_normals()
+            && c.adjacency_vertex_count == mesh.vertex_count()) {
+            Renderer& r = scene.renderer();
+            const uint32_t n = e.ring_vcount;
+            const uint64_t ids_off = (e.ring_offset + (uint64_t)n * 6) * sizeof(float);
+            c.ensure_dirty_verts(n);
+            gpu::copy_buffer(c.gpu_dev, c.undo_ring_ssbo, ids_off, c.dirty_verts_ssbo, 0,
+                             (uint64_t)n * sizeof(uint32_t));
+            c.dispatch_multires_apply(r.vbo_pos, ent.multires_gpu.disp_ssbo,
+                                      ent.multires_gpu.frames_ssbo, ent.multires_gpu.base_ssbo,
+                                      nullptr, nullptr, n, e.targets_base, true,
+                                      (uint32_t)e.ring_offset, forward);
+            // The same ids as a {count, ids[]} list: normals over their one-ring, and
+            // the entity's stale set for the next materialize.
+            c.load_touched_ids(c.undo_ring_ssbo, ids_off, n, mesh.vertex_count());
+            c.expand_normals_from(c.touched_list_ssbo, 1, n, mesh.vertex_count(), false, r.ebo);
+            c.flush_gpu_normals(mesh.vertex_count(), r.vbo_pos, r.vbo_norm, r.ebo);
+            MultiresGPU& mg = ent.multires_gpu;
+            mg.ensure_stale(mesh.vertex_count());
+            c.dispatch_touched_fold(c.touched_list_ssbo, 1, n, mg.stale_mark_ssbo,
+                                    mg.stale_list_ssbo, mg.stale_stamp, mesh.vertex_count(),
+                                    false);
+            mg.mark_gpu_dirty();
+            if (e.targets_base) {
+                for (auto& fv : multires.frames) fv.clear();
+            } else {
+                for (int i = e.disp_index + 1; i < (int)multires.frames.size(); i++)
+                    multires.frames[i].clear();
+            }
+            return false;
+        }
+        // No GPU expansion available: fetch the ids and take the arm below.
+        read_ids_from_ring(e, c);
+    }
     if (inplace_gpu_ring) {
         Renderer&     r = scene.renderer();
         ComputeState& c = scene.compute();
@@ -339,13 +393,13 @@ bool UndoStack::apply(UndoEntry& e, MeshEntity& ent, Scene& scene, bool forward)
     // entity's CPU copy stale, materialize it through the choke before we read/write
     // CPU storage (no-op when not dirty).
     scene.materialize_active_cpu();
-    // Case 3 (cross-level, e.level != cur): the storage write + cascade below read
-    // this entry's CPU old/new — placeholders if it's still ring-resident. Spill it
-    // out of the ring first so they hold the real values.
-    if (e.level != cur && e.ring_offset != SIZE_MAX && scene.compute().undo_ring_ssbo.handle) {
+    // Every arm below reads this entry's CPU verts/old/new — empty or placeholders if
+    // it is still ring-resident. Spill it out of the ring first so they hold the real
+    // values. (This used to spill only cross-level; a same-level entry reaching here
+    // without the GPU arm would have applied placeholder zeros.)
+    if (e.ring_offset != SIZE_MAX && scene.compute().undo_ring_ssbo.handle) {
         spill_entry_from_ring(e, scene.compute());
-        e.ring_offset = SIZE_MAX;
-        e.ring_vcount = 0;
+        unring(e);
     }
 
     // 1) Write to storage (base cage or disp layer).

@@ -224,7 +224,16 @@ struct BrushStroke {
     bool blocks_need_rebuild = true;   // rebuild block AABBs on this frame's first dab
     bool snapped_whole_mesh = false;   // the fallback above already ran this stroke
 
-    void begin_dab(DabContext& ctx);
+    // GPU touched list (CHISEL_GPU_TOUCHED, decided at pen-down): geometry dabs fold
+    // their region into ComputeState's stroke list instead of reading it back, so no
+    // geometry id crosses to the CPU during the stroke or at pen-up. snap_list and
+    // the per-vertex snap arrays stay EMPTY on this path; pen-up reads only the list's
+    // two header words. Mask/colour/density dabs keep the per-dab reads.
+    bool gpu_touched  = false;   // this stroke uses the GPU list
+    bool touched_any  = false;   // at least one geometry region was folded
+    bool touched_lost = false;   // a geometry dab got no region: its ids are unknown
+
+    void begin_dab(DabContext& ctx, uint8_t kind = DAB_GEO);
     void kick_dab_readback(DabContext& ctx, uint8_t kind);
     void drain_dab_readbacks(DabContext& ctx);
     bool dab_readbacks_pending() const { return !pending_dabs.empty() || move.capture_tk != 0; }
@@ -386,7 +395,7 @@ struct BrushStroke {
                   BrushType brush_type, bool autosmooth, bool& had_update);
 
     // Pen-up reconcile state (see finalize).
-    enum class FinState : uint8_t { IDLE, DRAIN, READS };
+    enum class FinState : uint8_t { IDLE, DRAIN, COUNT, READS };
     FinState fin_state = FinState::IDLE;
     bool reconciling() const { return fin_state != FinState::IDLE; }
     bool fin_ring_captured = false;
@@ -394,6 +403,14 @@ struct BrushStroke {
     bool      fin_autosmooth = false;             // input can change mid-reconcile
     gpu::ReadTicket fin_pos_tk = 0, fin_mask_tk = 0, fin_color_tk = 0, fin_norm_tk = 0,
                     fin_density_tk = 0;
+    // GPU touched list at pen-up: the header read (flag + count) and the count it gave.
+    gpu::ReadTicket fin_touched_tk = 0;
+    uint32_t        fin_touched_n = 0;
+    // Set when the touched list could not go into the ring: the stroke's (id, old,
+    // new) came down in chunks and commit_undo builds a CPU entry from these.
+    bool                  fin_cpu_entry = false;
+    std::vector<uint32_t> fin_cpu_ids;
+    std::vector<float>    fin_cpu_pairs;   // 6 floats per id: old xyz, new xyz
     std::vector<float>    fin_pos_buf, fin_mask_buf, fin_norm_buf, fin_density_buf;  // persistent
     std::vector<uint32_t> fin_color_buf;
     std::vector<float>    fin_gpu_diff_chk;   // CHISEL_DEBUG_MULTIRES stage-1 snapshot

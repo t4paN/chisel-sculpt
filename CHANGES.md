@@ -2,6 +2,51 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-09-24 — Geometry strokes keep their touched list on the GPU
+
+*Browser-tested on itch (test build `0.2.23-gputest`, #2010810) on an Intel APU at L9
+(~5M tris): strokes, undo/redo, undo across a level change, mirror, and Move. No alarm
+lines. User: it "feels pretty good… well-er". The native GL/wgpu builds compile and pass
+the shader check, but they have **not** been hand-run, so there are no before/after
+timings yet. Measure with `CHISEL_GPU_TOUCHED=0` (the old path) against the default.*
+
+**No geometry id crosses to the CPU during a stroke or at pen-up.** Every geometry dab
+used to read its dirty-list region back so the CPU could keep the stroke's touched set
+for undo. One big L10 stroke moved up to ~980 MB that way. The set's consumers at pen-up
+are all GPU kernels, so it is now built on the GPU:
+- `touched_fold.{wgsl,comp}` folds each dab's region into a per-stroke list, deduped by a
+  per-vertex stamp, the same trick as `normals_expand`. Pair-map mirror twins are
+  claimed too.
+- Geometry regions are whole-mesh, since nothing reads them back, so they cannot
+  overflow. They are handed back to the arena right after the fold.
+- Pen-up reads **two words**, the list's overflow flag and count, to size the undo ring
+  span. Autosmooth, the multires diff, and the ring capture all read the list GPU-side.
+- Move/limb fold their captured set once per stroke.
+
+**Undo entries carry their ids in the ring.** A span is now 7 floats per vertex: the
+(old,new) block as before, then the ids as raw bits (`ring_has_ids`). `UndoEntry::verts`
+stays empty until something spills the entry. The in-place GPU undo copies the ids out of
+the ring GPU-side, applies them, expands normals from them, and marks them stale, all on
+the GPU. Any other undo arm spills the entry first. It used to spill only across levels,
+so a same-level entry that missed the GPU arm would have applied placeholder zeros.
+
+**The CPU-stale set lives on the GPU too.** The same fold keeps `MultiresGPU`'s stale
+list. `materialize_cpu()` reads it, which is the only point these ids come down, and a
+level switch, save, remesh or object switch is already waiting there.
+
+**Memory.** Ring-resident entries no longer allocate 24 B/vert of placeholder old/new
+arrays, which matters most in the 32-bit browser heap. Pen-down on this path no longer
+fills four whole-mesh snapshot arrays, about 136 MB of writes at L10.
+
+**Degrade paths.** A region overflow or a dab with no region produces a whole-mesh entry
+(`[touched]`, loud). A stroke larger than the whole ring runs the diff in 1M-vert chunks
+into a scratch buffer and builds a CPU entry (blocking, loud). Mask, paint and density
+strokes, `!compute.supported`, and `CHISEL_GPU_TOUCHED=0` keep the per-dab reads.
+
+**Seen, not fixed:** in the browser the 256 MB ring holds about three big L9 strokes. Each
+new stroke evicts the oldest with a blocking ~70 MB spill at pen-up. That predates this
+change, but it is now the largest pen-up transfer left.
+
 ## 2026-09-23 — v0.2.23 — Level switches after sculpting: 20 s → 1 s in the browser; arena sized to the real queue
 
 *Browser-tested in Chromium 153 with a no-cache server; the build is confirmed by
