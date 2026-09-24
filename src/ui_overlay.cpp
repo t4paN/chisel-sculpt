@@ -1289,9 +1289,11 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
             ImGui::Checkbox("Remesh keeps detail", &input.remesh_keep_detail);
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("On: the remesher keeps its new points on your sculpt\n"
-                                  "and won't flip an edge across a ridge or a carved line.\n\n"
-                                  "Off: the old remesher, which rounds small forms and\n"
-                                  "creases a little more on every pass.\n\n"
+                                  "and won't flip an edge across a ridge or a carved line.\n"
+                                  "The SDF remesh/merge also snaps its result back onto\n"
+                                  "your meshes, so detail finer than a voxel survives.\n\n"
+                                  "Off: the old remeshers, which round small forms and\n"
+                                  "creases away.\n\n"
                                   "Either way the console prints a DRIFT line after each\n"
                                   "remesh: how far the result sits from the original.\n"
                                   "Not saved - it resets to On at every launch.");

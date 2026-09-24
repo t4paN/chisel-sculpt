@@ -2,6 +2,67 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-09-24 — SDF remesh/merge keeps detail
+
+*Reviewed by the user from offline renders (original / old / new, plus wireframe close-ups)
+of three sculpts: "results are pretty tight", "great work". Measured headless with the
+new dev hooks below.*
+
+**The SDF merge now snaps its result back onto the source meshes.** Same bug as the iso
+remesher, one step earlier. The merge rebuilt the surface from the voxel grid, blurred the
+field against lattice pimples, and relaxed onto that field. Nothing ever looked at the
+original again, so anything finer than about a voxel was gone. At the 256 cap that is
+~0.4% of a full figure's height: eyelids, wrinkles, panel lines. The iso fix couldn't
+recover it either, because the chained adaptive remesh only keeps the merge's
+already-softened surface.
+- `snap_mesh_to_soup` (`remesh.cpp`) runs after the relax. It raycasts along the vertex
+  normal onto the source soup, at most one voxel away, in 2 passes, with the same fan
+  check as `project_to_ref`.
+- **Join guard:** a hit is only taken if the signed field is outside half a voxel out
+  along the normal and inside half a voxel in. That rejects each input's buried half
+  where meshes overlap (inside on both sides) and a subtract cutter's sheet in open air
+  (outside on both sides). On a two-sphere union checked against the exact shape, no
+  vertex ended up buried.
+- **Mirror (MC):** the +x half is snapped before the reflect, with the seam column
+  pinned and every other vert kept 0.02 voxel off the plane. **Surface-Nets mirror is
+  skipped:** its symmetry comes from the field, and the soup needn't be symmetric.
+- `RefSurface` now borrows the soup's arrays instead of copying them, and derives tri
+  normals on demand, because the soup can be millions of tris in a 32-bit WASM heap.
+  The iso remesher's output is byte-identical to before this refactor (same drift, tri
+  count and leftover flips on the same run).
+- Both paths print `[sdf] DRIFT from source`: tri centre to the nearest same-facing
+  source surface, sampled, as a % of a voxel.
+
+| Sculpt | Grid | Drift mean, old → new | p95, old → new |
+|---|---|---|---|
+| Garfield (328k) | 128 | 5.7% → 1.9% | 19.3% → 7.0% |
+| Garfield (328k) | 256 | 3.5% → 1.1% | 12.5% → 4.1% |
+| Garfield (328k) | 256, mirror | 3.5% → 1.1% | 12.5% → 4.2% |
+| Goggins | 128 | 4.0% → 1.2% | 15.5% → 4.7% |
+| Chameleon (481k) | 128 | 5.9% → 2.2% | 19.8% → 9.3% |
+
+Against the exact shape of the two-sphere union: 3.3% → 0.4% away from the join and
+5.3% → 0.5% at it. The snap adds 0.05–0.4 s to a 1–7 s merge. Watertightness is
+identical both ways in every run. Garfield at 256 non-mirror has 8 non-manifold edges
+with the snap OFF as well, so they predate this.
+
+The snap brings no pimples back on wide flat areas. On Goggins' skull dome, vertex
+out-of-plane offset (% of edge) is median 1.35% / p95 2.48% old versus 1.35% / 2.50% new.
+Detail below the grid's size, like the chameleon's carved snout emblem, comes back as a
+lumpy approximation of the shape: the triangles are too big to draw it cleanly. A higher
+grid is still the answer there.
+
+The switch is the same Settings box, "Remesh keeps detail", which now covers both
+remeshers. Its tooltip says so.
+
+**Subtract is untested:** it needs two entities, so it can't run headless. The join
+guard covers it by construction.
+
+Dev hooks: `CHISEL_AUTO_MERGE=1` (one SDF remesh after load), `CHISEL_MERGE_RES=64..256`,
+`CHISEL_MERGE_MIRROR=0/1`, `CHISEL_MERGE_DUMP=out.obj` (result) and
+`CHISEL_MERGE_SRC_DUMP=src.obj` (pre-merge mesh). The merge result line (tris, R, time,
+watertight) is now printed to the console as well as toasted.
+
 ## 2026-09-24 — Remesh keeps detail; remesh detail slider
 
 *Browser-tested on itch (`0.2.23-keepdetail2`, #2011177). The user took one sculpt from

@@ -1762,11 +1762,14 @@ int main(int argc, char* argv[]) {
             } else if (!vmerge_job) {
                 take_rescue("SDF remesh");
                 scene.materialize_active_cpu();  // 2b: merge reads the live surface (mesh.pos)
+                if (const char* dump = std::getenv("CHISEL_MERGE_SRC_DUMP"))   // dev: pre-merge mesh
+                    scene.active_mesh().export_obj(dump);
                 vmerge_job = voxel_merge_begin(scene, compute,
                                                input.voxel_merge_resolution,
                                                input.voxel_merge_mirror,
                                                input.voxel_merge_surface_nets,
-                                               input.voxel_merge_subtract);
+                                               input.voxel_merge_subtract,
+                                               input.remesh_keep_detail);
                 input.voxel_merge_in_progress = true;
             }
         }
@@ -1806,6 +1809,10 @@ int main(int argc, char* argv[]) {
                                   watertight ? "watertight" : "NOT watertight",
                                   vm.components, vm.boundary_edges, vm.nonmanifold_edges);
                     input.notification_timer = 6.0f;
+                    std::printf("[voxel-merge] %s\n", input.notification);
+                    // Dev hook: CHISEL_MERGE_DUMP=<path.obj> writes the result for offline checks.
+                    if (const char* dump = std::getenv("CHISEL_MERGE_DUMP"))
+                        mesh->export_obj(dump);
                     // Chain the adaptive remesh: the merge output is uniform-dense
                     // MC soup; when it carries a painted density field the user
                     // wants the topology to follow it right away (D in the merge
@@ -3388,6 +3395,11 @@ int main(int argc, char* argv[]) {
                     input.remesh_keep_detail = std::atoi(env) != 0;
                 if (const char* env = std::getenv("CHISEL_REMESH_DETAIL"))
                     input.remesh_detail = std::min(4.0f, std::max(0.25f, (float)std::atof(env)));
+                // SDF remesh knobs for CHISEL_AUTO_MERGE runs.
+                if (const char* env = std::getenv("CHISEL_MERGE_RES"))
+                    input.voxel_merge_resolution = std::min(256, std::max(64, std::atoi(env)));
+                if (const char* env = std::getenv("CHISEL_MERGE_MIRROR"))
+                    input.voxel_merge_mirror = std::atoi(env) != 0;
             }
         }
 
@@ -3404,6 +3416,21 @@ int main(int argc, char* argv[]) {
                 app_state == AppState::IDLE && !input.remesh_in_progress) {
                 input.remesh_requested = true;
                 auto_remesh_frames = 0;
+            }
+        }
+
+        // Dev hook: CHISEL_AUTO_MERGE=1 fires one SDF remesh of the selection the
+        // same way, so CHISEL_REMESH_KEEP_DETAIL=0/1 A/Bs the merge's snap too.
+        {
+            static int auto_merge_frames = -1;
+            if (auto_merge_frames < 0) {
+                const char* env = std::getenv("CHISEL_AUTO_MERGE");
+                auto_merge_frames = (env && std::atoi(env) != 0) ? 1 : 0;
+            }
+            if (auto_merge_frames > 0 && ++auto_merge_frames > 12 &&
+                app_state == AppState::IDLE && !input.voxel_merge_in_progress) {
+                input.voxel_merge_requested = true;
+                auto_merge_frames = 0;
             }
         }
 

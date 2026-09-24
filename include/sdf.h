@@ -78,7 +78,8 @@ enum class VoxelMergeStatus { Working, Done, Failed };
 // funnels through one path. Caller owns the job; free it with voxel_merge_destroy.
 VoxelMergeJob* voxel_merge_begin(Scene& scene, ComputeState& cs,
                                  int resolution, bool mirror, bool surface_nets,
-                                 bool subtract = false);
+                                 bool subtract = false,
+                                 bool keep_detail = true);  // snap the result back onto the source meshes
 
 // Advance one budgeted step. Returns Working until the job completes; on the final
 // step it runs the CPU tail (weld → relax → mirror seam → manifold gate → scene

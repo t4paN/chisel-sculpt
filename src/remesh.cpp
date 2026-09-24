@@ -2421,14 +2421,33 @@ static void audit_open_edges(const Mesh& m, float seam_tol, const char* stage,
 // edge, 3×3×3 neighbourhood), so a vertex that has drifted by less than one
 // cell always finds its original surface.
 struct RefSurface {
-    std::vector<Vec3>     p;          // 3 per tri, unshared (no index buffer needed)
-    std::vector<Vec3>     n;          // unit normal per tri
+    // Tris are read through P/I: either owned copies (remesh — the mesh it
+    // snapshots is about to be rewritten) or borrowed arrays (the SDF merge's
+    // source soup, which can be millions of tris in a 32-bit WASM heap and
+    // outlives the lookup anyway). Normals are derived on demand for the same
+    // reason: 12 bytes a tri is real money at that size.
+    std::vector<float>    own_p;      // owned copies, 9 floats per tri (unshared)
+    std::vector<uint32_t> own_i;
+    const float*    P = nullptr;      // flat xyz per vertex
+    const uint32_t* I = nullptr;      // 3 per tri
+    uint32_t        nt = 0;
     std::vector<uint32_t> bucket_off; // CSR over hashed cells
     std::vector<uint32_t> bucket_tri;
     float    cell = 0.0f, inv_cell = 0.0f;
     uint32_t mask = 0;                // bucket count - 1 (power of two)
 
-    bool empty() const { return n.empty(); }
+    bool empty() const { return nt == 0; }
+    Vec3 v(uint32_t t, int k) const {
+        const float* q = P + (size_t)I[t*3+k] * 3;
+        return Vec3(q[0], q[1], q[2]);
+    }
+    // Unit normal, or zero for a zero-area tri (fails every facing test).
+    Vec3 nrm(uint32_t t) const {
+        Vec3 a = v(t,0);
+        Vec3 nn = (v(t,1) - a).cross(v(t,2) - a);
+        float l = nn.length();
+        return l > 1e-20f ? nn * (1.0f / l) : Vec3(0, 0, 0);
+    }
 
     static uint32_t hash(int x, int y, int z) {
         return (uint32_t)x * 73856093u ^ (uint32_t)y * 19349663u ^ (uint32_t)z * 83492791u;
@@ -2436,25 +2455,33 @@ struct RefSurface {
     int ci(float v) const { return (int)std::floor(v * inv_cell); }
 
     void build(const Mesh& m, const std::vector<uint8_t>& keep, float cell_size) {
-        cell = cell_size; inv_cell = 1.0f / cell_size;
         const uint32_t tc = m.tri_count();
         for (uint32_t t = 0; t < tc; t++) {
             if (!keep[t]) continue;
             Vec3 a = m.get_pos(m.indices[t*3+0]);
             Vec3 b = m.get_pos(m.indices[t*3+1]);
             Vec3 c = m.get_pos(m.indices[t*3+2]);
-            Vec3 nn = (b - a).cross(c - a);
-            float l = nn.length();
-            if (l < 1e-20f) continue;      // zero-area: no plane to project onto
-            p.push_back(a); p.push_back(b); p.push_back(c);
-            n.push_back(nn * (1.0f / l));
+            if ((b - a).cross(c - a).length() < 1e-20f) continue;  // no plane to project onto
+            for (Vec3 x : {a, b, c}) {
+                own_i.push_back((uint32_t)(own_p.size() / 3));
+                own_p.push_back(x.x); own_p.push_back(x.y); own_p.push_back(x.z);
+            }
         }
-        const uint32_t nt = (uint32_t)n.size();
-        if (nt == 0) return;
+        P = own_p.data(); I = own_i.data(); nt = (uint32_t)(own_i.size() / 3);
+        index_buckets(cell_size);
+    }
 
+    void build_borrowed(const float* pos, const uint32_t* idx, uint32_t tri_count, float cell_size) {
+        P = pos; I = idx; nt = tri_count;
+        index_buckets(cell_size);
+    }
+
+    void index_buckets(float cell_size) {
+        cell = cell_size; inv_cell = 1.0f / cell_size;
+        if (nt == 0) return;
         // Count cell touches first so the bucket table is sized once.
         auto for_cells = [&](uint32_t t, auto&& fn) {
-            const Vec3& a = p[t*3]; const Vec3& b = p[t*3+1]; const Vec3& c = p[t*3+2];
+            Vec3 a = v(t,0), b = v(t,1), c = v(t,2);
             int x0 = ci(std::min({a.x,b.x,c.x})), x1 = ci(std::max({a.x,b.x,c.x}));
             int y0 = ci(std::min({a.y,b.y,c.y})), y1 = ci(std::max({a.y,b.y,c.y}));
             int z0 = ci(std::min({a.z,b.z,c.z})), z1 = ci(std::max({a.z,b.z,c.z}));
@@ -2514,8 +2541,8 @@ struct RefSurface {
                     uint32_t h = hash(x, y, z) & mask;
                     for (uint32_t j = bucket_off[h]; j < bucket_off[h+1]; j++) {
                         uint32_t t = bucket_tri[j];
-                        if (check_facing && n[t].dot(nrm) < 0.3f) continue;
-                        Vec3 c = closest_on_tri(q, p[t*3], p[t*3+1], p[t*3+2]);
+                        if (check_facing && this->nrm(t).dot(nrm) < 0.3f) continue;
+                        Vec3 c = closest_on_tri(q, v(t,0), v(t,1), v(t,2));
                         Vec3 d = c - q;
                         float d2 = d.dot(d);
                         if (d2 < best) { best = d2; out = c; found = true; }
@@ -2547,10 +2574,10 @@ static bool raycast_ref(const RefSurface& ref, Vec3 q, Vec3 dir, float reach, fl
         if (n_seen < 16) seen[n_seen++] = h;
         for (uint32_t j = ref.bucket_off[h]; j < ref.bucket_off[h+1]; j++) {
             uint32_t t = ref.bucket_tri[j];
-            if (ref.n[t].dot(dir) < 0.3f) continue;       // wrong side of a thin part
+            if (ref.nrm(t).dot(dir) < 0.3f) continue;     // wrong side of a thin part
             // Möller-Trumbore, two-sided in t.
-            const Vec3& a = ref.p[t*3];
-            Vec3 e1 = ref.p[t*3+1] - a, e2 = ref.p[t*3+2] - a;
+            const Vec3 a = ref.v(t,0);
+            Vec3 e1 = ref.v(t,1) - a, e2 = ref.v(t,2) - a;
             Vec3 pv = dir.cross(e2);
             float det = e1.dot(pv);
             if (std::fabs(det) < 1e-20f) continue;
@@ -2628,6 +2655,103 @@ static uint32_t project_to_ref(Mesh& m, const RefSurface& ref,
         m.pos_x[v] = c.x; m.pos_y[v] = c.y; m.pos_z[v] = c.z;
         moved++;
     }
+    return moved;
+}
+
+// SDF merge counterpart of project_to_ref. The merge rebuilds the surface from
+// a voxel grid, so anything finer than about a voxel is gone by construction,
+// and the relax then reprojects onto that grid surface. Here the extracted
+// surface is pulled back onto the source meshes it was voxelised from, along
+// the normal only (same reasons as project_to_ref). The soup is borrowed, not
+// copied. `accept` is the caller's say on whether a hit lies on the part of
+// the soup that is actually the result's surface: at a join, each input's
+// buried half is still in the soup, a voxel or less under the skin.
+uint32_t snap_mesh_to_soup(Mesh& m, const std::vector<float>& pos,
+                           const std::vector<uint32_t>& idx,
+                           float cell, float max_step, bool snap,
+                           const std::vector<uint8_t>* pinned, float seam_tol,
+                           const std::function<bool(Vec3, Vec3)>& accept) {
+    auto t0 = std::chrono::steady_clock::now();
+    RefSurface ref;
+    ref.build_borrowed(pos.data(), idx.data(), (uint32_t)(idx.size() / 3), cell);
+    uint32_t moved = 0, refused = 0;
+
+    for (int pass = 0; snap && pass < 2; pass++) {
+        // Fresh normals each pass: the second pass picks up verts whose fan
+        // check failed the first time because a neighbour hadn't moved yet.
+        m.build_adjacency();
+        m.recompute_normals();
+        const uint32_t vc = m.vertex_count();
+        for (uint32_t v = 0; v < vc; v++) {
+            if (pinned && v < (uint32_t)pinned->size() && (*pinned)[v]) continue;
+            Vec3 q = m.get_pos(v);
+            if (seam_tol > 0.0f && q.x < seam_tol) continue;   // mirror half: leave the seam column alone
+            Vec3 nrm(m.norm_x[v], m.norm_y[v], m.norm_z[v]);
+            float nl = nrm.length();
+            if (nl <= 1e-12f) continue;
+            nrm = nrm * (1.0f / nl);
+            float h;
+            if (!raycast_ref(ref, q, nrm, max_step, h)) continue;
+            if (std::fabs(h) < 1e-7f) continue;
+            Vec3 c = q + nrm * h;
+            if (!accept(c, nrm)) { refused++; continue; }
+            if (seam_tol > 0.0f) c.x = std::max(seam_tol, c.x);
+            const uint32_t ts = m.vert_tri_offset[v], te = m.vert_tri_offset[v+1];
+            bool fan_ok = true;
+            for (uint32_t j = ts; j < te && fan_ok; j++) {
+                uint32_t t = m.vert_tri_list[j];
+                Vec3 p3[3], r3[3];
+                for (int k = 0; k < 3; k++) {
+                    uint32_t u = m.indices[t*3+k];
+                    p3[k] = m.get_pos(u);
+                    r3[k] = (u == v) ? c : p3[k];
+                }
+                Vec3 nb = (p3[1] - p3[0]).cross(p3[2] - p3[0]);
+                Vec3 na = (r3[1] - r3[0]).cross(r3[2] - r3[0]);
+                if (na.dot(nb) < 0.25f * nb.dot(nb)) fan_ok = false;
+            }
+            if (!fan_ok) continue;
+            m.pos_x[v] = c.x; m.pos_y[v] = c.y; m.pos_z[v] = c.z;
+            moved++;
+        }
+    }
+
+    // DRIFT: tri centre to nearest same-facing source surface, % of a voxel.
+    // Sampled (≤ 60k tris) — a 27-cell closest-point search over a dense
+    // source is the expensive query, and the mean/p95 settle long before that.
+    {
+        m.build_adjacency();
+        m.recompute_normals();
+        std::vector<float> dists;
+        const uint32_t tc = m.tri_count();
+        const uint32_t stride = std::max(1u, tc / 60000u);
+        dists.reserve(tc / stride + 1);
+        for (uint32_t t = 0; t < tc; t += stride) {
+            Vec3 a = m.get_pos(m.indices[t*3]), b = m.get_pos(m.indices[t*3+1]),
+                 c = m.get_pos(m.indices[t*3+2]);
+            Vec3 n = (b - a).cross(c - a);
+            float nl = n.length();
+            if (nl < 1e-20f) continue;
+            Vec3 cp; float d;
+            if (ref.closest((a + b + c) * (1.0f / 3.0f), n * (1.0f / nl), cp, d)) dists.push_back(d);
+        }
+        if (!dists.empty()) {
+            std::sort(dists.begin(), dists.end());
+            double sum = 0.0;
+            for (float d : dists) sum += d;
+            const float pct = 100.0f / cell;
+            std::printf("[sdf] DRIFT from source (keep-detail %s): mean %.1f%%  p95 %.1f%%  "
+                        "max %.0f%% of voxel  over %zu sampled faces\n",
+                        snap ? "ON" : "OFF",
+                        (float)(sum / dists.size()) * pct,
+                        dists[dists.size() * 95 / 100] * pct,
+                        dists.back() * pct, dists.size());
+        }
+    }
+    std::printf("[sdf] snap to source: %u tris indexed, %u moves, %u refused at joins (%.0f ms)%s\n",
+                ref.nt, moved, refused,
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(),
+                snap ? "" : " - keep-detail OFF, measuring only");
     return moved;
 }
 
@@ -2857,7 +2981,7 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
         // each query tests a few dozen tris rather than hundreds.
         ref.build(mesh, keep, target_edge_length);
         std::printf("[remesh] reference surface: %zu tris, %zu cell refs (%.0f ms)%s\n",
-                    ref.n.size(), ref.bucket_tri.size(),
+                    (size_t)ref.nt, ref.bucket_tri.size(),
                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tr).count(),
                     keep_detail ? "" : " - keep-detail OFF, measuring only");
     }

@@ -5,6 +5,7 @@
 #include "gpu_shaders_generated.h"   // gpu::embedded_shader("sdf_count" / ...)
 #include "mc_tables.h"
 #include "chisel_debug.h"
+#include "remesh.h"          // snap_mesh_to_soup
 #include <glad/glad.h>
 #include <cstdio>
 #include <cstring>
@@ -1331,6 +1332,7 @@ struct VoxelMergeJob {
 
     bool     mirror = false;
     bool     use_nets = false;     // Surface Nets extractor chosen (vs Marching Cubes)
+    bool     keep_detail = true;   // snap the extracted surface back onto the source soup
     SdfGrid  grid;
     int      band = 0;
     uint32_t tri_count    = 0;
@@ -1341,6 +1343,7 @@ struct VoxelMergeJob {
     uint32_t sign_off     = 0;     // resumable winding-sign cursor (corner index)
 
     std::vector<float>    pos;     // source soup, kept for relax + paint transfer
+    std::vector<uint32_t> idx;     // its tris (cutters already wound backwards), kept for the snap
     std::vector<uint32_t> vcol;    // per-source-vertex paint
     bool                  any_paint = false;
     std::vector<float>    vdens;   // per-source-vertex remesh density
@@ -1409,9 +1412,10 @@ static void symmetrise_field_x(std::vector<float>& field, const SdfGrid& grid) {
 
 VoxelMergeJob* voxel_merge_begin(Scene& scene, ComputeState& cs,
                                  int resolution, bool mirror, bool surface_nets,
-                                 bool subtract) {
+                                 bool subtract, bool keep_detail) {
     VoxelMergeJob* job = new VoxelMergeJob();
     job->mirror = mirror;
+    job->keep_detail = keep_detail;
     job->t0 = std::chrono::high_resolution_clock::now();
 
     auto fail = [&](const std::string& msg) -> VoxelMergeJob* {
@@ -1606,6 +1610,7 @@ VoxelMergeJob* voxel_merge_begin(Scene& scene, ComputeState& cs,
     job->mc_ubo     = gpu::create_buffer(cs.gpu_dev, nullptr, sizeof(SdfMeshParamsGPU),   gpu::Usage::Uniform);
 
     sdf_gl_check("pre-merge (stale)");   // drain inherited errors so attribution is clean
+    job->idx = std::move(idx);           // uploaded + tree built; the CPU snap reads it in Finish
     job->phase = VoxelMergeJob::Phase::Splat;
     return job;
 }
@@ -1904,6 +1909,25 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
         // singularities. Flips move no vertices, so mirror pairing (position-
         // based) and the H-D watertight gate are unaffected; on a sphere the
         // confidence weight goes to ~0 and this degrades to the old plain relax.
+        // Keep detail: pull the relaxed surface back onto the source meshes.
+        // Everything above only ever sees the voxel grid, so detail finer than
+        // about a voxel is gone by construction; the source soup still has it.
+        // A hit counts only if the field says it sits on the result's skin —
+        // outside half a voxel out along the normal, inside half a voxel in.
+        // That turns away each input's buried half at a join (inside on both
+        // sides) and a cutter's sheet in open air (outside on both sides).
+        // Reach is one voxel: the snap restores sub-voxel detail, it doesn't
+        // reshape. Runs with snap=false too, so both paths print a DRIFT line.
+        auto snap_to_source = [&](Mesh& m, const std::vector<uint8_t>* pinned, float seam_tol) {
+            const float hv = 0.5f * grid.voxel;
+            snap_mesh_to_soup(m, j.pos, j.idx, grid.voxel, grid.voxel, j.keep_detail,
+                              pinned, seam_tol,
+                              [&](Vec3 c, Vec3 n) {
+                                  return sample_field(j.field_cpu, grid, c + n * hv) > 0.0f &&
+                                         sample_field(j.field_cpu, grid, c - n * hv) < 0.0f;
+                              });
+        };
+
         if (j.mirror && !j.use_nets) {
             // MC keep-+x-and-reflect: relax that half alone (seam pinned), then
             // mirror it -> both sides identical, exact partner map, no seam fight.
@@ -1918,6 +1942,9 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
             relax_to_field(welded, j.field_cpu, grid, /*iters=*/4, /*lambda=*/0.5f, &seam, &flow);
             std::printf("[sdf-flow] cross-field relax: %u valence flips (+x half)\n", flips);
             validate_seam_loop(welded, grid.voxel, seam);  // H-B: close seam escapees before reflecting
+            // Snap the +x half before it is reflected, seam column pinned and every
+            // other vert kept clear of the plane, so the reflect sees the same seam.
+            snap_to_source(welded, &seam, 0.02f * grid.voxel);
             reflect_across_x(welded, seam);
             weld_seam_band(welded, grid.voxel);   // H-A: weld any unflagged escapees onto x=0
         } else {
@@ -1933,6 +1960,9 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
             uint32_t flips = flip_valence(welded, nullptr);
             relax_to_field(welded, j.field_cpu, grid, /*iters=*/4, /*lambda=*/0.5f, nullptr, &flow);
             std::printf("[sdf-flow] cross-field relax: %u valence flips\n", flips);
+            // Surface-Nets mirror is made symmetric by the FIELD; the source soup
+            // needn't be, so a snap here would break the pairing. Faithful only.
+            if (!j.mirror) snap_to_source(welded, nullptr, 0.0f);
         }
 
         welded.build_adjacency();
@@ -2002,7 +2032,7 @@ void voxel_merge_destroy(VoxelMergeJob* job) { delete job; }
 VoxelMergeResult voxel_merge_selected(Scene& scene, ComputeState& cs,
                                       int resolution, bool mirror, bool surface_nets,
                                       bool subtract) {
-    VoxelMergeJob* job = voxel_merge_begin(scene, cs, resolution, mirror, surface_nets, subtract);
+    VoxelMergeJob* job = voxel_merge_begin(scene, cs, resolution, mirror, surface_nets, subtract, true);
     VoxelMergeResult out;
     while (voxel_merge_tick(scene, cs, *job, out) == VoxelMergeStatus::Working) {}
     voxel_merge_destroy(job);
