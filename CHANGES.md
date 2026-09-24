@@ -2,6 +2,38 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-09-24 — Dabs follow every pointer sample; the Catmull-Rom spline is gone
+
+*Browser-tested on itch (`0.2.23-pathtest`, #2010856) on an Intel APU. User: "it works so
+well now that i could barely test the difference before, but now it's just impossible to
+tell if any such issues remain". Native GL/wgpu build, but they have not been hand-run.
+No `[path]` numbers were collected yet.*
+
+**Fast strokes at low frame rates no longer turn circles into polygons.** The dab loop
+read the pointer once per frame. Every position reported in between was overwritten, so
+at 15-20 fps a fast circle had 6-8 points per lap. A Catmull-Rom spline through those
+per-frame points stood in for the missing ones, but it can only round corners, not
+recover the path. Now:
+- `InputState::path_x/y` keeps every position reported since the last frame (fixed 512
+  slots, no allocation, cleared in `end_frame`).
+- Natively the GLFW cursor callback feeds it. On the web the shell also feeds each
+  pointermove's `getCoalescedEvents()` through `chisel_path_sample`, since browsers merge
+  moves to one event per frame.
+- Dabs are placed at equal arc-length steps along that polyline, and the distance left
+  past the last dab carries into the next frame. The budget branch still ends its last
+  dab exactly on the cursor.
+- The spline and its cursor history are removed.
+
+Nothing is delayed: every frame still lays all its dabs that frame, only in the right
+places. This is not Blender's catch-up lag.
+
+**Edge wrap mid-stroke** now restarts the path at the wrapped position. Before, the next
+frame measured from the pre-wrap spot and could lay a line of dabs across the screen.
+
+**Diagnostic:** one `[path] N stroke frames, X pointer samples/frame (max Y)` line per
+stroke. A value near 1 would mean the device or browser reports once per frame and
+faceting could return. Remove the line once the numbers are known.
+
 ## 2026-09-24 — Geometry strokes keep their touched list on the GPU
 
 *Browser-tested on itch (test build `0.2.23-gputest`, #2010810) on an Intel APU at L9

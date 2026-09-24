@@ -233,9 +233,21 @@ void InputState::begin_frame() {
     // before the next one.
 }
 
+void InputState::push_path(double x, double y) {
+    const float fx = (float)x, fy = (float)y;
+    if (path_n > 0 && path_x[path_n - 1] == fx && path_y[path_n - 1] == fy) return;
+    // Full (a very long frame): keep the newest endpoint current rather than drop it.
+    // Losing samples mid-path only straightens that stretch of the stroke.
+    if (path_n == kPathMax) path_n--;
+    path_x[path_n] = fx;
+    path_y[path_n] = fy;
+    path_n++;
+}
+
 void InputState::end_frame() {
     prev_mouse_x = mouse_x;
     prev_mouse_y = mouse_y;
+    path_n = 0;
     mouse1_just_pressed = false;
     mouse1_just_released = false;
     enter_pressed = false;
@@ -479,6 +491,7 @@ static void cursor_pos_callback(GLFWwindow* w, double x, double y) {
     }
     g_input->mouse_x = x;
     g_input->mouse_y = y;
+    g_input->push_path(x, y);
 #endif
 }
 
@@ -498,12 +511,21 @@ extern "C" EMSCRIPTEN_KEEPALIVE void chisel_set_pointer(double x, double y, doub
     }
     g_input->mouse_x = x;
     g_input->mouse_y = y;
+    g_input->push_path(x, y);
     // Feed ImGui the same CSS-pixel position through its own backend entry point.
     // Its GLFW cursor callback was taken back (input_web_take_cursor_callback), so
     // this is the only position source it sees — toolbar/dialog hit-testing stays
     // aligned with the real pointer instead of GLFW's desynced coords.
     if (g_window && ImGui::GetCurrentContext())
         ImGui_ImplGlfw_CursorPosCallback(g_window, x, y);
+}
+
+// The browser batches pointer moves to one event per frame; getCoalescedEvents()
+// hands back the positions it merged. The shell feeds all but the last through here —
+// path only, no ImGui, no slider delta — and the last through chisel_set_pointer.
+extern "C" EMSCRIPTEN_KEEPALIVE void chisel_path_sample(double x, double y) {
+    if (!g_input || g_input->slider_mode != InputState::SliderMode::NONE) return;
+    g_input->push_path(x, y);
 }
 
 // ImGui_ImplGlfw installs its own cursor-pos callback (chaining to ours) and would

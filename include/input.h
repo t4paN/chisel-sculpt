@@ -69,6 +69,15 @@ struct InputState {
     // Mouse
     double mouse_x, mouse_y;
     double prev_mouse_x, prev_mouse_y;
+    // Every pointer position reported since the last frame, oldest first; mouse_x/y
+    // is only the newest of them. The OS reports motion at hundreds of Hz, but a heavy
+    // mesh can hold the frame rate at 15-20, and a stroke laid through one position
+    // per frame turns a fast circle into a polygon. The dab loop walks this path
+    // instead. Fixed size, no allocation; cleared in end_frame.
+    static constexpr int kPathMax = 512;
+    float path_x[kPathMax], path_y[kPathMax];
+    int   path_n = 0;
+    void push_path(double x, double y);
     bool mouse1_down;
     bool mouse2_down;
     bool mouse3_down;  // middle

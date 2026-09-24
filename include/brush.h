@@ -246,10 +246,9 @@ struct BrushStroke {
     // Dab spacing: only apply when cursor has moved far enough since last dab
     float last_dab_x, last_dab_y;
 
-    // Cursor history for Catmull-Rom spline interpolation between frames
-    static constexpr int CURSOR_HIST_SIZE = 4;
-    float cursor_hist_x[4], cursor_hist_y[4];
-    int cursor_hist_count;
+    // Pointer-path walk (main.cpp dab loop): where this frame's path starts — the
+    // previous frame's last position — and the arc length travelled since the last dab.
+    float walk_x = 0.0f, walk_y = 0.0f, walk_carry = 0.0f;
 
     // Move and Mask sub-structs
     MoveState move;

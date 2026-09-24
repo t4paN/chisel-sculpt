@@ -271,6 +271,26 @@ enum class AppState { IDLE, SCULPTING };
 
 // Wrap cursor at screen edges. Returns true if cursor was wrapped.
 // Non-static: insert_controller.cpp forward-declares and calls it.
+// Pointer samples per stroke frame, printed once per stroke. Says whether the path the
+// dab loop walks is dense: a mouse at 125-1000 Hz gives several samples per frame at
+// 20-60 fps, while a device (or browser) that reports once per frame gives 1, and then
+// fast curves facet again. One line per stroke; remove once the numbers are known.
+struct PathStats {
+    uint32_t frames = 0, samples = 0, max_per_frame = 0;
+    void frame(int n) {
+        frames++;
+        samples += (uint32_t)n;
+        if ((uint32_t)n > max_per_frame) max_per_frame = (uint32_t)n;
+    }
+    void report() {
+        if (frames)
+            std::printf("[path] %u stroke frames, %.1f pointer samples/frame (max %u)\n",
+                        frames, (double)samples / frames, max_per_frame);
+        *this = PathStats();
+    }
+};
+static PathStats g_path_stats;
+
 bool wrap_cursor(GLFWwindow* window, InputState& input, int win_w, int win_h) {
     double mx = input.mouse_x;
     double my = input.mouse_y;
@@ -1932,9 +1952,9 @@ int main(int argc, char* argv[]) {
                                input.current_brush, scene.active_mesh_id(),
                                scene.active_entity().multires_gpu,
                                !screen_buffers_dirty);
-            brush_stroke.cursor_hist_count = 1;
-            brush_stroke.cursor_hist_x[0] = (float)input.mouse_x;
-            brush_stroke.cursor_hist_y[0] = (float)input.mouse_y;
+            brush_stroke.walk_x = (float)input.mouse_x;
+            brush_stroke.walk_y = (float)input.mouse_y;
+            brush_stroke.walk_carry = 0.0f;
             app_state = AppState::SCULPTING;
         }
 
@@ -1958,6 +1978,7 @@ int main(int argc, char* argv[]) {
                                       renderer, input.current_brush,
                                       input.autosmooth, had_update)) {
                 print_undo_top("stroke-commit");
+                g_path_stats.report();
                 if (had_update)
                     renderer.update_screen_positions(*mesh);
                 screen_buffers_dirty = true;
@@ -2603,6 +2624,14 @@ int main(int argc, char* argv[]) {
 
         if (app_state == AppState::SCULPTING) {
             bool wrapped = wrap_cursor(window, input, win_w, win_h);
+            // A wrap teleports the cursor to the far edge. Restart the path there, or
+            // the next frame would lay a line of dabs straight across the screen.
+            if (wrapped) {
+                brush_stroke.walk_x = (float)input.mouse_x;
+                brush_stroke.walk_y = (float)input.mouse_y;
+                brush_stroke.walk_carry = 0.0f;
+                input.path_n = 0;
+            }
 
             if (brush_stroke.is_active() && !wrapped) {
                 bool is_smooth = input.is_smooth_active() ||
@@ -2663,25 +2692,38 @@ int main(int argc, char* argv[]) {
                 float eff_brush_size = input.brush_size *
                     (PRESSURE_SIZE_FLOOR + (1.0f - PRESSURE_SIZE_FLOOR) * p_shaped);
 
-                // Push cursor position into history for spline interpolation
+                // This frame's pointer path: from where the last frame's path ended,
+                // through every position reported since (InputState::path_x), to the
+                // cursor. Dabs are laid along its arc length, carrying the distance left
+                // over since the last dab into the next frame, so a fast circle at a low
+                // frame rate still follows the hand instead of cutting corners between
+                // one sample per frame. (A Catmull-Rom spline through those per-frame
+                // samples used to stand in for the missing points; with the real points
+                // there is nothing left to guess.)
                 float cur_x = (float)input.mouse_x;
                 float cur_y = (float)input.mouse_y;
-                if (brush_stroke.cursor_hist_count < BrushStroke::CURSOR_HIST_SIZE) {
-                    int i = brush_stroke.cursor_hist_count++;
-                    brush_stroke.cursor_hist_x[i] = cur_x;
-                    brush_stroke.cursor_hist_y[i] = cur_y;
-                } else {
-                    for (int i = 0; i < 3; i++) {
-                        brush_stroke.cursor_hist_x[i] = brush_stroke.cursor_hist_x[i+1];
-                        brush_stroke.cursor_hist_y[i] = brush_stroke.cursor_hist_y[i+1];
-                    }
-                    brush_stroke.cursor_hist_x[3] = cur_x;
-                    brush_stroke.cursor_hist_y[3] = cur_y;
+                static float pts_x[InputState::kPathMax + 2], pts_y[InputState::kPathMax + 2];
+                int np = 0;
+                pts_x[np] = brush_stroke.walk_x;
+                pts_y[np] = brush_stroke.walk_y;
+                np++;
+                for (int i = 0; i < input.path_n; i++) {
+                    pts_x[np] = input.path_x[i];
+                    pts_y[np] = input.path_y[i];
+                    np++;
                 }
+                if (pts_x[np - 1] != cur_x || pts_y[np - 1] != cur_y) {
+                    pts_x[np] = cur_x;
+                    pts_y[np] = cur_y;
+                    np++;
+                }
+                g_path_stats.frame(input.path_n);
 
-                float dab_dx = cur_x - brush_stroke.last_dab_x;
-                float dab_dy = cur_y - brush_stroke.last_dab_y;
-                float dab_dist = std::sqrt(dab_dx*dab_dx + dab_dy*dab_dy);
+                float dab_dist = brush_stroke.walk_carry;
+                for (int i = 0; i + 1 < np; i++) {
+                    float sx = pts_x[i + 1] - pts_x[i], sy = pts_y[i + 1] - pts_y[i];
+                    dab_dist += std::sqrt(sx * sx + sy * sy);
+                }
                 // eff.spacing (not the live global): transient shift-smooth doesn't
                 // swap the live globals, so this is what makes it use Smooth's spacing.
                 //
@@ -2726,8 +2768,10 @@ int main(int argc, char* argv[]) {
                 }
                 spacing = std::max(spacing, 1.0f);   // never sub-pixel
 
+                // Captured before the dab block flips BEGIN to ACTIVE.
+                const bool first_dab = brush_stroke.phase == StrokePhase::BEGIN;
                 int dab_count = 0;
-                if (is_grab || brush_stroke.phase == StrokePhase::BEGIN) {
+                if (is_grab || first_dab) {
                     dab_count = 1;
                 } else if (dab_dist >= spacing) {
                     dab_count = (int)(dab_dist / spacing);
@@ -2796,51 +2840,43 @@ int main(int argc, char* argv[]) {
                 if (brush_stroke.phase == StrokePhase::BEGIN)
                     brush_stroke.phase = StrokePhase::ACTIVE;
 
-                bool use_spline = !is_grab && dab_count > 1
-                    && brush_stroke.cursor_hist_count >= 3;
-
-                float p0x, p0y, p1x, p1y, p2x, p2y, p3x, p3y;
-                if (use_spline) {
-                    int hc = brush_stroke.cursor_hist_count;
-                    p0x = brush_stroke.cursor_hist_x[std::max(0, hc-3)];
-                    p0y = brush_stroke.cursor_hist_y[std::max(0, hc-3)];
-                    p1x = brush_stroke.last_dab_x;
-                    p1y = brush_stroke.last_dab_y;
-                    p2x = cur_x;
-                    p2y = cur_y;
-                    p3x = p2x + (p2x - p1x);
-                    p3y = p2y + (p2y - p1y);
-                }
-
-                float step_x = 0.0f, step_y = 0.0f;
-                if (!is_grab && dab_count > 0 && dab_dist > 1e-6f) {
-                    step_x = dab_dx / dab_dist * spacing;
-                    step_y = dab_dy / dab_dist * spacing;
+                // Place this frame's dabs along the path: the first one `spacing` of arc
+                // past the last dab (the carry has already covered part of that), then
+                // every `spacing` after it. Grab brushes and a stroke's first dab sit on
+                // the cursor itself.
+                static float dab_px[DAB_COUNT_MAX], dab_py[DAB_COUNT_MAX];
+                if (is_grab || first_dab) {
+                    dab_px[0] = cur_x;
+                    dab_py[0] = cur_y;
+                } else {
+                    int k = 0;
+                    float to_next = std::max(spacing - brush_stroke.walk_carry, 0.0f);
+                    for (int i = 0; i + 1 < np && k < dab_count; i++) {
+                        float ax = pts_x[i], ay = pts_y[i];
+                        float sx = pts_x[i + 1] - ax, sy = pts_y[i + 1] - ay;
+                        float len = std::sqrt(sx * sx + sy * sy);
+                        float at = 0.0f;   // arc position within this segment
+                        while (k < dab_count && len - at >= to_next) {
+                            at += to_next;
+                            float t = len > 1e-6f ? at / len : 1.0f;
+                            dab_px[k] = ax + sx * t;
+                            dab_py[k] = ay + sy * t;
+                            k++;
+                            to_next = spacing;
+                        }
+                        to_next -= len - at;
+                    }
+                    for (; k < dab_count; k++) {   // float rounding at the very end
+                        dab_px[k] = cur_x;
+                        dab_py[k] = cur_y;
+                    }
                 }
 
                 brush_stroke.gpu_dirty.clear();
 
                 for (int dab_i = 0; dab_i < dab_count; dab_i++) {
-                    float dab_x, dab_y;
-                    if (is_grab || dab_count == 1) {
-                        dab_x = cur_x;
-                        dab_y = cur_y;
-                    } else if (use_spline) {
-                        float t = (float)(dab_i + 1) / (float)dab_count;
-                        float t2 = t * t;
-                        float t3 = t2 * t;
-                        dab_x = 0.5f * ((2.0f*p1x) +
-                                 (-p0x + p2x) * t +
-                                 (2.0f*p0x - 5.0f*p1x + 4.0f*p2x - p3x) * t2 +
-                                 (-p0x + 3.0f*p1x - 3.0f*p2x + p3x) * t3);
-                        dab_y = 0.5f * ((2.0f*p1y) +
-                                 (-p0y + p2y) * t +
-                                 (2.0f*p0y - 5.0f*p1y + 4.0f*p2y - p3y) * t2 +
-                                 (-p0y + 3.0f*p1y - 3.0f*p2y + p3y) * t3);
-                    } else {
-                        dab_x = brush_stroke.last_dab_x + step_x * (dab_i + 1);
-                        dab_y = brush_stroke.last_dab_y + step_y * (dab_i + 1);
-                    }
+                    const float dab_x = dab_px[dab_i];
+                    const float dab_y = dab_py[dab_i];
 
                     DabContext ctx { renderer, camera, compute, *mesh, *multires, input, win_w, win_h,
                                      brush_stroke.vertex_count, eff_brush_size,
@@ -2927,18 +2963,19 @@ int main(int argc, char* argv[]) {
                     }
                 }
 
-                if (!is_grab) {
-                    if (use_spline) {
-                        brush_stroke.last_dab_x = cur_x;
-                        brush_stroke.last_dab_y = cur_y;
-                    } else {
-                        brush_stroke.last_dab_x += step_x * dab_count;
-                        brush_stroke.last_dab_y += step_y * dab_count;
-                    }
-                }
-
+                brush_stroke.last_dab_x = dab_px[dab_count - 1];
+                brush_stroke.last_dab_y = dab_py[dab_count - 1];
                 brush_stroke.needs_mesh_update = true;
                 } // dab_count > 0
+
+                // The next frame's path starts here. Whatever arc is left past the last
+                // dab carries over; with no dab this frame, all of it does.
+                if (is_grab || first_dab)
+                    brush_stroke.walk_carry = 0.0f;
+                else
+                    brush_stroke.walk_carry = std::max(dab_dist - spacing * (float)dab_count, 0.0f);
+                brush_stroke.walk_x = cur_x;
+                brush_stroke.walk_y = cur_y;
 
                 // Runs every stroke frame (not just dab frames): drains landed async
                 // dab readbacks — snap/normals bookkeeping for dabs kicked 1–2 frames
@@ -3832,6 +3869,15 @@ int main(int argc, char* argv[]) {
         var c = Module.canvas;
         var feed = function(e) {
             var r = c.getBoundingClientRect();
+            // Browsers deliver one pointermove per frame; the positions merged into it
+            // are the stroke's real path (see InputState::path_x). The last coalesced
+            // event is `e` itself, so it goes through the normal call below.
+            if (e.type === 'pointermove' && e.getCoalescedEvents) {
+                var list = e.getCoalescedEvents();
+                for (var i = 0; i + 1 < list.length; i++)
+                    Module._chisel_path_sample(list[i].clientX - r.left,
+                                               list[i].clientY - r.top);
+            }
             // movementX drives the slider drags (consistent CSS-scale deltas even
             // under pointer lock, where clientX freezes).
             Module._chisel_set_pointer(e.clientX - r.left, e.clientY - r.top,
