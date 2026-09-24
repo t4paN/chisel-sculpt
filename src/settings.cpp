@@ -202,6 +202,7 @@ std::string serialize(const InputState& in) {
     append_kv(s, "help_seen",           in.help_seen);
     append_kv(s, "camera_perspective",  in.camera_perspective);
     append_kv(s, "camera_fov",          in.camera_fov);
+    append_kv(s, "remesh_detail",       in.remesh_detail);
     append_kv(s, "sphere_kind",         (int)in.sphere_kind);
     // mirror_x is deliberately absent — see InputState::mirror_x. Symmetry is session
     // state that starts ON every run, so it must not survive into the next one. As with
@@ -281,6 +282,7 @@ void apply_global_key(InputState& in, const std::string& key, const std::string&
     else if (key == "per_brush_sizes")     in.per_brush_sizes     = parse_bool(val);
     else if (key == "autosmooth")          in.autosmooth          = parse_bool(val);
     else if (key == "camera_fov")          in.camera_fov          = clampf(std::strtof(val.c_str(), nullptr), 15.0f, 80.0f);
+    else if (key == "remesh_detail")       in.remesh_detail       = clampf(std::strtof(val.c_str(), nullptr), 0.25f, 4.0f);
     else if (key == "flat_shading")        in.flat_shading        = parse_bool(val);
     else if (key == "show_fps")            in.show_fps            = parse_bool(val);
     else if (key == "help_seen")           in.help_seen           = parse_bool(val);
@@ -423,6 +425,7 @@ void settings_reset(InputState& input) {
     input.show_fps           = fresh.show_fps;
     input.camera_perspective = fresh.camera_perspective;
     input.camera_fov         = fresh.camera_fov;
+    input.remesh_detail      = fresh.remesh_detail;
     input.sphere_kind        = fresh.sphere_kind;
     input.mirror_x           = fresh.mirror_x;
     input.mirror_topological = fresh.mirror_topological;

@@ -180,6 +180,15 @@ struct InputState {
 
     // FPS readout visibility (burger menu toggle). Display only.
     bool show_fps = true;
+    // Remesh snaps its new points back onto the original surface and refuses
+    // flips that plane off a ridge. Session-only on purpose while it is being
+    // A/B'd: untick, remesh, reload, tick, remesh — same file, two results.
+    bool remesh_keep_detail = true;
+    // Remesh detail offset, as a TRIANGLE-COUNT multiplier on the current mesh:
+    // 1 = keep today's average, 2 = twice the tris, 0.5 = half. Stored as a tri
+    // multiplier rather than an edge one because that is what you see and what
+    // the memory guard has to reason about; the edge target is mean / sqrt(x).
+    float remesh_detail = 1.0f;
 
     // Viewport projection. Orthographic is the default and stays that way: it is what
     // every version shipped and what the brush feel was tuned against. Perspective is

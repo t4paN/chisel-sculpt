@@ -1178,7 +1178,8 @@ static uint32_t collapse_short_edges(Mesh& m, EdgeTable& et,
 
 static uint32_t flip_edges(Mesh& m, EdgeTable& et,
                            const std::vector<uint32_t>& tri_selected,
-                           const std::vector<uint32_t>& pinned) {
+                           const std::vector<uint32_t>& pinned,
+                           float min_normal_cos = -2.0f) {
     // Botsch-Kobbelt: loop until valence stops improving. Single-pass unordered
     // iteration leaves wins on the table — an edge that becomes flippable only
     // after its neighbor flips never gets caught in the same sweep.
@@ -1265,6 +1266,23 @@ static uint32_t flip_edges(Mesh& m, EdgeTable& et,
 
             if (na_before.dot(na_after) <= 0.0f) continue;
             if (nb_before.dot(nb_after) <= 0.0f) continue;
+
+            // Shape guard (keep-detail mode). A flip moves no vertex but it does
+            // move the SURFACE: on a ridge or a carved line running along the
+            // edge, the new diagonal cuts straight across the feature and planes
+            // it off — and no vertex projection can undo that, the verts are all
+            // still on the original surface. Refuse any flip that turns a face
+            // normal further than the threshold; on a smooth patch the two
+            // layouts are near-coplanar and valence flips go through as before.
+            if (min_normal_cos > -1.5f) {
+                Vec3 u[2] = { na_before.normalized(), nb_before.normalized() };
+                Vec3 w[2] = { na_after.normalized(),  nb_after.normalized()  };
+                bool turns = false;
+                for (int i = 0; i < 2 && !turns; i++)
+                    for (int k = 0; k < 2; k++)
+                        if (u[i].dot(w[k]) < min_normal_cos) { turns = true; break; }
+                if (turns) continue;
+            }
 
             // Perform flip
             m.indices[e.tri_a*3+0] = vc;
@@ -1861,11 +1879,19 @@ static void mirror_positive_half(Mesh& m, float seam_tol, float target_edge, Com
             uint32_t i1 = m.indices[t*3+1];
             uint32_t i2 = m.indices[t*3+2];
             if (i0 == i1 || i1 == i2 || i0 == i2) { dropped++; continue; }
+            // Zero-AREA drops only where the seam split could have made them: a
+            // tri with a vertex on the plane. Anywhere else a flat tri is still
+            // load-bearing — its edges are shared with live neighbours, and
+            // dropping it punched a hole (8 open edges off-seam at x=±0.58,
+            // measured, on the old and new remesh paths alike).
+            const bool on_seam = std::fabs(m.pos_x[i0]) < seam_tol ||
+                                 std::fabs(m.pos_x[i1]) < seam_tol ||
+                                 std::fabs(m.pos_x[i2]) < seam_tol;
             Vec3 e1 = m.get_pos(i1) - m.get_pos(i0);
             Vec3 e2 = m.get_pos(i2) - m.get_pos(i0);
             Vec3 cr = e1.cross(e2);
             float area2 = cr.dot(cr);
-            if (area2 < 1e-20f) { dropped++; continue; }
+            if (on_seam && area2 < 1e-20f) { dropped++; continue; }
             filtered.push_back(i0);
             filtered.push_back(i1);
             filtered.push_back(i2);
@@ -2378,13 +2404,242 @@ static void audit_open_edges(const Mesh& m, float seam_tol, const char* stage,
 }
 
 // ---------------------------------------------------------------------------
+// Reference surface: the sculpt as it was before the remesh touched it
+// ---------------------------------------------------------------------------
+//
+// Split midpoints sit on the chord between two surface points, collapse
+// midpoints likewise, and the tangential smooth steps along a tangent plane
+// that is itself measured on the already-drifted mesh. Every one of those
+// lands slightly INSIDE a convex form — by ~L²/8R, which is nothing on a
+// broad curve and most of the feature on a carved crease or a small bump —
+// and ten iterations compound it. Botsch-Kobbelt close that loop by projecting
+// every moved vertex back onto the ORIGINAL surface; this is that step.
+//
+// Only the tris the remesh can reach are copied (the selection plus a margin),
+// which keeps the copy small on the usual stretched-patch remesh — this runs in
+// a 32-bit WASM heap. Lookups go through a flat hashed grid (cell = one target
+// edge, 3×3×3 neighbourhood), so a vertex that has drifted by less than one
+// cell always finds its original surface.
+struct RefSurface {
+    std::vector<Vec3>     p;          // 3 per tri, unshared (no index buffer needed)
+    std::vector<Vec3>     n;          // unit normal per tri
+    std::vector<uint32_t> bucket_off; // CSR over hashed cells
+    std::vector<uint32_t> bucket_tri;
+    float    cell = 0.0f, inv_cell = 0.0f;
+    uint32_t mask = 0;                // bucket count - 1 (power of two)
+
+    bool empty() const { return n.empty(); }
+
+    static uint32_t hash(int x, int y, int z) {
+        return (uint32_t)x * 73856093u ^ (uint32_t)y * 19349663u ^ (uint32_t)z * 83492791u;
+    }
+    int ci(float v) const { return (int)std::floor(v * inv_cell); }
+
+    void build(const Mesh& m, const std::vector<uint8_t>& keep, float cell_size) {
+        cell = cell_size; inv_cell = 1.0f / cell_size;
+        const uint32_t tc = m.tri_count();
+        for (uint32_t t = 0; t < tc; t++) {
+            if (!keep[t]) continue;
+            Vec3 a = m.get_pos(m.indices[t*3+0]);
+            Vec3 b = m.get_pos(m.indices[t*3+1]);
+            Vec3 c = m.get_pos(m.indices[t*3+2]);
+            Vec3 nn = (b - a).cross(c - a);
+            float l = nn.length();
+            if (l < 1e-20f) continue;      // zero-area: no plane to project onto
+            p.push_back(a); p.push_back(b); p.push_back(c);
+            n.push_back(nn * (1.0f / l));
+        }
+        const uint32_t nt = (uint32_t)n.size();
+        if (nt == 0) return;
+
+        // Count cell touches first so the bucket table is sized once.
+        auto for_cells = [&](uint32_t t, auto&& fn) {
+            const Vec3& a = p[t*3]; const Vec3& b = p[t*3+1]; const Vec3& c = p[t*3+2];
+            int x0 = ci(std::min({a.x,b.x,c.x})), x1 = ci(std::max({a.x,b.x,c.x}));
+            int y0 = ci(std::min({a.y,b.y,c.y})), y1 = ci(std::max({a.y,b.y,c.y}));
+            int z0 = ci(std::min({a.z,b.z,c.z})), z1 = ci(std::max({a.z,b.z,c.z}));
+            for (int z = z0; z <= z1; z++)
+                for (int y = y0; y <= y1; y++)
+                    for (int x = x0; x <= x1; x++) fn(hash(x, y, z));
+        };
+        uint64_t touches = 0;
+        for (uint32_t t = 0; t < nt; t++) for_cells(t, [&](uint32_t) { touches++; });
+        uint32_t buckets = 1;
+        while (buckets < touches && buckets < (1u << 24)) buckets <<= 1;
+        mask = buckets - 1;
+        bucket_off.assign(buckets + 1, 0);
+        for (uint32_t t = 0; t < nt; t++) for_cells(t, [&](uint32_t h) { bucket_off[(h & mask) + 1]++; });
+        for (uint32_t i = 0; i < buckets; i++) bucket_off[i+1] += bucket_off[i];
+        bucket_tri.resize(bucket_off[buckets]);
+        std::vector<uint32_t> fill(bucket_off.begin(), bucket_off.end() - 1);
+        for (uint32_t t = 0; t < nt; t++) for_cells(t, [&](uint32_t h) { bucket_tri[fill[h & mask]++] = t; });
+    }
+
+    // Ericson, Real-Time Collision Detection 5.1.5.
+    static Vec3 closest_on_tri(Vec3 q, Vec3 a, Vec3 b, Vec3 c) {
+        Vec3 ab = b - a, ac = c - a, ap = q - a;
+        float d1 = ab.dot(ap), d2 = ac.dot(ap);
+        if (d1 <= 0.0f && d2 <= 0.0f) return a;
+        Vec3 bp = q - b;
+        float d3 = ab.dot(bp), d4 = ac.dot(bp);
+        if (d3 >= 0.0f && d4 <= d3) return b;
+        float vc = d1*d4 - d3*d2;
+        if (vc <= 0.0f && d1 >= 0.0f && d3 <= 0.0f) return a + ab * (d1 / (d1 - d3));
+        Vec3 cp = q - c;
+        float d5 = ab.dot(cp), d6 = ac.dot(cp);
+        if (d6 >= 0.0f && d5 <= d6) return c;
+        float vb = d5*d2 - d1*d6;
+        if (vb <= 0.0f && d2 >= 0.0f && d6 <= 0.0f) return a + ac * (d2 / (d2 - d6));
+        float va = d3*d6 - d5*d4;
+        if (va <= 0.0f && (d4 - d3) >= 0.0f && (d5 - d6) >= 0.0f)
+            return b + (c - b) * ((d4 - d3) / ((d4 - d3) + (d5 - d6)));
+        float denom = 1.0f / (va + vb + vc);
+        return a + ab * (vb * denom) + ac * (vc * denom);
+    }
+
+    // Nearest point on a reference tri FACING the same way as `nrm` (unit, or
+    // zero to skip the test). The facing test is what keeps a vertex on one side
+    // of a thin part — an ear, a fin, a lip — from snapping onto the other side,
+    // which is closer than its own surface there. Returns false if nothing
+    // qualifying lies within one cell.
+    bool closest(Vec3 q, Vec3 nrm, Vec3& out, float& dist) const {
+        if (empty()) return false;
+        const bool check_facing = nrm.dot(nrm) > 0.25f;
+        int cx = ci(q.x), cy = ci(q.y), cz = ci(q.z);
+        float best = cell * cell;
+        bool found = false;
+        for (int z = cz-1; z <= cz+1; z++)
+            for (int y = cy-1; y <= cy+1; y++)
+                for (int x = cx-1; x <= cx+1; x++) {
+                    uint32_t h = hash(x, y, z) & mask;
+                    for (uint32_t j = bucket_off[h]; j < bucket_off[h+1]; j++) {
+                        uint32_t t = bucket_tri[j];
+                        if (check_facing && n[t].dot(nrm) < 0.3f) continue;
+                        Vec3 c = closest_on_tri(q, p[t*3], p[t*3+1], p[t*3+2]);
+                        Vec3 d = c - q;
+                        float d2 = d.dot(d);
+                        if (d2 < best) { best = d2; out = c; found = true; }
+                    }
+                }
+        dist = std::sqrt(best);
+        return found;
+    }
+};
+
+// Signed distance along `dir` (unit) from q to the nearest reference tri that
+// crosses the segment q ± dir·reach and faces the same way. A tri that the
+// segment crosses was registered in every cell its AABB touches — including the
+// one that holds the crossing point, which lies on the segment — so walking the
+// segment's cells at half-cell steps sees every candidate: 2-4 cells instead of
+// the 27 a closest-point search needs.
+static bool raycast_ref(const RefSurface& ref, Vec3 q, Vec3 dir, float reach, float& t_out) {
+    if (ref.empty()) return false;
+    uint32_t seen[16]; int n_seen = 0;
+    float best = reach;
+    bool found = false;
+    const int steps = (int)std::ceil(2.0f * reach * ref.inv_cell * 2.0f);
+    for (int i = 0; i <= steps; i++) {
+        Vec3 s = q + dir * (-reach + 2.0f * reach * (float)i / (float)std::max(1, steps));
+        uint32_t h = RefSurface::hash(ref.ci(s.x), ref.ci(s.y), ref.ci(s.z)) & ref.mask;
+        bool dup = false;
+        for (int k = 0; k < n_seen; k++) if (seen[k] == h) { dup = true; break; }
+        if (dup) continue;
+        if (n_seen < 16) seen[n_seen++] = h;
+        for (uint32_t j = ref.bucket_off[h]; j < ref.bucket_off[h+1]; j++) {
+            uint32_t t = ref.bucket_tri[j];
+            if (ref.n[t].dot(dir) < 0.3f) continue;       // wrong side of a thin part
+            // Möller-Trumbore, two-sided in t.
+            const Vec3& a = ref.p[t*3];
+            Vec3 e1 = ref.p[t*3+1] - a, e2 = ref.p[t*3+2] - a;
+            Vec3 pv = dir.cross(e2);
+            float det = e1.dot(pv);
+            if (std::fabs(det) < 1e-20f) continue;
+            float inv = 1.0f / det;
+            Vec3 tv = q - a;
+            float u = tv.dot(pv) * inv;
+            if (u < 0.0f || u > 1.0f) continue;
+            Vec3 qv = tv.cross(e1);
+            float w = dir.dot(qv) * inv;
+            if (w < 0.0f || u + w > 1.0f) continue;
+            float t_hit = e2.dot(qv) * inv;
+            if (std::fabs(t_hit) < std::fabs(best)) { best = t_hit; found = true; }
+        }
+    }
+    t_out = best;
+    return found;
+}
+
+// Snap vertices [v_begin, v_end) that are free to move back onto the reference.
+// Same eligibility as the smooth kernel (unpinned, touching the selection), and
+// the same seam clamp, so a projected vert can't land in or across the seam band.
+static uint32_t project_to_ref(Mesh& m, const RefSurface& ref,
+                               const std::vector<uint32_t>& tri_selected,
+                               const std::vector<uint32_t>& pinned,
+                               float seam_tol, float max_step,
+                               uint32_t v_begin, uint32_t v_end) {
+    if (ref.empty()) return 0;
+    uint32_t moved = 0;
+    // Adjacency must be current: the fan check below is what stops a snap from
+    // folding a neighbour flat, and a flat tri is later dropped by the mirror
+    // step's degenerate filter — leaving a hole (measured: 8 open edges).
+    if (m.vert_tri_offset.size() != (size_t)m.vertex_count() + 1) return 0;
+    v_end = std::min(v_end, m.vertex_count());
+    for (uint32_t v = v_begin; v < v_end; v++) {
+        if (v < (uint32_t)pinned.size() && pinned[v]) continue;
+        const uint32_t ts = m.vert_tri_offset[v], te = m.vert_tri_offset[v+1];
+        bool any_sel = false;
+        for (uint32_t j = ts; j < te; j++) {
+            uint32_t t = m.vert_tri_list[j];
+            if (t < (uint32_t)tri_selected.size() && tri_selected[t]) { any_sel = true; break; }
+        }
+        if (!any_sel) continue;
+        Vec3 q = m.get_pos(v);
+        Vec3 nrm(m.norm_x[v], m.norm_y[v], m.norm_z[v]);
+        float nl = nrm.length();
+        nrm = (nl > 1e-12f) ? nrm * (1.0f / nl) : Vec3(0, 0, 0);
+        if (nl <= 1e-12f) continue;
+        // Move along the normal only. A closest-point snap slides verts sideways
+        // too: near a crease every vert on both walls finds the crease line as
+        // its nearest point, and they pile up into needles and folds (measured:
+        // 50x the needles, 700 open edges). Along the normal is the part that is
+        // actually "sag"; the sideways part is spacing, which is the smooth's
+        // job. No hit within max_step = implausible, leave the vert be.
+        float h;
+        if (!raycast_ref(ref, q, nrm, max_step, h)) continue;
+        Vec3 c = q + nrm * h;
+        if (std::fabs(q.x) >= seam_tol)   // keep non-seam verts out of the seam band
+            c.x = (q.x < 0.0f ? -1.0f : 1.0f) * std::max(seam_tol, std::fabs(c.x));
+        // Fan check: every incident tri must keep its facing and at least a
+        // quarter of its projected area — rejects flips and near-flat slivers.
+        bool fan_ok = true;
+        for (uint32_t j = ts; j < te && fan_ok; j++) {
+            uint32_t t = m.vert_tri_list[j];
+            Vec3 p3[3], r3[3];
+            for (int k = 0; k < 3; k++) {
+                uint32_t u = m.indices[t*3+k];
+                p3[k] = m.get_pos(u);
+                r3[k] = (u == v) ? c : p3[k];
+            }
+            Vec3 nb = (p3[1] - p3[0]).cross(p3[2] - p3[0]);
+            Vec3 na = (r3[1] - r3[0]).cross(r3[2] - r3[0]);
+            if (na.dot(nb) < 0.25f * nb.dot(nb)) fan_ok = false;
+        }
+        if (!fan_ok) continue;
+        m.pos_x[v] = c.x; m.pos_y[v] = c.y; m.pos_z[v] = c.z;
+        moved++;
+    }
+    return moved;
+}
+
+// ---------------------------------------------------------------------------
 // Top-level entry point
 // ---------------------------------------------------------------------------
 
 RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
                             float target_edge_length, int iterations,
                             ComputeState* cs,
-                            float density_coarse_mult, float density_fine_mult) {
+                            float density_coarse_mult, float density_fine_mult,
+                            bool keep_detail, float detail) {
     RemeshResult r;
     r.old_verts = mesh.vertex_count();
     r.old_tris  = mesh.tri_count();
@@ -2434,6 +2689,16 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
     // Compute target edge length from mean if auto
     if (target_edge_length <= 0.0f)
         target_edge_length = compute_mean_edge_length(mesh);
+    // Tri count goes as 1/edge², so a count multiplier is an edge divisor of √x.
+    detail = std::min(4.0f, std::max(0.25f, detail));
+    const bool detail_offset = std::fabs(detail - 1.0f) > 0.01f;
+    if (detail_offset) {
+        // 0.87: aiming the 0.8-1.4 band at the input's mean edge settles ~15%
+        // LONGER on average — measured 0.74x/0.76x the promised count at x0.5/x2
+        // on a 328k-tri sculpt. √0.75 ≈ 0.87 makes the slider's number the count.
+        target_edge_length *= 0.87f / std::sqrt(detail);
+        std::printf("[remesh] detail x%.2f: target edge %.4f\n", detail, target_edge_length);
+    }
 
     float high = 1.4f * target_edge_length;
     float low  = 0.8f * target_edge_length;   // canonical 4/3:4/5 band (was 0.6 — too wide, left fine tris)
@@ -2492,7 +2757,10 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
     // decides what happens) — the stretched-only heuristic would skip painted
     // regions whose edges look fine against the GLOBAL target. target 0 ⇒ the
     // select kernel flags everything.
-    const float select_target = adaptive ? 0.0f : target_edge_length;
+    // An offset target is the same story: the stretched-only test flags edges
+    // LONGER than the target, so a coarser target would select almost nothing
+    // and a coarse remesh would do nothing at all. The whole mesh is in play.
+    const float select_target = (adaptive || detail_offset) ? 0.0f : target_edge_length;
 
     // Decide selection strategy: mask-driven or auto-detect.
     // tri_selected mirrors remesh_trisel_ssbo on GPU; we only readback when CPU
@@ -2565,6 +2833,34 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
     uint32_t total_selected = 0;
     for (uint32_t b : tri_selected) if (b) total_selected++;
     r.selected_tris = total_selected;
+
+    // Reference copy of the surface the remesh may touch: the selection plus a
+    // 4-ring margin (later reselections can reach a little past the first one).
+    // Built in both modes — the drift readout at the end needs it either way.
+    RefSurface ref;
+    {
+        auto tr = std::chrono::steady_clock::now();
+        const uint32_t vc = mesh.vertex_count(), tc = mesh.tri_count();
+        std::vector<uint8_t> keep(tc, 0), vmark(vc, 0);
+        for (uint32_t t = 0; t < tc && t < (uint32_t)tri_selected.size(); t++)
+            if (tri_selected[t]) keep[t] = 1;
+        for (int ring = 0; ring < 4; ring++) {
+            for (uint32_t t = 0; t < tc; t++)
+                if (keep[t]) for (int k = 0; k < 3; k++) vmark[mesh.indices[t*3+k]] = 1;
+            for (uint32_t v = 0; v < vc; v++)
+                if (vmark[v])
+                    for (uint32_t j = mesh.vert_tri_offset[v]; j < mesh.vert_tri_offset[v+1]; j++)
+                        keep[mesh.vert_tri_list[j]] = 1;
+        }
+        // Cell = one target edge: the 3×3×3 search then reaches at least one edge
+        // out, more than a projection ever moves (capped at half an edge), while
+        // each query tests a few dozen tris rather than hundreds.
+        ref.build(mesh, keep, target_edge_length);
+        std::printf("[remesh] reference surface: %zu tris, %zu cell refs (%.0f ms)%s\n",
+                    ref.n.size(), ref.bucket_tri.size(),
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tr).count(),
+                    keep_detail ? "" : " - keep-detail OFF, measuring only");
+    }
 
     // Find pinned boundary vertices (includes mirror seam). tri_sel already on GPU.
     std::vector<uint32_t> pinned;
@@ -2694,7 +2990,7 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
     // run a final smooth and bail. Floor of 8 prevents tiny meshes from doing all
     // 10 iters for 1-2 trivial ops.
     int iters_done = 0;
-    double t_split = 0.0, t_collapse = 0.0, t_flip = 0.0, t_rebuild = 0.0;
+    double t_split = 0.0, t_collapse = 0.0, t_flip = 0.0, t_rebuild = 0.0, t_project = 0.0;
     auto tick = [] { return std::chrono::steady_clock::now(); };
     auto since = [](std::chrono::steady_clock::time_point a) {
         return std::chrono::duration<double, std::milli>(
@@ -2740,7 +3036,9 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
         }
 
         ts = tick();
-        uint32_t n_flip = flip_edges(mesh, et, tri_selected, pinned);
+        // cos 15°: a flip may turn a face by at most that much in keep-detail mode.
+        uint32_t n_flip = flip_edges(mesh, et, tri_selected, pinned,
+                                     keep_detail ? 0.966f : -2.0f);
         t_flip += since(ts);
         if (n_flip > 0) rebuild_after_flip();
 
@@ -2758,6 +3056,17 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
         // fire. If it does, the smooth kernel is corrupting indices.
         REMESH_TOPO_TRACE(mesh, "smooth iter", iter, 0, -1);
 
+        // Collapse midpoints and the smooth's tangent-plane steps both leave
+        // the surface; one sweep over the free verts brings all of them back.
+        // Normals are a step stale here (pre-smooth), which only feeds the
+        // facing test — a 0.3 cosine gate has plenty of slack for that.
+        if (keep_detail) {
+            ts = tick();
+            project_to_ref(mesh, ref, tri_selected, pinned, seam_tol, 0.5f * target_edge_length,
+                           0, mesh.vertex_count());
+            t_project += since(ts);
+        }
+
         uint32_t total_ops = n_split + n_collapse + n_flip;
         uint32_t threshold = std::max<uint32_t>(8, mesh.tri_count() / 1000);
         iters_done = iter + 1;
@@ -2771,8 +3080,40 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
         if (iter + 1 < iterations) rebuild_after_smooth();
     }
     std::printf("[remesh] outer loop: %d/%d iters (split %.0f ms, collapse %.0f ms, "
-                "flip %.0f ms, rebuild %.0f ms)\n",
-                iters_done, iterations, t_split, t_collapse, t_flip, t_rebuild);
+                "flip %.0f ms, rebuild %.0f ms, project %.0f ms)\n",
+                iters_done, iterations, t_split, t_collapse, t_flip, t_rebuild, t_project);
+
+    // Drift readout: how far the new surface sits from the sculpt it replaced,
+    // sampled at every triangle CENTRE rather than at vertices — a vertex can be
+    // exactly on the original while the face between it and its neighbours cuts
+    // a corner (chord sag, or a flip across a ridge), and that is the loss you
+    // see. Only tris inside the reference region count, so two runs on the same
+    // file compare like for like. Units: % of the target edge length.
+    {
+        std::vector<float> dists;
+        dists.reserve(mesh.tri_count() / 4);
+        const uint32_t tc = mesh.tri_count();
+        for (uint32_t t = 0; t < tc; t++) {
+            if (tri_is_degenerate(mesh, t)) continue;
+            Vec3 a = mesh.get_pos(mesh.indices[t*3]), b = mesh.get_pos(mesh.indices[t*3+1]),
+                 c = mesh.get_pos(mesh.indices[t*3+2]);
+            Vec3 cen = (a + b + c) * (1.0f / 3.0f);
+            Vec3 cp; float d;
+            if (ref.closest(cen, tri_normal(mesh, t).normalized(), cp, d)) dists.push_back(d);
+        }
+        if (!dists.empty()) {
+            std::sort(dists.begin(), dists.end());
+            double sum = 0.0;
+            for (float d : dists) sum += d;
+            const float pct = 100.0f / target_edge_length;
+            std::printf("[remesh] DRIFT from original (%s): mean %.2f%%  p95 %.2f%%  "
+                        "max %.1f%% of edge  over %zu faces\n",
+                        keep_detail ? "keep-detail ON" : "keep-detail OFF",
+                        (float)(sum / dists.size()) * pct,
+                        dists[dists.size() * 95 / 100] * pct,
+                        dists.back() * pct, dists.size());
+        }
+    }
 
     // Final sweep before the mirror — the reflection duplicates whatever it is
     // handed, so a fin that survives to here comes out as two fins.

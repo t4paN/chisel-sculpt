@@ -1286,6 +1286,28 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
 
             ImGui::Checkbox("Show FPS", &input.show_fps);
 
+            ImGui::Checkbox("Remesh keeps detail", &input.remesh_keep_detail);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("On: the remesher keeps its new points on your sculpt\n"
+                                  "and won't flip an edge across a ridge or a carved line.\n\n"
+                                  "Off: the old remesher, which rounds small forms and\n"
+                                  "creases a little more on every pass.\n\n"
+                                  "Either way the console prints a DRIFT line after each\n"
+                                  "remesh: how far the result sits from the original.\n"
+                                  "Not saved - it resets to On at every launch.");
+
+            // Logarithmic: x0.5 and x2 sit the same distance either side of x1.
+            ImGui::SetNextItemWidth(150.0f);
+            ImGui::SliderFloat("##remeshDetail", &input.remesh_detail, 0.25f, 4.0f,
+                               "remesh detail x%.2f", ImGuiSliderFlags_Logarithmic);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("How many triangles a remesh aims for, compared with\n"
+                                  "the mesh as it is now. x1 keeps the current average\n"
+                                  "and only fixes stretched areas; x2 doubles the count,\n"
+                                  "x0.5 halves it.\n\n"
+                                  "Anything other than x1 reworks the WHOLE mesh, so it\n"
+                                  "takes longer. Ctrl+click to type an exact value.");
+
             ImGui::Separator();
 
             // What "sphere" means, for both consumers at once: the ball the app opens

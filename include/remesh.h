@@ -20,7 +20,9 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
                             int iterations = 10,
                             ComputeState* cs = nullptr,
                             float density_coarse_mult = 2.0f,
-                            float density_fine_mult = 0.5f);
+                            float density_fine_mult = 0.5f,
+                            bool keep_detail = true,   // snap to the original surface + guard flips
+                            float detail = 1.0f);      // tri-count multiplier on the auto target
 
 // Predicted post-remesh triangle count when a painted density field drives
 // adaptive sizing (each tri refines toward its local target edge length).

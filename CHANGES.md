@@ -2,6 +2,50 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-09-24 — Remesh keeps detail; remesh detail slider
+
+*Browser-tested on itch (`0.2.23-keepdetail2`, #2011177). The user took one sculpt from
+5M to 75k tris both ways and compared screenshots side by side: "looks dope af". With the
+fix, brow creases, lip lines and nose stay clean; without it, the whole surface goes
+crusty. They also noticed the new path is "less pimply" on smooth areas. Measured
+headless on a 328k-tri sculpt via the new dev hooks.*
+
+**The isotropic remesher now keeps new points on the original surface.** It never did.
+Split and collapse midpoints landed on the straight line between two points (inside
+any convex form, by about L²/8R), the tangential smooth drifted off the surface, and ten
+iterations compounded it. Small forms and carved creases got rounded off on every
+remesh. Botsch-Kobbelt's missing step is now in `remesh.cpp`:
+- `RefSurface`: a frozen copy of the tris the remesh can reach (selection + 4 rings) in
+  a hashed grid (cell = target edge).
+- `project_to_ref` runs after every smooth. It raycasts **along the vertex normal only**,
+  capped at half an edge. A facing test stops snaps across thin parts, and a fan check
+  refuses any move that would flip or flatten an incident tri. A full closest-point
+  snap was tried first and was much worse: verts on both walls of a crease piled onto
+  the crease line (50× the needles, 704 open edges).
+- Flips now refuse to turn a face by more than 15°, so a valence flip can no longer cut
+  across a ridge. Vertex projection can't undo that kind of damage.
+- A `DRIFT` console line after every remesh reports surface distance from the original,
+  sampled at tri centres, as a % of the target edge.
+
+Whole-mesh adaptive remesh, 328k → 418k tris: drift mean **2.01% → 1.07%**, p95
+**7.69% → 3.87%**, leftover flipped tris 10 → 0, time 14.6 s → 16.8 s. Settings →
+"Remesh keeps detail" switches it off for A/B (session-only, default on).
+
+**Remesh detail slider** (Settings, saved, ×0.25-×4): the remesh targets a
+triangle-count multiple of the current mesh. Target edge = mean × 0.87 / √x. The 0.87 is
+measured: without it the result came out at 0.75× the promised count. Measured ×0.5 →
+0.49×, ×1.5 → 1.51×. Any value other than ×1 selects the whole mesh, since the
+stretched-only selection would turn coarsening into a no-op. Going finer rides the
+existing GPU-limit guard.
+
+**Fixed: remesh could punch holes far from the mirror plane.** The mirror step's
+post-split filter dropped every zero-*area* tri on the mesh, not just those the seam
+split made. That left 8 open edges at x=±0.58 on a ×1.5 remesh, on the old path as well
+as the new. It now only drops area-degenerate tris that touch the seam.
+
+Dev hooks: `CHISEL_AUTO_REMESH=1` (plain remesh on load), `CHISEL_REMESH_DETAIL=x`,
+`CHISEL_REMESH_KEEP_DETAIL=0`.
+
 ## 2026-09-24 — Dabs follow every pointer sample; the Catmull-Rom spline is gone
 
 *Browser-tested on itch (`0.2.23-pathtest`, #2010856) on an Intel APU. User: "it works so

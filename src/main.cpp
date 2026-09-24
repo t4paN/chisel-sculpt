@@ -1662,19 +1662,26 @@ int main(int argc, char* argv[]) {
             // small fine-mult can explode tri counts the same way keymashed
             // subdivision does. Same predicted-size check, same refusal toast.
             bool remesh_refused = false;
-            if (!mesh->density.empty()) {
-                const uint64_t tris_pred = predict_adaptive_tris(
-                    *mesh, 0.0f, input.density_coarse_mult, input.density_fine_mult);
+            // The detail slider multiplies the count on either path, so it rides
+            // the same guard — a x4 on a big mesh is the uniform version of the
+            // red-heavy field this was written for.
+            const float detail = input.remesh_detail;
+            if (!mesh->density.empty() || detail > 1.0f) {
+                const uint64_t base_pred = mesh->density.empty()
+                    ? (uint64_t)mesh->tri_count()
+                    : predict_adaptive_tris(*mesh, 0.0f, input.density_coarse_mult,
+                                            input.density_fine_mult);
+                const uint64_t tris_pred = (uint64_t)((double)base_pred * std::max(1.0f, detail));
                 const uint64_t bytes_pred = tris_pred * 12ull;  // index/CSR SSBOs
                 const gpu::DeviceLimits dl = gpu::device_limits();
                 const uint64_t budget = dl.max_buffer_size < dl.max_storage_binding_size
                                       ? dl.max_buffer_size : dl.max_storage_binding_size;
                 if (bytes_pred > budget) {
                     std::snprintf(input.notification, sizeof(input.notification),
-                                  "Adaptive remesh would exceed GPU limits (%.1fM tris)",
+                                  "Remesh would exceed GPU limits (%.1fM tris)",
                                   (double)tris_pred / 1e6);
                     input.notification_timer = 4.0f;
-                    std::printf("[remesh] refused adaptive: %.1fM predicted tris needs %llu MB, device grants %llu MB\n",
+                    std::printf("[remesh] refused: %.1fM predicted tris needs %llu MB, device grants %llu MB\n",
                                 (double)tris_pred / 1e6,
                                 (unsigned long long)(bytes_pred >> 20),
                                 (unsigned long long)(budget >> 20));
@@ -1694,7 +1701,9 @@ int main(int argc, char* argv[]) {
                 result = perform_remesh(*mesh, *multires, 0.0f, 10,
                                         compute.supported ? &compute : nullptr,
                                         input.density_coarse_mult,
-                                        input.density_fine_mult);
+                                        input.density_fine_mult,
+                                        input.remesh_keep_detail,
+                                        input.remesh_detail);
 
             if (result.success) {
                 mesh->mask.clear();
@@ -3365,6 +3374,36 @@ int main(int argc, char* argv[]) {
             if (auto_subd_left > 0) {
                 --auto_subd_left;
                 input.level_switch_delta = +1;
+            }
+        }
+
+        // Dev hook: CHISEL_REMESH_KEEP_DETAIL=0 starts with the Settings box
+        // "Remesh keeps detail" unticked, so a scripted remesh can be run both
+        // ways on the same file and the two DRIFT lines compared.
+        {
+            static bool keep_detail_env_done = false;
+            if (!keep_detail_env_done) {
+                keep_detail_env_done = true;
+                if (const char* env = std::getenv("CHISEL_REMESH_KEEP_DETAIL"))
+                    input.remesh_keep_detail = std::atoi(env) != 0;
+                if (const char* env = std::getenv("CHISEL_REMESH_DETAIL"))
+                    input.remesh_detail = std::min(4.0f, std::max(0.25f, (float)std::atof(env)));
+            }
+        }
+
+        // Dev hook: CHISEL_AUTO_REMESH=1 fires one plain remesh (no density
+        // paint) once the scene has settled — pairs with CHISEL_AUTO_IMPORT and
+        // the two env knobs above to A/B a file headless. No-op when unset.
+        {
+            static int auto_remesh_frames = -1;
+            if (auto_remesh_frames < 0) {
+                const char* env = std::getenv("CHISEL_AUTO_REMESH");
+                auto_remesh_frames = (env && std::atoi(env) != 0) ? 1 : 0;
+            }
+            if (auto_remesh_frames > 0 && ++auto_remesh_frames > 12 &&
+                app_state == AppState::IDLE && !input.remesh_in_progress) {
+                input.remesh_requested = true;
+                auto_remesh_frames = 0;
             }
         }
 
