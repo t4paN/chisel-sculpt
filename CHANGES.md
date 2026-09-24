@@ -7,7 +7,8 @@ Short, chronological log of notable changes. Newest on top.
 *Browser-tested on itch (`0.2.23-pathtest`, #2010856) on an Intel APU. User: "it works so
 well now that i could barely test the difference before, but now it's just impossible to
 tell if any such issues remain". Native GL/wgpu build, but they have not been hand-run.
-No `[path]` numbers were collected yet.*
+Measured in the browser at L9: **2.8-5.8 pointer samples per frame, max 6-16**. The old
+loop threw most of those away.*
 
 **Fast strokes at low frame rates no longer turn circles into polygons.** The dab loop
 read the pointer once per frame. Every position reported in between was overwritten, so
@@ -38,7 +39,10 @@ faceting could return. Remove the line once the numbers are known.
 
 *Browser-tested on itch (test build `0.2.23-gputest`, #2010810) on an Intel APU at L9
 (~5M tris): strokes, undo/redo, undo across a level change, mirror, and Move. No alarm
-lines. User: it "feels pretty good… well-er". The native GL/wgpu builds compile and pass
+lines. User: it "feels pretty good… well-er". A second browser pass also covered undo
+through eight big strokes (older entries spilled out of the ring, ids and all),
+save/reopen, remesh right after sculpting, two objects with switching and per-object
+undo, autosmooth, mask/paint, and Limb. User: "it all works amazing". The native GL/wgpu builds compile and pass
 the shader check, but they have **not** been hand-run, so there are no before/after
 timings yet. Measure with `CHISEL_GPU_TOUCHED=0` (the old path) against the default.*
 
