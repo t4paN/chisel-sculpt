@@ -358,9 +358,11 @@ bool ComputeState::take_count_list_read(gpu::ReadTicket t, uint32_t words,
                           (uint64_t)words * sizeof(uint32_t)))
         return false;
     uint32_t count = count_list_scratch[0];
-    // The counter is GPU-written and deliberately unbounded, so bound it by something
-    // real before it is used as a length: no dab can touch more than the whole mesh.
-    if (count > smooth_dirty_capacity) count = smooth_dirty_capacity;
+    // The counter is GPU-written and deliberately unbounded, so it is bounded below by
+    // the length of the list actually read, which belongs to THIS buffer. It used to be
+    // bounded by smooth_dirty_capacity, which is another buffer's size and stays 0 until
+    // the first dab-based stroke allocates it: every Move/Limb capture before that read
+    // as empty and the grab did nothing (2026-09-25).
     // The kernels let the counter run past the region's cap on purpose: that overrun
     // is the ONLY evidence the region was too small, and the surplus ids were never
     // written. Report the true total, then clamp to what is actually readable.
