@@ -1723,6 +1723,13 @@ int main(int argc, char* argv[]) {
                 scene.sync();
                 mesh = &scene.active_mesh();
                 multires = &scene.active_multires();
+                // Same resync as the voxel merge: the GPU copy of the base still
+                // holds the PRE-remesh mesh, and strokes at the base level are
+                // diffed against it and later materialized from it. Without this,
+                // every stroke after a remesh landed as old-mesh positions at the
+                // new mesh's ids — invisible until the next level change rebuilt
+                // the model from them (2026-09-25).
+                refresh_active_gpu_residency();
                 screen_buffers_dirty = true;
                 brush_stroke.vertex_count = 0;
                 brush_stroke.phase = StrokePhase::NONE;

@@ -2,6 +2,40 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-09-25 — Subdividing after an iso remesh threw tris everywhere
+
+*Hand-tested by the user on the native GL build: remesh, sculpt at the base, then up,
+down and up again, with 0 folded fans on every check. User on the new iso remesher: "great,
+mirror works well too".*
+
+**Strokes made after an iso remesh were saved against the old mesh.** The remesh replaces
+the active mesh, but its success path never called `refresh_active_gpu_residency()`, so the
+GPU copy of the multires base still held the pre-remesh mesh. Base-level strokes are diffed
+against that copy and later materialized from it. Nothing showed on screen, because the
+display reads the working VBO. The next level change rebuilt the model from the mixed data.
+On the user's run, 50 strokes after a remesh, one undo and a subd-up left 57,908 of
+188,434 fans folded, and the mirror rebuild came out lopsided (128k verts on +x, 60k on
+-x). The voxel merge path has always done this resync, with a comment explaining why; the
+iso remesh now does the same.
+
+## 2026-09-25 — Grab and Limb dead until the first draw stroke
+
+*Hand-tested by the user on the native GL build: grab works as the first stroke of a
+session.*
+
+**Move and Limb did nothing until some other brush had been used in the session.** When
+a grab starts, the GPU lists the vertices inside the brush sphere and the CPU reads that
+list back. `take_count_list_read` bounded the GPU counter by `smooth_dirty_capacity`, but
+that is the size of a *different* buffer: the dirty-list arena, which stays at 0 until
+`begin_dab` allocates it on the first Draw/Smooth/Clay/etc. dab. So every grab capture
+read as empty, and the apply bailed. Probes showed the grab point was right, the GPU
+positions matched the CPU mesh, and the CPU counted 129 vertices inside the sphere while
+the read-back said 0.
+- The fix drops that bound. The existing `words - 1` clamp already bounds the list by the
+  buffer that was actually read.
+- It came in on 2026-09-17 (`4a28ed8`), so **v0.2.21–v0.2.23 have it, web included**.
+- A level switch right after launch made it look switch-related. It wasn't.
+
 ## 2026-09-24 — SDF remesh/merge keeps detail
 
 *Reviewed by the user from offline renders (original / old / new, plus wireframe close-ups)
