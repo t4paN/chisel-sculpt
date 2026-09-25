@@ -2,6 +2,17 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-09-26 — Space is real fullscreen on the desktop build
+
+*Hand-tested by the user on KDE Wayland.*
+
+**Space now covers the whole screen, taskbar included.** Since the first release it only
+dropped the titlebar (`GLFW_DECORATED`), so the desktop panel stayed on top. The native
+build now calls `glfwSetWindowMonitor` on the primary monitor at its video mode, and
+restores the remembered windowed size on the second press. The position isn't queried on
+Wayland, because it can't report one (GLFW errors if asked), so the compositor places the
+restored window there. The web build is unchanged, since the browser owns fullscreen.
+
 ## 2026-09-25 — v0.2.24 — Subdividing after an iso remesh threw tris everywhere
 
 *Hand-tested by the user on the native GL build: remesh, sculpt at the base, then up,

@@ -1109,18 +1109,42 @@ int main(int argc, char* argv[]) {
             settings_last_time = now;
         }
 
-        // Handle borderless toggle (Space)
+        // Fullscreen toggle (Space)
         if (input.fullscreen_toggle_requested) {
             input.fullscreen_toggle_requested = false;
+#ifndef __EMSCRIPTEN__
+            // Real fullscreen on the monitor, over the taskbar too. The old toggle only
+            // dropped the titlebar (borderless), and the desktop's panel stayed on top.
+            // Wayland can't report a window position (GLFW errors if asked), so only the
+            // size is remembered there; the compositor places the restored window.
+            bool wayland = false;
+#if GLFW_VERSION_MAJOR > 3 || GLFW_VERSION_MINOR >= 4
+            wayland = glfwGetPlatform() == GLFW_PLATFORM_WAYLAND;
+#endif
             if (!input.is_fullscreen) {
-                // Remove titlebar, keep taskbar
+                if (!wayland) glfwGetWindowPos(window, &windowed_x, &windowed_y);
+                glfwGetWindowSize(window, &windowed_w, &windowed_h);
+                GLFWmonitor* mon = glfwGetPrimaryMonitor();
+                const GLFWvidmode* vm = mon ? glfwGetVideoMode(mon) : nullptr;
+                if (vm) {
+                    glfwSetWindowMonitor(window, mon, 0, 0, vm->width, vm->height,
+                                         vm->refreshRate);
+                    input.is_fullscreen = true;
+                }
+            } else {
+                glfwSetWindowMonitor(window, nullptr, windowed_x, windowed_y,
+                                     windowed_w, windowed_h, GLFW_DONT_CARE);
+                input.is_fullscreen = false;
+            }
+#else
+            if (!input.is_fullscreen) {
                 glfwSetWindowAttrib(window, GLFW_DECORATED, GLFW_FALSE);
                 input.is_fullscreen = true;
             } else {
-                // Restore titlebar
                 glfwSetWindowAttrib(window, GLFW_DECORATED, GLFW_TRUE);
                 input.is_fullscreen = false;
             }
+#endif
         }
 
         // (win_w / win_h resolved and the surface reconfigured at the top of the frame,
