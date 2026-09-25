@@ -2,7 +2,7 @@
 
 Short, chronological log of notable changes. Newest on top.
 
-## 2026-09-25 — Subdividing after an iso remesh threw tris everywhere
+## 2026-09-25 — v0.2.24 — Subdividing after an iso remesh threw tris everywhere
 
 *Hand-tested by the user on the native GL build: remesh, sculpt at the base, then up,
 down and up again, with 0 folded fans on every check. User on the new iso remesher: "great,
@@ -18,7 +18,7 @@ On the user's run, 50 strokes after a remesh, one undo and a subd-up left 57,908
 -x). The voxel merge path has always done this resync, with a comment explaining why; the
 iso remesh now does the same.
 
-## 2026-09-25 — Grab and Limb dead until the first draw stroke
+## 2026-09-25 — v0.2.24 — Grab and Limb dead until the first draw stroke
 
 *Hand-tested by the user on the native GL build: grab works as the first stroke of a
 session.*
@@ -36,7 +36,7 @@ the read-back said 0.
 - It came in on 2026-09-17 (`4a28ed8`), so **v0.2.21–v0.2.23 have it, web included**.
 - A level switch right after launch made it look switch-related. It wasn't.
 
-## 2026-09-24 — SDF remesh/merge keeps detail
+## 2026-09-24 — v0.2.24 — SDF remesh/merge keeps detail
 
 *Reviewed by the user from offline renders (original / old / new, plus wireframe close-ups)
 of three sculpts: "results are pretty tight", "great work". Measured headless with the
@@ -97,7 +97,7 @@ Dev hooks: `CHISEL_AUTO_MERGE=1` (one SDF remesh after load), `CHISEL_MERGE_RES=
 `CHISEL_MERGE_SRC_DUMP=src.obj` (pre-merge mesh). The merge result line (tris, R, time,
 watertight) is now printed to the console as well as toasted.
 
-## 2026-09-24 — Remesh keeps detail; remesh detail slider
+## 2026-09-24 — v0.2.24 — Remesh keeps detail; remesh detail slider
 
 *Browser-tested on itch (`0.2.23-keepdetail2`, #2011177). The user took one sculpt from
 5M to 75k tris both ways and compared screenshots side by side: "looks dope af". With the
@@ -141,7 +141,7 @@ as the new. It now only drops area-degenerate tris that touch the seam.
 Dev hooks: `CHISEL_AUTO_REMESH=1` (plain remesh on load), `CHISEL_REMESH_DETAIL=x`,
 `CHISEL_REMESH_KEEP_DETAIL=0`.
 
-## 2026-09-24 — Dabs follow every pointer sample; the Catmull-Rom spline is gone
+## 2026-09-24 — v0.2.24 — Dabs follow every pointer sample; the Catmull-Rom spline is gone
 
 *Browser-tested on itch (`0.2.23-pathtest`, #2010856) on an Intel APU. User: "it works so
 well now that i could barely test the difference before, but now it's just impossible to
@@ -174,7 +174,7 @@ frame measured from the pre-wrap spot and could lay a line of dabs across the sc
 stroke. A value near 1 would mean the device or browser reports once per frame and
 faceting could return. Remove the line once the numbers are known.
 
-## 2026-09-24 — Geometry strokes keep their touched list on the GPU
+## 2026-09-24 — v0.2.24 — Geometry strokes keep their touched list on the GPU
 
 *Browser-tested on itch (test build `0.2.23-gputest`, #2010810) on an Intel APU at L9
 (~5M tris): strokes, undo/redo, undo across a level change, mirror, and Move. No alarm
