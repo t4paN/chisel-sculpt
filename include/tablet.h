@@ -9,6 +9,13 @@
 // every X11 desktop. xf86-input-wacom's pressure curve is applied driver-side, so
 // the values we get are already curved to the user's Krita/xsetwacom tuning.
 //
+// Linux, any session (native Wayland included): also reads a Wacom's own USB reports
+// through hidraw when the node is readable — which is what OpenTabletDriver's udev
+// rules arrange. Covers OTD's relative mode, where the desktop only ever sees a mouse.
+// See tablet.cpp for the format and why it is silent on a stock setup.
+//
+// Web: PointerEvent pressure from the browser (tablet.cpp's __EMSCRIPTEN__ branch).
+//
 // Other platforms / no tablet / lib missing: degrades to a no-op — pressure()
 // returns 1.0 and available() returns false, so the brush behaves exactly as a
 // mouse-only build.

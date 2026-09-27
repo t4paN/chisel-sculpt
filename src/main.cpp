@@ -731,7 +731,8 @@ int main(int argc, char* argv[]) {
     Renderer renderer;
     renderer.init();
 
-    // Pen tablet (X11/XInput2, dlopen'd libXi). No-op if absent. Detects hotplug.
+    // Pen tablet: XInput2 on X11/XWayland, plus a Wacom's own hidraw reports where readable
+    // (OpenTabletDriver setups, native Wayland). No-op if absent. Detects hotplug.
     Tablet tablet;
     tablet.init();
     if (tablet.available()) {

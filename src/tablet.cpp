@@ -51,21 +51,57 @@ unsigned long Tablet::sample_count() const { return g_web_pen_count; }
 #include <X11/Xlib.h>
 #include <X11/extensions/XInput2.h>
 #include <dlfcn.h>
+#include <dirent.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <cerrno>
+#include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <vector>
 
+// Two independent pressure sources, either of which may be absent:
+//
+//  - XInput2 (X11, and XWayland): the stylus "Abs Pressure" valuator, as below.
+//  - hidraw (any Linux session, native Wayland included): the tablet's own USB reports,
+//    read directly. This exists for OpenTabletDriver users. OTD's relative ("mouse") mode
+//    hands the desktop a plain virtual MOUSE, so no window system ever sees pressure —
+//    but Linux lets several readers share a hidraw node, so we read the same reports
+//    OTD is reading. It also covers native-Wayland GLFW, which has no tablet support.
+//
+// The hidraw source only switches on when a node is actually readable by the user. With
+// the stock kernel wacom driver the nodes are root-only, so on a normal X11 or Wayland
+// desktop it opens nothing and the XInput2 path behaves exactly as before. OTD's udev
+// rules are what grant access, so in practice "readable" means "OTD owns this tablet".
+//
+// Report format = Wacom's "Intuos/Bamboo" protocol (OTD's IntuosReportParser, the
+// kernel's wacom_bpt_pen), verified byte-for-byte on a One by Wacom CTL-672:
+//   [0] 0x02 report id   [1] 0x80 valid | 0x20 in range | 0x01 tip
+//   [2..5] x, y          [6..7] pressure, little-endian   [8] hover distance
+// Out of range the tablet sends 02 80 00...; anything else (other report ids, other
+// lengths, other vendors' formats) is ignored, so an unknown device is a silent no-op.
 namespace {
+const int kHidMaxFds      = 4;     // a Wacom exposes 2 hidraw interfaces; slack for two
+const int kHidReportLen   = 10;    // id + 9 payload bytes, per the report descriptor
+const int kHidDefaultMax  = 2047;  // One by Wacom / Intuos S-M; grows if exceeded
+const double kHidRescanSec = 2.0;  // hotplug: look again this often while none is open
+
 // The handful of libXi entry points we need, dlsym'd at runtime so the build
 // links nothing from libxi-dev. Signatures match <X11/extensions/XInput2.h>.
 typedef Status        (*PFN_XIQueryVersion)(Display*, int*, int*);
 typedef XIDeviceInfo* (*PFN_XIQueryDevice)(Display*, int, int*);
 typedef void          (*PFN_XIFreeDeviceInfo)(XIDeviceInfo*);
 typedef int           (*PFN_XISelectEvents)(Display*, Window, XIEventMask*, int);
+
+double now_sec() {
+    using namespace std::chrono;
+    return duration<double>(steady_clock::now().time_since_epoch()).count();
+}
 }
 
 struct Tablet::Impl {
     void*    xi_lib    = nullptr;
-    Display* dpy       = nullptr;   // our own connection (isolated from GLFW's)
+    Display* dpy       = nullptr;   // our own connection (isolated from GLFW's); may be null
     int      xi_opcode = -1;
 
     PFN_XIQueryVersion   QueryVersion   = nullptr;
@@ -76,13 +112,25 @@ struct Tablet::Impl {
     // One entry per pressure-capable tool (Wacom reports stylus + eraser).
     struct Pen { int sourceid; int axis; double min, max; };
     std::vector<Pen> pens;
-    bool  has_device    = false;
+    bool  has_device    = false;    // XInput2 found a pressure valuator
     float last_pressure = 0.0f;
     int   last_sourceid = -1;       // tool the raw stream last attributed motion to
     unsigned long samples = 0;      // bumped on any stylus motion, pressure axis or not
 
+    // hidraw source. Latches "seen" on the first valid pen report rather than on open:
+    // an open node only proves a Wacom is plugged in, not that it speaks this format.
+    int    hid_fds[kHidMaxFds];
+    int    hid_nfds       = 0;
+    bool   hid_seen       = false;
+    int    hid_max        = kHidDefaultMax;
+    double hid_next_scan  = 0.0;
+
+    bool init_xinput();
     bool scan_devices();
     void query_pressure();          // read live valuator state (grab-independent)
+    void hid_scan();
+    void hid_poll();
+    void hid_close_all();
 };
 
 // Read the current pressure straight off the device's valuator state via
@@ -149,36 +197,119 @@ bool Tablet::Impl::scan_devices() {
     return has_device;
 }
 
+// Open every readable hidraw node whose device is a Wacom (USB vendor 0x056A). A node
+// we can't open (EACCES — the normal case without OTD) is skipped without a word.
+void Tablet::Impl::hid_scan() {
+    DIR* dir = opendir("/sys/class/hidraw");
+    if (!dir) return;
+    while (dirent* e = readdir(dir)) {
+        if (hid_nfds >= kHidMaxFds) break;
+        if (std::strncmp(e->d_name, "hidraw", 6) != 0) continue;
+        char path[160];
+        std::snprintf(path, sizeof(path), "/sys/class/hidraw/%s/device/uevent", e->d_name);
+        FILE* f = std::fopen(path, "r");
+        if (!f) continue;
+        bool wacom = false;
+        char line[256];
+        while (std::fgets(line, sizeof(line), f)) {
+            // HID_ID=<bus>:<vendor>:<product>, e.g. 0003:0000056A:0000037B
+            if (std::strncmp(line, "HID_ID=", 7) == 0) {
+                unsigned bus = 0, vendor = 0, product = 0;
+                if (std::sscanf(line + 7, "%x:%x:%x", &bus, &vendor, &product) == 3)
+                    wacom = (vendor == 0x056A);
+                break;
+            }
+        }
+        std::fclose(f);
+        if (!wacom) continue;
+        std::snprintf(path, sizeof(path), "/dev/%s", e->d_name);
+        int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+        if (fd >= 0) hid_fds[hid_nfds++] = fd;
+    }
+    closedir(dir);
+}
+
+void Tablet::Impl::hid_close_all() {
+    for (int i = 0; i < hid_nfds; i++) close(hid_fds[i]);
+    hid_nfds = 0;
+    hid_seen = false;
+}
+
+void Tablet::Impl::hid_poll() {
+    if (hid_nfds == 0) {
+        double t = now_sec();
+        if (t < hid_next_scan) return;
+        hid_next_scan = t + kHidRescanSec;
+        hid_scan();
+        if (hid_nfds == 0) return;
+    }
+    unsigned char buf[64];
+    for (int i = 0; i < hid_nfds; ) {
+        ssize_t n;
+        while ((n = read(hid_fds[i], buf, sizeof(buf))) > 0) {
+            if (n != kHidReportLen || buf[0] != 0x02) continue;
+            if (!(buf[1] & 0x80) || !(buf[1] & 0x20)) continue;  // pen out of range
+            int raw = buf[6] | (buf[7] << 8);
+            // Pressure resolution differs by model and is not in the descriptor (the pen
+            // report sits on a vendor usage page). Start at 2047 and widen to the next
+            // all-ones value if the pen ever exceeds it, so a 4095-level pen is only too
+            // sensitive until its first hard press, never clipped.
+            while (raw > hid_max && hid_max < 0xFFFF) hid_max = (hid_max << 1) | 1;
+            last_pressure = (float)raw / (float)hid_max;
+            hid_seen = true;
+            samples++;
+        }
+        if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+            // Unplugged (ENODEV) or otherwise dead: drop this node, keep the rest.
+            close(hid_fds[i]);
+            hid_fds[i] = hid_fds[--hid_nfds];
+            if (hid_nfds == 0) hid_seen = false;
+            continue;
+        }
+        i++;
+    }
+}
+
 Tablet::Tablet() {}
 Tablet::~Tablet() { shutdown(); }
+
+// The two sources are set up independently: no X display (pure Wayland), no libXi, or
+// no XInput2 just means the hidraw source runs alone, and vice versa.
 
 bool Tablet::init() {
     shutdown();
     Impl* m = new Impl();
+    if (!m->init_xinput()) {
+        if (m->dpy)    { XCloseDisplay(m->dpy); m->dpy = nullptr; }
+        if (m->xi_lib) { dlclose(m->xi_lib);   m->xi_lib = nullptr; }
+    }
+    m->hid_scan();
+    m->hid_next_scan = now_sec() + kHidRescanSec;
+    impl = m;                 // kept even with no device yet (hotplug on both sources)
+    return available();
+}
 
+bool Tablet::Impl::init_xinput() {
+    Impl* m = this;
     m->xi_lib = dlopen("libXi.so.6", RTLD_NOW | RTLD_LOCAL);
     if (!m->xi_lib) m->xi_lib = dlopen("libXi.so", RTLD_NOW | RTLD_LOCAL);
-    if (!m->xi_lib) { delete m; return false; }
+    if (!m->xi_lib) return false;
 
     m->QueryVersion   = (PFN_XIQueryVersion)  dlsym(m->xi_lib, "XIQueryVersion");
     m->QueryDevice    = (PFN_XIQueryDevice)   dlsym(m->xi_lib, "XIQueryDevice");
     m->FreeDeviceInfo = (PFN_XIFreeDeviceInfo)dlsym(m->xi_lib, "XIFreeDeviceInfo");
     m->SelectEvents   = (PFN_XISelectEvents)  dlsym(m->xi_lib, "XISelectEvents");
-    if (!m->QueryVersion || !m->QueryDevice || !m->FreeDeviceInfo || !m->SelectEvents) {
-        dlclose(m->xi_lib); delete m; return false;
-    }
+    if (!m->QueryVersion || !m->QueryDevice || !m->FreeDeviceInfo || !m->SelectEvents)
+        return false;
 
     m->dpy = XOpenDisplay(nullptr);
-    if (!m->dpy) { dlclose(m->xi_lib); delete m; return false; }
+    if (!m->dpy) return false;
 
     int ev = 0, err = 0;
-    if (!XQueryExtension(m->dpy, "XInputExtension", &m->xi_opcode, &ev, &err)) {
-        XCloseDisplay(m->dpy); dlclose(m->xi_lib); delete m; return false;
-    }
+    if (!XQueryExtension(m->dpy, "XInputExtension", &m->xi_opcode, &ev, &err))
+        return false;
     int major = 2, minor = 0;
-    if (m->QueryVersion(m->dpy, &major, &minor) != Success) {
-        XCloseDisplay(m->dpy); dlclose(m->xi_lib); delete m; return false;
-    }
+    if (m->QueryVersion(m->dpy, &major, &minor) != Success) return false;
 
     m->scan_devices();
 
@@ -201,15 +332,21 @@ bool Tablet::init() {
     ems[1].mask     = hier_mask;
     m->SelectEvents(m->dpy, root, ems, 2);
     XFlush(m->dpy);
-
-    impl = m;                 // keep the connection even with no device yet (hotplug)
-    return m->has_device;
+    return true;
 }
 
 void Tablet::poll(bool stroke_active) {
     if (!impl) return;
     Impl* m = impl;
-    while (XPending(m->dpy)) {
+    // hidraw first: once it has delivered a pen report it is the authority on pressure,
+    // and the XInput2 writes below stand down. Otherwise, with OTD in its absolute
+    // "Artist" mode, XWayland also exposes the virtual pen, and the grab fallback's
+    // valuator query (stale while our window is a native Wayland one) would overwrite a
+    // live hidraw value every stroke frame.
+    m->hid_poll();
+    const bool xi_writes_pressure = !m->hid_seen;
+
+    while (m->dpy && XPending(m->dpy)) {
         XEvent ev;
         XNextEvent(m->dpy, &ev);
         if (ev.xcookie.type != GenericEvent || ev.xcookie.extension != m->xi_opcode)
@@ -227,6 +364,7 @@ void Tablet::poll(bool stroke_active) {
                 // Before the pressure-axis checks below: a hover with no pressure
                 // change is still the pen driving, and that is what this counts.
                 m->samples++;
+                if (!xi_writes_pressure) break;
                 const unsigned char* vmask = re->valuators.mask;
                 int mask_len = re->valuators.mask_len;
                 // Pressure only present in events where that axis actually moved.
@@ -247,15 +385,16 @@ void Tablet::poll(bool stroke_active) {
 
     // While the tip is down the pointer grab silences our raw selection, so fall
     // back to polling the live valuator state for the duration of the stroke.
-    if (stroke_active) m->query_pressure();
+    // hidraw has no grab to dodge; its reports keep coming mid-stroke.
+    if (stroke_active && xi_writes_pressure) m->query_pressure();
 }
 
 float Tablet::pressure() const {
-    return (impl && impl->has_device) ? impl->last_pressure : 1.0f;
+    return available() ? impl->last_pressure : 1.0f;
 }
 
 bool Tablet::available() const {
-    return impl && impl->has_device;
+    return impl && (impl->has_device || impl->hid_seen);
 }
 
 unsigned long Tablet::sample_count() const {
@@ -264,6 +403,7 @@ unsigned long Tablet::sample_count() const {
 
 void Tablet::shutdown() {
     if (!impl) return;
+    impl->hid_close_all();
     if (impl->dpy)    XCloseDisplay(impl->dpy);
     if (impl->xi_lib) dlclose(impl->xi_lib);
     delete impl;

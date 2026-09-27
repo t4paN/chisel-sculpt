@@ -2,6 +2,38 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-09-27 — Pen pressure with OpenTabletDriver and on native Wayland
+
+*Hand-tested by the user on the native GL build (KDE Wayland, One by Wacom CTL-672, OTD
+relative mode): pressure works, and the profile switches Tablet ↔ Mouse correctly.*
+
+**The desktop build got no pen pressure on Wayland.** Native pressure came only from
+XInput2, which sees nothing from a native-Wayland GLFW window. The user also runs the
+tablet through OpenTabletDriver in relative ("mouse") mode, because Plasma/libinput has no
+equivalent of `xsetwacom`'s liftoff distance and the cursor jumped at the hover edge. OTD's
+relative mode hands the desktop a plain virtual mouse, so no window system sees pressure.
+
+**`tablet.cpp` now also reads a Wacom's own USB reports through hidraw.** Linux lets
+several readers share a hidraw node, so Chisel reads the same reports OTD reads. The format
+is Wacom's Intuos/Bamboo pen report (id 2, 10 bytes, pressure little-endian at bytes 6–7),
+checked byte-for-byte on the user's tablet. Details:
+- **Silent on a stock setup.** Without OTD's udev rules the nodes are root-only, so on a
+  normal X11 or Wayland desktop nothing opens and the XInput2 path works as before. Only
+  Wacom vendor nodes are opened, and only matching reports count.
+- **hidraw wins once it has spoken.** After the first valid pen report, XInput2 still
+  counts pen motion but stops writing pressure. Otherwise, with OTD in absolute mode,
+  XWayland's stale valuator query during a stroke would overwrite live values.
+- **Availability latches on the first pen report**, like the web build: an open node only
+  proves a Wacom is plugged in, not that it speaks this format. Unplug closes the node, and
+  a rescan every 2 s picks the tablet back up.
+- **Pressure range starts at 2047** and widens to the next all-ones value if a pen ever
+  exceeds it, because the range isn't in the descriptor (the pen report sits on a vendor
+  usage page).
+- The X11 setup was split out (`init_xinput`), so a missing display or missing libXi no
+  longer disables the tablet code as a whole.
+
+Windows (WinTab) and the web build (PointerEvent) are untouched. All three targets build.
+
 ## 2026-09-26 — Space is real fullscreen on the desktop build
 
 *Hand-tested by the user on KDE Wayland.*
