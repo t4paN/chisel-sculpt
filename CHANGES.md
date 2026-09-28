@@ -2,6 +2,52 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-09-28 — The pen works on native Wayland (tablet protocol)
+
+*Hand-tested by the user on both native builds, GL and WebGPU (KDE Wayland, KWin 6.7.5,
+One by Wacom through OpenTabletDriver's "Relative Pen Mode" plugin): the ring follows the
+pen, pressure "feels right", toolbar and slider drags work. The slider-warning gate below
+is built, not hand-tested.*
+
+**Under a real pen device, native Chisel on Wayland got no pen input at all.** The user's
+new OTD plugin keeps relative ("mouse") motion but presents a real virtual pen instead of a
+virtual mouse, so Krita and browsers get proper pressure. Native Chisel then saw nothing:
+the "Tablet settings" toast fired (hidraw still read pressure) but the ring never moved and
+the tip never clicked. Cause: GLFW binds no Wayland tablet protocol, and KWin 6.7 no longer
+turns pen input into pointer input for clients that don't. That emulation now sits behind
+the deprecated `KWIN_WAYLAND_EMULATE_TABLET` env var (`input.cpp`, `emulateTabletEvent`).
+The old setup only worked because the pen used to *be* a mouse.
+
+**`tablet.cpp` now binds `zwp_tablet_manager_v2` itself**, on GLFW's own `wl_display`:
+- **Pen replayed through the window's GLFW callbacks.** Motion goes to the cursor-pos
+  callback, the tip to the left button, barrel buttons to right/middle (OTD's Artist-mode
+  mapping), and proximity to cursor-enter. Whatever callback is installed gets called, and
+  ImGui chains in front of the app's, so the toolbar works with the pen too. Enter/leave
+  matters: without it ImGui falls back to polling the idle mouse's position every frame.
+- **Private event queue.** `glfwPollEvents` still reads the socket, and `Tablet::poll`,
+  called right after it, dispatches our queue. The listeners never run inside GLFW's own
+  dispatch, and pen events land at the same point in the frame as mouse events.
+- **The tool's cursor follows GLFW's cursor mode.** It is hidden where Chisel draws its
+  ring, and a theme arrow (`wl_cursor`) is shown over UI. A tablet tool has its own cursor
+  and it is blank until the client sets one.
+- **Slider drags:** the drag code measures deltas from GLFW's virtual position, so while
+  the pointer is captured the pen is replayed as that position plus its own travel since
+  the drag began. Otherwise the first event would jump by the gap between the two. A pen
+  can't be pointer-locked or warped back on Wayland, so after a drag the ring lands where
+  the pen is, not where the drag began. Krita and the browser behave the same.
+- **Pressure priority:** once the pen has been over the window, the protocol's pressure
+  (after OTD's curve and filters) wins over the raw hidraw value, and XInput2 stands down.
+- **Build:** the protocol glue is pre-generated into `external/wayland-tablet/`, so
+  neither the scanner nor wayland-protocols is needed at build time. It is optional in
+  CMake (wayland-client + wayland-cursor via pkg-config) and needs GLFW 3.4+, so the CI
+  image (GLFW 3.3, X11 only) compiles it out. The AppImage runs through XWayland, which
+  already turns the pen into pointer events.
+
+**The slider's "POINTER DID NOT RETURN" warning no longer fires for pen drags.** It
+compared the mouse against the drag start, so a pen drag always "failed" it, blaming the
+wrong thing. It now only runs when GLFW's virtual position moved during the drag, which
+means the mouse did the dragging.
+
 ## 2026-09-27 — Pen pressure with OpenTabletDriver and on native Wayland
 
 *Hand-tested by the user on the native GL build (KDE Wayland, One by Wacom CTL-672, OTD

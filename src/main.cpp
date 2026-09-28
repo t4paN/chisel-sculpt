@@ -731,10 +731,11 @@ int main(int argc, char* argv[]) {
     Renderer renderer;
     renderer.init();
 
-    // Pen tablet: XInput2 on X11/XWayland, plus a Wacom's own hidraw reports where readable
-    // (OpenTabletDriver setups, native Wayland). No-op if absent. Detects hotplug.
+    // Pen tablet: XInput2 on X11/XWayland, a Wacom's own hidraw reports where readable
+    // (OpenTabletDriver setups), and on native Wayland the compositor's tablet protocol,
+    // which also supplies the pen's position and clicks. No-op if absent. Detects hotplug.
     Tablet tablet;
-    tablet.init();
+    tablet.init(window);
     if (tablet.available()) {
         std::snprintf(input.notification, sizeof(input.notification),
                       "Pen pressure: tablet detected");

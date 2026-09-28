@@ -1,5 +1,7 @@
 #pragma once
 
+struct GLFWwindow;
+
 // Pen/tablet pressure input.
 //
 // Linux/X11: reads the stylus "Abs Pressure" valuator straight off XInput2 — the
@@ -14,6 +16,13 @@
 // rules arrange. Covers OTD's relative mode, where the desktop only ever sees a mouse.
 // See tablet.cpp for the format and why it is silent on a stock setup.
 //
+// Linux, native Wayland: the compositor's tablet protocol (zwp_tablet_v2), the way
+// Krita and browsers get the pen. Needed for POSITION, not just pressure: KWin 6.7
+// stopped turning pen input into pointer input for apps that don't bind the protocol,
+// and GLFW doesn't, so without this a pen never moves or clicks in the window at all.
+// Pen motion/tip/buttons are fed through the window's own GLFW callbacks, so the app
+// and ImGui see them exactly like mouse events.
+//
 // Web: PointerEvent pressure from the browser (tablet.cpp's __EMSCRIPTEN__ branch).
 //
 // Other platforms / no tablet / lib missing: degrades to a no-op — pressure()
@@ -23,7 +32,9 @@ struct Tablet {
     Tablet();
     ~Tablet();
 
-    bool  init();              // true if a pressure-capable device was found
+    // true if a pressure-capable device was found. The window is only used by the
+    // native-Wayland source (to address its surface and callbacks); may be null.
+    bool  init(GLFWwindow* window = nullptr);
     // Drain pending raw events. During a stroke the button-down pointer grab
     // starves the root raw selection, so pass stroke_active=true to also query
     // the device's live valuator state directly (grab-independent).

@@ -291,6 +291,10 @@ static int g_shift_tap_count = 0;
 static int g_ctrl_tap_count = 0;
 
 static double g_slider_last_raw_x = 0;
+// GLFW's virtual position when the drag began. A pen drives a slider through a replay
+// (tablet.cpp) without ever moving it, so an unchanged value at release means the pen,
+// not the mouse, did the drag.
+static double g_slider_begin_vx = 0, g_slider_begin_vy = 0;
 static GLFWwindow* g_window = nullptr;
 
 // Slider drag: accumulate a horizontal delta into the active slider, clamped so
@@ -417,6 +421,8 @@ static void begin_slider_drag(GLFWwindow* w, InputState::SliderMode mode, float 
         double cx = 0.0, cy = 0.0;
         glfwGetCursorPos(w, &cx, &cy);
         g_slider_last_raw_x = cx;
+        g_slider_begin_vx = cx;
+        g_slider_begin_vy = cy;
     }
 #endif
 }
@@ -425,6 +431,16 @@ static void begin_slider_drag(GLFWwindow* w, InputState::SliderMode mode, float 
 // actually is rather than teleporting it into a window the user has already left.
 static void end_slider_drag(GLFWwindow* w, bool warp_back) {
     if (!g_input || g_input->slider_mode == InputState::SliderMode::NONE) return;
+    bool mouse_dragged = true;
+#if !defined(__EMSCRIPTEN__)
+    if (w) {
+        double vx = 0.0, vy = 0.0;
+        glfwGetCursorPos(w, &vx, &vy);
+        mouse_dragged = (vx != g_slider_begin_vx || vy != g_slider_begin_vy);
+    }
+#else
+    (void)mouse_dragged;
+#endif
     if (warp_back) {
         // Order matters. The position has to be set while the cursor is STILL disabled,
         // because that is the only mode Wayland accepts it in — there it records a
@@ -444,7 +460,9 @@ static void end_slider_drag(GLFWwindow* w, bool warp_back) {
     // position here but the pointer still visibly jumps on the next move, then GLFW's
     // idea of the cursor and the compositor's have diverged — a different bug from the
     // warp being refused outright.
-    if (w && warp_back) {
+    // A pen can't be warped on Wayland, and it isn't the pointer this checks anyway —
+    // after a pen-driven drag the "got" position is just the idle mouse.
+    if (w && warp_back && mouse_dragged) {
         double ax = 0.0, ay = 0.0;
         glfwGetCursorPos(w, &ax, &ay);
         if (std::fabs(ax - g_input->slider_start_x) > 1.0) {

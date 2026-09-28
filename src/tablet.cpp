@@ -39,7 +39,7 @@ struct Tablet::Impl { int unused; };
 
 Tablet::Tablet() {}
 Tablet::~Tablet() {}
-bool  Tablet::init()            { return false; }
+bool  Tablet::init(GLFWwindow*)  { return false; }
 void  Tablet::poll(bool)        {}
 float Tablet::pressure() const  { return g_web_pen_seen ? g_web_pressure : 1.0f; }
 bool  Tablet::available() const { return g_web_pen_seen; }
@@ -60,7 +60,20 @@ unsigned long Tablet::sample_count() const { return g_web_pen_count; }
 #include <cstring>
 #include <vector>
 
-// Two independent pressure sources, either of which may be absent:
+#if defined(CHISEL_WAYLAND_TABLET)
+#include <GLFW/glfw3.h>
+#if GLFW_VERSION_MAJOR > 3 || GLFW_VERSION_MINOR >= 4     // glfwGetPlatform
+#define GLFW_EXPOSE_NATIVE_WAYLAND
+#include <GLFW/glfw3native.h>
+#include <wayland-cursor.h>
+#include <linux/input-event-codes.h>
+#include "tablet-unstable-v2-client-protocol.h"
+#define CHISEL_WL_TABLET 1
+#endif
+#endif
+
+// Independent pressure sources, any of which may be absent (the third, the native-
+// Wayland tablet protocol, is described below; it also supplies position):
 //
 //  - XInput2 (X11, and XWayland): the stylus "Abs Pressure" valuator, as below.
 //  - hidraw (any Linux session, native Wayland included): the tablet's own USB reports,
@@ -99,6 +112,334 @@ double now_sec() {
 }
 }
 
+// ---- Native Wayland: the compositor's tablet protocol ----
+//
+// GLFW binds no tablet protocol, and KWin 6.7 no longer converts pen input into pointer
+// input for clients that don't (tablet emulation is gated behind the deprecated
+// KWIN_WAYLAND_EMULATE_TABLET env var). So under a real pen device — OTD Artist mode, or
+// the "Relative Pen Mode" plugin — a native-Wayland Chisel got no motion and no clicks at
+// all. This source binds zwp_tablet_manager_v2 on GLFW's own wl_display and replays the
+// pen into the window's GLFW callbacks, so the app and ImGui can't tell it from a mouse.
+//
+// Everything lives on a PRIVATE event queue. GLFW's glfwPollEvents still reads the socket
+// (that distributes our events into our queue), and Tablet::poll — called right after
+// it — dispatches them. So the listeners never run inside GLFW's own dispatch, and pen
+// events land at the same point in the frame as mouse events.
+//
+// Compiled only against GLFW 3.4+ with wayland-client found at configure time. The Linux
+// CI image ships GLFW 3.3 (X11 only), where the AppImage runs through XWayland — which
+// already turns the pen into core pointer events itself.
+#if defined(CHISEL_WL_TABLET)
+namespace {
+struct WlPen {
+    GLFWwindow*            win     = nullptr;
+    wl_surface*            surface = nullptr;   // the window's; pen events elsewhere are ignored
+    wl_display*            dpy     = nullptr;   // GLFW's; not ours to close
+    wl_event_queue*        queue   = nullptr;
+    wl_registry*           reg     = nullptr;
+    wl_compositor*         comp    = nullptr;
+    wl_shm*                shm     = nullptr;
+    wl_seat*               seat    = nullptr;
+    zwp_tablet_manager_v2* mgr     = nullptr;
+    zwp_tablet_seat_v2*    tseat   = nullptr;
+    std::vector<zwp_tablet_tool_v2*> tools;
+    std::vector<zwp_tablet_v2*>      tablets;
+
+    // A tablet tool has its own cursor, separate from the pointer's, and it is blank
+    // until the client sets one. Hidden while GLFW's cursor is (Chisel draws its ring),
+    // the theme arrow over UI. Unlike the pointer there is no GLFW cursor to reuse.
+    wl_cursor_theme* theme = nullptr;
+    wl_surface*      arrow = nullptr;
+    int arrow_hx = 0, arrow_hy = 0;
+    int cursor_applied = -1;             // 1 arrow, 0 hidden, -1 unknown
+
+    // The tool currently in proximity over our surface. Only one pen at a time.
+    zwp_tablet_tool_v2* active = nullptr;
+    uint32_t prox_serial = 0;
+    double   x = 0.0, y = 0.0;
+    bool     held_right = false, held_middle = false;
+
+    // Tool events arrive as a batch closed by `frame`; they're collected here and
+    // replayed in a fixed order (enter, move, press, release, leave) at the frame.
+    bool     f_in = false, f_out = false, f_motion = false, f_down = false, f_up = false;
+    zwp_tablet_tool_v2* f_tool = nullptr;
+    struct Btn { int button; bool pressed; };
+    Btn      f_btn[4];
+    int      f_nbtn = 0;
+
+    // Slider drags capture the POINTER (GLFW_CURSOR_DISABLED), which a pen isn't bound
+    // by. The drag code measures deltas from GLFW's virtual position, so while it runs
+    // the pen is replayed as that position plus the pen's travel since the drag began —
+    // otherwise its first event would be a jump of the gap between the two.
+    bool     drag = false;
+    double   drag_vx = 0, drag_vy = 0, drag_px = 0, drag_py = 0;
+
+    bool          seen     = false;      // a pen has been over our window
+    float         pressure = 0.0f;
+    unsigned long samples  = 0;
+};
+
+// GLFW has no getter for a callback. Setting one returns the previous, so swap and
+// restore. Whatever is installed is called: ImGui chains in front of the app's own, so
+// both get the pen.
+void wl_emit_pos(GLFWwindow* w, double x, double y) {
+    GLFWcursorposfun cb = glfwSetCursorPosCallback(w, nullptr);
+    glfwSetCursorPosCallback(w, cb);
+    if (cb) cb(w, x, y);
+}
+void wl_emit_enter(GLFWwindow* w, int entered) {
+    GLFWcursorenterfun cb = glfwSetCursorEnterCallback(w, nullptr);
+    glfwSetCursorEnterCallback(w, cb);
+    if (cb) cb(w, entered);
+}
+void wl_emit_button(GLFWwindow* w, int button, int action) {
+    // The pen carries no modifier state; the keyboard's is what a mouse click would get.
+    int mods = 0;
+    auto down = [w](int k) { return glfwGetKey(w, k) == GLFW_PRESS; };
+    if (down(GLFW_KEY_LEFT_SHIFT)   || down(GLFW_KEY_RIGHT_SHIFT))   mods |= GLFW_MOD_SHIFT;
+    if (down(GLFW_KEY_LEFT_CONTROL) || down(GLFW_KEY_RIGHT_CONTROL)) mods |= GLFW_MOD_CONTROL;
+    if (down(GLFW_KEY_LEFT_ALT)     || down(GLFW_KEY_RIGHT_ALT))     mods |= GLFW_MOD_ALT;
+    if (down(GLFW_KEY_LEFT_SUPER)   || down(GLFW_KEY_RIGHT_SUPER))   mods |= GLFW_MOD_SUPER;
+    GLFWmousebuttonfun cb = glfwSetMouseButtonCallback(w, nullptr);
+    glfwSetMouseButtonCallback(w, cb);
+    if (cb) cb(w, button, action, mods);
+}
+
+void wl_move(WlPen* p) {
+    if (glfwGetInputMode(p->win, GLFW_CURSOR) == GLFW_CURSOR_DISABLED) {
+        if (!p->drag) {
+            p->drag = true;
+            glfwGetCursorPos(p->win, &p->drag_vx, &p->drag_vy);
+            p->drag_px = p->x;
+            p->drag_py = p->y;
+        }
+        wl_emit_pos(p->win, p->drag_vx + (p->x - p->drag_px), p->drag_vy + (p->y - p->drag_py));
+        return;
+    }
+    p->drag = false;
+    wl_emit_pos(p->win, p->x, p->y);
+}
+
+void wl_apply_cursor(WlPen* p) {
+    if (!p->active) return;
+    int want = glfwGetInputMode(p->win, GLFW_CURSOR) == GLFW_CURSOR_NORMAL && p->arrow ? 1 : 0;
+    if (want == p->cursor_applied) return;
+    p->cursor_applied = want;
+    zwp_tablet_tool_v2_set_cursor(p->active, p->prox_serial, want ? p->arrow : nullptr,
+                                  p->arrow_hx, p->arrow_hy);
+    wl_display_flush(p->dpy);
+}
+
+// ---- tool ----
+void tool_type(void*, zwp_tablet_tool_v2*, uint32_t) {}
+void tool_hw_serial(void*, zwp_tablet_tool_v2*, uint32_t, uint32_t) {}
+void tool_hw_id(void*, zwp_tablet_tool_v2*, uint32_t, uint32_t) {}
+void tool_capability(void*, zwp_tablet_tool_v2*, uint32_t) {}
+void tool_done(void*, zwp_tablet_tool_v2*) {}
+void tool_removed(void* d, zwp_tablet_tool_v2* t) {
+    WlPen* p = (WlPen*)d;
+    if (p->active == t) p->active = nullptr;
+    if (p->f_tool == t) p->f_tool = nullptr;
+    for (size_t i = 0; i < p->tools.size(); i++)
+        if (p->tools[i] == t) { p->tools.erase(p->tools.begin() + i); break; }
+    zwp_tablet_tool_v2_destroy(t);
+}
+void tool_prox_in(void* d, zwp_tablet_tool_v2* t, uint32_t serial, zwp_tablet_v2*, wl_surface* s) {
+    WlPen* p = (WlPen*)d;
+    if (s != p->surface) return;         // a popup or someone else's surface
+    p->f_in = true;
+    p->f_tool = t;
+    p->prox_serial = serial;
+}
+void tool_prox_out(void* d, zwp_tablet_tool_v2* t) {
+    WlPen* p = (WlPen*)d;
+    p->f_out = true;
+    p->f_tool = t;
+}
+void tool_down(void* d, zwp_tablet_tool_v2*, uint32_t) { ((WlPen*)d)->f_down = true; }
+void tool_up(void* d, zwp_tablet_tool_v2*)             { ((WlPen*)d)->f_up = true; }
+void tool_motion(void* d, zwp_tablet_tool_v2*, wl_fixed_t x, wl_fixed_t y) {
+    WlPen* p = (WlPen*)d;
+    p->x = wl_fixed_to_double(x);
+    p->y = wl_fixed_to_double(y);
+    p->f_motion = true;
+}
+void tool_pressure(void* d, zwp_tablet_tool_v2*, uint32_t v) {
+    ((WlPen*)d)->pressure = (float)v / 65535.0f;   // protocol range is 0..65535
+}
+void tool_distance(void*, zwp_tablet_tool_v2*, uint32_t) {}
+void tool_tilt(void*, zwp_tablet_tool_v2*, wl_fixed_t, wl_fixed_t) {}
+void tool_rotation(void*, zwp_tablet_tool_v2*, wl_fixed_t) {}
+void tool_slider(void*, zwp_tablet_tool_v2*, int32_t) {}
+void tool_wheel(void*, zwp_tablet_tool_v2*, wl_fixed_t, int32_t) {}
+void tool_button(void* d, zwp_tablet_tool_v2*, uint32_t, uint32_t button, uint32_t state) {
+    WlPen* p = (WlPen*)d;
+    // Same mapping as OTD's Artist mode and the Relative Pen plugin: barrel button 1
+    // (BTN_STYLUS2) is a right click, button 2 (BTN_STYLUS) a middle click.
+    int b = button == BTN_STYLUS2 ? GLFW_MOUSE_BUTTON_RIGHT
+          : button == BTN_STYLUS  ? GLFW_MOUSE_BUTTON_MIDDLE : -1;
+    if (b < 0 || p->f_nbtn >= 4) return;
+    p->f_btn[p->f_nbtn++] = { b, state == ZWP_TABLET_TOOL_V2_BUTTON_STATE_PRESSED };
+}
+void tool_frame(void* d, zwp_tablet_tool_v2* t, uint32_t) {
+    WlPen* p = (WlPen*)d;
+    if (p->f_in) {
+        p->active = t;
+        p->seen = true;
+        p->cursor_applied = -1;
+        wl_emit_enter(p->win, 1);
+        wl_apply_cursor(p);
+    }
+    if (p->active == t) {
+        if (p->f_motion) { wl_move(p); p->samples++; }
+        if (p->f_down) wl_emit_button(p->win, GLFW_MOUSE_BUTTON_LEFT, GLFW_PRESS);
+        for (int i = 0; i < p->f_nbtn; i++) {
+            const WlPen::Btn& bt = p->f_btn[i];
+            bool& held = bt.button == GLFW_MOUSE_BUTTON_RIGHT ? p->held_right : p->held_middle;
+            if (held == bt.pressed) continue;
+            held = bt.pressed;
+            wl_emit_button(p->win, bt.button, bt.pressed ? GLFW_PRESS : GLFW_RELEASE);
+        }
+        if (p->f_up) wl_emit_button(p->win, GLFW_MOUSE_BUTTON_LEFT, GLFW_RELEASE);
+        if (p->f_out) {
+            // Leaving proximity with a button held (pen whisked off mid-drag) never sends
+            // the matching up, so release whatever is still down.
+            if (p->held_right)  { p->held_right = false;  wl_emit_button(p->win, GLFW_MOUSE_BUTTON_RIGHT,  GLFW_RELEASE); }
+            if (p->held_middle) { p->held_middle = false; wl_emit_button(p->win, GLFW_MOUSE_BUTTON_MIDDLE, GLFW_RELEASE); }
+            wl_emit_enter(p->win, 0);
+            p->active = nullptr;
+            p->drag = false;
+        }
+    }
+    p->f_in = p->f_out = p->f_motion = p->f_down = p->f_up = false;
+    p->f_tool = nullptr;
+    p->f_nbtn = 0;
+}
+const zwp_tablet_tool_v2_listener kToolListener = {
+    tool_type, tool_hw_serial, tool_hw_id, tool_capability, tool_done, tool_removed,
+    tool_prox_in, tool_prox_out, tool_down, tool_up, tool_motion, tool_pressure,
+    tool_distance, tool_tilt, tool_rotation, tool_slider, tool_wheel, tool_button, tool_frame,
+};
+
+// ---- tablet (only tracked so it can be destroyed when unplugged) ----
+void tab_name(void*, zwp_tablet_v2*, const char*) {}
+void tab_id(void*, zwp_tablet_v2*, uint32_t, uint32_t) {}
+void tab_path(void*, zwp_tablet_v2*, const char*) {}
+void tab_done(void*, zwp_tablet_v2*) {}
+void tab_removed(void* d, zwp_tablet_v2* t) {
+    WlPen* p = (WlPen*)d;
+    for (size_t i = 0; i < p->tablets.size(); i++)
+        if (p->tablets[i] == t) { p->tablets.erase(p->tablets.begin() + i); break; }
+    zwp_tablet_v2_destroy(t);
+}
+const zwp_tablet_v2_listener kTabletListener = {
+    tab_name, tab_id, tab_path, tab_done, tab_removed,
+};
+
+// ---- seat ----
+void seat_tablet_added(void* d, zwp_tablet_seat_v2*, zwp_tablet_v2* t) {
+    WlPen* p = (WlPen*)d;
+    p->tablets.push_back(t);
+    zwp_tablet_v2_add_listener(t, &kTabletListener, p);
+}
+void seat_tool_added(void* d, zwp_tablet_seat_v2*, zwp_tablet_tool_v2* t) {
+    WlPen* p = (WlPen*)d;
+    p->tools.push_back(t);
+    zwp_tablet_tool_v2_add_listener(t, &kToolListener, p);
+}
+void seat_pad_added(void*, zwp_tablet_seat_v2*, zwp_tablet_pad_v2* pad) {
+    zwp_tablet_pad_v2_destroy(pad);      // express keys / rings: not used
+}
+const zwp_tablet_seat_v2_listener kSeatListener = {
+    seat_tablet_added, seat_tool_added, seat_pad_added,
+};
+
+// ---- registry ----
+void reg_global(void* d, wl_registry* r, uint32_t name, const char* iface, uint32_t ver) {
+    WlPen* p = (WlPen*)d;
+    if (!std::strcmp(iface, zwp_tablet_manager_v2_interface.name))
+        p->mgr = (zwp_tablet_manager_v2*)wl_registry_bind(r, name, &zwp_tablet_manager_v2_interface, 1);
+    else if (!std::strcmp(iface, wl_seat_interface.name) && !p->seat)
+        p->seat = (wl_seat*)wl_registry_bind(r, name, &wl_seat_interface, 1);
+    else if (!std::strcmp(iface, wl_compositor_interface.name))
+        p->comp = (wl_compositor*)wl_registry_bind(r, name, &wl_compositor_interface, 1);
+    else if (!std::strcmp(iface, wl_shm_interface.name))
+        p->shm = (wl_shm*)wl_registry_bind(r, name, &wl_shm_interface, 1);
+    (void)ver;
+}
+void reg_global_remove(void*, wl_registry*, uint32_t) {}
+const wl_registry_listener kRegListener = { reg_global, reg_global_remove };
+
+void wl_destroy(WlPen* p) {
+    for (zwp_tablet_tool_v2* t : p->tools)   zwp_tablet_tool_v2_destroy(t);
+    for (zwp_tablet_v2* t : p->tablets)      zwp_tablet_v2_destroy(t);
+    if (p->tseat) zwp_tablet_seat_v2_destroy(p->tseat);
+    if (p->mgr)   zwp_tablet_manager_v2_destroy(p->mgr);
+    if (p->arrow) wl_surface_destroy(p->arrow);
+    if (p->theme) wl_cursor_theme_destroy(p->theme);
+    if (p->seat)  wl_seat_destroy(p->seat);
+    if (p->shm)   wl_shm_destroy(p->shm);
+    if (p->comp)  wl_compositor_destroy(p->comp);
+    if (p->reg)   wl_registry_destroy(p->reg);
+    if (p->queue) wl_event_queue_destroy(p->queue);
+    if (p->dpy)   wl_display_flush(p->dpy);
+    delete p;
+}
+
+WlPen* wl_create(GLFWwindow* win) {
+    if (!win || glfwGetPlatform() != GLFW_PLATFORM_WAYLAND) return nullptr;
+    WlPen* p = new WlPen();
+    p->win     = win;
+    p->dpy     = glfwGetWaylandDisplay();
+    p->surface = glfwGetWaylandWindow(win);
+    if (!p->dpy || !p->surface) { delete p; return nullptr; }
+
+    p->queue = wl_display_create_queue(p->dpy);
+    // Proxies inherit their factory's queue, so a wrapper registry puts every object
+    // bound through it (and everything those create) on our queue.
+    wl_display* wrapped = (wl_display*)wl_proxy_create_wrapper(p->dpy);
+    wl_proxy_set_queue((wl_proxy*)wrapped, p->queue);
+    p->reg = wl_display_get_registry(wrapped);
+    wl_proxy_wrapper_destroy(wrapped);
+    wl_registry_add_listener(p->reg, &kRegListener, p);
+    wl_display_roundtrip_queue(p->dpy, p->queue);
+
+    if (!p->mgr || !p->seat) {
+        std::printf("[tablet] Wayland: compositor has no tablet protocol — pen via pointer only\n");
+        std::fflush(stdout);
+        wl_destroy(p);
+        return nullptr;
+    }
+    p->tseat = zwp_tablet_manager_v2_get_tablet_seat(p->mgr, p->seat);
+    zwp_tablet_seat_v2_add_listener(p->tseat, &kSeatListener, p);
+
+    if (p->comp && p->shm) {
+        const char* size_env = getenv("XCURSOR_SIZE");
+        int size = size_env ? atoi(size_env) : 0;
+        if (size <= 0) size = 24;
+        p->theme = wl_cursor_theme_load(getenv("XCURSOR_THEME"), size, p->shm);
+        wl_cursor* c = p->theme ? wl_cursor_theme_get_cursor(p->theme, "default") : nullptr;
+        if (!c && p->theme) c = wl_cursor_theme_get_cursor(p->theme, "left_ptr");
+        wl_buffer* buf = (c && c->image_count > 0) ? wl_cursor_image_get_buffer(c->images[0]) : nullptr;
+        if (buf) {
+            p->arrow    = wl_compositor_create_surface(p->comp);
+            p->arrow_hx = (int)c->images[0]->hotspot_x;
+            p->arrow_hy = (int)c->images[0]->hotspot_y;
+            wl_surface_attach(p->arrow, buf, 0, 0);
+            wl_surface_damage(p->arrow, 0, 0, (int)c->images[0]->width, (int)c->images[0]->height);
+            wl_surface_commit(p->arrow);
+        }
+    }
+    // Second roundtrip: the tablet seat announces the tablets and tools already present.
+    wl_display_roundtrip_queue(p->dpy, p->queue);
+    std::printf("[tablet] Wayland tablet protocol bound (%zu tablet(s), %zu tool(s))\n",
+                p->tablets.size(), p->tools.size());
+    std::fflush(stdout);
+    return p;
+}
+}  // namespace
+#endif
+
 struct Tablet::Impl {
     void*    xi_lib    = nullptr;
     Display* dpy       = nullptr;   // our own connection (isolated from GLFW's); may be null
@@ -124,6 +465,20 @@ struct Tablet::Impl {
     bool   hid_seen       = false;
     int    hid_max        = kHidDefaultMax;
     double hid_next_scan  = 0.0;
+
+#if defined(CHISEL_WL_TABLET)
+    WlPen* wl = nullptr;            // native-Wayland tablet protocol; null elsewhere
+#endif
+    // The Wayland source, once a pen has been over the window, is the authority: its
+    // pressure is the one the compositor delivers after OTD's curve and filters, where
+    // hidraw is the raw sensor. Both would otherwise write last_pressure.
+    bool wl_seen() const {
+#if defined(CHISEL_WL_TABLET)
+        return wl && wl->seen;
+#else
+        return false;
+#endif
+    }
 
     bool init_xinput();
     bool scan_devices();
@@ -255,8 +610,9 @@ void Tablet::Impl::hid_poll() {
             // all-ones value if the pen ever exceeds it, so a 4095-level pen is only too
             // sensitive until its first hard press, never clipped.
             while (raw > hid_max && hid_max < 0xFFFF) hid_max = (hid_max << 1) | 1;
-            last_pressure = (float)raw / (float)hid_max;
             hid_seen = true;
+            if (wl_seen()) continue;    // still drained, but the Wayland pen speaks
+            last_pressure = (float)raw / (float)hid_max;
             samples++;
         }
         if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
@@ -276,7 +632,7 @@ Tablet::~Tablet() { shutdown(); }
 // The two sources are set up independently: no X display (pure Wayland), no libXi, or
 // no XInput2 just means the hidraw source runs alone, and vice versa.
 
-bool Tablet::init() {
+bool Tablet::init(GLFWwindow* window) {
     shutdown();
     Impl* m = new Impl();
     if (!m->init_xinput()) {
@@ -285,6 +641,11 @@ bool Tablet::init() {
     }
     m->hid_scan();
     m->hid_next_scan = now_sec() + kHidRescanSec;
+#if defined(CHISEL_WL_TABLET)
+    m->wl = wl_create(window);
+#else
+    (void)window;
+#endif
     impl = m;                 // kept even with no device yet (hotplug on both sources)
     return available();
 }
@@ -343,8 +704,15 @@ void Tablet::poll(bool stroke_active) {
     // "Artist" mode, XWayland also exposes the virtual pen, and the grab fallback's
     // valuator query (stale while our window is a native Wayland one) would overwrite a
     // live hidraw value every stroke frame.
+#if defined(CHISEL_WL_TABLET)
+    // Runs right after glfwPollEvents, which already read the socket into our queue.
+    if (m->wl) {
+        wl_display_dispatch_queue_pending(m->wl->dpy, m->wl->queue);
+        wl_apply_cursor(m->wl);         // follow GLFW's cursor mode (ring vs. UI arrow)
+    }
+#endif
     m->hid_poll();
-    const bool xi_writes_pressure = !m->hid_seen;
+    const bool xi_writes_pressure = !m->hid_seen && !m->wl_seen();
 
     while (m->dpy && XPending(m->dpy)) {
         XEvent ev;
@@ -390,19 +758,30 @@ void Tablet::poll(bool stroke_active) {
 }
 
 float Tablet::pressure() const {
-    return available() ? impl->last_pressure : 1.0f;
+    if (!available()) return 1.0f;
+#if defined(CHISEL_WL_TABLET)
+    if (impl->wl_seen()) return impl->wl->pressure;
+#endif
+    return impl->last_pressure;
 }
 
 bool Tablet::available() const {
-    return impl && (impl->has_device || impl->hid_seen);
+    return impl && (impl->has_device || impl->hid_seen || impl->wl_seen());
 }
 
 unsigned long Tablet::sample_count() const {
-    return impl ? impl->samples : 0;
+    if (!impl) return 0;
+#if defined(CHISEL_WL_TABLET)
+    if (impl->wl) return impl->samples + impl->wl->samples;
+#endif
+    return impl->samples;
 }
 
 void Tablet::shutdown() {
     if (!impl) return;
+#if defined(CHISEL_WL_TABLET)
+    if (impl->wl) wl_destroy(impl->wl);
+#endif
     impl->hid_close_all();
     if (impl->dpy)    XCloseDisplay(impl->dpy);
     if (impl->xi_lib) dlclose(impl->xi_lib);
@@ -462,7 +841,7 @@ struct Tablet::Impl {
 Tablet::Tablet() {}
 Tablet::~Tablet() { shutdown(); }
 
-bool Tablet::init() {
+bool Tablet::init(GLFWwindow* /*window*/) {
     shutdown();
     Impl* m = new Impl();
 
@@ -566,7 +945,7 @@ void Tablet::shutdown() {
 
 Tablet::Tablet() {}
 Tablet::~Tablet() {}
-bool  Tablet::init()            { return false; }
+bool  Tablet::init(GLFWwindow*)  { return false; }
 void  Tablet::poll(bool)        {}
 float Tablet::pressure() const  { return 1.0f; }
 bool  Tablet::available() const { return false; }
