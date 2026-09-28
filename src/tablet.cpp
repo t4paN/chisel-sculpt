@@ -67,6 +67,9 @@ unsigned long Tablet::sample_count() const { return g_web_pen_count; }
 #include <GLFW/glfw3native.h>
 #include <wayland-cursor.h>
 #include <linux/input-event-codes.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <cstdlib>
 #include "tablet-unstable-v2-client-protocol.h"
 #define CHISEL_WL_TABLET 1
 #endif
@@ -172,7 +175,20 @@ struct WlPen {
     // the pen is replayed as that position plus the pen's travel since the drag began —
     // otherwise its first event would be a jump of the gap between the two.
     bool     drag = false;
-    double   drag_vx = 0, drag_vy = 0, drag_px = 0, drag_py = 0;
+    double   drag_vx = 0, drag_vy = 0;       // GLFW's virtual position at drag start
+    double   drag_lx = 0, drag_ly = 0;       // last pen position folded into the sum
+    double   drag_sx = 0, drag_sy = 0;       // pen travel since drag start, all sources
+    double   ex = 0, ey = 0;                 // last position handed to the app
+
+    // Pen cursor lock, from the OTD "Relative Pen Mode" plugin — the pen's answer to the
+    // mouse's pointer lock, which the tablet protocol lacks: while held, the plugin
+    // freezes the pen's cursor and sends its motion here instead, so a slider drag
+    // neither moves the cursor nor stops at the screen edge. Contract in
+    // ~/Projects/CHISEL/otd-relative-pen-plugin.md ("Contract for apps"). No plugin =
+    // no socket = the drag works as before, the cursor just travels.
+    enum class Lock { NONE, REQUESTED, HELD, RELEASING };
+    int      lock_fd = -1;
+    Lock     lock    = Lock::NONE;
 
     bool          seen     = false;      // a pen has been over our window
     float         pressure = 0.0f;
@@ -205,18 +221,119 @@ void wl_emit_button(GLFWwindow* w, int button, int action) {
     if (cb) cb(w, button, action, mods);
 }
 
+// ---- pen cursor lock (plugin socket) ----
+void lock_close(WlPen* p) {
+    if (p->lock_fd >= 0) close(p->lock_fd);
+    p->lock_fd = -1;
+    p->lock = WlPen::Lock::NONE;
+}
+
+bool lock_send(WlPen* p, const char* msg) {
+    if (p->lock_fd < 0) return false;
+    // MSG_NOSIGNAL: a daemon that restarted must not SIGPIPE the app.
+    if (send(p->lock_fd, msg, std::strlen(msg), MSG_NOSIGNAL) < 0) { lock_close(p); return false; }
+    return true;
+}
+
+// Connected lazily at the first pen drag and kept open, as the contract asks. A failed
+// connect (plugin not loaded) is retried at the next drag — one syscall per drag.
+bool lock_connect(WlPen* p) {
+    if (p->lock_fd >= 0) return true;
+    const char* dir = getenv("XDG_RUNTIME_DIR");
+    if (!dir) return false;
+    sockaddr_un addr = {};
+    addr.sun_family = AF_UNIX;
+    if (std::snprintf(addr.sun_path, sizeof(addr.sun_path), "%s/otd-relative-pen.sock", dir)
+        >= (int)sizeof(addr.sun_path)) return false;
+    int fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+    if (fd < 0) return false;
+    if (connect(fd, (sockaddr*)&addr, sizeof(addr)) != 0) { close(fd); return false; }
+    p->lock_fd = fd;
+    return true;
+}
+
+void drag_emit(WlPen* p) {
+    wl_emit_pos(p->win, p->drag_vx + p->drag_sx, p->drag_vy + p->drag_sy);
+}
+
+// Drain the socket. Called every frame from Tablet::poll; replies arrive a few ms after
+// a request, so a drag waits a frame or two for `locked` and moves by Wayland motion
+// in between, which the contract allows.
+void lock_poll(WlPen* p) {
+    char buf[128];
+    while (p->lock_fd >= 0) {
+        ssize_t n = recv(p->lock_fd, buf, sizeof(buf) - 1, MSG_DONTWAIT);
+        if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) {
+            // Daemon gone. Closing is also how a lock is released, so nothing is stuck.
+            lock_close(p);
+            return;
+        }
+        if (n < 0) return;
+        buf[n] = 0;
+        while (n > 0 && (buf[n - 1] == ' ' || buf[n - 1] == '\n' || buf[n - 1] == '\r')) buf[--n] = 0;
+
+        if (!std::strncmp(buf, "motion ", 7)) {
+            // Only the held lock's motion counts: after `unlock` the contract says to
+            // ignore motion until `unlocked`, and it can't belong to a drag that's over.
+            if (p->lock != WlPen::Lock::HELD || !p->drag) continue;
+            char* end = nullptr;
+            double dx = std::strtod(buf + 7, &end);     // C locale: Chisel never sets one
+            double dy = std::strtod(end, nullptr);
+            p->drag_sx += dx;
+            p->drag_sy += dy;
+            drag_emit(p);
+        } else if (!std::strcmp(buf, "locked")) {
+            if (p->lock == WlPen::Lock::REQUESTED) p->lock = WlPen::Lock::HELD;
+            std::printf("[tablet] pen cursor lock: locked\n");
+            std::fflush(stdout);
+        } else if (!std::strncmp(buf, "denied", 6) || !std::strncmp(buf, "unlocked", 8)) {
+            // Denied, or ended by the plugin (pen lifted, timeout, turned off): the drag, if
+            // still running, carries on from Wayland motion. The cursor thaws where it froze,
+            // which is where drag_lx/ly were last left, so no jump.
+            p->lock = WlPen::Lock::NONE;
+            std::printf("[tablet] pen cursor lock: %s\n", buf);
+            std::fflush(stdout);
+        }
+        // `hello 1` and anything unknown: nothing to do.
+    }
+}
+
+// A slider drag began (GLFW's cursor went DISABLED) with the pen over the window. Mouse
+// drags never get here: the pen has to be in proximity, and nobody holds both.
+void wl_begin_drag(WlPen* p) {
+    p->drag = true;
+    glfwGetCursorPos(p->win, &p->drag_vx, &p->drag_vy);
+    // Anchor on the last position the app saw, not this event's: that's where the drag
+    // began, and this event's own motion then counts instead of being eaten.
+    p->drag_lx = p->ex;
+    p->drag_ly = p->ey;
+    p->drag_sx = p->drag_sy = 0.0;
+    if (p->lock == WlPen::Lock::NONE && lock_connect(p) && lock_send(p, "lock"))
+        p->lock = WlPen::Lock::REQUESTED;
+}
+
+void wl_end_drag(WlPen* p) {
+    p->drag = false;
+    if (p->lock == WlPen::Lock::REQUESTED || p->lock == WlPen::Lock::HELD) {
+        if (lock_send(p, "unlock")) p->lock = WlPen::Lock::RELEASING;
+    }
+}
+
 void wl_move(WlPen* p) {
     if (glfwGetInputMode(p->win, GLFW_CURSOR) == GLFW_CURSOR_DISABLED) {
-        if (!p->drag) {
-            p->drag = true;
-            glfwGetCursorPos(p->win, &p->drag_vx, &p->drag_vy);
-            p->drag_px = p->x;
-            p->drag_py = p->y;
-        }
-        wl_emit_pos(p->win, p->drag_vx + (p->x - p->drag_px), p->drag_vy + (p->y - p->drag_py));
+        if (!p->drag) wl_begin_drag(p);
+        // Wayland motion still counts until the lock lands (and after it lapses); while
+        // it's held the cursor is frozen, so this adds nothing.
+        p->drag_sx += p->x - p->drag_lx;
+        p->drag_sy += p->y - p->drag_ly;
+        p->drag_lx = p->x;
+        p->drag_ly = p->y;
+        drag_emit(p);
         return;
     }
-    p->drag = false;
+    if (p->drag) wl_end_drag(p);
+    p->ex = p->x;
+    p->ey = p->y;
     wl_emit_pos(p->win, p->x, p->y);
 }
 
@@ -371,6 +488,7 @@ void reg_global_remove(void*, wl_registry*, uint32_t) {}
 const wl_registry_listener kRegListener = { reg_global, reg_global_remove };
 
 void wl_destroy(WlPen* p) {
+    lock_close(p);                       // closing releases a held lock at once
     for (zwp_tablet_tool_v2* t : p->tools)   zwp_tablet_tool_v2_destroy(t);
     for (zwp_tablet_v2* t : p->tablets)      zwp_tablet_v2_destroy(t);
     if (p->tseat) zwp_tablet_seat_v2_destroy(p->tseat);
@@ -708,6 +826,12 @@ void Tablet::poll(bool stroke_active) {
     // Runs right after glfwPollEvents, which already read the socket into our queue.
     if (m->wl) {
         wl_display_dispatch_queue_pending(m->wl->dpy, m->wl->queue);
+        // Drags start and end on a key, so with the pen held still there's no motion
+        // event to notice either edge — check the cursor mode every frame too.
+        bool disabled = glfwGetInputMode(m->wl->win, GLFW_CURSOR) == GLFW_CURSOR_DISABLED;
+        if (disabled && !m->wl->drag && m->wl->active) wl_begin_drag(m->wl);
+        if (!disabled && m->wl->drag) wl_end_drag(m->wl);
+        lock_poll(m->wl);
         wl_apply_cursor(m->wl);         // follow GLFW's cursor mode (ring vs. UI arrow)
     }
 #endif

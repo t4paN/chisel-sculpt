@@ -2,6 +2,34 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-09-28 — Slider drags lock the pen cursor (with OTD Relative Pen Mode)
+
+*Hand-tested by the user on the native GL build: "sweet af". The log shows 9 pen drags,
+each one locked and released on request.*
+
+**A pen slider drag now behaves like a mouse one: the cursor freezes, the drag has no
+screen-edge limit, and on release the ring is where the drag began.** The tablet protocol
+has no pointer lock and no warp (see the entry below), so this can't come from the
+compositor. It comes from the OTD "Relative Pen Mode" plugin
+(`~/Projects/otd-relative-pen`, commit 2abca73). On request the plugin stops moving the
+pen's hidden position, so KWin's relative mode keeps the cursor still, and sends the
+motion to the app over `$XDG_RUNTIME_DIR/otd-relative-pen.sock` (SOCK_SEQPACKET) instead.
+The contract is in `~/Projects/CHISEL/otd-relative-pen-plugin.md`.
+
+`tablet.cpp` is the client:
+- **A drag starting with the pen over the window sends `lock`.** Both edges of a drag are
+  detected per frame from GLFW's cursor mode, because a key starts and ends the drag and a
+  pen held still sends no motion. Mouse drags never ask: the pen has to be in proximity.
+- **One running sum drives the slider.** Wayland motion is added until `locked` arrives
+  (a few ms), then the plugin's `motion dx dy`. It is replayed as GLFW's virtual position
+  plus the sum, the same thing the mouse lock produces.
+- **`denied` or an unsolicited `unlocked`** (pen lifted, 60 s cap, feature switched off
+  in OTD) → the drag carries on from Wayland motion, as before.
+- **The connection opens lazily at the first pen drag and stays open.** No socket means
+  no plugin: the drag works as before and the cursor travels. A daemon restart just
+  closes it, and closing is also how the plugin releases a lock, so nothing can stay
+  frozen.
+
 ## 2026-09-28 — The pen works on native Wayland (tablet protocol)
 
 *Hand-tested by the user on both native builds, GL and WebGPU (KDE Wayland, KWin 6.7.5,
