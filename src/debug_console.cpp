@@ -124,7 +124,14 @@ void init() {
     // stdout to a pipe is block-buffered by default, which would hold whole strokes
     // of output back until 4K accumulated. Line buffering is what makes the console
     // live, and it shrinks the crash-loss window to the current line.
+  #if defined(_WIN32)
+    // The MS CRT has no line buffering (_IOLBF means full) and rejects size 0 with
+    // _IOLBF/_IOFBF through the invalid-parameter handler — a fail-fast at startup.
+    // Unbuffered is the closest thing; the 1 MB pipe absorbs it.
+    setvbuf(stdout, nullptr, _IONBF, 0);
+  #else
     setvbuf(stdout, nullptr, _IOLBF, 0);
+  #endif
     setvbuf(stderr, nullptr, _IONBF, 0);
 
     g_capturing = true;

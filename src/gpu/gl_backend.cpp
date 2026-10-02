@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <vector>
 #include <unordered_map>
 
@@ -65,14 +66,79 @@ void release_buffer(Buffer& b) {
     b.size = 0;
 }
 
+// The ComputeBinding ids are global and run up to ~50, but GL only guarantees
+// GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS >= 8 (Intel Arc on Windows reports 16), and
+// a declared binding >= the limit fails to compile. No kernel uses more than a
+// handful of SSBOs, so pack each kernel's SSBO bindings into slots 0..k-1 in
+// declaration order and keep the logical -> slot map on the pipeline. UBOs are left
+// alone (the limit there is 84, well above the 61-63 the shared blocks use).
+static bool is_ident_char(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+}
+
+static std::string compact_ssbo_bindings(const char* glsl, ComputePipeline& p) {
+    std::string s(glsl);
+    size_t pos = 0;
+    while ((pos = s.find("layout", pos)) != std::string::npos) {
+        if (pos > 0 && is_ident_char(s[pos - 1])) { pos += 6; continue; }
+        size_t open = s.find_first_not_of(" \t", pos + 6);
+        if (open == std::string::npos || s[open] != '(') { pos += 6; continue; }
+        size_t close = s.find(')', open);
+        if (close == std::string::npos) break;
+        // skip memory qualifiers between the layout and the block keyword
+        size_t q = close + 1;
+        std::string word;
+        for (;;) {
+            q = s.find_first_not_of(" \t\r\n", q);
+            if (q == std::string::npos) break;
+            size_t e = q;
+            while (e < s.size() && is_ident_char(s[e])) ++e;
+            word = s.substr(q, e - q);
+            if (word == "readonly" || word == "writeonly" || word == "restrict" ||
+                word == "coherent" || word == "volatile") { q = e; continue; }
+            break;
+        }
+        if (word != "buffer") { pos = close; continue; }
+
+        size_t b = s.find("binding", open);
+        if (b == std::string::npos || b > close) { pos = close; continue; }
+        size_t eq = s.find('=', b);
+        size_t d0 = (eq == std::string::npos) ? std::string::npos : s.find_first_of("0123456789", eq);
+        if (d0 == std::string::npos || d0 > close) { pos = close; continue; }
+        size_t d1 = d0;
+        while (d1 < close && s[d1] >= '0' && s[d1] <= '9') ++d1;
+        uint32_t logical = (uint32_t)std::strtoul(s.c_str() + d0, nullptr, 10);
+
+        uint32_t slot = p.ssbo_count;
+        for (uint32_t k = 0; k < p.ssbo_count; ++k)
+            if (p.ssbo_logical[k] == logical) { slot = k; break; }
+        if (slot == p.ssbo_count) {
+            if (p.ssbo_count == kMaxBindings) { pos = close; continue; }  // leave as-is; compile reports it
+            p.ssbo_logical[p.ssbo_count++] = logical;
+        }
+        std::string repl = std::to_string(slot);
+        s.replace(d0, d1 - d0, repl);
+        pos = d0 + repl.size();
+    }
+    return s;
+}
+
+static uint32_t ssbo_slot(const ComputePipeline& p, uint32_t logical) {
+    for (uint32_t k = 0; k < p.ssbo_count; ++k)
+        if (p.ssbo_logical[k] == logical) return k;
+    return logical;  // not declared by this kernel: bind where the caller asked
+}
+
 ComputePipeline create_compute_pipeline(Device&, const ShaderSources& src,
                                         const BindEntry* entries, uint32_t n,
                                         const char* /*entry_point*/) {
     ComputePipeline p;
     if (!src.glsl) { std::printf("[gpu] no GLSL source for compute pipeline\n"); return p; }
 
+    const std::string glsl = compact_ssbo_bindings(src.glsl, p);
+    const char* glsl_c = glsl.c_str();
     GLuint sh = glCreateShader(GL_COMPUTE_SHADER);
-    glShaderSource(sh, 1, &src.glsl, nullptr);
+    glShaderSource(sh, 1, &glsl_c, nullptr);
     glCompileShader(sh);
     GLint ok = 0; glGetShaderiv(sh, GL_COMPILE_STATUS, &ok);
     if (!ok) {
@@ -97,6 +163,16 @@ ComputePipeline create_compute_pipeline(Device&, const ShaderSources& src,
         p.binding_id[i]   = entries[i].binding;
         p.binding_type[i] = entries[i].type;
     }
+    // A declared SSBO the layout doesn't list would read whatever is left in its
+    // packed slot by the previous dispatch — flag it rather than sculpt garbage.
+    for (uint32_t k = 0; k < p.ssbo_count; ++k) {
+        bool listed = false;
+        for (uint32_t i = 0; i < p.binding_count; ++i)
+            if (p.binding_id[i] == p.ssbo_logical[k]) { listed = true; break; }
+        if (!listed)
+            std::printf("[gpu] warning: kernel declares SSBO binding %u but its layout doesn't list it\n",
+                        p.ssbo_logical[k]);
+    }
     return p;
 }
 
@@ -110,13 +186,15 @@ BindGroup create_bind_group(Device&, ComputePipeline& pipe,
     BindGroup g;
     g.count = (n < kMaxBindings) ? n : kMaxBindings;
     for (uint32_t i = 0; i < g.count; ++i) {
-        g.binding[i] = entries[i].binding;
         g.buffer[i]  = entries[i].buffer->handle;
         // resolve the GL target from the pipeline's layout for this binding
         GLenum tgt = GL_SHADER_STORAGE_BUFFER;
         for (uint32_t k = 0; k < pipe.binding_count; ++k)
             if (pipe.binding_id[k] == entries[i].binding) { tgt = gl_target(pipe.binding_type[k]); break; }
         g.target[i] = tgt;
+        // SSBOs go to the kernel's packed slot (see compact_ssbo_bindings)
+        g.binding[i] = (tgt == GL_SHADER_STORAGE_BUFFER) ? ssbo_slot(pipe, entries[i].binding)
+                                                         : entries[i].binding;
     }
     return g;
 }

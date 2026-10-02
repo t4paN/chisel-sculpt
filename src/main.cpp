@@ -11,8 +11,16 @@
 // A Linux desktop session is either X11 or Wayland and GLFW picks at runtime,
 // so expose BOTH native handle sets and choose the matching surface source
 // below. Exposing only X11 builds fine on a Wayland box and fails at runtime.
-#define GLFW_EXPOSE_NATIVE_X11
-#define GLFW_EXPOSE_NATIVE_WAYLAND
+// Windows has the one platform: an HWND surface.
+#if defined(_WIN32)
+  #ifndef NOMINMAX
+  #define NOMINMAX
+  #endif
+  #define GLFW_EXPOSE_NATIVE_WIN32
+#else
+  #define GLFW_EXPOSE_NATIVE_X11
+  #define GLFW_EXPOSE_NATIVE_WAYLAND
+#endif
 #include <GLFW/glfw3.h>
 #include <GLFW/glfw3native.h>
 #include <webgpu/webgpu.h>
@@ -483,6 +491,13 @@ int main(int argc, char* argv[]) {
     // "Display pointer is not set" and aborts the process, so there is nothing
     // to gate on after the fact. Branch up front instead. Both descriptors are
     // declared out here because the chain must outlive CreateSurface below.
+  #if defined(_WIN32)
+    WGPUSurfaceSourceWindowsHWND hwnd_src = {};
+    hwnd_src.chain.sType = WGPUSType_SurfaceSourceWindowsHWND;
+    hwnd_src.hinstance   = GetModuleHandleW(nullptr);
+    hwnd_src.hwnd        = glfwGetWin32Window(window);
+    sd.nextInChain = &hwnd_src.chain;
+  #else
     WGPUSurfaceSourceXlibWindow     x11 = {};
     WGPUSurfaceSourceWaylandSurface wl  = {};
     if (glfwGetPlatform() == GLFW_PLATFORM_WAYLAND) {
@@ -496,10 +511,13 @@ int main(int argc, char* argv[]) {
         x11.window      = (uint64_t)glfwGetX11Window(window);
         sd.nextInChain  = &x11.chain;
     }
+  #endif
 #endif
     g_surface = wgpuInstanceCreateSurface(instance, &sd);
     if (!g_surface) { std::fprintf(stderr, "createSurface failed\n"); return 1; }
-#if !defined(__EMSCRIPTEN__)
+#if defined(_WIN32)
+    std::printf("[win] surface created (Win32)\n");
+#elif !defined(__EMSCRIPTEN__)
     std::printf("[win] surface created (%s)\n",
                 glfwGetPlatform() == GLFW_PLATFORM_WAYLAND ? "Wayland" : "X11");
 #endif

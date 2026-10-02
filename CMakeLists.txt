@@ -327,6 +327,14 @@ elseif(CHISEL_GPU_BACKEND STREQUAL "webgpu")
     # The prebuilt .so ships without a SONAME (see wgpu IMPORTED_NO_SONAME above);
     # RUNPATH lets the loader find it from any cwd.
     set_target_properties(chisel PROPERTIES BUILD_RPATH "${wgpu_native_SOURCE_DIR}/lib")
+    # Windows has no RPATH: the loader looks next to the exe, so put the DLL there.
+    if(WIN32)
+        foreach(_t chisel chisel-wgpu-probe chisel-wgpu-window)
+            add_custom_command(TARGET ${_t} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        "${wgpu_native_SOURCE_DIR}/lib/wgpu_native.dll" "$<TARGET_FILE_DIR:${_t}>")
+        endforeach()
+    endif()
 else()
     target_link_libraries(chisel PRIVATE glad OpenGL::GL glfw imgui)
 endif()
