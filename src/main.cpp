@@ -58,6 +58,7 @@
 #include "insert_controller.h"
 #include "ui_overlay.h"
 #include "debug_console.h"
+#include "bench.h"
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
 #ifdef CHISEL_BACKEND_WEBGPU
@@ -132,6 +133,7 @@ void onDevice(WGPURequestDeviceStatus status, WGPUDevice device,
 
 WGPUSurface  g_surface = nullptr;
 WGPUDevice   g_device  = nullptr;
+WGPUAdapter  g_adapter = nullptr;   // kept for present-mode queries in configureSurface
 WGPUTexture  g_depth_tex  = nullptr;
 WGPUTextureView g_depth_view = nullptr;
 WGPUTextureFormat g_surface_fmt = WGPUTextureFormat_BGRA8Unorm;
@@ -146,6 +148,20 @@ void configureSurface(int w, int h) {
     cfg.height      = (uint32_t)h;
     cfg.alphaMode   = WGPUCompositeAlphaMode_Auto;
     cfg.presentMode = WGPUPresentMode_Fifo;
+#ifndef __EMSCRIPTEN__
+    // CHISEL_PERF_VSYNC=0: present uncapped (Immediate, else Mailbox) if the surface offers it.
+    if (!bench::vsync() && g_adapter) {
+        WGPUSurfaceCapabilities caps = {};
+        if (wgpuSurfaceGetCapabilities(g_surface, g_adapter, &caps) == WGPUStatus_Success) {
+            for (size_t i = 0; i < caps.presentModeCount; ++i)
+                if (caps.presentModes[i] == WGPUPresentMode_Immediate) cfg.presentMode = WGPUPresentMode_Immediate;
+            if (cfg.presentMode == WGPUPresentMode_Fifo)
+                for (size_t i = 0; i < caps.presentModeCount; ++i)
+                    if (caps.presentModes[i] == WGPUPresentMode_Mailbox) cfg.presentMode = WGPUPresentMode_Mailbox;
+            wgpuSurfaceCapabilitiesFreeMembers(caps);
+        }
+    }
+#endif
     wgpuSurfaceConfigure(g_surface, &cfg);
 }
 
@@ -354,6 +370,7 @@ static void report_projection_check(const ProjectionStats& ps) {
 
 int main(int argc, char* argv[]) {
     debug_console::init();
+    bench::init();
     bool cli_use_topology = true;
     int max_level = MULTIRES_MAX_LEVEL;
     std::string cli_open_path;
@@ -555,6 +572,7 @@ int main(int argc, char* argv[]) {
     // browsers included), instead of demanding this GPU's high limits. If the web
     // build later trips a specific baseline field, bump that one field here.
     WGPULimits supported = WGPU_LIMITS_INIT;
+    g_adapter = ar.adapter;
     wgpuAdapterGetLimits(ar.adapter, &supported);
     WGPULimits limits = WGPU_LIMITS_INIT;                     // all baseline defaults
     limits.maxBufferSize               = supported.maxBufferSize;
@@ -616,7 +634,7 @@ int main(int argc, char* argv[]) {
     std::printf("Chisel %s (WebGPU)\n", CHISEL_VERSION);
 #else
     glfwMakeContextCurrent(window);
-    glfwSwapInterval(1); // vsync
+    glfwSwapInterval(bench::vsync() ? 1 : 0); // vsync (off only for a CHISEL_PERF_VSYNC=0 run)
 
     // Load OpenGL
     if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
@@ -798,6 +816,7 @@ int main(int argc, char* argv[]) {
 
     Mesh* mesh = &scene.active_mesh();
     MultiresStack* multires = &scene.active_multires();
+    int perf_prev_level = multires->current_level;   // CHISEL_PERF: level-switch frames
 
     // Tick-driven voxel merge: non-null while a merge job is in flight (advanced one
     // budgeted step per frame so the window stays responsive). See sdf.h / CHANGES.
@@ -3973,6 +3992,17 @@ int main(int argc, char* argv[]) {
 
         glfwSwapBuffers(window);
 #endif
+        if (bench::active()) {
+            const int lvl = multires->current_level;
+            bench::Phase ph = bench::Phase::IDLE;
+            if (lvl != perf_prev_level)                          ph = bench::Phase::SWITCH;
+            else if (brush_stroke.is_active())                   ph = bench::Phase::SCULPT;
+            else if (app_state == AppState::SCULPTING
+                     || brush_stroke.reconciling()
+                     || brush_stroke.dab_readbacks_pending())    ph = bench::Phase::PENUP;
+            bench::frame_end(lvl, ph);
+            perf_prev_level = lvl;
+        }
         input.end_frame();
     };
 
@@ -4071,6 +4101,7 @@ int main(int argc, char* argv[]) {
     settings_save(input);
 
     tablet.shutdown();
+    bench::shutdown();
     debug_console::shutdown();
     glfwDestroyWindow(window);
     glfwTerminate();

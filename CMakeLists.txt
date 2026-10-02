@@ -246,6 +246,7 @@ add_executable(chisel
     src/sdf.cpp
     src/ui_overlay.cpp
     src/debug_console.cpp
+    src/bench.cpp
     src/project_file.cpp
     src/project_file_v1.cpp
     src/window_icon.cpp
