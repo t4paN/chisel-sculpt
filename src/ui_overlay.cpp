@@ -1008,7 +1008,7 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
     y += mode_h + row_gap;
 
     // === Island 3 — Brush column: single vertical column ===
-    // Order: Draw, Inflate, Crease, Pinch, Move, Limb, Smooth, Mask. Smooth is a lock
+    // Order: Draw, Clay, Inflate, Crease, Pinch, Move, Limb, Smooth, Mask. Smooth is a lock
     // toggle (not a switch_brush), handled specially in-place. Paint lives in the
     // mode row above, not here.
     ImGui::SetNextWindowPos(ImVec2(margin, y), ImGuiCond_Always);
@@ -1029,7 +1029,7 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
         {"Mask",    "Mask",    "Shortcut: M",                    BrushType::MASK},
     };
 
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < (int)IM_ARRAYSIZE(brushes); i++) {
         if (brushes[i].type == BrushType::SMOOTH) {
             if (squircle_button(brushes[i].id, brushes[i].display, brushes[i].tooltip,
                                 ImVec2(brush_w, btn_h), smooth_on)) {
