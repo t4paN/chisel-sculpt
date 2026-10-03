@@ -28,8 +28,17 @@
 #endif
 #include "gpu/gpu.h"       // device_from_webgpu + surface-format/depth setters
 #else
+#if defined(_WIN32)
+  #ifndef NOMINMAX
+  #define NOMINMAX
+  #endif
+  #define GLFW_EXPOSE_NATIVE_WIN32
+#endif
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
+#if defined(_WIN32)
+#include <GLFW/glfw3native.h>   // glfwGetWin32Window, for MouseHistory
+#endif
 #endif
 #include <cstdio>
 #include <cstring>
@@ -314,6 +323,63 @@ struct PathStats {
     }
 };
 static PathStats g_path_stats;
+
+#if defined(_WIN32) && !defined(__EMSCRIPTEN__)
+// Windows does not queue mouse motion: WM_MOUSEMOVE is synthesized once per message
+// pump from the latest position, so glfwPollEvents hands the cursor callback ~1
+// position per frame however fast the mouse reports (a 500 Hz mouse at 75 fps: 1 of
+// ~6.6 positions), and InputState::path_x is as sparse as no path at all — fast
+// small-brush strokes facet into corners. The system still records every reported
+// position; GetMouseMovePointsEx returns that history (newest first, 64 deep), so after
+// each poll the frame's path is rebuilt from it. Linux/X11/Wayland deliver every event
+// and need none of this.
+struct MouseHistory {
+    MOUSEMOVEPOINT last = {};
+    bool have_last = false;
+
+    // Forget the history position (after a cursor teleport), so the next frame only
+    // takes points reported after it.
+    void forget() { have_last = false; }
+
+    void pull(GLFWwindow* window, InputState& input) {
+        if (input.slider_mode != InputState::SliderMode::NONE ||
+            glfwGetInputMode(window, GLFW_CURSOR) == GLFW_CURSOR_DISABLED) {
+            have_last = false;
+            return;
+        }
+        POINT cur;
+        if (!GetCursorPos(&cur)) return;
+        MOUSEMOVEPOINT in = {};
+        in.x = cur.x & 0xFFFF;
+        in.y = cur.y & 0xFFFF;
+        MOUSEMOVEPOINT buf[64];
+        const int n = GetMouseMovePointsEx(sizeof(MOUSEMOVEPOINT), &in, buf, 64,
+                                           GMMP_USE_DISPLAY_POINTS);
+        if (n <= 0) return;   // cursor not in the history (e.g. a SetCursorPos): keep GLFW's
+        int fresh = 1;
+        if (have_last) {
+            fresh = 0;
+            while (fresh < n && !(buf[fresh].x == last.x && buf[fresh].y == last.y &&
+                                  buf[fresh].time == last.time))
+                fresh++;
+        }
+        last = buf[0];
+        have_last = true;
+        if (fresh <= 1) return;   // nothing GLFW didn't already deliver
+
+        HWND hwnd = glfwGetWin32Window(window);
+        input.path_n = 0;
+        for (int i = fresh - 1; i >= 0; --i) {
+            // display points are 16-bit; sign-extend for monitors left of / above primary
+            POINT p = { buf[i].x > 32767 ? buf[i].x - 65536 : buf[i].x,
+                        buf[i].y > 32767 ? buf[i].y - 65536 : buf[i].y };
+            ScreenToClient(hwnd, &p);
+            input.push_path(p.x, p.y);
+        }
+    }
+};
+static MouseHistory g_mouse_history;
+#endif
 
 bool wrap_cursor(GLFWwindow* window, InputState& input, int win_w, int win_h) {
     double mx = input.mouse_x;
@@ -1002,6 +1068,9 @@ int main(int argc, char* argv[]) {
 
         debug_console::pump();
         glfwPollEvents();
+#if defined(_WIN32) && !defined(__EMSCRIPTEN__)
+        g_mouse_history.pull(window, input);
+#endif
         tablet.poll(brush_stroke.is_active());
         if (tablet.available() && !prev_tablet_avail) {
             std::snprintf(input.notification, sizeof(input.notification),
@@ -2738,6 +2807,9 @@ int main(int argc, char* argv[]) {
                 brush_stroke.walk_y = (float)input.mouse_y;
                 brush_stroke.walk_carry = 0.0f;
                 input.path_n = 0;
+#if defined(_WIN32) && !defined(__EMSCRIPTEN__)
+                g_mouse_history.forget();
+#endif
             }
 
             if (brush_stroke.is_active() && !wrapped) {

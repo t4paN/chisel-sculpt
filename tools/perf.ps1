@@ -8,6 +8,7 @@
   .\tools\perf.ps1 wgpu -Label "L8 clay"    # run the WebGPU build, tag the run
   .\tools\perf.ps1 gl -NoVsync              # uncapped: measure throughput, not 60 Hz
   .\tools\perf.ps1 gl -Open my.chisel       # open a file on launch
+  .\tools\perf.ps1 gl -Exe ..\releases\v0.2.25\chisel.exe -Label rel  # any other build
   .\tools\perf.ps1 compare                  # latest gl run vs latest wgpu run
   .\tools\perf.ps1 compare -Runs a,b        # two specific run folders
   .\tools\perf.ps1 list                     # list recorded runs
@@ -23,7 +24,8 @@ param(
     [switch]$NoVsync,
     [string]$Open = '',
     [string[]]$Runs = @(),
-    [string]$Config = 'Release'
+    [string]$Config = 'Release',
+    [string]$Exe = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -162,7 +164,7 @@ if ($Mode -eq 'compare') {
 
 # ---- run a build -------------------------------------------------------------
 
-$exe = $exes[$Mode]
+$exe = if ($Exe) { (Resolve-Path $Exe).Path } else { $exes[$Mode] }
 if (-not (Test-Path $exe)) { throw "Build not found: $exe (build $Mode first)" }
 
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'

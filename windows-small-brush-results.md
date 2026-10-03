@@ -1,4 +1,40 @@
-# Windows small-brush slowness — glbench results (2026-10-03)
+# Windows small-brush slowness — results (2026-10-03)
+
+## Update: the main cause was input, not the GPU (fixed)
+
+The user's complaint, made precise: with the **mouse**, fast small-brush strokes come
+out as **corners** (straight segments between samples) on Windows, on GL and WebGPU
+alike, while Linux is smooth. Frame rate was a steady 75 Hz (vsync) in every run, so this
+was never frame time.
+
+Cause: Windows doesn't queue mouse motion. `WM_MOUSEMOVE` is synthesized once per
+message pump from the latest position, so `glfwPollEvents` delivers ~1 cursor position
+per frame. `InputState::path_x` (built for exactly this problem, assuming the OS delivers
+every position as X11/Wayland do) was therefore as sparse as no path at all. Measured:
+
+| | positions/s | per frame |
+|---|---|---|
+| GLFW cursor callbacks (what Chisel got) | 65–79 | ~1.0 (`[path]` log: 1.1) |
+| `GetMouseMovePointsEx` history (what the 500 Hz mouse reported) | 400–500 | ~6.6 |
+
+Fix (commit on `chisel-windows`): `MouseHistory` in `main.cpp`, Windows-only. After each
+`glfwPollEvents` it pulls the positions reported since the last frame from
+`GetMouseMovePointsEx` and rebuilds the frame's path from them. It stands down during
+slider drags and disabled-cursor modes, and forgets its position across a sculpt-mode
+cursor wrap. Result: `[path]` 6.6–6.7 samples/frame on both backends, frame times
+unchanged. The user confirmed small fast strokes are smooth now.
+
+Known limit: the history is 64 deep, so a frame longer than ~130 ms (at 500 Hz) loses
+its oldest points. That only bites during GL's ~240 ms pick-readback freezes, which are
+still open (26 of them in 34 s on the v0.2.25 GL release; none on WebGPU).
+
+Pen/WinTab not yet tested. The WinTab context already receives packets at full rate,
+but only pressure is used. Positions from WinTab may be needed if the pen also arrives
+as one coalesced position per frame.
+
+---
+
+## glbench (GL upload path)
 
 Answers Test 2 of `windows-small-brush-handoff.md` (on the SHARED partition).
 Benchmark: `tools/glbench/` (standalone; build notes at the top of its CMakeLists.txt).
@@ -18,6 +54,10 @@ within a few µs; second run below.
 | D | B2 | none | 29.8 | 3.0 | 28.1 |
 
 All variants passed the CPU-replay check, C and D included.
+
+Apex Legends (DX12) was running in the background during those runs. Re-run twice with
+the GPU idle: A 67.5 / 68.0, B1 52, B2 11.7 / 12.1, B3 60–65, C 54–56, D 27–30 µs/dab.
+Same picture, so the conclusions below stand.
 
 ## Reading
 
