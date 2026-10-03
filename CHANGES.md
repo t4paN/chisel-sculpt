@@ -2,6 +2,49 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-03 — Windows round two merged: freezes, mouse corners, resize crash, Mask button
+
+*Fixed on the Windows side (Arc B570, branch `chisel-windows`), cherry-picked onto main
+on Linux; the three UI skins built there were left out on purpose. All three targets
+build. User-tested GL on Linux ("ridiculously snappy"). Write-ups:
+`windows-small-brush-results.md`, `windows-gl-freeze-results.md`,
+`windows-webgpu-resize-results.md`.*
+
+**Windows GL froze for ~240 ms after every orbit, view snap and pen-up.** The screen
+read-back behind the cursor (depth, normal, triangle id) was a synchronous
+`glReadPixels`, and on Intel's Windows driver that path runs at 177 MB/s. On Windows it's
+now asynchronous through a pack buffer, as on WebGPU. Buffer read-backs copy out by
+mapping instead of `glGetBufferSubData`, which reads at ~15 MB/s on that driver.
+
+**Linux GL keeps the synchronous read, and that's deliberate.** First merged as-is, the
+async read made Linux feel "cranky" right after pen-up: on Mesa the planes landed 60–80
+ms late, and for those 5–6 frames the sculpt-vs-orbit press latch and the cursor normal
+ran on stale data. Mesa's synchronous read is 14.5 ms and lands the same frame. Measured
+with `tools/glbench --readback` on both OSes (Linux numbers: `linux-glbench-results.md`
+in the working root).
+
+**Fast mouse strokes came out as corners on Windows.** Windows hands GLFW one mouse
+position per frame where X11/Wayland hand over every one, so the stroke path was
+sparse. Native Windows now pulls the full history from `GetMouseMovePointsEx` (~6.6
+positions a frame from a 500 Hz mouse). The itch build was never affected: browsers
+already deliver the full rate.
+
+**Native WebGPU crashed on un-maximize (any resize can hit it).** ImGui sized itself
+after the event poll, the swapchain before it, so on a resize frame the scissor
+overshot the surface and wgpu-native aborted. ImGui's display size is now clamped to the
+configured surface. Windows also gets: start maximized, a one-time swapchain rebuild
+on "suboptimal" (cures black triangles on Intel Vulkan), and `CHISEL_WGPU_BACKEND`.
+
+**A crash's last words now reach the log.** The `~` console's capture pipe swallowed
+whatever a dying frame printed; it now drains to the real stdout from terminate/abort
+handlers.
+
+**The Mask brush had no button.** The brush loop still counted 8 after Clay made it 9.
+
+**`tools/glbench`**: the standalone GL micro-benchmark behind all of the above. On
+Windows, per-dab parameter uploads cost 72 µs vs 11 µs with a persistent-mapped ring; on
+Linux they're already 12 µs. That ring isn't built yet, and if it is, Windows-only.
+
 ## 2026-10-03 — GL 4.3 context; driver error reports on in every GL build
 
 *User-confirmed on native GL (Linux, Mesa 26.2 on the Arc B570). A throwaway test made
