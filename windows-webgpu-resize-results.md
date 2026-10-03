@@ -1,6 +1,6 @@
 # Native WebGPU: un-maximize crash, black triangles (2026-10-03)
 
-For the Linux side. Commit `e25146b` on `chisel-windows`.
+For the Linux side. Commits `e25146b`, `6627753`, `8613725` on `chisel-windows`.
 
 ## Crash on resize (fixed; likely affects Linux too)
 
@@ -33,16 +33,36 @@ Whatever a crashing frame prints, including Rust panic messages, is lost. Set
 chasing a crash. Worth considering: drain the pipe from an abort/terminate handler, or
 tee to the original fd synchronously.
 
-## Black triangles while not maximized (gone, cause not proven)
+## Black triangles while not maximized (fixed by a one-time rebuild, `6627753`)
 
 On Windows the window was created at the video-mode size **without** maximizing (the
 comment said "Start windowed but maximized"). It hung under the taskbar, and in that
 state the user saw black triangles while orbiting and sculpting, gone after a maximize.
-It runs on **Vulkan** (`[win] adapter: ... via Vulkan`, new log line). Intel's Vulkan
-driver reports the swapchain "suboptimal" on nearly every frame after any resize,
-including maximized, so that status is not the cause. After this commit the user saw no
-triangles in the restored state either. Which change fixed it isn't proven. If it comes
-back, compare with `CHISEL_WGPU_BACKEND=dx12`.
+It runs on **Vulkan** (`[win] adapter: ... via Vulkan`, new log line).
+
+Intel's Vulkan driver reports the swapchain "suboptimal" on nearly every frame after any
+resize, maximized included, so it looks like noise. It isn't. The fix that works is to
+**reconfigure once per window size**, the frame after suboptimal is first reported, at
+the top of the frame (never while that frame's texture is acquired: that aborts in
+wgpu-native). User-tested both ways: with the rebuild the restored window is clean;
+without it (`e25146b` dropped it) the black triangles came back. Best guess at the
+mechanism: the reconfigure on the resize frame lands mid-transition and the second one
+sees the settled window. If triangles ever return, compare with
+`CHISEL_WGPU_BACKEND=dx12`.
+
+## Crash output is no longer lost (`8613725`)
+
+`debug_console` now drains its pipe to the real stdout from `std::terminate` and
+`SIGABRT` handlers, so a crash's last frame of output (including a wgpu panic message)
+reaches the log. Verified with a deliberate throw and abort. A hard fault (access
+violation, `__fastfail`) still bypasses it; `WAYLAND_DEBUG=1` remains the fallback.
+
+## Open: crash with huge strokes at 29.7M tris
+
+The release build crashed (`0xc0000409`, chisel.exe) after strokes that each touched
+1.4–3.3M of 14.85M verts. RAM and pagefile were fine, and VRAM was 7.56/10 GB before
+those strokes. The cause is unknown: its output was lost (before `8613725`). The next
+repro will say what it was. Log: `perf-runs\20261003-184937-wgpu\`.
 
 ## Also in the commit
 
