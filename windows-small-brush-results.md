@@ -28,6 +28,14 @@ Known limit: the history is 64 deep, so a frame longer than ~130 ms (at 500 Hz) 
 its oldest points. That only bites during GL's ~240 ms pick-readback freezes, which are
 still open (26 of them in 34 s on the v0.2.25 GL release; none on WebGPU).
 
+**Web build (itch) on Windows is not affected.** Measured with a 500 Hz injected mouse
+(`SendInput`; calibrated against the native probe, where it reproduces GLFW ~1/frame vs
+history ~5–6.6/frame) on a test page counting `getCoalescedEvents()` per animation frame:
+Chrome 154 6.67 positions/frame (499/s), Firefox 157 6.63/frame (496/s), at 75 fps, both
+with 1 `pointermove` per frame. Both browsers recover the full rate on Windows, and the web
+shell already feeds the coalesced positions into `path_x`. Only the native build had the
+gap.
+
 Pen/WinTab not yet tested. The WinTab context already receives packets at full rate,
 but only pressure is used. Positions from WinTab may be needed if the pen also arrives
 as one coalesced position per frame.
