@@ -147,6 +147,10 @@ WGPUTexture  g_depth_tex  = nullptr;
 WGPUTextureView g_depth_view = nullptr;
 WGPUTextureFormat g_surface_fmt = WGPUTextureFormat_BGRA8Unorm;
 static const WGPUTextureFormat kDepthFormat = WGPUTextureFormat_Depth24Plus;
+// Set when a frame's surface texture first comes back suboptimal at a window size: that
+// frame still presents, and the next frame reconfigures before acquiring.
+// Reconfiguring while the texture is still acquired aborts inside wgpu-native.
+bool g_surface_reconfigure = false;
 
 void configureSurface(int w, int h) {
     WGPUSurfaceConfiguration cfg = {};
@@ -1109,7 +1113,8 @@ int main(int argc, char* argv[]) {
         // Reconfigure the surface + depth on resize; per-pass viewport is set by the
         // seam (no global glViewport). On web, configureSurface also sets the canvas
         // backing (dpr=1), keeping color (surface) and depth attachments the same size.
-        if (win_w != fbw || win_h != fbh) {
+        if (win_w != fbw || win_h != fbh || g_surface_reconfigure) {
+            g_surface_reconfigure = false;
             fbw = win_w; fbh = win_h;
             configureSurface(fbw, fbh);
             makeDepth(fbw, fbh);
@@ -3273,10 +3278,23 @@ int main(int argc, char* argv[]) {
         wgpuSurfaceGetCurrentTexture(g_surface, &surfTex);
 #ifndef __EMSCRIPTEN__
         // An outdated/lost surface (the window changed under the swapchain) hands back
-        // no texture and must be reconfigured before it can present again. Those are
-        // logged; "suboptimal" is not, because Intel's Windows Vulkan driver reports it
-        // on nearly every frame after any resize, maximized or not, and it presents fine.
+        // no texture and must be reconfigured before it can present again; those are
+        // logged.
+        //
+        // "Suboptimal" gets ONE reconfigure per window size, on the next frame. Intel's
+        // Windows Vulkan driver reports it on nearly every frame after any resize, so it
+        // isn't logged and isn't chased beyond that one retry — but the retry matters:
+        // without it, a window restored (or created) hanging under the taskbar shows
+        // black triangles while orbiting/sculpting; with it, it doesn't (user-tested
+        // both ways). Presumably the reconfigure made at the resize lands while the
+        // window is still mid-transition, and the second one sees it settled.
         {
+            static int subopt_w = -1, subopt_h = -1;
+            if (surfTex.status == WGPUSurfaceGetCurrentTextureStatus_SuccessSuboptimal &&
+                (subopt_w != win_w || subopt_h != win_h)) {
+                subopt_w = win_w; subopt_h = win_h;
+                g_surface_reconfigure = true;
+            }
             const bool lost = surfTex.status == WGPUSurfaceGetCurrentTextureStatus_Outdated ||
                               surfTex.status == WGPUSurfaceGetCurrentTextureStatus_Lost;
             if (lost || surfTex.status == WGPUSurfaceGetCurrentTextureStatus_Timeout ||
