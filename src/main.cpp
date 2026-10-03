@@ -554,6 +554,13 @@ int main(int argc, char* argv[]) {
 #endif
 
     // Start windowed but maximized (easier for development)
+#if defined(_WIN32)
+    // Actually maximized: a window sized to the full video mode is taller than the work
+    // area once the title bar and borders are added, so it hangs under the taskbar —
+    // and in that state the Intel Vulkan driver reports the swapchain suboptimal and
+    // shows black triangles while orbiting/sculpting (gone after a maximize).
+    glfwWindowHint(GLFW_MAXIMIZED, GLFW_TRUE);
+#endif
     GLFWwindow* window = glfwCreateWindow(init_w, init_h, "Chisel", nullptr, nullptr);
 #ifdef CHISEL_BACKEND_GL
     if (!window) {
@@ -576,7 +583,31 @@ int main(int argc, char* argv[]) {
     // surface/device creation + per-frame acquire/present.)
     int fbw = init_w, fbh = init_h;
     glfwGetFramebufferSize(window, &fbw, &fbh);
+#if defined(__EMSCRIPTEN__)
     WGPUInstance instance = wgpuCreateInstance(nullptr);
+#else
+    // wgpu-native's own warnings and errors, so driver/surface trouble reaches the log.
+    wgpuSetLogCallback([](WGPULogLevel level, WGPUStringView msg, void*) {
+        std::printf("[wgpu] %s: %.*s\n", level == WGPULogLevel_Error ? "error" : "warn",
+                    (int)msg.length, msg.data ? msg.data : "");
+        std::fflush(stdout);
+    }, nullptr);
+    wgpuSetLogLevel(WGPULogLevel_Warn);
+    // CHISEL_WGPU_BACKEND=dx12|vulkan|gl pins wgpu-native to one API (default: let it
+    // choose). For telling a driver's presentation bug from ours: same window state,
+    // other API.
+    WGPUInstanceExtras inst_extras = {};
+    inst_extras.chain.sType = (WGPUSType)WGPUSType_InstanceExtras;
+    if (const char* be = std::getenv("CHISEL_WGPU_BACKEND")) {
+        if      (!std::strcmp(be, "dx12"))   inst_extras.backends = WGPUInstanceBackend_DX12;
+        else if (!std::strcmp(be, "vulkan")) inst_extras.backends = WGPUInstanceBackend_Vulkan;
+        else if (!std::strcmp(be, "gl"))     inst_extras.backends = WGPUInstanceBackend_GL;
+        else std::printf("[win] CHISEL_WGPU_BACKEND=%s not recognised (dx12|vulkan|gl)\n", be);
+    }
+    WGPUInstanceDescriptor inst_desc = {};
+    inst_desc.nextInChain = &inst_extras.chain;
+    WGPUInstance instance = wgpuCreateInstance(inst_extras.backends ? &inst_desc : nullptr);
+#endif
     if (!instance) { std::fprintf(stderr, "wgpuCreateInstance failed\n"); return 1; }
     // The seam's web readbacks pump this instance's event loop (no-op on native).
     gpu::webgpu_set_instance(instance);
@@ -660,12 +691,38 @@ int main(int argc, char* argv[]) {
     // build later trips a specific baseline field, bump that one field here.
     WGPULimits supported = WGPU_LIMITS_INIT;
     g_adapter = ar.adapter;
+#if !defined(__EMSCRIPTEN__)
+    {
+        WGPUAdapterInfo info = {};
+        if (wgpuAdapterGetInfo(ar.adapter, &info) == WGPUStatus_Success) {
+            const char* api = info.backendType == WGPUBackendType_Vulkan ? "Vulkan"
+                            : info.backendType == WGPUBackendType_D3D12  ? "D3D12"
+                            : info.backendType == WGPUBackendType_Metal  ? "Metal"
+                            : info.backendType == WGPUBackendType_OpenGL ||
+                              info.backendType == WGPUBackendType_OpenGLES ? "GL" : "other";
+            std::printf("[win] adapter: %.*s via %s\n", (int)info.device.length,
+                        info.device.data ? info.device.data : "", api);
+            wgpuAdapterInfoFreeMembers(info);
+        }
+    }
+#endif
     wgpuAdapterGetLimits(ar.adapter, &supported);
     WGPULimits limits = WGPU_LIMITS_INIT;                     // all baseline defaults
     limits.maxBufferSize               = supported.maxBufferSize;
     limits.maxStorageBufferBindingSize = supported.maxStorageBufferBindingSize;
     WGPUDeviceDescriptor ddesc = WGPU_DEVICE_DESCRIPTOR_INIT;
     ddesc.requiredLimits = &limits;
+#if !defined(__EMSCRIPTEN__)
+    // Without a handler, wgpu-native turns any validation error into a panic, and a
+    // panic across the C boundary aborts the process with no message (0xc0000409 in
+    // wgpu_native.dll). Log the error and carry on instead.
+    ddesc.uncapturedErrorCallbackInfo.callback =
+        [](WGPUDevice const*, WGPUErrorType type, WGPUStringView msg, void*, void*) {
+            std::printf("[wgpu] uncaptured error (type %d): %.*s\n", (int)type,
+                        (int)msg.length, msg.data ? msg.data : "");
+            std::fflush(stdout);
+        };
+#endif
     wgpuAdapterRequestDevice(ar.adapter, &ddesc, dcb);
     for (int i = 0; i < 200 && !dr.done; ++i) {
         wgpuInstanceProcessEvents(instance);
@@ -1172,6 +1229,21 @@ int main(int argc, char* argv[]) {
         // Scale is 1:1 because configureSurface sets the canvas backing at dpr=1.
         ImGui::GetIO().DisplaySize = ImVec2((float)win_w, (float)win_h);
         ImGui::GetIO().DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
+#elif defined(CHISEL_BACKEND_WEBGPU)
+        // The swapchain was configured from the size read at the top of the frame,
+        // before glfwPollEvents; ImGui_ImplGlfw_NewFrame reads the size again *after*
+        // it. On the frame a resize lands (un-maximize is the reliable trigger) the two
+        // differ, ImGui's renderer sets a scissor taller than the swapchain texture
+        // ("Scissor Rect 1920x1061 is not contained in the render target 1920x1017"),
+        // and wgpu-native treats a submit-time validation error as fatal. Clamp ImGui
+        // to the configured size; the next frame reconfigures and catches up.
+        {
+            ImGuiIO& io = ImGui::GetIO();
+            const float sx = io.DisplayFramebufferScale.x > 0.0f ? io.DisplayFramebufferScale.x : 1.0f;
+            const float sy = io.DisplayFramebufferScale.y > 0.0f ? io.DisplayFramebufferScale.y : 1.0f;
+            io.DisplaySize.x = std::min(io.DisplaySize.x, (float)fbw / sx);
+            io.DisplaySize.y = std::min(io.DisplaySize.y, (float)fbh / sy);
+        }
 #endif
         ImGui::NewFrame();
 
@@ -3199,6 +3271,27 @@ int main(int argc, char* argv[]) {
         // renderer.draw_background (the GL build instead clears explicitly below).
         WGPUSurfaceTexture surfTex = {};
         wgpuSurfaceGetCurrentTexture(g_surface, &surfTex);
+#ifndef __EMSCRIPTEN__
+        // An outdated/lost surface (the window changed under the swapchain) hands back
+        // no texture and must be reconfigured before it can present again. Those are
+        // logged; "suboptimal" is not, because Intel's Windows Vulkan driver reports it
+        // on nearly every frame after any resize, maximized or not, and it presents fine.
+        {
+            const bool lost = surfTex.status == WGPUSurfaceGetCurrentTextureStatus_Outdated ||
+                              surfTex.status == WGPUSurfaceGetCurrentTextureStatus_Lost;
+            if (lost || surfTex.status == WGPUSurfaceGetCurrentTextureStatus_Timeout ||
+                surfTex.status == WGPUSurfaceGetCurrentTextureStatus_Error)
+                std::printf("[win] surface status %d (window %dx%d, configured %dx%d)\n",
+                            (int)surfTex.status, win_w, win_h, fbw, fbh);
+            if (!surfTex.texture && lost) {
+                fbw = win_w; fbh = win_h;
+                configureSurface(fbw, fbh);
+                makeDepth(fbw, fbh);
+                screen_buffers_dirty = true;
+                wgpuSurfaceGetCurrentTexture(g_surface, &surfTex);
+            }
+        }
+#endif
         WGPUTextureView frameView = surfTex.texture
             ? wgpuTextureCreateView(surfTex.texture, nullptr) : nullptr;
         gpu::webgpu_set_default_color(frameView);
