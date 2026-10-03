@@ -1,8 +1,11 @@
 #include "debug_console.h"
 #include "text_overlay.h"
 
+#include <csignal>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <string>
 #include <vector>
 
@@ -15,6 +18,7 @@
 #else
     #include <unistd.h>
     #include <fcntl.h>
+    #include <poll.h>
 #endif
 
 namespace debug_console {
@@ -57,6 +61,62 @@ void absorb(const char* buf, size_t n) {
         else                { g_partial.push_back(buf[i]); }
     }
 }
+
+#if !defined(__EMSCRIPTEN__)
+// Last-gasp drain: copy whatever is still in the pipe to the real stdout, with no
+// allocation and no ring-buffer work, so it is safe while the process is dying. A
+// crash's own explanation (a wgpu panic message, an assert, an exception's what())
+// is printed in the frame that crashes — exactly the text the per-frame pump never
+// gets to, and the one a crash log needs most.
+void drain_to_log() {
+    if (!g_capturing || g_orig_out < 0) return;
+    static char buf[16384];
+    for (;;) {
+  #if defined(_WIN32)
+        DWORD avail = 0;
+        HANDLE h = (HANDLE)_get_osfhandle(g_pipe_r);
+        if (h == INVALID_HANDLE_VALUE) return;
+        if (!PeekNamedPipe(h, nullptr, 0, nullptr, &avail, nullptr) || avail == 0) return;
+        int n = _read(g_pipe_r, buf, (int)(avail < sizeof(buf) ? avail : sizeof(buf)));
+        if (n <= 0) return;
+        int w = _write(g_orig_out, buf, n); (void)w;
+  #else
+        // The read end is blocking; peek with poll() so an empty pipe can't hang us.
+        struct pollfd pfd = { g_pipe_r, POLLIN, 0 };
+        if (poll(&pfd, 1, 0) <= 0 || !(pfd.revents & POLLIN)) return;
+        ssize_t n = read(g_pipe_r, buf, sizeof(buf));
+        if (n <= 0) return;
+        ssize_t w = write(g_orig_out, buf, (size_t)n); (void)w;
+  #endif
+    }
+}
+
+std::terminate_handler g_prev_terminate = nullptr;
+
+void install_crash_drain() {
+    // Unhandled C++ exceptions — including a Rust panic unwinding out of
+    // wgpu_native.dll, which is how a fatal wgpu validation error arrives.
+    g_prev_terminate = std::set_terminate([] {
+        if (auto e = std::current_exception()) {
+            try { std::rethrow_exception(e); }
+            catch (const std::exception& ex) {
+                std::fprintf(stderr, "[crash] unhandled exception: %s\n", ex.what());
+            }
+            catch (...) {
+                std::fprintf(stderr, "[crash] unhandled non-C++ exception (a Rust panic "
+                                     "from wgpu-native, if the line above says so)\n");
+            }
+        }
+        drain_to_log();
+        if (g_prev_terminate) g_prev_terminate();
+        std::abort();
+    });
+    std::signal(SIGABRT, [](int) {
+        std::fprintf(stderr, "[crash] abort()\n");
+        drain_to_log();
+    });
+}
+#endif
 
 // Colour by prefix, so an alarm is findable without reading. The [arena]/[cull]
 // tags are exactly what chisel-debug.sh greps for when it decides whether a run
@@ -135,6 +195,7 @@ void init() {
     setvbuf(stderr, nullptr, _IONBF, 0);
 
     g_capturing = true;
+    install_crash_drain();
     g_lines.reserve(kMaxLines);
     std::printf("[console] ~ toggles this overlay; PgUp/PgDn scroll\n");
 #endif

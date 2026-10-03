@@ -13,8 +13,12 @@
 // to the real stdout, so chisel-debug.log still receives everything exactly as before.
 //
 // The cost of that choice: output now reaches the log when the frame drains it rather
-// than the instant it is printed, so a hard crash can lose up to one frame of text.
-// stdout is forced line-buffered here to keep that window as small as it can be.
+// than the instant it is printed. A crash would lose the crashing frame's text — the
+// one part of a log that explains the crash — so init() also installs terminate and
+// SIGABRT handlers that drain the pipe to the real stdout on the way down. That covers
+// unhandled C++ exceptions (a wgpu-native panic arrives as one), abort() and asserts;
+// a hard fault (access violation, __fastfail) still bypasses it. stdout is forced
+// line-buffered here to keep the window small either way.
 
 struct TextOverlay;
 
