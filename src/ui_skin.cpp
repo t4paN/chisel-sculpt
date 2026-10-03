@@ -7,6 +7,7 @@
 #include "imgui_internal.h"   // ShadeVertsLinearColorGradientKeepAlpha
 #include "ui_fonts_generated.h"
 #include <algorithm>
+#include <cctype>
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
@@ -32,29 +33,68 @@
 namespace {
 
 // ---- Tokens ------------------------------------------------------------------
-constexpr ImU32 kText      = IM_COL32(0xEC, 0xEA, 0xF2, 255);
-constexpr ImU32 kTextRail  = IM_COL32(0xDA, 0xD7, 0xE3, 255);
-constexpr ImU32 kMuted     = IM_COL32(0xA9, 0xA6, 0xB6, 255);
-constexpr ImU32 kDim       = IM_COL32(0x9C, 0x99, 0xAA, 255);
-constexpr ImU32 kStatus    = IM_COL32(0xC9, 0xC6, 0xD4, 255);
-constexpr ImU32 kAccent    = IM_COL32(0x76, 0x50, 0xE0, 255);
-constexpr ImU32 kAccentHi  = IM_COL32(0x8A, 0x68, 0xF0, 255);
-constexpr ImU32 kAccentLo  = IM_COL32(0x6B, 0x46, 0xD8, 255);
-constexpr ImU32 kTint      = IM_COL32(118, 80, 224, 82);     // toggles that are on
-constexpr ImU32 kTintText  = IM_COL32(0xE2, 0xD9, 0xFF, 255);
-constexpr ImU32 kBrush     = IM_COL32(0xF5, 0x9E, 0x3B, 255);
-constexpr ImU32 kUnsaved   = IM_COL32(0xF5, 0xB2, 0x6B, 255);
-constexpr ImU32 kAlert     = IM_COL32(0xFF, 0x8A, 0x80, 255);
-constexpr ImU32 kDivider   = IM_COL32(255, 255, 255, 31);
-constexpr ImU32 kDividerLo = IM_COL32(255, 255, 255, 20);
-constexpr ImU32 kBorder    = IM_COL32(255, 255, 255, 20);
-constexpr ImU32 kTipBg     = IM_COL32(0x0E, 0x0E, 0x11, 245);
-constexpr ImU32 kBadge     = IM_COL32(255, 255, 255, 46);
+// Set per skin by set_theme(): the modern values below, or the CGA ones.
+ImU32 kText, kTextRail, kMuted, kDim, kStatus, kAccent, kAccentHi, kAccentLo, kTint,
+      kTintText, kBrush, kUnsaved, kAlert, kDivider, kDividerLo, kBorder, kTipBg, kBadge;
+
+// CGA 16-colour palette (same values as `namespace cga` in ui_overlay.cpp).
+namespace cga {
+constexpr ImU32 black = IM_COL32(0x00, 0x00, 0x00, 255), blue = IM_COL32(0x00, 0x00, 0xAA, 255);
+constexpr ImU32 light_gray = IM_COL32(0xAA, 0xAA, 0xAA, 255), dark_gray = IM_COL32(0x55, 0x55, 0x55, 255);
+constexpr ImU32 light_green = IM_COL32(0x55, 0xFF, 0x55, 255), light_cyan = IM_COL32(0x55, 0xFF, 0xFF, 255);
+constexpr ImU32 light_red = IM_COL32(0xFF, 0x55, 0x55, 255), light_magenta = IM_COL32(0xFF, 0x55, 0xFF, 255);
+constexpr ImU32 yellow = IM_COL32(0xFF, 0xFF, 0x55, 255), white = IM_COL32(0xFF, 0xFF, 0xFF, 255);
+}
+
+bool g_dos = false;   // the DOS skin is active (theme + primitives switch on it)
+
+void set_theme(bool dos) {
+    g_dos = dos;
+    if (!dos) {
+        kText      = IM_COL32(0xEC, 0xEA, 0xF2, 255);
+        kTextRail  = IM_COL32(0xDA, 0xD7, 0xE3, 255);
+        kMuted     = IM_COL32(0xA9, 0xA6, 0xB6, 255);
+        kDim       = IM_COL32(0x9C, 0x99, 0xAA, 255);
+        kStatus    = IM_COL32(0xC9, 0xC6, 0xD4, 255);
+        kAccent    = IM_COL32(0x76, 0x50, 0xE0, 255);
+        kAccentHi  = IM_COL32(0x8A, 0x68, 0xF0, 255);
+        kAccentLo  = IM_COL32(0x6B, 0x46, 0xD8, 255);
+        kTint      = IM_COL32(118, 80, 224, 82);     // toggles that are on
+        kTintText  = IM_COL32(0xE2, 0xD9, 0xFF, 255);
+        kBrush     = IM_COL32(0xF5, 0x9E, 0x3B, 255);
+        kUnsaved   = IM_COL32(0xF5, 0xB2, 0x6B, 255);
+        kAlert     = IM_COL32(0xFF, 0x8A, 0x80, 255);
+        kDivider   = IM_COL32(255, 255, 255, 31);
+        kDividerLo = IM_COL32(255, 255, 255, 20);
+        kBorder    = IM_COL32(255, 255, 255, 20);
+        kTipBg     = IM_COL32(0x0E, 0x0E, 0x11, 245);
+        kBadge     = IM_COL32(255, 255, 255, 46);
+    } else {
+        // Board D: yellow for names and headings, light cyan for the active tool and
+        // key letters, light green for numbers, light magenta for mirror, light red for
+        // unsaved, light gray for frames, blue + white border for tooltips.
+        kText = kTextRail = cga::white;
+        kMuted = kStatus = cga::light_gray;
+        kDim = cga::dark_gray;
+        kAccent = kAccentHi = kAccentLo = cga::light_cyan;
+        kTint = cga::light_magenta;
+        kTintText = cga::light_magenta;
+        kBrush = cga::yellow;
+        kUnsaved = kAlert = cga::light_red;
+        kDivider = kDividerLo = cga::dark_gray;
+        kBorder = cga::light_gray;
+        kTipBg = cga::blue;
+        kBadge = cga::light_gray;
+    }
+}
 
 constexpr float kEdge      = 16.0f;   // screen margin
 constexpr float kRailW     = 56.0f;
 constexpr float kRailBtn   = 46.0f;
 constexpr float kBarBtn    = 44.0f;
+
+// Corner radius: the modern value, or square in DOS.
+float rad(float r) { return g_dos ? 0.0f : r; }
 
 ImU32 with_alpha(ImU32 c, float a) {
     int base = (int)((c >> IM_COL32_A_SHIFT) & 0xFF);
@@ -64,21 +104,45 @@ ImU32 with_alpha(ImU32 c, float a) {
 
 // ---- Fonts -----------------------------------------------------------------
 ImFont* g_classic_font = nullptr;
+ImFont* g_bitmap_font = nullptr;     // ChiselBitmap.ttf, Plex Mono merged for the rest
 ImFont* g_fonts[4] = {nullptr, nullptr, nullptr, nullptr};
-bool    g_modern_active = false;
+InputState::UiSkin g_active_skin = InputState::UiSkin::CLASSIC;
 bool    g_style_ready = false;
 ImGuiStyle g_classic_style;
 
-ImFont* F(UiFont f) { return g_fonts[(int)f]; }
+ImFont* F(UiFont f) { return g_dos ? g_bitmap_font : g_fonts[(int)f]; }
+
+// The bitmap font only stays crisp at whole multiples of its 8 px cell, so in DOS
+// every size lands on 8 (badges, corner keys) or 16 (everything else).
+float px_for(float px) { return g_dos ? (px < 11.0f ? 8.0f : 16.0f) : px; }
+bool  bold(UiFont f) { return f == UiFont::SansSemibold || f == UiFont::MonoMedium; }
 
 ImVec2 text_size(UiFont f, float px, const char* s) {
     ImFont* font = F(f);
-    return font ? font->CalcTextSizeA(px, FLT_MAX, 0.0f, s) : ImVec2(0, 0);
+    if (!font) return ImVec2(0, 0);
+    ImVec2 sz = font->CalcTextSizeA(px_for(px), FLT_MAX, 0.0f, s);
+    if (g_dos && bold(f)) sz.x += 2.0f;
+    return sz;
 }
 
 void text_at(ImDrawList* dl, UiFont f, float px, ImVec2 pos, ImU32 col, const char* s) {
-    dl->AddText(F(f), px, ImVec2(std::floor(pos.x + 0.5f), std::floor(pos.y + 0.5f)), col, s);
+    ImVec2 p(std::floor(pos.x + 0.5f), std::floor(pos.y + 0.5f));
+    dl->AddText(F(f), px_for(px), p, col, s);
+    // No bold weight in the bitmap face: the HUD's trick, drawn twice 2 px apart.
+    if (g_dos && bold(f)) dl->AddText(F(f), px_for(px), ImVec2(p.x + 2.0f, p.y), col, s);
 }
+
+// Names read as titles in DOS (board D: "DRAW", "CLAY").
+const char* title_case(const char* s) {
+    if (!g_dos) return s;
+    static char buf[64];
+    size_t i = 0;
+    for (; s[i] && i < sizeof buf - 1; i++) buf[i] = (char)std::toupper((unsigned char)s[i]);
+    buf[i] = '\0';
+    return buf;
+}
+
+ImU32 title_col() { return g_dos ? cga::yellow : kText; }
 
 // ---- Motion ----------------------------------------------------------------
 bool os_reduced_motion() {
@@ -139,6 +203,15 @@ Material material_from(const InputState& in) {
 void panel_bg(ImDrawList* dl, ImVec2 a, ImVec2 b, float r) {
     const Material& mt = g_mat;
     if (b.x - a.x < 2.0f || b.y - a.y < 2.0f) return;
+    if (g_dos) {
+        // DOS frame: black box, 2 px light-gray border, hard 8 px drop shadow.
+        a = ImVec2(std::floor(a.x), std::floor(a.y));
+        b = ImVec2(std::floor(b.x), std::floor(b.y));
+        dl->AddRectFilled(ImVec2(a.x + 8, a.y + 8), ImVec2(b.x + 8, b.y + 8), IM_COL32(0, 0, 0, 140));
+        dl->AddRectFilled(a, b, cga::black);
+        dl->AddRect(ImVec2(a.x + 1, a.y + 1), ImVec2(b.x - 1, b.y - 1), kBorder, 0.0f, 0, 2.0f);
+        return;
+    }
     for (int i = 1; i <= 4; i++) {
         float e = (float)i * 3.0f;
         dl->AddRectFilled(ImVec2(a.x - e, a.y - e + 6.0f), ImVec2(b.x + e, b.y + e + 6.0f),
@@ -218,6 +291,21 @@ void tooltip(ImVec2 anchor_min, ImVec2 anchor_max, TipSide side, const char* nam
     ImVec2 disp = ImGui::GetIO().DisplaySize;
     p.x = std::max(8.0f, std::min(p.x, disp.x - w - 8.0f));
     p.y = std::max(8.0f, std::min(p.y, disp.y - h - 8.0f));
+    if (g_dos) {
+        // Turbo-style help box: blue, white frame, hard shadow, yellow bold name,
+        // light-cyan key.
+        p = ImVec2(std::floor(p.x), std::floor(p.y));
+        const char* nm = title_case(name);
+        ImVec2 n2 = text_size(UiFont::SansSemibold, 16.0f, nm);
+        ImVec2 k2 = key ? text_size(UiFont::Mono, 16.0f, key) : ImVec2(0, 0);
+        float W = 12.0f * 2 + n2.x + (key ? 16.0f + k2.x : 0.0f), Hh = 6.0f * 2 + 16.0f + 4.0f;
+        dl->AddRectFilled(ImVec2(p.x + 8, p.y + 8), ImVec2(p.x + W + 8, p.y + Hh + 8), IM_COL32(0, 0, 0, 140));
+        dl->AddRectFilled(p, ImVec2(p.x + W, p.y + Hh), cga::blue);
+        dl->AddRect(ImVec2(p.x + 1, p.y + 1), ImVec2(p.x + W - 1, p.y + Hh - 1), cga::white, 0.0f, 0, 2.0f);
+        text_at(dl, UiFont::SansSemibold, 16.0f, ImVec2(p.x + 12, p.y + 8), cga::yellow, nm);
+        if (key) text_at(dl, UiFont::Mono, 16.0f, ImVec2(p.x + 12 + n2.x + 16, p.y + 8), cga::light_cyan, key);
+        return;
+    }
     dl->AddRectFilled(p, ImVec2(p.x + w, p.y + h), kTipBg, 8.0f);
     dl->AddRect(p, ImVec2(p.x + w, p.y + h), IM_COL32(255, 255, 255, 31), 8.0f);
     text_at(dl, UiFont::Sans, fs, ImVec2(p.x + padx, p.y + (h - ns.y) * 0.5f), kText, name);
@@ -262,6 +350,28 @@ bool icon_button(const char* id, Icon icon, float size, const BtnOpts& o) {
     float hs = size * 0.5f * s;
     ImVec2 a(c.x - hs, c.y - hs), b(c.x + hs, c.y + hs);
     float r = (o.look == Look::Rail ? 11.0f : 10.0f) * s;
+
+    if (g_dos) {
+        // Solid CGA blocks: light cyan = active tool, light magenta = toggle on,
+        // blue while pressed, dark gray on hover. Icons and corner keys go black on
+        // a lit block.
+        ImU32 bg = 0, icol = cga::white, kcol = cga::light_gray;
+        if (held && o.enabled)  bg = cga::blue;
+        else if (o.on)          { bg = o.look == Look::Rail ? cga::light_cyan : cga::light_magenta;
+                                  icol = kcol = cga::black; }
+        else if (hovered && o.enabled) bg = cga::dark_gray;
+        if (bg) dl->AddRectFilled(ImVec2(pos.x, pos.y), ImVec2(pos.x + size, pos.y + size), bg);
+        if (!o.enabled) icol = cga::dark_gray;
+        draw_pixel_icon(dl, icon, c, 2.0f, icol);
+        if (o.corner) {
+            ImVec2 ks = text_size(UiFont::Mono, 8.0f, o.corner);
+            text_at(dl, UiFont::Mono, 8.0f, ImVec2(pos.x + size - 2.0f - ks.x, pos.y + size - 2.0f - ks.y),
+                    kcol, o.corner);
+        }
+        if (hovered && o.tip) tooltip(ImVec2(pos.x, pos.y), ImVec2(pos.x + size, pos.y + size),
+                                      o.side, o.tip, o.key);
+        return clicked && o.enabled;
+    }
 
     ImU32 icol;
     if (o.on && o.look == Look::Rail) {
@@ -315,6 +425,15 @@ bool chip(const char* label, bool on, float h = 30.0f) {
     ImVec2 c(pos.x + size.x * 0.5f, pos.y + size.y * 0.5f);
     ImVec2 a(c.x - size.x * 0.5f * s, c.y - size.y * 0.5f * s);
     ImVec2 b(c.x + size.x * 0.5f * s, c.y + size.y * 0.5f * s);
+    if (g_dos) {
+        if (on) dl->AddRectFilled(a, b, cga::light_cyan);
+        else if (hovered) dl->AddRectFilled(a, b, cga::dark_gray);
+        dl->AddRect(ImVec2(a.x + 1, a.y + 1), ImVec2(b.x - 1, b.y - 1), on ? cga::light_cyan : cga::light_gray,
+                    0.0f, 0, 2.0f);
+        text_at(dl, UiFont::Sans, 16.0f, ImVec2(c.x - ts.x * 0.5f, c.y - ts.y * 0.5f),
+                on ? cga::black : cga::white, label);
+        return clicked;
+    }
     if (on) dl->AddRectFilled(a, b, kTint, 8.0f);
     else if (hovered) dl->AddRectFilled(a, b, IM_COL32(255, 255, 255, 18), 8.0f);
     dl->AddRect(a, b, on ? IM_COL32(118, 80, 224, 140) : kBorder, 8.0f);
@@ -327,17 +446,22 @@ void vdivider(float h = 22.0f, float margin = 4.0f) {
     ImGui::SameLine(0.0f, margin);
     ImVec2 p = ImGui::GetCursorScreenPos();
     float bh = kBarBtn;
-    ImGui::Dummy(ImVec2(1.0f, bh));
-    ImGui::GetWindowDrawList()->AddLine(ImVec2(p.x + 0.5f, p.y + (bh - h) * 0.5f),
-                                        ImVec2(p.x + 0.5f, p.y + (bh + h) * 0.5f), kDivider);
+    const float t = g_dos ? 2.0f : 1.0f;      // DOS rules are 2 px, like its frames
+    if (g_dos) h = 28.0f;
+    ImGui::Dummy(ImVec2(t, bh));
+    float x = std::floor(p.x) + t * 0.5f;
+    ImGui::GetWindowDrawList()->AddLine(ImVec2(x, p.y + (bh - h) * 0.5f),
+                                        ImVec2(x, p.y + (bh + h) * 0.5f), kDivider, t);
     ImGui::SameLine(0.0f, margin);
 }
 
 void hdivider(float width, float margin, ImU32 col, float h) {
     ImVec2 p = ImGui::GetCursorScreenPos();
     ImGui::Dummy(ImVec2(width, h));
-    float y = std::floor(p.y + h * 0.5f) + 0.5f;
-    ImGui::GetWindowDrawList()->AddLine(ImVec2(p.x + margin, y), ImVec2(p.x + width - margin, y), col);
+    const float t = g_dos ? 2.0f : 1.0f;
+    if (g_dos) margin = std::min(margin, 4.0f);
+    float y = std::floor(p.y + h * 0.5f) + t * 0.5f;
+    ImGui::GetWindowDrawList()->AddLine(ImVec2(p.x + margin, y), ImVec2(p.x + width - margin, y), col, t);
 }
 
 // ---- Formatting ------------------------------------------------------------
@@ -372,8 +496,10 @@ void project_name(char* out, size_t n, const char* path) {
 
 // ---- Alpha swatch ------------------------------------------------------------
 void draw_alpha_preview(ImDrawList* dl, ImVec2 a, float size, const float* preview) {
-    dl->AddRectFilled(a, ImVec2(a.x + size, a.y + size), IM_COL32(0x0E, 0x0E, 0x11, 255), 7.0f);
-    dl->AddRect(a, ImVec2(a.x + size, a.y + size), IM_COL32(255, 255, 255, 46), 7.0f);
+    dl->AddRectFilled(a, ImVec2(a.x + size, a.y + size), g_dos ? cga::black : IM_COL32(0x0E, 0x0E, 0x11, 255),
+                      rad(7.0f));
+    dl->AddRect(a, ImVec2(a.x + size, a.y + size), g_dos ? cga::light_gray : IM_COL32(255, 255, 255, 46),
+                rad(7.0f), 0, g_dos ? 2.0f : 1.0f);
     if (!preview) return;
     float inset = size * 0.18f, cell = (size - inset * 2.0f) / 16.0f;
     for (int y = 0; y < 16; y++)
@@ -468,6 +594,80 @@ void apply_modern_style() {
     c[ImGuiCol_ScrollbarBg]       = rgba(0, 0, 0, 0.0f);
     c[ImGuiCol_ScrollbarGrab]     = rgba(255, 255, 255, 0.14f);
     c[ImGuiCol_ModalWindowDimBg]  = rgba(8, 8, 10, 0.55f);
+}
+
+// ImGui widgets (menu, dialogs, file browser) in CGA: square everything, black
+// fields on blue frames, light cyan for marks and grabs, yellow for headings.
+void apply_dos_style() {
+    ImGuiStyle& s = ImGui::GetStyle();
+    s.WindowRounding = s.PopupRounding = s.ChildRounding = 0.0f;
+    s.FrameRounding = s.GrabRounding = s.TabRounding = s.ScrollbarRounding = 0.0f;
+    s.FramePadding = ImVec2(8.0f, 4.0f);
+    s.ItemSpacing = ImVec2(8.0f, 8.0f);
+    s.ItemInnerSpacing = ImVec2(8.0f, 6.0f);
+    s.GrabMinSize = 16.0f;
+    s.PopupBorderSize = s.WindowBorderSize = 2.0f;
+    s.FrameBorderSize = 0.0f;
+    s.TabBorderSize = 0.0f;
+    s.AntiAliasedLines = false;          // 2 px rules stay hard-edged
+    s.AntiAliasedFill = false;
+    ImVec4* c = s.Colors;
+    auto hex = [](unsigned v, float a = 1.0f) {
+        return ImVec4(((v >> 16) & 0xFF) / 255.0f, ((v >> 8) & 0xFF) / 255.0f, (v & 0xFF) / 255.0f, a);
+    };
+    for (int i = 0; i < ImGuiCol_COUNT; i++) c[i] = hex(0x000000);
+    c[ImGuiCol_Text]              = hex(0xFFFFFF);
+    c[ImGuiCol_TextDisabled]      = hex(0xAAAAAA);
+    c[ImGuiCol_WindowBg]          = hex(0x000000);
+    c[ImGuiCol_ChildBg]           = hex(0x000000, 0.0f);
+    c[ImGuiCol_PopupBg]           = hex(0x0000AA);
+    c[ImGuiCol_Border]            = hex(0xAAAAAA);
+    c[ImGuiCol_BorderShadow]      = hex(0x000000, 0.0f);
+    c[ImGuiCol_FrameBg]           = hex(0x0000AA);
+    c[ImGuiCol_FrameBgHovered]    = hex(0x5555FF);
+    c[ImGuiCol_FrameBgActive]     = hex(0x5555FF);
+    c[ImGuiCol_TitleBg]           = hex(0x0000AA);
+    c[ImGuiCol_TitleBgActive]     = hex(0x0000AA);
+    c[ImGuiCol_TitleBgCollapsed]  = hex(0x0000AA);
+    c[ImGuiCol_MenuBarBg]         = hex(0xAAAAAA);
+    c[ImGuiCol_ScrollbarBg]       = hex(0x000000);
+    c[ImGuiCol_ScrollbarGrab]     = hex(0x55FFFF);
+    c[ImGuiCol_ScrollbarGrabHovered] = hex(0xFFFFFF);
+    c[ImGuiCol_ScrollbarGrabActive]  = hex(0xFFFF55);
+    c[ImGuiCol_CheckMark]         = hex(0x55FFFF);
+    c[ImGuiCol_SliderGrab]        = hex(0x55FFFF);
+    c[ImGuiCol_SliderGrabActive]  = hex(0xFFFF55);
+    c[ImGuiCol_Button]            = hex(0x0000AA);
+    c[ImGuiCol_ButtonHovered]     = hex(0x5555FF);
+    c[ImGuiCol_ButtonActive]      = hex(0x00AAAA);
+    c[ImGuiCol_Header]            = hex(0x00AAAA);
+    c[ImGuiCol_HeaderHovered]     = hex(0x555555);
+    c[ImGuiCol_HeaderActive]      = hex(0x00AAAA);
+    c[ImGuiCol_Separator]         = hex(0x555555);
+    c[ImGuiCol_SeparatorHovered]  = hex(0xAAAAAA);
+    c[ImGuiCol_SeparatorActive]   = hex(0xFFFFFF);
+    c[ImGuiCol_ResizeGrip]        = hex(0x555555);
+    c[ImGuiCol_ResizeGripHovered] = hex(0xAAAAAA);
+    c[ImGuiCol_ResizeGripActive]  = hex(0xFFFFFF);
+    c[ImGuiCol_InputTextCursor]   = hex(0xFFFF55);
+    c[ImGuiCol_Tab]               = hex(0x000000);
+    c[ImGuiCol_TabHovered]        = hex(0x555555);
+    c[ImGuiCol_TabSelected]       = hex(0x0000AA);
+    c[ImGuiCol_TabSelectedOverline] = hex(0x55FFFF);
+    c[ImGuiCol_TabDimmed]         = hex(0x000000);
+    c[ImGuiCol_TabDimmedSelected] = hex(0x0000AA);
+    c[ImGuiCol_PlotLines]         = hex(0x55FF55);
+    c[ImGuiCol_PlotHistogram]     = hex(0x55FF55);
+    c[ImGuiCol_TableHeaderBg]     = hex(0x0000AA);
+    c[ImGuiCol_TableBorderStrong] = hex(0xAAAAAA);
+    c[ImGuiCol_TableBorderLight]  = hex(0x555555);
+    c[ImGuiCol_TextSelectedBg]    = hex(0x00AAAA);
+    c[ImGuiCol_TextLink]          = hex(0x55FFFF);
+    c[ImGuiCol_DragDropTarget]    = hex(0xFFFF55);
+    c[ImGuiCol_NavCursor]         = hex(0xFFFF55);
+    c[ImGuiCol_NavWindowingHighlight] = hex(0xFFFFFF);
+    c[ImGuiCol_NavWindowingDimBg] = hex(0x000000, 0.5f);
+    c[ImGuiCol_ModalWindowDimBg]  = hex(0x000000, 0.5f);
 }
 
 // ---- Panels ------------------------------------------------------------------
@@ -566,7 +766,7 @@ void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
         ImDrawList* dl = ImGui::GetWindowDrawList();
         ImVec2 c(pos.x + kRailBtn * 0.5f, pos.y + kRailBtn * 0.5f);
         if (hovered) dl->AddRectFilled(ImVec2(c.x - 23 * s, c.y - 23 * s), ImVec2(c.x + 23 * s, c.y + 23 * s),
-                                       IM_COL32(255, 255, 255, 18), 10.0f);
+                                       g_dos ? cga::dark_gray : IM_COL32(255, 255, 255, 18), rad(10.0f));
         int ai = std::max(0, std::min(input.active_alpha, alpha_lib->count() - 1));
         const AlphaEntry& ae = alpha_lib->get(ai);
         float sz = 30.0f * s;
@@ -579,8 +779,8 @@ void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
         if (begin_skin_popup("##alphapick", ImVec2(12, 12))) {
             ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(6, 6));
             text_at(ImGui::GetWindowDrawList(), UiFont::SansSemibold, 11.0f,
-                    ImGui::GetCursorScreenPos(), kMuted, "BRUSH ALPHA");
-            ImGui::Dummy(ImVec2(0, 14));
+                    ImGui::GetCursorScreenPos(), g_dos ? cga::yellow : kMuted, "BRUSH ALPHA");
+            ImGui::Dummy(ImVec2(0, g_dos ? 18.0f : 14.0f));
             int n = alpha_lib->count();
             for (int i = 0; i < n; i++) {
                 if (i % 5) ImGui::SameLine();
@@ -594,9 +794,10 @@ void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
                 bool hv = ImGui::IsItemHovered();
                 ImDrawList* pdl = ImGui::GetWindowDrawList();
                 if (input.active_alpha == i)
-                    pdl->AddRectFilled(p, ImVec2(p.x + 44, p.y + 44), kAccent, 10.0f);
+                    pdl->AddRectFilled(p, ImVec2(p.x + 44, p.y + 44), kAccent, rad(10.0f));
                 else if (hv)
-                    pdl->AddRectFilled(p, ImVec2(p.x + 44, p.y + 44), IM_COL32(255, 255, 255, 18), 10.0f);
+                    pdl->AddRectFilled(p, ImVec2(p.x + 44, p.y + 44),
+                                       g_dos ? cga::dark_gray : IM_COL32(255, 255, 255, 18), rad(10.0f));
                 draw_alpha_preview(pdl, ImVec2(p.x + 7, p.y + 7), 30.0f, e.preview);
                 if (hv) tooltip(p, ImVec2(p.x + 44, p.y + 44), TipSide::Below, e.name.c_str(), nullptr);
             }
@@ -608,8 +809,10 @@ void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
             }
             bool hv = ImGui::IsItemHovered();
             ImDrawList* pdl = ImGui::GetWindowDrawList();
-            if (hv) pdl->AddRectFilled(p, ImVec2(p.x + 44, p.y + 44), IM_COL32(255, 255, 255, 18), 10.0f);
-            pdl->AddRect(ImVec2(p.x + 7, p.y + 7), ImVec2(p.x + 37, p.y + 37), IM_COL32(255, 255, 255, 60), 7.0f);
+            if (hv) pdl->AddRectFilled(p, ImVec2(p.x + 44, p.y + 44),
+                                       g_dos ? cga::dark_gray : IM_COL32(255, 255, 255, 18), rad(10.0f));
+            pdl->AddRect(ImVec2(p.x + 7, p.y + 7), ImVec2(p.x + 37, p.y + 37),
+                         g_dos ? cga::light_gray : IM_COL32(255, 255, 255, 60), rad(7.0f), 0, g_dos ? 2.0f : 1.0f);
             pdl->AddLine(ImVec2(p.x + 16, p.y + 22), ImVec2(p.x + 28, p.y + 22), kText, 1.75f);
             pdl->AddLine(ImVec2(p.x + 22, p.y + 16), ImVec2(p.x + 22, p.y + 28), kText, 1.75f);
             if (hv) tooltip(p, ImVec2(p.x + 44, p.y + 44), TipSide::Below,
@@ -628,6 +831,20 @@ void file_panel(InputState& input, const SkinStats& st) {
     char name[64];
     project_name(name, sizeof name, st.project_path);
     const bool unsaved = !st.project_path || !*st.project_path;
+    if (g_dos) {
+        // Board D: yellow CHISEL brand, the name, a light-red * while unsaved.
+        ImVec2 bs = text_size(UiFont::SansSemibold, 16.0f, "CHISEL");
+        ImVec2 ns = text_size(UiFont::Sans, 16.0f, name);
+        float w = 10.0f + bs.x + 18.0f + ns.x + (unsaved ? 6.0f + 16.0f : 0.0f) + 8.0f;
+        ImVec2 p = ImGui::GetCursorScreenPos();
+        ImGui::Dummy(ImVec2(w, kBarBtn));
+        float ty = p.y + (kBarBtn - 16.0f) * 0.5f;
+        text_at(dl, UiFont::SansSemibold, 16.0f, ImVec2(p.x + 10.0f, ty), cga::yellow, "CHISEL");
+        text_at(dl, UiFont::Sans, 16.0f, ImVec2(p.x + 10.0f + bs.x + 18.0f, ty), cga::white, name);
+        if (unsaved)
+            text_at(dl, UiFont::Sans, 16.0f, ImVec2(p.x + 10.0f + bs.x + 18.0f + ns.x + 6.0f, ty),
+                    cga::light_red, "*");
+    } else {
     ImVec2 ns = text_size(UiFont::SansSemibold, 14.0f, name);
     ImVec2 us = text_size(UiFont::Sans, 11.0f, "unsaved");
     float w = 10.0f + ns.x + (unsaved ? 6.0f + 10.0f + us.x : 0.0f) + 8.0f;
@@ -638,6 +855,7 @@ void file_panel(InputState& input, const SkinStats& st) {
         float x = p.x + 10.0f + ns.x + 6.0f;
         dl->AddCircleFilled(ImVec2(x + 3.0f, p.y + kBarBtn * 0.5f), 3.0f, kUnsaved, 12);
         text_at(dl, UiFont::Sans, 11.0f, ImVec2(x + 10.0f, p.y + (kBarBtn - us.y) * 0.5f), kUnsaved, "unsaved");
+    }
     }
     vdivider();
 
@@ -676,8 +894,22 @@ void command_panel(InputState& input, int win_w, int win_h, MultiresInfo mres, c
         ImDrawList* dl = ImGui::GetWindowDrawList();
         ImVec2 p = ImGui::GetCursorScreenPos();
         const float w = 64.0f;
-        ImGui::Dummy(ImVec2(w, kBarBtn));
         char lv[16], mx[16], tris[24];
+        if (g_dos) {
+            // 16 px cells are wide: "L4/9" in light green, the tri count at 8 px below.
+            if (mres.locked) std::snprintf(lv, sizeof lv, "L%d/%d", st.level, mres.lmax);
+            else             std::snprintf(lv, sizeof lv, "L%d", st.level);
+            fmt_k(tris, sizeof tris, st.tris);
+            std::strncat(tris, " TRIS", sizeof tris - std::strlen(tris) - 1);
+            for (char* c = tris; *c; c++) *c = (char)std::toupper((unsigned char)*c);
+            ImVec2 a = text_size(UiFont::Mono, 16.0f, lv), t = text_size(UiFont::Mono, 8.0f, tris);
+            const float wd = std::max(80.0f, std::max(a.x, t.x) + 8.0f);
+            ImGui::Dummy(ImVec2(wd, kBarBtn));
+            float top = p.y + (kBarBtn - 16.0f - 4.0f - 8.0f) * 0.5f;
+            text_at(dl, UiFont::Mono, 16.0f, ImVec2(p.x + (wd - a.x) * 0.5f, top), cga::light_green, lv);
+            text_at(dl, UiFont::Mono, 8.0f, ImVec2(p.x + (wd - t.x) * 0.5f, top + 20.0f), cga::light_gray, tris);
+        } else {
+        ImGui::Dummy(ImVec2(w, kBarBtn));
         std::snprintf(lv, sizeof lv, "L%d", st.level);
         if (mres.locked) std::snprintf(mx, sizeof mx, " / %d", mres.lmax);
         else mx[0] = '\0';
@@ -691,6 +923,7 @@ void command_panel(InputState& input, int win_w, int win_h, MultiresInfo mres, c
         text_at(dl, UiFont::MonoMedium, 15.0f, ImVec2(x0, top), kText, lv);
         text_at(dl, UiFont::MonoMedium, 15.0f, ImVec2(x0 + a.x, top), kDim, mx);
         text_at(dl, UiFont::Sans, 11.0f, ImVec2(p.x + (w - t.x) * 0.5f, top + a.y - 2.0f), kMuted, tris);
+        }
     }
     ImGui::SameLine(0.0f, 2.0f);
     o.tip = "Subdivision up"; o.key = "Ctrl+D";
@@ -752,6 +985,22 @@ struct Meter { const char* key; const char* label; char value[16]; float pct; Im
 void meter_widget(const char* id, const Meter& m) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImVec2 p = ImGui::GetCursorScreenPos();
+    if (g_dos) {
+        // Board D: "S Size 70" — cyan key, gray label, green value, no bar.
+        const char* lab = m.label;
+        if (!std::strcmp(lab, "Strength")) lab = "Str";
+        else if (!std::strcmp(lab, "Hardness")) lab = "Hard";
+        else if (!std::strcmp(lab, "Spacing")) lab = "Spc";
+        char mid[24]; std::snprintf(mid, sizeof mid, " %s ", lab);
+        ImVec2 k = text_size(UiFont::Mono, 16.0f, m.key), l = text_size(UiFont::Mono, 16.0f, mid);
+        ImVec2 v = text_size(UiFont::Mono, 16.0f, m.value);
+        const float h = 30.0f, ty = p.y + (h - 16.0f) * 0.5f;
+        ImGui::Dummy(ImVec2(k.x + l.x + std::max(v.x, 48.0f), h));   // fixed slot: 3 cells
+        text_at(dl, UiFont::Mono, 16.0f, ImVec2(p.x, ty), cga::light_cyan, m.key);
+        text_at(dl, UiFont::Mono, 16.0f, ImVec2(p.x + k.x, ty), cga::light_gray, mid);
+        text_at(dl, UiFont::Mono, 16.0f, ImVec2(p.x + k.x + l.x, ty), cga::light_green, m.value);
+        return;
+    }
     const float w = 112.0f, h = 30.0f;
     ImGui::Dummy(ImVec2(w, h));
     // key badge
@@ -790,9 +1039,9 @@ bool shape_button(const char* id, int kind, bool on, const char* tip) {
     float s = spring(ImGui::GetItemID(), held ? 0.92f : 1.0f, held ? 1400.0f : 520.0f);
     ImVec2 c(pos.x + size * 0.5f, pos.y + size * 0.5f);
     ImVec2 a(c.x - size * 0.5f * s, c.y - size * 0.5f * s), b(c.x + size * 0.5f * s, c.y + size * 0.5f * s);
-    if (on) dl->AddRectFilled(a, b, kAccent, 9.0f);
-    else if (hovered) dl->AddRectFilled(a, b, IM_COL32(255, 255, 255, 18), 9.0f);
-    ImU32 col = on ? IM_COL32_WHITE : kText;
+    if (on) dl->AddRectFilled(a, b, kAccent, rad(9.0f));
+    else if (hovered) dl->AddRectFilled(a, b, g_dos ? cga::dark_gray : IM_COL32(255, 255, 255, 18), rad(9.0f));
+    ImU32 col = on ? (g_dos ? cga::black : IM_COL32_WHITE) : kText;
     float k = s * 0.75f, th = 1.6f;
     if (kind == 0) {
         dl->AddCircle(c, 9.0f * k * 1.33f, col, 0, th);
@@ -813,13 +1062,15 @@ bool shape_button(const char* id, int kind, bool on, const char* tip) {
     return clicked;
 }
 
+float g_brush_right = 0.0f;   // readout's right edge, for status_panel's collision check
+
 float brush_panel(InputState& input, int win_h) {
     const auto mode = input.interaction_mode;
     float panel_h = 0.0f;
     if (!begin_panel("##mBrush", ImVec2(kEdge + kRailW + kEdge, (float)win_h - kEdge), ImVec2(0, 1),
                      ImVec2(16, 10), 18.0f, 12.0f)) { end_panel(); return 0.0f; }
     if (mode == InputState::InteractionMode::INSERT) {
-        label_item(UiFont::SansSemibold, 14.0f, kText, "Insert", 64.0f, 36.0f);
+        label_item(UiFont::SansSemibold, 14.0f, title_col(), title_case("Insert"), 64.0f, 36.0f);
         struct S { const char* id; int kind; const char* tip; InputState::InsertShape shape; };
         static const S shapes[] = {
             {"##shSphere", 0, "Sphere",   InputState::InsertShape::SPHERE},
@@ -836,11 +1087,11 @@ float brush_panel(InputState& input, int win_h) {
         ImGui::SameLine(0.0f, 14.0f);
         label_item(UiFont::Sans, 12.0f, kMuted, "Click the model to place", 0.0f, 36.0f);
     } else if (mode == InputState::InteractionMode::SELECT) {
-        label_item(UiFont::SansSemibold, 14.0f, kText, "Select", 64.0f);
+        label_item(UiFont::SansSemibold, 14.0f, title_col(), title_case("Select"), 64.0f);
         ImGui::SameLine();
         label_item(UiFont::Sans, 12.0f, kMuted, "Click to pick  \xC2\xB7  drag to move  \xC2\xB7  Q / E rotate");
     } else {
-        label_item(UiFont::SansSemibold, 14.0f, kText, input.brush_name(), 64.0f);
+        label_item(UiFont::SansSemibold, 14.0f, title_col(), title_case(input.brush_name()), 64.0f);
         Meter ms[4] = {
             {"S", "Size",     "", input.brush_size / 500.0f, kBrush},
             {"W", "Strength", "", input.brush_strength, kText},
@@ -858,6 +1109,7 @@ float brush_panel(InputState& input, int win_h) {
         }
     }
     panel_h = ImGui::GetWindowSize().y;
+    g_brush_right = ImGui::GetWindowPos().x + ImGui::GetWindowSize().x;
     end_panel();
     return panel_h;
 }
@@ -923,11 +1175,40 @@ void options_panel(InputState& input, int win_h, float brush_h) {
     end_panel();
 }
 
-void status_panel(const InputState& input, int win_w, int win_h, const SkinStats& st) {
-    if (!begin_panel("##mStatus", ImVec2((float)win_w - kEdge, (float)win_h - kEdge), ImVec2(1, 1),
+// brush_right / brush_h: the readout's right edge and height this frame. On a window
+// too narrow for both on one row (or with DOS's wide 16 px cells), the status line
+// steps up and sits above the readout's row instead of sliding under it. The panel
+// keeps its x either way, so the check can't flip back and forth.
+void status_panel(const InputState& input, int win_w, int win_h, const SkinStats& st,
+                  float brush_right, float brush_h) {
+    static bool lifted = false;
+    float y = (float)win_h - kEdge - (lifted ? brush_h + 12.0f : 0.0f);
+    if (!begin_panel("##mStatus", ImVec2((float)win_w - kEdge, y), ImVec2(1, 1),
                      ImVec2(14, 10), 14.0f, 12.0f)) { end_panel(); return; }
+    if (ImGui::GetWindowSize().x > 1.0f) lifted = ImGui::GetWindowPos().x < brush_right + 12.0f;
     char verts[32], buf[48];
     fmt_thousands(verts, sizeof verts, st.verts);
+    if (g_dos) {
+        // Board D's status line: gray labels, green numbers, magenta mirror.
+        label_item(UiFont::Mono, 16.0f, cga::light_gray, "Verts", 0.0f, 18.0f);
+        ImGui::SameLine(0.0f, 8.0f);
+        label_item(UiFont::Mono, 16.0f, cga::light_green, verts, 0.0f, 18.0f);
+        ImGui::SameLine(0.0f, 24.0f);
+        label_item(UiFont::Mono, 16.0f, input.mirror_x ? cga::light_magenta : cga::dark_gray,
+                   !input.mirror_x ? "Mirror:Off"
+                   : input.mirror_topological ? "Mirror:Topo" : "Mirror:World", 0.0f, 18.0f);
+        if (input.autosmooth) {
+            ImGui::SameLine(0.0f, 24.0f);
+            label_item(UiFont::Mono, 16.0f, cga::light_cyan, "Autosmooth", 0.0f, 18.0f);
+        }
+        if (input.show_fps) {
+            ImGui::SameLine(0.0f, 24.0f);
+            std::snprintf(buf, sizeof buf, "%.0ffps", st.fps);
+            label_item(UiFont::Mono, 16.0f, cga::light_gray, buf, 0.0f, 18.0f);
+        }
+        end_panel();
+        return;
+    }
     std::snprintf(buf, sizeof buf, "%s verts", verts);
     label_item(UiFont::Mono, 12.0f, kStatus, buf, 0.0f, 18.0f);
     ImGui::SameLine();
@@ -978,7 +1259,8 @@ void notifications(InputState& input, int win_w, int win_h) {
     if (input.notification_timer > 0.0f) {
         input.notification_timer = std::max(0.0f, input.notification_timer - dt);
         float a = std::min(1.0f, input.notification_timer / 0.3f);
-        toast(input.notification, win_w * 0.5f, (float)win_h - kEdge - 44.0f - 56.0f, kText, a);
+        toast(input.notification, win_w * 0.5f, (float)win_h - kEdge - 44.0f - 56.0f,
+              g_dos ? cga::light_green : kText, a);
     }
     if (input.mirror_unavailable_timer > 0.0f) {
         input.mirror_unavailable_timer = std::max(0.0f, input.mirror_unavailable_timer - dt);
@@ -1019,8 +1301,9 @@ void slider_hud(const InputState& input) {
     ImVec2 vs = text_size(UiFont::MonoMedium, 14.0f, val);
     text_at(dl, UiFont::MonoMedium, 14.0f, ImVec2(b.x - 12.0f - vs.x, a.y + 7.0f), kText, val);
     float y = b.y - 12.0f;
-    dl->AddRectFilled(ImVec2(a.x + 12.0f, y), ImVec2(b.x - 12.0f, y + 4.0f), IM_COL32(255, 255, 255, 26), 2.0f);
-    dl->AddRectFilled(ImVec2(a.x + 12.0f, y), ImVec2(a.x + 12.0f + (w - 24.0f) * pct, y + 4.0f), col, 2.0f);
+    dl->AddRectFilled(ImVec2(a.x + 12.0f, y), ImVec2(b.x - 12.0f, y + 4.0f),
+                      g_dos ? cga::dark_gray : IM_COL32(255, 255, 255, 26), rad(2.0f));
+    dl->AddRectFilled(ImVec2(a.x + 12.0f, y), ImVec2(a.x + 12.0f + (w - 24.0f) * pct, y + 4.0f), col, rad(2.0f));
 }
 
 void viewfinder(int win_w, int win_h) {
@@ -1082,38 +1365,73 @@ void ui_skin_load_fonts() {
     g_fonts[(int)UiFont::SansSemibold] = add(k_font_IBMPlexSans_SemiBold, k_font_IBMPlexSans_SemiBold_size, "IBM Plex Sans SemiBold");
     g_fonts[(int)UiFont::Mono]         = add(k_font_IBMPlexMono_Regular,  k_font_IBMPlexMono_Regular_size,  "IBM Plex Mono");
     g_fonts[(int)UiFont::MonoMedium]   = add(k_font_IBMPlexMono_Medium,   k_font_IBMPlexMono_Medium_size,   "IBM Plex Mono Medium");
+
+    // DOS: the HUD's own 8x8 font (ChiselBitmap.ttf, built from text_overlay.cpp's
+    // font_data[]), unhinted pixels kept hard. It only covers ASCII 32-122, so Plex
+    // Mono is merged in underneath for anything else (braces, tilde, accents, the
+    // degree sign in the FOV slider).
+    ImFontConfig bc;
+    bc.FontDataOwnedByAtlas = false;
+    bc.OversampleH = bc.OversampleV = 1;
+    bc.PixelSnapH = true;
+    std::snprintf(bc.Name, sizeof bc.Name, "Chisel Bitmap");
+    bc.ExtraSizeScale = em_correction(k_font_ChiselBitmap, k_font_ChiselBitmap_size);
+    g_bitmap_font = io.Fonts->AddFontFromMemoryTTF((void*)k_font_ChiselBitmap, k_font_ChiselBitmap_size,
+                                                   16.0f, &bc);
+    ImFontConfig mc = cfg;
+    mc.MergeMode = true;
+    mc.ExtraSizeScale = em_correction(k_font_IBMPlexMono_Regular, k_font_IBMPlexMono_Regular_size);
+    std::snprintf(mc.Name, sizeof mc.Name, "IBM Plex Mono (DOS fallback)");
+    io.Fonts->AddFontFromMemoryTTF((void*)k_font_IBMPlexMono_Regular, k_font_IBMPlexMono_Regular_size,
+                                   16.0f, &mc);
 }
 
 void ui_skin_begin_frame(const InputState& input) {
     ImGuiIO& io = ImGui::GetIO();
     ImGuiStyle& s = ImGui::GetStyle();
-    if (!g_style_ready) { g_classic_style = s; g_style_ready = true; g_modern_active = false; }
-    const bool want_modern = !input.ui_classic && g_fonts[0] != nullptr;
-    if (want_modern != g_modern_active) {
-        if (want_modern) {
-            // Keep the app's own non-colour tweaks (hover delays) across the swap.
-            float hn = s.HoverDelayNormal, hs = s.HoverDelayShort;
-            apply_modern_style();
-            s.HoverDelayNormal = hn; s.HoverDelayShort = hs;
-            io.FontDefault = g_fonts[(int)UiFont::Sans];
-            s.FontSizeBase = 14.0f;
-        } else {
-            float hn = s.HoverDelayNormal, hs = s.HoverDelayShort;
-            s = g_classic_style;
-            s.HoverDelayNormal = hn; s.HoverDelayShort = hs;
-            io.FontDefault = g_classic_font;
-            s.FontSizeBase = 13.0f;
+    if (!g_style_ready) {
+        g_classic_style = s; g_style_ready = true;
+        g_active_skin = InputState::UiSkin::CLASSIC;    // what the context starts as
+        set_theme(false);
+    }
+    InputState::UiSkin want = g_fonts[0] ? input.ui_skin : InputState::UiSkin::CLASSIC;
+    if (want == InputState::UiSkin::DOS && !g_bitmap_font) want = InputState::UiSkin::MODERN;
+    if (want != g_active_skin) {
+        // Keep the app's own non-colour tweaks (hover delays) across the swap.
+        float hn = s.HoverDelayNormal, hs = s.HoverDelayShort;
+        s = g_classic_style;
+        switch (want) {
+            case InputState::UiSkin::MODERN:
+                apply_modern_style();
+                io.FontDefault = g_fonts[(int)UiFont::Sans];
+                s.FontSizeBase = 14.0f;
+                break;
+            case InputState::UiSkin::DOS:
+                apply_dos_style();
+                io.FontDefault = g_bitmap_font;
+                s.FontSizeBase = 16.0f;
+                break;
+            case InputState::UiSkin::CLASSIC:
+                io.FontDefault = g_classic_font;
+                s.FontSizeBase = 13.0f;
+                break;
         }
-        g_modern_active = want_modern;
+        s.HoverDelayNormal = hn; s.HoverDelayShort = hs;
+        set_theme(want == InputState::UiSkin::DOS);
+        g_active_skin = want;
     }
     g_mat = material_from(input);
 }
 
-ImFont* ui_skin_font(UiFont f) { return g_modern_active ? g_fonts[(int)f] : nullptr; }
+ImFont* ui_skin_font(UiFont f) {
+    return g_active_skin == InputState::UiSkin::CLASSIC ? nullptr : F(f);
+}
+
+float ui_skin_menu_item_width(float w) { return g_dos ? w * 2.2f : w; }
 
 void ui_skin_backdrop_params(const InputState& input, float* blur_px, float* saturate) {
     float m = std::max(0.0f, std::min(1.0f, input.ui_material / 100.0f));
-    *blur_px = input.ui_classic ? 0.0f : 22.0f * (1.0f - m);
+    *blur_px = input.ui_skin != InputState::UiSkin::MODERN ? 0.0f : 22.0f * (1.0f - m);
     if (*blur_px < 0.66f) *blur_px = 0.0f;
     *saturate = 1.0f + 0.5f * (1.0f - m);
 }
@@ -1123,20 +1441,26 @@ void ui_skin_popup_background() {
 }
 
 void draw_appearance_menu_items(InputState& input) {
-    const bool modern = !input.ui_classic;
     ImFont* semi = ui_skin_font(UiFont::SansSemibold);
-    if (semi) ImGui::PushFont(semi, 11.0f);
-    ImGui::TextDisabled("APPEARANCE");
+    if (semi) ImGui::PushFont(semi, g_dos ? 0.0f : 11.0f);
+    if (g_dos) ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.333f, 1.0f), "APPEARANCE");
+    else       ImGui::TextDisabled("APPEARANCE");
     if (semi) ImGui::PopFont();
 
-    int skin = input.ui_classic ? 1 : 0;
-    ImGui::RadioButton("Modern", &skin, 0);
+    int skin = (int)input.ui_skin;
+    ImGui::RadioButton("Modern", &skin, (int)InputState::UiSkin::MODERN);
     ImGui::SameLine();
-    ImGui::RadioButton("Classic", &skin, 1);
-    input.ui_classic = skin == 1;
+    ImGui::RadioButton("DOS", &skin, (int)InputState::UiSkin::DOS);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Chisel's own 8x8 font, the CGA palette and pixel icons.");
+    ImGui::SameLine();
+    ImGui::RadioButton("Classic", &skin, (int)InputState::UiSkin::CLASSIC);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("The original button islands and bitmap-font HUD.");
-    if (!modern) return;
+    input.ui_skin = (InputState::UiSkin)skin;
+    if (input.ui_skin == InputState::UiSkin::DOS)
+        ImGui::Checkbox("Viewfinder corners", &input.ui_viewfinder);
+    if (input.ui_skin != InputState::UiSkin::MODERN) return;
 
     const float m = input.ui_material;
     const char* mname = m < 20.0f ? "Clear" : (m < 75.0f ? "Tinted" : "Solid");
@@ -1172,7 +1496,7 @@ void draw_appearance_menu_items(InputState& input) {
 
 void draw_modern_ui(InputState& input, int win_w, int win_h, const AlphaLibrary* alpha_lib,
                     MultiresInfo mres, const SkinStats& stats) {
-    g_motion = input.ui_motion && !os_reduced_motion();
+    g_motion = !g_dos && input.ui_motion && !os_reduced_motion();   // DOS doesn't bounce
     if (input.ui_viewfinder) viewfinder(win_w, win_h);
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
@@ -1181,7 +1505,7 @@ void draw_modern_ui(InputState& input, int win_w, int win_h, const AlphaLibrary*
     command_panel(input, win_w, win_h, mres, stats);
     float bh = brush_panel(input, win_h);
     options_panel(input, win_h, bh);
-    status_panel(input, win_w, win_h, stats);
+    status_panel(input, win_w, win_h, stats, g_brush_right, bh);
     ImGui::PopStyleVar();
 
     // Paint colour wheel at the cursor on right-click (same trigger as classic).

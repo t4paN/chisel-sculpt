@@ -20,3 +20,7 @@ enum class Icon {
 // `stroke` is in grid units (the set is drawn at 1.75).
 void draw_icon(ImDrawList* dl, Icon icon, ImVec2 center, float size, ImU32 col,
                float stroke = 1.75f);
+
+// The DOS skin's 16x16 one-bit version of the same icon, `scale` whole screen
+// pixels per icon pixel (2 = 32 px), snapped to the pixel grid.
+void draw_pixel_icon(ImDrawList* dl, Icon icon, ImVec2 center, float scale, ImU32 col);

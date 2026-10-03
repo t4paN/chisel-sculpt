@@ -182,12 +182,16 @@ struct InputState {
     bool show_fps = true;
 
     // Appearance (burger menu). The modern skin is the default; Classic brings back
-    // the original button islands and the bitmap-font HUD. The rest only affect the
-    // modern skin: panel material runs 0 = clear glass (thin tint, strong backdrop
-    // blur) to 100 = solid (opaque, no blur pass at all); springy motion is the press
-    // squash / menu pop / bar easing, and is also skipped when the OS asks for reduced
-    // motion; viewfinder corners are four thin L-marks framing the work area.
-    bool  ui_classic    = false;
+    // the original button islands and the bitmap-font HUD; DOS is the modern layout
+    // dressed in Chisel's own 8x8 font, CGA colours and pixel icons. The material and
+    // motion only affect the modern skin: panel material runs 0 = clear glass (thin
+    // tint, strong backdrop blur) to 100 = solid (opaque, no blur pass at all); springy
+    // motion is the press squash / menu pop / bar easing, and is also skipped when the
+    // OS asks for reduced motion. Viewfinder corners (four thin L-marks framing the
+    // work area) apply to Modern and DOS.
+    enum class UiSkin { MODERN = 0, CLASSIC = 1, DOS = 2 };
+    UiSkin ui_skin      = UiSkin::MODERN;
+    bool  ui_classic() const { return ui_skin == UiSkin::CLASSIC; }
     float ui_material   = 45.0f;
     bool  ui_motion     = true;
     bool  ui_viewfinder = false;

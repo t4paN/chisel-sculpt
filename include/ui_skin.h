@@ -14,8 +14,12 @@ struct AlphaLibrary;
 //   bottom-left  brush readout: Size / Strength / Hardness / Spacing with key + bar
 //   bottom-right one status line: verts, mirror, autosmooth, fps
 // Panels share one material (Menu > Appearance): clear glass with a backdrop blur
-// through to solid, plus optional springy motion and viewfinder corners. The
-// classic islands + bitmap HUD stay available as InputState::ui_classic.
+// through to solid, plus optional springy motion and viewfinder corners.
+//
+// The DOS skin (board D) is the same layout and code with a CGA theme swapped in:
+// Chisel's 8x8 bitmap font at 16 px, the 16 CGA colours, black panels with grey
+// frames and hard shadows, 16x16 one-bit icons, no blur and no springs. The
+// classic islands + bitmap HUD stay available too (InputState::ui_skin).
 
 enum class UiFont { Sans, SansSemibold, Mono, MonoMedium };
 
@@ -23,8 +27,13 @@ enum class UiFont { Sans, SansSemibold, Mono, MonoMedium };
 void ui_skin_load_fonts();
 // Every frame, before ImGui::NewFrame: switches font + style when the skin changes.
 void ui_skin_begin_frame(const InputState& input);
-// The modern skin's faces; nullptr while the classic skin is active.
+// The active skin's faces (all four are the bitmap font in DOS); nullptr while
+// the classic skin is active.
 ImFont* ui_skin_font(UiFont f);
+
+// A fixed menu-item width designed for 13-14 px proportional text, adjusted for the
+// active skin's font (doubled-and-then-some for DOS's 16 px cells).
+float ui_skin_menu_item_width(float w);
 
 // Backdrop blur for this frame (sigma in px, saturation). blur_px == 0 means the
 // material is solid enough that no blur pass should run.

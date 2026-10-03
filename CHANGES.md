@@ -2,6 +2,32 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-03 — DOS skin (CGA + bitmap font)
+
+*Built and screenshot-checked on Windows (Intel Arc), GL and native WebGPU.*
+
+**Menu → Appearance → DOS** is the handoff's board D as a third skin. It uses the same
+layout and code as the modern skin, with a CGA theme swapped in:
+- **Type:** Chisel's own 8×8 font (`assets/fonts/ChiselBitmap.ttf`, built from
+  `text_overlay.cpp`'s `font_data[]`) at 16 px. Corner keys and the triangle count use
+  8 px. Bold is drawn twice, 2 px apart, like the HUD. Plex Mono is merged underneath for
+  glyphs outside ASCII 32–122.
+- **Icons:** the 16×16 one-bit set from the pack, drawn 2× as pixel runs
+  (`draw_pixel_icon`). Inflate is redrawn as a dome, matching the vector set.
+- **Panels:** black with a 2 px light-gray frame and a hard 8 px shadow. No blur, no
+  springs, square corners.
+- **Colours:** light cyan for the active tool, light magenta for Mirror, yellow for
+  names, light green for numbers, light red `*` while unsaved. Tooltips are blue boxes
+  with a white frame and a yellow name.
+- **ImGui widgets** (the menu, dialogs, the file browser) get a matching CGA style.
+
+The skin setting is now `ui_skin` (0 modern, 1 classic, 2 DOS). A stored `ui_classic=1`
+from the earlier build still loads as Classic.
+
+When the brush readout and the status line can't share the bottom row (a narrow window,
+or DOS's wide cells), the status line now steps up above the readout's row in either
+skin.
+
 ## 2026-10-03 — Modern UI skin (glass panels, icon rail)
 
 *Built and screenshot-checked on Windows (Intel Arc) for both the GL and native WebGPU

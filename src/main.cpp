@@ -3482,7 +3482,7 @@ int main(int argc, char* argv[]) {
                                       vmerge_job ? voxel_merge_progress(*vmerge_job) : 0.0f);
         // The bitmap HUD belongs to the classic skin; the modern skin draws its own
         // readouts, toast and slider in draw_modern_ui below.
-        if (input.ui_classic) {
+        if (input.ui_classic()) {
             if (input.toolbar_visible)
                 draw_toolbar(text, input, mesh->tri_count(), mesh->vertex_count(), CHISEL_VERSION,
                              multires->current_level,
@@ -4159,7 +4159,7 @@ int main(int argc, char* argv[]) {
         mres_info.locked     = multires->locked;
         mres_info.base_level = multires->base_level;
         mres_info.lmax       = multires->base_level + (int)multires->disp.size();
-        if (input.ui_classic) {
+        if (input.ui_classic()) {
             draw_button_islands(input, win_w, win_h, &alpha_lib, mres_info);
         } else {
             // Frosted glass: blur what has been drawn so far (the scene, cursor and any

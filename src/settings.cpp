@@ -199,7 +199,7 @@ std::string serialize(const InputState& in) {
     append_kv(s, "matcap_contrast",     in.matcap_contrast);
     append_kv(s, "flat_shading",        in.flat_shading);
     append_kv(s, "show_fps",            in.show_fps);
-    append_kv(s, "ui_classic",          in.ui_classic);
+    append_kv(s, "ui_skin",             (int)in.ui_skin);
     append_kv(s, "ui_material",         in.ui_material);
     append_kv(s, "ui_motion",           in.ui_motion);
     append_kv(s, "ui_viewfinder",       in.ui_viewfinder);
@@ -289,7 +289,13 @@ void apply_global_key(InputState& in, const std::string& key, const std::string&
     else if (key == "remesh_detail")       in.remesh_detail       = clampf(std::strtof(val.c_str(), nullptr), 0.25f, 4.0f);
     else if (key == "flat_shading")        in.flat_shading        = parse_bool(val);
     else if (key == "show_fps")            in.show_fps            = parse_bool(val);
-    else if (key == "ui_classic")          in.ui_classic          = parse_bool(val);
+    else if (key == "ui_skin") {
+        int k = (int)std::strtol(val.c_str(), nullptr, 10);
+        if (k >= 0 && k <= (int)InputState::UiSkin::DOS) in.ui_skin = (InputState::UiSkin)k;
+    }
+    // Pre-DOS builds stored the skin as a bool (2026-10-03 only); the next write
+    // replaces it with ui_skin.
+    else if (key == "ui_classic" && parse_bool(val)) in.ui_skin = InputState::UiSkin::CLASSIC;
     else if (key == "ui_material")         in.ui_material         = clampf(std::strtof(val.c_str(), nullptr), 0.0f, 100.0f);
     else if (key == "ui_motion")           in.ui_motion           = parse_bool(val);
     else if (key == "ui_viewfinder")       in.ui_viewfinder       = parse_bool(val);
@@ -431,7 +437,7 @@ void settings_reset(InputState& input) {
     input.matcap_contrast    = fresh.matcap_contrast;
     input.flat_shading       = fresh.flat_shading;
     input.show_fps           = fresh.show_fps;
-    input.ui_classic         = fresh.ui_classic;
+    input.ui_skin            = fresh.ui_skin;
     input.ui_material        = fresh.ui_material;
     input.ui_motion          = fresh.ui_motion;
     input.ui_viewfinder      = fresh.ui_viewfinder;

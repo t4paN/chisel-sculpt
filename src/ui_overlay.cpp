@@ -720,7 +720,7 @@ static void help_head(const char* title) {
 // scrolling, no prose. Anything that needs a sentence lives in MANUAL.md.
 void draw_help_popup(InputState& input, int win_w, int win_h) {
     input.help_popup_open = ImGui::IsPopupOpen("##helppopup");
-    const bool modern = !input.ui_classic;
+    const bool modern = !input.ui_classic();
     ImGui::SetNextWindowPos(ImVec2(win_w * 0.5f, win_h * 0.5f),
                             ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(28, 22));
@@ -1146,6 +1146,9 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
 }
 
 void draw_settings_menu_items(InputState& input, MultiresInfo mres, bool sync_tabs) {
+    // Width of the menu's sliders/buttons: 150 px fits ProggyClean and Plex, but the
+    // DOS skin's 16 px character cells need about twice that to show their labels.
+    const float mw = ui_skin_menu_item_width(150.0f);
     {
         {
             // Brush-feel profile. Both stay loaded and the active one follows whichever
@@ -1191,7 +1194,7 @@ void draw_settings_menu_items(InputState& input, MultiresInfo mres, bool sync_ta
             // 0.10, not 0: this is a ramp ceiling and PRESSURE_STR_FLOOR (0.05) is its
             // floor, so going below that would turn the pressure curve upside down.
             float max_pct = input.max_effect * 100.0f;
-            ImGui::SetNextItemWidth(150.0f);
+            ImGui::SetNextItemWidth(mw);
             if (ImGui::SliderFloat("##maxEffect", &max_pct, 10.0f, 100.0f, "max effect %.0f%%"))
                 input.max_effect = max_pct * 0.01f;
             if (ImGui::IsItemHovered())
@@ -1224,7 +1227,7 @@ void draw_settings_menu_items(InputState& input, MultiresInfo mres, bool sync_ta
                 ImGui::PushStyleColor(ImGuiCol_ButtonActive,  topo ? ImVec4(0.28f, 0.56f, 0.74f, 1.0f)
                                                                    : ImVec4(0.34f, 0.34f, 0.38f, 1.0f));
                 if (ImGui::Button(topo ? "Mirror: Topological" : "Mirror: World Space",
-                                  ImVec2(150.0f, 0.0f))) {
+                                  ImVec2(mw, 0.0f))) {
                     input.mirror_topological = !topo;
                     // Say it in the viewport, not just on the button: the point of the
                     // toggle is comparing the two mid-sculpt, and the menu is usually
@@ -1270,7 +1273,7 @@ void draw_settings_menu_items(InputState& input, MultiresInfo mres, bool sync_ta
             // as "even light" now that "flat shading" means the facet toggle below.
             sun_glyph(ImGui::GetFrameHeight(), input.matcap_contrast);
             ImGui::SameLine();
-            ImGui::SetNextItemWidth(150.0f);
+            ImGui::SetNextItemWidth(mw);
             ImGui::SliderFloat("##matcapLight", &input.matcap_contrast, 0.0f, 1.0f,
                                "light %.2f");
             if (ImGui::IsItemHovered())
@@ -1306,7 +1309,7 @@ void draw_settings_menu_items(InputState& input, MultiresInfo mres, bool sync_ta
                                   "sculpt precise detail in.");
 
             if (!input.camera_perspective) ImGui::BeginDisabled();
-            ImGui::SetNextItemWidth(150.0f);
+            ImGui::SetNextItemWidth(mw);
             ImGui::SliderFloat("##cameraFov", &input.camera_fov, 15.0f, 80.0f, "fov %.0f\xc2\xb0");
             if (!input.camera_perspective) ImGui::EndDisabled();
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
@@ -1332,7 +1335,7 @@ void draw_settings_menu_items(InputState& input, MultiresInfo mres, bool sync_ta
                                   "Not saved - it resets to On at every launch.");
 
             // Logarithmic: x0.5 and x2 sit the same distance either side of x1.
-            ImGui::SetNextItemWidth(150.0f);
+            ImGui::SetNextItemWidth(mw);
             ImGui::SliderFloat("##remeshDetail", &input.remesh_detail, 0.25f, 4.0f,
                                "remesh detail x%.2f", ImGuiSliderFlags_Logarithmic);
             if (ImGui::IsItemHovered())
@@ -1354,7 +1357,7 @@ void draw_settings_menu_items(InputState& input, MultiresInfo mres, bool sync_ta
             // settings — a startup ball that disagrees with the insert swatch is the
             // confusing half of this feature.
             int sk = (int)input.sphere_kind;
-            ImGui::SetNextItemWidth(150.0f);
+            ImGui::SetNextItemWidth(mw);
             if (ImGui::Combo("##sphereKind", &sk, "Sphere: icosphere\0Sphere: UV sphere\0"))
                 input.sphere_kind = (InputState::SphereKind)sk;
             if (ImGui::IsItemHovered())
