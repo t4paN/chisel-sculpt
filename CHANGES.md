@@ -2,7 +2,7 @@
 
 Short, chronological log of notable changes. Newest on top.
 
-## 2026-10-03 — 2000s skin (docked shelves, gloss, orange)
+## 2026-10-03 — v0.3.0 — 2000s skin (docked shelves, gloss, orange)
 
 *Built and screenshot-checked on Windows (Intel Arc), GL; native WebGPU built and run.*
 
@@ -28,7 +28,7 @@ layout (`draw_y2k_ui` in `ui_skin.cpp`):
 The 3D view still renders full-window behind the shelves; it isn't shrunk to the space
 between them.
 
-## 2026-10-03 — DOS skin (CGA + bitmap font)
+## 2026-10-03 — v0.3.0 — DOS skin (CGA + bitmap font)
 
 *Built and screenshot-checked on Windows (Intel Arc), GL and native WebGPU.*
 
@@ -54,7 +54,7 @@ When the brush readout and the status line can't share the bottom row (a narrow 
 or DOS's wide cells), the status line now steps up above the readout's row in either
 skin.
 
-## 2026-10-03 — Modern UI skin (glass panels, icon rail)
+## 2026-10-03 — v0.3.0 — Modern UI skin (glass panels, icon rail)
 
 *Built and screenshot-checked on Windows (Intel Arc) for both the GL and native WebGPU
 builds. Cherry-picked onto main on Linux: all three targets build, the web build's blur
@@ -93,7 +93,7 @@ Not changed: the brush cursor (the handoff suggests a single-colour ring; today'
 encodes hardness), and the Y/N confirm dialogs, which still use the bitmap font.
 
 
-## 2026-10-03 — Windows round two merged: freezes, mouse corners, resize crash, Mask button
+## 2026-10-03 — v0.3.0 — Windows round two merged: freezes, mouse corners, resize crash, Mask button
 
 *Fixed on the Windows side (Arc B570, branch `chisel-windows`), cherry-picked onto main
 on Linux; the three UI skins built there were left out on purpose. All three targets
@@ -136,7 +136,7 @@ handlers.
 Windows, per-dab parameter uploads cost 72 µs vs 11 µs with a persistent-mapped ring; on
 Linux they're already 12 µs. That ring isn't built yet, and if it is, Windows-only.
 
-## 2026-10-03 — GL 4.3 context; driver error reports on in every GL build
+## 2026-10-03 — v0.3.0 — GL 4.3 context; driver error reports on in every GL build
 
 *User-confirmed on native GL (Linux, Mesa 26.2 on the Arc B570). A throwaway test made
 deliberate GL errors through the same callback: each distinct message printed, and a
