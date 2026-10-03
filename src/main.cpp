@@ -11,8 +11,16 @@
 // A Linux desktop session is either X11 or Wayland and GLFW picks at runtime,
 // so expose BOTH native handle sets and choose the matching surface source
 // below. Exposing only X11 builds fine on a Wayland box and fails at runtime.
-#define GLFW_EXPOSE_NATIVE_X11
-#define GLFW_EXPOSE_NATIVE_WAYLAND
+// Windows has the one platform: an HWND surface.
+#if defined(_WIN32)
+  #ifndef NOMINMAX
+  #define NOMINMAX
+  #endif
+  #define GLFW_EXPOSE_NATIVE_WIN32
+#else
+  #define GLFW_EXPOSE_NATIVE_X11
+  #define GLFW_EXPOSE_NATIVE_WAYLAND
+#endif
 #include <GLFW/glfw3.h>
 #include <GLFW/glfw3native.h>
 #include <webgpu/webgpu.h>
@@ -50,6 +58,7 @@
 #include "insert_controller.h"
 #include "ui_overlay.h"
 #include "debug_console.h"
+#include "bench.h"
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
 #ifdef CHISEL_BACKEND_WEBGPU
@@ -124,6 +133,7 @@ void onDevice(WGPURequestDeviceStatus status, WGPUDevice device,
 
 WGPUSurface  g_surface = nullptr;
 WGPUDevice   g_device  = nullptr;
+WGPUAdapter  g_adapter = nullptr;   // kept for present-mode queries in configureSurface
 WGPUTexture  g_depth_tex  = nullptr;
 WGPUTextureView g_depth_view = nullptr;
 WGPUTextureFormat g_surface_fmt = WGPUTextureFormat_BGRA8Unorm;
@@ -138,6 +148,20 @@ void configureSurface(int w, int h) {
     cfg.height      = (uint32_t)h;
     cfg.alphaMode   = WGPUCompositeAlphaMode_Auto;
     cfg.presentMode = WGPUPresentMode_Fifo;
+#ifndef __EMSCRIPTEN__
+    // CHISEL_PERF_VSYNC=0: present uncapped (Immediate, else Mailbox) if the surface offers it.
+    if (!bench::vsync() && g_adapter) {
+        WGPUSurfaceCapabilities caps = {};
+        if (wgpuSurfaceGetCapabilities(g_surface, g_adapter, &caps) == WGPUStatus_Success) {
+            for (size_t i = 0; i < caps.presentModeCount; ++i)
+                if (caps.presentModes[i] == WGPUPresentMode_Immediate) cfg.presentMode = WGPUPresentMode_Immediate;
+            if (cfg.presentMode == WGPUPresentMode_Fifo)
+                for (size_t i = 0; i < caps.presentModeCount; ++i)
+                    if (caps.presentModes[i] == WGPUPresentMode_Mailbox) cfg.presentMode = WGPUPresentMode_Mailbox;
+            wgpuSurfaceCapabilitiesFreeMembers(caps);
+        }
+    }
+#endif
     wgpuSurfaceConfigure(g_surface, &cfg);
 }
 
@@ -346,6 +370,7 @@ static void report_projection_check(const ProjectionStats& ps) {
 
 int main(int argc, char* argv[]) {
     debug_console::init();
+    bench::init();
     bool cli_use_topology = true;
     int max_level = MULTIRES_MAX_LEVEL;
     std::string cli_open_path;
@@ -483,6 +508,13 @@ int main(int argc, char* argv[]) {
     // "Display pointer is not set" and aborts the process, so there is nothing
     // to gate on after the fact. Branch up front instead. Both descriptors are
     // declared out here because the chain must outlive CreateSurface below.
+  #if defined(_WIN32)
+    WGPUSurfaceSourceWindowsHWND hwnd_src = {};
+    hwnd_src.chain.sType = WGPUSType_SurfaceSourceWindowsHWND;
+    hwnd_src.hinstance   = GetModuleHandleW(nullptr);
+    hwnd_src.hwnd        = glfwGetWin32Window(window);
+    sd.nextInChain = &hwnd_src.chain;
+  #else
     WGPUSurfaceSourceXlibWindow     x11 = {};
     WGPUSurfaceSourceWaylandSurface wl  = {};
     if (glfwGetPlatform() == GLFW_PLATFORM_WAYLAND) {
@@ -496,10 +528,13 @@ int main(int argc, char* argv[]) {
         x11.window      = (uint64_t)glfwGetX11Window(window);
         sd.nextInChain  = &x11.chain;
     }
+  #endif
 #endif
     g_surface = wgpuInstanceCreateSurface(instance, &sd);
     if (!g_surface) { std::fprintf(stderr, "createSurface failed\n"); return 1; }
-#if !defined(__EMSCRIPTEN__)
+#if defined(_WIN32)
+    std::printf("[win] surface created (Win32)\n");
+#elif !defined(__EMSCRIPTEN__)
     std::printf("[win] surface created (%s)\n",
                 glfwGetPlatform() == GLFW_PLATFORM_WAYLAND ? "Wayland" : "X11");
 #endif
@@ -537,6 +572,7 @@ int main(int argc, char* argv[]) {
     // browsers included), instead of demanding this GPU's high limits. If the web
     // build later trips a specific baseline field, bump that one field here.
     WGPULimits supported = WGPU_LIMITS_INIT;
+    g_adapter = ar.adapter;
     wgpuAdapterGetLimits(ar.adapter, &supported);
     WGPULimits limits = WGPU_LIMITS_INIT;                     // all baseline defaults
     limits.maxBufferSize               = supported.maxBufferSize;
@@ -598,7 +634,7 @@ int main(int argc, char* argv[]) {
     std::printf("Chisel %s (WebGPU)\n", CHISEL_VERSION);
 #else
     glfwMakeContextCurrent(window);
-    glfwSwapInterval(1); // vsync
+    glfwSwapInterval(bench::vsync() ? 1 : 0); // vsync (off only for a CHISEL_PERF_VSYNC=0 run)
 
     // Load OpenGL
     if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
@@ -781,6 +817,7 @@ int main(int argc, char* argv[]) {
 
     Mesh* mesh = &scene.active_mesh();
     MultiresStack* multires = &scene.active_multires();
+    int perf_prev_level = multires->current_level;   // CHISEL_PERF: level-switch frames
 
     // Tick-driven voxel merge: non-null while a merge job is in flight (advanced one
     // budgeted step per frame so the window stays responsive). See sdf.h / CHANGES.
@@ -3956,6 +3993,17 @@ int main(int argc, char* argv[]) {
 
         glfwSwapBuffers(window);
 #endif
+        if (bench::active()) {
+            const int lvl = multires->current_level;
+            bench::Phase ph = bench::Phase::IDLE;
+            if (lvl != perf_prev_level)                          ph = bench::Phase::SWITCH;
+            else if (brush_stroke.is_active())                   ph = bench::Phase::SCULPT;
+            else if (app_state == AppState::SCULPTING
+                     || brush_stroke.reconciling()
+                     || brush_stroke.dab_readbacks_pending())    ph = bench::Phase::PENUP;
+            bench::frame_end(lvl, ph);
+            perf_prev_level = lvl;
+        }
         input.end_frame();
     };
 
@@ -4054,6 +4102,7 @@ int main(int argc, char* argv[]) {
     settings_save(input);
 
     tablet.shutdown();
+    bench::shutdown();
     debug_console::shutdown();
     glfwDestroyWindow(window);
     glfwTerminate();

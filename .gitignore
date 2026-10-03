@@ -11,5 +11,8 @@ packaging/tools/
 
 imgui.ini
 
+# tools/perf.ps1 run output
+perf-runs/
+
 # itch.io packaging output
 dist/

@@ -19,8 +19,15 @@
 // Run live (window stays open until closed) for a screenshot, or set
 // CHISEL_PROBE_FRAMES=N to auto-exit after N presented frames (CI/headless-ish).
 // X11 or Wayland is a runtime choice by GLFW — expose both (see main.cpp).
-#define GLFW_EXPOSE_NATIVE_X11
-#define GLFW_EXPOSE_NATIVE_WAYLAND
+#if defined(_WIN32)
+  #ifndef NOMINMAX
+  #define NOMINMAX
+  #endif
+  #define GLFW_EXPOSE_NATIVE_WIN32
+#else
+  #define GLFW_EXPOSE_NATIVE_X11
+  #define GLFW_EXPOSE_NATIVE_WAYLAND
+#endif
 #include <GLFW/glfw3.h>
 #include <GLFW/glfw3native.h>
 #include <webgpu/webgpu.h>
@@ -454,10 +461,18 @@ int main() {
     // ---- surface from the native window (X11 or Wayland) ----
     // Must match the platform GLFW chose; a NULL X11 display panics wgpu-native
     // rather than returning an error. Both live until CreateSurface is called.
+    WGPUSurfaceDescriptor surfDesc = {};
+#if defined(_WIN32)
+    WGPUSurfaceSourceWindowsHWND hwnd_src = {};
+    hwnd_src.chain.sType = WGPUSType_SurfaceSourceWindowsHWND;
+    hwnd_src.hinstance   = GetModuleHandleW(nullptr);
+    hwnd_src.hwnd        = glfwGetWin32Window(win);
+    surfDesc.nextInChain = &hwnd_src.chain;
+    const char* plat_name = "Win32";
+#else
     const bool on_wayland = (glfwGetPlatform() == GLFW_PLATFORM_WAYLAND);
     WGPUSurfaceSourceXlibWindow     x11 = {};
     WGPUSurfaceSourceWaylandSurface wl  = {};
-    WGPUSurfaceDescriptor surfDesc = {};
     if (on_wayland) {
         wl.chain.sType = WGPUSType_SurfaceSourceWaylandSurface;
         wl.display     = glfwGetWaylandDisplay();
@@ -469,10 +484,11 @@ int main() {
         x11.window      = (uint64_t)glfwGetX11Window(win);
         surfDesc.nextInChain = &x11.chain;
     }
+    const char* plat_name = on_wayland ? "Wayland" : "X11";
+#endif
     WGPUSurface surface = wgpuInstanceCreateSurface(instance, &surfDesc);
     if (!surface) { std::printf("[win] createSurface failed\n"); return 2; }
-    std::printf("[win] surface created (%s %dx%d)\n",
-                on_wayland ? "Wayland" : "X11", g_fbw, g_fbh);
+    std::printf("[win] surface created (%s %dx%d)\n", plat_name, g_fbw, g_fbh);
 
     // ---- adapter (compatible with this surface) ----
     AdapterResult ar;

@@ -132,6 +132,8 @@ struct ComputePipeline {
     uint32_t  binding_count = 0;             // bind-layout cache (GL has no BGL object):
     uint32_t  binding_id[kMaxBindings] = {}; //   binding number ...
     Bind      binding_type[kMaxBindings] = {};//   ... and its access type
+    uint32_t  ssbo_count = 0;                // SSBO bindings packed into slots 0..n-1:
+    uint32_t  ssbo_logical[kMaxBindings] = {};//  slot k holds this ComputeBinding id
 #endif
 };
 // Compile a compute pipeline from the backend's shader source + its bind-group
