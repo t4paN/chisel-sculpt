@@ -2,6 +2,42 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-03 — Modern UI skin (glass panels, icon rail)
+
+*Built and screenshot-checked on Windows (Intel Arc) for both the GL and native WebGPU
+builds. Not yet built for the web or on Linux.*
+
+**New default skin**, from the 2026-10 UI review (board F, with board G's appearance
+options). Everything sits on the screen edges and the middle stays empty:
+- **Left rail:** modes 1–4, the brushes with their keys in the corner, Smooth and Mask,
+  then the current alpha (click it for the alpha picker). Tooltips give name + key.
+- **Top-left:** file name (+ "unsaved" until first save), Save, Save copy, Open, Export.
+- **Top-right:** Undo/Redo, the subdivision stepper (level / highest, triangle count),
+  SDF merge, Mirror X, paint visibility, shortcuts, menu.
+- **Bottom-left:** brush readout (Size/Strength/Hardness/Spacing, key, value, bar); Insert
+  shows the shape picker there, and Paint and Clay get a tool-options strip above it.
+- **Bottom-right:** one status line — verts, mirror mode, autosmooth, fps.
+- Type is IBM Plex Sans/Mono (OFL, `assets/fonts/`, embedded at build time by
+  `cmake/embed_fonts.cmake`). Icons are the handoff's 24 px stroke set, drawn as vector
+  paths (`ui_icons.cpp`), so there's no atlas texture and nothing backend-specific.
+  Inflate was redrawn as a dome with an arrow, because the sun-with-rays clashed with the
+  lighting slider's sun.
+
+**Menu → Appearance:** *Panel material* from Clear glass (0) to Solid (100), default 45;
+*Springy motion* (press squash, menu pop, bar easing; also off when the OS asks for
+reduced motion); *Viewfinder corners*; and *Classic*, which brings back the old islands
+and bitmap HUD unchanged. All persist in `settings.cfg`.
+
+**Frosted glass** (`ui_backdrop.cpp`): before the ImGui pass, the frame is copied, shrunk
+to quarter size with a 4×4 box filter and blurred with a two-pass Gaussian. Panels draw
+their part of the result under the tint. GL blits the default framebuffer; WebGPU copies
+the swapchain texture, which is now configured with CopySrc when the surface offers it
+(if it doesn't, the panels are tinted only). At Solid nothing runs.
+
+Not changed: the brush cursor (the handoff suggests a single-colour ring; today's tint
+encodes hardness), and the Y/N confirm dialogs, which still use the bitmap font.
+
+
 ## 2026-10-03 — Windows round two merged: freezes, mouse corners, resize crash, Mask button
 
 *Fixed on the Windows side (Arc B570, branch `chisel-windows`), cherry-picked onto main

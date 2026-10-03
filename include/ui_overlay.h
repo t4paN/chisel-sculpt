@@ -49,6 +49,12 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
                          const AlphaLibrary* alpha_lib = nullptr,
                          MultiresInfo mres = MultiresInfo());
 
+// Shared by both skins. The burger menu's body (call between BeginPopup/EndPopup;
+// sync_tabs = true on the frame the menu opened, see the profile tabs), and the
+// shortcut card (call inside the window that opens "##helppopup").
+void draw_settings_menu_items(InputState& input, MultiresInfo mres, bool sync_tabs);
+void draw_help_popup(InputState& input, int win_w, int win_h);
+
 // Eyedropper cursor while the colour picker is armed (tip at x,y; dimmed when
 // the cursor is off the model). ImGui foreground draw list — identical on all
 // backends, replaces the brush ring for that state.

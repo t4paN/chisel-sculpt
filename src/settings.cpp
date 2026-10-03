@@ -199,6 +199,10 @@ std::string serialize(const InputState& in) {
     append_kv(s, "matcap_contrast",     in.matcap_contrast);
     append_kv(s, "flat_shading",        in.flat_shading);
     append_kv(s, "show_fps",            in.show_fps);
+    append_kv(s, "ui_classic",          in.ui_classic);
+    append_kv(s, "ui_material",         in.ui_material);
+    append_kv(s, "ui_motion",           in.ui_motion);
+    append_kv(s, "ui_viewfinder",       in.ui_viewfinder);
     append_kv(s, "help_seen",           in.help_seen);
     append_kv(s, "camera_perspective",  in.camera_perspective);
     append_kv(s, "camera_fov",          in.camera_fov);
@@ -285,6 +289,10 @@ void apply_global_key(InputState& in, const std::string& key, const std::string&
     else if (key == "remesh_detail")       in.remesh_detail       = clampf(std::strtof(val.c_str(), nullptr), 0.25f, 4.0f);
     else if (key == "flat_shading")        in.flat_shading        = parse_bool(val);
     else if (key == "show_fps")            in.show_fps            = parse_bool(val);
+    else if (key == "ui_classic")          in.ui_classic          = parse_bool(val);
+    else if (key == "ui_material")         in.ui_material         = clampf(std::strtof(val.c_str(), nullptr), 0.0f, 100.0f);
+    else if (key == "ui_motion")           in.ui_motion           = parse_bool(val);
+    else if (key == "ui_viewfinder")       in.ui_viewfinder       = parse_bool(val);
     else if (key == "help_seen")           in.help_seen           = parse_bool(val);
     else if (key == "camera_perspective")  in.camera_perspective  = parse_bool(val);
     else if (key == "mirror_topological")  in.mirror_topological  = parse_bool(val);
@@ -423,6 +431,10 @@ void settings_reset(InputState& input) {
     input.matcap_contrast    = fresh.matcap_contrast;
     input.flat_shading       = fresh.flat_shading;
     input.show_fps           = fresh.show_fps;
+    input.ui_classic         = fresh.ui_classic;
+    input.ui_material        = fresh.ui_material;
+    input.ui_motion          = fresh.ui_motion;
+    input.ui_viewfinder      = fresh.ui_viewfinder;
     input.camera_perspective = fresh.camera_perspective;
     input.camera_fov         = fresh.camera_fov;
     input.remesh_detail      = fresh.remesh_detail;

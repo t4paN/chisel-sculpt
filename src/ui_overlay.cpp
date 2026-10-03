@@ -1,4 +1,5 @@
 #include "ui_overlay.h"
+#include "ui_skin.h"
 #include "text_overlay.h"
 #include "input.h"
 #include "settings.h"
@@ -697,11 +698,15 @@ static bool info_button(float size, bool open) {
     return clicked;
 }
 
-// One "KEY   what it does" line of the shortcut card. The default ImGui font
-// (ProggyClean) is monospaced, so a %-9s pad is all the column alignment this
-// needs — no table, no per-cell sizing.
+// One "KEY   what it does" line of the shortcut card. The key column is set in a
+// monospaced face (ProggyClean in the classic skin, Plex Mono in the modern one),
+// so a %-9s pad is all the column alignment this needs — no table, no per-cell sizing.
 static void help_row(const char* key, const char* desc) {
-    ImGui::TextColored(ImVec4(1.00f, 1.00f, 0.40f, 1.0f), "%-9s", key);
+    const bool modern = ui_skin_font(UiFont::Mono) != nullptr;
+    if (modern) ImGui::PushFont(ui_skin_font(UiFont::Mono), 0.0f);
+    ImGui::TextColored(modern ? ImVec4(0.89f, 0.85f, 1.00f, 1.0f)
+                              : ImVec4(1.00f, 1.00f, 0.40f, 1.0f), "%-9s", key);
+    if (modern) ImGui::PopFont();
     ImGui::SameLine(0.0f, 0.0f);
     ImGui::TextColored(ImVec4(0.84f, 0.84f, 0.88f, 1.0f), "%s", desc);
 }
@@ -713,19 +718,29 @@ static void help_head(const char* title) {
 
 // The shortcut card itself. Deliberately a single screenful: two columns, no
 // scrolling, no prose. Anything that needs a sentence lives in MANUAL.md.
-static void draw_help_popup(InputState& input, int win_w, int win_h) {
+void draw_help_popup(InputState& input, int win_w, int win_h) {
     input.help_popup_open = ImGui::IsPopupOpen("##helppopup");
+    const bool modern = !input.ui_classic;
     ImGui::SetNextWindowPos(ImVec2(win_w * 0.5f, win_h * 0.5f),
                             ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(28, 22));
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8, 5));
-    ImGui::PushStyleColor(ImGuiCol_PopupBg, ImVec4(0.10f, 0.10f, 0.13f, 0.97f));
+    ImGui::PushStyleColor(ImGuiCol_PopupBg, modern ? ImVec4(0, 0, 0, 0)
+                                                   : ImVec4(0.10f, 0.10f, 0.13f, 0.97f));
     if (ImGui::BeginPopup("##helppopup")) {
-        // Big letters: the default font is 13 px, which is a squint at arm's
-        // length. Per-window scale, so it does not disturb the rest of the UI.
-        ImGui::SetWindowFontScale(1.40f);
+        if (modern) {
+            // Same material as every other panel; Plex is legible at its normal
+            // size, so no blow-up.
+            ui_skin_popup_background();
+        } else {
+            // Big letters: the default font is 13 px, which is a squint at arm's
+            // length. Per-window scale, so it does not disturb the rest of the UI.
+            ImGui::SetWindowFontScale(1.40f);
+        }
 
-        ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.40f, 1.0f), "CHISEL - SHORTCUTS");
+        ImGui::TextColored(modern ? ImVec4(0.93f, 0.92f, 0.95f, 1.0f)
+                                  : ImVec4(1.0f, 1.0f, 0.40f, 1.0f),
+                           modern ? "Shortcuts" : "CHISEL - SHORTCUTS");
         ImGui::Separator();
 
         ImGui::BeginGroup();
@@ -736,7 +751,7 @@ static void draw_help_popup(InputState& input, int win_w, int win_h) {
         help_row("Ctrl",     "Invert stroke");
         help_row("RMB",      "Colour palette (Paint)");
         help_head("MODES");
-        help_row("1 2 3 4",  "Edit Insert Select Paint");
+        help_row("1 2 3 4",  "Sculpt Insert Select Paint");
         help_row("Q E",      "Rotate object (Select mode)");
         help_head("BRUSHES");
         help_row("D T I",    "Draw  Clay  Inflate");
@@ -1115,6 +1130,24 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
 
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10, 10));
         if (ImGui::BeginPopup("##burgermenu")) {
+            draw_settings_menu_items(input, mres, sync_tabs);
+            ImGui::EndPopup();
+        }
+        ImGui::PopStyleVar();
+
+        // Opened from this window so it inherits the island's popup stack; drawn
+        // last so it lands on top of the menu if both were somehow up.
+        draw_help_popup(input, win_w, win_h);
+        ImGui::End();
+    }
+
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(3);
+}
+
+void draw_settings_menu_items(InputState& input, MultiresInfo mres, bool sync_tabs) {
+    {
+        {
             // Brush-feel profile. Both stay loaded and the active one follows whichever
             // device you are actually using (main.cpp arbitrates); these tabs are how you
             // *edit* the one that isn't in your hand — while this menu is open the
@@ -1312,6 +1345,10 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
 
             ImGui::Separator();
 
+            draw_appearance_menu_items(input);
+
+            ImGui::Separator();
+
             // What "sphere" means, for both consumers at once: the ball the app opens
             // with and the one the INSERT shape picker spawns. Deliberately not two
             // settings — a startup ball that disagrees with the insert swatch is the
@@ -1379,18 +1416,8 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
                       "Detail bakes down one level; cannot be undone."
                     : "No subdivision level above the base cage to delete");
             }
-            ImGui::EndPopup();
         }
-        ImGui::PopStyleVar();
-
-        // Opened from this window so it inherits the island's popup stack; drawn
-        // last so it lands on top of the menu if both were somehow up.
-        draw_help_popup(input, win_w, win_h);
-        ImGui::End();
     }
-
-    ImGui::PopStyleColor();
-    ImGui::PopStyleVar(3);
 }
 
 void draw_pick_cursor(float x, float y, bool on_model) {

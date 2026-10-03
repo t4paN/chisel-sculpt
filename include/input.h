@@ -180,6 +180,17 @@ struct InputState {
 
     // FPS readout visibility (burger menu toggle). Display only.
     bool show_fps = true;
+
+    // Appearance (burger menu). The modern skin is the default; Classic brings back
+    // the original button islands and the bitmap-font HUD. The rest only affect the
+    // modern skin: panel material runs 0 = clear glass (thin tint, strong backdrop
+    // blur) to 100 = solid (opaque, no blur pass at all); springy motion is the press
+    // squash / menu pop / bar easing, and is also skipped when the OS asks for reduced
+    // motion; viewfinder corners are four thin L-marks framing the work area.
+    bool  ui_classic    = false;
+    float ui_material   = 45.0f;
+    bool  ui_motion     = true;
+    bool  ui_viewfinder = false;
     // Remesh snaps its new points back onto the original surface and refuses
     // flips that plane off a ridge. Session-only on purpose while it is being
     // A/B'd: untick, remesh, reload, tick, remesh — same file, two results.

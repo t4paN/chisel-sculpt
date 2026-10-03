@@ -48,6 +48,21 @@ add_custom_command(
     VERBATIM)
 add_custom_target(chisel_shaders DEPENDS "${CHISEL_SHADERS_HEADER}")
 
+# UI fonts (IBM Plex, OFL) for the modern skin, embedded the same way: one generated
+# header of byte arrays, regenerated when a TTF changes. See cmake/embed_fonts.cmake.
+set(CHISEL_FONTS_HEADER "${CHISEL_GENERATED_DIR}/ui_fonts_generated.h")
+file(GLOB _CHISEL_FONTS CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts/*.ttf")
+add_custom_command(
+    OUTPUT "${CHISEL_FONTS_HEADER}"
+    COMMAND ${CMAKE_COMMAND}
+        -DFONT_DIR=${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts
+        -DOUT=${CHISEL_FONTS_HEADER}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_fonts.cmake
+    DEPENDS ${_CHISEL_FONTS} ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_fonts.cmake
+    COMMENT "Embedding UI fonts -> ui_fonts_generated.h"
+    VERBATIM)
+add_custom_target(chisel_fonts DEPENDS "${CHISEL_FONTS_HEADER}")
+
 # ---------------------------------------------------------------------------
 # Emscripten web target (Stage 9 bring-up). Cross-compiling with emcmake sets
 # EMSCRIPTEN; this must come before the wgpu-native branch below. The web build
@@ -245,6 +260,9 @@ add_executable(chisel
     src/brush_alpha.cpp
     src/sdf.cpp
     src/ui_overlay.cpp
+    src/ui_skin.cpp
+    src/ui_icons.cpp
+    src/ui_backdrop.cpp
     src/debug_console.cpp
     src/bench.cpp
     src/project_file.cpp
@@ -267,7 +285,7 @@ if(CHISEL_GPU_BACKEND STREQUAL "webgpu")
 else()
     target_compile_definitions(chisel PRIVATE CHISEL_BACKEND_GL)
 endif()
-add_dependencies(chisel chisel_shaders)
+add_dependencies(chisel chisel_shaders chisel_fonts)
 
 # Emscripten web build: emdawnwebgpu port + emulated GLFW (compile+link), ASYNCIFY
 # for the event-loop-yielding async readbacks, memory growth, and an .html shell.

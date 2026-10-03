@@ -270,6 +270,7 @@ const char* InputState::brush_name() const {
     if (is_smooth_active()) return "Smooth";
     switch (current_brush) {
         case BrushType::DRAW:   return is_subtract_active() ? "Draw (-)"   : "Draw";
+        case BrushType::CLAY:   return is_subtract_active() ? "Clay (-)"   : "Clay";
         case BrushType::INFLATE:return is_subtract_active() ? "Inflate (-)": "Inflate";
         case BrushType::CREASE: return is_subtract_active() ? "Crease (-)" : "Crease";
         case BrushType::PINCH:  return is_subtract_active() ? "Pinch (-)"  : "Pinch";

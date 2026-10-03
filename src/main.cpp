@@ -66,6 +66,8 @@
 #include "sdf.h"
 #include "insert_controller.h"
 #include "ui_overlay.h"
+#include "ui_skin.h"
+#include "ui_backdrop.h"
 #include "debug_console.h"
 #include "bench.h"
 #include "imgui.h"
@@ -146,6 +148,7 @@ WGPUAdapter  g_adapter = nullptr;   // kept for present-mode queries in configur
 WGPUTexture  g_depth_tex  = nullptr;
 WGPUTextureView g_depth_view = nullptr;
 WGPUTextureFormat g_surface_fmt = WGPUTextureFormat_BGRA8Unorm;
+WGPUTextureUsage  g_surface_usage = WGPUTextureUsage_RenderAttachment;   // + CopySrc if offered
 static const WGPUTextureFormat kDepthFormat = WGPUTextureFormat_Depth24Plus;
 // Set when a frame's surface texture first comes back suboptimal at a window size: that
 // frame still presents, and the next frame reconfigures before acquiring.
@@ -156,7 +159,7 @@ void configureSurface(int w, int h) {
     WGPUSurfaceConfiguration cfg = {};
     cfg.device      = g_device;
     cfg.format      = g_surface_fmt;
-    cfg.usage       = WGPUTextureUsage_RenderAttachment;
+    cfg.usage       = g_surface_usage;
     cfg.width       = (uint32_t)w;
     cfg.height      = (uint32_t)h;
     cfg.alphaMode   = WGPUCompositeAlphaMode_Auto;
@@ -773,6 +776,10 @@ int main(int argc, char* argv[]) {
             break;
         }
     }
+    // CopySrc lets the modern UI skin copy the frame for its frosted-glass panels
+    // (ui_backdrop). Optional: without it the panels are tinted but not blurred.
+    if (caps.usages & WGPUTextureUsage_CopySrc)
+        g_surface_usage = (WGPUTextureUsage)(g_surface_usage | WGPUTextureUsage_CopySrc);
     wgpuSurfaceCapabilitiesFreeMembers(caps);
     gpu::webgpu_set_surface_format(g_surface_fmt);
     configureSurface(fbw, fbh);
@@ -892,6 +899,7 @@ int main(int argc, char* argv[]) {
     ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
     ImGui::GetStyle().HoverDelayNormal = 0.0f;
     ImGui::GetStyle().HoverDelayShort  = 0.0f;
+    ui_skin_load_fonts();
 #ifdef CHISEL_BACKEND_WEBGPU
     ImGui_ImplGlfw_InitForOther(window, true);
     ImGui_ImplWGPU_InitInfo imguiInit = {};
@@ -1250,6 +1258,7 @@ int main(int argc, char* argv[]) {
             io.DisplaySize.y = std::min(io.DisplaySize.y, (float)fbh / sy);
         }
 #endif
+        ui_skin_begin_frame(input);      // font + style follow the Appearance setting
         ImGui::NewFrame();
 
         // A drop on an untouched scene — the default sphere with an empty
@@ -3471,20 +3480,24 @@ int main(int argc, char* argv[]) {
         if (input.voxel_merge_in_progress)
             draw_voxel_merge_progress(text, win_w, win_h,
                                       vmerge_job ? voxel_merge_progress(*vmerge_job) : 0.0f);
-        if (input.toolbar_visible)
-            draw_toolbar(text, input, mesh->tri_count(), mesh->vertex_count(), CHISEL_VERSION,
-                         multires->current_level,
-                         current_project_path.c_str(), win_w, win_h);
-        if (input.slider_mode != InputState::SliderMode::NONE)
-            draw_slider(text, input, win_w, win_h);
-        if (input.interaction_mode == InputState::InteractionMode::SELECT)
-            draw_mode_indicator(text, "SELECT", win_w, win_h);
-        else if (input.interaction_mode == InputState::InteractionMode::INSERT)
-            draw_mode_indicator(text, "INSERT", win_w, win_h);
-        draw_notification(text, input, win_w, win_h);
-        draw_mirror_unavailable(text, input, win_w, win_h);
-        if (input.show_fps)
-            draw_fps(text, fps_display, win_w, win_h);
+        // The bitmap HUD belongs to the classic skin; the modern skin draws its own
+        // readouts, toast and slider in draw_modern_ui below.
+        if (input.ui_classic) {
+            if (input.toolbar_visible)
+                draw_toolbar(text, input, mesh->tri_count(), mesh->vertex_count(), CHISEL_VERSION,
+                             multires->current_level,
+                             current_project_path.c_str(), win_w, win_h);
+            if (input.slider_mode != InputState::SliderMode::NONE)
+                draw_slider(text, input, win_w, win_h);
+            if (input.interaction_mode == InputState::InteractionMode::SELECT)
+                draw_mode_indicator(text, "SELECT", win_w, win_h);
+            else if (input.interaction_mode == InputState::InteractionMode::INSERT)
+                draw_mode_indicator(text, "INSERT", win_w, win_h);
+            draw_notification(text, input, win_w, win_h);
+            draw_mirror_unavailable(text, input, win_w, win_h);
+            if (input.show_fps)
+                draw_fps(text, fps_display, win_w, win_h);
+        }
         debug_console::draw(text, win_w, win_h);
 
         // ---- Open/import a path (shared by the native dialog and the web picker) ----
@@ -4146,7 +4159,27 @@ int main(int argc, char* argv[]) {
         mres_info.locked     = multires->locked;
         mres_info.base_level = multires->base_level;
         mres_info.lmax       = multires->base_level + (int)multires->disp.size();
-        draw_button_islands(input, win_w, win_h, &alpha_lib, mres_info);
+        if (input.ui_classic) {
+            draw_button_islands(input, win_w, win_h, &alpha_lib, mres_info);
+        } else {
+            // Frosted glass: blur what has been drawn so far (the scene, cursor and any
+            // bitmap dialog) for the panels to sit on. Only the ImGui pass is still to
+            // come, so the copy is exactly what is behind them.
+            float blur_px = 0.0f, saturate = 1.0f;
+            ui_skin_backdrop_params(input, &blur_px, &saturate);
+#ifdef CHISEL_BACKEND_WEBGPU
+            ui_backdrop::capture(win_w, win_h, blur_px, saturate, surfTex.texture);
+#else
+            ui_backdrop::capture(win_w, win_h, blur_px, saturate, nullptr);
+#endif
+            SkinStats st;
+            st.tris = mesh->tri_count();
+            st.verts = mesh->vertex_count();
+            st.level = multires->current_level;
+            st.fps = fps_display;
+            st.project_path = current_project_path.c_str();
+            draw_modern_ui(input, win_w, win_h, &alpha_lib, mres_info, st);
+        }
 
         // ---- Error popup ----
         if (error_popup_trigger) {
@@ -4292,6 +4325,7 @@ int main(int argc, char* argv[]) {
     while (!glfwWindowShouldClose(window)) frame();
 #endif
 
+    ui_backdrop::shutdown();
 #ifdef CHISEL_BACKEND_WEBGPU
     ImGui_ImplWGPU_Shutdown();
 #else
