@@ -4173,6 +4173,7 @@ int main(int argc, char* argv[]) {
             ui_backdrop::capture(win_w, win_h, blur_px, saturate, nullptr);
 #endif
             SkinStats st;
+            st.version = CHISEL_VERSION;
             st.tris = mesh->tri_count();
             st.verts = mesh->vertex_count();
             st.level = multires->current_level;

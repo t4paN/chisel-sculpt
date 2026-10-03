@@ -291,7 +291,7 @@ void apply_global_key(InputState& in, const std::string& key, const std::string&
     else if (key == "show_fps")            in.show_fps            = parse_bool(val);
     else if (key == "ui_skin") {
         int k = (int)std::strtol(val.c_str(), nullptr, 10);
-        if (k >= 0 && k <= (int)InputState::UiSkin::DOS) in.ui_skin = (InputState::UiSkin)k;
+        if (k >= 0 && k <= (int)InputState::UiSkin::Y2K) in.ui_skin = (InputState::UiSkin)k;
     }
     // Pre-DOS builds stored the skin as a bool (2026-10-03 only); the next write
     // replaces it with ui_skin.

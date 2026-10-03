@@ -16,6 +16,12 @@ struct AlphaLibrary;
 // Panels share one material (Menu > Appearance): clear glass with a backdrop blur
 // through to solid, plus optional springy motion and viewfinder corners.
 //
+// The Y2K skin (board E) has its own layout in ui_skin.cpp's draw_y2k_ui: opaque
+// shelves docked on all four edges (title + slider shelf on top, brushes left,
+// commands right, a status bar below), glossy two-tone tiles, orange for "on".
+// Verdana where the system has it (not redistributable, so loaded from the OS),
+// else DejaVu Sans, else Plex.
+//
 // The DOS skin (board D) is the same layout and code with a CGA theme swapped in:
 // Chisel's 8x8 bitmap font at 16 px, the 16 CGA colours, black panels with grey
 // frames and hard shadows, 16x16 one-bit icons, no blur and no springs. The
@@ -40,6 +46,7 @@ float ui_skin_menu_item_width(float w);
 void ui_skin_backdrop_params(const InputState& input, float* blur_px, float* saturate);
 
 struct SkinStats {
+    const char* version = nullptr;    // CHISEL_VERSION (the Y2K title strip shows it)
     uint32_t    tris = 0;
     uint32_t    verts = 0;
     int         level = 0;            // live multires level

@@ -47,9 +47,38 @@ constexpr ImU32 yellow = IM_COL32(0xFF, 0xFF, 0x55, 255), white = IM_COL32(0xFF,
 }
 
 bool g_dos = false;   // the DOS skin is active (theme + primitives switch on it)
+bool g_y2k = false;   // the Y2K skin is active (own layout; shares popups, toasts, menu)
 
-void set_theme(bool dos) {
+// Y2K palette (board E).
+namespace y2k {
+constexpr ImU32 text = IM_COL32(0xE6, 0xE6, 0xE6, 255), muted = IM_COL32(0x9C, 0x9C, 0xA2, 255);
+constexpr ImU32 label = IM_COL32(0xBD, 0xBD, 0xC2, 255), edge = IM_COL32(0x14, 0x14, 0x16, 255);
+constexpr ImU32 well = IM_COL32(0x1D, 0x1D, 0x20, 255), orange = IM_COL32(0xF2, 0x8C, 0x28, 255);
+constexpr ImU32 orange_hi = IM_COL32(0xFF, 0xC2, 0x66, 255), orange_lo = IM_COL32(0xD4, 0x6F, 0x0E, 255);
+constexpr ImU32 amber = IM_COL32(0xFF, 0xB3, 0x47, 255), value = IM_COL32(0xFF, 0xD0, 0x8A, 255);
+constexpr ImU32 on_text = IM_COL32(0x2A, 0x15, 0x00, 255);
+}
+
+void set_theme(bool dos, bool y2k = false) {
     g_dos = dos;
+    g_y2k = y2k;
+    if (y2k) {
+        // Only what shared code (toasts, slider HUD, popups, alpha picker) reads;
+        // the shelves paint with namespace y2k directly.
+        kText = kTextRail = y2k::text;
+        kMuted = kStatus = kDim = y2k::muted;
+        kAccent = kAccentHi = kAccentLo = y2k::orange;
+        kTint = IM_COL32(0xF2, 0x8C, 0x28, 110);
+        kTintText = y2k::amber;
+        kBrush = y2k::orange;
+        kUnsaved = y2k::amber;
+        kAlert = IM_COL32(0xFF, 0x4A, 0x3D, 255);
+        kDivider = kDividerLo = IM_COL32(0x55, 0x55, 0x5A, 255);
+        kBorder = y2k::edge;
+        kTipBg = IM_COL32(0xFF, 0xFF, 0xE1, 255);
+        kBadge = IM_COL32(0x80, 0x80, 0x80, 255);
+        return;
+    }
     if (!dos) {
         kText      = IM_COL32(0xEC, 0xEA, 0xF2, 255);
         kTextRail  = IM_COL32(0xDA, 0xD7, 0xE3, 255);
@@ -106,16 +135,28 @@ ImU32 with_alpha(ImU32 c, float a) {
 ImFont* g_classic_font = nullptr;
 ImFont* g_bitmap_font = nullptr;     // ChiselBitmap.ttf, Plex Mono merged for the rest
 ImFont* g_fonts[4] = {nullptr, nullptr, nullptr, nullptr};
+ImFont* g_y2k_font = nullptr;        // Verdana / DejaVu Sans / Plex Sans, see load
+ImFont* g_y2k_bold = nullptr;
 InputState::UiSkin g_active_skin = InputState::UiSkin::CLASSIC;
 bool    g_style_ready = false;
 ImGuiStyle g_classic_style;
 
-ImFont* F(UiFont f) { return g_dos ? g_bitmap_font : g_fonts[(int)f]; }
+bool bold(UiFont f) { return f == UiFont::SansSemibold || f == UiFont::MonoMedium; }
+
+ImFont* F(UiFont f) {
+    if (g_dos) return g_bitmap_font;
+    if (g_y2k) return bold(f) ? g_y2k_bold : g_y2k_font;
+    return g_fonts[(int)f];
+}
 
 // The bitmap font only stays crisp at whole multiples of its 8 px cell, so in DOS
-// every size lands on 8 (badges, corner keys) or 16 (everything else).
-float px_for(float px) { return g_dos ? (px < 11.0f ? 8.0f : 16.0f) : px; }
-bool  bold(UiFont f) { return f == UiFont::SansSemibold || f == UiFont::MonoMedium; }
+// every size lands on 8 (badges, corner keys) or 16 (everything else). Verdana runs
+// big and wide, so Y2K sets the shared code's sizes a notch smaller (board E: 11 px).
+float px_for(float px) {
+    if (g_dos) return px < 11.0f ? 8.0f : 16.0f;
+    if (g_y2k) return std::max(9.0f, px - 2.0f);
+    return px;
+}
 
 ImVec2 text_size(UiFont f, float px, const char* s) {
     ImFont* font = F(f);
@@ -203,6 +244,20 @@ Material material_from(const InputState& in) {
 void panel_bg(ImDrawList* dl, ImVec2 a, ImVec2 b, float r) {
     const Material& mt = g_mat;
     if (b.x - a.x < 2.0f || b.y - a.y < 2.0f) return;
+    if (g_y2k) {
+        // A loose shelf: vertical brushed-gray gradient, dark edge, lit top line,
+        // short soft shadow.
+        r = std::min(r, 5.0f);
+        dl->AddRectFilled(ImVec2(a.x + 1, a.y + 3), ImVec2(b.x + 3, b.y + 4), IM_COL32(0, 0, 0, 90), r);
+        int v0 = dl->VtxBuffer.Size;
+        dl->AddRectFilled(a, b, IM_COL32_WHITE, r);
+        ImGui::ShadeVertsLinearColorGradientKeepAlpha(dl, v0, dl->VtxBuffer.Size, a, ImVec2(a.x, b.y),
+                                                      IM_COL32(0x4E, 0x4E, 0x53, 255),
+                                                      IM_COL32(0x38, 0x38, 0x3C, 255));
+        dl->AddRect(a, b, y2k::edge, r);
+        dl->AddLine(ImVec2(a.x + r, a.y + 1.5f), ImVec2(b.x - r, a.y + 1.5f), IM_COL32(255, 255, 255, 40));
+        return;
+    }
     if (g_dos) {
         // DOS frame: black box, 2 px light-gray border, hard 8 px drop shadow.
         a = ImVec2(std::floor(a.x), std::floor(a.y));
@@ -270,7 +325,7 @@ bool begin_panel(const char* name, ImVec2 pos, ImVec2 pivot, ImVec2 pad, float g
 void end_panel() { ImGui::End(); ImGui::PopStyleVar(2); }
 
 // ---- Tooltip -----------------------------------------------------------------
-enum class TipSide { Right, Below };
+enum class TipSide { Right, Below, Left };
 
 // Name + key badge on the near-black chip from board A. Foreground draw list so it
 // never fights the panels for z-order, and immediate (the app runs a 0 hover delay).
@@ -286,11 +341,29 @@ void tooltip(ImVec2 anchor_min, ImVec2 anchor_max, TipSide side, const char* nam
     ImVec2 p;
     if (side == TipSide::Right)
         p = ImVec2(anchor_max.x + 10.0f, (anchor_min.y + anchor_max.y) * 0.5f - h * 0.5f);
+    else if (side == TipSide::Left)
+        p = ImVec2(anchor_min.x - 10.0f - w, (anchor_min.y + anchor_max.y) * 0.5f - h * 0.5f);
     else
         p = ImVec2((anchor_min.x + anchor_max.x) * 0.5f - w * 0.5f, anchor_max.y + 10.0f);
     ImVec2 disp = ImGui::GetIO().DisplaySize;
     p.x = std::max(8.0f, std::min(p.x, disp.x - w - 8.0f));
     p.y = std::max(8.0f, std::min(p.y, disp.y - h - 8.0f));
+    if (g_y2k) {
+        // The period tooltip: pale yellow, 1 px black frame, black text, key in gray.
+        p = ImVec2(std::floor(p.x), std::floor(p.y));
+        ImVec2 n2 = text_size(UiFont::Sans, 13.0f, name);
+        ImVec2 k2 = key ? text_size(UiFont::Sans, 13.0f, key) : ImVec2(0, 0);
+        float W = 6.0f * 2 + n2.x + (key ? 8.0f + k2.x : 0.0f), Hh = 4.0f * 2 + n2.y;
+        if (side == TipSide::Left) p.x = std::floor(anchor_min.x - 8.0f - W);
+        else if (side == TipSide::Right) p.y = std::floor((anchor_min.y + anchor_max.y - Hh) * 0.5f);
+        dl->AddRectFilled(ImVec2(p.x + 2, p.y + 2), ImVec2(p.x + W + 2, p.y + Hh + 2), IM_COL32(0, 0, 0, 80));
+        dl->AddRectFilled(p, ImVec2(p.x + W, p.y + Hh), kTipBg);
+        dl->AddRect(p, ImVec2(p.x + W, p.y + Hh), IM_COL32(0, 0, 0, 255));
+        text_at(dl, UiFont::Sans, 13.0f, ImVec2(p.x + 6, p.y + 4), IM_COL32(0, 0, 0, 255), name);
+        if (key) text_at(dl, UiFont::Sans, 13.0f, ImVec2(p.x + 6 + n2.x + 8, p.y + 4),
+                         IM_COL32(0x60, 0x60, 0x60, 255), key);
+        return;
+    }
     if (g_dos) {
         // Turbo-style help box: blue, white frame, hard shadow, yellow bold name,
         // light-cyan key.
@@ -596,6 +669,54 @@ void apply_modern_style() {
     c[ImGuiCol_ModalWindowDimBg]  = rgba(8, 8, 10, 0.55f);
 }
 
+// ImGui widgets in Y2K: brushed-gray windows, inset dark fields, orange marks and
+// grabs, small radii.
+void apply_y2k_style() {
+    ImGuiStyle& s = ImGui::GetStyle();
+    s.WindowRounding = 4.0f; s.PopupRounding = 4.0f; s.ChildRounding = 3.0f;
+    s.FrameRounding = 3.0f; s.GrabRounding = 3.0f; s.TabRounding = 3.0f; s.ScrollbarRounding = 3.0f;
+    s.FramePadding = ImVec2(6.0f, 3.0f);
+    s.ItemSpacing = ImVec2(6.0f, 5.0f);
+    s.ItemInnerSpacing = ImVec2(6.0f, 4.0f);
+    s.GrabMinSize = 12.0f;
+    s.PopupBorderSize = s.WindowBorderSize = 1.0f;
+    s.FrameBorderSize = 1.0f;
+    s.TabBorderSize = 0.0f;
+    ImVec4* c = s.Colors;
+    auto hex = [](unsigned v, float a = 1.0f) {
+        return ImVec4(((v >> 16) & 0xFF) / 255.0f, ((v >> 8) & 0xFF) / 255.0f, (v & 0xFF) / 255.0f, a);
+    };
+    c[ImGuiCol_Text]              = hex(0xE6E6E6);
+    c[ImGuiCol_TextDisabled]      = hex(0x9C9CA2);
+    c[ImGuiCol_WindowBg]          = hex(0x3B3B3F);
+    c[ImGuiCol_PopupBg]           = hex(0x3B3B3F, 0.98f);
+    c[ImGuiCol_Border]            = hex(0x141416);
+    c[ImGuiCol_BorderShadow]      = hex(0xFFFFFF, 0.06f);
+    c[ImGuiCol_FrameBg]           = hex(0x1D1D20);
+    c[ImGuiCol_FrameBgHovered]    = hex(0x26262A);
+    c[ImGuiCol_FrameBgActive]     = hex(0x2C2C31);
+    c[ImGuiCol_TitleBg]           = hex(0x2F2F33);
+    c[ImGuiCol_TitleBgActive]     = hex(0x3F3F43);
+    c[ImGuiCol_CheckMark]         = hex(0xF28C28);
+    c[ImGuiCol_SliderGrab]        = hex(0xF28C28);
+    c[ImGuiCol_SliderGrabActive]  = hex(0xFFC266);
+    c[ImGuiCol_Button]            = hex(0x55555A);
+    c[ImGuiCol_ButtonHovered]     = hex(0x6C6C71);
+    c[ImGuiCol_ButtonActive]      = hex(0xF28C28);
+    c[ImGuiCol_Header]            = hex(0xF28C28, 0.55f);
+    c[ImGuiCol_HeaderHovered]     = hex(0x6C6C71);
+    c[ImGuiCol_HeaderActive]      = hex(0xF28C28, 0.75f);
+    c[ImGuiCol_Separator]         = hex(0x141416);
+    c[ImGuiCol_Tab]               = hex(0x2F2F33);
+    c[ImGuiCol_TabHovered]        = hex(0x6C6C71);
+    c[ImGuiCol_TabSelected]       = hex(0x55555A);
+    c[ImGuiCol_TabSelectedOverline] = hex(0xF28C28);
+    c[ImGuiCol_ScrollbarBg]       = hex(0x1D1D20);
+    c[ImGuiCol_ScrollbarGrab]     = hex(0x6C6C71);
+    c[ImGuiCol_TextSelectedBg]    = hex(0xF28C28, 0.45f);
+    c[ImGuiCol_ModalWindowDimBg]  = hex(0x000000, 0.45f);
+}
+
 // ImGui widgets (menu, dialogs, file browser) in CGA: square everything, black
 // fields on blue frames, light cyan for marks and grabs, yellow for headings.
 void apply_dos_style() {
@@ -671,6 +792,56 @@ void apply_dos_style() {
 }
 
 // ---- Panels ------------------------------------------------------------------
+// The alpha (stamp) picker: built-ins + loaded images, then "+" to load one.
+// Opens beside whatever button armed "##alphapick" (the modern rail, the Y2K shelf).
+void alpha_picker_popup(InputState& input, const AlphaLibrary* alpha_lib, ImVec2 at) {
+    ImGui::SetNextWindowPos(at, ImGuiCond_Always);
+    if (begin_skin_popup("##alphapick", ImVec2(12, 12))) {
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(6, 6));
+        text_at(ImGui::GetWindowDrawList(), UiFont::SansSemibold, 11.0f,
+                ImGui::GetCursorScreenPos(), g_dos ? cga::yellow : kMuted, "BRUSH ALPHA");
+        ImGui::Dummy(ImVec2(0, g_dos ? 18.0f : 14.0f));
+        int n = alpha_lib->count();
+        for (int i = 0; i < n; i++) {
+            if (i % 5) ImGui::SameLine();
+            const AlphaEntry& e = alpha_lib->get(i);
+            ImVec2 p = ImGui::GetCursorScreenPos();
+            char id[24]; std::snprintf(id, sizeof id, "##al%d", i);
+            if (ImGui::InvisibleButton(id, ImVec2(44, 44))) {
+                input.active_alpha = i;
+                ImGui::CloseCurrentPopup();
+            }
+            bool hv = ImGui::IsItemHovered();
+            ImDrawList* pdl = ImGui::GetWindowDrawList();
+            if (input.active_alpha == i)
+                pdl->AddRectFilled(p, ImVec2(p.x + 44, p.y + 44), kAccent, rad(10.0f));
+            else if (hv)
+                pdl->AddRectFilled(p, ImVec2(p.x + 44, p.y + 44),
+                                   g_dos ? cga::dark_gray : IM_COL32(255, 255, 255, 18), rad(10.0f));
+            draw_alpha_preview(pdl, ImVec2(p.x + 7, p.y + 7), 30.0f, e.preview);
+            if (hv) tooltip(p, ImVec2(p.x + 44, p.y + 44), TipSide::Below, e.name.c_str(), nullptr);
+        }
+        if (n % 5) ImGui::SameLine();
+        ImVec2 p = ImGui::GetCursorScreenPos();
+        if (ImGui::InvisibleButton("##alLoad", ImVec2(44, 44))) {
+            input.load_alpha_dialog_active = true;
+            ImGui::CloseCurrentPopup();
+        }
+        bool hv = ImGui::IsItemHovered();
+        ImDrawList* pdl = ImGui::GetWindowDrawList();
+        if (hv) pdl->AddRectFilled(p, ImVec2(p.x + 44, p.y + 44),
+                                   g_dos ? cga::dark_gray : IM_COL32(255, 255, 255, 18), rad(10.0f));
+        pdl->AddRect(ImVec2(p.x + 7, p.y + 7), ImVec2(p.x + 37, p.y + 37),
+                     g_dos ? cga::light_gray : IM_COL32(255, 255, 255, 60), rad(7.0f), 0, g_dos ? 2.0f : 1.0f);
+        pdl->AddLine(ImVec2(p.x + 16, p.y + 22), ImVec2(p.x + 28, p.y + 22), kText, 1.75f);
+        pdl->AddLine(ImVec2(p.x + 22, p.y + 16), ImVec2(p.x + 22, p.y + 28), kText, 1.75f);
+        if (hv) tooltip(p, ImVec2(p.x + 44, p.y + 44), TipSide::Below,
+                        "Load a grayscale image", nullptr);
+        ImGui::PopStyleVar();
+        end_skin_popup();
+    }
+}
+
 void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
     (void)win_h;
     BrushType current = input.current_brush;
@@ -775,51 +946,7 @@ void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
                              ae.name.c_str(), nullptr);
         if (clicked) ImGui::OpenPopup("##alphapick");
 
-        ImGui::SetNextWindowPos(ImVec2(pos.x + kRailBtn + 18.0f, pos.y - 8.0f), ImGuiCond_Always);
-        if (begin_skin_popup("##alphapick", ImVec2(12, 12))) {
-            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(6, 6));
-            text_at(ImGui::GetWindowDrawList(), UiFont::SansSemibold, 11.0f,
-                    ImGui::GetCursorScreenPos(), g_dos ? cga::yellow : kMuted, "BRUSH ALPHA");
-            ImGui::Dummy(ImVec2(0, g_dos ? 18.0f : 14.0f));
-            int n = alpha_lib->count();
-            for (int i = 0; i < n; i++) {
-                if (i % 5) ImGui::SameLine();
-                const AlphaEntry& e = alpha_lib->get(i);
-                ImVec2 p = ImGui::GetCursorScreenPos();
-                char id[24]; std::snprintf(id, sizeof id, "##al%d", i);
-                if (ImGui::InvisibleButton(id, ImVec2(44, 44))) {
-                    input.active_alpha = i;
-                    ImGui::CloseCurrentPopup();
-                }
-                bool hv = ImGui::IsItemHovered();
-                ImDrawList* pdl = ImGui::GetWindowDrawList();
-                if (input.active_alpha == i)
-                    pdl->AddRectFilled(p, ImVec2(p.x + 44, p.y + 44), kAccent, rad(10.0f));
-                else if (hv)
-                    pdl->AddRectFilled(p, ImVec2(p.x + 44, p.y + 44),
-                                       g_dos ? cga::dark_gray : IM_COL32(255, 255, 255, 18), rad(10.0f));
-                draw_alpha_preview(pdl, ImVec2(p.x + 7, p.y + 7), 30.0f, e.preview);
-                if (hv) tooltip(p, ImVec2(p.x + 44, p.y + 44), TipSide::Below, e.name.c_str(), nullptr);
-            }
-            if (n % 5) ImGui::SameLine();
-            ImVec2 p = ImGui::GetCursorScreenPos();
-            if (ImGui::InvisibleButton("##alLoad", ImVec2(44, 44))) {
-                input.load_alpha_dialog_active = true;
-                ImGui::CloseCurrentPopup();
-            }
-            bool hv = ImGui::IsItemHovered();
-            ImDrawList* pdl = ImGui::GetWindowDrawList();
-            if (hv) pdl->AddRectFilled(p, ImVec2(p.x + 44, p.y + 44),
-                                       g_dos ? cga::dark_gray : IM_COL32(255, 255, 255, 18), rad(10.0f));
-            pdl->AddRect(ImVec2(p.x + 7, p.y + 7), ImVec2(p.x + 37, p.y + 37),
-                         g_dos ? cga::light_gray : IM_COL32(255, 255, 255, 60), rad(7.0f), 0, g_dos ? 2.0f : 1.0f);
-            pdl->AddLine(ImVec2(p.x + 16, p.y + 22), ImVec2(p.x + 28, p.y + 22), kText, 1.75f);
-            pdl->AddLine(ImVec2(p.x + 22, p.y + 16), ImVec2(p.x + 22, p.y + 28), kText, 1.75f);
-            if (hv) tooltip(p, ImVec2(p.x + 44, p.y + 44), TipSide::Below,
-                            "Load a grayscale image", nullptr);
-            ImGui::PopStyleVar();
-            end_skin_popup();
-        }
+        alpha_picker_popup(input, alpha_lib, ImVec2(pos.x + kRailBtn + 18.0f, pos.y - 8.0f));
     }
     end_panel();
 }
@@ -1259,7 +1386,8 @@ void notifications(InputState& input, int win_w, int win_h) {
     if (input.notification_timer > 0.0f) {
         input.notification_timer = std::max(0.0f, input.notification_timer - dt);
         float a = std::min(1.0f, input.notification_timer / 0.3f);
-        toast(input.notification, win_w * 0.5f, (float)win_h - kEdge - 44.0f - 56.0f,
+        toast(input.notification, win_w * 0.5f,
+              g_y2k ? (float)win_h - 30.0f - 60.0f : (float)win_h - kEdge - 44.0f - 56.0f,
               g_dos ? cga::light_green : kText, a);
     }
     if (input.mirror_unavailable_timer > 0.0f) {
@@ -1304,6 +1432,595 @@ void slider_hud(const InputState& input) {
     dl->AddRectFilled(ImVec2(a.x + 12.0f, y), ImVec2(b.x - 12.0f, y + 4.0f),
                       g_dos ? cga::dark_gray : IM_COL32(255, 255, 255, 26), rad(2.0f));
     dl->AddRectFilled(ImVec2(a.x + 12.0f, y), ImVec2(a.x + 12.0f + (w - 24.0f) * pct, y + 4.0f), col, rad(2.0f));
+}
+
+// ============================ Y2K skin (board E) =============================
+// An homage to the docked-shelf 3D apps of the early 2000s (no copied layout or
+// branding): opaque shelves on every edge, glossy two-tone tiles with a hard
+// step at half height, orange for "on", and an inset bevel framing the viewport.
+// The 3D view still renders full-window behind the shelves; the model sits in
+// the middle, so the shelves only cover what the floating panels would.
+
+constexpr float kTopH = 78.0f, kTitleH = 22.0f, kLeftW = 112.0f, kRightW = 94.0f, kBotH = 30.0f;
+
+ImFont* yf(bool b) { return b ? g_y2k_bold : g_y2k_font; }
+ImVec2 ysize(bool b, float px, const char* s) { return yf(b)->CalcTextSizeA(px, FLT_MAX, 0.0f, s); }
+
+// Text with the era's 1 px drop shadow under it.
+void ytext(ImDrawList* dl, bool b, float px, ImVec2 p, ImU32 col, const char* s, bool shadow = true) {
+    p = ImVec2(std::floor(p.x + 0.5f), std::floor(p.y + 0.5f));
+    if (shadow) dl->AddText(yf(b), px, ImVec2(p.x, p.y + 1.0f), IM_COL32(0, 0, 0, 255), s);
+    dl->AddText(yf(b), px, p, col, s);
+}
+
+void vgrad(ImDrawList* dl, ImVec2 a, ImVec2 b, ImU32 top, ImU32 bottom, float r = 0.0f,
+           ImDrawFlags f = 0) {
+    int v0 = dl->VtxBuffer.Size;
+    dl->AddRectFilled(a, b, IM_COL32_WHITE, r, f);
+    ImGui::ShadeVertsLinearColorGradientKeepAlpha(dl, v0, dl->VtxBuffer.Size, a, ImVec2(a.x, b.y), top, bottom);
+}
+void hgrad(ImDrawList* dl, ImVec2 a, ImVec2 b, ImU32 left, ImU32 right) {
+    int v0 = dl->VtxBuffer.Size;
+    dl->AddRectFilled(a, b, IM_COL32_WHITE);
+    ImGui::ShadeVertsLinearColorGradientKeepAlpha(dl, v0, dl->VtxBuffer.Size, a, ImVec2(b.x, a.y), left, right);
+}
+
+// Recessed well: the dark field everything "inset" sits in.
+void inset(ImDrawList* dl, ImVec2 a, ImVec2 b, float r) {
+    dl->AddRectFilled(a, b, y2k::well, r);
+    dl->AddLine(ImVec2(a.x + r, a.y + 0.5f), ImVec2(b.x - r, a.y + 0.5f), IM_COL32(0, 0, 0, 255));
+    dl->AddLine(ImVec2(a.x + r, b.y + 0.5f), ImVec2(b.x - r, b.y + 0.5f), IM_COL32(255, 255, 255, 31));
+}
+
+// The glossy two-tone tile: light-to-mid on top, a hard step at half height,
+// dark-to-mid below, lit top edge. Orange when on.
+void gloss_tile(ImDrawList* dl, ImVec2 a, ImVec2 b, float r, bool on, bool hovered, bool held) {
+    ImU32 t0, t1, b0, b1;
+    if (on)           { t0 = IM_COL32(0xFF,0xC2,0x66,255); t1 = IM_COL32(0xF7,0xA2,0x3C,255);
+                        b0 = IM_COL32(0xEA,0x84,0x18,255); b1 = IM_COL32(0xD4,0x6F,0x0E,255); }
+    else if (held)    { t0 = IM_COL32(0x3C,0x3C,0x40,255); t1 = IM_COL32(0x44,0x44,0x49,255);
+                        b0 = IM_COL32(0x48,0x48,0x4D,255); b1 = IM_COL32(0x50,0x50,0x55,255); }
+    else if (hovered) { t0 = IM_COL32(0x7C,0x7C,0x82,255); t1 = IM_COL32(0x60,0x60,0x66,255);
+                        b0 = IM_COL32(0x52,0x52,0x58,255); b1 = IM_COL32(0x5A,0x5A,0x60,255); }
+    else              { t0 = IM_COL32(0x6C,0x6C,0x71,255); t1 = IM_COL32(0x52,0x52,0x57,255);
+                        b0 = IM_COL32(0x45,0x45,0x4A,255); b1 = IM_COL32(0x4D,0x4D,0x52,255); }
+    dl->AddRectFilled(ImVec2(a.x, a.y + 1), ImVec2(b.x, b.y + 2), IM_COL32(0, 0, 0, 120), r);
+    float mid = std::floor((a.y + b.y) * 0.5f);
+    vgrad(dl, a, ImVec2(b.x, mid), t0, t1, r, ImDrawFlags_RoundCornersTop);
+    vgrad(dl, ImVec2(a.x, mid), b, b0, b1, r, ImDrawFlags_RoundCornersBottom);
+    dl->AddRect(a, b, y2k::edge, r);
+    dl->AddLine(ImVec2(a.x + r, a.y + 1.5f), ImVec2(b.x - r, a.y + 1.5f),
+                IM_COL32(255, 255, 255, on ? 140 : (held ? 20 : 72)));
+}
+
+// An invisible button at an absolute spot, reporting hover/held.
+bool hit(const char* id, ImVec2 a, ImVec2 size, bool* hovered, bool* held, bool enabled = true) {
+    ImGui::SetCursorScreenPos(a);
+    if (!enabled) ImGui::BeginDisabled();
+    bool c = ImGui::InvisibleButton(id, size);
+    *hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
+    *held = ImGui::IsItemActive();
+    if (!enabled) ImGui::EndDisabled();
+    return c && enabled;
+}
+
+bool begin_shelf(const char* name, ImVec2 pos, ImVec2 size) {
+    ImGui::SetNextWindowPos(pos, ImGuiCond_Always);
+    ImGui::SetNextWindowSize(size, ImGuiCond_Always);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    const ImGuiWindowFlags f = (kPanelFlags & ~ImGuiWindowFlags_AlwaysAutoResize) |
+                               ImGuiWindowFlags_NoScrollWithMouse;
+    bool open = ImGui::Begin(name, nullptr, f);
+    ImGui::GetWindowDrawList()->PushClipRectFullScreen();
+    return open;
+}
+void end_shelf() {
+    ImGui::GetWindowDrawList()->PopClipRect();
+    ImGui::End();
+    ImGui::PopStyleVar(3);
+}
+
+void apply_mode(InputState& input, int m) {
+    const BrushType current = input.current_brush;
+    switch (m) {
+        case 0:
+            input.interaction_mode = InputState::InteractionMode::EDIT;
+            if (current == BrushType::PAINT) { input.clear_smooth_lock(); input.switch_brush(BrushType::DRAW); }
+            break;
+        case 1: input.interaction_mode = InputState::InteractionMode::INSERT; break;
+        case 2: input.interaction_mode = InputState::InteractionMode::SELECT; break;
+        case 3:
+            input.interaction_mode = InputState::InteractionMode::EDIT;
+            input.clear_smooth_lock();
+            input.switch_brush(BrushType::PAINT);
+            input.subtract_locked = false;
+            break;
+    }
+}
+
+// Brush feel written the way the hold-key drag writes it: the live mirror for
+// this frame, and per_brush[] / brush_size_of[] as the truth.
+void set_feel(InputState& in, int which, float t) {
+    t = std::max(0.0f, std::min(1.0f, t));
+    const BrushType slot = in.live_brush_slot();
+    switch (which) {
+        case 0: in.brush_size = std::max(5.0f, t * 500.0f);
+                in.brush_size_of[(int)in.size_slot()] = in.brush_size; break;
+        case 1: in.brush_strength = std::max(0.01f, t); in.per_brush[(int)slot].strength = in.brush_strength; break;
+        case 2: in.brush_hardness = std::max(0.01f, t); in.per_brush[(int)slot].hardness = in.brush_hardness; break;
+        case 3: in.brush_spacing = std::max(0.05f, std::min(t, max_spacing_for(slot)));
+                in.per_brush[(int)slot].spacing = in.brush_spacing; break;
+    }
+}
+
+// Inset track with the orange gloss fill. Click or drag anywhere on it to set.
+// Returns the new 0..1 value while dragged, or -1.
+float y2k_track(const char* id, ImDrawList* dl, ImVec2 a, float w, float h, float pct, const char* tip) {
+    bool hv, held;
+    hit(id, ImVec2(a.x, a.y - 2), ImVec2(w, h + 4), &hv, &held);
+    inset(dl, a, ImVec2(a.x + w, a.y + h), 3.0f);
+    float fw = std::floor(w * std::max(0.0f, std::min(1.0f, pct)));
+    if (fw >= 2.0f) {
+        vgrad(dl, ImVec2(a.x + 1, a.y + 1), ImVec2(a.x + fw - 1, a.y + h - 1),
+              y2k::orange_hi, IM_COL32(0xC9, 0x65, 0x0A, 255), 2.0f);
+        dl->AddLine(ImVec2(a.x + 2, a.y + 1.5f), ImVec2(a.x + fw - 2, a.y + 1.5f), IM_COL32(255, 255, 255, 128));
+    }
+    if (hv && tip && !held) tooltip(a, ImVec2(a.x + w, a.y + h), TipSide::Below, tip, nullptr);
+    if (held) return (ImGui::GetIO().MousePos.x - a.x) / w;
+    return -1.0f;
+}
+
+void y2k_top(InputState& in, int W, const SkinStats& st) {
+    if (!begin_shelf("##yTop", ImVec2(0, 0), ImVec2((float)W, kTopH))) { end_shelf(); return; }
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float w = (float)W;
+    vgrad(dl, ImVec2(0, 0), ImVec2(w, kTopH), IM_COL32(0x5D, 0x5D, 0x62, 255), IM_COL32(0x3F, 0x3F, 0x43, 255));
+    dl->AddLine(ImVec2(0, kTopH - 0.5f), ImVec2(w, kTopH - 0.5f), y2k::edge);
+    // Title strip.
+    vgrad(dl, ImVec2(0, 0), ImVec2(w, kTitleH), IM_COL32(0x2F, 0x2F, 0x33, 255), IM_COL32(0x24, 0x24, 0x27, 255));
+    dl->AddLine(ImVec2(0, kTitleH - 0.5f), ImVec2(w, kTitleH - 0.5f), y2k::edge);
+    dl->AddLine(ImVec2(0, kTitleH + 0.5f), ImVec2(w, kTitleH + 0.5f), IM_COL32(255, 255, 255, 46));
+    float x = 10.0f, ty = 4.0f;
+    for (const char* c = "CHISEL"; *c; c++) {                       // letter-spaced wordmark
+        char g[2] = {*c, 0};
+        ytext(dl, true, 12.0f, ImVec2(x, ty), y2k::amber, g);
+        x += ysize(true, 12.0f, g).x + 1.5f;
+    }
+    x += 12.0f;
+    if (st.version && *st.version) {
+        char v[24];
+        const char* s = (*st.version == 'v' || *st.version == 'V') ? st.version + 1 : st.version;
+        size_t i = 0;
+        while (s[i] && s[i] != '-' && i < sizeof v - 1) { v[i] = s[i]; i++; }
+        v[i] = '\0';
+        ytext(dl, false, 11.0f, ImVec2(x, ty + 1), y2k::muted, v, false);
+        x += ysize(false, 11.0f, v).x + 14.0f;
+    }
+    dl->AddLine(ImVec2(x, 5.0f), ImVec2(x, kTitleH - 5.0f), IM_COL32(0x55, 0x55, 0x55, 255));
+    x += 14.0f;
+    char name[64];
+    project_name(name, sizeof name, st.project_path);
+    ytext(dl, false, 11.0f, ImVec2(x, ty + 1), y2k::text, name);
+    if (!st.project_path || !*st.project_path)
+        ytext(dl, false, 11.0f, ImVec2(x + ysize(false, 11.0f, name).x + 2, ty + 1), y2k::amber, " *");
+    const char* hint = "Hold S / W / A / O and drag to tune the brush";
+    ytext(dl, false, 11.0f, ImVec2(w - 10.0f - ysize(false, 11.0f, hint).x, ty + 1), y2k::muted, hint, false);
+
+    // Slider shelf row.
+    const float cy = kTitleH + (kTopH - kTitleH) * 0.5f;
+    // Mode well: Sculpt / Insert / Select / Paint, the live one an orange tile.
+    static const char* modes[4] = {"Sculpt", "Insert", "Select", "Paint"};
+    static const char* mkeys[4] = {"1", "2", "3", "4"};
+    const bool smooth_on = in.is_smooth_active();
+    const bool paint_on = in.current_brush == BrushType::PAINT && !smooth_on;
+    int mode = in.interaction_mode == InputState::InteractionMode::INSERT ? 1
+             : in.interaction_mode == InputState::InteractionMode::SELECT ? 2
+             : paint_on ? 3 : 0;
+    float bw[4], total = 4.0f;
+    for (int i = 0; i < 4; i++) {
+        bw[i] = ysize(true, 11.0f, modes[i]).x + ysize(false, 9.0f, mkeys[i]).x + 5.0f + 24.0f;
+        total += bw[i] + (i ? 2.0f : 0.0f);
+    }
+    x = 10.0f;
+    inset(dl, ImVec2(x, cy - 15), ImVec2(x + total, cy + 15), 4.0f);
+    float bx = x + 2.0f;
+    for (int i = 0; i < 4; i++) {
+        bool hv, held;
+        char id[16]; std::snprintf(id, sizeof id, "##ym%d", i);
+        ImVec2 a(bx, cy - 13), b(bx + bw[i], cy + 13);
+        if (hit(id, a, ImVec2(bw[i], 26), &hv, &held)) apply_mode(in, i);
+        if (i == mode) gloss_tile(dl, a, b, 3.0f, true, false, false);
+        else if (hv) dl->AddRectFilled(a, b, IM_COL32(255, 255, 255, held ? 10 : 22), 3.0f);
+        ImU32 tc = i == mode ? y2k::on_text : y2k::text;
+        ImVec2 ns = ysize(true, 11.0f, modes[i]);
+        float tx = a.x + 12.0f, tyy = cy - ns.y * 0.5f;
+        ytext(dl, true, 11.0f, ImVec2(tx, tyy), tc, modes[i], i != mode);
+        ytext(dl, false, 9.0f, ImVec2(tx + ns.x + 5.0f, tyy + 2.0f), with_alpha(tc, 0.75f), mkeys[i], false);
+        bx += bw[i] + 2.0f;
+    }
+    x += total + 14.0f;
+
+    // The four feel sliders, draggable right here (or hold the key in the viewport).
+    struct S { const char* label; const char* key; float pct; char val[12]; };
+    S sl[4] = {{"Size", "S", in.brush_size / 500.0f, ""}, {"Strength", "W", in.brush_strength, ""},
+               {"Hardness", "A", in.brush_hardness, ""}, {"Spacing", "O", in.brush_spacing, ""}};
+    std::snprintf(sl[0].val, sizeof sl[0].val, "%.0f", in.brush_size);
+    std::snprintf(sl[1].val, sizeof sl[1].val, "%.0f", in.brush_strength * 100.0f);
+    std::snprintf(sl[2].val, sizeof sl[2].val, "%.0f", in.brush_hardness * 100.0f);
+    std::snprintf(sl[3].val, sizeof sl[3].val, "%.0f", in.brush_spacing * 100.0f);
+    const bool editing = in.interaction_mode == InputState::InteractionMode::EDIT;
+    for (int i = 0; i < 4; i++) {
+        const float sw = 168.0f;
+        if (x + sw > w - 10.0f) break;                             // narrow window: drop what won't fit
+        ytext(dl, true, 11.0f, ImVec2(x, cy - 17), y2k::text, sl[i].label);
+        ytext(dl, false, 11.0f, ImVec2(x + ysize(true, 11.0f, sl[i].label).x + 5, cy - 17), y2k::muted, sl[i].key, false);
+        ytext(dl, true, 11.0f, ImVec2(x + sw - ysize(true, 11.0f, sl[i].val).x, cy - 17), y2k::value, sl[i].val);
+        char id[16]; std::snprintf(id, sizeof id, "##ys%d", i);
+        float t = y2k_track(id, dl, ImVec2(x, cy + 1), sw, 14.0f, sl[i].pct, nullptr);
+        if (t >= 0.0f && editing) set_feel(in, i, t);
+        x += sw + 14.0f;
+    }
+    // Autosmooth checkbox.
+    if (x + 120.0f <= w - 10.0f) {
+        bool hv, held;
+        ImVec2 ls = ysize(true, 11.0f, "Autosmooth");
+        if (hit("##yAs", ImVec2(x, cy - 10), ImVec2(14 + 6 + ls.x + 18, 20), &hv, &held))
+            in.autosmooth = !in.autosmooth;
+        ImVec2 a(x, cy - 7), b(x + 14, cy + 7);
+        inset(dl, a, b, 2.0f);
+        if (in.autosmooth) {
+            dl->AddLine(ImVec2(a.x + 3, a.y + 7), ImVec2(a.x + 6, a.y + 10), y2k::orange, 2.0f);
+            dl->AddLine(ImVec2(a.x + 6, a.y + 10), ImVec2(a.x + 11, a.y + 3), y2k::orange, 2.0f);
+        }
+        ytext(dl, true, 11.0f, ImVec2(x + 20, cy - ls.y * 0.5f), hv ? IM_COL32_WHITE : y2k::text, "Autosmooth");
+        ytext(dl, false, 11.0f, ImVec2(x + 20 + ls.x + 6, cy - ls.y * 0.5f), y2k::muted, "B", false);
+    }
+    end_shelf();
+}
+
+void y2k_left(InputState& in, int H, const AlphaLibrary* lib) {
+    const float h = (float)H - kTopH - kBotH;
+    if (!begin_shelf("##yLeft", ImVec2(0, kTopH), ImVec2(kLeftW, h))) { end_shelf(); return; }
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    hgrad(dl, ImVec2(0, kTopH), ImVec2(kLeftW, kTopH + h), IM_COL32(0x4A, 0x4A, 0x4E, 255), IM_COL32(0x3B, 0x3B, 0x3F, 255));
+    dl->AddLine(ImVec2(kLeftW - 0.5f, kTopH), ImVec2(kLeftW - 0.5f, kTopH + h), y2k::edge);
+    dl->AddLine(ImVec2(0.5f, kTopH), ImVec2(0.5f, kTopH + h), IM_COL32(255, 255, 255, 31));
+
+    const BrushType current = in.current_brush;
+    const bool smooth_on = in.is_smooth_active();
+    const auto mode = in.interaction_mode;
+    const bool editing = mode == InputState::InteractionMode::EDIT;
+    const float x0 = 8.0f, w = kLeftW - 16.0f;
+    float y = kTopH + 10.0f;
+
+    struct B { const char* name; const char* key; Icon icon; BrushType type; };
+    static const B brushes[] = {
+        {"Draw", "D", Icon::BrushDraw, BrushType::DRAW},       {"Clay", "T", Icon::BrushClay, BrushType::CLAY},
+        {"Inflate", "I", Icon::BrushInflate, BrushType::INFLATE}, {"Crease", "C", Icon::BrushCrease, BrushType::CREASE},
+        {"Pinch", "V", Icon::BrushPinch, BrushType::PINCH},    {"Move", "G", Icon::BrushMove, BrushType::MOVE},
+        {"Limb", "H", Icon::BrushLimb, BrushType::LIMB},       {"Smooth", "SS", Icon::BrushSmooth, BrushType::SMOOTH},
+        {"Mask", "M", Icon::BrushMask, BrushType::MASK},
+    };
+
+    // The big "current tool" tile.
+    {
+        Icon icon = Icon::BrushDraw;
+        const char* nm = "Draw";
+        if (mode == InputState::InteractionMode::INSERT)      { icon = Icon::ModeInsert; nm = "Insert"; }
+        else if (mode == InputState::InteractionMode::SELECT) { icon = Icon::ModeSelect; nm = "Select"; }
+        else if (current == BrushType::PAINT && !smooth_on)   { icon = Icon::ModePaint; nm = "Paint"; }
+        else {
+            BrushType t = smooth_on ? BrushType::SMOOTH : current;
+            for (const B& b : brushes) if (b.type == t) { icon = b.icon; nm = b.name; }
+        }
+        ImVec2 a(x0, y), b(x0 + w, y + 92);
+        gloss_tile(dl, a, b, 6.0f, true, false, false);
+        ImVec2 ns = ysize(true, 12.0f, nm);
+        draw_icon(dl, icon, ImVec2((a.x + b.x) * 0.5f, a.y + 36), 30.0f, y2k::on_text, 2.0f);
+        ytext(dl, true, 12.0f, ImVec2((a.x + b.x - ns.x) * 0.5f, a.y + 60), y2k::on_text, nm, false);
+        y += 92 + 10;
+    }
+
+    ytext(dl, true, 11.0f, ImVec2(x0 + 2, y), y2k::label, "Brushes");
+    y += 18;
+    const float tw = (w - 4.0f) * 0.5f, th = 44.0f;
+    for (int i = 0; i < 9; i++) {
+        const B& br = brushes[i];
+        ImVec2 a(x0 + (i % 2) * (tw + 4.0f), y + (i / 2) * (th + 4.0f)), b(a.x + tw, a.y + th);
+        bool hv, held;
+        char id[16]; std::snprintf(id, sizeof id, "##yb%d", i);
+        bool clicked = hit(id, a, ImVec2(tw, th), &hv, &held);
+        bool on = br.type == BrushType::SMOOTH ? (smooth_on && editing)
+                                               : (editing && current == br.type && !smooth_on);
+        gloss_tile(dl, a, b, 5.0f, on, hv, held);
+        ImU32 ic = on ? y2k::on_text : IM_COL32(0xEC, 0xEC, 0xEC, 255);
+        draw_icon(dl, br.icon, ImVec2((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f - 1), 22.0f, ic);
+        ImVec2 ks = ysize(false, 9.0f, br.key);
+        ytext(dl, false, 9.0f, ImVec2(b.x - 3 - ks.x, b.y - 2 - ks.y), with_alpha(ic, 0.8f), br.key, false);
+        if (hv) tooltip(a, b, TipSide::Right, br.name,
+                        br.type == BrushType::SMOOTH ? "Shift Shift" : br.key);
+        if (clicked) {
+            if (br.type == BrushType::SMOOTH) {
+                if (!in.smooth_locked) { in.smooth_locked = true; in.sync_live_settings(); }
+                else in.clear_smooth_lock();
+            } else {
+                in.clear_smooth_lock();
+                in.switch_brush(br.type);
+                in.subtract_locked = false;
+                in.interaction_mode = InputState::InteractionMode::EDIT;
+            }
+        }
+    }
+    y += 5 * (th + 4.0f) + 6.0f;
+
+    // Alpha.
+    const bool alpha_brush = current == BrushType::DRAW || current == BrushType::MASK ||
+                             current == BrushType::PAINT;
+    if (editing && !smooth_on && alpha_brush && lib && lib->count() > 0) {
+        ytext(dl, true, 11.0f, ImVec2(x0 + 2, y), y2k::label, "Alpha");
+        y += 18;
+        ImVec2 a(x0, y), b(x0 + w, y + 72);
+        bool hv, held;
+        if (hit("##yAlpha", a, ImVec2(w, 72), &hv, &held)) ImGui::OpenPopup("##alphapick");
+        inset(dl, a, b, 6.0f);
+        dl->AddRect(a, b, y2k::edge, 6.0f);
+        int ai = std::max(0, std::min(in.active_alpha, lib->count() - 1));
+        const AlphaEntry& ae = lib->get(ai);
+        draw_alpha_preview(dl, ImVec2((a.x + b.x) * 0.5f - 26, a.y + 10), 52.0f, ae.preview);
+        if (hv) tooltip(a, b, TipSide::Right, ae.name.c_str(), nullptr);
+        alpha_picker_popup(in, lib, ImVec2(kLeftW + 6.0f, y - 8.0f));
+        y += 72 + 10;
+    }
+
+    // Tool options.
+    const bool paint_on = editing && current == BrushType::PAINT && !smooth_on;
+    const bool clay_on = editing && current == BrushType::CLAY && !smooth_on;
+    if (clay_on) {
+        ytext(dl, true, 11.0f, ImVec2(x0 + 2, y), y2k::label, "Melt");
+        char v[12]; std::snprintf(v, sizeof v, "%.2f", in.clay_melt);
+        ytext(dl, true, 11.0f, ImVec2(x0 + w - ysize(true, 11.0f, v).x, y), y2k::value, v);
+        y += 17;
+        float t = y2k_track("##yMelt", dl, ImVec2(x0, y), w, 14.0f, in.clay_melt,
+                            "How strongly clay cuts raised areas down to its plane");
+        if (t >= 0.0f) in.clay_melt = std::max(0.0f, std::min(1.0f, t));
+        y += 24;
+    }
+    if (paint_on) {
+        ytext(dl, true, 11.0f, ImVec2(x0 + 2, y), y2k::label, "Paint");
+        y += 18;
+        const float hw = (w - 4.0f) * 0.5f;
+        bool hv, held;
+        ImVec2 a(x0, y);
+        if (hit("##yPc", a, ImVec2(hw, 22), &hv, &held)) in.paint_target_density = false;
+        gloss_tile(dl, a, ImVec2(a.x + hw, a.y + 22), 3.0f, !in.paint_target_density, hv, held);
+        ImVec2 s1 = ysize(true, 10.0f, "Colour");
+        ytext(dl, true, 10.0f, ImVec2(a.x + (hw - s1.x) * 0.5f, a.y + 5), !in.paint_target_density ? y2k::on_text : y2k::text,
+              "Colour", in.paint_target_density);
+        a = ImVec2(x0 + hw + 4, y);
+        if (hit("##yPd", a, ImVec2(hw, 22), &hv, &held)) { in.paint_target_density = true; in.color_pick_active = false; }
+        gloss_tile(dl, a, ImVec2(a.x + hw, a.y + 22), 3.0f, in.paint_target_density, hv, held);
+        ImVec2 s2 = ysize(true, 10.0f, "Density");
+        ytext(dl, true, 10.0f, ImVec2(a.x + (hw - s2.x) * 0.5f, a.y + 5), in.paint_target_density ? y2k::on_text : y2k::text,
+              "Density", !in.paint_target_density);
+        y += 30;
+        ImGui::SetCursorScreenPos(ImVec2(x0, y));
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4, 4));
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6, 6));
+        if (!in.paint_target_density) {
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(13, 13));
+            ImGui::ColorEdit3("##ypaintA", in.paint_color, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel);
+            ImGui::SameLine();
+            ImGui::ColorEdit3("##ypaintB", in.paint_color_alt, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel);
+            ImGui::PopStyleVar();
+            y += 34;
+            ytext(dl, false, 10.0f, ImVec2(x0, y), in.color_pick_active ? y2k::amber : y2k::muted,
+                  in.color_pick_active ? "Picking..." : "Q/E swap  C pick", false);
+        } else {
+            ImGui::PushFont(nullptr, 10.0f);
+            ImGui::SetNextItemWidth(w);
+            ImGui::SliderFloat("##ydC", &in.density_coarse_mult, 1.0f, 4.0f, "green x%.2f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Remesh edge length where painted green (coarse)");
+            ImGui::SetNextItemWidth(w);
+            ImGui::SliderFloat("##ydF", &in.density_fine_mult, 0.2f, 1.0f, "red x%.2f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Remesh edge length where painted red (dense)");
+            ImGui::PopFont();
+        }
+        ImGui::PopStyleVar(2);
+    }
+    if (mode == InputState::InteractionMode::INSERT) {
+        ytext(dl, true, 11.0f, ImVec2(x0 + 2, y), y2k::label, "Shape");
+        y += 18;
+        static const struct { const char* id; int kind; const char* tip; InputState::InsertShape s; } shapes[] = {
+            {"##ySh0", 0, "Sphere", InputState::InsertShape::SPHERE},
+            {"##ySh1", 1, "Box", InputState::InsertShape::BOX},
+            {"##ySh2", 2, "Cylinder", InputState::InsertShape::CYLINDER},
+        };
+        const float sw = (w - 8.0f) / 3.0f;
+        for (int i = 0; i < 3; i++) {
+            ImVec2 a(x0 + i * (sw + 4.0f), y);
+            bool hv, held;
+            if (hit(shapes[i].id, a, ImVec2(sw, 36), &hv, &held)) in.insert_shape = shapes[i].s;
+            bool on = in.insert_shape == shapes[i].s;
+            gloss_tile(dl, a, ImVec2(a.x + sw, a.y + 36), 4.0f, on, hv, held);
+            ImVec2 c(a.x + sw * 0.5f, a.y + 18);
+            ImU32 col = on ? y2k::on_text : y2k::text;
+            if (shapes[i].kind == 0) { dl->AddCircle(c, 9.0f, col, 0, 1.6f); dl->AddEllipse(c, ImVec2(9, 3), col, 0, 0, 1.2f); }
+            else if (shapes[i].kind == 1) draw_icon(dl, Icon::ModeInsert, c, 22.0f, col);
+            else {
+                dl->AddEllipse(ImVec2(c.x, c.y - 7), ImVec2(7, 2.6f), col, 0, 0, 1.5f);
+                dl->AddLine(ImVec2(c.x - 7, c.y - 7), ImVec2(c.x - 7, c.y + 7), col, 1.5f);
+                dl->AddLine(ImVec2(c.x + 7, c.y - 7), ImVec2(c.x + 7, c.y + 7), col, 1.5f);
+                dl->AddEllipse(ImVec2(c.x, c.y + 7), ImVec2(7, 2.6f), col, 0, 0, 1.5f);
+            }
+            if (hv) tooltip(a, ImVec2(a.x + sw, a.y + 36), TipSide::Right, shapes[i].tip, nullptr);
+        }
+        y += 44;
+        ytext(dl, false, 10.0f, ImVec2(x0, y), y2k::muted, "Click the model", false);
+    }
+    if (mode == InputState::InteractionMode::SELECT) {
+        ytext(dl, false, 10.0f, ImVec2(x0, y), y2k::muted, "Click to pick,", false);
+        ytext(dl, false, 10.0f, ImVec2(x0, y + 13), y2k::muted, "drag to move.", false);
+        ytext(dl, false, 10.0f, ImVec2(x0, y + 26), y2k::muted, "Q / E rotate.", false);
+    }
+    end_shelf();
+}
+
+void y2k_right(InputState& in, int W, int H, MultiresInfo mres) {
+    const float h = (float)H - kTopH - kBotH, x = (float)W - kRightW;
+    if (!begin_shelf("##yRight", ImVec2(x, kTopH), ImVec2(kRightW, h))) { end_shelf(); return; }
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    hgrad(dl, ImVec2(x, kTopH), ImVec2(x + kRightW, kTopH + h), IM_COL32(0x3B, 0x3B, 0x3F, 255), IM_COL32(0x4A, 0x4A, 0x4E, 255));
+    dl->AddLine(ImVec2(x + 0.5f, kTopH), ImVec2(x + 0.5f, kTopH + h), y2k::edge);
+    dl->AddLine(ImVec2(x + kRightW - 0.5f, kTopH), ImVec2(x + kRightW - 0.5f, kTopH + h), IM_COL32(255, 255, 255, 31));
+
+    struct C { const char* id; const char* name; const char* tip; const char* key; Icon icon; bool sep; };
+    const C cmds[] = {
+        {"##yUndo", "Undo", "Undo", "Ctrl+Z", Icon::CmdUndo, false},
+        {"##yRedo", "Redo", "Redo", "Ctrl+Shift+Z", Icon::CmdRedo, false},
+        {"##yUp",   "Divide", "Subdivision up", "Ctrl+D", Icon::CmdLevelUp, true},
+        {"##yDn",   "Lower", "Subdivision down", "Shift+D", Icon::CmdLevelDown, false},
+        {"##yMrg",  "Merge", "SDF merge", "J", Icon::CmdMerge, false},
+        {"##yMir",  "Mirror X", "Mirror X", "X", Icon::ViewMirrorX, true},
+        {"##yVis",  "Paint", in.paint_visible ? "Paint shown while sculpting" : "Paint hidden while sculpting",
+                    nullptr, in.paint_visible ? Icon::ViewPaintShow : Icon::ViewPaintHide, false},
+        {"##ySave", "Save", "Save", "Ctrl+S", Icon::CmdSave, true},
+        {"##ySavI", "Save +", "Save numbered copy", nullptr, Icon::CmdSaveCopy, false},
+        {"##yOpen", "Open", "Open", "Ctrl+O", Icon::CmdOpen, false},
+        {"##yExp",  "Export", "Export", "Ctrl+E", Icon::CmdExport, false},
+        {"##yKeys", "Keys", "Shortcuts", nullptr, Icon::UiShortcuts, true},
+        {"##yMenu", "Menu", "Menu", nullptr, Icon::UiMenu, false},
+    };
+    const int n = (int)(sizeof cmds / sizeof cmds[0]);
+    int nsep = 0;
+    for (const C& c : cmds) nsep += c.sep ? 1 : 0;
+    const float bh = std::max(30.0f, std::min(48.0f, (h - 20.0f - nsep * 14.0f) / n - 4.0f));
+    const float bx = x + 8.0f, bw = kRightW - 16.0f;
+    float y = kTopH + 10.0f, menu_y = y;
+    for (int i = 0; i < n; i++) {
+        const C& c = cmds[i];
+        if (c.sep) {
+            dl->AddLine(ImVec2(bx + 4, y + 5.5f), ImVec2(bx + bw - 4, y + 5.5f), y2k::well);
+            dl->AddLine(ImVec2(bx + 4, y + 6.5f), ImVec2(bx + bw - 4, y + 6.5f), IM_COL32(255, 255, 255, 26));
+            y += 14.0f;
+        }
+        bool enabled = (i == 2 || i == 3) ? in.mesh_locked : true;
+        bool on = (i == 5 && in.mirror_x) || (i == 11 && ImGui::IsPopupOpen("##helppopup")) ||
+                  (i == 12 && ImGui::IsPopupOpen("##burgermenu"));
+        bool hv, held;
+        ImVec2 a(bx, y), b(bx + bw, y + bh);
+        bool clicked = hit(c.id, a, ImVec2(bw, bh), &hv, &held, enabled);
+        gloss_tile(dl, a, b, 5.0f, on, hv && enabled, held);
+        ImU32 col = on ? y2k::on_text : (enabled ? IM_COL32(0xEC, 0xEC, 0xEC, 255) : IM_COL32(0x80, 0x80, 0x84, 255));
+        const float ip = bh >= 40.0f ? 20.0f : 16.0f;
+        ImVec2 ns = ysize(true, 10.0f, c.name);
+        float stack = ip + 3.0f + ns.y;
+        draw_icon(dl, c.icon, ImVec2((a.x + b.x) * 0.5f, a.y + (bh - stack) * 0.5f + ip * 0.5f), ip, col);
+        ytext(dl, true, 10.0f, ImVec2((a.x + b.x - ns.x) * 0.5f, a.y + (bh - stack) * 0.5f + ip + 3.0f), col, c.name, !on);
+        if (hv) tooltip(a, b, TipSide::Left, c.tip, c.key);
+        if (i == 12) menu_y = y;
+        if (clicked) {
+            switch (i) {
+                case 0: in.undo_requested = true; break;
+                case 1: in.redo_requested = true; break;
+                case 2: in.level_switch_delta = +1; break;
+                case 3: in.level_switch_delta = -1; break;
+                case 4: in.voxel_merge_confirm_pending = true; break;
+                case 5: in.mirror_x = !in.mirror_x; break;
+                case 6: in.paint_visible = !in.paint_visible; break;
+                case 7: in.save_requested = true; break;
+                case 8: in.save_incremental_requested = true; break;
+                case 9: in.import_dialog_active = true; break;
+                case 10: in.export_dialog_active = true; break;
+                case 11: ImGui::OpenPopup("##helppopup"); break;
+                case 12: ImGui::OpenPopup("##burgermenu"); break;
+            }
+        }
+        y += bh + 4.0f;
+    }
+    (void)mres;
+    if (!in.help_seen) { in.help_seen = true; ImGui::OpenPopup("##helppopup"); }
+
+    static bool prev_menu_open = false;
+    bool menu_open = ImGui::IsPopupOpen("##burgermenu");
+    bool sync_tabs = menu_open && !prev_menu_open;
+    prev_menu_open = menu_open;
+    in.settings_menu_open = menu_open;
+    // The menu opens out of the shelf to the left, bottom-aligned with the button.
+    ImGui::SetNextWindowPos(ImVec2(x - 6.0f, menu_y + bh), ImGuiCond_Always, ImVec2(1, 1));
+    ImGui::SetNextWindowSizeConstraints(ImVec2(300, 0), ImVec2(FLT_MAX, (float)H - kBotH - 16.0f));
+    if (begin_skin_popup("##burgermenu", ImVec2(12, 12))) {
+        draw_settings_menu_items(in, mres, sync_tabs);
+        end_skin_popup();
+    }
+    draw_help_popup(in, W, H);
+    end_shelf();
+}
+
+void y2k_bottom(const InputState& in, int W, int H, MultiresInfo mres, const SkinStats& st) {
+    const float y0 = (float)H - kBotH;
+    if (!begin_shelf("##yBottom", ImVec2(0, y0), ImVec2((float)W, kBotH))) { end_shelf(); return; }
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    vgrad(dl, ImVec2(0, y0), ImVec2((float)W, (float)H), IM_COL32(0x3A, 0x3A, 0x3E, 255), IM_COL32(0x2A, 0x2A, 0x2D, 255));
+    dl->AddLine(ImVec2(0, y0 + 0.5f), ImVec2((float)W, y0 + 0.5f), y2k::edge);
+    dl->AddLine(ImVec2(0, y0 + 1.5f), ImVec2((float)W, y0 + 1.5f), IM_COL32(255, 255, 255, 26));
+    const float cy = y0 + kBotH * 0.5f;
+    float x = 10.0f;
+    auto seg = [&](const char* label, const char* value, ImU32 vcol, const char* tail, bool sep_after) {
+        x += 12.0f;
+        ImVec2 ls = ysize(false, 11.0f, label);
+        ytext(dl, false, 11.0f, ImVec2(x, cy - ls.y * 0.5f), y2k::text, label);
+        x += ls.x + 4.0f;
+        ImVec2 vs = ysize(true, 11.0f, value);
+        ytext(dl, true, 11.0f, ImVec2(x, cy - vs.y * 0.5f), vcol, value);
+        x += vs.x;
+        if (tail) {
+            ImVec2 ts = ysize(false, 11.0f, tail);
+            ytext(dl, false, 11.0f, ImVec2(x + 4.0f, cy - ts.y * 0.5f), y2k::text, tail);
+            x += 4.0f + ts.x;
+        }
+        x += 12.0f;
+        if (sep_after) dl->AddLine(ImVec2(x + 0.5f, cy - 7), ImVec2(x + 0.5f, cy + 7), IM_COL32(0x55, 0x55, 0x55, 255));
+    };
+    char tris[24], verts[24], lvl[12], of[16];
+    fmt_thousands(tris, sizeof tris, st.tris);
+    fmt_thousands(verts, sizeof verts, st.verts);
+    std::snprintf(lvl, sizeof lvl, "%d", st.level);
+    if (mres.locked) std::snprintf(of, sizeof of, "of %d", mres.lmax); else of[0] = '\0';
+    seg("Tris", tris, y2k::text, nullptr, true);
+    seg("Verts", verts, y2k::text, nullptr, true);
+    seg("Level", lvl, y2k::text, of[0] ? of : nullptr, true);
+    seg("Mirror", !in.mirror_x ? "Off" : in.mirror_topological ? "Topological" : "World",
+        in.mirror_x ? y2k::amber : y2k::muted, nullptr, true);
+    seg("Normals", in.fast_normals ? "Fast" : "Interpolated", y2k::text, nullptr, false);
+    if (in.show_fps) {
+        char f[16]; std::snprintf(f, sizeof f, "%.0f fps", st.fps);
+        ImVec2 fs = ysize(false, 11.0f, f);
+        ytext(dl, false, 11.0f, ImVec2((float)W - 22.0f - fs.x, cy - fs.y * 0.5f), y2k::muted, f);
+    }
+    end_shelf();
+}
+
+// The viewport sits sunk into the shelves: dark rim, inner top shadow, a lit lip below.
+void y2k_bevel(int W, int H) {
+    ImDrawList* dl = ImGui::GetBackgroundDrawList();
+    ImVec2 a(kLeftW, kTopH), b((float)W - kRightW, (float)H - kBotH);
+    dl->AddRectFilledMultiColor(a, ImVec2(b.x, a.y + 8), IM_COL32(0, 0, 0, 140), IM_COL32(0, 0, 0, 140),
+                                IM_COL32(0, 0, 0, 0), IM_COL32(0, 0, 0, 0));
+    dl->AddRectFilledMultiColor(a, ImVec2(a.x + 5, b.y), IM_COL32(0, 0, 0, 90), IM_COL32(0, 0, 0, 0),
+                                IM_COL32(0, 0, 0, 0), IM_COL32(0, 0, 0, 90));
+    dl->AddRect(ImVec2(a.x - 0.5f, a.y - 0.5f), ImVec2(b.x + 0.5f, b.y + 0.5f), IM_COL32(0x12, 0x12, 0x14, 255));
+    dl->AddLine(ImVec2(a.x, b.y - 0.5f), ImVec2(b.x, b.y - 0.5f), IM_COL32(255, 255, 255, 20));
+}
+
+void draw_y2k_ui(InputState& input, int W, int H, const AlphaLibrary* lib, MultiresInfo mres,
+                 const SkinStats& st) {
+    y2k_bevel(W, H);
+    y2k_top(input, W, st);
+    y2k_left(input, H, lib);
+    y2k_right(input, W, H, mres);
+    y2k_bottom(input, W, H, mres, st);
 }
 
 void viewfinder(int win_w, int win_h) {
@@ -1384,6 +2101,60 @@ void ui_skin_load_fonts() {
     std::snprintf(mc.Name, sizeof mc.Name, "IBM Plex Mono (DOS fallback)");
     io.Fonts->AddFontFromMemoryTTF((void*)k_font_IBMPlexMono_Regular, k_font_IBMPlexMono_Regular_size,
                                    16.0f, &mc);
+    // Y2K: Verdana is what board E calls for, but it is Microsoft's and can't ship
+    // with Chisel, so it is borrowed from the OS when present. DejaVu Sans (a Vera
+    // descendant, close in width and feel) is the usual Linux stand-in; failing both,
+    // the skin falls back to Plex. Nothing found on the web build, by design.
+    {
+        std::string win;
+        if (const char* wd = std::getenv("WINDIR")) win = std::string(wd) + "\\Fonts\\";
+        const std::string reg[] = {
+            win + "verdana.ttf",
+            "/usr/share/fonts/truetype/msttcorefonts/Verdana.ttf",
+            "/usr/share/fonts/TTF/verdana.ttf",
+            "/System/Library/Fonts/Supplemental/Verdana.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/TTF/DejaVuSans.ttf",
+            "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
+        };
+        const std::string bld[] = {
+            win + "verdanab.ttf",
+            "/usr/share/fonts/truetype/msttcorefonts/Verdana_Bold.ttf",
+            "/usr/share/fonts/TTF/verdanab.ttf",
+            "/System/Library/Fonts/Supplemental/Verdana Bold.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans-Bold.ttf",
+        };
+        auto load_first = [&](const std::string* paths, int n, const char* name) -> ImFont* {
+            for (int i = 0; i < n; i++) {
+                if (paths[i].empty() || paths[i][0] == '\\') continue;
+                FILE* f = std::fopen(paths[i].c_str(), "rb");
+                if (!f) continue;
+                std::fseek(f, 0, SEEK_END);
+                long sz = std::ftell(f);
+                std::fseek(f, 0, SEEK_SET);
+                if (sz <= 0 || sz > (32L << 20)) { std::fclose(f); continue; }
+                unsigned char* buf = (unsigned char*)IM_ALLOC((size_t)sz);   // atlas frees it
+                size_t got = std::fread(buf, 1, (size_t)sz, f);
+                std::fclose(f);
+                if (got != (size_t)sz) { IM_FREE(buf); continue; }
+                ImFontConfig yc;
+                yc.OversampleH = 2;
+                yc.ExtraSizeScale = em_correction(buf, (int)sz);
+                std::snprintf(yc.Name, sizeof yc.Name, "%s", name);
+                if (ImFont* font = io.Fonts->AddFontFromMemoryTTF(buf, (int)sz, 12.0f, &yc)) return font;
+            }
+            return nullptr;
+        };
+        g_y2k_font = load_first(reg, (int)(sizeof reg / sizeof reg[0]), "Y2K regular");
+        g_y2k_bold = load_first(bld, (int)(sizeof bld / sizeof bld[0]), "Y2K bold");
+        if (!g_y2k_font) g_y2k_font = g_fonts[(int)UiFont::Sans];
+        if (!g_y2k_bold) g_y2k_bold = g_fonts[(int)UiFont::SansSemibold];
+    }
+
 }
 
 void ui_skin_begin_frame(const InputState& input) {
@@ -1411,13 +2182,18 @@ void ui_skin_begin_frame(const InputState& input) {
                 io.FontDefault = g_bitmap_font;
                 s.FontSizeBase = 16.0f;
                 break;
+            case InputState::UiSkin::Y2K:
+                apply_y2k_style();
+                io.FontDefault = g_y2k_font;
+                s.FontSizeBase = 12.0f;
+                break;
             case InputState::UiSkin::CLASSIC:
                 io.FontDefault = g_classic_font;
                 s.FontSizeBase = 13.0f;
                 break;
         }
         s.HoverDelayNormal = hn; s.HoverDelayShort = hs;
-        set_theme(want == InputState::UiSkin::DOS);
+        set_theme(want == InputState::UiSkin::DOS, want == InputState::UiSkin::Y2K);
         g_active_skin = want;
     }
     g_mat = material_from(input);
@@ -1427,7 +2203,7 @@ ImFont* ui_skin_font(UiFont f) {
     return g_active_skin == InputState::UiSkin::CLASSIC ? nullptr : F(f);
 }
 
-float ui_skin_menu_item_width(float w) { return g_dos ? w * 2.2f : w; }
+float ui_skin_menu_item_width(float w) { return g_dos ? w * 2.2f : (g_y2k ? w * 1.2f : w); }
 
 void ui_skin_backdrop_params(const InputState& input, float* blur_px, float* saturate) {
     float m = std::max(0.0f, std::min(1.0f, input.ui_material / 100.0f));
@@ -1442,9 +2218,10 @@ void ui_skin_popup_background() {
 
 void draw_appearance_menu_items(InputState& input) {
     ImFont* semi = ui_skin_font(UiFont::SansSemibold);
-    if (semi) ImGui::PushFont(semi, g_dos ? 0.0f : 11.0f);
-    if (g_dos) ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.333f, 1.0f), "APPEARANCE");
-    else       ImGui::TextDisabled("APPEARANCE");
+    if (semi) ImGui::PushFont(semi, (g_dos || g_y2k) ? 0.0f : 11.0f);
+    if (g_dos)      ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.333f, 1.0f), "APPEARANCE");
+    else if (g_y2k) ImGui::TextColored(ImVec4(1.0f, 0.70f, 0.28f, 1.0f), "Appearance");
+    else            ImGui::TextDisabled("APPEARANCE");
     if (semi) ImGui::PopFont();
 
     int skin = (int)input.ui_skin;
@@ -1453,6 +2230,10 @@ void draw_appearance_menu_items(InputState& input) {
     ImGui::RadioButton("DOS", &skin, (int)InputState::UiSkin::DOS);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Chisel's own 8x8 font, the CGA palette and pixel icons.");
+    ImGui::SameLine();
+    ImGui::RadioButton("2000s", &skin, (int)InputState::UiSkin::Y2K);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Early-2000s 3D app: docked shelves, glossy tiles, orange.");
     ImGui::SameLine();
     ImGui::RadioButton("Classic", &skin, (int)InputState::UiSkin::CLASSIC);
     if (ImGui::IsItemHovered())
@@ -1496,17 +2277,22 @@ void draw_appearance_menu_items(InputState& input) {
 
 void draw_modern_ui(InputState& input, int win_w, int win_h, const AlphaLibrary* alpha_lib,
                     MultiresInfo mres, const SkinStats& stats) {
-    g_motion = !g_dos && input.ui_motion && !os_reduced_motion();   // DOS doesn't bounce
-    if (input.ui_viewfinder) viewfinder(win_w, win_h);
+    // DOS and Y2K don't bounce: neither era did.
+    g_motion = !g_dos && !g_y2k && input.ui_motion && !os_reduced_motion();
 
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
-    rail(input, win_h, alpha_lib);
-    file_panel(input, stats);
-    command_panel(input, win_w, win_h, mres, stats);
-    float bh = brush_panel(input, win_h);
-    options_panel(input, win_h, bh);
-    status_panel(input, win_w, win_h, stats, g_brush_right, bh);
-    ImGui::PopStyleVar();
+    if (g_y2k) {
+        draw_y2k_ui(input, win_w, win_h, alpha_lib, mres, stats);
+    } else {
+        if (input.ui_viewfinder) viewfinder(win_w, win_h);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+        rail(input, win_h, alpha_lib);
+        file_panel(input, stats);
+        command_panel(input, win_w, win_h, mres, stats);
+        float bh = brush_panel(input, win_h);
+        options_panel(input, win_h, bh);
+        status_panel(input, win_w, win_h, stats, g_brush_right, bh);
+        ImGui::PopStyleVar();
+    }
 
     // Paint colour wheel at the cursor on right-click (same trigger as classic).
     {

@@ -2,6 +2,32 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-03 — 2000s skin (docked shelves, gloss, orange)
+
+*Built and screenshot-checked on Windows (Intel Arc), GL; native WebGPU built and run.*
+
+**Menu → Appearance → 2000s** is the handoff's board E: an homage to the docked-shelf 3D
+apps of the early 2000s, with no copied layout or branding. Unlike DOS, it has its own
+layout (`draw_y2k_ui` in `ui_skin.cpp`):
+- **Top shelf:** a title strip (CHISEL, version, file name + `*`, a drag hint), then the
+  mode switcher in an inset well, four Size/Strength/Hardness/Spacing sliders you can
+  click or drag right there, and an Autosmooth checkbox. The sliders write through to
+  the per-brush settings the same way the hold-key drag does.
+- **Left shelf:** a big orange current-tool tile, the brushes in a two-column grid of
+  glossy two-tone tiles, the alpha (opens the shared alpha picker), and the tool's
+  options (Clay melt, Paint colour/density, Insert shapes, Select hints).
+- **Right shelf:** labelled command tiles (Undo, Redo, Divide, Lower, Merge, Mirror X,
+  Paint, Save, Save +, Open, Export, Keys, Menu). They shrink to fit short windows; the
+  menu opens out of the shelf.
+- **Bottom bar:** Tris, Verts, Level N of M, Mirror (amber when on), Normals, fps.
+- **Other details:** an inset bevel around the viewport, pale-yellow tooltips, and a
+  brushed-gray ImGui style.
+- **Type:** Verdana where the OS has it (it isn't redistributable, so it's loaded from the
+  system, not embedded), else DejaVu Sans, else Plex. The web build gets Plex.
+
+The 3D view still renders full-window behind the shelves; it isn't shrunk to the space
+between them.
+
 ## 2026-10-03 — DOS skin (CGA + bitmap font)
 
 *Built and screenshot-checked on Windows (Intel Arc), GL and native WebGPU.*

@@ -183,13 +183,15 @@ struct InputState {
 
     // Appearance (burger menu). The modern skin is the default; Classic brings back
     // the original button islands and the bitmap-font HUD; DOS is the modern layout
-    // dressed in Chisel's own 8x8 font, CGA colours and pixel icons. The material and
+    // dressed in Chisel's own 8x8 font, CGA colours and pixel icons; Y2K is the
+    // early-2000s 3D-app homage (opaque docked shelves on every edge, glossy two-tone
+    // tiles, an orange slider shelf). The material and
     // motion only affect the modern skin: panel material runs 0 = clear glass (thin
     // tint, strong backdrop blur) to 100 = solid (opaque, no blur pass at all); springy
     // motion is the press squash / menu pop / bar easing, and is also skipped when the
     // OS asks for reduced motion. Viewfinder corners (four thin L-marks framing the
     // work area) apply to Modern and DOS.
-    enum class UiSkin { MODERN = 0, CLASSIC = 1, DOS = 2 };
+    enum class UiSkin { MODERN = 0, CLASSIC = 1, DOS = 2, Y2K = 3 };
     UiSkin ui_skin      = UiSkin::MODERN;
     bool  ui_classic() const { return ui_skin == UiSkin::CLASSIC; }
     float ui_material   = 45.0f;
