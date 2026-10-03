@@ -632,8 +632,8 @@ void read_target_region(Device&, OffscreenTarget& t, uint32_t attachment,
 // build needs them), so only the timing changes: dab lists now land a frame or so
 // later on GL, exactly as they always have on WebGPU.
 //
-// Texture reads (read_target_region_async, the screen-buffer plane cache) are
-// asynchronous the same way: glReadPixels into a staging buffer bound as the pixel
+// Texture reads (read_target_region_async, the screen-buffer plane cache) are, on
+// Windows only, asynchronous the same way (elsewhere they stay synchronous, see there): glReadPixels into a staging buffer bound as the pixel
 // pack buffer, then a fence. A synchronous full-screen glReadPixels of the three
 // planes cost ~235 ms on Intel Arc / Windows (177 MB/s, tools/glbench --readback) —
 // the "freeze" after every orbit and pen-up; through a pack buffer the kick is
@@ -739,6 +739,23 @@ ReadTicket read_target_region_async(Device& dev, OffscreenTarget& t, uint32_t at
         x < 0 || y < 0 || w <= 0 || h <= 0 ||
         x + w > t.width || y + h > t.height)
         return 0;
+#ifndef _WIN32
+    // Everywhere but Windows the read stays synchronous. On Mesa the full three-plane
+    // read is 14.5 ms and the planes are usable the same frame; through a pack buffer
+    // they land ~60-80 ms later (tools/glbench --readback, Arc B570, Mesa 26.2), and
+    // for those 5-6 frames after every pen-up and orbit the press latch (sculpt vs
+    // orbit) and the cursor normal run on stale data — it felt "cranky". The async path
+    // below only pays off on Intel's Windows driver, where the sync read is 235 ms.
+    {
+        GlTicket tk;
+        tk.data.resize((size_t)texformat_out_bpp(t.color_fmt[attachment]) * w * h);
+        tk.size = tk.data.size();
+        read_target_region(dev, t, attachment, x, y, w, h, tk.data.data());
+        uint32_t id = ticket_new_id();
+        g_gl_tickets.emplace(id, std::move(tk));
+        return id;
+    }
+#endif
     (void)dev;
     GLint internal; GLenum fmt, type;
     gl_tex_format(t.color_fmt[attachment], internal, fmt, type);

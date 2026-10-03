@@ -182,9 +182,10 @@ struct Renderer {
     // on BOTH backends. render_screen_buffers kicks an async full-plane read of
     // depth/normal/triid and every sample_* indexes the CPU copy (false = cache not
     // landed yet / out of bounds — caller keeps its last value or skips the dab).
-    // poll_plane_reads() lands it a frame or two later on both backends (a blocking
-    // read is a full GPU sync, a fatal suspend on web, and ~235 ms of frozen frame
-    // on GL/Intel Windows). One full-screen read per refresh instead of 4–5
+    // poll_plane_reads() lands it a frame or two later on WebGPU and GL/Windows (a
+    // blocking read is a full GPU sync, a fatal suspend on web, and ~235 ms of frozen
+    // frame on GL/Intel Windows); GL elsewhere reads synchronously (14.5 ms on Mesa)
+    // and lands it the same frame — see gl_backend.cpp read_target_region_async. One full-screen read per refresh instead of 4–5
     // glReadPixels stalls per dab (which is what set_anchor used to cost, see
     // dab-readback-perf-handoff.md).
     void poll_plane_reads();                          // call once per frame

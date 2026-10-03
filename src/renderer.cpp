@@ -2108,8 +2108,8 @@ void Renderer::render_screen_buffers(const Camera& cam, int w, int h) {
     plane_kick_w = w; plane_kick_h = h;
     plane_pending = true;
 
-    // Normally nothing is ready yet (both backends read asynchronously); this no-ops
-    // and the per-frame poll lands them a frame or two later.
+    // On WebGPU and GL/Windows nothing is ready yet and this no-ops (the per-frame poll
+    // lands them a frame or two later); GL elsewhere reads synchronously, so it lands here.
     poll_plane_reads();
 }
 
