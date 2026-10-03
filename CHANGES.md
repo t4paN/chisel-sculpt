@@ -2,7 +2,38 @@
 
 Short, chronological log of notable changes. Newest on top.
 
-## 2026-09-28 — Slider drags lock the pen cursor (with OTD Relative Pen Mode)
+## 2026-10-02 — v0.2.25 — Chisel runs on Windows again (Intel Arc)
+
+*Found and fixed on a Windows dual-boot of the dev desktop (Arc B570, Intel GL driver
+32.0.101.9033). Merged into main on Linux 2026-10-03: all three targets build, every GL
+kernel compiles under Mesa with no packing warnings, and the user hand-tested GL
+sculpting on Linux. Full write-up: `windows-perf-handoff.md`.*
+
+**v0.2.24 crashed at launch on every Windows machine.** `debug_console::init` called
+`setvbuf(stdout, nullptr, _IOLBF, 0)`. glibc accepts a size of 0; the MS CRT treats it as
+an invalid parameter and kills the process before the first log line. Now `_IONBF` on
+`_WIN32`. The bug arrived with the `~` console, which is why v0.2.20 ran and v0.2.24
+didn't.
+
+**On the Windows GL build most compute kernels were dead.** Intel's Windows driver allows
+16 SSBO bindings (the spec only promises 8), and our binding ids go up to ~50, so any
+kernel that declared a high id failed to compile. Brushes, cascade and remesh fell back
+to the CPU or did nothing. `gl_backend.cpp` now packs each kernel's SSBO bindings into
+slots 0..n-1 at compile time and binds through that map. This happens on Linux too, so
+the shaders stay the same. A kernel that declares an SSBO its layout doesn't list now
+prints a `[gpu] warning`, so it gets noticed instead of reading a stale slot.
+
+**Native WebGPU gets a Win32 surface** (`wgpu_window.cpp`, `main.cpp`). It was X11/Wayland
+only.
+
+**`CHISEL_PERF` frame-time recorder** (`bench.cpp`) plus `tools/perf.ps1` to run it on
+Windows.
+
+**Still open:** on Windows GL every pen-up, press and level switch freezes one frame for
+~250 ms. That is the synchronous pick-plane `glReadPixels`, and Intel's Windows driver
+does it at ~160 MB/s. WebGPU does the same read asynchronously and stays smooth.
+
+## 2026-09-28 — v0.2.25 — Slider drags lock the pen cursor (with OTD Relative Pen Mode)
 
 *Hand-tested by the user on the native GL build: "sweet af". The log shows 9 pen drags,
 each one locked and released on request.*
@@ -30,7 +61,7 @@ The contract is in `~/Projects/CHISEL/otd-relative-pen-plugin.md`.
   closes it, and closing is also how the plugin releases a lock, so nothing can stay
   frozen.
 
-## 2026-09-28 — The pen works on native Wayland (tablet protocol)
+## 2026-09-28 — v0.2.25 — The pen works on native Wayland (tablet protocol)
 
 *Hand-tested by the user on both native builds, GL and WebGPU (KDE Wayland, KWin 6.7.5,
 One by Wacom through OpenTabletDriver's "Relative Pen Mode" plugin): the ring follows the
@@ -76,7 +107,7 @@ compared the mouse against the drag start, so a pen drag always "failed" it, bla
 wrong thing. It now only runs when GLFW's virtual position moved during the drag, which
 means the mouse did the dragging.
 
-## 2026-09-27 — Pen pressure with OpenTabletDriver and on native Wayland
+## 2026-09-27 — v0.2.25 — Pen pressure with OpenTabletDriver and on native Wayland
 
 *Hand-tested by the user on the native GL build (KDE Wayland, One by Wacom CTL-672, OTD
 relative mode): pressure works, and the profile switches Tablet ↔ Mouse correctly.*
@@ -108,7 +139,7 @@ checked byte-for-byte on the user's tablet. Details:
 
 Windows (WinTab) and the web build (PointerEvent) are untouched. All three targets build.
 
-## 2026-09-26 — Space is real fullscreen on the desktop build
+## 2026-09-26 — v0.2.25 — Space is real fullscreen on the desktop build
 
 *Hand-tested by the user on KDE Wayland.*
 
