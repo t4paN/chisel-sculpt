@@ -2,6 +2,28 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-03 — GL 4.3 context; driver error reports on in every GL build
+
+*User-confirmed on native GL (Linux, Mesa 26.2 on the Arc B570). A throwaway test made
+deliberate GL errors through the same callback: each distinct message printed, and a
+repeated one was muted after 3. The app itself prints no `[GL]` lines at startup in
+either mode.*
+
+**The GL window asks for a 4.3 core context instead of 3.3.** Every compute kernel is
+`#version 430`, which a 3.3 context only ran through extensions, outside the spec. 4.3
+makes compute, SSBOs and KHR_debug core. A driver without 4.3 gets the 3.3 window as
+before, with a `[gl]` line, and the GPU brush paths gate off the usual way.
+
+**The driver's own error reports are on in every native GL build, not just
+`CHISEL_DEBUG` ones** (`chisel_debug.h`). Nobody tests Chisel on NVIDIA, and on a GPU
+nobody tests, the driver saying "that's an error / that's undefined" is the next best
+thing. The default level only reports errors, undefined behaviour, portability and
+deprecation, asynchronously, so a healthy run prints nothing and costs nothing.
+`CHISEL_GL_DEBUG=1` adds performance and other messages, makes output synchronous, and
+asks for a debug context. Each distinct message prints at most 3 times. The cap is keyed
+on the message text, not the id: Mesa reuses id 1 for unrelated errors, and the first
+version's id cap hid a second, different error behind the first.
+
 ## 2026-10-02 — v0.2.25 — Chisel runs on Windows again (Intel Arc)
 
 *Found and fixed on a Windows dual-boot of the dev desktop (Arc B570, Intel GL driver

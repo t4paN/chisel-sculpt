@@ -444,9 +444,22 @@ int main(int argc, char* argv[]) {
 #ifdef CHISEL_BACKEND_WEBGPU
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);  // WebGPU owns the surface; no GL context
 #else
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+    // GL 4.3 is where compute shaders and SSBOs became core, and the kernels are
+    // all #version 430. On a 3.3 context they ran through extensions, outside the
+    // spec. 4.3 also makes KHR_debug core, which init below relies on. A driver
+    // without 4.3 falls back to 3.3 at window creation (compute then gates off).
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+  #ifdef CHISEL_DEBUG
+    const bool gl_debug_verbose = true;
+  #else
+    const char* gl_debug_env = std::getenv("CHISEL_GL_DEBUG");
+    const bool gl_debug_verbose = gl_debug_env && gl_debug_env[0] == '1';
+  #endif
+    // A debug context makes some drivers (NVIDIA above all) report more, at a
+    // speed cost, so only the verbose mode asks for one.
+    if (gl_debug_verbose) glfwWindowHint(GLFW_OPENGL_DEBUG_CONTEXT, GLFW_TRUE);
 #endif
 
     // WM_CLASS must match StartupWMClass=Chisel in chisel.desktop so the running
@@ -476,6 +489,14 @@ int main(int argc, char* argv[]) {
 
     // Start windowed but maximized (easier for development)
     GLFWwindow* window = glfwCreateWindow(init_w, init_h, "Chisel", nullptr, nullptr);
+#ifdef CHISEL_BACKEND_GL
+    if (!window) {
+        std::printf("[gl] no GL 4.3 context, retrying with 3.3 (GPU brushes will be off)\n");
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+        window = glfwCreateWindow(init_w, init_h, "Chisel", nullptr, nullptr);
+    }
+#endif
     if (!window) {
         std::fprintf(stderr, "Failed to create window\n");
         glfwTerminate();
@@ -646,7 +667,7 @@ int main(int argc, char* argv[]) {
     std::printf("OpenGL %s\n", glGetString(GL_VERSION));
     std::printf("Renderer: %s\n", glGetString(GL_RENDERER));
 
-    chisel_init_gl_debug();   // synchronous KHR_debug output (CHISEL_DEBUG builds only)
+    chisel_init_gl_debug(gl_debug_verbose);   // driver error reports, see chisel_debug.h
     gpu::set_app_device(gpu::gl_device());
     // Capture SSBO size limits for the subdivision guard. GL 4.3 enum: on a plain
     // 3.3 context the query fails silently (GL_INVALID_ENUM) and the value keeps

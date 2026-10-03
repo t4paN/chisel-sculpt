@@ -67,17 +67,50 @@ inline void chisel_check_undo_entry(uint32_t vertex_offset, uint32_t mesh_vc,
 }
 
 // --- GL debug output ---
-// Call chisel_init_gl_debug() after gladLoadGL. Requires GL_KHR_debug or GL 4.3+.
-// Falls back to no-op on GL 3.3 without the extension, and on the WebGPU backend.
+// Call chisel_init_gl_debug(verbose) after gladLoadGL. Needs GL_KHR_debug, which
+// every GL 4.3 context has and most 3.3 ones advertise; without it this is a no-op.
+//
+// ON IN EVERY GL BUILD, not just CHISEL_DEBUG ones: we have no NVIDIA or Windows
+// AMD tester, and the driver's own "that's an error / that's undefined" messages
+// are the nearest thing to one. The default level is chosen to stay silent on a
+// healthy run: errors, undefined behaviour, portability and deprecation only,
+// asynchronous (synchronous output stalls the driver), and each message id prints
+// at most kGlDebugRepeat times so a per-frame fault can't flood the console.
+// verbose (CHISEL_GL_DEBUG=1, or a CHISEL_DEBUG build) adds performance/other
+// messages and makes output synchronous so it lands next to the call that caused it.
 
-#if defined(CHISEL_DEBUG) && defined(CHISEL_BACKEND_GL)
+#if defined(CHISEL_BACKEND_GL)
 #include <glad/glad.h>
+#include <mutex>
+
+static constexpr int kGlDebugRepeat = 3;
 
 inline void GLAPIENTRY chisel_gl_debug_callback(
     GLenum source, GLenum type, GLuint id, GLenum severity,
     GLsizei /*length*/, const GLchar* message, const void* /*userParam*/)
 {
     if (severity == GL_DEBUG_SEVERITY_NOTIFICATION) return;
+
+    // Cap repeats per distinct MESSAGE, not per id: Mesa reuses one id for
+    // unrelated errors, so an id cap hid the second fault behind the first.
+    // FNV-1a of the text, fixed table, no allocation. Async output can arrive on
+    // a driver thread, hence the lock. Once the table fills, new messages still
+    // print, they just aren't capped.
+    uint32_t key = 2166136261u ^ id;
+    for (const GLchar* c = message; c && *c; ++c) key = (key ^ (uint8_t)*c) * 16777619u;
+    static std::mutex mtx;
+    static uint32_t seen_key[64];
+    static int      seen_n[64];
+    static int      seen_count = 0;
+    int n = 0;
+    {
+        std::lock_guard<std::mutex> lk(mtx);
+        int k = 0;
+        while (k < seen_count && seen_key[k] != key) ++k;
+        if (k == seen_count && seen_count < 64) { seen_key[k] = key; seen_n[k] = 0; ++seen_count; }
+        if (k < seen_count) n = ++seen_n[k];
+    }
+    if (n > kGlDebugRepeat) return;
 
     const char* src_str = "?";
     switch (source) {
@@ -104,21 +137,40 @@ inline void GLAPIENTRY chisel_gl_debug_callback(
     }
     std::fprintf(stderr, "[GL %s][%s][%s] id=%u: %s\n",
                  sev_str, src_str, type_str, id, message);
+    if (n == kGlDebugRepeat)
+        std::fprintf(stderr, "[GL] that message repeated %d times, muting it\n", n);
 }
 
-inline void chisel_init_gl_debug() {
-    if (GLAD_GL_KHR_debug) {
-        glEnable(GL_DEBUG_OUTPUT);
-        glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS);
-        glDebugMessageCallback(chisel_gl_debug_callback, nullptr);
-        glDebugMessageControl(GL_DONT_CARE, GL_DONT_CARE,
-                              GL_DEBUG_SEVERITY_NOTIFICATION,
-                              0, nullptr, GL_FALSE);
-        std::printf("[debug] GL debug output enabled (KHR_debug)\n");
-    } else {
+inline void chisel_init_gl_debug(bool verbose) {
+    if (!GLAD_GL_KHR_debug) {
         std::printf("[debug] GL_KHR_debug not available, GL debug output disabled\n");
+        return;
     }
+    glEnable(GL_DEBUG_OUTPUT);
+    if (verbose) glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS);
+    glDebugMessageCallback(chisel_gl_debug_callback, nullptr);
+    // Filter at the driver, so muted classes cost nothing: start from nothing,
+    // then enable the classes we want.
+    glDebugMessageControl(GL_DONT_CARE, GL_DONT_CARE, GL_DONT_CARE, 0, nullptr, GL_FALSE);
+    const GLenum always[] = { GL_DEBUG_TYPE_ERROR, GL_DEBUG_TYPE_UNDEFINED_BEHAVIOR,
+                              GL_DEBUG_TYPE_PORTABILITY, GL_DEBUG_TYPE_DEPRECATED_BEHAVIOR };
+    for (GLenum t : always)
+        glDebugMessageControl(GL_DONT_CARE, t, GL_DONT_CARE, 0, nullptr, GL_TRUE);
+    if (verbose) {
+        glDebugMessageControl(GL_DONT_CARE, GL_DEBUG_TYPE_PERFORMANCE, GL_DONT_CARE, 0, nullptr, GL_TRUE);
+        glDebugMessageControl(GL_DONT_CARE, GL_DEBUG_TYPE_OTHER,       GL_DONT_CARE, 0, nullptr, GL_TRUE);
+    }
+    std::printf("[debug] GL debug output on (%s)\n",
+                verbose ? "verbose, synchronous" : "errors + undefined behaviour");
 }
+
+#else
+
+inline void chisel_init_gl_debug(bool) {}
+
+#endif
+
+#if defined(CHISEL_DEBUG) && defined(CHISEL_BACKEND_GL)
 
 inline void chisel_gl_label(GLenum type, GLuint obj, const char* name) {
     if (GLAD_GL_KHR_debug)
@@ -137,7 +189,6 @@ inline void chisel_gl_pop_group() {
 
 #else
 
-inline void chisel_init_gl_debug() {}
 inline void chisel_gl_label(unsigned, unsigned, const char*) {}
 inline void chisel_gl_push_group(const char*) {}
 inline void chisel_gl_pop_group() {}
