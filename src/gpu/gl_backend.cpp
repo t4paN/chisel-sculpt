@@ -654,6 +654,9 @@ struct GlTicket {
     // seam's top-down order while copying out
     uint32_t flip_rows = 0;
     size_t   row_bytes = 0;
+    // 16F textures are staged as RGBA half and expanded to `out_channels` floats at
+    // take time (see read_target_region_async); 0 = staged in the output layout
+    uint32_t out_channels = 0;
 };
 std::unordered_map<uint32_t, GlTicket> g_gl_tickets;
 uint32_t g_gl_next_ticket = 1;
@@ -702,6 +705,24 @@ void ticket_free(GlTicket& tk) {
     tk.staging = 0;
 }
 
+float half_to_float(uint16_t h) {
+    uint32_t sign = (uint32_t)(h & 0x8000) << 16;
+    uint32_t exp  = (h >> 10) & 0x1F;
+    uint32_t man  = h & 0x3FF;
+    uint32_t f;
+    if (exp == 0x1F)      f = sign | 0x7F800000u | (man << 13);          // inf / nan
+    else if (exp != 0)    f = sign | ((exp + 112) << 23) | (man << 13);  // normal
+    else if (man == 0)    f = sign;                                      // +-0
+    else {                                                               // subnormal
+        exp = 113;
+        while (!(man & 0x400)) { man <<= 1; exp--; }
+        f = sign | (exp << 23) | ((man & 0x3FF) << 13);
+    }
+    float out;
+    std::memcpy(&out, &f, 4);
+    return out;
+}
+
 uint32_t ticket_new_id() {
     uint32_t id = g_gl_next_ticket++;
     if (!g_gl_next_ticket) g_gl_next_ticket = 1;
@@ -745,7 +766,17 @@ ReadTicket read_target_region_async(Device& dev, OffscreenTarget& t, uint32_t at
     const size_t row = (size_t)texformat_out_bpp(t.color_fmt[attachment]) * (size_t)w;
     const uint64_t size = (uint64_t)row * (uint64_t)h;
 
-    Staging st = staging_acquire(size);
+    // 16F planes (the normal plane) are packed as RGBA half, not as the seam's float
+    // layout. Mesa can't pack RGB16F -> RGB float on the GPU: it converts on the CPU
+    // inside glReadPixels, even into a pack buffer, so the "async" kick blocked 34 ms
+    // vs 0.13 ms as RGBA half (tools/glbench --readback, Arc B570, Mesa 26.2). Intel's
+    // Windows driver is fine either way. The expansion to float happens in ticket_take.
+    const bool half = t.color_fmt[attachment] == TexFormat::RGB16F ||
+                      t.color_fmt[attachment] == TexFormat::RG16F;
+    const size_t staged_row = half ? (size_t)8 * (size_t)w : row;
+    if (half) { fmt = GL_RGBA; type = GL_HALF_FLOAT; }
+
+    Staging st = staging_acquire((uint64_t)staged_row * (uint64_t)h);
     GLint pack_align = 4;
     glGetIntegerv(GL_PACK_ALIGNMENT, &pack_align);
     glPixelStorei(GL_PACK_ALIGNMENT, 1);   // rows tightly packed, as the seam expects
@@ -763,6 +794,7 @@ ReadTicket read_target_region_async(Device& dev, OffscreenTarget& t, uint32_t at
     tk.size = size;
     tk.flip_rows = (uint32_t)h;
     tk.row_bytes = row;
+    tk.out_channels = half ? (uint32_t)(row / ((size_t)w * 4)) : 0;
     tk.fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
     glFlush();   // see read_buffer_async
     uint32_t id = ticket_new_id();
@@ -798,11 +830,25 @@ bool ticket_take(Device&, ReadTicket t, void* out, uint64_t out_size) {
         ok = (r == GL_ALREADY_SIGNALED || r == GL_CONDITION_SATISFIED);
         if (ok) {
             glBindBuffer(GL_COPY_READ_BUFFER, tk.staging);
+            // half-staged rows are 4 halves (8 B) per pixel, not the output's layout
+            const size_t px = tk.out_channels ? tk.row_bytes / ((size_t)tk.out_channels * 4) : 0;
+            const size_t staged_row = tk.out_channels ? px * 8 : tk.row_bytes;
+            const uint64_t staged_size = tk.out_channels ? (uint64_t)staged_row * tk.flip_rows
+                                                         : out_size;
             const uint8_t* src = (const uint8_t*)glMapBufferRange(
-                GL_COPY_READ_BUFFER, 0, (GLsizeiptr)out_size, GL_MAP_READ_BIT);
+                GL_COPY_READ_BUFFER, 0, (GLsizeiptr)staged_size, GL_MAP_READ_BIT);
             if (src) {
                 uint8_t* dst = (uint8_t*)out;
-                if (tk.flip_rows > 1) {
+                if (tk.out_channels) {
+                    // flip + expand RGBA half -> out_channels floats in one pass
+                    const uint32_t ch = tk.out_channels;
+                    for (uint32_t r = 0; r < tk.flip_rows; ++r) {
+                        const uint16_t* s = (const uint16_t*)(src + (size_t)(tk.flip_rows - 1 - r) * staged_row);
+                        float* d = (float*)(dst + (size_t)r * tk.row_bytes);
+                        for (size_t i = 0; i < px; ++i, s += 4, d += ch)
+                            for (uint32_t c = 0; c < ch; ++c) d[c] = half_to_float(s[c]);
+                    }
+                } else if (tk.flip_rows > 1) {
                     for (uint32_t r = 0; r < tk.flip_rows; ++r)
                         std::memcpy(dst + (size_t)r * tk.row_bytes,
                                     src + (size_t)(tk.flip_rows - 1 - r) * tk.row_bytes, tk.row_bytes);
