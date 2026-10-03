@@ -632,9 +632,16 @@ void read_target_region(Device&, OffscreenTarget& t, uint32_t attachment,
 // build needs them), so only the timing changes: dab lists now land a frame or so
 // later on GL, exactly as they always have on WebGPU.
 //
-// Texture reads (read_target_region_async, the pen-down plane cache) stay
-// synchronous: they run once per stroke, not per dab, and a texture needs a pixel
-// pack buffer rather than a buffer copy.
+// Texture reads (read_target_region_async, the screen-buffer plane cache) are
+// asynchronous the same way: glReadPixels into a staging buffer bound as the pixel
+// pack buffer, then a fence. A synchronous full-screen glReadPixels of the three
+// planes cost ~235 ms on Intel Arc / Windows (177 MB/s, tools/glbench --readback) —
+// the "freeze" after every orbit and pen-up; through a pack buffer the kick is
+// ~0.1 ms and the copy-out ~13 ms, a frame or two later.
+//
+// Copy-out maps the staging buffer and memcpys. On that same driver
+// glGetBufferSubData (and mapping a CLIENT_STORAGE buffer) reads at ~15 MB/s, while
+// mapping a STREAM_READ buffer reads at ~3 GB/s.
 
 namespace {
 struct GlTicket {
@@ -643,6 +650,10 @@ struct GlTicket {
     uint64_t staging_cap = 0;
     GLsync   fence = nullptr;     // ...and the point the GPU must pass first
     uint64_t size = 0;
+    // texture reads: glReadPixels packs rows bottom-up; ticket_take flips them to the
+    // seam's top-down order while copying out
+    uint32_t flip_rows = 0;
+    size_t   row_bytes = 0;
 };
 std::unordered_map<uint32_t, GlTicket> g_gl_tickets;
 uint32_t g_gl_next_ticket = 1;
@@ -728,10 +739,32 @@ ReadTicket read_target_region_async(Device& dev, OffscreenTarget& t, uint32_t at
         x < 0 || y < 0 || w <= 0 || h <= 0 ||
         x + w > t.width || y + h > t.height)
         return 0;
+    (void)dev;
+    GLint internal; GLenum fmt, type;
+    gl_tex_format(t.color_fmt[attachment], internal, fmt, type);
+    const size_t row = (size_t)texformat_out_bpp(t.color_fmt[attachment]) * (size_t)w;
+    const uint64_t size = (uint64_t)row * (uint64_t)h;
+
+    Staging st = staging_acquire(size);
+    GLint pack_align = 4;
+    glGetIntegerv(GL_PACK_ALIGNMENT, &pack_align);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);   // rows tightly packed, as the seam expects
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, t.fbo);
+    glReadBuffer(GL_COLOR_ATTACHMENT0 + attachment);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, st.buf);
+    glReadPixels(x, t.height - y - h, w, h, fmt, type, nullptr);  // GL origin is bottom-left
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+    glPixelStorei(GL_PACK_ALIGNMENT, pack_align);
+
     GlTicket tk;
-    tk.data.resize((size_t)texformat_out_bpp(t.color_fmt[attachment]) * w * h);
-    tk.size = tk.data.size();
-    read_target_region(dev, t, attachment, x, y, w, h, tk.data.data());
+    tk.staging = st.buf;
+    tk.staging_cap = st.cap;
+    tk.size = size;
+    tk.flip_rows = (uint32_t)h;
+    tk.row_bytes = row;
+    tk.fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    glFlush();   // see read_buffer_async
     uint32_t id = ticket_new_id();
     g_gl_tickets.emplace(id, std::move(tk));
     return id;
@@ -765,7 +798,22 @@ bool ticket_take(Device&, ReadTicket t, void* out, uint64_t out_size) {
         ok = (r == GL_ALREADY_SIGNALED || r == GL_CONDITION_SATISFIED);
         if (ok) {
             glBindBuffer(GL_COPY_READ_BUFFER, tk.staging);
-            glGetBufferSubData(GL_COPY_READ_BUFFER, 0, (GLsizeiptr)out_size, out);
+            const uint8_t* src = (const uint8_t*)glMapBufferRange(
+                GL_COPY_READ_BUFFER, 0, (GLsizeiptr)out_size, GL_MAP_READ_BIT);
+            if (src) {
+                uint8_t* dst = (uint8_t*)out;
+                if (tk.flip_rows > 1) {
+                    for (uint32_t r = 0; r < tk.flip_rows; ++r)
+                        std::memcpy(dst + (size_t)r * tk.row_bytes,
+                                    src + (size_t)(tk.flip_rows - 1 - r) * tk.row_bytes, tk.row_bytes);
+                } else {
+                    std::memcpy(dst, src, (size_t)out_size);
+                }
+                glUnmapBuffer(GL_COPY_READ_BUFFER);
+            } else {
+                ok = false;
+                std::memset(out, 0, (size_t)out_size);
+            }
             glBindBuffer(GL_COPY_READ_BUFFER, 0);
         } else {
             std::memset(out, 0, (size_t)out_size);

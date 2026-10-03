@@ -182,11 +182,11 @@ struct Renderer {
     // on BOTH backends. render_screen_buffers kicks an async full-plane read of
     // depth/normal/triid and every sample_* indexes the CPU copy (false = cache not
     // landed yet / out of bounds — caller keeps its last value or skips the dab).
-    // On WebGPU poll_plane_reads() lands it a frame or two later (a blocking read
-    // is a full GPU sync, and a fatal suspend on web). On GL the tickets resolve
-    // synchronously, so the cache lands inside render_screen_buffers itself — one
-    // full-screen read per refresh instead of 4–5 glReadPixels stalls per dab
-    // (which is what set_anchor used to cost, see dab-readback-perf-handoff.md).
+    // poll_plane_reads() lands it a frame or two later on both backends (a blocking
+    // read is a full GPU sync, a fatal suspend on web, and ~235 ms of frozen frame
+    // on GL/Intel Windows). One full-screen read per refresh instead of 4–5
+    // glReadPixels stalls per dab (which is what set_anchor used to cost, see
+    // dab-readback-perf-handoff.md).
     void poll_plane_reads();                          // call once per frame
     bool sample_depth(int x, int y, float* out);      // attachment 0, linear distance
 

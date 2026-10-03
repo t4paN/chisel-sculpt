@@ -322,6 +322,280 @@ struct Bench {
     }
 };
 
+// ---- --readback: the pick-plane refresh ---------------------------------------
+// Chisel's GL backend refreshes three full-screen planes (render_screen_buffers):
+// depth R32F, normal RGB16F (read back as RGB float), triid R32UI, each with a
+// synchronous glReadPixels. This times the alternatives on a frame the GPU has just
+// rendered: a sphere-ish blob in the middle, cleared background around it, like the
+// real planes.
+//   kick  CPU time issuing render + reads (what a frame pays when reads are async)
+//   wait  fence wait until the copies are done (overlaps later frames when async)
+//   copy  CPU time getting the bytes into client memory (incl. any conversion)
+namespace rb {
+
+const char* kVs = R"(#version 430
+void main() {
+    vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);
+    gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}
+)";
+const char* kFs = R"(#version 430
+uniform vec2 size;
+layout(location = 0) out float o_depth;
+layout(location = 1) out vec3  o_normal;
+layout(location = 2) out uint  o_triid;
+void main() {
+    vec2 c = (gl_FragCoord.xy - 0.5 * size) / (0.4 * size.y);
+    float r2 = dot(c, c);
+    if (r2 > 1.0) { o_depth = 1000.0; o_normal = vec3(0.0); o_triid = 0xFFFFFFFFu; return; }
+    float z = sqrt(1.0 - r2);
+    o_depth = 5.0 - z;
+    o_normal = vec3(c, z);
+    uvec2 q = uvec2(gl_FragCoord.xy) / 6u;
+    o_triid = q.y * 512u + q.x;
+}
+)";
+
+GLuint compile(GLenum type, const char* src) {
+    GLuint s = glCreateShader(type);
+    glShaderSource(s, 1, &src, nullptr);
+    glCompileShader(s);
+    GLint ok = 0; glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
+    if (!ok) { char log[2048]; glGetShaderInfoLog(s, sizeof log, nullptr, log); std::fprintf(stderr, "%s\n", log); }
+    return s;
+}
+
+float half_to_float(uint16_t h) {
+    uint32_t sign = (uint32_t)(h & 0x8000) << 16, exp = (h >> 10) & 0x1F, man = h & 0x3FF, f;
+    if (exp == 0) {
+        if (man == 0) f = sign;
+        else { exp = 127 - 14; while (!(man & 0x400)) { man <<= 1; exp--; } man &= 0x3FF; f = sign | (exp << 23) | (man << 13); }
+    } else if (exp == 31) f = sign | 0x7F800000 | (man << 13);
+    else f = sign | ((exp + 112) << 23) | (man << 13);
+    float out; std::memcpy(&out, &f, 4); return out;
+}
+
+struct Plane { GLenum fmt, type; int bpp; };
+
+struct ReadBench {
+    int w = 1920, h = 1080;
+    GLuint fbo = 0, tex[3] = {}, depth_rb = 0, prog = 0, vao = 0;
+    GLint loc_size = -1;
+
+    std::vector<uint8_t> client[3];
+
+    bool init() {
+        prog = glCreateProgram();
+        GLuint vs = compile(GL_VERTEX_SHADER, kVs), fs = compile(GL_FRAGMENT_SHADER, kFs);
+        glAttachShader(prog, vs); glAttachShader(prog, fs); glLinkProgram(prog);
+        glDeleteShader(vs); glDeleteShader(fs);
+        GLint ok = 0; glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+        if (!ok) { std::fprintf(stderr, "readback program link failed\n"); return false; }
+        loc_size  = glGetUniformLocation(prog, "size");
+        glGenVertexArrays(1, &vao);
+
+        // same internal formats as Renderer's screen_target attachments 0..2
+        const GLint internal[3] = { GL_R32F, GL_RGB16F, GL_R32UI };
+        const GLenum fmt[3] = { GL_RED, GL_RGB, GL_RED_INTEGER };
+        const GLenum type[3] = { GL_FLOAT, GL_FLOAT, GL_UNSIGNED_INT };
+        glGenFramebuffers(1, &fbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        glGenTextures(3, tex);
+        for (int i = 0; i < 3; ++i) {
+            glBindTexture(GL_TEXTURE_2D, tex[i]);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glTexImage2D(GL_TEXTURE_2D, 0, internal[i], w, h, 0, fmt[i], type[i], nullptr);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + i, GL_TEXTURE_2D, tex[i], 0);
+        }
+        glGenRenderbuffers(1, &depth_rb);
+        glBindRenderbuffer(GL_RENDERBUFFER, depth_rb);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w, h);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, depth_rb);
+        const GLenum bufs[3] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2 };
+        glDrawBuffers(3, bufs);
+        GLenum st = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        if (st != GL_FRAMEBUFFER_COMPLETE) { std::fprintf(stderr, "FBO incomplete 0x%x\n", st); return false; }
+
+        // what the driver says it reads natively, per attachment
+        for (int i = 0; i < 3; ++i) {
+            glReadBuffer(GL_COLOR_ATTACHMENT0 + i);
+            GLint f = 0, t = 0;
+            glGetIntegerv(GL_IMPLEMENTATION_COLOR_READ_FORMAT, &f);
+            glGetIntegerv(GL_IMPLEMENTATION_COLOR_READ_TYPE, &t);
+            std::printf("attachment %d: implementation read format 0x%04x type 0x%04x\n", i, f, t);
+        }
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        return true;
+    }
+
+    void render() {
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        glViewport(0, 0, w, h);
+        glClear(GL_DEPTH_BUFFER_BIT);
+        glUseProgram(prog);
+        glUniform2f(loc_size, (float)w, (float)h);
+        glBindVertexArray(vao);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glBindVertexArray(0);
+    }
+
+    // The three planes as Chisel reads them today, or with the normal plane in a
+    // narrower form (RGBA half: 8 B/px instead of 12, converted on the CPU).
+    void planes(bool half_normal, Plane out[3]) const {
+        out[0] = { GL_RED, GL_FLOAT, 4 };
+        out[1] = half_normal ? Plane{ GL_RGBA, GL_HALF_FLOAT, 8 } : Plane{ GL_RGB, GL_FLOAT, 12 };
+        out[2] = { GL_RED_INTEGER, GL_UNSIGNED_INT, 4 };
+    }
+
+    uint64_t checksum() const {   // depth + triid, to compare variants
+        uint64_t s = 1469598103934665603ull;
+        for (int i : {0, 2})
+            for (size_t k = 0; k < client[i].size(); k += 4093) s = (s ^ client[i][k]) * 1099511628211ull;
+        return s;
+    }
+
+    struct Result { double kick, wait, copy, total; uint64_t sum; double mb; };
+
+    enum class Mode { Sync, PboMap, PboGet, PboClient };
+
+    Result run(Mode mode, bool half_normal, int iters) {
+        Plane pl[3]; planes(half_normal, pl);
+        size_t bytes[3]; double mb = 0;
+        for (int i = 0; i < 3; ++i) {
+            bytes[i] = (size_t)pl[i].bpp * w * h;
+            client[i].resize(i == 1 ? (size_t)12 * w * h : bytes[i]);
+            mb += bytes[i] / 1e6;
+        }
+        std::vector<uint8_t> half_tmp(half_normal ? bytes[1] : 0);
+
+        GLuint pbo[3] = {};
+        void* mapped[3] = {};
+        if (mode != Mode::Sync) {
+            glGenBuffers(3, pbo);
+            for (int i = 0; i < 3; ++i) {
+                glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo[i]);
+                if (mode == Mode::PboClient) {
+                    const GLbitfield f = GL_MAP_READ_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT |
+                                         GL_CLIENT_STORAGE_BIT;
+                    glBufferStorage(GL_PIXEL_PACK_BUFFER, bytes[i], nullptr, f);
+                    mapped[i] = glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0, bytes[i],
+                                                 GL_MAP_READ_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT);
+                } else {
+                    glBufferData(GL_PIXEL_PACK_BUFFER, bytes[i], nullptr, GL_STREAM_READ);
+                }
+            }
+            glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+        }
+
+        std::vector<double> kick, wait, copy, total;
+        Result r{};
+        for (int it = 0; it < iters + 1; ++it) {   // +1 warm-up
+            glFinish();
+            const auto t0 = Clock::now();
+            render();
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
+            glPixelStorei(GL_PACK_ALIGNMENT, 1);
+            if (mode == Mode::Sync) {
+                for (int i = 0; i < 3; ++i) {
+                    glReadBuffer(GL_COLOR_ATTACHMENT0 + i);
+                    void* dst = (i == 1 && half_normal) ? (void*)half_tmp.data() : (void*)client[i].data();
+                    glReadPixels(0, 0, w, h, pl[i].fmt, pl[i].type, dst);
+                }
+            } else {
+                for (int i = 0; i < 3; ++i) {
+                    glReadBuffer(GL_COLOR_ATTACHMENT0 + i);
+                    glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo[i]);
+                    glReadPixels(0, 0, w, h, pl[i].fmt, pl[i].type, nullptr);
+                }
+                glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+            }
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+            GLsync fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+            glFlush();
+            const double k_us = us_since(t0);
+
+            const auto t1 = Clock::now();
+            glClientWaitSync(fence, GL_SYNC_FLUSH_COMMANDS_BIT, ~0ull);
+            glDeleteSync(fence);
+            const double w_us = us_since(t1);
+
+            const auto t2 = Clock::now();
+            if (mode != Mode::Sync) {
+                for (int i = 0; i < 3; ++i) {
+                    void* dst = (i == 1 && half_normal) ? (void*)half_tmp.data() : (void*)client[i].data();
+                    if (mode == Mode::PboClient) {
+                        std::memcpy(dst, mapped[i], bytes[i]);
+                    } else {
+                        glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo[i]);
+                        if (mode == Mode::PboGet) {
+                            glGetBufferSubData(GL_PIXEL_PACK_BUFFER, 0, bytes[i], dst);
+                        } else {
+                            void* p = glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0, bytes[i], GL_MAP_READ_BIT);
+                            std::memcpy(dst, p, bytes[i]);
+                            glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+                        }
+                    }
+                }
+                glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+            }
+            if (half_normal) {
+                const uint16_t* src = (const uint16_t*)half_tmp.data();
+                float* dst = (float*)client[1].data();
+                const size_t px = (size_t)w * h;
+                for (size_t p = 0; p < px; ++p) {
+                    dst[p * 3 + 0] = half_to_float(src[p * 4 + 0]);
+                    dst[p * 3 + 1] = half_to_float(src[p * 4 + 1]);
+                    dst[p * 3 + 2] = half_to_float(src[p * 4 + 2]);
+                }
+            }
+            const double c_us = us_since(t2);
+            if (it == 0) continue;
+            kick.push_back(k_us / 1000); wait.push_back(w_us / 1000); copy.push_back(c_us / 1000);
+            total.push_back((k_us + w_us + c_us) / 1000);
+        }
+        if (mode != Mode::Sync) {
+            if (mode == Mode::PboClient)
+                for (int i = 0; i < 3; ++i) { glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo[i]); glUnmapBuffer(GL_PIXEL_PACK_BUFFER); }
+            glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+            glDeleteBuffers(3, pbo);
+        }
+        r.kick = median(kick); r.wait = median(wait); r.copy = median(copy); r.total = median(total);
+        r.sum = checksum(); r.mb = mb;
+        return r;
+    }
+};
+
+int run_readback(int iters, int w, int h) {
+    ReadBench b; b.w = w; b.h = h;
+    if (!b.init()) return 1;
+    std::printf("planes %dx%d: depth R32F, normal RGB16F, triid R32UI; median of %d refreshes\n\n", w, h, iters);
+    std::printf("%-4s %-46s %8s %8s %8s %8s %8s %9s  %s\n", "", "path", "MB", "kick", "wait", "copy", "total",
+                "MB/s", "checksum");
+    std::printf("%-4s %-46s %8s %8s %8s %8s %8s\n", "", "", "", "ms", "ms", "ms", "ms");
+    struct V { const char* name; const char* desc; ReadBench::Mode mode; bool half; };
+    const V vs[] = {
+        {"S",   "sync glReadPixels (= Chisel today)",          ReadBench::Mode::Sync,      false},
+        {"S-h", "sync, normal as RGBA half + CPU convert",     ReadBench::Mode::Sync,      true},
+        {"P",   "PBO STREAM_READ, map + memcpy",               ReadBench::Mode::PboMap,    false},
+        {"P-g", "PBO STREAM_READ, glGetBufferSubData",         ReadBench::Mode::PboGet,    false},
+        {"C",   "PBO CLIENT_STORAGE persistent map, memcpy",   ReadBench::Mode::PboClient, false},
+        {"C-h", "C, normal as RGBA half + CPU convert",        ReadBench::Mode::PboClient, true},
+        {"P-h", "P, normal as RGBA half + CPU convert",        ReadBench::Mode::PboMap,    true},
+    };
+    uint64_t ref = 0;
+    for (const V& v : vs) {
+        ReadBench::Result r = b.run(v.mode, v.half, iters);
+        if (!ref) ref = r.sum;
+        std::printf("%-4s %-46s %8.1f %8.2f %8.2f %8.2f %8.2f %9.0f  %s\n", v.name, v.desc, r.mb, r.kick, r.wait,
+                    r.copy, r.total, r.mb / (r.total / 1000), r.sum == ref ? "same" : "DIFFERS");
+        std::fflush(stdout);
+    }
+    return 0;
+}
+
+}  // namespace rb
+
 std::vector<std::string> split_csv(const std::string& s) {
     std::vector<std::string> out;
     size_t a = 0;
@@ -336,14 +610,16 @@ std::vector<std::string> split_csv(const std::string& s) {
 
 void usage() {
     std::fprintf(stderr,
-        "usage: glbench [--dabs N] [--k K] [--runs R] [--only A,B1,B2,B3,C,D] [--debug]\n");
+        "usage: glbench [--dabs N] [--k K] [--runs R] [--only A,B1,B2,B3,C,D] [--debug]\n"
+        "       glbench --readback [--size WxH] [--runs R]   (pick-plane readback paths)\n");
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
     int dabs = 2000, k = 6, runs = 5;
-    bool debug = false;
+    bool debug = false, readback = false;
+    int rb_w = 1920, rb_h = 1080;
     std::vector<std::string> only;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -356,6 +632,10 @@ int main(int argc, char** argv) {
         else if (a == "--runs") runs = std::atoi(next());
         else if (a == "--only") only = split_csv(next());
         else if (a == "--debug") debug = true;
+        else if (a == "--readback") readback = true;
+        else if (a == "--size") {
+            if (std::sscanf(next(), "%dx%d", &rb_w, &rb_h) != 2) { usage(); return 2; }
+        }
         else { usage(); return 2; }
     }
     if (dabs <= 0 || k <= 0 || runs <= 0) { usage(); return 2; }
@@ -377,6 +657,15 @@ int main(int argc, char** argv) {
         glEnable(GL_DEBUG_OUTPUT);
         glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS);
         glDebugMessageCallback(on_debug, nullptr);
+    }
+
+    if (readback) {
+        std::printf("GL_RENDERER  %s\nGL_VERSION   %s\n", (const char*)glGetString(GL_RENDERER),
+                    (const char*)glGetString(GL_VERSION));
+        int rc = rb::run_readback(runs < 10 ? 20 : runs, rb_w, rb_h);
+        glfwDestroyWindow(win);
+        glfwTerminate();
+        return rc;
     }
 
     Bench b;

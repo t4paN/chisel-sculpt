@@ -997,9 +997,8 @@ void BrushStroke::set_anchor(const Mesh& mesh, const Camera& cam,
     if (cx < 0 || cx >= screen_w || cy < 0 || cy >= screen_h) return;
 
     // Cursor samples come from the renderer's plane cache — no in-frame readback
-    // on either backend. Not-landed-yet (webgpu, 1–2 frames after the screen-buffer
-    // render) skips the dab; on GL the cache lands inside render_screen_buffers, so
-    // it is always ready here.
+    // on either backend. Not-landed-yet (1–2 frames after the screen-buffer render)
+    // skips the dab.
     uint32_t tid;
     float nx, ny, nz;
 

@@ -2108,9 +2108,8 @@ void Renderer::render_screen_buffers(const Camera& cam, int w, int h) {
     plane_kick_w = w; plane_kick_h = h;
     plane_pending = true;
 
-    // On GL the tickets resolved synchronously at kick, so land them now — the cache
-    // is valid before this returns and a pen-down press never sees a not-ready gap.
-    // On WebGPU nothing is ready yet; this no-ops and the per-frame poll lands them.
+    // Normally nothing is ready yet (both backends read asynchronously); this no-ops
+    // and the per-frame poll lands them a frame or two later.
     poll_plane_reads();
 }
 
