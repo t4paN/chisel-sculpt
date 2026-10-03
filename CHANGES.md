@@ -57,7 +57,10 @@ skin.
 ## 2026-10-03 — Modern UI skin (glass panels, icon rail)
 
 *Built and screenshot-checked on Windows (Intel Arc) for both the GL and native WebGPU
-builds. Not yet built for the web or on Linux.*
+builds. Cherry-picked onto main on Linux: all three targets build, the web build's blur
+shaders pass Chromium's Tint with no WebGPU errors, and the user looked it over on Linux
+GL ("looks pretty good"). Reduced motion follows the OS only on Windows and the web; on
+Linux it's the in-app toggle.*
 
 **New default skin**, from the 2026-10 UI review (board F, with board G's appearance
 options). Everything sits on the screen edges and the middle stays empty:
