@@ -2,6 +2,13 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-04 — UI skins confirmed on Linux and web
+
+The three new skins (modern, DOS, 2000s) were built and screenshot-checked on Windows
+(see the 10-03 entries below). The user has since run all of them on the native Linux
+build and in the web build: they work on both, with nothing to fix. The only change still
+to come is moving some of the new skins' buttons around.
+
 ## 2026-10-03 — v0.3.0 — 2000s skin (docked shelves, gloss, orange)
 
 *Built and screenshot-checked on Windows (Intel Arc), GL; native WebGPU built and run.*
