@@ -1610,66 +1610,124 @@ void draw_keybind_window(InputState& input, int win_w, int win_h) {
                                      ImGui::CalcTextSize("Ctrl+Shift+Del").x)
                           + ImGui::GetStyle().FramePadding.x * 2.0f;
         const float x_w = ImGui::GetFrameHeight();
-        const float list_w = label_w + key_w + x_w + ImGui::GetStyle().ItemSpacing.x * 2.0f
-                           + ImGui::GetStyle().ScrollbarSize + 8.0f;
-        const float list_h = std::max(200.0f, std::min(win_h * 0.62f, 620.0f));
+        const float col_w = label_w + key_w + x_w + ImGui::GetStyle().ItemSpacing.x * 2.0f;
+        const float col_gap = 32.0f;
+
+        // Lay the groups out in columns so the whole list fits on screen without
+        // scrolling. A group never splits across columns; the "Fixed" list is the last
+        // unit. Heights mirror what the loop below draws.
+        const float sp_y   = ImGui::GetStyle().ItemSpacing.y;
+        const float head_h = 4.0f + sp_y + ImGui::GetTextLineHeightWithSpacing();
+        const float row_h  = ImGui::GetFrameHeightWithSpacing();
+        const float text_h = ImGui::GetTextLineHeightWithSpacing();
+        constexpr int kMaxUnits = (int)KeyAction::COUNT + 1;
+        int   unit_first[kMaxUnits + 1];        // unit u = actions [first[u], first[u+1])
+        float unit_h[kMaxUnits];
+        int   units = 0;
+        for (int i = 0; i < (int)KeyAction::COUNT; i++) {
+            if (i == 0 || std::strcmp(key_action_info((KeyAction)i).group,
+                                      key_action_info((KeyAction)(i - 1)).group) != 0) {
+                unit_first[units] = i;
+                unit_h[units++] = head_h;
+            }
+            unit_h[units - 1] += row_h;
+        }
+        unit_first[units] = (int)KeyAction::COUNT;
+        const int fixed_unit = units;
+        const int n_fixed = (int)(sizeof(fixed) / sizeof(fixed[0]));
+        unit_h[units++] = head_h + text_h * (float)n_fixed;
+
+        // Greedy fill, in order: how many columns does a column height of H need?
+        auto columns_for = [&](float H, int* col_of) {
+            int c = 0;
+            float used = 0.0f;
+            for (int u = 0; u < units; u++) {
+                if (used > 0.0f && used + unit_h[u] > H) { c++; used = 0.0f; }
+                used += unit_h[u];
+                if (col_of) col_of[u] = c;
+            }
+            return c + 1;
+        };
+        // Room left after the title, hint, separators, buttons and a two-line conflict
+        // warning, with a margin to the window edges.
+        const float chrome = 36.0f + text_h * 6.0f + row_h * 2.0f;
+        const float avail_h = std::max(200.0f, win_h - 40.0f - chrome);
+        const int max_cols = std::max(1, (int)((win_w - 88.0f + col_gap) / (col_w + col_gap)));
+        float total_h = 0.0f, tallest = 0.0f;
+        for (int u = 0; u < units; u++) { total_h += unit_h[u]; tallest = std::max(tallest, unit_h[u]); }
+        const int cols = std::min(max_cols, columns_for(std::max(avail_h, tallest), nullptr));
+        // Balance: the shortest column height that still fits in `cols` columns.
+        float H = std::max(tallest, total_h / (float)cols);
+        while (columns_for(H, nullptr) > cols) H += row_h * 0.5f;
+        int col_of[kMaxUnits];
+        columns_for(H, col_of);
+        const bool scrolls = H > avail_h;    // window too small even at max_cols
+        const float list_w = cols * col_w + (cols - 1) * col_gap
+                           + (scrolls ? ImGui::GetStyle().ScrollbarSize : 0.0f) + 8.0f;
+        const float list_h = std::min(H, avail_h) + 4.0f;
 
         ImGui::BeginChild("##kblist", ImVec2(list_w, list_h), false);
-        const char* group = nullptr;
-        for (int i = 0; i < (int)KeyAction::COUNT; i++) {
-            const KeyActionInfo& info = key_action_info((KeyAction)i);
-            if (!group || std::strcmp(group, info.group) != 0) {
-                group = info.group;
+        for (int c = 0; c < cols; c++) {
+            if (c > 0) ImGui::SameLine(c * (col_w + col_gap));
+            ImGui::BeginGroup();
+            for (int u = 0; u < units; u++) {
+                if (col_of[u] != c) continue;
+                if (u == fixed_unit) {
+                    // The keys that can't be rebound, listed so the window really shows every
+                    // key. Key centred in the key column, like the buttons above it.
+                    ImGui::Dummy(ImVec2(0.0f, 4.0f));
+                    ImGui::TextColored(accent, "Fixed");
+                    for (const auto& f : fixed) {
+                        ImGui::TextDisabled("%s", f[1]);
+                        ImGui::SameLine(label_w + std::max(0.0f, (key_w - ImGui::CalcTextSize(f[0]).x) * 0.5f));
+                        ImGui::TextDisabled("%s", f[0]);
+                    }
+                    continue;
+                }
                 ImGui::Dummy(ImVec2(0.0f, 4.0f));
-                ImGui::TextColored(accent, "%s", group);
-            }
-            ImGui::PushID(i);
-            ImGui::AlignTextToFramePadding();
-            ImGui::TextUnformatted(info.label);
-            if (info.note && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", info.note);
+                ImGui::TextColored(accent, "%s", key_action_info((KeyAction)unit_first[u]).group);
+                for (int i = unit_first[u]; i < unit_first[u + 1]; i++) {
+                    const KeyActionInfo& info = key_action_info((KeyAction)i);
+                    ImGui::PushID(i);
+                    ImGui::AlignTextToFramePadding();
+                    ImGui::TextUnformatted(info.label);
+                    if (info.note && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", info.note);
 
-            ImGui::SameLine(label_w);
-            const bool listening = input.keybind_capture == i;
-            char buf[48];
-            if (listening) std::snprintf(buf, sizeof(buf), "press a key...##k");
-            else {
-                char name[32];
-                std::snprintf(buf, sizeof(buf), "%s##k", format_keybind(work[i], name, sizeof(name)));
-            }
-            int pushed = 0;
-            if (listening) {
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.46f, 0.31f, 0.88f, 0.85f));
-                pushed++;
-            }
-            if (!work[i].bound()) { ImGui::PushStyleColor(ImGuiCol_Text, warn); pushed++; }
-            if (ImGui::Button(buf, ImVec2(key_w, 0.0f))) {
-                input.keybind_capture = listening ? -1 : i;
-                conflict_with = -1;
-                refusal[0] = '\0';
-            }
-            ImGui::PopStyleColor(pushed);
+                    ImGui::SameLine(label_w);
+                    const bool listening = input.keybind_capture == i;
+                    char buf[48];
+                    if (listening) std::snprintf(buf, sizeof(buf), "press a key...##k");
+                    else {
+                        char name[32];
+                        std::snprintf(buf, sizeof(buf), "%s##k", format_keybind(work[i], name, sizeof(name)));
+                    }
+                    int pushed = 0;
+                    if (listening) {
+                        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.46f, 0.31f, 0.88f, 0.85f));
+                        pushed++;
+                    }
+                    if (!work[i].bound()) { ImGui::PushStyleColor(ImGuiCol_Text, warn); pushed++; }
+                    if (ImGui::Button(buf, ImVec2(key_w, 0.0f))) {
+                        input.keybind_capture = listening ? -1 : i;
+                        conflict_with = -1;
+                        refusal[0] = '\0';
+                    }
+                    ImGui::PopStyleColor(pushed);
 
-            ImGui::SameLine();
-            ImGui::BeginDisabled(!work[i].bound());
-            if (ImGui::Button("X##clear", ImVec2(x_w, 0.0f))) {
-                work[i] = { GLFW_KEY_UNKNOWN, 0 };
-                if (listening) input.keybind_capture = -1;
-                conflict_with = -1;
+                    ImGui::SameLine();
+                    ImGui::BeginDisabled(!work[i].bound());
+                    if (ImGui::Button("X##clear", ImVec2(x_w, 0.0f))) {
+                        work[i] = { GLFW_KEY_UNKNOWN, 0 };
+                        if (listening) input.keybind_capture = -1;
+                        conflict_with = -1;
+                    }
+                    ImGui::EndDisabled();
+                    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                        ImGui::SetTooltip("Remove this binding (leaves it as \?\?\?)");
+                    ImGui::PopID();
+                }
             }
-            ImGui::EndDisabled();
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                ImGui::SetTooltip("Remove this binding (leaves it as \?\?\?)");
-            ImGui::PopID();
-        }
-
-        // The keys that can't be rebound, listed so the window really shows every key.
-        // Key centred in the key column, like the buttons above it.
-        ImGui::Dummy(ImVec2(0.0f, 4.0f));
-        ImGui::TextColored(accent, "Fixed");
-        for (const auto& f : fixed) {
-            ImGui::TextDisabled("%s", f[1]);
-            ImGui::SameLine(label_w + std::max(0.0f, (key_w - ImGui::CalcTextSize(f[0]).x) * 0.5f));
-            ImGui::TextDisabled("%s", f[0]);
+            ImGui::EndGroup();
         }
         ImGui::EndChild();
 

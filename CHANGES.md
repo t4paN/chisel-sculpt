@@ -2,6 +2,22 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-06 — Web: mouse wheel scrolls UI windows; Key bindings window in columns
+
+*Built GL, native WebGPU and web; tested by the user in the browser and on native.*
+
+- **The mouse wheel never scrolled an ImGui window in the browser.** On web, ImGui's GLFW
+  backend drops GLFW scroll events on purpose and reads the wheel from its own canvas
+  hook, which only `ImGui_ImplGlfw_InstallEmscriptenCallbacks` registers. We can't call
+  that one, since it also takes over canvas resizing (the shell and main loop own that).
+  `input_web_feed_imgui_wheel` registers just its wheel handler. Camera zoom still comes
+  from GLFW's own listener. Found because the Key bindings list was the first window
+  tall enough to need scrolling.
+- **Key bindings window lays out in columns** so every key fits on screen at once. It
+  picks the fewest columns that fit the window height (capped by the width), never
+  splits a group, and balances the columns. "Fixed" is the last block. It only
+  scrolls if the window is too small even at the widest layout.
+
 ## 2026-10-06 — Pen cursor visible over the title bar; Linux starts maximized
 
 *Built GL and native WebGPU; tested by the user on native Wayland (Plasma) with the pen.
@@ -26,7 +42,8 @@ Native-only: the web build doesn't compile either path.*
 
 ## 2026-10-06 — Remesh and SDF-merge prompts become real dialogs per skin
 
-*Built GL, native WebGPU and web; the user checked the look on native.*
+*Built GL, native WebGPU and web; the user checked the look on native, then ran the
+browser round (reported all good).*
 
 - **Modern, DOS and 2000s** draw the remesh and merge prompts as modal dialogs in their
   own style: glass panel + violet main button / black CGA box + Turbo-style shadowed
@@ -45,8 +62,9 @@ Native-only: the web build doesn't compile either path.*
 
 ## 2026-10-06 — Rebindable keys (Key bindings window) + fullscreen moves to Tab
 
-*Built GL, native WebGPU and web; run by the user on native (layout fix after the first
-look). The full test recipe hasn't been run yet; the browser build hasn't been run.*
+*Built GL, native WebGPU and web; full test recipe passed on native (layout fix after the
+first look) and the user ran it in Chromium and Firefox. Tab doesn't toggle fullscreen in
+the browser: use the itch page's fullscreen button or F11 (the user's call, fine as is).*
 
 - **Fullscreen is Tab now; Space is unbound.**
 - **Burger menu → Key bindings…** opens a centred window listing every shortcut, grouped
