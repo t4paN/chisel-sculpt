@@ -2337,3 +2337,328 @@ void draw_modern_ui(InputState& input, int win_w, int win_h, const AlphaLibrary*
     notifications(input, win_w, win_h);
     slider_hud(input);
 }
+
+// ============================ Dialogs ========================================
+// The remesh and SDF-merge prompts as real dialogs in the active skin, replacing the
+// classic bitmap text for Modern, DOS and Y2K. Every button calls press_dialog_key,
+// so clicking and pressing the key printed on the button are the same code path —
+// the keyboard flow is unchanged.
+namespace {
+
+enum class Tone { Ok, Warn, Danger };
+
+ImU32 tone_col(Tone t) {
+    if (g_dos) return t == Tone::Ok ? cga::light_green : t == Tone::Warn ? cga::yellow : cga::light_red;
+    if (g_y2k) return t == Tone::Ok ? IM_COL32(0x9F, 0xE0, 0x8A, 255) : t == Tone::Warn ? y2k::amber : kAlert;
+    return t == Tone::Ok ? IM_COL32(0x8B, 0xE0, 0xA4, 255) : t == Tone::Warn ? kUnsaved : kAlert;
+}
+
+// One line of text at the cursor, laid out like ImGui::Text but in the skin's faces.
+void dlg_text(UiFont f, float px, ImU32 col, const char* s) {
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    ImGui::Dummy(text_size(f, px, s));
+    text_at(ImGui::GetWindowDrawList(), f, px, p, col, s);
+}
+
+// A row label: fixed width so the controls after it line up, centred on the row height.
+void dlg_label(const char* s, float w, float h) {
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    ImVec2 ts = text_size(UiFont::Sans, 13.0f, s);
+    ImGui::Dummy(ImVec2(w, h));
+    text_at(ImGui::GetWindowDrawList(), UiFont::Sans, 13.0f, ImVec2(p.x, p.y + (h - ts.y) * 0.5f),
+            kMuted, title_case(s));
+}
+
+float dlg_min_w() { return g_dos ? 560.0f : (g_y2k ? 380.0f : 420.0f); }
+float dlg_row_h() { return g_dos ? 32.0f : (g_y2k ? 26.0f : 32.0f); }
+
+// A dialog button with its key printed inside it. primary = the default action
+// (accent tile), danger = the destructive one (alert-coloured text).
+bool dlg_button(const char* id, const char* label, const char* key, bool primary,
+                bool danger = false) {
+    char lab[64];
+    std::snprintf(lab, sizeof lab, "%s", title_case(label));
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const UiFont lf = UiFont::SansSemibold;
+    ImVec2 ls = text_size(lf, 14.0f, lab);
+    ImVec2 ks = key ? text_size(UiFont::Mono, 12.0f, key) : ImVec2(0, 0);
+    const float padx = g_dos ? 14.0f : 16.0f, gap = 10.0f, badge = key ? ks.x + 10.0f : 0.0f;
+    ImVec2 size(padx * 2.0f + ls.x + (key ? gap + badge : 0.0f), dlg_row_h());
+
+    ImVec2 pos = ImGui::GetCursorScreenPos();
+    bool clicked = ImGui::InvisibleButton(id, size);
+    bool hovered = ImGui::IsItemHovered();
+    bool held = ImGui::IsItemActive();
+    ImVec2 a = pos, b(pos.x + size.x, pos.y + size.y);
+    ImU32 tcol, kcol;
+
+    if (g_y2k) {
+        gloss_tile(dl, a, b, 4.0f, primary, hovered, held);
+        tcol = primary ? y2k::on_text : (danger ? kAlert : y2k::text);
+        kcol = primary ? with_alpha(y2k::on_text, 0.7f) : y2k::muted;
+    } else if (g_dos) {
+        // Turbo-style button: hard black shadow that the button "presses" into.
+        if (held) { a.x += 3; a.y += 3; b.x += 3; b.y += 3; }
+        else dl->AddRectFilled(ImVec2(a.x + 4, a.y + 4), ImVec2(b.x + 4, b.y + 4), cga::black);
+        ImU32 bg = primary ? cga::light_cyan : (hovered ? IM_COL32(0x55, 0x55, 0xFF, 255) : cga::blue);
+        dl->AddRectFilled(a, b, bg);
+        if (hovered) dl->AddRect(ImVec2(a.x + 1, a.y + 1), ImVec2(b.x - 1, b.y - 1), cga::white, 0.0f, 0, 2.0f);
+        tcol = primary ? cga::black : (danger ? cga::light_red : cga::white);
+        kcol = primary ? cga::black : cga::yellow;
+    } else {
+        float s = spring(ImGui::GetItemID(), held ? 0.95f : 1.0f, held ? 1400.0f : 520.0f);
+        ImVec2 c((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f);
+        a = ImVec2(c.x - size.x * 0.5f * s, c.y - size.y * 0.5f * s);
+        b = ImVec2(c.x + size.x * 0.5f * s, c.y + size.y * 0.5f * s);
+        const float r = 8.0f;
+        if (primary) {
+            int v0 = dl->VtxBuffer.Size;
+            dl->AddRectFilled(a, b, kAccent, r);
+            ImGui::ShadeVertsLinearColorGradientKeepAlpha(dl, v0, dl->VtxBuffer.Size, a,
+                                                          ImVec2(a.x, b.y), kAccentHi, kAccentLo);
+            dl->AddLine(ImVec2(a.x + r, a.y + 1.0f), ImVec2(b.x - r, a.y + 1.0f),
+                        IM_COL32(255, 255, 255, 89), 1.0f);
+        } else {
+            dl->AddRectFilled(a, b, IM_COL32(255, 255, 255, hovered ? 28 : 15), r);
+            dl->AddRect(a, b, danger ? with_alpha(kAlert, 0.55f) : kBorder, r);
+        }
+        if (held) dl->AddRectFilled(a, b, IM_COL32(0, 0, 0, 46), r);
+        tcol = primary ? IM_COL32_WHITE : (danger ? kAlert : kText);
+        kcol = primary ? IM_COL32(255, 255, 255, 190) : kStatus;
+    }
+
+    const float ty = a.y + (b.y - a.y - ls.y) * 0.5f;
+    text_at(dl, lf, 14.0f, ImVec2(a.x + padx, ty), tcol, lab);
+    if (key) {
+        ImVec2 k0(a.x + padx + ls.x + gap, a.y + (b.y - a.y - ks.y - 2.0f) * 0.5f);
+        ImVec2 k1(k0.x + badge, k0.y + ks.y + 2.0f);
+        if (!g_dos) dl->AddRect(k0, k1, with_alpha(kcol, 0.45f), g_y2k ? 2.0f : 4.0f);
+        text_at(dl, UiFont::Mono, 12.0f, ImVec2(k0.x + 5.0f, k0.y + 1.0f), kcol, key);
+    }
+    return clicked;
+}
+
+// Two-state option (extractor, adaptive): the skin's toggle look.
+bool dlg_toggle(const char* label, bool on) {
+    if (!g_y2k) return chip(label, on, dlg_row_h());
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 ts = ysize(true, 11.0f, label);
+    ImVec2 size(ts.x + 22.0f, dlg_row_h());
+    ImVec2 a = ImGui::GetCursorScreenPos();
+    bool clicked = ImGui::InvisibleButton(label, size);
+    ImVec2 b(a.x + size.x, a.y + size.y);
+    gloss_tile(dl, a, b, 4.0f, on, ImGui::IsItemHovered(), ImGui::IsItemActive());
+    ytext(dl, true, 11.0f, ImVec2(a.x + 11.0f, a.y + (size.y - ts.y) * 0.5f),
+          on ? y2k::on_text : y2k::text, label, !on);
+    return clicked;
+}
+
+// Progress bar, t in 0..1.
+void dlg_bar(float w, float t) {
+    t = std::max(0.0f, std::min(1.0f, t));
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 a = ImGui::GetCursorScreenPos();
+    const float h = g_dos ? 16.0f : (g_y2k ? 14.0f : 6.0f);
+    ImGui::Dummy(ImVec2(w, h));
+    ImVec2 b(a.x + w, a.y + h), f(a.x + w * t, b.y);
+    if (g_y2k) {
+        inset(dl, a, b, 3.0f);
+        if (t > 0.0f) vgrad(dl, ImVec2(a.x + 1, a.y + 1), ImVec2(f.x - 1, f.y - 1), y2k::orange_hi, y2k::orange_lo, 2.0f);
+    } else if (g_dos) {
+        dl->AddRectFilled(a, b, cga::dark_gray);
+        dl->AddRectFilled(a, f, cga::light_green);
+    } else {
+        dl->AddRectFilled(a, b, IM_COL32(255, 255, 255, 26), 3.0f);
+        if (t > 0.0f) dl->AddRectFilled(a, f, kAccentHi, 3.0f);
+    }
+}
+
+// The rescue-snapshot line both prompts carry: what Undo can and can't take back. The
+// Y is the user's consent to any bake, so the cost has to be on screen before it.
+void dlg_rescue_line(int levels_to_bake) {
+    char line[160];
+    Tone t;
+    if (levels_to_bake < 0) {
+        std::snprintf(line, sizeof line, "Too big to keep a revert copy - save first (%s)",
+                      live_key_label(KeyAction::SAVE));
+        t = Tone::Danger;
+    } else if (levels_to_bake > 0) {
+        std::snprintf(line, sizeof line, "Bakes down %d subdiv level%s first, then %s can revert",
+                      levels_to_bake, levels_to_bake == 1 ? "" : "s", live_key_label(KeyAction::UNDO));
+        t = Tone::Warn;
+    } else {
+        std::snprintf(line, sizeof line, "%s reverts this for 3 strokes", live_key_label(KeyAction::UNDO));
+        t = Tone::Ok;
+    }
+    dlg_text(UiFont::Sans, 13.0f, tone_col(t), line);
+}
+
+// TL;DR hover note for the button just drawn, in the skin's own tooltip.
+void dlg_tip(const char* tip) {
+    if (ImGui::IsItemHovered())
+        tooltip(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), TipSide::Below, tip, nullptr);
+}
+
+void dlg_title(const char* s) {
+    dlg_text(UiFont::SansSemibold, 16.0f, title_col(), title_case(s));
+}
+
+// Opens / closes a modal to follow `want` (the InputState flag the keys also drive),
+// and paints the skin's panel under it. The modal also dims the viewport and keeps
+// clicks off the canvas while it is up.
+bool begin_dialog(const char* id, bool want, int win_w, int win_h) {
+    const bool open = ImGui::IsPopupOpen(id);
+    if (want && !open) ImGui::OpenPopup(id);
+    else if (!want && !open) return false;
+    ImGui::SetNextWindowPos(ImVec2(win_w * 0.5f, win_h * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::PushStyleColor(ImGuiCol_PopupBg, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, g_dos ? ImVec2(24, 20) : ImVec2(26, 22));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10, 10));
+    const ImGuiWindowFlags f = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_AlwaysAutoResize |
+                               ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+                               ImGuiWindowFlags_NoScrollbar;
+    bool vis = ImGui::BeginPopupModal(id, nullptr, f);
+    if (vis && !want) {
+        ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+        vis = false;
+    }
+    if (!vis) {
+        ImGui::PopStyleVar(2);
+        ImGui::PopStyleColor(2);
+        return false;
+    }
+    window_panel(16.0f);
+    // Minimum width, so a short prompt doesn't make a cramped box.
+    ImGui::Dummy(ImVec2(dlg_min_w(), 0.0f));
+    return true;
+}
+void end_dialog() {
+    ImGui::EndPopup();
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor(2);
+}
+
+}  // namespace
+
+void draw_skin_dialogs(InputState& input, int win_w, int win_h, const DialogInfo& info) {
+    // ---- Remesh: confirm ----
+    if (begin_dialog("##dlgRemesh", input.remesh_confirm_pending, win_w, win_h)) {
+        dlg_title("Remesh stretched regions?");
+        dlg_text(UiFont::Sans, 13.0f, kMuted, "Evens out stretched triangles. Wipes the subdivision stack.");
+        dlg_rescue_line(info.levels_to_bake);
+        ImGui::Dummy(ImVec2(0.0f, 2.0f));
+        if (dlg_button("##rmY", "Remesh", "Y", true)) press_dialog_key(GLFW_KEY_Y);
+        dlg_tip("Rebuild stretched areas into even triangles");
+        ImGui::SameLine();
+        if (dlg_button("##rmN", "Cancel", "N", false)) press_dialog_key(GLFW_KEY_N);
+        dlg_tip("Close, change nothing");
+        end_dialog();
+    }
+
+    // ---- Remesh: running. Remesh runs inside a single frame, so this is the panel the
+    // app freezes on (main.cpp holds the remesh back one frame so it gets drawn).
+    if (begin_dialog("##dlgRemeshRun", input.remesh_in_progress, win_w, win_h)) {
+        dlg_title("Remeshing...");
+        dlg_text(UiFont::Sans, 13.0f, kMuted, "This can take a few seconds on a big mesh.");
+        end_dialog();
+    }
+
+    // ---- SDF merge: confirm ----
+    if (begin_dialog("##dlgMerge", input.voxel_merge_confirm_pending, win_w, win_h)) {
+        char line[160];
+        std::snprintf(line, sizeof line, "SDF-remesh %d mesh%s into one watertight mesh?",
+                      info.n_selected, info.n_selected == 1 ? "" : "es");
+        dlg_title(line);
+        dlg_rescue_line(info.levels_to_bake);
+        ImGui::Dummy(ImVec2(0.0f, 2.0f));
+
+        const float row_h = dlg_row_h();
+        float label_w = std::max(text_size(UiFont::Sans, 13.0f, title_case("Resolution")).x,
+                                 text_size(UiFont::Sans, 13.0f, title_case("Extractor")).x);
+        if (info.has_density)
+            label_w = std::max(label_w, text_size(UiFont::Sans, 13.0f, title_case("Remesh after")).x);
+        label_w += 18.0f;
+        const ImU32 hint = g_dos ? cga::dark_gray : kDim;
+        auto key_hint = [&](const char* k) {
+            ImGui::SameLine(0.0f, 14.0f);
+            ImVec2 p = ImGui::GetCursorScreenPos();
+            ImVec2 ks = text_size(UiFont::Mono, 12.0f, k);
+            ImGui::Dummy(ImVec2(ks.x, row_h));
+            text_at(ImGui::GetWindowDrawList(), UiFont::Mono, 12.0f,
+                    ImVec2(p.x, p.y + (row_h - ks.y) * 0.5f), hint, k);
+        };
+
+        // Resolution: - 128 +, the same 32-step nudge as [ / ].
+        dlg_label("Resolution", label_w, row_h);
+        ImGui::SameLine(0.0f, 0.0f);
+        if (dlg_button("##resDn", "-", nullptr, false)) press_dialog_key(GLFW_KEY_LEFT_BRACKET);
+        dlg_tip("Coarser grid: faster, less detail");
+        ImGui::SameLine();
+        {
+            char v[16];
+            std::snprintf(v, sizeof v, "%d", input.voxel_merge_resolution);
+            ImVec2 p = ImGui::GetCursorScreenPos();
+            ImVec2 vs = text_size(UiFont::MonoMedium, 15.0f, "000");
+            ImVec2 ts = text_size(UiFont::MonoMedium, 15.0f, v);
+            ImGui::Dummy(ImVec2(vs.x + 8.0f, row_h));
+            text_at(ImGui::GetWindowDrawList(), UiFont::MonoMedium, 15.0f,
+                    ImVec2(p.x + (vs.x + 8.0f - ts.x) * 0.5f, p.y + (row_h - ts.y) * 0.5f),
+                    g_dos ? cga::light_green : (g_y2k ? y2k::value : kText), v);
+        }
+        ImGui::SameLine();
+        if (dlg_button("##resUp", "+", nullptr, false)) press_dialog_key(GLFW_KEY_RIGHT_BRACKET);
+        dlg_tip("Finer grid: more detail, slower");
+        key_hint("[ ]");
+
+        // Extractor: both options visible, the live one lit; S flips it.
+        dlg_label("Extractor", label_w, row_h);
+        ImGui::SameLine(0.0f, 0.0f);
+        if (dlg_toggle("Surface Nets", input.voxel_merge_surface_nets) && !input.voxel_merge_surface_nets)
+            press_dialog_key(GLFW_KEY_S);
+        dlg_tip("Smoother, more even surface");
+        ImGui::SameLine();
+        if (dlg_toggle("Marching Cubes", !input.voxel_merge_surface_nets) && input.voxel_merge_surface_nets)
+            press_dialog_key(GLFW_KEY_S);
+        dlg_tip("The robust default");
+        key_hint("S");
+
+        // Density paint on the selection: offer the chained adaptive remesh.
+        if (info.has_density) {
+            dlg_label("Remesh after", label_w, row_h);
+            ImGui::SameLine(0.0f, 0.0f);
+            if (dlg_toggle(input.voxel_merge_adaptive ? "Adaptive: on" : "Adaptive: off",
+                           input.voxel_merge_adaptive))
+                press_dialog_key(GLFW_KEY_D);
+            dlg_tip("Then remesh by your density paint");
+            key_hint("D");
+        }
+
+        ImGui::Dummy(ImVec2(0.0f, 4.0f));
+        if (dlg_button("##mgY", "Merge", "Y", true)) press_dialog_key(GLFW_KEY_Y);
+        dlg_tip("Weld the selection into one watertight mesh");
+        ImGui::SameLine();
+        if (dlg_button("##mgM", "Mirror merge", "M", false)) press_dialog_key(GLFW_KEY_M);
+        dlg_tip("Same, but symmetric: stays editable with X-mirror");
+        if (info.n_unselected > 0) {
+            ImGui::SameLine();
+            std::snprintf(line, sizeof line, "Subtract %d red", info.n_unselected);
+            if (dlg_button("##mgSub", line, "-", false, true)) press_dialog_key(GLFW_KEY_MINUS);
+            dlg_tip("Merge, then carve the red meshes out of it");
+        }
+        ImGui::SameLine();
+        if (dlg_button("##mgN", "Cancel", "N", false)) press_dialog_key(GLFW_KEY_N);
+        dlg_tip("Close, change nothing");
+        end_dialog();
+    }
+
+    // ---- SDF merge: running (spans frames, so the bar really moves) ----
+    if (begin_dialog("##dlgMergeRun", input.voxel_merge_in_progress, win_w, win_h)) {
+        char line[48];
+        std::snprintf(line, sizeof line, "SDF-remeshing...  %d%%", (int)(info.merge_progress * 100.0f + 0.5f));
+        dlg_title(line);
+        dlg_bar(dlg_min_w(), info.merge_progress);
+        end_dialog();
+    }
+}

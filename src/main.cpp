@@ -1915,7 +1915,15 @@ int main(int argc, char* argv[]) {
         // Handled in the ImGui widget section below (after rendering).
 
         // ---- Remesh execution ----
-        if (input.remesh_requested) {
+        // A remesh runs inside this one frame, so the "Remeshing..." panel would never
+        // reach the screen: the first frame only raises remesh_in_progress (the panel
+        // draws and presents), the next one does the work.
+        static bool remesh_shown = false;
+        if (input.remesh_requested && !remesh_shown) {
+            remesh_shown = true;
+            input.remesh_in_progress = true;
+        } else if (input.remesh_requested) {
+            remesh_shown = false;
             input.remesh_requested = false;
             input.remesh_in_progress = true;
 
@@ -3472,43 +3480,51 @@ int main(int argc, char* argv[]) {
         }
 
         // ---- Overlays ----
-        if (input.quit_requested)
-            draw_quit_dialog(text, win_w, win_h);
-        if (input.drop_confirm_pending)
-            draw_drop_confirm(text, input.drop_path, win_w, win_h);
-        if (input.remesh_confirm_pending)
-            draw_remesh_confirm(text, snapshot_levels_to_bake(scene), win_w, win_h);
-        if (input.drop_level_confirm_pending)
-            draw_drop_level_confirm(text, multires->base_level + (int)multires->disp.size(),
-                                    win_w, win_h);
+        // Remesh and SDF-merge prompts: what they need from the scene is gathered once
+        // here. The classic skin draws them as bitmap text right below; every other
+        // skin draws real dialogs (draw_skin_dialogs, after the skin's UI).
+        DialogInfo dlg;
+        if (input.remesh_confirm_pending || input.voxel_merge_confirm_pending)
+            dlg.levels_to_bake = snapshot_levels_to_bake(scene);
         if (input.voxel_merge_confirm_pending) {
+            dlg.n_selected = (int)scene.selected_ids().size();
             // Count unselected (red) committed entities — candidate cutters for subtract.
-            int n_unselected = 0;
             for (const auto& up : scene.entities()) {
                 if (!up || !up->alive || up->preview) continue;
                 bool sel = false;
                 for (uint32_t sid : scene.selected_ids())
                     if (sid == up->id) { sel = true; break; }
-                if (!sel) n_unselected++;
+                if (!sel) dlg.n_unselected++;
             }
             // Density field on any selected mesh → the merge output will carry
             // the heatmap; offer the chained adaptive remesh line.
-            bool merge_has_density = false;
             for (uint32_t sid : scene.selected_ids()) {
                 const MeshEntity* e = scene.find_entity(sid);
-                if (e && e->alive && !e->mesh.density.empty()) { merge_has_density = true; break; }
+                if (e && e->alive && !e->mesh.density.empty()) { dlg.has_density = true; break; }
             }
-            draw_voxel_merge_confirm(text, input.voxel_merge_resolution,
-                                     (int)scene.selected_ids().size(), n_unselected,
-                                     input.voxel_merge_surface_nets,
-                                     merge_has_density, input.voxel_merge_adaptive,
-                                     snapshot_levels_to_bake(scene), win_w, win_h);
         }
-        if (input.remesh_in_progress)
+        if (vmerge_job) dlg.merge_progress = voxel_merge_progress(*vmerge_job);
+        const bool bitmap_dialogs = input.ui_classic();
+
+        if (input.quit_requested)
+            draw_quit_dialog(text, win_w, win_h);
+        if (input.drop_confirm_pending)
+            draw_drop_confirm(text, input.drop_path, win_w, win_h);
+        if (bitmap_dialogs && input.remesh_confirm_pending)
+            draw_remesh_confirm(text, dlg.levels_to_bake, win_w, win_h);
+        if (input.drop_level_confirm_pending)
+            draw_drop_level_confirm(text, multires->base_level + (int)multires->disp.size(),
+                                    win_w, win_h);
+        if (bitmap_dialogs && input.voxel_merge_confirm_pending)
+            draw_voxel_merge_confirm(text, input.voxel_merge_resolution,
+                                     dlg.n_selected, dlg.n_unselected,
+                                     input.voxel_merge_surface_nets,
+                                     dlg.has_density, input.voxel_merge_adaptive,
+                                     dlg.levels_to_bake, win_w, win_h);
+        if (bitmap_dialogs && input.remesh_in_progress)
             draw_remesh_progress(text, win_w, win_h);
-        if (input.voxel_merge_in_progress)
-            draw_voxel_merge_progress(text, win_w, win_h,
-                                      vmerge_job ? voxel_merge_progress(*vmerge_job) : 0.0f);
+        if (bitmap_dialogs && input.voxel_merge_in_progress)
+            draw_voxel_merge_progress(text, win_w, win_h, dlg.merge_progress);
         // The bitmap HUD belongs to the classic skin; the modern skin draws its own
         // readouts, toast and slider in draw_modern_ui below.
         if (input.ui_classic()) {
@@ -4209,6 +4225,7 @@ int main(int argc, char* argv[]) {
             st.fps = fps_display;
             st.project_path = current_project_path.c_str();
             draw_modern_ui(input, win_w, win_h, &alpha_lib, mres_info, st);
+            draw_skin_dialogs(input, win_w, win_h, dlg);
         }
 
         // Key bindings window (burger menu). Top level, so every skin shares it.

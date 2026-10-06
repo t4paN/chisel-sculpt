@@ -1067,6 +1067,10 @@ static void handle_modal_key(GLFWwindow* w, int key) {
     }
 }
 
+void press_dialog_key(int glfw_key) {
+    if (g_input) handle_modal_key(g_window, glfw_key);
+}
+
 static void key_callback(GLFWwindow* w, int key, int scancode, int action, int mods) {
     (void)scancode;
     if (!g_input) return;

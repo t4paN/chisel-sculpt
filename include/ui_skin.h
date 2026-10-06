@@ -60,6 +60,20 @@ struct SkinStats {
 void draw_modern_ui(InputState& input, int win_w, int win_h, const AlphaLibrary* alpha_lib,
                     MultiresInfo mres, const SkinStats& stats);
 
+// What the remesh / SDF-merge dialogs need from the scene, gathered in main.cpp.
+struct DialogInfo {
+    int   levels_to_bake = 0;    // see snapshot_levels_to_bake: -1 = too big to stash
+    int   n_selected     = 0;    // meshes the merge welds
+    int   n_unselected   = 0;    // red meshes a subtract merge would carve away
+    bool  has_density    = false;
+    float merge_progress = 0.0f; // 0..1 while a merge runs
+};
+
+// The remesh and SDF-merge prompts and progress panels, drawn as real dialogs in the
+// active skin (Modern, DOS, Y2K). Classic keeps its bitmap prompts (ui_overlay.cpp).
+// Call at the top level, after draw_modern_ui.
+void draw_skin_dialogs(InputState& input, int win_w, int win_h, const DialogInfo& info);
+
 // Menu > Appearance (skin, panel material, motion, viewfinder). Both skins' menus
 // call it so Classic can always switch back.
 void draw_appearance_menu_items(InputState& input);

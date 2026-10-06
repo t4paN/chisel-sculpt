@@ -2,6 +2,25 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-06 — Remesh and SDF-merge prompts become real dialogs per skin
+
+*Built GL, native WebGPU and web; the user checked the look on native.*
+
+- **Modern, DOS and 2000s** draw the remesh and merge prompts as modal dialogs in their
+  own style: glass panel + violet main button / black CGA box + Turbo-style shadowed
+  buttons / brushed gray + gloss tiles. **Classic** keeps its bitmap prompts. The
+  modal dims the viewport and keeps clicks off the model.
+- Every button shows its key (Remesh **Y**, Cancel **N**, Mirror merge **M**,
+  Subtract **-**) and calls `press_dialog_key`, the same path the keypress takes, so
+  clicking and typing can't drift apart. The merge dialog also has −/+ for the
+  resolution, the extractor as two options with the current one lit, and the Adaptive
+  toggle when there's density paint. Each button has a one-line hover tip.
+- Both carry the undo line (green / amber / red: what Ctrl+Z can take back).
+- **SDF merge progress** is a panel with a real progress bar.
+- **"Remeshing..." had never shown, in any skin**: the remesh starts and finishes
+  inside one frame, so the flag was cleared before anything drew. The remesh now
+  waits one frame after Y, so the panel appears before the app pauses.
+
 ## 2026-10-06 — Rebindable keys (Key bindings window) + fullscreen moves to Tab
 
 *Built GL, native WebGPU and web; run by the user on native (layout fix after the first

@@ -116,6 +116,10 @@ const char* keybind_reserved(int key);
 // The live label for an action, for code that has no InputState at hand (the bitmap
 // dialogs). Same as InputState::key_label on the state input.cpp is wired to.
 const char* live_key_label(KeyAction a);
+// Exactly what pressing that key does while a dialog is up (Y, N, Esc, and the merge
+// dialog's M S D - [ ]). The skinned dialogs' buttons call this, so a click and the
+// keypress can never drift apart.
+void press_dialog_key(int glfw_key);
 
 struct InputState {
     // Mouse
