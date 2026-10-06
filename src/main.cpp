@@ -541,6 +541,12 @@ int main(int argc, char* argv[]) {
 #if !defined(__EMSCRIPTEN__)
     glfwWindowHintString(GLFW_X11_CLASS_NAME, "Chisel");
     glfwWindowHintString(GLFW_X11_INSTANCE_NAME, "Chisel");
+  #ifdef GLFW_WAYLAND_APP_ID
+    // Wayland ignores glfwSetWindowIcon; the compositor finds the titlebar/taskbar
+    // icon by matching app_id to a .desktop file name. "chisel" = chisel.desktop
+    // (the one AppRun installs). Without it KWin shows its generic "W" icon.
+    glfwWindowHintString(GLFW_WAYLAND_APP_ID, "chisel");
+  #endif
 #endif
 
     // Initial window size.

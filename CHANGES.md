@@ -2,6 +2,22 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-06 — New app icon + taskbar icon on Wayland
+
+*Confirmed by the user on the desktop (KDE Wayland), native build + AppImage, after a
+re-login.*
+
+- **New icon.** The skull is replaced by the user's new artwork (a 512 px master, scaled to
+  256 px for `assets/chisel-icon.png`, then lightened slightly with levels).
+  `include/icon_data.h` is regenerated from it with `xxd -i`, so the window icon baked
+  into the binary matches the AppImage/menu icon.
+- **Wayland taskbar/titlebar icon.** KWin was showing its generic "W" icon for Chisel
+  windows. Wayland ignores `glfwSetWindowIcon`; the compositor looks the icon up by
+  matching the window's **app_id** to a `.desktop` file name, and GLFW never set one. The
+  native build now sets `GLFW_WAYLAND_APP_ID` to `chisel`, which matches the
+  `chisel.desktop` that the AppImage's `AppRun` installs. X11 still uses the embedded
+  icon as before.
+
 ## 2026-10-04 — UI skins confirmed on Linux and web
 
 The three new skins (modern, DOS, 2000s) were built and screenshot-checked on Windows
