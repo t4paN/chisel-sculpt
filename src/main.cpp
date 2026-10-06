@@ -943,6 +943,7 @@ int main(int argc, char* argv[]) {
     // ImGui must not read GLFW's desynced pointer coords either — take the cursor
     // callback back; chisel_set_pointer feeds ImGui the DOM position instead.
     input_web_take_cursor_callback(window);
+    input_web_feed_imgui_wheel();
 #endif
 
     Renderer renderer;

@@ -7,6 +7,7 @@
 #include <algorithm>
 #if defined(__EMSCRIPTEN__)
 #include <emscripten.h>
+#include <emscripten/html5.h>
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
 #endif
@@ -697,6 +698,23 @@ extern "C" EMSCRIPTEN_KEEPALIVE void chisel_path_sample(double x, double y) {
 // chisel_set_pointer above feeds both from the DOM.
 void input_web_take_cursor_callback(GLFWwindow* window) {
     glfwSetCursorPosCallback(window, cursor_pos_callback);
+}
+
+// On web, ImGui_ImplGlfw drops GLFW scroll events on purpose (Emscripten's GLFW
+// quantizes them) and reads the wheel from a canvas hook that only
+// ImGui_ImplGlfw_InstallEmscriptenCallbacks registers. We can't call that one: it
+// also takes over canvas resizing, which the shell and main loop own. So ImGui
+// windows never scrolled in the browser. This is its wheel handler, alone. GLFW's
+// own listener is separate and still drives camera zoom.
+static EM_BOOL web_imgui_wheel(int, const EmscriptenWheelEvent* ev, void*) {
+    if (!ImGui::GetCurrentContext()) return EM_FALSE;
+    float k = ev->deltaMode == DOM_DELTA_PIXEL ? 1.0f / 100.0f    // same steps as ImGui's
+            : ev->deltaMode == DOM_DELTA_LINE  ? 1.0f / 3.0f : 80.0f;
+    ImGui::GetIO().AddMouseWheelEvent((float)ev->deltaX * -k, (float)ev->deltaY * -k);
+    return EM_TRUE;
+}
+void input_web_feed_imgui_wheel() {
+    emscripten_set_wheel_callback("#canvas", nullptr, false, web_imgui_wheel);
 }
 #endif
 

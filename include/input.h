@@ -532,4 +532,7 @@ void setup_char_callback(GLFWwindow* window);
 // on web both consumers are fed the DOM CSS-pixel position via chisel_set_pointer
 // instead of GLFW's desynced backing-store coords.
 void input_web_take_cursor_callback(GLFWwindow* window);
+// Feed the mouse wheel to ImGui (call after ImGui init). Its GLFW backend ignores
+// GLFW scroll on web and expects its own canvas wheel hook instead.
+void input_web_feed_imgui_wheel();
 #endif
