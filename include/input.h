@@ -65,6 +65,58 @@ struct ProfileSettings {
     BrushSettings per_brush[(int)BrushType::COUNT];
 };
 
+// Rebindable keyboard shortcuts (burger menu -> Key bindings). One entry per thing a
+// key can do outside a dialog; key_callback looks the pressed key up here instead of
+// switching on fixed GLFW codes, and every on-screen key hint reads its label from the
+// same table, so a rebind can never leave a tooltip or the shortcut card lying.
+//
+// NOT in here, on purpose: the dialog answers (Y/N, Esc, the merge dialog's M S D - [ ])
+// and the modifier gestures (hold/double-tap Shift and Ctrl). Those are fixed — a
+// dialog key you could unbind is a dialog you could no longer answer.
+//
+// The id strings are what settings.cpp writes to disk — never rename one, or every
+// saved rebind of it is silently dropped. Append new actions anywhere; order is only
+// the order the Key bindings window lists them in.
+enum class KeyAction : int {
+    MODE_SCULPT, MODE_INSERT, MODE_SELECT, MODE_PAINT,
+    BRUSH_DRAW, BRUSH_CLAY, BRUSH_INFLATE, BRUSH_CREASE, BRUSH_PINCH,
+    BRUSH_MOVE, BRUSH_LIMB, BRUSH_MASK, BRUSH_PREV, BRUSH_NEXT,
+    HOLD_SIZE, HOLD_STRENGTH, HOLD_HARDNESS, HOLD_SPACING, SIZE_DOWN, SIZE_UP, AUTOSMOOTH,
+    LEVEL_UP, LEVEL_DOWN, PROJECT, MIRROR, REMESH, MERGE, DELETE_MESH,
+    MASK_INVERT, MASK_CLEAR,
+    FOCUS, VIEW_FRONT, VIEW_SIDE, VIEW_TOP, FULLSCREEN, WIREFRAME, FAST_NORMALS,
+    UNDO, REDO, SAVE, SAVE_AS, OPEN, EXPORT,
+    COUNT
+};
+
+// key = a GLFW_KEY_* code, or GLFW_KEY_UNKNOWN for "unbound" (shown as ???).
+// mods = the GLFW_MOD_CONTROL / SHIFT / ALT bits that must be held with it.
+struct KeyBind {
+    int key;
+    int mods;
+    bool bound() const { return key != GLFW_KEY_UNKNOWN; }
+    bool operator==(const KeyBind& o) const { return key == o.key && mods == o.mods; }
+};
+constexpr int kKeyModMask = GLFW_MOD_CONTROL | GLFW_MOD_SHIFT | GLFW_MOD_ALT;
+
+struct KeyActionInfo {
+    const char* id;      // on-disk name, stable forever
+    const char* group;   // section heading in the Key bindings window
+    const char* label;   // what it does, short
+    const char* note;    // what it does in other modes, or nullptr
+    KeyBind     def;     // factory binding
+};
+const KeyActionInfo& key_action_info(KeyAction a);
+// "Ctrl+Shift+S", "F1", "Tab", "???" for unbound. Writes into buf and returns it.
+const char* format_keybind(const KeyBind& b, char* buf, int n);
+// Keys a binding may not use: they belong to the fixed set above (Esc closes every
+// dialog, ` is the console, F9/F10/F12 and PgUp/PgDn are the debug keys). Returns a
+// short reason, or nullptr when the key is free to bind.
+const char* keybind_reserved(int key);
+// The live label for an action, for code that has no InputState at hand (the bitmap
+// dialogs). Same as InputState::key_label on the state input.cpp is wired to.
+const char* live_key_label(KeyAction a);
+
 struct InputState {
     // Mouse
     double mouse_x, mouse_y;
@@ -139,6 +191,24 @@ struct InputState {
     // so the click that dismisses it lands on the canvas too — this makes main.cpp
     // swallow that click instead of laying down a stray dab or starting an orbit.
     bool             help_popup_open;
+
+    // Live shortcut table (see KeyAction). Seeded with the factory bindings by the
+    // constructor; settings.cpp persists only the ones that differ from those.
+    KeyBind keybinds[(int)KeyAction::COUNT];
+    // Label of the live binding, e.g. "Ctrl+D", or "???" when unbound. Each action has
+    // its own buffer, so several can sit in one printf.
+    const char* key_label(KeyAction a) const;
+
+    // Key bindings window. While it is open key_callback runs no shortcuts at all: it
+    // only reports keys to the window. keybind_capture is the action waiting for a new
+    // key (-1 = none); the callback drops the next key press into keybind_captured
+    // (key, with mods), or sets keybind_esc for Esc, and the window consumes both.
+    bool    keybind_menu_open    = false;
+    bool    keybind_menu_request = false;   // burger menu asks the window to open
+    int     keybind_capture      = -1;
+    bool    keybind_has_capture  = false;
+    KeyBind keybind_captured     = { GLFW_KEY_UNKNOWN, 0 };
+    bool    keybind_esc          = false;
 
     // False until the shortcut card has been shown once, then persisted. A first-time
     // user — especially on the itch build, where there is no install step to read a

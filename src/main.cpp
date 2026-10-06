@@ -216,6 +216,23 @@ extern "C" EMSCRIPTEN_KEEPALIVE void chisel_flush_settings() {
     if (g_settings_input) settings_save(*g_settings_input);
 }
 
+// Asked by the page's keydown hook whether the browser should be kept off this key:
+// yes for anything while the Key bindings window is open (it is listening, and Ctrl+D
+// must reach it rather than bookmark the page), else yes only when a binding wants
+// exactly this key and these modifiers. Exact, not the subset rule key_callback uses,
+// so a plain F binding does not also swallow the browser's own Ctrl+F.
+extern "C" EMSCRIPTEN_KEEPALIVE int chisel_key_wanted(int glfw_key, int ctrl, int shift, int alt) {
+    if (!g_settings_input) return 0;
+    const InputState& in = *g_settings_input;
+    if (in.keybind_menu_open) return 1;
+    const int mods = (ctrl ? GLFW_MOD_CONTROL : 0) | (shift ? GLFW_MOD_SHIFT : 0)
+                   | (alt ? GLFW_MOD_ALT : 0);
+    for (int i = 0; i < (int)KeyAction::COUNT; i++)
+        if (in.keybinds[i].bound() && in.keybinds[i].key == glfw_key && in.keybinds[i].mods == mods)
+            return 1;
+    return 0;
+}
+
 // Set async by the picker's JS callback; the frame loop consumes it. Safe to
 // assign from JS mid-ASYNCIFY-suspend: plain reentry, nothing here suspends.
 static std::string g_web_import_path;
@@ -1281,7 +1298,7 @@ int main(int argc, char* argv[]) {
         }
 
         bool imgui_wants_mouse = ImGui::GetIO().WantCaptureMouse;
-        bool dialog_open = input.export_dialog_active || input.import_dialog_active || input.save_dialog_active || input.voxel_merge_confirm_pending || input.drop_confirm_pending || input.help_popup_open;
+        bool dialog_open = input.export_dialog_active || input.import_dialog_active || input.save_dialog_active || input.voxel_merge_confirm_pending || input.drop_confirm_pending || input.help_popup_open || input.keybind_menu_open;
         if ((imgui_wants_mouse || dialog_open) && app_state != AppState::SCULPTING) {
             input.drag_mode = InputState::DragMode::NONE;
             input.mouse1_just_pressed = false;
@@ -1307,7 +1324,8 @@ int main(int argc, char* argv[]) {
             } else if (left != rescue_shown && input.notification_timer <= 0.0f) {
                 rescue_shown = left;
                 std::snprintf(input.notification, sizeof(input.notification),
-                              "Ctrl+Z reverts the %s - %d stroke%s left",
+                              "%s reverts the %s - %d stroke%s left",
+                              input.key_label(KeyAction::UNDO),
                               rescue.op, left, left == 1 ? "" : "s");
                 input.notification_timer = 2.5f;
             }
@@ -2476,12 +2494,17 @@ int main(int argc, char* argv[]) {
                                 || input.drop_level_confirm_pending
                                 || input.drop_confirm_pending
                                 || input.export_dialog_active || input.import_dialog_active
-                                || input.save_dialog_active;
+                                || input.save_dialog_active
+                                || input.keybind_menu_open;
+                // The spin keys are whatever Previous/Next brush are bound to (Q/E by
+                // default) — the same keys cycle brushes outside Select mode.
+                const KeyBind& spin_cw  = input.keybinds[(int)KeyAction::BRUSH_NEXT];
+                const KeyBind& spin_ccw = input.keybinds[(int)KeyAction::BRUSH_PREV];
                 int dir = 0;
                 if (input.interaction_mode == InputState::InteractionMode::SELECT
                     && !modal && !input.ctrl_held && !scene.selected_ids().empty()) {
-                    if (glfwGetKey(window, GLFW_KEY_E) == GLFW_PRESS) dir += 1;
-                    if (glfwGetKey(window, GLFW_KEY_Q) == GLFW_PRESS) dir -= 1;
+                    if (spin_cw.bound()  && glfwGetKey(window, spin_cw.key)  == GLFW_PRESS) dir += 1;
+                    if (spin_ccw.bound() && glfwGetKey(window, spin_ccw.key) == GLFW_PRESS) dir -= 1;
                 }
 
                 const double now = glfwGetTime();
@@ -3263,7 +3286,7 @@ int main(int argc, char* argv[]) {
         // ---- Cursor visibility ----
         bool non_edit_mode = input.interaction_mode != InputState::InteractionMode::EDIT;
         // Hide the OS cursor while sculpting (we draw our own brush cursor).
-        bool show_os_cursor = input.quit_requested || input.export_dialog_active || input.import_dialog_active || input.save_dialog_active || input.remesh_confirm_pending || input.voxel_merge_confirm_pending || input.drop_confirm_pending || input.help_popup_open || imgui_wants_mouse || non_edit_mode;
+        bool show_os_cursor = input.quit_requested || input.export_dialog_active || input.import_dialog_active || input.save_dialog_active || input.remesh_confirm_pending || input.voxel_merge_confirm_pending || input.drop_confirm_pending || input.help_popup_open || input.keybind_menu_open || imgui_wants_mouse || non_edit_mode;
 #ifndef __EMSCRIPTEN__
         // A slider drag owns the cursor mode while it runs: it holds GLFW_CURSOR_DISABLED
         // to capture the pointer. This line ran unconditionally every frame and put the
@@ -3379,7 +3402,7 @@ int main(int argc, char* argv[]) {
         }
 
         // Brush cursor — draw at locked position during slider, normal position otherwise
-        if (!input.quit_requested && !input.export_dialog_active && !input.import_dialog_active && !input.save_dialog_active && !input.remesh_confirm_pending && !input.voxel_merge_confirm_pending && !input.drop_confirm_pending && !input.help_popup_open && !imgui_wants_mouse && !non_edit_mode) {
+        if (!input.quit_requested && !input.export_dialog_active && !input.import_dialog_active && !input.save_dialog_active && !input.remesh_confirm_pending && !input.voxel_merge_confirm_pending && !input.drop_confirm_pending && !input.help_popup_open && !input.keybind_menu_open && !imgui_wants_mouse && !non_edit_mode) {
             float cursor_x, cursor_y;
             if (input.slider_mode != InputState::SliderMode::NONE) {
                 cursor_x = (float)input.slider_start_x;
@@ -4188,6 +4211,9 @@ int main(int argc, char* argv[]) {
             draw_modern_ui(input, win_w, win_h, &alpha_lib, mres_info, st);
         }
 
+        // Key bindings window (burger menu). Top level, so every skin shares it.
+        draw_keybind_window(input, win_w, win_h);
+
         // ---- Error popup ----
         if (error_popup_trigger) {
             ImGui::OpenPopup("Error");
@@ -4312,12 +4338,29 @@ int main(int argc, char* argv[]) {
         // devtools (Ctrl+Shift+I) keep working. Matched on e.code (physical key),
         // not e.key: under a non-Latin layout (e.g. Greek) Ctrl+D arrives as
         // e.key='δ' and a key-based match lets the browser bookmark anyway.
+        //
+        // Rebound shortcuts: Ctrl/Alt combos and F-keys are checked against the live
+        // bindings (chisel_key_wanted), mapping e.code to the GLFW code — letters and
+        // digits share their ASCII value, F1 is 290. Plain keys are left alone: keeping
+        // the browser off them would also eat the keypress the Save dialog types with.
+        // While the Key bindings window is open it wants every key.
         window.addEventListener('keydown', function(e) {
             var code = e.code || "";
             var ctrl = e.ctrlKey || e.metaKey;
             if (e.key === 'F1'
                 || (ctrl && !e.altKey && (!e.shiftKey || code === 'KeyZ')
-                    && ['KeyD','KeyS','KeyO','KeyI','KeyZ','KeyY','KeyP'].indexOf(code) !== -1))
+                    && ['KeyD','KeyS','KeyO','KeyI','KeyZ','KeyY','KeyP'].indexOf(code) !== -1)) {
+                e.preventDefault();
+                return;
+            }
+            var gk = -1, fkey = false;
+            if (/^Key[A-Z]$/.test(code)) gk = code.charCodeAt(3);
+            else if (/^Digit[0-9]$/.test(code)) gk = code.charCodeAt(5);
+            else if (/^F([1-9]|1[0-2])$/.test(code)) { gk = 289 + parseInt(code.substring(1), 10); fkey = true; }
+            // -2 is no key at all, so this is true only while the window is listening.
+            var listening = Module._chisel_key_wanted(-2, 0, 0, 0);
+            if (listening || ((ctrl || e.altKey || fkey) && gk !== -1
+                    && Module._chisel_key_wanted(gk, ctrl ? 1 : 0, e.shiftKey ? 1 : 0, e.altKey ? 1 : 0)))
                 e.preventDefault();
         }, true);
     });

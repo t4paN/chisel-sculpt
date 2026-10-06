@@ -2,6 +2,36 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-06 — Rebindable keys (Key bindings window) + fullscreen moves to Tab
+
+*Built GL, native WebGPU and web; run by the user on native (layout fix after the first
+look). The full test recipe hasn't been run yet; the browser build hasn't been run.*
+
+- **Fullscreen is Tab now; Space is unbound.**
+- **Burger menu → Key bindings…** opens a centred window listing every shortcut, grouped
+  like the shortcut card. Click a key, press the new one (Ctrl/Shift/Alt combos work).
+  Picking a key another action already has shows a warning; **Continue** swaps the two,
+  so nothing silently loses its key. **X** clears a binding, shown as `???`. **Save**
+  applies and persists; **Exit** (or Esc) drops the changes with no prompt.
+- **One table drives everything.** `key_callback`'s hard-coded switch is replaced by a
+  `KeyAction` table in `input.h`. The shortcut card, every skin's tooltips and key
+  letters (Classic, Modern, DOS, 2000s), and the "Ctrl+Z reverts" messages all read
+  their labels from it, so a rebind never leaves a stale hint. Select mode's spin keys
+  follow Previous/Next brush.
+- **Matching:** a binding fires when its key is pressed with at least its modifiers,
+  and the binding with the most modifiers wins. Shift+D still means "Subdivision down"
+  while D is Draw, and holding Shift for smooth still lets plain brush keys through,
+  as before.
+- **Fixed on purpose:** dialog answers (Y/N, Esc, the merge dialog's M S D - [ ]) and
+  the Shift/Ctrl hold and double-tap gestures; the window lists them greyed out. Esc,
+  `` ` `` and the debug keys (F9 F10 F12, PgUp/PgDn) are refused as bindings.
+- **Saved** as `key.<id>=<key>:<mods>`, and only for bindings that differ from the
+  default, so a later default change still reaches untouched keys. **Reset settings
+  to defaults** restores the factory keys too.
+- **Web:** the page keeps the browser off bound Ctrl/Alt combos and F-keys, and off
+  every key while the window is listening, so Ctrl+D can be captured instead of
+  bookmarking the page.
+
 ## 2026-10-06 — New app icon + taskbar icon on Wayland
 
 *Confirmed by the user on the desktop (KDE Wayland), native build + AppImage, after a

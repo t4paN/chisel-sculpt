@@ -37,6 +37,15 @@ mesh to sculpt; left-drag off the mesh to orbit. That's 90% of the app right the
   results, merge status, warnings).
 - **(i) shortcut card** — top right, beside the burger menu: every key on one screen.
   Click anywhere outside it to dismiss.
+- **Key bindings** — burger menu → **Key bindings…** opens a window listing every
+  shortcut. Click a key and press the new one (hold Ctrl/Shift/Alt with it for a
+  combo). If another action already uses that key you get a warning; **Continue** swaps
+  the two. **X** clears a binding, which then shows as `???`. **Save** keeps your
+  changes, and they are remembered next time. **Exit** (or Esc) closes the window and
+  throws the changes away. The shortcut card and every tooltip follow your bindings.
+  Dialog answers (Y/N, Esc, the merge dialog's keys) and the Shift/Ctrl gestures are
+  fixed. **Reset settings to defaults** in the same menu also restores the factory keys.
+  The key tables in this manual list the **default** keys.
 
 ## Modes
 
@@ -259,7 +268,7 @@ as you like and never clip inside the model.
 | Ctrl + RMB drag / Alt + RMB drag | Zoom |
 | F | Focus on the active mesh |
 | F1 / F2 / F3 | Snap to front / side / top |
-| Space | Toggle fullscreen |
+| Tab | Toggle fullscreen |
 
 ### Smooth shading
 
@@ -349,7 +358,7 @@ you want to choose folders on itch.
 | Key | Action |
 |---|---|
 | N | Toggle fast normals |
-| Y | Toggle debug mesh view (outside prompts) |
+| Y | Toggle wireframe overlay (outside prompts) |
 | Esc | Quit (native only) / cancel prompts |
 
 ## Known limitations

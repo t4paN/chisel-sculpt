@@ -54,6 +54,9 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
 // shortcut card (call inside the window that opens "##helppopup").
 void draw_settings_menu_items(InputState& input, MultiresInfo mres, bool sync_tabs);
 void draw_help_popup(InputState& input, int win_w, int win_h);
+// Burger menu -> Key bindings: the centred rebinding window. Call once per frame at
+// the top level (outside any ImGui window), after the skin's UI.
+void draw_keybind_window(InputState& input, int win_w, int win_h);
 
 // Eyedropper cursor while the colour picker is armed (tip at x,y; dimmed when
 // the cursor is off the model). ImGui foreground draw list — identical on all

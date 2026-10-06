@@ -220,6 +220,18 @@ std::string serialize(const InputState& in) {
     append_kv(s, "clay_melt",           in.clay_melt);
     append_kv(s, "density_coarse_mult", in.density_coarse_mult);
     append_kv(s, "density_fine_mult",   in.density_fine_mult);
+    // Shortcuts: only the ones that differ from the factory binding, as key.<id>=<glfw
+    // key>:<mods>. Untouched keys stay unwritten so a later change to a default reaches
+    // them; an unbound key is written as -1 so it stays unbound.
+    for (int i = 0; i < (int)KeyAction::COUNT; i++) {
+        const KeyActionInfo& info = key_action_info((KeyAction)i);
+        const KeyBind& b = in.keybinds[i];
+        if (b == info.def) continue;
+        char buf[96];
+        std::snprintf(buf, sizeof(buf), "key.%s=%d:%d\n", info.id, b.bound() ? b.key : -1,
+                      b.bound() ? b.mods : 0);
+        s += buf;
+    }
     if (in.active_alpha >= 0 && in.active_alpha < kBuiltinAlphaCount)
         append_kv(s, "active_alpha", in.active_alpha);
     char buf[128];
@@ -289,6 +301,22 @@ void apply_global_key(InputState& in, const std::string& key, const std::string&
     else if (key == "remesh_detail")       in.remesh_detail       = clampf(std::strtof(val.c_str(), nullptr), 0.25f, 4.0f);
     else if (key == "flat_shading")        in.flat_shading        = parse_bool(val);
     else if (key == "show_fps")            in.show_fps            = parse_bool(val);
+    else if (key.compare(0, 4, "key.") == 0) {
+        // Unknown ids (an action a newer build added, then this build reads the blob)
+        // are skipped, and a key outside GLFW's range or one that is reserved is
+        // ignored rather than trusted — a hand-edited file must not be able to bind Esc.
+        const std::string id = key.substr(4);
+        int k = GLFW_KEY_UNKNOWN, m = 0;
+        if (std::sscanf(val.c_str(), "%d:%d", &k, &m) < 1) return;
+        if (k != GLFW_KEY_UNKNOWN && (k < GLFW_KEY_SPACE || k > GLFW_KEY_LAST || keybind_reserved(k)))
+            return;
+        for (int i = 0; i < (int)KeyAction::COUNT; i++) {
+            if (id == key_action_info((KeyAction)i).id) {
+                in.keybinds[i] = { k, k == GLFW_KEY_UNKNOWN ? 0 : (m & kKeyModMask) };
+                break;
+            }
+        }
+    }
     else if (key == "ui_skin") {
         int k = (int)std::strtol(val.c_str(), nullptr, 10);
         if (k >= 0 && k <= (int)InputState::UiSkin::Y2K) in.ui_skin = (InputState::UiSkin)k;
@@ -453,6 +481,7 @@ void settings_reset(InputState& input) {
     input.density_coarse_mult = fresh.density_coarse_mult;
     input.density_fine_mult   = fresh.density_fine_mult;
     input.active_alpha       = fresh.active_alpha;
+    for (int i = 0; i < (int)KeyAction::COUNT; i++) input.keybinds[i] = fresh.keybinds[i];
     for (int i = 0; i < 3; i++) {
         input.paint_color[i]     = fresh.paint_color[i];
         input.paint_color_alt[i] = fresh.paint_color_alt[i];

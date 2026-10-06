@@ -50,16 +50,19 @@ static void draw_rescue_line(TextOverlay& text, int levels_to_bake, float x, flo
                              float scale, int win_w, int win_h) {
     char line[128];
     if (levels_to_bake < 0) {
-        draw_text_bold(text, "Too big to stash a revert - SAVE FIRST (Ctrl+S)",
-                       x, y, scale, win_w, win_h, CGA(light_red), 1.0f);
+        std::snprintf(line, sizeof(line), "Too big to stash a revert - SAVE FIRST (%s)",
+                      live_key_label(KeyAction::SAVE));
+        draw_text_bold(text, line, x, y, scale, win_w, win_h, CGA(light_red), 1.0f);
     } else if (levels_to_bake > 0) {
         std::snprintf(line, sizeof(line),
-                      "Bakes down %d subdiv level%s first, then Ctrl+Z can revert",
-                      levels_to_bake, levels_to_bake == 1 ? "" : "s");
+                      "Bakes down %d subdiv level%s first, then %s can revert",
+                      levels_to_bake, levels_to_bake == 1 ? "" : "s",
+                      live_key_label(KeyAction::UNDO));
         draw_text_bold(text, line, x, y, scale, win_w, win_h, CGA(yellow), 1.0f);
     } else {
-        draw_text_bold(text, "Ctrl+Z reverts this for 3 strokes",
-                       x, y, scale, win_w, win_h, CGA(light_green), 1.0f);
+        std::snprintf(line, sizeof(line), "%s reverts this for 3 strokes",
+                      live_key_label(KeyAction::UNDO));
+        draw_text_bold(text, line, x, y, scale, win_w, win_h, CGA(light_green), 1.0f);
     }
 }
 
@@ -743,6 +746,9 @@ void draw_help_popup(InputState& input, int win_w, int win_h) {
                            modern ? "Shortcuts" : "CHISEL - SHORTCUTS");
         ImGui::Separator();
 
+        // Keys come from the live bindings, so a rebind shows up here at once.
+        auto L = [&](KeyAction a) { return input.key_label(a); };
+        char k[96], d[96];
         ImGui::BeginGroup();
         help_head("MOUSE");
         help_row("LMB",      "Sculpt  (off mesh: Orbit)");
@@ -751,16 +757,29 @@ void draw_help_popup(InputState& input, int win_w, int win_h) {
         help_row("Ctrl",     "Invert stroke");
         help_row("RMB",      "Colour palette (Paint)");
         help_head("MODES");
-        help_row("1 2 3 4",  "Sculpt Insert Select Paint");
-        help_row("Q E",      "Rotate object (Select mode)");
+        std::snprintf(k, sizeof(k), "%s %s %s %s", L(KeyAction::MODE_SCULPT),
+                      L(KeyAction::MODE_INSERT), L(KeyAction::MODE_SELECT), L(KeyAction::MODE_PAINT));
+        help_row(k, "Sculpt Insert Select Paint");
+        std::snprintf(k, sizeof(k), "%s %s", L(KeyAction::BRUSH_PREV), L(KeyAction::BRUSH_NEXT));
+        help_row(k, "Rotate object (Select mode)");
         help_head("BRUSHES");
-        help_row("D T I",    "Draw  Clay  Inflate");
-        help_row("C V G",    "Crease  Pinch  Move");
-        help_row("H M",      "Limb  Mask");
-        help_row("Q E",      "Cycle brush");
+        std::snprintf(k, sizeof(k), "%s %s %s", L(KeyAction::BRUSH_DRAW),
+                      L(KeyAction::BRUSH_CLAY), L(KeyAction::BRUSH_INFLATE));
+        help_row(k, "Draw  Clay  Inflate");
+        std::snprintf(k, sizeof(k), "%s %s %s", L(KeyAction::BRUSH_CREASE),
+                      L(KeyAction::BRUSH_PINCH), L(KeyAction::BRUSH_MOVE));
+        help_row(k, "Crease  Pinch  Move");
+        std::snprintf(k, sizeof(k), "%s %s", L(KeyAction::BRUSH_LIMB), L(KeyAction::BRUSH_MASK));
+        help_row(k, "Limb  Mask");
+        std::snprintf(k, sizeof(k), "%s %s", L(KeyAction::BRUSH_PREV), L(KeyAction::BRUSH_NEXT));
+        help_row(k, "Cycle brush");
         help_head("SIZE + FEEL");
-        help_row("[ ]",      "Brush size");
-        help_row("S W A O",  "Size, Strength, Hardness, Spacing");
+        std::snprintf(k, sizeof(k), "%s %s", L(KeyAction::SIZE_DOWN), L(KeyAction::SIZE_UP));
+        help_row(k, "Brush size");
+        std::snprintf(k, sizeof(k), "%s %s %s %s", L(KeyAction::HOLD_SIZE),
+                      L(KeyAction::HOLD_STRENGTH), L(KeyAction::HOLD_HARDNESS),
+                      L(KeyAction::HOLD_SPACING));
+        help_row(k, "Size, Strength, Hardness, Spacing");
         help_row("",         "(Hold + Drag)");
         ImGui::EndGroup();
 
@@ -768,22 +787,29 @@ void draw_help_popup(InputState& input, int win_w, int win_h) {
 
         ImGui::BeginGroup();
         help_head("SHAPE");
-        help_row("Ctrl+D",   "Subdiv up  (Shift+D: Down)");
-        help_row("P",        "Project detail down");
-        help_row("X",        "Mirror");
-        help_row("/",        "Remesh");
-        help_row("J",        "SDF Remesh");
-        help_row("B",        "Autosmooth");
+        std::snprintf(d, sizeof(d), "Subdiv up  (%s: Down)", L(KeyAction::LEVEL_DOWN));
+        help_row(L(KeyAction::LEVEL_UP), d);
+        help_row(L(KeyAction::PROJECT),    "Project detail down");
+        help_row(L(KeyAction::MIRROR),     "Mirror");
+        help_row(L(KeyAction::REMESH),     "Remesh");
+        help_row(L(KeyAction::MERGE),      "SDF Remesh");
+        help_row(L(KeyAction::AUTOSMOOTH), "Autosmooth");
         help_head("MASK");
-        help_row("Ctrl+I",   "Invert  ~  Ctrl+A: Clear");
+        std::snprintf(d, sizeof(d), "Invert  ~  %s: Clear", L(KeyAction::MASK_CLEAR));
+        help_row(L(KeyAction::MASK_INVERT), d);
         help_head("VIEW");
-        help_row("F",        "Focus");
-        help_row("F1 F2 F3", "Front  Side  Top");
-        help_row("Space",    "Fullscreen");
+        help_row(L(KeyAction::FOCUS), "Focus");
+        std::snprintf(k, sizeof(k), "%s %s %s", L(KeyAction::VIEW_FRONT),
+                      L(KeyAction::VIEW_SIDE), L(KeyAction::VIEW_TOP));
+        help_row(k, "Front  Side  Top");
+        help_row(L(KeyAction::FULLSCREEN), "Fullscreen");
         help_head("FILES");
-        help_row("Ctrl+Z",   "Undo  (+Shift: Redo)");
-        help_row("Ctrl+S",   "Save  (+Shift: Save as)");
-        help_row("Ctrl+O",   "Open  ~  Ctrl+E: Export");
+        std::snprintf(d, sizeof(d), "Undo  (%s: Redo)", L(KeyAction::REDO));
+        help_row(L(KeyAction::UNDO), d);
+        std::snprintf(d, sizeof(d), "Save  (%s: Save as)", L(KeyAction::SAVE_AS));
+        help_row(L(KeyAction::SAVE), d);
+        std::snprintf(d, sizeof(d), "Open  ~  %s: Export", L(KeyAction::EXPORT));
+        help_row(L(KeyAction::OPEN), d);
         ImGui::EndGroup();
 
         ImGui::Dummy(ImVec2(0.0f, 6.0f));
@@ -839,17 +865,23 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
     ImGui::SetNextWindowPos(ImVec2(margin, y), ImGuiCond_Always);
     ImGui::Begin("##IslandOps", nullptr, island_flags);
 
+    // Tooltips name the live bindings (see KeyAction), so they follow a rebind.
+    static char tips[9][96];
+    auto tip = [&](int i, const char* fmt, KeyAction a) {
+        std::snprintf(tips[i], sizeof(tips[i]), fmt, input.key_label(a));
+        return tips[i];
+    };
     struct OpsBtn { const char* id; const char* display; const char* tooltip; };
     OpsBtn ops[] = {
-        {"MresDown", "Subdiv -",  "Shortcut: Shift+D"},
-        {"MresUp",   "Subdiv +",  "Shortcut: Ctrl+D"},
-        {"Undo",     "Undo",      "Shortcut: Ctrl+Z"},
-        {"Redo",     "Redo",      "Shortcut: Ctrl+Shift+Z"},
-        {"Export",   "Export",    "Shortcut: Ctrl+E"},
-        {"Save",     "Save",      "Shortcut: Ctrl+S"},
+        {"MresDown", "Subdiv -",  tip(0, "Shortcut: %s", KeyAction::LEVEL_DOWN)},
+        {"MresUp",   "Subdiv +",  tip(1, "Shortcut: %s", KeyAction::LEVEL_UP)},
+        {"Undo",     "Undo",      tip(2, "Shortcut: %s", KeyAction::UNDO)},
+        {"Redo",     "Redo",      tip(3, "Shortcut: %s", KeyAction::REDO)},
+        {"Export",   "Export",    tip(4, "Shortcut: %s", KeyAction::EXPORT)},
+        {"Save",     "Save",      tip(5, "Shortcut: %s", KeyAction::SAVE)},
         {"SaveInc",  "+",         "Save incremental: next numbered copy (name_001, name_002, ...)"},
-        {"Load",     "Load",      "Shortcut: Ctrl+O"},
-        {"Merge",    "SDF Merge", "SDF remesh selection (Shortcut: J)"},
+        {"Load",     "Load",      tip(7, "Shortcut: %s", KeyAction::OPEN)},
+        {"Merge",    "SDF Merge", tip(8, "SDF remesh selection (Shortcut: %s)", KeyAction::MERGE)},
     };
     const int ops_count = (int)(sizeof(ops) / sizeof(ops[0]));
     const int ops_save_inc = 6;   // square, so it reads as a modifier hanging off Save
@@ -882,8 +914,13 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
     ImGui::SetNextWindowPos(ImVec2(margin, y), ImGuiCond_Always);
     ImGui::Begin("##IslandModes", nullptr, island_flags);
     {
+        static char mtips[4][64];
+        std::snprintf(mtips[0], sizeof(mtips[0]), "Sculpt (Shortcut: %s)", input.key_label(KeyAction::MODE_SCULPT));
+        std::snprintf(mtips[1], sizeof(mtips[1]), "Spawn a primitive (Shortcut: %s)", input.key_label(KeyAction::MODE_INSERT));
+        std::snprintf(mtips[2], sizeof(mtips[2]), "Pick / move objects (Shortcut: %s)", input.key_label(KeyAction::MODE_SELECT));
+        std::snprintf(mtips[3], sizeof(mtips[3]), "Vertex paint (Shortcut: %s)", input.key_label(KeyAction::MODE_PAINT));
         bool edit_sel = (mode == InputState::InteractionMode::EDIT) && !paint_on;
-        if (squircle_button("Edit", "Edit", "Sculpt (Shortcut: 1)",
+        if (squircle_button("Edit", "Edit", mtips[0],
                             ImVec2(calc_btn_w("Edit"), btn_h), edit_sel)) {
             input.interaction_mode = InputState::InteractionMode::EDIT;
             if (current == BrushType::PAINT) {
@@ -892,19 +929,19 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
             }
         }
         ImGui::SameLine();
-        if (squircle_button("Insert", "Insert", "Spawn a primitive (Shortcut: 2)",
+        if (squircle_button("Insert", "Insert", mtips[1],
                             ImVec2(calc_btn_w("Insert"), btn_h),
                             mode == InputState::InteractionMode::INSERT)) {
             input.interaction_mode = InputState::InteractionMode::INSERT;
         }
         ImGui::SameLine();
-        if (squircle_button("Select", "Select", "Pick / move objects (Shortcut: 3)",
+        if (squircle_button("Select", "Select", mtips[2],
                             ImVec2(calc_btn_w("Select"), btn_h),
                             mode == InputState::InteractionMode::SELECT)) {
             input.interaction_mode = InputState::InteractionMode::SELECT;
         }
         ImGui::SameLine();
-        if (squircle_button("PaintMode", "Paint", "Vertex paint (Shortcut: 4)",
+        if (squircle_button("PaintMode", "Paint", mtips[3],
                             ImVec2(calc_btn_w("Paint"), btn_h), paint_on)) {
             input.interaction_mode = InputState::InteractionMode::EDIT;
             input.clear_smooth_lock();
@@ -1031,17 +1068,22 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
 
     float brush_w = calc_btn_w("Inflate");
 
+    static char btips[9][48];
+    auto btip = [&](int i, KeyAction a) {
+        std::snprintf(btips[i], sizeof(btips[i]), "Shortcut: %s", input.key_label(a));
+        return btips[i];
+    };
     struct BrushBtn { const char* id; const char* display; const char* tooltip; BrushType type; };
     BrushBtn brushes[] = {
-        {"Draw",    "Draw",    "Shortcut: D",                    BrushType::DRAW},
-        {"Clay",    "Clay",    "Shortcut: T",                    BrushType::CLAY},
-        {"Inflate", "Inflate", "Shortcut: I",                    BrushType::INFLATE},
-        {"Crease",  "Crease",  "Shortcut: C",                    BrushType::CREASE},
-        {"Pinch",   "Pinch",   "Shortcut: V",                    BrushType::PINCH},
-        {"Move",    "Move",    "Shortcut: G",                    BrushType::MOVE},
-        {"Limb",    "Limb",    "Shortcut: H",                    BrushType::LIMB},
-        {"Smooth",  "Smooth",  "Shortcut: double-press Shift",   BrushType::SMOOTH},
-        {"Mask",    "Mask",    "Shortcut: M",                    BrushType::MASK},
+        {"Draw",    "Draw",    btip(0, KeyAction::BRUSH_DRAW),    BrushType::DRAW},
+        {"Clay",    "Clay",    btip(1, KeyAction::BRUSH_CLAY),    BrushType::CLAY},
+        {"Inflate", "Inflate", btip(2, KeyAction::BRUSH_INFLATE), BrushType::INFLATE},
+        {"Crease",  "Crease",  btip(3, KeyAction::BRUSH_CREASE),  BrushType::CREASE},
+        {"Pinch",   "Pinch",   btip(4, KeyAction::BRUSH_PINCH),   BrushType::PINCH},
+        {"Move",    "Move",    btip(5, KeyAction::BRUSH_MOVE),    BrushType::MOVE},
+        {"Limb",    "Limb",    btip(6, KeyAction::BRUSH_LIMB),    BrushType::LIMB},
+        {"Smooth",  "Smooth",  "Shortcut: double-press Shift",    BrushType::SMOOTH},
+        {"Mask",    "Mask",    btip(8, KeyAction::BRUSH_MASK),    BrushType::MASK},
     };
 
     for (int i = 0; i < (int)IM_ARRAYSIZE(brushes); i++) {
@@ -1375,6 +1417,13 @@ void draw_settings_menu_items(InputState& input, MultiresInfo mres, bool sync_ta
             // any value you dragged somewhere unusable was one restart away from gone.
             // Now it comes back, so there has to be a way out that is not "hunt down the
             // config file". Not destructive to the scene, so no Y/N confirm.
+            if (ImGui::Selectable("Key bindings...")) {
+                input.keybind_menu_request = true;
+                ImGui::CloseCurrentPopup();
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Change, swap or clear any keyboard shortcut.");
+
             if (ImGui::Selectable("Reset settings to defaults")) {
                 settings_reset(input);
                 std::snprintf(input.notification, sizeof(input.notification),
@@ -1383,8 +1432,9 @@ void draw_settings_menu_items(InputState& input, MultiresInfo mres, bool sync_ta
                 ImGui::CloseCurrentPopup();
             }
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Both profiles, colours and display options back to\n"
-                                  "factory values, and clears the saved copy.\n"
+                ImGui::SetTooltip("Both profiles, colours, display options and key\n"
+                                  "bindings back to factory values, and clears the\n"
+                                  "saved copy.\n"
                                   "Does not touch your sculpt.");
 
             // Only surfaces when a sink has actually refused us — otherwise silence.
@@ -1448,4 +1498,221 @@ void draw_pick_cursor(float x, float y, bool on_model) {
     ImVec2 c = at(22.5f, 0);
     dl->AddCircleFilled(c, 4.8f, fill);
     dl->AddCircle(c, 4.8f, line, 0, 1.4f);
+}
+
+// ---- Key bindings window ------------------------------------------------------------
+//
+// Edits a working copy; input.keybinds is only touched by Save. Exit (and Esc) just
+// drops the copy — no "discard changes?" prompt, on purpose. Picking a key another
+// action already owns raises a warning; going ahead SWAPS the two, so nothing is ever
+// silently left without a key it used to have. X clears a binding (shown as ???).
+//
+// Keys reach this window through key_callback, not ImGui: while keybind_menu_open is
+// set the callback runs no shortcuts and drops the next press into keybind_captured.
+void draw_keybind_window(InputState& input, int win_w, int win_h) {
+    static KeyBind work[(int)KeyAction::COUNT];
+    static int     conflict_with = -1;   // action that already owns the captured key
+    static int     pending_for   = -1;   // action the captured key is meant for
+    static KeyBind pending       = { GLFW_KEY_UNKNOWN, 0 };
+    static char    refusal[128]  = "";
+
+    if (input.keybind_menu_request) {
+        input.keybind_menu_request = false;
+        for (int i = 0; i < (int)KeyAction::COUNT; i++) work[i] = input.keybinds[i];
+        conflict_with = pending_for = -1;
+        refusal[0] = '\0';
+        input.keybind_capture = -1;
+        input.keybind_has_capture = false;
+        input.keybind_esc = false;
+        ImGui::OpenPopup("##keybinds");
+    }
+    input.keybind_menu_open = ImGui::IsPopupOpen("##keybinds");
+    if (!input.keybind_menu_open) return;
+
+    bool close = false;
+
+    // Esc peels one layer: a listening button, then a pending warning, then the window.
+    if (input.keybind_esc) {
+        input.keybind_esc = false;
+        if (input.keybind_capture >= 0) input.keybind_capture = -1;
+        else if (conflict_with >= 0)    conflict_with = -1;
+        else                            close = true;
+    }
+
+    if (input.keybind_has_capture) {
+        input.keybind_has_capture = false;
+        const int i = input.keybind_capture;
+        const KeyBind kb = input.keybind_captured;
+        input.keybind_capture = -1;
+        if (i >= 0) {
+            char name[32];
+            if (const char* why = keybind_reserved(kb.key)) {
+                std::snprintf(refusal, sizeof(refusal), "%s can't be used: %s.",
+                              format_keybind(kb, name, sizeof(name)), why);
+            } else {
+                int owner = -1;
+                for (int j = 0; j < (int)KeyAction::COUNT; j++)
+                    if (j != i && work[j] == kb) { owner = j; break; }
+                if (owner < 0) {
+                    work[i] = kb;
+                } else {
+                    conflict_with = owner;
+                    pending_for = i;
+                    pending = kb;
+                }
+            }
+        }
+    }
+
+    const bool modern = !input.ui_classic();
+    const ImVec4 accent(0.72f, 0.58f, 0.95f, 1.0f);
+    const ImVec4 warn  (0.98f, 0.70f, 0.30f, 1.0f);
+
+    ImGui::SetNextWindowPos(ImVec2(win_w * 0.5f, win_h * 0.5f), ImGuiCond_Always,
+                            ImVec2(0.5f, 0.5f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(24, 18));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8, 5));
+    ImGui::PushStyleColor(ImGuiCol_PopupBg, modern ? ImVec4(0, 0, 0, 0)
+                                                   : ImVec4(0.10f, 0.10f, 0.13f, 0.97f));
+    const ImGuiWindowFlags flags = ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar
+                                 | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings;
+    if (ImGui::BeginPopupModal("##keybinds", nullptr, flags)) {
+        if (modern) ui_skin_popup_background();
+
+        ImGui::TextColored(modern ? ImVec4(0.93f, 0.92f, 0.95f, 1.0f)
+                                  : ImVec4(1.0f, 1.0f, 0.40f, 1.0f), "Key bindings");
+        ImGui::TextDisabled("Click a key, then press the new one. Esc cancels.");
+        ImGui::Separator();
+
+        // Keys that can't be rebound: { key, what it does }. Listed at the bottom.
+        static const char* fixed[][2] = {
+            {"Esc",         "Close, cancel, quit"},
+            {"Y / N",       "Answer a prompt"},
+            {"Shift",       "Smooth (2x: lock)"},
+            {"Ctrl",        "Invert (2x: lock)"},
+            {"M S D - [ ]", "SDF merge dialog"},
+#ifndef __EMSCRIPTEN__
+            {"`",           "Console"},
+#endif
+            {"F9 F10 F12",  "Debug"},
+        };
+
+        // Column widths from the actual text (fixed rows included), so the DOS skin's
+        // wide cells fit too.
+        float label_w = 0.0f;
+        for (int i = 0; i < (int)KeyAction::COUNT; i++)
+            label_w = std::max(label_w, ImGui::CalcTextSize(
+                key_action_info((KeyAction)i).label).x);
+        for (const auto& f : fixed)
+            label_w = std::max(label_w, ImGui::CalcTextSize(f[1]).x);
+        label_w += 24.0f;
+        const float key_w = std::max(ImGui::CalcTextSize("press a key...").x,
+                                     ImGui::CalcTextSize("Ctrl+Shift+Del").x)
+                          + ImGui::GetStyle().FramePadding.x * 2.0f;
+        const float x_w = ImGui::GetFrameHeight();
+        const float list_w = label_w + key_w + x_w + ImGui::GetStyle().ItemSpacing.x * 2.0f
+                           + ImGui::GetStyle().ScrollbarSize + 8.0f;
+        const float list_h = std::max(200.0f, std::min(win_h * 0.62f, 620.0f));
+
+        ImGui::BeginChild("##kblist", ImVec2(list_w, list_h), false);
+        const char* group = nullptr;
+        for (int i = 0; i < (int)KeyAction::COUNT; i++) {
+            const KeyActionInfo& info = key_action_info((KeyAction)i);
+            if (!group || std::strcmp(group, info.group) != 0) {
+                group = info.group;
+                ImGui::Dummy(ImVec2(0.0f, 4.0f));
+                ImGui::TextColored(accent, "%s", group);
+            }
+            ImGui::PushID(i);
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(info.label);
+            if (info.note && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", info.note);
+
+            ImGui::SameLine(label_w);
+            const bool listening = input.keybind_capture == i;
+            char buf[48];
+            if (listening) std::snprintf(buf, sizeof(buf), "press a key...##k");
+            else {
+                char name[32];
+                std::snprintf(buf, sizeof(buf), "%s##k", format_keybind(work[i], name, sizeof(name)));
+            }
+            int pushed = 0;
+            if (listening) {
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.46f, 0.31f, 0.88f, 0.85f));
+                pushed++;
+            }
+            if (!work[i].bound()) { ImGui::PushStyleColor(ImGuiCol_Text, warn); pushed++; }
+            if (ImGui::Button(buf, ImVec2(key_w, 0.0f))) {
+                input.keybind_capture = listening ? -1 : i;
+                conflict_with = -1;
+                refusal[0] = '\0';
+            }
+            ImGui::PopStyleColor(pushed);
+
+            ImGui::SameLine();
+            ImGui::BeginDisabled(!work[i].bound());
+            if (ImGui::Button("X##clear", ImVec2(x_w, 0.0f))) {
+                work[i] = { GLFW_KEY_UNKNOWN, 0 };
+                if (listening) input.keybind_capture = -1;
+                conflict_with = -1;
+            }
+            ImGui::EndDisabled();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("Remove this binding (leaves it as \?\?\?)");
+            ImGui::PopID();
+        }
+
+        // The keys that can't be rebound, listed so the window really shows every key.
+        // Key centred in the key column, like the buttons above it.
+        ImGui::Dummy(ImVec2(0.0f, 4.0f));
+        ImGui::TextColored(accent, "Fixed");
+        for (const auto& f : fixed) {
+            ImGui::TextDisabled("%s", f[1]);
+            ImGui::SameLine(label_w + std::max(0.0f, (key_w - ImGui::CalcTextSize(f[0]).x) * 0.5f));
+            ImGui::TextDisabled("%s", f[0]);
+        }
+        ImGui::EndChild();
+
+        ImGui::Separator();
+        if (conflict_with >= 0) {
+            char want[32], old[32];
+            format_keybind(pending, want, sizeof(want));
+            format_keybind(work[pending_for], old, sizeof(old));
+            ImGui::TextColored(warn, "%s is already used by %s.", want,
+                               key_action_info((KeyAction)conflict_with).label);
+            ImGui::TextColored(warn, "Continue to swap them: %s gets %s instead.",
+                               key_action_info((KeyAction)conflict_with).label, old);
+            if (ImGui::Button("Continue")) {
+                work[conflict_with] = work[pending_for];
+                work[pending_for] = pending;
+                conflict_with = -1;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel")) conflict_with = -1;
+            ImGui::Separator();
+        } else if (refusal[0]) {
+            ImGui::TextColored(warn, "%s", refusal);
+            ImGui::Separator();
+        }
+
+        const float bw = ImGui::CalcTextSize("Save").x * 3.0f;
+        if (ImGui::Button("Save", ImVec2(bw, 0.0f))) {
+            for (int i = 0; i < (int)KeyAction::COUNT; i++) input.keybinds[i] = work[i];
+            std::snprintf(input.notification, sizeof(input.notification), "Key bindings saved");
+            input.notification_timer = 1.5f;
+            close = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Exit", ImVec2(bw, 0.0f))) close = true;
+
+        if (close) {
+            input.keybind_capture = -1;
+            conflict_with = -1;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(2);
+    if (close) input.keybind_menu_open = false;
 }

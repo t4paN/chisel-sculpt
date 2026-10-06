@@ -11,6 +11,146 @@
 #include "imgui_impl_glfw.h"
 #endif
 
+// ---- Rebindable shortcuts ----------------------------------------------------------
+
+namespace {
+constexpr int C = GLFW_MOD_CONTROL, S = GLFW_MOD_SHIFT;
+const KeyActionInfo kKeyActions[(int)KeyAction::COUNT] = {
+    {"mode_sculpt",   "Modes",   "Sculpt mode",         nullptr, {GLFW_KEY_1, 0}},
+    {"mode_insert",   "Modes",   "Insert mode",         nullptr, {GLFW_KEY_2, 0}},
+    {"mode_select",   "Modes",   "Select mode",         nullptr, {GLFW_KEY_3, 0}},
+    {"mode_paint",    "Modes",   "Paint mode",          nullptr, {GLFW_KEY_4, 0}},
+    {"brush_draw",    "Brushes", "Draw",                nullptr, {GLFW_KEY_D, 0}},
+    {"brush_clay",    "Brushes", "Clay",                nullptr, {GLFW_KEY_T, 0}},
+    {"brush_inflate", "Brushes", "Inflate",             nullptr, {GLFW_KEY_I, 0}},
+    {"brush_crease",  "Brushes", "Crease",              "In Paint mode: colour picker", {GLFW_KEY_C, 0}},
+    {"brush_pinch",   "Brushes", "Pinch",               nullptr, {GLFW_KEY_V, 0}},
+    {"brush_move",    "Brushes", "Move",                nullptr, {GLFW_KEY_G, 0}},
+    {"brush_limb",    "Brushes", "Limb",                nullptr, {GLFW_KEY_H, 0}},
+    {"brush_mask",    "Brushes", "Mask",                nullptr, {GLFW_KEY_M, 0}},
+    {"brush_prev",    "Brushes", "Previous brush",
+        "In Paint mode: swap colours. In Select mode: hold to spin the selection.", {GLFW_KEY_Q, 0}},
+    {"brush_next",    "Brushes", "Next brush",
+        "In Paint mode: swap colours. In Select mode: hold to spin the selection.", {GLFW_KEY_E, 0}},
+    {"hold_size",     "Brush feel", "Size",             "Hold and drag", {GLFW_KEY_S, 0}},
+    {"hold_strength", "Brush feel", "Strength",         "Hold and drag", {GLFW_KEY_W, 0}},
+    {"hold_hardness", "Brush feel", "Hardness",         "Hold and drag", {GLFW_KEY_A, 0}},
+    {"hold_spacing",  "Brush feel", "Spacing",          "Hold and drag", {GLFW_KEY_O, 0}},
+    {"size_down",     "Brush feel", "Size down",        "Repeats while held", {GLFW_KEY_LEFT_BRACKET, 0}},
+    {"size_up",       "Brush feel", "Size up",          "Repeats while held", {GLFW_KEY_RIGHT_BRACKET, 0}},
+    {"autosmooth",    "Brush feel", "Autosmooth",       nullptr, {GLFW_KEY_B, 0}},
+    {"level_up",      "Shape",   "Subdivision up",      nullptr, {GLFW_KEY_D, C}},
+    {"level_down",    "Shape",   "Subdivision down",    nullptr, {GLFW_KEY_D, S}},
+    {"project",       "Shape",   "Project detail down", nullptr, {GLFW_KEY_P, 0}},
+    {"mirror",        "Shape",   "Mirror X",            nullptr, {GLFW_KEY_X, 0}},
+    {"remesh",        "Shape",   "Remesh",              nullptr, {GLFW_KEY_SLASH, 0}},
+    {"merge",         "Shape",   "SDF merge",           nullptr, {GLFW_KEY_J, 0}},
+    {"delete_mesh",   "Shape",   "Delete object",       nullptr, {GLFW_KEY_DELETE, 0}},
+    {"mask_invert",   "Mask",    "Invert mask",         nullptr, {GLFW_KEY_I, C}},
+    {"mask_clear",    "Mask",    "Clear mask",          nullptr, {GLFW_KEY_A, C}},
+    {"focus",         "View",    "Focus",               nullptr, {GLFW_KEY_F, 0}},
+    {"view_front",    "View",    "Front view",          nullptr, {GLFW_KEY_F1, 0}},
+    {"view_side",     "View",    "Side view",           nullptr, {GLFW_KEY_F2, 0}},
+    {"view_top",      "View",    "Top view",            nullptr, {GLFW_KEY_F3, 0}},
+    {"fullscreen",    "View",    "Fullscreen",          nullptr, {GLFW_KEY_TAB, 0}},
+    {"wireframe",     "View",    "Wireframe overlay",   nullptr, {GLFW_KEY_Y, 0}},
+    {"fast_normals",  "View",    "Fast normals",        nullptr, {GLFW_KEY_N, 0}},
+    {"undo",          "Files",   "Undo",                nullptr, {GLFW_KEY_Z, C}},
+    {"redo",          "Files",   "Redo",                nullptr, {GLFW_KEY_Z, C | S}},
+    {"save",          "Files",   "Save",                nullptr, {GLFW_KEY_S, C}},
+    {"save_as",       "Files",   "Save as",             nullptr, {GLFW_KEY_S, C | S}},
+    {"open",          "Files",   "Open",                nullptr, {GLFW_KEY_O, C}},
+    {"export",        "Files",   "Export",              nullptr, {GLFW_KEY_E, C}},
+};
+}  // namespace
+
+const KeyActionInfo& key_action_info(KeyAction a) { return kKeyActions[(int)a]; }
+
+// US names, matching the key's place on the keyboard: GLFW codes are layout-independent
+// for letters and digits, and glfwGetKeyName would hand back 'δ' under a Greek layout
+// or nothing at all for Tab.
+static const char* key_name(int key) {
+    static char one[2];
+    if ((key >= GLFW_KEY_A && key <= GLFW_KEY_Z) || (key >= GLFW_KEY_0 && key <= GLFW_KEY_9)) {
+        one[0] = (char)key; one[1] = '\0';
+        return one;
+    }
+    if (key >= GLFW_KEY_F1 && key <= GLFW_KEY_F25) {
+        static char f[4];
+        std::snprintf(f, sizeof(f), "F%d", key - GLFW_KEY_F1 + 1);
+        return f;
+    }
+    if (key >= GLFW_KEY_KP_0 && key <= GLFW_KEY_KP_9) {
+        static char kp[8];
+        std::snprintf(kp, sizeof(kp), "Num%d", key - GLFW_KEY_KP_0);
+        return kp;
+    }
+    switch (key) {
+        case GLFW_KEY_SPACE:         return "Space";
+        case GLFW_KEY_APOSTROPHE:    return "'";
+        case GLFW_KEY_COMMA:         return ",";
+        case GLFW_KEY_MINUS:         return "-";
+        case GLFW_KEY_PERIOD:        return ".";
+        case GLFW_KEY_SLASH:         return "/";
+        case GLFW_KEY_SEMICOLON:     return ";";
+        case GLFW_KEY_EQUAL:         return "=";
+        case GLFW_KEY_LEFT_BRACKET:  return "[";
+        case GLFW_KEY_BACKSLASH:     return "\\";
+        case GLFW_KEY_RIGHT_BRACKET: return "]";
+        case GLFW_KEY_GRAVE_ACCENT:  return "`";
+        case GLFW_KEY_ESCAPE:        return "Esc";
+        case GLFW_KEY_ENTER:         return "Enter";
+        case GLFW_KEY_TAB:           return "Tab";
+        case GLFW_KEY_BACKSPACE:     return "Backspace";
+        case GLFW_KEY_INSERT:        return "Insert";
+        case GLFW_KEY_DELETE:        return "Del";
+        case GLFW_KEY_RIGHT:         return "Right";
+        case GLFW_KEY_LEFT:          return "Left";
+        case GLFW_KEY_DOWN:          return "Down";
+        case GLFW_KEY_UP:            return "Up";
+        case GLFW_KEY_PAGE_UP:       return "PgUp";
+        case GLFW_KEY_PAGE_DOWN:     return "PgDn";
+        case GLFW_KEY_HOME:          return "Home";
+        case GLFW_KEY_END:           return "End";
+        case GLFW_KEY_CAPS_LOCK:     return "CapsLock";
+        case GLFW_KEY_PAUSE:         return "Pause";
+        case GLFW_KEY_KP_DECIMAL:    return "Num.";
+        case GLFW_KEY_KP_DIVIDE:     return "Num/";
+        case GLFW_KEY_KP_MULTIPLY:   return "Num*";
+        case GLFW_KEY_KP_SUBTRACT:   return "Num-";
+        case GLFW_KEY_KP_ADD:        return "Num+";
+        case GLFW_KEY_KP_ENTER:      return "NumEnter";
+        case GLFW_KEY_MENU:          return "Menu";
+        default:                     return "?";
+    }
+}
+
+const char* format_keybind(const KeyBind& b, char* buf, int n) {
+    if (!b.bound()) { std::snprintf(buf, n, "???"); return buf; }
+    std::snprintf(buf, n, "%s%s%s%s",
+                  (b.mods & GLFW_MOD_CONTROL) ? "Ctrl+"  : "",
+                  (b.mods & GLFW_MOD_ALT)     ? "Alt+"   : "",
+                  (b.mods & GLFW_MOD_SHIFT)   ? "Shift+" : "",
+                  key_name(b.key));
+    return buf;
+}
+
+const char* keybind_reserved(int key) {
+    switch (key) {
+        case GLFW_KEY_ESCAPE:       return "Esc closes dialogs";
+        case GLFW_KEY_GRAVE_ACCENT: return "` is the console";
+        case GLFW_KEY_F9: case GLFW_KEY_F10: case GLFW_KEY_F12:
+        case GLFW_KEY_PAGE_UP: case GLFW_KEY_PAGE_DOWN:
+                                    return "that's a debug key";
+        default:                    return nullptr;
+    }
+}
+
+const char* InputState::key_label(KeyAction a) const {
+    static char bufs[(int)KeyAction::COUNT][32];
+    return format_keybind(keybinds[(int)a], bufs[(int)a], (int)sizeof(bufs[0]));
+}
+
 InputState::InputState()
     : mouse_x(0), mouse_y(0)
     , prev_mouse_x(0), prev_mouse_y(0)
@@ -131,6 +271,8 @@ InputState::InputState()
     // of a stroke well below. 1.0 here is not a guess about tablets — it is the number
     // the pressure ramp already used implicitly, so pen feel is bit-for-bit unchanged.
     profiles[(int)InputProfile::TABLET].max_effect = 1.0f;
+
+    for (int i = 0; i < (int)KeyAction::COUNT; i++) keybinds[i] = kKeyActions[i].def;
 }
 
 void InputState::seed_brush_sizes() {
@@ -286,6 +428,8 @@ const char* InputState::brush_name() const {
 // ---- GLFW Callbacks ----
 
 static InputState* g_input = nullptr;
+
+const char* live_key_label(KeyAction a) { return g_input ? g_input->key_label(a) : "?"; }
 static double g_last_shift_time = 0;
 static double g_last_ctrl_time = 0;
 static int g_shift_tap_count = 0;
@@ -651,7 +795,280 @@ static void scroll_cb_internal(GLFWwindow* w, double xoff, double yoff) {
     g_scroll_accum += (float)yoff;
 }
 
+// The held modifiers as GLFW_MOD_* bits, from the per-event-corrected *_held flags
+// (see the X11 note in key_callback) rather than the raw `mods` argument.
+static int held_mods() {
+    return (g_input->ctrl_held  ? GLFW_MOD_CONTROL : 0)
+         | (g_input->shift_held ? GLFW_MOD_SHIFT   : 0)
+         | (g_input->alt_held   ? GLFW_MOD_ALT     : 0);
+}
+
+static int mod_count(int mods) {
+    return ((mods & GLFW_MOD_CONTROL) ? 1 : 0) + ((mods & GLFW_MOD_SHIFT) ? 1 : 0)
+         + ((mods & GLFW_MOD_ALT) ? 1 : 0);
+}
+
+// Which shortcut a key press means. A binding matches when its key is the one pressed
+// and every modifier it asks for is held; of those, the one asking for the MOST
+// modifiers wins. That is how Shift+D reaches "Subdivision down" while plain D stays
+// Draw — and why holding Shift for smooth doesn't stop T from picking Clay, which is
+// how the hard-coded switch behaved before the keys became rebindable.
+static int find_key_action(int key, int mods) {
+    int best = -1, best_n = -1;
+    for (int i = 0; i < (int)KeyAction::COUNT; i++) {
+        const KeyBind& b = g_input->keybinds[i];
+        if (!b.bound() || b.key != key || (b.mods & ~mods & kKeyModMask)) continue;
+        const int n = mod_count(b.mods);
+        if (n > best_n) { best = i; best_n = n; }
+    }
+    return best;
+}
+
+static void pick_brush(BrushType b) {
+    g_input->clear_smooth_lock();
+    g_input->switch_brush(b);
+    g_input->subtract_locked = false;
+}
+
+static void notify(const char* text, float secs) {
+    snprintf(g_input->notification, sizeof(g_input->notification), "%s", text);
+    g_input->notification_timer = secs;
+}
+
+// What each shortcut does. `repeat` is a held key's auto-repeat: only the size nudge
+// acts on those, everything else fires once per press.
+static void run_key_action(GLFWwindow* w, KeyAction a, bool repeat) {
+    InputState& in = *g_input;
+    if (repeat && a != KeyAction::SIZE_DOWN && a != KeyAction::SIZE_UP) return;
+    const bool select_mode = in.interaction_mode == InputState::InteractionMode::SELECT;
+    const bool insert_mode = in.interaction_mode == InputState::InteractionMode::INSERT;
+
+    switch (a) {
+        case KeyAction::MODE_SCULPT:
+            in.interaction_mode = InputState::InteractionMode::EDIT;
+            // Leaving paint: drop back to the draw brush so this sculpts, not paints.
+            if (in.current_brush == BrushType::PAINT) {
+                in.clear_smooth_lock();
+                in.switch_brush(BrushType::DRAW);
+            }
+            notify("Edit", 1.0f);
+            break;
+        case KeyAction::MODE_INSERT:
+            in.interaction_mode = InputState::InteractionMode::INSERT;
+            in.color_pick_active = false;
+            notify("Insert mode", 1.5f);
+            break;
+        case KeyAction::MODE_SELECT:
+            in.interaction_mode = InputState::InteractionMode::SELECT;
+            in.color_pick_active = false;
+            notify("Select", 1.0f);
+            break;
+        case KeyAction::MODE_PAINT:
+            // Paint mode: sculpt-style interaction (EDIT) with the paint brush.
+            in.interaction_mode = InputState::InteractionMode::EDIT;
+            pick_brush(BrushType::PAINT);
+            notify("Paint", 1.0f);
+            break;
+
+        case KeyAction::BRUSH_DRAW:    pick_brush(BrushType::DRAW);    break;
+        case KeyAction::BRUSH_CLAY:    pick_brush(BrushType::CLAY);    break;
+        case KeyAction::BRUSH_INFLATE: pick_brush(BrushType::INFLATE); break;
+        case KeyAction::BRUSH_PINCH:   pick_brush(BrushType::PINCH);   break;
+        case KeyAction::BRUSH_MOVE:    pick_brush(BrushType::MOVE);    break;
+        // Limb (snakehook): pull + tangential redistribute
+        case KeyAction::BRUSH_LIMB:    pick_brush(BrushType::LIMB);    break;
+        case KeyAction::BRUSH_MASK:    pick_brush(BrushType::MASK);    break;
+        case KeyAction::BRUSH_CREASE:
+            if (in.current_brush == BrushType::PAINT) {
+                // Paint mode: the crease key toggles the colour picker instead.
+                // Density target has no colour to pick — a no-op there.
+                if (in.paint_target_density) break;
+                in.color_pick_active = !in.color_pick_active;
+                notify(in.color_pick_active ? "Colour picker: click the model (C/ESC cancels)"
+                                            : "Colour picker off", 1.5f);
+            } else {
+                pick_brush(BrushType::CREASE);
+            }
+            break;
+        case KeyAction::BRUSH_PREV:
+        case KeyAction::BRUSH_NEXT: {
+            // In SELECT mode these keys spin the selection instead. The main loop polls
+            // the bound keys directly for that (continuous, frame-rate independent), so
+            // there is nothing to latch here — just don't cycle the brush too.
+            if (select_mode) break;
+            if (in.current_brush == BrushType::PAINT) {
+                // In paint mode both swap the active colour with the alternate.
+                for (int c = 0; c < 3; c++) std::swap(in.paint_color[c], in.paint_color_alt[c]);
+                break;
+            }
+            in.clear_smooth_lock();
+            int b = (int)in.current_brush + (a == KeyAction::BRUSH_NEXT ? 1 : -1);
+            if (b < 0) b = (int)BrushType::COUNT - 1;
+            if (b >= (int)BrushType::COUNT) b = 0;
+            in.switch_brush((BrushType)b);
+            break;
+        }
+
+        case KeyAction::HOLD_SIZE:
+            begin_slider_drag(w, InputState::SliderMode::SIZE, in.brush_size); break;
+        case KeyAction::HOLD_STRENGTH:
+            begin_slider_drag(w, InputState::SliderMode::STRENGTH, in.brush_strength); break;
+        case KeyAction::HOLD_HARDNESS:
+            begin_slider_drag(w, InputState::SliderMode::HARDNESS, in.brush_hardness); break;
+        case KeyAction::HOLD_SPACING:
+            begin_slider_drag(w, InputState::SliderMode::SPACING, in.brush_spacing); break;
+
+        // Brush size by keyboard, repeating. The S-drag is still the fast way to cross
+        // the whole 5..500 range; this is the path for machines without a comfortable
+        // drag (trackpads) and for nudging a size you already like.
+        //
+        // The step is proportional, not fixed: 8% of the current size keeps the felt
+        // increment constant across two decades, where a flat step would be a jump at
+        // 5 px and imperceptible at 500. The 1 px floor keeps it moving at the bottom,
+        // where 8% would round away under the "%.0f" readout.
+        case KeyAction::SIZE_DOWN:
+        case KeyAction::SIZE_UP: {
+            float step = std::max(1.0f, in.brush_size * 0.08f);
+            in.brush_size = std::max(5.0f, std::min(500.0f,
+                in.brush_size + (a == KeyAction::SIZE_UP ? step : -step)));
+            // Stash it too, or with per-brush sizes on the next switch_brush undoes this.
+            in.brush_size_of[(int)in.size_slot()] = in.brush_size;
+            snprintf(in.notification, sizeof(in.notification), "Size: %.0f", in.brush_size);
+            in.notification_timer = 1.0f;
+            break;
+        }
+        case KeyAction::AUTOSMOOTH:
+            in.autosmooth = !in.autosmooth;
+            notify(in.autosmooth ? "Autosmooth ON" : "Autosmooth OFF", 1.5f);
+            break;
+
+        case KeyAction::LEVEL_UP:   if (in.mesh_locked) in.level_switch_delta = +1; break;
+        case KeyAction::LEVEL_DOWN: if (in.mesh_locked) in.level_switch_delta = -1; break;
+        case KeyAction::PROJECT:    if (in.mesh_locked) in.project_requested = true; break;
+        case KeyAction::MIRROR:     in.mirror_x = !in.mirror_x; break;
+        case KeyAction::REMESH:
+            if (in.mesh_locked && !in.remesh_in_progress) in.remesh_confirm_pending = true;
+            break;
+        case KeyAction::MERGE:
+            // Voxel merge (join selection for print). Same gating as remesh.
+            if (in.mesh_locked && !in.voxel_merge_in_progress) in.voxel_merge_confirm_pending = true;
+            break;
+        case KeyAction::DELETE_MESH: in.delete_mesh_requested = true; break;
+
+        case KeyAction::MASK_INVERT: in.mask_invert_requested = true; break;
+        case KeyAction::MASK_CLEAR:  in.mask_clear_requested = true; break;
+
+        case KeyAction::FOCUS:      in.focus_requested = true; break;
+        case KeyAction::VIEW_FRONT: in.snap_view_requested = InputState::SnapView::FRONT; break;
+        case KeyAction::VIEW_SIDE:  in.snap_view_requested = InputState::SnapView::SIDE; break;
+        case KeyAction::VIEW_TOP:   in.snap_view_requested = InputState::SnapView::TOP; break;
+        case KeyAction::FULLSCREEN: in.fullscreen_toggle_requested = true; break;
+        // Insert mode keeps Y and N for its symmetrize prompt (key_y/n_pressed, set in
+        // key_callback), so these two toggles stand down there.
+        case KeyAction::WIREFRAME:
+            if (!insert_mode) in.show_debug_mesh = !in.show_debug_mesh;
+            break;
+        case KeyAction::FAST_NORMALS:
+            if (!insert_mode) in.fast_normals = !in.fast_normals;
+            break;
+
+        case KeyAction::UNDO:    in.undo_requested = true; break;
+        case KeyAction::REDO:    in.redo_requested = true; break;
+        case KeyAction::SAVE:    in.save_requested = true; break;
+        case KeyAction::SAVE_AS: in.save_as_requested = true; break;
+        case KeyAction::OPEN:
+            in.import_dialog_active = true;
+            in.quit_requested = false;
+            in.export_dialog_active = false;
+            break;
+        case KeyAction::EXPORT:
+            in.export_dialog_active = true;
+            in.quit_requested = false;
+            break;
+        case KeyAction::COUNT: break;
+    }
+}
+
+// Keys while a dialog is up. These are fixed — they are how a dialog gets answered,
+// so they live outside the rebindable table on purpose.
+static void handle_modal_key(GLFWwindow* w, int key) {
+    InputState& in = *g_input;
+    const bool merge = in.voxel_merge_confirm_pending;
+    switch (key) {
+        case GLFW_KEY_ESCAPE:
+            if      (in.drop_confirm_pending)       in.drop_confirm_pending = false;
+            else if (in.voxel_merge_confirm_pending) in.voxel_merge_confirm_pending = false;
+            else if (in.drop_level_confirm_pending) in.drop_level_confirm_pending = false;
+            else if (in.remesh_confirm_pending)     in.remesh_confirm_pending = false;
+            else if (in.export_dialog_active)       in.export_dialog_active = false;
+            else if (in.import_dialog_active)       in.import_dialog_active = false;
+            else if (in.save_dialog_active)         in.save_dialog_active = false;
+            else if (in.quit_requested)             in.quit_requested = false;
+            break;
+        // `~` debug console. Native only — on web the shell.html overlay owns this key
+        // and already mirrors console.log.
+#ifndef __EMSCRIPTEN__
+        case GLFW_KEY_GRAVE_ACCENT: debug_console::toggle(); break;
+#endif
+        case GLFW_KEY_Y:
+            if (in.drop_confirm_pending) {
+                // In the drop dialog, Y = open without saving.
+                in.drop_confirm_pending = false;
+                in.drop_open_requested = true;
+            } else if (merge) {
+                in.voxel_merge_confirm_pending = false;
+                in.voxel_merge_mirror = false;   // faithful (asymmetric) merge
+                in.voxel_merge_subtract = false;
+                in.voxel_merge_requested = true;
+            } else if (in.drop_level_confirm_pending) {
+                in.drop_level_confirm_pending = false;
+                in.drop_level_requested = true;
+            } else if (in.remesh_confirm_pending) {
+                in.remesh_confirm_pending = false;
+                in.remesh_requested = true;
+            } else if (in.quit_requested) {
+                glfwSetWindowShouldClose(w, GLFW_TRUE);
+            }
+            break;
+        case GLFW_KEY_N:
+            if      (in.drop_confirm_pending)       in.drop_confirm_pending = false;
+            else if (merge)                         in.voxel_merge_confirm_pending = false;
+            else if (in.drop_level_confirm_pending) in.drop_level_confirm_pending = false;
+            else if (in.remesh_confirm_pending)     in.remesh_confirm_pending = false;
+            else if (in.quit_requested)             in.quit_requested = false;
+            break;
+        // The merge dialog's own keys: M = mirror-symmetric merge, '-' = subtract (union
+        // the selection, then carve away every unselected red mesh), S flips the
+        // extractor (Surface Nets / Marching Cubes), D flips the chained adaptive remesh,
+        // [ / ] nudge the resolution.
+        case GLFW_KEY_M:
+            if (!merge) break;
+            in.voxel_merge_confirm_pending = false;
+            in.voxel_merge_mirror = true;
+            in.voxel_merge_subtract = false;
+            in.voxel_merge_requested = true;
+            break;
+        case GLFW_KEY_MINUS:
+            if (!merge) break;
+            in.voxel_merge_confirm_pending = false;
+            in.voxel_merge_mirror = false;
+            in.voxel_merge_subtract = true;
+            in.voxel_merge_requested = true;
+            break;
+        case GLFW_KEY_S: if (merge) in.voxel_merge_surface_nets = !in.voxel_merge_surface_nets; break;
+        case GLFW_KEY_D: if (merge) in.voxel_merge_adaptive = !in.voxel_merge_adaptive; break;
+        case GLFW_KEY_LEFT_BRACKET:
+            if (merge && in.voxel_merge_resolution > 64) in.voxel_merge_resolution -= 32;
+            break;
+        case GLFW_KEY_RIGHT_BRACKET:
+            if (merge && in.voxel_merge_resolution < 256) in.voxel_merge_resolution += 32;
+            break;
+        default: break;
+    }
+}
+
 static void key_callback(GLFWwindow* w, int key, int scancode, int action, int mods) {
+    (void)scancode;
     if (!g_input) return;
     double now = glfwGetTime();
 
@@ -669,6 +1086,7 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
     // only flipped to Smooth once you pressed, instead of previewing it on the hold.
     // Ctrl (subtract) had the identical tell. The action is unambiguous where the
     // bitfield is not, so derive these three from it. REPEAT counts as held.
+    bool modifier_key = true;
     switch (key) {
         case GLFW_KEY_LEFT_SHIFT:
         case GLFW_KEY_RIGHT_SHIFT:
@@ -679,7 +1097,26 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
         case GLFW_KEY_LEFT_ALT:
         case GLFW_KEY_RIGHT_ALT:
             g_input->alt_held = (action != GLFW_RELEASE); break;
-        default: break;
+        case GLFW_KEY_LEFT_SUPER:
+        case GLFW_KEY_RIGHT_SUPER:
+            break;
+        default: modifier_key = false; break;
+    }
+
+    // Key bindings window: report keys to it, run nothing. A modifier on its own is
+    // never a binding — it is held while the real key is pressed, and that press
+    // carries it in held_mods().
+    if (g_input->keybind_menu_open) {
+        // GLFW_KEY_UNKNOWN is a key GLFW has no code for (some media keys) — it can't
+        // be a binding, since that same value means "unbound".
+        if (action != GLFW_PRESS || modifier_key || key == GLFW_KEY_UNKNOWN) return;
+        if (key == GLFW_KEY_ESCAPE) {
+            g_input->keybind_esc = true;
+        } else if (g_input->keybind_capture >= 0) {
+            g_input->keybind_captured = { key, held_mods() };
+            g_input->keybind_has_capture = true;
+        }
+        return;
     }
 
     // Modal UI steals keypresses from sculpting. ImGui file dialogs handle
@@ -694,193 +1131,13 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
                      || g_input->drop_level_confirm_pending
                      || g_input->drop_confirm_pending;
     if (modal_active) {
-        bool is_yn_dialog = g_input->quit_requested
-                         || g_input->remesh_confirm_pending
-                         || g_input->voxel_merge_confirm_pending
-                         || g_input->drop_level_confirm_pending
-                         || g_input->drop_confirm_pending;
-        // The voxel-merge dialog also takes [ / ] to nudge the resolution.
-        bool res_keys = g_input->voxel_merge_confirm_pending
-                     && (key == GLFW_KEY_LEFT_BRACKET || key == GLFW_KEY_RIGHT_BRACKET);
-        // The voxel-merge dialog also takes M (mirror-symmetric merge).
-        bool merge_mirror_key = g_input->voxel_merge_confirm_pending
-                             && key == GLFW_KEY_M;
-        // ...and S to toggle the extractor (Surface Nets vs Marching Cubes).
-        bool merge_nets_key = g_input->voxel_merge_confirm_pending
-                           && key == GLFW_KEY_S;
-        // ...and '-' to confirm a subtract merge (carve the unselected reds).
-        bool merge_subtract_key = g_input->voxel_merge_confirm_pending
-                               && key == GLFW_KEY_MINUS;
-        // ...and D to toggle the chained adaptive remesh (density field only).
-        bool merge_adaptive_key = g_input->voxel_merge_confirm_pending
-                               && key == GLFW_KEY_D;
-        bool allow = (key == GLFW_KEY_ESCAPE)
-                  || (key == GLFW_KEY_GRAVE_ACCENT)
-                  || (is_yn_dialog && (key == GLFW_KEY_Y || key == GLFW_KEY_N))
-                  || res_keys || merge_mirror_key || merge_nets_key || merge_subtract_key
-                  || merge_adaptive_key;
-        if (!allow) return;
+        if (action == GLFW_PRESS) handle_modal_key(w, key);
+        return;
     }
 
+    // Fixed keys: the modifier gestures, Esc, the prompt answers and the debug keys.
     if (action == GLFW_PRESS) {
         switch (key) {
-            case GLFW_KEY_D:
-                if (g_input->voxel_merge_confirm_pending) {
-                    // In the merge dialog, D flips the chained adaptive remesh.
-                    g_input->voxel_merge_adaptive = !g_input->voxel_merge_adaptive;
-                } else if (g_input->ctrl_held && !g_input->shift_held && g_input->mesh_locked) {
-                    g_input->level_switch_delta = +1;    // Ctrl+D: level up
-                } else if (g_input->shift_held && !g_input->ctrl_held && g_input->mesh_locked) {
-                    g_input->level_switch_delta = -1;    // Shift+D: level down
-                } else if (!g_input->shift_held && !g_input->ctrl_held) {
-                    g_input->clear_smooth_lock();
-                    g_input->switch_brush(BrushType::DRAW);
-                    g_input->subtract_locked = false;
-                }
-                break;
-
-            case GLFW_KEY_C:
-                if (g_input->current_brush == BrushType::PAINT) {
-                    // Paint mode: C toggles the colour picker instead of crease.
-                    // Density target has no colour to pick — C is a no-op there.
-                    if (g_input->paint_target_density) break;
-                    g_input->color_pick_active = !g_input->color_pick_active;
-                    snprintf(g_input->notification, sizeof(g_input->notification),
-                             g_input->color_pick_active
-                                 ? "Colour picker: click the model (C/ESC cancels)"
-                                 : "Colour picker off");
-                    g_input->notification_timer = 1.5f;
-                } else {
-                    g_input->clear_smooth_lock();
-                    g_input->switch_brush(BrushType::CREASE);
-                    g_input->subtract_locked = false;
-                }
-                break;
-
-            case GLFW_KEY_V:
-                g_input->clear_smooth_lock();
-                g_input->switch_brush(BrushType::PINCH);
-                g_input->subtract_locked = false;
-                break;
-
-            case GLFW_KEY_T:
-                g_input->clear_smooth_lock();
-                g_input->switch_brush(BrushType::CLAY);
-                g_input->subtract_locked = false;
-                break;
-
-            case GLFW_KEY_M:
-                if (g_input->voxel_merge_confirm_pending) {
-                    g_input->voxel_merge_confirm_pending = false;
-                    g_input->voxel_merge_mirror = true;   // mirror-symmetric merge
-                    g_input->voxel_merge_subtract = false;
-                    g_input->voxel_merge_requested = true;
-                    break;
-                }
-                g_input->clear_smooth_lock();
-                g_input->switch_brush(BrushType::MASK);
-                g_input->subtract_locked = false;
-                break;
-
-            case GLFW_KEY_Q:
-                // In SELECT mode Q/E spin the selection instead. The main loop polls
-                // the key directly for that (continuous, frame-rate independent), so
-                // there is nothing to latch here — just don't cycle the brush too.
-                if (g_input->interaction_mode == InputState::InteractionMode::SELECT)
-                    break;
-                if (g_input->current_brush == BrushType::PAINT) {
-                    // In paint mode Q/E swap the active colour with the alternate.
-                    for (int c = 0; c < 3; c++)
-                        std::swap(g_input->paint_color[c], g_input->paint_color_alt[c]);
-                } else {
-                    // Cycle brush backward
-                    g_input->clear_smooth_lock();
-                    int b = (int)g_input->current_brush - 1;
-                    if (b < 0) b = (int)BrushType::COUNT - 1;
-                    g_input->switch_brush((BrushType)b);
-                }
-                break;
-
-            case GLFW_KEY_E:
-                if (g_input->ctrl_held) {
-                    g_input->export_dialog_active = true;
-                    g_input->quit_requested = false;
-                } else if (g_input->interaction_mode == InputState::InteractionMode::SELECT) {
-                    break;   // see GLFW_KEY_Q above
-                } else if (g_input->current_brush == BrushType::PAINT) {
-                    // In paint mode Q/E swap the active colour with the alternate.
-                    for (int c = 0; c < 3; c++)
-                        std::swap(g_input->paint_color[c], g_input->paint_color_alt[c]);
-                } else {
-                    // E: Cycle brush forward
-                    g_input->clear_smooth_lock();
-                    int b = (int)g_input->current_brush + 1;
-                    if (b >= (int)BrushType::COUNT) b = 0;
-                    g_input->switch_brush((BrushType)b);
-                }
-                break;
-
-            case GLFW_KEY_S:
-                if (g_input->voxel_merge_confirm_pending) {
-                    // In the merge dialog, S flips the extractor (Surface Nets / MC).
-                    g_input->voxel_merge_surface_nets = !g_input->voxel_merge_surface_nets;
-                } else if (g_input->ctrl_held && g_input->shift_held) {
-                    g_input->save_as_requested = true;
-                } else if (g_input->ctrl_held) {
-                    g_input->save_requested = true;
-                } else {
-                    begin_slider_drag(w, InputState::SliderMode::SIZE,
-                                      g_input->brush_size);
-                }
-                break;
-
-            case GLFW_KEY_W:
-                begin_slider_drag(w, InputState::SliderMode::STRENGTH,
-                                  g_input->brush_strength);
-                break;
-
-            case GLFW_KEY_A:
-                if (g_input->ctrl_held && !g_input->shift_held) {
-                    // Ctrl+A: clear mask (any brush)
-                    g_input->mask_clear_requested = true;
-                } else {
-                    // A: hardness slider
-                    begin_slider_drag(w, InputState::SliderMode::HARDNESS,
-                                      g_input->brush_hardness);
-                }
-                break;
-
-            case GLFW_KEY_O:
-                if (g_input->ctrl_held) {
-                    g_input->import_dialog_active = true;
-                    g_input->quit_requested = false;
-                    g_input->export_dialog_active = false;
-                } else {
-                    begin_slider_drag(w, InputState::SliderMode::SPACING,
-                                      g_input->brush_spacing);
-                }
-                break;
-
-            case GLFW_KEY_SPACE:
-                g_input->fullscreen_toggle_requested = true;
-                break;
-
-            case GLFW_KEY_X:
-                g_input->mirror_x = !g_input->mirror_x;
-                break;
-
-            case GLFW_KEY_MINUS:
-                // In the merge dialog, '-' confirms a SUBTRACT merge: union the
-                // selected meshes, then carve away every unselected (red) mesh.
-                // Parallels M (union+mirror) and Y (union faithful).
-                if (g_input->voxel_merge_confirm_pending) {
-                    g_input->voxel_merge_confirm_pending = false;
-                    g_input->voxel_merge_mirror = false;
-                    g_input->voxel_merge_subtract = true;
-                    g_input->voxel_merge_requested = true;
-                }
-                break;
-
             case GLFW_KEY_LEFT_SHIFT:
             case GLFW_KEY_RIGHT_SHIFT:
                 // Double-tap shift detection
@@ -907,274 +1164,45 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
                 g_last_ctrl_time = now;
                 break;
 
-            case GLFW_KEY_SLASH:
-                if (g_input->mesh_locked &&
-                    !g_input->quit_requested &&
-                    !g_input->export_dialog_active &&
-                    !g_input->import_dialog_active &&
-                    !g_input->remesh_confirm_pending &&
-                    !g_input->remesh_in_progress) {
-                    g_input->remesh_confirm_pending = true;
-                }
-                break;
-
-            case GLFW_KEY_J:
-                // Voxel merge (join selection for print). Same gating as remesh.
-                if (g_input->mesh_locked &&
-                    !g_input->quit_requested &&
-                    !g_input->export_dialog_active &&
-                    !g_input->import_dialog_active &&
-                    !g_input->save_dialog_active &&
-                    !g_input->remesh_confirm_pending &&
-                    !g_input->voxel_merge_confirm_pending &&
-                    !g_input->voxel_merge_in_progress) {
-                    g_input->voxel_merge_confirm_pending = true;
-                }
-                break;
-
-            case GLFW_KEY_LEFT_BRACKET:
-                if (g_input->voxel_merge_confirm_pending &&
-                    g_input->voxel_merge_resolution > 64)
-                    g_input->voxel_merge_resolution -= 32;
-                break;
-            case GLFW_KEY_RIGHT_BRACKET:
-                if (g_input->voxel_merge_confirm_pending &&
-                    g_input->voxel_merge_resolution < 256)
-                    g_input->voxel_merge_resolution += 32;
-                break;
-
             case GLFW_KEY_ESCAPE:
-                if (g_input->drop_confirm_pending) {
-                    g_input->drop_confirm_pending = false;
-                } else if (g_input->voxel_merge_confirm_pending) {
-                    g_input->voxel_merge_confirm_pending = false;
-                } else if (g_input->drop_level_confirm_pending) {
-                    g_input->drop_level_confirm_pending = false;
-                } else if (g_input->remesh_confirm_pending) {
-                    g_input->remesh_confirm_pending = false;
-                } else if (g_input->export_dialog_active) {
-                    g_input->export_dialog_active = false;
-                } else if (g_input->import_dialog_active) {
-                    g_input->import_dialog_active = false;
-                } else if (g_input->save_dialog_active) {
-                    g_input->save_dialog_active = false;
-                } else if (g_input->quit_requested) {
-                    g_input->quit_requested = false;
-                } else if (g_input->color_pick_active) {
-                    g_input->color_pick_active = false;
-                } else {
-                    g_input->quit_requested = true;
-                }
-                break;
-
-            case GLFW_KEY_F:
-                g_input->focus_requested = true;
-                break;
-
-            case GLFW_KEY_F1:
-                g_input->snap_view_requested = InputState::SnapView::FRONT;
-                break;
-            case GLFW_KEY_F2:
-                g_input->snap_view_requested = InputState::SnapView::SIDE;
-                break;
-            case GLFW_KEY_F3:
-                g_input->snap_view_requested = InputState::SnapView::TOP;
-                break;
-            // `~` debug console. Native only — on web the shell.html overlay owns
-            // this key and already mirrors console.log.
-#ifndef __EMSCRIPTEN__
-            case GLFW_KEY_GRAVE_ACCENT:
-                debug_console::toggle();
-                break;
-            case GLFW_KEY_PAGE_UP:
-                debug_console::scroll_lines(8);
-                break;
-            case GLFW_KEY_PAGE_DOWN:
-                debug_console::scroll_lines(-8);
-                break;
-#endif
-
-            case GLFW_KEY_F9:
-                g_input->debug_stride_cycle_requested = true;
-                break;
-            case GLFW_KEY_F10:
-                g_input->debug_pick_vertex_requested = true;
-                break;
-            case GLFW_KEY_F12:
-                g_input->debug_multires_requested = true;
-                break;
-
-            case GLFW_KEY_P:
-                if (g_input->mesh_locked &&
-                    !g_input->shift_held && !g_input->ctrl_held && !g_input->alt_held) {
-                    g_input->project_requested = true;
-                }
-                break;
-
-            case GLFW_KEY_Z:
-                if (g_input->ctrl_held) {
-                    if (g_input->shift_held) g_input->redo_requested = true;
-                    else g_input->undo_requested = true;
-                }
-                break;
-
-            case GLFW_KEY_I:
-                if (g_input->ctrl_held && !g_input->shift_held) {
-                    // Ctrl+I: invert mask
-                    g_input->mask_invert_requested = true;
-                } else if (!g_input->ctrl_held && !g_input->shift_held && !g_input->alt_held) {
-                    // I: inflate brush
-                    g_input->clear_smooth_lock();
-                    g_input->switch_brush(BrushType::INFLATE);
-                    g_input->subtract_locked = false;
-                }
-                break;
-
-            case GLFW_KEY_G:
-                g_input->clear_smooth_lock();
-                g_input->switch_brush(BrushType::MOVE);
-                g_input->subtract_locked = false;
-                break;
-
-            case GLFW_KEY_H:
-                // Limb (snakehook): pull + tangential redistribute
-                g_input->clear_smooth_lock();
-                g_input->switch_brush(BrushType::LIMB);
-                g_input->subtract_locked = false;
+                if (g_input->color_pick_active) g_input->color_pick_active = false;
+                else                            g_input->quit_requested = true;
                 break;
 
             case GLFW_KEY_ENTER:
                 g_input->enter_pressed = true;
                 break;
 
-            case GLFW_KEY_BACKSPACE:
-                break;
+            // Insert mode's symmetrize prompt (insert_controller.cpp) reads these.
+            case GLFW_KEY_Y: g_input->key_y_pressed = true; break;
+            case GLFW_KEY_N: g_input->key_n_pressed = true; break;
 
-            case GLFW_KEY_Y:
-                if (g_input->drop_confirm_pending) {
-                    // In the drop dialog, Y = open without saving.
-                    g_input->drop_confirm_pending = false;
-                    g_input->drop_open_requested = true;
-                } else if (g_input->voxel_merge_confirm_pending) {
-                    g_input->voxel_merge_confirm_pending = false;
-                    g_input->voxel_merge_mirror = false;   // faithful (asymmetric) merge
-                    g_input->voxel_merge_subtract = false;
-                    g_input->voxel_merge_requested = true;
-                } else if (g_input->drop_level_confirm_pending) {
-                    g_input->drop_level_confirm_pending = false;
-                    g_input->drop_level_requested = true;
-                } else if (g_input->remesh_confirm_pending) {
-                    g_input->remesh_confirm_pending = false;
-                    g_input->remesh_requested = true;
-                } else if (g_input->quit_requested) {
-                    glfwSetWindowShouldClose(w, GLFW_TRUE);
-                } else {
-                    g_input->key_y_pressed = true;
-                    if (g_input->interaction_mode != InputState::InteractionMode::INSERT)
-                        g_input->show_debug_mesh = !g_input->show_debug_mesh;
-                }
-                break;
-
-            case GLFW_KEY_B:
-                g_input->autosmooth = !g_input->autosmooth;
-                snprintf(g_input->notification, sizeof(g_input->notification),
-                         g_input->autosmooth ? "Autosmooth ON" : "Autosmooth OFF");
-                g_input->notification_timer = 1.5f;
-                break;
-
-            case GLFW_KEY_N:
-                if (g_input->drop_confirm_pending) {
-                    g_input->drop_confirm_pending = false;
-                } else if (g_input->voxel_merge_confirm_pending) {
-                    g_input->voxel_merge_confirm_pending = false;
-                } else if (g_input->drop_level_confirm_pending) {
-                    g_input->drop_level_confirm_pending = false;
-                } else if (g_input->remesh_confirm_pending) {
-                    g_input->remesh_confirm_pending = false;
-                } else if (g_input->quit_requested) {
-                    g_input->quit_requested = false;
-                } else {
-                    g_input->key_n_pressed = true;
-                    if (g_input->interaction_mode != InputState::InteractionMode::INSERT)
-                        g_input->fast_normals = !g_input->fast_normals;
-                }
-                break;
-
-            case GLFW_KEY_1:
-                g_input->interaction_mode = InputState::InteractionMode::EDIT;
-                // Leaving paint: drop back to the draw brush so 1 sculpts, not paints.
-                if (g_input->current_brush == BrushType::PAINT) {
-                    g_input->clear_smooth_lock();
-                    g_input->switch_brush(BrushType::DRAW);
-                }
-                snprintf(g_input->notification, sizeof(g_input->notification), "Edit");
-                g_input->notification_timer = 1.0f;
-                break;
-            case GLFW_KEY_2:
-                g_input->interaction_mode = InputState::InteractionMode::INSERT;
-                g_input->color_pick_active = false;
-                snprintf(g_input->notification, sizeof(g_input->notification), "Insert mode");
-                g_input->notification_timer = 1.5f;
-                break;
-            case GLFW_KEY_3:
-                g_input->interaction_mode = InputState::InteractionMode::SELECT;
-                g_input->color_pick_active = false;
-                snprintf(g_input->notification, sizeof(g_input->notification), "Select");
-                g_input->notification_timer = 1.0f;
-                break;
-            case GLFW_KEY_4:
-                // Paint mode: sculpt-style interaction (EDIT) with the paint brush.
-                g_input->interaction_mode = InputState::InteractionMode::EDIT;
-                g_input->clear_smooth_lock();
-                g_input->switch_brush(BrushType::PAINT);
-                g_input->subtract_locked = false;
-                snprintf(g_input->notification, sizeof(g_input->notification), "Paint");
-                g_input->notification_timer = 1.0f;
-                break;
-            case GLFW_KEY_DELETE:
-                if (!g_input->ctrl_held && !g_input->shift_held)
-                    g_input->delete_mesh_requested = true;
-                break;
-
+#ifndef __EMSCRIPTEN__
+            case GLFW_KEY_GRAVE_ACCENT: debug_console::toggle(); break;
+            case GLFW_KEY_PAGE_UP:      debug_console::scroll_lines(8); break;
+            case GLFW_KEY_PAGE_DOWN:    debug_console::scroll_lines(-8); break;
+#endif
+            case GLFW_KEY_F9:  g_input->debug_stride_cycle_requested = true; break;
+            case GLFW_KEY_F10: g_input->debug_pick_vertex_requested = true; break;
+            case GLFW_KEY_F12: g_input->debug_multires_requested = true; break;
+            default: break;
         }
     }
 
-    // Brush size on [ / ], repeating. The S-drag is still the fast way to cross the
-    // whole 5..500 range; this is the keyboard path for machines without a comfortable
-    // drag (trackpads) and for nudging a size you already like.
-    //
-    // The step is proportional, not fixed: 8% of the current size keeps the felt
-    // increment constant across two decades, where a flat step would be a jump at 5 px
-    // and imperceptible at 500. The 1 px floor keeps it moving at the bottom, where 8%
-    // would round away under the "%.0f" readout.
-    //
-    // Guarded on voxel_merge_confirm_pending because those same two keys nudge the merge
-    // resolution while that dialog is up (handled in the PRESS block above) — the modal
-    // gate lets them through on purpose, so without this they would do both.
-    if ((action == GLFW_PRESS || action == GLFW_REPEAT) &&
-        !g_input->voxel_merge_confirm_pending) {
-        const bool down = (key == GLFW_KEY_LEFT_BRACKET);
-        const bool up   = (key == GLFW_KEY_RIGHT_BRACKET);
-        if (down || up) {
-            float step = std::max(1.0f, g_input->brush_size * 0.08f);
-            g_input->brush_size = std::max(5.0f, std::min(500.0f,
-                g_input->brush_size + (up ? step : -step)));
-            // Stash it too, or with per-brush sizes on the next switch_brush undoes this.
-            g_input->brush_size_of[(int)g_input->size_slot()] = g_input->brush_size;
-            snprintf(g_input->notification, sizeof(g_input->notification),
-                     "Size: %.0f", g_input->brush_size);
-            g_input->notification_timer = 1.0f;
-        }
+    // Everything else goes through the rebindable table.
+    if ((action == GLFW_PRESS || action == GLFW_REPEAT) && !modifier_key &&
+        !keybind_reserved(key)) {
+        int a = find_key_action(key, held_mods());
+        if (a >= 0) run_key_action(w, (KeyAction)a, action == GLFW_REPEAT);
     }
 
+    // Letting go of a hold-and-drag key ends its drag, whatever modifiers are up now.
     if (action == GLFW_RELEASE) {
-        switch (key) {
-            case GLFW_KEY_S:
-            case GLFW_KEY_W:
-            case GLFW_KEY_A:
-            case GLFW_KEY_O:
-                end_slider_drag(w, true);
-                break;
+        const KeyAction holds[4] = { KeyAction::HOLD_SIZE, KeyAction::HOLD_STRENGTH,
+                                     KeyAction::HOLD_HARDNESS, KeyAction::HOLD_SPACING };
+        for (KeyAction h : holds) {
+            const KeyBind& b = g_input->keybinds[(int)h];
+            if (b.bound() && b.key == key) { end_slider_drag(w, true); break; }
         }
     }
 }

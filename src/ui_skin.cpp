@@ -858,7 +858,14 @@ void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
     o.look = Look::Rail; o.side = TipSide::Right; o.icon_px = 22.0f;
 
     // Modes — "what am I doing" is one column with the brushes.
-    o.on = editing && !paint_on; o.tip = "Sculpt"; o.key = "1"; o.corner = "1";
+    // Keys come from the live bindings (see KeyAction) so a rebind shows up here.
+    // The corner badge only fits a short key, and an unbound one shows none.
+    auto corner = [&](KeyAction a) -> const char* {
+        const char* k = input.key_label(a);
+        return input.keybinds[(int)a].bound() && std::strlen(k) <= 3 ? k : nullptr;
+    };
+    o.on = editing && !paint_on; o.tip = "Sculpt";
+    o.key = input.key_label(KeyAction::MODE_SCULPT); o.corner = corner(KeyAction::MODE_SCULPT);
     if (icon_button("mSculpt", Icon::ModeSculpt, kRailBtn, o)) {
         input.interaction_mode = InputState::InteractionMode::EDIT;
         if (current == BrushType::PAINT) {
@@ -866,13 +873,16 @@ void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
             input.switch_brush(BrushType::DRAW);
         }
     }
-    o.on = mode == InputState::InteractionMode::INSERT; o.tip = "Insert"; o.key = o.corner = "2";
+    o.on = mode == InputState::InteractionMode::INSERT; o.tip = "Insert";
+    o.key = input.key_label(KeyAction::MODE_INSERT); o.corner = corner(KeyAction::MODE_INSERT);
     if (icon_button("mInsert", Icon::ModeInsert, kRailBtn, o))
         input.interaction_mode = InputState::InteractionMode::INSERT;
-    o.on = mode == InputState::InteractionMode::SELECT; o.tip = "Select"; o.key = o.corner = "3";
+    o.on = mode == InputState::InteractionMode::SELECT; o.tip = "Select";
+    o.key = input.key_label(KeyAction::MODE_SELECT); o.corner = corner(KeyAction::MODE_SELECT);
     if (icon_button("mSelect", Icon::ModeSelect, kRailBtn, o))
         input.interaction_mode = InputState::InteractionMode::SELECT;
-    o.on = editing && paint_on; o.tip = "Paint"; o.key = o.corner = "4";
+    o.on = editing && paint_on; o.tip = "Paint";
+    o.key = input.key_label(KeyAction::MODE_PAINT); o.corner = corner(KeyAction::MODE_PAINT);
     if (icon_button("mPaint", Icon::ModePaint, kRailBtn, o)) {
         input.interaction_mode = InputState::InteractionMode::EDIT;
         input.clear_smooth_lock();
@@ -882,17 +892,17 @@ void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
 
     hdivider(kRailBtn, 6.0f, kDivider, 9.0f);
 
-    struct B { const char* id; const char* name; const char* key; Icon icon; BrushType type; };
+    struct B { const char* id; const char* name; KeyAction key; Icon icon; BrushType type; };
     static const B brushes[] = {
-        {"bDraw",    "Draw",    "D", Icon::BrushDraw,    BrushType::DRAW},
-        {"bClay",    "Clay",    "T", Icon::BrushClay,    BrushType::CLAY},
-        {"bInflate", "Inflate", "I", Icon::BrushInflate, BrushType::INFLATE},
-        {"bCrease",  "Crease",  "C", Icon::BrushCrease,  BrushType::CREASE},
-        {"bPinch",   "Pinch",   "V", Icon::BrushPinch,   BrushType::PINCH},
-        {"bMove",    "Move",    "G", Icon::BrushMove,    BrushType::MOVE},
-        {"bLimb",    "Limb",    "H", Icon::BrushLimb,    BrushType::LIMB},
-        {"bSmooth",  "Smooth",  nullptr, Icon::BrushSmooth, BrushType::SMOOTH},
-        {"bMask",    "Mask",    "M", Icon::BrushMask,    BrushType::MASK},
+        {"bDraw",    "Draw",    KeyAction::BRUSH_DRAW,    Icon::BrushDraw,    BrushType::DRAW},
+        {"bClay",    "Clay",    KeyAction::BRUSH_CLAY,    Icon::BrushClay,    BrushType::CLAY},
+        {"bInflate", "Inflate", KeyAction::BRUSH_INFLATE, Icon::BrushInflate, BrushType::INFLATE},
+        {"bCrease",  "Crease",  KeyAction::BRUSH_CREASE,  Icon::BrushCrease,  BrushType::CREASE},
+        {"bPinch",   "Pinch",   KeyAction::BRUSH_PINCH,   Icon::BrushPinch,   BrushType::PINCH},
+        {"bMove",    "Move",    KeyAction::BRUSH_MOVE,    Icon::BrushMove,    BrushType::MOVE},
+        {"bLimb",    "Limb",    KeyAction::BRUSH_LIMB,    Icon::BrushLimb,    BrushType::LIMB},
+        {"bSmooth",  "Smooth",  KeyAction::COUNT,         Icon::BrushSmooth,  BrushType::SMOOTH},
+        {"bMask",    "Mask",    KeyAction::BRUSH_MASK,    Icon::BrushMask,    BrushType::MASK},
     };
     // Shift-Shift: the glyph if the face has it, else spelled out.
     ImFont* mono = F(UiFont::Mono);
@@ -915,7 +925,7 @@ void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
             continue;
         }
         o.on = editing && current == b.type && !smooth_on;
-        o.key = o.corner = b.key;
+        o.key = input.key_label(b.key); o.corner = corner(b.key);
         if (icon_button(b.id, b.icon, kRailBtn, o)) {
             input.clear_smooth_lock();
             input.switch_brush(b.type);
@@ -987,16 +997,16 @@ void file_panel(InputState& input, const SkinStats& st) {
     vdivider();
 
     BtnOpts o;
-    o.tip = "Save"; o.key = "Ctrl+S";
+    o.tip = "Save"; o.key = input.key_label(KeyAction::SAVE);
     if (icon_button("fSave", Icon::CmdSave, kBarBtn, o)) input.save_requested = true;
     ImGui::SameLine();
     o.tip = "Save numbered copy"; o.key = nullptr;
     if (icon_button("fSaveInc", Icon::CmdSaveCopy, kBarBtn, o)) input.save_incremental_requested = true;
     ImGui::SameLine();
-    o.tip = "Open"; o.key = "Ctrl+O";
+    o.tip = "Open"; o.key = input.key_label(KeyAction::OPEN);
     if (icon_button("fOpen", Icon::CmdOpen, kBarBtn, o)) input.import_dialog_active = true;
     ImGui::SameLine();
-    o.tip = "Export"; o.key = "Ctrl+E";
+    o.tip = "Export"; o.key = input.key_label(KeyAction::EXPORT);
     if (icon_button("fExport", Icon::CmdExport, kBarBtn, o)) input.export_dialog_active = true;
     end_panel();
 }
@@ -1005,16 +1015,16 @@ void command_panel(InputState& input, int win_w, int win_h, MultiresInfo mres, c
     if (!begin_panel("##mCmd", ImVec2((float)win_w - kEdge, kEdge), ImVec2(1, 0),
                      ImVec2(4, 4), 2.0f, 12.0f)) { end_panel(); return; }
     BtnOpts o;
-    o.tip = "Undo"; o.key = "Ctrl+Z";
+    o.tip = "Undo"; o.key = input.key_label(KeyAction::UNDO);
     if (icon_button("cUndo", Icon::CmdUndo, kBarBtn, o)) input.undo_requested = true;
     ImGui::SameLine();
-    o.tip = "Redo"; o.key = "Ctrl+Shift+Z";
+    o.tip = "Redo"; o.key = input.key_label(KeyAction::REDO);
     if (icon_button("cRedo", Icon::CmdRedo, kBarBtn, o)) input.redo_requested = true;
     vdivider();
 
     // Subdivision stepper: − / L6 / 9 over the triangle count / +.
     o.enabled = input.mesh_locked;
-    o.tip = "Subdivision down"; o.key = "Shift+D";
+    o.tip = "Subdivision down"; o.key = input.key_label(KeyAction::LEVEL_DOWN);
     if (icon_button("cLvlDn", Icon::CmdLevelDown, kBarBtn, o)) input.level_switch_delta = -1;
     ImGui::SameLine(0.0f, 2.0f);
     {
@@ -1053,19 +1063,19 @@ void command_panel(InputState& input, int win_w, int win_h, MultiresInfo mres, c
         }
     }
     ImGui::SameLine(0.0f, 2.0f);
-    o.tip = "Subdivision up"; o.key = "Ctrl+D";
+    o.tip = "Subdivision up"; o.key = input.key_label(KeyAction::LEVEL_UP);
     if (icon_button("cLvlUp", Icon::CmdLevelUp, kBarBtn, o)) input.level_switch_delta = +1;
     o.enabled = true;
     vdivider();
 
-    o.tip = "SDF merge"; o.key = "J";
+    o.tip = "SDF merge"; o.key = input.key_label(KeyAction::MERGE);
     if (icon_button("cMerge", Icon::CmdMerge, kBarBtn, o)) input.voxel_merge_confirm_pending = true;
     ImGui::SameLine();
     o.on = input.mirror_x;
     o.tip = input.mirror_x ? (input.mirror_topological ? "Mirror X: on, topological"
                                                        : "Mirror X: on, world space")
                            : "Mirror X: off";
-    o.key = "X";
+    o.key = input.key_label(KeyAction::MIRROR);
     if (icon_button("cMirror", Icon::ViewMirrorX, kBarBtn, o)) input.mirror_x = !input.mirror_x;
     ImGui::SameLine();
     o.on = false;
@@ -1605,14 +1615,18 @@ void y2k_top(InputState& in, int W, const SkinStats& st) {
     ytext(dl, false, 11.0f, ImVec2(x, ty + 1), y2k::text, name);
     if (!st.project_path || !*st.project_path)
         ytext(dl, false, 11.0f, ImVec2(x + ysize(false, 11.0f, name).x + 2, ty + 1), y2k::amber, " *");
-    const char* hint = "Hold S / W / A / O and drag to tune the brush";
+    char hint[128];
+    std::snprintf(hint, sizeof hint, "Hold %s / %s / %s / %s and drag to tune the brush",
+                  in.key_label(KeyAction::HOLD_SIZE), in.key_label(KeyAction::HOLD_STRENGTH),
+                  in.key_label(KeyAction::HOLD_HARDNESS), in.key_label(KeyAction::HOLD_SPACING));
     ytext(dl, false, 11.0f, ImVec2(w - 10.0f - ysize(false, 11.0f, hint).x, ty + 1), y2k::muted, hint, false);
 
     // Slider shelf row.
     const float cy = kTitleH + (kTopH - kTitleH) * 0.5f;
     // Mode well: Sculpt / Insert / Select / Paint, the live one an orange tile.
     static const char* modes[4] = {"Sculpt", "Insert", "Select", "Paint"};
-    static const char* mkeys[4] = {"1", "2", "3", "4"};
+    const char* mkeys[4] = {in.key_label(KeyAction::MODE_SCULPT), in.key_label(KeyAction::MODE_INSERT),
+                            in.key_label(KeyAction::MODE_SELECT), in.key_label(KeyAction::MODE_PAINT)};
     const bool smooth_on = in.is_smooth_active();
     const bool paint_on = in.current_brush == BrushType::PAINT && !smooth_on;
     int mode = in.interaction_mode == InputState::InteractionMode::INSERT ? 1
@@ -1644,8 +1658,10 @@ void y2k_top(InputState& in, int W, const SkinStats& st) {
 
     // The four feel sliders, draggable right here (or hold the key in the viewport).
     struct S { const char* label; const char* key; float pct; char val[12]; };
-    S sl[4] = {{"Size", "S", in.brush_size / 500.0f, ""}, {"Strength", "W", in.brush_strength, ""},
-               {"Hardness", "A", in.brush_hardness, ""}, {"Spacing", "O", in.brush_spacing, ""}};
+    S sl[4] = {{"Size", in.key_label(KeyAction::HOLD_SIZE), in.brush_size / 500.0f, ""},
+               {"Strength", in.key_label(KeyAction::HOLD_STRENGTH), in.brush_strength, ""},
+               {"Hardness", in.key_label(KeyAction::HOLD_HARDNESS), in.brush_hardness, ""},
+               {"Spacing", in.key_label(KeyAction::HOLD_SPACING), in.brush_spacing, ""}};
     std::snprintf(sl[0].val, sizeof sl[0].val, "%.0f", in.brush_size);
     std::snprintf(sl[1].val, sizeof sl[1].val, "%.0f", in.brush_strength * 100.0f);
     std::snprintf(sl[2].val, sizeof sl[2].val, "%.0f", in.brush_hardness * 100.0f);
@@ -1675,7 +1691,7 @@ void y2k_top(InputState& in, int W, const SkinStats& st) {
             dl->AddLine(ImVec2(a.x + 6, a.y + 10), ImVec2(a.x + 11, a.y + 3), y2k::orange, 2.0f);
         }
         ytext(dl, true, 11.0f, ImVec2(x + 20, cy - ls.y * 0.5f), hv ? IM_COL32_WHITE : y2k::text, "Autosmooth");
-        ytext(dl, false, 11.0f, ImVec2(x + 20 + ls.x + 6, cy - ls.y * 0.5f), y2k::muted, "B", false);
+        ytext(dl, false, 11.0f, ImVec2(x + 20 + ls.x + 6, cy - ls.y * 0.5f), y2k::muted, in.key_label(KeyAction::AUTOSMOOTH), false);
     }
     end_shelf();
 }
@@ -1696,12 +1712,17 @@ void y2k_left(InputState& in, int H, const AlphaLibrary* lib) {
     float y = kTopH + 10.0f;
 
     struct B { const char* name; const char* key; Icon icon; BrushType type; };
-    static const B brushes[] = {
-        {"Draw", "D", Icon::BrushDraw, BrushType::DRAW},       {"Clay", "T", Icon::BrushClay, BrushType::CLAY},
-        {"Inflate", "I", Icon::BrushInflate, BrushType::INFLATE}, {"Crease", "C", Icon::BrushCrease, BrushType::CREASE},
-        {"Pinch", "V", Icon::BrushPinch, BrushType::PINCH},    {"Move", "G", Icon::BrushMove, BrushType::MOVE},
-        {"Limb", "H", Icon::BrushLimb, BrushType::LIMB},       {"Smooth", "SS", Icon::BrushSmooth, BrushType::SMOOTH},
-        {"Mask", "M", Icon::BrushMask, BrushType::MASK},
+    // Not static: the key letters are the live bindings, re-read every frame.
+    const B brushes[] = {
+        {"Draw", in.key_label(KeyAction::BRUSH_DRAW), Icon::BrushDraw, BrushType::DRAW},
+        {"Clay", in.key_label(KeyAction::BRUSH_CLAY), Icon::BrushClay, BrushType::CLAY},
+        {"Inflate", in.key_label(KeyAction::BRUSH_INFLATE), Icon::BrushInflate, BrushType::INFLATE},
+        {"Crease", in.key_label(KeyAction::BRUSH_CREASE), Icon::BrushCrease, BrushType::CREASE},
+        {"Pinch", in.key_label(KeyAction::BRUSH_PINCH), Icon::BrushPinch, BrushType::PINCH},
+        {"Move", in.key_label(KeyAction::BRUSH_MOVE), Icon::BrushMove, BrushType::MOVE},
+        {"Limb", in.key_label(KeyAction::BRUSH_LIMB), Icon::BrushLimb, BrushType::LIMB},
+        {"Smooth", "SS", Icon::BrushSmooth, BrushType::SMOOTH},
+        {"Mask", in.key_label(KeyAction::BRUSH_MASK), Icon::BrushMask, BrushType::MASK},
     };
 
     // The big "current tool" tile.
@@ -1877,18 +1898,18 @@ void y2k_right(InputState& in, int W, int H, MultiresInfo mres) {
 
     struct C { const char* id; const char* name; const char* tip; const char* key; Icon icon; bool sep; };
     const C cmds[] = {
-        {"##yUndo", "Undo", "Undo", "Ctrl+Z", Icon::CmdUndo, false},
-        {"##yRedo", "Redo", "Redo", "Ctrl+Shift+Z", Icon::CmdRedo, false},
-        {"##yUp",   "Divide", "Subdivision up", "Ctrl+D", Icon::CmdLevelUp, true},
-        {"##yDn",   "Lower", "Subdivision down", "Shift+D", Icon::CmdLevelDown, false},
-        {"##yMrg",  "Merge", "SDF merge", "J", Icon::CmdMerge, false},
-        {"##yMir",  "Mirror X", "Mirror X", "X", Icon::ViewMirrorX, true},
+        {"##yUndo", "Undo", "Undo", in.key_label(KeyAction::UNDO), Icon::CmdUndo, false},
+        {"##yRedo", "Redo", "Redo", in.key_label(KeyAction::REDO), Icon::CmdRedo, false},
+        {"##yUp",   "Divide", "Subdivision up", in.key_label(KeyAction::LEVEL_UP), Icon::CmdLevelUp, true},
+        {"##yDn",   "Lower", "Subdivision down", in.key_label(KeyAction::LEVEL_DOWN), Icon::CmdLevelDown, false},
+        {"##yMrg",  "Merge", "SDF merge", in.key_label(KeyAction::MERGE), Icon::CmdMerge, false},
+        {"##yMir",  "Mirror X", "Mirror X", in.key_label(KeyAction::MIRROR), Icon::ViewMirrorX, true},
         {"##yVis",  "Paint", in.paint_visible ? "Paint shown while sculpting" : "Paint hidden while sculpting",
                     nullptr, in.paint_visible ? Icon::ViewPaintShow : Icon::ViewPaintHide, false},
-        {"##ySave", "Save", "Save", "Ctrl+S", Icon::CmdSave, true},
+        {"##ySave", "Save", "Save", in.key_label(KeyAction::SAVE), Icon::CmdSave, true},
         {"##ySavI", "Save +", "Save numbered copy", nullptr, Icon::CmdSaveCopy, false},
-        {"##yOpen", "Open", "Open", "Ctrl+O", Icon::CmdOpen, false},
-        {"##yExp",  "Export", "Export", "Ctrl+E", Icon::CmdExport, false},
+        {"##yOpen", "Open", "Open", in.key_label(KeyAction::OPEN), Icon::CmdOpen, false},
+        {"##yExp",  "Export", "Export", in.key_label(KeyAction::EXPORT), Icon::CmdExport, false},
         {"##yKeys", "Keys", "Shortcuts", nullptr, Icon::UiShortcuts, true},
         {"##yMenu", "Menu", "Menu", nullptr, Icon::UiMenu, false},
     };
