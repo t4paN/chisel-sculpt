@@ -584,11 +584,13 @@ int main(int argc, char* argv[]) {
 #endif
 
     // Start windowed but maximized (easier for development)
-#if defined(_WIN32)
+#if !defined(__EMSCRIPTEN__)
     // Actually maximized: a window sized to the full video mode is taller than the work
     // area once the title bar and borders are added, so it hangs under the taskbar —
-    // and in that state the Intel Vulkan driver reports the swapchain suboptimal and
-    // shows black triangles while orbiting/sculpting (gone after a maximize).
+    // and in that state the Intel Vulkan driver on Windows reports the swapchain
+    // suboptimal and shows black triangles while orbiting/sculpting (gone after a
+    // maximize). GNOME auto-maximizes a screen-sized window and hid this on Linux;
+    // KWin doesn't, so Plasma showed the overhang.
     glfwWindowHint(GLFW_MAXIMIZED, GLFW_TRUE);
 #endif
     GLFWwindow* window = glfwCreateWindow(init_w, init_h, "Chisel", nullptr, nullptr);

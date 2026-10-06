@@ -2,6 +2,28 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-06 — Pen cursor visible over the title bar; Linux starts maximized
+
+*Built GL and native WebGPU; tested by the user on native Wayland (Plasma) with the pen.
+Native-only: the web build doesn't compile either path.*
+
+- **Pen cursor went invisible over Chisel's title bar** (KDE Plasma, native Wayland,
+  OTD relative pen). A tablet tool has its own cursor, which only the client sets, and
+  KWin (6.7.5, `tablet_input.cpp`) never resets it when the pen crosses onto a
+  server-side decoration — it does for the mouse. Chisel hides the pen cursor over the
+  canvas (it draws its ring), so "hidden" carried onto the title bar and the invisible
+  resize borders. A `set_cursor` sent after the pen has left is ignored, so a leave
+  handler can't fix it: `wl_apply_cursor` now shows the arrow within **40 px of any
+  window edge**, and re-checks on every pen motion, not once per frame, so a fast flick
+  can't cross before the arrow is up. Slider drags (cursor locked) and fullscreen are
+  left alone. Other apps escape this only because they show an arrow near their edges
+  anyway. Worth an upstream KWin bug.
+- **The window hung under the Plasma taskbar at startup.** Chisel opened at the full
+  screen size without maximizing, so with the title bar added it was taller than the
+  space above the panel. The Windows build already asked for a real maximize for the
+  same reason; Linux now does too. GNOME hid this by auto-maximizing screen-sized
+  windows; KWin doesn't. Tab into fullscreen and back restores cleanly.
+
 ## 2026-10-06 — Remesh and SDF-merge prompts become real dialogs per skin
 
 *Built GL, native WebGPU and web; the user checked the look on native.*
