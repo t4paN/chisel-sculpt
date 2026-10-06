@@ -337,9 +337,26 @@ void wl_move(WlPen* p) {
     wl_emit_pos(p->win, p->x, p->y);
 }
 
+// KWin never resets a tablet tool's cursor when the pen crosses onto a server-side
+// decoration (title bar, invisible resize borders) — it does for the mouse — so our
+// "hidden" would stay in force out there and the pen goes invisible. A set_cursor sent
+// after the crossing is ignored, so the arrow has to be up before it: near any edge,
+// show it even over the canvas. The margin covers one event's travel of a fast
+// relative-pen flick. Not during a slider drag (the plugin's lock freezes the cursor
+// anyway), and not fullscreen, where there's no decoration to cross onto.
+constexpr double kPenEdgeMargin = 40.0;
+
 void wl_apply_cursor(WlPen* p) {
     if (!p->active) return;
-    int want = glfwGetInputMode(p->win, GLFW_CURSOR) == GLFW_CURSOR_NORMAL && p->arrow ? 1 : 0;
+    int mode = glfwGetInputMode(p->win, GLFW_CURSOR);
+    bool near_edge = false;
+    if (mode != GLFW_CURSOR_DISABLED && !glfwGetWindowMonitor(p->win)) {
+        int w = 0, h = 0;
+        glfwGetWindowSize(p->win, &w, &h);     // surface-local units, same as p->x/y
+        near_edge = p->x < kPenEdgeMargin || p->y < kPenEdgeMargin ||
+                    p->x > w - kPenEdgeMargin || p->y > h - kPenEdgeMargin;
+    }
+    int want = (mode == GLFW_CURSOR_NORMAL || near_edge) && p->arrow ? 1 : 0;
     if (want == p->cursor_applied) return;
     p->cursor_applied = want;
     zwp_tablet_tool_v2_set_cursor(p->active, p->prox_serial, want ? p->arrow : nullptr,
@@ -408,7 +425,9 @@ void tool_frame(void* d, zwp_tablet_tool_v2* t, uint32_t) {
         wl_apply_cursor(p);
     }
     if (p->active == t) {
-        if (p->f_motion) { wl_move(p); p->samples++; }
+        // Re-check the cursor on every motion, not just per app frame: a fast exit would
+        // otherwise cross the edge before the arrow is up (see wl_apply_cursor).
+        if (p->f_motion) { wl_move(p); wl_apply_cursor(p); p->samples++; }
         if (p->f_down) wl_emit_button(p->win, GLFW_MOUSE_BUTTON_LEFT, GLFW_PRESS);
         for (int i = 0; i < p->f_nbtn; i++) {
             const WlPen::Btn& bt = p->f_btn[i];
