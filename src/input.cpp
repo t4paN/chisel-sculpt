@@ -622,6 +622,100 @@ static void end_slider_drag(GLFWwindow* w, bool warp_back) {
 #endif
 }
 
+// ---- Edge wrap ----
+//
+// A held drag (strokes, Move/Limb, orbit, pan, zoom, object move/scale) that reaches the
+// window edge carries on from the opposite edge. The callers skip the frame of the jump,
+// so per-frame deltas never see it.
+//
+// X11 and Windows simply warp the pointer. Wayland only accepts a warp while the cursor
+// is captured, and a browser can't warp at all, so there the first wrap of a drag
+// captures the pointer (GLFW_CURSOR_DISABLED / requestPointerLock) and every position
+// after it is the captured motion plus an offset. Each wrap moves the offset, not the
+// pointer. Faking it without the capture is what this replaced: Chisel's idea of the
+// cursor jumped across while the real one stayed at the edge, and the next event
+// yanked it back, so a Move drag lurched to and fro.
+static double g_wrap_off_x = 0.0, g_wrap_off_y = 0.0;
+static bool   g_wrap_captured = false;
+
+static bool platform_can_warp() {
+#if defined(__EMSCRIPTEN__)
+    return false;
+#elif GLFW_VERSION_MAJOR > 3 || GLFW_VERSION_MINOR >= 4
+    return glfwGetPlatform() != GLFW_PLATFORM_WAYLAND;
+#else
+    return true;
+#endif
+}
+
+bool wrap_capture_active() { return g_wrap_captured; }
+
+bool wrap_cursor(GLFWwindow* window, InputState& input, int win_w, int win_h) {
+    // A pen maps the tablet onto the screen: it can't travel past the edge and nothing
+    // can warp it, so the next sample would just put it back.
+    if (input.active_profile == InputProfile::TABLET) return false;
+    double mx = input.mouse_x;
+    double my = input.mouse_y;
+    bool wrapped = false;
+    if (mx <= 0) { mx = win_w - 2; wrapped = true; }
+    else if (mx >= win_w - 1) { mx = 1; wrapped = true; }
+    if (my <= 0) { my = win_h - 2; wrapped = true; }
+    else if (my >= win_h - 1) { my = 1; wrapped = true; }
+    if (!wrapped) return false;
+
+    if (platform_can_warp()) {
+        glfwSetCursorPos(window, mx, my);
+    } else if (!g_wrap_captured) {
+        g_wrap_captured = true;
+#if defined(__EMSCRIPTEN__)
+        // Positions stay continuous across the lock: the shell seeds its locked
+        // position from the last free one, so the same offset carries over. If the
+        // browser refuses the lock (it wants a recent click), the drag still gets the
+        // room between the canvas and the screen edge.
+        (void)window;
+        web_pointer_lock(true);
+        g_wrap_off_x += mx - input.mouse_x;
+        g_wrap_off_y += my - input.mouse_y;
+#else
+        // GLFW switches to an unbounded virtual position that need not match the window
+        // coordinate, so measure the offset against it after capturing.
+        glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+        double vx = 0.0, vy = 0.0;
+        glfwGetCursorPos(window, &vx, &vy);
+        g_wrap_off_x = mx - vx;
+        g_wrap_off_y = my - vy;
+#endif
+    } else {
+        g_wrap_off_x += mx - input.mouse_x;
+        g_wrap_off_y += my - input.mouse_y;
+    }
+    input.mouse_x = mx;
+    input.prev_mouse_x = mx;
+    input.mouse_y = my;
+    input.prev_mouse_y = my;
+    return true;
+}
+
+// Drag over: hand the pointer back where the user sees the cursor. On Wayland the
+// position has to be set while still captured (the only mode it's accepted in — it
+// becomes the lock's position hint) and the release moves the pointer there, as the
+// slider drag does. A browser puts it back where the lock began; nothing can change that.
+static void end_wrap_capture(GLFWwindow* w) {
+    if (g_wrap_captured) {
+#if defined(__EMSCRIPTEN__)
+        (void)w;
+        web_pointer_lock(false);
+#else
+        if (w) {
+            glfwSetCursorPos(w, g_input->mouse_x, g_input->mouse_y);
+            glfwSetInputMode(w, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+        }
+#endif
+    }
+    g_wrap_captured = false;
+    g_wrap_off_x = g_wrap_off_y = 0.0;
+}
+
 #ifndef __EMSCRIPTEN__
 // A slider drag holds the pointer captured and hidden. If focus leaves while the key is
 // still down the release never arrives, so without this the cursor would stay trapped
@@ -629,6 +723,7 @@ static void end_slider_drag(GLFWwindow* w, bool warp_back) {
 static void window_focus_callback(GLFWwindow* w, int focused) {
     if (focused) return;
     end_slider_drag(w, false);
+    end_wrap_capture(w);
 }
 #endif
 
@@ -653,6 +748,8 @@ static void cursor_pos_callback(GLFWwindow* w, double x, double y) {
         apply_slider_delta(dx);
         return;
     }
+    x += g_wrap_off_x;
+    y += g_wrap_off_y;
     g_input->mouse_x = x;
     g_input->mouse_y = y;
     g_input->push_path(x, y);
@@ -673,6 +770,8 @@ extern "C" EMSCRIPTEN_KEEPALIVE void chisel_set_pointer(double x, double y, doub
         apply_slider_delta((float)dx);
         return;
     }
+    x += g_wrap_off_x;
+    y += g_wrap_off_y;
     g_input->mouse_x = x;
     g_input->mouse_y = y;
     g_input->push_path(x, y);
@@ -689,7 +788,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE void chisel_set_pointer(double x, double y, doub
 // path only, no ImGui, no slider delta — and the last through chisel_set_pointer.
 extern "C" EMSCRIPTEN_KEEPALIVE void chisel_path_sample(double x, double y) {
     if (!g_input || g_input->slider_mode != InputState::SliderMode::NONE) return;
-    g_input->push_path(x, y);
+    g_input->push_path(x + g_wrap_off_x, y + g_wrap_off_y);
 }
 
 // ImGui_ImplGlfw installs its own cursor-pos callback (chaining to ours) and would
@@ -790,6 +889,10 @@ static void mouse_button_callback(GLFWwindow* w, int button, int action, int mod
                 g_input->drag_mode = InputState::DragMode::NONE;
         }
     }
+
+    if (action == GLFW_RELEASE && !g_input->mouse1_down && !g_input->mouse2_down
+        && !g_input->mouse3_down)
+        end_wrap_capture(w);
 }
 
 static void scroll_callback(GLFWwindow* w, double xoff, double yoff) {

@@ -538,6 +538,12 @@ struct InputState {
 };
 
 void setup_input_callbacks(GLFWwindow* window, InputState* state);
+// Edge wrap for held drags (input.cpp). Returns true on the frame the cursor jumped to
+// the far edge — the caller skips that frame's motion.
+bool wrap_cursor(GLFWwindow* window, InputState& input, int win_w, int win_h);
+// True while a wrap holds the pointer captured (Wayland); the per-frame cursor-mode
+// write must leave it alone, as it does for a slider drag.
+bool wrap_capture_active();
 void setup_char_callback(GLFWwindow* window);
 #if defined(__EMSCRIPTEN__)
 // Re-take the GLFW cursor-pos callback from ImGui_ImplGlfw (call after ImGui init):

@@ -12,9 +12,6 @@
 #include <cmath>
 #include <algorithm>
 
-// Defined in main.cpp (intentionally non-static so the controller can call it).
-bool wrap_cursor(GLFWwindow* window, InputState& input, int win_w, int win_h);
-
 InsertController::InsertController(Scene& scene, Renderer& renderer)
     : scene_(scene), renderer_(renderer) {}
 

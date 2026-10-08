@@ -327,8 +327,6 @@ static void web_open_alpha_picker() {
 
 enum class AppState { IDLE, SCULPTING };
 
-// Wrap cursor at screen edges. Returns true if cursor was wrapped.
-// Non-static: insert_controller.cpp forward-declares and calls it.
 // Pointer samples per stroke frame, printed once per stroke. Says whether the path the
 // dab loop walks is dense: a mouse at 125-1000 Hz gives several samples per frame at
 // 20-60 fps, while a device (or browser) that reports once per frame gives 1, and then
@@ -405,24 +403,6 @@ struct MouseHistory {
 };
 static MouseHistory g_mouse_history;
 #endif
-
-bool wrap_cursor(GLFWwindow* window, InputState& input, int win_w, int win_h) {
-    double mx = input.mouse_x;
-    double my = input.mouse_y;
-    bool wrapped = false;
-    if (mx <= 0) { mx = win_w - 2; wrapped = true; }
-    else if (mx >= win_w - 1) { mx = 1; wrapped = true; }
-    if (my <= 0) { my = win_h - 2; wrapped = true; }
-    else if (my >= win_h - 1) { my = 1; wrapped = true; }
-    if (wrapped) {
-        glfwSetCursorPos(window, mx, my);
-        input.mouse_x = mx;
-        input.prev_mouse_x = mx;
-        input.mouse_y = my;
-        input.prev_mouse_y = my;
-    }
-    return wrapped;
-}
 
 // Sample depth at a pixel to decide if the cursor is on the model. Returns false
 // when no fresh sample is available this frame — the caller keeps the previous
@@ -2367,10 +2347,12 @@ int main(int argc, char* argv[]) {
             if (input.drag_mode == InputState::DragMode::PAN || input.mouse3_down) {
                 camera.pan(dx, dy, win_w, win_h);
                 if (dx != 0.0f || dy != 0.0f) screen_buffers_dirty = true;
+                wrap_cursor(window, input, win_w, win_h);
             }
             if (input.zoom_modifier_held() && input.mouse2_down) {
                 camera.zoom(-dy * 0.05f);
                 if (dy != 0.0f) screen_buffers_dirty = true;
+                wrap_cursor(window, input, win_w, win_h);
             }
 
             // Object move: drag selected meshes in view-plane
@@ -3379,7 +3361,8 @@ int main(int argc, char* argv[]) {
         // lock ~50us after the drag created it. Two owners of one piece of state, and
         // this one won sixty times a second — so the capture never actually held, the
         // pointer really did travel, and glfwSetCursorPos was refused for want of a lock.
-        if (input.slider_mode == InputState::SliderMode::NONE)
+        // An edge wrap on Wayland holds the same capture for the same reason.
+        if (input.slider_mode == InputState::SliderMode::NONE && !wrap_capture_active())
             glfwSetInputMode(window, GLFW_CURSOR, show_os_cursor ? GLFW_CURSOR_NORMAL : GLFW_CURSOR_HIDDEN);
 #else
         // Emscripten's GLFW has no GLFW_CURSOR_HIDDEN (warns every frame) —
@@ -4401,24 +4384,44 @@ int main(int argc, char* argv[]) {
     // exact through any resize/DPR change. chisel_set_pointer lives in input.cpp.
     EM_ASM({
         var c = Module.canvas;
+        // Under pointer lock clientX freezes, so the position is rebuilt from
+        // movementX/Y, starting from the last free one. That keeps it continuous for
+        // the edge wrap (input.cpp), which offsets it either way.
+        var lx = 0;   // (separate statements: a bare comma would split EM_ASM's
+        var ly = 0;   //  macro arguments)
         var feed = function(e) {
             var r = c.getBoundingClientRect();
+            var locked = document.pointerLockElement === c;
             // Browsers deliver one pointermove per frame; the positions merged into it
             // are the stroke's real path (see InputState::path_x). The last coalesced
             // event is `e` itself, so it goes through the normal call below.
             if (e.type === 'pointermove' && e.getCoalescedEvents) {
                 var list = e.getCoalescedEvents();
-                for (var i = 0; i + 1 < list.length; i++)
-                    Module._chisel_path_sample(list[i].clientX - r.left,
-                                               list[i].clientY - r.top);
+                var px = lx;
+                var py = ly;
+                for (var i = 0; i + 1 < list.length; i++) {
+                    if (locked) { px += list[i].movementX || 0; py += list[i].movementY || 0; }
+                    else        { px = list[i].clientX - r.left; py = list[i].clientY - r.top; }
+                    Module._chisel_path_sample(px, py);
+                }
+                if (locked) { lx = px; ly = py; }
             }
+            if (locked) { lx += e.movementX || 0; ly += e.movementY || 0; }
+            else        { lx = e.clientX - r.left; ly = e.clientY - r.top; }
             // movementX drives the slider drags (consistent CSS-scale deltas even
             // under pointer lock, where clientX freezes).
-            Module._chisel_set_pointer(e.clientX - r.left, e.clientY - r.top,
-                                       e.movementX || 0);
+            Module._chisel_set_pointer(lx, ly, e.movementX || 0);
         };
         c.addEventListener('pointermove', feed);
         c.addEventListener('pointerdown', feed);
+        // Keep a mouse drag's moves coming once it leaves the canvas (or itch's
+        // iframe), so the edge wrap sees it get there. Released by the browser on
+        // pointerup. Pens are left alone: they can't wrap.
+        c.addEventListener('pointerdown', function(e) {
+            if (e.pointerType === 'mouse' && c.setPointerCapture) {
+                try { c.setPointerCapture(e.pointerId); } catch (err) {}
+            }
+        });
 
         // Stylus force, which GLFW never surfaces — this is the web build's entire
         // tablet path (see the __EMSCRIPTEN__ branch of tablet.cpp). Guarded on

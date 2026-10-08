@@ -2,6 +2,13 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-08 — Edge wrap works on Wayland and web
+
+- Mouse drags (brushes, orbit, pan, zoom, object move/scale) wrap around the window
+  edge on Wayland and in the browser too. Neither can warp the cursor, so the first
+  wrap captures the pointer and carries on from its motion; the old fake warp made Move
+  drags lurch. Pens don't wrap.
+
 ## 2026-10-08 — Closing only asks when there's unsaved work
 
 - Title-bar X, logout or `kill` close at once when no mesh has changed since the last
