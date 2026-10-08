@@ -1214,15 +1214,15 @@ void draw_settings_menu_items(InputState& input, MultiresInfo mres, bool sync_ta
             }
             ImGui::TextDisabled("(?) follows the device you're using");
             if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Both profiles stay loaded. Touch the pen and the tablet\n"
-                                  "profile takes over; move the mouse and the mouse profile\n"
-                                  "does. Never mid-stroke.\n\n"
-                                  "Per profile: strength, hardness, spacing, max effect.\n"
-                                  "Shared: brush size (per brush if you turn that on\n"
-                                  "below), autosmooth, lighting, colours, mirror,\n"
-                                  "density.\n\n"
-                                  "Pick a tab here to edit the other profile — switching\n"
-                                  "is paused while this menu is open.");
+                ui_skin_menu_tip("Both profiles stay loaded. Touch the pen and the tablet\n"
+                                 "profile takes over; move the mouse and the mouse profile\n"
+                                 "does. Never mid-stroke.\n\n"
+                                 "Per profile: strength, hardness, spacing, max effect.\n"
+                                 "Shared: brush size (per brush if you turn that on\n"
+                                 "below), autosmooth, lighting, colours, mirror,\n"
+                                 "density.\n\n"
+                                 "Pick a tab here to edit the other profile — switching\n"
+                                 "is paused while this menu is open.");
             }
 
             // Max brush effect: the ceiling of the strength ramp for the profile whose
@@ -1240,12 +1240,12 @@ void draw_settings_menu_items(InputState& input, MultiresInfo mres, bool sync_ta
             if (ImGui::SliderFloat("##maxEffect", &max_pct, 10.0f, 100.0f, "max effect %.0f%%"))
                 input.max_effect = max_pct * 0.01f;
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("How hard Draw/Inflate/Crease/Pinch hit at FULL input —\n"
-                                  "a mouse dab, or the pen pressed to the stop.\n\n"
-                                  "Those brushes pile up without bound, so the cap is what\n"
-                                  "stops a stroke overshooting. Move, Smooth, Mask and\n"
-                                  "Paint aim at a target instead and ignore it.\n\n"
-                                  "Defaults: 60%% mouse, 100%% tablet.");
+                ui_skin_menu_tip("How hard Draw/Inflate/Crease/Pinch hit at FULL input —\n"
+                                 "a mouse dab, or the pen pressed to the stop.\n\n"
+                                 "Those brushes pile up without bound, so the cap is what\n"
+                                 "stops a stroke overshooting. Move, Smooth, Mask and\n"
+                                 "Paint aim at a target instead and ignore it.\n\n"
+                                 "Defaults: 60%% mouse, 100%% tablet.");
 
             ImGui::Separator();
 
@@ -1282,19 +1282,19 @@ void draw_settings_menu_items(InputState& input, MultiresInfo mres, bool sync_ta
                 ImGui::PopStyleColor(3);
             }
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("How X symmetry works. The X key still turns it on and off;\n"
-                                  "this is which kind you get, and it changes on the fly —\n"
-                                  "the next dab already uses it.\n\n"
-                                  "World Space: the dab is reflected in the centre plane\n"
-                                  "and applied again to whatever is there. It asks nothing of\n"
-                                  "the mesh, so it works on imported models, on remeshed and\n"
-                                  "merged ones, and on anything whose two halves are built\n"
-                                  "differently. The default.\n\n"
-                                  "Topological: vertices are additionally paired across the\n"
-                                  "plane and forced to match, so the two sides can never drift\n"
-                                  "apart. Only possible on a mesh that really is built\n"
-                                  "symmetrically; on one that isn't, Chisel says so and falls\n"
-                                  "back to the World Space mirror for that stroke.");
+                ui_skin_menu_tip("How X symmetry works. The X key still turns it on and off;\n"
+                                 "this is which kind you get, and it changes on the fly —\n"
+                                 "the next dab already uses it.\n\n"
+                                 "World Space: the dab is reflected in the centre plane\n"
+                                 "and applied again to whatever is there. It asks nothing of\n"
+                                 "the mesh, so it works on imported models, on remeshed and\n"
+                                 "merged ones, and on anything whose two halves are built\n"
+                                 "differently. The default.\n\n"
+                                 "Topological: vertices are additionally paired across the\n"
+                                 "plane and forced to match, so the two sides can never drift\n"
+                                 "apart. Only possible on a mesh that really is built\n"
+                                 "symmetrically; on one that isn't, Chisel says so and falls\n"
+                                 "back to the World Space mirror for that stroke.");
 
             ImGui::Separator();
 
@@ -1304,12 +1304,12 @@ void draw_settings_menu_items(InputState& input, MultiresInfo mres, bool sync_ta
             if (ImGui::Checkbox("Individual brush sizes", &input.per_brush_sizes))
                 input.seed_brush_sizes();
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Off: one brush size for every brush.\n\n"
-                                  "On: each brush remembers its own, the way strength and\n"
-                                  "spacing already do — Move and Smooth can sit large\n"
-                                  "while Paint and Crease stay small, and switching\n"
-                                  "between them keeps both.\n\n"
-                                  "Sizes last for the session only; they are not saved.");
+                ui_skin_menu_tip("Off: one brush size for every brush.\n\n"
+                                 "On: each brush remembers its own, the way strength and\n"
+                                 "spacing already do — Move and Smooth can sit large\n"
+                                 "while Paint and Crease stay small, and switching\n"
+                                 "between them keeps both.\n\n"
+                                 "Sizes last for the session only; they are not saved.");
 
             // Lighting dial: sun label + the matcap blend (0 = even, 1 = keyed). Worded
             // as "even light" now that "flat shading" means the facet toggle below.
@@ -1319,8 +1319,8 @@ void draw_settings_menu_items(InputState& input, MultiresInfo mres, bool sync_ta
             ImGui::SliderFloat("##matcapLight", &input.matcap_contrast, 0.0f, 1.0f,
                                "light %.2f");
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Viewport lighting: 0 = even, ambient light, 1 = keyed "
-                                  "light with contrast and sheen (display only)");
+                ui_skin_menu_tip("Viewport lighting: 0 = even, ambient light, 1 = keyed "
+                                 "light with contrast and sheen (display only)");
 
             // Shading. Stored as flat_shading (defaults true, so a settings blob with
             // no key lands faceted like a fresh install), shown inverted because
@@ -1329,64 +1329,64 @@ void draw_settings_menu_items(InputState& input, MultiresInfo mres, bool sync_ta
             if (ImGui::Checkbox("Smooth shading", &smooth))
                 input.flat_shading = !smooth;
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("On: normals are averaged across each vertex, so the\n"
-                                  "surface reads as one continuous form.\n\n"
-                                  "Off: every triangle is shaded by its own facet, so you\n"
-                                  "see the actual polygons — useful for judging topology,\n"
-                                  "density and what a remesh really did.\n\n"
-                                  "Display only: the mesh, the brush and the saved file\n"
-                                  "are identical either way.");
+                ui_skin_menu_tip("On: normals are averaged across each vertex, so the\n"
+                                 "surface reads as one continuous form.\n\n"
+                                 "Off: every triangle is shaded by its own facet, so you\n"
+                                 "see the actual polygons — useful for judging topology,\n"
+                                 "density and what a remesh really did.\n\n"
+                                 "Display only: the mesh, the brush and the saved file\n"
+                                 "are identical either way.");
 
             // Viewport projection. Off = the orthographic camera the app has always
             // used and the one the brush feel was tuned against, so it stays default;
             // the slider only bites once perspective is on, hence the disable.
             ImGui::Checkbox("Perspective", &input.camera_perspective);
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Off: orthographic — parallel lines stay parallel and a\n"
-                                  "shape reads the same wherever it sits on screen. The\n"
-                                  "default, and what the brushes were tuned against.\n\n"
-                                  "On: perspective — nearer parts of the model read larger,\n"
-                                  "which is how the eye actually sees volume. Worth a look\n"
-                                  "when you are judging proportion; ortho is easier to\n"
-                                  "sculpt precise detail in.");
+                ui_skin_menu_tip("Off: orthographic — parallel lines stay parallel and a\n"
+                                 "shape reads the same wherever it sits on screen. The\n"
+                                 "default, and what the brushes were tuned against.\n\n"
+                                 "On: perspective — nearer parts of the model read larger,\n"
+                                 "which is how the eye actually sees volume. Worth a look\n"
+                                 "when you are judging proportion; ortho is easier to\n"
+                                 "sculpt precise detail in.");
 
             if (!input.camera_perspective) ImGui::BeginDisabled();
             ImGui::SetNextItemWidth(mw);
             ImGui::SliderFloat("##cameraFov", &input.camera_fov, 15.0f, 80.0f, "fov %.0f\xc2\xb0");
             if (!input.camera_perspective) ImGui::EndDisabled();
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                ImGui::SetTooltip("Lens angle. Low = long lens, flat and near-orthographic.\n"
-                                  "High = wide lens, strong convergence and more distortion\n"
-                                  "toward the edges of the view.\n\n"
-                                  "The model keeps its on-screen size as you drag this —\n"
-                                  "the camera dollies to compensate — so you are changing\n"
-                                  "the perspective, not zooming.");
+                ui_skin_menu_tip("Lens angle. Low = long lens, flat and near-orthographic.\n"
+                                 "High = wide lens, strong convergence and more distortion\n"
+                                 "toward the edges of the view.\n\n"
+                                 "The model keeps its on-screen size as you drag this —\n"
+                                 "the camera dollies to compensate — so you are changing\n"
+                                 "the perspective, not zooming.");
 
             ImGui::Checkbox("Show FPS", &input.show_fps);
 
             ImGui::Checkbox("Remesh keeps detail", &input.remesh_keep_detail);
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("On: the remesher keeps its new points on your sculpt\n"
-                                  "and won't flip an edge across a ridge or a carved line.\n"
-                                  "The SDF remesh/merge also snaps its result back onto\n"
-                                  "your meshes, so detail finer than a voxel survives.\n\n"
-                                  "Off: the old remeshers, which round small forms and\n"
-                                  "creases away.\n\n"
-                                  "Either way the console prints a DRIFT line after each\n"
-                                  "remesh: how far the result sits from the original.\n"
-                                  "Not saved - it resets to On at every launch.");
+                ui_skin_menu_tip("On: the remesher keeps its new points on your sculpt\n"
+                                 "and won't flip an edge across a ridge or a carved line.\n"
+                                 "The SDF remesh/merge also snaps its result back onto\n"
+                                 "your meshes, so detail finer than a voxel survives.\n\n"
+                                 "Off: the old remeshers, which round small forms and\n"
+                                 "creases away.\n\n"
+                                 "Either way the console prints a DRIFT line after each\n"
+                                 "remesh: how far the result sits from the original.\n"
+                                 "Not saved - it resets to On at every launch.");
 
             // Logarithmic: x0.5 and x2 sit the same distance either side of x1.
             ImGui::SetNextItemWidth(mw);
             ImGui::SliderFloat("##remeshDetail", &input.remesh_detail, 0.25f, 4.0f,
                                "remesh detail x%.2f", ImGuiSliderFlags_Logarithmic);
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("How many triangles a remesh aims for, compared with\n"
-                                  "the mesh as it is now. x1 keeps the current average\n"
-                                  "and only fixes stretched areas; x2 doubles the count,\n"
-                                  "x0.5 halves it.\n\n"
-                                  "Anything other than x1 reworks the WHOLE mesh, so it\n"
-                                  "takes longer. Ctrl+click to type an exact value.");
+                ui_skin_menu_tip("How many triangles a remesh aims for, compared with\n"
+                                 "the mesh as it is now. x1 keeps the current average\n"
+                                 "and only fixes stretched areas; x2 doubles the count,\n"
+                                 "x0.5 halves it.\n\n"
+                                 "Anything other than x1 reworks the WHOLE mesh, so it\n"
+                                 "takes longer. Ctrl+click to type an exact value.");
 
             ImGui::Separator();
 
@@ -1406,7 +1406,7 @@ void draw_settings_menu_items(InputState& input, MultiresInfo mres, bool sync_ta
             ImGui::PopStyleColor();
             // Insert picks it up at once; only the opening ball waits for a relaunch.
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Takes effect on next launch");
+                ui_skin_menu_tip("Takes effect on next launch");
 
             // The escape hatch persistence makes necessary: before settings were saved,
             // any value you dragged somewhere unusable was one restart away from gone.
@@ -1417,7 +1417,7 @@ void draw_settings_menu_items(InputState& input, MultiresInfo mres, bool sync_ta
                 ImGui::CloseCurrentPopup();
             }
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Change, swap or clear any keyboard shortcut.");
+                ui_skin_menu_tip("Change, swap or clear any keyboard shortcut.");
 
             if (ImGui::Selectable("Reset settings to defaults")) {
                 settings_reset(input);
@@ -1427,10 +1427,10 @@ void draw_settings_menu_items(InputState& input, MultiresInfo mres, bool sync_ta
                 ImGui::CloseCurrentPopup();
             }
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Both profiles, colours, display options and key\n"
-                                  "bindings back to factory values, and clears the\n"
-                                  "saved copy.\n"
-                                  "Does not touch your sculpt.");
+                ui_skin_menu_tip("Both profiles, colours, display options and key\n"
+                                 "bindings back to factory values, and clears the\n"
+                                 "saved copy.\n"
+                                 "Does not touch your sculpt.");
 
             // Only surfaces when a sink has actually refused us — otherwise silence.
             // Most likely on itch: the game runs in a cross-origin iframe, and a browser
@@ -1439,9 +1439,9 @@ void draw_settings_menu_items(InputState& input, MultiresInfo mres, bool sync_ta
                 ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.25f, 1.0f),
                                    "Settings can't be saved");
                 if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Storage was refused, so settings will reset when\n"
-                                      "you close the tab. Usually third-party cookies or\n"
-                                      "site data being blocked, or a private window.");
+                    ui_skin_menu_tip("Storage was refused, so settings will reset when\n"
+                                     "you close the tab. Usually third-party cookies or\n"
+                                     "site data being blocked, or a private window.");
             }
 
             ImGui::Separator();
@@ -1459,7 +1459,7 @@ void draw_settings_menu_items(InputState& input, MultiresInfo mres, bool sync_ta
             }
             if (!can_drop) ImGui::EndDisabled();
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-                ImGui::SetTooltip(can_drop
+                ui_skin_menu_tip("%s", can_drop
                     ? "Drop the finest subdivision level and reclaim its memory.\n"
                       "Detail bakes down one level; cannot be undone."
                     : "No subdivision level above the base cage to delete");

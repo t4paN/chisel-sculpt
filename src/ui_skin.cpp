@@ -8,6 +8,7 @@
 #include "ui_fonts_generated.h"
 #include <algorithm>
 #include <cctype>
+#include <cstdarg>
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
@@ -330,7 +331,10 @@ enum class TipSide { Right, Below, Left };
 
 // Name + key badge on the near-black chip from board A. Foreground draw list so it
 // never fights the panels for z-order, and immediate (the app runs a 0 hover delay).
-void tooltip(ImVec2 anchor_min, ImVec2 anchor_max, TipSide side, const char* name, const char* key) {
+// `body`: the text is a note, not a name — DOS then skips its yellow upper-case title
+// look (title_case also caps at 63 chars) and sizes the box to every line.
+void tooltip(ImVec2 anchor_min, ImVec2 anchor_max, TipSide side, const char* name, const char* key,
+             bool body = false) {
     if (!name) return;
     ImDrawList* dl = ImGui::GetForegroundDrawList();
     const float fs = 13.0f, ks = 11.0f, padx = 10.0f, pady = 7.0f;
@@ -369,14 +373,19 @@ void tooltip(ImVec2 anchor_min, ImVec2 anchor_max, TipSide side, const char* nam
         // Turbo-style help box: blue, white frame, hard shadow, yellow bold name,
         // light-cyan key.
         p = ImVec2(std::floor(p.x), std::floor(p.y));
-        const char* nm = title_case(name);
-        ImVec2 n2 = text_size(UiFont::SansSemibold, 16.0f, nm);
+        const char* nm = body ? name : title_case(name);
+        const UiFont nf = body ? UiFont::Sans : UiFont::SansSemibold;
+        ImVec2 n2 = text_size(nf, 16.0f, nm);
         ImVec2 k2 = key ? text_size(UiFont::Mono, 16.0f, key) : ImVec2(0, 0);
-        float W = 12.0f * 2 + n2.x + (key ? 16.0f + k2.x : 0.0f), Hh = 6.0f * 2 + 16.0f + 4.0f;
+        float W = 12.0f * 2 + n2.x + (key ? 16.0f + k2.x : 0.0f);
+        float Hh = 6.0f * 2 + std::max(16.0f, n2.y) + 4.0f;
+        if (side == TipSide::Left) p.x = std::floor(anchor_min.x - 10.0f - W);
+        p.x = std::max(8.0f, p.x);
+        p.y = std::floor(std::max(8.0f, std::min(p.y, disp.y - Hh - 16.0f)));   // 8 px shadow
         dl->AddRectFilled(ImVec2(p.x + 8, p.y + 8), ImVec2(p.x + W + 8, p.y + Hh + 8), IM_COL32(0, 0, 0, 140));
         dl->AddRectFilled(p, ImVec2(p.x + W, p.y + Hh), cga::blue);
         dl->AddRect(ImVec2(p.x + 1, p.y + 1), ImVec2(p.x + W - 1, p.y + Hh - 1), cga::white, 0.0f, 0, 2.0f);
-        text_at(dl, UiFont::SansSemibold, 16.0f, ImVec2(p.x + 12, p.y + 8), cga::yellow, nm);
+        text_at(dl, nf, 16.0f, ImVec2(p.x + 12, p.y + 8), body ? cga::white : cga::yellow, nm);
         if (key) text_at(dl, UiFont::Mono, 16.0f, ImVec2(p.x + 12 + n2.x + 16, p.y + 8), cga::light_cyan, key);
         return;
     }
@@ -2240,6 +2249,24 @@ void ui_skin_popup_background() {
     window_panel(16.0f);
 }
 
+void ui_skin_menu_tip(const char* fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    if (g_active_skin == InputState::UiSkin::CLASSIC) {
+        ImGui::SetTooltipV(fmt, args);
+        va_end(args);
+        return;
+    }
+    static char buf[1024];
+    std::vsnprintf(buf, sizeof buf, fmt, args);
+    va_end(args);
+    // Anchored on the menu's left edge at the item's height: every skin docks the
+    // menu on the right, so the chip sits beside it like the dock's sit beside the rail.
+    const float left = ImGui::GetWindowPos().x;
+    ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+    tooltip(ImVec2(left, a.y), ImVec2(left, b.y), TipSide::Left, buf, nullptr, true);
+}
+
 void ui_skin_push_dropdown_bg() {
     ImVec4 c = g_theme_popup_bg;
     c.w = 1.0f;
@@ -2259,15 +2286,15 @@ void draw_appearance_menu_items(InputState& input) {
     ImGui::SameLine();
     ImGui::RadioButton("DOS", &skin, (int)InputState::UiSkin::DOS);
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Chisel's own 8x8 font, the CGA palette and pixel icons.");
+        ui_skin_menu_tip("Chisel's own 8x8 font, the CGA palette and pixel icons.");
     ImGui::SameLine();
     ImGui::RadioButton("2000s", &skin, (int)InputState::UiSkin::Y2K);
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Early-2000s 3D app: docked shelves, glossy tiles, orange.");
+        ui_skin_menu_tip("Early-2000s 3D app: docked shelves, glossy tiles, orange.");
     ImGui::SameLine();
     ImGui::RadioButton("Classic", &skin, (int)InputState::UiSkin::CLASSIC);
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("The original button islands and bitmap-font HUD.");
+        ui_skin_menu_tip("The original button islands and bitmap-font HUD.");
     input.ui_skin = (InputState::UiSkin)skin;
     if (input.ui_skin == InputState::UiSkin::DOS)
         ImGui::Checkbox("Viewfinder corners", &input.ui_viewfinder);
@@ -2285,8 +2312,8 @@ void draw_appearance_menu_items(InputState& input) {
     ImGui::SetNextItemWidth(w);
     ImGui::SliderFloat("##uiMaterial", &input.ui_material, 0.0f, 100.0f, "%.0f");
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Clear glass blurs the model behind the panels (one extra\n"
-                          "GPU pass per frame); Solid turns the blur off entirely.");
+        ui_skin_menu_tip("Clear glass blurs the model behind the panels (one extra\n"
+                         "GPU pass per frame); Solid turns the blur off entirely.");
     {
         ImDrawList* dl = ImGui::GetWindowDrawList();
         ImVec2 p = ImGui::GetCursorScreenPos();

@@ -82,6 +82,11 @@ void draw_appearance_menu_items(InputState& input);
 // panel material under it.
 void ui_skin_popup_background();
 
+// Hover note for the menu item just drawn, in the skin's own tooltip chip (the one
+// the brush dock uses), parked beside the menu. Classic keeps ImGui's tooltip, which
+// is what its islands use. printf-style, like ImGui::SetTooltip.
+void ui_skin_menu_tip(const char* fmt, ...) IM_FMTARGS(1);
+
 // A dropdown opened inside such a popup inherits that transparent PopupBg and its
 // list floats see-through over the menu. Push this around the Combo to give it the
 // skin's popup colour back, fully opaque. Pop with ImGui::PopStyleColor().

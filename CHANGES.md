@@ -2,9 +2,17 @@
 
 Short, chronological log of notable changes. Newest on top.
 
-## 2026-10-08 — Opaque dropdown in the menu; shorter Sphere tooltip
+## 2026-10-08 — Menu tooltips in the skin's own chip; opaque dropdown; shorter Sphere tooltip
 
 *Built GL and native WebGPU; tested by the user on native.*
+
+- **Burger-menu tooltips use the skin's chip, like the brush dock.** They were ImGui's
+  stock tooltip at the cursor, which in a long menu covered the next control. All 19
+  (settings + Appearance) now go through `ui_skin_menu_tip()`: the dock's chip, parked
+  to the LEFT of the menu at the hovered item's height (every skin docks the menu on
+  the right). Classic keeps ImGui's tooltip, as its own islands do. The DOS chip was
+  built for brush names: yellow capitals, cut at 63 chars, one line high. It gained a
+  `body` mode for notes: normal case, white, as many lines as the text needs.
 
 - **The Sphere dropdown in the burger menu was see-through.** The skinned menus (Modern,
   Y2K, DOS) set ImGui's popup background to transparent and paint their own panel
