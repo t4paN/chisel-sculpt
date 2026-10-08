@@ -8,8 +8,9 @@
 // stroke 1.75, round caps). Each icon is a few parts; a part is an SVG path, a
 // circle or a (rounded) rect. Brush Inflate is the one redraw: the handoff flagged
 // its sun-with-rays as reading like "brightness" and colliding with the lighting
-// slider's sun glyph, so it is a dome swelling up off the surface line Draw and
-// Clay sit on, with an arrow out of it.
+// slider's sun glyph. It is now a round form with a smaller one swelling out of its
+// shoulder (the user's sketch, 2026-10-08): the outline of the two together, plus
+// a short stretch of the small one's edge running back inside the big one.
 
 namespace {
 
@@ -34,9 +35,11 @@ struct IconDef { Part parts[4]; int n; };
 const IconDef kIcons[(int)Icon::Count] = {
     /* BrushDraw    */ {{P("M3 17h4c2 0 2.5-7 5-7s3 7 5 7h4")}, 1},
     /* BrushClay    */ {{P("M3 18h3l2-4h8l2 4h3"), P("M9.5 14l1.5-3h2l1.5 3")}, 2},
-    /* BrushInflate */ {{P("M3 18h3a6 6 0 0 1 12 0h3"), P("M12 3v6M9.5 5.5L12 3l2.5 2.5")}, 2},
+    /* BrushInflate */ {{P("M12.12 5.68A4.8 4.8 0 1 1 18 12.86A7.5 7.5 0 1 1 12.12 5.68"),
+                         P("M12.12 5.68A4.8 4.8 0 0 0 11.21 8.83")}, 2},
     /* BrushCrease  */ {{P("M3 8h5l4 9 4-9h5")}, 1},
-    /* BrushPinch   */ {{P("M12 4v16"), P("M3 12h5M6 9l3 3-3 3"), P("M21 12h-5M18 9l-3 3 3 3")}, 3},
+    /* BrushPinch   */ {{F("M8.5 3.5H15.5C13.4 7 13 10 13 12C13 14 13.4 17 15.5 20.5H8.5C10.6 17 11 14 11 12C11 10 10.6 7 8.5 3.5Z"),
+                         P("M2.5 12H9M6 8.5l3.5 3.5-3.5 3.5"), P("M21.5 12H15M18 8.5l-3.5 3.5 3.5 3.5")}, 3},
     /* BrushMove    */ {{P("M12 3v18M3 12h18"),
                          P("M9 6l3-3 3 3M9 18l3 3 3-3M6 9l-3 3 3 3M18 9l3 3-3 3")}, 2},
     /* BrushLimb    */ {{P("M3 20h5c0-7 3-11 9-13"), P("M13.5 4.5L17 7l-2.5 3.5")}, 2},
@@ -99,7 +102,15 @@ struct Emitter {
 
     void flush(bool closed) {
         if (!open) return;
-        if (kind == Kind::FillPath) dl->PathFillConvex(col);
+        if (kind == Kind::FillPath) {
+            // Concave fill (Pinch's waisted bar). A path whose last curve lands back on
+            // its start repeats that point, which the ear-clipper reads as a zero-area
+            // ear; drop it.
+            ImVector<ImVec2>& pts = dl->_Path;
+            if (pts.Size > 3 && std::fabs(pts.back().x - pts[0].x) < 0.01f
+                             && std::fabs(pts.back().y - pts[0].y) < 0.01f) pts.pop_back();
+            dl->PathFillConcave(col);
+        }
         else dl->PathStroke(col, closed ? ImDrawFlags_Closed : ImDrawFlags_None, thick);
         open = false;
     }
@@ -244,15 +255,15 @@ void draw_icon(ImDrawList* dl, Icon icon, ImVec2 center, float size, ImU32 col, 
 // ---- Pixel set (the DOS skin) ------------------------------------------------
 // The same 27 icons as 16x16 one-bit art, from the handoff's cga-pixel/icons
 // (pixel_icons.json, converted to row masks: bit 15 = leftmost pixel). Mirror X,
-// Smooth and Merge were hand-drawn there; Inflate is redrawn here as a dome with an
-// arrow, matching the vector set.
+// Smooth and Merge were hand-drawn there; Inflate is redrawn here to match the
+// vector set (rasterised from the same two circles).
 namespace {
 const unsigned short kPixel[(int)Icon::Count][16] = {
     /* brush-draw      */ {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0180,0x03C0,0x0660,0x0660,0x3E7C,0x7C3E,0x0000,0x0000,0x0000,0x0000},
     /* brush-clay      */ {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0180,0x03C0,0x07E0,0x0FF0,0x0C30,0x781E,0x781E,0x0000,0x0000,0x0000},
-    /* brush-inflate   */ {0x0000,0x0180,0x03C0,0x07E0,0x0180,0x0180,0x07E0,0x1C38,0x300C,0x300C,0x6006,0xE007,0xE007,0x0000,0x0000,0x0000},   // redrawn: dome + arrow
+    /* brush-inflate   */ {0x0000,0x0078,0x00FC,0x038E,0x1F86,0x3F86,0x3006,0x600E,0x601C,0x6018,0x6018,0x7038,0x3070,0x1FE0,0x0FC0,0x0000},   // redrawn: swelling circle
     /* brush-crease    */ {0x0000,0x0000,0x0000,0x0000,0x381C,0x7C3E,0x0660,0x0660,0x03C0,0x03C0,0x0180,0x0180,0x0000,0x0000,0x0000,0x0000},
-    /* brush-pinch     */ {0x0000,0x0000,0x0180,0x0180,0x0180,0x1998,0x1DB8,0x7FFE,0x7FFE,0x1DB8,0x1998,0x0180,0x0180,0x0180,0x0000,0x0000},
+    /* brush-pinch     */ {0x0000,0x07E0,0x07E0,0x03C0,0x03C0,0x318C,0x1998,0xFDBF,0xFDBF,0x1998,0x318C,0x03C0,0x03C0,0x07E0,0x07E0,0x0000},   // redrawn: waisted bar
     /* brush-move      */ {0x0000,0x0180,0x03C0,0x07E0,0x07E0,0x1998,0x399C,0x7FFE,0x7FFE,0x399C,0x1998,0x07E0,0x07E0,0x03C0,0x0180,0x0000},
     /* brush-limb      */ {0x0000,0x0000,0x00C0,0x00E0,0x0070,0x00F0,0x01E0,0x0340,0x0600,0x0600,0x0600,0x0400,0x3C00,0x7C00,0x0000,0x0000},
     /* brush-smooth    */ {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x6000,0x7300,0xF7FF,0xDFFF,0x1C00,0x0000,0x0000,0x0000,0x0000,0x0000},

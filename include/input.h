@@ -228,6 +228,7 @@ struct InputState {
     // capable dab modulates its falloff by the sampled alpha. load_alpha_dialog_active
     // pops the custom-image file picker (mirrors import_dialog_active).
     int  active_alpha = 0;
+    int  alpha_step = 0;   // pending Q/E steps through the alphas; main applies + wraps
     bool load_alpha_dialog_active = false;
     // Clay melt (0..1): how strongly clay pulls verts on the WRONG side of its plane
     // (proud on a build, sunk on a carve) back toward it. 0 (default) = ride over:
@@ -345,6 +346,10 @@ struct InputState {
 
     // Quit confirmation
     bool quit_requested;    // ESC pressed, waiting for Y/N
+    // Quit dialog's Save & Quit: the app closes once a save succeeds. If the project
+    // has no file yet that save goes through the Save window, and cancelling it
+    // drops this (main.cpp) — you are back in the app, nothing lost.
+    bool quit_after_save = false;
 
     // File dialogs (Ctrl+E export, Ctrl+O import, Ctrl+S save, Ctrl+Shift+S save-as)
     bool export_dialog_active;

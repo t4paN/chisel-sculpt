@@ -40,6 +40,7 @@
 #include <GLFW/glfw3native.h>   // glfwGetWin32Window, for MouseHistory
 #endif
 #endif
+#include <csignal>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -457,6 +458,12 @@ static void report_projection_check(const ProjectionStats& ps) {
                 bad ? "  <-- LOSSY, cascade does not reproduce the surface" : "  ok");
     std::fflush(stdout);
 }
+
+#if !defined(__EMSCRIPTEN__) && !defined(_WIN32)
+// Set by SIGTERM / SIGHUP, consumed by the frame loop (a handler may only touch a
+// sig_atomic_t; the dialog is raised from the loop).
+static volatile std::sig_atomic_t g_quit_signal = 0;
+#endif
 
 int main(int argc, char* argv[]) {
     debug_console::init();
@@ -891,6 +898,12 @@ int main(int argc, char* argv[]) {
 #endif
     setup_input_callbacks(window, &input);
     setup_char_callback(window);
+#if !defined(__EMSCRIPTEN__) && !defined(_WIN32)
+    // Logout / shutdown / `kill` ask first, like the title-bar X. SIGINT (Ctrl+C in a
+    // terminal) is left alone: that is the developer's hard stop.
+    std::signal(SIGTERM, [](int) { g_quit_signal = 1; });
+    std::signal(SIGHUP,  [](int) { g_quit_signal = 1; });
+#endif
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -1137,6 +1150,19 @@ int main(int argc, char* argv[]) {
         win_h = EM_ASM_INT({ return (Module.canvas.clientHeight || window.innerHeight) | 0; });
 #else
         glfwGetFramebufferSize(window, &win_w, &win_h);
+#endif
+#if !defined(__EMSCRIPTEN__) && !defined(_WIN32)
+        // SIGTERM / SIGHUP (logout, shutdown, `kill`): bring up the quit dialog and
+        // ask for the window's attention instead of dying with the work unsaved.
+        // Checked before the minimised-window early-out below, so a minimised window
+        // gets restored. systemd still sends SIGKILL if nobody answers before its
+        // stop timeout.
+        if (g_quit_signal) {
+            g_quit_signal = 0;
+            if (!input.quit_after_save) input.quit_requested = true;
+            if (glfwGetWindowAttrib(window, GLFW_ICONIFIED)) glfwRestoreWindow(window);
+            glfwRequestWindowAttention(window);
+        }
 #endif
         if (win_w == 0 || win_h == 0) {
             glfwPollEvents();      // keep the browser event loop breathing on a hidden frame
@@ -1903,6 +1929,14 @@ int main(int argc, char* argv[]) {
         // so switching Clay ↔ other brushes swaps the upload back and forth.
         if (input.active_alpha < 0 || input.active_alpha >= alpha_lib.count())
             input.active_alpha = 0;
+        if (input.alpha_step && alpha_lib.count() > 0) {
+            int n = alpha_lib.count();
+            input.active_alpha = ((input.active_alpha + input.alpha_step) % n + n) % n;
+            input.alpha_step = 0;
+            std::snprintf(input.notification, sizeof(input.notification), "Alpha: %s",
+                          alpha_lib.get(input.active_alpha).name.c_str());
+            input.notification_timer = 1.0f;
+        }
         int want_alpha = (input.current_brush == BrushType::CLAY)
                              ? AlphaLibrary::kSquareIndex : input.active_alpha;
         if (want_alpha != last_uploaded_alpha) {
@@ -2507,8 +2541,8 @@ int main(int argc, char* argv[]) {
                                 || input.export_dialog_active || input.import_dialog_active
                                 || input.save_dialog_active
                                 || input.keybind_menu_open;
-                // The spin keys are whatever Previous/Next brush are bound to (Q/E by
-                // default) — the same keys cycle brushes outside Select mode.
+                // The spin keys are whatever Previous/Next alpha are bound to (Q/E by
+                // default) — the same keys step the alpha outside Select mode.
                 const KeyBind& spin_cw  = input.keybinds[(int)KeyAction::BRUSH_NEXT];
                 const KeyBind& spin_ccw = input.keybinds[(int)KeyAction::BRUSH_PREV];
                 int dir = 0;
@@ -3509,7 +3543,7 @@ int main(int argc, char* argv[]) {
         if (vmerge_job) dlg.merge_progress = voxel_merge_progress(*vmerge_job);
         const bool bitmap_dialogs = input.ui_classic();
 
-        if (input.quit_requested)
+        if (bitmap_dialogs && input.quit_requested)
             draw_quit_dialog(text, win_w, win_h);
         if (input.drop_confirm_pending)
             draw_drop_confirm(text, input.drop_path, win_w, win_h);
@@ -3976,6 +4010,11 @@ int main(int argc, char* argv[]) {
             proj.mirror_x     = input.mirror_x;
             proj.subdiv_level = input.subdiv_level;
             SaveResult sr = save_project(path.c_str(), proj);
+            if (sr == SaveResult::OK && input.quit_after_save) {
+                input.quit_after_save = false;
+                glfwSetWindowShouldClose(window, GLFW_TRUE);
+            }
+            if (sr != SaveResult::OK) input.quit_after_save = false;   // stay; the error popup says why
             if (sr == SaveResult::OK) {
                 current_project_path = path;
 #ifdef __EMSCRIPTEN__
@@ -4201,6 +4240,11 @@ int main(int argc, char* argv[]) {
             ::remove(path.c_str());
         }
 #endif // __EMSCRIPTEN__
+
+        // Save & Quit whose Save window was cancelled: forget the quit. A successful
+        // save already closed the window inside do_save_project.
+        if (input.quit_after_save && !input.save_dialog_active && !input.save_requested)
+            input.quit_after_save = false;
 
         // ---- Button islands (brush selection + ops) ----
         MultiresInfo mres_info;

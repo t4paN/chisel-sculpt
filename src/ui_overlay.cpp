@@ -71,10 +71,10 @@ void draw_quit_dialog(TextOverlay& text, int win_w, int win_h) {
                    win_w, win_h, 0.0f, 0.0f, 0.0f, 0.5f);
 
     float msg_scale = 3.0f;
-    float msg_x = (float)win_w * 0.5f - 180.0f;
+    const char* msg = "Quit? Y / N / S = save first";
+    float msg_x = (float)win_w * 0.5f - std::strlen(msg) * 8.0f * msg_scale * 0.5f;   // 8 px cells
     float msg_y = (float)win_h * 0.5f - 20.0f;
-    text.draw_text("Quit? Y / N / ESC", msg_x, msg_y, msg_scale,
-                  win_w, win_h, CGA(yellow), 1.0f);
+    text.draw_text(msg, msg_x, msg_y, msg_scale, win_w, win_h, CGA(yellow), 1.0f);
 }
 
 void draw_drop_confirm(TextOverlay& text, const char* path, int win_w, int win_h) {
@@ -772,7 +772,7 @@ void draw_help_popup(InputState& input, int win_w, int win_h) {
         std::snprintf(k, sizeof(k), "%s %s", L(KeyAction::BRUSH_LIMB), L(KeyAction::BRUSH_MASK));
         help_row(k, "Limb  Mask");
         std::snprintf(k, sizeof(k), "%s %s", L(KeyAction::BRUSH_PREV), L(KeyAction::BRUSH_NEXT));
-        help_row(k, "Cycle brush");
+        help_row(k, "Cycle alpha (Draw, Mask)");
         help_head("SIZE + FEEL");
         std::snprintf(k, sizeof(k), "%s %s", L(KeyAction::SIZE_DOWN), L(KeyAction::SIZE_UP));
         help_row(k, "Brush size");

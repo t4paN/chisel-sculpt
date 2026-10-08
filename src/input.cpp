@@ -29,10 +29,10 @@ const KeyActionInfo kKeyActions[(int)KeyAction::COUNT] = {
     {"brush_move",    "Brushes", "Move",                nullptr, {GLFW_KEY_G, 0}},
     {"brush_limb",    "Brushes", "Limb",                nullptr, {GLFW_KEY_H, 0}},
     {"brush_mask",    "Brushes", "Mask",                nullptr, {GLFW_KEY_M, 0}},
-    {"brush_prev",    "Brushes", "Previous brush",
-        "In Paint mode: swap colours. In Select mode: hold to spin the selection.", {GLFW_KEY_Q, 0}},
-    {"brush_next",    "Brushes", "Next brush",
-        "In Paint mode: swap colours. In Select mode: hold to spin the selection.", {GLFW_KEY_E, 0}},
+    {"brush_prev",    "Brushes", "Previous alpha",
+        "Draw and Mask. In Paint mode: swap colours. In Select mode: hold to spin the selection.", {GLFW_KEY_Q, 0}},
+    {"brush_next",    "Brushes", "Next alpha",
+        "Draw and Mask. In Paint mode: swap colours. In Select mode: hold to spin the selection.", {GLFW_KEY_E, 0}},
     {"hold_size",     "Brush feel", "Size",             "Hold and drag", {GLFW_KEY_S, 0}},
     {"hold_strength", "Brush feel", "Strength",         "Hold and drag", {GLFW_KEY_W, 0}},
     {"hold_hardness", "Brush feel", "Hardness",         "Hold and drag", {GLFW_KEY_A, 0}},
@@ -912,18 +912,18 @@ static void run_key_action(GLFWwindow* w, KeyAction a, bool repeat) {
         case KeyAction::BRUSH_NEXT: {
             // In SELECT mode these keys spin the selection instead. The main loop polls
             // the bound keys directly for that (continuous, frame-rate independent), so
-            // there is nothing to latch here — just don't cycle the brush too.
+            // there is nothing to latch here — just don't step the alpha too.
             if (select_mode) break;
+            if (in.interaction_mode != InputState::InteractionMode::EDIT || in.is_smooth_active()) break;
             if (in.current_brush == BrushType::PAINT) {
                 // In paint mode both swap the active colour with the alternate.
                 for (int c = 0; c < 3; c++) std::swap(in.paint_color[c], in.paint_color_alt[c]);
                 break;
             }
-            in.clear_smooth_lock();
-            int b = (int)in.current_brush + (a == KeyAction::BRUSH_NEXT ? 1 : -1);
-            if (b < 0) b = (int)BrushType::COUNT - 1;
-            if (b >= (int)BrushType::COUNT) b = 0;
-            in.switch_brush((BrushType)b);
+            // Draw and Mask step through the alphas; the main loop owns the library,
+            // so it applies the step and wraps it. Brushes with no alpha: nothing.
+            if (in.current_brush == BrushType::DRAW || in.current_brush == BrushType::MASK)
+                in.alpha_step += (a == KeyAction::BRUSH_NEXT ? 1 : -1);
             break;
         }
 
@@ -1073,7 +1073,14 @@ static void handle_modal_key(GLFWwindow* w, int key) {
             in.voxel_merge_subtract = true;
             in.voxel_merge_requested = true;
             break;
-        case GLFW_KEY_S: if (merge) in.voxel_merge_surface_nets = !in.voxel_merge_surface_nets; break;
+        case GLFW_KEY_S:
+            if (merge) in.voxel_merge_surface_nets = !in.voxel_merge_surface_nets;
+            else if (in.quit_requested) {   // Save & Quit
+                in.quit_requested = false;
+                in.quit_after_save = true;
+                in.save_requested = true;
+            }
+            break;
         case GLFW_KEY_D: if (merge) in.voxel_merge_adaptive = !in.voxel_merge_adaptive; break;
         case GLFW_KEY_LEFT_BRACKET:
             if (merge && in.voxel_merge_resolution > 64) in.voxel_merge_resolution -= 32;
@@ -1271,6 +1278,15 @@ void setup_input_callbacks(GLFWwindow* window, InputState* state) {
 #ifndef __EMSCRIPTEN__
     glfwSetWindowFocusCallback(window, window_focus_callback);
     glfwSetDropCallback(window, drop_callback);
+    // The title-bar X (and a desktop's "close window", which KDE also sends its
+    // windows at logout) asks the quit dialog instead of closing. Only a Y / Save &
+    // Quit in that dialog sets the close flag for real; GLFW doesn't call this back
+    // for the app's own glfwSetWindowShouldClose. A second X while the dialog is up
+    // just keeps it up, and one during Save & Quit's Save window is ignored.
+    glfwSetWindowCloseCallback(window, [](GLFWwindow* w) {
+        glfwSetWindowShouldClose(w, GLFW_FALSE);
+        if (!g_input->quit_after_save) g_input->quit_requested = true;
+    });
 #endif
 }
 

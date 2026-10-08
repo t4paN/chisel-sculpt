@@ -859,12 +859,16 @@ bool alpha_picker_popup(InputState& input, const AlphaLibrary* alpha_lib, ImVec2
             }
             bool hv = ImGui::IsItemHovered();
             ImDrawList* pdl = ImGui::GetWindowDrawList();
+            // Strip: the bare stamp nearly fills the slot, so the selection / hover
+            // fill shows only as a 3 px ring (rounding cut to clear the image corners).
+            const float rr = strip ? rad(6.0f) : rad(10.0f);
             if (input.active_alpha == i)
-                pdl->AddRectFilled(p, ImVec2(p.x + 44, p.y + 44), kAccent, rad(10.0f));
+                pdl->AddRectFilled(p, ImVec2(p.x + 44, p.y + 44), kAccent, rr);
             else if (hv)
                 pdl->AddRectFilled(p, ImVec2(p.x + 44, p.y + 44),
-                                   g_dos ? cga::dark_gray : IM_COL32(255, 255, 255, 18), rad(10.0f));
-            draw_alpha_preview(pdl, ImVec2(p.x + 7, p.y + 7), 30.0f, e.preview);
+                                   g_dos ? cga::dark_gray : IM_COL32(255, 255, 255, 18), rr);
+            if (strip) draw_alpha_preview(pdl, ImVec2(p.x + 3, p.y + 3), 38.0f, e.preview, true);
+            else       draw_alpha_preview(pdl, ImVec2(p.x + 7, p.y + 7), 30.0f, e.preview);
             if (hv) tooltip(p, ImVec2(p.x + 44, p.y + 44), TipSide::Below, e.name.c_str(), nullptr);
         }
         if (n % per_row) ImGui::SameLine();
@@ -928,8 +932,8 @@ bool alpha_picker_popup(InputState& input, const AlphaLibrary* alpha_lib, ImVec2
                 break;
             }
             if (input.active_alpha == i)
-                fg->AddRectFilled(p, ImVec2(p.x + 44, p.y + 44), kAccent, rad(10.0f));
-            draw_alpha_preview(fg, ImVec2(p.x + 7, p.y + 7), 30.0f, alpha_lib->get(i).preview);
+                fg->AddRectFilled(p, ImVec2(p.x + 44, p.y + 44), kAccent, rad(6.0f));
+            draw_alpha_preview(fg, ImVec2(p.x + 3, p.y + 3), 38.0f, alpha_lib->get(i).preview, true);
         }
         fg->PopClipRect();
         return true;
@@ -1239,14 +1243,12 @@ void command_panel(InputState& input, int win_w, int win_h, MultiresInfo mres, c
         input.paint_visible = !input.paint_visible;
     vdivider();
 
-    o.on = ImGui::IsPopupOpen("##helppopup");
-    o.tip = "Shortcuts"; o.key = nullptr;
-    if (icon_button("cHelp", Icon::UiShortcuts, kBarBtn, o)) ImGui::OpenPopup("##helppopup");
-    if (!input.help_seen) {           // first launch ever: open the card once
+    // No Shortcuts button here any more: Menu > Key bindings lists every key and can
+    // change them. The card still opens once on the very first launch, as a primer.
+    if (!input.help_seen) {
         input.help_seen = true;
         ImGui::OpenPopup("##helppopup");
     }
-    ImGui::SameLine();
     o.on = ImGui::IsPopupOpen("##burgermenu");
     o.tip = "Menu";
     if (icon_button("cMenu", Icon::UiMenu, kBarBtn, o)) ImGui::OpenPopup("##burgermenu");
@@ -2621,6 +2623,13 @@ float dlg_row_h() { return g_dos ? 32.0f : (g_y2k ? 26.0f : 32.0f); }
 
 // A dialog button with its key printed inside it. primary = the default action
 // (accent tile), danger = the destructive one (alert-coloured text).
+float dlg_button_w(const char* label, const char* key) {
+    const float padx = g_dos ? 14.0f : 16.0f, gap = 10.0f;
+    float w = padx * 2.0f + text_size(UiFont::SansSemibold, 14.0f, title_case(label)).x;
+    if (key) w += gap + text_size(UiFont::Mono, 12.0f, key).x + 10.0f;
+    return w;
+}
+
 bool dlg_button(const char* id, const char* label, const char* key, bool primary,
                 bool danger = false) {
     char lab[64];
@@ -2630,7 +2639,7 @@ bool dlg_button(const char* id, const char* label, const char* key, bool primary
     ImVec2 ls = text_size(lf, 14.0f, lab);
     ImVec2 ks = key ? text_size(UiFont::Mono, 12.0f, key) : ImVec2(0, 0);
     const float padx = g_dos ? 14.0f : 16.0f, gap = 10.0f, badge = key ? ks.x + 10.0f : 0.0f;
-    ImVec2 size(padx * 2.0f + ls.x + (key ? gap + badge : 0.0f), dlg_row_h());
+    ImVec2 size(dlg_button_w(label, key), dlg_row_h());
 
     ImVec2 pos = ImGui::GetCursorScreenPos();
     bool clicked = ImGui::InvisibleButton(id, size);
@@ -2790,6 +2799,33 @@ void end_dialog() {
 }  // namespace
 
 void draw_skin_dialogs(InputState& input, int win_w, int win_h, const DialogInfo& info) {
+    // ---- Quit ---- Everything centred. Save & Quit saves first: a project with no
+    // file yet gets the Save window, and the app closes once that save lands.
+    if (begin_dialog("##dlgQuit", input.quit_requested, win_w, win_h)) {
+        const float avail = ImGui::GetContentRegionAvail().x;
+        auto centre = [&](float w) {
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.0f, (avail - w) * 0.5f));
+        };
+        const char* title = "Quit Chisel?";
+        const char* note = "Anything not saved is lost.";
+        centre(text_size(UiFont::SansSemibold, 16.0f, title_case(title)).x);
+        dlg_title(title);
+        centre(text_size(UiFont::Sans, 13.0f, note).x);
+        dlg_text(UiFont::Sans, 13.0f, kMuted, note);
+        ImGui::Dummy(ImVec2(0.0f, 2.0f));
+        const float sp = ImGui::GetStyle().ItemSpacing.x;
+        centre(dlg_button_w("Save & Quit", "S") + dlg_button_w("Quit", "Y") + dlg_button_w("Cancel", "N") + sp * 2.0f);
+        if (dlg_button("##qS", "Save & Quit", "S", true)) press_dialog_key(GLFW_KEY_S);
+        dlg_tip("Save, then close (asks for a name if the work has no file yet)");
+        ImGui::SameLine();
+        if (dlg_button("##qY", "Quit", "Y", false, true)) press_dialog_key(GLFW_KEY_Y);
+        dlg_tip("Close without saving");
+        ImGui::SameLine();
+        if (dlg_button("##qN", "Cancel", "N", false)) press_dialog_key(GLFW_KEY_N);
+        dlg_tip("Back to sculpting (Esc works too)");
+        end_dialog();
+    }
+
     // ---- Remesh: confirm ----
     if (begin_dialog("##dlgRemesh", input.remesh_confirm_pending, win_w, win_h)) {
         dlg_title("Remesh stretched regions?");

@@ -2,6 +2,40 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-08 — Quit asks first (title-bar X, logout, SIGTERM) with Save & Quit; Q/E step alphas; new Inflate + Pinch icons
+
+*Built GL and native WebGPU; tested by the user on native Linux. Windows not yet run:
+handoff `~/Projects/CHISEL/windows-ui-quit-handoff.md` (copy on SHARED).*
+
+- **Quit dialog in the skin's own style** (Modern, DOS, 2000s; Classic keeps its
+  bitmap line), everything centred: **Save & Quit** (S, primary), **Quit** (Y, red),
+  **Cancel** (N / Esc). Save & Quit sets `quit_after_save`: a project with a file saves
+  and closes; an Untitled one gets the Save window and closes once that save lands.
+  Cancelling the Save window or a failed save drops the flag, and you are back in the
+  app. Classic's line now reads "Quit? Y / N / S = save first".
+- **Closing never skips the dialog.** The window-close callback (title-bar X, Alt+F4, a
+  desktop's close request at logout) clears GLFW's close flag and raises the dialog.
+  Only the dialog's Quit / Save & Quit close for real. Linux native also catches
+  **SIGTERM / SIGHUP**: a flag the frame loop turns into the dialog, restoring a
+  minimised window and requesting attention. It is checked before the minimised-frame
+  early-out. SIGINT is left as the terminal's hard stop. systemd still SIGKILLs at its
+  stop timeout, so a `systemctl poweroff` can only be delayed, not refused. Windows
+  shutdown (WM_QUERYENDSESSION) is not handled yet.
+- **Q / E step through the alphas** on Draw and Mask (toast names the one you land on),
+  wrapped by the main loop, which owns the library. Paint still swaps colours, Select
+  still spins. Every other brush, Smooth and Insert: nothing. The old brush cycling is
+  gone; the bindings keep their stored ids, only their labels changed to Previous / Next
+  alpha. Help card and MANUAL updated.
+- **Picker strip alphas are bigger:** the bare stamp at 38 px in the 44 px slot, so the
+  purple selection is a 3 px ring. The retract overlay draws them the same way.
+- **New Inflate icon** (a round form with a smaller one swelling from its shoulder, from
+  the user's sketch) and **new Pinch icon** (a filled waisted bar with arrows into the
+  waist), in both the vector set and DOS's pixel set. Icon fills now use ImGui's
+  concave filler. A path that closes onto its own start drops the repeated point first,
+  or the ear-clipper sees a zero-area ear.
+- **Shortcuts button removed** from the top-right dock (Modern / DOS): Menu → Key
+  bindings lists and edits every key. The card still opens once on a first launch.
+
 ## 2026-10-08 — Modern skin: left-column layout, mode dock, alpha swatch, stacked readouts
 
 *Built GL and native WebGPU; tested by the user on native. Modern and DOS share this

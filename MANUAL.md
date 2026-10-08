@@ -92,7 +92,7 @@ crisp chisel rim, low melts the rim toward the centre.
 | Shift + LMB | Smooth (any brush) |
 | Double-tap Ctrl | Lock subtract mode (tap again to unlock) |
 | Double-tap Shift | Lock smooth mode (tap again to unlock) |
-| Q / E | Cycle brush backward / forward |
+| Q / E | Previous / next alpha (Draw, Mask); swap colours in Paint; nothing on other brushes |
 | B | Toggle autosmooth (a gentle smoothing pass folded into every stroke) |
 
 ### Brush tuning — hold a key and drag left/right
