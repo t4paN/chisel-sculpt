@@ -353,6 +353,10 @@ struct InputState {
     // has no file yet that save goes through the Save window, and cancelling it
     // drops this (main.cpp) — you are back in the app, nothing lost.
     bool quit_after_save = false;
+    // A close asked from outside the app's own keys (title-bar X, the desktop's
+    // "close window", which KDE sends at logout). main.cpp closes at once when
+    // nothing is unsaved, else raises the window and asks.
+    bool close_requested = false;
 
     // File dialogs (Ctrl+E export, Ctrl+O import, Ctrl+S save, Ctrl+Shift+S save-as)
     bool export_dialog_active;

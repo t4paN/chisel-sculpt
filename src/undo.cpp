@@ -569,6 +569,7 @@ bool UndoStack::apply(UndoEntry& e, MeshEntity& ent, Scene& scene, bool forward)
 
 bool UndoStack::undo(MeshEntity& ent, Scene& scene) {
     if (undo_stack.empty()) return false;
+    scene.mark_edited();
     UndoEntry e = std::move(undo_stack.back());
     undo_stack.pop_back();
     bool needs_cascade = apply(e, ent, scene, false);
@@ -578,6 +579,7 @@ bool UndoStack::undo(MeshEntity& ent, Scene& scene) {
 
 bool UndoStack::redo(MeshEntity& ent, Scene& scene) {
     if (redo_stack.empty()) return false;
+    scene.mark_edited();
     UndoEntry e = std::move(redo_stack.back());
     redo_stack.pop_back();
     bool needs_cascade = apply(e, ent, scene, true);

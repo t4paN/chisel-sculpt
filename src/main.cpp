@@ -1032,6 +1032,10 @@ int main(int argc, char* argv[]) {
     // budgeted step per frame so the window stays responsive). See sdf.h / CHANGES.
     VoxelMergeJob* vmerge_job = nullptr;
 
+    // scene.edit_mark() as of the last save or load (or startup): when the two
+    // match there is nothing to save, and a close from outside needn't ask.
+    uint64_t clean_edit_mark = scene.edit_mark();
+
     // Pre-remesh rescue copy (scene_snapshot.h). Held only for the two ops you
     // cannot judge until the old model is gone: '/' and 'J'. rescue_shown is the
     // last countdown figure put on screen, -1 meaning "not announced yet".
@@ -1166,16 +1170,33 @@ int main(int argc, char* argv[]) {
         glfwGetFramebufferSize(window, &win_w, &win_h);
 #endif
 #if !defined(__EMSCRIPTEN__) && !defined(_WIN32)
-        // SIGTERM / SIGHUP (logout, shutdown, `kill`): bring up the quit dialog and
-        // ask for the window's attention instead of dying with the work unsaved.
-        // Checked before the minimised-window early-out below, so a minimised window
-        // gets restored. systemd still sends SIGKILL if nobody answers before its
-        // stop timeout.
+        // SIGTERM / SIGHUP (logout, shutdown, `kill`) asks like the title-bar X.
         if (g_quit_signal) {
             g_quit_signal = 0;
-            if (!input.quit_after_save) input.quit_requested = true;
-            if (glfwGetWindowAttrib(window, GLFW_ICONIFIED)) glfwRestoreWindow(window);
-            glfwRequestWindowAttention(window);
+            if (!input.quit_after_save) input.close_requested = true;
+        }
+#endif
+#ifndef __EMSCRIPTEN__
+        // A close from outside (title-bar X, logout, a signal). Nothing unsaved and
+        // nothing mid-flight: just close. Otherwise bring up the quit dialog and pull
+        // the window forward, since the request may have come from the taskbar or a
+        // logout while the window sat behind others or minimised. On Wayland the
+        // compositor decides whether to raise it or only flash its taskbar entry.
+        // Checked before the minimised-window early-out below, so a minimised window
+        // gets restored. systemd still sends SIGKILL if nobody answers before its
+        // stop timeout. ESC stays a plain ask: a stray key shouldn't close the app.
+        if (input.close_requested) {
+            input.close_requested = false;
+            const bool busy = app_state != AppState::IDLE || vmerge_job
+                || input.remesh_requested || input.remesh_in_progress;
+            if (scene.edit_mark() == clean_edit_mark && !busy) {
+                glfwSetWindowShouldClose(window, GLFW_TRUE);
+            } else {
+                input.quit_requested = true;
+                if (glfwGetWindowAttrib(window, GLFW_ICONIFIED)) glfwRestoreWindow(window);
+                glfwFocusWindow(window);
+                glfwRequestWindowAttention(window);
+            }
         }
 #endif
         if (win_w == 0 || win_h == 0) {
@@ -1834,6 +1855,7 @@ int main(int argc, char* argv[]) {
                 input.notification_timer = 2.0f;
             } else {
                 const double drop_t0 = glfwGetTime();
+                scene.mark_edited();
                 const int target = L_max - 1;
                 scene.materialize_active_cpu();  // projection/cascade read disp/base
 
@@ -2028,6 +2050,7 @@ int main(int argc, char* argv[]) {
                                         input.remesh_detail);
 
             if (result.success) {
+                scene.mark_edited();
                 mesh->mask.clear();
                 // perform_remesh rebuilt the ACTIVE entity's mesh + multires base
                 // in place. Leave every other entity untouched — only the active
@@ -2113,6 +2136,7 @@ int main(int argc, char* argv[]) {
                 input.voxel_merge_in_progress = false;
 
                 if (st == VoxelMergeStatus::Done && vm.success) {
+                    scene.mark_edited();
                     // Mirror merge yields a tessellation-symmetric mesh → topology
                     // mirror gives an exact partner map. Faithful merge is generic
                     // geometry → spatial mirror. Either way refresh from the fresh mesh.
@@ -2807,6 +2831,7 @@ int main(int argc, char* argv[]) {
                 input.undo_requested = false;
                 const char* what = rescue.op;
                 snapshot_restore(rescue, scene);
+                scene.mark_edited();
                 rescue_shown = -1;
                 // Same fixups the .chisel load path runs: the scene was rebuilt
                 // wholesale, so every cached pointer and GPU mirror is stale.
@@ -3625,6 +3650,7 @@ int main(int argc, char* argv[]) {
                     xforms.clear();      // records point at the outgoing scene
                     scene.refresh_mirror_map(input.subdiv_level);
                     scene.sync();
+                    clean_edit_mark = scene.edit_mark();
 
                     mesh = &scene.active_mesh();
                     multires = &scene.active_multires();
@@ -3718,6 +3744,7 @@ int main(int argc, char* argv[]) {
                     brush_stroke.phase = StrokePhase::NONE;
                     app_state = AppState::IDLE;
                     screen_buffers_dirty = true;
+                    clean_edit_mark = scene.edit_mark();   // the imported file still holds it
 
                     std::snprintf(input.notification, sizeof(input.notification),
                                   "Imported: %.400s (%u v, %u t)",
@@ -4034,6 +4061,7 @@ int main(int argc, char* argv[]) {
             if (sr != SaveResult::OK) input.quit_after_save = false;   // stay; the error popup says why
             if (sr == SaveResult::OK) {
                 current_project_path = path;
+                clean_edit_mark = scene.edit_mark();
 #ifdef __EMSCRIPTEN__
                 // A MEMFS "save" only counts once the bytes leave as a download
                 // (which also unlinks the MEMFS copy; Ctrl+S recreates it).

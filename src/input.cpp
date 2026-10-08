@@ -1286,13 +1286,14 @@ void setup_input_callbacks(GLFWwindow* window, InputState* state) {
     glfwSetWindowFocusCallback(window, window_focus_callback);
     glfwSetDropCallback(window, drop_callback);
     // The title-bar X (and a desktop's "close window", which KDE also sends its
-    // windows at logout) asks the quit dialog instead of closing. Only a Y / Save &
-    // Quit in that dialog sets the close flag for real; GLFW doesn't call this back
-    // for the app's own glfwSetWindowShouldClose. A second X while the dialog is up
-    // just keeps it up, and one during Save & Quit's Save window is ignored.
+    // windows at logout) never closes here: main.cpp decides, closing at once when
+    // nothing is unsaved and otherwise raising the quit dialog. GLFW doesn't call
+    // this back for the app's own glfwSetWindowShouldClose. A second X while the
+    // dialog is up just keeps it up, and one during Save & Quit's Save window is
+    // ignored.
     glfwSetWindowCloseCallback(window, [](GLFWwindow* w) {
         glfwSetWindowShouldClose(w, GLFW_FALSE);
-        if (!g_input->quit_after_save) g_input->quit_requested = true;
+        if (!g_input->quit_after_save) g_input->close_requested = true;
     });
 #endif
 }

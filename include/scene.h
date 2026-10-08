@@ -32,6 +32,16 @@ public:
     MeshEntity&    active_entity();     // the whole active entity (asserts one exists)
     UndoStack&     active_undo();       // active entity's per-model undo history
 
+    // ---- Unsaved work ----
+    // A clock that moves on every change to a mesh. "Anything to save?" is then one
+    // comparison against the value at the last save or load (main.cpp). Undo pushes
+    // and object-transform commits already tick UndoStack's scene-wide clock, so it
+    // is folded in; mark_edited() covers what that clock misses: undo/redo, mesh
+    // add/delete/merge, remesh, level delete. Over-counting only costs a needless
+    // "save?" prompt; under-counting closes without one, so mark when in doubt.
+    void     mark_edited() { ++edits_; }
+    uint64_t edit_mark() const { return edits_ + UndoStack::global_pushes; }
+
     // ---- Mirror map ----
     void set_mirror_topology(bool use_topology) { mirror_use_topology_ = use_topology; }
     bool mirror_topology() const { return mirror_use_topology_; }
@@ -179,6 +189,7 @@ private:
     uint32_t active_id_      = 0;
     uint32_t preview_id_     = 0;
     int      load_flattened_ = 0;
+    uint64_t edits_          = 0;
     std::vector<uint32_t> selected_ids_;
 
     bool mirror_use_topology_ = true;

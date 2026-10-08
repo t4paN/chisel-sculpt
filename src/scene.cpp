@@ -521,6 +521,7 @@ uint32_t Scene::reset_to_single_mesh(uint32_t subdiv_level) {
 
 uint32_t Scene::merge_selected_into(const Mesh& welded, uint32_t subdiv_level) {
     if (selected_ids_.empty()) return 0;
+    mark_edited();
 
     // Carrier = the active entity if it is part of the selection, else the
     // first selected entity. Its mesh becomes the welded result.
@@ -562,6 +563,7 @@ Scene::DeleteResult Scene::delete_selected() {
     DeleteResult r;
     MeshEntity* sel = selected();
     if (!sel) return r;
+    mark_edited();
 
     if (alive_count() <= 1) {
         r.blocked_only_mesh = true;
@@ -612,6 +614,7 @@ void Scene::commit_preview(uint32_t entity_id) {
     if (!e) return;
     e->preview = false;
     if (preview_id_ == entity_id) preview_id_ = 0;
+    mark_edited();
     // Make it the active entity
     set_active(entity_id);
     refresh_for_edit_mode();

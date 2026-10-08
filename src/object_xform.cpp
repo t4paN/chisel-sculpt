@@ -303,6 +303,7 @@ uint32_t ObjectXformStack::newer_edit_entity(Scene& scene) const {
 
 bool ObjectXformStack::undo(Scene& scene) {
     if (undo_.empty()) return false;
+    scene.mark_edited();
     ObjectXform x = std::move(undo_.back());
     undo_.pop_back();
     apply(x, true, scene);
@@ -313,6 +314,7 @@ bool ObjectXformStack::undo(Scene& scene) {
 
 bool ObjectXformStack::redo(Scene& scene) {
     if (redo_.empty()) return false;
+    scene.mark_edited();
     ObjectXform x = std::move(redo_.back());
     redo_.pop_back();
     apply(x, false, scene);

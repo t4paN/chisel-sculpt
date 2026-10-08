@@ -2,6 +2,12 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-08 — Closing only asks when there's unsaved work
+
+- Title-bar X, logout or `kill` close at once when no mesh has changed since the last
+  save or load; otherwise the quit dialog comes up and the taskbar entry flashes
+  (KWin won't let it raise itself on Wayland). ESC still always asks.
+
 ## 2026-10-08 — Icon refresh
 
 - Changed the app icon a bit (navy outline).
