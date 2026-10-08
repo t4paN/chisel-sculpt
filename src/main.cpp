@@ -459,6 +459,20 @@ static void report_projection_check(const ProjectionStats& ps) {
     std::fflush(stdout);
 }
 
+#ifndef __EMSCRIPTEN__
+// Native file dialogs (Open, Save, Export, Load Brush Alpha) open centred on the
+// screen rather than wherever ImGui last left them (often under the button that
+// opened them). Appearing only, so the user can still drag one aside. The position
+// is set only when this key's dialog is up: otherwise it would land on whatever
+// window begins next.
+static bool display_file_dialog(IGFD::FileDialog* fd, const char* key) {
+    if (fd->IsOpened(key))
+        ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing,
+                                ImVec2(0.5f, 0.5f));
+    return fd->Display(key, ImGuiWindowFlags_NoCollapse, ImVec2(600, 400));
+}
+#endif
+
 #if !defined(__EMSCRIPTEN__) && !defined(_WIN32)
 // Set by SIGTERM / SIGHUP, consumed by the frame loop (a handler may only touch a
 // sig_atomic_t; the dialog is raised from the loop).
@@ -2537,6 +2551,7 @@ int main(int argc, char* argv[]) {
                 const bool modal = input.quit_requested || input.remesh_confirm_pending
                                 || input.voxel_merge_confirm_pending
                                 || input.drop_level_confirm_pending
+                                || input.reset_confirm_pending
                                 || input.drop_confirm_pending
                                 || input.export_dialog_active || input.import_dialog_active
                                 || input.save_dialog_active
@@ -3331,7 +3346,7 @@ int main(int argc, char* argv[]) {
         // ---- Cursor visibility ----
         bool non_edit_mode = input.interaction_mode != InputState::InteractionMode::EDIT;
         // Hide the OS cursor while sculpting (we draw our own brush cursor).
-        bool show_os_cursor = input.quit_requested || input.export_dialog_active || input.import_dialog_active || input.save_dialog_active || input.remesh_confirm_pending || input.voxel_merge_confirm_pending || input.drop_confirm_pending || input.help_popup_open || input.keybind_menu_open || imgui_wants_mouse || non_edit_mode;
+        bool show_os_cursor = input.quit_requested || input.export_dialog_active || input.import_dialog_active || input.save_dialog_active || input.remesh_confirm_pending || input.voxel_merge_confirm_pending || input.drop_confirm_pending || input.reset_confirm_pending || input.help_popup_open || input.keybind_menu_open || imgui_wants_mouse || non_edit_mode;
 #ifndef __EMSCRIPTEN__
         // A slider drag owns the cursor mode while it runs: it holds GLFW_CURSOR_DISABLED
         // to capture the pointer. This line ran unconditionally every frame and put the
@@ -3447,7 +3462,7 @@ int main(int argc, char* argv[]) {
         }
 
         // Brush cursor — draw at locked position during slider, normal position otherwise
-        if (!input.quit_requested && !input.export_dialog_active && !input.import_dialog_active && !input.save_dialog_active && !input.remesh_confirm_pending && !input.voxel_merge_confirm_pending && !input.drop_confirm_pending && !input.help_popup_open && !input.keybind_menu_open && !imgui_wants_mouse && !non_edit_mode) {
+        if (!input.quit_requested && !input.export_dialog_active && !input.import_dialog_active && !input.save_dialog_active && !input.remesh_confirm_pending && !input.voxel_merge_confirm_pending && !input.drop_confirm_pending && !input.reset_confirm_pending && !input.help_popup_open && !input.keybind_menu_open && !imgui_wants_mouse && !non_edit_mode) {
             float cursor_x, cursor_y;
             if (input.slider_mode != InputState::SliderMode::NONE) {
                 cursor_x = (float)input.slider_start_x;
@@ -3552,6 +3567,8 @@ int main(int argc, char* argv[]) {
         if (input.drop_level_confirm_pending)
             draw_drop_level_confirm(text, multires->base_level + (int)multires->disp.size(),
                                     win_w, win_h);
+        if (bitmap_dialogs && input.reset_confirm_pending)
+            draw_reset_confirm(text, win_w, win_h);
         if (bitmap_dialogs && input.voxel_merge_confirm_pending)
             draw_voxel_merge_confirm(text, input.voxel_merge_resolution,
                                      dlg.n_selected, dlg.n_unselected,
@@ -3926,7 +3943,7 @@ int main(int argc, char* argv[]) {
             fd->OpenDialog("ImportKey", "Open File", ".chisel,.obj,.ply", cfg);
         }
 
-        if (fd->Display("ExportKey", ImGuiWindowFlags_NoCollapse, ImVec2(600, 400))) {
+        if (display_file_dialog(fd, "ExportKey")) {
             if (fd->IsOk()) {
                 std::string path = fd->GetFilePathName();
                 auto dot = path.find_last_of('.');
@@ -3953,7 +3970,7 @@ int main(int argc, char* argv[]) {
         if (!input.export_dialog_active && fd->IsOpened("ExportKey"))
             fd->Close();
 
-        if (fd->Display("ImportKey", ImGuiWindowFlags_NoCollapse, ImVec2(600, 400))) {
+        if (display_file_dialog(fd, "ImportKey")) {
             if (fd->IsOk())
                 do_import_path(fd->GetFilePathName());
             fd->Close();
@@ -3970,7 +3987,7 @@ int main(int argc, char* argv[]) {
             cfg.flags = ImGuiFileDialogFlags_None;
             fd->OpenDialog("AlphaKey", "Load Brush Alpha", ".png,.jpg,.jpeg,.tga,.bmp", cfg);
         }
-        if (fd->Display("AlphaKey", ImGuiWindowFlags_NoCollapse, ImVec2(600, 400))) {
+        if (display_file_dialog(fd, "AlphaKey")) {
             if (fd->IsOk()) {
                 int idx = alpha_lib.load_custom(fd->GetFilePathName().c_str());
                 if (idx > 0) {
@@ -4117,7 +4134,7 @@ int main(int argc, char* argv[]) {
             fd->OpenDialog("SaveKey", "Save Project", ".chisel", cfg);
         }
 
-        if (fd->Display("SaveKey", ImGuiWindowFlags_NoCollapse, ImVec2(600, 400))) {
+        if (display_file_dialog(fd, "SaveKey")) {
             if (fd->IsOk()) {
                 do_save_project(fd->GetFilePathName());
             }
@@ -4240,6 +4257,14 @@ int main(int argc, char* argv[]) {
             ::remove(path.c_str());
         }
 #endif // __EMSCRIPTEN__
+
+        // Menu > Reset settings, after its Y/N confirm.
+        if (input.reset_settings_requested) {
+            input.reset_settings_requested = false;
+            settings_reset(input);
+            std::snprintf(input.notification, sizeof(input.notification), "Settings reset to defaults");
+            input.notification_timer = 2.0f;
+        }
 
         // Save & Quit whose Save window was cancelled: forget the quit. A successful
         // save already closed the window inside do_save_project.

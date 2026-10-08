@@ -380,6 +380,20 @@ void draw_drop_level_confirm(TextOverlay& text, int level, int win_w, int win_h)
                   1.5f, win_w, win_h, CGA(light_gray), 1.0f);
 }
 
+void draw_reset_confirm(TextOverlay& text, int win_w, int win_h) {
+    text.draw_panel(0, 0, (float)win_w, (float)win_h,
+                   win_w, win_h, 0.0f, 0.0f, 0.0f, 0.5f);
+    const char* msg = "Reset all settings? (Y/N)";
+    float msg_scale = 3.0f;
+    float cx = (float)win_w * 0.5f;
+    float msg_y = (float)win_h * 0.5f - 40.0f;
+    text.draw_text(msg, cx - std::strlen(msg) * 8.0f * msg_scale * 0.5f, msg_y,
+                  msg_scale, win_w, win_h, CGA(yellow), 1.0f);
+    const char* sub = "Profiles, colours, display and keys go back to defaults. Sculpt untouched.";
+    text.draw_text(sub, cx - std::strlen(sub) * 8.0f * 1.5f * 0.5f, msg_y + 40.0f,
+                  1.5f, win_w, win_h, CGA(light_gray), 1.0f);
+}
+
 void draw_notification(TextOverlay& text, InputState& input, int win_w, int win_h) {
     if (input.notification_timer > 0.0f) {
         input.notification_timer -= 1.0f / 60.0f;
@@ -1411,7 +1425,8 @@ void draw_settings_menu_items(InputState& input, MultiresInfo mres, bool sync_ta
             // The escape hatch persistence makes necessary: before settings were saved,
             // any value you dragged somewhere unusable was one restart away from gone.
             // Now it comes back, so there has to be a way out that is not "hunt down the
-            // config file". Not destructive to the scene, so no Y/N confirm.
+            // config file". It doesn't touch the scene, but it does wipe every setting
+            // and binding the user has made, so it asks Y/N first.
             if (ImGui::Selectable("Key bindings...")) {
                 input.keybind_menu_request = true;
                 ImGui::CloseCurrentPopup();
@@ -1419,11 +1434,8 @@ void draw_settings_menu_items(InputState& input, MultiresInfo mres, bool sync_ta
             if (ImGui::IsItemHovered())
                 ui_skin_menu_tip("Change, swap or clear any keyboard shortcut.");
 
-            if (ImGui::Selectable("Reset settings to defaults")) {
-                settings_reset(input);
-                std::snprintf(input.notification, sizeof(input.notification),
-                              "Settings reset to defaults");
-                input.notification_timer = 2.0f;
+            if (ImGui::Selectable("Reset settings to defaults...")) {
+                input.reset_confirm_pending = true;
                 ImGui::CloseCurrentPopup();
             }
             if (ImGui::IsItemHovered())

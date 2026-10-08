@@ -295,6 +295,9 @@ struct InputState {
     // confirm; Y sets the request, which the main loop consumes once. Destructive
     // and not undoable — see the handler in main.cpp.
     bool drop_level_confirm_pending = false;
+    // Menu > Reset settings: Y/N confirm first, then main applies settings_reset.
+    bool reset_confirm_pending = false;
+    bool reset_settings_requested = false;
     bool drop_level_requested = false;
 
     // Paint brush albedo (RGB, [0,1]). paint_color is the active colour used by
@@ -414,9 +417,9 @@ struct InputState {
     float mirror_unavailable_timer = 0.0f;
 
     // Autosmooth: light Laplacian pass on draw-brush strokes at pen-up.
-    // Defaults ON, toggled with B. Persisted since 2026-08-06, global since
-    // 2026-08-07 — it is a sculpting preference, not a device trait, so a
-    // mouse-side toggle must not flip back when you pick up the pen.
+    // Defaults OFF (was ON until 2026-10-08), toggled with B. Persisted since
+    // 2026-08-06, global since 2026-08-07 — it is a sculpting preference, not a
+    // device trait, so a mouse-side toggle must not flip back when you pick up the pen.
     bool autosmooth;
 
     // Max brush effect: the strength multiplier at FULL input — a mouse dab, or a pen

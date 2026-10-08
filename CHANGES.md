@@ -2,6 +2,23 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-08 — Reset asks first; file dialogs open centred; autosmooth off by default
+
+*Built GL and native WebGPU; tested by the user on native Linux.*
+
+- **Menu → Reset settings asks Y/N** ("Reset settings to defaults..."). Skinned
+  dialog, centred, with **Cancel** as the highlighted default and Reset in alert red.
+  Classic gets a bitmap line. It follows the drop-level confirm pattern:
+  `reset_confirm_pending` sits in every modal guard (keys, drops, spin keys, cursor,
+  sculpt), and Y sets `reset_settings_requested`, which main turns into
+  `settings_reset`.
+- **Native file dialogs open centred** (Open, Save, Export, Load Brush Alpha), via
+  `display_file_dialog`. The position is set only while that key's dialog is open,
+  with `ImGuiCond_Appearing`, so a dragged one stays put until it next opens. Web uses
+  the browser picker and modals that were already centred.
+- **Autosmooth now defaults to off.** A saved setting still wins, so existing users
+  keep theirs until they toggle B or use Reset.
+
 ## 2026-10-08 — Quit asks first (title-bar X, logout, SIGTERM) with Save & Quit; Q/E step alphas; new Inflate + Pinch icons
 
 *Built GL and native WebGPU; tested by the user on native Linux. Windows not yet run:

@@ -2799,6 +2799,32 @@ void end_dialog() {
 }  // namespace
 
 void draw_skin_dialogs(InputState& input, int win_w, int win_h, const DialogInfo& info) {
+    // ---- Reset settings: confirm ---- Centred, Cancel is the default.
+    if (begin_dialog("##dlgReset", input.reset_confirm_pending, win_w, win_h)) {
+        const float avail = ImGui::GetContentRegionAvail().x;
+        auto centre = [&](float w) {
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.0f, (avail - w) * 0.5f));
+        };
+        const char* title = "Reset all settings?";
+        const char* l1 = "Both profiles, colours, display options and key bindings";
+        const char* l2 = "go back to factory values. Your sculpt is not touched.";
+        centre(text_size(UiFont::SansSemibold, 16.0f, title_case(title)).x);
+        dlg_title(title);
+        centre(text_size(UiFont::Sans, 13.0f, l1).x);
+        dlg_text(UiFont::Sans, 13.0f, kMuted, l1);
+        centre(text_size(UiFont::Sans, 13.0f, l2).x);
+        dlg_text(UiFont::Sans, 13.0f, kMuted, l2);
+        ImGui::Dummy(ImVec2(0.0f, 2.0f));
+        const float sp = ImGui::GetStyle().ItemSpacing.x;
+        centre(dlg_button_w("Reset", "Y") + dlg_button_w("Cancel", "N") + sp);
+        if (dlg_button("##rsY", "Reset", "Y", false, true)) press_dialog_key(GLFW_KEY_Y);
+        dlg_tip("Wipe your settings and bindings");
+        ImGui::SameLine();
+        if (dlg_button("##rsN", "Cancel", "N", true)) press_dialog_key(GLFW_KEY_N);
+        dlg_tip("Keep everything as it is (Esc works too)");
+        end_dialog();
+    }
+
     // ---- Quit ---- Everything centred. Save & Quit saves first: a project with no
     // file yet gets the Save window, and the app closes once that save lands.
     if (begin_dialog("##dlgQuit", input.quit_requested, win_w, win_h)) {

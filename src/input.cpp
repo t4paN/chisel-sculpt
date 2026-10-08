@@ -198,7 +198,7 @@ InputState::InputState()
     , mesh_locked(false)
     , mirror_x(true)
     , mirror_topological(false)
-    , autosmooth(true)
+    , autosmooth(false)
     , max_effect(0.6f)          // mouse default; the tablet profile is raised to 1.0 below
     , fast_normals(false)
     , current_lod(0)
@@ -1017,6 +1017,7 @@ static void handle_modal_key(GLFWwindow* w, int key) {
             if      (in.drop_confirm_pending)       in.drop_confirm_pending = false;
             else if (in.voxel_merge_confirm_pending) in.voxel_merge_confirm_pending = false;
             else if (in.drop_level_confirm_pending) in.drop_level_confirm_pending = false;
+            else if (in.reset_confirm_pending)      in.reset_confirm_pending = false;
             else if (in.remesh_confirm_pending)     in.remesh_confirm_pending = false;
             else if (in.export_dialog_active)       in.export_dialog_active = false;
             else if (in.import_dialog_active)       in.import_dialog_active = false;
@@ -1041,6 +1042,9 @@ static void handle_modal_key(GLFWwindow* w, int key) {
             } else if (in.drop_level_confirm_pending) {
                 in.drop_level_confirm_pending = false;
                 in.drop_level_requested = true;
+            } else if (in.reset_confirm_pending) {
+                in.reset_confirm_pending = false;
+                in.reset_settings_requested = true;
             } else if (in.remesh_confirm_pending) {
                 in.remesh_confirm_pending = false;
                 in.remesh_requested = true;
@@ -1052,6 +1056,7 @@ static void handle_modal_key(GLFWwindow* w, int key) {
             if      (in.drop_confirm_pending)       in.drop_confirm_pending = false;
             else if (merge)                         in.voxel_merge_confirm_pending = false;
             else if (in.drop_level_confirm_pending) in.drop_level_confirm_pending = false;
+            else if (in.reset_confirm_pending)      in.reset_confirm_pending = false;
             else if (in.remesh_confirm_pending)     in.remesh_confirm_pending = false;
             else if (in.quit_requested)             in.quit_requested = false;
             break;
@@ -1158,6 +1163,7 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
                      || g_input->remesh_confirm_pending
                      || g_input->voxel_merge_confirm_pending
                      || g_input->drop_level_confirm_pending
+                     || g_input->reset_confirm_pending
                      || g_input->drop_confirm_pending;
     if (modal_active) {
         if (action == GLFW_PRESS) handle_modal_key(w, key);
@@ -1244,7 +1250,8 @@ static void drop_callback(GLFWwindow* w, int count, const char** paths) {
     if (g_input->quit_requested || g_input->export_dialog_active ||
         g_input->import_dialog_active || g_input->save_dialog_active ||
         g_input->remesh_confirm_pending || g_input->voxel_merge_confirm_pending ||
-        g_input->drop_level_confirm_pending || g_input->drop_confirm_pending)
+        g_input->drop_level_confirm_pending || g_input->drop_confirm_pending ||
+        g_input->reset_confirm_pending)
         return;
     // Only project/model files; anything else gets a notification, not a prompt.
     const char* path = paths[0];
