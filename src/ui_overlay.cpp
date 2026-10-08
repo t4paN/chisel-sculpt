@@ -1400,18 +1400,13 @@ void draw_settings_menu_items(InputState& input, MultiresInfo mres, bool sync_ta
             // confusing half of this feature.
             int sk = (int)input.sphere_kind;
             ImGui::SetNextItemWidth(mw);
+            ui_skin_push_dropdown_bg();
             if (ImGui::Combo("##sphereKind", &sk, "Sphere: icosphere\0Sphere: UV sphere\0"))
                 input.sphere_kind = (InputState::SphereKind)sk;
+            ImGui::PopStyleColor();
+            // Insert picks it up at once; only the opening ball waits for a relaunch.
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Which sphere you get — as the opening mesh AND from the\n"
-                                  "Insert shape picker.\n\n"
-                                  "Icosphere: even triangles all over, no poles. The default,\n"
-                                  "and what the brushes were tuned against.\n\n"
-                                  "UV sphere: Blender's stock 32x16 latitude/longitude ball,\n"
-                                  "482 verts. Familiar edge loops, at the cost of 32 triangles\n"
-                                  "converging at each pole.\n\n"
-                                  "Insert changes immediately; the opening mesh changes on\n"
-                                  "the next launch — your current sculpt is left alone.");
+                ImGui::SetTooltip("Takes effect on next launch");
 
             // The escape hatch persistence makes necessary: before settings were saved,
             // any value you dragged somewhere unusable was one restart away from gone.

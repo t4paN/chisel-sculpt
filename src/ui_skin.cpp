@@ -139,6 +139,7 @@ ImFont* g_y2k_font = nullptr;        // Verdana / DejaVu Sans / Plex Sans, see l
 ImFont* g_y2k_bold = nullptr;
 InputState::UiSkin g_active_skin = InputState::UiSkin::CLASSIC;
 bool    g_style_ready = false;
+ImVec4  g_theme_popup_bg;   // the active skin's PopupBg, untouched by pushes
 ImGuiStyle g_classic_style;
 
 bool bold(UiFont f) { return f == UiFont::SansSemibold || f == UiFont::MonoMedium; }
@@ -2218,6 +2219,8 @@ void ui_skin_begin_frame(const InputState& input) {
         g_active_skin = want;
     }
     g_mat = material_from(input);
+    // Read at frame start, before any popup has pushed over it.
+    g_theme_popup_bg = s.Colors[ImGuiCol_PopupBg];
 }
 
 ImFont* ui_skin_font(UiFont f) {
@@ -2235,6 +2238,12 @@ void ui_skin_backdrop_params(const InputState& input, float* blur_px, float* sat
 
 void ui_skin_popup_background() {
     window_panel(16.0f);
+}
+
+void ui_skin_push_dropdown_bg() {
+    ImVec4 c = g_theme_popup_bg;
+    c.w = 1.0f;
+    ImGui::PushStyleColor(ImGuiCol_PopupBg, c);
 }
 
 void draw_appearance_menu_items(InputState& input) {

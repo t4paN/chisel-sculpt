@@ -2,6 +2,21 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-08 — Opaque dropdown in the menu; shorter Sphere tooltip
+
+*Built GL and native WebGPU; tested by the user on native.*
+
+- **The Sphere dropdown in the burger menu was see-through.** The skinned menus (Modern,
+  Y2K, DOS) set ImGui's popup background to transparent and paint their own panel
+  underneath. A dropdown is a popup too, so it inherited the transparency and its list
+  floated over the menu with no backing. Classic was close to solid but not quite (94%).
+  `ui_skin_push_dropdown_bg()` now gives a dropdown the skin's own popup colour at full
+  opacity. The colour is read at frame start, before any popup pushes over it. Any
+  future dropdown in a skinned popup needs the same wrapper.
+- **Sphere tooltip cut to "Takes effect on next launch".** The old one was a paragraph.
+  The relaunch note is the one thing nobody would guess: Insert picks the new sphere up
+  at once, but the opening ball only changes on the next launch.
+
 ## 2026-10-06 — Web: mouse wheel scrolls UI windows; Key bindings window in columns
 
 *Built GL, native WebGPU and web; tested by the user in the browser and on native.*

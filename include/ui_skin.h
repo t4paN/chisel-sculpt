@@ -81,3 +81,8 @@ void draw_appearance_menu_items(InputState& input);
 // Inside BeginPopup of a popup pushed with a transparent PopupBg: paints the
 // panel material under it.
 void ui_skin_popup_background();
+
+// A dropdown opened inside such a popup inherits that transparent PopupBg and its
+// list floats see-through over the menu. Push this around the Combo to give it the
+// skin's popup colour back, fully opaque. Pop with ImGui::PopStyleColor().
+void ui_skin_push_dropdown_bg();
