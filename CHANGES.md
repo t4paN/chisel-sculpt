@@ -2,6 +2,37 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-08 — Edge wrap puts the pointer back where the ring is (Wayland)
+
+*Built GL, native WebGPU and web; tested by the user on native Linux (KWin 6.7, mouse).*
+
+- After a wrapped drag the pointer used to reappear beside the edge it first crossed
+  (worse in a window than fullscreen). GLFW's Wayland pointer lock never sends the
+  lock's position hint, so the pointer can only come back where it was frozen. Chisel
+  now takes its own lock (pointer-constraints + relative-pointer, in `tablet.cpp`) on
+  the drag's first frame, while the pointer is still over the window, and on release
+  hints the ring's position, so KWin warps the pointer there. Sliders keep GLFW's lock:
+  for them, back-where-it-started is the point.
+- While that lock holds, absolute pointer reports are ignored and no wrap fires until
+  KWin confirms the lock. Without this a stray report reset Chisel's cursor to the
+  frozen pointer: the pointer landed back at the stroke start and Move jumped.
+  The lock also outlives the release by 3 frames, re-sending the hint each one. Which
+  of the two fixed the landing spot was never isolated; the delay costs ~50 ms.
+- The two locks never overlap (that would be a protocol error that kills the
+  connection): a slider capture ends the wrap lock first, and the wrap lock won't start
+  while a slider holds GLFW's. Falls back to GLFW's capture if the compositor lacks the
+  protocols. Browser behaviour is unchanged: it returns the pointer where the lock began.
+
+## 2026-10-08 — Springy motion obeys its checkbox on the web
+
+- The web build also deferred to the OS "reduced motion" setting, and a KDE animation
+  speed of "instant" reaches Chrome as exactly that, so the springs were off with the
+  box ticked. The checkbox alone decides now, on every platform.
+
+## 2026-10-08 — Thinner ring at low strength
+
+- Ring weight at 0% strength is 0.70x of the old line (was 0.95x); 50% and up unchanged.
+
 ## 2026-10-08 — v0.3.1 — Editable brush dock; ring weight follows strength
 
 - Size / Strength / Hardness / Spacing rows in the Modern and DOS dock are click/drag

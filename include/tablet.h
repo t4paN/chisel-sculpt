@@ -55,3 +55,13 @@ private:
     struct Impl;
     Impl* impl = nullptr;      // nullptr on unsupported platforms / failed init
 };
+
+// Native Wayland only: Chisel's own pointer lock for edge-wrapped drags, which (unlike
+// GLFW's) can say where the pointer should reappear when it ends. begin returns false
+// where it can't be had (other platforms, compositor without the protocols); while held,
+// the pointer's motion arrives as deltas through on_motion. dispatch runs once a frame
+// after glfwPollEvents. See tablet.cpp.
+bool wl_pointer_lock_begin(GLFWwindow* window, void (*on_motion)(double dx, double dy));
+void wl_pointer_lock_end(double x, double y);   // window coords to put the pointer at
+void wl_pointer_lock_dispatch();
+bool wl_pointer_lock_active();                  // begun AND the compositor confirmed it

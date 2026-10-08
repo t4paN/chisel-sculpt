@@ -1208,6 +1208,7 @@ int main(int argc, char* argv[]) {
 #if defined(_WIN32) && !defined(__EMSCRIPTEN__)
         g_mouse_history.pull(window, input);
 #endif
+        wl_pointer_lock_dispatch();   // a wrapped mouse drag's motion, while Chisel holds the lock
         tablet.poll(brush_stroke.is_active());
         if (tablet.available() && !prev_tablet_avail) {
             std::snprintf(input.notification, sizeof(input.notification),

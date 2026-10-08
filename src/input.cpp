@@ -1,5 +1,6 @@
 #include "input.h"
 #include "debug_console.h"
+#include "tablet.h"
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -539,12 +540,15 @@ static void web_pointer_lock(bool) {}
 // bounded by the screen edge, and it is exactly what the web build already does with
 // requestPointerLock. Raw motion is deliberately NOT enabled — it bypasses the OS
 // pointer acceleration curve and would change the feel of every slider.
+static void end_wrap_capture(GLFWwindow* w);
 static void slider_capture(GLFWwindow* w, bool grab) {
 #if defined(__EMSCRIPTEN__)
     (void)w;
     web_pointer_lock(grab);
 #else
     if (!w) return;
+    // GLFW's lock and Chisel's own wrap lock can't coexist on one surface.
+    if (grab) end_wrap_capture(w);
     glfwSetInputMode(w, GLFW_CURSOR, grab ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
 #endif
 }
@@ -628,15 +632,19 @@ static void end_slider_drag(GLFWwindow* w, bool warp_back) {
 // window edge carries on from the opposite edge. The callers skip the frame of the jump,
 // so per-frame deltas never see it.
 //
-// X11 and Windows simply warp the pointer. Wayland only accepts a warp while the cursor
-// is captured, and a browser can't warp at all, so there the first wrap of a drag
-// captures the pointer (GLFW_CURSOR_DISABLED / requestPointerLock) and every position
-// after it is the captured motion plus an offset. Each wrap moves the offset, not the
-// pointer. Faking it without the capture is what this replaced: Chisel's idea of the
-// cursor jumped across while the real one stayed at the edge, and the next event
-// yanked it back, so a Move drag lurched to and fro.
+// X11 and Windows simply warp the pointer. Wayland and the browser can't, so there the
+// pointer is captured and each wrap moves Chisel's idea of the position, not the
+// pointer. Faking it without the capture is what this replaced: Chisel's cursor jumped
+// across while the real one stayed at the edge, and the next event yanked it back, so a
+// Move drag lurched to and fro.
+//
+// Native Wayland uses Chisel's own lock (tablet.cpp), taken on the drag's first frame:
+// it is the only kind that can put the pointer back where the ring is when the drag
+// ends. Where that lock is unavailable, GLFW's capture is the fallback — it works, but
+// the pointer comes back where it was captured.
 static double g_wrap_off_x = 0.0, g_wrap_off_y = 0.0;
 static bool   g_wrap_captured = false;
+static bool   g_wrap_own_lock = false;   // the capture is Chisel's own Wayland lock
 
 static bool platform_can_warp() {
 #if defined(__EMSCRIPTEN__)
@@ -650,10 +658,41 @@ static bool platform_can_warp() {
 
 bool wrap_capture_active() { return g_wrap_captured; }
 
+#if !defined(__EMSCRIPTEN__)
+// Motion while Chisel's own lock holds: the pointer is frozen, so wl_pointer sends
+// nothing and GLFW's cursor callback is silent. Same bookkeeping as that callback.
+static void own_lock_motion(double dx, double dy) {
+    if (!g_input) return;
+    g_input->mouse_x += dx;
+    g_input->mouse_y += dy;
+    g_input->push_path(g_input->mouse_x, g_input->mouse_y);
+}
+#endif
+
 bool wrap_cursor(GLFWwindow* window, InputState& input, int win_w, int win_h) {
     // A pen maps the tablet onto the screen: it can't travel past the edge and nothing
     // can warp it, so the next sample would just put it back.
     if (input.active_profile == InputProfile::TABLET) return false;
+#if !defined(__EMSCRIPTEN__)
+    // On the drag's first frame, while the pointer is still over the window — a lock
+    // only takes hold there. Not while a slider holds GLFW's lock (two locks = protocol
+    // error), and not with no button down, or nothing would end it.
+    if (!platform_can_warp() && !g_wrap_captured &&
+        (input.mouse1_down || input.mouse2_down || input.mouse3_down) &&
+        input.slider_mode == InputState::SliderMode::NONE &&
+        glfwGetInputMode(window, GLFW_CURSOR) != GLFW_CURSOR_DISABLED &&
+        wl_pointer_lock_begin(window, own_lock_motion)) {
+        g_wrap_captured = true;
+        g_wrap_own_lock = true;
+        glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_HIDDEN);   // frozen arrow otherwise
+    }
+#endif
+#if !defined(__EMSCRIPTEN__)
+    // Not until KWin confirms the lock: before that the pointer still moves and still
+    // reports absolute positions, and the first one after a wrap would yank Chisel's
+    // cursor straight back across the window — a grab brush dragged its verts with it.
+    if (g_wrap_own_lock && !wl_pointer_lock_active()) return false;
+#endif
     double mx = input.mouse_x;
     double my = input.mouse_y;
     bool wrapped = false;
@@ -665,6 +704,8 @@ bool wrap_cursor(GLFWwindow* window, InputState& input, int win_w, int win_h) {
 
     if (platform_can_warp()) {
         glfwSetCursorPos(window, mx, my);
+    } else if (g_wrap_own_lock) {
+        // Positions are integrated from deltas: moving them is the whole wrap.
     } else if (!g_wrap_captured) {
         g_wrap_captured = true;
 #if defined(__EMSCRIPTEN__)
@@ -696,23 +737,27 @@ bool wrap_cursor(GLFWwindow* window, InputState& input, int win_w, int win_h) {
     return true;
 }
 
-// Drag over: hand the pointer back where the user sees the cursor. On Wayland the
-// position has to be set while still captured (the only mode it's accepted in — it
-// becomes the lock's position hint) and the release moves the pointer there, as the
-// slider drag does. A browser puts it back where the lock began; nothing can change that.
+// Drag over: hand the pointer back where the user sees the cursor. Chisel's own lock
+// sends that as its position hint and KWin warps there as it ends. GLFW's capture
+// can't: the pointer reappears where it was captured. A browser puts it back where the
+// lock began; nothing can change that.
 static void end_wrap_capture(GLFWwindow* w) {
     if (g_wrap_captured) {
 #if defined(__EMSCRIPTEN__)
         (void)w;
         web_pointer_lock(false);
 #else
-        if (w) {
+        if (g_wrap_own_lock) {
+            wl_pointer_lock_end(g_input->mouse_x, g_input->mouse_y);
+        } else if (w) {
             glfwSetCursorPos(w, g_input->mouse_x, g_input->mouse_y);
-            glfwSetInputMode(w, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
         }
+        // The main loop picks NORMAL or HIDDEN again next frame.
+        if (w) glfwSetInputMode(w, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
 #endif
     }
     g_wrap_captured = false;
+    g_wrap_own_lock = false;
     g_wrap_off_x = g_wrap_off_y = 0.0;
 }
 
@@ -748,6 +793,9 @@ static void cursor_pos_callback(GLFWwindow* w, double x, double y) {
         apply_slider_delta(dx);
         return;
     }
+    // Under Chisel's own lock, motion comes as deltas (own_lock_motion). An absolute
+    // position here is the frozen pointer's, and would undo every wrap.
+    if (g_wrap_own_lock && wl_pointer_lock_active()) return;
     x += g_wrap_off_x;
     y += g_wrap_off_y;
     g_input->mouse_x = x;

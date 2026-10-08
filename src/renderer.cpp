@@ -1869,11 +1869,11 @@ void Renderer::draw_cursor(const Camera& cam, float cx, float cy, float radius,
         cp.screenSize[0] = (float)w; cp.screenSize[1] = (float)h;
         cp.normal[0] = nx; cp.normal[1] = ny; cp.normal[2] = nz; cp.radius = radius;
         cp.camRight[0] = cam_right.x; cp.camRight[1] = cam_right.y; cp.camRight[2] = cam_right.z;
-        // Strength weighs the outer ring: 0.95x the old 2.5 px line at none, 1.15x at
+        // Strength weighs the outer ring: 0.70x the old 2.5 px line at none, 1.15x at
         // half, 1.4x at full, linear between. The front boost scales with it so the
         // ring keeps its shape.
         float ss = std::max(0.0f, std::min(1.0f, strength));
-        float weight = ss < 0.5f ? 0.95f + 0.40f * ss : 1.15f + 0.50f * (ss - 0.5f);
+        float weight = ss < 0.5f ? 0.70f + 0.90f * ss : 1.15f + 0.50f * (ss - 0.5f);
         cp.baseThick = 2.5f * weight;
         cp.camUp[0] = cam_up.x; cp.camUp[1] = cam_up.y; cp.camUp[2] = cam_up.z;
         cp.frontBoost = 3.0f * weight;

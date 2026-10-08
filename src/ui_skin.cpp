@@ -192,24 +192,9 @@ const char* title_case(const char* s) {
 ImU32 title_col() { return g_dos ? cga::yellow : kText; }
 
 // ---- Motion ----------------------------------------------------------------
-bool os_reduced_motion() {
-    static double next_check = -1.0;
-    static bool reduced = false;
-    double now = ImGui::GetTime();
-    if (now < next_check) return reduced;
-    next_check = now + 2.0;                // a settings flip shows up within 2 s
-#if defined(_WIN32)
-    BOOL anim = TRUE;
-    if (SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &anim, 0)) reduced = !anim;
-#elif defined(__EMSCRIPTEN__)
-    reduced = EM_ASM_INT({
-        return (window.matchMedia &&
-                window.matchMedia('(prefers-reduced-motion: reduce)').matches) ? 1 : 0;
-    }) != 0;
-#endif
-    return reduced;
-}
-
+// The Springy motion checkbox alone decides. It used to defer to the OS reduced-motion
+// setting too, and a KDE animation speed of "instant" reaches Chrome as exactly that —
+// so the web build sat still with the box ticked and only a grey hint to say why.
 bool g_motion = true;   // resolved once per frame in draw_modern_ui
 
 struct Spring { float x = 0.0f, v = 0.0f; bool init = false; };
@@ -2573,16 +2558,12 @@ void draw_appearance_menu_items(InputState& input) {
     }
     ImGui::Checkbox("Viewfinder corners", &input.ui_viewfinder);
     ImGui::Checkbox("Springy motion", &input.ui_motion);
-    if (input.ui_motion && os_reduced_motion()) {
-        ImGui::SameLine();
-        ImGui::TextDisabled("(off: system reduced motion)");
-    }
 }
 
 void draw_modern_ui(InputState& input, int win_w, int win_h, const AlphaLibrary* alpha_lib,
                     MultiresInfo mres, const SkinStats& stats) {
     // DOS and Y2K don't bounce: neither era did.
-    g_motion = !g_dos && !g_y2k && input.ui_motion && !os_reduced_motion();
+    g_motion = !g_dos && !g_y2k && input.ui_motion;
 
     if (g_y2k) {
         draw_y2k_ui(input, win_w, win_h, alpha_lib, mres, stats);
