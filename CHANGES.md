@@ -2,7 +2,7 @@
 
 Short, chronological log of notable changes. Newest on top.
 
-## 2026-10-08 — Editable brush dock; ring weight follows strength
+## 2026-10-08 — v0.3.1 — Editable brush dock; ring weight follows strength
 
 - Size / Strength / Hardness / Spacing rows in the Modern and DOS dock are click/drag
   sliders. A drag tracks the pointer exactly, a click springs; during an S/W/A/O hold
@@ -11,24 +11,24 @@ Short, chronological log of notable changes. Newest on top.
 - Ring thickness follows strength (0.95x / 1.15x / 1.4x of the old line at 0 / 50 /
   100%); hardness only tints it, and its inner ring is gone.
 
-## 2026-10-08 — Edge wrap works on Wayland and web
+## 2026-10-08 — v0.3.1 — Edge wrap works on Wayland and web
 
 - Mouse drags (brushes, orbit, pan, zoom, object move/scale) wrap around the window
   edge on Wayland and in the browser too. Neither can warp the cursor, so the first
   wrap captures the pointer and carries on from its motion; the old fake warp made Move
   drags lurch. Pens don't wrap.
 
-## 2026-10-08 — Closing only asks when there's unsaved work
+## 2026-10-08 — v0.3.1 — Closing only asks when there's unsaved work
 
 - Title-bar X, logout or `kill` close at once when no mesh has changed since the last
   save or load; otherwise the quit dialog comes up and the taskbar entry flashes
   (KWin won't let it raise itself on Wayland). ESC still always asks.
 
-## 2026-10-08 — Icon refresh
+## 2026-10-08 — v0.3.1 — Icon refresh
 
 - Changed the app icon a bit (navy outline).
 
-## 2026-10-08 — Reset asks first; file dialogs open centred; autosmooth off by default
+## 2026-10-08 — v0.3.1 — Reset asks first; file dialogs open centred; autosmooth off by default
 
 *Built GL and native WebGPU; tested by the user on native Linux.*
 
@@ -45,7 +45,7 @@ Short, chronological log of notable changes. Newest on top.
 - **Autosmooth now defaults to off.** A saved setting still wins, so existing users
   keep theirs until they toggle B or use Reset.
 
-## 2026-10-08 — Quit asks first (title-bar X, logout, SIGTERM) with Save & Quit; Q/E step alphas; new Inflate + Pinch icons
+## 2026-10-08 — v0.3.1 — Quit asks first (title-bar X, logout, SIGTERM) with Save & Quit; Q/E step alphas; new Inflate + Pinch icons
 
 *Built GL and native WebGPU; tested by the user on native Linux. Windows not yet run:
 handoff `~/Projects/CHISEL/windows-ui-quit-handoff.md` (copy on SHARED).*
@@ -79,7 +79,7 @@ handoff `~/Projects/CHISEL/windows-ui-quit-handoff.md` (copy on SHARED).*
 - **Shortcuts button removed** from the top-right dock (Modern / DOS): Menu → Key
   bindings lists and edits every key. The card still opens once on a first launch.
 
-## 2026-10-08 — Modern skin: left-column layout, mode dock, alpha swatch, stacked readouts
+## 2026-10-08 — v0.3.1 — Modern skin: left-column layout, mode dock, alpha swatch, stacked readouts
 
 *Built GL and native WebGPU; tested by the user on native. Modern and DOS share this
 code; 2000s and Classic have their own layouts and are untouched.*
@@ -116,7 +116,7 @@ code; 2000s and Classic have their own layouts and are untouched.*
   90% (was Regular 9 px at 70%). DOS stays at its 8 px cell (16 would cover the icon),
   drawn white and doubled 1 px apart for weight.
 
-## 2026-10-08 — Menu tooltips in the skin's own chip; opaque dropdown; shorter Sphere tooltip
+## 2026-10-08 — v0.3.1 — Menu tooltips in the skin's own chip; opaque dropdown; shorter Sphere tooltip
 
 *Built GL and native WebGPU; tested by the user on native.*
 
@@ -139,7 +139,7 @@ code; 2000s and Classic have their own layouts and are untouched.*
   The relaunch note is the one thing nobody would guess: Insert picks the new sphere up
   at once, but the opening ball only changes on the next launch.
 
-## 2026-10-06 — Web: mouse wheel scrolls UI windows; Key bindings window in columns
+## 2026-10-06 — v0.3.1 — Web: mouse wheel scrolls UI windows; Key bindings window in columns
 
 *Built GL, native WebGPU and web; tested by the user in the browser and on native.*
 
@@ -155,7 +155,7 @@ code; 2000s and Classic have their own layouts and are untouched.*
   splits a group, and balances the columns. "Fixed" is the last block. It only
   scrolls if the window is too small even at the widest layout.
 
-## 2026-10-06 — Pen cursor visible over the title bar; Linux starts maximized
+## 2026-10-06 — v0.3.1 — Pen cursor visible over the title bar; Linux starts maximized
 
 *Built GL and native WebGPU; tested by the user on native Wayland (Plasma) with the pen.
 Native-only: the web build doesn't compile either path.*
@@ -177,7 +177,7 @@ Native-only: the web build doesn't compile either path.*
   same reason; Linux now does too. GNOME hid this by auto-maximizing screen-sized
   windows; KWin doesn't. Tab into fullscreen and back restores cleanly.
 
-## 2026-10-06 — Remesh and SDF-merge prompts become real dialogs per skin
+## 2026-10-06 — v0.3.1 — Remesh and SDF-merge prompts become real dialogs per skin
 
 *Built GL, native WebGPU and web; the user checked the look on native, then ran the
 browser round (reported all good).*
@@ -197,7 +197,7 @@ browser round (reported all good).*
   inside one frame, so the flag was cleared before anything drew. The remesh now
   waits one frame after Y, so the panel appears before the app pauses.
 
-## 2026-10-06 — Rebindable keys (Key bindings window) + fullscreen moves to Tab
+## 2026-10-06 — v0.3.1 — Rebindable keys (Key bindings window) + fullscreen moves to Tab
 
 *Built GL, native WebGPU and web; full test recipe passed on native (layout fix after the
 first look) and the user ran it in Chromium and Firefox. Tab doesn't toggle fullscreen in
@@ -228,7 +228,7 @@ the browser: use the itch page's fullscreen button or F11 (the user's call, fine
   every key while the window is listening, so Ctrl+D can be captured instead of
   bookmarking the page.
 
-## 2026-10-06 — New app icon + taskbar icon on Wayland
+## 2026-10-06 — v0.3.1 — New app icon + taskbar icon on Wayland
 
 *Confirmed by the user on the desktop (KDE Wayland), native build + AppImage, after a
 re-login.*
@@ -244,7 +244,7 @@ re-login.*
   `chisel.desktop` that the AppImage's `AppRun` installs. X11 still uses the embedded
   icon as before.
 
-## 2026-10-04 — UI skins confirmed on Linux and web
+## 2026-10-04 — v0.3.1 — UI skins confirmed on Linux and web
 
 The three new skins (modern, DOS, 2000s) were built and screenshot-checked on Windows
 (see the 10-03 entries below). The user has since run all of them on the native Linux
