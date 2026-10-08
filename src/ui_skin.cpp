@@ -447,9 +447,13 @@ bool icon_button(const char* id, Icon icon, float size, const BtnOpts& o) {
         if (!o.enabled) icol = cga::dark_gray;
         draw_pixel_icon(dl, icon, c, 2.0f, icol);
         if (o.corner) {
+            // 8 px is the only crisp size that fits a corner (16 would cover the icon),
+            // so legibility comes from weight: white, drawn twice 1 px apart.
+            if (!o.on) kcol = cga::white;
             ImVec2 ks = text_size(UiFont::Mono, 8.0f, o.corner);
-            text_at(dl, UiFont::Mono, 8.0f, ImVec2(pos.x + size - 2.0f - ks.x, pos.y + size - 2.0f - ks.y),
-                    kcol, o.corner);
+            ImVec2 kp(pos.x + size - 3.0f - ks.x, pos.y + size - 2.0f - ks.y);
+            text_at(dl, UiFont::Mono, 8.0f, kp, kcol, o.corner);
+            text_at(dl, UiFont::Mono, 8.0f, ImVec2(kp.x + 1.0f, kp.y), kcol, o.corner);
         }
         if (hovered && o.tip) tooltip(ImVec2(pos.x, pos.y), ImVec2(pos.x + size, pos.y + size),
                                       o.side, o.tip, o.key);
@@ -486,9 +490,9 @@ bool icon_button(const char* id, Icon icon, float size, const BtnOpts& o) {
     if (!o.enabled) icol = with_alpha(icol, 0.35f);
     draw_icon(dl, icon, c, o.icon_px * s, icol);
     if (o.corner) {
-        ImVec2 ks = text_size(UiFont::Mono, 9.0f, o.corner);
-        text_at(dl, UiFont::Mono, 9.0f, ImVec2(b.x - 4.0f - ks.x, b.y - 3.0f - ks.y),
-                with_alpha(icol, 0.7f), o.corner);
+        ImVec2 ks = text_size(UiFont::MonoMedium, 11.0f, o.corner);
+        text_at(dl, UiFont::MonoMedium, 11.0f, ImVec2(b.x - 4.0f - ks.x, b.y - 3.0f - ks.y),
+                with_alpha(icol, 0.9f), o.corner);
     }
     if (hovered && o.tip) tooltip(ImVec2(pos.x, pos.y), ImVec2(pos.x + size, pos.y + size),
                                   o.side, o.tip, o.key);
@@ -578,21 +582,54 @@ void project_name(char* out, size_t n, const char* path) {
 }
 
 // ---- Alpha swatch ------------------------------------------------------------
-void draw_alpha_preview(ImDrawList* dl, ImVec2 a, float size, const float* preview) {
-    dl->AddRectFilled(a, ImVec2(a.x + size, a.y + size), g_dos ? cga::black : IM_COL32(0x0E, 0x0E, 0x11, 255),
-                      rad(7.0f));
-    dl->AddRect(a, ImVec2(a.x + size, a.y + size), g_dos ? cga::light_gray : IM_COL32(255, 255, 255, 46),
-                rad(7.0f), 0, g_dos ? 2.0f : 1.0f);
+// `bare`: no backing tile or inset; the stamp alone fills the square.
+void draw_alpha_preview(ImDrawList* dl, ImVec2 a, float size, const float* preview, bool bare = false) {
+    if (!bare) {
+        dl->AddRectFilled(a, ImVec2(a.x + size, a.y + size), g_dos ? cga::black : IM_COL32(0x0E, 0x0E, 0x11, 255),
+                          rad(7.0f));
+        dl->AddRect(a, ImVec2(a.x + size, a.y + size), g_dos ? cga::light_gray : IM_COL32(255, 255, 255, 46),
+                    rad(7.0f), 0, g_dos ? 2.0f : 1.0f);
+    }
     if (!preview) return;
-    float inset = size * 0.18f, cell = (size - inset * 2.0f) / 16.0f;
-    for (int y = 0; y < 16; y++)
-        for (int x = 0; x < 16; x++) {
-            float v = preview[y * 16 + x];
-            if (v <= 0.02f) continue;
-            int g = (int)(v * 242.0f + 0.5f);
-            dl->AddRectFilled(ImVec2(a.x + inset + x * cell, a.y + inset + y * cell),
-                              ImVec2(a.x + inset + (x + 1) * cell, a.y + inset + (y + 1) * cell),
-                              IM_COL32(g, g, (int)(g * 1.02f > 255 ? 255 : g * 1.02f), 255));
+    float inset = bare ? 0.0f : size * 0.18f;
+    if (g_dos) {
+        // DOS keeps the hard 16x16 cells: pixels are the look.
+        float cell = (size - inset * 2.0f) / 16.0f;
+        for (int y = 0; y < 16; y++)
+            for (int x = 0; x < 16; x++) {
+                float v = preview[y * 16 + x];
+                if (v <= 0.02f) continue;
+                int g = (int)(v * 242.0f + 0.5f);
+                dl->AddRectFilled(ImVec2(a.x + inset + x * cell, a.y + inset + y * cell),
+                                  ImVec2(a.x + inset + (x + 1) * cell, a.y + inset + (y + 1) * cell),
+                                  IM_COL32(g, g, (int)(g * 1.02f > 255 ? 255 : g * 1.02f), 255));
+            }
+        return;
+    }
+    // Crisp cells with a narrow soft edge: each cell is flat across most of its width
+    // and blends into its neighbour over a band of 40% of a cell (under a pixel at
+    // these sizes) — antialiased steps rather than a blur. Built as a grid with two
+    // lines per cell (flat start, flat end); a quad between two lines of one cell is
+    // flat, one across a boundary is shaded from its corners, which is exactly that
+    // band. Black where the stamp is empty, so the whole image shows.
+    if (bare) dl->AddRectFilled(a, ImVec2(a.x + size, a.y + size), IM_COL32(0, 0, 0, 255));
+    const float cell = (size - inset * 2.0f) / 16.0f, band = cell * 0.4f;
+    float g[32];
+    for (int i = 0; i < 16; i++) {
+        g[2 * i]     = inset + i * cell + (i == 0 ? 0.0f : band * 0.5f);
+        g[2 * i + 1] = inset + (i + 1) * cell - (i == 15 ? 0.0f : band * 0.5f);
+    }
+    auto v = [&](int jx, int jy) { return preview[(jy >> 1) * 16 + (jx >> 1)]; };
+    auto col = [&](int jx, int jy) {
+        int c = (int)(std::max(0.0f, std::min(1.0f, v(jx, jy))) * 242.0f + 0.5f);
+        return IM_COL32(c, c, std::min(255, (int)(c * 1.02f)), 255);
+    };
+    for (int jy = 0; jy < 31; jy++)
+        for (int jx = 0; jx < 31; jx++) {
+            if (v(jx, jy) <= 0.02f && v(jx + 1, jy) <= 0.02f &&
+                v(jx, jy + 1) <= 0.02f && v(jx + 1, jy + 1) <= 0.02f) continue;
+            dl->AddRectFilledMultiColor(ImVec2(a.x + g[jx], a.y + g[jy]), ImVec2(a.x + g[jx + 1], a.y + g[jy + 1]),
+                                        col(jx, jy), col(jx + 1, jy), col(jx + 1, jy + 1), col(jx, jy + 1));
         }
 }
 
@@ -804,16 +841,15 @@ void apply_dos_style() {
 // ---- Panels ------------------------------------------------------------------
 // The alpha (stamp) picker: built-ins + loaded images, then "+" to load one.
 // Opens beside whatever button armed "##alphapick" (the modern rail, the Y2K shelf).
-void alpha_picker_popup(InputState& input, const AlphaLibrary* alpha_lib, ImVec2 at) {
-    ImGui::SetNextWindowPos(at, ImGuiCond_Always);
-    if (begin_skin_popup("##alphapick", ImVec2(12, 12))) {
-        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(6, 6));
-        text_at(ImGui::GetWindowDrawList(), UiFont::SansSemibold, 11.0f,
-                ImGui::GetCursorScreenPos(), g_dos ? cga::yellow : kMuted, "BRUSH ALPHA");
-        ImGui::Dummy(ImVec2(0, g_dos ? 18.0f : 14.0f));
+// `strip`: one row that grows sideways out of the rail edge (`at` = its left edge,
+// vertically centred); otherwise a titled 5-wide grid with its top-left at `at`.
+// Returns true while the strip is open or still retracting.
+bool alpha_picker_popup(InputState& input, const AlphaLibrary* alpha_lib, ImVec2 at, bool strip = false) {
+    const int per_row = strip ? 10 : 5;
+    auto swatches = [&]() {
         int n = alpha_lib->count();
         for (int i = 0; i < n; i++) {
-            if (i % 5) ImGui::SameLine();
+            if (i % per_row) ImGui::SameLine();
             const AlphaEntry& e = alpha_lib->get(i);
             ImVec2 p = ImGui::GetCursorScreenPos();
             char id[24]; std::snprintf(id, sizeof id, "##al%d", i);
@@ -831,7 +867,7 @@ void alpha_picker_popup(InputState& input, const AlphaLibrary* alpha_lib, ImVec2
             draw_alpha_preview(pdl, ImVec2(p.x + 7, p.y + 7), 30.0f, e.preview);
             if (hv) tooltip(p, ImVec2(p.x + 44, p.y + 44), TipSide::Below, e.name.c_str(), nullptr);
         }
-        if (n % 5) ImGui::SameLine();
+        if (n % per_row) ImGui::SameLine();
         ImVec2 p = ImGui::GetCursorScreenPos();
         if (ImGui::InvisibleButton("##alLoad", ImVec2(44, 44))) {
             input.load_alpha_dialog_active = true;
@@ -847,10 +883,82 @@ void alpha_picker_popup(InputState& input, const AlphaLibrary* alpha_lib, ImVec2
         pdl->AddLine(ImVec2(p.x + 22, p.y + 16), ImVec2(p.x + 22, p.y + 28), kText, 1.75f);
         if (hv) tooltip(p, ImVec2(p.x + 44, p.y + 44), TipSide::Below,
                         "Load a grayscale image", nullptr);
-        ImGui::PopStyleVar();
-        end_skin_popup();
+    };
+
+    if (!strip) {
+        ImGui::SetNextWindowPos(at, ImGuiCond_Always);
+        if (begin_skin_popup("##alphapick", ImVec2(12, 12))) {
+            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(6, 6));
+            text_at(ImGui::GetWindowDrawList(), UiFont::SansSemibold, 11.0f,
+                    ImGui::GetCursorScreenPos(), g_dos ? cga::yellow : kMuted, "BRUSH ALPHA");
+            ImGui::Dummy(ImVec2(0, g_dos ? 18.0f : 14.0f));
+            swatches();
+            ImGui::PopStyleVar();
+            end_skin_popup();
+        }
+        return false;
     }
+
+    // The strip: its frame is drawn only as wide as the reveal spring says, starting
+    // from one swatch, and the swatches are clipped to it, so the row slides out of
+    // the rail edge. Critically damped, so the frame never overshoots its contents.
+    // ImGui closes a popup on the spot, so the way back is drawn here: the last
+    // frame's geometry, retracting to one swatch on the foreground list, with no
+    // hit-testing — the pick has already happened.
+    static ImVec2 last_wp, last_ws;
+    const bool open = ImGui::IsPopupOpen("##alphapick");
+    float t = spring(ImGui::GetID("##alphapick"), open ? 1.0f : 0.0f, 800.0f, 1.0f);
+    t = std::max(0.0f, std::min(1.0f, t));
+    const float w0 = 44.0f + 10.0f;   // one swatch + padding: what it grows out of
+    if (!open) {
+        if (t < 0.03f || last_ws.x <= w0) return false;
+        float rw = w0 + (last_ws.x - w0) * t;
+        ImVec2 b(last_wp.x + rw, last_wp.y + last_ws.y);
+        ImDrawList* fg = ImGui::GetForegroundDrawList();
+        panel_bg(fg, last_wp, b, 14.0f);
+        fg->PushClipRect(last_wp, b, true);
+        const int n = alpha_lib->count();
+        for (int i = 0; i <= n; i++) {
+            ImVec2 p(last_wp.x + 5.0f + (i % per_row) * 48.0f, last_wp.y + 5.0f + (i / per_row) * 48.0f);
+            if (i == n) {   // the "+" tile
+                fg->AddRect(ImVec2(p.x + 7, p.y + 7), ImVec2(p.x + 37, p.y + 37),
+                            g_dos ? cga::light_gray : IM_COL32(255, 255, 255, 60), rad(7.0f), 0, g_dos ? 2.0f : 1.0f);
+                fg->AddLine(ImVec2(p.x + 16, p.y + 22), ImVec2(p.x + 28, p.y + 22), kText, 1.75f);
+                fg->AddLine(ImVec2(p.x + 22, p.y + 16), ImVec2(p.x + 22, p.y + 28), kText, 1.75f);
+                break;
+            }
+            if (input.active_alpha == i)
+                fg->AddRectFilled(p, ImVec2(p.x + 44, p.y + 44), kAccent, rad(10.0f));
+            draw_alpha_preview(fg, ImVec2(p.x + 7, p.y + 7), 30.0f, alpha_lib->get(i).preview);
+        }
+        fg->PopClipRect();
+        return true;
+    }
+    ImGui::SetNextWindowPos(at, ImGuiCond_Always, ImVec2(0.0f, 0.5f));
+    ImGui::PushStyleColor(ImGuiCol_PopupBg, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(5, 5));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4, 4));
+    if (ImGui::BeginPopup("##alphapick")) {
+        ImVec2 wp = ImGui::GetWindowPos(), ws = ImGui::GetWindowSize();
+        last_wp = wp; last_ws = ws;
+        float rw = ws.x > w0 ? w0 + (ws.x - w0) * t : ws.x;
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        dl->PushClipRectFullScreen();
+        panel_bg(dl, wp, ImVec2(wp.x + rw, wp.y + ws.y), 14.0f);
+        dl->PopClipRect();
+        ImGui::PushClipRect(wp, ImVec2(wp.x + rw, wp.y + ws.y), true);
+        swatches();
+        ImGui::PopClipRect();
+        ImGui::EndPopup();
+    }
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor(2);
+    return true;
 }
+
+float g_rail_bottom = 0.0f;   // the rail's bottom edge this frame, for brush_panel's fit check
+float g_file_bottom = kEdge;  // the file bar's bottom edge; the rail starts below it
 
 void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
     (void)win_h;
@@ -860,14 +968,15 @@ void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
     const auto mode = input.interaction_mode;
     const bool editing = mode == InputState::InteractionMode::EDIT;
 
-    if (!begin_panel("##mRail", ImVec2(kEdge, kEdge), ImVec2(0, 0), ImVec2(5, 5), 2.0f, 14.0f)) {
+    // Modes — "what am I doing" — are their own horizontal dock under the file bar;
+    // the brush rail hangs below it.
+    if (!begin_panel("##mModes", ImVec2(kEdge, g_file_bottom + 12.0f), ImVec2(0, 0), ImVec2(5, 5), 2.0f, 14.0f)) {
         end_panel();
         return;
     }
     BtnOpts o;
-    o.look = Look::Rail; o.side = TipSide::Right; o.icon_px = 22.0f;
+    o.look = Look::Rail; o.side = TipSide::Below; o.icon_px = 22.0f;
 
-    // Modes — "what am I doing" is one column with the brushes.
     // Keys come from the live bindings (see KeyAction) so a rebind shows up here.
     // The corner badge only fits a short key, and an unbound one shows none.
     auto corner = [&](KeyAction a) -> const char* {
@@ -885,12 +994,21 @@ void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
     }
     o.on = mode == InputState::InteractionMode::INSERT; o.tip = "Insert";
     o.key = input.key_label(KeyAction::MODE_INSERT); o.corner = corner(KeyAction::MODE_INSERT);
+    ImGui::SameLine();
     if (icon_button("mInsert", Icon::ModeInsert, kRailBtn, o))
         input.interaction_mode = InputState::InteractionMode::INSERT;
+    ImGui::SameLine();
     o.on = mode == InputState::InteractionMode::SELECT; o.tip = "Select";
     o.key = input.key_label(KeyAction::MODE_SELECT); o.corner = corner(KeyAction::MODE_SELECT);
     if (icon_button("mSelect", Icon::ModeSelect, kRailBtn, o))
         input.interaction_mode = InputState::InteractionMode::SELECT;
+    ImGui::SameLine();
+    // Where the button of the brush the alpha serves sits: Paint is a mode button,
+    // Draw and Mask are in the brush column. y < 0 = no alpha tile this frame.
+    // alpha_edge: the right edge of the dock that button is in.
+    ImVec2 alpha_at(0.0f, -1.0f);
+    float alpha_edge = 0.0f;
+    if (current == BrushType::PAINT) alpha_at = ImGui::GetCursorScreenPos();
     o.on = editing && paint_on; o.tip = "Paint";
     o.key = input.key_label(KeyAction::MODE_PAINT); o.corner = corner(KeyAction::MODE_PAINT);
     if (icon_button("mPaint", Icon::ModePaint, kRailBtn, o)) {
@@ -899,8 +1017,15 @@ void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
         input.switch_brush(BrushType::PAINT);
         input.subtract_locked = false;
     }
+    const float modes_bottom = ImGui::GetWindowPos().y + ImGui::GetWindowSize().y;
+    if (current == BrushType::PAINT) alpha_edge = ImGui::GetWindowPos().x + ImGui::GetWindowSize().x;
+    end_panel();
 
-    hdivider(kRailBtn, 6.0f, kDivider, 9.0f);
+    if (!begin_panel("##mRail", ImVec2(kEdge, modes_bottom + 12.0f), ImVec2(0, 0), ImVec2(5, 5), 2.0f, 14.0f)) {
+        end_panel();
+        return;
+    }
+    o.side = TipSide::Right;
 
     struct B { const char* id; const char* name; KeyAction key; Icon icon; BrushType type; };
     static const B brushes[] = {
@@ -915,7 +1040,7 @@ void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
         {"bMask",    "Mask",    KeyAction::BRUSH_MASK,    Icon::BrushMask,    BrushType::MASK},
     };
     // Shift-Shift: the glyph if the face has it, else spelled out.
-    ImFont* mono = F(UiFont::Mono);
+    ImFont* mono = F(UiFont::MonoMedium);
     const char* shift2 = (mono && mono->IsGlyphInFont(0x21E7)) ? "\xE2\x87\xA7\xE2\x87\xA7" : "SS";
     for (const B& b : brushes) {
         if (b.type == BrushType::SMOOTH) hdivider(kRailBtn, 10.0f, kDividerLo, 7.0f);
@@ -934,6 +1059,7 @@ void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
             }
             continue;
         }
+        if (current == b.type) alpha_at = ImGui::GetCursorScreenPos();
         o.on = editing && current == b.type && !smooth_on;
         o.key = input.key_label(b.key); o.corner = corner(b.key);
         if (icon_button(b.id, b.icon, kRailBtn, o)) {
@@ -944,35 +1070,51 @@ void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
         }
     }
 
-    // Current alpha (stamp). Only where an alpha applies: Draw, Mask, Paint.
+    g_rail_bottom = ImGui::GetWindowPos().y + ImGui::GetWindowSize().y;
+    if (current != BrushType::PAINT) alpha_edge = ImGui::GetWindowPos().x + ImGui::GetWindowSize().x;
+    end_panel();
+
+    // Current alpha (stamp), beside the button of the brush it serves — Draw, Mask or
+    // Paint only. Closed, it is just the swatch: 88% of a rail button, its top a fifth
+    // of the way down the button so it hangs a little below it, and tucked partly
+    // under the dock's edge — drawn on the background list so the dock panel and its
+    // button paint over the tucked part, with the click target on the part that
+    // shows. Clicked, the picker strip grows out of the dock edge at the swatch's
+    // height, and retracts the same way after a pick. The tip just says what it is;
+    // the alpha names show in the strip.
     const bool alpha_brush = current == BrushType::DRAW || current == BrushType::MASK ||
                              current == BrushType::PAINT;
-    if (editing && !smooth_on && alpha_brush && alpha_lib && alpha_lib->count() > 0) {
-        hdivider(kRailBtn, 6.0f, kDivider, 9.0f);
+    if (editing && !smooth_on && alpha_brush && alpha_lib && alpha_lib->count() > 0
+        && alpha_at.y >= 0.0f) {
+        const float bs = kRailBtn * 0.88f, tuck = 10.0f, vis = bs - tuck;
+        const float top = alpha_at.y + kRailBtn * 0.22f, cy = top + bs * 0.5f;
+        ImGui::SetNextWindowPos(ImVec2(alpha_edge, top), ImGuiCond_Always);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+        ImGui::Begin("##mAlpha", nullptr, kPanelFlags);
         ImVec2 pos = ImGui::GetCursorScreenPos();
-        bool clicked = ImGui::InvisibleButton("##alphaBtn", ImVec2(kRailBtn, kRailBtn));
+        bool clicked = ImGui::InvisibleButton("##alphaBtn", ImVec2(vis + 4.0f, bs));
         bool hovered = ImGui::IsItemHovered();
         bool held = ImGui::IsItemActive();
-        float s = spring(ImGui::GetItemID(), held ? 0.92f : 1.0f, held ? 1400.0f : 520.0f);
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-        ImVec2 c(pos.x + kRailBtn * 0.5f, pos.y + kRailBtn * 0.5f);
-        if (hovered) dl->AddRectFilled(ImVec2(c.x - 23 * s, c.y - 23 * s), ImVec2(c.x + 23 * s, c.y + 23 * s),
-                                       g_dos ? cga::dark_gray : IM_COL32(255, 255, 255, 18), rad(10.0f));
-        int ai = std::max(0, std::min(input.active_alpha, alpha_lib->count() - 1));
-        const AlphaEntry& ae = alpha_lib->get(ai);
-        float sz = 30.0f * s;
-        draw_alpha_preview(dl, ImVec2(c.x - sz * 0.5f, c.y - sz * 0.5f), sz, ae.preview);
-        if (hovered) tooltip(pos, ImVec2(pos.x + kRailBtn, pos.y + kRailBtn), TipSide::Right,
-                             ae.name.c_str(), nullptr);
+        float s = spring(ImGui::GetItemID(), held ? 0.92f : (hovered ? 1.06f : 1.0f), held ? 1400.0f : 520.0f);
         if (clicked) ImGui::OpenPopup("##alphapick");
-
-        alpha_picker_popup(input, alpha_lib, ImVec2(pos.x + kRailBtn + 18.0f, pos.y - 8.0f));
+        const bool busy = alpha_picker_popup(input, alpha_lib, ImVec2(alpha_edge + 6.0f, cy), true);
+        if (!busy) {
+            // The stamp itself, no frame, filling the swatch square.
+            ImDrawList* bg = ImGui::GetBackgroundDrawList();
+            ImVec2 c(alpha_edge - tuck + bs * 0.5f, cy);
+            int ai = std::max(0, std::min(input.active_alpha, alpha_lib->count() - 1));
+            float sz = bs * s;
+            draw_alpha_preview(bg, ImVec2(c.x - sz * 0.5f, c.y - sz * 0.5f), sz, alpha_lib->get(ai).preview, true);
+            if (hovered) tooltip(ImVec2(pos.x, pos.y), ImVec2(pos.x + vis, pos.y + bs), TipSide::Right,
+                                 "Brush Alpha", nullptr);
+        }
+        ImGui::End();
+        ImGui::PopStyleVar();
     }
-    end_panel();
 }
 
 void file_panel(InputState& input, const SkinStats& st) {
-    if (!begin_panel("##mFile", ImVec2(kEdge + kRailW + kEdge, kEdge), ImVec2(0, 0),
+    if (!begin_panel("##mFile", ImVec2(kEdge, kEdge), ImVec2(0, 0),
                      ImVec2(4, 4), 2.0f, 12.0f)) { end_panel(); return; }
     ImDrawList* dl = ImGui::GetWindowDrawList();
     char name[64];
@@ -1018,6 +1160,7 @@ void file_panel(InputState& input, const SkinStats& st) {
     ImGui::SameLine();
     o.tip = "Export"; o.key = input.key_label(KeyAction::EXPORT);
     if (icon_button("fExport", Icon::CmdExport, kBarBtn, o)) input.export_dialog_active = true;
+    g_file_bottom = ImGui::GetWindowPos().y + ImGui::GetWindowSize().y;
     end_panel();
 }
 
@@ -1129,26 +1272,24 @@ void command_panel(InputState& input, int win_w, int win_h, MultiresInfo mres, c
 
 struct Meter { const char* key; const char* label; char value[16]; float pct; ImU32 col; };
 
-void meter_widget(const char* id, const Meter& m) {
+// One row of the brush-settings stack, `w` wide: key badge, label, value at the
+// right edge, and a bar underneath springing to its new width.
+void meter_widget(const char* id, const Meter& m, float w) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImVec2 p = ImGui::GetCursorScreenPos();
     if (g_dos) {
-        // Board D: "S Size 70" — cyan key, gray label, green value, no bar.
-        const char* lab = m.label;
-        if (!std::strcmp(lab, "Strength")) lab = "Str";
-        else if (!std::strcmp(lab, "Hardness")) lab = "Hard";
-        else if (!std::strcmp(lab, "Spacing")) lab = "Spc";
-        char mid[24]; std::snprintf(mid, sizeof mid, " %s ", lab);
-        ImVec2 k = text_size(UiFont::Mono, 16.0f, m.key), l = text_size(UiFont::Mono, 16.0f, mid);
+        // Board D: "S Size  70" — cyan key, gray label, green value, no bar.
+        char lab[24]; std::snprintf(lab, sizeof lab, " %s", m.label);
+        ImVec2 k = text_size(UiFont::Mono, 16.0f, m.key);
         ImVec2 v = text_size(UiFont::Mono, 16.0f, m.value);
-        const float h = 30.0f, ty = p.y + (h - 16.0f) * 0.5f;
-        ImGui::Dummy(ImVec2(k.x + l.x + std::max(v.x, 48.0f), h));   // fixed slot: 3 cells
+        const float h = 20.0f, ty = p.y + (h - 16.0f) * 0.5f;
+        ImGui::Dummy(ImVec2(w, h));
         text_at(dl, UiFont::Mono, 16.0f, ImVec2(p.x, ty), cga::light_cyan, m.key);
-        text_at(dl, UiFont::Mono, 16.0f, ImVec2(p.x + k.x, ty), cga::light_gray, mid);
-        text_at(dl, UiFont::Mono, 16.0f, ImVec2(p.x + k.x + l.x, ty), cga::light_green, m.value);
+        text_at(dl, UiFont::Mono, 16.0f, ImVec2(p.x + k.x, ty), cga::light_gray, lab);
+        text_at(dl, UiFont::Mono, 16.0f, ImVec2(p.x + w - v.x, ty), cga::light_green, m.value);
         return;
     }
-    const float w = 112.0f, h = 30.0f;
+    const float h = 30.0f;
     ImGui::Dummy(ImVec2(w, h));
     // key badge
     ImVec2 b0(p.x, p.y + 2.0f), b1(p.x + 16.0f, p.y + 18.0f);
@@ -1156,10 +1297,9 @@ void meter_widget(const char* id, const Meter& m) {
     ImVec2 ks = text_size(UiFont::Mono, 10.0f, m.key);
     text_at(dl, UiFont::Mono, 10.0f, ImVec2(b0.x + (16.0f - ks.x) * 0.5f, b0.y + (16.0f - ks.y) * 0.5f), kText, m.key);
     ImVec2 ls = text_size(UiFont::Sans, 13.0f, m.label);
-    text_at(dl, UiFont::Sans, 13.0f, ImVec2(p.x + 22.0f, p.y + 10.0f - ls.y * 0.5f), kMuted, m.label);
+    text_at(dl, UiFont::Sans, 13.0f, ImVec2(p.x + 24.0f, p.y + 10.0f - ls.y * 0.5f), kText, m.label);
     ImVec2 vs = text_size(UiFont::Mono, 13.0f, m.value);
     text_at(dl, UiFont::Mono, 13.0f, ImVec2(p.x + w - vs.x, p.y + 10.0f - vs.y * 0.5f), kText, m.value);
-    // bar, springing to its new width
     float pct = spring(ImGui::GetID(id), std::max(0.0f, std::min(1.0f, m.pct)), 260.0f, 0.6f);
     pct = std::max(0.0f, std::min(1.0f, pct));
     float y = p.y + h - 4.0f;
@@ -1209,36 +1349,67 @@ bool shape_button(const char* id, int kind, bool on, const char* tip) {
     return clicked;
 }
 
-float g_brush_right = 0.0f;   // readout's right edge, for status_panel's collision check
+float g_brush_right = 0.0f;   // readout's right edge, for options/status placement
+float g_opts_right  = 0.0f;   // tool-options panel's right edge, 0 when it isn't up
 
+// The brush readout, stacked: a heading, then one row per setting. Bottom-left,
+// flush with the rail's left edge, under it; Insert and Select reuse the slot for
+// their own few controls.
 float brush_panel(InputState& input, int win_h) {
     const auto mode = input.interaction_mode;
+    const float w = g_dos ? 272.0f : 196.0f;
     float panel_h = 0.0f;
-    if (!begin_panel("##mBrush", ImVec2(kEdge + kRailW + kEdge, (float)win_h - kEdge), ImVec2(0, 1),
-                     ImVec2(16, 10), 18.0f, 12.0f)) { end_panel(); return 0.0f; }
+    // Under the rail only when it fits there; a short window puts it back beside the
+    // rail. Judged on the TALLEST rail and panel seen at this window height (the alpha
+    // row comes and goes with the brush, the panel shrinks in Insert/Select), so
+    // switching brush can't make it hop between the two spots.
+    static float rail_max = 0.0f, panel_max = 0.0f;
+    static int seen_h = -1;
+    if (win_h != seen_h) { rail_max = panel_max = 0.0f; seen_h = win_h; }
+    rail_max = std::max(rail_max, g_rail_bottom);
+    const bool under = rail_max + 12.0f <= (float)win_h - kEdge - panel_max;
+    const float x = under ? kEdge : kEdge + kRailW + kEdge;
+    if (!begin_panel("##mBrush", ImVec2(x, (float)win_h - kEdge), ImVec2(0, 1),
+                     ImVec2(14, 12), g_dos ? 4.0f : 8.0f, 12.0f)) { end_panel(); return 0.0f; }
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    // Heading: the name in the title colour, an optional muted suffix after it.
+    auto heading = [&](const char* name, const char* rest) {
+        const float px = g_dos ? 16.0f : 14.0f, rpx = g_dos ? 16.0f : 13.0f;
+        const char* nm = title_case(name);
+        ImVec2 p = ImGui::GetCursorScreenPos();
+        ImVec2 ns = text_size(UiFont::SansSemibold, px, nm);
+        ImGui::Dummy(ImVec2(w, g_dos ? 22.0f : 24.0f));
+        float cy = p.y + (g_dos ? 22.0f : 24.0f) * 0.5f;
+        text_at(dl, UiFont::SansSemibold, px, ImVec2(p.x, cy - ns.y * 0.5f), title_col(), nm);
+        if (rest) {
+            ImVec2 rs = text_size(UiFont::Sans, rpx, rest);
+            text_at(dl, UiFont::Sans, rpx, ImVec2(p.x + ns.x, cy - rs.y * 0.5f), kMuted, rest);
+        }
+    };
+    auto hint = [&](const char* s) { label_item(UiFont::Sans, 12.0f, kMuted, s, 0.0f, g_dos ? 18.0f : 16.0f); };
     if (mode == InputState::InteractionMode::INSERT) {
-        label_item(UiFont::SansSemibold, 14.0f, title_col(), title_case("Insert"), 64.0f, 36.0f);
+        heading("Insert", nullptr);
         struct S { const char* id; int kind; const char* tip; InputState::InsertShape shape; };
         static const S shapes[] = {
             {"##shSphere", 0, "Sphere",   InputState::InsertShape::SPHERE},
             {"##shBox",    1, "Box",      InputState::InsertShape::BOX},
             {"##shCyl",    2, "Cylinder", InputState::InsertShape::CYLINDER},
         };
-        ImGui::SameLine(0.0f, 10.0f);
         for (int i = 0; i < 3; i++) {
             if (i) ImGui::SameLine(0.0f, 4.0f);
             if (shape_button(shapes[i].id, shapes[i].kind, input.insert_shape == shapes[i].shape,
                              shapes[i].tip))
                 input.insert_shape = shapes[i].shape;
         }
-        ImGui::SameLine(0.0f, 14.0f);
-        label_item(UiFont::Sans, 12.0f, kMuted, "Click the model to place", 0.0f, 36.0f);
+        hint("Click the model");
+        hint("to place");
     } else if (mode == InputState::InteractionMode::SELECT) {
-        label_item(UiFont::SansSemibold, 14.0f, title_col(), title_case("Select"), 64.0f);
-        ImGui::SameLine();
-        label_item(UiFont::Sans, 12.0f, kMuted, "Click to pick  \xC2\xB7  drag to move  \xC2\xB7  Q / E rotate");
+        heading("Select", nullptr);
+        hint("Click to pick");
+        hint("Drag to move");
+        hint("Q / E rotate");
     } else {
-        label_item(UiFont::SansSemibold, 14.0f, title_col(), title_case(input.brush_name()), 64.0f);
+        heading(input.brush_name(), " - Tool Options");
         Meter ms[4] = {
             {"S", "Size",     "", input.brush_size / 500.0f, kBrush},
             {"W", "Strength", "", input.brush_strength, kText},
@@ -1250,20 +1421,19 @@ float brush_panel(InputState& input, int win_h) {
         std::snprintf(ms[2].value, sizeof ms[2].value, "%.0f%%", input.brush_hardness * 100.0f);
         std::snprintf(ms[3].value, sizeof ms[3].value, "%.0f%%", input.brush_spacing * 100.0f);
         static const char* ids[4] = {"##mS", "##mW", "##mA", "##mO"};
-        for (int i = 0; i < 4; i++) {
-            ImGui::SameLine();
-            meter_widget(ids[i], ms[i]);
-        }
+        for (int i = 0; i < 4; i++) meter_widget(ids[i], ms[i], w);
     }
     panel_h = ImGui::GetWindowSize().y;
+    panel_max = std::max(panel_max, panel_h);
     g_brush_right = ImGui::GetWindowPos().x + ImGui::GetWindowSize().x;
     end_panel();
     return panel_h;
 }
 
-// Tool options: what the current tool needs beyond the four meters. Stacked above
-// the brush readout; absent when there is nothing to show.
-void options_panel(InputState& input, int win_h, float brush_h) {
+// Tool options: what the current tool needs beyond the four meters. Bottom-aligned
+// just right of the brush readout; absent when there is nothing to show.
+void options_panel(InputState& input, int win_h) {
+    g_opts_right = 0.0f;
     const BrushType current = input.current_brush;
     const bool smooth_on = input.is_smooth_active();
     const bool editing = input.interaction_mode == InputState::InteractionMode::EDIT;
@@ -1271,8 +1441,7 @@ void options_panel(InputState& input, int win_h, float brush_h) {
     const bool clay_on = editing && current == BrushType::CLAY && !smooth_on;
     if (!paint_on && !clay_on) return;
 
-    float y = (float)win_h - kEdge - brush_h - 8.0f;
-    if (!begin_panel("##mOpts", ImVec2(kEdge + kRailW + kEdge, y), ImVec2(0, 1),
+    if (!begin_panel("##mOpts", ImVec2(g_brush_right + 12.0f, (float)win_h - kEdge), ImVec2(0, 1),
                      ImVec2(12, 8), 8.0f, 12.0f)) { end_panel(); return; }
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8, 7));
     if (clay_on) {
@@ -1319,60 +1488,102 @@ void options_panel(InputState& input, int win_h, float brush_h) {
         }
     }
     ImGui::PopStyleVar();
+    g_opts_right = ImGui::GetWindowPos().x + ImGui::GetWindowSize().x;
     end_panel();
 }
 
-// brush_right / brush_h: the readout's right edge and height this frame. On a window
-// too narrow for both on one row (or with DOS's wide 16 px cells), the status line
-// steps up and sits above the readout's row instead of sliding under it. The panel
-// keeps its x either way, so the check can't flip back and forth.
+// File + scene readout, bottom-right: name and save state (fps opposite), then
+// Tris / Verts / Level / Normals as label-value rows, then the Mirror and
+// Autosmooth chips. brush_right / brush_h: the right edge of the bottom-left
+// panels (brush + tool options) and the brush panel's height this frame. On a window too narrow for both side by side, this panel steps up and
+// sits above the brush panel's row instead of sliding under it. It keeps its x
+// either way, so the check can't flip back and forth.
 void status_panel(const InputState& input, int win_w, int win_h, const SkinStats& st,
-                  float brush_right, float brush_h) {
+                  MultiresInfo mres, float brush_right, float brush_h) {
     static bool lifted = false;
     float y = (float)win_h - kEdge - (lifted ? brush_h + 12.0f : 0.0f);
     if (!begin_panel("##mStatus", ImVec2((float)win_w - kEdge, y), ImVec2(1, 1),
-                     ImVec2(14, 10), 14.0f, 12.0f)) { end_panel(); return; }
+                     ImVec2(14, 12), 4.0f, 12.0f)) { end_panel(); return; }
     if (ImGui::GetWindowSize().x > 1.0f) lifted = ImGui::GetWindowPos().x < brush_right + 12.0f;
-    char verts[32], buf[48];
-    fmt_thousands(verts, sizeof verts, st.verts);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float w  = g_dos ? 320.0f : 236.0f;
+    const float px = g_dos ? 16.0f : 12.5f, rh = g_dos ? 20.0f : 19.0f;
+    const ImU32 lab_col = g_dos ? cga::light_gray : kMuted;
+    const ImU32 val_col = g_dos ? cga::light_green : kText;
+    char buf[48];
+
+    // Title row: name, save state, fps at the right edge.
+    {
+        char name[64];
+        project_name(name, sizeof name, st.project_path);
+        const bool unsaved = !st.project_path || !*st.project_path;
+        const float tpx = g_dos ? 16.0f : 13.0f, th = g_dos ? 22.0f : 24.0f;
+        ImVec2 p = ImGui::GetCursorScreenPos();
+        ImGui::Dummy(ImVec2(w, th));
+        float cy = p.y + th * 0.5f;
+        ImVec2 ns = text_size(UiFont::SansSemibold, tpx, name);
+        text_at(dl, UiFont::SansSemibold, tpx, ImVec2(p.x, cy - ns.y * 0.5f), g_dos ? cga::white : kText, name);
+        if (unsaved) {
+            float x = p.x + ns.x + 8.0f;
+            if (g_dos) {
+                text_at(dl, UiFont::Sans, 16.0f, ImVec2(x - 4.0f, cy - 8.0f), cga::light_red, "*");
+            } else {
+                ImVec2 us = text_size(UiFont::Sans, 11.0f, "unsaved");
+                dl->AddCircleFilled(ImVec2(x + 3.0f, cy), 3.0f, kUnsaved, 12);
+                text_at(dl, UiFont::Sans, 11.0f, ImVec2(x + 10.0f, cy - us.y * 0.5f), kUnsaved, "unsaved");
+            }
+        }
+        if (input.show_fps) {
+            std::snprintf(buf, sizeof buf, g_dos ? "%.0ffps" : "%.0f fps", st.fps);
+            const float fpx = g_dos ? 16.0f : 11.0f;
+            ImVec2 fs = text_size(UiFont::Mono, fpx, buf);
+            text_at(dl, UiFont::Mono, fpx, ImVec2(p.x + w - fs.x, cy - fs.y * 0.5f), lab_col, buf);
+        }
+    }
+
+    auto row = [&](const char* label, const char* value) {
+        ImVec2 p = ImGui::GetCursorScreenPos();
+        ImGui::Dummy(ImVec2(w, rh));
+        ImVec2 ls = text_size(g_dos ? UiFont::Mono : UiFont::Sans, px, label);
+        ImVec2 vs = text_size(UiFont::Mono, px, value);
+        text_at(dl, g_dos ? UiFont::Mono : UiFont::Sans, px, ImVec2(p.x, p.y + (rh - ls.y) * 0.5f), lab_col, label);
+        text_at(dl, UiFont::Mono, px, ImVec2(p.x + w - vs.x, p.y + (rh - vs.y) * 0.5f), val_col, value);
+    };
+    fmt_thousands(buf, sizeof buf, st.tris);
+    row("Tris", buf);
+    fmt_thousands(buf, sizeof buf, st.verts);
+    row("Verts", buf);
+    if (mres.locked) std::snprintf(buf, sizeof buf, "%d of %d", st.level, mres.lmax);
+    else             std::snprintf(buf, sizeof buf, "%d", st.level);
+    row("Level", buf);
+    row("Normals", input.flat_shading ? "Flat" : "Interpolated");
+
+    // Chips: Mirror (tinted while on) and Autosmooth (only while on).
+    ImGui::Dummy(ImVec2(0.0f, g_dos ? 0.0f : 2.0f));
+    const char* mirror = !input.mirror_x ? (g_dos ? "Mirror:Off" : "Mirror off")
+                       : input.mirror_topological ? (g_dos ? "Mirror:Topo" : "Mirror \xC2\xB7 Topological")
+                       : (g_dos ? "Mirror:World" : "Mirror \xC2\xB7 World");
     if (g_dos) {
-        // Board D's status line: gray labels, green numbers, magenta mirror.
-        label_item(UiFont::Mono, 16.0f, cga::light_gray, "Verts", 0.0f, 18.0f);
-        ImGui::SameLine(0.0f, 8.0f);
-        label_item(UiFont::Mono, 16.0f, cga::light_green, verts, 0.0f, 18.0f);
-        ImGui::SameLine(0.0f, 24.0f);
-        label_item(UiFont::Mono, 16.0f, input.mirror_x ? cga::light_magenta : cga::dark_gray,
-                   !input.mirror_x ? "Mirror:Off"
-                   : input.mirror_topological ? "Mirror:Topo" : "Mirror:World", 0.0f, 18.0f);
+        label_item(UiFont::Mono, 16.0f, input.mirror_x ? cga::light_magenta : cga::dark_gray, mirror, 0.0f, 18.0f);
         if (input.autosmooth) {
             ImGui::SameLine(0.0f, 24.0f);
             label_item(UiFont::Mono, 16.0f, cga::light_cyan, "Autosmooth", 0.0f, 18.0f);
         }
-        if (input.show_fps) {
-            ImGui::SameLine(0.0f, 24.0f);
-            std::snprintf(buf, sizeof buf, "%.0ffps", st.fps);
-            label_item(UiFont::Mono, 16.0f, cga::light_gray, buf, 0.0f, 18.0f);
+    } else {
+        auto pill = [&](const char* s, ImU32 bg, ImU32 fg) {
+            ImVec2 ts = text_size(UiFont::Sans, 11.0f, s);
+            ImVec2 p = ImGui::GetCursorScreenPos();
+            const float pw = ts.x + 16.0f, ph = 20.0f;
+            ImGui::Dummy(ImVec2(pw, ph));
+            dl->AddRectFilled(p, ImVec2(p.x + pw, p.y + ph), bg, ph * 0.5f);
+            text_at(dl, UiFont::Sans, 11.0f, ImVec2(p.x + 8.0f, p.y + (ph - ts.y) * 0.5f), fg, s);
+        };
+        if (input.mirror_x) pill(mirror, kTint, kTintText);
+        else                pill(mirror, IM_COL32(255, 255, 255, 14), kMuted);
+        if (input.autosmooth) {
+            ImGui::SameLine(0.0f, 6.0f);
+            pill("Autosmooth", IM_COL32(255, 255, 255, 20), kStatus);
         }
-        end_panel();
-        return;
-    }
-    std::snprintf(buf, sizeof buf, "%s verts", verts);
-    label_item(UiFont::Mono, 12.0f, kStatus, buf, 0.0f, 18.0f);
-    ImGui::SameLine();
-    if (input.mirror_x)
-        label_item(UiFont::Sans, 12.0f, kTintText,
-                   input.mirror_topological ? "Mirror \xC2\xB7 Topological" : "Mirror \xC2\xB7 World",
-                   0.0f, 18.0f);
-    else
-        label_item(UiFont::Sans, 12.0f, kMuted, "Mirror off", 0.0f, 18.0f);
-    if (input.autosmooth) {
-        ImGui::SameLine();
-        label_item(UiFont::Sans, 12.0f, kStatus, "Autosmooth", 0.0f, 18.0f);
-    }
-    if (input.show_fps) {
-        ImGui::SameLine();
-        std::snprintf(buf, sizeof buf, "%.0f fps", st.fps);
-        label_item(UiFont::Mono, 12.0f, kMuted, buf, 0.0f, 18.0f);
     }
     end_panel();
 }
@@ -2342,12 +2553,12 @@ void draw_modern_ui(InputState& input, int win_w, int win_h, const AlphaLibrary*
     } else {
         if (input.ui_viewfinder) viewfinder(win_w, win_h);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+        file_panel(input, stats);   // first: the rail hangs below it
         rail(input, win_h, alpha_lib);
-        file_panel(input, stats);
         command_panel(input, win_w, win_h, mres, stats);
         float bh = brush_panel(input, win_h);
-        options_panel(input, win_h, bh);
-        status_panel(input, win_w, win_h, stats, g_brush_right, bh);
+        options_panel(input, win_h);
+        status_panel(input, win_w, win_h, stats, mres, std::max(g_brush_right, g_opts_right), bh);
         ImGui::PopStyleVar();
     }
 

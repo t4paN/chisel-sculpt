@@ -2,6 +2,43 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-08 — Modern skin: left-column layout, mode dock, alpha swatch, stacked readouts
+
+*Built GL and native WebGPU; tested by the user on native. Modern and DOS share this
+code; 2000s and Classic have their own layouts and are untouched.*
+
+- **One left column.** The file bar (name, saved state, Save / copy / Open / Export)
+  moved to the top-left corner. Below it, the **modes (1–4) are their own horizontal
+  dock**, then the brush rail, then the brush readout, all flush on the same left edge.
+  Mode tooltips open below the buttons. The rail is ~150 px shorter for it.
+- **Brush readout is a vertical stack again**, headed "Draw - Tool Options" (the brush
+  name in the title colour, the rest muted). Size / Strength / Hardness / Spacing are
+  one row each: key badge, name, value, full-width bar. It sits under the rail, and
+  goes back beside it on a window too short for both. The fit is judged on the tallest
+  rail and readout seen at that window height, so switching brushes can't make it
+  hop. Insert and Select stack their controls in the same slot.
+- **Clay / Paint options** sit bottom-aligned just right of the readout. They used to
+  stack on top of it, which would now run into the rail.
+- **Status panel (bottom right) reworked:** name + unsaved with fps opposite, then
+  Tris, Verts, Level ("6 of 9") and Normals (Interpolated / Flat) as label-value rows,
+  then Mirror and Autosmooth chips. Its narrow-window "step up" check now counts the
+  tool options too.
+- **Brush alpha left the rail.** Closed, it is the bare stamp (black included, no
+  frame), 88% of a button, hanging a little below the button of the brush it serves
+  (Draw, Mask, or Paint in the mode dock). Its left edge is tucked under the dock:
+  drawn on the background list so the dock paints over it, click target on the part
+  that shows. Tip: "Brush Alpha". Clicked, a strip of all alphas widens out of the
+  dock edge, with names on the swatch tips. After a pick (or a click away) it retracts
+  the same way. ImGui closes a popup on the spot, so the retract is redrawn from the
+  last frame's geometry on the foreground list. Critically damped, so the frame never
+  outruns its contents.
+- **Alpha previews are antialiased.** Each of the 16×16 cells stays flat and blends
+  into its neighbour over 40% of a cell: crisp steps without jaggies. Full bilinear
+  was tried first and read as blur. DOS keeps hard pixels.
+- **Shortcut keys in the dock corners are easier to read:** Plex Mono Medium 11 px at
+  90% (was Regular 9 px at 70%). DOS stays at its 8 px cell (16 would cover the icon),
+  drawn white and doubled 1 px apart for weight.
+
 ## 2026-10-08 — Menu tooltips in the skin's own chip; opaque dropdown; shorter Sphere tooltip
 
 *Built GL and native WebGPU; tested by the user on native.*
