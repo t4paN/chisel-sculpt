@@ -1801,8 +1801,9 @@ void Renderer::read_id_region(int x, int y, int w, int h, uint32_t* out) {
 
 // Brush-cursor tint from hardness: pale lime (soft) -> bright orange (mid) ->
 // bluish purple (hard). Shared by the ring and by the mirror crosshair, which
-// inverts it — so the two must come from one place or they drift apart.
-static void brush_cursor_rgb(float hardness, float* out) {
+// inverts it, and by the size bar in the brush dock (ui_skin.cpp) — so they all
+// come from one place or they drift apart.
+void brush_cursor_rgb(float hardness, float* out) {
     float hh = std::max(0.0f, std::min(1.0f, hardness));
     if (hh < 0.5f) {
         float t = hh * 2.0f;
@@ -1818,13 +1819,14 @@ static void brush_cursor_rgb(float hardness, float* out) {
 }
 
 void Renderer::draw_cursor(const Camera& cam, float cx, float cy, float radius,
-                           float nx, float ny, float nz, float hardness,
+                           float nx, float ny, float nz, float hardness, float strength,
                            int w, int h, bool on_model) {
-    float hh = std::max(0.0f, std::min(1.0f, hardness));
+    // Hardness is the tint alone; the ring's weight is strength's (below). The opacity
+    // used to ride hardness too (0.75..0.90) and is held at that range's middle.
     float rgb[3];
     brush_cursor_rgb(hardness, rgb);
     float cr = rgb[0], cg = rgb[1], cb = rgb[2];
-    float ca = 0.75f + 0.15f * hh;
+    const float ca = 0.825f;
 
     // Camera basis in world space (matches brush.cpp apply_move derivation)
     Vec3 cam_pos = cam.get_position();
@@ -1854,7 +1856,7 @@ void Renderer::draw_cursor(const Camera& cam, float cx, float cy, float radius,
         gpu::release_bind_group(grp);
     }
 
-    // ---- Ring (outer), plus an optional thinner inner hardness ring ----
+    // ---- Ring ----
     {
         gpu::set_pipeline(rp, cursor_pipeline);
         gpu::BindBufferEntry be[] = {{ 63, &cursor_ubo, sizeof(CursorParamsGPU) }};
@@ -1867,23 +1869,18 @@ void Renderer::draw_cursor(const Camera& cam, float cx, float cy, float radius,
         cp.screenSize[0] = (float)w; cp.screenSize[1] = (float)h;
         cp.normal[0] = nx; cp.normal[1] = ny; cp.normal[2] = nz; cp.radius = radius;
         cp.camRight[0] = cam_right.x; cp.camRight[1] = cam_right.y; cp.camRight[2] = cam_right.z;
-        cp.baseThick = 2.5f;
+        // Strength weighs the outer ring: 0.95x the old 2.5 px line at none, 1.15x at
+        // half, 1.4x at full, linear between. The front boost scales with it so the
+        // ring keeps its shape.
+        float ss = std::max(0.0f, std::min(1.0f, strength));
+        float weight = ss < 0.5f ? 0.95f + 0.40f * ss : 1.15f + 0.50f * (ss - 0.5f);
+        cp.baseThick = 2.5f * weight;
         cp.camUp[0] = cam_up.x; cp.camUp[1] = cam_up.y; cp.camUp[2] = cam_up.z;
-        cp.frontBoost = 3.0f;
+        cp.frontBoost = 3.0f * weight;
         cp.camFwd[0] = cam_fwd.x; cp.camFwd[1] = cam_fwd.y; cp.camFwd[2] = cam_fwd.z;
         cp.color[0] = cr; cp.color[1] = cg; cp.color[2] = cb; cp.color[3] = ca;
         gpu::write_buffer(gpu_dev, cursor_ubo, 0, &cp, sizeof cp);
         gpu::draw(rp, (CURSOR_SEGS + 1) * 2);
-
-        if (hh > 0.5f) {
-            // Re-upload the shared UBO mid-pass for the second draw. Fine on GL
-            // (immediate); the web backend will need a 2nd UBO / dynamic offset here.
-            cp.radius = std::max(3.0f, radius - 5.0f);
-            cp.baseThick = 1.5f; cp.frontBoost = 1.5f;
-            cp.color[3] = (hh - 0.5f) * 2.0f * ca;
-            gpu::write_buffer(gpu_dev, cursor_ubo, 0, &cp, sizeof cp);
-            gpu::draw(rp, (CURSOR_SEGS + 1) * 2);
-        }
         gpu::release_bind_group(grp);
     }
 

@@ -2,6 +2,15 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-08 — Editable brush dock; ring weight follows strength
+
+- Size / Strength / Hardness / Spacing rows in the Modern and DOS dock are click/drag
+  sliders. A drag tracks the pointer exactly, a click springs; during an S/W/A/O hold
+  the bar waits and springs on release.
+- The size bar takes the cursor ring's hardness colour.
+- Ring thickness follows strength (0.95x / 1.15x / 1.4x of the old line at 0 / 50 /
+  100%); hardness only tints it, and its inner ring is gone.
+
 ## 2026-10-08 — Edge wrap works on Wayland and web
 
 - Mouse drags (brushes, orbit, pan, zoom, object move/scale) wrap around the window

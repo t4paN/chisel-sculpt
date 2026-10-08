@@ -31,6 +31,10 @@
 // (material dial + springs) — HANDOFF.md sections 5 and 6. Sizes are in window
 // pixels, like the rest of the UI (DisplayFramebufferScale is pinned to 1).
 
+// The brush ring's tint from hardness (renderer.cpp). Declared here rather than by
+// pulling in renderer.h and its GPU headers for one function.
+void brush_cursor_rgb(float hardness, float* out);
+
 namespace {
 
 // ---- Tokens ------------------------------------------------------------------
@@ -1272,41 +1276,81 @@ void command_panel(InputState& input, int win_w, int win_h, MultiresInfo mres, c
     end_panel();
 }
 
-struct Meter { const char* key; const char* label; char value[16]; float pct; ImU32 col; };
+void set_feel(InputState& in, int which, float t);   // below, shared with the 2000s tracks
 
-// One row of the brush-settings stack, `w` wide: key badge, label, value at the
-// right edge, and a bar underneath springing to its new width.
-void meter_widget(const char* id, const Meter& m, float w) {
+// One row of the brush-settings stack (which: 0 size, 1 strength, 2 hardness,
+// 3 spacing), `w` wide: key badge, label, value at the right edge, and a bar underneath.
+// The whole row is the hit area: click or drag anywhere on it to set the value by where
+// the pointer sits across it, as on the 2000s tracks. The value is applied before the
+// row is drawn, so the bar shows this frame's value. A click springs the bar to its new
+// width; a drag pins it to the pointer exactly.
+void meter_widget(const char* id, InputState& in, int which, float w) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImVec2 p = ImGui::GetCursorScreenPos();
+    const float h = g_dos ? 20.0f : 30.0f;
+    ImGui::InvisibleButton(id, ImVec2(w, h));
+    const bool held = ImGui::IsItemActive();
+    const bool lit = held || ImGui::IsItemHovered();
+    const bool dragging = held && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 2.0f);
+    if (held) set_feel(in, which, (ImGui::GetIO().MousePos.x - p.x) / w);
+
+    static const char* keys[4]   = {"S", "W", "A", "O"};
+    static const char* labels[4] = {"Size", "Strength", "Hardness", "Spacing"};
+    const float vals[4] = {in.brush_size / 500.0f, in.brush_strength,
+                           in.brush_hardness, in.brush_spacing};
+    char value[16];
+    if (which == 0) std::snprintf(value, sizeof value, "%.0f", in.brush_size);
+    else            std::snprintf(value, sizeof value, "%.0f%%", vals[which] * 100.0f);
+
     if (g_dos) {
         // Board D: "S Size  70" — cyan key, gray label, green value, no bar.
-        char lab[24]; std::snprintf(lab, sizeof lab, " %s", m.label);
-        ImVec2 k = text_size(UiFont::Mono, 16.0f, m.key);
-        ImVec2 v = text_size(UiFont::Mono, 16.0f, m.value);
-        const float h = 20.0f, ty = p.y + (h - 16.0f) * 0.5f;
-        ImGui::Dummy(ImVec2(w, h));
-        text_at(dl, UiFont::Mono, 16.0f, ImVec2(p.x, ty), cga::light_cyan, m.key);
+        char lab[24]; std::snprintf(lab, sizeof lab, " %s", labels[which]);
+        ImVec2 k = text_size(UiFont::Mono, 16.0f, keys[which]);
+        ImVec2 v = text_size(UiFont::Mono, 16.0f, value);
+        const float ty = p.y + (h - 16.0f) * 0.5f;
+        if (lit) dl->AddRectFilled(p, ImVec2(p.x + w, p.y + h), cga::dark_gray);
+        text_at(dl, UiFont::Mono, 16.0f, ImVec2(p.x, ty), cga::light_cyan, keys[which]);
         text_at(dl, UiFont::Mono, 16.0f, ImVec2(p.x + k.x, ty), cga::light_gray, lab);
-        text_at(dl, UiFont::Mono, 16.0f, ImVec2(p.x + w - v.x, ty), cga::light_green, m.value);
+        text_at(dl, UiFont::Mono, 16.0f, ImVec2(p.x + w - v.x, ty), cga::light_green, value);
         return;
     }
-    const float h = 30.0f;
-    ImGui::Dummy(ImVec2(w, h));
     // key badge
     ImVec2 b0(p.x, p.y + 2.0f), b1(p.x + 16.0f, p.y + 18.0f);
     dl->AddRect(b0, b1, IM_COL32(255, 255, 255, 51), 4.0f);
-    ImVec2 ks = text_size(UiFont::Mono, 10.0f, m.key);
-    text_at(dl, UiFont::Mono, 10.0f, ImVec2(b0.x + (16.0f - ks.x) * 0.5f, b0.y + (16.0f - ks.y) * 0.5f), kText, m.key);
-    ImVec2 ls = text_size(UiFont::Sans, 13.0f, m.label);
-    text_at(dl, UiFont::Sans, 13.0f, ImVec2(p.x + 24.0f, p.y + 10.0f - ls.y * 0.5f), kText, m.label);
-    ImVec2 vs = text_size(UiFont::Mono, 13.0f, m.value);
-    text_at(dl, UiFont::Mono, 13.0f, ImVec2(p.x + w - vs.x, p.y + 10.0f - vs.y * 0.5f), kText, m.value);
-    float pct = spring(ImGui::GetID(id), std::max(0.0f, std::min(1.0f, m.pct)), 260.0f, 0.6f);
+    ImVec2 ks = text_size(UiFont::Mono, 10.0f, keys[which]);
+    text_at(dl, UiFont::Mono, 10.0f, ImVec2(b0.x + (16.0f - ks.x) * 0.5f, b0.y + (16.0f - ks.y) * 0.5f), kText, keys[which]);
+    ImVec2 ls = text_size(UiFont::Sans, 13.0f, labels[which]);
+    text_at(dl, UiFont::Sans, 13.0f, ImVec2(p.x + 24.0f, p.y + 10.0f - ls.y * 0.5f), kText, labels[which]);
+    ImVec2 vs = text_size(UiFont::Mono, 13.0f, value);
+    text_at(dl, UiFont::Mono, 13.0f, ImVec2(p.x + w - vs.x, p.y + 10.0f - vs.y * 0.5f), kText, value);
+    const float target = std::max(0.0f, std::min(1.0f, vals[which]));
+    const ImGuiID sid = ImGui::GetID(id);
+    if (dragging) spring_reset(sid, target);
+    // A hold-key (S/W/A/O) drag leaves the bar where it was; on release it springs to
+    // the new value at twice the click speed (4x the stiffness, same damping).
+    static bool after_key[4] = {};
+    float pct;
+    if (in.slider_mode != InputState::SliderMode::NONE && g_springs[sid].init) {
+        after_key[which] = true;
+        pct = g_springs[sid].x;
+    } else {
+        // Same damping as before, ~2.25x the stiffness: the same overshoot in 2/3 the time.
+        pct = spring(sid, target, after_key[which] ? 2340.0f : 585.0f, 0.6f);
+        const Spring& sp = g_springs[sid];
+        if (std::fabs(sp.x - target) < 1e-4f && std::fabs(sp.v) < 1e-3f) after_key[which] = false;
+    }
     pct = std::max(0.0f, std::min(1.0f, pct));
     float y = p.y + h - 4.0f;
-    dl->AddRectFilled(ImVec2(p.x, y), ImVec2(p.x + w, y + 3.0f), IM_COL32(255, 255, 255, 26), 2.0f);
-    if (pct > 0.0f) dl->AddRectFilled(ImVec2(p.x, y), ImVec2(p.x + w * pct, y + 3.0f), m.col, 2.0f);
+    dl->AddRectFilled(ImVec2(p.x, y), ImVec2(p.x + w, y + 3.0f),
+                      IM_COL32(255, 255, 255, lit ? 56 : 26), 2.0f);
+    // Size wears the ring's own colour, so it moves with Hardness like the cursor does.
+    ImU32 col = kText;
+    if (which == 0) {
+        float rgb[3];
+        brush_cursor_rgb(in.brush_hardness, rgb);
+        col = IM_COL32((int)(rgb[0] * 255.0f), (int)(rgb[1] * 255.0f), (int)(rgb[2] * 255.0f), 255);
+    }
+    if (pct > 0.0f) dl->AddRectFilled(ImVec2(p.x, y), ImVec2(p.x + w * pct, y + 3.0f), col, 2.0f);
 }
 
 // A small text label laid out as an item (so SameLine works around it).
@@ -1412,18 +1456,8 @@ float brush_panel(InputState& input, int win_h) {
         hint("Q / E rotate");
     } else {
         heading(input.brush_name(), " - Tool Options");
-        Meter ms[4] = {
-            {"S", "Size",     "", input.brush_size / 500.0f, kBrush},
-            {"W", "Strength", "", input.brush_strength, kText},
-            {"A", "Hardness", "", input.brush_hardness, kText},
-            {"O", "Spacing",  "", input.brush_spacing, kText},
-        };
-        std::snprintf(ms[0].value, sizeof ms[0].value, "%.0f", input.brush_size);
-        std::snprintf(ms[1].value, sizeof ms[1].value, "%.0f%%", input.brush_strength * 100.0f);
-        std::snprintf(ms[2].value, sizeof ms[2].value, "%.0f%%", input.brush_hardness * 100.0f);
-        std::snprintf(ms[3].value, sizeof ms[3].value, "%.0f%%", input.brush_spacing * 100.0f);
         static const char* ids[4] = {"##mS", "##mW", "##mA", "##mO"};
-        for (int i = 0; i < 4; i++) meter_widget(ids[i], ms[i], w);
+        for (int i = 0; i < 4; i++) meter_widget(ids[i], input, i, w);
     }
     panel_h = ImGui::GetWindowSize().y;
     panel_max = std::max(panel_max, panel_h);

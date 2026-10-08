@@ -3489,7 +3489,7 @@ int main(int argc, char* argv[]) {
                     cursor_x, cursor_y,
                     input.brush_size,
                     input.cursor_nx, input.cursor_ny, input.cursor_nz,
-                    input.brush_hardness,
+                    input.brush_hardness, input.brush_strength,
                     win_w, win_h, input.on_model);
 
                 // Symmetry lobe marker. Where the second dab lands is a WORLD
