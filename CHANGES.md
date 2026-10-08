@@ -2,6 +2,10 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-08 — Icon refresh
+
+- Changed the app icon a bit (navy outline).
+
 ## 2026-10-08 — Reset asks first; file dialogs open centred; autosmooth off by default
 
 *Built GL and native WebGPU; tested by the user on native Linux.*
