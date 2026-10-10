@@ -1423,6 +1423,7 @@ static void drop_callback(GLFWwindow* w, int count, const char** paths) {
     }
     snprintf(g_input->drop_path, sizeof(g_input->drop_path), "%s", path);
     g_input->drop_confirm_pending = true;
+    g_input->wake_requested = true;
 }
 #endif
 

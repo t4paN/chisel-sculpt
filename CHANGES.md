@@ -2,6 +2,39 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-10 — Idle frames are skipped: an untouched model costs almost nothing
+
+*Built GL, native WebGPU and web; measured by the user on the web build (Firefox,
+taptop). The "nothing freezes" checklist (springs, tooltips, held-key rotation, toasts,
+remesh progress) is still owed. On branch `idle-frame-skip`, not on main.*
+
+- Chisel used to repaint the whole scene and UI on every screen refresh, even with
+  nothing changing. Now each frame first asks whether anything happened: new input
+  (ImGui's event queue sees every key, button, wheel and pointer event on both targets),
+  a resize, pen samples, a held key or button, a stroke or its pen-up cleanup, remesh /
+  voxel merge, a toast still counting down, a pending screen-buffer refresh, a text
+  field with a caret, a file drop or web import. If nothing did, drawing continues for
+  one more second, then stops. That tail covers what keeps moving after input stops
+  (button springs, tooltip delays, the cursor ring's LERP, a flag a finishing job
+  chains into) without a trigger per animation.
+- A skipped frame presents nothing: the browser keeps showing the last canvas; native
+  sleeps in `glfwWaitEventsTimeout(0.1)` instead of spinning. Settings still autosave
+  while idle. Benchmark mode never skips.
+- The first frame after an idle stretch clamps ImGui's DeltaTime to one frame: ImGui
+  measures it from the last *drawn* frame, so the gap would otherwise count down a toast
+  raised by the waking keypress before it was ever shown. The FPS readout holds its
+  last real value until a full drawn second.
+- Measured with `gpuwatch` (a new taptop tool that reads the graphics clock, because
+  amdgpu's busy % reads 100% at the 200 MHz floor on this Raven APU): idle Firefox
+  went from ~115% of a core to 5% (max 11%), graphics clock idle 100% of the time,
+  temps 55°C → 41°C. Sculpting costs the same as before.
+
+## 2026-10-10 — Native WebGPU builds against GLFW 3.3 again
+
+- The Wayland surface path called `glfwGetPlatform` (GLFW 3.4+) unguarded in
+  `main.cpp` and `wgpu_window.cpp`, so `build-wgpu` failed on distro GLFW 3.3
+  (Mint/Ubuntu 24.04). Same version guard the rest of the code uses; 3.3 takes X11.
+
 ## 2026-10-08 — Edge wrap puts the pointer back where the ring is (Wayland)
 
 *Built GL, native WebGPU and web; tested by the user on native Linux (KWin 6.7, mouse).*
