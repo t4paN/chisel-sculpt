@@ -470,14 +470,21 @@ int main() {
     surfDesc.nextInChain = &hwnd_src.chain;
     const char* plat_name = "Win32";
 #else
+    // glfwGetPlatform is GLFW 3.4+; a distro 3.3 (Ubuntu/Mint 24.04) is X11-only.
+#if GLFW_VERSION_MAJOR > 3 || GLFW_VERSION_MINOR >= 4
     const bool on_wayland = (glfwGetPlatform() == GLFW_PLATFORM_WAYLAND);
-    WGPUSurfaceSourceXlibWindow     x11 = {};
     WGPUSurfaceSourceWaylandSurface wl  = {};
+#else
+    const bool on_wayland = false;
+#endif
+    WGPUSurfaceSourceXlibWindow     x11 = {};
     if (on_wayland) {
+#if GLFW_VERSION_MAJOR > 3 || GLFW_VERSION_MINOR >= 4
         wl.chain.sType = WGPUSType_SurfaceSourceWaylandSurface;
         wl.display     = glfwGetWaylandDisplay();
         wl.surface     = glfwGetWaylandWindow(win);
         surfDesc.nextInChain = &wl.chain;
+#endif
     } else {
         x11.chain.sType = WGPUSType_SurfaceSourceXlibWindow;
         x11.display     = glfwGetX11Display();

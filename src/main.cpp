@@ -666,14 +666,18 @@ int main(int argc, char* argv[]) {
     hwnd_src.hwnd        = glfwGetWin32Window(window);
     sd.nextInChain = &hwnd_src.chain;
   #else
+    // glfwGetPlatform is GLFW 3.4+; a distro 3.3 (Ubuntu/Mint 24.04) is X11-only.
     WGPUSurfaceSourceXlibWindow     x11 = {};
+  #if GLFW_VERSION_MAJOR > 3 || GLFW_VERSION_MINOR >= 4
     WGPUSurfaceSourceWaylandSurface wl  = {};
     if (glfwGetPlatform() == GLFW_PLATFORM_WAYLAND) {
         wl.chain.sType = WGPUSType_SurfaceSourceWaylandSurface;
         wl.display     = glfwGetWaylandDisplay();
         wl.surface     = glfwGetWaylandWindow(window);
         sd.nextInChain = &wl.chain;
-    } else {
+    } else
+  #endif
+    {
         x11.chain.sType = WGPUSType_SurfaceSourceXlibWindow;
         x11.display     = glfwGetX11Display();
         x11.window      = (uint64_t)glfwGetX11Window(window);
@@ -685,9 +689,11 @@ int main(int argc, char* argv[]) {
     if (!g_surface) { std::fprintf(stderr, "createSurface failed\n"); return 1; }
 #if defined(_WIN32)
     std::printf("[win] surface created (Win32)\n");
-#elif !defined(__EMSCRIPTEN__)
+#elif !defined(__EMSCRIPTEN__) && (GLFW_VERSION_MAJOR > 3 || GLFW_VERSION_MINOR >= 4)
     std::printf("[win] surface created (%s)\n",
                 glfwGetPlatform() == GLFW_PLATFORM_WAYLAND ? "Wayland" : "X11");
+#elif !defined(__EMSCRIPTEN__)
+    std::printf("[win] surface created (X11)\n");
 #endif
 
     AdapterResult ar;
