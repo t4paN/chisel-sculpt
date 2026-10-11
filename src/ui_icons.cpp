@@ -67,6 +67,8 @@ const IconDef kIcons[(int)Icon::Count] = {
     /* CmdExport    */ {{P("M12 15V3M7 8l5-5 5 5"), P("M5 13v7h14v-7")}, 2},
     /* CmdMerge     */ {{P("M8.5 7a5 5 0 1 0 0 10c1.5 0 2.5-.8 3.5-1.6 1 .8 2 1.6 3.5 1.6"
                            "a5 5 0 1 0 0-10c-1.5 0-2.5.8-3.5 1.6C11 7.8 10 7 8.5 7z")}, 1},
+    /* UiFullscreen    */ {{P("M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5")}, 1},
+    /* UiFullscreenExit*/ {{P("M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5")}, 1},
 };
 
 // ---- Minimal SVG path interpreter -------------------------------------------
@@ -253,7 +255,7 @@ void draw_icon(ImDrawList* dl, Icon icon, ImVec2 center, float size, ImU32 col, 
 }
 
 // ---- Pixel set (the DOS skin) ------------------------------------------------
-// The same 27 icons as 16x16 one-bit art, from the handoff's cga-pixel/icons
+// The same 29 icons as 16x16 one-bit art, from the handoff's cga-pixel/icons
 // (pixel_icons.json, converted to row masks: bit 15 = leftmost pixel). Mirror X,
 // Smooth and Merge were hand-drawn there; Inflate is redrawn here to match the
 // vector set (rasterised from the same two circles).
@@ -286,6 +288,8 @@ const unsigned short kPixel[(int)Icon::Count][16] = {
     /* cmd-open        */ {0x0000,0x0000,0x1C00,0x7E00,0x63FC,0x61FE,0x6006,0x6006,0x6006,0x6006,0x6006,0x6006,0x7FFE,0x3FFC,0x0000,0x0000},
     /* cmd-export      */ {0x0000,0x0180,0x03C0,0x07E0,0x0FF0,0x0DB0,0x0180,0x0180,0x1188,0x318C,0x318C,0x300C,0x3FFC,0x1FF8,0x0000,0x0000},
     /* cmd-merge       */ {0x0000,0x0000,0x0000,0x0420,0x1FF8,0x3BDC,0x6006,0x6006,0x6006,0x6006,0x3BDC,0x1FF8,0x0420,0x0000,0x0000,0x0000},
+    /* ui-fullscreen   */ {0x0000,0x0000,0x3C3C,0x3C3C,0x300C,0x300C,0x0000,0x0000,0x0000,0x0000,0x300C,0x300C,0x3C3C,0x3C3C,0x0000,0x0000},   // drawn here: corners out
+    /* ui-fs-exit      */ {0x0000,0x0000,0x0C30,0x0C30,0x3C3C,0x3C3C,0x0000,0x0000,0x0000,0x0000,0x3C3C,0x3C3C,0x0C30,0x0C30,0x0000,0x0000},   // drawn here: corners in
 };
 } // namespace
 

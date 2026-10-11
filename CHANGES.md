@@ -2,6 +2,21 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-12 — Fullscreen button on the web; canvas fits mobile Chrome (branch `android-controls`)
+
+*Built GL and web. The bottom-bar fix was confirmed by the user on the phone; the
+fullscreen button in its final spot was committed before a phone test.*
+
+- A fullscreen button sits just before the burger in every skin (Modern/DOS top bar,
+  bottom of the 2000s column, Classic corner island), web only. It and Tab now do real
+  browser fullscreen (`requestFullscreen`, Android nav bar hidden); the web Tab used to
+  toggle a window decoration the browser ignores. The icon reads the browser's state
+  every frame, so leaving via Esc or Android's back gesture flips it back. New
+  `UiFullscreen`/`UiFullscreenExit` icons, vector and 16x16 DOS pixel art.
+- The canvas is `100dvh` tall, not `100vh`. Mobile Chrome's 100vh is the height with
+  the address bar retracted, so while the bar showed the canvas overran the screen and
+  the bottom panels sat under Android's back/home bar.
+
 ## 2026-10-12 — Touch controls for phones: pinch zoom, two-finger pan (branch `android-controls`)
 
 *Built GL and web; all of it tested by the user on a Moto g84 (Chrome, 1.3M tris).*

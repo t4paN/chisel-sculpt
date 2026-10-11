@@ -8,8 +8,12 @@
     html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #1a1a1a; }
     /* Full-window canvas. The CSS size (100vw x 100vh) is authoritative — the app
        reads clientWidth/clientHeight each frame and sets the WebGPU surface + depth
-       backing to match (dpr=1), so color/depth attachments never diverge. */
-    #canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block;
+       backing to match (dpr=1), so color/depth attachments never diverge.
+       Height is 100dvh, not 100vh: on mobile Chrome 100vh is the height with the
+       address bar RETRACTED, so while the bar shows the canvas ran that much past the
+       visible bottom and the bottom UI sat under Android's back/home bar. dvh tracks
+       the bar; the 100vh line is the fallback for browsers without it. */
+    #canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; height: 100dvh; display: block;
               border: 0; outline: none; background: #1a1a1a; touch-action: none; }
     #boot { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
             color: #787878; font-family: system-ui, sans-serif; font-size: 14px; pointer-events: none; }

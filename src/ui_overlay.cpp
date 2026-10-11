@@ -715,6 +715,50 @@ static bool info_button(float size, bool open) {
     return clicked;
 }
 
+#ifdef __EMSCRIPTEN__
+// Fullscreen button: four corner brackets, pointing out to enter and in to leave. Web
+// only — a phone has no Tab key, and a browser tab has no other way to shed its
+// address bar. Same squircle as its neighbours. Returns true on click.
+static bool fullscreen_button(float size, bool is_fs) {
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 pos = ImGui::GetCursorScreenPos();
+
+    ImGui::PushID("FullscreenButton");
+    bool clicked = ImGui::InvisibleButton("fs", ImVec2(size, size));
+    bool hovered = ImGui::IsItemHovered();
+    bool active  = ImGui::IsItemActive();
+    if (hovered) ImGui::SetTooltip(is_fs ? "Exit fullscreen" : "Fullscreen");
+
+    ImU32 bg;
+    if (active)       bg = ImGui::GetColorU32(ImVec4(0.45f, 0.30f, 0.60f, 1.0f));
+    else if (hovered) bg = ImGui::GetColorU32(col_btn_hover);
+    else              bg = ImGui::GetColorU32(col_btn);
+    float rounding = size * 0.28f;
+    dl->AddRectFilled(ImVec2(pos.x + 2, pos.y + 2), ImVec2(pos.x + size + 2, pos.y + size + 2),
+                      IM_COL32(0, 0, 0, 80), rounding);
+    dl->AddRectFilled(pos, ImVec2(pos.x + size, pos.y + size), bg, rounding);
+
+    // Each corner is an L whose elbow sits at the box corner (enter) or pulled in
+    // toward the centre with the arms reaching back out (exit).
+    ImU32 col = ImGui::GetColorU32(col_text);
+    float cx = pos.x + size * 0.5f, cy = pos.y + size * 0.5f;
+    float h = size * 0.27f;      // half-extent of the bracket box
+    float arm = size * 0.13f;
+    for (int sx = -1; sx <= 1; sx += 2)
+        for (int sy = -1; sy <= 1; sy += 2) {
+            float ex = cx + sx * h, ey = cy + sy * h;              // box corner
+            float ax = is_fs ?  sx * arm : -sx * arm;              // arm directions
+            float ay = is_fs ?  sy * arm : -sy * arm;
+            if (is_fs) { ex -= sx * arm; ey -= sy * arm; }         // elbow pulled in
+            ImVec2 pts[3] = { ImVec2(ex + ax, ey), ImVec2(ex, ey), ImVec2(ex, ey + ay) };
+            dl->AddPolyline(pts, 3, col, 0, 1.8f);
+        }
+
+    ImGui::PopID();
+    return clicked;
+}
+#endif
+
 // One "KEY   what it does" line of the shortcut card. The key column is set in a
 // monospaced face (ProggyClean in the classic skin, Plex Mono in the modern one),
 // so a %-9s pad is all the column alignment this needs — no table, no per-cell sizing.
@@ -1169,6 +1213,13 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
             ImGui::OpenPopup("##helppopup");
         }
         ImGui::SameLine();
+#ifdef __EMSCRIPTEN__
+        // Between (i) and the burger: in the island's leftmost slot it couldn't be
+        // seen on a portrait phone (likely covered by the top toolbar).
+        if (fullscreen_button(burger, input.is_fullscreen))
+            input.fullscreen_toggle_requested = true;
+        ImGui::SameLine();
+#endif
         if (hamburger_button(burger, ImGui::IsPopupOpen("##burgermenu")))
             ImGui::OpenPopup("##burgermenu");
 

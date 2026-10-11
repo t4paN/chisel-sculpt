@@ -1431,15 +1431,26 @@ int main(int argc, char* argv[]) {
                 input.is_fullscreen = false;
             }
 #else
-            if (!input.is_fullscreen) {
-                glfwSetWindowAttrib(window, GLFW_DECORATED, GLFW_FALSE);
-                input.is_fullscreen = true;
-            } else {
-                glfwSetWindowAttrib(window, GLFW_DECORATED, GLFW_TRUE);
-                input.is_fullscreen = false;
-            }
+            // Browser fullscreen of the whole page (the canvas is position:fixed at
+            // 100vw/100vh, so it follows; win_w/h re-read the size next frame).
+            // navigationUI 'hide' also drops Android's nav bar. Must run with the
+            // tap's user activation still live — it is: Chrome keeps it ~5 s, and
+            // this runs on the frame after the click or keypress.
+            EM_ASM({
+                if (document.fullscreenElement) {
+                    document.exitFullscreen();
+                } else if (document.documentElement.requestFullscreen) {
+                    document.documentElement.requestFullscreen({ navigationUI: 'hide' })
+                        .catch(function(e) { console.warn('[fullscreen] ' + e.message); });
+                }
+            });
 #endif
         }
+#ifdef __EMSCRIPTEN__
+        // The browser owns this state: Esc, Android's back gesture or a refused
+        // request all change it without us. Read it back every frame for the icon.
+        input.is_fullscreen = EM_ASM_INT({ return document.fullscreenElement ? 1 : 0; }) != 0;
+#endif
 
         // (win_w / win_h resolved and the surface reconfigured at the top of the frame,
         //  before glfwPollEvents — see the note there.)
