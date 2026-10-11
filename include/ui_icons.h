@@ -13,6 +13,7 @@ enum class Icon {
     UiShortcuts, UiMenu,
     CmdUndo, CmdRedo, CmdLevelDown, CmdLevelUp, CmdSave, CmdSaveCopy, CmdOpen,
     CmdExport, CmdMerge,
+    UiFullscreen, UiFullscreenExit,   // web only (a browser tab's one way to drop its bars)
     Count
 };
 

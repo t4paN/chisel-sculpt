@@ -1238,6 +1238,16 @@ void command_panel(InputState& input, int win_w, int win_h, MultiresInfo mres, c
         input.help_seen = true;
         ImGui::OpenPopup("##helppopup");
     }
+#ifdef __EMSCRIPTEN__
+    o.on = false;
+    o.tip = input.is_fullscreen ? "Exit fullscreen" : "Fullscreen";
+    o.key = input.key_label(KeyAction::FULLSCREEN);
+    if (icon_button("cFull", input.is_fullscreen ? Icon::UiFullscreenExit : Icon::UiFullscreen,
+                    kBarBtn, o))
+        input.fullscreen_toggle_requested = true;
+    o.key = nullptr;
+    ImGui::SameLine();
+#endif
     o.on = ImGui::IsPopupOpen("##burgermenu");
     o.tip = "Menu";
     if (icon_button("cMenu", Icon::UiMenu, kBarBtn, o)) ImGui::OpenPopup("##burgermenu");
@@ -2154,6 +2164,12 @@ void y2k_right(InputState& in, int W, int H, MultiresInfo mres) {
         {"##yExp",  "Export", "Export", in.key_label(KeyAction::EXPORT), Icon::CmdExport, false},
         {"##yKeys", "Keys", "Shortcuts", nullptr, Icon::UiShortcuts, true},
         {"##yMenu", "Menu", "Menu", nullptr, Icon::UiMenu, false},
+#ifdef __EMSCRIPTEN__
+        // Last rather than before Menu: the switch below and menu_y key on indices.
+        {"##yFull", "Full", in.is_fullscreen ? "Exit fullscreen" : "Fullscreen",
+                    in.key_label(KeyAction::FULLSCREEN),
+                    in.is_fullscreen ? Icon::UiFullscreenExit : Icon::UiFullscreen, false},
+#endif
     };
     const int n = (int)(sizeof cmds / sizeof cmds[0]);
     int nsep = 0;
@@ -2198,6 +2214,7 @@ void y2k_right(InputState& in, int W, int H, MultiresInfo mres) {
                 case 10: in.export_dialog_active = true; break;
                 case 11: ImGui::OpenPopup("##helppopup"); break;
                 case 12: ImGui::OpenPopup("##burgermenu"); break;
+                case 13: in.fullscreen_toggle_requested = true; break;
             }
         }
         y += bh + 4.0f;
