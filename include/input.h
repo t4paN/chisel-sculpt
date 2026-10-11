@@ -196,6 +196,28 @@ struct InputState {
     // swallow that click instead of laying down a stray dab or starting an orbit.
     bool             help_popup_open;
 
+    // Two-finger touch (web on phones/tablets): pinch zooms, the fingers' midpoint
+    // pans. Emscripten's GLFW turns the FIRST finger into a left click, so by the time
+    // the second one lands the first has already started a stroke or an orbit. While
+    // touch_gesture is set the left button is ignored entirely, from the moment the
+    // second finger lands until every finger is up — the leftover finger must not
+    // start a stroke of its own. Fed by chisel_touch_count / chisel_touch_pinch.
+    bool  touch_gesture = false;
+    int   touch_count   = 0;
+    // Set when a gesture begins soon enough after the first finger that whatever it
+    // started was a stub, not intent: main.cpp undoes the stroke (if it committed
+    // anything) or puts the camera back (orbit). The drag mode it cancelled rides
+    // along, since the callback has already cleared drag_mode by the time main runs.
+    bool  touch_revert_requested = false;
+    int   touch_cancelled_drag   = 0;   // (int)DragMode
+    float touch_zoom  = 1.0f;           // accumulated finger-distance ratio, >1 = spread
+    float touch_pan_x = 0.0f, touch_pan_y = 0.0f;   // CSS px, midpoint motion
+    // A finger has no hover, so the press arrives before any frame has looked at what
+    // is under it: the SCULPT-vs-ORBIT latch would read on_model from wherever the LAST
+    // finger lifted. Set when a single finger lands; main.cpp re-reads the plane cache
+    // at the press point on the next frame and re-latches before anything moves.
+    bool  touch_relatch = false;
+
     // Live shortcut table (see KeyAction). Seeded with the factory bindings by the
     // constructor; settings.cpp persists only the ones that differ from those.
     KeyBind keybinds[(int)KeyAction::COUNT];

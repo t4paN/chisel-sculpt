@@ -1081,6 +1081,10 @@ int main(int argc, char* argv[]) {
     // each use so a mid-frame selection change targets the right stack.
     AppState app_state = AppState::IDLE;
     InsertController insert_ctrl(scene, renderer);
+    // Two-finger take-back (see InputState::touch_revert_requested).
+    Camera   camera_at_press;
+    bool     touch_undo_on_commit   = false;
+    uint64_t pushes_at_stroke_start = 0;
 
     std::string default_browse_path = ".";
     {
@@ -1452,10 +1456,34 @@ int main(int argc, char* argv[]) {
         // the averaged normal and the cursor "slides along" the form. When the
         // full circle is off the mesh we target face-camera. A per-frame LERP
         // smooths the transition for a magnetic feel.
+        // Touch press: correct the SCULPT/ORBIT latch from what is actually under the
+        // finger (see InputState::touch_relatch). Runs before camera_moving and the
+        // IDLE→SCULPTING transition, so the wrong latch never moves anything. Waits
+        // while the emulated press hasn't arrived yet; a gesture or lift clears it.
+        if (input.touch_relatch && (input.mouse1_down || input.touch_gesture)) {
+            input.touch_relatch = false;
+            int px = (int)input.mouse_x;
+            int py = (int)input.mouse_y;
+            bool om;
+            if (!input.touch_gesture && !input.alt_held
+                && input.interaction_mode == InputState::InteractionMode::EDIT
+                && (input.drag_mode == InputState::DragMode::SCULPT
+                    || input.drag_mode == InputState::DragMode::ORBIT)
+                && px >= 0 && px < win_w && py >= 0 && py < win_h
+                && sample_on_model(renderer, px, py, win_h, &om)) {
+                input.on_model = om;
+                input.drag_mode = om ? InputState::DragMode::SCULPT
+                                     : InputState::DragMode::ORBIT;
+            }
+        }
+
         bool camera_moving = input.drag_mode == InputState::DragMode::ORBIT
                           || input.drag_mode == InputState::DragMode::PAN
                           || input.drag_mode == InputState::DragMode::ZOOM
-                          || input.mouse2_down || input.mouse3_down;
+                          || input.mouse2_down || input.mouse3_down
+                          // Pinch/pan moves the camera with drag_mode NONE; without
+                          // this, every gesture frame paid a full extra MRT pass.
+                          || input.touch_gesture;
 
         // Refresh screen buffers whenever idle and dirty. The menu counts as not-idle:
         // the FOV slider dirties these every frame it moves, and unlike an orbit drag
@@ -1515,6 +1543,24 @@ int main(int argc, char* argv[]) {
                 camera.zoom(scroll);
                 screen_buffers_dirty = true;
             }
+        }
+
+        // Pinch + two-finger pan. Distance divides by the finger ratio directly (not
+        // through zoom()'s 10%-per-notch step) so the model stays stuck to the fingers.
+        // Same clamp as zoom(). Pan is 1:1 too: the view spans 2*half_height() world
+        // units over win_h pixels, so that is one pixel of finger travel. Camera::pan
+        // runs at a fixed mouse rate of half_height()*0.0048284 per pixel instead —
+        // fine for a middle-drag, but about twice the finger on a phone-sized view,
+        // so the model slid away from under the fingers. Rescale into its units.
+        if (input.touch_zoom != 1.0f || input.touch_pan_x != 0.0f || input.touch_pan_y != 0.0f) {
+            if (input.touch_zoom > 0.0f)
+                camera.distance = std::max(0.05f, std::min(200.0f, camera.distance / input.touch_zoom));
+            float to_pan_units = (2.0f / (float)std::max(1, win_h)) / 0.0048284f;
+            camera.pan(input.touch_pan_x * to_pan_units, input.touch_pan_y * to_pan_units,
+                       win_w, win_h);
+            input.touch_zoom = 1.0f;
+            input.touch_pan_x = input.touch_pan_y = 0.0f;
+            screen_buffers_dirty = true;
         }
 
         // Debug: print multires stack state (F12)
@@ -2177,6 +2223,23 @@ int main(int argc, char* argv[]) {
         float dx = (float)(input.mouse_x - input.prev_mouse_x);
         float dy = (float)(input.mouse_y - input.prev_mouse_y);
 
+        // Two-finger touch landed right after the first finger: what that finger
+        // started was a stub of the pinch, not a stroke. An orbit is put back here; a
+        // stroke still has to finish committing (drag_mode is already NONE, so the
+        // pen-up path below runs), and is undone from the commit.
+        if (input.mouse1_just_pressed) camera_at_press = camera;
+        if (input.touch_revert_requested) {
+            input.touch_revert_requested = false;
+            auto was = (InputState::DragMode)input.touch_cancelled_drag;
+            if (was == InputState::DragMode::ORBIT) {
+                camera.yaw   = camera_at_press.yaw;
+                camera.pitch = camera_at_press.pitch;
+                screen_buffers_dirty = true;
+            } else if (was == InputState::DragMode::SCULPT && app_state == AppState::SCULPTING) {
+                touch_undo_on_commit = true;
+            }
+        }
+
         // ---- State transitions ----
 
         // SELECT mode: intercept sculpt drag for mesh picking or object move
@@ -2311,6 +2374,7 @@ int main(int argc, char* argv[]) {
             brush_stroke.walk_x = (float)input.mouse_x;
             brush_stroke.walk_y = (float)input.mouse_y;
             brush_stroke.walk_carry = 0.0f;
+            pushes_at_stroke_start = UndoStack::global_pushes;
             app_state = AppState::SCULPTING;
         }
 
@@ -2335,6 +2399,13 @@ int main(int argc, char* argv[]) {
                                       input.autosmooth, had_update)) {
                 print_undo_top("stroke-commit");
                 g_path_stats.report();
+                // Only if this stroke pushed an entry: a stub that never laid a dab
+                // commits nothing, and a blind undo would eat the stroke BEFORE it.
+                if (touch_undo_on_commit) {
+                    touch_undo_on_commit = false;
+                    if (UndoStack::global_pushes > pushes_at_stroke_start)
+                        input.undo_requested = true;
+                }
                 if (had_update)
                     renderer.update_screen_positions(*mesh);
                 screen_buffers_dirty = true;
@@ -4396,7 +4467,74 @@ int main(int argc, char* argv[]) {
         // the edge wrap (input.cpp), which offsets it either way.
         var lx = 0;   // (separate statements: a bare comma would split EM_ASM's
         var ly = 0;   //  macro arguments)
+
+        // Two-finger touch: pinch zooms, midpoint pans (applied in the main loop).
+        // Only the first finger reaches the app as a click (Emscripten's GLFW), so
+        // every finger is tracked here from pointer events. Registered BEFORE feed so
+        // the gesture flag is already up when feed sees the second finger. Per-axis
+        // maps, not {x, y} objects: same EM_ASM comma rule as above.
+        var tpx = {};
+        var tpy = {};
+        var tn = 0;
+        var tFirst = 0;       // when the first finger of this touch landed
+        var tGesture = false;
+        var tDist = 0;
+        var tMx = 0;
+        var tMy = 0;
+        // A second finger this soon after the first means the first one's stroke or
+        // orbit was a stub of the pinch, and the app takes it back. Later than this,
+        // whatever the first finger did is kept.
+        var TAKE_BACK_MS = 300;
+        var tPair = function() {
+            var k = Object.keys(tpx);
+            var dx = tpx[k[0]] - tpx[k[1]];
+            var dy = tpy[k[0]] - tpy[k[1]];
+            tDist = Math.sqrt(dx * dx + dy * dy);
+            tMx = (tpx[k[0]] + tpx[k[1]]) * 0.5;
+            tMy = (tpy[k[0]] + tpy[k[1]]) * 0.5;
+        };
+        c.addEventListener('pointerdown', function(e) {
+            if (e.pointerType !== 'touch') return;
+            if (tn === 0) tFirst = performance.now();
+            tpx[e.pointerId] = e.clientX;
+            tpy[e.pointerId] = e.clientY;
+            tn++;
+            var revert = 0;
+            if (tn >= 2 && !tGesture) {
+                tGesture = true;
+                revert = (performance.now() - tFirst < TAKE_BACK_MS) ? 1 : 0;
+            }
+            if (tn >= 2) tPair();   // re-baseline: a new finger is not a pinch step
+            Module._chisel_touch_count(tn, revert);
+        });
+        c.addEventListener('pointermove', function(e) {
+            if (e.pointerType !== 'touch' || !(e.pointerId in tpx)) return;
+            tpx[e.pointerId] = e.clientX;
+            tpy[e.pointerId] = e.clientY;
+            if (!tGesture || tn < 2) return;
+            var d0 = tDist;
+            var mx0 = tMx;
+            var my0 = tMy;
+            tPair();
+            if (d0 > 1 && tDist > 1)
+                Module._chisel_touch_pinch(tDist / d0, tMx - mx0, tMy - my0);
+        });
+        var tUp = function(e) {
+            if (e.pointerType !== 'touch' || !(e.pointerId in tpx)) return;
+            delete tpx[e.pointerId];
+            delete tpy[e.pointerId];
+            tn--;
+            if (tn >= 2) tPair();
+            if (tn === 0) tGesture = false;
+            Module._chisel_touch_count(tn, 0);
+        };
+        c.addEventListener('pointerup', tUp);
+        c.addEventListener('pointercancel', tUp);
+
         var feed = function(e) {
+            // During a gesture no finger drives the cursor, and outside one only the
+            // first finger does (it is the one GLFW clicks with).
+            if (e.pointerType === 'touch' && (tGesture || !e.isPrimary)) return;
             var r = c.getBoundingClientRect();
             var locked = document.pointerLockElement === c;
             // Browsers deliver one pointermove per frame; the positions merged into it

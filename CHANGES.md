@@ -2,6 +2,25 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-12 — Touch controls for phones: pinch zoom, two-finger pan (branch `android-controls`)
+
+*Built GL and web; all of it tested by the user on a Moto g84 (Chrome, 1.3M tris).*
+
+- Two fingers pinch to zoom and slide to pan, as one gesture: a pinch can turn into a
+  pan mid-motion. Both are 1:1, so the model stays under the fingers. Pan is rescaled
+  from the middle-drag rate, which ran about twice the finger on a phone-sized view.
+- Emscripten's GLFW turns only the first finger into a click, so that finger has
+  already started a stroke or orbit when the second lands. If the second lands within
+  300 ms, the stub is taken back: the orbit is undone, and the stroke is undone only if
+  it actually pushed an entry, so the stroke before it is never eaten. Until every
+  finger lifts, the leftover finger does nothing.
+- A gesture counts as camera movement, so the screen buffers aren't re-rendered every
+  frame during it (it cost a full extra MRT pass per frame and made pan crawl).
+- A finger has no hover, so stroke-vs-orbit was decided by where the last finger
+  lifted. A single touch now re-reads the plane cache at the press point on its first
+  frame and re-latches before anything moves.
+- Desktop mouse and pen input is unchanged.
+
 ## 2026-10-08 — Edge wrap puts the pointer back where the ring is (Wayland)
 
 *Built GL, native WebGPU and web; tested by the user on native Linux (KWin 6.7, mouse).*

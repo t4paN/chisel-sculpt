@@ -839,6 +839,38 @@ extern "C" EMSCRIPTEN_KEEPALIVE void chisel_path_sample(double x, double y) {
     g_input->push_path(x + g_wrap_off_x, y + g_wrap_off_y);
 }
 
+// Fingers on the canvas, from the shell's touch tracker (main.cpp). `revert` is set
+// on the call where a second finger lands soon after the first — see
+// InputState::touch_revert_requested. The gesture ends once no finger is down AND
+// GLFW has delivered the first finger's emulated release; whichever arrives last
+// clears it (pointer events reach the shell before GLFW sees the touchend).
+extern "C" EMSCRIPTEN_KEEPALIVE void chisel_touch_count(int n, int revert) {
+    if (!g_input) return;
+    g_input->touch_count = n;
+    if (n == 1 && !g_input->touch_gesture) g_input->touch_relatch = true;
+    if (n == 0) g_input->touch_relatch = false;
+    if (n >= 2 && !g_input->touch_gesture) {
+        g_input->touch_gesture = true;
+        g_input->touch_revert_requested = revert != 0;
+        g_input->touch_cancelled_drag = (int)g_input->drag_mode;
+        g_input->drag_mode = InputState::DragMode::NONE;   // ends the stroke / orbit
+        g_input->mouse1_just_pressed = false;
+        g_input->touch_zoom = 1.0f;
+        g_input->touch_pan_x = g_input->touch_pan_y = 0.0f;
+    }
+    if (n == 0 && !g_input->mouse1_down)
+        g_input->touch_gesture = false;
+}
+
+// Per two-finger move: distance ratio since the last call, and midpoint motion.
+// Accumulated here, applied once per frame by main.cpp.
+extern "C" EMSCRIPTEN_KEEPALIVE void chisel_touch_pinch(double scale, double dx, double dy) {
+    if (!g_input || !g_input->touch_gesture) return;
+    g_input->touch_zoom  *= (float)scale;
+    g_input->touch_pan_x += (float)dx;
+    g_input->touch_pan_y += (float)dy;
+}
+
 // ImGui_ImplGlfw installs its own cursor-pos callback (chaining to ours) and would
 // keep feeding ImGui the desynced GLFW coords the app already ignores. Take the
 // callback back after ImGui init so GLFW motion reaches neither consumer;
@@ -873,7 +905,13 @@ static void mouse_button_callback(GLFWwindow* w, int button, int action, int mod
     g_input->ctrl_held = (mods & GLFW_MOD_CONTROL) != 0;
     g_input->alt_held = (mods & GLFW_MOD_ALT) != 0;
 
-    if (button == GLFW_MOUSE_BUTTON_LEFT) {
+    // A two-finger gesture owns the touch until every finger is up: track the
+    // emulated button so the state stays truthful, but latch nothing from it.
+    if (button == GLFW_MOUSE_BUTTON_LEFT && g_input->touch_gesture) {
+        g_input->mouse1_down = (action == GLFW_PRESS);
+        if (action == GLFW_RELEASE && g_input->touch_count == 0)
+            g_input->touch_gesture = false;
+    } else if (button == GLFW_MOUSE_BUTTON_LEFT) {
         bool was_down = g_input->mouse1_down;
         g_input->mouse1_down = (action == GLFW_PRESS);
         if (action == GLFW_PRESS && !was_down) {
