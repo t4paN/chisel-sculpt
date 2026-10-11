@@ -27,6 +27,30 @@ static inline float max_corner_weight(const Vec3& a, const Vec3& b) {
     return (denom > 0.0f) ? 1.0f / denom : 0.0f;
 }
 
+// Sliver guard. Max weighting scales a face's say by ~1/(edge length)^2, so on bad
+// geometry (a fold where verts crossed over, crushing triangles) one tiny, wrong-facing
+// sliver can outvote the whole ring and flip the vertex's shading — area weighting
+// gave that sliver almost no say, which is why pre-v0.2.10 builds hid it. Each vertex
+// sums both; where they agree (clean meshes, the UV sphere included, differ by a few
+// degrees) Max wins outright, and as they diverge past 15 deg the result blends to the
+// area normal, fully by 35 deg. A size floor on edges can't do this: any floor that
+// leaves the UV sphere's legit pole edges alone still lets a crushed sliver carry ~25x
+// a normal face. MUST match the WGSL/GLSL compute_normals twins.
+static inline Vec3 guard_normal(const Vec3& max_sum, const Vec3& area_sum) {
+    Vec3 na = area_sum.normalized();
+    Vec3 nm = max_sum.normalized();
+    if (nm.dot(nm) == 0.0f) return na;
+    const float kFull = 0.96592583f;   // cos 15 deg: pure Max at or above
+    const float kNone = 0.81915204f;   // cos 35 deg: pure area at or below
+    float t = (nm.dot(na) - kNone) / (kFull - kNone);
+    t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
+    t = t * t * (3.0f - 2.0f * t);     // smoothstep: no visible seam where it kicks in
+    return (na * (1.0f - t) + nm * t).normalized();
+}
+// Per-vertex area-weighted sums for the guard, indexed v*3. Static like the partial
+// path's flag arrays: grows once, then no heap churn per stroke.
+static std::vector<float> g_area_sum;
+
 void Mesh::recompute_normals() {
     uint32_t vc = vertex_count();
     uint32_t tc = tri_count();
@@ -35,8 +59,12 @@ void Mesh::recompute_normals() {
     std::memset(norm_x.data(), 0, vc * sizeof(float));
     std::memset(norm_y.data(), 0, vc * sizeof(float));
     std::memset(norm_z.data(), 0, vc * sizeof(float));
+    if (g_area_sum.size() < (size_t)vc * 3) g_area_sum.resize((size_t)vc * 3);
+    std::memset(g_area_sum.data(), 0, (size_t)vc * 3 * sizeof(float));
+    float* as = g_area_sum.data();
 
-    // Accumulate face normals, Max-weighted per corner. cross(next-k, prev-k) is the
+    // Accumulate face normals, Max-weighted per corner (plus the plain area sum the
+    // sliver guard compares against). cross(next-k, prev-k) is the
     // SAME vector at all three corners (standard triangle identity), so one face
     // normal serves the whole triangle and only the weight differs.
     for (uint32_t t = 0; t < tc; t++) {
@@ -59,12 +87,15 @@ void Mesh::recompute_normals() {
         norm_x[i0] += fn.x*w0; norm_y[i0] += fn.y*w0; norm_z[i0] += fn.z*w0;
         norm_x[i1] += fn.x*w1; norm_y[i1] += fn.y*w1; norm_z[i1] += fn.z*w1;
         norm_x[i2] += fn.x*w2; norm_y[i2] += fn.y*w2; norm_z[i2] += fn.z*w2;
+        as[i0*3] += fn.x; as[i0*3+1] += fn.y; as[i0*3+2] += fn.z;
+        as[i1*3] += fn.x; as[i1*3+1] += fn.y; as[i1*3+2] += fn.z;
+        as[i2*3] += fn.x; as[i2*3+1] += fn.y; as[i2*3+2] += fn.z;
     }
 
-    // Normalize
+    // Normalize, through the sliver guard
     for (uint32_t i = 0; i < vc; i++) {
-        Vec3 n = {norm_x[i], norm_y[i], norm_z[i]};
-        n = n.normalized();
+        Vec3 n = guard_normal({norm_x[i], norm_y[i], norm_z[i]},
+                              {as[i*3], as[i*3+1], as[i*3+2]});
         norm_x[i] = n.x;
         norm_y[i] = n.y;
         norm_z[i] = n.z;
@@ -443,10 +474,13 @@ void Mesh::recompute_normals_partial(const std::vector<uint32_t>& dirty_verts,
     }
 
     // Zero normals for affected verts
+    if (g_area_sum.size() < (size_t)vc * 3) g_area_sum.resize((size_t)vc * 3);
+    float* as = g_area_sum.data();
     for (uint32_t v : affected_vert_list) {
         norm_x[v] = 0.0f;
         norm_y[v] = 0.0f;
         norm_z[v] = 0.0f;
+        as[v*3] = 0.0f; as[v*3+1] = 0.0f; as[v*3+2] = 0.0f;
     }
 
     // Collect all triangles touching affected verts (superset for boundary correctness)
@@ -480,21 +514,24 @@ void Mesh::recompute_normals_partial(const std::vector<uint32_t>& dirty_verts,
         if (vert_flag[i0]) {
             float w = max_corner_weight(e1, e2);
             norm_x[i0] += fn.x*w; norm_y[i0] += fn.y*w; norm_z[i0] += fn.z*w;
+            as[i0*3] += fn.x; as[i0*3+1] += fn.y; as[i0*3+2] += fn.z;
         }
         if (vert_flag[i1]) {
             float w = max_corner_weight(v2 - v1, v0 - v1);
             norm_x[i1] += fn.x*w; norm_y[i1] += fn.y*w; norm_z[i1] += fn.z*w;
+            as[i1*3] += fn.x; as[i1*3+1] += fn.y; as[i1*3+2] += fn.z;
         }
         if (vert_flag[i2]) {
             float w = max_corner_weight(v0 - v2, v1 - v2);
             norm_x[i2] += fn.x*w; norm_y[i2] += fn.y*w; norm_z[i2] += fn.z*w;
+            as[i2*3] += fn.x; as[i2*3+1] += fn.y; as[i2*3+2] += fn.z;
         }
     }
 
-    // Normalize
+    // Normalize, through the sliver guard
     for (uint32_t v : affected_vert_list) {
-        Vec3 n = {norm_x[v], norm_y[v], norm_z[v]};
-        n = n.normalized();
+        Vec3 n = guard_normal({norm_x[v], norm_y[v], norm_z[v]},
+                              {as[v*3], as[v*3+1], as[v*3+2]});
         norm_x[v] = n.x;
         norm_y[v] = n.y;
         norm_z[v] = n.z;
