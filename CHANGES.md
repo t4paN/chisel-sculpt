@@ -2,6 +2,28 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-11 — Folds shade cleanly again: Max normals get a sliver guard
+
+*Built GL, native WebGPU and web; GL and native WebGPU shaders compile clean. Tested by
+the user on the web build (Firefox) with `monstabrain_001`: folds that showed broken
+shading load clean. Not yet run through Chrome/Tint. On branch `normals-sliver-floor`.*
+
+- Since v0.2.10 vertex normals use Nelson Max weighting, which scales a face's say by
+  ~1/(edge length)^2. Where vertices cross over in a fold, the crushed slivers have tiny
+  edges, so one wrong-facing sliver could outvote a vertex's whole ring and flip its
+  shading. Area weighting (pre-v0.2.10) gave slivers almost no say, which hid bad
+  geometry. Each vertex now sums both in the same pass: where they agree (all clean
+  geometry, the UV sphere included) Max wins outright; past 15 deg of disagreement the
+  result smoothsteps to the area normal, fully by 35 deg.
+- A plain edge-length floor was considered and rejected: any floor that leaves the UV
+  sphere's legitimately short pole edges alone still lets a crushed sliver carry ~25x a
+  normal face's weight.
+- `cascade_normals` (the level-switch shader, WGSL + GLSL) was never moved to Max in
+  v0.2.10 and still area-weighted. So a level switch shaded the forgiving way and the
+  next stroke the strict way — which is why a Shift+D → Ctrl+D round trip seemed to fix
+  broken folds until you sculpted again. All six sites now match: `recompute_normals`,
+  `recompute_normals_partial`, and the `compute_normals` + `cascade_normals` shader pairs.
+
 ## 2026-10-10 — Idle frames are skipped: an untouched model costs almost nothing
 
 *Built GL, native WebGPU and web; measured by the user on the web build (Firefox,
