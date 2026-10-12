@@ -6,7 +6,7 @@ Short, chronological log of notable changes. Newest on top.
 
 *Built GL, native WebGPU and web; GL and native WebGPU shaders compile clean. Tested by
 the user on the web build (Firefox) with `monstabrain_001`: folds that showed broken
-shading load clean. Not yet run through Chrome/Tint. On branch `normals-sliver-floor`.*
+shading load clean. Chrome/Tint gate clean (desktop, 2026-10-12). Merged to main.*
 
 - Since v0.2.10 vertex normals use Nelson Max weighting, which scales a face's say by
   ~1/(edge length)^2. Where vertices cross over in a fold, the crushed slivers have tiny
@@ -28,7 +28,7 @@ shading load clean. Not yet run through Chrome/Tint. On branch `normals-sliver-f
 
 *Built GL, native WebGPU and web; measured by the user on the web build (Firefox,
 taptop). The "nothing freezes" checklist (springs, tooltips, held-key rotation, toasts,
-remesh progress) is still owed. On branch `idle-frame-skip`, not on main.*
+remesh progress) is still owed. Merged to main 2026-10-12.*
 
 - Chisel used to repaint the whole scene and UI on every screen refresh, even with
   nothing changing. Now each frame first asks whether anything happened: new input
