@@ -1364,6 +1364,7 @@ int main(int argc, char* argv[]) {
                 || input.remesh_requested || input.remesh_in_progress
                 || input.voxel_merge_requested || input.voxel_merge_in_progress
                 || input.drag_mode != InputState::DragMode::NONE
+                || input.touch_gesture
                 || input.slider_mode != InputState::SliderMode::NONE
                 || wrap_capture_active()
                 || input.notification_timer > 0.0f || input.mirror_unavailable_timer > 0.0f

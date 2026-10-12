@@ -839,6 +839,10 @@ extern "C" EMSCRIPTEN_KEEPALIVE void chisel_path_sample(double x, double y) {
     g_input->push_path(x + g_wrap_off_x, y + g_wrap_off_y);
 }
 
+// The four chisel_touch_* entry points below arrive from shell.html, outside GLFW and
+// ImGui's event queue, so each raises wake_requested or the idle frame skip in main.cpp
+// would sleep through a pinch, a modifier tap or a mode switch.
+
 // Fingers on the canvas, from the shell's touch tracker (main.cpp). `revert` is set
 // on the call where a second finger lands soon after the first — see
 // InputState::touch_revert_requested. The gesture ends once no finger is down AND
@@ -846,6 +850,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE void chisel_path_sample(double x, double y) {
 // clears it (pointer events reach the shell before GLFW sees the touchend).
 extern "C" EMSCRIPTEN_KEEPALIVE void chisel_touch_count(int n, int revert) {
     if (!g_input) return;
+    g_input->wake_requested = true;
     g_input->touch_count = n;
     if (n == 1 && !g_input->touch_gesture) g_input->touch_relatch = true;
     if (n == 0) g_input->touch_relatch = false;
@@ -866,6 +871,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE void chisel_touch_count(int n, int revert) {
 // canvas, so neither GLFW nor the finger tracker ever sees a thumb on them.
 extern "C" EMSCRIPTEN_KEEPALIVE void chisel_touch_mods(int ctrl, int shift) {
     if (!g_input) return;
+    g_input->wake_requested = true;
     g_input->touch_ctrl  = ctrl != 0;
     g_input->touch_shift = shift != 0;
     g_input->ctrl_held   = g_input->touch_ctrl;
@@ -874,13 +880,16 @@ extern "C" EMSCRIPTEN_KEEPALIVE void chisel_touch_mods(int ctrl, int shift) {
 
 // Touch mode: on at the first finger, off at the first real mouse move (shell.html).
 extern "C" EMSCRIPTEN_KEEPALIVE void chisel_touch_mode(int on) {
-    if (g_input) g_input->touch_mode = on != 0;
+    if (!g_input) return;
+    g_input->wake_requested = true;
+    g_input->touch_mode = on != 0;
 }
 
 // Per two-finger move: distance ratio since the last call, and midpoint motion.
 // Accumulated here, applied once per frame by main.cpp.
 extern "C" EMSCRIPTEN_KEEPALIVE void chisel_touch_pinch(double scale, double dx, double dy) {
     if (!g_input || !g_input->touch_gesture) return;
+    g_input->wake_requested = true;
     g_input->touch_zoom  *= (float)scale;
     g_input->touch_pan_x += (float)dx;
     g_input->touch_pan_y += (float)dy;
