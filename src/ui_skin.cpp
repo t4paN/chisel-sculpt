@@ -223,6 +223,14 @@ void spring_reset(ImGuiID id, float x) { Spring& s = g_springs[id]; s.x = x; s.v
 struct Material { float m, fill_a, rim, sheen; };
 Material g_mat{0.45f, 0.62f, 0.19f, 0.066f};
 
+// Touch-mode dock growth (see DockGrow below). While a dock is drawn, g_k scales
+// everything its widgets lay out, g_dock_live = false makes them swallow presses,
+// and g_dock_solid paints the panel opaque so a grown dock reads cleanly over the
+// docks it now covers. All three are back to 1 / true / false between docks.
+float g_k = 1.0f;
+bool g_dock_live = true;
+bool g_dock_solid = false;
+
 Material material_from(const InputState& in) {
     float m = std::max(0.0f, std::min(1.0f, in.ui_material / 100.0f));
     return Material{m, 0.32f + 0.66f * m, 0.07f + 0.22f * (1.0f - m), 0.12f * (1.0f - m)};
@@ -263,12 +271,18 @@ void panel_bg(ImDrawList* dl, ImVec2 a, ImVec2 b, float r) {
         dl->AddRectFilled(ImVec2(a.x - e, a.y - e + 6.0f), ImVec2(b.x + e, b.y + e + 6.0f),
                           IM_COL32(0, 0, 0, 13), r + e);
     }
-    if (ui_backdrop::available()) {
-        ImVec2 uv0, uv1;
-        ui_backdrop::uv_for(a, b, &uv0, &uv1);
-        dl->AddImageRounded(ui_backdrop::texture(), a, b, uv0, uv1, IM_COL32_WHITE, r);
+    if (g_dock_solid) {
+        // A grown dock: no glass. The blurred backdrop only holds the scene, not the
+        // docks beneath, so they'd show through the tint — fill it outright instead.
+        dl->AddRectFilled(a, b, IM_COL32(30, 30, 34, 255), r);
+    } else {
+        if (ui_backdrop::available()) {
+            ImVec2 uv0, uv1;
+            ui_backdrop::uv_for(a, b, &uv0, &uv1);
+            dl->AddImageRounded(ui_backdrop::texture(), a, b, uv0, uv1, IM_COL32_WHITE, r);
+        }
+        dl->AddRectFilled(a, b, IM_COL32(20, 20, 24, (int)(mt.fill_a * 255.0f + 0.5f)), r);
     }
-    dl->AddRectFilled(a, b, IM_COL32(20, 20, 24, (int)(mt.fill_a * 255.0f + 0.5f)), r);
     if (mt.sheen > 0.004f) {
         int v0 = dl->VtxBuffer.Size;
         dl->AddRectFilled(a, b, IM_COL32_WHITE, r);
@@ -314,6 +328,76 @@ bool begin_panel(const char* name, ImVec2 pos, ImVec2 pivot, ImVec2 pad, float g
     return open;
 }
 void end_panel() { ImGui::End(); ImGui::PopStyleVar(2); }
+
+// ---- Touch-mode dock growth ----------------------------------------------------
+// On a phone the docks are small for a finger, so in touch mode each one works like
+// the brush panel: the first tap only grows it (to kDockGrow, or as much as fits the
+// screen) and its buttons ignore that tap; once grown its buttons work; a tap
+// anywhere outside shrinks it again. A grown dock is opaque, sits on top of the
+// others, and holds the mouse so the closing tap never lands on the model as a dab.
+// Layout that hangs off a dock (the rail under the modes, the modifier buttons under
+// the rail) uses its REST size, so growing one dock never shoves the others around.
+//
+// Usage per dock:  dock_pre(d) → begin_panel(…, scaled by g_k) → dock_hit(d) →
+//                  widgets → dock_post(d) → end_panel()
+constexpr float kDockGrow = 2.0f;
+
+struct DockGrow {
+    bool big = false;      // grown
+    bool armed = false;    // the current press started on the grown dock: buttons live
+    float max_k = kDockGrow;
+    ImVec2 rest{0, 0};     // last size seen while not grown
+    int small_frames = 0;  // frames since it last shrank (auto-resize lags a frame)
+};
+
+void dock_pre(DockGrow& d, bool touch) {
+    if (!touch) d.big = d.armed = false;
+    float k = 1.0f;
+    if (d.big && d.rest.x > 0.0f) {
+        // As big as asked, but never past the screen's edges.
+        const ImVec2 disp = ImGui::GetIO().DisplaySize;
+        k = std::min({d.max_k, (disp.x - 2.0f * kEdge) / d.rest.x, (disp.y - 2.0f * kEdge) / d.rest.y});
+        k = std::max(1.0f, k);
+    }
+    g_k = k;
+    g_dock_solid = d.big;
+}
+
+// Right after begin_panel, before any widget: decide this press's fate.
+void dock_hit(DockGrow& d, bool touch) {
+    g_dock_live = true;
+    if (!touch) return;
+    const ImGuiIO& io = ImGui::GetIO();
+    // A press inside one of this dock's popups (the burger menu, the brush strip)
+    // isn't "outside": leave the dock as it is while one is open.
+    const bool popup = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId);
+    if (io.MouseClicked[0] && !popup) {
+        const bool over = ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+        const bool was = d.big;
+        if (over) { d.armed = d.big; d.big = true; }   // small: this tap only grows it
+        else      { d.big = d.armed = false; }
+        if (d.big != was) {
+            const ImVec2 p = ImGui::GetWindowPos(), s = ImGui::GetWindowSize();
+            std::printf("[dock] %s %s (was %.0f,%.0f %.0fx%.0f)\n", ImGui::GetCurrentWindow()->Name,
+                        d.big ? "grow" : "shrink", p.x, p.y, s.x, s.y);
+        }
+    }
+    g_dock_live = d.big && d.armed;
+    if (d.big) {
+        ImGui::SetNextFrameWantCaptureMouse(true);
+        // Over the docks it now covers — but never over an open popup (the menu,
+        // the brush strip), which ImGui keeps on top itself.
+        if (!popup) ImGui::BringWindowToDisplayFront(ImGui::GetCurrentWindow());
+    }
+}
+
+void dock_post(DockGrow& d) {
+    d.small_frames = d.big ? 0 : d.small_frames + 1;
+    if (d.small_frames > 2) d.rest = ImGui::GetWindowSize();
+    g_k = 1.0f;
+    g_dock_live = true;
+    g_dock_solid = false;
+}
 
 // ---- Tooltip -----------------------------------------------------------------
 enum class TipSide { Right, Below, Left };
@@ -408,11 +492,14 @@ struct BtnOpts {
 bool icon_button(const char* id, Icon icon, float size, const BtnOpts& o) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImVec2 pos = ImGui::GetCursorScreenPos();
+    size *= g_k;                               // a grown dock (touch mode)
+    const float ipx = o.icon_px * g_k;
     ImGui::PushID(id);
     if (!o.enabled) ImGui::BeginDisabled();
-    bool clicked = ImGui::InvisibleButton("##b", ImVec2(size, size));
-    bool hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
-    bool held    = ImGui::IsItemActive();
+    // A dock that's only growing this tap: laid out and drawn, but deaf.
+    bool clicked = ImGui::InvisibleButton("##b", ImVec2(size, size)) && g_dock_live;
+    bool hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled) && g_dock_live;
+    bool held    = ImGui::IsItemActive() && g_dock_live;
     ImGuiID sid  = ImGui::GetItemID();
     if (!o.enabled) ImGui::EndDisabled();
     ImGui::PopID();
@@ -421,7 +508,7 @@ bool icon_button(const char* id, Icon icon, float size, const BtnOpts& o) {
     ImVec2 c(pos.x + size * 0.5f, pos.y + size * 0.5f);
     float hs = size * 0.5f * s;
     ImVec2 a(c.x - hs, c.y - hs), b(c.x + hs, c.y + hs);
-    float r = (o.look == Look::Rail ? 11.0f : 10.0f) * s;
+    float r = (o.look == Look::Rail ? 11.0f : 10.0f) * g_k * s;
 
     if (g_dos) {
         // Solid CGA blocks: light cyan = active tool, light magenta = toggle on,
@@ -434,7 +521,7 @@ bool icon_button(const char* id, Icon icon, float size, const BtnOpts& o) {
         else if (hovered && o.enabled) bg = cga::dark_gray;
         if (bg) dl->AddRectFilled(ImVec2(pos.x, pos.y), ImVec2(pos.x + size, pos.y + size), bg);
         if (!o.enabled) icol = cga::dark_gray;
-        draw_pixel_icon(dl, icon, c, 2.0f, icol);
+        draw_pixel_icon(dl, icon, c, g_k > 1.0f ? 4.0f : 2.0f, icol);
         if (o.corner) {
             // 8 px is the only crisp size that fits a corner (16 would cover the icon),
             // so legibility comes from weight: white, drawn twice 1 px apart.
@@ -477,10 +564,10 @@ bool icon_button(const char* id, Icon icon, float size, const BtnOpts& o) {
                           ImDrawFlags_RoundCornersTop);
     }
     if (!o.enabled) icol = with_alpha(icol, 0.35f);
-    draw_icon(dl, icon, c, o.icon_px * s, icol);
+    draw_icon(dl, icon, c, ipx * s, icol);
     if (o.corner) {
-        ImVec2 ks = text_size(UiFont::MonoMedium, 11.0f, o.corner);
-        text_at(dl, UiFont::MonoMedium, 11.0f, ImVec2(b.x - 4.0f - ks.x, b.y - 3.0f - ks.y),
+        ImVec2 ks = text_size(UiFont::MonoMedium, 11.0f * g_k, o.corner);
+        text_at(dl, UiFont::MonoMedium, 11.0f * g_k, ImVec2(b.x - 4.0f * g_k - ks.x, b.y - 3.0f * g_k - ks.y),
                 with_alpha(icol, 0.9f), o.corner);
     }
     if (hovered && o.tip) tooltip(ImVec2(pos.x, pos.y), ImVec2(pos.x + size, pos.y + size),
@@ -519,11 +606,12 @@ bool chip(const char* label, bool on, float h = 30.0f) {
 }
 
 void vdivider(float h = 22.0f, float margin = 4.0f) {
+    if (g_dos) h = 28.0f;
+    h *= g_k; margin *= g_k;                  // a grown dock (touch mode)
     ImGui::SameLine(0.0f, margin);
     ImVec2 p = ImGui::GetCursorScreenPos();
-    float bh = kBarBtn;
+    float bh = kBarBtn * g_k;
     const float t = g_dos ? 2.0f : 1.0f;      // DOS rules are 2 px, like its frames
-    if (g_dos) h = 28.0f;
     ImGui::Dummy(ImVec2(t, bh));
     float x = std::floor(p.x) + t * 0.5f;
     ImGui::GetWindowDrawList()->AddLine(ImVec2(x, p.y + (bh - h) * 0.5f),
@@ -995,7 +1083,7 @@ bool touch_brush_picker(InputState& input, BtnOpts o, bool smooth_on, bool editi
     o.on = editing && cur >= 0; o.tip = nullptr; o.key = nullptr; o.corner = nullptr;
     o.icon_px = 30.0f;
     icon_button("tBrush", cur >= 0 ? kRailBrushes[cur].icon : Icon::BrushDraw, kTouchBtn, o);
-    if (ImGui::IsItemActivated()) {
+    if (ImGui::IsItemActivated() && g_dock_live) {
         if (state == BROWSE) {
             std::printf("[strip] button again -> close\n");
             state = CLOSED;           // tapping the button again closes the strip
@@ -1028,7 +1116,7 @@ bool touch_brush_picker(InputState& input, BtnOpts o, bool smooth_on, bool editi
         input.interaction_mode = InputState::InteractionMode::EDIT;
     };
 
-    const float top = bpos.y + kTouchBtn + 14.0f;
+    const float top = bpos.y + kTouchBtn * g_k + 14.0f;
     const float content_h = kRailBrushCount * kStripRow;
     const float h = std::max(kStripRow + 2.0f * kStripPad,
                              std::min(content_h + 2.0f * kStripPad, io.DisplaySize.y - kEdge - top));
@@ -1142,10 +1230,16 @@ void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
 
     // Modes — "what am I doing" — are their own horizontal dock under the file bar;
     // the brush rail hangs below it.
-    if (!begin_panel("##mModes", ImVec2(kEdge, g_file_bottom + 12.0f), ImVec2(0, 0), ImVec2(5, 5), 2.0f, 14.0f)) {
+    static DockGrow modes_dock, rail_dock;
+    rail_dock.max_k = 1.5f;   // the touch brush button is already 64 px
+    dock_pre(modes_dock, input.touch_mode);
+    if (!begin_panel("##mModes", ImVec2(kEdge, g_file_bottom + 12.0f), ImVec2(0, 0),
+                     ImVec2(5 * g_k, 5 * g_k), 2.0f * g_k, 14.0f * g_k)) {
+        dock_post(modes_dock);
         end_panel();
         return;
     }
+    dock_hit(modes_dock, input.touch_mode);
     BtnOpts o;
     o.look = Look::Rail; o.side = TipSide::Below; o.icon_px = 22.0f;
 
@@ -1189,14 +1283,22 @@ void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
         input.switch_brush(BrushType::PAINT);
         input.subtract_locked = false;
     }
-    const float modes_bottom = ImGui::GetWindowPos().y + ImGui::GetWindowSize().y;
+    dock_post(modes_dock);
+    // Rest height: a grown modes dock covers the rail instead of shoving it down.
+    const float modes_bottom = ImGui::GetWindowPos().y +
+        (modes_dock.rest.y > 0.0f ? modes_dock.rest.y : ImGui::GetWindowSize().y);
     if (current == BrushType::PAINT) alpha_edge = ImGui::GetWindowPos().x + ImGui::GetWindowSize().x;
     end_panel();
 
-    if (!begin_panel("##mRail", ImVec2(kEdge, modes_bottom + 12.0f), ImVec2(0, 0), ImVec2(5, 5), 2.0f, 14.0f)) {
+    // Only the touch rail (one big brush button) grows; the desktop rail is mouse-only.
+    dock_pre(rail_dock, input.touch_mode);
+    if (!begin_panel("##mRail", ImVec2(kEdge, modes_bottom + 12.0f), ImVec2(0, 0),
+                     ImVec2(5 * g_k, 5 * g_k), 2.0f * g_k, 14.0f * g_k)) {
+        dock_post(rail_dock);
         end_panel();
         return;
     }
+    dock_hit(rail_dock, input.touch_mode);
     o.side = TipSide::Right;
 
     bool strip_open = false;
@@ -1236,7 +1338,9 @@ void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
         }
     }
 
-    g_rail_bottom = ImGui::GetWindowPos().y + ImGui::GetWindowSize().y;
+    dock_post(rail_dock);
+    g_rail_bottom = ImGui::GetWindowPos().y +
+        (rail_dock.rest.y > 0.0f ? rail_dock.rest.y : ImGui::GetWindowSize().y);
     if (current != BrushType::PAINT) alpha_edge = ImGui::GetWindowPos().x + ImGui::GetWindowSize().x;
     end_panel();
 
@@ -1308,9 +1412,14 @@ void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
 }
 
 void file_panel(InputState& input, const SkinStats& st) {
+    static DockGrow dock;
+    dock_pre(dock, input.touch_mode);
+    const float k = g_k;
     if (!begin_panel("##mFile", ImVec2(kEdge, kEdge), ImVec2(0, 0),
-                     ImVec2(4, 4), 2.0f, 12.0f)) { end_panel(); return; }
+                     ImVec2(4 * k, 4 * k), 2.0f * k, 12.0f * k)) { dock_post(dock); end_panel(); return; }
+    dock_hit(dock, input.touch_mode);
     ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float bb = kBarBtn * k;
     char name[64];
     project_name(name, sizeof name, st.project_path);
     const bool unsaved = !st.project_path || !*st.project_path;
@@ -1320,24 +1429,24 @@ void file_panel(InputState& input, const SkinStats& st) {
         ImVec2 ns = text_size(UiFont::Sans, 16.0f, name);
         float w = 10.0f + bs.x + 18.0f + ns.x + (unsaved ? 6.0f + 16.0f : 0.0f) + 8.0f;
         ImVec2 p = ImGui::GetCursorScreenPos();
-        ImGui::Dummy(ImVec2(w, kBarBtn));
-        float ty = p.y + (kBarBtn - 16.0f) * 0.5f;
+        ImGui::Dummy(ImVec2(w, bb));
+        float ty = p.y + (bb - 16.0f) * 0.5f;
         text_at(dl, UiFont::SansSemibold, 16.0f, ImVec2(p.x + 10.0f, ty), cga::yellow, "CHISEL");
         text_at(dl, UiFont::Sans, 16.0f, ImVec2(p.x + 10.0f + bs.x + 18.0f, ty), cga::white, name);
         if (unsaved)
             text_at(dl, UiFont::Sans, 16.0f, ImVec2(p.x + 10.0f + bs.x + 18.0f + ns.x + 6.0f, ty),
                     cga::light_red, "*");
     } else {
-    ImVec2 ns = text_size(UiFont::SansSemibold, 14.0f, name);
-    ImVec2 us = text_size(UiFont::Sans, 11.0f, "unsaved");
-    float w = 10.0f + ns.x + (unsaved ? 6.0f + 10.0f + us.x : 0.0f) + 8.0f;
+    ImVec2 ns = text_size(UiFont::SansSemibold, 14.0f * k, name);
+    ImVec2 us = text_size(UiFont::Sans, 11.0f * k, "unsaved");
+    float w = (10.0f + 8.0f) * k + ns.x + (unsaved ? (6.0f + 10.0f) * k + us.x : 0.0f);
     ImVec2 p = ImGui::GetCursorScreenPos();
-    ImGui::Dummy(ImVec2(w, kBarBtn));
-    text_at(dl, UiFont::SansSemibold, 14.0f, ImVec2(p.x + 10.0f, p.y + (kBarBtn - ns.y) * 0.5f), kText, name);
+    ImGui::Dummy(ImVec2(w, bb));
+    text_at(dl, UiFont::SansSemibold, 14.0f * k, ImVec2(p.x + 10.0f * k, p.y + (bb - ns.y) * 0.5f), kText, name);
     if (unsaved) {
-        float x = p.x + 10.0f + ns.x + 6.0f;
-        dl->AddCircleFilled(ImVec2(x + 3.0f, p.y + kBarBtn * 0.5f), 3.0f, kUnsaved, 12);
-        text_at(dl, UiFont::Sans, 11.0f, ImVec2(x + 10.0f, p.y + (kBarBtn - us.y) * 0.5f), kUnsaved, "unsaved");
+        float x = p.x + 10.0f * k + ns.x + 6.0f * k;
+        dl->AddCircleFilled(ImVec2(x + 3.0f * k, p.y + bb * 0.5f), 3.0f * k, kUnsaved, 12);
+        text_at(dl, UiFont::Sans, 11.0f * k, ImVec2(x + 10.0f * k, p.y + (bb - us.y) * 0.5f), kUnsaved, "unsaved");
     }
     }
     vdivider();
@@ -1354,13 +1463,19 @@ void file_panel(InputState& input, const SkinStats& st) {
     ImGui::SameLine();
     o.tip = "Export"; o.key = input.key_label(KeyAction::EXPORT);
     if (icon_button("fExport", Icon::CmdExport, kBarBtn, o)) input.export_dialog_active = true;
-    g_file_bottom = ImGui::GetWindowPos().y + ImGui::GetWindowSize().y;
+    dock_post(dock);
+    // The rest height, so a grown file bar doesn't push the modes dock down.
+    g_file_bottom = ImGui::GetWindowPos().y + (dock.rest.y > 0.0f ? dock.rest.y : ImGui::GetWindowSize().y);
     end_panel();
 }
 
 void command_panel(InputState& input, int win_w, int win_h, MultiresInfo mres, const SkinStats& st) {
+    static DockGrow dock;
+    dock_pre(dock, input.touch_mode);
+    const float k = g_k, bb = kBarBtn * k;
     if (!begin_panel("##mCmd", ImVec2((float)win_w - kEdge, kEdge), ImVec2(1, 0),
-                     ImVec2(4, 4), 2.0f, 12.0f)) { end_panel(); return; }
+                     ImVec2(4 * k, 4 * k), 2.0f * k, 12.0f * k)) { dock_post(dock); end_panel(); return; }
+    dock_hit(dock, input.touch_mode);
     BtnOpts o;
     o.tip = "Undo"; o.key = input.key_label(KeyAction::UNDO);
     if (icon_button("cUndo", Icon::CmdUndo, kBarBtn, o)) input.undo_requested = true;
@@ -1373,11 +1488,11 @@ void command_panel(InputState& input, int win_w, int win_h, MultiresInfo mres, c
     o.enabled = input.mesh_locked;
     o.tip = "Subdivision down"; o.key = input.key_label(KeyAction::LEVEL_DOWN);
     if (icon_button("cLvlDn", Icon::CmdLevelDown, kBarBtn, o)) input.level_switch_delta = -1;
-    ImGui::SameLine(0.0f, 2.0f);
+    ImGui::SameLine(0.0f, 2.0f * k);
     {
         ImDrawList* dl = ImGui::GetWindowDrawList();
         ImVec2 p = ImGui::GetCursorScreenPos();
-        const float w = 64.0f;
+        const float w = 64.0f * k;
         char lv[16], mx[16], tris[24];
         if (g_dos) {
             // 16 px cells are wide: "L4/9" in light green, the tri count at 8 px below.
@@ -1387,29 +1502,29 @@ void command_panel(InputState& input, int win_w, int win_h, MultiresInfo mres, c
             std::strncat(tris, " TRIS", sizeof tris - std::strlen(tris) - 1);
             for (char* c = tris; *c; c++) *c = (char)std::toupper((unsigned char)*c);
             ImVec2 a = text_size(UiFont::Mono, 16.0f, lv), t = text_size(UiFont::Mono, 8.0f, tris);
-            const float wd = std::max(80.0f, std::max(a.x, t.x) + 8.0f);
-            ImGui::Dummy(ImVec2(wd, kBarBtn));
-            float top = p.y + (kBarBtn - 16.0f - 4.0f - 8.0f) * 0.5f;
+            const float wd = std::max(80.0f * k, std::max(a.x, t.x) + 8.0f);
+            ImGui::Dummy(ImVec2(wd, bb));
+            float top = p.y + (bb - 16.0f - 4.0f - 8.0f) * 0.5f;
             text_at(dl, UiFont::Mono, 16.0f, ImVec2(p.x + (wd - a.x) * 0.5f, top), cga::light_green, lv);
             text_at(dl, UiFont::Mono, 8.0f, ImVec2(p.x + (wd - t.x) * 0.5f, top + 20.0f), cga::light_gray, tris);
         } else {
-        ImGui::Dummy(ImVec2(w, kBarBtn));
+        ImGui::Dummy(ImVec2(w, bb));
         std::snprintf(lv, sizeof lv, "L%d", st.level);
         if (mres.locked) std::snprintf(mx, sizeof mx, " / %d", mres.lmax);
         else mx[0] = '\0';
         fmt_k(tris, sizeof tris, st.tris);
         std::strncat(tris, " tris", sizeof tris - std::strlen(tris) - 1);
-        ImVec2 a = text_size(UiFont::MonoMedium, 15.0f, lv);
-        ImVec2 b = text_size(UiFont::MonoMedium, 15.0f, mx);
-        ImVec2 t = text_size(UiFont::Sans, 11.0f, tris);
-        float top = p.y + (kBarBtn - (a.y + t.y - 2.0f)) * 0.5f;
+        ImVec2 a = text_size(UiFont::MonoMedium, 15.0f * k, lv);
+        ImVec2 b = text_size(UiFont::MonoMedium, 15.0f * k, mx);
+        ImVec2 t = text_size(UiFont::Sans, 11.0f * k, tris);
+        float top = p.y + (bb - (a.y + t.y - 2.0f * k)) * 0.5f;
         float x0 = p.x + (w - (a.x + b.x)) * 0.5f;
-        text_at(dl, UiFont::MonoMedium, 15.0f, ImVec2(x0, top), kText, lv);
-        text_at(dl, UiFont::MonoMedium, 15.0f, ImVec2(x0 + a.x, top), kDim, mx);
-        text_at(dl, UiFont::Sans, 11.0f, ImVec2(p.x + (w - t.x) * 0.5f, top + a.y - 2.0f), kMuted, tris);
+        text_at(dl, UiFont::MonoMedium, 15.0f * k, ImVec2(x0, top), kText, lv);
+        text_at(dl, UiFont::MonoMedium, 15.0f * k, ImVec2(x0 + a.x, top), kDim, mx);
+        text_at(dl, UiFont::Sans, 11.0f * k, ImVec2(p.x + (w - t.x) * 0.5f, top + a.y - 2.0f * k), kMuted, tris);
         }
     }
-    ImGui::SameLine(0.0f, 2.0f);
+    ImGui::SameLine(0.0f, 2.0f * k);
     o.tip = "Subdivision up"; o.key = input.key_label(KeyAction::LEVEL_UP);
     if (icon_button("cLvlUp", Icon::CmdLevelUp, kBarBtn, o)) input.level_switch_delta = +1;
     o.enabled = true;
@@ -1460,6 +1575,7 @@ void command_panel(InputState& input, int win_w, int win_h, MultiresInfo mres, c
     prev_menu_open = menu_open;
     input.settings_menu_open = menu_open;
 
+    dock_post(dock);
     float bar_bottom = ImGui::GetWindowPos().y + ImGui::GetWindowSize().y;
     ImGui::SetNextWindowPos(ImVec2((float)win_w - kEdge, bar_bottom + 8.0f), ImGuiCond_Always,
                             ImVec2(1, 0));
