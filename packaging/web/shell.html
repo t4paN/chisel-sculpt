@@ -209,6 +209,19 @@
       window.addEventListener('pointermove', function(e) {
         if (e.pointerType === 'mouse' && (e.movementX || e.movementY)) setTouchMode(false);
       }, true);
+      // A phone (coarse primary pointer) starts in touch mode instead of waiting for the
+      // first finger; main.cpp asks the same media query, so the two agree from frame
+      // one. The saved UI scale goes on now too, so the page doesn't open at 100 % and
+      // jump once the app's settings load.
+      if (window.matchMedia && matchMedia('(pointer: coarse)').matches) {
+        touchMode = true;
+        modsBox.classList.add('on');
+        try {
+          var sc = /(^|\n)ui_scale_touch=(\d+)/.exec(localStorage.getItem('chisel.settings') || '');
+          if (sc) document.documentElement.style.setProperty('--ui',
+                    String(Math.min(150, Math.max(40, +sc[2])) / 100));
+        } catch (e) {}
+      }
 
       var mods = [];
       var sendMods = function() {
