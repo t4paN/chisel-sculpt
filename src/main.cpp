@@ -894,6 +894,8 @@ int main(int argc, char* argv[]) {
     // Before anything reads the brush fields. Missing/corrupt storage is a no-op that
     // leaves the constructor defaults standing, so there is nothing to check here.
     settings_load(input);
+    // Dev: the phone layout on desktop, for layout work (touch mode is otherwise web-only).
+    if (std::getenv("CHISEL_TOUCH_UI")) input.touch_mode = true;
 #ifdef __EMSCRIPTEN__
     g_settings_input = &input;   // arms the pagehide flush above
 #endif
@@ -4574,6 +4576,11 @@ int main(int argc, char* argv[]) {
         var tn = 0;
         var tFirst = 0;       // when the first finger of this touch landed
         var tGesture = false;
+        // The finger GLFW clicks with: the first one on the CANVAS. Not e.isPrimary —
+        // that is the first finger on the whole page, which is the thumb whenever it
+        // is already holding a modifier button (shell.html), and then the sculpting
+        // finger would never move the cursor.
+        var tPrimary = -1;
         var tDist = 0;
         var tMx = 0;
         var tMy = 0;
@@ -4591,7 +4598,7 @@ int main(int argc, char* argv[]) {
         };
         c.addEventListener('pointerdown', function(e) {
             if (e.pointerType !== 'touch') return;
-            if (tn === 0) tFirst = performance.now();
+            if (tn === 0) { tFirst = performance.now(); tPrimary = e.pointerId; }
             tpx[e.pointerId] = e.clientX;
             tpy[e.pointerId] = e.clientY;
             tn++;
@@ -4621,7 +4628,7 @@ int main(int argc, char* argv[]) {
             delete tpy[e.pointerId];
             tn--;
             if (tn >= 2) tPair();
-            if (tn === 0) tGesture = false;
+            if (tn === 0) { tGesture = false; tPrimary = -1; }
             Module._chisel_touch_count(tn, 0);
         };
         c.addEventListener('pointerup', tUp);
@@ -4629,8 +4636,8 @@ int main(int argc, char* argv[]) {
 
         var feed = function(e) {
             // During a gesture no finger drives the cursor, and outside one only the
-            // first finger does (it is the one GLFW clicks with).
-            if (e.pointerType === 'touch' && (tGesture || !e.isPrimary)) return;
+            // first canvas finger does (it is the one GLFW clicks with).
+            if (e.pointerType === 'touch' && (tGesture || e.pointerId !== tPrimary)) return;
             var r = c.getBoundingClientRect();
             var locked = document.pointerLockElement === c;
             // Browsers deliver one pointermove per frame; the positions merged into it
