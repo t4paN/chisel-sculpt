@@ -4,6 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
   <title>Chisel</title>
+  <!-- PWA: only the pack-pwa.sh folder ships these files; the itch zip doesn't,
+       so there the link just 404s harmlessly. -->
+  <link rel="manifest" href="manifest.webmanifest">
+  <meta name="theme-color" content="#1a1a1a">
+  <link rel="icon" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
   <style>
     html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #1a1a1a; }
     /* Full-window canvas. The CSS size (100vw x 100vh) is authoritative — the app
@@ -225,6 +231,16 @@
         var b = document.getElementById('boot'); if (b) b.remove();
       }
     };
+    // Offline/installable mode. Skipped inside an iframe (itch's player) and on
+    // insecure origins, where service workers either can't register or would
+    // cache under someone else's scope. Needs HTTPS or localhost.
+    if ('serviceWorker' in navigator && window.isSecureContext && window.top === window) {
+      window.addEventListener('load', function() {
+        navigator.serviceWorker.register('sw.js').catch(function(e) {
+          console.warn('[pwa] service worker not registered:', e && e.message);
+        });
+      });
+    }
     window.onerror = function(msg, src, line) {
       console.error('[onerror]', msg, src ? src + ':' + line : '');
     };
