@@ -300,6 +300,10 @@ struct InputState {
     float ui_material   = 45.0f;
     bool  ui_motion     = true;
     bool  ui_viewfinder = false;
+    // Web, touch mode only: the whole page drawn at this percent (a CSS scale on the
+    // canvas stage), like Chrome's page zoom but owned by the app. 50 = half-size UI
+    // with twice the room and twice the pixels. Desktop always draws at 100.
+    int   ui_scale_touch = 100;
     // Remesh snaps its new points back onto the original surface and refuses
     // flips that plane off a ridge. Session-only on purpose while it is being
     // A/B'd: untick, remesh, reload, tick, remesh — same file, two results.

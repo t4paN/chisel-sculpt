@@ -19,7 +19,16 @@
        address bar RETRACTED, so while the bar shows the canvas ran that much past the
        visible bottom and the bottom UI sat under Android's back/home bar. dvh tracks
        the bar; the 100vh line is the fallback for browsers without it. */
-    #canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; height: 100dvh; display: block;
+    /* The stage holds the canvas and the modifier buttons. --ui is the touch UI scale
+       (the app sets it, 1 = off): the stage is laid out at 1/--ui of the window and
+       scaled back down by --ui, so the app — which sizes everything from the canvas's
+       clientWidth/Height — gets that much more room and backing, like page zoom. Its
+       pointer feed divides client px by the same factor (main.cpp). */
+    #stage { position: fixed; left: 0; top: 0; overflow: hidden;
+             width: calc(100vw / var(--ui, 1)); height: calc(100vh / var(--ui, 1));
+             height: calc(100dvh / var(--ui, 1));
+             transform: scale(var(--ui, 1)); transform-origin: 0 0; }
+    #canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block;
               border: 0; outline: none; background: #1a1a1a; touch-action: none; }
     /* On-screen modifier buttons for phones, stacked down the left edge under the
        brush button. The app places and sizes them (left/top/--mod, set from
@@ -27,7 +36,7 @@
        elements on top of the canvas, not ImGui: a thumb on them never reaches the
        canvas, so GLFW can't mistake it for the sculpting finger and the pinch tracker
        never counts it. Hidden until a finger touches the page. */
-    #mods { position: fixed; left: 16px; top: 50%;
+    #mods { position: absolute; left: 16px; top: 50%;
             display: none; flex-direction: column; gap: 12px; z-index: 50; }
     #mods.on { display: flex; }
     /* Text and corners scale with the size the app sets (--mod), so the big 102 px
@@ -59,14 +68,16 @@
   </style>
 </head>
 <body>
-  <canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
+  <div id="stage">
+    <canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
+    <div id="mods">
+      <div class="mod" id="modCtrl">Ctrl<small>invert</small></div>
+      <div class="mod" id="modShift">Shift<small>smooth</small></div>
+    </div>
+  </div>
   <div id="boot">Loading Chisel…</div>
   <div id="upd" role="status">Update ready — save first
     <button id="updGo">Reload</button><button id="updX" class="x" aria-label="Later">✕</button>
-  </div>
-  <div id="mods">
-    <div class="mod" id="modCtrl">Ctrl<small>invert</small></div>
-    <div class="mod" id="modShift">Shift<small>smooth</small></div>
   </div>
   <script>
     // On-page console overlay: mirrors console.log/warn/error and uncaught
