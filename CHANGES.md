@@ -2,6 +2,25 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-12 — Phone: UI scale setting, bigger Ctrl/Shift (branch `android-controls`)
+
+*Built GL and web. Tested in headless Chrome with touch emulation (layout size, backing
+and tap mapping at 50 %); not yet on the phone.*
+
+- **Menu > Appearance > UI scale** (web, 40–150 %, default 100): the whole page drawn
+  smaller or larger, like Chrome's page zoom but stored with the other settings, so it
+  survives cleared site data and a fresh install. At 50 % the app lays out at twice the
+  window size and renders twice the pixels, then the page shrinks it to fit. Applies in
+  touch mode only and is greyed out until a finger has touched the screen; desktop stays
+  at 100. The slider applies on release, since rescaling mid-drag would move it out
+  from under the finger.
+  - How: the canvas and the modifier buttons sit in a `#stage` laid out at 1/scale and
+    CSS-scaled back down; the DOM pointer feed and the pinch pan divide client pixels by
+    the same factor.
+- **Ctrl/Shift buttons 102 px** (from 64), the biggest targets on screen, still capped
+  by the height under the brush button. The brush panel clears their column. Labels and
+  corners scale with the button.
+
 ## 2026-10-12 — Phone: every dock grows on tap; installable offline PWA (branch `android-controls`)
 
 *Built GL and web. Dock growth tested in headless Chrome with touch emulation (grow,

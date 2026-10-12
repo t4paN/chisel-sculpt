@@ -1163,6 +1163,18 @@ int main(int argc, char* argv[]) {
         // authoritative window size. glfwGetFramebufferSize can't be trusted here: the
         // canvas backing may be resized outside GLFW's knowledge, and stale GLFW size
         // vs. a resized surface produces attachment-size-mismatch validation errors.
+        // UI scale (touch mode only): the shell lays the canvas stage out at 1/scale of
+        // the window and CSS-scales it back down, so the app sees a bigger window — more
+        // room, more pixels — exactly like page zoom. Set before clientWidth is read so
+        // this frame's layout already has the new size. See shell.html #stage.
+        {
+            static int applied = -1;
+            const int pct = input.touch_mode ? input.ui_scale_touch : 100;
+            if (pct != applied) {
+                applied = pct;
+                EM_ASM({ document.documentElement.style.setProperty('--ui', String($0 / 100)); }, pct);
+            }
+        }
         win_w = EM_ASM_INT({ return (Module.canvas.clientWidth  || window.innerWidth)  | 0; });
         win_h = EM_ASM_INT({ return (Module.canvas.clientHeight || window.innerHeight) | 0; });
 #else
@@ -4620,7 +4632,12 @@ int main(int argc, char* argv[]) {
             var my0 = tMy;
             tPair();
             if (d0 > 1 && tDist > 1)
-                Module._chisel_touch_pinch(tDist / d0, tMx - mx0, tMy - my0);
+            {
+                // Pan in the app's pixels: client px times the stage's CSS scale-down
+                // (1 unless the touch UI scale is on, see shell.html #stage).
+                var pk = c.clientWidth / (c.getBoundingClientRect().width || c.clientWidth || 1);
+                Module._chisel_touch_pinch(tDist / d0, (tMx - mx0) * pk, (tMy - my0) * pk);
+            }
         });
         var tUp = function(e) {
             if (e.pointerType !== 'touch' || !(e.pointerId in tpx)) return;
@@ -4639,6 +4656,10 @@ int main(int argc, char* argv[]) {
             // first canvas finger does (it is the one GLFW clicks with).
             if (e.pointerType === 'touch' && (tGesture || e.pointerId !== tPrimary)) return;
             var r = c.getBoundingClientRect();
+            // Client px -> the app's pixels. 1 normally; under the touch UI scale the
+            // canvas is laid out bigger than it shows (shell.html #stage), and the app
+            // works in its layout size.
+            var k = r.width > 0 ? c.clientWidth / r.width : 1;
             var locked = document.pointerLockElement === c;
             // Browsers deliver one pointermove per frame; the positions merged into it
             // are the stroke's real path (see InputState::path_x). The last coalesced
@@ -4648,17 +4669,17 @@ int main(int argc, char* argv[]) {
                 var px = lx;
                 var py = ly;
                 for (var i = 0; i + 1 < list.length; i++) {
-                    if (locked) { px += list[i].movementX || 0; py += list[i].movementY || 0; }
-                    else        { px = list[i].clientX - r.left; py = list[i].clientY - r.top; }
+                    if (locked) { px += (list[i].movementX || 0) * k; py += (list[i].movementY || 0) * k; }
+                    else        { px = (list[i].clientX - r.left) * k; py = (list[i].clientY - r.top) * k; }
                     Module._chisel_path_sample(px, py);
                 }
                 if (locked) { lx = px; ly = py; }
             }
-            if (locked) { lx += e.movementX || 0; ly += e.movementY || 0; }
-            else        { lx = e.clientX - r.left; ly = e.clientY - r.top; }
+            if (locked) { lx += (e.movementX || 0) * k; ly += (e.movementY || 0) * k; }
+            else        { lx = (e.clientX - r.left) * k; ly = (e.clientY - r.top) * k; }
             // movementX drives the slider drags (consistent CSS-scale deltas even
             // under pointer lock, where clientX freezes).
-            Module._chisel_set_pointer(lx, ly, e.movementX || 0);
+            Module._chisel_set_pointer(lx, ly, (e.movementX || 0) * k);
         };
         c.addEventListener('pointermove', feed);
         c.addEventListener('pointerdown', feed);

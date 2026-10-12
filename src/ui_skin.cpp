@@ -2887,6 +2887,29 @@ void draw_appearance_menu_items(InputState& input) {
     if (ImGui::IsItemHovered())
         ui_skin_menu_tip("The original button islands and bitmap-font HUD.");
     input.ui_skin = (InputState::UiSkin)skin;
+#ifdef __EMSCRIPTEN__
+    // UI scale: the whole page, touch screens only (desktop has the browser's zoom and
+    // a mouse). Greyed out until a finger has been seen. The slider shows the pending
+    // value while dragged and applies on release: rescaling the page under the finger
+    // mid-drag would move the slider out from under it.
+    {
+        static int pending = 100;
+        static bool dragging = false;
+        if (!dragging) pending = input.ui_scale_touch;
+        ImGui::BeginDisabled(!input.touch_mode);
+        ImGui::SetNextItemWidth(160.0f);
+        ImGui::SliderInt("UI scale##uiScale", &pending, 40, 150, "%d%%");
+        dragging = ImGui::IsItemActive();
+        if (ImGui::IsItemDeactivatedAfterEdit())
+            input.ui_scale_touch = (pending + 2) / 5 * 5;   // snap to 5 %
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ui_skin_menu_tip(input.touch_mode
+                ? "Size of everything on screen, applied when you let go.\n"
+                  "Smaller gives the model more room and sharper pixels."
+                : "Touch screens only: tap the screen to use it.");
+    }
+#endif
     if (input.ui_skin == InputState::UiSkin::DOS)
         ImGui::Checkbox("Viewfinder corners", &input.ui_viewfinder);
     if (input.ui_skin != InputState::UiSkin::MODERN) return;
