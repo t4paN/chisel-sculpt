@@ -1216,6 +1216,7 @@ bool touch_brush_picker(InputState& input, BtnOpts o, bool smooth_on, bool editi
     return state != CLOSED;
 }
 
+constexpr float kModsPx = 102.0f;  // touch mode: modifier buttons' size when there's room
 float g_mods_px = 0.0f;       // touch mode: the on-screen modifier buttons' size (rail sets it)
 float g_rail_bottom = 0.0f;   // the rail's bottom edge this frame, for brush_panel's fit check
 float g_file_bottom = kEdge;  // the file bar's bottom edge; the rail starts below it
@@ -1350,10 +1351,12 @@ void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
     // They are where the strip drops, so they hide while it is open — nobody sculpts
     // while picking a brush.
     if (input.touch_mode) {
-        // Capped to clear the brush panel when it sits beside the rail (x = 88).
+        // The biggest targets on screen (1.6x the old 64 px): they're held by a thumb
+        // the whole time you sculpt. Only the height left under the brush button caps
+        // them; the brush panel moves right to clear them (see brush_panel).
         const float top = g_rail_bottom + 14.0f;
-        g_mods_px = std::floor(std::max(52.0f, std::min({84.0f, kRailW + kEdge - 8.0f,
-                                                          ((float)win_h - kEdge - top - 12.0f) * 0.5f})));
+        g_mods_px = std::floor(std::max(52.0f, std::min(kModsPx,
+                                                        ((float)win_h - kEdge - top - 12.0f) * 0.5f)));
 #ifdef __EMSCRIPTEN__
         static int sent_top = -1, sent_px = -1, sent_hide = -1;
         if ((int)top != sent_top || (int)g_mods_px != sent_px || (int)strip_open != sent_hide) {
@@ -1737,8 +1740,12 @@ float brush_panel(InputState& input, int win_h) {
     static int seen_h = -1;
     if (win_h != seen_h) { rail_max = panel_max = 0.0f; seen_h = win_h; }
     rail_max = std::max(rail_max, g_rail_bottom);
-    const bool under = rail_max + 12.0f <= (float)win_h - kEdge - panel_max;
-    const float x = under ? kEdge : kEdge + kRailW + kEdge;
+    // Touch mode: the modifier buttons stack under the rail too, so "under" needs room
+    // for them as well, and "beside" has to clear their column, not just the rail's.
+    const float mods_h = input.touch_mode ? 2.0f * g_mods_px + 12.0f + 14.0f : 0.0f;
+    const float col_w = input.touch_mode ? std::max(kRailW, g_mods_px) : kRailW;
+    const bool under = rail_max + mods_h + 12.0f <= (float)win_h - kEdge - panel_max;
+    const float x = under ? kEdge : kEdge + col_w + kEdge;
     if (!begin_panel("##mBrush", ImVec2(x, (float)win_h - kEdge), ImVec2(0, 1),
                      ImVec2(14, 12), g_dos ? 4.0f : 8.0f, 12.0f)) { end_panel(); return 0.0f; }
     ImDrawList* dl = ImGui::GetWindowDrawList();
