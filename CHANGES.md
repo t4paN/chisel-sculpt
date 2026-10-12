@@ -2,6 +2,33 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-12 — Phone: every dock grows on tap; installable offline PWA (branch `android-controls`)
+
+*Built GL and web. Dock growth tested in headless Chrome with touch emulation (grow,
+second tap presses, outside tap shrinks, layout holds still), not yet on the phone. The
+PWA was installed and run on the phone, save/load included.*
+
+- **Tap-to-grow for all docks in touch mode**, the way the brush panel already works: the
+  file bar, the command bar, the modes dock and the touch brush button. The first tap
+  only grows the dock and its buttons ignore it; once grown its buttons work; a tap
+  anywhere else shrinks it, and that tap never reaches the model. Desktop is unchanged.
+- **Grown size**: 2x (the brush button 1.5x, it is already 64 px), capped so the dock
+  stays on screen — the command bar is wider than a landscape phone at 2x, so it stops
+  at what fits.
+- **A grown dock is opaque and on top**, so it reads cleanly over the docks it covers.
+  Anything laid out off a dock (the modes under the file bar, the rail under the modes,
+  the modifier buttons under the rail) keeps using its resting size, so growing one
+  never shoves the others around.
+- While a popup is open (the menu, the brush strip, the first-launch card) the docks
+  keep their size; the tap that closes the popup doesn't shrink them.
+- `[dock] … grow / shrink` lines in the log, like the strip's.
+- **Installable PWA**: `packaging/web/pack-pwa.sh` builds a folder with a manifest, icons
+  and a cache-first service worker, served at https://t4pan.github.io/chisel/. Installed
+  from Chrome on Android it launches fullscreen and runs offline. A new build shows an
+  "Update ready — save first" pill (Reload / Later); it never reloads on its own. The
+  service worker only registers top-level on a secure origin, so the itch build is
+  unaffected.
+
 ## 2026-10-12 — Phone layout: modifier buttons, collapsible brush strip, tap-to-grow panel (branch `android-controls`)
 
 *Built GL and web. Modifier buttons, the brush strip and the panel position were
