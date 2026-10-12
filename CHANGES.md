@@ -14,6 +14,9 @@ and tap mapping at 50 %); not yet on the phone.*
   touch mode only and is greyed out until a finger has touched the screen; desktop stays
   at 100. The slider applies on release, since rescaling mid-drag would move it out
   from under the finger.
+  - A phone (coarse pointer) now starts in touch mode, so the saved scale holds from
+    the first frame after a reload instead of waiting for a tap; the page applies it
+    before the app loads, so there's no jump.
   - How: the canvas and the modifier buttons sit in a `#stage` laid out at 1/scale and
     CSS-scaled back down; the DOM pointer feed and the pinch pan divide client pixels by
     the same factor.

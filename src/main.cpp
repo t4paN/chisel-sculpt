@@ -898,6 +898,11 @@ int main(int argc, char* argv[]) {
     if (std::getenv("CHISEL_TOUCH_UI")) input.touch_mode = true;
 #ifdef __EMSCRIPTEN__
     g_settings_input = &input;   // arms the pagehide flush above
+    // A phone starts in touch mode rather than at the first finger, so its saved UI
+    // scale (touch-only) is in force from the first frame instead of only after a tap.
+    // Same media query the shell uses to show the modifier buttons up front.
+    if (EM_ASM_INT({ return (window.matchMedia && matchMedia('(pointer: coarse)').matches) ? 1 : 0; }))
+        input.touch_mode = true;
 #endif
     setup_input_callbacks(window, &input);
     setup_char_callback(window);
