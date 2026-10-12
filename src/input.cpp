@@ -862,6 +862,21 @@ extern "C" EMSCRIPTEN_KEEPALIVE void chisel_touch_count(int n, int revert) {
         g_input->touch_gesture = false;
 }
 
+// On-screen Ctrl / Shift buttons (shell.html): held or latched. They live outside the
+// canvas, so neither GLFW nor the finger tracker ever sees a thumb on them.
+extern "C" EMSCRIPTEN_KEEPALIVE void chisel_touch_mods(int ctrl, int shift) {
+    if (!g_input) return;
+    g_input->touch_ctrl  = ctrl != 0;
+    g_input->touch_shift = shift != 0;
+    g_input->ctrl_held   = g_input->touch_ctrl;
+    g_input->shift_held  = g_input->touch_shift;
+}
+
+// Touch mode: on at the first finger, off at the first real mouse move (shell.html).
+extern "C" EMSCRIPTEN_KEEPALIVE void chisel_touch_mode(int on) {
+    if (g_input) g_input->touch_mode = on != 0;
+}
+
 // Per two-finger move: distance ratio since the last call, and midpoint motion.
 // Accumulated here, applied once per frame by main.cpp.
 extern "C" EMSCRIPTEN_KEEPALIVE void chisel_touch_pinch(double scale, double dx, double dy) {
@@ -875,8 +890,17 @@ extern "C" EMSCRIPTEN_KEEPALIVE void chisel_touch_pinch(double scale, double dx,
 // keep feeding ImGui the desynced GLFW coords the app already ignores. Take the
 // callback back after ImGui init so GLFW motion reaches neither consumer;
 // chisel_set_pointer above feeds both from the DOM.
+//
+// Its enter/leave tracking has to go too. While the backend thinks the cursor is
+// outside the window it falls back to polling glfwGetCursorPos EVERY frame — and a
+// finger never sends mouseenter, so on a phone that was always, overwriting the DOM
+// position with GLFW's. Those drift off the real ones in fullscreen (~20 px on a
+// phone), enough that a still tap on the brush button read as a drag. Mark the
+// cursor inside once and keep it there; leaving the canvas just leaves a stale hover.
 void input_web_take_cursor_callback(GLFWwindow* window) {
     glfwSetCursorPosCallback(window, cursor_pos_callback);
+    glfwSetCursorEnterCallback(window, nullptr);
+    ImGui_ImplGlfw_CursorEnterCallback(window, 1);
 }
 
 // On web, ImGui_ImplGlfw drops GLFW scroll events on purpose (Emscripten's GLFW
@@ -901,8 +925,10 @@ static void mouse_button_callback(GLFWwindow* w, int button, int action, int mod
     if (!g_input) return;
 
     // Update modifiers from mouse event too
-    g_input->shift_held = (mods & GLFW_MOD_SHIFT) != 0;
-    g_input->ctrl_held = (mods & GLFW_MOD_CONTROL) != 0;
+    // The on-screen buttons hold their modifier regardless: the emulated touch click
+    // always arrives with mods = 0.
+    g_input->shift_held = (mods & GLFW_MOD_SHIFT) != 0 || g_input->touch_shift;
+    g_input->ctrl_held = (mods & GLFW_MOD_CONTROL) != 0 || g_input->touch_ctrl;
     g_input->alt_held = (mods & GLFW_MOD_ALT) != 0;
 
     // A two-finger gesture owns the touch until every finger is up: track the
@@ -1295,9 +1321,9 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
     if (!g_input) return;
     double now = glfwGetTime();
 
-    // Track modifiers
-    g_input->shift_held = (mods & GLFW_MOD_SHIFT) != 0;
-    g_input->ctrl_held = (mods & GLFW_MOD_CONTROL) != 0;
+    // Track modifiers (the on-screen touch buttons count as held, see touch_ctrl)
+    g_input->shift_held = (mods & GLFW_MOD_SHIFT) != 0 || g_input->touch_shift;
+    g_input->ctrl_held = (mods & GLFW_MOD_CONTROL) != 0 || g_input->touch_ctrl;
     g_input->alt_held = (mods & GLFW_MOD_ALT) != 0;
 
     // ...except for a modifier key's OWN event, where `mods` is not just stale but
@@ -1313,10 +1339,10 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
     switch (key) {
         case GLFW_KEY_LEFT_SHIFT:
         case GLFW_KEY_RIGHT_SHIFT:
-            g_input->shift_held = (action != GLFW_RELEASE); break;
+            g_input->shift_held = (action != GLFW_RELEASE) || g_input->touch_shift; break;
         case GLFW_KEY_LEFT_CONTROL:
         case GLFW_KEY_RIGHT_CONTROL:
-            g_input->ctrl_held = (action != GLFW_RELEASE); break;
+            g_input->ctrl_held = (action != GLFW_RELEASE) || g_input->touch_ctrl; break;
         case GLFW_KEY_LEFT_ALT:
         case GLFW_KEY_RIGHT_ALT:
             g_input->alt_held = (action != GLFW_RELEASE); break;

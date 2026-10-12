@@ -2,6 +2,47 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-12 — Phone layout: modifier buttons, collapsible brush strip, tap-to-grow panel (branch `android-controls`)
+
+*Built GL and web. Modifier buttons, the brush strip and the panel position were
+user-tested live on the phone. The tap-to-grow panel, the landscape drag-offset fix and
+the fullscreen tap fix were committed before a phone test (the laptop went down mid-test).*
+
+- **Touch mode.** The page flips into it at the first finger and back out at the first
+  real mouse move, so a touchscreen laptop follows whatever was used last. Everything
+  below is gated on it, so desktop is unchanged. `CHISEL_TOUCH_UI=1` forces it on native
+  builds, for layout work.
+- **On-screen Ctrl (invert) and Shift (smooth)**, stacked down the left edge under the
+  brush button. Hold one for a held key, or tap quickly to latch it on until the next
+  tap. They are page elements laid over the canvas, not ImGui, so a thumb on them never
+  reaches the canvas. GLFW keeps treating the sculpting finger as the mouse, and the
+  pinch tracker doesn't count the thumb. The app sets their position and size from its
+  layout, and they hide while the brush strip is open. The cursor now follows the first
+  finger on the *canvas*, not the page's primary pointer, which is the thumb whenever a
+  button is already held.
+- **The brush rail collapses to one 64 px button** showing the current brush; nine
+  buttons ran off the bottom of a landscape phone. Press and drag down and a strip of
+  every brush, with names, drops out. The row under the finger lights up and lifting
+  picks it. Holding near the strip's ends scrolls it. A plain tap leaves the strip open:
+  drag to scroll, tap a brush to pick, tap elsewhere to close. Hit-testing is done by
+  hand, because opening the popup takes ImGui's active item away mid-gesture.
+- **The brush settings panel** is narrower at rest (150 px, 208 in DOS). A tap doubles it
+  (meters, text and width) for finger-sized adjusting, and a tap elsewhere shrinks it
+  back. That closing tap is captured, so it never drops a dab, and the tap that opens it
+  doesn't set a value. It keeps its normal place beside the rail.
+- Fixed: in landscape the strip highlighted the wrong row while dragging. The edge
+  scroll overshot the end of the list, and the row was read before the overshoot was
+  clamped.
+- Fixed: tapping the brush button in fullscreen was treated as a drag. A finger never
+  sends `mouseenter`, so ImGui's GLFW backend thought the cursor was outside the window
+  and polled `glfwGetCursorPos` every frame. Those coordinates drift about 20 px in
+  fullscreen and overwrote the accurate DOM-fed position. The web build now marks the
+  cursor inside once and drops ImGui's enter/leave callback. This may also sharpen every
+  other UI tap in fullscreen.
+- LAN dev aid: served from the test server's port (8642, never itch), the page relays its
+  console and touch pointer events back to `~/CHISEL/.lan-https/serve.py`, so phone logs
+  show up on the laptop. `[strip]` printfs log the picker's transitions.
+
 ## 2026-10-12 — Fullscreen button on the web; canvas fits mobile Chrome (branch `android-controls`)
 
 *Built GL and web. The bottom-bar fix was confirmed by the user on the phone; the

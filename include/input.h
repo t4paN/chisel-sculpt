@@ -217,6 +217,12 @@ struct InputState {
     // finger lifted. Set when a single finger lands; main.cpp re-reads the plane cache
     // at the press point on the next frame and re-latches before anything moves.
     bool  touch_relatch = false;
+    // Touch mode: the last pointer was a finger (web only, fed by shell.html). Gates
+    // the phone-only layout tweaks; desktop never touches the screen, never sees them.
+    bool  touch_mode  = false;
+    // On-screen modifier buttons (shell.html), OR'd into ctrl_held / shift_held.
+    bool  touch_ctrl  = false;
+    bool  touch_shift = false;
 
     // Live shortcut table (see KeyAction). Seeded with the factory bindings by the
     // constructor; settings.cpp persists only the ones that differ from those.

@@ -950,6 +950,185 @@ bool alpha_picker_popup(InputState& input, const AlphaLibrary* alpha_lib, ImVec2
     return true;
 }
 
+struct RailBrush { const char* id; const char* name; KeyAction key; Icon icon; BrushType type; };
+const RailBrush kRailBrushes[] = {
+    {"bDraw",    "Draw",    KeyAction::BRUSH_DRAW,    Icon::BrushDraw,    BrushType::DRAW},
+    {"bClay",    "Clay",    KeyAction::BRUSH_CLAY,    Icon::BrushClay,    BrushType::CLAY},
+    {"bInflate", "Inflate", KeyAction::BRUSH_INFLATE, Icon::BrushInflate, BrushType::INFLATE},
+    {"bCrease",  "Crease",  KeyAction::BRUSH_CREASE,  Icon::BrushCrease,  BrushType::CREASE},
+    {"bPinch",   "Pinch",   KeyAction::BRUSH_PINCH,   Icon::BrushPinch,   BrushType::PINCH},
+    {"bMove",    "Move",    KeyAction::BRUSH_MOVE,    Icon::BrushMove,    BrushType::MOVE},
+    {"bLimb",    "Limb",    KeyAction::BRUSH_LIMB,    Icon::BrushLimb,    BrushType::LIMB},
+    {"bSmooth",  "Smooth",  KeyAction::COUNT,         Icon::BrushSmooth,  BrushType::SMOOTH},
+    {"bMask",    "Mask",    KeyAction::BRUSH_MASK,    Icon::BrushMask,    BrushType::MASK},
+};
+constexpr int kRailBrushCount = (int)(sizeof kRailBrushes / sizeof kRailBrushes[0]);
+
+constexpr float kTouchBtn  = 64.0f;   // the collapsed brush button, touch mode
+constexpr float kStripRow  = 58.0f;   // one brush in the drop-down strip
+constexpr float kStripW    = 184.0f;
+constexpr float kStripPad  = 6.0f;
+
+// Touch mode's brush rail: nine 46 px buttons don't fit a landscape phone (the rail
+// ran off the bottom), so it collapses to one big button showing the current brush.
+// Press it and drag down: a strip of every brush drops out below it, the one under
+// the finger lights, and lifting there picks it — one motion. Press without dragging
+// and the strip stays open instead: drag it to scroll, tap a brush to pick, tap
+// anywhere else to close. Hit-testing is by hand rather than per-item ImGui buttons:
+// in the press-drag case the finger went down on the big button, and opening the
+// popup takes ImGui's active item away from it mid-gesture.
+// Returns true while the strip is open.
+bool touch_brush_picker(InputState& input, BtnOpts o, bool smooth_on, bool editing) {
+    enum { CLOSED, PRESS_DRAG, BROWSE };
+    static int state = CLOSED;
+    static float scroll = 0.0f, travel = 0.0f, last_y = 0.0f;
+    static ImVec2 press;
+    static bool tracking = false;
+    ImGuiIO& io = ImGui::GetIO();
+
+    int cur = -1;
+    for (int i = 0; i < kRailBrushCount; i++)
+        if (smooth_on ? kRailBrushes[i].type == BrushType::SMOOTH
+                      : kRailBrushes[i].type == input.current_brush) cur = i;
+
+    const ImVec2 bpos = ImGui::GetCursorScreenPos();
+    o.on = editing && cur >= 0; o.tip = nullptr; o.key = nullptr; o.corner = nullptr;
+    o.icon_px = 30.0f;
+    icon_button("tBrush", cur >= 0 ? kRailBrushes[cur].icon : Icon::BrushDraw, kTouchBtn, o);
+    if (ImGui::IsItemActivated()) {
+        if (state == BROWSE) {
+            std::printf("[strip] button again -> close\n");
+            state = CLOSED;           // tapping the button again closes the strip
+        } else {
+            std::printf("[strip] open (press at %.0f,%.0f)\n", io.MousePos.x, io.MousePos.y);
+            state = PRESS_DRAG;
+            press = io.MousePos;
+            travel = 0.0f;
+            tracking = false;
+            ImGui::OpenPopup("##tStrip");
+        }
+    }
+    if (state != CLOSED && !ImGui::IsPopupOpen("##tStrip")) {   // closed from outside
+        std::printf("[strip] closed by imgui (state %d)\n", state);
+        state = CLOSED;
+    }
+
+    auto pick = [&](int i) {
+        const RailBrush& b = kRailBrushes[i];
+        if (b.type == BrushType::SMOOTH) {
+            if (!input.smooth_locked) {
+                input.smooth_locked = true;
+                input.sync_live_settings();
+            }
+        } else {
+            input.clear_smooth_lock();
+            input.switch_brush(b.type);
+            input.subtract_locked = false;
+        }
+        input.interaction_mode = InputState::InteractionMode::EDIT;
+    };
+
+    const float top = bpos.y + kTouchBtn + 14.0f;
+    const float content_h = kRailBrushCount * kStripRow;
+    const float h = std::max(kStripRow + 2.0f * kStripPad,
+                             std::min(content_h + 2.0f * kStripPad, io.DisplaySize.y - kEdge - top));
+    ImGui::SetNextWindowPos(ImVec2(kEdge, top), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(kStripW, h), ImGuiCond_Always);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 0.0f);
+    ImGui::PushStyleColor(ImGuiCol_PopupBg, IM_COL32(0, 0, 0, 0));
+    if (ImGui::BeginPopup("##tStrip", ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
+                                      ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoSavedSettings)) {
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const ImVec2 a = ImGui::GetWindowPos();
+        const ImVec2 b(a.x + kStripW, a.y + h);
+        const float view_top = a.y + kStripPad, view_bot = b.y - kStripPad;
+        const float max_scroll = std::max(0.0f, content_h - (view_bot - view_top));
+        const ImVec2 m = io.MousePos;
+        const bool inside = m.x >= a.x && m.x < b.x && m.y >= view_top && m.y < view_bot;
+        auto row_at = [&](float y) {
+            int i = (int)std::floor((y - view_top + scroll) / kStripRow);
+            return (i >= 0 && i < kRailBrushCount) ? i : -1;
+        };
+        int lit = -1;
+        if (state == PRESS_DRAG) {
+            travel = std::max(travel, std::hypot(m.x - press.x, m.y - press.y));
+            // Holding near either end of the strip scrolls it, faster the deeper in.
+            const float zone = kStripRow * 0.8f;
+            if (inside && m.y > view_bot - zone)
+                scroll += 900.0f * io.DeltaTime * (m.y - (view_bot - zone)) / zone;
+            else if (inside && m.y < view_top + zone && m.y > view_top)
+                scroll -= 900.0f * io.DeltaTime * ((view_top + zone) - m.y) / zone;
+            // Clamp BEFORE reading the row: the edge scroll overshoots the end, and a
+            // row read at the overshot scroll is not the row drawn under the finger.
+            scroll = std::max(0.0f, std::min(max_scroll, scroll));
+            if (inside) lit = row_at(m.y);
+            if (!io.MouseDown[0]) {
+                if (travel > 12.0f) {
+                    std::printf("[strip] drag-release travel=%.0f row=%d\n", travel, lit);
+                    if (lit >= 0) pick(lit);
+                    state = CLOSED;
+                } else {
+                    std::printf("[strip] tap -> browse travel=%.0f\n", travel);
+                    state = BROWSE;   // it was a tap: leave the strip open for browsing
+                }
+            }
+        } else if (state == BROWSE) {
+            if (io.MouseClicked[0] && inside) { tracking = true; last_y = m.y; travel = 0.0f; }
+            if (tracking && io.MouseDown[0]) {
+                scroll -= m.y - last_y;
+                travel += std::fabs(m.y - last_y);
+                last_y = m.y;
+                if (travel < 10.0f && inside) lit = row_at(m.y);
+            }
+            if (tracking && io.MouseReleased[0]) {
+                tracking = false;
+                std::printf("[strip] browse release travel=%.0f inside=%d\n", travel, (int)inside);
+                if (travel < 10.0f && inside) {
+                    int i = row_at(m.y);
+                    if (i >= 0) { pick(i); state = CLOSED; }
+                }
+            }
+        }
+        scroll = std::max(0.0f, std::min(max_scroll, scroll));
+
+        panel_bg(dl, a, b, 14.0f);
+        dl->PushClipRect(ImVec2(a.x, view_top), ImVec2(b.x, view_bot), true);
+        for (int i = 0; i < kRailBrushCount; i++) {
+            const float y0 = view_top + i * kStripRow - scroll;
+            if (y0 + kStripRow < view_top || y0 > view_bot) continue;
+            const ImVec2 r0(a.x + kStripPad, y0 + 2.0f), r1(b.x - kStripPad, y0 + kStripRow - 2.0f);
+            ImU32 icol = kTextRail, tcol = kText;
+            if (i == cur && editing) {
+                dl->AddRectFilled(r0, r1, kAccent, g_dos ? 0.0f : 11.0f);
+                if (g_dos) icol = tcol = cga::black; else icol = tcol = IM_COL32_WHITE;
+            } else if (i == lit) {
+                dl->AddRectFilled(r0, r1, g_dos ? cga::dark_gray : with_alpha(kAccent, 0.35f),
+                                  g_dos ? 0.0f : 11.0f);
+            }
+            const ImVec2 ic(r0.x + kStripRow * 0.5f, (r0.y + r1.y) * 0.5f);
+            if (g_dos) draw_pixel_icon(dl, kRailBrushes[i].icon, ic, 2.0f, icol);
+            else       draw_icon(dl, kRailBrushes[i].icon, ic, 30.0f, icol);
+            ImVec2 ts = text_size(UiFont::Sans, 17.0f, kRailBrushes[i].name);
+            text_at(dl, UiFont::Sans, 17.0f, ImVec2(r0.x + kStripRow + 6.0f, ic.y - ts.y * 0.5f),
+                    tcol, kRailBrushes[i].name);
+        }
+        dl->PopClipRect();
+        // A sliver of scrollbar so it reads as "there's more" when it doesn't all fit.
+        if (max_scroll > 0.0f) {
+            const float vh = view_bot - view_top;
+            const float th = vh * vh / content_h, ty = view_top + (vh - th) * (scroll / max_scroll);
+            dl->AddRectFilled(ImVec2(b.x - 5.0f, ty), ImVec2(b.x - 2.0f, ty + th), kDivider, 2.0f);
+        }
+        if (state == CLOSED) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(2);
+    return state != CLOSED;
+}
+
+float g_mods_px = 0.0f;       // touch mode: the on-screen modifier buttons' size (rail sets it)
 float g_rail_bottom = 0.0f;   // the rail's bottom edge this frame, for brush_panel's fit check
 float g_file_bottom = kEdge;  // the file bar's bottom edge; the rail starts below it
 
@@ -1020,52 +1199,74 @@ void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
     }
     o.side = TipSide::Right;
 
-    struct B { const char* id; const char* name; KeyAction key; Icon icon; BrushType type; };
-    static const B brushes[] = {
-        {"bDraw",    "Draw",    KeyAction::BRUSH_DRAW,    Icon::BrushDraw,    BrushType::DRAW},
-        {"bClay",    "Clay",    KeyAction::BRUSH_CLAY,    Icon::BrushClay,    BrushType::CLAY},
-        {"bInflate", "Inflate", KeyAction::BRUSH_INFLATE, Icon::BrushInflate, BrushType::INFLATE},
-        {"bCrease",  "Crease",  KeyAction::BRUSH_CREASE,  Icon::BrushCrease,  BrushType::CREASE},
-        {"bPinch",   "Pinch",   KeyAction::BRUSH_PINCH,   Icon::BrushPinch,   BrushType::PINCH},
-        {"bMove",    "Move",    KeyAction::BRUSH_MOVE,    Icon::BrushMove,    BrushType::MOVE},
-        {"bLimb",    "Limb",    KeyAction::BRUSH_LIMB,    Icon::BrushLimb,    BrushType::LIMB},
-        {"bSmooth",  "Smooth",  KeyAction::COUNT,         Icon::BrushSmooth,  BrushType::SMOOTH},
-        {"bMask",    "Mask",    KeyAction::BRUSH_MASK,    Icon::BrushMask,    BrushType::MASK},
-    };
-    // Shift-Shift: the glyph if the face has it, else spelled out.
-    ImFont* mono = F(UiFont::MonoMedium);
-    const char* shift2 = (mono && mono->IsGlyphInFont(0x21E7)) ? "\xE2\x87\xA7\xE2\x87\xA7" : "SS";
-    for (const B& b : brushes) {
-        if (b.type == BrushType::SMOOTH) hdivider(kRailBtn, 10.0f, kDividerLo, 7.0f);
-        o.tip = b.name;
-        if (b.type == BrushType::SMOOTH) {
-            o.on = smooth_on && editing;
-            o.key = "Shift Shift"; o.corner = shift2;
-            if (icon_button(b.id, b.icon, kRailBtn, o)) {
-                if (!input.smooth_locked) {
-                    // Same two lines as the double-tap-Shift path in input.cpp.
-                    input.smooth_locked = true;
-                    input.sync_live_settings();
-                } else {
-                    input.clear_smooth_lock();
+    bool strip_open = false;
+    if (input.touch_mode) {
+        if (current != BrushType::PAINT) alpha_at = ImGui::GetCursorScreenPos();
+        strip_open = touch_brush_picker(input, o, smooth_on, editing);
+    } else {
+        // Shift-Shift: the glyph if the face has it, else spelled out.
+        ImFont* mono = F(UiFont::MonoMedium);
+        const char* shift2 = (mono && mono->IsGlyphInFont(0x21E7)) ? "\xE2\x87\xA7\xE2\x87\xA7" : "SS";
+        for (const RailBrush& b : kRailBrushes) {
+            if (b.type == BrushType::SMOOTH) hdivider(kRailBtn, 10.0f, kDividerLo, 7.0f);
+            o.tip = b.name;
+            if (b.type == BrushType::SMOOTH) {
+                o.on = smooth_on && editing;
+                o.key = "Shift Shift"; o.corner = shift2;
+                if (icon_button(b.id, b.icon, kRailBtn, o)) {
+                    if (!input.smooth_locked) {
+                        // Same two lines as the double-tap-Shift path in input.cpp.
+                        input.smooth_locked = true;
+                        input.sync_live_settings();
+                    } else {
+                        input.clear_smooth_lock();
+                    }
                 }
+                continue;
             }
-            continue;
-        }
-        if (current == b.type) alpha_at = ImGui::GetCursorScreenPos();
-        o.on = editing && current == b.type && !smooth_on;
-        o.key = input.key_label(b.key); o.corner = corner(b.key);
-        if (icon_button(b.id, b.icon, kRailBtn, o)) {
-            input.clear_smooth_lock();
-            input.switch_brush(b.type);
-            input.subtract_locked = false;
-            input.interaction_mode = InputState::InteractionMode::EDIT;
+            if (current == b.type) alpha_at = ImGui::GetCursorScreenPos();
+            o.on = editing && current == b.type && !smooth_on;
+            o.key = input.key_label(b.key); o.corner = corner(b.key);
+            if (icon_button(b.id, b.icon, kRailBtn, o)) {
+                input.clear_smooth_lock();
+                input.switch_brush(b.type);
+                input.subtract_locked = false;
+                input.interaction_mode = InputState::InteractionMode::EDIT;
+            }
         }
     }
 
     g_rail_bottom = ImGui::GetWindowPos().y + ImGui::GetWindowSize().y;
     if (current != BrushType::PAINT) alpha_edge = ImGui::GetWindowPos().x + ImGui::GetWindowSize().x;
     end_panel();
+
+    // Touch mode: the modifier buttons (shell.html, real DOM over the canvas) stack in
+    // the column the long rail used to fill, under the brush button, sized to the
+    // height left and to the gap before the brush panel.
+    // They are where the strip drops, so they hide while it is open — nobody sculpts
+    // while picking a brush.
+    if (input.touch_mode) {
+        // Capped to clear the brush panel when it sits beside the rail (x = 88).
+        const float top = g_rail_bottom + 14.0f;
+        g_mods_px = std::floor(std::max(52.0f, std::min({84.0f, kRailW + kEdge - 8.0f,
+                                                          ((float)win_h - kEdge - top - 12.0f) * 0.5f})));
+#ifdef __EMSCRIPTEN__
+        static int sent_top = -1, sent_px = -1, sent_hide = -1;
+        if ((int)top != sent_top || (int)g_mods_px != sent_px || (int)strip_open != sent_hide) {
+            sent_top = (int)top; sent_px = (int)g_mods_px; sent_hide = strip_open;
+            EM_ASM({
+                var m = document.getElementById('mods');
+                if (!m) return;
+                m.style.left = $0 + 'px';
+                m.style.top = $1 + 'px';
+                m.style.setProperty('--mod', $2 + 'px');
+                m.style.visibility = $3 ? "hidden" : "visible";
+            }, (int)kEdge, sent_top, sent_px, sent_hide);
+        }
+#else
+        (void)strip_open;
+#endif
+    }
 
     // Current alpha (stamp), beside the button of the brush it serves — Draw, Mask or
     // Paint only. Closed, it is just the swatch: 88% of a rail button, its top a fifth
@@ -1279,12 +1480,15 @@ void set_feel(InputState& in, int which, float t);   // below, shared with the 2
 // the pointer sits across it, as on the 2000s tracks. The value is applied before the
 // row is drawn, so the bar shows this frame's value. A click springs the bar to its new
 // width; a drag pins it to the pointer exactly.
-void meter_widget(const char* id, InputState& in, int which, float w) {
+// k scales the whole row (the touch-mode panel doubles when tapped); live = false
+// lays it out and draws it but ignores presses, so the tap that grows the panel
+// can't also set a value.
+void meter_widget(const char* id, InputState& in, int which, float w, float k = 1.0f, bool live = true) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImVec2 p = ImGui::GetCursorScreenPos();
-    const float h = g_dos ? 20.0f : 30.0f;
+    const float h = (g_dos ? 20.0f : 30.0f) * k;
     ImGui::InvisibleButton(id, ImVec2(w, h));
-    const bool held = ImGui::IsItemActive();
+    const bool held = live && ImGui::IsItemActive();
     const bool lit = held || ImGui::IsItemHovered();
     const bool dragging = held && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 2.0f);
     if (held) set_feel(in, which, (ImGui::GetIO().MousePos.x - p.x) / w);
@@ -1300,24 +1504,25 @@ void meter_widget(const char* id, InputState& in, int which, float w) {
     if (g_dos) {
         // Board D: "S Size  70" — cyan key, gray label, green value, no bar.
         char lab[24]; std::snprintf(lab, sizeof lab, " %s", labels[which]);
-        ImVec2 k = text_size(UiFont::Mono, 16.0f, keys[which]);
-        ImVec2 v = text_size(UiFont::Mono, 16.0f, value);
-        const float ty = p.y + (h - 16.0f) * 0.5f;
+        const float fpx = 16.0f * k;
+        ImVec2 ks = text_size(UiFont::Mono, fpx, keys[which]);
+        ImVec2 v = text_size(UiFont::Mono, fpx, value);
+        const float ty = p.y + (h - fpx) * 0.5f;
         if (lit) dl->AddRectFilled(p, ImVec2(p.x + w, p.y + h), cga::dark_gray);
-        text_at(dl, UiFont::Mono, 16.0f, ImVec2(p.x, ty), cga::light_cyan, keys[which]);
-        text_at(dl, UiFont::Mono, 16.0f, ImVec2(p.x + k.x, ty), cga::light_gray, lab);
-        text_at(dl, UiFont::Mono, 16.0f, ImVec2(p.x + w - v.x, ty), cga::light_green, value);
+        text_at(dl, UiFont::Mono, fpx, ImVec2(p.x, ty), cga::light_cyan, keys[which]);
+        text_at(dl, UiFont::Mono, fpx, ImVec2(p.x + ks.x, ty), cga::light_gray, lab);
+        text_at(dl, UiFont::Mono, fpx, ImVec2(p.x + w - v.x, ty), cga::light_green, value);
         return;
     }
     // key badge
-    ImVec2 b0(p.x, p.y + 2.0f), b1(p.x + 16.0f, p.y + 18.0f);
-    dl->AddRect(b0, b1, IM_COL32(255, 255, 255, 51), 4.0f);
-    ImVec2 ks = text_size(UiFont::Mono, 10.0f, keys[which]);
-    text_at(dl, UiFont::Mono, 10.0f, ImVec2(b0.x + (16.0f - ks.x) * 0.5f, b0.y + (16.0f - ks.y) * 0.5f), kText, keys[which]);
-    ImVec2 ls = text_size(UiFont::Sans, 13.0f, labels[which]);
-    text_at(dl, UiFont::Sans, 13.0f, ImVec2(p.x + 24.0f, p.y + 10.0f - ls.y * 0.5f), kText, labels[which]);
-    ImVec2 vs = text_size(UiFont::Mono, 13.0f, value);
-    text_at(dl, UiFont::Mono, 13.0f, ImVec2(p.x + w - vs.x, p.y + 10.0f - vs.y * 0.5f), kText, value);
+    ImVec2 b0(p.x, p.y + 2.0f * k), b1(p.x + 16.0f * k, p.y + 18.0f * k);
+    dl->AddRect(b0, b1, IM_COL32(255, 255, 255, 51), 4.0f * k);
+    ImVec2 ks = text_size(UiFont::Mono, 10.0f * k, keys[which]);
+    text_at(dl, UiFont::Mono, 10.0f * k, ImVec2(b0.x + (16.0f * k - ks.x) * 0.5f, b0.y + (16.0f * k - ks.y) * 0.5f), kText, keys[which]);
+    ImVec2 ls = text_size(UiFont::Sans, 13.0f * k, labels[which]);
+    text_at(dl, UiFont::Sans, 13.0f * k, ImVec2(p.x + 24.0f * k, p.y + 10.0f * k - ls.y * 0.5f), kText, labels[which]);
+    ImVec2 vs = text_size(UiFont::Mono, 13.0f * k, value);
+    text_at(dl, UiFont::Mono, 13.0f * k, ImVec2(p.x + w - vs.x, p.y + 10.0f * k - vs.y * 0.5f), kText, value);
     const float target = std::max(0.0f, std::min(1.0f, vals[which]));
     const ImGuiID sid = ImGui::GetID(id);
     if (dragging) spring_reset(sid, target);
@@ -1335,9 +1540,9 @@ void meter_widget(const char* id, InputState& in, int which, float w) {
         if (std::fabs(sp.x - target) < 1e-4f && std::fabs(sp.v) < 1e-3f) after_key[which] = false;
     }
     pct = std::max(0.0f, std::min(1.0f, pct));
-    float y = p.y + h - 4.0f;
-    dl->AddRectFilled(ImVec2(p.x, y), ImVec2(p.x + w, y + 3.0f),
-                      IM_COL32(255, 255, 255, lit ? 56 : 26), 2.0f);
+    float y = p.y + h - 4.0f * k;
+    dl->AddRectFilled(ImVec2(p.x, y), ImVec2(p.x + w, y + 3.0f * k),
+                      IM_COL32(255, 255, 255, lit ? 56 : 26), 2.0f * k);
     // Size wears the ring's own colour, so it moves with Hardness like the cursor does.
     ImU32 col = kText;
     if (which == 0) {
@@ -1345,7 +1550,7 @@ void meter_widget(const char* id, InputState& in, int which, float w) {
         brush_cursor_rgb(in.brush_hardness, rgb);
         col = IM_COL32((int)(rgb[0] * 255.0f), (int)(rgb[1] * 255.0f), (int)(rgb[2] * 255.0f), 255);
     }
-    if (pct > 0.0f) dl->AddRectFilled(ImVec2(p.x, y), ImVec2(p.x + w * pct, y + 3.0f), col, 2.0f);
+    if (pct > 0.0f) dl->AddRectFilled(ImVec2(p.x, y), ImVec2(p.x + w * pct, y + 3.0f * k), col, 2.0f * k);
 }
 
 // A small text label laid out as an item (so SameLine works around it).
@@ -1398,7 +1603,15 @@ float g_opts_right  = 0.0f;   // tool-options panel's right edge, 0 when it isn'
 // their own few controls.
 float brush_panel(InputState& input, int win_h) {
     const auto mode = input.interaction_mode;
-    const float w = g_dos ? 272.0f : 196.0f;
+    // Touch mode: narrow at rest (a landscape phone is short and wide, and the panel
+    // ate a big bite of it), and a tap doubles the whole thing so the meters are easy
+    // to set with a finger; a tap anywhere else shrinks it back. While big it holds
+    // the mouse, so that closing tap never lands on the model as a dab.
+    static bool big = false;
+    const bool can_grow = input.touch_mode && mode == InputState::InteractionMode::EDIT;
+    if (!can_grow) big = false;
+    const float k = big ? 2.0f : 1.0f;
+    const float w = (input.touch_mode ? (g_dos ? 208.0f : 150.0f) : (g_dos ? 272.0f : 196.0f)) * k;
     float panel_h = 0.0f;
     // Under the rail only when it fits there; a short window puts it back beside the
     // rail. Judged on the TALLEST rail and panel seen at this window height (the alpha
@@ -1415,12 +1628,12 @@ float brush_panel(InputState& input, int win_h) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     // Heading: the name in the title colour, an optional muted suffix after it.
     auto heading = [&](const char* name, const char* rest) {
-        const float px = g_dos ? 16.0f : 14.0f, rpx = g_dos ? 16.0f : 13.0f;
+        const float px = (g_dos ? 16.0f : 14.0f) * k, rpx = (g_dos ? 16.0f : 13.0f) * k;
         const char* nm = title_case(name);
         ImVec2 p = ImGui::GetCursorScreenPos();
         ImVec2 ns = text_size(UiFont::SansSemibold, px, nm);
-        ImGui::Dummy(ImVec2(w, g_dos ? 22.0f : 24.0f));
-        float cy = p.y + (g_dos ? 22.0f : 24.0f) * 0.5f;
+        ImGui::Dummy(ImVec2(w, (g_dos ? 22.0f : 24.0f) * k));
+        float cy = p.y + (g_dos ? 22.0f : 24.0f) * k * 0.5f;
         text_at(dl, UiFont::SansSemibold, px, ImVec2(p.x, cy - ns.y * 0.5f), title_col(), nm);
         if (rest) {
             ImVec2 rs = text_size(UiFont::Sans, rpx, rest);
@@ -1452,10 +1665,16 @@ float brush_panel(InputState& input, int win_h) {
     } else {
         heading(input.brush_name(), " - Tool Options");
         static const char* ids[4] = {"##mS", "##mW", "##mA", "##mO"};
-        for (int i = 0; i < 4; i++) meter_widget(ids[i], input, i, w);
+        for (int i = 0; i < 4; i++) meter_widget(ids[i], input, i, w, k, !can_grow || big);
+    }
+    if (can_grow) {
+        const ImGuiIO& io = ImGui::GetIO();
+        const bool over = ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+        if (io.MouseClicked[0]) big = over;
+        if (big) ImGui::SetNextFrameWantCaptureMouse(true);
     }
     panel_h = ImGui::GetWindowSize().y;
-    panel_max = std::max(panel_max, panel_h);
+    if (!big) panel_max = std::max(panel_max, panel_h);   // the grown panel mustn't move the dock
     g_brush_right = ImGui::GetWindowPos().x + ImGui::GetWindowSize().x;
     end_panel();
     return panel_h;

@@ -15,6 +15,24 @@
        the bar; the 100vh line is the fallback for browsers without it. */
     #canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; height: 100dvh; display: block;
               border: 0; outline: none; background: #1a1a1a; touch-action: none; }
+    /* On-screen modifier buttons for phones, stacked down the left edge under the
+       brush button. The app places and sizes them (left/top/--mod, set from
+       ui_skin.cpp's rail), since only it knows where the brush button ends. Real DOM
+       elements on top of the canvas, not ImGui: a thumb on them never reaches the
+       canvas, so GLFW can't mistake it for the sculpting finger and the pinch tracker
+       never counts it. Hidden until a finger touches the page. */
+    #mods { position: fixed; left: 16px; top: 50%;
+            display: none; flex-direction: column; gap: 12px; z-index: 50; }
+    #mods.on { display: flex; }
+    .mod { width: var(--mod, 80px); height: var(--mod, 80px); border-radius: 20px; box-sizing: border-box;
+           border: 1px solid rgba(255,255,255,.14); background: rgba(30,30,34,.72);
+           color: #c8c8cc; font: 600 15px/1.15 system-ui, sans-serif; text-align: center;
+           display: flex; flex-direction: column; align-items: center; justify-content: center;
+           touch-action: none; user-select: none; -webkit-user-select: none;
+           -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent; }
+    .mod small { font-weight: 400; font-size: 11px; opacity: .7; }
+    .mod.held  { background: rgba(115,76,153,.92); color: #fff; }
+    .mod.latch { background: rgba(115,76,153,.92); color: #fff; border: 2px solid #e6d2ff; }
     #boot { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
             color: #787878; font-family: system-ui, sans-serif; font-size: 14px; pointer-events: none; }
   </style>
@@ -22,6 +40,10 @@
 <body>
   <canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
   <div id="boot">Loading Chisel…</div>
+  <div id="mods">
+    <div class="mod" id="modCtrl">Ctrl<small>invert</small></div>
+    <div class="mod" id="modShift">Shift<small>smooth</small></div>
+  </div>
   <script>
     // On-page console overlay: mirrors console.log/warn/error and uncaught
     // errors into a floating panel. Always wired — itch serves the app in an
@@ -49,9 +71,31 @@
           if (hidden) dbgPane.scrollTop = dbgPane.scrollHeight;
         }
       }, true);
+      // LAN dev relay: served by ~/CHISEL/.lan-https/serve.py (port 8642, never itch),
+      // console lines are batched and POSTed back to it, so the laptop can read the
+      // phone's log live. Touch pointer events are logged too, for input debugging.
+      var relayBuf = [];
+      var relayOn = location.port === '8642';
+      if (relayOn) {
+        setInterval(function() {
+          if (!relayBuf.length) return;
+          var body = relayBuf.join('\n'); relayBuf = [];
+          fetch('/log', { method: 'POST', body: body, keepalive: true }).catch(function() {});
+        }, 400);
+        ['pointerdown', 'pointerup', 'pointercancel'].forEach(function(t) {
+          window.addEventListener(t, function(e) {
+            if (e.pointerType !== 'touch') return;
+            relayBuf.push('[ptr] ' + t + ' id=' + e.pointerId + ' ' + Math.round(e.clientX) + ',' +
+                          Math.round(e.clientY) + ' on=' + (e.target.id || e.target.tagName) +
+                          ' fs=' + (document.fullscreenElement ? 1 : 0) +
+                          ' ' + innerWidth + 'x' + innerHeight);
+          }, true);
+        });
+      }
       var dbgWrap = function(fn, tag, color) {
         return function() {
           fn.apply(console, arguments);
+          if (relayOn) relayBuf.push(tag + Array.prototype.join.call(arguments, ' '));
           var line = document.createElement('div');
           if (color) line.style.color = color;
           line.textContent = tag + Array.prototype.map.call(arguments, function(a) {
@@ -109,6 +153,65 @@
     window.addEventListener('wheel', function(e) {
       e.preventDefault();
     }, { capture: true, passive: false });
+
+    // Touch mode + the on-screen Ctrl / Shift buttons. Touch mode turns on at the
+    // first finger anywhere on the page and off at the first real mouse move, so a
+    // touchscreen laptop flips back the moment the mouse is used. Each button holds
+    // its modifier while pressed; a quick tap (< 250 ms) latches it on until the next
+    // tap, freeing the thumb. The app hears both through Module._chisel_touch_*.
+    {
+      var modsBox = document.getElementById('mods');
+      var touchMode = false;
+      var setTouchMode = function(on) {
+        if (on === touchMode) return;
+        touchMode = on;
+        modsBox.classList.toggle('on', on);
+        if (Module._chisel_touch_mode) Module._chisel_touch_mode(on ? 1 : 0);
+      };
+      window.addEventListener('pointerdown', function(e) {
+        if (e.pointerType === 'touch') setTouchMode(true);
+      }, true);
+      window.addEventListener('pointermove', function(e) {
+        if (e.pointerType === 'mouse' && (e.movementX || e.movementY)) setTouchMode(false);
+      }, true);
+
+      var mods = [];
+      var sendMods = function() {
+        if (Module._chisel_touch_mods)
+          Module._chisel_touch_mods(mods[0].on() ? 1 : 0, mods[1].on() ? 1 : 0);
+      };
+      var makeMod = function(el) {
+        var m = { held: false, latched: false, t0: 0, wasLatched: false };
+        m.on = function() { return m.held || m.latched; };
+        var paint = function() {
+          el.classList.toggle('held', m.held && !m.latched);
+          el.classList.toggle('latch', m.latched);
+        };
+        el.addEventListener('pointerdown', function(e) {
+          e.preventDefault();
+          el.setPointerCapture(e.pointerId);
+          m.wasLatched = m.latched;
+          m.latched = false;
+          m.held = true;
+          m.t0 = performance.now();
+          paint(); sendMods();
+        });
+        var up = function(e) {
+          if (!m.held) return;
+          m.held = false;
+          // A quick tap latches; a tap on a latched button just releases it.
+          if (!m.wasLatched && e.type === 'pointerup' && performance.now() - m.t0 < 250)
+            m.latched = true;
+          paint(); sendMods();
+        };
+        el.addEventListener('pointerup', up);
+        el.addEventListener('pointercancel', up);
+        el.addEventListener('contextmenu', function(e) { e.preventDefault(); });
+        return m;
+      };
+      mods.push(makeMod(document.getElementById('modCtrl')));
+      mods.push(makeMod(document.getElementById('modShift')));
+    }
 
     var canvasElement = document.getElementById('canvas');
     canvasElement.addEventListener('webglcontextlost', function(e) {
