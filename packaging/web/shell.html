@@ -30,13 +30,16 @@
     #mods { position: fixed; left: 16px; top: 50%;
             display: none; flex-direction: column; gap: 12px; z-index: 50; }
     #mods.on { display: flex; }
-    .mod { width: var(--mod, 80px); height: var(--mod, 80px); border-radius: 20px; box-sizing: border-box;
+    /* Text and corners scale with the size the app sets (--mod), so the big 102 px
+       buttons don't carry 15 px labels. */
+    .mod { width: var(--mod, 80px); height: var(--mod, 80px); border-radius: calc(var(--mod, 80px) * 0.24);
+           box-sizing: border-box;
            border: 1px solid rgba(255,255,255,.14); background: rgba(30,30,34,.72);
-           color: #c8c8cc; font: 600 15px/1.15 system-ui, sans-serif; text-align: center;
+           color: #c8c8cc; font: 600 calc(var(--mod, 80px) * 0.19)/1.15 system-ui, sans-serif; text-align: center;
            display: flex; flex-direction: column; align-items: center; justify-content: center;
            touch-action: none; user-select: none; -webkit-user-select: none;
            -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent; }
-    .mod small { font-weight: 400; font-size: 11px; opacity: .7; }
+    .mod small { font-weight: 400; font-size: calc(var(--mod, 80px) * 0.135); opacity: .7; }
     .mod.held  { background: rgba(115,76,153,.92); color: #fff; }
     .mod.latch { background: rgba(115,76,153,.92); color: #fff; border: 2px solid #e6d2ff; }
     #boot { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
