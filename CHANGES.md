@@ -2,6 +2,27 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-13 — Phone layout: brush button starts grown, Ctrl/Shift flank the model (branch `android-controls`)
+
+*Built GL and web. Tested in headless Chrome with touch emulation at UI scale 50 % and
+100 % (button placement, first-tap strip, brush panel growth hides the buttons); not yet
+on the phone.*
+
+- **The touch brush button is drawn at its grown size (1.5x) from the start**, so the
+  first tap opens the brush strip instead of only growing the button. The other docks
+  keep tap-to-grow.
+- **Ctrl on the left edge, Shift on the right**, side by side just above the bottom docks
+  (the higher of the brush panel's rest top and the status panel's top), up to 102 px.
+  On a short screen with no room there (100 % on a landscape phone) they drop to just
+  under the brush button instead, sized to the gap before the brush panel. Hidden while
+  a dock is grown or a popup (strip, menu) is open, since page buttons sit above the
+  canvas and would cover it.
+- **The status panel never moves**: pinned bottom-right and drawn behind the other docks,
+  which may cover it. It used to lift above the brush panel when they met.
+- **The brush settings panel grows over everything** — opaque and on top — instead of
+  pushing the options panel and status panel aside; they and the buttons read its rest
+  size. Beside the rail, it now clears the brush button's real (1.5x) width.
+
 ## 2026-10-13 — Touch input wakes the idle frame skip (branch `android-controls`)
 
 *Merged main (idle frame skip, normals sliver guard) into the branch. Built GL and web;
