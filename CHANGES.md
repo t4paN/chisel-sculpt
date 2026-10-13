@@ -2,6 +2,17 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-13 — Touch input wakes the idle frame skip (branch `android-controls`)
+
+*Merged main (idle frame skip, normals sliver guard) into the branch. Built GL and web;
+touch, dock and UI-scale checks re-run in headless Chrome. Not yet tested on the phone.*
+
+- The idle skip wakes on ImGui's event queue, but pinch zoom / two-finger pan, the
+  on-screen Ctrl/Shift buttons and the switch into touch mode arrive from the page
+  through `chisel_touch_*`, outside that queue. Each now sets `wake_requested`, so a
+  pinch started after a second of stillness moves the camera at once, and a latched
+  modifier or a layout change is drawn straight away.
+
 ## 2026-10-12 — Phone: UI scale setting, bigger Ctrl/Shift (branch `android-controls`)
 
 *Built GL and web. Tested in headless Chrome with touch emulation (layout size, backing
