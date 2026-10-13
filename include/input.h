@@ -408,6 +408,9 @@ struct InputState {
     // Notification (brief on-screen message)
     char notification[512];
     float notification_timer;  // seconds remaining
+    // Set by event sources ImGui never hears about (a file drop), so the idle frame
+    // skip in main.cpp still draws the frame that reacts to them. Cleared there.
+    bool wake_requested = false;
 
     // Focus request
     bool focus_requested;   // F pressed, main loop handles reframe

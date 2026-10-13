@@ -125,6 +125,60 @@ fullscreen button in its final spot was committed before a phone test.*
   lifted. A single touch now re-reads the plane cache at the press point on its first
   frame and re-latches before anything moves.
 - Desktop mouse and pen input is unchanged.
+## 2026-10-11 — Folds shade cleanly again: Max normals get a sliver guard
+
+*Built GL, native WebGPU and web; GL and native WebGPU shaders compile clean. Tested by
+the user on the web build (Firefox) with `monstabrain_001`: folds that showed broken
+shading load clean. Chrome/Tint gate clean (desktop, 2026-10-12). Merged to main.*
+
+- Since v0.2.10 vertex normals use Nelson Max weighting, which scales a face's say by
+  ~1/(edge length)^2. Where vertices cross over in a fold, the crushed slivers have tiny
+  edges, so one wrong-facing sliver could outvote a vertex's whole ring and flip its
+  shading. Area weighting (pre-v0.2.10) gave slivers almost no say, which hid bad
+  geometry. Each vertex now sums both in the same pass: where they agree (all clean
+  geometry, the UV sphere included) Max wins outright; past 15 deg of disagreement the
+  result smoothsteps to the area normal, fully by 35 deg.
+- A plain edge-length floor was considered and rejected: any floor that leaves the UV
+  sphere's legitimately short pole edges alone still lets a crushed sliver carry ~25x a
+  normal face's weight.
+- `cascade_normals` (the level-switch shader, WGSL + GLSL) was never moved to Max in
+  v0.2.10 and still area-weighted. So a level switch shaded the forgiving way and the
+  next stroke the strict way — which is why a Shift+D → Ctrl+D round trip seemed to fix
+  broken folds until you sculpted again. All six sites now match: `recompute_normals`,
+  `recompute_normals_partial`, and the `compute_normals` + `cascade_normals` shader pairs.
+
+## 2026-10-10 — Idle frames are skipped: an untouched model costs almost nothing
+
+*Built GL, native WebGPU and web; measured by the user on the web build (Firefox,
+taptop). The "nothing freezes" checklist (springs, tooltips, held-key rotation, toasts,
+remesh progress) is still owed. Merged to main 2026-10-12.*
+
+- Chisel used to repaint the whole scene and UI on every screen refresh, even with
+  nothing changing. Now each frame first asks whether anything happened: new input
+  (ImGui's event queue sees every key, button, wheel and pointer event on both targets),
+  a resize, pen samples, a held key or button, a stroke or its pen-up cleanup, remesh /
+  voxel merge, a toast still counting down, a pending screen-buffer refresh, a text
+  field with a caret, a file drop or web import. If nothing did, drawing continues for
+  one more second, then stops. That tail covers what keeps moving after input stops
+  (button springs, tooltip delays, the cursor ring's LERP, a flag a finishing job
+  chains into) without a trigger per animation.
+- A skipped frame presents nothing: the browser keeps showing the last canvas; native
+  sleeps in `glfwWaitEventsTimeout(0.1)` instead of spinning. Settings still autosave
+  while idle. Benchmark mode never skips.
+- The first frame after an idle stretch clamps ImGui's DeltaTime to one frame: ImGui
+  measures it from the last *drawn* frame, so the gap would otherwise count down a toast
+  raised by the waking keypress before it was ever shown. The FPS readout holds its
+  last real value until a full drawn second.
+- Measured with `gpuwatch` (a new taptop tool that reads the graphics clock, because
+  amdgpu's busy % reads 100% at the 200 MHz floor on this Raven APU): idle Firefox
+  went from ~115% of a core to 5% (max 11%), graphics clock idle 100% of the time,
+  temps 55°C → 41°C. Sculpting costs the same as before.
+
+## 2026-10-10 — Native WebGPU builds against GLFW 3.3 again
+
+- The Wayland surface path called `glfwGetPlatform` (GLFW 3.4+) unguarded in
+  `main.cpp` and `wgpu_window.cpp`, so `build-wgpu` failed on distro GLFW 3.3
+  (Mint/Ubuntu 24.04). Same version guard the rest of the code uses; 3.3 takes X11.
 
 ## 2026-10-08 — Edge wrap puts the pointer back where the ring is (Wayland)
 

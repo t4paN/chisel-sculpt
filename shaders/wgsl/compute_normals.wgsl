@@ -29,6 +29,31 @@ struct Params {
 @group(0) @binding(6)  var<storage, read>       dirty_verts : array<u32>;
 @group(0) @binding(63) var<uniform>             P           : Params;
 
+// Sliver guard: MUST match guard_normal() in src/mesh.cpp and the other normals
+// shaders. Max weighting lets one crushed, wrong-facing sliver (a fold where verts
+// crossed over) outvote a whole ring; where the Max and area normals disagree by more
+// than 15 deg, blend to the area normal (fully by 35 deg). Clean meshes never trip it.
+fn guard_normal(max_sum : vec3<f32>, area_sum : vec3<f32>) -> vec3<f32> {
+    var na = vec3<f32>(0.0, 0.0, 0.0);
+    let la = length(area_sum);
+    if (la > 1e-8) {
+        na = area_sum / la;
+    }
+    let lm = length(max_sum);
+    if (lm <= 1e-8) {
+        return na;
+    }
+    let nm = max_sum / lm;
+    let d = dot(nm, na);
+    let t = smoothstep(0.81915204, 0.96592583, d);
+    let b = na * (1.0 - t) + nm * t;
+    let lb = length(b);
+    if (lb > 1e-8) {
+        return b / lb;
+    }
+    return vec3<f32>(0.0, 0.0, 0.0);
+}
+
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     let di = gid.x;
@@ -45,6 +70,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     let v = dirty_verts[first + di];
 
     var n = vec3<f32>(0.0, 0.0, 0.0);
+    var a = vec3<f32>(0.0, 0.0, 0.0);   // area-weighted sum, for the guard
 
     let start = adj_offset[v];
     let end = adj_offset[v + 1u];
@@ -87,14 +113,10 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
             continue;
         }
         n = n + fn_ * (1.0 / denom);
+        a = a + fn_;
     }
 
-    let len = length(n);
-    if (len > 1e-8) {
-        n = n / len;
-    } else {
-        n = vec3<f32>(0.0, 0.0, 0.0);
-    }
+    n = guard_normal(n, a);
 
     let base = v * 3u;
     normals[base] = n.x;

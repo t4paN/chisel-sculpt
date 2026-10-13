@@ -1,7 +1,7 @@
 // cascade_normals.comp — GLSL 430 sibling of shaders/wgsl/cascade_normals.wgsl.
 // Full-mesh vertex normals after a GPU cascade: the sequential-id variant of
 // compute_normals.comp (no dirty list — every vertex is "dirty" after a level
-// switch). One thread per vertex: sum area-weighted face normals via CSR
+// switch). One thread per vertex: sum Max-weighted face normals (sliver-guarded) via CSR
 // adjacency, normalize. Reads the final cascade positions at the SRC slot,
 // writes an interleaved float3 normals buffer for readback + display.
 #version 430
@@ -20,11 +20,29 @@ layout(std140, binding = 63) uniform Params {
     uint _pad2;         // struct rounds to 16
 } P;
 
+// Sliver guard: MUST match guard_normal() in src/mesh.cpp and the WGSL twins. Max
+// weighting lets one crushed, wrong-facing sliver (a fold where verts crossed over)
+// outvote a whole ring; where the Max and area normals disagree by more than 15 deg,
+// blend to the area normal (fully by 35 deg). Clean meshes never trip it.
+vec3 guard_normal(vec3 max_sum, vec3 area_sum) {
+    vec3 na = vec3(0.0);
+    float la = length(area_sum);
+    if (la > 1e-8) na = area_sum / la;
+    float lm = length(max_sum);
+    if (lm <= 1e-8) return na;
+    vec3 nm = max_sum / lm;
+    float t = smoothstep(0.81915204, 0.96592583, dot(nm, na));
+    vec3 b = na * (1.0 - t) + nm * t;
+    float lb = length(b);
+    return lb > 1e-8 ? b / lb : vec3(0.0);
+}
+
 void main() {
     uint v = gl_GlobalInvocationID.x;
     if (v >= P.vcount) return;
 
     float nx = 0.0, ny = 0.0, nz = 0.0;
+    vec3 a = vec3(0.0);
 
     uint start = adj_offset[v];
     uint end   = adj_offset[v + 1u];
@@ -41,19 +59,27 @@ void main() {
 
         vec3 fn = cross(p1 - p0, p2 - p0);
         if (length(fn) < 1e-7) continue;
-
-        nx += fn.x;
-        ny += fn.y;
-        nz += fn.z;
+        // Same Max weighting + guard as compute_normals.comp (was plain area
+        // weighting, left behind when v0.2.10 moved the other sites to Max).
+        vec3 ea, eb;
+        if (v == i0) {
+            ea = p1 - p0; eb = p2 - p0;
+        } else if (v == i1) {
+            ea = p2 - p1; eb = p0 - p1;
+        } else {
+            ea = p0 - p2; eb = p1 - p2;
+        }
+        float denom = dot(ea, ea) * dot(eb, eb);
+        if (denom <= 0.0) continue;
+        float w = 1.0 / denom;
+        nx += fn.x * w;
+        ny += fn.y * w;
+        nz += fn.z * w;
+        a += fn;
     }
 
-    float len = sqrt(nx*nx + ny*ny + nz*nz);
-    if (len > 1e-8) {
-        float inv = 1.0 / len;
-        nx *= inv; ny *= inv; nz *= inv;
-    } else {
-        nx = 0.0; ny = 0.0; nz = 0.0;
-    }
+    vec3 g = guard_normal(vec3(nx, ny, nz), a);
+    nx = g.x; ny = g.y; nz = g.z;
 
     uint o = v * 3u;
     normals[o]     = nx;

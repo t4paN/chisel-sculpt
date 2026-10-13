@@ -72,6 +72,7 @@
 #include "debug_console.h"
 #include "bench.h"
 #include "imgui.h"
+#include "imgui_internal.h"   // InputEventsQueue: the idle frame skip reads it
 #include "imgui_impl_glfw.h"
 #ifdef CHISEL_BACKEND_WEBGPU
 #include "imgui_impl_wgpu.h"
@@ -1120,6 +1121,12 @@ int main(int argc, char* argv[]) {
 
     bool screen_buffers_dirty = true;
 
+    // Idle frame skip (see the block before ImGui::NewFrame).
+    double last_active_time = glfwGetTime();
+    bool idle_last_frame = false;
+    int idle_prev_w = 0, idle_prev_h = 0;
+    unsigned long idle_prev_pen = tablet.sample_count();
+
     // FPS counter
     double fps_last_time = glfwGetTime();
     int fps_frame_count = 0;
@@ -1233,6 +1240,13 @@ int main(int argc, char* argv[]) {
 #endif
 
         debug_console::pump();
+#ifndef __EMSCRIPTEN__
+        // After an idle (skipped) frame, sleep until an event instead of spinning; the
+        // timeout keeps the signal/close checks and settings autosave ticking. The web
+        // can't block — the browser's rAF paces it and a skipped frame costs ~nothing.
+        if (idle_last_frame) glfwWaitEventsTimeout(0.1);
+        else
+#endif
         glfwPollEvents();
 #if defined(_WIN32) && !defined(__EMSCRIPTEN__)
         g_mouse_history.pull(window, input);
@@ -1318,6 +1332,73 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        // ---- Idle frame skip ----
+        // Nothing on screen changes unless something happened, so a model you're only
+        // looking at shouldn't cost a full scene + UI repaint every vsync (an idle web
+        // tab held the GPU at ~100%). A frame is active when there's new input (ImGui's
+        // queue sees every key/button/wheel/pointer event on both targets), the window
+        // resized, the pen reported, or multi-frame work is in flight. Drawing then
+        // continues for kIdleTail after the last active frame: that covers everything
+        // that keeps moving on its own once input stops (button springs, tooltip
+        // delays, the cursor ring's LERP, a request flag a finishing job chains into)
+        // without a trigger per animation. A skipped frame presents nothing: the
+        // browser keeps showing the last canvas, native sleeps in glfwWaitEvents.
+        bool woke_from_idle = false;
+        {
+            const double kIdleTail = 1.0;
+            const double now = glfwGetTime();
+            bool active = !ImGui::GetCurrentContext()->InputEventsQueue.empty()
+                || input.wake_requested
+                || input.path_n > 0
+                || input.mouse_x != input.prev_mouse_x || input.mouse_y != input.prev_mouse_y
+                || tablet.sample_count() != idle_prev_pen
+                || win_w != idle_prev_w || win_h != idle_prev_h;
+#ifdef __EMSCRIPTEN__
+            active = active || !g_web_import_path.empty() || !g_web_alpha_path.empty();
+#endif
+            const bool busy = bench::active()
+                || app_state != AppState::IDLE
+                || brush_stroke.is_active() || brush_stroke.reconciling()
+                || brush_stroke.dab_readbacks_pending()
+                || vmerge_job
+                || input.remesh_requested || input.remesh_in_progress
+                || input.voxel_merge_requested || input.voxel_merge_in_progress
+                || input.drag_mode != InputState::DragMode::NONE
+                || input.slider_mode != InputState::SliderMode::NONE
+                || wrap_capture_active()
+                || input.notification_timer > 0.0f || input.mirror_unavailable_timer > 0.0f
+                // Same condition the refresh below runs under, so it can't keep us awake
+                // while the menu defers it.
+                || (screen_buffers_dirty && !input.settings_menu_open)
+                || ImGui::GetIO().WantTextInput;   // keep a text field's caret alive
+            // A held key or button sends no events (ImGui drops key repeats), yet a held
+            // rotate key turns the model every frame. ImGuiKey's named range includes
+            // the mouse buttons.
+            bool held = false;
+            for (int k = ImGuiKey_NamedKey_BEGIN; k < ImGuiKey_NamedKey_END && !held; ++k)
+                held = ImGui::IsKeyDown((ImGuiKey)k);
+            input.wake_requested = false;
+            idle_prev_w = win_w; idle_prev_h = win_h;
+            idle_prev_pen = tablet.sample_count();
+
+            if (active || busy || held) last_active_time = now;
+            if (now - last_active_time > kIdleTail) {
+                // Settings still save on their debounce while nothing is drawn.
+                settings_tick(input, (float)(now - settings_last_time));
+                settings_last_time = now;
+                idle_last_frame = true;
+                input.end_frame();
+                return;   // == `continue` in the native loop, like the hidden-frame skip
+            }
+            if (idle_last_frame) {
+                woke_from_idle = true;
+                idle_last_frame = false;
+                // The FPS readout holds its last real value until a full drawn second.
+                fps_last_time = now;
+                fps_frame_count = 0;
+            }
+        }
+
         mesh = &scene.active_mesh();
         multires = &scene.active_multires();
 
@@ -1327,6 +1408,10 @@ int main(int argc, char* argv[]) {
         ImGui_ImplOpenGL3_NewFrame();
 #endif
         ImGui_ImplGlfw_NewFrame();
+        // ImGui measures DeltaTime from the last drawn frame, so the wake frame after an
+        // idle stretch would see the whole gap: a toast raised by the waking keypress
+        // would be counted down by minutes and vanish before it was ever drawn.
+        if (woke_from_idle) ImGui::GetIO().DeltaTime = 1.0f / 60.0f;
 #ifdef __EMSCRIPTEN__
         // Re-take DisplaySize from the canvas, for the same reason win_w is read from
         // clientWidth up top: ImGui_ImplGlfw_NewFrame sources it from glfwGetWindowSize,
