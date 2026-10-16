@@ -57,7 +57,11 @@ struct PaintLayer {
 
     // dense:  rgba has one entry per vertex, ids is empty.
     // packed: rgba[k] belongs to vertex ids[k]; ids ascending; no zero-alpha entries.
+    // vcount: the vertex count of the mesh this layer was stored for. Topology ops
+    // compare it with the mesh's to tell a layer that needs fitting (a multires level
+    // added or dropped) from one that is current.
     bool dense = false;
+    uint32_t vcount = 0;
     std::vector<uint32_t> ids;
     std::vector<uint32_t> rgba;
 
@@ -68,6 +72,7 @@ struct PaintLayerStack {
     std::vector<PaintLayer> layers;    // bottom first
     int active = -1;                   // index into layers, -1 = no layers yet
     uint32_t next_id = 1;              // Base is id 0
+    bool carrying = false;             // between paint_layers_begin/end_carry
 
     bool empty() const { return layers.empty(); }
 };
@@ -150,3 +155,27 @@ uint32_t paint_composite_vertex(const PaintLayerStack& s, const std::vector<uint
 
 // Bytes the stack holds, not counting act (for budgets and the console).
 size_t paint_layers_bytes(const PaintLayerStack& s);
+
+// --- topology ops ------------------------------------------------------------------
+//
+// An op that rebuilds the mesh (remesh, ...) already carries Mesh::color step by step.
+// Bracket it with begin/end, and repeat each colour step on every stored layer through
+// paint_layers_each_stored():
+//   begin: every stored layer dense at vcount. A layer stored for more verts is cut to
+//          its prefix — exact, because a multires working level's verts are a prefix of
+//          the finer levels' (the nested numbering).
+//   end:   pack them again for the op's new vertex count.
+void paint_layers_begin_carry(PaintLayerStack& s, uint32_t vcount);
+void paint_layers_end_carry(PaintLayerStack& s, uint32_t vcount);
+// Only inside a carry: outside one, stored layers are packed (indexing them by vertex
+// would read out of bounds), so a topology helper reached from some other path leaves
+// them alone and the next fit or stale check deals with them.
+template <class F> inline void paint_layers_each_stored(PaintLayerStack& s, F f) {
+    if (!s.carrying) return;
+    for (int i = 0; i < (int)s.layers.size(); i++)
+        if (i != s.active) f(s.layers[i].rgba);
+}
+// A stored layer whose vcount doesn't match a plain (non-multires) mesh can't be
+// fitted: an op changed the topology without carrying it. Clears its pixels and says
+// so on the console rather than drawing another mesh's paint. Returns layers cleared.
+int  paint_layers_drop_stale(PaintLayerStack& s, uint32_t vcount);

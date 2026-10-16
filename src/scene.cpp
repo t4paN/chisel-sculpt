@@ -162,6 +162,15 @@ void Scene::sync_mirror_map() {
 
 // ---- bind-on-select: swap the working set to a given entity ----
 
+// Stored paint layers must match the entity's current topology before anything reads
+// them. A multires entity fits them to its finest level (a level may have been added
+// or dropped since); a plain mesh can only clear a layer that no longer matches.
+static void fit_paint_layers(MeshEntity& e) {
+    if (e.mesh.paint_layers.empty()) return;
+    if (e.multires.locked) multires_fit_paint_layers(e.multires, e.mesh.paint_layers);
+    else                   paint_layers_drop_stale(e.mesh.paint_layers, e.mesh.vertex_count());
+}
+
 void Scene::bind_active_(uint32_t id) {
     // 1. Flush the outgoing active entity's working buffers into its own display
     //    VAO so its viewport/pick copy stays current. Its CPU mesh is already
@@ -176,7 +185,7 @@ void Scene::bind_active_(uint32_t id) {
             // cache for the active entity only.
             out->multires_gpu.materialize_cpu(out->multires, out->mesh, renderer_.vbo_pos);
             out->undo.ring_park_all(compute_);
-            renderer_.upload_display(out->gpu, out->mesh);
+            { fit_paint_layers(*out); renderer_.upload_display(out->gpu, out->mesh); }
         }
     }
 
@@ -196,6 +205,7 @@ void Scene::bind_active_(uint32_t id) {
         in->multires_gpu.materialize_cpu(in->multires, in->mesh, renderer_.vbo_pos);
 
     // Working VBOs hold the incoming entity at offset 0.
+    fit_paint_layers(*in);
     renderer_.upload_mesh(in->mesh);
     // Refresh the mask/color aliases: upload_mesh may have released+recreated
     // vbo_mask/vbo_color (new handle on a vertex-count change — the WebGPU-correct
@@ -254,7 +264,7 @@ void Scene::sync() {
     for (auto& up : entities_) {
         if (!up || !up->alive || up->id == active_id_) continue;
         if (up->gpu.dirty || !up->gpu.vbo_pos.handle)
-            renderer_.upload_display(up->gpu, up->mesh);
+            { fit_paint_layers(*up); renderer_.upload_display(up->gpu, up->mesh); }
     }
 }
 
@@ -270,7 +280,7 @@ void Scene::sync_partial_entity(uint32_t eid,
         renderer_.update_screen_positions(e->mesh);
     } else {
         // Inactive entity (object-move drag): re-upload its static display VAO.
-        renderer_.upload_display(e->gpu, e->mesh);
+        { fit_paint_layers(*e); renderer_.upload_display(e->gpu, e->mesh); }
     }
 }
 
@@ -282,7 +292,7 @@ void Scene::sync_mask_partial_entity(uint32_t eid,
     if (eid == active_id_)
         renderer_.update_mask_verts(e->mesh, local_dirty);
     else
-        renderer_.upload_display(e->gpu, e->mesh);
+        { fit_paint_layers(*e); renderer_.upload_display(e->gpu, e->mesh); }
 }
 
 void Scene::sync_density_partial_entity(uint32_t eid,
@@ -340,7 +350,7 @@ void Scene::paint_layers_changed(uint32_t eid, bool pixels) {
         }
 #endif
     } else {
-        renderer_.upload_display(e->gpu, e->mesh);
+        { fit_paint_layers(*e); renderer_.upload_display(e->gpu, e->mesh); }
     }
 }
 
@@ -349,6 +359,7 @@ void Scene::edit_paint_layers(uint32_t eid,
                                                        uint32_t)>& op) {
     MeshEntity* e = find_entity(eid);
     if (!e) return;
+    fit_paint_layers(*e);
     if (e->multires.locked) {
         multires_sync_paint(e->multires, e->mesh);   // fold the working level's edits in first
         std::vector<uint32_t>& plane = e->multires.color;
@@ -369,7 +380,7 @@ void Scene::sync_color_partial_entity(uint32_t eid,
     if (eid == active_id_)
         renderer_.update_color_verts(e->mesh, local_dirty);
     else
-        renderer_.upload_display(e->gpu, e->mesh);
+        { fit_paint_layers(*e); renderer_.upload_display(e->gpu, e->mesh); }
 }
 
 // ---- Selection ----

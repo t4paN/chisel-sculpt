@@ -617,7 +617,10 @@ bool Mesh::export_ply(const char* filename) const {
     if (!f) return false;
 
     uint32_t nv = vertex_count(), nt = tri_count();
-    bool have_color = (color.size() == nv);
+    // The colours you see: every paint layer blended (also turns an erased, transparent
+    // vertex into the white it shows as, instead of writing its raw zero).
+    std::vector<uint32_t> shown(nv);
+    paint_composite(paint_layers, color, nv, shown.data());
 
     std::fprintf(f, "ply\n");
     std::fprintf(f, "format ascii 1.0\n");
@@ -637,7 +640,7 @@ bool Mesh::export_ply(const char* filename) const {
     std::fprintf(f, "end_header\n");
 
     for (uint32_t i = 0; i < nv; i++) {
-        uint32_t c = have_color ? color[i] : 0xFFFFFFFFu;
+        uint32_t c = shown[i];
         unsigned r = c & 0xFF, g = (c >> 8) & 0xFF, b = (c >> 16) & 0xFF;
         std::fprintf(f, "%f %f %f %f %f %f %u %u %u\n",
                      pos_x[i], pos_y[i], pos_z[i],

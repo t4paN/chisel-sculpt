@@ -79,7 +79,11 @@ uint32_t gather_soup(const Scene& scene,
         const Mesh& m = e->mesh;
         if (m.vertex_count() == 0 || m.indices.empty()) return false;
 
-        const bool painted = !m.color.empty();
+        // A layered entity contributes what it shows (its layers' composite): a merge of
+        // several models flattens their layers into the result's one Base. A single
+        // model's layers are carried separately (VoxelMergeJob::layers).
+        const bool layered = !m.paint_layers.empty();
+        const bool painted = !m.color.empty() || layered;
         if (painted) any_paint = true;
         const bool has_dens = !m.density.empty();
         if (has_dens) any_density = true;
@@ -92,7 +96,8 @@ uint32_t gather_soup(const Scene& scene,
             pos.push_back(m.pos_x[v]);
             pos.push_back(m.pos_y[v]);
             pos.push_back(m.pos_z[v]);
-            vcol.push_back((painted && v < m.color.size()) ? m.color[v] : 0xFFFFFFFFu);
+            vcol.push_back(layered ? paint_composite_vertex(m.paint_layers, m.color, v)
+                         : (painted && v < m.color.size()) ? m.color[v] : 0xFFFFFFFFu);
             vdens.push_back((has_dens && v < m.density.size()) ? m.density[v] : 0.5f);
         }
         idx.reserve(idx.size() + m.indices.size());
@@ -1190,9 +1195,13 @@ static void transfer_attrs_world(Mesh& out,
                                  bool                         carry_col,
                                  const std::vector<float>&    src_dens,
                                  bool                         carry_dens,
-                                 Vec3 origin, float cell, uint32_t R) {
+                                 Vec3 origin, float cell, uint32_t R,
+                                 std::vector<uint32_t>*       pick = nullptr) {
     const uint32_t ns = (uint32_t)(src_pos.size() / 3);
     const uint32_t vc = out.vertex_count();
+    // pick (optional): the source vertex each output vertex took its attributes from,
+    // UINT32_MAX for none — so paint layers can be carried by the exact same choice.
+    if (pick) pick->assign(vc, UINT32_MAX);
     if (carry_col)  out.color.assign(vc, 0xFFFFFFFFu);
     if (carry_dens) out.density.assign(vc, 0.5f);
     if (ns == 0 || cell <= 0.0f || (!carry_col && !carry_dens)) return;
@@ -1250,6 +1259,7 @@ static void transfer_attrs_world(Mesh& out,
         if (best_s != UINT32_MAX) {
             if (carry_col)  out.color[v]   = src_col[best_s];
             if (carry_dens) out.density[v] = src_dens[best_s];
+            if (pick)       (*pick)[v]     = best_s;
         }
     }
 }
@@ -1346,6 +1356,11 @@ struct VoxelMergeJob {
     std::vector<uint32_t> idx;     // its tris (cutters already wound backwards), kept for the snap
     std::vector<uint32_t> vcol;    // per-source-vertex paint
     bool                  any_paint = false;
+    // A single layered model (SDF used as a remesher) keeps its layers: copies of its
+    // stack and active layer, every stored layer dense, indexed like the soup (the one
+    // source's verts come first, at offset 0). Empty unless that case applies.
+    PaintLayerStack       layers;
+    std::vector<uint32_t> layers_act;
     std::vector<float>    vdens;   // per-source-vertex remesh density
     bool                  any_density = false;
 
@@ -1435,6 +1450,26 @@ VoxelMergeJob* voxel_merge_begin(Scene& scene, ComputeState& cs,
                                        subtract, n_additive, n_cutter, additive_floats);
     job->res.in_tris     = (uint32_t)(idx.size() / 3);
     if (idx.empty()) return fail("selection has no triangles");
+    if (n_additive == 1 && n_cutter == 0 && scene.selected_ids().size() == 1) {
+        const MeshEntity* src = scene.find_entity(scene.selected_ids().front());
+        if (src && !src->mesh.paint_layers.empty()) {
+            const uint32_t svc = src->mesh.vertex_count();
+            job->layers     = src->mesh.paint_layers;
+            job->layers_act = src->mesh.color;
+            job->layers_act.resize(svc, 0u);
+            paint_layers_begin_carry(job->layers, svc);   // dense, cut to this level
+            job->layers.carrying = false;                 // a copy, not a live carry
+        }
+    } else {
+        for (uint32_t id : scene.selected_ids()) {
+            const MeshEntity* e = scene.find_entity(id);
+            if (e && !e->mesh.paint_layers.empty()) {
+                std::printf("[paint-layers] merging %u models: layers are flattened into the result\n",
+                            n_additive + n_cutter);
+                break;
+            }
+        }
+    }
     if (subtract && n_additive == 0)
         return fail("subtract needs at least one selected (kept) mesh");
     const uint32_t tri_count = job->res.in_tris;
@@ -1970,10 +2005,33 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
 
         // Reproject vertex paint + remesh density from the source meshes
         // (skipped entirely if no source carries either attribute).
+        std::vector<uint32_t> pick;
+        const bool carry_layers = !j.layers.empty();
         if (j.any_paint || j.any_density)
             transfer_attrs_world(welded, j.pos, j.vcol, j.any_paint,
                                  j.vdens, j.any_density,
-                                 grid.origin, grid.voxel, grid.R);
+                                 grid.origin, grid.voxel, grid.R,
+                                 carry_layers ? &pick : nullptr);
+        if (carry_layers) {
+            // Every layer takes the same source vertex the composite did, so the
+            // result looks the same and every layer survives.
+            const uint32_t wvc = welded.vertex_count();
+            auto carry = [&](const std::vector<uint32_t>& src) {
+                std::vector<uint32_t> out(wvc, 0u);
+                for (uint32_t v = 0; v < wvc; v++)
+                    if (pick[v] != UINT32_MAX && pick[v] < src.size()) out[v] = src[pick[v]];
+                return out;
+            };
+            welded.color = carry(j.layers_act);
+            for (int i = 0; i < (int)j.layers.layers.size(); i++) {
+                if (i == j.layers.active) continue;
+                PaintLayer& L = j.layers.layers[i];
+                L.rgba   = carry(L.rgba);
+                L.vcount = wvc;
+                paint_layer_pack(L);
+            }
+            welded.paint_layers = std::move(j.layers);
+        }
 
         j.res.out_tris  = welded.tri_count();
         j.res.out_verts = welded.vertex_count();

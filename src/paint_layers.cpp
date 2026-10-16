@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 
 // Unorm conversions written to match WGSL unpack4x8unorm / pack4x8unorm exactly
 // (x/255 in, floor(0.5 + 255*clamp(x)) out), so the CPU composite and the GPU one
@@ -85,6 +86,7 @@ void paint_layer_pack(PaintLayer& L) {
 }
 
 void paint_layer_unpack(PaintLayer& L, uint32_t vcount) {
+    L.vcount = vcount;
     if (L.dense) {
         L.rgba.resize(vcount, 0u);
         return;
@@ -104,8 +106,9 @@ static void stash(PaintLayerStack& s, std::vector<uint32_t>& act) {
     if (s.active < 0) return;
     PaintLayer& L = s.layers[s.active];
     L.ids.clear();
-    L.rgba  = std::move(act);
-    L.dense = true;
+    L.rgba   = std::move(act);
+    L.dense  = true;
+    L.vcount = (uint32_t)L.rgba.size();
     act.clear();
 }
 static void unstash(PaintLayerStack& s, std::vector<uint32_t>& act, uint32_t vcount) {
@@ -138,9 +141,10 @@ int paint_layer_add(PaintLayerStack& s, std::vector<uint32_t>& act,
     if ((int)s.layers.size() >= kMaxPaintLayers) return -1;
     stash(s, act);
     PaintLayer L;
-    L.id    = s.next_id++;
-    L.name  = name;
-    L.dense = true;
+    L.id     = s.next_id++;
+    L.name   = name;
+    L.dense  = true;
+    L.vcount = vcount;
     L.rgba.assign(vcount, 0u);
     const int idx = s.active + 1;      // directly above the active one
     s.layers.insert(s.layers.begin() + idx, std::move(L));
@@ -261,9 +265,10 @@ void paint_layers_merge_visible(PaintLayerStack& s, std::vector<uint32_t>& act,
 
     stash(s, act);
     PaintLayer M;
-    M.id    = s.next_id++;
-    M.name  = "Merged";
-    M.dense = true;
+    M.id     = s.next_id++;
+    M.name   = "Merged";
+    M.dense  = true;
+    M.vcount = vcount;
     M.rgba  = std::move(out);
     const int at = merged.front();
     std::vector<PaintLayer> kept;
@@ -321,4 +326,42 @@ size_t paint_layers_bytes(const PaintLayerStack& s) {
     size_t b = 0;
     for (const PaintLayer& L : s.layers) b += L.bytes();
     return b;
+}
+
+void paint_layers_begin_carry(PaintLayerStack& s, uint32_t vcount) {
+    s.carrying = !s.empty();
+    for (int i = 0; i < (int)s.layers.size(); i++) {
+        if (i == s.active) continue;
+        PaintLayer& L = s.layers[i];
+        paint_layer_unpack(L, vcount);     // dense; a longer layer keeps its prefix
+    }
+}
+
+void paint_layers_end_carry(PaintLayerStack& s, uint32_t vcount) {
+    if (!s.carrying) return;
+    s.carrying = false;
+    for (int i = 0; i < (int)s.layers.size(); i++) {
+        if (i == s.active) continue;
+        PaintLayer& L = s.layers[i];
+        L.rgba.resize(vcount, 0u);
+        L.vcount = vcount;
+        paint_layer_pack(L);
+    }
+}
+
+int paint_layers_drop_stale(PaintLayerStack& s, uint32_t vcount) {
+    int dropped = 0;
+    for (int i = 0; i < (int)s.layers.size(); i++) {
+        if (i == s.active) continue;
+        PaintLayer& L = s.layers[i];
+        if (L.vcount == vcount) continue;
+        std::printf("[paint-layers] layer \"%s\" was stored for %u verts, mesh has %u: cleared\n",
+                    L.name.c_str(), L.vcount, vcount);
+        L.ids.clear();
+        L.rgba.clear();
+        L.dense  = false;
+        L.vcount = vcount;
+        dropped++;
+    }
+    return dropped;
 }

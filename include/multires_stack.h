@@ -111,6 +111,12 @@ void compute_frames(const Mesh& m, std::vector<Frame>& out);
 void multires_sync_paint(MultiresStack& stack, const Mesh& working);
 // Vertex count of the finest-level paint planes (what MultiresStack::color is sized to).
 uint32_t multires_paint_vcount(const MultiresStack& stack);
+// Bring every stored paint layer to the finest level's size, the way the colour plane
+// itself is kept there: a layer from a coarser level gets the new verts by midpoint
+// interpolation (a subdivide-up happened since), a layer from a finer level keeps its
+// prefix (a level was dropped). A size that matches no level is stale and is cleared.
+// Cheap when every layer already fits; call it before anything reads the layers.
+void multires_fit_paint_layers(MultiresStack& stack, PaintLayerStack& layers);
 
 // Rebuild `out` to the stack's surface at absolute level K.
 // Preconditions: stack.locked == true, base_level <= K <= MULTIRES_MAX_LEVEL.

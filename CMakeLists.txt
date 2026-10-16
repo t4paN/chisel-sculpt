@@ -175,6 +175,7 @@ if(NOT EMSCRIPTEN AND CHISEL_GPU_BACKEND STREQUAL "webgpu")
         src/gpu/webgpu_backend.cpp   # gpu:: seam (WebGPU backend, compute path)
         src/sphere.cpp
         src/mesh.cpp
+        src/paint_layers.cpp
         src/camera.cpp)
     target_include_directories(chisel-wgpu-window PRIVATE include)
     # Canonical WGSL kernels are loaded from disk at runtime (no drift vs the .wgsl
@@ -411,7 +412,8 @@ if(CHISEL_GPU_BACKEND STREQUAL "gl")
         src/gpu/gl_compute_test.cpp
         src/gpu/gl_backend.cpp
         src/sphere.cpp
-        src/mesh.cpp)
+        src/mesh.cpp
+        src/paint_layers.cpp)
     target_include_directories(chisel-gl-compute-test PRIVATE include)
     target_compile_definitions(chisel-gl-compute-test PRIVATE
         CHISEL_BACKEND_GL

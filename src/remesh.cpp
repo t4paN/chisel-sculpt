@@ -694,6 +694,9 @@ static uint32_t split_long_edges(Mesh& m, EdgeTable& et,
                 uint32_t cb = (vb < (uint32_t)m.color.size()) ? m.color[vb] : 0xFFFFFFFFu;
                 m.color.push_back(color_avg(ca, cb));
             }
+            paint_layers_each_stored(m.paint_layers, [&](std::vector<uint32_t>& L) {
+                L.push_back(color_avg(L[va], L[vb]));
+            });
             if (!m.density.empty()) {
                 float da = (va < (uint32_t)m.density.size()) ? m.density[va] : 0.5f;
                 float db = (vb < (uint32_t)m.density.size()) ? m.density[vb] : 0.5f;
@@ -1421,6 +1424,12 @@ static void compact_mesh(Mesh& m, std::vector<float>* aux, std::vector<float>* a
         }
         m.color = std::move(new_color);
     }
+    paint_layers_each_stored(m.paint_layers, [&](std::vector<uint32_t>& L) {
+        std::vector<uint32_t> nl(new_count, 0u);
+        for (uint32_t i = 0; i < vc && i < (uint32_t)L.size(); i++)
+            if (remap[i] != INVALID) nl[remap[i]] = L[i];
+        L = std::move(nl);
+    });
 
     if (!m.density.empty()) {
         std::vector<float> new_density(new_count, 0.5f);
@@ -1768,6 +1777,9 @@ static void mirror_positive_half(Mesh& m, float seam_tol, float target_edge, Com
                 uint32_t cb = (b < (uint32_t)m.color.size()) ? m.color[b] : 0xFFFFFFFFu;
                 m.color.push_back(color_lerp(ca, cb, t));
             }
+            paint_layers_each_stored(m.paint_layers, [&](std::vector<uint32_t>& L) {
+                L.push_back(color_lerp(L[a], L[b], t));
+            });
             if (!m.density.empty()) {
                 float da = (a < (uint32_t)m.density.size()) ? m.density[a] : 0.5f;
                 float db = (b < (uint32_t)m.density.size()) ? m.density[b] : 0.5f;
@@ -2061,6 +2073,12 @@ static void mirror_positive_half(Mesh& m, float seam_tol, float target_edge, Com
                 m.color[vert_mirror[v]] = m.color[v];
         }
     }
+    paint_layers_each_stored(m.paint_layers, [&](std::vector<uint32_t>& L) {
+        L.resize(m.vertex_count(), 0u);
+        for (uint32_t v = 0; v < vc; v++)
+            if (side[v] == 1 && vert_mirror[v] != INVALID && vert_mirror[v] >= vc)
+                L[vert_mirror[v]] = L[v];
+    });
 
     // Mirror the density field onto the newly created mirror verts (neutral
     // fill). Without this the -x half resets to 0.5 on every remesh.
@@ -2942,6 +2960,15 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
         return r;
     }
 
+    // From here the mesh is rebuilt. Stored paint layers ride along dense, cut to this
+    // level's verts (a prefix of the finer levels'), and every colour step below
+    // repeats on them; they pack again for the new topology on the way out.
+    paint_layers_begin_carry(mesh.paint_layers, mesh.vertex_count());
+    struct CarryEnd {
+        Mesh& m;
+        ~CarryEnd() { paint_layers_end_carry(m.paint_layers, m.vertex_count()); }
+    } carry_end{mesh};
+
     // Non-mask path: grow for smooth transition (on GPU).
     if (!using_mask) {
         cs->dispatch_grow_selection(mesh.vertex_count(), mesh.tri_count(), 8);
@@ -3270,6 +3297,7 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
     // (edge ops interpolate it), the mask dies with the old topology
     // (main.cpp clears mesh.mask right after).
     stack.base          = mesh;
+    stack.base.paint_layers = PaintLayerStack{};   // the entity's mesh owns them
     stack.base_level    = 0;
     stack.current_level = 0;
     stack.disp.clear();

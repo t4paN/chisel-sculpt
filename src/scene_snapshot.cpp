@@ -96,6 +96,11 @@ static EntityRecord lean_record(const MeshEntity& e) {
     rec.multires.mirror.clear();
     rec.multires.base_mirror.clear();
 
+    // Paint layers belong to the entity, not to the cached surface, so they ride along
+    // even when the surface is dropped. They are stored at the finest level, like the
+    // colour plane above; a bake that shrinks the planes is fitted back on restore.
+    rec.mesh.paint_layers = e.mesh.paint_layers;
+
     if (!e.multires.locked) {
         rec.mesh = e.mesh;
         rec.mesh.norm_x.clear(); rec.mesh.norm_y.clear(); rec.mesh.norm_z.clear();
@@ -202,7 +207,7 @@ void snapshot_capture(SceneSnapshot& snap, Scene& scene, const char* op) {
     for (const EntityRecord& r : snap.entities) {
         for (const auto& d : r.multires.disp) bytes += d.size() * sizeof(Vec3);
         bytes += r.multires.color.size() * 4 + r.multires.mask.size() * 4
-               + r.multires.density.size() * 4;
+               + r.multires.density.size() * 4 + paint_layers_bytes(r.mesh.paint_layers);
         bytes += (r.mesh.pos_x.size() * 3 + r.mesh.indices.size()) * 4;
     }
     std::printf("[snapshot] %zu entit%s before %s: %.1f MB, %.2fM tris, %d level%s baked\n",

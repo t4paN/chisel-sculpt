@@ -258,6 +258,41 @@ static PaintSyncCounts sync_plane(std::vector<T>& plane, const std::vector<T>& w
 
 uint32_t multires_paint_vcount(const MultiresStack& stack) { return plane_vcount(stack); }
 
+void multires_fit_paint_layers(MultiresStack& stack, PaintLayerStack& layers) {
+    if (!stack.locked || layers.empty()) return;
+    const uint32_t V_top = plane_vcount(stack);
+    const int      k_top = (int)stack.disp.size();
+    for (int i = 0; i < (int)layers.layers.size(); i++) {
+        if (i == layers.active) continue;            // its pixels are stack.color
+        PaintLayer& L = layers.layers[i];
+        if (L.vcount == V_top) continue;
+        if (L.vcount > V_top) {
+            // A level was dropped: the coarser levels' verts are a prefix.
+            paint_layer_unpack(L, V_top);
+            paint_layer_pack(L);
+            continue;
+        }
+        const int k_from = level_index_for_vcount(stack, L.vcount);
+        if (k_from < 0) {
+            std::printf("[paint-layers] layer \"%s\" stored for %u verts matches no level "
+                        "(top %u): cleared\n", L.name.c_str(), L.vcount, V_top);
+            L.ids.clear();
+            L.rgba.clear();
+            L.dense  = false;
+            L.vcount = V_top;
+            continue;
+        }
+        // A level was added: same midpoint interpolation the colour plane gets.
+        paint_layer_unpack(L, L.vcount);
+        ensure_parent_maps(stack, k_top);
+        L.rgba.resize(V_top, 0u);
+        interpolate_plane_up(L.rgba, stack, k_from, k_top,
+                             [](uint32_t a, uint32_t b) { return color_avg(a, b); });
+        L.vcount = V_top;
+        paint_layer_pack(L);
+    }
+}
+
 void multires_sync_paint(MultiresStack& stack, const Mesh& working) {
     if (!stack.locked) return;
     const uint32_t Vw = working.vertex_count();
@@ -328,6 +363,7 @@ void multires_stack_init_from_lock(MultiresStack& stack,
     stack.base.color.clear();
     stack.base.mask.clear();
     stack.base.density.clear();
+    stack.base.paint_layers = PaintLayerStack{};   // the entity's mesh owns them
 
     build_mirror_spatial(stack.base, stack.base_mirror);
 
@@ -791,6 +827,10 @@ static void check_frames(const MultiresStack& stack, const Mesh& surface, int K)
 
 void cascade_to_level(MultiresStack& stack, Mesh& out, int K, ComputeState* compute) {
     const int passes = K - stack.base_level;
+    // The replays rebuild `out` from scratch, and when `out` is the entity's own mesh
+    // that would throw away its paint layers. They belong to the entity, not to one
+    // level's geometry, so they step aside for the replay and come back after it.
+    PaintLayerStack keep_layers = std::move(out.paint_layers);
 
     // A CPU replay leaves the GPU cascade scratch holding a previous switch's
     // output — make sure no one copies it (gpu_cascade_replay re-arms on success).
@@ -867,6 +907,8 @@ void cascade_to_level(MultiresStack& stack, Mesh& out, int K, ComputeState* comp
     // Paint rides the finest-level planes: the working array at level K is the
     // [0, V_K) prefix. Extend first — the pass loop above may have grown disp.
     extend_planes(stack);
+    out.paint_layers = std::move(keep_layers);
+    multires_fit_paint_layers(stack, out.paint_layers);
     const uint32_t V_K = out.vertex_count();
     if (!stack.color.empty())
         out.color.assign(stack.color.begin(), stack.color.begin() + V_K);
