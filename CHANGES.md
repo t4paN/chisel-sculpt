@@ -2,6 +2,36 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-17 — Paint layers (branch `paint-layers`)
+
+*Built GL, wgpu and web; shaders clean on GL, naga and Tint. GPU and CPU composites
+compared vertex by vertex on GL and wgpu: identical. Hand-tested by the user on native.*
+
+- **Layers for vertex paint**, kept minimal. A **Layers panel** in
+  paint mode lists layers top first, with an eye and click-to-select per row. Below the
+  list are the active layer's **blend mode** (Normal, Multiply; more get added as one case
+  each), **opacity**, **Clip to layer below**, and **+ / - / Up / Down / Merge visible**.
+  Up to 16 layers.
+- **No mask layer type.** A mask is an ordinary layer with a blend mode. Clip (a
+  clipping mask) confines it to where the layer under it is painted. The sculpting mask is
+  unrelated and unchanged.
+- **Merge visible**: shown layers merge onto transparent, so unpainted
+  areas stay unpainted, and hidden layers are kept.
+- **Erase (Ctrl) on a layer now goes transparent** and shows what's underneath. On the
+  bottom layer it still looks like erasing to white.
+- **Paint undo knows its layer**: Ctrl+Z switches back to the layer a stroke was painted
+  on. Adding, deleting, moving and merging layers isn't undoable yet.
+- The eyedropper picks the blended colour you see. Layers work at every subdivision level.
+- **Old files load unchanged** as a single Base layer.
+- **Not yet:** saving flattens layers to the blended result (the file format comes
+  next). Subdividing up, remeshing, SDF merge and join/split keep only the active layer.
+- How: layers store premultiplied RGBA with alpha as coverage. Only the active layer is
+  stored in full (it's `Mesh::color`, so every existing paint path still works on it);
+  the others keep only the vertices they cover, so a 2%-painted layer at 10M verts is
+  1.5 MB, not 38 MB. A new `color_composite` kernel re-blends each dab's touched verts on
+  the GPU without readback. `CHISEL_PAINT_PARITY=1` (native) checks it against the CPU
+  composite after every layer edit.
+
 ## 2026-10-12 — Phone: UI scale setting, bigger Ctrl/Shift (branch `android-controls`)
 
 *Built GL and web. Tested in headless Chrome with touch emulation (layout size, backing
