@@ -67,6 +67,9 @@ make the translation mechanical.
 - `gl_GlobalInvocationID.x` → `@builtin(global_invocation_id) gid : vec3<u32>` param, use `gid.x`.
 - `layout(local_size_x = 256) in;` → `@compute @workgroup_size(256)`.
 - `uint`→`u32`, `int`→`i32`, `float`→`f32`, `vec3`→`vec3<f32>`, `uvec3`→`vec3<u32>`.
+- **WGSL reserves a long list of common words** as identifiers (`target`, `active`, `filter`,
+  `module`, `self`, `shared`, `smooth`, `type`, `use`, ...). GLSL accepts them; Tint rejects the
+  whole module. Name buffers descriptively (`active_layer`, not `active`).
 - Integer literals need the `u`/`i` suffix where typed (`1u`, `255u`). Float compares stay `0.0`.
 - `mix`, `clamp`, `length`, `normalize`, `dot`, `cross` all exist with the same names.
 - WGSL has no implicit int↔uint↔float conversion — cast explicitly (`f32(x)`, `u32(x)`, `i32(x)`).

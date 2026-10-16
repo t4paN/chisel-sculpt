@@ -6,6 +6,7 @@
 
 struct Mesh;            // gpu_cascade_replay fills pos/norm SOA arrays
 struct MultiresStack;   // gpu_cascade_replay reads topo_cache/disp/frames
+struct PaintLayerStack; // upload_paint_layers builds the composite's layer table from it
 
 // SSBO binding points (shared between C++ and GLSL)
 enum ComputeBinding : GLuint {
@@ -63,6 +64,8 @@ enum ComputeBinding : GLuint {
     BIND_BLOCK_STICKY      = 48, // uint   per-block "already listed this frame" flag
     BIND_NORM_MARK         = 49, // uint   per-vertex frame stamp (normals_expand dedupe)
     BIND_NORM_LIST         = 50, // uint   [count, v0, v1, ...] verts whose normals need recomputing
+    BIND_COLOR_DISPLAY     = 51, // uint   composited RGBA8 the renderer shows (paint layers; BIND_COLOR = active layer)
+    BIND_PAINT_LAYER_POOL  = 52, // uint   inactive visible layers: packed ids+values / dense values, offsets in the table
     // Per-dab dirty-list region (base word + id capacity) for the arena below. Shared
     // by every kernel that appends to the dirty list, so their own Params blocks stay
     // untouched. Written once per dab by set_dirty_region().
@@ -343,6 +346,18 @@ struct ComputeState {
     gpu::Buffer          color_paint_ubo;     // 64-byte ColorPaintParams block
     gpu::Buffer          color_smooth_ubo;    // 48-byte ColorSmoothParams block
 
+    // Paint layers composite (shaders/*/color_composite.*): blends every visible layer
+    // into the display buffer. The active layer is read from color_ssbo (what the brush
+    // writes); the others come from paint_layer_pool_ssbo, rebuilt by
+    // upload_paint_layers() whenever the stack changes (never per dab). The table is
+    // kept CPU-side too so a per-dab dispatch only rewrites list_mode.
+    gpu::ComputePipeline color_composite_pipeline;
+    gpu::Buffer          color_composite_ubo;      // 336-byte ColorCompositeParams block
+    gpu::Buffer          paint_layer_pool_ssbo;    // owned; grows, never shrinks
+    std::vector<uint32_t> paint_layer_pool_cpu;    // staging, kept for its capacity
+    uint32_t             paint_layer_table[4 + 16 + 64] = {};   // ColorCompositeParamsGPU image
+    bool                 paint_layers_uploaded = false;
+
     // Move brush compute shaders — ported onto the gpu:: seam (Seam Step 2b).
     // Stateful: capture-once weights + per-dab apply. Capture carries a 32-byte
     // std140 Params block, apply a 16-byte one; weight_smooth takes no UBO (it is
@@ -524,6 +539,11 @@ struct ComputeState {
     // writes packed RGBA8 directly into the display VBO. Same refresh contract as
     // mask_ssbo; not owned here.
     gpu::Buffer color_ssbo;
+
+    // Display colour SSBO: alias (non-owning) of renderer.vbo_color once paint layers
+    // are wired. Until then it stays empty and color_ssbo is still the display VBO —
+    // the composite refuses to run while the two are the same buffer.
+    gpu::Buffer color_display_ssbo;
 
     // Density SSBO: alias (non-owning copy) of renderer.vbo_density. Same refresh
     // contract as mask_ssbo; not owned here.
@@ -900,6 +920,7 @@ struct ComputeState {
     // Paint readiness (replaces color_paint_program / color_smooth_program checks).
     bool has_color() const { return color_paint_pipeline.handle != 0; }
     bool has_color_smooth() const { return color_smooth_pipeline.handle != 0; }
+    bool has_color_composite() const { return color_composite_pipeline.handle != 0; }
 
     // Compute-normals readiness (replaces compute_normals_program truthiness checks).
     bool has_normals() const { return compute_normals_pipeline.handle != 0; }
@@ -929,6 +950,16 @@ struct ComputeState {
     // Paint-smooth: reuses ColorPaintParams (paint_strength = blend amount,
     // paint_r/g/b ignored). Averages neighbour colours via CSR adjacency.
     void dispatch_color_smooth(const ColorPaintParams& params, const gpu::Buffer& pos_vbo, const gpu::Buffer& index_ebo);
+
+    // Paint layers. upload_paint_layers() packs every visible non-active layer into the
+    // pool and builds the layer table; call it when the stack changes (layer added,
+    // removed, reordered, hidden, opacity/mode edited, active switched), not per dab.
+    // Returns false if the pool would exceed the device's storage-binding limit.
+    // composite_all re-blends every vertex; composite_dirty re-blends only the current
+    // dab's dirty list (indirect, sized on the GPU — no readback).
+    bool upload_paint_layers(const PaintLayerStack& stack, uint32_t vertex_count);
+    void dispatch_color_composite_all(uint32_t vertex_count);
+    void dispatch_color_composite_dirty(uint32_t vertex_count);
 
     // Compile the three move-brush compute pipelines (capture / weight-smooth /
     // apply) + their Params UBOs, through the gpu:: seam. Called once at init.

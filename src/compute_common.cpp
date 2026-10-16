@@ -264,6 +264,9 @@ void ComputeState::cleanup() {
     gpu::release_compute_pipeline(color_smooth_pipeline);
     gpu::release_buffer(color_paint_ubo);
     gpu::release_buffer(color_smooth_ubo);
+    gpu::release_compute_pipeline(color_composite_pipeline);
+    gpu::release_buffer(color_composite_ubo);
+    gpu::release_buffer(paint_layer_pool_ssbo);
     gpu::release_compute_pipeline(move_capture_pipeline);
     gpu::release_compute_pipeline(move_weight_smooth_pipeline);
     gpu::release_compute_pipeline(move_apply_pipeline);

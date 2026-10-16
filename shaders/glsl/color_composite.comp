@@ -1,0 +1,77 @@
+// color_composite.comp — GLSL 430 sibling of shaders/wgsl/color_composite.wgsl.
+// Paint layers -> the display colour buffer; the CPU reference is paint_blend() in
+// src/paint_layers.cpp. See the .wgsl for the full contract (premultiplied values,
+// table layout, list modes). 336-byte std140 Params UBO at binding 63.
+#version 430
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 6)  readonly buffer DirtyBuf  { uint list[]; };
+layout(std430, binding = 28) readonly buffer ActiveBuf { uint active_buf[]; };
+layout(std430, binding = 51) buffer DisplayBuf         { uint display[]; };
+layout(std430, binding = 52) readonly buffer PoolBuf   { uint pool[]; };
+
+layout(std140, binding = 61) uniform DirtyRegion {
+    uint base;
+    uint cap;
+    uint _p0;
+    uint _p1;
+} DR;
+
+layout(std140, binding = 63) uniform Params {
+    uint  vertex_count;   // 0
+    uint  layer_count;    // 4
+    uint  list_mode;      // 8   0 = every vertex, 1 = the dab's dirty list
+    uint  _pad0;          // 12
+    vec4  opacity[4];     // 16  layer i -> opacity[i / 4][i % 4]
+    uvec4 layers[16];     // 80  x ids off, y values off, z count, w mode | source << 8
+} P;                      //     (struct = 336)
+
+const uint SRC_PACKED = 0u;
+const uint SRC_DENSE  = 1u;
+
+const uint MODE_MULTIPLY = 1u;
+
+vec3 blend_channel(vec3 d, vec3 s, uint mode) {
+    if (mode == MODE_MULTIPLY) return d * s;
+    return s;   // MODE_NORMAL (0) and anything unknown
+}
+
+uint sample_packed(uint ids_off, uint vals_off, uint count, uint v) {
+    uint lo = 0u, hi = count;
+    while (lo < hi) {
+        uint mid = (lo + hi) / 2u;
+        if (pool[ids_off + mid] < v) lo = mid + 1u;
+        else                         hi = mid;
+    }
+    if (lo < count && pool[ids_off + lo] == v) return pool[vals_off + lo];
+    return 0u;
+}
+
+uint sample_layer(uvec4 e, uint v) {
+    uint src = e.w >> 8u;
+    if (src == SRC_PACKED) return sample_packed(e.x, e.y, e.z, v);
+    if (src == SRC_DENSE)  return pool[e.y + v];
+    return active_buf[v];
+}
+
+void main() {
+    uint v = gl_GlobalInvocationID.x;
+    if (P.list_mode == 1u) {
+        uint n = min(list[DR.base], DR.cap);
+        if (gl_GlobalInvocationID.x >= n) return;
+        v = list[DR.base + 1u + gl_GlobalInvocationID.x];
+    }
+    if (v >= P.vertex_count) return;
+
+    vec3 d = vec3(1.0);
+    for (uint i = 0u; i < P.layer_count; i++) {
+        uvec4 e = P.layers[i];
+        vec4 c = unpackUnorm4x8(sample_layer(e, v));
+        if (c.a <= 0.0) continue;
+        float ao = c.a * P.opacity[i / 4u][i % 4u];
+        vec3 s = c.rgb / c.a;                     // un-premultiply
+        d = mix(d, blend_channel(d, s, e.w & 0xFFu), ao);
+        d = unpackUnorm4x8(packUnorm4x8(vec4(d, 1.0))).rgb;   // 8-bit per layer, as the CPU
+    }
+    display[v] = packUnorm4x8(vec4(d, 1.0));
+}

@@ -253,6 +253,7 @@ add_executable(chisel
     src/compute_mask.cpp
     src/compute_density.cpp
     src/compute_color.cpp
+    src/paint_layers.cpp
     src/compute_alpha.cpp
     src/compute_remesh.cpp
     src/compute_multires.cpp
