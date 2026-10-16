@@ -716,7 +716,7 @@ is built, not hand-tested.*
 
 **Under a real pen device, native Chisel on Wayland got no pen input at all.** The user's
 new OTD plugin keeps relative ("mouse") motion but presents a real virtual pen instead of a
-virtual mouse, so Krita and browsers get proper pressure. Native Chisel then saw nothing:
+virtual mouse, so other drawing apps and browsers get proper pressure. Native Chisel then saw nothing:
 the "Tablet settings" toast fired (hidraw still read pressure) but the ring never moved and
 the tip never clicked. Cause: GLFW binds no Wayland tablet protocol, and KWin 6.7 no longer
 turns pen input into pointer input for clients that don't. That emulation now sits behind
@@ -739,7 +739,7 @@ The old setup only worked because the pen used to *be* a mouse.
   the pointer is captured the pen is replayed as that position plus its own travel since
   the drag began. Otherwise the first event would jump by the gap between the two. A pen
   can't be pointer-locked or warped back on Wayland, so after a drag the ring lands where
-  the pen is, not where the drag began. Krita and the browser behave the same.
+  the pen is, not where the drag began. Other drawing apps and the browser behave the same.
 - **Pressure priority:** once the pen has been over the window, the protocol's pressure
   (after OTD's curve and filters) wins over the raw hidraw value, and XInput2 stands down.
 - **Build:** the protocol glue is pre-generated into `external/wayland-tablet/`, so
@@ -6269,9 +6269,9 @@ needs a preload or browser file-picker (was checklist step 4).
 
 ## 2026-06-01 — Pen pressure sensitivity (X11)
 
-- **Graphics-tablet pressure** — new `src/tablet.cpp` / `include/tablet.h`: reads the stylus `Abs Pressure` valuator straight off **XInput2** (the same layer Krita/Blender use; GLFW has no tablet support). Own X display connection, raw motion selected on root (`XIAllMasterDevices`) + hierarchy events (`XIAllDevices`, separate mask — mixing the two is a `BadValue`), pressure decoded from `raw_values` and normalized by the device's reported range. `XIHierarchyChanged` triggers a device rescan, so plugging the tablet in after launch works. Stylus + eraser both tracked as pressure sources.
+- **Graphics-tablet pressure** — new `src/tablet.cpp` / `include/tablet.h`: reads the stylus `Abs Pressure` valuator straight off **XInput2** (the same layer other drawing apps and Blender use; GLFW has no tablet support). Own X display connection, raw motion selected on root (`XIAllMasterDevices`) + hierarchy events (`XIAllDevices`, separate mask — mixing the two is a `BadValue`), pressure decoded from `raw_values` and normalized by the device's reported range. `XIHierarchyChanged` triggers a device rescan, so plugging the tablet in after launch works. Stylus + eraser both tracked as pressure sources.
 - **Plug-and-play, zero build dep** — `libXi` is `dlopen`'d at runtime (`libXi.so.6`, present on every X11 desktop) and the XInput2 headers are vendored under `external/xinput2/`, so **`libxi-dev` is not required to build** (only the ubiquitous libX11 dev headers; verified compiling with `libxi-dev` absent). No tablet / no lib / non-Linux → graceful no-op (`pressure()==1.0`), mouse behaviour unchanged.
-- **Brush response** — pressure drives brush **strength and size** via independent floors (`PRESSURE_STR_FLOOR 0.05`, `PRESSURE_SIZE_FLOOR 0.40`, `PRESSURE_GAMMA` in `main.cpp`): a light touch fades strength to near-nothing while keeping a usable footprint; hard press digs in. xf86-input-wacom's pressure curve is applied driver-side, so the user's Krita/xsetwacom tuning carries over. Wired through `DabContext::eff_brush_size` (per-dab) + an `eff_strength` multiplier — applies to all brushes. **K** toggles pressure on/off (default on); on-screen notification on tablet detect/connect. GUI-verified with a Wacom One by Wacom M.
+- **Brush response** — pressure drives brush **strength and size** via independent floors (`PRESSURE_STR_FLOOR 0.05`, `PRESSURE_SIZE_FLOOR 0.40`, `PRESSURE_GAMMA` in `main.cpp`): a light touch fades strength to near-nothing while keeping a usable footprint; hard press digs in. xf86-input-wacom's pressure curve is applied driver-side, so the user's xsetwacom tuning carries over. Wired through `DabContext::eff_brush_size` (per-dab) + an `eff_strength` multiplier — applies to all brushes. **K** toggles pressure on/off (default on); on-screen notification on tablet detect/connect. GUI-verified with a Wacom One by Wacom M.
 
 ## 2026-06-01 — SDF voxel-merge (post-v0.1.0)
 

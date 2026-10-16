@@ -5,11 +5,11 @@ struct GLFWwindow;
 // Pen/tablet pressure input.
 //
 // Linux/X11: reads the stylus "Abs Pressure" valuator straight off XInput2 — the
-// same layer Krita/Blender/GIMP read (they go through Qt/GTK; we talk to libXi
+// same layer other drawing apps and Blender read (they go through Qt/GTK; we talk to libXi
 // directly because GLFW has no tablet support). libXi is dlopen'd at runtime, so
 // there is NO build- or run-time hard dependency on libxi-dev; libXi.so.6 ships on
 // every X11 desktop. xf86-input-wacom's pressure curve is applied driver-side, so
-// the values we get are already curved to the user's Krita/xsetwacom tuning.
+// the values we get are already curved to the user's xsetwacom tuning.
 //
 // Linux, any session (native Wayland included): also reads a Wacom's own USB reports
 // through hidraw when the node is readable — which is what OpenTabletDriver's udev
@@ -17,7 +17,7 @@ struct GLFWwindow;
 // See tablet.cpp for the format and why it is silent on a stock setup.
 //
 // Linux, native Wayland: the compositor's tablet protocol (zwp_tablet_v2), the way
-// Krita and browsers get the pen. Needed for POSITION, not just pressure: KWin 6.7
+// other drawing apps and browsers get the pen. Needed for POSITION, not just pressure: KWin 6.7
 // stopped turning pen input into pointer input for apps that don't bind the protocol,
 // and GLFW doesn't, so without this a pen never moves or clicks in the window at all.
 // Pen motion/tip/buttons are fed through the window's own GLFW callbacks, so the app

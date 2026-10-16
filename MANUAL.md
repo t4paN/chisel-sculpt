@@ -126,7 +126,7 @@ toggle itself is remembered; the sizes it stashes last for the session.
 
 Plug in a tablet and pressure drives both strength and size automatically — no
 switch to flip, it's on whenever a tablet is present. Sources: XInput2 on Linux
-(same as Krita), WinTab on Windows, the Pointer Events pressure channel in the
+(same as other Linux drawing apps), WinTab on Windows, the Pointer Events pressure channel in the
 browser. How hard a full-pressure press actually hits is the **max effect** slider
 in the burger menu. Chisel is designed to work fine with a mouse — a tablet is nice,
 never necessary.
