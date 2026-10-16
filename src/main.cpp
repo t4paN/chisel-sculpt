@@ -1738,8 +1738,8 @@ int main(int argc, char* argv[]) {
                     uint32_t i0 = pm.indices[tid*3+0];
                     uint32_t i1 = pm.indices[tid*3+1];
                     uint32_t i2 = pm.indices[tid*3+2];
-                    auto vcol = [&](uint32_t v) {
-                        return v < pm.color.size() ? pm.color[v] : 0xFFFFFFFFu;
+                    auto vcol = [&](uint32_t v) {   // what you see: the layers' composite
+                        return paint_composite_vertex(pm.paint_layers, pm.color, v);
                     };
                     uint32_t c0 = vcol(i0), c1 = vcol(i1), c2 = vcol(i2);
                     for (int ch = 0; ch < 3; ch++) {
@@ -4507,6 +4507,7 @@ int main(int argc, char* argv[]) {
 
         // Key bindings window (burger menu). Top level, so every skin shares it.
         draw_keybind_window(input, win_w, win_h);
+        draw_paint_layers_panel(input, scene, win_w, win_h);
 
         // ---- Error popup ----
         if (error_popup_trigger) {

@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <vector>
 #include <memory>
+#include <functional>
 #include "mesh.h"
 #include "mesh_entity.h"
 #include "entity_record.h"
@@ -81,6 +82,22 @@ public:
     // Partial color sync: active → patch working color buffer; inactive → display.
     void sync_color_partial_entity(uint32_t entity_id,
                                    const std::vector<uint32_t>& local_dirty);
+    // The entity's paint layer stack changed (layer added/removed/moved, visibility,
+    // opacity, mode, clip, active layer, merge): re-upload the active layer, the GPU
+    // composite's layer table, and the composite itself. User-paced, never per dab.
+    // pixels=false = only properties changed (visibility, opacity, mode, clip, order):
+    // the active layer on the GPU is still right, so the composite re-runs on the GPU
+    // and an opacity drag stays interactive on a big mesh.
+    void paint_layers_changed(uint32_t entity_id, bool pixels = true);
+    // Runs a paint-layer stack edit (add, remove, set active, merge...) on an entity and
+    // refreshes it. `act` is the active layer's FULL-resolution pixels: Mesh::color on a
+    // plain mesh, but the finest paint plane on a multires one, where Mesh::color is
+    // only the current level's prefix. Inactive layers are kept at that full size too;
+    // the nested vertex numbering makes them valid at every level as a prefix.
+    void edit_paint_layers(uint32_t entity_id,
+                           const std::function<void(PaintLayerStack& stack,
+                                                    std::vector<uint32_t>& act,
+                                                    uint32_t vcount)>& op);
 
     // ---- Selection / active ----
     void     set_active(uint32_t entity_id);

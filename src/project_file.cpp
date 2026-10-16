@@ -83,6 +83,19 @@ static bool all_equal(const std::vector<float>& a, float v) {
 // multires stack is locked, in which case scene.cpp regenerates the surface by
 // cascading that stack and the stored copy would be dropped on the floor.
 // `may_drop_mask` gates the blank-mask elision (see write_enty_chunk).
+// Paint layers aren't in the file format yet (that's v8). Until then a layered entity
+// saves its COMPOSITE in every colour slot, so the file keeps the look and loads as a
+// single opaque Base layer. Every colour array here is a prefix of one vertex
+// numbering (working level, base cage, finest plane), so one stack composites them all.
+static const std::vector<uint32_t>& paint_for_file(const PaintLayerStack& layers,
+                                                   const std::vector<uint32_t>& act,
+                                                   std::vector<uint32_t>& scratch) {
+    if (layers.empty() || act.empty()) return act;
+    scratch.resize(act.size());
+    paint_composite(layers, act, (uint32_t)act.size(), scratch.data());
+    return scratch;
+}
+
 static void write_mesh_body(std::ofstream& f, const Mesh& m, bool derived,
                             bool may_drop_mask) {
     write_u8(f, derived ? 1 : 0);
@@ -101,9 +114,11 @@ static void write_mesh_body(std::ofstream& f, const Mesh& m, bool derived,
     // v3: packed-RGBA8 paint colour (count then data, empty when unpainted).
     // Never elided: "unpainted" and "painted white" are not the same thing to
     // every consumer (matcap tinting), and the measured files show no gain.
-    uint32_t cc = (uint32_t)m.color.size();
+    std::vector<uint32_t> flat;
+    const std::vector<uint32_t>& col = paint_for_file(m.paint_layers, m.color, flat);
+    uint32_t cc = (uint32_t)col.size();
     write_u32(f, cc);
-    if (cc > 0) write_raw(f, m.color.data(), cc * sizeof(uint32_t));
+    if (cc > 0) write_raw(f, col.data(), cc * sizeof(uint32_t));
     // v6: remesh-density field (count then data, empty when unpainted).
     // Neutral is 0.5, not 0 — an all-zero density field is real paint.
     uint32_t dc = (uint32_t)m.density.size();
@@ -112,7 +127,9 @@ static void write_mesh_body(std::ofstream& f, const Mesh& m, bool derived,
     if (dc > 0) write_floats(f, m.density.data(), dc);
 }
 
-static void write_multires_body(std::ofstream& f, const MultiresStack& s) {
+static void write_multires_body(std::ofstream& f, const MultiresStack& s,
+                                const PaintLayerStack& layers) {
+    std::vector<uint32_t> flat;
     write_u8(f, s.locked ? 1 : 0);
     if (!s.locked) return;
     write_i32(f, s.base_level);
@@ -125,9 +142,10 @@ static void write_multires_body(std::ofstream& f, const MultiresStack& s) {
     write_raw(f, s.base.indices.data(), s.base.indices.size() * sizeof(uint32_t));
     // v3: base-cage paint colour (count then data), so level switches after a
     // load re-derive painted colour up the cascade. Empty when unpainted.
-    uint32_t bcc = (uint32_t)s.base.color.size();
+    const std::vector<uint32_t>& bcol = paint_for_file(layers, s.base.color, flat);
+    uint32_t bcc = (uint32_t)bcol.size();
     write_u32(f, bcc);
-    if (bcc > 0) write_raw(f, s.base.color.data(), bcc * sizeof(uint32_t));
+    if (bcc > 0) write_raw(f, bcol.data(), bcc * sizeof(uint32_t));
     uint32_t num_layers = (uint32_t)s.disp.size();
     write_u32(f, num_layers);
     for (uint32_t k = 0; k < num_layers; k++) {
@@ -137,9 +155,10 @@ static void write_multires_body(std::ofstream& f, const MultiresStack& s) {
             write_raw(f, s.disp[k].data(), nv * sizeof(Vec3));
     }
     // v5: finest-level paint planes (count then data, empty when unused).
-    uint32_t pcc = (uint32_t)s.color.size();
+    const std::vector<uint32_t>& pcol = paint_for_file(layers, s.color, flat);
+    uint32_t pcc = (uint32_t)pcol.size();
     write_u32(f, pcc);
-    if (pcc > 0) write_raw(f, s.color.data(), pcc * sizeof(uint32_t));
+    if (pcc > 0) write_raw(f, pcol.data(), pcc * sizeof(uint32_t));
     // v7: a fully-zero mask plane is an unmasked plane — write nothing. Load
     // rebuilds an all-zero plane from the working mesh (or leaves it empty,
     // which cascades to the same unmasked surface).
@@ -196,7 +215,7 @@ static void write_enty_chunk(std::ofstream& f, const EntityRecord& e) {
     // working mask over a plane that still holds the mask up top.
     const bool may_drop_mask = all_equal(e.multires.mask, 0.0f);
     write_mesh_body(f, e.mesh, e.multires.locked, may_drop_mask);
-    write_multires_body(f, e.multires);
+    write_multires_body(f, e.multires, e.mesh.paint_layers);
     write_chunk_end(f, sp);
 }
 

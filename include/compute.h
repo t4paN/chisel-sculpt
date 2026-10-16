@@ -197,6 +197,7 @@ struct ColorPaintParams {
     float hardness;
     float paint_strength;       // lerp factor toward paint_color (0..1, * falloff)
     float paint_r, paint_g, paint_b;  // brush albedo, linear [0,1]
+    float paint_a = 1.0f;             // target coverage: 1 = paint, 0 = erase to transparent
     uint32_t vertex_count;
 };
 
@@ -357,6 +358,7 @@ struct ComputeState {
     std::vector<uint32_t> paint_layer_pool_cpu;    // staging, kept for its capacity
     uint32_t             paint_layer_table[4 + 16 + 64] = {};   // ColorCompositeParamsGPU image
     bool                 paint_layers_uploaded = false;
+    uint32_t             paint_layers_vcount = 0;  // the table's dense offsets assume this mesh size
 
     // Move brush compute shaders — ported onto the gpu:: seam (Seam Step 2b).
     // Stateful: capture-once weights + per-dab apply. Capture carries a 32-byte

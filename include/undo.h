@@ -25,6 +25,7 @@ struct UndoEntry {
 
     // --- PAINT fields --- (packed RGBA8, parallel to verts; level-agnostic like mask)
     std::vector<uint32_t> old_color, new_color;
+    uint32_t paint_layer_id = 0;   // PaintLayer::id the stroke painted (0 = Base)
 
     // Which storage layer this entry modifies
     int  level        = 0;

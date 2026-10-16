@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cmath>
 #include <cassert>
+#include "paint_layers.h"
 
 struct Vec3 {
     float x, y, z;
@@ -75,6 +76,11 @@ struct Mesh {
     // Persists across subdivide/remesh (carried by interpolation); unlike mask
     // it is creative work, not a transient selection. 0xFFFFFFFF = white.
     std::vector<uint32_t> color;
+
+    // Paint layers. `color` above IS the active layer's pixels (premultiplied RGBA8,
+    // alpha = coverage); this holds every other layer plus the stack's order, modes and
+    // flags. Empty = the pre-layer world: `color` is the only paint. See paint_layers.h.
+    PaintLayerStack paint_layers;
 
     // Remesh-density field: per-vertex 0..1 (0 = coarse, 1 = dense), painted in
     // Paint mode (density target) and consumed by the adaptive remesher. Empty =

@@ -21,7 +21,7 @@ struct ColorPaintParamsGPU {
     float    anchor_a[3];    float world_radius;     // 16
     float    anchor_b[3];    float hardness;         // 16
     float    paint_color[3]; float paint_strength;   // 16
-    uint32_t use_b; uint32_t vertex_count; uint32_t _pad0; uint32_t _pad1; // 16
+    uint32_t use_b; uint32_t vertex_count; float paint_alpha; uint32_t _pad1; // 16
 };
 static_assert(sizeof(ColorPaintParamsGPU) == 64, "color paint Params UBO must be 64 bytes");
 
@@ -37,7 +37,7 @@ static_assert(sizeof(ColorSmoothParamsGPU) == 48, "color smooth Params UBO must 
 struct ColorCompositeParamsGPU {
     uint32_t vertex_count; uint32_t layer_count; uint32_t list_mode; uint32_t _pad0; // 16
     float    opacity[16];                                                            // 64
-    uint32_t layers[16][4];   // ids off, values off, count, mode | source << 8         256
+    uint32_t layers[16][4];   // ids off, values off, count, mode | source<<8 | clip<<16  256
 };
 static_assert(sizeof(ColorCompositeParamsGPU) == 336, "color composite Params UBO must be 336 bytes");
 static_assert(kMaxPaintLayers == 16, "the composite's layer table is sized for 16 layers");
@@ -131,6 +131,7 @@ void ComputeState::dispatch_color_paint(const ColorPaintParams& p, const gpu::Bu
     u.hardness = p.hardness;
     u.paint_color[0] = p.paint_r; u.paint_color[1] = p.paint_g; u.paint_color[2] = p.paint_b;
     u.paint_strength = p.paint_strength;
+    u.paint_alpha = p.paint_a;
     u.use_b = (uint32_t)p.use_b;
     u.vertex_count = vc;
     gpu::write_buffer(gpu_dev, color_paint_ubo, 0, &u, sizeof(u));
@@ -207,7 +208,10 @@ bool ComputeState::upload_paint_layers(const PaintLayerStack& stack, uint32_t vc
     pool.clear();
     for (int i = 0; i < (int)stack.layers.size(); i++) {
         const PaintLayer& L = stack.layers[i];
-        if (!L.visible || L.opacity <= 0.0f) continue;
+        if (!paint_layer_shown(stack, i)) continue;
+        // A clipped layer's base is always in the table before it (shown() requires the
+        // base visible), so the kernel's running base alpha is the right one.
+        const bool clip = L.clip && paint_layer_clip_base(stack, i) >= 0;
         const uint32_t k = u.layer_count++;
         uint32_t* e = u.layers[k];
         uint32_t src;
@@ -226,8 +230,15 @@ bool ComputeState::upload_paint_layers(const PaintLayerStack& stack, uint32_t vc
             pool.insert(pool.end(), L.rgba.begin(), L.rgba.end());
             e[2] = (uint32_t)L.ids.size();
         }
-        e[3] = (uint32_t)L.mode | (src << 8);
+        e[3] = (uint32_t)L.mode | (src << 8) | ((clip ? 1u : 0u) << 16);
         u.opacity[k] = L.opacity;
+    }
+    if (stack.empty()) {
+        // The pre-layer world: one implicit Base, Normal at full opacity, read from the
+        // active buffer.
+        u.layer_count = 1;
+        u.layers[0][3] = (uint32_t)BlendMode::Normal | (kLayerSrcActive << 8);
+        u.opacity[0] = 1.0f;
     }
     if (pool.empty()) pool.push_back(0u);    // a zero-size binding is invalid on WebGPU
 
@@ -245,11 +256,23 @@ bool ComputeState::upload_paint_layers(const PaintLayerStack& stack, uint32_t vc
     gpu::write_buffer(gpu_dev, paint_layer_pool_ssbo, 0, pool.data(), bytes);
     std::memcpy(paint_layer_table, &u, sizeof(u));
     paint_layers_uploaded = true;
+    paint_layers_vcount   = vc;
     return true;
 }
 
 static void dispatch_color_composite_impl(ComputeState& cs, uint32_t vc, bool dirty_only) {
     if (!cs.has_color_composite() || !cs.paint_layers_uploaded) return;
+    // A table built for another vertex count (level switch, remesh) would index the
+    // pool's dense layers out of range. Re-uploads happen on every bind; this is the net.
+    if (vc != cs.paint_layers_vcount) {
+        static uint32_t warned = 0;
+        if (warned != vc) {
+            std::printf("[paint-layers] composite skipped: table built for %u verts, mesh has %u\n",
+                        cs.paint_layers_vcount, vc);
+            warned = vc;
+        }
+        return;
+    }
     if (!cs.color_ssbo.handle || !cs.color_display_ssbo.handle) return;
     // Until layers are wired, color_ssbo IS the display VBO; binding one buffer as both
     // read and read_write is a validation error on WebGPU.
@@ -263,6 +286,14 @@ static void dispatch_color_composite_impl(ComputeState& cs, uint32_t vc, bool di
     gpu::write_buffer(cs.gpu_dev, cs.color_composite_ubo, 0, &u, sizeof(u));
 
     cs.ensure_smooth_dirty_buffer(vc);
+    // The region UBO is otherwise created by the first brush dab; a layer edit before
+    // any stroke would bind a null buffer (a panic on wgpu, a dead page on the web).
+    if (!cs.dirty_region_ubo.handle) {
+        cs.dirty_region_ubo = gpu::create_buffer(cs.gpu_dev, nullptr, sizeof(DirtyRegionGPU),
+                                                 gpu::Usage::Uniform);
+        const DirtyRegionGPU dr = { 0, 0, 0, 0 };
+        gpu::write_buffer(cs.gpu_dev, cs.dirty_region_ubo, 0, &dr, sizeof(dr));
+    }
     const gpu::BindBufferEntry bg[] = {
         { BIND_DIRTY_VERTS,      &cs.smooth_dirty_ssbo,     cs.smooth_dirty_ssbo.size },
         { BIND_COLOR,            &cs.color_ssbo,            (uint64_t)vc * sizeof(uint32_t) },

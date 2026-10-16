@@ -2187,7 +2187,11 @@ void BrushStroke::apply_color_gpu(DabContext& ctx, float dab_x, float dab_y,
     p.hardness = hardness;
     p.paint_strength = strength;
     if (erase) {
-        p.paint_r = p.paint_g = p.paint_b = 1.0f;   // erase = lerp toward white
+        // Erase = lerp toward transparent. On the Base layer that shows the white the
+        // composite starts from (the old "lerp toward white" look); on any other layer
+        // it reveals whatever is below.
+        p.paint_r = p.paint_g = p.paint_b = 0.0f;
+        p.paint_a = 0.0f;
     } else {
         p.paint_r = ctx.input.paint_color[0];
         p.paint_g = ctx.input.paint_color[1];
@@ -2197,6 +2201,7 @@ void BrushStroke::apply_color_gpu(DabContext& ctx, float dab_x, float dab_y,
 
     set_alpha_dab(ctx, true);
     ctx.compute.dispatch_color_paint(p, ctx.renderer.vbo_pos);
+    ctx.compute.dispatch_color_composite_dirty(p.vertex_count);   // re-blend what it touched
 
     // Dirty list lands async → color first-touch snapshots in drain_dab_readbacks.
     kick_dab_readback(ctx, DAB_COLOR);
@@ -2230,6 +2235,7 @@ void BrushStroke::apply_color_smooth_gpu(DabContext& ctx, float dab_x, float dab
     p.vertex_count = ctx.mesh.vertex_count();
 
     ctx.compute.dispatch_color_smooth(p, ctx.renderer.vbo_pos, ctx.renderer.ebo);
+    ctx.compute.dispatch_color_composite_dirty(p.vertex_count);
 
     // Dirty list lands async → color first-touch snapshots in drain_dab_readbacks.
     kick_dab_readback(ctx, DAB_COLOR);
@@ -2367,6 +2373,7 @@ void BrushStroke::commit_color_undo(const Mesh& mesh, UndoStack& stack) {
 
     UndoEntry e;
     e.kind = UndoEntry::Kind::PAINT;
+    e.paint_layer_id = paint_layers_active_id(mesh.paint_layers);
 
     for (uint32_t v : color.snap_list) {
         uint32_t old_val = color.snap[v];
@@ -2699,7 +2706,7 @@ bool BrushStroke::finalize(DabContext& ctx, Mesh& mesh, UndoStack& stack,
             g_penup.read((uint64_t)vertex_count * sizeof(float));
         }
         if (gpu_color_deferred && !color.snap_list.empty() && compute) {
-            fin_color_tk = gpu::read_buffer_async(compute->gpu_dev, renderer.vbo_color,
+            fin_color_tk = gpu::read_buffer_async(compute->gpu_dev, compute->color_ssbo,
                                                   0, (uint64_t)vertex_count * sizeof(uint32_t));
             g_penup.read((uint64_t)vertex_count * sizeof(uint32_t));
         }

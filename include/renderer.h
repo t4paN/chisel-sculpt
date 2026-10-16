@@ -23,7 +23,11 @@ struct Renderer {
     // (re)allocation in Scene::bind_active_ (a WebGPU grow makes a new handle — the old
     // set-once GL alias relied on stable-handle realloc, which WebGPU doesn't have).
     gpu::Buffer vbo_mask;      // per-vertex sculpt mask values (0..1)
-    gpu::Buffer vbo_color;     // per-vertex albedo, packed RGBA8 (paint)
+    gpu::Buffer vbo_color;     // per-vertex albedo the matcap draws: the paint layers'
+                               // composite (color_composite writes it during strokes)
+    gpu::Buffer ssbo_paint_layer;   // the ACTIVE paint layer = Mesh::color, premultiplied
+                                    // RGBA8; what the paint/smooth kernels write and the
+                                    // pen-up readback reads. Storage only, never drawn.
     gpu::Buffer vbo_density;   // per-vertex remesh-density field (0..1, 0.5 neutral);
                                // storage-only in practice (never a draw attribute —
                                // the density view colormaps into vbo_color instead)

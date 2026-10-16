@@ -161,7 +161,10 @@ void ComputeState::dispatch_density_smooth(const MaskPaintParams& p, const gpu::
 }
 
 void ComputeState::dispatch_density_colormap(uint32_t vertex_count) {
-    if (!density_colormap_pipeline.handle || !density_ssbo.handle || !color_ssbo.handle) return;
+    // The density view draws its colormap into the DISPLAY buffer. Paint layers split
+    // that from color_ssbo (the active layer), and writing there would paint over it.
+    const gpu::Buffer& display = color_display_ssbo.handle ? color_display_ssbo : color_ssbo;
+    if (!density_colormap_pipeline.handle || !density_ssbo.handle || !display.handle) return;
 
     DensityColormapParamsGPU cp = {};
     cp.vertex_count = vertex_count;
@@ -169,7 +172,7 @@ void ComputeState::dispatch_density_colormap(uint32_t vertex_count) {
 
     const gpu::BindBufferEntry bg[] = {
         { BIND_DENSITY, &density_ssbo,        (uint64_t)vertex_count * sizeof(float) },
-        { BIND_COLOR,   &color_ssbo,          (uint64_t)vertex_count * sizeof(uint32_t) },
+        { BIND_COLOR,   &display,             (uint64_t)vertex_count * sizeof(uint32_t) },
         { BIND_PARAMS,  &density_colormap_ubo, sizeof(DensityColormapParamsGPU) },
     };
     gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, density_colormap_pipeline, bg, 3);

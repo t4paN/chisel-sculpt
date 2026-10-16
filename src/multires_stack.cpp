@@ -256,6 +256,8 @@ static PaintSyncCounts sync_plane(std::vector<T>& plane, const std::vector<T>& w
     return counts;
 }
 
+uint32_t multires_paint_vcount(const MultiresStack& stack) { return plane_vcount(stack); }
+
 void multires_sync_paint(MultiresStack& stack, const Mesh& working) {
     if (!stack.locked) return;
     const uint32_t Vw = working.vertex_count();

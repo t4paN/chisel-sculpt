@@ -263,6 +263,20 @@ bool UndoStack::apply(UndoEntry& e, MeshEntity& ent, Scene& scene, bool forward)
     }
 
     if (e.kind == UndoEntry::Kind::PAINT) {
+        // A paint entry belongs to the layer it was painted on. If another layer is
+        // active now, switch to it first (mesh.color must hold that layer's pixels);
+        // if that layer was since deleted or merged, there is nothing to restore into.
+        bool switched = false;
+        if (!mesh.paint_layers.empty()
+            && paint_layers_active_id(mesh.paint_layers) != e.paint_layer_id) {
+            const int idx = paint_layers_index_of(mesh.paint_layers, e.paint_layer_id);
+            if (idx < 0) return false;
+            scene.edit_paint_layers(ent.id, [idx](PaintLayerStack& st, std::vector<uint32_t>& act,
+                                                  uint32_t vc) {
+                paint_layer_set_active(st, act, idx, vc);
+            });
+            switched = true;
+        }
         const std::vector<uint32_t>& target = forward ? e.new_color : e.old_color;
         if (mesh.color.empty()) mesh.color.assign(mesh.vertex_count(), 0xFFFFFFFFu);
         else if (mesh.color.size() < mesh.vertex_count())
@@ -271,7 +285,8 @@ bool UndoStack::apply(UndoEntry& e, MeshEntity& ent, Scene& scene, bool forward)
             uint32_t v = e.verts[k];
             if (v < (uint32_t)mesh.color.size()) mesh.color[v] = target[k];
         }
-        scene.sync_color_partial_entity(ent.id, e.verts);
+        if (switched) scene.paint_layers_changed(ent.id);
+        else          scene.sync_color_partial_entity(ent.id, e.verts);
         return false;
     }
 

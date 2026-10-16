@@ -11,7 +11,10 @@
 //   0 PACKED  in the pool: ids at .x (ascending), values at .y, .z entries; binary search
 //   1 DENSE   in the pool: values at .y, indexed by vertex
 //   2 ACTIVE  the buffer the brush writes (binding 28), indexed by vertex
-// Only visible layers are in the table; the CPU filters them.
+// Bit 16 of .w = CLIP (clipping mask): the layer's coverage is scaled by the
+// coverage of the nearest unclipped layer before it in the table (its base). Only
+// layers the composite actually draws are in the table — the CPU drops hidden layers
+// and clipped layers whose base is hidden, and clears CLIP when there is no base.
 //
 // list_mode 0 runs one thread per vertex (a full rebuild). list_mode 1 runs one thread
 // per entry of the dab's dirty list, dispatched indirectly off dirty_args (256 per
@@ -27,7 +30,7 @@ struct Params {
     list_mode    : u32,
     _pad0        : u32,
     opacity      : array<vec4<f32>, 4>,    // layer i -> opacity[i / 4][i % 4]
-    layers       : array<vec4<u32>, 16>,   // x ids off, y values off, z count, w mode | source << 8
+    layers       : array<vec4<u32>, 16>,   // x ids off, y values off, z count, w mode | source << 8 | clip << 16
 };
 
 struct DirtyRegion {
@@ -82,7 +85,7 @@ fn sample_packed(ids_off : u32, vals_off : u32, count : u32, v : u32) -> u32 {
 }
 
 fn sample_layer(e : vec4<u32>, v : u32) -> u32 {
-    let src = e.w >> 8u;
+    let src = (e.w >> 8u) & 0xFFu;   // mask: bit 16 is the clip flag
     if (src == SRC_PACKED) {
         return sample_packed(e.x, e.y, e.z, v);
     }
@@ -109,13 +112,21 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     }
 
     var d = vec3<f32>(1.0, 1.0, 1.0);
+    var base_a = 1.0;
     for (var i = 0u; i < P.layer_count; i = i + 1u) {
         let e = P.layers[i];
         let c = unpack4x8unorm(sample_layer(e, v));
+        let clipped = ((e.w >> 16u) & 1u) == 1u;
+        var op = P.opacity[i / 4u][i % 4u];
+        if (clipped) {
+            op = op * base_a;
+        } else {
+            base_a = c.a;    // set even when transparent: an empty base clips to nothing
+        }
         if (c.a <= 0.0) {
             continue;
         }
-        let ao = c.a * P.opacity[i / 4u][i % 4u];
+        let ao = c.a * op;
         let s = c.rgb / c.a;                      // un-premultiply
         d = mix(d, blend_channel(d, s, e.w & 0xFFu), ao);
         // Round to 8 bits after every layer, as the CPU composite does (it stores

@@ -4,6 +4,7 @@
 struct TextOverlay;
 struct InputState;
 struct AlphaLibrary;
+class Scene;
 
 void draw_quit_dialog(TextOverlay& text, int win_w, int win_h);
 void draw_drop_confirm(TextOverlay& text, const char* path, int win_w, int win_h);
@@ -58,6 +59,8 @@ void draw_help_popup(InputState& input, int win_w, int win_h);
 // Burger menu -> Key bindings: the centred rebinding window. Call once per frame at
 // the top level (outside any ImGui window), after the skin's UI.
 void draw_keybind_window(InputState& input, int win_w, int win_h);
+// Paint layers docker (paint mode, colour target). Shared by every skin.
+void draw_paint_layers_panel(InputState& input, Scene& scene, int win_w, int win_h);
 
 // Eyedropper cursor while the colour picker is armed (tip at x,y; dimmed when
 // the cursor is off the model). ImGui foreground draw list — identical on all

@@ -109,6 +109,8 @@ void compute_frames(const Mesh& m, std::vector<Frame>& out);
 // empty working mask clears the mask plane (a cleared mask must not
 // resurrect); an empty working colour leaves the colour plane alone.
 void multires_sync_paint(MultiresStack& stack, const Mesh& working);
+// Vertex count of the finest-level paint planes (what MultiresStack::color is sized to).
+uint32_t multires_paint_vcount(const MultiresStack& stack);
 
 // Rebuild `out` to the stack's surface at absolute level K.
 // Preconditions: stack.locked == true, base_level <= K <= MULTIRES_MAX_LEVEL.

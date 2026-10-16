@@ -107,6 +107,14 @@ static void ensure_buffer(gpu::Device& dev, gpu::Buffer& b,
     else { gpu::release_buffer(b); b = gpu::create_buffer(dev, data, size, usage); }
 }
 
+// Paint: Mesh::color is the ACTIVE layer (ssbo_paint_layer); vbo_color shows the
+// composite of every layer. A never-painted mesh with no layers reads as white, which
+// is also what the composite gives — so the pre-layer world uploads exactly as before.
+static inline uint32_t paint_layer_px(const Mesh& mesh, uint32_t v) {
+    if (v < mesh.color.size()) return mesh.color[v];
+    return mesh.paint_layers.empty() ? 0xFFFFFFFFu : 0u;
+}
+
 // ---- Shader sources ----
 
 static const char* bg_vert_src = R"(
@@ -1000,6 +1008,7 @@ Renderer::~Renderer() {
     gpu::release_buffer(vbo_norm);
     gpu::release_buffer(vbo_mask);
     gpu::release_buffer(vbo_color);
+    gpu::release_buffer(ssbo_paint_layer);
     gpu::release_buffer(vbo_density);
     gpu::release_buffer(ebo);
     gpu::release_render_pipeline(bg_pipeline);
@@ -1325,8 +1334,7 @@ void Renderer::upload_mesh(const Mesh& mesh) {
     // Interleave SoA → AoS for VBO upload (positions/normals skipped when they
     // arrive by GPU copy below).
     std::vector<float> pos, norm, mask_buf(vc);
-    std::vector<uint32_t> col_buf(vc);
-    bool has_color = !mesh.color.empty();
+    std::vector<uint32_t> col_buf(vc), layer_buf(vc);
     if (!gpu_geom) {
         pos.resize((size_t)vc * 3); norm.resize((size_t)vc * 3);
         for (uint32_t i = 0; i < vc; i++) {
@@ -1336,8 +1344,9 @@ void Renderer::upload_mesh(const Mesh& mesh) {
     }
     for (uint32_t i = 0; i < vc; i++) {
         mask_buf[i] = (i < mesh.mask.size()) ? mesh.mask[i] : 0.0f;
-        col_buf[i] = (has_color && i < mesh.color.size()) ? mesh.color[i] : 0xFFFFFFFFu;
+        layer_buf[i] = paint_layer_px(mesh, i);
     }
+    paint_composite(mesh.paint_layers, mesh.color, vc, col_buf.data());
 
     // pos/norm/ebo + mask/color: owned seam buffers. pos/norm carry Vertex|Storage,
     // ebo Index|Storage, mask/color Vertex|Storage (vertex attribute + brush-written
@@ -1380,6 +1389,8 @@ void Renderer::upload_mesh(const Mesh& mesh) {
                   gpu::Usage::Vertex | gpu::Usage::Storage);
     ensure_buffer(gpu_dev, vbo_color, col_buf.data(), (uint64_t)col_buf.size()*sizeof(uint32_t),
                   gpu::Usage::Vertex | gpu::Usage::Storage);
+    ensure_buffer(gpu_dev, ssbo_paint_layer, layer_buf.data(),
+                  (uint64_t)layer_buf.size()*sizeof(uint32_t), gpu::Usage::Storage);
 
     // Density field rides the same lifecycle as mask/color (compute.density_ssbo
     // aliases it); unpainted verts default to the neutral 0.5.
@@ -1565,9 +1576,9 @@ void Renderer::update_density_verts(const Mesh& mesh, const std::vector<uint32_t
 void Renderer::update_color(const Mesh& mesh) {
     uint32_t vc = mesh.vertex_count();
     std::vector<uint32_t> buf(vc);
-    bool has = !mesh.color.empty();
-    for (uint32_t i = 0; i < vc; i++)
-        buf[i] = (has && i < mesh.color.size()) ? mesh.color[i] : 0xFFFFFFFFu;
+    for (uint32_t i = 0; i < vc; i++) buf[i] = paint_layer_px(mesh, i);
+    gpu::write_buffer(gpu_dev, ssbo_paint_layer, 0, buf.data(), (uint64_t)vc * sizeof(uint32_t));
+    paint_composite(mesh.paint_layers, mesh.color, vc, buf.data());
     gpu::write_buffer(gpu_dev, vbo_color, 0, buf.data(), (uint64_t)vc * sizeof(uint32_t));
 }
 
@@ -1582,12 +1593,11 @@ void Renderer::update_color_partial(const Mesh& mesh, const std::vector<uint32_t
 
     uint32_t range = max_idx - min_idx + 1;
     std::vector<uint32_t> buf(range);
-    bool has = !mesh.color.empty();
-    for (uint32_t i = 0; i < range; i++) {
-        uint32_t v = min_idx + i;
-        buf[i] = (has && v < mesh.color.size()) ? mesh.color[v] : 0xFFFFFFFFu;
-    }
-
+    for (uint32_t i = 0; i < range; i++) buf[i] = paint_layer_px(mesh, min_idx + i);
+    gpu::write_buffer(gpu_dev, ssbo_paint_layer, (uint64_t)min_idx * sizeof(uint32_t),
+                      buf.data(), (uint64_t)range * sizeof(uint32_t));
+    for (uint32_t i = 0; i < range; i++)
+        buf[i] = paint_composite_vertex(mesh.paint_layers, mesh.color, min_idx + i);
     gpu::write_buffer(gpu_dev, vbo_color, (uint64_t)min_idx * sizeof(uint32_t),
                       buf.data(), (uint64_t)range * sizeof(uint32_t));
 }
@@ -1611,7 +1621,6 @@ void Renderer::update_color_verts(const Mesh& mesh, const std::vector<uint32_t>&
     }
 
     static std::vector<uint32_t> buf;
-    bool has = !mesh.color.empty();
     size_t i = 0, n = sorted.size();
     while (i < n) {
         uint32_t start = sorted[i], end = start;
@@ -1620,10 +1629,11 @@ void Renderer::update_color_verts(const Mesh& mesh, const std::vector<uint32_t>&
         uint32_t run = end - start + 1;
 
         buf.resize(run);
-        for (uint32_t k = 0; k < run; k++) {
-            uint32_t v = start + k;
-            buf[k] = (has && v < mesh.color.size()) ? mesh.color[v] : 0xFFFFFFFFu;
-        }
+        for (uint32_t k = 0; k < run; k++) buf[k] = paint_layer_px(mesh, start + k);
+        gpu::write_buffer(gpu_dev, ssbo_paint_layer, (uint64_t)start * sizeof(uint32_t),
+                          buf.data(), (uint64_t)run * sizeof(uint32_t));
+        for (uint32_t k = 0; k < run; k++)
+            buf[k] = paint_composite_vertex(mesh.paint_layers, mesh.color, start + k);
         gpu::write_buffer(gpu_dev, vbo_color, (uint64_t)start * sizeof(uint32_t),
                           buf.data(), (uint64_t)run * sizeof(uint32_t));
         i = j;
@@ -1694,13 +1704,12 @@ void Renderer::upload_display(EntityGpu& g, const Mesh& mesh) {
 
     std::vector<float> pos(vc * 3), norm(vc * 3), mask_buf(vc);
     std::vector<uint32_t> col_buf(vc);
-    bool has_color = !mesh.color.empty();
     for (uint32_t i = 0; i < vc; i++) {
         pos[i*3+0] = mesh.pos_x[i]; pos[i*3+1] = mesh.pos_y[i]; pos[i*3+2] = mesh.pos_z[i];
         norm[i*3+0] = mesh.norm_x[i]; norm[i*3+1] = mesh.norm_y[i]; norm[i*3+2] = mesh.norm_z[i];
         mask_buf[i] = (i < mesh.mask.size()) ? mesh.mask[i] : 0.0f;
-        col_buf[i] = (has_color && i < mesh.color.size()) ? mesh.color[i] : 0xFFFFFFFFu;
     }
+    paint_composite(mesh.paint_layers, mesh.color, vc, col_buf.data());   // display only
 
     // Display-only buffers: vertex attributes for the matcap + pick draws (pos also
     // bound as a pick vertex buffer). The render pipeline owns the vertex layout.

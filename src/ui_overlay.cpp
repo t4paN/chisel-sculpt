@@ -1,3 +1,4 @@
+#include "scene.h"          // first: pulls in glad, which must precede any GL header
 #include "ui_overlay.h"
 #include "ui_skin.h"
 #include "text_overlay.h"
@@ -5,6 +6,7 @@
 #include "settings.h"
 #include "brush_alpha.h"
 #include "imgui.h"
+#include <functional>
 #include <cstdio>
 #include <cstring>
 #include <cmath>
@@ -1831,4 +1833,120 @@ void draw_keybind_window(InputState& input, int win_w, int win_h) {
     ImGui::PopStyleColor();
     ImGui::PopStyleVar(2);
     if (close) input.keybind_menu_open = false;
+}
+
+// ---- Paint layers panel ----
+// A minimal layer docker: top layer first; the eye toggles visibility, a click
+// makes a layer active; the active layer's mode, opacity and clip sit underneath, then
+// add / delete / up / down / merge visible. Paint mode (colour target) only. Edits that
+// move pixels (add, delete, switch, merge) go through Scene::edit_paint_layers so a
+// multires entity edits its full-resolution planes; property edits don't move pixels,
+// so they mutate the stack and ask for a GPU re-blend.
+void draw_paint_layers_panel(InputState& input, Scene& scene, int win_w, int /*win_h*/) {
+    if (input.current_brush != BrushType::PAINT || input.paint_target_density) return;
+    MeshEntity* ent = scene.find_entity(scene.active_mesh_id());
+    if (!ent) return;
+    const uint32_t eid = ent->id;
+    PaintLayerStack& st = ent->mesh.paint_layers;
+    using Op = std::function<void(PaintLayerStack&, std::vector<uint32_t>&, uint32_t)>;
+    auto move_pixels = [&](const Op& op) { scene.edit_paint_layers(eid, op); };
+    auto props       = [&]() { scene.paint_layers_changed(eid, false); };
+
+    ImGui::SetNextWindowPos(ImVec2((float)win_w - 16.0f, 140.0f), ImGuiCond_FirstUseEver,
+                            ImVec2(1.0f, 0.0f));
+    if (!ImGui::Begin("Layers", nullptr,
+                      ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoFocusOnAppearing)) {
+        ImGui::End();
+        return;
+    }
+
+    if (st.empty()) {
+        // The pre-layer world: one implicit Base. Nothing to toggle until a layer exists.
+        ImGui::TextDisabled("Base");
+    }
+    for (int i = (int)st.layers.size() - 1; i >= 0; i--) {
+        PaintLayer& L = st.layers[i];
+        ImGui::PushID((int)L.id);
+        bool vis = L.visible;
+        if (ImGui::Checkbox("##vis", &vis)) { L.visible = vis; props(); }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Show / hide");
+        ImGui::SameLine();
+        char label[96];
+        std::snprintf(label, sizeof(label), "%s%s", L.clip ? "\xC2\xBB " : "", L.name.c_str());
+        if (ImGui::Selectable(label, i == st.active, 0, ImVec2(150.0f, 0.0f)) && i != st.active)
+            move_pixels([i](PaintLayerStack& s, std::vector<uint32_t>& act, uint32_t vc) {
+                paint_layer_set_active(s, act, i, vc);
+            });
+        ImGui::PopID();
+    }
+
+    ImGui::Separator();
+    if (!st.empty() && st.active >= 0) {
+        PaintLayer& A = st.layers[st.active];
+        ImGui::SetNextItemWidth(180.0f);
+        if (ImGui::BeginCombo("##mode", blend_mode_name(A.mode))) {
+            for (int m = 0; m < (int)BlendMode::Count; m++) {
+                const bool sel = (int)A.mode == m;
+                if (ImGui::Selectable(blend_mode_name((BlendMode)m), sel) && !sel) {
+                    A.mode = (BlendMode)m;
+                    props();
+                }
+            }
+            ImGui::EndCombo();
+        }
+        float pct = A.opacity * 100.0f;
+        ImGui::SetNextItemWidth(180.0f);
+        if (ImGui::SliderFloat("##opacity", &pct, 0.0f, 100.0f, "opacity %.0f%%")) {
+            A.opacity = pct / 100.0f;
+            props();
+        }
+        bool clip = A.clip;
+        if (ImGui::Checkbox("Clip to layer below", &clip)) { A.clip = clip; props(); }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Only show this layer where the layer under it is painted\n"
+                              "(a clipping mask)");
+        ImGui::Separator();
+    }
+
+    const bool full = (int)st.layers.size() >= kMaxPaintLayers;
+    ImGui::BeginDisabled(full);
+    if (ImGui::Button("+")) {
+        char name[32];
+        std::snprintf(name, sizeof(name), "Layer %u", st.next_id);
+        const std::string nm = name;
+        move_pixels([nm](PaintLayerStack& s, std::vector<uint32_t>& act, uint32_t vc) {
+            paint_layer_add(s, act, nm, vc);
+        });
+    }
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip(full ? "16 layers is the limit" : "New layer above the active one");
+    ImGui::SameLine();
+    ImGui::BeginDisabled(st.empty());
+    if (ImGui::Button("-")) {
+        const int a = st.active;
+        move_pixels([a](PaintLayerStack& s, std::vector<uint32_t>& act, uint32_t vc) {
+            paint_layer_remove(s, act, a, vc);
+        });
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("Delete the active layer (the last one is cleared instead)");
+    ImGui::SameLine();
+    ImGui::BeginDisabled(st.active >= (int)st.layers.size() - 1);
+    if (ImGui::Button("Up")) { paint_layer_move(st, st.active, st.active + 1); props(); }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::BeginDisabled(st.active <= 0);
+    if (ImGui::Button("Down")) { paint_layer_move(st, st.active, st.active - 1); props(); }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (ImGui::Button("Merge visible"))
+        move_pixels([](PaintLayerStack& s, std::vector<uint32_t>& act, uint32_t vc) {
+            paint_layers_merge_visible(s, act, vc);
+        });
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("Merge every visible layer into one (hidden layers are kept)");
+    ImGui::EndDisabled();
+
+    ImGui::End();
 }

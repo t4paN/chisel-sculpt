@@ -33,6 +33,9 @@ static inline float paint_blend_channel(float d, float s, BlendMode mode) {
 uint32_t paint_blend(uint32_t dst, uint32_t src, BlendMode mode, float opacity) {
     const uint32_t sa8 = src >> 24;
     if (sa8 == 0) return dst;
+    // Opaque Normal at full opacity is a copy — and it is the whole pre-layer world
+    // (one opaque Base), so the common case skips the float maths entirely.
+    if (sa8 == 255 && opacity >= 1.0f && mode == BlendMode::Normal) return src;
     const float sa = (float)sa8 / 255.0f;
     const float ao = sa * opacity;
     uint32_t out = 0xFF000000u;
@@ -50,6 +53,15 @@ uint32_t paint_layer_sample(const PaintLayer& L, uint32_t v) {
     auto it = std::lower_bound(L.ids.begin(), L.ids.end(), v);
     if (it == L.ids.end() || *it != v) return 0u;
     return L.rgba[(size_t)(it - L.ids.begin())];
+}
+
+uint32_t paint_layers_value(const PaintLayerStack& s, const std::vector<uint32_t>& act,
+                            int i, uint32_t v) {
+    if (i == s.active || s.empty()) {
+        if (act.empty()) return 0xFFFFFFFFu;     // implicit / never-painted Base
+        return v < act.size() ? act[v] : 0u;
+    }
+    return paint_layer_sample(s.layers[i], v);
 }
 
 void paint_layer_pack(PaintLayer& L) {
@@ -86,55 +98,82 @@ void paint_layer_unpack(PaintLayer& L, uint32_t vcount) {
     L.dense = true;
 }
 
-void paint_layers_init(PaintLayerStack& s, std::vector<uint32_t>&& legacy_color,
-                       uint32_t vcount) {
-    s.layers.clear();
+// Edits work on the whole stack with the active layer's pixels parked in its own slot
+// (stash), then hand the active layer's pixels back to act (unstash).
+static void stash(PaintLayerStack& s, std::vector<uint32_t>& act) {
+    if (s.active < 0) return;
+    PaintLayer& L = s.layers[s.active];
+    L.ids.clear();
+    L.rgba  = std::move(act);
+    L.dense = true;
+    act.clear();
+}
+static void unstash(PaintLayerStack& s, std::vector<uint32_t>& act, uint32_t vcount) {
+    if (s.active < 0) return;
+    PaintLayer& L = s.layers[s.active];
+    paint_layer_unpack(L, vcount);
+    act = std::move(L.rgba);
+    L.rgba.clear();
+}
+
+void paint_layers_ensure(PaintLayerStack& s, std::vector<uint32_t>& act, uint32_t vcount) {
+    if (!s.empty()) return;
     PaintLayer base;
     base.name  = "Base";
     base.dense = true;
-    base.rgba  = std::move(legacy_color);
-    base.rgba.resize(vcount, 0u);
     s.layers.push_back(std::move(base));
     s.active = 0;
+    if (act.empty()) act.assign(vcount, 0xFFFFFFFFu);
+    else             act.resize(vcount, 0xFFFFFFFFu);
 }
 
-int paint_layer_add(PaintLayerStack& s, const std::string& name, uint32_t vcount) {
+static void set_active_stashed(PaintLayerStack& s, int idx) {
+    if (s.active >= 0) paint_layer_pack(s.layers[s.active]);
+    s.active = idx;
+}
+
+int paint_layer_add(PaintLayerStack& s, std::vector<uint32_t>& act,
+                    const std::string& name, uint32_t vcount) {
+    paint_layers_ensure(s, act, vcount);
     if ((int)s.layers.size() >= kMaxPaintLayers) return -1;
-    if (PaintLayer* prev = s.active_layer()) paint_layer_pack(*prev);
+    stash(s, act);
     PaintLayer L;
+    L.id    = s.next_id++;
     L.name  = name;
     L.dense = true;
     L.rgba.assign(vcount, 0u);
-    const int idx = s.active + 1;      // directly above the active one (0 on an empty stack)
+    const int idx = s.active + 1;      // directly above the active one
     s.layers.insert(s.layers.begin() + idx, std::move(L));
-    s.active = idx;
+    set_active_stashed(s, idx);
+    unstash(s, act, vcount);
     return idx;
 }
 
-void paint_layer_set_active(PaintLayerStack& s, int idx, uint32_t vcount) {
+void paint_layer_set_active(PaintLayerStack& s, std::vector<uint32_t>& act, int idx,
+                            uint32_t vcount) {
     if (idx < 0 || idx >= (int)s.layers.size() || idx == s.active) return;
-    if (PaintLayer* prev = s.active_layer()) paint_layer_pack(*prev);
-    s.active = idx;
-    paint_layer_unpack(s.layers[idx], vcount);
+    stash(s, act);
+    set_active_stashed(s, idx);
+    unstash(s, act, vcount);
 }
 
-void paint_layer_remove(PaintLayerStack& s, int idx, uint32_t vcount) {
+void paint_layer_remove(PaintLayerStack& s, std::vector<uint32_t>& act, int idx,
+                        uint32_t vcount) {
     if (idx < 0 || idx >= (int)s.layers.size()) return;
     if (s.layers.size() == 1) {
-        PaintLayer& L = s.layers[0];
-        L.ids.clear();
-        L.rgba.assign(vcount, 0u);
-        L.dense = true;
+        act.assign(vcount, 0u);
         return;
     }
+    stash(s, act);
     s.layers.erase(s.layers.begin() + idx);
     if (idx == s.active) {
         // The layer below takes over (or the new bottom one).
         s.active = -1;
-        paint_layer_set_active(s, std::max(0, idx - 1), vcount);
+        set_active_stashed(s, std::max(0, idx - 1));
     } else if (idx < s.active) {
         s.active--;
     }
+    unstash(s, act, vcount);
 }
 
 void paint_layer_move(PaintLayerStack& s, int from, int to) {
@@ -143,47 +182,139 @@ void paint_layer_move(PaintLayerStack& s, int from, int to) {
     PaintLayer L = std::move(s.layers[from]);
     s.layers.erase(s.layers.begin() + from);
     s.layers.insert(s.layers.begin() + to, std::move(L));
-    if (s.active == from)                     s.active = to;
+    if (s.active == from)                       s.active = to;
     else if (from < s.active && to >= s.active) s.active--;
     else if (from > s.active && to <= s.active) s.active++;
 }
 
-void paint_layers_flatten(PaintLayerStack& s, uint32_t vcount) {
-    std::vector<uint32_t> flat;
-    paint_composite(s, vcount, flat);
-    paint_layers_init(s, std::move(flat), vcount);
+uint32_t paint_layers_active_id(const PaintLayerStack& s) {
+    return s.active >= 0 ? s.layers[s.active].id : 0u;
 }
 
-void paint_composite(const PaintLayerStack& s, uint32_t vcount, std::vector<uint32_t>& out) {
-    out.assign(vcount, 0xFFFFFFFFu);
-    // Layer-major: each layer touches only what it covers, so a packed layer costs its
-    // own size, not the mesh's. Order is still bottom to top at every vertex.
-    for (const PaintLayer& L : s.layers) {
-        if (!L.visible || L.opacity <= 0.0f) continue;
-        if (L.dense) {
-            const uint32_t n = std::min<uint32_t>(vcount, (uint32_t)L.rgba.size());
-            for (uint32_t v = 0; v < n; v++)
-                out[v] = paint_blend(out[v], L.rgba[v], L.mode, L.opacity);
+int paint_layers_index_of(const PaintLayerStack& s, uint32_t id) {
+    if (s.empty()) return id == 0 ? 0 : -1;
+    for (int i = 0; i < (int)s.layers.size(); i++)
+        if (s.layers[i].id == id) return i;
+    return -1;
+}
+
+int paint_layer_clip_base(const PaintLayerStack& s, int i) {
+    if (s.empty() || !s.layers[i].clip) return i;
+    for (int b = i - 1; b >= 0; b--)
+        if (!s.layers[b].clip) return b;
+    return -1;
+}
+
+bool paint_layer_shown(const PaintLayerStack& s, int i) {
+    if (s.empty()) return true;
+    if (!s.layers[i].visible) return false;
+    const int b = paint_layer_clip_base(s, i);
+    return b < 0 || s.layers[b].visible;
+}
+
+// A clipped layer's coverage is scaled by its base's coverage at the vertex. Applied
+// as a multiplier on opacity so paint_blend() stays the single per-vertex reference.
+static inline float layer_opacity(const PaintLayerStack& s, const std::vector<uint32_t>& act,
+                                  int i, uint32_t v) {
+    if (s.empty()) return 1.0f;
+    const float op = s.layers[i].opacity;
+    const int b = paint_layer_clip_base(s, i);
+    if (b == i || b < 0) return op;
+    return op * ((float)(paint_layers_value(s, act, b, v) >> 24) / 255.0f);
+}
+static inline BlendMode layer_mode(const PaintLayerStack& s, int i) {
+    return s.empty() ? BlendMode::Normal : s.layers[i].mode;
+}
+
+void paint_layers_merge_visible(PaintLayerStack& s, std::vector<uint32_t>& act,
+                                uint32_t vcount) {
+    paint_layers_ensure(s, act, vcount);
+    std::vector<int> merged;
+    for (int i = 0; i < (int)s.layers.size(); i++)
+        if (paint_layer_shown(s, i)) merged.push_back(i);
+    if (merged.empty()) return;
+
+    // W3C source-over with a separable blend, onto a transparent backdrop, in
+    // premultiplied form:  co = as*(1-ab)*cs + as*ab*B(cb,cs) + (1-as)*cb_premult,
+    //                      ao = as + ab*(1-as).  Float across layers, rounded once.
+    std::vector<uint32_t> out(vcount, 0u);
+    for (uint32_t v = 0; v < vcount; v++) {
+        float cr[3] = {0, 0, 0}, ar = 0.0f;
+        for (int i : merged) {
+            const uint32_t c = paint_layers_value(s, act, i, v);
+            const uint32_t ca8 = c >> 24;
+            if (ca8 == 0) continue;
+            const float ca = (float)ca8 / 255.0f;
+            const float as = ca * layer_opacity(s, act, i, v);
+            if (as <= 0.0f) continue;
+            for (int ch = 0; ch < 3; ch++) {
+                const float cs = unorm(c, ch) / ca;
+                const float cb = ar > 0.0f ? cr[ch] / ar : 0.0f;
+                cr[ch] = as * (1.0f - ar) * cs + as * ar * paint_blend_channel(cb, cs, s.layers[i].mode)
+                       + (1.0f - as) * cr[ch];
+            }
+            ar = as + ar * (1.0f - as);
+        }
+        if (ar <= 0.0f) continue;
+        out[v] = to_unorm(cr[0]) | to_unorm(cr[1]) << 8 | to_unorm(cr[2]) << 16 | to_unorm(ar) << 24;
+    }
+
+    stash(s, act);
+    PaintLayer M;
+    M.id    = s.next_id++;
+    M.name  = "Merged";
+    M.dense = true;
+    M.rgba  = std::move(out);
+    const int at = merged.front();
+    std::vector<PaintLayer> kept;
+    for (int i = 0; i < (int)s.layers.size(); i++) {
+        if (i == at) kept.push_back(std::move(M));
+        else if (std::find(merged.begin(), merged.end(), i) == merged.end()) {
+            paint_layer_pack(s.layers[i]);
+            kept.push_back(std::move(s.layers[i]));
+        }
+    }
+    s.layers = std::move(kept);
+    s.active = at;   // everything below `at` was kept, so the merged layer lands at `at`
+    unstash(s, act, vcount);
+}
+
+void paint_composite(const PaintLayerStack& s, const std::vector<uint32_t>& act,
+                     uint32_t vcount, uint32_t* out) {
+    for (uint32_t v = 0; v < vcount; v++) out[v] = 0xFFFFFFFFu;
+    const int n = s.empty() ? 1 : (int)s.layers.size();
+    // Layer-major: each stored layer touches only what it covers, so a packed layer
+    // costs its own size, not the mesh's. Order is still bottom to top at every vertex.
+    for (int i = 0; i < n; i++) {
+        if (!paint_layer_shown(s, i)) continue;
+        const BlendMode mode = layer_mode(s, i);
+        const bool is_act = s.empty() || i == s.active;
+        const PaintLayer* L = is_act ? nullptr : &s.layers[i];
+        if (is_act || L->dense) {
+            if (is_act && act.empty()) continue;            // unpainted Base = the white we start from
+            const std::vector<uint32_t>& px = is_act ? act : L->rgba;
+            const uint32_t m = std::min<uint32_t>(vcount, (uint32_t)px.size());
+            for (uint32_t v = 0; v < m; v++)
+                out[v] = paint_blend(out[v], px[v], mode, layer_opacity(s, act, i, v));
         } else {
-            for (size_t k = 0; k < L.ids.size(); k++) {
-                const uint32_t v = L.ids[k];
-                if (v < vcount) out[v] = paint_blend(out[v], L.rgba[k], L.mode, L.opacity);
+            for (size_t k = 0; k < L->ids.size(); k++) {
+                const uint32_t v = L->ids[k];
+                if (v < vcount) out[v] = paint_blend(out[v], L->rgba[k], mode, layer_opacity(s, act, i, v));
             }
         }
     }
 }
 
-void paint_composite_verts(const PaintLayerStack& s, const uint32_t* verts, size_t n,
-                           uint32_t* out) {
-    for (size_t i = 0; i < n; i++) {
-        const uint32_t v = verts[i];
-        uint32_t c = 0xFFFFFFFFu;
-        for (const PaintLayer& L : s.layers) {
-            if (!L.visible || L.opacity <= 0.0f) continue;
-            c = paint_blend(c, paint_layer_sample(L, v), L.mode, L.opacity);
-        }
-        out[v] = c;
+uint32_t paint_composite_vertex(const PaintLayerStack& s, const std::vector<uint32_t>& act,
+                                uint32_t v) {
+    uint32_t c = 0xFFFFFFFFu;
+    const int n = s.empty() ? 1 : (int)s.layers.size();
+    for (int i = 0; i < n; i++) {
+        if (!paint_layer_shown(s, i)) continue;
+        c = paint_blend(c, paint_layers_value(s, act, i, v), layer_mode(s, i),
+                        layer_opacity(s, act, i, v));
     }
+    return c;
 }
 
 size_t paint_layers_bytes(const PaintLayerStack& s) {

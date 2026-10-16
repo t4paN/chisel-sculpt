@@ -30,7 +30,7 @@ layout(std140, binding = 63) uniform Params {
     float paint_strength; // 44
     uint  use_b;          // 48
     uint  vertex_count;   // 52
-    uint  _pad0;          // 56
+    float paint_alpha;    // 56  target coverage: 1 = paint, 0 = erase
     uint  _pad1;          // 60  (struct = 64)
 } P;
 
@@ -85,9 +85,11 @@ void try_paint(uint v, vec3 anchor, vec3 vp, uint mirrored) {
     if (w <= 0.0) return;
 
     float a = clamp(P.paint_strength * w, 0.0, 1.0);
+    // Premultiplied RGBA8, alpha = coverage: lerp all four channels toward the
+    // premultiplied target (see the .wgsl).
     vec4 old_rgba = unpackUnorm4x8(color_buf[v]);
-    vec3 new_rgb  = mix(old_rgba.rgb, P.paint_color, a);   // lerp-to-color
-    uint pk_rgba  = packUnorm4x8(vec4(new_rgb, 1.0));      // alpha forced opaque
+    vec4 target_c = vec4(P.paint_color * P.paint_alpha, P.paint_alpha);
+    uint pk_rgba  = packUnorm4x8(mix(old_rgba, target_c, a));
     if (pk_rgba == color_buf[v]) return;
 
     color_buf[v] = pk_rgba;

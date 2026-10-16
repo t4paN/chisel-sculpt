@@ -3,6 +3,7 @@
 #include "compute.h"
 #include "multires_stack.h"
 #include <cstdio>
+#include <cstdlib>
 #include <algorithm>
 #include <cassert>
 
@@ -201,8 +202,21 @@ void Scene::bind_active_(uint32_t id) {
     // path has no in-place resize), so the compute alias must be re-pointed here
     // rather than cached once at startup (Step 3a).
     compute_.mask_ssbo    = renderer_.vbo_mask;
-    compute_.color_ssbo   = renderer_.vbo_color;
+    if (compute_.has_color_composite() && compute_.has_dirty_args()) {
+        compute_.color_ssbo         = renderer_.ssbo_paint_layer;   // the brush paints the active layer
+        compute_.color_display_ssbo = renderer_.vbo_color;          // the composite is what's drawn
+    } else {
+        // No GPU composite: paint straight into the display buffer, as before layers.
+        // Exact while the stack is a single layer; with more, strokes show unblended
+        // until the next full refresh.
+        compute_.color_ssbo         = renderer_.vbo_color;
+        compute_.color_display_ssbo = gpu::Buffer();
+        if (in->mesh.paint_layers.layers.size() > 1)
+            std::printf("[paint-layers] no GPU composite: strokes on layered paint won't blend live\n");
+    }
     compute_.density_ssbo = renderer_.vbo_density;
+    if (compute_.supported)
+        compute_.upload_paint_layers(in->mesh.paint_layers, in->mesh.vertex_count());
     // Brush/pick FBO mesh.
     renderer_.upload_screen_mesh(in->mesh);
 
@@ -281,6 +295,70 @@ void Scene::sync_density_partial_entity(uint32_t eid,
     // an inactive entity's mesh.density re-uploads whole at its next bind.
     if (eid == active_id_)
         renderer_.update_density_verts(e->mesh, local_dirty);
+}
+
+void Scene::paint_layers_changed(uint32_t eid, bool pixels) {
+    MeshEntity* e = find_entity(eid);
+    if (!e) return;
+    if (eid == active_id_) {
+        const uint32_t vc = e->mesh.vertex_count();
+        const bool table = compute_.supported
+                        && compute_.upload_paint_layers(e->mesh.paint_layers, vc);
+        if (!pixels && table && compute_.color_display_ssbo.handle)
+            compute_.dispatch_color_composite_all(vc);
+        else
+            renderer_.update_color(e->mesh);
+#ifndef __EMSCRIPTEN__
+        // CHISEL_PAINT_PARITY=1: re-blend on the GPU and diff it against the CPU
+        // composite. The two are written to agree to the bit (both round per layer);
+        // this is the proof. Blocking readback, so native-only and opt-in — a layer
+        // edit is user-paced, never inside a stroke.
+        static const bool parity = std::getenv("CHISEL_PAINT_PARITY") != nullptr;
+        if (parity && table && compute_.color_display_ssbo.handle) {
+            compute_.dispatch_color_composite_all(vc);
+            std::vector<uint32_t> gpu_px(vc), cpu_px(vc);
+            gpu::read_buffer(compute_.gpu_dev, renderer_.vbo_color, 0,
+                             (uint64_t)vc * sizeof(uint32_t), gpu_px.data());
+            paint_composite(e->mesh.paint_layers, e->mesh.color, vc, cpu_px.data());
+            uint32_t diff = 0, worst = 0;
+            for (uint32_t v = 0; v < vc; v++) {
+                if (gpu_px[v] == cpu_px[v]) continue;
+                if (diff < 4) {
+                    std::printf("[paint-parity]   v%u gpu %08x cpu %08x  layers:", v, gpu_px[v], cpu_px[v]);
+                    for (int i = 0; i < (int)e->mesh.paint_layers.layers.size(); i++)
+                        std::printf(" %08x", paint_layers_value(e->mesh.paint_layers, e->mesh.color, i, v));
+                    std::printf("\n");
+                }
+                diff++;
+                for (int ch = 0; ch < 3; ch++) {
+                    const int a = (gpu_px[v] >> (8 * ch)) & 0xFF, b = (cpu_px[v] >> (8 * ch)) & 0xFF;
+                    worst = std::max<uint32_t>(worst, (uint32_t)std::abs(a - b));
+                }
+            }
+            std::printf("[paint-parity] %zu layers, %u verts: %u differ (worst %u/255)\n",
+                        e->mesh.paint_layers.layers.size(), vc, diff, worst);
+        }
+#endif
+    } else {
+        renderer_.upload_display(e->gpu, e->mesh);
+    }
+}
+
+void Scene::edit_paint_layers(uint32_t eid,
+                              const std::function<void(PaintLayerStack&, std::vector<uint32_t>&,
+                                                       uint32_t)>& op) {
+    MeshEntity* e = find_entity(eid);
+    if (!e) return;
+    if (e->multires.locked) {
+        multires_sync_paint(e->multires, e->mesh);   // fold the working level's edits in first
+        std::vector<uint32_t>& plane = e->multires.color;
+        op(e->mesh.paint_layers, plane, multires_paint_vcount(e->multires));
+        const size_t vw = std::min<size_t>(e->mesh.vertex_count(), plane.size());
+        e->mesh.color.assign(plane.begin(), plane.begin() + vw);
+    } else {
+        op(e->mesh.paint_layers, e->mesh.color, e->mesh.vertex_count());
+    }
+    paint_layers_changed(eid);
 }
 
 void Scene::sync_color_partial_entity(uint32_t eid,

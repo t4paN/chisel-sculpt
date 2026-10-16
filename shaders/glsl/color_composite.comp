@@ -23,7 +23,7 @@ layout(std140, binding = 63) uniform Params {
     uint  list_mode;      // 8   0 = every vertex, 1 = the dab's dirty list
     uint  _pad0;          // 12
     vec4  opacity[4];     // 16  layer i -> opacity[i / 4][i % 4]
-    uvec4 layers[16];     // 80  x ids off, y values off, z count, w mode | source << 8
+    uvec4 layers[16];     // 80  x ids off, y values off, z count, w mode | source << 8 | clip << 16
 } P;                      //     (struct = 336)
 
 const uint SRC_PACKED = 0u;
@@ -48,7 +48,7 @@ uint sample_packed(uint ids_off, uint vals_off, uint count, uint v) {
 }
 
 uint sample_layer(uvec4 e, uint v) {
-    uint src = e.w >> 8u;
+    uint src = (e.w >> 8u) & 0xFFu;   // mask: bit 16 is the clip flag
     if (src == SRC_PACKED) return sample_packed(e.x, e.y, e.z, v);
     if (src == SRC_DENSE)  return pool[e.y + v];
     return active_buf[v];
@@ -64,11 +64,15 @@ void main() {
     if (v >= P.vertex_count) return;
 
     vec3 d = vec3(1.0);
+    float base_a = 1.0;
     for (uint i = 0u; i < P.layer_count; i++) {
         uvec4 e = P.layers[i];
         vec4 c = unpackUnorm4x8(sample_layer(e, v));
+        float op = P.opacity[i / 4u][i % 4u];
+        if (((e.w >> 16u) & 1u) == 1u) op *= base_a;   // clipped to the base below
+        else                           base_a = c.a;   // set even when transparent
         if (c.a <= 0.0) continue;
-        float ao = c.a * P.opacity[i / 4u][i % 4u];
+        float ao = c.a * op;
         vec3 s = c.rgb / c.a;                     // un-premultiply
         d = mix(d, blend_channel(d, s, e.w & 0xFFu), ao);
         d = unpackUnorm4x8(packUnorm4x8(vec4(d, 1.0))).rgb;   // 8-bit per layer, as the CPU

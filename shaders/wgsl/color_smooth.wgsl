@@ -88,7 +88,7 @@ fn main(@builtin(workgroup_id) wg : vec3<u32>,
         return;
     }
 
-    var sum = vec3<f32>(0.0);
+    var sum = vec4<f32>(0.0);   // premultiplied RGBA: coverage blurs along with colour
     var count = 0.0;
     let start = adj_offset[v];
     let end   = adj_offset[v + 1u];
@@ -102,8 +102,8 @@ fn main(@builtin(workgroup_id) wg : vec3<u32>,
         if      (v == i0) { n0 = i1; n1 = i2; }
         else if (v == i1) { n0 = i0; n1 = i2; }
         else              { n0 = i0; n1 = i1; }
-        sum = sum + unpack4x8unorm(color_buf[n0]).rgb;
-        sum = sum + unpack4x8unorm(color_buf[n1]).rgb;
+        sum = sum + unpack4x8unorm(color_buf[n0]);
+        sum = sum + unpack4x8unorm(color_buf[n1]);
         count = count + 2.0;
     }
     if (count <= 0.0) {
@@ -111,9 +111,9 @@ fn main(@builtin(workgroup_id) wg : vec3<u32>,
     }
 
     let avg     = sum / count;
-    let old_rgb = unpack4x8unorm(color_buf[v]).rgb;
+    let old_c   = unpack4x8unorm(color_buf[v]);
     let a       = clamp(P.strength * w, 0.0, 1.0);
-    let pk_rgba = pack4x8unorm(vec4<f32>(mix(old_rgb, avg, a), 1.0));
+    let pk_rgba = pack4x8unorm(mix(old_c, avg, a));
     if (pk_rgba == color_buf[v]) {
         return;
     }

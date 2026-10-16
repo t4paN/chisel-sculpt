@@ -18,7 +18,7 @@ struct Params {
     paint_strength : f32,
     use_b          : u32,
     vertex_count   : u32,
-    _pad0          : u32,
+    paint_alpha    : f32,         // target coverage: 1 = paint, 0 = erase to transparent
     _pad1          : u32,
 };
 
@@ -119,9 +119,12 @@ fn try_paint(v : u32, anchor : vec3<f32>, vp : vec3<f32>, mirrored : u32) {
     }
 
     let a = clamp(P.paint_strength * w, 0.0, 1.0);
+    // Layer values are premultiplied RGBA8 (alpha = coverage), so painting is a plain
+    // lerp of all four channels toward the premultiplied target: (colour, 1) paints,
+    // (0, 0) erases. On an opaque layer alpha stays 1 and this is the old rgb lerp.
     let old_rgba = unpack4x8unorm(color_buf[v]);
-    let new_rgb  = mix(old_rgba.rgb, P.paint_color, a);   // lerp-to-color
-    let pk_rgba  = pack4x8unorm(vec4<f32>(new_rgb, 1.0)); // alpha forced opaque
+    let target_c = vec4<f32>(P.paint_color * P.paint_alpha, P.paint_alpha);
+    let pk_rgba  = pack4x8unorm(mix(old_rgba, target_c, a));
     if (pk_rgba == color_buf[v]) {
         return;
     }
