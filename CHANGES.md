@@ -5,13 +5,18 @@ Short, chronological log of notable changes. Newest on top.
 ## 2026-10-17 — Paint layers (branch `paint-layers`)
 
 *Built GL, wgpu and web; shaders clean on GL, naga and Tint. GPU and CPU composites
-compared vertex by vertex on GL and wgpu: identical. Hand-tested by the user on native.*
+are compared vertex by vertex. They're identical at full opacity; below it about 0.1% of
+verts differ by 1/255, which is float rounding at the 8-bit boundary, not a logic error.
+Hand-tested by the user on native: the panel, blending, clip, tools, undo, merge, every
+level operation, remesh and single-model SDF. Still owed: undo after remesh, two-model
+SDF merge, save/PLY, and the browser.*
 
 - **Layers for vertex paint**, kept minimal. A **Layers panel** in
   paint mode lists layers top first, with an eye and click-to-select per row. Below the
   list are the active layer's **blend mode** (Normal, Multiply; more get added as one case
-  each), **opacity**, **Clip to layer below**, and **+ / - / Up / Down / Merge visible**.
-  Up to 16 layers.
+  each), **opacity**, **Clip to layer below**, and **+ / Up / Down / Merge visible**. Each
+  row ends in its own **trash can**, kept away from **+** so a stray click can't cost a
+  layer (deleting isn't undoable yet). Up to 16 layers.
 - **No mask layer type.** A mask is an ordinary layer with a blend mode. Clip (a
   clipping mask) confines it to where the layer under it is painted. The sculpting mask is
   unrelated and unchanged.
@@ -23,8 +28,15 @@ compared vertex by vertex on GL and wgpu: identical. Hand-tested by the user on 
   on. Adding, deleting, moving and merging layers isn't undoable yet.
 - The eyedropper picks the blended colour you see. Layers work at every subdivision level.
 - **Old files load unchanged** as a single Base layer.
-- **Not yet:** saving flattens layers to the blended result (the file format comes
-  next). Subdividing up, remeshing, SDF merge and join/split keep only the active layer.
+- **Layers survive** level switches, subdividing up, dropping a level, remesh (mirror
+  included), SDF of a single model and the pre-remesh rescue undo. An SDF merge of
+  several models flattens to one layer and says so in the console. PLY export writes
+  the blended result.
+- **Fixed: black polka dots after subdividing.** The helper that colours new in-between
+  vertices forced them opaque, a leftover from when all paint was opaque, so a layer's
+  soft edges and erased patches came out as solid black dots. It now averages coverage
+  too, and opaque paint averages exactly as before.
+- **Not yet:** saving flattens layers to the blended result (the file format comes next).
 - How: layers store premultiplied RGBA with alpha as coverage. Only the active layer is
   stored in full (it's `Mesh::color`, so every existing paint path still works on it);
   the others keep only the vertices they cover, so a 2%-painted layer at 10M verts is
