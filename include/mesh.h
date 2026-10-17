@@ -174,14 +174,17 @@ Mesh cylinder_primitive(int radial, int height_seg);
 Mesh uv_sphere(int segments, int rings);
 
 // Packed-RGBA8 vertex-colour blending used to carry paint across topology
-// changes (subdivide / remesh). Alpha is forced to 0xFF — the paint model
-// keeps alpha at 1.0, and unpainted verts are white 0xFFFFFFFF.
+// changes (subdivide / remesh). All four channels lerp: paint layers store
+// PREMULTIPLIED colour with alpha = coverage, so a soft stroke edge is
+// "dark and half covered". Forcing alpha to 0xFF (the pre-layer rule) turned
+// every new midpoint on an edge or an erased patch into opaque black dots.
+// Legacy opaque paint (alpha 0xFF both ends) lerps to 0xFF exactly as before.
 inline uint32_t color_lerp(uint32_t a, uint32_t b, float t) {
-    float ar = (float)( a        & 0xFF), ag = (float)((a >> 8) & 0xFF), ab = (float)((a >> 16) & 0xFF);
-    float br = (float)( b        & 0xFF), bg = (float)((b >> 8) & 0xFF), bb = (float)((b >> 16) & 0xFF);
-    uint32_t r  = (uint32_t)(ar + t * (br - ar) + 0.5f);
-    uint32_t g  = (uint32_t)(ag + t * (bg - ag) + 0.5f);
-    uint32_t bl = (uint32_t)(ab + t * (bb - ab) + 0.5f);
-    return r | (g << 8) | (bl << 16) | (0xFFu << 24);
+    uint32_t out = 0;
+    for (int ch = 0; ch < 32; ch += 8) {
+        float x = (float)((a >> ch) & 0xFF), y = (float)((b >> ch) & 0xFF);
+        out |= (uint32_t)(x + t * (y - x) + 0.5f) << ch;
+    }
+    return out;
 }
 inline uint32_t color_avg(uint32_t a, uint32_t b) { return color_lerp(a, b, 0.5f); }
