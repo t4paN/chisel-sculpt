@@ -1835,11 +1835,38 @@ void draw_keybind_window(InputState& input, int win_w, int win_h) {
     if (close) input.keybind_menu_open = false;
 }
 
+// Trash-can button for one layer row: outline only, no background until hovered (then a
+// red tint), so it reads as quieter than the row and isn't hit by accident. Returns true
+// on click.
+static bool trash_button(const char* id, float size) {
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    bool clicked = ImGui::InvisibleButton(id, ImVec2(size, size));
+    bool hovered = ImGui::IsItemHovered();
+    if (hovered)
+        dl->AddRectFilled(p, ImVec2(p.x + size, p.y + size),
+                          ImGui::GetColorU32(ImVec4(0.60f, 0.18f, 0.18f, ImGui::IsItemActive() ? 1.0f : 0.75f)),
+                          size * 0.22f);
+    ImU32 col = ImGui::GetColorU32(hovered ? col_text_sel : col_text);
+    const float s = size, th = 1.4f;
+    auto P = [&](float fx, float fy) { return ImVec2(p.x + s * fx, p.y + s * fy); };
+    dl->AddLine(P(0.22f, 0.28f), P(0.78f, 0.28f), col, th);                  // lid
+    dl->AddLine(P(0.40f, 0.28f), P(0.42f, 0.18f), col, th);                  // handle
+    dl->AddLine(P(0.42f, 0.18f), P(0.58f, 0.18f), col, th);
+    dl->AddLine(P(0.58f, 0.18f), P(0.60f, 0.28f), col, th);
+    dl->AddLine(P(0.28f, 0.34f), P(0.33f, 0.82f), col, th);                  // can
+    dl->AddLine(P(0.33f, 0.82f), P(0.67f, 0.82f), col, th);
+    dl->AddLine(P(0.67f, 0.82f), P(0.72f, 0.34f), col, th);
+    dl->AddLine(P(0.44f, 0.42f), P(0.45f, 0.72f), col, 1.0f);                // ribs
+    dl->AddLine(P(0.56f, 0.42f), P(0.55f, 0.72f), col, 1.0f);
+    return clicked;
+}
+
 // ---- Paint layers panel ----
 // A minimal layer docker: top layer first; the eye toggles visibility, a click
 // makes a layer active; the active layer's mode, opacity and clip sit underneath, then
-// add / delete / up / down / merge visible. Paint mode (colour target) only. Edits that
-// move pixels (add, delete, switch, merge) go through Scene::edit_paint_layers so a
+// add / up / down / merge visible; each row ends in its own trash can. Paint mode
+// (colour target) only. Edits that move pixels (add, delete, switch, merge) go through Scene::edit_paint_layers so a
 // multires entity edits its full-resolution planes; property edits don't move pixels,
 // so they mutate the stack and ask for a GPU re-blend.
 void draw_paint_layers_panel(InputState& input, Scene& scene, int win_w, int /*win_h*/) {
@@ -1877,6 +1904,16 @@ void draw_paint_layers_panel(InputState& input, Scene& scene, int win_w, int /*w
             move_pixels([i](PaintLayerStack& s, std::vector<uint32_t>& act, uint32_t vc) {
                 paint_layer_set_active(s, act, i, vc);
             });
+        // Delete sits at the far end of its own row, not next to "+": a stray click on
+        // the add button must never cost a layer (layer edits aren't undoable yet).
+        ImGui::SameLine();
+        if (trash_button("##del", ImGui::GetFrameHeight()))
+            move_pixels([i](PaintLayerStack& s, std::vector<uint32_t>& act, uint32_t vc) {
+                paint_layer_remove(s, act, i, vc);
+            });
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(st.layers.size() == 1 ? "Clear this layer (it's the only one)"
+                                                    : "Delete this layer");
         ImGui::PopID();
     }
 
@@ -1923,15 +1960,6 @@ void draw_paint_layers_panel(InputState& input, Scene& scene, int win_w, int /*w
         ImGui::SetTooltip(full ? "16 layers is the limit" : "New layer above the active one");
     ImGui::SameLine();
     ImGui::BeginDisabled(st.empty());
-    if (ImGui::Button("-")) {
-        const int a = st.active;
-        move_pixels([a](PaintLayerStack& s, std::vector<uint32_t>& act, uint32_t vc) {
-            paint_layer_remove(s, act, a, vc);
-        });
-    }
-    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-        ImGui::SetTooltip("Delete the active layer (the last one is cleared instead)");
-    ImGui::SameLine();
     ImGui::BeginDisabled(st.active >= (int)st.layers.size() - 1);
     if (ImGui::Button("Up")) { paint_layer_move(st, st.active, st.active + 1); props(); }
     ImGui::EndDisabled();
