@@ -1912,7 +1912,7 @@ void options_panel(InputState& input, int win_h) {
             const bool grad = input.fill_pattern == kFillGradient;
             label_item(UiFont::Sans, 12.0f, armed ? kTintText : kMuted,
                        input.color_pick_active ? "Picking... click the model"
-                       : input.bucket_active && grad ? "Drag from full to none  \xC2\xB7  Ctrl erases"
+                       : input.bucket_active && grad ? "Drag from main colour to second  \xC2\xB7  Ctrl erases"
                        : input.bucket_active   ? "Click to fill  \xC2\xB7  Ctrl erases"
                                                : "Q / E swap  \xC2\xB7  C pick  \xC2\xB7  right-click: wheel");
             // A tiling pattern's size and turn. Scale is relative to the model, so it

@@ -40,8 +40,8 @@ struct AlphaLibrary {
 
 // Fill-bucket patterns: the same entry shape in a library of their own, built in code
 // on first use (no files yet). Unlike stamps they TILE: data covers one period, and
-// sampling wraps. A value is coverage, like an alpha: 1 = full paint colour, 0 = the
-// fill leaves that spot alone. Two entries have no bitmap: Solid (is_round, the flat
-// fill) and Gradient, which is not sampled but laid along a dragged A-to-B line.
+// sampling wraps. A value picks between the two paint colours: 0 (black) = the main
+// colour, 1 (white) = the secondary. Two entries have no bitmap: Solid (is_round, all
+// main colour) and Gradient, which is not sampled but laid along a dragged A-to-B line.
 constexpr int kFillSolid = 0, kFillGradient = 1;
 const AlphaLibrary& fill_patterns();

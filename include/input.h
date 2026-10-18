@@ -371,8 +371,8 @@ struct InputState {
     bool bucket_click;
     bool bucket_erase;
     // What the bucket lays down: a fill_patterns() index (brush_alpha.h). Solid and the
-    // tiling patterns fill on press; Gradient is a drag, press = A (full paint, and the
-    // island it fills), release = B (none). bucket_a/b are those screen points, set
+    // tiling patterns fill on press; Gradient is a drag, press = A (main colour, and the
+    // island it fills), release = B (secondary). bucket_a/b are those screen points, set
     // with bucket_click; bucket_dragging is "pressed, waiting for the release".
     int   fill_pattern;
     float fill_scale;    // pattern tile size, as a fraction of the model's radius

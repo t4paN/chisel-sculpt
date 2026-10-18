@@ -1794,8 +1794,8 @@ int main(int argc, char* argv[]) {
         }
 
         // Fill bucket (paint mode): flood the unmasked island under the click on the
-        // active layer, flat or through a pattern; a gradient runs from the press (A)
-        // to the release (B). Points come from the screen FBO exactly as the picker's
+        // active layer, flat or through a pattern (main colour to secondary); a gradient
+        // runs from the press (A, main) to the release (B, secondary). Points come from the screen FBO exactly as the picker's
         // do (tri + barycentrics); mask and colour are the CPU copies, both synced at
         // pen-up. One PAINT undo entry, so Ctrl+Z takes the fill back.
         if (input.bucket_click) {
@@ -1852,33 +1852,34 @@ int main(int argc, char* argv[]) {
                     Vec3 p = cam_pos + fwd * d + right * (ndc_x * half_w) + up * (ndc_y * half_h);
                     b[0] = p.x; b[1] = p.y; b[2] = p.z;
                 }
-                uint32_t rgba = 0;   // erase: transparent
-                if (!input.bucket_erase) {
-                    for (int ch = 0; ch < 3; ch++) {
-                        float c = std::max(0.0f, std::min(1.0f, input.paint_color[ch]));
-                        rgba |= (uint32_t)(c * 255.0f + 0.5f) << (ch * 8);
-                    }
-                    rgba |= 0xFFu << 24;
-                }
+                // Patterns run from the main colour (black) to the secondary (white).
+                auto pack = [](const float* rgb) {
+                    uint32_t c = 0xFFu << 24;
+                    for (int ch = 0; ch < 3; ch++)
+                        c |= (uint32_t)(std::max(0.0f, std::min(1.0f, rgb[ch])) * 255.0f + 0.5f) << (ch * 8);
+                    return c;
+                };
+                const uint32_t main_c = pack(input.paint_color), second_c = pack(input.paint_color_alt);
                 const double t0 = glfwGetTime();
                 static std::vector<uint32_t> island;
-                static std::vector<float> cover;
+                static std::vector<float> value;
                 paint_bucket_island(pm, seed, island);
                 const float* cv = nullptr;
                 if (gradient) {
-                    paint_cover_gradient(pm, island, a, b, cover);
-                    cv = cover.data();
+                    paint_cover_gradient(pm, island, a, b, value);
+                    cv = value.data();
                 } else if (!solid) {
                     const AlphaEntry& pe = fill_patterns().get(pattern);
                     paint_cover_triplanar(pm, island, pe.data.data(), pe.w, pe.h,
                                           input.fill_scale * mesh_radius,
-                                          input.fill_angle * 3.14159265f / 180.0f, a, cover);
-                    cv = cover.data();
+                                          input.fill_angle * 3.14159265f / 180.0f, a, value);
+                    cv = value.data();
                 }
                 UndoEntry e;
                 e.kind = UndoEntry::Kind::PAINT;
                 e.paint_layer_id = paint_layers_active_id(pm.paint_layers);
-                paint_bucket_apply(pm, island, rgba, cv, e.verts, e.old_color, e.new_color);
+                paint_bucket_apply(pm, island, main_c, second_c, cv, input.bucket_erase,
+                                   e.verts, e.old_color, e.new_color);
                 const double ms = (glfwGetTime() - t0) * 1000.0;
                 std::printf("[bucket] seed %u, %s: reached %zu / %u verts, changed %zu, %.1f ms%s\n",
                             seed, fill_patterns().get(solid ? kFillSolid : pattern).name.c_str(),

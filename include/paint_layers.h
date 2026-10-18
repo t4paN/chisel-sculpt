@@ -191,21 +191,26 @@ struct Mesh;
 // Disconnected pieces of one mesh are separate islands.
 void paint_bucket_island(const Mesh& mesh, uint32_t seed, std::vector<uint32_t>& island);
 
-// Per-island-vertex coverage in [0,1] (a pattern or a gradient), for paint_bucket_apply.
+// Per-island-vertex pattern value in [0,1] for paint_bucket_apply: 0 (black) = the main
+// colour, 1 (white) = the secondary.
 // A tiling pattern, projected from the three axes and blended by which way the surface
 // faces (no UVs, no seams). `tile` = world size of one period, `angle` = radians,
 // `origin` = where a tile corner sits (the clicked point, so the click places it).
 void paint_cover_triplanar(const Mesh& mesh, const std::vector<uint32_t>& island,
                            const float* data, uint32_t w, uint32_t h, float tile,
-                           float angle, const float origin[3], std::vector<float>& cover);
-// A linear ramp: 1 at and behind `a`, 0 at and beyond `b`, along the a-to-b line.
+                           float angle, const float origin[3], std::vector<float>& value);
+// A linear ramp along the a-to-b line: 0 (main colour) at and behind `a`, 1 (secondary)
+// at and beyond `b`.
 void paint_cover_gradient(const Mesh& mesh, const std::vector<uint32_t>& island,
-                          const float a[3], const float b[3], std::vector<float>& cover);
+                          const float a[3], const float b[3], std::vector<float>& value);
 
-// Paint `rgba` (premultiplied; 0 erases) onto the island in the active layer
-// (mesh.color), each vertex weighted by (1 - mask) * cover[k] (cover null = 1): the
-// brush's four-channel lerp at full strength. Appends every vertex whose value
-// changed to verts/old_c/new_c (the undo entry).
-void paint_bucket_apply(Mesh& mesh, const std::vector<uint32_t>& island, uint32_t rgba,
-                        const float* cover, std::vector<uint32_t>& verts,
+// Fill the island in the active layer (mesh.color), each vertex weighted by
+// (1 - mask): the brush's four-channel lerp at full strength. `value` (null = all 0)
+// picks each vertex's colour between `main` and `second` (premultiplied). `erase` reads
+// the same value as how much to KEEP: 0 erases to transparent, 1 leaves it alone, so an
+// erase gradient clears at the press and fades out by the release.
+// Appends every vertex whose value changed to verts/old_c/new_c (the undo entry).
+void paint_bucket_apply(Mesh& mesh, const std::vector<uint32_t>& island, uint32_t main,
+                        uint32_t second, const float* value, bool erase,
+                        std::vector<uint32_t>& verts,
                         std::vector<uint32_t>& old_c, std::vector<uint32_t>& new_c);

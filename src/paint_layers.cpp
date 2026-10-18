@@ -453,13 +453,13 @@ void paint_cover_gradient(const Mesh& mesh, const std::vector<uint32_t>& island,
         const uint32_t v = island[k];
         float t = ((mesh.pos_x[v] - a[0]) * dx + (mesh.pos_y[v] - a[1]) * dy +
                    (mesh.pos_z[v] - a[2]) * dz) / len2;
-        t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
-        cover[k] = 1.0f - t;
+        cover[k] = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
     }
 }
 
-void paint_bucket_apply(Mesh& mesh, const std::vector<uint32_t>& island, uint32_t rgba,
-                        const float* cover, std::vector<uint32_t>& verts,
+void paint_bucket_apply(Mesh& mesh, const std::vector<uint32_t>& island, uint32_t main,
+                        uint32_t second, const float* value, bool erase,
+                        std::vector<uint32_t>& verts,
                         std::vector<uint32_t>& old_c, std::vector<uint32_t>& new_c) {
     const uint32_t vc = mesh.vertex_count();
     // An unpainted layer reads as what the renderer shows for it (paint_layer_px).
@@ -468,13 +468,16 @@ void paint_bucket_apply(Mesh& mesh, const std::vector<uint32_t>& island, uint32_
     for (size_t k = 0; k < island.size(); k++) {
         const uint32_t v = island[k];
         if (v >= vc) continue;
+        const float t = value ? value[k] : 0.0f;
         // The brush's lerp of all four channels (color_paint.*), at full strength.
-        const float w = (1.0f - bucket_mask_at(mesh, v)) * (cover ? cover[k] : 1.0f);
+        float w = 1.0f - bucket_mask_at(mesh, v);
+        if (erase) w *= 1.0f - t;
         const uint32_t old = mesh.color[v];
         uint32_t out = 0;
         for (int ch = 0; ch < 4; ch++) {
             const float o = unorm(old, ch);
-            out |= to_unorm(o + (unorm(rgba, ch) - o) * w) << (8 * ch);
+            const float target = erase ? 0.0f : unorm(main, ch) + (unorm(second, ch) - unorm(main, ch)) * t;
+            out |= to_unorm(o + (target - o) * w) << (8 * ch);
         }
         if (out == old) continue;
         mesh.color[v] = out;

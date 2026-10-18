@@ -194,7 +194,7 @@ AlphaLibrary build_fill_patterns() {
     AlphaEntry grad;   // no bitmap: the bucket lays it along the drag
     grad.name = "Gradient (drag)";
     for (int y = 0; y < 16; y++)
-        for (int x = 0; x < 16; x++) grad.preview[y * 16 + x] = 1.0f - (x + 0.5f) / 16.0f;
+        for (int x = 0; x < 16; x++) grad.preview[y * 16 + x] = (x + 0.5f) / 16.0f;
     lib.entries.push_back(std::move(grad));
 
     lib.entries.push_back(make_tile("Stripes", 128, [](float u, float, float e) { return band(u, e); }));
