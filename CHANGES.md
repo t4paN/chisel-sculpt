@@ -2,6 +2,50 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-18/19 — Fill bucket with patterns and gradients, paint mode's own dock and shortcuts
+
+*Built GL, wgpu and web (`27453da` through `5d2b92d`). Off-screen self-tests passed: mask
+walls hard and soft, masked click, separate pieces, erase and its undo values, gradient
+ends, two-colour blend, pattern period, rotation, click-anchored projection, seamless tiles,
+strength. On the phone (Android Chrome, GitHub Pages builds) the user tried the fill,
+patterns and gradient: "everything works from what i can see". The bucket's own Size and
+Strength and the greyed Hardness came after and haven't been on the phone yet. The desktop
+checklist (`fill-bucket-tests.md`) is still open.*
+
+- **Fill bucket.** `F` in paint mode, or its dock button. Click the model and it fills the
+  unmasked area you clicked, on the active layer, with the paint colour. **Ctrl+click
+  erases** that area. The mask is the wall: a vertex masked 50% or more stops the fill, and
+  a soft mask edge stays soft on the filled side. Separate pieces of a model fill
+  separately. One Ctrl+Z undoes the whole fill. Mirror X doesn't apply to it yet.
+- **Fill patterns.** The bucket has its own swatch beside its button, like a brush's alpha,
+  opening a strip of patterns: Solid, Gradient, Stripes, Checks, Grid, Dots, Zigzag (drawn
+  in code, seamless). A pattern paints with both colours: black parts get the main colour,
+  white parts the secondary. Ctrl erases through it instead: black parts are erased, white
+  parts left alone. With no UVs to hang it on, it's projected from three directions and
+  blended by which way the surface faces. The directions are the click's: the main one
+  looks straight down onto the spot you clicked, upright as you see it, so the pattern
+  spreads out from there undistorted and the blending only happens out at the rim, where
+  the surface turns away. Detail is limited by vertex spacing: fine patterns need a high
+  level.
+- **The bucket has its own brush feel**, separate from the paint brush. **Size** is the
+  pattern's repeat: one tile across the brush ring, which shows while a pattern is picked.
+  **Strength** is how strongly the whole fill lands over what's there. Hardness has no
+  job on the bucket, so it shows greyed out while the bucket is armed. **Rotate** sits in
+  the paint options.
+- **Gradient fill.** Pick Gradient, then drag across the model: the clicked area runs from
+  the main colour at the press to the secondary at the release, in the direction you
+  dragged. With Ctrl it erases at the press and fades back to untouched by the release. A
+  line shows the drag. Released off the model, the far end sits level with the press,
+  facing you.
+- **Paint mode has its own dock**: Paint, Fill Bucket, Colour Picker, then Smooth and Mask.
+  Mask lives there because masking is how you fence off what the bucket fills; picking it
+  keeps you in paint mode. In every skin (Classic keeps its old layout, keys still work).
+- **Each mode has its own shortcuts.** Sculpt brush keys work in sculpt mode, paint tool
+  keys (`F` bucket, `C` picker) in paint mode; view, file, mask and brush-feel keys work
+  everywhere. A mode's own key wins a shared letter, so `F` is Focus except in paint mode.
+  The colour picker is now its own rebindable shortcut instead of borrowing Crease's key,
+  and the Key bindings window only warns about a clash where both keys would be live.
+
 ## 2026-10-18 — Paint smooth on layers: visible again, and no more gigabyte readbacks
 
 *Built GL, wgpu and web. Tested by the user on native WebGPU at level 8 with layers: small
