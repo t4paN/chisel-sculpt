@@ -466,7 +466,7 @@ void paint_cover_gradient(const Mesh& mesh, const std::vector<uint32_t>& island,
 }
 
 void paint_bucket_apply(Mesh& mesh, const std::vector<uint32_t>& island, uint32_t main,
-                        uint32_t second, const float* value, bool erase,
+                        uint32_t second, const float* value, bool erase, float strength,
                         std::vector<uint32_t>& verts,
                         std::vector<uint32_t>& old_c, std::vector<uint32_t>& new_c) {
     const uint32_t vc = mesh.vertex_count();
@@ -477,8 +477,8 @@ void paint_bucket_apply(Mesh& mesh, const std::vector<uint32_t>& island, uint32_
         const uint32_t v = island[k];
         if (v >= vc) continue;
         const float t = value ? value[k] : 0.0f;
-        // The brush's lerp of all four channels (color_paint.*), at full strength.
-        float w = 1.0f - bucket_mask_at(mesh, v);
+        // The brush's lerp of all four channels (color_paint.*).
+        float w = (1.0f - bucket_mask_at(mesh, v)) * strength;
         if (erase) w *= 1.0f - t;
         const uint32_t old = mesh.color[v];
         uint32_t out = 0;

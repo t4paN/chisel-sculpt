@@ -1915,17 +1915,10 @@ void options_panel(InputState& input, int win_h) {
                        : input.bucket_active && grad ? "Drag from main colour to second  \xC2\xB7  Ctrl erases"
                        : input.bucket_active   ? "Click to fill  \xC2\xB7  Ctrl erases"
                                                : "Q / E swap  \xC2\xB7  C pick  \xC2\xB7  right-click: wheel");
-            // A tiling pattern's size and turn. Scale is relative to the model, so it
-            // holds across subdivision levels.
+            // A tiling pattern's turn. Its repeat is the bucket's Size (the ring shows
+            // one tile), its edge the Hardness, how strongly it lands the Strength.
             if (input.bucket_active && !grad && input.fill_pattern != kFillSolid) {
                 ImGui::SameLine(0.0f, 14.0f);
-                label_item(UiFont::Sans, 13.0f, kMuted, "Scale", 0.0f, 30.0f);
-                ImGui::SameLine();
-                ImGui::SetNextItemWidth(130.0f);
-                ImGui::SliderFloat("##fillScale", &input.fill_scale, 0.02f, 2.0f, "%.2f",
-                                   ImGuiSliderFlags_Logarithmic);
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Pattern size, relative to the model");
-                ImGui::SameLine(0.0f, 10.0f);
                 label_item(UiFont::Sans, 13.0f, kMuted, "Rotate", 0.0f, 30.0f);
                 ImGui::SameLine();
                 ImGui::SetNextItemWidth(110.0f);
@@ -2470,18 +2463,8 @@ void y2k_left(InputState& in, int H, const AlphaLibrary* lib) {
         pattern_picker_popup(in, ImVec2(kLeftW + 6.0f, y - 8.0f));
         y += 72 + 10;
         if (pi != kFillSolid && pi != kFillGradient) {
-            // Scale runs 0.02..2 on a log track, so the small end isn't crammed.
-            const float lo = 0.02f, hi = 2.0f;
             char v[16];
-            ytext(dl, true, 11.0f, ImVec2(x0 + 2, y), y2k::label, "Scale");
-            std::snprintf(v, sizeof v, "%.2f", in.fill_scale);
-            ytext(dl, true, 11.0f, ImVec2(x0 + w - ysize(true, 11.0f, v).x, y), y2k::value, v);
-            y += 17;
-            float pct = std::log(std::max(lo, in.fill_scale) / lo) / std::log(hi / lo);
-            float t = y2k_track("##yFillScale", dl, ImVec2(x0, y), w, 14.0f, pct,
-                                "Pattern size, relative to the model");
-            if (t >= 0.0f) in.fill_scale = lo * std::pow(hi / lo, std::max(0.0f, std::min(1.0f, t)));
-            y += 24;
+            float t;
             ytext(dl, true, 11.0f, ImVec2(x0 + 2, y), y2k::label, "Rotate");
             std::snprintf(v, sizeof v, "%.0f\xC2\xB0", in.fill_angle);
             ytext(dl, true, 11.0f, ImVec2(x0 + w - ysize(true, 11.0f, v).x, y), y2k::value, v);

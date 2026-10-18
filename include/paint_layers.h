@@ -210,12 +210,12 @@ void paint_cover_gradient(const Mesh& mesh, const std::vector<uint32_t>& island,
                           const float a[3], const float b[3], std::vector<float>& value);
 
 // Fill the island in the active layer (mesh.color), each vertex weighted by
-// (1 - mask): the brush's four-channel lerp at full strength. `value` (null = all 0)
+// (1 - mask) * strength: the brush's four-channel lerp. `value` (null = all 0)
 // picks each vertex's colour between `main` and `second` (premultiplied). `erase` reads
 // the same value as how much to KEEP: 0 erases to transparent, 1 leaves it alone, so an
 // erase gradient clears at the press and fades out by the release.
 // Appends every vertex whose value changed to verts/old_c/new_c (the undo entry).
 void paint_bucket_apply(Mesh& mesh, const std::vector<uint32_t>& island, uint32_t main,
-                        uint32_t second, const float* value, bool erase,
+                        uint32_t second, const float* value, bool erase, float strength,
                         std::vector<uint32_t>& verts,
                         std::vector<uint32_t>& old_c, std::vector<uint32_t>& new_c);

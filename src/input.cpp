@@ -244,6 +244,8 @@ InputState::InputState()
     per_brush[(int)BrushType::MASK].hardness = 0.64f;     // 64% hardness
     per_brush[(int)BrushType::PAINT].strength = 0.5f;     // soft build-up by default
     per_brush[(int)BrushType::PAINT].hardness = 0.5f;
+    per_brush[(int)BrushType::BUCKET].strength = 1.0f;    // a fill replaces what's there
+    per_brush[(int)BrushType::BUCKET].hardness = 0.75f;   // patterns crisp, not razor
     // Clay's hardness is the square stamp's edge feather (clay_square in
     // draw_accum): 1 = crisp chisel rim, lower melts the rim toward the centre.
     // 0.3 = generous feather by default (user-tuned; crisper felt jittery).
@@ -265,7 +267,6 @@ InputState::InputState()
     bucket_click = false;
     bucket_erase = false;
     fill_pattern = kFillSolid;
-    fill_scale = 0.25f;
     fill_angle = 0.0f;
     bucket_dragging = false;
     bucket_ax = bucket_ay = bucket_bx = bucket_by = 0.0f;
@@ -320,8 +321,9 @@ void InputState::switch_brush(BrushType to) {
 // value you were watching into the underlying brush's slot, silently — which is how
 // Clay ended up holding a spacing nobody set on it.
 BrushType InputState::live_brush_slot() const {
-    return (is_smooth_active() || current_brush == BrushType::SMOOTH)
-         ? BrushType::SMOOTH : current_brush;
+    if (is_smooth_active() || current_brush == BrushType::SMOOTH) return BrushType::SMOOTH;
+    if (current_brush == BrushType::PAINT && bucket_active) return BrushType::BUCKET;
+    return current_brush;
 }
 
 BrushType InputState::size_slot() const {
@@ -456,7 +458,8 @@ const char* InputState::brush_name() const {
         case BrushType::LIMB:   return "Limb";
         case BrushType::SMOOTH: return "Smooth";
         case BrushType::MASK:   return "Mask";
-        case BrushType::PAINT:  return "Paint";
+        case BrushType::PAINT:  return bucket_active ? (is_subtract_active() ? "Fill (erase)" : "Fill")
+                                                     : "Paint";
         default: return "Unknown";
     }
 }

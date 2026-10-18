@@ -176,19 +176,19 @@ AlphaEntry make_tile(const char* name, uint32_t res, F fn) {
 }
 
 float fract(float x) { return x - std::floor(x); }
-// 1 on the middle half of each period, 0 on the outer half.
-float band(float x, float e) { return 1.0f - smoothstep01(0.25f - e, 0.25f + e, std::fabs(fract(x) - 0.5f)); }
-// 1 within half_w of each whole number.
-float line(float x, float half_w, float e) {
-    return 1.0f - smoothstep01(half_w - e, half_w + e, std::fabs(fract(x + 0.5f) - 0.5f));
-}
+float clamp01(float x) { return x < 0.0f ? 0.0f : (x > 1.0f ? 1.0f : x); }
+// The tiles are stored SOFT: a ramp with 0.5 exactly on each shape's edge, as wide as
+// the shape allows. The bucket's Hardness sharpens that ramp at fill time
+// (fill_pattern_hardness), so one tile serves every edge from smooth to crisp.
+// Signed band: +1 mid-band, 0 on its edges, -1 halfway between bands.
+float band_s(float x) { return 1.0f - 4.0f * std::fabs(fract(x) - 0.5f); }
 
 AlphaLibrary build_fill_patterns() {
     AlphaLibrary lib;
     AlphaEntry solid;
     solid.name = "Solid";
     solid.is_round = true;
-    for (float& p : solid.preview) p = 1.0f;
+    for (float& p : solid.preview) p = 0.0f;   // all main colour (black)
     lib.entries.push_back(std::move(solid));
 
     AlphaEntry grad;   // no bitmap: the bucket lays it along the drag
@@ -197,27 +197,40 @@ AlphaLibrary build_fill_patterns() {
         for (int x = 0; x < 16; x++) grad.preview[y * 16 + x] = (x + 0.5f) / 16.0f;
     lib.entries.push_back(std::move(grad));
 
-    lib.entries.push_back(make_tile("Stripes", 128, [](float u, float, float e) { return band(u, e); }));
-    lib.entries.push_back(make_tile("Checks", 128, [](float u, float v, float e) {
-        float a = band(u, e), b = band(v, e);
-        return a * (1.0f - b) + b * (1.0f - a);
+    lib.entries.push_back(make_tile("Stripes", 128, [](float u, float, float) {
+        return 0.5f + 0.5f * band_s(u);
     }));
-    lib.entries.push_back(make_tile("Grid", 128, [](float u, float v, float e) {
-        return std::fmax(line(u, 0.06f, e), line(v, 0.06f, e));
+    lib.entries.push_back(make_tile("Checks", 128, [](float u, float v, float) {
+        return 0.5f - 0.5f * band_s(u) * band_s(v);   // inside one band, outside the other
     }));
-    lib.entries.push_back(make_tile("Dots", 128, [](float u, float v, float e) {
-        float du = fract(u) - 0.5f, dv = fract(v) - 0.5f;
-        return 1.0f - smoothstep01(0.27f - e, 0.27f + e, std::sqrt(du * du + dv * dv));
+    lib.entries.push_back(make_tile("Grid", 128, [](float u, float v, float) {
+        // Lines 0.12 wide, ramping out to 0 at twice that.
+        const float du = std::fabs(fract(u + 0.5f) - 0.5f), dv = std::fabs(fract(v + 0.5f) - 0.5f);
+        return clamp01(0.5f + (0.06f - std::fmin(du, dv)) * (0.5f / 0.06f));
     }));
-    lib.entries.push_back(make_tile("Zigzag", 128, [](float u, float v, float e) {
+    lib.entries.push_back(make_tile("Dots", 128, [](float u, float v, float) {
+        const float du = fract(u) - 0.5f, dv = fract(v) - 0.5f;
+        return clamp01(0.5f + (0.27f - std::sqrt(du * du + dv * dv)) * (0.5f / 0.27f));
+    }));
+    lib.entries.push_back(make_tile("Zigzag", 128, [](float u, float v, float) {
         // Two chevron bands per tile; the triangle wave keeps both ends of u level.
-        float tri = std::fabs(fract(u) - 0.5f);
-        return band(2.0f * (v + tri), 3.0f * e);
+        const float tri = std::fabs(fract(u) - 0.5f);
+        return 0.5f + 0.5f * band_s(2.0f * (v + tri));
     }));
+    // The swatches show a crisp version, the way the default hardness lays it down.
+    for (AlphaEntry& e : lib.entries)
+        if (!e.data.empty())
+            for (float& p : e.preview) p = fill_pattern_hardness(p, 0.85f);
     return lib;
 }
 
 }  // namespace
+
+float fill_pattern_hardness(float v, float hardness) {
+    // Half-width of the ramp around 0.5: the whole range at 0, a sliver at 1.
+    const float half = std::fmax(0.5f * (1.0f - clamp01(hardness)), 0.004f);
+    return clamp01((v - 0.5f) / (2.0f * half) + 0.5f);
+}
 
 const AlphaLibrary& fill_patterns() {
     static const AlphaLibrary lib = build_fill_patterns();

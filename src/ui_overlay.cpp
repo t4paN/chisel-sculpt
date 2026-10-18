@@ -1071,10 +1071,6 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
                 if (pi != kFillSolid && pi != kFillGradient) {
                     ImGui::SameLine();
                     ImGui::SetNextItemWidth(120.0f);
-                    ImGui::SliderFloat("##fillScale", &input.fill_scale, 0.02f, 2.0f, "scale %.2f",
-                                       ImGuiSliderFlags_Logarithmic);
-                    ImGui::SameLine();
-                    ImGui::SetNextItemWidth(120.0f);
                     ImGui::SliderFloat("##fillAngle", &input.fill_angle, 0.0f, 180.0f, "rotate %.0f");
                 }
             }

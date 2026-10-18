@@ -12,6 +12,11 @@ enum class BrushType {
     SMOOTH,
     MASK,
     PAINT,
+    // Not a brush you hold: the fill bucket's own settings slot (per_brush[] and
+    // brush_size_of[]), so its Size (pattern repeat), Strength (how strongly the fill
+    // lands) and Hardness (edge between the two colours) don't move the paint brush's.
+    // live_brush_slot() aims here while the bucket is armed; current_brush stays PAINT.
+    BUCKET,
     COUNT
 };
 
@@ -375,8 +380,7 @@ struct InputState {
     // island it fills), release = B (secondary). bucket_a/b are those screen points, set
     // with bucket_click; bucket_dragging is "pressed, waiting for the release".
     int   fill_pattern;
-    float fill_scale;    // pattern tile size, as a fraction of the model's radius
-    float fill_angle;    // pattern rotation, degrees
+    float fill_angle;    // pattern rotation, degrees (its repeat is the bucket's Size)
     bool  bucket_dragging;
     float bucket_ax, bucket_ay, bucket_bx, bucket_by;
     // Show vertex paint in the viewport. Toggle (next to the Paint icon) lets you

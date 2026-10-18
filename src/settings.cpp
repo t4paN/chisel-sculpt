@@ -26,9 +26,9 @@ constexpr float kDebounceSec   = 1.0f;   // quiet time after the last edit befor
 // keying off it would silently orphan every saved brush the day a label changes.
 const char* kBrushKey[(int)BrushType::COUNT] = {
     "draw", "clay", "inflate", "crease", "pinch",
-    "move", "limb", "smooth", "mask", "paint"
+    "move", "limb", "smooth", "mask", "paint", "bucket"
 };
-static_assert((int)BrushType::COUNT == 10, "kBrushKey is out of sync with BrushType");
+static_assert((int)BrushType::COUNT == 11, "kBrushKey is out of sync with BrushType");
 
 const char* kProfileKey[(int)InputProfile::COUNT] = { "mouse", "tablet" };
 
@@ -238,7 +238,6 @@ std::string serialize(const InputState& in) {
         append_kv(s, "active_alpha", in.active_alpha);
     // Fill patterns are all built in, so an index is stable (new ones are appended).
     append_kv(s, "fill_pattern", in.fill_pattern);
-    append_kv(s, "fill_scale",   in.fill_scale);
     append_kv(s, "fill_angle",   in.fill_angle);
     char buf[128];
     std::snprintf(buf, sizeof(buf), "paint_color=%.6g %.6g %.6g\n",
@@ -359,7 +358,6 @@ void apply_global_key(InputState& in, const std::string& key, const std::string&
         int p = (int)std::strtol(val.c_str(), nullptr, 10);
         if (p >= 0 && p < fill_patterns().count()) in.fill_pattern = p;
     }
-    else if (key == "fill_scale") in.fill_scale = clampf(std::strtof(val.c_str(), nullptr), 0.02f, 2.0f);
     else if (key == "fill_angle") in.fill_angle = clampf(std::strtof(val.c_str(), nullptr), 0.0f, 180.0f);
 }
 
@@ -499,7 +497,6 @@ void settings_reset(InputState& input) {
     input.density_fine_mult   = fresh.density_fine_mult;
     input.active_alpha       = fresh.active_alpha;
     input.fill_pattern       = fresh.fill_pattern;
-    input.fill_scale         = fresh.fill_scale;
     input.fill_angle         = fresh.fill_angle;
     for (int i = 0; i < (int)KeyAction::COUNT; i++) input.keybinds[i] = fresh.keybinds[i];
     for (int i = 0; i < 3; i++) {

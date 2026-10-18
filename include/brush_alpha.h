@@ -43,5 +43,8 @@ struct AlphaLibrary {
 // sampling wraps. A value picks between the two paint colours: 0 (black) = the main
 // colour, 1 (white) = the secondary. Two entries have no bitmap: Solid (is_round, all
 // main colour) and Gradient, which is not sampled but laid along a dragged A-to-B line.
+// Tiles are stored soft (0.5 on every edge); Hardness sharpens them, and the gradient,
+// into the two colours: 0 = the raw ramp, 1 = a hard split at 0.5.
 constexpr int kFillSolid = 0, kFillGradient = 1;
 const AlphaLibrary& fill_patterns();
+float fill_pattern_hardness(float v, float hardness);

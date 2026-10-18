@@ -1891,17 +1891,24 @@ int main(int argc, char* argv[]) {
                     up = up.normalized();
                     Vec3 right = up.cross(n).normalized();
                     const float frame[9] = {right.x, right.y, right.z, up.x, up.y, up.z, n.x, n.y, n.z};
+                    // Size = one tile across the brush circle at the clicked spot, so
+                    // the ring shows the repeat before you click.
+                    const float wpp = 2.0f * camera.half_height_at(camera.view_depth(Vec3{a[0], a[1], a[2]}))
+                                    / (float)win_h;
                     const AlphaEntry& pe = fill_patterns().get(pattern);
                     paint_cover_triplanar(pm, island, pe.data.data(), pe.w, pe.h,
-                                          input.fill_scale * mesh_radius,
+                                          2.0f * input.brush_size * wpp,
                                           input.fill_angle * 3.14159265f / 180.0f, a, frame, value);
                     cv = value.data();
                 }
+                // Hardness = how sharp the edge between the two colours is (the bucket's
+                // own slot: live_brush_slot() is BUCKET while it is armed).
+                if (cv) for (float& x : value) x = fill_pattern_hardness(x, input.brush_hardness);
                 UndoEntry e;
                 e.kind = UndoEntry::Kind::PAINT;
                 e.paint_layer_id = paint_layers_active_id(pm.paint_layers);
                 paint_bucket_apply(pm, island, main_c, second_c, cv, input.bucket_erase,
-                                   e.verts, e.old_color, e.new_color);
+                                   input.brush_strength, e.verts, e.old_color, e.new_color);
                 const double ms = (glfwGetTime() - t0) * 1000.0;
                 std::printf("[bucket] seed %u, %s: reached %zu / %u verts, changed %zu, %.1f ms%s\n",
                             seed, fill_patterns().get(solid ? kFillSolid : pattern).name.c_str(),
@@ -3854,10 +3861,17 @@ int main(int argc, char* argv[]) {
                 draw_pick_cursor(cursor_x, cursor_y, input.on_model);
             } else if (input.bucket_active && input.current_brush == BrushType::PAINT
                        && !input.is_smooth_active()) {
-                if (input.bucket_dragging)
+                if (input.bucket_dragging) {
                     draw_gradient_drag(input.bucket_ax, input.bucket_ay, cursor_x, cursor_y);
-                else
+                } else {
+                    // A tiling pattern repeats once across the brush circle: show it.
+                    if (input.fill_pattern != kFillSolid && input.fill_pattern != kFillGradient)
+                        renderer.draw_cursor(camera, cursor_x, cursor_y, input.brush_size,
+                                             input.cursor_nx, input.cursor_ny, input.cursor_nz,
+                                             input.brush_hardness, input.brush_strength,
+                                             win_w, win_h, input.on_model);
                     draw_bucket_cursor(cursor_x, cursor_y, input.on_model);
+                }
             } else {
                 renderer.draw_cursor(
                     camera,
