@@ -54,7 +54,41 @@ rest re-checked by the user; the Tint shader gate is clean (39 pipelines, no WGS
   the GPU without readback. `CHISEL_PAINT_PARITY=1` (native) checks it against the CPU
   composite after every layer edit.
 
-## 2026-10-12 — Phone: UI scale setting, bigger Ctrl/Shift (branch `android-controls`)
+## 2026-10-13 — Phone layout: brush button starts grown, Ctrl/Shift flank the model
+
+*Built on the taptop and deployed to the GitHub Pages phone build the same day; brought
+to main 2026-10-18. Tested in headless Chrome with touch emulation at UI scale 50 % and
+100 % (button placement, first-tap strip, brush panel growth hides the buttons); not yet
+on the phone.*
+
+- **The touch brush button is drawn at its grown size (1.5x) from the start**, so the
+  first tap opens the brush strip instead of only growing the button. The other docks
+  keep tap-to-grow.
+- **Ctrl on the left edge, Shift on the right**, side by side just above the bottom docks
+  (the higher of the brush panel's rest top and the status panel's top), up to 102 px.
+  On a short screen with no room there (100 % on a landscape phone) they drop to just
+  under the brush button instead, sized to the gap before the brush panel. Hidden while
+  a dock is grown or a popup (strip, menu) is open, since page buttons sit above the
+  canvas and would cover it.
+- **The status panel never moves**: pinned bottom-right and drawn behind the other docks,
+  which may cover it. It used to lift above the brush panel when they met.
+- **The brush settings panel grows over everything** — opaque and on top — instead of
+  pushing the options panel and status panel aside; they and the buttons read its rest
+  size. Beside the rail, it now clears the brush button's real (1.5x) width.
+
+## 2026-10-13 — Touch input wakes the idle frame skip
+
+*Built GL and web. Written from reasoning; not yet seen on the phone or with DevTools'
+fake pinch. (The taptop wrote its own copy of this fix the same day; main keeps this one.)*
+
+- The idle skip wakes on ImGui's event queue, but pinch zoom / two-finger pan, the
+  on-screen Ctrl/Shift buttons and the switch into touch mode arrive from the page
+  through `chisel_touch_*`, outside that queue. Each now sets `wake_requested`, and a
+  two-finger gesture in progress counts as busy, so a pinch started after a second of
+  stillness moves the camera at once, and a latched modifier or a layout change is drawn
+  straight away.
+
+## 2026-10-12 — Phone: UI scale setting, bigger Ctrl/Shift
 
 *Built GL and web. Tested in headless Chrome with touch emulation (layout size, backing
 and tap mapping at 50 %); not yet on the phone.*
@@ -76,7 +110,7 @@ and tap mapping at 50 %); not yet on the phone.*
   by the height under the brush button. The brush panel clears their column. Labels and
   corners scale with the button.
 
-## 2026-10-12 — Phone: every dock grows on tap; installable offline PWA (branch `android-controls`)
+## 2026-10-12 — Phone: every dock grows on tap; installable offline PWA
 
 *Built GL and web. Dock growth tested in headless Chrome with touch emulation (grow,
 second tap presses, outside tap shrinks, layout holds still), not yet on the phone. The
@@ -103,7 +137,7 @@ PWA was installed and run on the phone, save/load included.*
   service worker only registers top-level on a secure origin, so the itch build is
   unaffected.
 
-## 2026-10-12 — Phone layout: modifier buttons, collapsible brush strip, tap-to-grow panel (branch `android-controls`)
+## 2026-10-12 — Phone layout: modifier buttons, collapsible brush strip, tap-to-grow panel
 
 *Built GL and web. Modifier buttons, the brush strip and the panel position were
 user-tested live on the phone. The tap-to-grow panel, the landscape drag-offset fix and
@@ -144,7 +178,7 @@ the fullscreen tap fix were committed before a phone test (the laptop went down 
   console and touch pointer events back to `~/CHISEL/.lan-https/serve.py`, so phone logs
   show up on the laptop. `[strip]` printfs log the picker's transitions.
 
-## 2026-10-12 — Fullscreen button on the web; canvas fits mobile Chrome (branch `android-controls`)
+## 2026-10-12 — Fullscreen button on the web; canvas fits mobile Chrome
 
 *Built GL and web. The bottom-bar fix was confirmed by the user on the phone; the
 fullscreen button in its final spot was committed before a phone test.*
@@ -159,7 +193,7 @@ fullscreen button in its final spot was committed before a phone test.*
   the address bar retracted, so while the bar showed the canvas overran the screen and
   the bottom panels sat under Android's back/home bar.
 
-## 2026-10-12 — Touch controls for phones: pinch zoom, two-finger pan (branch `android-controls`)
+## 2026-10-12 — Touch controls for phones: pinch zoom, two-finger pan
 
 *Built GL and web; all of it tested by the user on a Moto g84 (Chrome, 1.3M tris).*
 

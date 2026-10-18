@@ -230,6 +230,7 @@ Material g_mat{0.45f, 0.62f, 0.19f, 0.066f};
 float g_k = 1.0f;
 bool g_dock_live = true;
 bool g_dock_solid = false;
+bool g_any_dock_big = false;  // some dock is grown this frame (dock_hit / brush panel)
 
 Material material_from(const InputState& in) {
     float m = std::max(0.0f, std::min(1.0f, in.ui_material / 100.0f));
@@ -383,6 +384,7 @@ void dock_hit(DockGrow& d, bool touch) {
         }
     }
     g_dock_live = d.big && d.armed;
+    if (d.big) g_any_dock_big = true;
     if (d.big) {
         ImGui::SetNextFrameWantCaptureMouse(true);
         // Over the docks it now covers — but never over an open popup (the menu,
@@ -1217,7 +1219,13 @@ bool touch_brush_picker(InputState& input, BtnOpts o, bool smooth_on, bool editi
 }
 
 constexpr float kModsPx = 102.0f;  // touch mode: modifier buttons' size when there's room
-float g_mods_px = 0.0f;       // touch mode: the on-screen modifier buttons' size (rail sets it)
+constexpr float kRailTouchK = 1.5f; // touch mode: the brush button's (always-grown) scale
+float g_mods_px = 0.0f;       // touch mode: the on-screen modifier buttons' size
+bool  g_strip_open = false;   // touch mode: the brush strip is down this frame
+float g_brush_top = 0.0f;     // the brush panel's top edge at REST size
+float g_status_top = 0.0f;    // the status panel's top edge (it never moves)
+float g_rail_right = 0.0f;    // the rail's right edge (the touch brush button is 1.5x wide)
+float g_brush_left = 0.0f;    // the brush panel's left edge
 float g_rail_bottom = 0.0f;   // the rail's bottom edge this frame, for brush_panel's fit check
 float g_file_bottom = kEdge;  // the file bar's bottom edge; the rail starts below it
 
@@ -1231,8 +1239,7 @@ void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
 
     // Modes — "what am I doing" — are their own horizontal dock under the file bar;
     // the brush rail hangs below it.
-    static DockGrow modes_dock, rail_dock;
-    rail_dock.max_k = 1.5f;   // the touch brush button is already 64 px
+    static DockGrow modes_dock;
     dock_pre(modes_dock, input.touch_mode);
     if (!begin_panel("##mModes", ImVec2(kEdge, g_file_bottom + 12.0f), ImVec2(0, 0),
                      ImVec2(5 * g_k, 5 * g_k), 2.0f * g_k, 14.0f * g_k)) {
@@ -1291,15 +1298,16 @@ void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
     if (current == BrushType::PAINT) alpha_edge = ImGui::GetWindowPos().x + ImGui::GetWindowSize().x;
     end_panel();
 
-    // Only the touch rail (one big brush button) grows; the desktop rail is mouse-only.
-    dock_pre(rail_dock, input.touch_mode);
+    // The touch rail is one brush button, drawn at its grown size from the start
+    // (kRailTouchK): no grow tap, the first tap already opens the strip. The desktop
+    // rail is mouse-only and stays at 1.
+    g_k = input.touch_mode ? kRailTouchK : 1.0f;
     if (!begin_panel("##mRail", ImVec2(kEdge, modes_bottom + 12.0f), ImVec2(0, 0),
                      ImVec2(5 * g_k, 5 * g_k), 2.0f * g_k, 14.0f * g_k)) {
-        dock_post(rail_dock);
+        g_k = 1.0f;
         end_panel();
         return;
     }
-    dock_hit(rail_dock, input.touch_mode);
     o.side = TipSide::Right;
 
     bool strip_open = false;
@@ -1339,41 +1347,12 @@ void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
         }
     }
 
-    dock_post(rail_dock);
-    g_rail_bottom = ImGui::GetWindowPos().y +
-        (rail_dock.rest.y > 0.0f ? rail_dock.rest.y : ImGui::GetWindowSize().y);
+    g_k = 1.0f;
+    g_rail_bottom = ImGui::GetWindowPos().y + ImGui::GetWindowSize().y;
+    g_rail_right = ImGui::GetWindowPos().x + ImGui::GetWindowSize().x;
+    g_strip_open = strip_open;
     if (current != BrushType::PAINT) alpha_edge = ImGui::GetWindowPos().x + ImGui::GetWindowSize().x;
     end_panel();
-
-    // Touch mode: the modifier buttons (shell.html, real DOM over the canvas) stack in
-    // the column the long rail used to fill, under the brush button, sized to the
-    // height left and to the gap before the brush panel.
-    // They are where the strip drops, so they hide while it is open — nobody sculpts
-    // while picking a brush.
-    if (input.touch_mode) {
-        // The biggest targets on screen (1.6x the old 64 px): they're held by a thumb
-        // the whole time you sculpt. Only the height left under the brush button caps
-        // them; the brush panel moves right to clear them (see brush_panel).
-        const float top = g_rail_bottom + 14.0f;
-        g_mods_px = std::floor(std::max(52.0f, std::min(kModsPx,
-                                                        ((float)win_h - kEdge - top - 12.0f) * 0.5f)));
-#ifdef __EMSCRIPTEN__
-        static int sent_top = -1, sent_px = -1, sent_hide = -1;
-        if ((int)top != sent_top || (int)g_mods_px != sent_px || (int)strip_open != sent_hide) {
-            sent_top = (int)top; sent_px = (int)g_mods_px; sent_hide = strip_open;
-            EM_ASM({
-                var m = document.getElementById('mods');
-                if (!m) return;
-                m.style.left = $0 + 'px';
-                m.style.top = $1 + 'px';
-                m.style.setProperty('--mod', $2 + 'px');
-                m.style.visibility = $3 ? "hidden" : "visible";
-            }, (int)kEdge, sent_top, sent_px, sent_hide);
-        }
-#else
-        (void)strip_open;
-#endif
-    }
 
     // Current alpha (stamp), beside the button of the brush it serves — Draw, Mask or
     // Paint only. Closed, it is just the swatch: 88% of a rail button, its top a fifth
@@ -1742,12 +1721,17 @@ float brush_panel(InputState& input, int win_h) {
     rail_max = std::max(rail_max, g_rail_bottom);
     // Touch mode: the modifier buttons stack under the rail too, so "under" needs room
     // for them as well, and "beside" has to clear their column, not just the rail's.
-    const float mods_h = input.touch_mode ? 2.0f * g_mods_px + 12.0f + 14.0f : 0.0f;
-    const float col_w = input.touch_mode ? std::max(kRailW, g_mods_px) : kRailW;
-    const bool under = rail_max + mods_h + 12.0f <= (float)win_h - kEdge - panel_max;
-    const float x = under ? kEdge : kEdge + col_w + kEdge;
-    if (!begin_panel("##mBrush", ImVec2(x, (float)win_h - kEdge), ImVec2(0, 1),
-                     ImVec2(14, 12), g_dos ? 4.0f : 8.0f, 12.0f)) { end_panel(); return 0.0f; }
+    const bool under = rail_max + 12.0f <= (float)win_h - kEdge - panel_max;
+    // Beside the rail means beside its real width: the touch brush button is 1.5x.
+    const float x = under ? kEdge : std::max(kEdge + kRailW, g_rail_right) + kEdge;
+    g_brush_left = x;
+    // Grown, it is opaque and on top of everything (the docks it covers, the options
+    // and status panels); nothing else moves for it — they all read its rest size.
+    g_dock_solid = big;
+    const bool open = begin_panel("##mBrush", ImVec2(x, (float)win_h - kEdge), ImVec2(0, 1),
+                                  ImVec2(14, 12), g_dos ? 4.0f : 8.0f, 12.0f);
+    g_dock_solid = false;
+    if (!open) { end_panel(); return 0.0f; }
     ImDrawList* dl = ImGui::GetWindowDrawList();
     // Heading: the name in the title colour, an optional muted suffix after it.
     auto heading = [&](const char* name, const char* rest) {
@@ -1794,11 +1778,22 @@ float brush_panel(InputState& input, int win_h) {
         const ImGuiIO& io = ImGui::GetIO();
         const bool over = ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
         if (io.MouseClicked[0]) big = over;
-        if (big) ImGui::SetNextFrameWantCaptureMouse(true);
+        if (big) {
+            ImGui::SetNextFrameWantCaptureMouse(true);
+            ImGui::BringWindowToDisplayFront(ImGui::GetCurrentWindow());
+            g_any_dock_big = true;
+        }
     }
-    panel_h = ImGui::GetWindowSize().y;
+    // Rest geometry, kept from the last frames it was small (auto-resize lags a frame,
+    // so a couple of frames after shrinking are skipped too).
+    static ImVec2 rest_size(0, 0);
+    static int small_frames = 0;
+    small_frames = big ? 0 : small_frames + 1;
+    if (small_frames > 2 || rest_size.x <= 0.0f) rest_size = ImGui::GetWindowSize();
+    panel_h = rest_size.y;
     if (!big) panel_max = std::max(panel_max, panel_h);   // the grown panel mustn't move the dock
-    g_brush_right = ImGui::GetWindowPos().x + ImGui::GetWindowSize().x;
+    g_brush_right = x + rest_size.x;
+    g_brush_top = (float)win_h - kEdge - rest_size.y;
     end_panel();
     return panel_h;
 }
@@ -1873,11 +1868,15 @@ void options_panel(InputState& input, int win_h) {
 // either way, so the check can't flip back and forth.
 void status_panel(const InputState& input, int win_w, int win_h, const SkinStats& st,
                   MultiresInfo mres, float brush_right, float brush_h) {
-    static bool lifted = false;
-    float y = (float)win_h - kEdge - (lifted ? brush_h + 12.0f : 0.0f);
+    // Pinned to the bottom-right corner, always. It used to lift above the brush panel
+    // when they met; now it stays put and sits behind the other docks, which may draw
+    // over it.
+    (void)brush_right; (void)brush_h;
+    const float y = (float)win_h - kEdge;
     if (!begin_panel("##mStatus", ImVec2((float)win_w - kEdge, y), ImVec2(1, 1),
                      ImVec2(14, 12), 4.0f, 12.0f)) { end_panel(); return; }
-    if (ImGui::GetWindowSize().x > 1.0f) lifted = ImGui::GetWindowPos().x < brush_right + 12.0f;
+    ImGui::BringWindowToDisplayBack(ImGui::GetCurrentWindow());
+    g_status_top = ImGui::GetWindowPos().y;
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const float w  = g_dos ? 320.0f : 236.0f;
     const float px = g_dos ? 16.0f : 12.5f, rh = g_dos ? 20.0f : 19.0f;
@@ -2942,6 +2941,49 @@ void draw_appearance_menu_items(InputState& input) {
     ImGui::Checkbox("Springy motion", &input.ui_motion);
 }
 
+// Touch mode: the on-screen Ctrl and Shift (shell.html, real DOM over the canvas) flank
+// the model — Ctrl on the left edge, Shift on the right — side by side at one height,
+// just above the bottom docks (the higher of the brush panel's rest top and the status
+// panel's top). As big as kModsPx when there's room, shrinking rather than climbing
+// into the brush button. Hidden while a dock is grown or a popup is open (the strip,
+// the menu): DOM sits above the canvas and would cover them.
+void place_touch_mods(const InputState& input, int win_w, int win_h) {
+    if (!input.touch_mode) { g_any_dock_big = false; return; }
+    const float bottom = std::min(g_brush_top, g_status_top > 0.0f ? g_status_top : g_brush_top) - 14.0f;
+    const float room = bottom - (g_rail_bottom + 14.0f);
+    float top;
+    if (room >= 52.0f) {
+        g_mods_px = std::floor(std::min(kModsPx, room));
+        top = bottom - g_mods_px;
+    } else {
+        // No room above the docks (a short screen at a big UI scale: the brush panel
+        // sits beside the rail, reaching up past the brush button's bottom). Drop to
+        // just under the brush button instead, in the strip between the screen edge
+        // and the brush panel, sized to fit there.
+        top = g_rail_bottom + 14.0f;
+        const float w = g_brush_left > kEdge ? g_brush_left - kEdge - 10.0f : kModsPx;
+        g_mods_px = std::floor(std::max(40.0f, std::min({kModsPx, w, (float)win_h - kEdge - top})));
+    }
+    const bool hide = g_strip_open || g_any_dock_big || ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId);
+    g_any_dock_big = false;   // re-collected by next frame's docks
+#ifdef __EMSCRIPTEN__
+    static int sent_top = -1, sent_px = -1, sent_hide = -1;
+    if ((int)top != sent_top || (int)g_mods_px != sent_px || (int)hide != sent_hide) {
+        sent_top = (int)top; sent_px = (int)g_mods_px; sent_hide = hide;
+        EM_ASM({
+            var m = document.getElementById('mods');
+            if (!m) return;
+            m.style.setProperty('--mods-edge', $0 + 'px');
+            m.style.setProperty('--mods-top', $1 + 'px');
+            m.style.setProperty('--mod', $2 + 'px');
+            m.style.visibility = $3 ? "hidden" : "visible";
+        }, (int)kEdge, sent_top, sent_px, sent_hide);
+    }
+#else
+    (void)win_w; (void)win_h; (void)top; (void)hide;
+#endif
+}
+
 void draw_modern_ui(InputState& input, int win_w, int win_h, const AlphaLibrary* alpha_lib,
                     MultiresInfo mres, const SkinStats& stats) {
     // DOS and Y2K don't bounce: neither era did.
@@ -2958,6 +3000,7 @@ void draw_modern_ui(InputState& input, int win_w, int win_h, const AlphaLibrary*
         float bh = brush_panel(input, win_h);
         options_panel(input, win_h);
         status_panel(input, win_w, win_h, stats, mres, std::max(g_brush_right, g_opts_right), bh);
+        place_touch_mods(input, win_w, win_h);
         ImGui::PopStyleVar();
     }
 
