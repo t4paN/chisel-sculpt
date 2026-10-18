@@ -58,8 +58,8 @@ rest re-checked by the user; the Tint shader gate is clean (39 pipelines, no WGS
 
 *Built on the taptop and deployed to the GitHub Pages phone build the same day; brought
 to main 2026-10-18. Tested in headless Chrome with touch emulation at UI scale 50 % and
-100 % (button placement, first-tap strip, brush panel growth hides the buttons); not yet
-on the phone.*
+100 % (button placement, first-tap strip, brush panel growth hides the buttons). Since then in everyday use on the phone through the GitHub Pages build: "works pretty
+damn well" (user, 2026-10-18).*
 
 - **The touch brush button is drawn at its grown size (1.5x) from the start**, so the
   first tap opens the brush strip instead of only growing the button. The other docks
@@ -78,8 +78,9 @@ on the phone.*
 
 ## 2026-10-13 — Touch input wakes the idle frame skip
 
-*Built GL and web. Written from reasoning; not yet seen on the phone or with DevTools'
-fake pinch. (The taptop wrote its own copy of this fix the same day; main keeps this one.)*
+*Built GL and web. The taptop wrote a near-identical copy the same day; main keeps this
+one. The copy is what the GitHub Pages build runs, and it works on the phone (user,
+2026-10-18); this exact version reaches the phone with the next deploy.*
 
 - The idle skip wakes on ImGui's event queue, but pinch zoom / two-finger pan, the
   on-screen Ctrl/Shift buttons and the switch into touch mode arrive from the page
@@ -91,7 +92,8 @@ fake pinch. (The taptop wrote its own copy of this fix the same day; main keeps 
 ## 2026-10-12 — Phone: UI scale setting, bigger Ctrl/Shift
 
 *Built GL and web. Tested in headless Chrome with touch emulation (layout size, backing
-and tap mapping at 50 %); not yet on the phone.*
+and tap mapping at 50 %). Since then in everyday use on the phone through the GitHub Pages build: "works pretty
+damn well" (user, 2026-10-18).*
 
 - **Menu > Appearance > UI scale** (web, 40–150 %, default 100): the whole page drawn
   smaller or larger, like Chrome's page zoom but stored with the other settings, so it
@@ -113,8 +115,9 @@ and tap mapping at 50 %); not yet on the phone.*
 ## 2026-10-12 — Phone: every dock grows on tap; installable offline PWA
 
 *Built GL and web. Dock growth tested in headless Chrome with touch emulation (grow,
-second tap presses, outside tap shrinks, layout holds still), not yet on the phone. The
-PWA was installed and run on the phone, save/load included.*
+second tap presses, outside tap shrinks, layout holds still). The PWA was installed and
+run on the phone, save/load included, and picks up new builds by itself. Since then in everyday use on the phone through the GitHub Pages build: "works pretty
+damn well" (user, 2026-10-18).*
 
 - **Tap-to-grow for all docks in touch mode**, the way the brush panel already works: the
   file bar, the command bar, the modes dock and the touch brush button. The first tap
@@ -141,7 +144,8 @@ PWA was installed and run on the phone, save/load included.*
 
 *Built GL and web. Modifier buttons, the brush strip and the panel position were
 user-tested live on the phone. The tap-to-grow panel, the landscape drag-offset fix and
-the fullscreen tap fix were committed before a phone test (the laptop went down mid-test).*
+the fullscreen tap fix were committed before a phone test (the laptop went down mid-test). Since then in everyday use on the phone through the GitHub Pages build: "works pretty
+damn well" (user, 2026-10-18).*
 
 - **Touch mode.** The page flips into it at the first finger and back out at the first
   real mouse move, so a touchscreen laptop follows whatever was used last. Everything
