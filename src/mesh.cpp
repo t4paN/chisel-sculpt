@@ -624,7 +624,12 @@ bool Mesh::export_ply(const char* filename) const {
 
     std::fprintf(f, "ply\n");
     std::fprintf(f, "format ascii 1.0\n");
-    std::fprintf(f, "comment Chisel PLY export\n");
+    // Z-up: PLY has no agreed up axis, and Blender (the usual next stop) reads it Z-up,
+    // so a Y-up file landed lying on its back. Written turned +90 degrees about X:
+    // file (x, y, z) = (x, -z, y), a proper rotation (winding and mirror-x untouched).
+    // The comment marks it so import_ply turns our own files back; other PLYs and our
+    // pre-Z-up exports carry no marker and import as before.
+    std::fprintf(f, "comment Chisel PLY export, Z-up\n");
     std::fprintf(f, "element vertex %u\n", nv);
     std::fprintf(f, "property float x\n");
     std::fprintf(f, "property float y\n");
@@ -643,8 +648,8 @@ bool Mesh::export_ply(const char* filename) const {
         uint32_t c = shown[i];
         unsigned r = c & 0xFF, g = (c >> 8) & 0xFF, b = (c >> 16) & 0xFF;
         std::fprintf(f, "%f %f %f %f %f %f %u %u %u\n",
-                     pos_x[i], pos_y[i], pos_z[i],
-                     norm_x[i], norm_y[i], norm_z[i], r, g, b);
+                     pos_x[i], -pos_z[i], pos_y[i],
+                     norm_x[i], -norm_z[i], norm_y[i], r, g, b);
     }
 
     for (uint32_t t = 0; t < nt; t++) {
@@ -820,6 +825,7 @@ bool Mesh::import_ply(const char* filename, Mesh& out) {
     std::vector<Prop> vprops;
     uint32_t n_vert = 0, n_face = 0;
     int format = -1;                 // 0 ascii, 1 binary_le
+    bool z_up = false;               // our own Z-up export (see export_ply): turn it back
     int face_count_size = 1, face_idx_size = 4;
     enum { EL_NONE, EL_VERTEX, EL_FACE } cur = EL_NONE;
 
@@ -831,7 +837,9 @@ bool Mesh::import_ply(const char* filename, Mesh& out) {
         char a[64], b[64], c[64];
         if (std::sscanf(line, "%63s", a) != 1) continue;
         if (std::strcmp(a, "end_header") == 0) break;
-        if (std::strcmp(a, "format") == 0) {
+        if (std::strcmp(a, "comment") == 0) {
+            if (std::strstr(line, "Chisel PLY export, Z-up")) z_up = true;
+        } else if (std::strcmp(a, "format") == 0) {
             std::sscanf(line, "format %63s", b);
             if      (std::strcmp(b, "ascii") == 0)                format = 0;
             else if (std::strcmp(b, "binary_little_endian") == 0) format = 1;
@@ -956,6 +964,12 @@ bool Mesh::import_ply(const char* filename, Mesh& out) {
     std::fclose(f);
     if (idxs.empty()) return false;
 
+    if (z_up) {                      // file (x, y, z) -> Chisel (x, z, -y)
+        for (uint32_t v = 0; v < n_vert; v++) {
+            float y = py[v]; py[v] = pz[v]; pz[v] = -y;
+            if (have_n) { float ny0 = ny[v]; ny[v] = nz[v]; nz[v] = -ny0; }
+        }
+    }
     out.pos_x = std::move(px); out.pos_y = std::move(py); out.pos_z = std::move(pz);
     out.indices = std::move(idxs);
     out.mirror_x_map.clear();

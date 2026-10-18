@@ -2,6 +2,12 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-18 — PLY export stands upright in Blender
+
+- PLY files are now written Z-up, the way Blender reads them, so an export no longer lands
+  lying on its back. Chisel marks its own PLYs and turns them back on import; other PLYs
+  and older Chisel exports import as before. Tested by the user in Blender, with new and old files.
+
 ## 2026-10-18 — Paint layers survive saving
 
 *Built GL, wgpu and web. A scratch round-trip test passed (every layer field and pixel

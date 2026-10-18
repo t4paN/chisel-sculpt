@@ -253,7 +253,9 @@ spacing, and pressure all apply.
 | `[ ]` toggle (toolbar) | Hide vertex colour while sculpting (Paint mode always shows it) |
 
 Paint lives on the base cage of the multires stack, so it survives level switches,
-subdivision, remeshing, and voxel merges. PLY export carries it out of the app.
+subdivision, remeshing, and voxel merges. PLY export carries it out of the app,
+standing upright (Z-up, the way Blender reads PLY); re-importing a Chisel PLY turns it
+back.
 
 ## Camera
 
