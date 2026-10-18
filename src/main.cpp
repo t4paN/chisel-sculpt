@@ -1486,6 +1486,14 @@ int main(int argc, char* argv[]) {
         bool imgui_wants_mouse = ImGui::GetIO().WantCaptureMouse;
         bool dialog_open = input.export_dialog_active || input.import_dialog_active || input.save_dialog_active || input.voxel_merge_confirm_pending || input.drop_confirm_pending || input.help_popup_open || input.keybind_menu_open;
         if ((imgui_wants_mouse || dialog_open) && app_state != AppState::SCULPTING) {
+            // A press on a panel over the model is the panel's, not a pick or a fill
+            // (the bucket's Scale slider sits right over it). Only this frame's press:
+            // a gradient dragged from the model may still be released over a panel.
+            if (input.mouse1_just_pressed) {
+                input.color_pick_click = false;
+                input.bucket_click = false;
+                input.bucket_dragging = false;
+            }
             input.drag_mode = InputState::DragMode::NONE;
             input.mouse1_just_pressed = false;
             input_consume_scroll();
@@ -1786,25 +1794,64 @@ int main(int argc, char* argv[]) {
         }
 
         // Fill bucket (paint mode): flood the unmasked island under the click on the
-        // active layer. The vertex comes from the screen FBO exactly as the picker's
-        // does (nearest corner of the clicked tri); mask and colour are the CPU copies,
-        // both synced at pen-up. One PAINT undo entry, so Ctrl+Z takes the fill back.
+        // active layer, flat or through a pattern; a gradient runs from the press (A)
+        // to the release (B). Points come from the screen FBO exactly as the picker's
+        // do (tri + barycentrics); mask and colour are the CPU copies, both synced at
+        // pen-up. One PAINT undo entry, so Ctrl+Z takes the fill back.
         if (input.bucket_click) {
             input.bucket_click = false;
-            int cx = (int)input.mouse_x;
-            int cy = (int)input.mouse_y;
             Mesh& pm = scene.active_mesh();
-            uint32_t tid = 0xFFFFFFFF;
-            if (cx >= 0 && cx < win_w && cy >= 0 && cy < win_h)
+            const int pattern = input.fill_pattern;
+            const bool gradient = pattern == kFillGradient;
+            const bool solid = pattern == kFillSolid || pattern < 0 || pattern >= fill_patterns().count();
+            // Patterns and gradients read positions/normals: pull the GPU's back first.
+            if (!solid) scene.materialize_active_cpu();
+            // The surface under a screen pixel: nearest corner (the seed) and the point.
+            auto surface_at = [&](float fx, float fy, uint32_t* seed, float out[3]) -> bool {
+                const int cx = (int)fx, cy = (int)fy;
+                if (cx < 0 || cx >= win_w || cy < 0 || cy >= win_h) return false;
+                uint32_t tid = 0xFFFFFFFF;
                 renderer.read_triid_region(cx, cy, 1, 1, &tid);
-            if (tid != 0xFFFFFFFF && tid < pm.tri_count()) {
+                if (tid == 0xFFFFFFFF || tid >= pm.tri_count()) return false;
                 float bary[2];
                 renderer.read_bary_region(cx, cy, 1, 1, bary);
-                float bu = bary[0], bv = bary[1], bw = 1.0f - bu - bv;
-                uint32_t i0 = pm.indices[tid*3+0];
-                uint32_t i1 = pm.indices[tid*3+1];
-                uint32_t i2 = pm.indices[tid*3+2];
-                uint32_t seed = (bu >= bv && bu >= bw) ? i0 : (bv >= bw ? i1 : i2);
+                const float bw[3] = {bary[0], bary[1], 1.0f - bary[0] - bary[1]};
+                const uint32_t ix[3] = {pm.indices[tid*3+0], pm.indices[tid*3+1], pm.indices[tid*3+2]};
+                if (seed) *seed = (bw[0] >= bw[1] && bw[0] >= bw[2]) ? ix[0] : (bw[1] >= bw[2] ? ix[1] : ix[2]);
+                if (out) {
+                    out[0] = out[1] = out[2] = 0.0f;
+                    for (int c = 0; c < 3; c++) {
+                        out[0] += bw[c] * pm.pos_x[ix[c]];
+                        out[1] += bw[c] * pm.pos_y[ix[c]];
+                        out[2] += bw[c] * pm.pos_z[ix[c]];
+                    }
+                }
+                return true;
+            };
+            uint32_t seed = 0;
+            float a[3], b[3];
+            const float drag_px = std::hypot(input.bucket_bx - input.bucket_ax, input.bucket_by - input.bucket_ay);
+            if (!surface_at(input.bucket_ax, input.bucket_ay, &seed, a)) {
+                // Missed the model (on_model and the FBO can disagree by a pixel).
+            } else if (gradient && drag_px < 4.0f) {
+                std::snprintf(input.notification, sizeof(input.notification),
+                              "Drag across the model to set the gradient");
+                input.notification_timer = 1.5f;
+            } else {
+                if (gradient && !surface_at(input.bucket_bx, input.bucket_by, nullptr, b)) {
+                    // Released off the model: B on the view plane through A.
+                    Vec3 cam_pos = camera.get_position();
+                    Vec3 fwd = (camera.target - cam_pos).normalized();
+                    Vec3 right = fwd.cross(Vec3{0, 1, 0}).normalized();
+                    Vec3 up = right.cross(fwd).normalized();
+                    const float d = camera.view_depth(Vec3{a[0], a[1], a[2]});
+                    const float half_h = camera.half_height_at(d);
+                    const float half_w = half_h * ((float)win_w / (float)win_h);
+                    const float ndc_x = 2.0f * input.bucket_bx / (float)win_w - 1.0f;
+                    const float ndc_y = 1.0f - 2.0f * input.bucket_by / (float)win_h;
+                    Vec3 p = cam_pos + fwd * d + right * (ndc_x * half_w) + up * (ndc_y * half_h);
+                    b[0] = p.x; b[1] = p.y; b[2] = p.z;
+                }
                 uint32_t rgba = 0;   // erase: transparent
                 if (!input.bucket_erase) {
                     for (int ch = 0; ch < 3; ch++) {
@@ -1813,16 +1860,31 @@ int main(int argc, char* argv[]) {
                     }
                     rgba |= 0xFFu << 24;
                 }
+                const double t0 = glfwGetTime();
+                static std::vector<uint32_t> island;
+                static std::vector<float> cover;
+                paint_bucket_island(pm, seed, island);
+                const float* cv = nullptr;
+                if (gradient) {
+                    paint_cover_gradient(pm, island, a, b, cover);
+                    cv = cover.data();
+                } else if (!solid) {
+                    const AlphaEntry& pe = fill_patterns().get(pattern);
+                    paint_cover_triplanar(pm, island, pe.data.data(), pe.w, pe.h,
+                                          input.fill_scale * mesh_radius,
+                                          input.fill_angle * 3.14159265f / 180.0f, a, cover);
+                    cv = cover.data();
+                }
                 UndoEntry e;
                 e.kind = UndoEntry::Kind::PAINT;
                 e.paint_layer_id = paint_layers_active_id(pm.paint_layers);
-                const double t0 = glfwGetTime();
-                uint32_t reached = paint_bucket_fill(pm, seed, rgba, e.verts, e.old_color, e.new_color);
+                paint_bucket_apply(pm, island, rgba, cv, e.verts, e.old_color, e.new_color);
                 const double ms = (glfwGetTime() - t0) * 1000.0;
-                std::printf("[bucket] seed %u: reached %u / %u verts, changed %zu, %.1f ms%s\n",
-                            seed, reached, pm.vertex_count(), e.verts.size(), ms,
+                std::printf("[bucket] seed %u, %s: reached %zu / %u verts, changed %zu, %.1f ms%s\n",
+                            seed, fill_patterns().get(solid ? kFillSolid : pattern).name.c_str(),
+                            island.size(), pm.vertex_count(), e.verts.size(), ms,
                             input.bucket_erase ? " (erase)" : "");
-                if (reached == 0) {
+                if (island.empty()) {
                     std::snprintf(input.notification, sizeof(input.notification),
                                   "That spot is masked");
                     input.notification_timer = 1.5f;
@@ -3769,7 +3831,10 @@ int main(int argc, char* argv[]) {
                 draw_pick_cursor(cursor_x, cursor_y, input.on_model);
             } else if (input.bucket_active && input.current_brush == BrushType::PAINT
                        && !input.is_smooth_active()) {
-                draw_bucket_cursor(cursor_x, cursor_y, input.on_model);
+                if (input.bucket_dragging)
+                    draw_gradient_drag(input.bucket_ax, input.bucket_ay, cursor_x, cursor_y);
+                else
+                    draw_bucket_cursor(cursor_x, cursor_y, input.on_model);
             } else {
                 renderer.draw_cursor(
                     camera,

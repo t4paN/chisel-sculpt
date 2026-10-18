@@ -1,4 +1,5 @@
 #include "input.h"
+#include "brush_alpha.h"   // kFillGradient
 #include "debug_console.h"
 #include "tablet.h"
 #include <cmath>
@@ -263,6 +264,11 @@ InputState::InputState()
     bucket_active = false;
     bucket_click = false;
     bucket_erase = false;
+    fill_pattern = kFillSolid;
+    fill_scale = 0.25f;
+    fill_angle = 0.0f;
+    bucket_dragging = false;
+    bucket_ax = bucket_ay = bucket_bx = bucket_by = 0.0f;
 
     // Seed BOTH profiles from the same defaults rather than shipping invented pen
     // numbers — the whole point of the split is that the user tunes each to their
@@ -972,6 +978,7 @@ static void mouse_button_callback(GLFWwindow* w, int button, int action, int mod
     // emulated button so the state stays truthful, but latch nothing from it.
     if (button == GLFW_MOUSE_BUTTON_LEFT && g_input->touch_gesture) {
         g_input->mouse1_down = (action == GLFW_PRESS);
+        g_input->bucket_dragging = false;   // a pinch mid-gradient cancels it
         if (action == GLFW_RELEASE && g_input->touch_count == 0)
             g_input->touch_gesture = false;
     } else if (button == GLFW_MOUSE_BUTTON_LEFT) {
@@ -1005,9 +1012,13 @@ static void mouse_button_callback(GLFWwindow* w, int button, int action, int mod
                        && !g_input->is_smooth_active()
                        && g_input->interaction_mode == InputState::InteractionMode::EDIT) {
                 // Fill bucket consumes this click too: the main loop floods the
-                // island under the cursor. Shift (smooth) still strokes.
-                g_input->bucket_click = true;
+                // island under the cursor. Shift (smooth) still strokes. A gradient
+                // waits for the release, which sets its far end.
+                g_input->bucket_ax = (float)g_input->mouse_x;
+                g_input->bucket_ay = (float)g_input->mouse_y;
                 g_input->bucket_erase = g_input->is_subtract_active();
+                if (g_input->fill_pattern == kFillGradient) g_input->bucket_dragging = true;
+                else                                         g_input->bucket_click = true;
             } else if (g_input->on_model) {
                 g_input->drag_mode = InputState::DragMode::SCULPT;
             } else {
@@ -1017,6 +1028,12 @@ static void mouse_button_callback(GLFWwindow* w, int button, int action, int mod
         if (action == GLFW_RELEASE && was_down) {
             g_input->mouse1_just_released = true;
             g_input->drag_mode = InputState::DragMode::NONE;
+            if (g_input->bucket_dragging) {
+                g_input->bucket_dragging = false;
+                g_input->bucket_bx = (float)g_input->mouse_x;
+                g_input->bucket_by = (float)g_input->mouse_y;
+                g_input->bucket_click = true;
+            }
         }
     }
     if (button == GLFW_MOUSE_BUTTON_RIGHT) {

@@ -1059,6 +1059,25 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
             ImGui::TextUnformatted(input.color_pick_active ? "Picking..."
                                    : input.bucket_active   ? "Click to fill, Ctrl erases"
                                                           : "Q/E swap - C pick - F fill");
+            if (input.bucket_active) {
+                const AlphaLibrary& pl = fill_patterns();
+                const int pi = std::max(0, std::min(input.fill_pattern, pl.count() - 1));
+                ImGui::SetNextItemWidth(150.0f);
+                if (ImGui::BeginCombo("##fillPattern", pl.get(pi).name.c_str())) {
+                    for (int i = 0; i < pl.count(); i++)
+                        if (ImGui::Selectable(pl.get(i).name.c_str(), i == pi)) input.fill_pattern = i;
+                    ImGui::EndCombo();
+                }
+                if (pi != kFillSolid && pi != kFillGradient) {
+                    ImGui::SameLine();
+                    ImGui::SetNextItemWidth(120.0f);
+                    ImGui::SliderFloat("##fillScale", &input.fill_scale, 0.02f, 2.0f, "scale %.2f",
+                                       ImGuiSliderFlags_Logarithmic);
+                    ImGui::SameLine();
+                    ImGui::SetNextItemWidth(120.0f);
+                    ImGui::SliderFloat("##fillAngle", &input.fill_angle, 0.0f, 180.0f, "rotate %.0f");
+                }
+            }
         } else {
             // What the painted extremes mean to the adaptive remesher, as
             // multipliers on the auto target edge length. Defaults (2.0 / 0.5)
@@ -1570,6 +1589,19 @@ void draw_bucket_cursor(float x, float y, bool on_model) {
     const ImVec2 c(x + 15.0f, y - 15.0f);
     draw_icon(dl, Icon::PaintBucket, c, 24.0f, line, 3.6f);
     draw_icon(dl, Icon::PaintBucket, c, 24.0f, fill, 1.75f);
+}
+
+// A gradient being dragged: a filled dot where it is full (the press), a hollow one
+// where it runs out (the cursor), joined by a line.
+void draw_gradient_drag(float ax, float ay, float bx, float by) {
+    ImDrawList* dl = ImGui::GetForegroundDrawList();
+    const ImU32 fill = IM_COL32(255, 255, 255, 235), line = IM_COL32(25, 25, 25, 235);
+    dl->AddLine(ImVec2(ax, ay), ImVec2(bx, by), line, 4.0f);
+    dl->AddLine(ImVec2(ax, ay), ImVec2(bx, by), fill, 1.8f);
+    dl->AddCircleFilled(ImVec2(ax, ay), 6.0f, line);
+    dl->AddCircleFilled(ImVec2(ax, ay), 4.5f, fill);
+    dl->AddCircle(ImVec2(bx, by), 6.0f, line, 0, 3.6f);
+    dl->AddCircle(ImVec2(bx, by), 6.0f, fill, 0, 1.6f);
 }
 
 // ---- Key bindings window ------------------------------------------------------------

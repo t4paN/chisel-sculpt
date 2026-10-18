@@ -183,15 +183,29 @@ int  paint_layers_drop_stale(PaintLayerStack& s, uint32_t vcount);
 // --- fill bucket -------------------------------------------------------------------
 
 struct Mesh;
-// Flood the active layer (mesh.color) from `seed` with `rgba` (premultiplied; 0 erases).
-// The flood walks triangle neighbours and stops at the sculpting mask: a vertex masked
-// 0.5 or more is a wall. Walls next to the island are still painted, weighted by
-// (1 - mask) like a brush dab, so a soft mask edge stays soft on the filled side;
-// they just never pass the flood on. That is what keeps one unmasked island from
-// leaking into the next. A masked seed fills nothing. Disconnected pieces of one mesh
-// are separate islands too.
-// Appends every vertex whose value changed to verts/old_c/new_c (the undo entry), and
-// returns how many vertices the flood reached.
-uint32_t paint_bucket_fill(Mesh& mesh, uint32_t seed, uint32_t rgba,
-                           std::vector<uint32_t>& verts,
-                           std::vector<uint32_t>& old_c, std::vector<uint32_t>& new_c);
+// The island a fill covers: flood from `seed` across triangle neighbours, stopping at
+// the sculpting mask. A vertex masked 0.5 or more is a wall. Walls next to the island
+// are in the list too (they get painted, weighted by 1 - mask, so a soft mask edge
+// stays soft on the filled side) but never pass the flood on, which is what keeps one
+// unmasked island from leaking into the next. A masked seed gives an empty island.
+// Disconnected pieces of one mesh are separate islands.
+void paint_bucket_island(const Mesh& mesh, uint32_t seed, std::vector<uint32_t>& island);
+
+// Per-island-vertex coverage in [0,1] (a pattern or a gradient), for paint_bucket_apply.
+// A tiling pattern, projected from the three axes and blended by which way the surface
+// faces (no UVs, no seams). `tile` = world size of one period, `angle` = radians,
+// `origin` = where a tile corner sits (the clicked point, so the click places it).
+void paint_cover_triplanar(const Mesh& mesh, const std::vector<uint32_t>& island,
+                           const float* data, uint32_t w, uint32_t h, float tile,
+                           float angle, const float origin[3], std::vector<float>& cover);
+// A linear ramp: 1 at and behind `a`, 0 at and beyond `b`, along the a-to-b line.
+void paint_cover_gradient(const Mesh& mesh, const std::vector<uint32_t>& island,
+                          const float a[3], const float b[3], std::vector<float>& cover);
+
+// Paint `rgba` (premultiplied; 0 erases) onto the island in the active layer
+// (mesh.color), each vertex weighted by (1 - mask) * cover[k] (cover null = 1): the
+// brush's four-channel lerp at full strength. Appends every vertex whose value
+// changed to verts/old_c/new_c (the undo entry).
+void paint_bucket_apply(Mesh& mesh, const std::vector<uint32_t>& island, uint32_t rgba,
+                        const float* cover, std::vector<uint32_t>& verts,
+                        std::vector<uint32_t>& old_c, std::vector<uint32_t>& new_c);

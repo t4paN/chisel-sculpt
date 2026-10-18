@@ -369,44 +369,107 @@ int paint_layers_drop_stale(PaintLayerStack& s, uint32_t vcount) {
 
 // ---- fill bucket ----
 
-uint32_t paint_bucket_fill(Mesh& mesh, uint32_t seed, uint32_t rgba,
-                           std::vector<uint32_t>& verts,
-                           std::vector<uint32_t>& old_c, std::vector<uint32_t>& new_c) {
-    const uint32_t vc = mesh.vertex_count();
-    if (seed >= vc || mesh.vert_tri_offset.size() != (size_t)vc + 1) return 0;
-    auto mask_at = [&](uint32_t v) {
-        float m = v < mesh.mask.size() ? mesh.mask[v] : 0.0f;
-        return m < 0.0f ? 0.0f : (m > 1.0f ? 1.0f : m);
-    };
-    constexpr float kWall = 0.5f;
-    if (mask_at(seed) >= kWall) return 0;
+static inline float bucket_mask_at(const Mesh& mesh, uint32_t v) {
+    float m = v < mesh.mask.size() ? mesh.mask[v] : 0.0f;
+    return m < 0.0f ? 0.0f : (m > 1.0f ? 1.0f : m);
+}
+static constexpr float kBucketWall = 0.5f;
 
+void paint_bucket_island(const Mesh& mesh, uint32_t seed, std::vector<uint32_t>& island) {
+    island.clear();
+    const uint32_t vc = mesh.vertex_count();
+    if (seed >= vc || mesh.vert_tri_offset.size() != (size_t)vc + 1) return;
+    if (bucket_mask_at(mesh, seed) >= kBucketWall) return;
+    // One-shot and user-paced, so it may walk the whole mesh. Kept across calls to
+    // skip re-allocating it per fill.
+    static std::vector<uint8_t> seen;
+    seen.assign(vc, 0);
+    island.push_back(seed);
+    seen[seed] = 1;
+    for (size_t head = 0; head < island.size(); head++) {
+        const uint32_t v = island[head];
+        if (bucket_mask_at(mesh, v) >= kBucketWall) continue;
+        for (uint32_t k = mesh.vert_tri_offset[v]; k < mesh.vert_tri_offset[v + 1]; k++) {
+            const uint32_t t = mesh.vert_tri_list[k];
+            for (int c = 0; c < 3; c++) {
+                const uint32_t u = mesh.indices[t * 3 + c];
+                if (!seen[u]) { seen[u] = 1; island.push_back(u); }
+            }
+        }
+    }
+}
+
+// Bilinear, wrapping both ways: patterns tile.
+static float sample_wrap(const float* data, uint32_t w, uint32_t h, float u, float v) {
+    const float fx = (u - std::floor(u)) * w - 0.5f, fy = (v - std::floor(v)) * h - 0.5f;
+    const int x0 = (int)std::floor(fx), y0 = (int)std::floor(fy);
+    const float tx = fx - x0, ty = fy - y0;
+    auto at = [&](int x, int y) {
+        x %= (int)w; if (x < 0) x += w;
+        y %= (int)h; if (y < 0) y += h;
+        return data[(size_t)y * w + x];
+    };
+    const float a = at(x0, y0), b = at(x0 + 1, y0), c = at(x0, y0 + 1), d = at(x0 + 1, y0 + 1);
+    return (a + (b - a) * tx) * (1.0f - ty) + (c + (d - c) * tx) * ty;
+}
+
+void paint_cover_triplanar(const Mesh& mesh, const std::vector<uint32_t>& island,
+                           const float* data, uint32_t w, uint32_t h, float tile,
+                           float angle, const float origin[3], std::vector<float>& cover) {
+    cover.resize(island.size());
+    const float inv = 1.0f / std::max(tile, 1e-6f);
+    const float ca = std::cos(angle), sa = std::sin(angle);
+    const bool has_n = mesh.norm_x.size() >= mesh.vertex_count();
+    for (size_t k = 0; k < island.size(); k++) {
+        const uint32_t v = island[k];
+        const float x = (mesh.pos_x[v] - origin[0]) * inv;
+        const float y = (mesh.pos_y[v] - origin[1]) * inv;
+        const float z = (mesh.pos_z[v] - origin[2]) * inv;
+        // Facing weights, sharpened (^4) so each projection owns its faces and the
+        // blurry blend band where two meet stays narrow.
+        float wx = 1, wy = 1, wz = 1;
+        if (has_n) {
+            wx = mesh.norm_x[v] * mesh.norm_x[v]; wx *= wx;
+            wy = mesh.norm_y[v] * mesh.norm_y[v]; wy *= wy;
+            wz = mesh.norm_z[v] * mesh.norm_z[v]; wz *= wz;
+        }
+        const float sum = wx + wy + wz;
+        if (sum <= 0.0f) { wx = wy = wz = 1.0f / 3.0f; } else { wx /= sum; wy /= sum; wz /= sum; }
+        // Each axis sees the other two as its (across, up) plane; image rows run down.
+        auto plane = [&](float pu, float pv) {
+            const float u = ca * pu - sa * pv, t = sa * pu + ca * pv;
+            return sample_wrap(data, w, h, u, -t);
+        };
+        cover[k] = wx * plane(z, y) + wy * plane(x, z) + wz * plane(x, y);
+    }
+}
+
+void paint_cover_gradient(const Mesh& mesh, const std::vector<uint32_t>& island,
+                          const float a[3], const float b[3], std::vector<float>& cover) {
+    cover.resize(island.size());
+    const float dx = b[0] - a[0], dy = b[1] - a[1], dz = b[2] - a[2];
+    const float len2 = std::max(dx * dx + dy * dy + dz * dz, 1e-12f);
+    for (size_t k = 0; k < island.size(); k++) {
+        const uint32_t v = island[k];
+        float t = ((mesh.pos_x[v] - a[0]) * dx + (mesh.pos_y[v] - a[1]) * dy +
+                   (mesh.pos_z[v] - a[2]) * dz) / len2;
+        t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
+        cover[k] = 1.0f - t;
+    }
+}
+
+void paint_bucket_apply(Mesh& mesh, const std::vector<uint32_t>& island, uint32_t rgba,
+                        const float* cover, std::vector<uint32_t>& verts,
+                        std::vector<uint32_t>& old_c, std::vector<uint32_t>& new_c) {
+    const uint32_t vc = mesh.vertex_count();
     // An unpainted layer reads as what the renderer shows for it (paint_layer_px).
     const uint32_t blank = mesh.paint_layers.empty() ? 0xFFFFFFFFu : 0u;
     if (mesh.color.size() < vc) mesh.color.resize(vc, blank);
-
-    // One-shot and user-paced, so it may walk the whole mesh. Kept across calls
-    // to skip re-allocating them per fill.
-    static std::vector<uint8_t>  seen;
-    static std::vector<uint32_t> queue;
-    seen.assign(vc, 0);
-    queue.clear();
-    queue.push_back(seed);
-    seen[seed] = 1;
-    for (size_t head = 0; head < queue.size(); head++) {
-        const uint32_t v = queue[head];
-        const float m = mask_at(v);
-        if (m < kWall) {
-            for (uint32_t k = mesh.vert_tri_offset[v]; k < mesh.vert_tri_offset[v + 1]; k++) {
-                const uint32_t t = mesh.vert_tri_list[k];
-                for (int c = 0; c < 3; c++) {
-                    const uint32_t u = mesh.indices[t * 3 + c];
-                    if (!seen[u]) { seen[u] = 1; queue.push_back(u); }
-                }
-            }
-        }
+    for (size_t k = 0; k < island.size(); k++) {
+        const uint32_t v = island[k];
+        if (v >= vc) continue;
         // The brush's lerp of all four channels (color_paint.*), at full strength.
-        const float w = 1.0f - m;
+        const float w = (1.0f - bucket_mask_at(mesh, v)) * (cover ? cover[k] : 1.0f);
         const uint32_t old = mesh.color[v];
         uint32_t out = 0;
         for (int ch = 0; ch < 4; ch++) {
@@ -419,5 +482,4 @@ uint32_t paint_bucket_fill(Mesh& mesh, uint32_t seed, uint32_t rgba,
         old_c.push_back(old);
         new_c.push_back(out);
     }
-    return (uint32_t)queue.size();
 }

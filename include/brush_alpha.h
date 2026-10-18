@@ -37,3 +37,11 @@ struct AlphaLibrary {
     int count() const { return (int)entries.size(); }
     const AlphaEntry& get(int i) const { return entries[(i >= 0 && i < count()) ? i : 0]; }
 };
+
+// Fill-bucket patterns: the same entry shape in a library of their own, built in code
+// on first use (no files yet). Unlike stamps they TILE: data covers one period, and
+// sampling wraps. A value is coverage, like an alpha: 1 = full paint colour, 0 = the
+// fill leaves that spot alone. Two entries have no bitmap: Solid (is_round, the flat
+// fill) and Gradient, which is not sampled but laid along a dragged A-to-B line.
+constexpr int kFillSolid = 0, kFillGradient = 1;
+const AlphaLibrary& fill_patterns();

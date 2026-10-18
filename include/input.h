@@ -370,6 +370,15 @@ struct InputState {
     bool bucket_active;
     bool bucket_click;
     bool bucket_erase;
+    // What the bucket lays down: a fill_patterns() index (brush_alpha.h). Solid and the
+    // tiling patterns fill on press; Gradient is a drag, press = A (full paint, and the
+    // island it fills), release = B (none). bucket_a/b are those screen points, set
+    // with bucket_click; bucket_dragging is "pressed, waiting for the release".
+    int   fill_pattern;
+    float fill_scale;    // pattern tile size, as a fraction of the model's radius
+    float fill_angle;    // pattern rotation, degrees
+    bool  bucket_dragging;
+    float bucket_ax, bucket_ay, bucket_bx, bucket_by;
     // Show vertex paint in the viewport. Toggle (next to the Paint icon) lets you
     // hide albedo while sculpting; the paint brush always forces it visible.
     bool paint_visible;

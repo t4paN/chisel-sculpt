@@ -67,3 +67,4 @@ void draw_paint_layers_panel(InputState& input, Scene& scene, int win_w, int win
 // backends, replaces the brush ring for that state.
 void draw_pick_cursor(float x, float y, bool on_model);
 void draw_bucket_cursor(float x, float y, bool on_model);
+void draw_gradient_drag(float ax, float ay, float bx, float by);

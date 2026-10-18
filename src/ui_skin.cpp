@@ -923,7 +923,12 @@ void apply_dos_style() {
 // `strip`: one row that grows sideways out of the rail edge (`at` = its left edge,
 // vertically centred); otherwise a titled 5-wide grid with its top-left at `at`.
 // Returns true while the strip is open or still retracting.
-bool alpha_picker_popup(InputState& input, const AlphaLibrary* alpha_lib, ImVec2 at, bool strip = false) {
+// The swatch picker, shared by the brush alphas and the bucket's fill patterns: `lib`
+// is what it lists, `active` the slot a pick writes, `id` the popup the caller opens.
+// `loadable` adds the "+" tile that asks for an image (alphas only, for now).
+bool swatch_picker_popup(InputState& input, const AlphaLibrary* alpha_lib, int& active,
+                         const char* id, const char* title, bool loadable, ImVec2 at,
+                         bool strip = false) {
     const int per_row = strip ? 10 : 5;
     auto swatches = [&]() {
         int n = alpha_lib->count();
@@ -933,7 +938,7 @@ bool alpha_picker_popup(InputState& input, const AlphaLibrary* alpha_lib, ImVec2
             ImVec2 p = ImGui::GetCursorScreenPos();
             char id[24]; std::snprintf(id, sizeof id, "##al%d", i);
             if (ImGui::InvisibleButton(id, ImVec2(44, 44))) {
-                input.active_alpha = i;
+                active = i;
                 ImGui::CloseCurrentPopup();
             }
             bool hv = ImGui::IsItemHovered();
@@ -941,7 +946,7 @@ bool alpha_picker_popup(InputState& input, const AlphaLibrary* alpha_lib, ImVec2
             // Strip: the bare stamp nearly fills the slot, so the selection / hover
             // fill shows only as a 3 px ring (rounding cut to clear the image corners).
             const float rr = strip ? rad(6.0f) : rad(10.0f);
-            if (input.active_alpha == i)
+            if (active == i)
                 pdl->AddRectFilled(p, ImVec2(p.x + 44, p.y + 44), kAccent, rr);
             else if (hv)
                 pdl->AddRectFilled(p, ImVec2(p.x + 44, p.y + 44),
@@ -950,6 +955,7 @@ bool alpha_picker_popup(InputState& input, const AlphaLibrary* alpha_lib, ImVec2
             else       draw_alpha_preview(pdl, ImVec2(p.x + 7, p.y + 7), 30.0f, e.preview);
             if (hv) tooltip(p, ImVec2(p.x + 44, p.y + 44), TipSide::Below, e.name.c_str(), nullptr);
         }
+        if (!loadable) return;
         if (n % per_row) ImGui::SameLine();
         ImVec2 p = ImGui::GetCursorScreenPos();
         if (ImGui::InvisibleButton("##alLoad", ImVec2(44, 44))) {
@@ -970,10 +976,10 @@ bool alpha_picker_popup(InputState& input, const AlphaLibrary* alpha_lib, ImVec2
 
     if (!strip) {
         ImGui::SetNextWindowPos(at, ImGuiCond_Always);
-        if (begin_skin_popup("##alphapick", ImVec2(12, 12))) {
+        if (begin_skin_popup(id, ImVec2(12, 12))) {
             ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(6, 6));
             text_at(ImGui::GetWindowDrawList(), UiFont::SansSemibold, 11.0f,
-                    ImGui::GetCursorScreenPos(), g_dos ? cga::yellow : kMuted, "BRUSH ALPHA");
+                    ImGui::GetCursorScreenPos(), g_dos ? cga::yellow : kMuted, title);
             ImGui::Dummy(ImVec2(0, g_dos ? 18.0f : 14.0f));
             swatches();
             ImGui::PopStyleVar();
@@ -988,9 +994,14 @@ bool alpha_picker_popup(InputState& input, const AlphaLibrary* alpha_lib, ImVec2
     // ImGui closes a popup on the spot, so the way back is drawn here: the last
     // frame's geometry, retracting to one swatch on the foreground list, with no
     // hit-testing — the pick has already happened.
-    static ImVec2 last_wp, last_ws;
-    const bool open = ImGui::IsPopupOpen("##alphapick");
-    float t = spring(ImGui::GetID("##alphapick"), open ? 1.0f : 0.0f, 800.0f, 1.0f);
+    // The last open frame's geometry, per popup (the alpha and pattern strips each
+    // retract from their own).
+    static ImVec2 geo_wp[2], geo_ws[2];
+    const int gi = std::strcmp(id, "##alphapick") == 0 ? 0 : 1;
+    ImVec2& last_wp = geo_wp[gi];
+    ImVec2& last_ws = geo_ws[gi];
+    const bool open = ImGui::IsPopupOpen(id);
+    float t = spring(ImGui::GetID(id), open ? 1.0f : 0.0f, 800.0f, 1.0f);
     t = std::max(0.0f, std::min(1.0f, t));
     const float w0 = 44.0f + 10.0f;   // one swatch + padding: what it grows out of
     if (!open) {
@@ -1002,6 +1013,7 @@ bool alpha_picker_popup(InputState& input, const AlphaLibrary* alpha_lib, ImVec2
         fg->PushClipRect(last_wp, b, true);
         const int n = alpha_lib->count();
         for (int i = 0; i <= n; i++) {
+            if (i == n && !loadable) break;
             ImVec2 p(last_wp.x + 5.0f + (i % per_row) * 48.0f, last_wp.y + 5.0f + (i / per_row) * 48.0f);
             if (i == n) {   // the "+" tile
                 fg->AddRect(ImVec2(p.x + 7, p.y + 7), ImVec2(p.x + 37, p.y + 37),
@@ -1010,7 +1022,7 @@ bool alpha_picker_popup(InputState& input, const AlphaLibrary* alpha_lib, ImVec2
                 fg->AddLine(ImVec2(p.x + 22, p.y + 16), ImVec2(p.x + 22, p.y + 28), kText, 1.75f);
                 break;
             }
-            if (input.active_alpha == i)
+            if (active == i)
                 fg->AddRectFilled(p, ImVec2(p.x + 44, p.y + 44), kAccent, rad(6.0f));
             draw_alpha_preview(fg, ImVec2(p.x + 3, p.y + 3), 38.0f, alpha_lib->get(i).preview, true);
         }
@@ -1022,7 +1034,7 @@ bool alpha_picker_popup(InputState& input, const AlphaLibrary* alpha_lib, ImVec2
     ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0, 0, 0, 0));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(5, 5));
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4, 4));
-    if (ImGui::BeginPopup("##alphapick")) {
+    if (ImGui::BeginPopup(id)) {
         ImVec2 wp = ImGui::GetWindowPos(), ws = ImGui::GetWindowSize();
         last_wp = wp; last_ws = ws;
         float rw = ws.x > w0 ? w0 + (ws.x - w0) * t : ws.x;
@@ -1043,6 +1055,15 @@ bool alpha_picker_popup(InputState& input, const AlphaLibrary* alpha_lib, ImVec2
 // Paint mode's tools are all the paint brush underneath (its colour, size and layer);
 // the tool says what a click does with it.
 enum class RailTool { Brush, Bucket, Picker };
+bool alpha_picker_popup(InputState& input, const AlphaLibrary* alpha_lib, ImVec2 at, bool strip = false) {
+    return swatch_picker_popup(input, alpha_lib, input.active_alpha, "##alphapick", "BRUSH ALPHA",
+                               true, at, strip);
+}
+bool pattern_picker_popup(InputState& input, ImVec2 at, bool strip = false) {
+    return swatch_picker_popup(input, &fill_patterns(), input.fill_pattern, "##patternpick",
+                               "FILL PATTERN", false, at, strip);
+}
+
 struct RailBrush {
     const char* id; const char* name; KeyAction key; Icon icon; BrushType type;
     RailTool tool = RailTool::Brush;
@@ -1397,12 +1418,17 @@ void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
     // shows. Clicked, the picker strip grows out of the dock edge at the swatch's
     // height, and retracts the same way after a pick. The tip just says what it is;
     // the alpha names show in the strip.
-    // The bucket and the picker have no stamp.
+    // The bucket's sidecard is the same swatch, showing its fill pattern instead.
+    // The picker has neither.
     const bool alpha_brush = current == BrushType::DRAW || current == BrushType::MASK ||
                              (current == BrushType::PAINT && !input.bucket_active &&
                               !input.color_pick_active);
-    if (editing && !smooth_on && alpha_brush && alpha_lib && alpha_lib->count() > 0
+    const bool bucket = current == BrushType::PAINT && input.bucket_active;
+    const AlphaLibrary* lib = bucket ? &fill_patterns() : alpha_lib;
+    if (editing && !smooth_on && (alpha_brush || bucket) && lib && lib->count() > 0
         && alpha_at.y >= 0.0f) {
+        const char* popup = bucket ? "##patternpick" : "##alphapick";
+        const int active = bucket ? input.fill_pattern : input.active_alpha;
         const float bs = kRailBtn * 0.88f, tuck = 10.0f, vis = bs - tuck;
         const float top = alpha_at.y + kRailBtn * 0.22f, cy = top + bs * 0.5f;
         ImGui::SetNextWindowPos(ImVec2(alpha_edge, top), ImGuiCond_Always);
@@ -1413,17 +1439,19 @@ void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
         bool hovered = ImGui::IsItemHovered();
         bool held = ImGui::IsItemActive();
         float s = spring(ImGui::GetItemID(), held ? 0.92f : (hovered ? 1.06f : 1.0f), held ? 1400.0f : 520.0f);
-        if (clicked) ImGui::OpenPopup("##alphapick");
-        const bool busy = alpha_picker_popup(input, alpha_lib, ImVec2(alpha_edge + 6.0f, cy), true);
+        if (clicked) ImGui::OpenPopup(popup);
+        const ImVec2 strip_at(alpha_edge + 6.0f, cy);
+        const bool busy = bucket ? pattern_picker_popup(input, strip_at, true)
+                                 : alpha_picker_popup(input, alpha_lib, strip_at, true);
         if (!busy) {
             // The stamp itself, no frame, filling the swatch square.
             ImDrawList* bg = ImGui::GetBackgroundDrawList();
             ImVec2 c(alpha_edge - tuck + bs * 0.5f, cy);
-            int ai = std::max(0, std::min(input.active_alpha, alpha_lib->count() - 1));
+            int ai = std::max(0, std::min(active, lib->count() - 1));
             float sz = bs * s;
-            draw_alpha_preview(bg, ImVec2(c.x - sz * 0.5f, c.y - sz * 0.5f), sz, alpha_lib->get(ai).preview, true);
+            draw_alpha_preview(bg, ImVec2(c.x - sz * 0.5f, c.y - sz * 0.5f), sz, lib->get(ai).preview, true);
             if (hovered) tooltip(ImVec2(pos.x, pos.y), ImVec2(pos.x + vis, pos.y + bs), TipSide::Right,
-                                 "Brush Alpha", nullptr);
+                                 bucket ? "Fill Pattern" : "Brush Alpha", nullptr);
         }
         ImGui::End();
         ImGui::PopStyleVar();
@@ -1881,10 +1909,29 @@ void options_panel(InputState& input, int win_h) {
             ImGui::PopStyleVar(2);
             ImGui::SameLine(0.0f, 10.0f);
             const bool armed = input.color_pick_active || input.bucket_active;
+            const bool grad = input.fill_pattern == kFillGradient;
             label_item(UiFont::Sans, 12.0f, armed ? kTintText : kMuted,
                        input.color_pick_active ? "Picking... click the model"
-                       : input.bucket_active   ? "Click an unmasked area to fill it  \xC2\xB7  Ctrl erases"
+                       : input.bucket_active && grad ? "Drag from full to none  \xC2\xB7  Ctrl erases"
+                       : input.bucket_active   ? "Click to fill  \xC2\xB7  Ctrl erases"
                                                : "Q / E swap  \xC2\xB7  C pick  \xC2\xB7  right-click: wheel");
+            // A tiling pattern's size and turn. Scale is relative to the model, so it
+            // holds across subdivision levels.
+            if (input.bucket_active && !grad && input.fill_pattern != kFillSolid) {
+                ImGui::SameLine(0.0f, 14.0f);
+                label_item(UiFont::Sans, 13.0f, kMuted, "Scale", 0.0f, 30.0f);
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(130.0f);
+                ImGui::SliderFloat("##fillScale", &input.fill_scale, 0.02f, 2.0f, "%.2f",
+                                   ImGuiSliderFlags_Logarithmic);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Pattern size, relative to the model");
+                ImGui::SameLine(0.0f, 10.0f);
+                label_item(UiFont::Sans, 13.0f, kMuted, "Rotate", 0.0f, 30.0f);
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(110.0f);
+                ImGui::SliderFloat("##fillAngle", &input.fill_angle, 0.0f, 180.0f, "%.0f\xC2\xB0");
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Pattern rotation");
+            }
         } else {
             ImGui::SetNextItemWidth(170.0f);
             ImGui::SliderFloat("##densCoarse", &input.density_coarse_mult, 1.0f, 4.0f, "green: edge x%.2f");
@@ -2406,6 +2453,44 @@ void y2k_left(InputState& in, int H, const AlphaLibrary* lib) {
         if (hv) tooltip(a, b, TipSide::Right, ae.name.c_str(), nullptr);
         alpha_picker_popup(in, lib, ImVec2(kLeftW + 6.0f, y - 8.0f));
         y += 72 + 10;
+    }
+    // The bucket's pattern, in the same well, then a tiling pattern's size and turn.
+    if (editing && !smooth_on && current == BrushType::PAINT && in.bucket_active) {
+        const AlphaLibrary& pl = fill_patterns();
+        ytext(dl, true, 11.0f, ImVec2(x0 + 2, y), y2k::label, "Pattern");
+        y += 18;
+        ImVec2 a(x0, y), b(x0 + w, y + 72);
+        bool hv, held;
+        if (hit("##yPattern", a, ImVec2(w, 72), &hv, &held)) ImGui::OpenPopup("##patternpick");
+        inset(dl, a, b, 6.0f);
+        dl->AddRect(a, b, y2k::edge, 6.0f);
+        const int pi = std::max(0, std::min(in.fill_pattern, pl.count() - 1));
+        draw_alpha_preview(dl, ImVec2((a.x + b.x) * 0.5f - 26, a.y + 10), 52.0f, pl.get(pi).preview);
+        if (hv) tooltip(a, b, TipSide::Right, pl.get(pi).name.c_str(), nullptr);
+        pattern_picker_popup(in, ImVec2(kLeftW + 6.0f, y - 8.0f));
+        y += 72 + 10;
+        if (pi != kFillSolid && pi != kFillGradient) {
+            // Scale runs 0.02..2 on a log track, so the small end isn't crammed.
+            const float lo = 0.02f, hi = 2.0f;
+            char v[16];
+            ytext(dl, true, 11.0f, ImVec2(x0 + 2, y), y2k::label, "Scale");
+            std::snprintf(v, sizeof v, "%.2f", in.fill_scale);
+            ytext(dl, true, 11.0f, ImVec2(x0 + w - ysize(true, 11.0f, v).x, y), y2k::value, v);
+            y += 17;
+            float pct = std::log(std::max(lo, in.fill_scale) / lo) / std::log(hi / lo);
+            float t = y2k_track("##yFillScale", dl, ImVec2(x0, y), w, 14.0f, pct,
+                                "Pattern size, relative to the model");
+            if (t >= 0.0f) in.fill_scale = lo * std::pow(hi / lo, std::max(0.0f, std::min(1.0f, t)));
+            y += 24;
+            ytext(dl, true, 11.0f, ImVec2(x0 + 2, y), y2k::label, "Rotate");
+            std::snprintf(v, sizeof v, "%.0f\xC2\xB0", in.fill_angle);
+            ytext(dl, true, 11.0f, ImVec2(x0 + w - ysize(true, 11.0f, v).x, y), y2k::value, v);
+            y += 17;
+            t = y2k_track("##yFillAngle", dl, ImVec2(x0, y), w, 14.0f, in.fill_angle / 180.0f,
+                          "Pattern rotation");
+            if (t >= 0.0f) in.fill_angle = 180.0f * std::max(0.0f, std::min(1.0f, t));
+            y += 24;
+        }
     }
 
     // Tool options.

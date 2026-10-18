@@ -1,5 +1,6 @@
 #include "settings.h"
 #include "input.h"
+#include "brush_alpha.h"   // fill_patterns()
 
 #include <cstdio>
 #include <cstdlib>
@@ -235,6 +236,10 @@ std::string serialize(const InputState& in) {
     }
     if (in.active_alpha >= 0 && in.active_alpha < kBuiltinAlphaCount)
         append_kv(s, "active_alpha", in.active_alpha);
+    // Fill patterns are all built in, so an index is stable (new ones are appended).
+    append_kv(s, "fill_pattern", in.fill_pattern);
+    append_kv(s, "fill_scale",   in.fill_scale);
+    append_kv(s, "fill_angle",   in.fill_angle);
     char buf[128];
     std::snprintf(buf, sizeof(buf), "paint_color=%.6g %.6g %.6g\n",
                   (double)in.paint_color[0], (double)in.paint_color[1],
@@ -350,6 +355,12 @@ void apply_global_key(InputState& in, const std::string& key, const std::string&
         int a = (int)std::strtol(val.c_str(), nullptr, 10);
         if (a >= 0 && a < kBuiltinAlphaCount) in.active_alpha = a;
     }
+    else if (key == "fill_pattern") {
+        int p = (int)std::strtol(val.c_str(), nullptr, 10);
+        if (p >= 0 && p < fill_patterns().count()) in.fill_pattern = p;
+    }
+    else if (key == "fill_scale") in.fill_scale = clampf(std::strtof(val.c_str(), nullptr), 0.02f, 2.0f);
+    else if (key == "fill_angle") in.fill_angle = clampf(std::strtof(val.c_str(), nullptr), 0.0f, 180.0f);
 }
 
 std::string trim(const std::string& s) {
@@ -487,6 +498,9 @@ void settings_reset(InputState& input) {
     input.density_coarse_mult = fresh.density_coarse_mult;
     input.density_fine_mult   = fresh.density_fine_mult;
     input.active_alpha       = fresh.active_alpha;
+    input.fill_pattern       = fresh.fill_pattern;
+    input.fill_scale         = fresh.fill_scale;
+    input.fill_angle         = fresh.fill_angle;
     for (int i = 0; i < (int)KeyAction::COUNT; i++) input.keybinds[i] = fresh.keybinds[i];
     for (int i = 0; i < 3; i++) {
         input.paint_color[i]     = fresh.paint_color[i];

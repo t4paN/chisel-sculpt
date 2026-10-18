@@ -151,3 +151,75 @@ int AlphaLibrary::load_custom(const char* path, const char* display_name) {
                 logged_name.c_str(), w, h, count() - 1);
     return count() - 1;
 }
+
+// ---- fill-bucket patterns ----
+
+namespace {
+
+// One tile on (u,v) in [0,1)^2. Edges are smoothed over about a texel (e) so bilinear
+// sampling across the wrap has no hard seam; every shape here repeats exactly at 1.
+template <typename F>
+AlphaEntry make_tile(const char* name, uint32_t res, F fn) {
+    AlphaEntry e;
+    e.name = name;
+    e.w = res;
+    e.h = res;
+    e.data.resize((size_t)res * res);
+    const float px = 1.0f / res;
+    for (uint32_t y = 0; y < res; y++)
+        for (uint32_t x = 0; x < res; x++) {
+            float a = fn((x + 0.5f) * px, (y + 0.5f) * px, px);
+            e.data[y * res + x] = a < 0.0f ? 0.0f : (a > 1.0f ? 1.0f : a);
+        }
+    build_preview(e);
+    return e;
+}
+
+float fract(float x) { return x - std::floor(x); }
+// 1 on the middle half of each period, 0 on the outer half.
+float band(float x, float e) { return 1.0f - smoothstep01(0.25f - e, 0.25f + e, std::fabs(fract(x) - 0.5f)); }
+// 1 within half_w of each whole number.
+float line(float x, float half_w, float e) {
+    return 1.0f - smoothstep01(half_w - e, half_w + e, std::fabs(fract(x + 0.5f) - 0.5f));
+}
+
+AlphaLibrary build_fill_patterns() {
+    AlphaLibrary lib;
+    AlphaEntry solid;
+    solid.name = "Solid";
+    solid.is_round = true;
+    for (float& p : solid.preview) p = 1.0f;
+    lib.entries.push_back(std::move(solid));
+
+    AlphaEntry grad;   // no bitmap: the bucket lays it along the drag
+    grad.name = "Gradient (drag)";
+    for (int y = 0; y < 16; y++)
+        for (int x = 0; x < 16; x++) grad.preview[y * 16 + x] = 1.0f - (x + 0.5f) / 16.0f;
+    lib.entries.push_back(std::move(grad));
+
+    lib.entries.push_back(make_tile("Stripes", 128, [](float u, float, float e) { return band(u, e); }));
+    lib.entries.push_back(make_tile("Checks", 128, [](float u, float v, float e) {
+        float a = band(u, e), b = band(v, e);
+        return a * (1.0f - b) + b * (1.0f - a);
+    }));
+    lib.entries.push_back(make_tile("Grid", 128, [](float u, float v, float e) {
+        return std::fmax(line(u, 0.06f, e), line(v, 0.06f, e));
+    }));
+    lib.entries.push_back(make_tile("Dots", 128, [](float u, float v, float e) {
+        float du = fract(u) - 0.5f, dv = fract(v) - 0.5f;
+        return 1.0f - smoothstep01(0.27f - e, 0.27f + e, std::sqrt(du * du + dv * dv));
+    }));
+    lib.entries.push_back(make_tile("Zigzag", 128, [](float u, float v, float e) {
+        // Two chevron bands per tile; the triangle wave keeps both ends of u level.
+        float tri = std::fabs(fract(u) - 0.5f);
+        return band(2.0f * (v + tri), 3.0f * e);
+    }));
+    return lib;
+}
+
+}  // namespace
+
+const AlphaLibrary& fill_patterns() {
+    static const AlphaLibrary lib = build_fill_patterns();
+    return lib;
+}
