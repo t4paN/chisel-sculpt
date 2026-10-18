@@ -43,3 +43,11 @@ uint32_t snap_mesh_to_soup(Mesh& m, const std::vector<float>& pos,
                            float cell, float max_step, bool snap,
                            const std::vector<uint8_t>* pinned, float seam_tol,
                            const std::function<bool(Vec3, Vec3)>& accept);
+
+// SDF merge paint carry: for each vertex of m (normals current), the soup vertex
+// to take paint from — nearest corner of the closest same-facing soup tri that
+// `accept` puts on the skin. UINT32_MAX where none lies within `cell`.
+void pick_soup_sources(const Mesh& m, const std::vector<float>& pos,
+                       const std::vector<uint32_t>& idx, float cell,
+                       const std::function<bool(Vec3, Vec3)>& accept,
+                       std::vector<uint32_t>& pick);

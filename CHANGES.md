@@ -2,6 +2,13 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-18 — SDF merge: no more colour fringe at joins
+
+- Merging a coarse model into a dense one left a ragged band of the dense one's colour
+  around the join. Paint now comes from the closest surface that's still on the outside
+  of the result, not the closest vertex, which a buried or across-the-crease neighbour
+  could win. Tested by the user on native.
+
 ## 2026-10-17 — Paint layers (branch `paint-layers`)
 
 *Built GL, wgpu and web; shaders clean on GL, naga and Tint. GPU and CPU composites

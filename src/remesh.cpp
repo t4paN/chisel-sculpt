@@ -7,6 +7,7 @@
 #include <cstring>
 #include <unordered_map>
 #include <functional>
+#include <limits>
 #include <vector>
 
 // ---------------------------------------------------------------------------
@@ -2547,7 +2548,10 @@ struct RefSurface {
     // of a thin part — an ear, a fin, a lip — from snapping onto the other side,
     // which is closer than its own surface there. Returns false if nothing
     // qualifying lies within one cell.
-    bool closest(Vec3 q, Vec3 nrm, Vec3& out, float& dist) const {
+    // skip (optional): tris flagged non-zero are invisible to the search.
+    // tri_out (optional): which tri the closest point lies on.
+    bool closest(Vec3 q, Vec3 nrm, Vec3& out, float& dist,
+                 const std::vector<uint8_t>* skip = nullptr, uint32_t* tri_out = nullptr) const {
         if (empty()) return false;
         const bool check_facing = nrm.dot(nrm) > 0.25f;
         int cx = ci(q.x), cy = ci(q.y), cz = ci(q.z);
@@ -2559,11 +2563,15 @@ struct RefSurface {
                     uint32_t h = hash(x, y, z) & mask;
                     for (uint32_t j = bucket_off[h]; j < bucket_off[h+1]; j++) {
                         uint32_t t = bucket_tri[j];
+                        if (skip && (*skip)[t]) continue;
                         if (check_facing && this->nrm(t).dot(nrm) < 0.3f) continue;
                         Vec3 c = closest_on_tri(q, v(t,0), v(t,1), v(t,2));
                         Vec3 d = c - q;
                         float d2 = d.dot(d);
-                        if (d2 < best) { best = d2; out = c; found = true; }
+                        if (d2 < best) {
+                            best = d2; out = c; found = true;
+                            if (tri_out) *tri_out = t;
+                        }
                     }
                 }
         dist = std::sqrt(best);
@@ -2771,6 +2779,58 @@ uint32_t snap_mesh_to_soup(Mesh& m, const std::vector<float>& pos,
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(),
                 snap ? "" : " - keep-detail OFF, measuring only");
     return moved;
+}
+
+// Which soup vertex each vertex of m should take its paint from. Nearest VERTEX
+// alone gets joins wrong: a coarse input's vertices sit far apart, so a point on
+// its surface near the crease is often closer to a dense neighbour's vertex across
+// the crease — or to that neighbour's buried half underneath — and takes the wrong
+// colour in a fringe several voxels wide. So: the closest same-facing soup TRI
+// whose centre `accept` puts on the result's skin, then that tri's nearest corner
+// (a single source keeps paint crisp and lets every paint layer carry by the same
+// pick). UINT32_MAX = no skin tri within a voxel; the caller falls back.
+void pick_soup_sources(const Mesh& m, const std::vector<float>& pos,
+                       const std::vector<uint32_t>& idx, float cell,
+                       const std::function<bool(Vec3, Vec3)>& accept,
+                       std::vector<uint32_t>& pick) {
+    auto t0 = std::chrono::steady_clock::now();
+    const uint32_t vc = m.vertex_count();
+    pick.assign(vc, UINT32_MAX);
+    RefSurface ref;
+    ref.build_borrowed(pos.data(), idx.data(), (uint32_t)(idx.size() / 3), cell);
+    if (ref.empty() || m.norm_x.size() < vc) return;
+
+    // Skin test once per tri, not per candidate: two field samples each.
+    std::vector<uint8_t> buried(ref.nt, 0);
+    uint32_t n_buried = 0;
+    for (uint32_t t = 0; t < ref.nt; t++) {
+        Vec3 n = ref.nrm(t);
+        if (n.dot(n) < 0.25f) { buried[t] = 1; n_buried++; continue; }
+        Vec3 c = (ref.v(t,0) + ref.v(t,1) + ref.v(t,2)) * (1.0f / 3.0f);
+        if (!accept(c, n)) { buried[t] = 1; n_buried++; }
+    }
+
+    uint32_t hits = 0;
+    for (uint32_t v = 0; v < vc; v++) {
+        Vec3 q = m.get_pos(v);
+        Vec3 nrm(m.norm_x[v], m.norm_y[v], m.norm_z[v]);
+        float nl = nrm.length();
+        if (nl <= 1e-12f) continue;
+        Vec3 cp; float d; uint32_t t = UINT32_MAX;
+        if (!ref.closest(q, nrm * (1.0f / nl), cp, d, &buried, &t)) continue;
+        uint32_t bestk = 0; float bd = std::numeric_limits<float>::max();
+        for (int k = 0; k < 3; k++) {
+            Vec3 e = ref.v(t,k) - cp;
+            float d2 = e.dot(e);
+            if (d2 < bd) { bd = d2; bestk = (uint32_t)k; }
+        }
+        pick[v] = idx[t*3 + bestk];
+        hits++;
+    }
+    std::printf("[sdf] paint pick: %u/%u verts from skin tris (%u of %u soup tris buried), "
+                "rest nearest-vertex (%.0f ms)\n",
+                hits, vc, n_buried, ref.nt,
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
 }
 
 // ---------------------------------------------------------------------------

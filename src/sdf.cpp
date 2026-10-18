@@ -1196,7 +1196,8 @@ static void transfer_attrs_world(Mesh& out,
                                  const std::vector<float>&    src_dens,
                                  bool                         carry_dens,
                                  Vec3 origin, float cell, uint32_t R,
-                                 std::vector<uint32_t>*       pick = nullptr) {
+                                 std::vector<uint32_t>*       pick = nullptr,
+                                 const std::vector<uint32_t>* prefer = nullptr) {
     const uint32_t ns = (uint32_t)(src_pos.size() / 3);
     const uint32_t vc = out.vertex_count();
     // pick (optional): the source vertex each output vertex took its attributes from,
@@ -1233,7 +1234,10 @@ static void transfer_attrs_world(Mesh& out,
         int ci, cj, ck; cell_of(px, py, pz, ci, cj, ck);
         float    best   = std::numeric_limits<float>::max();
         uint32_t best_s = UINT32_MAX;
-        for (int r = 0; r <= RMAX; r++) {
+        // prefer: a skin-aware choice made by the caller (pick_soup_sources). The
+        // ring search below is only the fallback for vertices it found nothing for.
+        if (prefer && v < prefer->size() && (*prefer)[v] < ns) best_s = (*prefer)[v];
+        for (int r = 0; best_s == UINT32_MAX && r <= RMAX; r++) {
             for (int dk = -r; dk <= r; dk++)
             for (int dj = -r; dj <= r; dj++)
             for (int di = -r; di <= r; di++) {
@@ -2007,11 +2011,21 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
         // (skipped entirely if no source carries either attribute).
         std::vector<uint32_t> pick;
         const bool carry_layers = !j.layers.empty();
-        if (j.any_paint || j.any_density)
+        // Skin-aware pick first, so a coarse input's colour doesn't lose its own
+        // surface near a join to a dense neighbour's vertices (see pick_soup_sources).
+        std::vector<uint32_t> skin_pick;
+        if (j.any_paint || j.any_density) {
+            const float hv = 0.5f * grid.voxel;
+            pick_soup_sources(welded, j.pos, j.idx, grid.voxel,
+                              [&](Vec3 c, Vec3 n) {
+                                  return sample_field(j.field_cpu, grid, c + n * hv) > 0.0f &&
+                                         sample_field(j.field_cpu, grid, c - n * hv) < 0.0f;
+                              }, skin_pick);
             transfer_attrs_world(welded, j.pos, j.vcol, j.any_paint,
                                  j.vdens, j.any_density,
                                  grid.origin, grid.voxel, grid.R,
-                                 carry_layers ? &pick : nullptr);
+                                 carry_layers ? &pick : nullptr, &skin_pick);
+        }
         if (carry_layers) {
             // Every layer takes the same source vertex the composite did, so the
             // result looks the same and every layer survives.
