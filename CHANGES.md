@@ -7,9 +7,8 @@ Short, chronological log of notable changes. Newest on top.
 - When the compositor doesn't hand over a frame in time (seen on KWin as status 3,
   Timeout), Chisel drew into nothing and the graphics layer aborted the app. That frame now
   goes to a spare offscreen image and isn't shown, and nothing is presented without a frame.
-  Native WebGPU only; GL and the browser never hit it. The user repeated the session that
-  crashed without a crash; the new console line (`[win] no swapchain frame`) wasn't caught
-  in a log yet.
+  Native WebGPU only; GL and the browser never hit it. Stress-tested by the user at ~4M
+  tris with no crash (the timeout itself didn't recur in the logged run).
 
 ## 2026-10-18 — PLY export stands upright in Blender
 
