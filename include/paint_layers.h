@@ -193,12 +193,17 @@ void paint_bucket_island(const Mesh& mesh, uint32_t seed, std::vector<uint32_t>&
 
 // Per-island-vertex pattern value in [0,1] for paint_bucket_apply: 0 (black) = the main
 // colour, 1 (white) = the secondary.
-// A tiling pattern, projected from the three axes and blended by which way the surface
-// faces (no UVs, no seams). `tile` = world size of one period, `angle` = radians,
-// `origin` = where a tile corner sits (the clicked point, so the click places it).
+// A tiling pattern, projected along three axes and blended by which way the surface
+// faces (no UVs, no seams). The axes are the click's: `frame` = right, up, normal (9
+// floats, orthonormal), so the main projection looks straight down onto the clicked spot
+// and the pattern spreads out from it undistorted; it is favoured until the surface
+// turns ~58 degrees away, so the side projections and their blend only take the rim.
+// `tile` = world size of one period, `angle` = radians, `origin` = where a tile corner
+// sits (the clicked point).
 void paint_cover_triplanar(const Mesh& mesh, const std::vector<uint32_t>& island,
                            const float* data, uint32_t w, uint32_t h, float tile,
-                           float angle, const float origin[3], std::vector<float>& value);
+                           float angle, const float origin[3], const float frame[9],
+                           std::vector<float>& value);
 // A linear ramp along the a-to-b line: 0 (main colour) at and behind `a`, 1 (secondary)
 // at and beyond `b`.
 void paint_cover_gradient(const Mesh& mesh, const std::vector<uint32_t>& island,

@@ -415,26 +415,34 @@ static float sample_wrap(const float* data, uint32_t w, uint32_t h, float u, flo
 
 void paint_cover_triplanar(const Mesh& mesh, const std::vector<uint32_t>& island,
                            const float* data, uint32_t w, uint32_t h, float tile,
-                           float angle, const float origin[3], std::vector<float>& cover) {
+                           float angle, const float origin[3], const float frame[9],
+                           std::vector<float>& cover) {
     cover.resize(island.size());
     const float inv = 1.0f / std::max(tile, 1e-6f);
     const float ca = std::cos(angle), sa = std::sin(angle);
     const bool has_n = mesh.norm_x.size() >= mesh.vertex_count();
+    const float* R = frame;       // right
+    const float* U = frame + 3;   // up
+    const float* N = frame + 6;   // the clicked spot's normal
+    auto dot = [](const float* a, float x, float y, float z) { return a[0] * x + a[1] * y + a[2] * z; };
+    // Facing weights are cos^4; the main one is boosted by 6.5 so the side projections
+    // only win past tan(theta) = 6.5^(1/4) ~ 1.6, i.e. ~58 degrees off the click.
+    constexpr float kMainBias = 6.5f;
     for (size_t k = 0; k < island.size(); k++) {
         const uint32_t v = island[k];
-        const float x = (mesh.pos_x[v] - origin[0]) * inv;
-        const float y = (mesh.pos_y[v] - origin[1]) * inv;
-        const float z = (mesh.pos_z[v] - origin[2]) * inv;
-        // Facing weights, sharpened (^4) so each projection owns its faces and the
-        // blurry blend band where two meet stays narrow.
+        const float rx = mesh.pos_x[v] - origin[0], ry = mesh.pos_y[v] - origin[1],
+                    rz = mesh.pos_z[v] - origin[2];
+        const float x = dot(R, rx, ry, rz) * inv, y = dot(U, rx, ry, rz) * inv,
+                    z = dot(N, rx, ry, rz) * inv;
         float wx = 1, wy = 1, wz = 1;
         if (has_n) {
-            wx = mesh.norm_x[v] * mesh.norm_x[v]; wx *= wx;
-            wy = mesh.norm_y[v] * mesh.norm_y[v]; wy *= wy;
-            wz = mesh.norm_z[v] * mesh.norm_z[v]; wz *= wz;
+            const float nx = mesh.norm_x[v], ny = mesh.norm_y[v], nz = mesh.norm_z[v];
+            wx = dot(R, nx, ny, nz); wx *= wx; wx *= wx;
+            wy = dot(U, nx, ny, nz); wy *= wy; wy *= wy;
+            wz = dot(N, nx, ny, nz); wz *= wz; wz *= wz * kMainBias;
         }
         const float sum = wx + wy + wz;
-        if (sum <= 0.0f) { wx = wy = wz = 1.0f / 3.0f; } else { wx /= sum; wy /= sum; wz /= sum; }
+        if (sum <= 0.0f) { wx = wy = 0.0f; wz = 1.0f; } else { wx /= sum; wy /= sum; wz /= sum; }
         // Each axis sees the other two as its (across, up) plane; image rows run down.
         auto plane = [&](float pu, float pv) {
             const float u = ca * pu - sa * pv, t = sa * pu + ca * pv;

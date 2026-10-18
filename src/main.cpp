@@ -1807,6 +1807,7 @@ int main(int argc, char* argv[]) {
             // Patterns and gradients read positions/normals: pull the GPU's back first.
             if (!solid) scene.materialize_active_cpu();
             // The surface under a screen pixel: nearest corner (the seed) and the point.
+            float click_n[3] = {0.0f, 0.0f, 1.0f};   // the surface normal at the last surface_at hit
             auto surface_at = [&](float fx, float fy, uint32_t* seed, float out[3]) -> bool {
                 const int cx = (int)fx, cy = (int)fy;
                 if (cx < 0 || cx >= win_w || cy < 0 || cy >= win_h) return false;
@@ -1824,6 +1825,15 @@ int main(int argc, char* argv[]) {
                         out[0] += bw[c] * pm.pos_x[ix[c]];
                         out[1] += bw[c] * pm.pos_y[ix[c]];
                         out[2] += bw[c] * pm.pos_z[ix[c]];
+                    }
+                }
+                if (pm.norm_x.size() >= pm.vertex_count()) {
+                    Vec3 n{0, 0, 0};
+                    for (int c = 0; c < 3; c++)
+                        n = n + Vec3{pm.norm_x[ix[c]], pm.norm_y[ix[c]], pm.norm_z[ix[c]]} * bw[c];
+                    if (n.length() > 1e-6f) {
+                        n = n.normalized();
+                        click_n[0] = n.x; click_n[1] = n.y; click_n[2] = n.z;
                     }
                 }
                 return true;
@@ -1869,10 +1879,22 @@ int main(int argc, char* argv[]) {
                     paint_cover_gradient(pm, island, a, b, value);
                     cv = value.data();
                 } else if (!solid) {
+                    // The click's frame: its normal, and the camera's up laid onto the
+                    // surface there, so Rotate 0 reads upright from where you look.
+                    // (surface_at(A) ran last on this path, so click_n is A's.)
+                    Vec3 n{click_n[0], click_n[1], click_n[2]};
+                    Vec3 cam_fwd = (camera.target - camera.get_position()).normalized();
+                    Vec3 cam_right = cam_fwd.cross(Vec3{0, 1, 0}).normalized();
+                    Vec3 cam_up = cam_right.cross(cam_fwd).normalized();
+                    Vec3 up = cam_up - n * n.dot(cam_up);
+                    if (up.length() < 1e-3f) up = cam_right - n * n.dot(cam_right);
+                    up = up.normalized();
+                    Vec3 right = up.cross(n).normalized();
+                    const float frame[9] = {right.x, right.y, right.z, up.x, up.y, up.z, n.x, n.y, n.z};
                     const AlphaEntry& pe = fill_patterns().get(pattern);
                     paint_cover_triplanar(pm, island, pe.data.data(), pe.w, pe.h,
                                           input.fill_scale * mesh_radius,
-                                          input.fill_angle * 3.14159265f / 180.0f, a, value);
+                                          input.fill_angle * 3.14159265f / 180.0f, a, frame, value);
                     cv = value.data();
                 }
                 UndoEntry e;
