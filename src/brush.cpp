@@ -724,7 +724,13 @@ void BrushStroke::begin_dab(DabContext& ctx, uint8_t kind) {
         mx = (uint32_t)std::min(guess, (double)vc);
         if (mx == 0) mx = 1;
     }
-    if (mx) {
+    // A window of nothing but EMPTY dabs (mx 0, recent_n > 0) is history saying "tiny",
+    // not a missing one: it takes the 1024 floor. Falling through to the whole-mesh
+    // default here was a trap: paint-smoothing a spot the active layer doesn't cover
+    // changes nothing, 32 such dabs zero the window, and every dab after reserved and
+    // read back the WHOLE mesh. 1.1 GB of readback for one small stroke at L8, the ring
+    // full and grown to 22M words (2026-10-18).
+    if (mx || recent_n) {
         est = (mx > vc / kCapSlack) ? vc : mx * kCapSlack;
         need = std::min(vc, mx + mx / 2);
         if (est < 1024u) est = 1024u;
@@ -901,6 +907,9 @@ void BrushStroke::drain_dab_readbacks(DabContext& ctx) {
                 snapshot_whole_mesh(*this, ctx, pd.kind);
                 snapped_whole_mesh = true;
             }
+            // The layer composite missed the surplus too (see composite_after_color_dab).
+            if (pd.kind == DAB_COLOR && pd.vc == ctx.mesh.vertex_count())
+                ctx.compute.dispatch_color_composite_all(pd.vc);
         }
         // Feed the window from EVERY dab, overflowed ones included. `total` is the true
         // count either way — the counter runs past `cap` on purpose so the CPU can see
@@ -2164,6 +2173,17 @@ void BrushStroke::apply_density_smooth_gpu(DabContext& ctx, float dab_x, float d
     needs_mesh_update = true;
 }
 
+// Re-blend the paint layers over what this dab changed. The cheap path walks the dab's
+// dirty list, so it only sees the ids that FIT its region: a dab with no region (cap 0)
+// or one that overruns it changed colours the list doesn't name, and those stayed on
+// screen unblended. That read as "smoothing stopped working" (2026-10-18). With no
+// region, re-blend the whole mesh now; an overrun is only known when the read lands,
+// so drain_dab_readbacks re-blends then. One pass over the mesh, and rare.
+void BrushStroke::composite_after_color_dab(DabContext& ctx, uint32_t vc) {
+    if (dab_region_valid) ctx.compute.dispatch_color_composite_dirty(vc);
+    else                  ctx.compute.dispatch_color_composite_all(vc);
+}
+
 void BrushStroke::apply_color_gpu(DabContext& ctx, float dab_x, float dab_y,
                                   float strength, float hardness, bool erase) {
 
@@ -2201,7 +2221,7 @@ void BrushStroke::apply_color_gpu(DabContext& ctx, float dab_x, float dab_y,
 
     set_alpha_dab(ctx, true);
     ctx.compute.dispatch_color_paint(p, ctx.renderer.vbo_pos);
-    ctx.compute.dispatch_color_composite_dirty(p.vertex_count);   // re-blend what it touched
+    composite_after_color_dab(ctx, p.vertex_count);
 
     // Dirty list lands async → color first-touch snapshots in drain_dab_readbacks.
     kick_dab_readback(ctx, DAB_COLOR);
@@ -2235,7 +2255,7 @@ void BrushStroke::apply_color_smooth_gpu(DabContext& ctx, float dab_x, float dab
     p.vertex_count = ctx.mesh.vertex_count();
 
     ctx.compute.dispatch_color_smooth(p, ctx.renderer.vbo_pos, ctx.renderer.ebo);
-    ctx.compute.dispatch_color_composite_dirty(p.vertex_count);
+    composite_after_color_dab(ctx, p.vertex_count);
 
     // Dirty list lands async → color first-touch snapshots in drain_dab_readbacks.
     kick_dab_readback(ctx, DAB_COLOR);

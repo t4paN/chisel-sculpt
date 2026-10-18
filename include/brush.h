@@ -235,6 +235,7 @@ struct BrushStroke {
 
     void begin_dab(DabContext& ctx, uint8_t kind = DAB_GEO);
     void kick_dab_readback(DabContext& ctx, uint8_t kind);
+    void composite_after_color_dab(DabContext& ctx, uint32_t vc);
     void drain_dab_readbacks(DabContext& ctx);
     bool dab_readbacks_pending() const { return !pending_dabs.empty() || move.capture_tk != 0; }
 

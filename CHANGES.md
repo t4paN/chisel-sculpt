@@ -2,6 +2,22 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-18 — Paint smooth on layers: visible again, and no more gigabyte readbacks
+
+*Built GL, wgpu and web. Tested by the user on native WebGPU at level 8 with layers: small
+smooth strokes blur again; the log shows no arena fallbacks and at most 7 MB read back per
+stroke (was 1.1 GB).*
+
+- **Smoothing on a layer could silently stop showing.** After a paint or smooth dab, the
+  layers are re-blended only over the vertices the dab listed. A dab that ran out of list
+  space changed colours the list didn't name, and those stayed on screen unblended. Such
+  dabs now re-blend the whole mesh (one cheap pass, and rare). Latent since layers shipped.
+- **Smoothing nothing made every later dab huge.** Paint-smoothing a spot the active layer
+  doesn't cover changes nothing. After 32 such dabs, the size estimate read its all-zero
+  history as "no history" and reserved, then read back, the whole mesh on every dab: about
+  1.1 GB of readback for one small stroke at level 8, with the list ring full and growing.
+  An all-zero history now means "small".
+
 ## 2026-10-18 — Native WebGPU: a missed frame no longer kills the app
 
 - When the compositor doesn't hand over a frame in time (seen on KWin as status 3,
