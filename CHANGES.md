@@ -2,6 +2,23 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-18 — Paint layers survive saving
+
+*Built GL, wgpu and web. A scratch round-trip test passed (every layer field and pixel
+exact, with and without subdivision levels; a damaged or stripped layer section loads
+flattened). Hand-tested by the user: a 3-layer save/quit/reload with Multiply and clip,
+painting and level changes after the load, models without levels, mixed scenes, old files,
+and the browser.*
+
+- **Saving keeps every layer**: order, names, visibility, opacity, blend mode, clip and
+  the active layer.
+- **Older Chisel versions still open these files**, showing the blended picture as one
+  layer. The file format version didn't change: the blended picture stays where it always
+  was, and the layers ride in an extra section that older readers skip. A damaged layer
+  section loads the model flattened rather than failing.
+- Models without layers save byte-for-byte as before. Models with layers cost a little
+  more, since the layer you're painting on is also stored on its own.
+
 ## 2026-10-18 — SDF merge: no more colour fringe at joins
 
 - Merging a coarse model into a dense one left a ragged band of the dense one's colour

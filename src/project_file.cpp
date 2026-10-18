@@ -1,6 +1,7 @@
 #include "project_file.h"
 #include "project_file_v1.h"
 #include <fstream>
+#include <cstdio>
 #include <cstring>
 #include <vector>
 #include <algorithm>
@@ -33,7 +34,14 @@ static constexpr uint32_t MAGIC   = 0x4C534843; // "CHSL" little-endian
 // absent mask, and an all-0.5 density field is exactly an absent one. Together
 // these cut typical files by 45-73% losslessly. Older files are unaffected;
 // old builds refuse v7 cleanly via the version check.
+//
+// Paint layers (2026-10-18) did NOT bump the version. A layered entity's colour slots
+// still hold the blended picture, so any v7 reader shows it right, and the layers ride
+// in an optional LAYR chunk written after the entity's ENTY. Readers that predate it
+// skip the unknown chunk and load the flattened picture; this one swaps the layers
+// back in (see write_layr_chunk). The chunk carries its own format byte for growth.
 static constexpr uint32_t VERSION = 7;
+static constexpr uint8_t  LAYR_FORMAT = 1;
 
 struct ChunkHeader {
     char     tag[4];
@@ -83,10 +91,11 @@ static bool all_equal(const std::vector<float>& a, float v) {
 // multires stack is locked, in which case scene.cpp regenerates the surface by
 // cascading that stack and the stored copy would be dropped on the floor.
 // `may_drop_mask` gates the blank-mask elision (see write_enty_chunk).
-// Paint layers aren't in the file format yet (that's v8). Until then a layered entity
-// saves its COMPOSITE in every colour slot, so the file keeps the look and loads as a
-// single opaque Base layer. Every colour array here is a prefix of one vertex
-// numbering (working level, base cage, finest plane), so one stack composites them all.
+// A layered entity saves its COMPOSITE in every colour slot, so a reader that doesn't
+// know LAYR still shows the right picture (as one flattened layer). The layers
+// themselves, and the active layer's own pixels for these same three slots, go in the
+// LAYR chunk. Every colour array here is a prefix of one vertex numbering (working
+// level, base cage, finest plane), so one stack composites them all.
 static const std::vector<uint32_t>& paint_for_file(const PaintLayerStack& layers,
                                                    const std::vector<uint32_t>& act,
                                                    std::vector<uint32_t>& scratch) {
@@ -219,6 +228,62 @@ static void write_enty_chunk(std::ofstream& f, const EntityRecord& e) {
     write_chunk_end(f, sp);
 }
 
+// One layer's pixels: u8 dense, u32 vcount, u32 n, [n ids if packed], n rgba.
+// vcount 0 = an empty array (unpainted), which is not the same as all-zero.
+// `empty_slot` (the active layer) writes the flags with no pixels: they're elsewhere.
+static void write_layer_pixels(std::ofstream& f, const PaintLayer& L, bool empty_slot = false) {
+    const uint32_t n = empty_slot ? 0u : (uint32_t)L.rgba.size();
+    write_u8(f, L.dense ? 1 : 0);
+    write_u32(f, L.vcount);
+    write_u32(f, n);
+    if (n && !L.dense) write_raw(f, L.ids.data(), n * sizeof(uint32_t));
+    if (n)             write_raw(f, L.rgba.data(), n * sizeof(uint32_t));
+}
+
+// A dense colour array, packed on the way out when that's smaller (paint is usually
+// sparse on an upper layer). Packing only drops zero-alpha entries, which premultiplied
+// paint makes all-zero, so unpacking gives back the same array.
+static void write_dense_pixels(std::ofstream& f, const std::vector<uint32_t>& a) {
+    PaintLayer L;
+    L.dense  = true;
+    L.vcount = (uint32_t)a.size();
+    L.rgba   = a;
+    paint_layer_pack(L);
+    write_layer_pixels(f, L);
+}
+
+// LAYR: u32 entity id, u8 format, i32 active, u32 next_id, u32 layer count, then per
+// layer (bottom first) u32 id, u32 name length + bytes, u8 visible, f32 opacity,
+// u8 mode, u8 clip, pixels. The active layer's stack slot is empty by design (its
+// pixels live in the colour arrays), so it's written empty and followed, after the
+// last layer, by the active layer's raw pixels for the three colour slots the ENTY
+// body filled with the composite: working mesh, finest plane, base cage.
+static void write_layr_chunk(std::ofstream& f, const EntityRecord& e) {
+    const PaintLayerStack& s = e.mesh.paint_layers;
+    std::streampos sp;
+    write_chunk_begin(f, "LAYR", sp);
+    write_u32(f, e.id);
+    write_u8(f, LAYR_FORMAT);
+    write_i32(f, s.active);
+    write_u32(f, s.next_id);
+    write_u32(f, (uint32_t)s.layers.size());
+    for (int i = 0; i < (int)s.layers.size(); i++) {
+        const PaintLayer& L = s.layers[i];
+        write_u32(f, L.id);
+        write_u32(f, (uint32_t)L.name.size());
+        write_raw(f, L.name.data(), L.name.size());
+        write_u8(f, L.visible ? 1 : 0);
+        write_raw(f, &L.opacity, 4);
+        write_u8(f, (uint8_t)L.mode);
+        write_u8(f, L.clip ? 1 : 0);
+        write_layer_pixels(f, L, i == s.active);
+    }
+    write_dense_pixels(f, e.mesh.color);
+    write_dense_pixels(f, e.multires.color);
+    write_dense_pixels(f, e.multires.base.color);
+    write_chunk_end(f, sp);
+}
+
 SaveResult save_project(const char* path, const ProjectData& data) {
     std::ofstream f(path, std::ios::binary);
     if (!f.is_open()) return SaveResult::ERR_OPEN;
@@ -229,8 +294,10 @@ SaveResult save_project(const char* path, const ProjectData& data) {
     write_camr_chunk(f, data.camera);
     write_opts_chunk(f, data.mirror_x, data.subdiv_level);
     write_scen_chunk(f, data);
-    for (const EntityRecord& e : data.entities)
+    for (const EntityRecord& e : data.entities) {
         write_enty_chunk(f, e);
+        if (!e.mesh.paint_layers.empty()) write_layr_chunk(f, e);
+    }
 
     if (!f.good()) return SaveResult::ERR_WRITE;
     return SaveResult::OK;
@@ -442,6 +509,96 @@ static bool read_enty_chunk(ChunkReader& r, EntityRecord& e, bool has_color,
     return true;
 }
 
+// Pixels as write_layer_pixels laid them out. Every count is checked against what's
+// left in the chunk BEFORE anything is allocated, so a damaged file can't ask for 4 GB.
+static bool read_layer_pixels(ChunkReader& r, PaintLayer& L, bool empty_slot = false) {
+    uint8_t dense;
+    uint32_t vcount, n;
+    if (!r.read_u8(dense) || !r.read_u32(vcount) || !r.read_u32(n)) return false;
+    L.dense  = dense != 0;
+    L.vcount = vcount;
+    L.ids.clear();
+    L.rgba.clear();
+    if (empty_slot) return n == 0;
+    if (n > vcount) return false;
+    if (L.dense && n != vcount) return false;
+    const size_t need = (size_t)n * (L.dense ? 4 : 8);
+    if (need > r.remaining()) return false;
+    if (!L.dense) {
+        if (!r.read_u32_vec(L.ids, n)) return false;
+        for (uint32_t k = 0; k < n; k++)                      // ascending, in range
+            if (L.ids[k] >= vcount || (k && L.ids[k] <= L.ids[k - 1])) return false;
+    }
+    return r.read_u32_vec(L.rgba, n);
+}
+
+// The active layer's raw pixels for one colour slot. They must describe the same array
+// the ENTY body filled with the composite; a slot the body reader dropped (a v5 plane
+// of the wrong size) drops its raw copy too.
+static bool read_raw_slot(ChunkReader& r, const std::vector<uint32_t>& slot,
+                          std::vector<uint32_t>& out) {
+    PaintLayer L;
+    if (!read_layer_pixels(r, L)) return false;
+    if (slot.empty()) { out.clear(); return true; }
+    if (L.vcount != slot.size()) return false;
+    paint_layer_unpack(L, L.vcount);
+    out = std::move(L.rgba);
+    return true;
+}
+
+// LAYR (see write_layr_chunk). Anything off and the entity keeps the flattened
+// picture its colour slots already hold: a damaged layer section costs the layers,
+// never the model. Returns false only to say so on the console.
+static bool read_layr_chunk(ChunkReader& r, ProjectData& data) {
+    uint32_t eid;
+    uint8_t  format;
+    if (!r.read_u32(eid) || !r.read_u8(format)) return false;
+    EntityRecord* e = nullptr;
+    for (EntityRecord& c : data.entities) if (c.id == eid) e = &c;
+    if (!e || format != LAYR_FORMAT) return false;
+
+    PaintLayerStack s;
+    int32_t  active;
+    uint32_t count;
+    if (!r.read_i32(active) || !r.read_u32(s.next_id) || !r.read_u32(count)) return false;
+    if (count == 0 || count > (uint32_t)kMaxPaintLayers) return false;
+    if (active < 0 || active >= (int32_t)count) return false;
+    s.active = active;
+    s.layers.resize(count);
+    for (uint32_t i = 0; i < count; i++) {
+        PaintLayer& L = s.layers[i];
+        uint32_t len;
+        uint8_t  vis, mode, clip;
+        if (!r.read_u32(L.id) || !r.read_u32(len)) return false;
+        if (len > 256 || len > r.remaining()) return false;
+        L.name.resize(len);
+        if (!r.read_raw(&L.name[0], len)) return false;
+        if (!r.read_u8(vis) || !r.read_raw(&L.opacity, 4) ||
+            !r.read_u8(mode) || !r.read_u8(clip)) return false;
+        if (mode >= (uint8_t)BlendMode::Count) return false;
+        if (!(L.opacity >= 0.0f && L.opacity <= 1.0f)) return false;   // also catches NaN
+        L.visible = vis != 0;
+        L.mode    = (BlendMode)mode;
+        L.clip    = clip != 0;
+        if (!read_layer_pixels(r, L, (int32_t)i == active)) return false;
+        for (uint32_t j = 0; j < i; j++) if (s.layers[j].id == L.id) return false;
+        if (L.id >= s.next_id) return false;
+    }
+    std::vector<uint32_t> work, plane, base;
+    if (!read_raw_slot(r, e->mesh.color, work) ||
+        !read_raw_slot(r, e->multires.color, plane) ||
+        !read_raw_slot(r, e->multires.base.color, base)) return false;
+
+    e->mesh.paint_layers  = std::move(s);
+    e->mesh.color         = std::move(work);
+    e->multires.color     = std::move(plane);
+    e->multires.base.color = std::move(base);
+    std::printf("[paint-layers] entity %u: %zu layers loaded, \"%s\" active\n",
+                e->id, e->mesh.paint_layers.layers.size(),
+                e->mesh.paint_layers.layers[active].name.c_str());
+    return true;
+}
+
 // v2+ reader: file already validated (magic + version ok) and `f` positioned
 // just past the 8-byte header. Layout differences are feature-gated: v3+
 // carries per-vertex paint colour in each mesh body (has_color), v5+ carries
@@ -473,6 +630,10 @@ static LoadResult load_project_v2(std::ifstream& f, std::streamoff file_size,
             if (!read_enty_chunk(cr, e, has_color, has_planes, has_density, has_derived))
                 return LoadResult::ERR_CORRUPT;
             data.entities.push_back(std::move(e));
+        } else if (std::memcmp(hdr.tag, "LAYR", 4) == 0) {
+            if (!read_layr_chunk(cr, data))
+                std::printf("[load] a paint layer section didn't read back: that model "
+                            "keeps its flattened picture\n");
         } else if (std::memcmp(hdr.tag, "SCEN", 4) == 0) {
             if (!read_scen_chunk(cr, data)) return LoadResult::ERR_CORRUPT;
             has_scen = true;
