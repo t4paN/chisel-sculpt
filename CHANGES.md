@@ -8,8 +8,10 @@ Short, chronological log of notable changes. Newest on top.
 are compared vertex by vertex. They're identical at full opacity; below it about 0.1% of
 verts differ by 1/255, which is float rounding at the 8-bit boundary, not a logic error.
 Hand-tested by the user on native: the panel, blending, clip, tools, undo, merge, every
-level operation, remesh and single-model SDF. Still owed: undo after remesh, two-model
-SDF merge, save/PLY, and the browser.*
+level operation, remesh, single-model SDF, undo after remesh, the per-row trash can,
+two-model SDF merge plus its undo (layers come back), save and reload (one flattened
+layer, as expected) and PLY export (colours carried; Blender's PLY importer assumes
+Z-up, so set Up Axis: Y). Still owed: the browser.*
 
 - **Layers for vertex paint**, kept minimal. A **Layers panel** in
   paint mode lists layers top first, with an eye and click-to-select per row. Below the
