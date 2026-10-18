@@ -81,6 +81,7 @@ enum class KeyAction : int {
     MODE_SCULPT, MODE_INSERT, MODE_SELECT, MODE_PAINT,
     BRUSH_DRAW, BRUSH_CLAY, BRUSH_INFLATE, BRUSH_CREASE, BRUSH_PINCH,
     BRUSH_MOVE, BRUSH_LIMB, BRUSH_MASK, BRUSH_PREV, BRUSH_NEXT,
+    PAINT_BUCKET, PAINT_PICKER,
     HOLD_SIZE, HOLD_STRENGTH, HOLD_HARDNESS, HOLD_SPACING, SIZE_DOWN, SIZE_UP, AUTOSMOOTH,
     LEVEL_UP, LEVEL_DOWN, PROJECT, MIRROR, REMESH, MERGE, DELETE_MESH,
     MASK_INVERT, MASK_CLEAR,
@@ -99,13 +100,25 @@ struct KeyBind {
 };
 constexpr int kKeyModMask = GLFW_MOD_CONTROL | GLFW_MOD_SHIFT | GLFW_MOD_ALT;
 
+// Where a shortcut is live. Sculpt and Paint each have their own dock, so each has its
+// own keys: a Sculpt key does nothing in paint mode and the other way round, which is
+// what lets one letter mean a sculpt brush in one and a paint tool in the other.
+// Global keys (view, files, mask, brush feel) work everywhere, but in the mode that
+// owns a scoped key, that key wins over a Global one bound to the same letter.
+enum class KeyScope : uint8_t { Global, Sculpt, Paint };
+
 struct KeyActionInfo {
     const char* id;      // on-disk name, stable forever
     const char* group;   // section heading in the Key bindings window
     const char* label;   // what it does, short
     const char* note;    // what it does in other modes, or nullptr
     KeyBind     def;     // factory binding
+    KeyScope    scope = KeyScope::Global;
 };
+// Two scopes share a key only where both are live: Global overlaps everything.
+inline bool key_scopes_overlap(KeyScope a, KeyScope b) {
+    return a == KeyScope::Global || b == KeyScope::Global || a == b;
+}
 const KeyActionInfo& key_action_info(KeyAction a);
 // "Ctrl+Shift+S", "F1", "Tab", "???" for unbound. Writes into buf and returns it.
 const char* format_keybind(const KeyBind& b, char* buf, int n);
@@ -344,6 +357,19 @@ struct InputState {
     // color_pick_click is the one-shot "sample now" event the main loop consumes.
     bool color_pick_active;
     bool color_pick_click;
+    // Paint mode as a mode of its own, not just "the paint brush is current": its
+    // dock (Paint, Bucket, Picker | Smooth, Mask) has to stay up while the Mask brush
+    // is in hand, since masking is how you fence off the bucket's islands. Set by
+    // MODE_PAINT; cleared by MODE_SCULPT and by picking any brush but Paint or Mask.
+    bool paint_mode;
+    // Fill bucket (paint mode). While armed, LMB on the model floods the clicked
+    // unmasked island of the active layer with paint_color (Ctrl: erases it) instead
+    // of starting a stroke. Unlike the picker it stays armed after a fill.
+    // bucket_click is the one-shot event the main loop consumes; bucket_erase
+    // latches Ctrl at the click, since it may be up again by the time that runs.
+    bool bucket_active;
+    bool bucket_click;
+    bool bucket_erase;
     // Show vertex paint in the viewport. Toggle (next to the Paint icon) lets you
     // hide albedo while sculpting; the paint brush always forces it visible.
     bool paint_visible;
@@ -549,6 +575,17 @@ struct InputState {
     void end_frame();
 
     void switch_brush(BrushType to);
+    // The mode buttons and keys 1 and 4, one place for every skin. Paint: EDIT with the
+    // plain paint brush in hand (no bucket, no picker, no smooth lock). Sculpt: EDIT
+    // and out of paint mode; the paint brush gives way to Draw, a Mask brush stays.
+    void enter_paint_mode();
+    void enter_sculpt_mode();
+    // Which mode's shortcuts are live: Paint while painting (EDIT in paint mode), else
+    // Sculpt (Insert and Select keep the sculpt keys, as before the split).
+    KeyScope key_scope() const {
+        return paint_mode && interaction_mode == InteractionMode::EDIT ? KeyScope::Paint
+                                                                      : KeyScope::Sculpt;
+    }
     void clear_smooth_lock();  // drop the sticky smooth lock, re-aim the mirror
     void switch_profile(InputProfile to);  // park the live brush feel, load the other profile's
     void flush_profile();      // per_brush[] -> profiles[active_profile] (call before saving)

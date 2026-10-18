@@ -22,18 +22,20 @@ const KeyActionInfo kKeyActions[(int)KeyAction::COUNT] = {
     {"mode_insert",   "Modes",   "Insert mode",         nullptr, {GLFW_KEY_2, 0}},
     {"mode_select",   "Modes",   "Select mode",         nullptr, {GLFW_KEY_3, 0}},
     {"mode_paint",    "Modes",   "Paint mode",          nullptr, {GLFW_KEY_4, 0}},
-    {"brush_draw",    "Brushes", "Draw",                nullptr, {GLFW_KEY_D, 0}},
-    {"brush_clay",    "Brushes", "Clay",                nullptr, {GLFW_KEY_T, 0}},
-    {"brush_inflate", "Brushes", "Inflate",             nullptr, {GLFW_KEY_I, 0}},
-    {"brush_crease",  "Brushes", "Crease",              "In Paint mode: colour picker", {GLFW_KEY_C, 0}},
-    {"brush_pinch",   "Brushes", "Pinch",               nullptr, {GLFW_KEY_V, 0}},
-    {"brush_move",    "Brushes", "Move",                nullptr, {GLFW_KEY_G, 0}},
-    {"brush_limb",    "Brushes", "Limb",                nullptr, {GLFW_KEY_H, 0}},
+    {"brush_draw",    "Sculpt brushes", "Draw",      nullptr, {GLFW_KEY_D, 0}, KeyScope::Sculpt},
+    {"brush_clay",    "Sculpt brushes", "Clay",      nullptr, {GLFW_KEY_T, 0}, KeyScope::Sculpt},
+    {"brush_inflate", "Sculpt brushes", "Inflate",   nullptr, {GLFW_KEY_I, 0}, KeyScope::Sculpt},
+    {"brush_crease",  "Sculpt brushes", "Crease",    nullptr, {GLFW_KEY_C, 0}, KeyScope::Sculpt},
+    {"brush_pinch",   "Sculpt brushes", "Pinch",     nullptr, {GLFW_KEY_V, 0}, KeyScope::Sculpt},
+    {"brush_move",    "Sculpt brushes", "Move",      nullptr, {GLFW_KEY_G, 0}, KeyScope::Sculpt},
+    {"brush_limb",    "Sculpt brushes", "Limb",      nullptr, {GLFW_KEY_H, 0}, KeyScope::Sculpt},
     {"brush_mask",    "Brushes", "Mask",                nullptr, {GLFW_KEY_M, 0}},
     {"brush_prev",    "Brushes", "Previous alpha",
         "Draw and Mask. In Paint mode: swap colours. In Select mode: hold to spin the selection.", {GLFW_KEY_Q, 0}},
     {"brush_next",    "Brushes", "Next alpha",
         "Draw and Mask. In Paint mode: swap colours. In Select mode: hold to spin the selection.", {GLFW_KEY_E, 0}},
+    {"paint_bucket",  "Paint mode", "Fill bucket",      "Click an unmasked area to fill it. Ctrl: erase it", {GLFW_KEY_F, 0}, KeyScope::Paint},
+    {"paint_picker",  "Paint mode", "Colour picker",    "Click the model to pick its colour", {GLFW_KEY_C, 0}, KeyScope::Paint},
     {"hold_size",     "Brush feel", "Size",             "Hold and drag", {GLFW_KEY_S, 0}},
     {"hold_strength", "Brush feel", "Strength",         "Hold and drag", {GLFW_KEY_W, 0}},
     {"hold_hardness", "Brush feel", "Hardness",         "Hold and drag", {GLFW_KEY_A, 0}},
@@ -257,6 +259,10 @@ InputState::InputState()
     paint_visible = true;
     color_pick_active = false;
     color_pick_click = false;
+    paint_mode = false;
+    bucket_active = false;
+    bucket_click = false;
+    bucket_erase = false;
 
     // Seed BOTH profiles from the same defaults rather than shipping invented pen
     // numbers — the whole point of the split is that the user tunes each to their
@@ -282,7 +288,9 @@ void InputState::seed_brush_sizes() {
 }
 
 void InputState::switch_brush(BrushType to) {
-    if (to != BrushType::PAINT) color_pick_active = false;
+    if (to != BrushType::PAINT) { color_pick_active = false; bucket_active = false; }
+    if (to == BrushType::PAINT) paint_mode = true;
+    else if (to != BrushType::MASK) paint_mode = false;
     if (to == current_brush) return;
     // Nothing to save on the way out: per_brush[] and brush_size_of[] are written at
     // the point of edit, so they are already current. This used to copy the live
@@ -353,6 +361,25 @@ void InputState::switch_profile(InputProfile to) {
     sync_live_settings();
 }
 
+void InputState::enter_paint_mode() {
+    interaction_mode = InteractionMode::EDIT;
+    clear_smooth_lock();
+    switch_brush(BrushType::PAINT);
+    paint_mode = true;
+    bucket_active = false;
+    color_pick_active = false;
+    subtract_locked = false;
+}
+
+void InputState::enter_sculpt_mode() {
+    interaction_mode = InteractionMode::EDIT;
+    paint_mode = false;
+    if (current_brush == BrushType::PAINT) {
+        clear_smooth_lock();
+        switch_brush(BrushType::DRAW);
+    }
+}
+
 void InputState::clear_smooth_lock() {
     if (!smooth_locked) return;
     smooth_locked = false;
@@ -400,6 +427,7 @@ void InputState::end_frame() {
     debug_stride_cycle_requested = false;
     debug_pick_vertex_requested  = false;
     color_pick_click = false;
+    bucket_click = false;
 }
 
 bool InputState::is_smooth_active() const {
@@ -972,6 +1000,14 @@ static void mouse_button_callback(GLFWwindow* w, int button, int action, int mod
                 // Colour picker consumes this click: sample instead of sculpt
                 // (main loop reads the albedo under the cursor and disarms).
                 g_input->color_pick_click = true;
+            } else if (g_input->on_model && g_input->bucket_active
+                       && g_input->current_brush == BrushType::PAINT
+                       && !g_input->is_smooth_active()
+                       && g_input->interaction_mode == InputState::InteractionMode::EDIT) {
+                // Fill bucket consumes this click too: the main loop floods the
+                // island under the cursor. Shift (smooth) still strokes.
+                g_input->bucket_click = true;
+                g_input->bucket_erase = g_input->is_subtract_active();
             } else if (g_input->on_model) {
                 g_input->drag_mode = InputState::DragMode::SCULPT;
             } else {
@@ -1055,12 +1091,18 @@ static int mod_count(int mods) {
 // modifiers wins. That is how Shift+D reaches "Subdivision down" while plain D stays
 // Draw — and why holding Shift for smooth doesn't stop T from picking Clay, which is
 // how the hard-coded switch behaved before the keys became rebindable.
+// Only actions live in the current mode's scope compete (see KeyScope); on a tie in
+// modifiers, the mode's own key beats a Global one, so paint mode's F fills where
+// everywhere else F focuses.
 static int find_key_action(int key, int mods) {
+    const KeyScope live = g_input->key_scope();
     int best = -1, best_n = -1;
     for (int i = 0; i < (int)KeyAction::COUNT; i++) {
         const KeyBind& b = g_input->keybinds[i];
         if (!b.bound() || b.key != key || (b.mods & ~mods & kKeyModMask)) continue;
-        const int n = mod_count(b.mods);
+        const KeyScope sc = kKeyActions[i].scope;
+        if (sc != KeyScope::Global && sc != live) continue;
+        const int n = mod_count(b.mods) * 2 + (sc != KeyScope::Global ? 1 : 0);
         if (n > best_n) { best = i; best_n = n; }
     }
     return best;
@@ -1087,12 +1129,8 @@ static void run_key_action(GLFWwindow* w, KeyAction a, bool repeat) {
 
     switch (a) {
         case KeyAction::MODE_SCULPT:
-            in.interaction_mode = InputState::InteractionMode::EDIT;
             // Leaving paint: drop back to the draw brush so this sculpts, not paints.
-            if (in.current_brush == BrushType::PAINT) {
-                in.clear_smooth_lock();
-                in.switch_brush(BrushType::DRAW);
-            }
+            in.enter_sculpt_mode();
             notify("Edit", 1.0f);
             break;
         case KeyAction::MODE_INSERT:
@@ -1107,9 +1145,23 @@ static void run_key_action(GLFWwindow* w, KeyAction a, bool repeat) {
             break;
         case KeyAction::MODE_PAINT:
             // Paint mode: sculpt-style interaction (EDIT) with the paint brush.
-            in.interaction_mode = InputState::InteractionMode::EDIT;
-            pick_brush(BrushType::PAINT);
+            in.enter_paint_mode();
             notify("Paint", 1.0f);
+            break;
+        case KeyAction::PAINT_BUCKET:
+            // Paint mode's key (KeyScope::Paint): arm the bucket. Again: back to the brush.
+            in.interaction_mode = InputState::InteractionMode::EDIT;
+            if (in.paint_mode && in.current_brush == BrushType::PAINT && in.bucket_active
+                && !in.is_smooth_active()) {
+                in.bucket_active = false;
+                notify("Paint brush", 1.0f);
+                break;
+            }
+            pick_brush(BrushType::PAINT);
+            in.paint_target_density = false;   // the bucket fills colour only
+            in.color_pick_active = false;
+            in.bucket_active = true;
+            notify("Fill bucket: click an unmasked area (Ctrl erases)", 1.5f);
             break;
 
         case KeyAction::BRUSH_DRAW:    pick_brush(BrushType::DRAW);    break;
@@ -1120,17 +1172,15 @@ static void run_key_action(GLFWwindow* w, KeyAction a, bool repeat) {
         // Limb (snakehook): pull + tangential redistribute
         case KeyAction::BRUSH_LIMB:    pick_brush(BrushType::LIMB);    break;
         case KeyAction::BRUSH_MASK:    pick_brush(BrushType::MASK);    break;
-        case KeyAction::BRUSH_CREASE:
-            if (in.current_brush == BrushType::PAINT) {
-                // Paint mode: the crease key toggles the colour picker instead.
-                // Density target has no colour to pick — a no-op there.
-                if (in.paint_target_density) break;
-                in.color_pick_active = !in.color_pick_active;
-                notify(in.color_pick_active ? "Colour picker: click the model (C/ESC cancels)"
-                                            : "Colour picker off", 1.5f);
-            } else {
-                pick_brush(BrushType::CREASE);
-            }
+        case KeyAction::BRUSH_CREASE:  pick_brush(BrushType::CREASE);  break;
+        case KeyAction::PAINT_PICKER:
+            // Density target has no colour to pick — a no-op there.
+            if (in.paint_target_density) break;
+            if (in.current_brush != BrushType::PAINT) pick_brush(BrushType::PAINT);
+            in.color_pick_active = !in.color_pick_active;
+            in.bucket_active = false;
+            notify(in.color_pick_active ? "Colour picker: click the model (C/ESC cancels)"
+                                        : "Colour picker off", 1.5f);
             break;
         case KeyAction::BRUSH_PREV:
         case KeyAction::BRUSH_NEXT: {

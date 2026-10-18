@@ -14,6 +14,7 @@ enum class Icon {
     CmdUndo, CmdRedo, CmdLevelDown, CmdLevelUp, CmdSave, CmdSaveCopy, CmdOpen,
     CmdExport, CmdMerge,
     UiFullscreen, UiFullscreenExit,   // web only (a browser tab's one way to drop its bars)
+    PaintBucket, PaintPicker,         // the paint dock's fill bucket and colour picker
     Count
 };
 

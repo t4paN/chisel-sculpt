@@ -66,3 +66,4 @@ void draw_paint_layers_panel(InputState& input, Scene& scene, int win_w, int win
 // the cursor is off the model). ImGui foreground draw list — identical on all
 // backends, replaces the brush ring for that state.
 void draw_pick_cursor(float x, float y, bool on_model);
+void draw_bucket_cursor(float x, float y, bool on_model);

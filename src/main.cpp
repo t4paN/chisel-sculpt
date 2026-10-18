@@ -1785,6 +1785,54 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        // Fill bucket (paint mode): flood the unmasked island under the click on the
+        // active layer. The vertex comes from the screen FBO exactly as the picker's
+        // does (nearest corner of the clicked tri); mask and colour are the CPU copies,
+        // both synced at pen-up. One PAINT undo entry, so Ctrl+Z takes the fill back.
+        if (input.bucket_click) {
+            input.bucket_click = false;
+            int cx = (int)input.mouse_x;
+            int cy = (int)input.mouse_y;
+            Mesh& pm = scene.active_mesh();
+            uint32_t tid = 0xFFFFFFFF;
+            if (cx >= 0 && cx < win_w && cy >= 0 && cy < win_h)
+                renderer.read_triid_region(cx, cy, 1, 1, &tid);
+            if (tid != 0xFFFFFFFF && tid < pm.tri_count()) {
+                float bary[2];
+                renderer.read_bary_region(cx, cy, 1, 1, bary);
+                float bu = bary[0], bv = bary[1], bw = 1.0f - bu - bv;
+                uint32_t i0 = pm.indices[tid*3+0];
+                uint32_t i1 = pm.indices[tid*3+1];
+                uint32_t i2 = pm.indices[tid*3+2];
+                uint32_t seed = (bu >= bv && bu >= bw) ? i0 : (bv >= bw ? i1 : i2);
+                uint32_t rgba = 0;   // erase: transparent
+                if (!input.bucket_erase) {
+                    for (int ch = 0; ch < 3; ch++) {
+                        float c = std::max(0.0f, std::min(1.0f, input.paint_color[ch]));
+                        rgba |= (uint32_t)(c * 255.0f + 0.5f) << (ch * 8);
+                    }
+                    rgba |= 0xFFu << 24;
+                }
+                UndoEntry e;
+                e.kind = UndoEntry::Kind::PAINT;
+                e.paint_layer_id = paint_layers_active_id(pm.paint_layers);
+                const double t0 = glfwGetTime();
+                uint32_t reached = paint_bucket_fill(pm, seed, rgba, e.verts, e.old_color, e.new_color);
+                const double ms = (glfwGetTime() - t0) * 1000.0;
+                std::printf("[bucket] seed %u: reached %u / %u verts, changed %zu, %.1f ms%s\n",
+                            seed, reached, pm.vertex_count(), e.verts.size(), ms,
+                            input.bucket_erase ? " (erase)" : "");
+                if (reached == 0) {
+                    std::snprintf(input.notification, sizeof(input.notification),
+                                  "That spot is masked");
+                    input.notification_timer = 1.5f;
+                } else if (!e.verts.empty()) {
+                    scene.sync_color_partial_entity(scene.active_entity().id, e.verts);
+                    scene.active_undo().push(std::move(e));
+                }
+            }
+        }
+
         // Debug helper: print undo stack top after key operations
         auto print_undo_top = [&](const char* tag) {
             UndoStack& undo_stack = scene.active_undo();
@@ -3719,6 +3767,9 @@ int main(int argc, char* argv[]) {
                 // Armed colour picker: eyedropper glyph instead of the brush
                 // ring — the ring's size/hardness reading is meaningless here.
                 draw_pick_cursor(cursor_x, cursor_y, input.on_model);
+            } else if (input.bucket_active && input.current_brush == BrushType::PAINT
+                       && !input.is_smooth_active()) {
+                draw_bucket_cursor(cursor_x, cursor_y, input.on_model);
             } else {
                 renderer.draw_cursor(
                     camera,

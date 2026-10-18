@@ -179,3 +179,19 @@ template <class F> inline void paint_layers_each_stored(PaintLayerStack& s, F f)
 // fitted: an op changed the topology without carrying it. Clears its pixels and says
 // so on the console rather than drawing another mesh's paint. Returns layers cleared.
 int  paint_layers_drop_stale(PaintLayerStack& s, uint32_t vcount);
+
+// --- fill bucket -------------------------------------------------------------------
+
+struct Mesh;
+// Flood the active layer (mesh.color) from `seed` with `rgba` (premultiplied; 0 erases).
+// The flood walks triangle neighbours and stops at the sculpting mask: a vertex masked
+// 0.5 or more is a wall. Walls next to the island are still painted, weighted by
+// (1 - mask) like a brush dab, so a soft mask edge stays soft on the filled side;
+// they just never pass the flood on. That is what keeps one unmasked island from
+// leaking into the next. A masked seed fills nothing. Disconnected pieces of one mesh
+// are separate islands too.
+// Appends every vertex whose value changed to verts/old_c/new_c (the undo entry), and
+// returns how many vertices the flood reached.
+uint32_t paint_bucket_fill(Mesh& mesh, uint32_t seed, uint32_t rgba,
+                           std::vector<uint32_t>& verts,
+                           std::vector<uint32_t>& old_c, std::vector<uint32_t>& new_c);

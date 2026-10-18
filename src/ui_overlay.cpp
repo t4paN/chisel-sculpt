@@ -5,6 +5,7 @@
 #include "input.h"
 #include "settings.h"
 #include "brush_alpha.h"
+#include "ui_icons.h"
 #include "imgui.h"
 #include <functional>
 #include <cstdio>
@@ -833,6 +834,8 @@ void draw_help_popup(InputState& input, int win_w, int win_h) {
         help_row(k, "Limb  Mask");
         std::snprintf(k, sizeof(k), "%s %s", L(KeyAction::BRUSH_PREV), L(KeyAction::BRUSH_NEXT));
         help_row(k, "Cycle alpha (Draw, Mask)");
+        std::snprintf(k, sizeof(k), "%s %s", L(KeyAction::PAINT_BUCKET), L(KeyAction::PAINT_PICKER));
+        help_row(k, "Fill bucket  Colour picker (Paint)");
         help_head("SIZE + FEEL");
         std::snprintf(k, sizeof(k), "%s %s", L(KeyAction::SIZE_DOWN), L(KeyAction::SIZE_UP));
         help_row(k, "Brush size");
@@ -982,11 +985,7 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
         bool edit_sel = (mode == InputState::InteractionMode::EDIT) && !paint_on;
         if (squircle_button("Edit", "Edit", mtips[0],
                             ImVec2(calc_btn_w("Edit"), btn_h), edit_sel)) {
-            input.interaction_mode = InputState::InteractionMode::EDIT;
-            if (current == BrushType::PAINT) {
-                input.clear_smooth_lock();
-                input.switch_brush(BrushType::DRAW);
-            }
+            input.enter_sculpt_mode();
         }
         ImGui::SameLine();
         if (squircle_button("Insert", "Insert", mtips[1],
@@ -1003,10 +1002,7 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
         ImGui::SameLine();
         if (squircle_button("PaintMode", "Paint", mtips[3],
                             ImVec2(calc_btn_w("Paint"), btn_h), paint_on)) {
-            input.interaction_mode = InputState::InteractionMode::EDIT;
-            input.clear_smooth_lock();
-            input.switch_brush(BrushType::PAINT);
-            input.subtract_locked = false;
+            input.enter_paint_mode();
         }
         // Paint-visibility toggle beside the Paint mode button. Hides albedo while
         // sculpting (the paint brush itself always forces it visible).
@@ -1050,6 +1046,7 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
                             "Paint remesh density (green = coarse, red = dense; Ctrl lowers)",
                             ImVec2(calc_btn_w("Density"), btn_h), !color_target)) {
             input.paint_target_density = true;
+            input.bucket_active = false;   // the bucket fills colour only
             input.color_pick_active = false;    // no colour to pick on the heatmap
         }
         if (!input.paint_target_density) {
@@ -1059,8 +1056,9 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
             ImGui::ColorEdit3("##paintB", input.paint_color_alt,
                               ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel);
             ImGui::SameLine();
-            ImGui::TextUnformatted(input.color_pick_active ? "C: picking..."
-                                                          : "Q/E swap - C pick");
+            ImGui::TextUnformatted(input.color_pick_active ? "Picking..."
+                                   : input.bucket_active   ? "Click to fill, Ctrl erases"
+                                                          : "Q/E swap - C pick - F fill");
         } else {
             // What the painted extremes mean to the adaptive remesher, as
             // multipliers on the auto target edge length. Defaults (2.0 / 0.5)
@@ -1560,6 +1558,20 @@ void draw_pick_cursor(float x, float y, bool on_model) {
     dl->AddCircle(c, 4.8f, line, 0, 1.4f);
 }
 
+// The armed fill bucket: a dot at the exact hotspot (the fill seeds from the vertex
+// under it) and the bucket glyph up and to the right, out of the way of what you aim at.
+void draw_bucket_cursor(float x, float y, bool on_model) {
+    ImDrawList* dl = ImGui::GetForegroundDrawList();
+    int a = on_model ? 235 : 110;
+    ImU32 fill = IM_COL32(255, 255, 255, a);
+    ImU32 line = IM_COL32(25, 25, 25, a);
+    dl->AddCircleFilled(ImVec2(x, y), 3.2f, line);
+    dl->AddCircleFilled(ImVec2(x, y), 1.8f, fill);
+    const ImVec2 c(x + 15.0f, y - 15.0f);
+    draw_icon(dl, Icon::PaintBucket, c, 24.0f, line, 3.6f);
+    draw_icon(dl, Icon::PaintBucket, c, 24.0f, fill, 1.75f);
+}
+
 // ---- Key bindings window ------------------------------------------------------------
 //
 // Edits a working copy; input.keybinds is only touched by Save. Exit (and Esc) just
@@ -1610,9 +1622,13 @@ void draw_keybind_window(InputState& input, int win_w, int win_h) {
                 std::snprintf(refusal, sizeof(refusal), "%s can't be used: %s.",
                               format_keybind(kb, name, sizeof(name)), why);
             } else {
+                // Keys of different modes may share a letter (KeyScope); only a clash
+                // where both are live counts.
                 int owner = -1;
+                const KeyScope sc = key_action_info((KeyAction)i).scope;
                 for (int j = 0; j < (int)KeyAction::COUNT; j++)
-                    if (j != i && work[j] == kb) { owner = j; break; }
+                    if (j != i && work[j] == kb &&
+                        key_scopes_overlap(sc, key_action_info((KeyAction)j).scope)) { owner = j; break; }
                 if (owner < 0) {
                     work[i] = kb;
                 } else {

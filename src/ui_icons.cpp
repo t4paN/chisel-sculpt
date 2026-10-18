@@ -69,6 +69,12 @@ const IconDef kIcons[(int)Icon::Count] = {
                            "a5 5 0 1 0 0-10c-1.5 0-2.5.8-3.5 1.6C11 7.8 10 7 8.5 7z")}, 1},
     /* UiFullscreen    */ {{P("M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5")}, 1},
     /* UiFullscreenExit*/ {{P("M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5")}, 1},
+    // Drawn here, not from the handoff: a tipped bucket half full, a drop off its lip.
+    /* PaintBucket  */ {{P("M10 4l7.5 7.5-7.5 7.5-7.5-7.5z"), F("M2.5 11.5h15L10 19z"),
+                         F("M19.5 14s2 2.4 2 3.8a2 2 0 0 1-4 0c0-1.4 2-3.8 2-3.8z")}, 3},
+    // Drawn here: an eyedropper in the picker cursor's pose (tip bottom-left).
+    /* PaintPicker  */ {{P("M4 20l1.15-2.85 7.5-7.5 1.7 1.7-7.5 7.5z"), P("M11.5 8.5l4 4"),
+                         C(17.2f, 6.8f, 3.2f)}, 3},
 };
 
 // ---- Minimal SVG path interpreter -------------------------------------------
@@ -255,7 +261,7 @@ void draw_icon(ImDrawList* dl, Icon icon, ImVec2 center, float size, ImU32 col, 
 }
 
 // ---- Pixel set (the DOS skin) ------------------------------------------------
-// The same 29 icons as 16x16 one-bit art, from the handoff's cga-pixel/icons
+// The same 31 icons as 16x16 one-bit art, from the handoff's cga-pixel/icons
 // (pixel_icons.json, converted to row masks: bit 15 = leftmost pixel). Mirror X,
 // Smooth and Merge were hand-drawn there; Inflate is redrawn here to match the
 // vector set (rasterised from the same two circles).
@@ -290,6 +296,8 @@ const unsigned short kPixel[(int)Icon::Count][16] = {
     /* cmd-merge       */ {0x0000,0x0000,0x0000,0x0420,0x1FF8,0x3BDC,0x6006,0x6006,0x6006,0x6006,0x3BDC,0x1FF8,0x0420,0x0000,0x0000,0x0000},
     /* ui-fullscreen   */ {0x0000,0x0000,0x3C3C,0x3C3C,0x300C,0x300C,0x0000,0x0000,0x0000,0x0000,0x300C,0x300C,0x3C3C,0x3C3C,0x0000,0x0000},   // drawn here: corners out
     /* ui-fs-exit      */ {0x0000,0x0000,0x0C30,0x0C30,0x3C3C,0x3C3C,0x0000,0x0000,0x0000,0x0000,0x3C3C,0x3C3C,0x0C30,0x0C30,0x0000,0x0000},   // drawn here: corners in
+    /* paint-bucket    */ {0x0000,0x0000,0x0300,0x0780,0x0CC0,0x1860,0x3030,0x6018,0xFFFC,0x7FF8,0x3FF2,0x1FE7,0x0FC7,0x0782,0x0300,0x0000},   // drawn here
+    /* paint-picker    */ {0x0000,0x0000,0x0038,0x007C,0x007C,0x01FC,0x01F8,0x01E0,0x03E0,0x0700,0x0E00,0x1C00,0x3800,0x3000,0x0000,0x0000},   // drawn here
 };
 } // namespace
 

@@ -1,4 +1,5 @@
 #include "paint_layers.h"
+#include "mesh.h"
 
 #include <algorithm>
 #include <cmath>
@@ -364,4 +365,59 @@ int paint_layers_drop_stale(PaintLayerStack& s, uint32_t vcount) {
         dropped++;
     }
     return dropped;
+}
+
+// ---- fill bucket ----
+
+uint32_t paint_bucket_fill(Mesh& mesh, uint32_t seed, uint32_t rgba,
+                           std::vector<uint32_t>& verts,
+                           std::vector<uint32_t>& old_c, std::vector<uint32_t>& new_c) {
+    const uint32_t vc = mesh.vertex_count();
+    if (seed >= vc || mesh.vert_tri_offset.size() != (size_t)vc + 1) return 0;
+    auto mask_at = [&](uint32_t v) {
+        float m = v < mesh.mask.size() ? mesh.mask[v] : 0.0f;
+        return m < 0.0f ? 0.0f : (m > 1.0f ? 1.0f : m);
+    };
+    constexpr float kWall = 0.5f;
+    if (mask_at(seed) >= kWall) return 0;
+
+    // An unpainted layer reads as what the renderer shows for it (paint_layer_px).
+    const uint32_t blank = mesh.paint_layers.empty() ? 0xFFFFFFFFu : 0u;
+    if (mesh.color.size() < vc) mesh.color.resize(vc, blank);
+
+    // One-shot and user-paced, so it may walk the whole mesh. Kept across calls
+    // to skip re-allocating them per fill.
+    static std::vector<uint8_t>  seen;
+    static std::vector<uint32_t> queue;
+    seen.assign(vc, 0);
+    queue.clear();
+    queue.push_back(seed);
+    seen[seed] = 1;
+    for (size_t head = 0; head < queue.size(); head++) {
+        const uint32_t v = queue[head];
+        const float m = mask_at(v);
+        if (m < kWall) {
+            for (uint32_t k = mesh.vert_tri_offset[v]; k < mesh.vert_tri_offset[v + 1]; k++) {
+                const uint32_t t = mesh.vert_tri_list[k];
+                for (int c = 0; c < 3; c++) {
+                    const uint32_t u = mesh.indices[t * 3 + c];
+                    if (!seen[u]) { seen[u] = 1; queue.push_back(u); }
+                }
+            }
+        }
+        // The brush's lerp of all four channels (color_paint.*), at full strength.
+        const float w = 1.0f - m;
+        const uint32_t old = mesh.color[v];
+        uint32_t out = 0;
+        for (int ch = 0; ch < 4; ch++) {
+            const float o = unorm(old, ch);
+            out |= to_unorm(o + (unorm(rgba, ch) - o) * w) << (8 * ch);
+        }
+        if (out == old) continue;
+        mesh.color[v] = out;
+        verts.push_back(v);
+        old_c.push_back(old);
+        new_c.push_back(out);
+    }
+    return (uint32_t)queue.size();
 }

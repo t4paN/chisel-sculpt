@@ -1040,7 +1040,13 @@ bool alpha_picker_popup(InputState& input, const AlphaLibrary* alpha_lib, ImVec2
     return true;
 }
 
-struct RailBrush { const char* id; const char* name; KeyAction key; Icon icon; BrushType type; };
+// Paint mode's tools are all the paint brush underneath (its colour, size and layer);
+// the tool says what a click does with it.
+enum class RailTool { Brush, Bucket, Picker };
+struct RailBrush {
+    const char* id; const char* name; KeyAction key; Icon icon; BrushType type;
+    RailTool tool = RailTool::Brush;
+};
 const RailBrush kRailBrushes[] = {
     {"bDraw",    "Draw",    KeyAction::BRUSH_DRAW,    Icon::BrushDraw,    BrushType::DRAW},
     {"bClay",    "Clay",    KeyAction::BRUSH_CLAY,    Icon::BrushClay,    BrushType::CLAY},
@@ -1053,6 +1059,49 @@ const RailBrush kRailBrushes[] = {
     {"bMask",    "Mask",    KeyAction::BRUSH_MASK,    Icon::BrushMask,    BrushType::MASK},
 };
 constexpr int kRailBrushCount = (int)(sizeof kRailBrushes / sizeof kRailBrushes[0]);
+
+// Paint mode's own dock. Mask is here because masking is how you fence off what the
+// bucket fills; Smooth smooths whichever of the two is underneath, as in sculpt.
+const RailBrush kPaintBrushes[] = {
+    {"pPaint",  "Paint",         KeyAction::MODE_PAINT,   Icon::ModePaint,   BrushType::PAINT},
+    {"pBucket", "Fill Bucket",   KeyAction::PAINT_BUCKET, Icon::PaintBucket, BrushType::PAINT, RailTool::Bucket},
+    {"pPicker", "Colour Picker", KeyAction::PAINT_PICKER, Icon::PaintPicker, BrushType::PAINT, RailTool::Picker},
+    {"pSmooth", "Smooth",        KeyAction::COUNT,        Icon::BrushSmooth, BrushType::SMOOTH},
+    {"pMask",   "Mask",          KeyAction::BRUSH_MASK,   Icon::BrushMask,   BrushType::MASK},
+};
+constexpr int kPaintBrushCount = (int)(sizeof kPaintBrushes / sizeof kPaintBrushes[0]);
+
+// The brush list the rail shows: paint mode swaps in its own dock.
+const RailBrush* rail_brushes(const InputState& in, int* n) {
+    if (in.paint_mode) { *n = kPaintBrushCount; return kPaintBrushes; }
+    *n = kRailBrushCount;
+    return kRailBrushes;
+}
+
+// Is this entry the tool in hand? (The caller adds "and in EDIT mode".)
+bool rail_brush_on(const InputState& in, const RailBrush& b, bool smooth_on) {
+    if (b.type == BrushType::SMOOTH) return smooth_on;
+    if (smooth_on || in.current_brush != b.type) return false;
+    if (b.type != BrushType::PAINT) return true;
+    switch (b.tool) {
+        case RailTool::Bucket: return in.bucket_active;
+        case RailTool::Picker: return in.color_pick_active;
+        default:               return !in.bucket_active && !in.color_pick_active;
+    }
+}
+
+// Take up a non-Smooth entry, the same from the rail, the touch strip and the Y2K shelf.
+// The picker toggles, like its key.
+void rail_pick(InputState& in, const RailBrush& b) {
+    in.clear_smooth_lock();
+    in.switch_brush(b.type);
+    in.subtract_locked = false;
+    in.interaction_mode = InputState::InteractionMode::EDIT;
+    if (b.type != BrushType::PAINT) return;
+    if (b.tool != RailTool::Brush) in.paint_target_density = false;   // colour-only tools
+    in.bucket_active = b.tool == RailTool::Bucket;
+    in.color_pick_active = b.tool == RailTool::Picker && !in.color_pick_active;
+}
 
 constexpr float kTouchBtn  = 64.0f;   // the collapsed brush button, touch mode
 constexpr float kStripRow  = 58.0f;   // one brush in the drop-down strip
@@ -1076,15 +1125,16 @@ bool touch_brush_picker(InputState& input, BtnOpts o, bool smooth_on, bool editi
     static bool tracking = false;
     ImGuiIO& io = ImGui::GetIO();
 
+    int count = 0;
+    const RailBrush* list = rail_brushes(input, &count);
     int cur = -1;
-    for (int i = 0; i < kRailBrushCount; i++)
-        if (smooth_on ? kRailBrushes[i].type == BrushType::SMOOTH
-                      : kRailBrushes[i].type == input.current_brush) cur = i;
+    for (int i = 0; i < count && cur < 0; i++)
+        if (rail_brush_on(input, list[i], smooth_on)) cur = i;
 
     const ImVec2 bpos = ImGui::GetCursorScreenPos();
     o.on = editing && cur >= 0; o.tip = nullptr; o.key = nullptr; o.corner = nullptr;
     o.icon_px = 30.0f;
-    icon_button("tBrush", cur >= 0 ? kRailBrushes[cur].icon : Icon::BrushDraw, kTouchBtn, o);
+    icon_button("tBrush", cur >= 0 ? list[cur].icon : list[0].icon, kTouchBtn, o);
     if (ImGui::IsItemActivated() && g_dock_live) {
         if (state == BROWSE) {
             std::printf("[strip] button again -> close\n");
@@ -1104,22 +1154,20 @@ bool touch_brush_picker(InputState& input, BtnOpts o, bool smooth_on, bool editi
     }
 
     auto pick = [&](int i) {
-        const RailBrush& b = kRailBrushes[i];
+        const RailBrush& b = list[i];
         if (b.type == BrushType::SMOOTH) {
             if (!input.smooth_locked) {
                 input.smooth_locked = true;
                 input.sync_live_settings();
             }
+            input.interaction_mode = InputState::InteractionMode::EDIT;
         } else {
-            input.clear_smooth_lock();
-            input.switch_brush(b.type);
-            input.subtract_locked = false;
+            rail_pick(input, b);
         }
-        input.interaction_mode = InputState::InteractionMode::EDIT;
     };
 
     const float top = bpos.y + kTouchBtn * g_k + 14.0f;
-    const float content_h = kRailBrushCount * kStripRow;
+    const float content_h = count * kStripRow;
     const float h = std::max(kStripRow + 2.0f * kStripPad,
                              std::min(content_h + 2.0f * kStripPad, io.DisplaySize.y - kEdge - top));
     ImGui::SetNextWindowPos(ImVec2(kEdge, top), ImGuiCond_Always);
@@ -1138,7 +1186,7 @@ bool touch_brush_picker(InputState& input, BtnOpts o, bool smooth_on, bool editi
         const bool inside = m.x >= a.x && m.x < b.x && m.y >= view_top && m.y < view_bot;
         auto row_at = [&](float y) {
             int i = (int)std::floor((y - view_top + scroll) / kStripRow);
-            return (i >= 0 && i < kRailBrushCount) ? i : -1;
+            return (i >= 0 && i < count) ? i : -1;
         };
         int lit = -1;
         if (state == PRESS_DRAG) {
@@ -1184,7 +1232,7 @@ bool touch_brush_picker(InputState& input, BtnOpts o, bool smooth_on, bool editi
 
         panel_bg(dl, a, b, 14.0f);
         dl->PushClipRect(ImVec2(a.x, view_top), ImVec2(b.x, view_bot), true);
-        for (int i = 0; i < kRailBrushCount; i++) {
+        for (int i = 0; i < count; i++) {
             const float y0 = view_top + i * kStripRow - scroll;
             if (y0 + kStripRow < view_top || y0 > view_bot) continue;
             const ImVec2 r0(a.x + kStripPad, y0 + 2.0f), r1(b.x - kStripPad, y0 + kStripRow - 2.0f);
@@ -1197,11 +1245,11 @@ bool touch_brush_picker(InputState& input, BtnOpts o, bool smooth_on, bool editi
                                   g_dos ? 0.0f : 11.0f);
             }
             const ImVec2 ic(r0.x + kStripRow * 0.5f, (r0.y + r1.y) * 0.5f);
-            if (g_dos) draw_pixel_icon(dl, kRailBrushes[i].icon, ic, 2.0f, icol);
-            else       draw_icon(dl, kRailBrushes[i].icon, ic, 30.0f, icol);
-            ImVec2 ts = text_size(UiFont::Sans, 17.0f, kRailBrushes[i].name);
+            if (g_dos) draw_pixel_icon(dl, list[i].icon, ic, 2.0f, icol);
+            else       draw_icon(dl, list[i].icon, ic, 30.0f, icol);
+            ImVec2 ts = text_size(UiFont::Sans, 17.0f, list[i].name);
             text_at(dl, UiFont::Sans, 17.0f, ImVec2(r0.x + kStripRow + 6.0f, ic.y - ts.y * 0.5f),
-                    tcol, kRailBrushes[i].name);
+                    tcol, list[i].name);
         }
         dl->PopClipRect();
         // A sliver of scrollbar so it reads as "there's more" when it doesn't all fit.
@@ -1233,9 +1281,10 @@ void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
     (void)win_h;
     BrushType current = input.current_brush;
     const bool smooth_on = input.is_smooth_active();
-    const bool paint_on = current == BrushType::PAINT && !smooth_on;
     const auto mode = input.interaction_mode;
     const bool editing = mode == InputState::InteractionMode::EDIT;
+    int brush_count = 0;
+    const RailBrush* brushes = rail_brushes(input, &brush_count);
 
     // Modes — "what am I doing" — are their own horizontal dock under the file bar;
     // the brush rail hangs below it.
@@ -1257,15 +1306,10 @@ void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
         const char* k = input.key_label(a);
         return input.keybinds[(int)a].bound() && std::strlen(k) <= 3 ? k : nullptr;
     };
-    o.on = editing && !paint_on; o.tip = "Sculpt";
+    o.on = editing && !input.paint_mode; o.tip = "Sculpt";
     o.key = input.key_label(KeyAction::MODE_SCULPT); o.corner = corner(KeyAction::MODE_SCULPT);
-    if (icon_button("mSculpt", Icon::ModeSculpt, kRailBtn, o)) {
-        input.interaction_mode = InputState::InteractionMode::EDIT;
-        if (current == BrushType::PAINT) {
-            input.clear_smooth_lock();
-            input.switch_brush(BrushType::DRAW);
-        }
-    }
+    if (icon_button("mSculpt", Icon::ModeSculpt, kRailBtn, o))
+        input.enter_sculpt_mode();
     o.on = mode == InputState::InteractionMode::INSERT; o.tip = "Insert";
     o.key = input.key_label(KeyAction::MODE_INSERT); o.corner = corner(KeyAction::MODE_INSERT);
     ImGui::SameLine();
@@ -1277,25 +1321,19 @@ void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
     if (icon_button("mSelect", Icon::ModeSelect, kRailBtn, o))
         input.interaction_mode = InputState::InteractionMode::SELECT;
     ImGui::SameLine();
-    // Where the button of the brush the alpha serves sits: Paint is a mode button,
-    // Draw and Mask are in the brush column. y < 0 = no alpha tile this frame.
+    // Where the button of the brush the alpha serves sits (Draw, Mask or the paint
+    // brush, all in the brush column). y < 0 = no alpha tile this frame.
     // alpha_edge: the right edge of the dock that button is in.
     ImVec2 alpha_at(0.0f, -1.0f);
     float alpha_edge = 0.0f;
-    if (current == BrushType::PAINT) alpha_at = ImGui::GetCursorScreenPos();
-    o.on = editing && paint_on; o.tip = "Paint";
+    o.on = editing && input.paint_mode; o.tip = "Paint";
     o.key = input.key_label(KeyAction::MODE_PAINT); o.corner = corner(KeyAction::MODE_PAINT);
-    if (icon_button("mPaint", Icon::ModePaint, kRailBtn, o)) {
-        input.interaction_mode = InputState::InteractionMode::EDIT;
-        input.clear_smooth_lock();
-        input.switch_brush(BrushType::PAINT);
-        input.subtract_locked = false;
-    }
+    if (icon_button("mPaint", Icon::ModePaint, kRailBtn, o))
+        input.enter_paint_mode();
     dock_post(modes_dock);
     // Rest height: a grown modes dock covers the rail instead of shoving it down.
     const float modes_bottom = ImGui::GetWindowPos().y +
         (modes_dock.rest.y > 0.0f ? modes_dock.rest.y : ImGui::GetWindowSize().y);
-    if (current == BrushType::PAINT) alpha_edge = ImGui::GetWindowPos().x + ImGui::GetWindowSize().x;
     end_panel();
 
     // The touch rail is one brush button, drawn at its grown size from the start
@@ -1312,13 +1350,14 @@ void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
 
     bool strip_open = false;
     if (input.touch_mode) {
-        if (current != BrushType::PAINT) alpha_at = ImGui::GetCursorScreenPos();
+        alpha_at = ImGui::GetCursorScreenPos();
         strip_open = touch_brush_picker(input, o, smooth_on, editing);
     } else {
         // Shift-Shift: the glyph if the face has it, else spelled out.
         ImFont* mono = F(UiFont::MonoMedium);
         const char* shift2 = (mono && mono->IsGlyphInFont(0x21E7)) ? "\xE2\x87\xA7\xE2\x87\xA7" : "SS";
-        for (const RailBrush& b : kRailBrushes) {
+        for (int bi = 0; bi < brush_count; bi++) {
+            const RailBrush& b = brushes[bi];
             if (b.type == BrushType::SMOOTH) hdivider(kRailBtn, 10.0f, kDividerLo, 7.0f);
             o.tip = b.name;
             if (b.type == BrushType::SMOOTH) {
@@ -1335,15 +1374,11 @@ void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
                 }
                 continue;
             }
-            if (current == b.type) alpha_at = ImGui::GetCursorScreenPos();
-            o.on = editing && current == b.type && !smooth_on;
+            const bool on = rail_brush_on(input, b, smooth_on);
+            if (on) alpha_at = ImGui::GetCursorScreenPos();
+            o.on = editing && on;
             o.key = input.key_label(b.key); o.corner = corner(b.key);
-            if (icon_button(b.id, b.icon, kRailBtn, o)) {
-                input.clear_smooth_lock();
-                input.switch_brush(b.type);
-                input.subtract_locked = false;
-                input.interaction_mode = InputState::InteractionMode::EDIT;
-            }
+            if (icon_button(b.id, b.icon, kRailBtn, o)) rail_pick(input, b);
         }
     }
 
@@ -1351,7 +1386,7 @@ void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
     g_rail_bottom = ImGui::GetWindowPos().y + ImGui::GetWindowSize().y;
     g_rail_right = ImGui::GetWindowPos().x + ImGui::GetWindowSize().x;
     g_strip_open = strip_open;
-    if (current != BrushType::PAINT) alpha_edge = ImGui::GetWindowPos().x + ImGui::GetWindowSize().x;
+    alpha_edge = ImGui::GetWindowPos().x + ImGui::GetWindowSize().x;
     end_panel();
 
     // Current alpha (stamp), beside the button of the brush it serves — Draw, Mask or
@@ -1362,8 +1397,10 @@ void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
     // shows. Clicked, the picker strip grows out of the dock edge at the swatch's
     // height, and retracts the same way after a pick. The tip just says what it is;
     // the alpha names show in the strip.
+    // The bucket and the picker have no stamp.
     const bool alpha_brush = current == BrushType::DRAW || current == BrushType::MASK ||
-                             current == BrushType::PAINT;
+                             (current == BrushType::PAINT && !input.bucket_active &&
+                              !input.color_pick_active);
     if (editing && !smooth_on && alpha_brush && alpha_lib && alpha_lib->count() > 0
         && alpha_at.y >= 0.0f) {
         const float bs = kRailBtn * 0.88f, tuck = 10.0f, vis = bs - tuck;
@@ -1827,6 +1864,7 @@ void options_panel(InputState& input, int win_h) {
         ImGui::SameLine(0.0f, 4.0f);
         if (chip("Density", input.paint_target_density)) {
             input.paint_target_density = true;
+            input.bucket_active = false;   // the bucket fills colour only
             input.color_pick_active = false;
         }
         if (ImGui::IsItemHovered())
@@ -1842,8 +1880,10 @@ void options_panel(InputState& input, int win_h) {
                               ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel);
             ImGui::PopStyleVar(2);
             ImGui::SameLine(0.0f, 10.0f);
-            label_item(UiFont::Sans, 12.0f, input.color_pick_active ? kTintText : kMuted,
+            const bool armed = input.color_pick_active || input.bucket_active;
+            label_item(UiFont::Sans, 12.0f, armed ? kTintText : kMuted,
                        input.color_pick_active ? "Picking... click the model"
+                       : input.bucket_active   ? "Click an unmasked area to fill it  \xC2\xB7  Ctrl erases"
                                                : "Q / E swap  \xC2\xB7  C pick  \xC2\xB7  right-click: wheel");
         } else {
             ImGui::SetNextItemWidth(170.0f);
@@ -2126,20 +2166,11 @@ void end_shelf() {
 }
 
 void apply_mode(InputState& input, int m) {
-    const BrushType current = input.current_brush;
     switch (m) {
-        case 0:
-            input.interaction_mode = InputState::InteractionMode::EDIT;
-            if (current == BrushType::PAINT) { input.clear_smooth_lock(); input.switch_brush(BrushType::DRAW); }
-            break;
+        case 0: input.enter_sculpt_mode(); break;
         case 1: input.interaction_mode = InputState::InteractionMode::INSERT; break;
         case 2: input.interaction_mode = InputState::InteractionMode::SELECT; break;
-        case 3:
-            input.interaction_mode = InputState::InteractionMode::EDIT;
-            input.clear_smooth_lock();
-            input.switch_brush(BrushType::PAINT);
-            input.subtract_locked = false;
-            break;
+        case 3: input.enter_paint_mode(); break;
     }
 }
 
@@ -2221,10 +2252,9 @@ void y2k_top(InputState& in, int W, const SkinStats& st) {
     const char* mkeys[4] = {in.key_label(KeyAction::MODE_SCULPT), in.key_label(KeyAction::MODE_INSERT),
                             in.key_label(KeyAction::MODE_SELECT), in.key_label(KeyAction::MODE_PAINT)};
     const bool smooth_on = in.is_smooth_active();
-    const bool paint_on = in.current_brush == BrushType::PAINT && !smooth_on;
     int mode = in.interaction_mode == InputState::InteractionMode::INSERT ? 1
              : in.interaction_mode == InputState::InteractionMode::SELECT ? 2
-             : paint_on ? 3 : 0;
+             : in.paint_mode ? 3 : 0;
     float bw[4], total = 4.0f;
     for (int i = 0; i < 4; i++) {
         bw[i] = ysize(true, 11.0f, modes[i]).x + ysize(false, 9.0f, mkeys[i]).x + 5.0f + 24.0f;
@@ -2304,30 +2334,22 @@ void y2k_left(InputState& in, int H, const AlphaLibrary* lib) {
     const float x0 = 8.0f, w = kLeftW - 16.0f;
     float y = kTopH + 10.0f;
 
-    struct B { const char* name; const char* key; Icon icon; BrushType type; };
-    // Not static: the key letters are the live bindings, re-read every frame.
-    const B brushes[] = {
-        {"Draw", in.key_label(KeyAction::BRUSH_DRAW), Icon::BrushDraw, BrushType::DRAW},
-        {"Clay", in.key_label(KeyAction::BRUSH_CLAY), Icon::BrushClay, BrushType::CLAY},
-        {"Inflate", in.key_label(KeyAction::BRUSH_INFLATE), Icon::BrushInflate, BrushType::INFLATE},
-        {"Crease", in.key_label(KeyAction::BRUSH_CREASE), Icon::BrushCrease, BrushType::CREASE},
-        {"Pinch", in.key_label(KeyAction::BRUSH_PINCH), Icon::BrushPinch, BrushType::PINCH},
-        {"Move", in.key_label(KeyAction::BRUSH_MOVE), Icon::BrushMove, BrushType::MOVE},
-        {"Limb", in.key_label(KeyAction::BRUSH_LIMB), Icon::BrushLimb, BrushType::LIMB},
-        {"Smooth", "SS", Icon::BrushSmooth, BrushType::SMOOTH},
-        {"Mask", in.key_label(KeyAction::BRUSH_MASK), Icon::BrushMask, BrushType::MASK},
+    int count = 0;
+    const RailBrush* brushes = rail_brushes(in, &count);
+    // Not cached: the key letters are the live bindings, re-read every frame.
+    auto key_of = [&](const RailBrush& b) {
+        return b.type == BrushType::SMOOTH ? "SS" : in.key_label(b.key);
     };
 
     // The big "current tool" tile.
     {
-        Icon icon = Icon::BrushDraw;
-        const char* nm = "Draw";
+        Icon icon = in.paint_mode ? Icon::ModePaint : Icon::BrushDraw;
+        const char* nm = in.paint_mode ? "Paint" : "Draw";
         if (mode == InputState::InteractionMode::INSERT)      { icon = Icon::ModeInsert; nm = "Insert"; }
         else if (mode == InputState::InteractionMode::SELECT) { icon = Icon::ModeSelect; nm = "Select"; }
-        else if (current == BrushType::PAINT && !smooth_on)   { icon = Icon::ModePaint; nm = "Paint"; }
         else {
-            BrushType t = smooth_on ? BrushType::SMOOTH : current;
-            for (const B& b : brushes) if (b.type == t) { icon = b.icon; nm = b.name; }
+            for (int i = 0; i < count; i++)
+                if (rail_brush_on(in, brushes[i], smooth_on)) { icon = brushes[i].icon; nm = brushes[i].name; break; }
         }
         ImVec2 a(x0, y), b(x0 + w, y + 92);
         gloss_tile(dl, a, b, 6.0f, true, false, false);
@@ -2337,41 +2359,39 @@ void y2k_left(InputState& in, int H, const AlphaLibrary* lib) {
         y += 92 + 10;
     }
 
-    ytext(dl, true, 11.0f, ImVec2(x0 + 2, y), y2k::label, "Brushes");
+    ytext(dl, true, 11.0f, ImVec2(x0 + 2, y), y2k::label, in.paint_mode ? "Paint Tools" : "Brushes");
     y += 18;
     const float tw = (w - 4.0f) * 0.5f, th = 44.0f;
-    for (int i = 0; i < 9; i++) {
-        const B& br = brushes[i];
+    for (int i = 0; i < count; i++) {
+        const RailBrush& br = brushes[i];
+        const char* key = key_of(br);
         ImVec2 a(x0 + (i % 2) * (tw + 4.0f), y + (i / 2) * (th + 4.0f)), b(a.x + tw, a.y + th);
         bool hv, held;
         char id[16]; std::snprintf(id, sizeof id, "##yb%d", i);
         bool clicked = hit(id, a, ImVec2(tw, th), &hv, &held);
-        bool on = br.type == BrushType::SMOOTH ? (smooth_on && editing)
-                                               : (editing && current == br.type && !smooth_on);
+        bool on = editing && rail_brush_on(in, br, smooth_on);
         gloss_tile(dl, a, b, 5.0f, on, hv, held);
         ImU32 ic = on ? y2k::on_text : IM_COL32(0xEC, 0xEC, 0xEC, 255);
         draw_icon(dl, br.icon, ImVec2((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f - 1), 22.0f, ic);
-        ImVec2 ks = ysize(false, 9.0f, br.key);
-        ytext(dl, false, 9.0f, ImVec2(b.x - 3 - ks.x, b.y - 2 - ks.y), with_alpha(ic, 0.8f), br.key, false);
+        ImVec2 ks = ysize(false, 9.0f, key);
+        ytext(dl, false, 9.0f, ImVec2(b.x - 3 - ks.x, b.y - 2 - ks.y), with_alpha(ic, 0.8f), key, false);
         if (hv) tooltip(a, b, TipSide::Right, br.name,
-                        br.type == BrushType::SMOOTH ? "Shift Shift" : br.key);
+                        br.type == BrushType::SMOOTH ? "Shift Shift" : key);
         if (clicked) {
             if (br.type == BrushType::SMOOTH) {
                 if (!in.smooth_locked) { in.smooth_locked = true; in.sync_live_settings(); }
                 else in.clear_smooth_lock();
             } else {
-                in.clear_smooth_lock();
-                in.switch_brush(br.type);
-                in.subtract_locked = false;
-                in.interaction_mode = InputState::InteractionMode::EDIT;
+                rail_pick(in, br);
             }
         }
     }
-    y += 5 * (th + 4.0f) + 6.0f;
+    y += ((count + 1) / 2) * (th + 4.0f) + 6.0f;
 
-    // Alpha.
+    // Alpha. The bucket and the picker have no stamp.
     const bool alpha_brush = current == BrushType::DRAW || current == BrushType::MASK ||
-                             current == BrushType::PAINT;
+                             (current == BrushType::PAINT && !in.bucket_active &&
+                              !in.color_pick_active);
     if (editing && !smooth_on && alpha_brush && lib && lib->count() > 0) {
         ytext(dl, true, 11.0f, ImVec2(x0 + 2, y), y2k::label, "Alpha");
         y += 18;
@@ -2413,7 +2433,7 @@ void y2k_left(InputState& in, int H, const AlphaLibrary* lib) {
         ytext(dl, true, 10.0f, ImVec2(a.x + (hw - s1.x) * 0.5f, a.y + 5), !in.paint_target_density ? y2k::on_text : y2k::text,
               "Colour", in.paint_target_density);
         a = ImVec2(x0 + hw + 4, y);
-        if (hit("##yPd", a, ImVec2(hw, 22), &hv, &held)) { in.paint_target_density = true; in.color_pick_active = false; }
+        if (hit("##yPd", a, ImVec2(hw, 22), &hv, &held)) { in.paint_target_density = true; in.color_pick_active = false; in.bucket_active = false; }
         gloss_tile(dl, a, ImVec2(a.x + hw, a.y + 22), 3.0f, in.paint_target_density, hv, held);
         ImVec2 s2 = ysize(true, 10.0f, "Density");
         ytext(dl, true, 10.0f, ImVec2(a.x + (hw - s2.x) * 0.5f, a.y + 5), in.paint_target_density ? y2k::on_text : y2k::text,
@@ -2429,8 +2449,10 @@ void y2k_left(InputState& in, int H, const AlphaLibrary* lib) {
             ImGui::ColorEdit3("##ypaintB", in.paint_color_alt, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel);
             ImGui::PopStyleVar();
             y += 34;
-            ytext(dl, false, 10.0f, ImVec2(x0, y), in.color_pick_active ? y2k::amber : y2k::muted,
-                  in.color_pick_active ? "Picking..." : "Q/E swap  C pick", false);
+            ytext(dl, false, 10.0f, ImVec2(x0, y),
+                  in.color_pick_active || in.bucket_active ? y2k::amber : y2k::muted,
+                  in.color_pick_active ? "Picking..." : in.bucket_active ? "Click to fill, Ctrl erases"
+                                                                         : "Q/E swap  C pick", false);
         } else {
             ImGui::PushFont(nullptr, 10.0f);
             ImGui::SetNextItemWidth(w);
