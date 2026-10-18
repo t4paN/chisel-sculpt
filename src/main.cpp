@@ -183,6 +183,32 @@ void configureSurface(int w, int h) {
     wgpuSurfaceConfigure(g_surface, &cfg);
 }
 
+// Stand-in colour target for a frame the swapchain didn't hand over (Timeout, or a
+// lost surface that stayed lost after the reconfigure). Every default-screen pass
+// still needs a real attachment: a pass begun on a null view fails validation and
+// wgpu-native aborts the whole app (seen 2026-10-18, status 3 = Timeout on KWin).
+// The frame is drawn here and thrown away; only allocated if that ever happens.
+WGPUTexture     g_spare_tex  = nullptr;
+WGPUTextureView g_spare_view = nullptr;
+int g_spare_w = 0, g_spare_h = 0;
+
+WGPUTextureView spareColorView(int w, int h) {
+    if (g_spare_view && g_spare_w == w && g_spare_h == h) return g_spare_view;
+    if (g_spare_view) { wgpuTextureViewRelease(g_spare_view); g_spare_view = nullptr; }
+    if (g_spare_tex)  { wgpuTextureRelease(g_spare_tex);      g_spare_tex  = nullptr; }
+    WGPUTextureDescriptor td = {};
+    td.usage = WGPUTextureUsage_RenderAttachment;
+    td.dimension = WGPUTextureDimension_2D;
+    td.size = { (uint32_t)w, (uint32_t)h, 1 };
+    td.format = g_surface_fmt;
+    td.mipLevelCount = 1;
+    td.sampleCount = 1;
+    g_spare_tex  = wgpuDeviceCreateTexture(g_device, &td);
+    g_spare_view = wgpuTextureCreateView(g_spare_tex, nullptr);
+    g_spare_w = w; g_spare_h = h;
+    return g_spare_view;
+}
+
 void makeDepth(int w, int h) {
     if (g_depth_view) { wgpuTextureViewRelease(g_depth_view); g_depth_view = nullptr; }
     if (g_depth_tex)  { wgpuTextureRelease(g_depth_tex);      g_depth_tex  = nullptr; }
@@ -3612,6 +3638,22 @@ int main(int argc, char* argv[]) {
 #endif
         WGPUTextureView frameView = surfTex.texture
             ? wgpuTextureCreateView(surfTex.texture, nullptr) : nullptr;
+        bool spare_frame = false;
+#ifndef __EMSCRIPTEN__
+        // No texture this frame: draw into the stand-in and don't present (see
+        // spareColorView). Said once per run of missed frames, not every frame.
+        {
+            static bool missing = false;
+            if (!frameView) {
+                if (!missing)
+                    std::printf("[win] no swapchain frame (status %d): drawing offscreen "
+                                "until it comes back\n", (int)surfTex.status);
+                frameView   = spareColorView(fbw, fbh);
+                spare_frame = true;
+            }
+            missing = spare_frame;
+        }
+#endif
         gpu::webgpu_set_default_color(frameView);
 #else
         // glClear(DEPTH) is gated by the depth write-mask; force it TRUE so the clear
@@ -4548,10 +4590,10 @@ int main(int argc, char* argv[]) {
         // Native (wgpu-native) presents explicitly. On the web the browser composites
         // the canvas automatically when the requestAnimationFrame callback returns, and
         // emdawnwebgpu aborts if wgpuSurfacePresent is called at all — so skip it.
-        wgpuSurfacePresent(g_surface);
+        if (surfTex.texture) wgpuSurfacePresent(g_surface);   // nothing acquired, nothing to show
 #endif
         gpu::webgpu_set_default_color(nullptr);
-        if (frameView) wgpuTextureViewRelease(frameView);
+        if (frameView && !spare_frame) wgpuTextureViewRelease(frameView);
         if (surfTex.texture) wgpuTextureRelease(surfTex.texture);
 #else
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
