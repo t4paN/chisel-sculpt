@@ -245,7 +245,6 @@ InputState::InputState()
     per_brush[(int)BrushType::PAINT].strength = 0.5f;     // soft build-up by default
     per_brush[(int)BrushType::PAINT].hardness = 0.5f;
     per_brush[(int)BrushType::BUCKET].strength = 1.0f;    // a fill replaces what's there
-    per_brush[(int)BrushType::BUCKET].hardness = 0.75f;   // patterns crisp, not razor
     // Clay's hardness is the square stamp's edge feather (clay_square in
     // draw_accum): 1 = crisp chisel rim, lower melts the rim toward the centre.
     // 0.3 = generous feather by default (user-tuned; crisper felt jittery).
@@ -1226,6 +1225,7 @@ static void run_key_action(GLFWwindow* w, KeyAction a, bool repeat) {
         case KeyAction::HOLD_STRENGTH:
             begin_slider_drag(w, InputState::SliderMode::STRENGTH, in.brush_strength); break;
         case KeyAction::HOLD_HARDNESS:
+            if (in.hardness_unused()) { notify("Hardness doesn't apply to the fill bucket", 1.5f); break; }
             begin_slider_drag(w, InputState::SliderMode::HARDNESS, in.brush_hardness); break;
         case KeyAction::HOLD_SPACING:
             begin_slider_drag(w, InputState::SliderMode::SPACING, in.brush_spacing); break;

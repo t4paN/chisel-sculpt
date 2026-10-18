@@ -1901,9 +1901,6 @@ int main(int argc, char* argv[]) {
                                           input.fill_angle * 3.14159265f / 180.0f, a, frame, value);
                     cv = value.data();
                 }
-                // Hardness = how sharp the edge between the two colours is (the bucket's
-                // own slot: live_brush_slot() is BUCKET while it is armed).
-                if (cv) for (float& x : value) x = fill_pattern_hardness(x, input.brush_hardness);
                 UndoEntry e;
                 e.kind = UndoEntry::Kind::PAINT;
                 e.paint_layer_id = paint_layers_active_id(pm.paint_layers);

@@ -1651,8 +1651,10 @@ void meter_widget(const char* id, InputState& in, int which, float w, float k = 
     ImVec2 p = ImGui::GetCursorScreenPos();
     const float h = (g_dos ? 20.0f : 30.0f) * k;
     ImGui::InvisibleButton(id, ImVec2(w, h));
-    const bool held = live && ImGui::IsItemActive();
-    const bool lit = held || ImGui::IsItemHovered();
+    const bool off = which == 2 && in.hardness_unused();   // greyed: nothing to set
+    const bool held = live && !off && ImGui::IsItemActive();
+    const bool lit = held || (!off && ImGui::IsItemHovered());
+    if (off && ImGui::IsItemHovered()) ImGui::SetTooltip("Hardness doesn't apply to the fill bucket");
     const bool dragging = held && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 2.0f);
     if (held) set_feel(in, which, (ImGui::GetIO().MousePos.x - p.x) / w);
 
@@ -1661,8 +1663,9 @@ void meter_widget(const char* id, InputState& in, int which, float w, float k = 
     const float vals[4] = {in.brush_size / 500.0f, in.brush_strength,
                            in.brush_hardness, in.brush_spacing};
     char value[16];
-    if (which == 0) std::snprintf(value, sizeof value, "%.0f", in.brush_size);
-    else            std::snprintf(value, sizeof value, "%.0f%%", vals[which] * 100.0f);
+    if (off)             std::snprintf(value, sizeof value, "-");
+    else if (which == 0) std::snprintf(value, sizeof value, "%.0f", in.brush_size);
+    else                 std::snprintf(value, sizeof value, "%.0f%%", vals[which] * 100.0f);
 
     if (g_dos) {
         // Board D: "S Size  70" — cyan key, gray label, green value, no bar.
@@ -1672,20 +1675,21 @@ void meter_widget(const char* id, InputState& in, int which, float w, float k = 
         ImVec2 v = text_size(UiFont::Mono, fpx, value);
         const float ty = p.y + (h - fpx) * 0.5f;
         if (lit) dl->AddRectFilled(p, ImVec2(p.x + w, p.y + h), cga::dark_gray);
-        text_at(dl, UiFont::Mono, fpx, ImVec2(p.x, ty), cga::light_cyan, keys[which]);
-        text_at(dl, UiFont::Mono, fpx, ImVec2(p.x + ks.x, ty), cga::light_gray, lab);
-        text_at(dl, UiFont::Mono, fpx, ImVec2(p.x + w - v.x, ty), cga::light_green, value);
+        text_at(dl, UiFont::Mono, fpx, ImVec2(p.x, ty), off ? cga::dark_gray : cga::light_cyan, keys[which]);
+        text_at(dl, UiFont::Mono, fpx, ImVec2(p.x + ks.x, ty), off ? cga::dark_gray : cga::light_gray, lab);
+        text_at(dl, UiFont::Mono, fpx, ImVec2(p.x + w - v.x, ty), off ? cga::dark_gray : cga::light_green, value);
         return;
     }
     // key badge
+    const ImU32 tc = off ? with_alpha(kText, 0.3f) : kText;
     ImVec2 b0(p.x, p.y + 2.0f * k), b1(p.x + 16.0f * k, p.y + 18.0f * k);
-    dl->AddRect(b0, b1, IM_COL32(255, 255, 255, 51), 4.0f * k);
+    dl->AddRect(b0, b1, IM_COL32(255, 255, 255, off ? 20 : 51), 4.0f * k);
     ImVec2 ks = text_size(UiFont::Mono, 10.0f * k, keys[which]);
-    text_at(dl, UiFont::Mono, 10.0f * k, ImVec2(b0.x + (16.0f * k - ks.x) * 0.5f, b0.y + (16.0f * k - ks.y) * 0.5f), kText, keys[which]);
+    text_at(dl, UiFont::Mono, 10.0f * k, ImVec2(b0.x + (16.0f * k - ks.x) * 0.5f, b0.y + (16.0f * k - ks.y) * 0.5f), tc, keys[which]);
     ImVec2 ls = text_size(UiFont::Sans, 13.0f * k, labels[which]);
-    text_at(dl, UiFont::Sans, 13.0f * k, ImVec2(p.x + 24.0f * k, p.y + 10.0f * k - ls.y * 0.5f), kText, labels[which]);
+    text_at(dl, UiFont::Sans, 13.0f * k, ImVec2(p.x + 24.0f * k, p.y + 10.0f * k - ls.y * 0.5f), tc, labels[which]);
     ImVec2 vs = text_size(UiFont::Mono, 13.0f * k, value);
-    text_at(dl, UiFont::Mono, 13.0f * k, ImVec2(p.x + w - vs.x, p.y + 10.0f * k - vs.y * 0.5f), kText, value);
+    text_at(dl, UiFont::Mono, 13.0f * k, ImVec2(p.x + w - vs.x, p.y + 10.0f * k - vs.y * 0.5f), tc, value);
     const float target = std::max(0.0f, std::min(1.0f, vals[which]));
     const ImGuiID sid = ImGui::GetID(id);
     if (dragging) spring_reset(sid, target);
@@ -1713,7 +1717,7 @@ void meter_widget(const char* id, InputState& in, int which, float w, float k = 
         brush_cursor_rgb(in.brush_hardness, rgb);
         col = IM_COL32((int)(rgb[0] * 255.0f), (int)(rgb[1] * 255.0f), (int)(rgb[2] * 255.0f), 255);
     }
-    if (pct > 0.0f) dl->AddRectFilled(ImVec2(p.x, y), ImVec2(p.x + w * pct, y + 3.0f * k), col, 2.0f * k);
+    if (pct > 0.0f && !off) dl->AddRectFilled(ImVec2(p.x, y), ImVec2(p.x + w * pct, y + 3.0f * k), col, 2.0f * k);
 }
 
 // A small text label laid out as an item (so SameLine works around it).
@@ -2223,7 +2227,8 @@ void set_feel(InputState& in, int which, float t) {
         case 0: in.brush_size = std::max(5.0f, t * 500.0f);
                 in.brush_size_of[(int)in.size_slot()] = in.brush_size; break;
         case 1: in.brush_strength = std::max(0.01f, t); in.per_brush[(int)slot].strength = in.brush_strength; break;
-        case 2: in.brush_hardness = std::max(0.01f, t); in.per_brush[(int)slot].hardness = in.brush_hardness; break;
+        case 2: if (in.hardness_unused()) break;
+                in.brush_hardness = std::max(0.01f, t); in.per_brush[(int)slot].hardness = in.brush_hardness; break;
         case 3: in.brush_spacing = std::max(0.05f, std::min(t, max_spacing_for(slot)));
                 in.per_brush[(int)slot].spacing = in.brush_spacing; break;
     }
@@ -2333,11 +2338,14 @@ void y2k_top(InputState& in, int W, const SkinStats& st) {
     for (int i = 0; i < 4; i++) {
         const float sw = 168.0f;
         if (x + sw > w - 10.0f) break;                             // narrow window: drop what won't fit
-        ytext(dl, true, 11.0f, ImVec2(x, cy - 17), y2k::text, sl[i].label);
+        const bool off = i == 2 && in.hardness_unused();           // greyed: the bucket ignores it
+        if (off) std::snprintf(sl[i].val, sizeof sl[i].val, "-");
+        ytext(dl, true, 11.0f, ImVec2(x, cy - 17), off ? y2k::muted : y2k::text, sl[i].label);
         ytext(dl, false, 11.0f, ImVec2(x + ysize(true, 11.0f, sl[i].label).x + 5, cy - 17), y2k::muted, sl[i].key, false);
-        ytext(dl, true, 11.0f, ImVec2(x + sw - ysize(true, 11.0f, sl[i].val).x, cy - 17), y2k::value, sl[i].val);
+        ytext(dl, true, 11.0f, ImVec2(x + sw - ysize(true, 11.0f, sl[i].val).x, cy - 17), off ? y2k::muted : y2k::value, sl[i].val);
         char id[16]; std::snprintf(id, sizeof id, "##ys%d", i);
-        float t = y2k_track(id, dl, ImVec2(x, cy + 1), sw, 14.0f, sl[i].pct, nullptr);
+        float t = y2k_track(id, dl, ImVec2(x, cy + 1), sw, 14.0f, off ? 0.0f : sl[i].pct,
+                            off ? "Hardness doesn't apply to the fill bucket" : nullptr);
         if (t >= 0.0f && editing) set_feel(in, i, t);
         x += sw + 14.0f;
     }

@@ -593,6 +593,11 @@ struct InputState {
     // and out of paint mode; the paint brush gives way to Draw, a Mask brush stays.
     void enter_paint_mode();
     void enter_sculpt_mode();
+    // The fill bucket has no use for Hardness (its patterns are crisp and its fill has
+    // no falloff), so the readouts grey it out and the A drag leaves it alone.
+    bool hardness_unused() const {
+        return current_brush == BrushType::PAINT && bucket_active && !is_smooth_active();
+    }
     // Which mode's shortcuts are live: Paint while painting (EDIT in paint mode), else
     // Sculpt (Insert and Select keep the sculpt keys, as before the split).
     KeyScope key_scope() const {
