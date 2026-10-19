@@ -2,7 +2,7 @@
 
 Short, chronological log of notable changes. Newest on top.
 
-## 2026-10-19 — Fill bucket stops at paint
+## 2026-10-19 — v0.3.2 — Fill bucket stops at paint
 
 *Built GL, wgpu and web. Off-screen test passed (a soft-edged painted line walls a fill,
 hard and soft, nothing crosses it). Hand-tested by the user on native: "perfect".*
@@ -14,7 +14,7 @@ hard and soft, nothing crosses it). Hand-tested by the user on native: "perfect"
   **Stop at paint** in the paint options (on by default) turns it off to fill straight
   over paint.
 
-## 2026-10-19 — Fill bucket: Hardness is the edge on the mask, repeat fills creep, B key
+## 2026-10-19 — v0.3.2 — Fill bucket: Hardness is the edge on the mask, repeat fills creep, B key
 
 *Built GL, wgpu and web. Off-screen tests of the edge weights passed (hard wall, soft mask,
 repeat fills at full and half strength). Hand-tested by the user on native: "works well".*
@@ -30,7 +30,7 @@ repeat fills at full and half strength). Hand-tested by the user on native: "wor
 - **The bucket's key is B** in paint mode. Autosmooth is sculpt-only now, so F is Focus
   everywhere again.
 
-## 2026-10-18/19 — Fill bucket with patterns and gradients, paint mode's own dock and shortcuts
+## 2026-10-18/19 — v0.3.2 — Fill bucket with patterns and gradients, paint mode's own dock and shortcuts
 
 *Built GL, wgpu and web (`27453da` through `5d2b92d`). Off-screen self-tests passed: mask
 walls hard and soft, masked click, separate pieces, erase and its undo values, gradient
@@ -74,7 +74,7 @@ checklist (`fill-bucket-tests.md`) is still open.*
   The colour picker is now its own rebindable shortcut instead of borrowing Crease's key,
   and the Key bindings window only warns about a clash where both keys would be live.
 
-## 2026-10-18 — Paint smooth on layers: visible again, and no more gigabyte readbacks
+## 2026-10-18 — v0.3.2 — Paint smooth on layers: visible again, and no more gigabyte readbacks
 
 *Built GL, wgpu and web. Tested by the user on native WebGPU at level 8 with layers: small
 smooth strokes blur again; the log shows no arena fallbacks and at most 7 MB read back per
@@ -90,7 +90,7 @@ stroke (was 1.1 GB).*
   1.1 GB of readback for one small stroke at level 8, with the list ring full and growing.
   An all-zero history now means "small".
 
-## 2026-10-18 — Native WebGPU: a missed frame no longer kills the app
+## 2026-10-18 — v0.3.2 — Native WebGPU: a missed frame no longer kills the app
 
 - When the compositor doesn't hand over a frame in time (seen on KWin as status 3,
   Timeout), Chisel drew into nothing and the graphics layer aborted the app. That frame now
@@ -98,13 +98,13 @@ stroke (was 1.1 GB).*
   Native WebGPU only; GL and the browser never hit it. Stress-tested by the user at ~4M
   tris with no crash (the timeout itself didn't recur in the logged run).
 
-## 2026-10-18 — PLY export stands upright in Blender
+## 2026-10-18 — v0.3.2 — PLY export stands upright in Blender
 
 - PLY files are now written Z-up, the way Blender reads them, so an export no longer lands
   lying on its back. Chisel marks its own PLYs and turns them back on import; other PLYs
   and older Chisel exports import as before. Tested by the user in Blender, with new and old files.
 
-## 2026-10-18 — Paint layers survive saving
+## 2026-10-18 — v0.3.2 — Paint layers survive saving
 
 *Built GL, wgpu and web. A scratch round-trip test passed (every layer field and pixel
 exact, with and without subdivision levels; a damaged or stripped layer section loads
@@ -121,14 +121,14 @@ and the browser.*
 - Models without layers save byte-for-byte as before. Models with layers cost a little
   more, since the layer you're painting on is also stored on its own.
 
-## 2026-10-18 — SDF merge: no more colour fringe at joins
+## 2026-10-18 — v0.3.2 — SDF merge: no more colour fringe at joins
 
 - Merging a coarse model into a dense one left a ragged band of the dense one's colour
   around the join. Paint now comes from the closest surface that's still on the outside
   of the result, not the closest vertex, which a buried or across-the-crease neighbour
   could win. Tested by the user on native.
 
-## 2026-10-17 — Paint layers (branch `paint-layers`)
+## 2026-10-17 — v0.3.2 — Paint layers (branch `paint-layers`)
 
 *Built GL, wgpu and web; shaders clean on GL, naga and Tint. GPU and CPU composites
 are compared vertex by vertex. They're identical at full opacity; below it about 0.1% of
@@ -173,7 +173,7 @@ rest re-checked by the user; the Tint shader gate is clean (39 pipelines, no WGS
   the GPU without readback. `CHISEL_PAINT_PARITY=1` (native) checks it against the CPU
   composite after every layer edit.
 
-## 2026-10-13 — Phone layout: brush button starts grown, Ctrl/Shift flank the model
+## 2026-10-13 — v0.3.2 — Phone layout: brush button starts grown, Ctrl/Shift flank the model
 
 *Built on the taptop and deployed to the GitHub Pages phone build the same day; brought
 to main 2026-10-18. Tested in headless Chrome with touch emulation at UI scale 50 % and
@@ -195,7 +195,7 @@ damn well" (user, 2026-10-18).*
   pushing the options panel and status panel aside; they and the buttons read its rest
   size. Beside the rail, it now clears the brush button's real (1.5x) width.
 
-## 2026-10-13 — Touch input wakes the idle frame skip
+## 2026-10-13 — v0.3.2 — Touch input wakes the idle frame skip
 
 *Built GL and web. The taptop wrote a near-identical copy the same day; main keeps this
 one. The copy is what the GitHub Pages build runs, and it works on the phone (user,
@@ -208,7 +208,7 @@ one. The copy is what the GitHub Pages build runs, and it works on the phone (us
   stillness moves the camera at once, and a latched modifier or a layout change is drawn
   straight away.
 
-## 2026-10-12 — Phone: UI scale setting, bigger Ctrl/Shift
+## 2026-10-12 — v0.3.2 — Phone: UI scale setting, bigger Ctrl/Shift
 
 *Built GL and web. Tested in headless Chrome with touch emulation (layout size, backing
 and tap mapping at 50 %). Since then in everyday use on the phone through the GitHub Pages build: "works pretty
@@ -231,7 +231,7 @@ damn well" (user, 2026-10-18).*
   by the height under the brush button. The brush panel clears their column. Labels and
   corners scale with the button.
 
-## 2026-10-12 — Phone: every dock grows on tap; installable offline PWA
+## 2026-10-12 — v0.3.2 — Phone: every dock grows on tap; installable offline PWA
 
 *Built GL and web. Dock growth tested in headless Chrome with touch emulation (grow,
 second tap presses, outside tap shrinks, layout holds still). The PWA was installed and
@@ -259,7 +259,7 @@ damn well" (user, 2026-10-18).*
   service worker only registers top-level on a secure origin, so the itch build is
   unaffected.
 
-## 2026-10-12 — Phone layout: modifier buttons, collapsible brush strip, tap-to-grow panel
+## 2026-10-12 — v0.3.2 — Phone layout: modifier buttons, collapsible brush strip, tap-to-grow panel
 
 *Built GL and web. Modifier buttons, the brush strip and the panel position were
 user-tested live on the phone. The tap-to-grow panel, the landscape drag-offset fix and
@@ -301,7 +301,7 @@ damn well" (user, 2026-10-18).*
   console and touch pointer events back to `~/CHISEL/.lan-https/serve.py`, so phone logs
   show up on the laptop. `[strip]` printfs log the picker's transitions.
 
-## 2026-10-12 — Fullscreen button on the web; canvas fits mobile Chrome
+## 2026-10-12 — v0.3.2 — Fullscreen button on the web; canvas fits mobile Chrome
 
 *Built GL and web. The bottom-bar fix was confirmed by the user on the phone; the
 fullscreen button in its final spot was committed before a phone test.*
@@ -316,7 +316,7 @@ fullscreen button in its final spot was committed before a phone test.*
   the address bar retracted, so while the bar showed the canvas overran the screen and
   the bottom panels sat under Android's back/home bar.
 
-## 2026-10-12 — Touch controls for phones: pinch zoom, two-finger pan
+## 2026-10-12 — v0.3.2 — Touch controls for phones: pinch zoom, two-finger pan
 
 *Built GL and web; all of it tested by the user on a Moto g84 (Chrome, 1.3M tris).*
 
@@ -335,7 +335,7 @@ fullscreen button in its final spot was committed before a phone test.*
   frame and re-latches before anything moves.
 - Desktop mouse and pen input is unchanged.
 
-## 2026-10-11 — Folds shade cleanly again: Max normals get a sliver guard
+## 2026-10-11 — v0.3.2 — Folds shade cleanly again: Max normals get a sliver guard
 
 *Built GL, native WebGPU and web; GL and native WebGPU shaders compile clean. Tested by
 the user on the web build (Firefox) with `monstabrain_001`: folds that showed broken
@@ -357,7 +357,7 @@ shading load clean. Chrome/Tint gate clean (desktop, 2026-10-12). Merged to main
   broken folds until you sculpted again. All six sites now match: `recompute_normals`,
   `recompute_normals_partial`, and the `compute_normals` + `cascade_normals` shader pairs.
 
-## 2026-10-10 — Idle frames are skipped: an untouched model costs almost nothing
+## 2026-10-10 — v0.3.2 — Idle frames are skipped: an untouched model costs almost nothing
 
 *Built GL, native WebGPU and web; measured by the user on the web build (Firefox,
 taptop). The "nothing freezes" checklist (springs, tooltips, held-key rotation, toasts,
@@ -384,14 +384,14 @@ remesh progress) is still owed. Merged to main 2026-10-12.*
   went from ~115% of a core to 5% (max 11%), graphics clock idle 100% of the time,
   temps 55°C → 41°C. Sculpting costs the same as before.
 
-## 2026-10-10 — Native WebGPU builds against GLFW 3.3 again
+## 2026-10-10 — v0.3.2 — Native WebGPU builds against GLFW 3.3 again
 
 - The Wayland surface path called `glfwGetPlatform` (GLFW 3.4+) unguarded in
   `main.cpp` and `wgpu_window.cpp`, so `build-wgpu` failed on distro GLFW 3.3
   (Mint/Ubuntu 24.04). Same version guard the rest of the code uses; 3.3 takes X11.
 
 
-## 2026-10-08 — Edge wrap puts the pointer back where the ring is (Wayland)
+## 2026-10-08 — v0.3.2 — Edge wrap puts the pointer back where the ring is (Wayland)
 
 *Built GL, native WebGPU and web; tested by the user on native Linux (KWin 6.7, mouse).*
 
@@ -412,13 +412,13 @@ remesh progress) is still owed. Merged to main 2026-10-12.*
   while a slider holds GLFW's. Falls back to GLFW's capture if the compositor lacks the
   protocols. Browser behaviour is unchanged: it returns the pointer where the lock began.
 
-## 2026-10-08 — Springy motion obeys its checkbox on the web
+## 2026-10-08 — v0.3.2 — Springy motion obeys its checkbox on the web
 
 - The web build also deferred to the OS "reduced motion" setting, and a KDE animation
   speed of "instant" reaches Chrome as exactly that, so the springs were off with the
   box ticked. The checkbox alone decides now, on every platform.
 
-## 2026-10-08 — Thinner ring at low strength
+## 2026-10-08 — v0.3.2 — Thinner ring at low strength
 
 - Ring weight at 0% strength is 0.70x of the old line (was 0.95x); 50% and up unchanged.
 
