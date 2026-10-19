@@ -2,6 +2,22 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-19 — Fill bucket: Hardness is the edge on the mask, repeat fills creep, B key
+
+*Built GL, wgpu and web. Off-screen tests of the edge weights passed (hard wall, soft mask,
+repeat fills at full and half strength). Hand-tested by the user on native: "works well".*
+
+- **Hardness is back on the bucket**, now as the fill's edge where it meets the mask. High:
+  a hard clash right along the mask line. Low: the fill melts across the line over up to
+  one brush radius, a little way into the masked area, instead of leaving a jagged gap.
+  The ring shows the width before you click.
+- **Repeat fills creep.** Filling the same spot again with the same paint pushes the soft
+  edge further across the mask, about half its width per click, keeping the same smooth
+  slope (no rims). Ctrl+Z steps it back; any other edit in between starts it over. At full
+  Hardness there is nothing to creep.
+- **The bucket's key is B** in paint mode. Autosmooth is sculpt-only now, so F is Focus
+  everywhere again.
+
 ## 2026-10-18/19 — Fill bucket with patterns and gradients, paint mode's own dock and shortcuts
 
 *Built GL, wgpu and web (`27453da` through `5d2b92d`). Off-screen self-tests passed: mask

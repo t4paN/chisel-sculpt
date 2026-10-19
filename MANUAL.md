@@ -93,7 +93,7 @@ crisp chisel rim, low melts the rim toward the centre.
 | Double-tap Ctrl | Lock subtract mode (tap again to unlock) |
 | Double-tap Shift | Lock smooth mode (tap again to unlock) |
 | Q / E | Previous / next alpha (Draw, Mask); swap colours in Paint; nothing on other brushes |
-| B | Toggle autosmooth (a gentle smoothing pass folded into every stroke) |
+| B | Toggle autosmooth (a gentle smoothing pass folded into every stroke). Sculpt mode only; in Paint mode B is the fill bucket |
 
 ### Brush tuning — hold a key and drag left/right
 
@@ -250,6 +250,7 @@ spacing, and pressure all apply.
 | RMB | Open the colour palette at the cursor |
 | C | Colour picker: click the model to grab the colour under the cursor (pure paint, shading excluded); ESC or C cancels |
 | Q / E | Swap active / alternate colour |
+| B | Fill bucket: click to fill the unmasked area you clicked, Ctrl+click erases it. The mask is the wall. Hardness is the fill's edge against the mask: high cuts hard along it, low melts across the mask line, a little way into the masked area (up to one brush radius in all) |
 | `[ ]` toggle (toolbar) | Hide vertex colour while sculpting (Paint mode always shows it) |
 
 Paint lives on the base cage of the multires stack, so it survives level switches,

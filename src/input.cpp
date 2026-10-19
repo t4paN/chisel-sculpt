@@ -35,7 +35,7 @@ const KeyActionInfo kKeyActions[(int)KeyAction::COUNT] = {
         "Draw and Mask. In Paint mode: swap colours. In Select mode: hold to spin the selection.", {GLFW_KEY_Q, 0}},
     {"brush_next",    "Brushes", "Next alpha",
         "Draw and Mask. In Paint mode: swap colours. In Select mode: hold to spin the selection.", {GLFW_KEY_E, 0}},
-    {"paint_bucket",  "Paint mode", "Fill bucket",      "Click an unmasked area to fill it. Ctrl: erase it", {GLFW_KEY_F, 0}, KeyScope::Paint},
+    {"paint_bucket",  "Paint mode", "Fill bucket",      "Click an unmasked area to fill it. Ctrl: erase it", {GLFW_KEY_B, 0}, KeyScope::Paint},
     {"paint_picker",  "Paint mode", "Colour picker",    "Click the model to pick its colour", {GLFW_KEY_C, 0}, KeyScope::Paint},
     {"hold_size",     "Brush feel", "Size",             "Hold and drag", {GLFW_KEY_S, 0}},
     {"hold_strength", "Brush feel", "Strength",         "Hold and drag", {GLFW_KEY_W, 0}},
@@ -43,7 +43,7 @@ const KeyActionInfo kKeyActions[(int)KeyAction::COUNT] = {
     {"hold_spacing",  "Brush feel", "Spacing",          "Hold and drag", {GLFW_KEY_O, 0}},
     {"size_down",     "Brush feel", "Size down",        "Repeats while held", {GLFW_KEY_LEFT_BRACKET, 0}},
     {"size_up",       "Brush feel", "Size up",          "Repeats while held", {GLFW_KEY_RIGHT_BRACKET, 0}},
-    {"autosmooth",    "Brush feel", "Autosmooth",       nullptr, {GLFW_KEY_B, 0}},
+    {"autosmooth",    "Brush feel", "Autosmooth",       nullptr, {GLFW_KEY_B, 0}, KeyScope::Sculpt},
     {"level_up",      "Shape",   "Subdivision up",      nullptr, {GLFW_KEY_D, C}},
     {"level_down",    "Shape",   "Subdivision down",    nullptr, {GLFW_KEY_D, S}},
     {"project",       "Shape",   "Project detail down", nullptr, {GLFW_KEY_P, 0}},
@@ -245,6 +245,7 @@ InputState::InputState()
     per_brush[(int)BrushType::PAINT].strength = 0.5f;     // soft build-up by default
     per_brush[(int)BrushType::PAINT].hardness = 0.5f;
     per_brush[(int)BrushType::BUCKET].strength = 1.0f;    // a fill replaces what's there
+    per_brush[(int)BrushType::BUCKET].hardness = 0.75f;   // hardness = edge on the mask: a short fade
     // Clay's hardness is the square stamp's edge feather (clay_square in
     // draw_accum): 1 = crisp chisel rim, lower melts the rim toward the centre.
     // 0.3 = generous feather by default (user-tuned; crisper felt jittery).
@@ -1111,8 +1112,8 @@ static int mod_count(int mods) {
 // Draw — and why holding Shift for smooth doesn't stop T from picking Clay, which is
 // how the hard-coded switch behaved before the keys became rebindable.
 // Only actions live in the current mode's scope compete (see KeyScope); on a tie in
-// modifiers, the mode's own key beats a Global one, so paint mode's F fills where
-// everywhere else F focuses.
+// modifiers, the mode's own key beats a Global one (a Global key and a mode key on
+// one letter is allowed, the mode key just shadows it there).
 static int find_key_action(int key, int mods) {
     const KeyScope live = g_input->key_scope();
     int best = -1, best_n = -1;
@@ -1225,7 +1226,6 @@ static void run_key_action(GLFWwindow* w, KeyAction a, bool repeat) {
         case KeyAction::HOLD_STRENGTH:
             begin_slider_drag(w, InputState::SliderMode::STRENGTH, in.brush_strength); break;
         case KeyAction::HOLD_HARDNESS:
-            if (in.hardness_unused()) { notify("Hardness doesn't apply to the fill bucket", 1.5f); break; }
             begin_slider_drag(w, InputState::SliderMode::HARDNESS, in.brush_hardness); break;
         case KeyAction::HOLD_SPACING:
             begin_slider_drag(w, InputState::SliderMode::SPACING, in.brush_spacing); break;

@@ -1804,8 +1804,11 @@ int main(int argc, char* argv[]) {
             const int pattern = input.fill_pattern;
             const bool gradient = pattern == kFillGradient;
             const bool solid = pattern == kFillSolid || pattern < 0 || pattern >= fill_patterns().count();
-            // Patterns and gradients read positions/normals: pull the GPU's back first.
-            if (!solid) scene.materialize_active_cpu();
+            // Hardness below 1 feathers the fill off the mask, measured along the surface.
+            const bool feathered = input.brush_hardness < 0.99f;
+            // Patterns, gradients and the feather read positions/normals: pull the GPU's
+            // back first.
+            if (!solid || feathered) scene.materialize_active_cpu();
             // The surface under a screen pixel: nearest corner (the seed) and the point.
             float click_n[3] = {0.0f, 0.0f, 1.0f};   // the surface normal at the last surface_at hit
             auto surface_at = [&](float fx, float fy, uint32_t* seed, float out[3]) -> bool {
@@ -1872,8 +1875,45 @@ int main(int argc, char* argv[]) {
                 const uint32_t main_c = pack(input.paint_color), second_c = pack(input.paint_color_alt);
                 const double t0 = glfwGetTime();
                 static std::vector<uint32_t> island;
-                static std::vector<float> value;
+                static std::vector<float> value, edge;
                 paint_bucket_island(pm, seed, island);
+                // World size of a screen pixel at the clicked spot: the brush ring there.
+                const float wpp = 2.0f * camera.half_height_at(camera.view_depth(Vec3{a[0], a[1], a[2]}))
+                                / (float)win_h;
+                // Hardness = the edge against the mask; at 0 the fade is one brush radius
+                // wide (the bucket's own slot: live_brush_slot() is BUCKET while armed).
+                const float feather = feathered ? (1.0f - input.brush_hardness) * input.brush_size * wpp : 0.0f;
+                // Repeat fills of one island with the same paint creep the edge further
+                // across the mask, half a band per click. A repeat = the undo stack's top is
+                // still the fill recorded at that depth, so Ctrl+Z steps the creep back
+                // with it, and any other edit in between starts it over.
+                struct BucketRepeat {
+                    uint32_t entity, island_n, island_min, main_c, second_c;
+                    int pattern; bool erase;
+                    size_t depth; size_t top_n; uint32_t top_v, top_c;
+                    int n;
+                };
+                static std::vector<BucketRepeat> repeats;
+                BucketRepeat rep{scene.active_entity().id, (uint32_t)island.size(),
+                                 island.empty() ? 0u : *std::min_element(island.begin(), island.end()),
+                                 main_c, second_c, pattern, input.bucket_erase, 0, 0, 0, 0, 0};
+                {
+                    UndoStack& us = scene.active_undo();
+                    while (!repeats.empty() && repeats.back().depth > us.undo_depth()) repeats.pop_back();
+                    const UndoEntry* top = us.peek_undo();
+                    if (!repeats.empty() && top && top->kind == UndoEntry::Kind::PAINT && !top->verts.empty()) {
+                        const BucketRepeat& r = repeats.back();
+                        if (r.depth == us.undo_depth() && r.top_n == top->verts.size()
+                            && r.top_v == top->verts[0] && r.top_c == top->new_color[0]
+                            && r.entity == rep.entity && r.island_n == rep.island_n
+                            && r.island_min == rep.island_min && r.main_c == rep.main_c
+                            && r.second_c == rep.second_c && r.pattern == rep.pattern
+                            && r.erase == rep.erase)
+                            rep.n = r.n + 1;
+                    }
+                }
+                paint_bucket_edge(pm, island, input.brush_hardness, feather,
+                                  0.5f * feather * (float)rep.n, edge);
                 const float* cv = nullptr;
                 if (gradient) {
                     paint_cover_gradient(pm, island, a, b, value);
@@ -1893,8 +1933,6 @@ int main(int argc, char* argv[]) {
                     const float frame[9] = {right.x, right.y, right.z, up.x, up.y, up.z, n.x, n.y, n.z};
                     // Size = one tile across the brush circle at the clicked spot, so
                     // the ring shows the repeat before you click.
-                    const float wpp = 2.0f * camera.half_height_at(camera.view_depth(Vec3{a[0], a[1], a[2]}))
-                                    / (float)win_h;
                     const AlphaEntry& pe = fill_patterns().get(pattern);
                     paint_cover_triplanar(pm, island, pe.data.data(), pe.w, pe.h,
                                           2.0f * input.brush_size * wpp,
@@ -1904,20 +1942,24 @@ int main(int argc, char* argv[]) {
                 UndoEntry e;
                 e.kind = UndoEntry::Kind::PAINT;
                 e.paint_layer_id = paint_layers_active_id(pm.paint_layers);
-                paint_bucket_apply(pm, island, main_c, second_c, cv, input.bucket_erase,
+                paint_bucket_apply(pm, island, main_c, second_c, cv, edge.data(), input.bucket_erase,
                                    input.brush_strength, e.verts, e.old_color, e.new_color);
                 const double ms = (glfwGetTime() - t0) * 1000.0;
-                std::printf("[bucket] seed %u, %s: reached %zu / %u verts, changed %zu, %.1f ms%s\n",
+                std::printf("[bucket] seed %u, %s, hardness %.2f, repeat %d: reached %zu / %u verts, changed %zu, %.1f ms%s\n",
                             seed, fill_patterns().get(solid ? kFillSolid : pattern).name.c_str(),
-                            island.size(), pm.vertex_count(), e.verts.size(), ms,
+                            input.brush_hardness, rep.n, island.size(), pm.vertex_count(), e.verts.size(), ms,
                             input.bucket_erase ? " (erase)" : "");
                 if (island.empty()) {
                     std::snprintf(input.notification, sizeof(input.notification),
                                   "That spot is masked");
                     input.notification_timer = 1.5f;
                 } else if (!e.verts.empty()) {
+                    rep.top_n = e.verts.size(); rep.top_v = e.verts[0]; rep.top_c = e.new_color[0];
                     scene.sync_color_partial_entity(scene.active_entity().id, e.verts);
                     scene.active_undo().push(std::move(e));
+                    rep.depth = scene.active_undo().undo_depth();
+                    repeats.push_back(rep);
+                    if (repeats.size() > 64) repeats.erase(repeats.begin());
                 }
             }
         }
@@ -3861,8 +3903,10 @@ int main(int argc, char* argv[]) {
                 if (input.bucket_dragging) {
                     draw_gradient_drag(input.bucket_ax, input.bucket_ay, cursor_x, cursor_y);
                 } else {
-                    // A tiling pattern repeats once across the brush circle: show it.
-                    if (input.fill_pattern != kFillSolid && input.fill_pattern != kFillGradient)
+                    // A tiling pattern repeats once across the brush circle, and the
+                    // mask feather (Hardness below 1) is up to a radius wide: show it.
+                    if ((input.fill_pattern != kFillSolid && input.fill_pattern != kFillGradient)
+                        || input.brush_hardness < 0.99f)
                         renderer.draw_cursor(camera, cursor_x, cursor_y, input.brush_size,
                                              input.cursor_nx, input.cursor_ny, input.cursor_nz,
                                              input.brush_hardness, input.brush_strength,

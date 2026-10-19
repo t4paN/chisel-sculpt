@@ -465,8 +465,95 @@ void paint_cover_gradient(const Mesh& mesh, const std::vector<uint32_t>& island,
     }
 }
 
+void paint_bucket_edge(const Mesh& mesh, std::vector<uint32_t>& island, float hardness,
+                       float feather, float creep, std::vector<float>& weight) {
+    weight.resize(island.size());
+    const float h = hardness < 0.0f ? 0.0f : (hardness > 1.0f ? 1.0f : hardness);
+    // The mask, ramped toward a hard split at the wall as hardness rises: 0 keeps a soft
+    // mask as soft as it was painted, 1 paints everything short of the wall in full.
+    const float half = std::max(0.5f * (1.0f - h), 0.004f);
+    for (size_t k = 0; k < island.size(); k++) {
+        float m = (bucket_mask_at(mesh, island[k]) - 0.5f) / (2.0f * half) + 0.5f;
+        weight[k] = 1.0f - (m < 0.0f ? 0.0f : (m > 1.0f ? 1.0f : m));
+    }
+    if (feather <= 0.0f) return;
+    // The hard edge is one triangle wide, which on a coarse mesh reads as a jagged gap.
+    // The feather is a band straddling the mask outline instead: 60% of it on the fill
+    // side, 40% reaching into the mask, so the fill melts into what the mask protects
+    // rather than stopping short of it. Distances run along the surface from the wall
+    // vertices (Dijkstra, only as far as the band reaches, so a hard edge costs nothing).
+    // `creep` slides the whole band that much further into the mask (repeat fills).
+    const float reach_in = 0.6f * feather, reach_out = 0.4f * feather + creep;
+    const float band_out = 0.4f * feather;
+    const uint32_t vc = mesh.vertex_count();
+    static std::vector<float> dist_in, dist_out;
+    static std::vector<uint8_t> listed;
+    static std::vector<std::pair<float, uint32_t>> heap;
+    dist_in.assign(vc, reach_in);
+    dist_out.assign(vc, reach_out);
+    listed.assign(vc, 0);
+    for (uint32_t v : island) listed[v] = 1;
+    auto later = [](const std::pair<float, uint32_t>& x, const std::pair<float, uint32_t>& y) {
+        return x.first > y.first;
+    };
+    // From every wall vertex at once, through the unmasked side or through the mask.
+    auto spread = [&](std::vector<float>& dist, bool into_mask) {
+        heap.clear();
+        for (uint32_t v : island)
+            if (bucket_mask_at(mesh, v) >= kBucketWall) { dist[v] = 0.0f; heap.push_back({0.0f, v}); }
+        std::make_heap(heap.begin(), heap.end(), later);
+        while (!heap.empty()) {
+            std::pop_heap(heap.begin(), heap.end(), later);
+            const auto [d, v] = heap.back();
+            heap.pop_back();
+            if (d > dist[v]) continue;   // a shorter path got here first
+            for (uint32_t k = mesh.vert_tri_offset[v]; k < mesh.vert_tri_offset[v + 1]; k++) {
+                const uint32_t t = mesh.vert_tri_list[k];
+                for (int c = 0; c < 3; c++) {
+                    const uint32_t u = mesh.indices[t * 3 + c];
+                    if ((bucket_mask_at(mesh, u) >= kBucketWall) != into_mask) continue;
+                    const float dx = mesh.pos_x[u] - mesh.pos_x[v], dy = mesh.pos_y[u] - mesh.pos_y[v],
+                                dz = mesh.pos_z[u] - mesh.pos_z[v];
+                    const float nd = d + std::sqrt(dx * dx + dy * dy + dz * dz);
+                    if (nd >= dist[u]) continue;
+                    dist[u] = nd;
+                    heap.push_back({nd, u});
+                    std::push_heap(heap.begin(), heap.end(), later);
+                }
+            }
+        }
+    };
+    spread(dist_in, false);
+    spread(dist_out, true);
+    // 1 at the band's inner end, 0 at its outer end; s = signed distance, + into the mask.
+    auto ramp = [&](float s) {
+        float t = (s - creep + reach_in) / (reach_in + band_out);
+        t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
+        return 1.0f - t * t * (3.0f - 2.0f * t);
+    };
+    for (size_t k = 0; k < island.size(); k++) {
+        const uint32_t v = island[k];
+        // The smaller of the two, not their product: a soft mask's own ramp times the
+        // band dipped just inside the wall and read as a pale ring there. The soft
+        // mask's hold never drops below what the band gives the wall itself, so the
+        // inside can't fall under the line as creep lifts it (a ring again, otherwise).
+        // A vertex short of the wall holds at least 0.5, above the uncrept 0.35 there,
+        // so without creep this is just the mask.
+        if (bucket_mask_at(mesh, v) >= kBucketWall) weight[k] = ramp(dist_out[v]);
+        else weight[k] = std::min(std::max(weight[k], ramp(0.0f)), ramp(-dist_in[v]));
+    }
+    // Masked vertices the band reaches past the first wall ring join the fill. The flood
+    // above only entered the mask, so it can't cross a thin mask line into the next island.
+    for (uint32_t v = 0; v < vc; v++) {
+        if (listed[v] || dist_out[v] >= reach_out) continue;
+        island.push_back(v);
+        weight.push_back(ramp(dist_out[v]));
+    }
+}
+
 void paint_bucket_apply(Mesh& mesh, const std::vector<uint32_t>& island, uint32_t main,
-                        uint32_t second, const float* value, bool erase, float strength,
+                        uint32_t second, const float* value, const float* edge, bool erase,
+                        float strength,
                         std::vector<uint32_t>& verts,
                         std::vector<uint32_t>& old_c, std::vector<uint32_t>& new_c) {
     const uint32_t vc = mesh.vertex_count();
@@ -477,16 +564,41 @@ void paint_bucket_apply(Mesh& mesh, const std::vector<uint32_t>& island, uint32_
         const uint32_t v = island[k];
         if (v >= vc) continue;
         const float t = value ? value[k] : 0.0f;
-        // The brush's lerp of all four channels (color_paint.*).
-        float w = (1.0f - bucket_mask_at(mesh, v)) * strength;
-        if (erase) w *= 1.0f - t;
         const uint32_t old = mesh.color[v];
-        uint32_t out = 0;
+        float o[4], tg[4];
         for (int ch = 0; ch < 4; ch++) {
-            const float o = unorm(old, ch);
-            const float target = erase ? 0.0f : unorm(main, ch) + (unorm(second, ch) - unorm(main, ch)) * t;
-            out |= to_unorm(o + (target - o) * w) << (8 * ch);
+            o[ch] = unorm(old, ch);
+            tg[ch] = erase ? 0.0f : unorm(main, ch) + (unorm(second, ch) - unorm(main, ch)) * t;
         }
+        // The brush's lerp of all four channels (color_paint.*).
+        float w = edge[k] * strength;
+        if (erase) {
+            w *= 1.0f - t;
+        } else {
+            // The edge is a ceiling, not a step: how much of this target the vertex
+            // already has (its place on the blank-to-target line, when it sits on that
+            // line) is its coverage, and each fill takes `strength` of the gap up to the
+            // edge. Otherwise every repeat fill lerped the soft edge again, steepening it
+            // and creeping it outward while the full middle stayed put.
+            const uint32_t under = blank;
+            float num = 0.0f, den = 0.0f;
+            for (int ch = 0; ch < 4; ch++) {
+                const float d = tg[ch] - unorm(under, ch);
+                num += (o[ch] - unorm(under, ch)) * d;
+                den += d * d;
+            }
+            float cov = den > 1e-6f ? num / den : 0.0f;
+            cov = cov < 0.0f ? 0.0f : (cov > 1.0f ? 1.0f : cov);
+            for (int ch = 0; ch < 4; ch++) {
+                const float on_line = unorm(under, ch) + (tg[ch] - unorm(under, ch)) * cov;
+                if (std::fabs(o[ch] - on_line) > 0.02f) { cov = 0.0f; break; }   // other paint: plain lerp
+            }
+            if (cov >= edge[k]) continue;                       // already at (or past) the edge
+            if (cov > 0.0f) w = (edge[k] - cov) * strength / (1.0f - cov);
+        }
+        uint32_t out = 0;
+        for (int ch = 0; ch < 4; ch++)
+            out |= to_unorm(o[ch] + (tg[ch] - o[ch]) * w) << (8 * ch);
         if (out == old) continue;
         mesh.color[v] = out;
         verts.push_back(v);

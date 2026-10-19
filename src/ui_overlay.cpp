@@ -1058,7 +1058,7 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
             ImGui::SameLine();
             ImGui::TextUnformatted(input.color_pick_active ? "Picking..."
                                    : input.bucket_active   ? "Click to fill, Ctrl erases"
-                                                          : "Q/E swap - C pick - F fill");
+                                                          : "Q/E swap - C pick - B fill");
             if (input.bucket_active) {
                 const AlphaLibrary& pl = fill_patterns();
                 const int pi = std::max(0, std::min(input.fill_pattern, pl.count() - 1));
