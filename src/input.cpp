@@ -268,6 +268,7 @@ InputState::InputState()
     bucket_erase = false;
     fill_pattern = kFillSolid;
     fill_angle = 0.0f;
+    bucket_paint_walls = true;
     bucket_dragging = false;
     bucket_ax = bucket_ay = bucket_bx = bucket_by = 0.0f;
 

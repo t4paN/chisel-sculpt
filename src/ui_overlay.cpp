@@ -1073,6 +1073,10 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
                     ImGui::SetNextItemWidth(120.0f);
                     ImGui::SliderFloat("##fillAngle", &input.fill_angle, 0.0f, 180.0f, "rotate %.0f");
                 }
+                ImGui::SameLine();
+                ImGui::Checkbox("Stop at paint", &input.bucket_paint_walls);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Paint unlike the colour you click walls the fill in, like the mask");
             }
         } else {
             // What the painted extremes mean to the adaptive remesher, as

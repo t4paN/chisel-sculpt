@@ -1925,6 +1925,12 @@ void options_panel(InputState& input, int win_h) {
                 ImGui::SliderFloat("##fillAngle", &input.fill_angle, 0.0f, 180.0f, "%.0f\xC2\xB0");
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Pattern rotation");
             }
+            if (input.bucket_active) {
+                ImGui::SameLine(0.0f, 14.0f);
+                ImGui::Checkbox("Stop at paint", &input.bucket_paint_walls);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Paint unlike the colour you click walls the fill in, like the mask");
+            }
         } else {
             ImGui::SetNextItemWidth(170.0f);
             ImGui::SliderFloat("##densCoarse", &input.density_coarse_mult, 1.0f, 4.0f, "green: edge x%.2f");
@@ -2473,6 +2479,20 @@ void y2k_left(InputState& in, int H, const AlphaLibrary* lib) {
                           "Pattern rotation");
             if (t >= 0.0f) in.fill_angle = 180.0f * std::max(0.0f, std::min(1.0f, t));
             y += 24;
+        }
+        {   // Stop at paint: paint unlike the clicked colour walls the fill, like the mask.
+            bool hv, held;
+            ImVec2 ls = ysize(true, 11.0f, "Stop at paint");
+            if (hit("##yPaintWalls", ImVec2(x0, y), ImVec2(w, 20), &hv, &held))
+                in.bucket_paint_walls = !in.bucket_paint_walls;
+            ImVec2 a(x0 + 2, y + 3), b(x0 + 16, y + 17);
+            inset(dl, a, b, 2.0f);
+            if (in.bucket_paint_walls) {
+                dl->AddLine(ImVec2(a.x + 3, a.y + 7), ImVec2(a.x + 6, a.y + 10), y2k::orange, 2.0f);
+                dl->AddLine(ImVec2(a.x + 6, a.y + 10), ImVec2(a.x + 11, a.y + 3), y2k::orange, 2.0f);
+            }
+            ytext(dl, true, 11.0f, ImVec2(x0 + 22, y + 10 - ls.y * 0.5f), hv ? IM_COL32_WHITE : y2k::text, "Stop at paint");
+            y += 26;
         }
     }
 

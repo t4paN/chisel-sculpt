@@ -1876,43 +1876,66 @@ int main(int argc, char* argv[]) {
                 const double t0 = glfwGetTime();
                 static std::vector<uint32_t> island;
                 static std::vector<float> value, edge;
-                paint_bucket_island(pm, seed, island);
                 // World size of a screen pixel at the clicked spot: the brush ring there.
                 const float wpp = 2.0f * camera.half_height_at(camera.view_depth(Vec3{a[0], a[1], a[2]}))
                                 / (float)win_h;
-                // Hardness = the edge against the mask; at 0 the fade is one brush radius
+                // Hardness = the edge against the walls; at 0 the fade is one brush radius
                 // wide (the bucket's own slot: live_brush_slot() is BUCKET while armed).
                 const float feather = feathered ? (1.0f - input.brush_hardness) * input.brush_size * wpp : 0.0f;
                 // Repeat fills of one island with the same paint creep the edge further
-                // across the mask, half a band per click. A repeat = the undo stack's top is
-                // still the fill recorded at that depth, so Ctrl+Z steps the creep back
+                // across the walls, half a band per click. A repeat = the undo stack's top
+                // is still the fill recorded at that depth, so Ctrl+Z steps the creep back
                 // with it, and any other edit in between starts it over.
+                // A run of repeats reuses its first fill's walls and island (the chain):
+                // with paint as walls, that fill's own soft edge would otherwise read as
+                // new walls, or new floor, on the next click and shift them.
                 struct BucketRepeat {
-                    uint32_t entity, island_n, island_min, main_c, second_c;
+                    uint32_t entity, chain, main_c, second_c;
                     int pattern; bool erase;
                     size_t depth; size_t top_n; uint32_t top_v, top_c;
                     int n;
                 };
                 static std::vector<BucketRepeat> repeats;
-                BucketRepeat rep{scene.active_entity().id, (uint32_t)island.size(),
-                                 island.empty() ? 0u : *std::min_element(island.begin(), island.end()),
-                                 main_c, second_c, pattern, input.bucket_erase, 0, 0, 0, 0, 0};
+                static std::vector<float> chain_block;        // the chain's walls, per vertex
+                static std::vector<uint32_t> chain_island;    // its flood, sorted
+                static uint32_t chain_id = 0;
+                BucketRepeat rep{scene.active_entity().id, 0, main_c, second_c, pattern,
+                                 input.bucket_erase, 0, 0, 0, 0, 0};
+                bool repeat = false;
                 {
                     UndoStack& us = scene.active_undo();
                     while (!repeats.empty() && repeats.back().depth > us.undo_depth()) repeats.pop_back();
                     const UndoEntry* top = us.peek_undo();
                     if (!repeats.empty() && top && top->kind == UndoEntry::Kind::PAINT && !top->verts.empty()) {
                         const BucketRepeat& r = repeats.back();
-                        if (r.depth == us.undo_depth() && r.top_n == top->verts.size()
-                            && r.top_v == top->verts[0] && r.top_c == top->new_color[0]
-                            && r.entity == rep.entity && r.island_n == rep.island_n
-                            && r.island_min == rep.island_min && r.main_c == rep.main_c
-                            && r.second_c == rep.second_c && r.pattern == rep.pattern
-                            && r.erase == rep.erase)
-                            rep.n = r.n + 1;
+                        repeat = r.depth == us.undo_depth() && r.top_n == top->verts.size()
+                              && r.top_v == top->verts[0] && r.top_c == top->new_color[0]
+                              && r.entity == rep.entity && r.chain == chain_id
+                              && r.main_c == rep.main_c && r.second_c == rep.second_c
+                              && r.pattern == rep.pattern && r.erase == rep.erase
+                              && chain_block.size() == pm.vertex_count()
+                              && std::binary_search(chain_island.begin(), chain_island.end(), seed);
+                        if (repeat) rep.n = r.n + 1;
                     }
                 }
-                paint_bucket_edge(pm, island, input.brush_hardness, feather,
+                if (!repeat) {
+                    // Walls: the mask, plus (Stop at paint) paint unlike the clicked colour,
+                    // read off what the viewport shows, every visible layer.
+                    static std::vector<uint32_t> shown;
+                    if (input.bucket_paint_walls) {
+                        shown.resize(pm.vertex_count());
+                        paint_composite(pm.paint_layers, pm.color, pm.vertex_count(), shown.data());
+                    }
+                    constexpr float kPaintTolerance = 0.15f;   // largest channel difference that walls
+                    paint_bucket_walls(pm, input.bucket_paint_walls ? shown.data() : nullptr, seed,
+                                       kPaintTolerance, chain_block);
+                    paint_bucket_island(pm, chain_block.data(), seed, chain_island);
+                    std::sort(chain_island.begin(), chain_island.end());
+                    chain_id++;
+                }
+                rep.chain = chain_id;
+                island = chain_island;
+                paint_bucket_edge(pm, chain_block.data(), island, input.brush_hardness, feather,
                                   0.5f * feather * (float)rep.n, edge);
                 const float* cv = nullptr;
                 if (gradient) {
@@ -1945,9 +1968,10 @@ int main(int argc, char* argv[]) {
                 paint_bucket_apply(pm, island, main_c, second_c, cv, edge.data(), input.bucket_erase,
                                    input.brush_strength, e.verts, e.old_color, e.new_color);
                 const double ms = (glfwGetTime() - t0) * 1000.0;
-                std::printf("[bucket] seed %u, %s, hardness %.2f, repeat %d: reached %zu / %u verts, changed %zu, %.1f ms%s\n",
+                std::printf("[bucket] seed %u, %s, hardness %.2f, repeat %d%s: reached %zu / %u verts, changed %zu, %.1f ms%s\n",
                             seed, fill_patterns().get(solid ? kFillSolid : pattern).name.c_str(),
-                            input.brush_hardness, rep.n, island.size(), pm.vertex_count(), e.verts.size(), ms,
+                            input.brush_hardness, rep.n, input.bucket_paint_walls ? ", stops at paint" : "",
+                            island.size(), pm.vertex_count(), e.verts.size(), ms,
                             input.bucket_erase ? " (erase)" : "");
                 if (island.empty()) {
                     std::snprintf(input.notification, sizeof(input.notification),

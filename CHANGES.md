@@ -2,6 +2,18 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-19 — Fill bucket stops at paint
+
+*Built GL, wgpu and web. Off-screen test passed (a soft-edged painted line walls a fill,
+hard and soft, nothing crosses it). Hand-tested by the user on native: "perfect".*
+
+- **Existing paint walls the fill, like the mask.** Paint that differs clearly from the
+  colour you click (about 15%) stops the bucket, read from what you see, so line work on
+  its own layer walls a fill on another. Everything the mask edge does carries over:
+  Hardness melts the fill into the stroke, repeat fills creep into it, Ctrl+Z steps back.
+  **Stop at paint** in the paint options (on by default) turns it off to fill straight
+  over paint.
+
 ## 2026-10-19 — Fill bucket: Hardness is the edge on the mask, repeat fills creep, B key
 
 *Built GL, wgpu and web. Off-screen tests of the edge weights passed (hard wall, soft mask,

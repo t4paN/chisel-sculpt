@@ -381,6 +381,7 @@ struct InputState {
     // with bucket_click; bucket_dragging is "pressed, waiting for the release".
     int   fill_pattern;
     float fill_angle;    // pattern rotation, degrees (its repeat is the bucket's Size)
+    bool  bucket_paint_walls;   // Stop at paint: paint unlike the clicked colour walls the fill like the mask
     bool  bucket_dragging;
     float bucket_ax, bucket_ay, bucket_bx, bucket_by;
     // Show vertex paint in the viewport. Toggle (next to the Paint icon) lets you

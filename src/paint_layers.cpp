@@ -375,11 +375,32 @@ static inline float bucket_mask_at(const Mesh& mesh, uint32_t v) {
 }
 static constexpr float kBucketWall = 0.5f;
 
-void paint_bucket_island(const Mesh& mesh, uint32_t seed, std::vector<uint32_t>& island) {
+void paint_bucket_walls(const Mesh& mesh, const uint32_t* shown, uint32_t seed, float tolerance,
+                        std::vector<float>& block) {
+    const uint32_t vc = mesh.vertex_count();
+    block.resize(vc);
+    for (uint32_t v = 0; v < vc; v++) block[v] = bucket_mask_at(mesh, v);
+    if (!shown || seed >= vc) return;
+    // Paint unlike the clicked colour walls the fill like a mask: the largest channel
+    // difference, ramped so it crosses the wall (0.5) at `tolerance`. A ramp, not a
+    // cut: a soft stroke's fringe holds partly, the way a soft mask edge does.
+    const float tol = std::max(tolerance, 1e-3f);
+    const uint32_t ref = shown[seed];
+    for (uint32_t v = 0; v < vc; v++) {
+        float d = 0.0f;
+        for (int ch = 0; ch < 3; ch++) d = std::max(d, std::fabs(unorm(shown[v], ch) - unorm(ref, ch)));
+        float w = (d - 0.5f * tol) / tol;
+        w = w < 0.0f ? 0.0f : (w > 1.0f ? 1.0f : w);
+        if (w > block[v]) block[v] = w;
+    }
+}
+
+void paint_bucket_island(const Mesh& mesh, const float* block, uint32_t seed,
+                         std::vector<uint32_t>& island) {
     island.clear();
     const uint32_t vc = mesh.vertex_count();
     if (seed >= vc || mesh.vert_tri_offset.size() != (size_t)vc + 1) return;
-    if (bucket_mask_at(mesh, seed) >= kBucketWall) return;
+    if (block[seed] >= kBucketWall) return;
     // One-shot and user-paced, so it may walk the whole mesh. Kept across calls to
     // skip re-allocating it per fill.
     static std::vector<uint8_t> seen;
@@ -388,7 +409,7 @@ void paint_bucket_island(const Mesh& mesh, uint32_t seed, std::vector<uint32_t>&
     seen[seed] = 1;
     for (size_t head = 0; head < island.size(); head++) {
         const uint32_t v = island[head];
-        if (bucket_mask_at(mesh, v) >= kBucketWall) continue;
+        if (block[v] >= kBucketWall) continue;
         for (uint32_t k = mesh.vert_tri_offset[v]; k < mesh.vert_tri_offset[v + 1]; k++) {
             const uint32_t t = mesh.vert_tri_list[k];
             for (int c = 0; c < 3; c++) {
@@ -465,15 +486,15 @@ void paint_cover_gradient(const Mesh& mesh, const std::vector<uint32_t>& island,
     }
 }
 
-void paint_bucket_edge(const Mesh& mesh, std::vector<uint32_t>& island, float hardness,
-                       float feather, float creep, std::vector<float>& weight) {
+void paint_bucket_edge(const Mesh& mesh, const float* block, std::vector<uint32_t>& island,
+                       float hardness, float feather, float creep, std::vector<float>& weight) {
     weight.resize(island.size());
     const float h = hardness < 0.0f ? 0.0f : (hardness > 1.0f ? 1.0f : hardness);
     // The mask, ramped toward a hard split at the wall as hardness rises: 0 keeps a soft
     // mask as soft as it was painted, 1 paints everything short of the wall in full.
     const float half = std::max(0.5f * (1.0f - h), 0.004f);
     for (size_t k = 0; k < island.size(); k++) {
-        float m = (bucket_mask_at(mesh, island[k]) - 0.5f) / (2.0f * half) + 0.5f;
+        float m = (block[island[k]] - 0.5f) / (2.0f * half) + 0.5f;
         weight[k] = 1.0f - (m < 0.0f ? 0.0f : (m > 1.0f ? 1.0f : m));
     }
     if (feather <= 0.0f) return;
@@ -500,7 +521,7 @@ void paint_bucket_edge(const Mesh& mesh, std::vector<uint32_t>& island, float ha
     auto spread = [&](std::vector<float>& dist, bool into_mask) {
         heap.clear();
         for (uint32_t v : island)
-            if (bucket_mask_at(mesh, v) >= kBucketWall) { dist[v] = 0.0f; heap.push_back({0.0f, v}); }
+            if (block[v] >= kBucketWall) { dist[v] = 0.0f; heap.push_back({0.0f, v}); }
         std::make_heap(heap.begin(), heap.end(), later);
         while (!heap.empty()) {
             std::pop_heap(heap.begin(), heap.end(), later);
@@ -511,7 +532,7 @@ void paint_bucket_edge(const Mesh& mesh, std::vector<uint32_t>& island, float ha
                 const uint32_t t = mesh.vert_tri_list[k];
                 for (int c = 0; c < 3; c++) {
                     const uint32_t u = mesh.indices[t * 3 + c];
-                    if ((bucket_mask_at(mesh, u) >= kBucketWall) != into_mask) continue;
+                    if ((block[u] >= kBucketWall) != into_mask) continue;
                     const float dx = mesh.pos_x[u] - mesh.pos_x[v], dy = mesh.pos_y[u] - mesh.pos_y[v],
                                 dz = mesh.pos_z[u] - mesh.pos_z[v];
                     const float nd = d + std::sqrt(dx * dx + dy * dy + dz * dz);
@@ -539,7 +560,7 @@ void paint_bucket_edge(const Mesh& mesh, std::vector<uint32_t>& island, float ha
         // inside can't fall under the line as creep lifts it (a ring again, otherwise).
         // A vertex short of the wall holds at least 0.5, above the uncrept 0.35 there,
         // so without creep this is just the mask.
-        if (bucket_mask_at(mesh, v) >= kBucketWall) weight[k] = ramp(dist_out[v]);
+        if (block[v] >= kBucketWall) weight[k] = ramp(dist_out[v]);
         else weight[k] = std::min(std::max(weight[k], ramp(0.0f)), ramp(-dist_in[v]));
     }
     // Masked vertices the band reaches past the first wall ring join the fill. The flood

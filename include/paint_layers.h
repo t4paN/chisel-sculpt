@@ -183,13 +183,21 @@ int  paint_layers_drop_stale(PaintLayerStack& s, uint32_t vcount);
 // --- fill bucket -------------------------------------------------------------------
 
 struct Mesh;
+// What walls a fill in, per vertex, 0..1, like the sculpting mask (and including it):
+// the mask, and, given `shown` (the composite the viewport draws, one opaque RGBA8 per
+// vertex; null = mask only), paint unlike the clicked vertex's colour: past
+// `tolerance` (largest channel difference, 0..1) it is a wall, with a soft ramp either
+// side so a soft stroke's fringe holds partly. Every bucket step below reads this.
+void paint_bucket_walls(const Mesh& mesh, const uint32_t* shown, uint32_t seed, float tolerance,
+                        std::vector<float>& block);
 // The island a fill covers: flood from `seed` across triangle neighbours, stopping at
-// the sculpting mask. A vertex masked 0.5 or more is a wall. Walls next to the island
-// are in the list too (they get what paint_bucket_edge gives them, so a soft mask edge
-// can stay soft on the filled side) but never pass the flood on, which is what keeps one
-// unmasked island from leaking into the next. A masked seed gives an empty island.
+// the walls. A vertex blocked 0.5 or more is a wall. Walls next to the island are in
+// the list too (they get what paint_bucket_edge gives them, so a soft edge can stay
+// soft on the filled side) but never pass the flood on, which is what keeps one
+// island from leaking into the next. A walled seed gives an empty island.
 // Disconnected pieces of one mesh are separate islands.
-void paint_bucket_island(const Mesh& mesh, uint32_t seed, std::vector<uint32_t>& island);
+void paint_bucket_island(const Mesh& mesh, const float* block, uint32_t seed,
+                         std::vector<uint32_t>& island);
 
 // Per-island-vertex pattern value in [0,1] for paint_bucket_apply: 0 (black) = the main
 // colour, 1 (white) = the secondary.
@@ -209,16 +217,16 @@ void paint_cover_triplanar(const Mesh& mesh, const std::vector<uint32_t>& island
 void paint_cover_gradient(const Mesh& mesh, const std::vector<uint32_t>& island,
                           const float a[3], const float b[3], std::vector<float>& value);
 
-// How much of the fill each island vertex takes, from the mask: the fill's edge where
-// it meets the wall. `hardness` 1 paints everything short of the wall in full, a hard
-// clash along the mask line; lower softens the mask's own ramp and fades the fill over a
-// band `feather` world units wide straddling the mask outline (measured along the
-// surface: 60% on the fill side, 40% into the mask). Masked vertices inside the band
+// How much of the fill each island vertex takes, from the walls (`block`): the fill's
+// edge where it meets them. `hardness` 1 paints everything short of a wall in full, a
+// hard clash along the line; lower softens the walls' own ramp and fades the fill over
+// a band `feather` world units wide straddling the outline (measured along the
+// surface: 60% on the fill side, 40% into the wall). Walled vertices inside the band
 // are APPENDED to `island`, so call this before the pattern/gradient cover. `creep`
-// (world units) slides the band that much further into the mask: repeat fills on one
-// spot pass a growing creep, so each click eats a little further across the mask.
-void paint_bucket_edge(const Mesh& mesh, std::vector<uint32_t>& island, float hardness,
-                       float feather, float creep, std::vector<float>& weight);
+// (world units) slides the band that much further into the wall: repeat fills on one
+// spot pass a growing creep, so each click eats a little further across it.
+void paint_bucket_edge(const Mesh& mesh, const float* block, std::vector<uint32_t>& island,
+                       float hardness, float feather, float creep, std::vector<float>& weight);
 
 // Fill the island in the active layer (mesh.color): the brush's four-channel lerp
 // toward each vertex's target. `edge` (paint_bucket_edge) is a CEILING on how much of

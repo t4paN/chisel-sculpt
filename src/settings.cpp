@@ -239,6 +239,7 @@ std::string serialize(const InputState& in) {
     // Fill patterns are all built in, so an index is stable (new ones are appended).
     append_kv(s, "fill_pattern", in.fill_pattern);
     append_kv(s, "fill_angle",   in.fill_angle);
+    append_kv(s, "bucket_paint_walls", in.bucket_paint_walls);
     char buf[128];
     std::snprintf(buf, sizeof(buf), "paint_color=%.6g %.6g %.6g\n",
                   (double)in.paint_color[0], (double)in.paint_color[1],
@@ -359,6 +360,7 @@ void apply_global_key(InputState& in, const std::string& key, const std::string&
         if (p >= 0 && p < fill_patterns().count()) in.fill_pattern = p;
     }
     else if (key == "fill_angle") in.fill_angle = clampf(std::strtof(val.c_str(), nullptr), 0.0f, 180.0f);
+    else if (key == "bucket_paint_walls") in.bucket_paint_walls = parse_bool(val);
 }
 
 std::string trim(const std::string& s) {
@@ -498,6 +500,7 @@ void settings_reset(InputState& input) {
     input.active_alpha       = fresh.active_alpha;
     input.fill_pattern       = fresh.fill_pattern;
     input.fill_angle         = fresh.fill_angle;
+    input.bucket_paint_walls = fresh.bucket_paint_walls;
     for (int i = 0; i < (int)KeyAction::COUNT; i++) input.keybinds[i] = fresh.keybinds[i];
     for (int i = 0; i < 3; i++) {
         input.paint_color[i]     = fresh.paint_color[i];
