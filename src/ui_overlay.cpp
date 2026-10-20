@@ -1303,8 +1303,8 @@ void draw_settings_menu_items(InputState& input, MultiresInfo mres, bool sync_ta
                                  "does. Never mid-stroke.\n\n"
                                  "Per profile: strength, hardness, spacing, max effect.\n"
                                  "Shared: brush size (per brush if you turn that on\n"
-                                 "below), autosmooth, lighting, colours, mirror,\n"
-                                 "density.\n\n"
+                                 "below), autosmooth, speed falloff, lighting,\n"
+                                 "colours, mirror, density.\n\n"
                                  "Pick a tab here to edit the other profile — switching\n"
                                  "is paused while this menu is open.");
             }
@@ -1330,6 +1330,20 @@ void draw_settings_menu_items(InputState& input, MultiresInfo mres, bool sync_ta
                                  "stops a stroke overshooting. Move, Smooth, Mask and\n"
                                  "Paint aim at a target instead and ignore it.\n\n"
                                  "Defaults: 60%% mouse, 100%% tablet.");
+
+            // Speed falloff (InputState::speed_gain). Sits with max effect because the
+            // two are tuned together, but it is ONE shared value, not per profile: the
+            // pen has real pressure and never uses it, so a per-profile copy would be a
+            // slider that does nothing on one of its two tabs.
+            float speed_pct = input.speed_gain * 100.0f;
+            ImGui::SetNextItemWidth(mw);
+            if (ImGui::SliderFloat("##speedGain", &speed_pct, 0.0f, 100.0f, "speed falloff %.0f%%"))
+                input.speed_gain = speed_pct * 0.01f;
+            if (ImGui::IsItemHovered())
+                ui_skin_menu_tip("Mouse and finger strokes: the faster you move,\n"
+                                 "the lighter the stroke, and a little softer.\n"
+                                 "Slow strokes keep full strength.\n\n"
+                                 "0%% = off. A pen uses its real pressure instead.");
 
             ImGui::Separator();
 

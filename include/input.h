@@ -508,6 +508,11 @@ struct InputState {
     // device trait, so a mouse-side toggle must not flip back when you pick up the pen.
     bool autosmooth;
 
+    // Speed falloff: how much a fast stroke lightens itself, 0..1 (0 = off, the default).
+    // Applies only where there is no real pressure (mouse, finger), as a stand-in for the
+    // lighter touch a fast pen stroke has. Global: it describes the hand, not the brush.
+    float speed_gain;
+
     // Max brush effect: the strength multiplier at FULL input — a mouse dab, or a pen
     // pressed to the stop. It is the ceiling of the pressure ramp, not a separate scale,
     // so one number means the same thing on both profiles (a per-profile copy that only

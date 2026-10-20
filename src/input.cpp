@@ -205,6 +205,7 @@ InputState::InputState()
     , mirror_x(true)
     , mirror_topological(false)
     , autosmooth(false)
+    , speed_gain(0.0f)
     , max_effect(0.6f)          // mouse default; the tablet profile is raised to 1.0 below
     , fast_normals(false)
     , current_lod(0)

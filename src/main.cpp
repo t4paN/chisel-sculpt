@@ -96,6 +96,16 @@ static constexpr float PRESSURE_STR_FLOOR  = 0.05f;
 static constexpr float PRESSURE_SIZE_FLOOR = 0.40f;
 static constexpr float PRESSURE_GAMMA      = 1.0f;
 
+// Speed falloff (InputState::speed_gain): strength x 1 / (1 + gain * speed / REF), so at
+// full gain a stroke at SPEED_REF px/s lands at half strength. Speed is screen px/s,
+// smoothed over SPEED_TAU so one jerky frame doesn't pulse the stroke; the floor keeps a
+// flick from vanishing outright.
+static constexpr float SPEED_REF   = 400.0f;
+static constexpr float SPEED_TAU   = 0.08f;
+static constexpr float SPEED_FLOOR = 0.10f;
+struct StrokeSpeed { float px_s = 0.0f; float x = 0.0f; float y = 0.0f; double t = 0.0; };
+static StrokeSpeed g_stroke_speed;
+
 // The old MOUSE_STRENGTH_SCALE (0.6) lived here. It is now the per-profile "max brush
 // effect" slider (InputState::max_effect) — same number, same defaults, but reachable.
 // Dab spacing is stepped in SCREEN pixels but every dab deposits into a WORLD-space
@@ -2720,6 +2730,7 @@ int main(int argc, char* argv[]) {
             brush_stroke.walk_x = (float)input.mouse_x;
             brush_stroke.walk_y = (float)input.mouse_y;
             brush_stroke.walk_carry = 0.0f;
+            g_stroke_speed = StrokeSpeed{0.0f, (float)input.mouse_x, (float)input.mouse_y, glfwGetTime()};
             pushes_at_stroke_start = UndoStack::global_pushes;
             app_state = AppState::SCULPTING;
         }
@@ -3421,6 +3432,8 @@ int main(int argc, char* argv[]) {
             if (wrapped) {
                 brush_stroke.walk_x = (float)input.mouse_x;
                 brush_stroke.walk_y = (float)input.mouse_y;
+                g_stroke_speed.x = (float)input.mouse_x;   // the jump isn't hand speed
+                g_stroke_speed.y = (float)input.mouse_y;
                 brush_stroke.walk_carry = 0.0f;
                 input.path_n = 0;
 #if defined(_WIN32) && !defined(__EMSCRIPTEN__)
@@ -3486,6 +3499,30 @@ int main(int argc, char* argv[]) {
 
                 float eff_brush_size = input.brush_size *
                     (PRESSURE_SIZE_FLOOR + (1.0f - PRESSURE_SIZE_FLOOR) * p_shaped);
+
+                // Speed falloff: tracked every stroke frame so the speed is warm if the
+                // slider moves mid-session; applied only without real pressure, and not
+                // to Move/Limb, which read strength as how closely to track the cursor.
+                {
+                    const double now = glfwGetTime();
+                    const float dt = (float)(now - g_stroke_speed.t);
+                    if (dt > 0.0f) {
+                        const float d = std::hypot((float)input.mouse_x - g_stroke_speed.x,
+                                                   (float)input.mouse_y - g_stroke_speed.y);
+                        const float a = 1.0f - std::exp(-dt / SPEED_TAU);
+                        g_stroke_speed.px_s += (d / dt - g_stroke_speed.px_s) * a;
+                        g_stroke_speed.x = (float)input.mouse_x;
+                        g_stroke_speed.y = (float)input.mouse_y;
+                        g_stroke_speed.t = now;
+                    }
+                    // Hardness softens too, at half the rate: a fast stroke lands lighter
+                    // and a little more feathered, the way a quick pen stroke does.
+                    if (pressure_is_synthetic && !is_grab && input.speed_gain > 0.0f) {
+                        const float k = input.speed_gain * g_stroke_speed.px_s / SPEED_REF;
+                        eff_strength *= std::max(SPEED_FLOOR, 1.0f / (1.0f + k));
+                        eff_hardness *= std::max(SPEED_FLOOR, 1.0f / (1.0f + 0.5f * k));
+                    }
+                }
 
                 // This frame's pointer path: from where the last frame's path ended,
                 // through every position reported since (InputState::path_x), to the

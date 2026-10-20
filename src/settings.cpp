@@ -197,6 +197,7 @@ std::string serialize(const InputState& in) {
     // size slider no longer marks settings dirty at all.
     append_kv(s, "per_brush_sizes",     in.per_brush_sizes);
     append_kv(s, "autosmooth",          in.autosmooth);
+    append_kv(s, "speed_gain",          in.speed_gain);
     append_kv(s, "matcap_contrast",     in.matcap_contrast);
     append_kv(s, "flat_shading",        in.flat_shading);
     append_kv(s, "show_fps",            in.show_fps);
@@ -303,6 +304,7 @@ void apply_global_key(InputState& in, const std::string& key, const std::string&
     else if (key == "density_fine_mult")   in.density_fine_mult   = clampf(std::strtof(val.c_str(), nullptr), 0.2f, 1.0f);
     else if (key == "per_brush_sizes")     in.per_brush_sizes     = parse_bool(val);
     else if (key == "autosmooth")          in.autosmooth          = parse_bool(val);
+    else if (key == "speed_gain")          in.speed_gain          = clampf(std::strtof(val.c_str(), nullptr), 0.0f, 1.0f);
     else if (key == "camera_fov")          in.camera_fov          = clampf(std::strtof(val.c_str(), nullptr), 15.0f, 80.0f);
     else if (key == "remesh_detail")       in.remesh_detail       = clampf(std::strtof(val.c_str(), nullptr), 0.25f, 4.0f);
     else if (key == "flat_shading")        in.flat_shading        = parse_bool(val);
@@ -478,6 +480,7 @@ void settings_reset(InputState& input) {
     input.per_brush_sizes    = fresh.per_brush_sizes;
     input.seed_brush_sizes();
     input.autosmooth         = fresh.autosmooth;
+    input.speed_gain         = fresh.speed_gain;
     input.matcap_contrast    = fresh.matcap_contrast;
     input.flat_shading       = fresh.flat_shading;
     input.show_fps           = fresh.show_fps;
