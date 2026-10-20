@@ -2,6 +2,18 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-20 — Browser: size/strength/hardness drags move smoothly again
+
+*Built web; hand-tested by the user in Firefox and Chromium on Linux (KDE Wayland).*
+
+- **Firefox no longer snaps the value to 0 or 100.** Under the pointer lock it reported
+  every other move as the pointer's distance from the grab point (-1, +153, -1, +152, ...).
+  Firefox on desktop Linux now skips the lock, and the slider reads the real pointer
+  position step instead. Its pointer stays where the drag left it, since a browser can't
+  move it back.
+- **Chromium keeps the lock**, so the pointer returns to the spot where the drag began.
+  The one-frame flash of the ring out at the dragged-to spot on release is gone.
+
 ## 2026-10-20 — v0.3.3 — Layers panel: double-click to rename, drag to reorder
 
 *Built GL, wgpu and web. The user's first hand test found a bug (renaming one layer also

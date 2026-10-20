@@ -557,7 +557,21 @@ static void apply_slider_delta(float dx) {
 // the DOM movementX feed still works, only the visible cursor wanders.
 #if defined(__EMSCRIPTEN__)
 static void web_pointer_lock(bool grab) {
-    if (grab) EM_ASM({ if (Module.canvas.requestPointerLock) Module.canvas.requestPointerLock(); });
+    // Not in Firefox on desktop Linux. Its lock doesn't hold the pointer there (it is
+    // somewhere else on release), and its movementX under the lock alternates the real
+    // step with the pointer's distance from the grab point (-1, +153, -1, +152, ...),
+    // which slammed every slider to its ends. Unlocked, the shell feeds the clientX
+    // step instead, which is exact. Chromium on the same desktop locks properly.
+    // Newer browsers answer with a promise; a refusal is otherwise silent.
+    if (grab) EM_ASM({
+        var ua = navigator.userAgent;
+        if (ua.indexOf('Firefox') >= 0 && ua.indexOf('Linux') >= 0 && ua.indexOf('Android') < 0) return;
+        if (!Module.canvas.requestPointerLock) return;
+        var p = Module.canvas.requestPointerLock();
+        if (p && p.catch) p.catch(function(err) {
+            console.log('[slider] pointer lock refused: ' + err.name + ': ' + err.message);
+        });
+    });
     else      EM_ASM({ if (document.exitPointerLock) document.exitPointerLock(); });
 }
 #else
@@ -636,6 +650,10 @@ static void end_slider_drag(GLFWwindow* w, bool warp_back) {
         // what actually moves the pointer there. (On web the pointer-lock exit restores
         // the OS cursor to where it was grabbed, which is the same place.)
         if (w) glfwSetCursorPos(w, g_input->slider_start_x, g_input->slider_start_y);
+#if defined(__EMSCRIPTEN__)
+        EM_ASM({ if (Module.chiselSetLockedPos) Module.chiselSetLockedPos($0, $1); },
+               g_input->slider_start_x, g_input->slider_start_y);
+#endif
         g_input->mouse_x      = g_input->slider_start_x;
         g_input->mouse_y      = g_input->slider_start_y;
         g_input->prev_mouse_x = g_input->slider_start_x;

@@ -4859,6 +4859,25 @@ int main(int argc, char* argv[]) {
         // continuous when the lock lets go.
         var lx = 0;   // (separate statements: a bare comma would split EM_ASM's
         var ly = 0;   //  macro arguments)
+        // Slider drags are fed their own delta, not the raw movementX: browsers on Linux
+        // report spikes of hundreds of pixels in it (on lock and at random), which pinned
+        // a slider to 0 or 100 with nothing between. Free pointer: the clientX step,
+        // which can't spike. Locked: movementX, minus the event that crosses the lock
+        // change and anything too big for one frame of a hand.
+        // A slider drag ends before the browser lets go of its lock, and the moves in
+        // between carry the position rebuilt above, which travelled with the hand all
+        // through the drag: one frame of the ring out there, then a pop back. The drag's
+        // end puts it back on the grab point (end_slider_drag).
+        Module.chiselSetLockedPos = function(x, y) { lx = x; ly = y; };
+        var sx0 = -1;
+        var sLocked = false;
+        var SPIKE = 400;
+        document.addEventListener('pointerlockchange', function() {
+            console.log('[slider] pointer lock ' + (document.pointerLockElement === c ? 'on' : 'off'));
+        });
+        document.addEventListener('pointerlockerror', function() {
+            console.log('[slider] pointer lock refused (pointerlockerror)');
+        });
 
         // Two-finger touch: pinch zooms, midpoint pans (applied in the main loop).
         // Only the first finger reaches the app as a click (Emscripten's GLFW), so
@@ -4959,9 +4978,20 @@ int main(int argc, char* argv[]) {
             }
             if (locked) { lx += (e.movementX || 0) * k; ly += (e.movementY || 0) * k; }
             else        { lx = (e.clientX - r.left) * k; ly = (e.clientY - r.top) * k; }
-            // movementX drives the slider drags (consistent CSS-scale deltas even
-            // under pointer lock, where clientX freezes).
-            Module._chisel_set_pointer(lx, ly, (e.movementX || 0) * k);
+            var sdx = 0;
+            if (locked !== sLocked) {
+                sLocked = locked;
+            } else if (locked) {
+                sdx = (e.movementX || 0) * k;
+                if (Math.abs(sdx) > SPIKE) {
+                    console.log('[slider] dropped a movementX spike: ' + e.movementX);
+                    sdx = 0;
+                }
+            } else if (sx0 >= 0) {
+                sdx = (e.clientX - sx0) * k;
+            }
+            sx0 = e.clientX;
+            Module._chisel_set_pointer(lx, ly, sdx);
         };
         c.addEventListener('pointermove', feed);
         c.addEventListener('pointerdown', feed);
