@@ -138,6 +138,11 @@ struct BrushStroke {
     // stroke keeps the direction while dropping the per-dab noise.
     Vec3 crease_axis;
     bool crease_axis_valid;
+    // How far the recent dabs agree with that axis, 0..1 (smoothed cos^2 between each
+    // step and the axis). Scales the pinch pull: a scribble's turnarounds step sideways
+    // to the axis, and pulling at full strength there yanked the same verts in a fresh
+    // direction on every pass until they piled to one side and the normals broke.
+    float crease_axis_conf;
     // Stamp rake: smoothed in-plane angle that turns the alpha stamp to follow the
     // stroke direction (Clay only for now). Travel between dab anchors, projected
     // into the stamp plane, gives a target angle; the current angle eases a quarter

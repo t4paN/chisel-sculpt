@@ -168,11 +168,14 @@ fn deposit(v : u32, anchor : vec3<f32>, view : vec3<f32>, anchor_n : vec3<f32>,
         return;
     }
 
-    // Depth: (1 - x)^k, a cusp on the stroke line. Hardness sets k, i.e. how narrow
-    // and pointed the V is (it used to widen a flat-topped plateau, which is what made
-    // the tip flat and the falloff wide).
-    let k = 1.5 + 2.5 * P.hardness;
-    var d = anchor_n * (P.disp_amount * pow(1.0 - xa, k) * mask);
+    // Depth: a wide V with a sharp point on the stroke line. The body is (1 - x)^k with
+    // k near 1, so the flanks run nearly straight; hardness raises k toward 2 for a
+    // narrower V (it used to widen a flat-topped plateau, which is what made the tip
+    // flat and the falloff wide). A fifth of the depth is a very narrow (1 - x)^10 cut
+    // that sharpens the point itself without narrowing the flanks.
+    let k = 1.0 + P.hardness;
+    let shape = 0.8 * pow(1.0 - xa, k) + 0.2 * pow(1.0 - xa, 10.0);
+    var d = anchor_n * (P.disp_amount * shape * mask);
 
     // Pinch: squeeze onto the stroke line, never along it (pulling at the dab centre
     // drags topology down the path). Weight (1 - x) makes the pull x(1 - x): zero on

@@ -980,6 +980,7 @@ BrushStroke::BrushStroke()
     , anchor_world_radius(0.0f)
     , anchor_cos_tilt(1.0f)
     , crease_axis_valid(false)
+    , crease_axis_conf(1.0f)
     , cyl_axis_x(0.0f), cyl_axis_y(0.0f), cyl_axis_z(0.0f)
     , screen_slack(1.0f)
     , last_stroke_valid(false)
@@ -1282,6 +1283,7 @@ void BrushStroke::begin(Renderer& renderer, const Camera& cam,
     anchor_valid = false;
     crease_prev_valid = false;
     crease_axis_valid = false;
+    crease_axis_conf = 1.0f;
     stamp_prev_valid = false;
     stamp_rake_valid = false;
     stamp_rake_angle = 0.0f;
@@ -1468,7 +1470,8 @@ void BrushStroke::apply_crease(DabContext& ctx, float dab_x, float dab_y,
     //
     // 0.30 -> 0.42 with the V-profile (2026-10-20): the cusp carries less volume than the
     // old flat-topped dab, and this keeps the centre-line depth about where it was.
-    float disp_amount = base_disp * strength * sign * 0.42f;
+    // 0.48 with the wide-V body: the user asked for it a bit deeper.
+    float disp_amount = base_disp * strength * sign * 0.48f;
     // Pinch gathers vertices into a narrow band — that gathering is what reads as
     // sharpness, and it's an absolute width, not a ratio. Scaled linearly it made a
     // low-strength crease shallow AND wide (i.e. a Draw dent), because the band never
@@ -1483,8 +1486,9 @@ void BrushStroke::apply_crease(DabContext& ctx, float dab_x, float dab_y,
     // noise amplifier: a few percent of R of anchor jitter swings the raw direction
     // by tens of degrees, and since the kernel squeezes ACROSS this axis, that swing
     // IS the ridge wandering. Sub-pixel anchoring cut the jitter at source; the EMA
-    // takes what survives. Weight 0.35 tracks a deliberate curve within a few dabs
-    // while averaging out per-dab rattle.
+    // takes what survives. Weight 0.15 (was 0.35) still follows a deliberate curve,
+    // but a back-and-forth scribble's turnarounds no longer swing it: each swing
+    // re-aimed the squeeze and dragged the same verts somewhere new (2026-10-20).
     float sdx = 0.0f, sdy = 0.0f, sdz = 0.0f;
     if (crease_prev_valid) {
         Vec3 d = anchor_pos - crease_prev_anchor;
@@ -1503,8 +1507,9 @@ void BrushStroke::apply_crease(DabContext& ctx, float dab_x, float dab_y,
                 // the axis is an orientation, not a heading, and a 180-degree
                 // disagreement would otherwise cancel it to zero.
                 float dp = crease_axis.x * ux + crease_axis.y * uy + crease_axis.z * uz;
+                crease_axis_conf += (dp * dp - crease_axis_conf) * 0.5f;
                 if (dp < 0.0f) { ux = -ux; uy = -uy; uz = -uz; }
-                const float a = 0.35f;
+                const float a = 0.15f;
                 crease_axis.x += (ux - crease_axis.x) * a;
                 crease_axis.y += (uy - crease_axis.y) * a;
                 crease_axis.z += (uz - crease_axis.z) * a;
@@ -1544,7 +1549,8 @@ void BrushStroke::apply_crease(DabContext& ctx, float dab_x, float dab_y,
     params.use_b = ctx.mirror_x ? 1 : 0;
     params.world_radius = anchor_world_radius;
     params.disp_amount = disp_amount;
-    params.pinch_amount = pinch_amount;
+    // Less pull while the axis is unsure (see crease_axis_conf); depth is unaffected.
+    params.pinch_amount = pinch_amount * crease_axis_conf;
     params.hardness = hardness;
     params.view_a_x = view_dir.x;
     params.view_a_y = view_dir.y;

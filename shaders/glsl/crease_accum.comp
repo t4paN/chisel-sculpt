@@ -112,8 +112,9 @@ void deposit(uint v, vec3 anchor, vec3 view, vec3 anchor_n, vec3 vp, vec3 vn, ui
     float mask = sample_alpha(rel, mirrored) * gate_w * (1.0 - smoothstep(0.0, 1.0, ya));
     if (mask <= 0.0) return;
 
-    float k = 1.5 + 2.5 * P.hardness;
-    vec3 d = anchor_n * (P.disp_amount * pow(1.0 - xa, k) * mask);
+    float k = 1.0 + P.hardness;
+    float shape = 0.8 * pow(1.0 - xa, k) + 0.2 * pow(1.0 - xa, 10.0);
+    vec3 d = anchor_n * (P.disp_amount * shape * mask);
     d -= across * ((1.0 - xa) * mask * P.pinch_amount / P.world_radius);
 
     uint base = v * 4u;

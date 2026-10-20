@@ -2,6 +2,22 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-20 — Crease cuts a sharp V
+
+*Built GL, wgpu and web; shader gate 69/69. Hand-tested by the user on native wgpu (mouse):
+"the new crease is on-point", then "aces" after the wide-V and scribble changes.*
+
+- **A V-shaped cut with a sharp point, not a flat-bottomed trough.** The profile is now
+  shaped across the stroke line instead of around each dab's centre, so overlapping dabs
+  no longer blur it round. Nearly straight flanks plus a narrow extra cut at the tip;
+  Hardness narrows the V (it used to widen a flat plateau). Somewhat deeper than before.
+- **The pinch gathers the flanks** into a tight band, pulling hardest half-way out, so the
+  tip has vertices to be sharp with. It still only contracts toward the line, so
+  neighbours can't fold over each other.
+- **Scribbling over a spot no longer breaks the normals.** The squeeze direction averages
+  over more dabs, and the pull eases off while a stroke moves sideways to it (a scribble's
+  turnarounds), instead of dragging the same verts somewhere new on every pass.
+
 ## 2026-10-20 — Browser: size/strength/hardness drags move smoothly again
 
 *Built web; hand-tested by the user in Firefox and Chromium on Linux (KDE Wayland).*
