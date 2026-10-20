@@ -2,6 +2,16 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-20 — Layers panel: double-click to rename, drag to reorder
+
+*Built GL, wgpu and web. The user's first hand test found a bug (renaming one layer also
+renamed Base, and Base couldn't be selected); fixed, and the retest passed.*
+
+- **Double-click a layer's name to rename it.** Enter or clicking away keeps the new name,
+  Esc drops it, an empty name keeps the old one. Shortcuts don't fire while typing.
+- **Drag a layer row onto another to move it there.** A line on the target's edge shows
+  whether it lands above or below. Neither the rename nor the move is undoable yet.
+
 ## 2026-10-20 — Edge wrap moves the pointer on Wayland; no wrap in the browser
 
 *Built GL, wgpu and web; hand-tested by the user on native wgpu (Wayland, KWin 6.8, mouse):

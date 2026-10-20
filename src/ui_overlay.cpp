@@ -1926,6 +1926,13 @@ void draw_paint_layers_panel(InputState& input, Scene& scene, int win_w, int /*w
     using Op = std::function<void(PaintLayerStack&, std::vector<uint32_t>&, uint32_t)>;
     auto move_pixels = [&](const Op& op) { scene.edit_paint_layers(eid, op); };
     auto props       = [&]() { scene.paint_layers_changed(eid, false); };
+    // Layer being renamed, and on which entity, since layer ids are only unique per
+    // stack. Its own on/off flag: Base is id 0, so no id can mean "none". Static: it has
+    // to outlive the frame.
+    static bool rename_on = false;
+    static uint32_t rename_id = 0, rename_eid = 0;
+    static bool rename_focus = false;
+    static char rename_buf[64];
 
     ImGui::SetNextWindowPos(ImVec2((float)win_w - 16.0f, 140.0f), ImGuiCond_FirstUseEver,
                             ImVec2(1.0f, 0.0f));
@@ -1946,12 +1953,59 @@ void draw_paint_layers_panel(InputState& input, Scene& scene, int win_w, int /*w
         if (ImGui::Checkbox("##vis", &vis)) { L.visible = vis; props(); }
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Show / hide");
         ImGui::SameLine();
-        char label[96];
-        std::snprintf(label, sizeof(label), "%s%s", L.clip ? "\xC2\xBB " : "", L.name.c_str());
-        if (ImGui::Selectable(label, i == st.active, 0, ImVec2(150.0f, 0.0f)) && i != st.active)
-            move_pixels([i](PaintLayerStack& s, std::vector<uint32_t>& act, uint32_t vc) {
-                paint_layer_set_active(s, act, i, vc);
-            });
+        if (rename_on && rename_id == L.id && rename_eid == eid) {
+            // Inline rename: Enter or clicking away keeps the edit, Esc drops it, and
+            // an empty name keeps the old one.
+            if (rename_focus) { ImGui::SetKeyboardFocusHere(); rename_focus = false; }
+            ImGui::SetNextItemWidth(150.0f);
+            ImGui::InputText("##rename", rename_buf, sizeof(rename_buf),
+                             ImGuiInputTextFlags_AutoSelectAll);
+            if (ImGui::IsItemDeactivated()) {
+                if (!ImGui::IsKeyPressed(ImGuiKey_Escape) && rename_buf[0]) L.name = rename_buf;
+                rename_on = false;
+            }
+        } else {
+            char label[96];
+            std::snprintf(label, sizeof(label), "%s%s", L.clip ? "\xC2\xBB " : "", L.name.c_str());
+            if (ImGui::Selectable(label, i == st.active, 0, ImVec2(150.0f, 0.0f)) && i != st.active)
+                move_pixels([i](PaintLayerStack& s, std::vector<uint32_t>& act, uint32_t vc) {
+                    paint_layer_set_active(s, act, i, vc);
+                });
+            if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                rename_on = true;
+                rename_id = L.id;
+                rename_eid = eid;
+                rename_focus = true;
+                std::snprintf(rename_buf, sizeof(rename_buf), "%s", L.name.c_str());
+            }
+            // Drag a row onto another to reorder. The payload is the layer id, not its
+            // index, so it can't go stale. The dragged layer takes the target's slot,
+            // which lands above the target when moving up and below it when moving down;
+            // a line on that edge says which.
+            if (ImGui::BeginDragDropSource()) {
+                ImGui::SetDragDropPayload("CHISEL_LAYER", &L.id, sizeof(L.id));
+                ImGui::TextUnformatted(L.name.c_str());
+                ImGui::EndDragDropSource();
+            }
+            if (ImGui::BeginDragDropTarget()) {
+                const ImGuiPayload* pl = ImGui::AcceptDragDropPayload(
+                    "CHISEL_LAYER", ImGuiDragDropFlags_AcceptBeforeDelivery
+                                    | ImGuiDragDropFlags_AcceptNoDrawDefaultRect);
+                if (pl) {
+                    uint32_t from_id;
+                    std::memcpy(&from_id, pl->Data, sizeof(from_id));
+                    const int from = paint_layers_index_of(st, from_id);
+                    if (from >= 0 && from != i) {
+                        const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+                        const float y = from < i ? a.y : b.y;
+                        ImGui::GetWindowDrawList()->AddLine(ImVec2(a.x, y), ImVec2(b.x, y),
+                                                            ImGui::GetColorU32(col_text_sel), 2.0f);
+                        if (pl->IsDelivery()) { paint_layer_move(st, from, i); props(); }
+                    }
+                }
+                ImGui::EndDragDropTarget();
+            }
+        }
         // Delete sits at the far end of its own row, not next to "+": a stray click on
         // the add button must never cost a layer (layer edits aren't undoable yet).
         ImGui::SameLine();

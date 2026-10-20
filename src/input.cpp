@@ -2,6 +2,7 @@
 #include "brush_alpha.h"   // kFillGradient
 #include "debug_console.h"
 #include "tablet.h"
+#include "imgui.h"           // key_callback yields to a focused text field
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -1429,6 +1430,11 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
         if (action == GLFW_PRESS) handle_modal_key(w, key);
         return;
     }
+
+    // A text field (the layer rename) owns the keyboard. ImGui already got this key
+    // through its chained callback, so no shortcut may fire on it too. Releases still
+    // pass, so a key held before the field opened can't stay stuck down.
+    if (ImGui::GetIO().WantTextInput && action != GLFW_RELEASE) return;
 
     // Fixed keys: the modifier gestures, Esc, the prompt answers and the debug keys.
     if (action == GLFW_PRESS) {
