@@ -613,6 +613,10 @@ static void begin_slider_drag(GLFWwindow* w, InputState::SliderMode mode, float 
     g_input->slider_start_value = start_value;
     g_input->slider_slot        = g_input->live_brush_slot();
     g_input->slider_accum       = 0;
+#if defined(__EMSCRIPTEN__)
+    EM_ASM({ if (Module.chiselSliderBegin) Module.chiselSliderBegin($0, $1); },
+           g_input->mouse_x, g_input->mouse_y);
+#endif
     slider_capture(w, true);
     // Seed the delta baseline AFTER capturing. Disabling the cursor switches GLFW to an
     // unbounded virtual position that need not start at the window coordinate, so
@@ -651,16 +655,17 @@ static void end_slider_drag(GLFWwindow* w, bool warp_back) {
         // what actually moves the pointer there. (On web the pointer-lock exit restores
         // the OS cursor to where it was grabbed, which is the same place.)
         if (w) glfwSetCursorPos(w, g_input->slider_start_x, g_input->slider_start_y);
-#if defined(__EMSCRIPTEN__)
-        EM_ASM({ if (Module.chiselSetLockedPos) Module.chiselSetLockedPos($0, $1); },
-               g_input->slider_start_x, g_input->slider_start_y);
-#endif
         g_input->mouse_x      = g_input->slider_start_x;
         g_input->mouse_y      = g_input->slider_start_y;
         g_input->prev_mouse_x = g_input->slider_start_x;
         g_input->prev_mouse_y = g_input->slider_start_y;
     }
     g_input->slider_mode = InputState::SliderMode::NONE;
+#if defined(__EMSCRIPTEN__)
+    // The shell keeps the ring on the grab point from here (see its pointer feed).
+    // The abandon path hands over the real position instead.
+    EM_ASM({ if (Module.chiselSliderEnd) Module.chiselSliderEnd($0); }, warp_back ? 1 : 0);
+#endif
     slider_capture(w, false);
 #if !defined(__EMSCRIPTEN__)
     // TEMPORARY, pairs with the trace in begin_slider_drag. If GLFW reports the asked-for

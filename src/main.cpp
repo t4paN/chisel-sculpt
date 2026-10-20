@@ -4906,11 +4906,28 @@ int main(int argc, char* argv[]) {
         // a slider to 0 or 100 with nothing between. Free pointer: the clientX step,
         // which can't spike. Locked: movementX, minus the event that crosses the lock
         // change and anything too big for one frame of a hand.
-        // A slider drag ends before the browser lets go of its lock, and the moves in
-        // between carry the position rebuilt above, which travelled with the hand all
-        // through the drag: one frame of the ring out there, then a pop back. The drag's
-        // end puts it back on the grab point (end_slider_drag).
-        Module.chiselSetLockedPos = function(x, y) { lx = x; ly = y; };
+        // The ring stays where a slider drag began. No browser can put the pointer back
+        // there (Firefox on Linux doesn't even hold it still), so Chisel does it on its
+        // side: the position is frozen at the grab point for the whole drag, and when the
+        // drag ends, the next real position gets an offset that continues from the grab
+        // point instead of jumping to wherever the pointer went. The offset clears where
+        // the hidden pointer must be honest: at the canvas edge (it can't go further),
+        // over the UI (the OS arrow is showing there) and for pens and fingers (absolute).
+        var sliding = false;
+        var anchorX = 0;
+        var anchorY = 0;
+        var reanchor = false;
+        var offX = 0;
+        var offY = 0;
+        var lastX = 0;
+        var lastY = 0;
+        Module.chiselSliderBegin = function(x, y) { sliding = true; anchorX = x; anchorY = y; };
+        Module.chiselSliderEnd = function(keep) {
+            sliding = false;
+            reanchor = keep !== 0;
+            lastX = anchorX;
+            lastY = anchorY;
+        };
         var sx0 = -1;
         var sLocked = false;
         var SPIKE = 400;
@@ -5012,14 +5029,42 @@ int main(int argc, char* argv[]) {
                 var px = lx;
                 var py = ly;
                 for (var i = 0; i + 1 < list.length; i++) {
-                    if (locked) { px += (list[i].movementX || 0) * k; py += (list[i].movementY || 0) * k; }
-                    else        { px = (list[i].clientX - r.left) * k; py = (list[i].clientY - r.top) * k; }
-                    Module._chisel_path_sample(px, py);
+                    if (locked) {
+                        if (!sliding) { px += (list[i].movementX || 0) * k; py += (list[i].movementY || 0) * k; }
+                    } else {
+                        px = (list[i].clientX - r.left) * k; py = (list[i].clientY - r.top) * k;
+                    }
+                    Module._chisel_path_sample(px + offX, py + offY);
                 }
                 if (locked) { lx = px; ly = py; }
             }
-            if (locked) { lx += (e.movementX || 0) * k; ly += (e.movementY || 0) * k; }
-            else        { lx = (e.clientX - r.left) * k; ly = (e.clientY - r.top) * k; }
+            if (locked) {
+                if (!sliding) { lx += (e.movementX || 0) * k; ly += (e.movementY || 0) * k; }
+            } else {
+                lx = (e.clientX - r.left) * k; ly = (e.clientY - r.top) * k;
+            }
+            var outX = anchorX;
+            var outY = anchorY;
+            if (!sliding) {
+                // The first free position after a drag: continue from where the ring is.
+                // (Still locked = Chromium hasn't let go yet; lx is still on the grab
+                // point there, so the offset waits for the real position.)
+                if (reanchor && !locked) {
+                    reanchor = false;
+                    offX = lastX - lx;
+                    offY = lastY - ly;
+                }
+                var edge = lx <= 0.5 || ly <= 0.5
+                        || lx >= c.clientWidth - 1.5 || ly >= c.clientHeight - 1.5;
+                if (e.pointerType !== 'mouse' || c.style.cursor !== 'none' || edge) {
+                    offX = 0;
+                    offY = 0;
+                }
+                outX = lx + offX;
+                outY = ly + offY;
+            }
+            lastX = outX;
+            lastY = outY;
             var sdx = 0;
             if (locked !== sLocked) {
                 sLocked = locked;
@@ -5033,7 +5078,7 @@ int main(int argc, char* argv[]) {
                 sdx = (e.clientX - sx0) * k;
             }
             sx0 = e.clientX;
-            Module._chisel_set_pointer(lx, ly, sdx);
+            Module._chisel_set_pointer(outX, outY, sdx);
         };
         c.addEventListener('pointermove', feed);
         c.addEventListener('pointerdown', feed);
