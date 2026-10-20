@@ -2,20 +2,19 @@
 
 Short, chronological log of notable changes. Newest on top.
 
-## 2026-10-20 — Speed falloff: fast strokes land lighter
+## 2026-10-20 — v0.3.4 — Speed falloff: fast strokes land lighter
 
-*Built GL, wgpu and web. Hand-tested by the user on the desktop: "aces", "couldn't stop
-testing strokes on it".*
+*Built GL, wgpu and web. Hand-tested by the user on the desktop.*
 
 - **New "speed falloff" slider** in the menu, under max effect (one shared value, 0% = off,
   the default). With a mouse or finger, the faster the stroke the lighter it lands, and a
   little softer (hardness drops at half the rate). Slow strokes keep full strength. A pen
   uses its real pressure instead; Move and Limb ignore it.
 
-## 2026-10-20 — Crease cuts a sharp V
+## 2026-10-20 — v0.3.4 — Crease cuts a sharp V
 
-*Built GL, wgpu and web; shader gate 69/69. Hand-tested by the user on native wgpu (mouse):
-"the new crease is on-point", then "aces" after the wide-V and scribble changes.*
+*Built GL, wgpu and web; shader gate 69/69. Hand-tested by the user on native wgpu (mouse),
+including the wide-V and scribble changes.*
 
 - **A V-shaped cut with a sharp point, not a flat-bottomed trough.** The profile is now
   shaped across the stroke line instead of around each dab's centre, so overlapping dabs
@@ -28,7 +27,7 @@ testing strokes on it".*
   over more dabs, and the pull eases off while a stroke moves sideways to it (a scribble's
   turnarounds), instead of dragging the same verts somewhere new on every pass.
 
-## 2026-10-20 — Browser: size/strength/hardness drags move smoothly again
+## 2026-10-20 — v0.3.4 — Browser: size/strength/hardness drags move smoothly again
 
 *Built web; hand-tested by the user in Firefox and Chromium on Linux (KDE Wayland).*
 
