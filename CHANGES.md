@@ -2,6 +2,16 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-20 — Speed falloff: fast strokes land lighter
+
+*Built GL, wgpu and web. Hand-tested by the user on the desktop: "aces", "couldn't stop
+testing strokes on it".*
+
+- **New "speed falloff" slider** in the menu, under max effect (one shared value, 0% = off,
+  the default). With a mouse or finger, the faster the stroke the lighter it lands, and a
+  little softer (hardness drops at half the rate). Slow strokes keep full strength. A pen
+  uses its real pressure instead; Move and Limb ignore it.
+
 ## 2026-10-20 — Crease cuts a sharp V
 
 *Built GL, wgpu and web; shader gate 69/69. Hand-tested by the user on native wgpu (mouse):
