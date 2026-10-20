@@ -1341,8 +1341,9 @@ void draw_settings_menu_items(InputState& input, MultiresInfo mres, bool sync_ta
                 input.speed_gain = speed_pct * 0.01f;
             if (ImGui::IsItemHovered())
                 ui_skin_menu_tip("Mouse and finger strokes: the faster you move,\n"
-                                 "the lighter the stroke, and a little softer.\n"
-                                 "Slow strokes keep full strength.\n\n"
+                                 "the lighter the stroke, and a little softer\n"
+                                 "and thinner. Slow strokes keep full strength\n"
+                                 "and size.\n\n"
                                  "0%% = off. A pen uses its real pressure instead.");
 
             ImGui::Separator();

@@ -103,6 +103,7 @@ static constexpr float PRESSURE_GAMMA      = 1.0f;
 static constexpr float SPEED_REF   = 400.0f;
 static constexpr float SPEED_TAU   = 0.08f;
 static constexpr float SPEED_FLOOR = 0.10f;
+static constexpr float SPEED_SIZE_FLOOR = 0.80f;   // a fast stroke thins, never by more than a fifth
 struct StrokeSpeed { float px_s = 0.0f; float x = 0.0f; float y = 0.0f; double t = 0.0; };
 static StrokeSpeed g_stroke_speed;
 
@@ -3515,12 +3516,16 @@ int main(int argc, char* argv[]) {
                         g_stroke_speed.y = (float)input.mouse_y;
                         g_stroke_speed.t = now;
                     }
-                    // Hardness softens too, at half the rate: a fast stroke lands lighter
-                    // and a little more feathered, the way a quick pen stroke does.
+                    // Hardness softens at half the rate and the size shrinks at a tenth: a
+                    // fast stroke lands lighter, a little more feathered and slightly
+                    // thinner, the way a quick pen stroke does. Size never drops below 80%
+                    // (SPEED_SIZE_FLOOR), and spacing and the density compensation below
+                    // already follow eff_brush_size, as for a pen.
                     if (pressure_is_synthetic && !is_grab && input.speed_gain > 0.0f) {
                         const float k = input.speed_gain * g_stroke_speed.px_s / SPEED_REF;
-                        eff_strength *= std::max(SPEED_FLOOR, 1.0f / (1.0f + k));
-                        eff_hardness *= std::max(SPEED_FLOOR, 1.0f / (1.0f + 0.5f * k));
+                        eff_strength   *= std::max(SPEED_FLOOR, 1.0f / (1.0f + k));
+                        eff_hardness   *= std::max(SPEED_FLOOR, 1.0f / (1.0f + 0.5f * k));
+                        eff_brush_size *= std::max(SPEED_SIZE_FLOOR, 1.0f / (1.0f + 0.1f * k));
                     }
                 }
 

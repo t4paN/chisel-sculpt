@@ -2,6 +2,14 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-21 — Speed falloff thins fast strokes a little
+
+*Built GL, wgpu and web; hand-tested by the user on the desktop.*
+
+- With speed falloff on, a fast mouse or finger stroke now also gets slightly thinner, at a
+  tenth of the rate its strength drops, and never below 80% of the brush size. Slow strokes
+  keep their size. Dab spacing follows the thinner stroke, so it stays gap-free.
+
 ## 2026-10-20 — v0.3.4 — Speed falloff: fast strokes land lighter
 
 *Built GL, wgpu and web. Hand-tested by the user on the desktop.*
