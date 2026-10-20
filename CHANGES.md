@@ -2,6 +2,25 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-20 — Short strokes land where you aim
+
+*Built GL and wgpu; hand-tested by the user on native wgpu (Wayland, mouse): "felt better".
+Web build not exercised; only the stroke-end fix reaches it.*
+
+- **Side-by-side strokes no longer creep down the screen.** On Wayland, every mouse drag
+  grabbed the pointer from its first frame so it could wrap at the window edge. Letting go
+  handed the pointer back short of the return trip, so a row of quick `|||` strokes started
+  lower each time and the frozen arrow flashed between them. Logged per stroke: with the
+  grab, start heights ran 315 → 841 px over seven strokes; without it they stay within a
+  ~100 px band. The grab now only happens when a drag comes within 64 px of an edge (more
+  when moving fast, so a flick still gets caught before it crosses). Strokes in the middle
+  of the window never take it. Edge wrap itself is unchanged.
+- **A stroke reaches the point where you let go.** The release frame finished the stroke
+  before drawing that frame's motion, so the last stretch was dropped: ~15 px a release,
+  up to 82 px on a quick flick (106 releases measured). It now draws up to the exact
+  release point (not beyond, so the move back up isn't drawn) and finishes the stroke one
+  frame later.
+
 ## 2026-10-20 — Shader checks in CI
 
 - **Every WGSL shader now goes through the browser's compiler on each push.**

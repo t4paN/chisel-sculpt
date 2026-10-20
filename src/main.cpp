@@ -1119,6 +1119,7 @@ int main(int argc, char* argv[]) {
     Camera   camera_at_press;
     bool     touch_undo_on_commit   = false;
     uint64_t pushes_at_stroke_start = 0;
+    bool     pen_up_pending = false;   // the release frame laid its tail; finalize next
 
     std::string default_browse_path = ".";
     {
@@ -2730,9 +2731,19 @@ int main(int argc, char* argv[]) {
         // IDLE-only ops (undo, delete, merge, …) exactly like an active stroke; a
         // re-press during the reconcile starts its stroke from the IDLE transition
         // a frame or two later.
-        if (app_state == AppState::SCULPTING
-            && (brush_stroke.reconciling()
-                || input.drag_mode != InputState::DragMode::SCULPT)) {
+        // The release frame first lays the path that arrived before the button came up
+        // (the dab loop below), and pen-up runs the frame after. Finalizing straight
+        // away ended the stroke wherever the PREVIOUS frame had left it, dropping the
+        // last frame of motion: ~15 px a release, up to 80 on a quick flick, so short
+        // strokes stopped short of where the button came up (2026-10-20).
+        bool pen_up = brush_stroke.reconciling() || pen_up_pending
+                   || input.drag_mode != InputState::DragMode::SCULPT;
+        if (app_state == AppState::SCULPTING && pen_up && !pen_up_pending
+            && !brush_stroke.reconciling()
+            && input.release_tail && brush_stroke.is_active()) {
+            pen_up_pending = true;
+        } else if (app_state == AppState::SCULPTING && pen_up) {
+            pen_up_pending = false;
             input.sculpting = false;
             DabContext fctx { renderer, camera, compute, *mesh, *multires, input,
                               win_w, win_h, brush_stroke.vertex_count, input.brush_size,
@@ -3486,6 +3497,11 @@ int main(int argc, char* argv[]) {
                 // there is nothing left to guess.)
                 float cur_x = (float)input.mouse_x;
                 float cur_y = (float)input.mouse_y;
+                if (input.release_tail) {   // the release frame: stop where the button came up
+                    input.path_n = input.release_path_n;
+                    cur_x = input.release_x;
+                    cur_y = input.release_y;
+                }
                 static float pts_x[InputState::kPathMax + 2], pts_y[InputState::kPathMax + 2];
                 int np = 0;
                 pts_x[np] = brush_stroke.walk_x;

@@ -430,6 +430,7 @@ void InputState::end_frame() {
     path_n = 0;
     mouse1_just_pressed = false;
     mouse1_just_released = false;
+    release_tail = false;
     enter_pressed = false;
     key_y_pressed = false;
     key_n_pressed = false;
@@ -712,17 +713,31 @@ bool wrap_cursor(GLFWwindow* window, InputState& input, int win_w, int win_h) {
     // can warp it, so the next sample would just put it back.
     if (input.active_profile == InputProfile::TABLET) return false;
 #if !defined(__EMSCRIPTEN__)
-    // On the drag's first frame, while the pointer is still over the window — a lock
-    // only takes hold there. Not while a slider holds GLFW's lock (two locks = protocol
+    // Only once the drag nears an edge, while the pointer is still over the window — a
+    // lock only takes hold there. Taking it on every drag's first frame (as this used
+    // to) cost motion: the release hands the pointer back with less of the return
+    // travel than the hand made, so short strokes laid side by side crept down the
+    // screen like a staircase, and the frozen arrow flashed between strokes
+    // (2026-10-20). Drags in the middle of the window now never lock at all. The
+    // margin grows with speed, so a fast flick still locks a frame or two before it
+    // can cross the edge. Not while a slider holds GLFW's lock (two locks = protocol
     // error), and not with no button down, or nothing would end it.
     if (!platform_can_warp() && !g_wrap_captured &&
         (input.mouse1_down || input.mouse2_down || input.mouse3_down) &&
         input.slider_mode == InputState::SliderMode::NONE &&
-        glfwGetInputMode(window, GLFW_CURSOR) != GLFW_CURSOR_DISABLED &&
-        wl_pointer_lock_begin(window, own_lock_motion)) {
-        g_wrap_captured = true;
-        g_wrap_own_lock = true;
-        glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_HIDDEN);   // frozen arrow otherwise
+        glfwGetInputMode(window, GLFW_CURSOR) != GLFW_CURSOR_DISABLED) {
+        const double step = std::hypot(input.mouse_x - input.prev_mouse_x,
+                                       input.mouse_y - input.prev_mouse_y);
+        const double margin = std::max(64.0, 4.0 * step);
+        const double x = input.mouse_x, y = input.mouse_y;
+        const bool inside = x >= 0 && y >= 0 && x < win_w && y < win_h;
+        const bool near_edge = x < margin || y < margin ||
+                               x > win_w - margin || y > win_h - margin;
+        if (inside && near_edge && wl_pointer_lock_begin(window, own_lock_motion)) {
+            g_wrap_captured = true;
+            g_wrap_own_lock = true;
+            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_HIDDEN);   // frozen arrow otherwise
+        }
     }
 #endif
 #if !defined(__EMSCRIPTEN__)
@@ -1031,6 +1046,12 @@ static void mouse_button_callback(GLFWwindow* w, int button, int action, int mod
         }
         if (action == GLFW_RELEASE && was_down) {
             g_input->mouse1_just_released = true;
+            if (g_input->drag_mode == InputState::DragMode::SCULPT) {
+                g_input->release_tail   = true;
+                g_input->release_path_n = g_input->path_n;
+                g_input->release_x      = (float)g_input->mouse_x;
+                g_input->release_y      = (float)g_input->mouse_y;
+            }
             g_input->drag_mode = InputState::DragMode::NONE;
             if (g_input->bucket_dragging) {
                 g_input->bucket_dragging = false;

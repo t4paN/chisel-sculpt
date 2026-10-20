@@ -152,6 +152,13 @@ struct InputState {
     float path_x[kPathMax], path_y[kPathMax];
     int   path_n = 0;
     void push_path(double x, double y);
+    // A stroke's release, as it happened: how much of this frame's path had arrived
+    // and where the cursor was. The release frame lays that last stretch before
+    // pen-up (main.cpp), and stops here so motion after the release isn't drawn.
+    // Cleared in end_frame.
+    bool  release_tail = false;
+    int   release_path_n = 0;
+    float release_x = 0.0f, release_y = 0.0f;
     bool mouse1_down;
     bool mouse2_down;
     bool mouse3_down;  // middle
