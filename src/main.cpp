@@ -1001,6 +1001,7 @@ int main(int argc, char* argv[]) {
     // which also supplies the pen's position and clicks. No-op if absent. Detects hotplug.
     Tablet tablet;
     tablet.init(window);
+    wl_pointer_warp_init(window);   // edge wrap on Wayland (tablet.cpp)
     if (tablet.available()) {
         std::snprintf(input.notification, sizeof(input.notification),
                       "Pen pressure: tablet detected");
@@ -1278,7 +1279,7 @@ int main(int argc, char* argv[]) {
 #if defined(_WIN32) && !defined(__EMSCRIPTEN__)
         g_mouse_history.pull(window, input);
 #endif
-        wl_pointer_lock_dispatch();   // a wrapped mouse drag's motion, while Chisel holds the lock
+        wl_pointer_warp_dispatch();   // the pointer-enter serial a Wayland edge wrap needs
         tablet.poll(brush_stroke.is_active());
         if (tablet.available() && !prev_tablet_avail) {
             std::snprintf(input.notification, sizeof(input.notification),
@@ -1393,7 +1394,6 @@ int main(int argc, char* argv[]) {
                 || input.drag_mode != InputState::DragMode::NONE
                 || input.touch_gesture
                 || input.slider_mode != InputState::SliderMode::NONE
-                || wrap_capture_active()
                 || input.notification_timer > 0.0f || input.mirror_unavailable_timer > 0.0f
                 // Same condition the refresh below runs under, so it can't keep us awake
                 // while the menu defers it.
@@ -3800,8 +3800,7 @@ int main(int argc, char* argv[]) {
         // lock ~50us after the drag created it. Two owners of one piece of state, and
         // this one won sixty times a second — so the capture never actually held, the
         // pointer really did travel, and glfwSetCursorPos was refused for want of a lock.
-        // An edge wrap on Wayland holds the same capture for the same reason.
-        if (input.slider_mode == InputState::SliderMode::NONE && !wrap_capture_active())
+        if (input.slider_mode == InputState::SliderMode::NONE)
             glfwSetInputMode(window, GLFW_CURSOR, show_os_cursor ? GLFW_CURSOR_NORMAL : GLFW_CURSOR_HIDDEN);
 #else
         // Emscripten's GLFW has no GLFW_CURSOR_HIDDEN (warns every frame) —
@@ -4855,9 +4854,9 @@ int main(int argc, char* argv[]) {
     // exact through any resize/DPR change. chisel_set_pointer lives in input.cpp.
     EM_ASM({
         var c = Module.canvas;
-        // Under pointer lock clientX freezes, so the position is rebuilt from
-        // movementX/Y, starting from the last free one. That keeps it continuous for
-        // the edge wrap (input.cpp), which offsets it either way.
+        // Under pointer lock (slider drags only) clientX freezes, so the position is
+        // rebuilt from movementX/Y, starting from the last free one, and stays
+        // continuous when the lock lets go.
         var lx = 0;   // (separate statements: a bare comma would split EM_ASM's
         var ly = 0;   //  macro arguments)
 
@@ -4967,8 +4966,8 @@ int main(int argc, char* argv[]) {
         c.addEventListener('pointermove', feed);
         c.addEventListener('pointerdown', feed);
         // Keep a mouse drag's moves coming once it leaves the canvas (or itch's
-        // iframe), so the edge wrap sees it get there. Released by the browser on
-        // pointerup. Pens are left alone: they can't wrap.
+        // iframe), so an orbit or a stroke carries on past it. Released by the browser
+        // on pointerup. Pens are left alone.
         c.addEventListener('pointerdown', function(e) {
             if (e.pointerType === 'mouse' && c.setPointerCapture) {
                 try { c.setPointerCapture(e.pointerId); } catch (err) {}

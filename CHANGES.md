@@ -2,6 +2,19 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-20 — Edge wrap moves the pointer on Wayland; no wrap in the browser
+
+*Built GL, wgpu and web; hand-tested by the user on native wgpu (Wayland, KWin 6.8, mouse):
+"perfect wraps all around".*
+
+- **Wayland wraps the way X11 does: the pointer jumps to the far edge.** KWin (and any
+  compositor offering `wp_pointer_warp_v1`) lets an app move the pointer inside its own
+  window during a drag. Chisel's own pointer lock is gone, and with it the hand-back on
+  release, the hold between strokes and the staircase they caused. A compositor without
+  the protocol gets no wrap: drags stop at the edge.
+- **The browser no longer wraps.** It can't move the pointer, and capturing it put the
+  pointer back wherever the capture began. Slider drags still capture, as before.
+
 ## 2026-10-20 — Short strokes land where you aim
 
 *Built GL and wgpu; hand-tested by the user on native wgpu (Wayland, mouse): "felt better".

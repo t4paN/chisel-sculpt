@@ -4,6 +4,7 @@
 #include "tablet.h"
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <cctype>
 #include <algorithm>
@@ -579,15 +580,12 @@ static void web_pointer_lock(bool) {}
 // bounded by the screen edge, and it is exactly what the web build already does with
 // requestPointerLock. Raw motion is deliberately NOT enabled — it bypasses the OS
 // pointer acceleration curve and would change the feel of every slider.
-static void end_wrap_capture(GLFWwindow* w);
 static void slider_capture(GLFWwindow* w, bool grab) {
 #if defined(__EMSCRIPTEN__)
     (void)w;
     web_pointer_lock(grab);
 #else
     if (!w) return;
-    // GLFW's lock and Chisel's own wrap lock can't coexist on one surface.
-    if (grab) end_wrap_capture(w);
     glfwSetInputMode(w, GLFW_CURSOR, grab ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
 #endif
 }
@@ -667,85 +665,55 @@ static void end_slider_drag(GLFWwindow* w, bool warp_back) {
 
 // ---- Edge wrap ----
 //
-// A held drag (strokes, Move/Limb, orbit, pan, zoom, object move/scale) that reaches the
-// window edge carries on from the opposite edge. The callers skip the frame of the jump,
-// so per-frame deltas never see it.
+// A held mouse drag (strokes, Move/Limb, orbit, pan, zoom, object move/scale) that reaches
+// the window edge carries on from the opposite edge. The callers skip the frame of the
+// jump, so per-frame deltas never see it.
 //
-// X11 and Windows simply warp the pointer. Wayland and the browser can't, so there the
-// pointer is captured and each wrap moves Chisel's idea of the position, not the
-// pointer. Faking it without the capture is what this replaced: Chisel's cursor jumped
-// across while the real one stayed at the edge, and the next event yanked it back, so a
-// Move drag lurched to and fro.
+// It needs the pointer moved: glfwSetCursorPos on X11 and Windows, the compositor's
+// pointer-warp on Wayland (tablet.cpp). Where neither exists — a Wayland compositor
+// without the protocol, and every browser — the drag stops at the edge. Capturing the
+// pointer to fake it was tried on both: on Wayland the release lost part of every return
+// trip, so quick side-by-side strokes crept down the screen; in the browser the pointer
+// came back wherever the capture began.
 //
-// Native Wayland uses Chisel's own lock (tablet.cpp), taken on the drag's first frame:
-// it is the only kind that can put the pointer back where the ring is when the drag
-// ends. Where that lock is unavailable, GLFW's capture is the fallback — it works, but
-// the pointer comes back where it was captured.
-static double g_wrap_off_x = 0.0, g_wrap_off_y = 0.0;
-static bool   g_wrap_captured = false;
-static bool   g_wrap_own_lock = false;   // the capture is Chisel's own Wayland lock
-
-static bool platform_can_warp() {
-#if defined(__EMSCRIPTEN__)
-    return false;
-#elif GLFW_VERSION_MAJOR > 3 || GLFW_VERSION_MINOR >= 4
-    return glfwGetPlatform() != GLFW_PLATFORM_WAYLAND;
-#else
-    return true;
-#endif
-}
-
-bool wrap_capture_active() { return g_wrap_captured; }
+// A Wayland warp is asynchronous: motion the compositor sent before it still arrives
+// after, at the old edge, and taken at face value it drags the cursor back across the
+// window — a stroke drawn edge to edge. So reports are dropped until one lands nearer the
+// warp's target than the spot it left. A warp the compositor ignores never lands: after
+// kWarpTimeout the reports count again, and two misses in a row turn wrapping off.
+static bool   g_warp_pending = false;
+static double g_warp_from_x = 0.0, g_warp_from_y = 0.0;
+static double g_warp_to_x = 0.0, g_warp_to_y = 0.0;
+static double g_warp_time = 0.0;
+static int    g_warp_misses = 0;
+static bool   g_warp_off = false;
+static constexpr double kWarpTimeout = 0.25;
+// CHISEL_STROKE_LOG=1: one [stroke] line per left press/release with the cursor
+// position, read by tools/stroke-drift-test.py. `g_drag_wraps` = wraps in this drag.
+static const bool g_stroke_log = std::getenv("CHISEL_STROKE_LOG") != nullptr;
+static int    g_drag_wraps = 0;
 
 #if !defined(__EMSCRIPTEN__)
-// Motion while Chisel's own lock holds: the pointer is frozen, so wl_pointer sends
-// nothing and GLFW's cursor callback is silent. Same bookkeeping as that callback.
-static void own_lock_motion(double dx, double dy) {
-    if (!g_input) return;
-    g_input->mouse_x += dx;
-    g_input->mouse_y += dy;
-    g_input->push_path(g_input->mouse_x, g_input->mouse_y);
+static bool on_wayland() {
+#if GLFW_VERSION_MAJOR > 3 || GLFW_VERSION_MINOR >= 4
+    return glfwGetPlatform() == GLFW_PLATFORM_WAYLAND;
+#else
+    return false;
+#endif
 }
 #endif
 
 bool wrap_cursor(GLFWwindow* window, InputState& input, int win_w, int win_h) {
+#if defined(__EMSCRIPTEN__)
+    (void)window; (void)input; (void)win_w; (void)win_h;
+    return false;
+#else
     // A pen maps the tablet onto the screen: it can't travel past the edge and nothing
     // can warp it, so the next sample would just put it back.
     if (input.active_profile == InputProfile::TABLET) return false;
-#if !defined(__EMSCRIPTEN__)
-    // Only once the drag nears an edge, while the pointer is still over the window — a
-    // lock only takes hold there. Taking it on every drag's first frame (as this used
-    // to) cost motion: the release hands the pointer back with less of the return
-    // travel than the hand made, so short strokes laid side by side crept down the
-    // screen like a staircase, and the frozen arrow flashed between strokes
-    // (2026-10-20). Drags in the middle of the window now never lock at all. The
-    // margin grows with speed, so a fast flick still locks a frame or two before it
-    // can cross the edge. Not while a slider holds GLFW's lock (two locks = protocol
-    // error), and not with no button down, or nothing would end it.
-    if (!platform_can_warp() && !g_wrap_captured &&
-        (input.mouse1_down || input.mouse2_down || input.mouse3_down) &&
-        input.slider_mode == InputState::SliderMode::NONE &&
-        glfwGetInputMode(window, GLFW_CURSOR) != GLFW_CURSOR_DISABLED) {
-        const double step = std::hypot(input.mouse_x - input.prev_mouse_x,
-                                       input.mouse_y - input.prev_mouse_y);
-        const double margin = std::max(64.0, 4.0 * step);
-        const double x = input.mouse_x, y = input.mouse_y;
-        const bool inside = x >= 0 && y >= 0 && x < win_w && y < win_h;
-        const bool near_edge = x < margin || y < margin ||
-                               x > win_w - margin || y > win_h - margin;
-        if (inside && near_edge && wl_pointer_lock_begin(window, own_lock_motion)) {
-            g_wrap_captured = true;
-            g_wrap_own_lock = true;
-            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_HIDDEN);   // frozen arrow otherwise
-        }
-    }
-#endif
-#if !defined(__EMSCRIPTEN__)
-    // Not until KWin confirms the lock: before that the pointer still moves and still
-    // reports absolute positions, and the first one after a wrap would yank Chisel's
-    // cursor straight back across the window — a grab brush dragged its verts with it.
-    if (g_wrap_own_lock && !wl_pointer_lock_active()) return false;
-#endif
+    if (g_warp_off || g_warp_pending) return false;
+    const bool wayland = on_wayland();
+    if (wayland && !wl_pointer_warp_available()) return false;
     double mx = input.mouse_x;
     double my = input.mouse_y;
     bool wrapped = false;
@@ -755,63 +723,24 @@ bool wrap_cursor(GLFWwindow* window, InputState& input, int win_w, int win_h) {
     else if (my >= win_h - 1) { my = 1; wrapped = true; }
     if (!wrapped) return false;
 
-    if (platform_can_warp()) {
-        glfwSetCursorPos(window, mx, my);
-    } else if (g_wrap_own_lock) {
-        // Positions are integrated from deltas: moving them is the whole wrap.
-    } else if (!g_wrap_captured) {
-        g_wrap_captured = true;
-#if defined(__EMSCRIPTEN__)
-        // Positions stay continuous across the lock: the shell seeds its locked
-        // position from the last free one, so the same offset carries over. If the
-        // browser refuses the lock (it wants a recent click), the drag still gets the
-        // room between the canvas and the screen edge.
-        (void)window;
-        web_pointer_lock(true);
-        g_wrap_off_x += mx - input.mouse_x;
-        g_wrap_off_y += my - input.mouse_y;
-#else
-        // GLFW switches to an unbounded virtual position that need not match the window
-        // coordinate, so measure the offset against it after capturing.
-        glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-        double vx = 0.0, vy = 0.0;
-        glfwGetCursorPos(window, &vx, &vy);
-        g_wrap_off_x = mx - vx;
-        g_wrap_off_y = my - vy;
-#endif
+    if (wayland) {
+        if (!wl_pointer_warp(mx, my)) return false;
+        g_warp_pending = true;
+        g_warp_from_x = input.mouse_x;
+        g_warp_from_y = input.mouse_y;
+        g_warp_to_x = mx;
+        g_warp_to_y = my;
+        g_warp_time = glfwGetTime();
     } else {
-        g_wrap_off_x += mx - input.mouse_x;
-        g_wrap_off_y += my - input.mouse_y;
+        glfwSetCursorPos(window, mx, my);
     }
+    g_drag_wraps++;
     input.mouse_x = mx;
     input.prev_mouse_x = mx;
     input.mouse_y = my;
     input.prev_mouse_y = my;
     return true;
-}
-
-// Drag over: hand the pointer back where the user sees the cursor. Chisel's own lock
-// sends that as its position hint and KWin warps there as it ends. GLFW's capture
-// can't: the pointer reappears where it was captured. A browser puts it back where the
-// lock began; nothing can change that.
-static void end_wrap_capture(GLFWwindow* w) {
-    if (g_wrap_captured) {
-#if defined(__EMSCRIPTEN__)
-        (void)w;
-        web_pointer_lock(false);
-#else
-        if (g_wrap_own_lock) {
-            wl_pointer_lock_end(g_input->mouse_x, g_input->mouse_y);
-        } else if (w) {
-            glfwSetCursorPos(w, g_input->mouse_x, g_input->mouse_y);
-        }
-        // The main loop picks NORMAL or HIDDEN again next frame.
-        if (w) glfwSetInputMode(w, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
 #endif
-    }
-    g_wrap_captured = false;
-    g_wrap_own_lock = false;
-    g_wrap_off_x = g_wrap_off_y = 0.0;
 }
 
 #ifndef __EMSCRIPTEN__
@@ -821,7 +750,6 @@ static void end_wrap_capture(GLFWwindow* w) {
 static void window_focus_callback(GLFWwindow* w, int focused) {
     if (focused) return;
     end_slider_drag(w, false);
-    end_wrap_capture(w);
 }
 #endif
 
@@ -846,11 +774,24 @@ static void cursor_pos_callback(GLFWwindow* w, double x, double y) {
         apply_slider_delta(dx);
         return;
     }
-    // Under Chisel's own lock, motion comes as deltas (own_lock_motion). An absolute
-    // position here is the frozen pointer's, and would undo every wrap.
-    if (g_wrap_own_lock && wl_pointer_lock_active()) return;
-    x += g_wrap_off_x;
-    y += g_wrap_off_y;
+    // A Wayland edge wrap still in flight: drop the reports from before it (see Edge wrap).
+    if (g_warp_pending) {
+        const double to   = std::hypot(x - g_warp_to_x, y - g_warp_to_y);
+        const double from = std::hypot(x - g_warp_from_x, y - g_warp_from_y);
+        if (to < from) {
+            g_warp_pending = false;
+            g_warp_misses = 0;
+        } else if (glfwGetTime() - g_warp_time > kWarpTimeout) {
+            g_warp_pending = false;
+            if (++g_warp_misses >= 2) {
+                g_warp_off = true;
+                std::printf("[wrap] the compositor ignores pointer warps, edge wrap off\n");
+                std::fflush(stdout);
+            }
+        } else {
+            return;
+        }
+    }
     g_input->mouse_x = x;
     g_input->mouse_y = y;
     g_input->push_path(x, y);
@@ -871,8 +812,6 @@ extern "C" EMSCRIPTEN_KEEPALIVE void chisel_set_pointer(double x, double y, doub
         apply_slider_delta((float)dx);
         return;
     }
-    x += g_wrap_off_x;
-    y += g_wrap_off_y;
     g_input->mouse_x = x;
     g_input->mouse_y = y;
     g_input->push_path(x, y);
@@ -889,7 +828,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE void chisel_set_pointer(double x, double y, doub
 // path only, no ImGui, no slider delta — and the last through chisel_set_pointer.
 extern "C" EMSCRIPTEN_KEEPALIVE void chisel_path_sample(double x, double y) {
     if (!g_input || g_input->slider_mode != InputState::SliderMode::NONE) return;
-    g_input->push_path(x + g_wrap_off_x, y + g_wrap_off_y);
+    g_input->push_path(x, y);
 }
 
 // The four chisel_touch_* entry points below arrive from shell.html, outside GLFW and
@@ -1003,6 +942,15 @@ static void mouse_button_callback(GLFWwindow* w, int button, int action, int mod
     } else if (button == GLFW_MOUSE_BUTTON_LEFT) {
         bool was_down = g_input->mouse1_down;
         g_input->mouse1_down = (action == GLFW_PRESS);
+        if (g_stroke_log) {
+            int ww = 0, wh = 0;
+            glfwGetWindowSize(w, &ww, &wh);
+            std::printf("[stroke] %s %.1f %.1f win %d %d wraps %d\n",
+                        action == GLFW_PRESS ? "down" : "up", g_input->mouse_x,
+                        g_input->mouse_y, ww, wh, g_drag_wraps);
+            std::fflush(stdout);
+            if (action == GLFW_PRESS) g_drag_wraps = 0;
+        }
         if (action == GLFW_PRESS && !was_down) {
             g_input->mouse1_just_pressed = true;
             // Zero delta so the first sculpt/drag frame doesn't inherit pre-click cursor motion.
@@ -1088,10 +1036,6 @@ static void mouse_button_callback(GLFWwindow* w, int button, int action, int mod
                 g_input->drag_mode = InputState::DragMode::NONE;
         }
     }
-
-    if (action == GLFW_RELEASE && !g_input->mouse1_down && !g_input->mouse2_down
-        && !g_input->mouse3_down)
-        end_wrap_capture(w);
 }
 
 static void scroll_callback(GLFWwindow* w, double xoff, double yoff) {

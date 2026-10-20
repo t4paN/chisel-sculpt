@@ -54,6 +54,7 @@ unsigned long Tablet::sample_count() const { return g_web_pen_count; }
 #include <dirent.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <cstdio>
@@ -71,8 +72,7 @@ unsigned long Tablet::sample_count() const { return g_web_pen_count; }
 #include <sys/un.h>
 #include <cstdlib>
 #include "tablet-unstable-v2-client-protocol.h"
-#include "pointer-constraints-unstable-v1-client-protocol.h"
-#include "relative-pointer-unstable-v1-client-protocol.h"
+#include "pointer-warp-v1-client-protocol.h"
 #define CHISEL_WL_TABLET 1
 #endif
 #endif
@@ -578,172 +578,106 @@ WlPen* wl_create(GLFWwindow* win) {
 }
 }  // namespace
 
-// ---- Native Wayland: Chisel's own pointer lock, for edge-wrapped drags ----
+// ---- Native Wayland: pointer warp, for edge-wrapped drags ----
 //
-// GLFW_CURSOR_DISABLED locks the pointer but never sends the lock's position hint —
-// GLFW 3.5's Wayland glfwSetCursorPos is a stub, and while disabled it only moves
-// GLFW's virtual position. So when a GLFW lock ends, the pointer reappears exactly
-// where it was frozen. A slider wants that (the pointer belongs back at the start); a
-// wrapped drag doesn't: the cursor came back beside the edge it crossed instead of
-// where the ring was. This lock is Chisel's own, so the hint can be sent, and KWin
-// warps the pointer there as the lock ends.
+// Wayland doesn't let a client move the pointer (GLFW 3.5's glfwSetCursorPos is a stub
+// there), except through wp_pointer_warp_v1: a client may move it within its own surface
+// while that surface has pointer focus — which a held drag keeps even once the pointer is
+// past the window edge. So an edge wrap is the same jump X11 makes, nothing captured.
+// It replaced a lock (pointer-constraints + relative-pointer) whose hand-back on release
+// lost part of every return trip: quick side-by-side strokes crept down the screen.
 //
-// It's taken on the drag's first frame, because a lock only activates while the
-// pointer is over the window — in a window (not fullscreen) the pointer is already
-// past the edge by the time a wrap fires. Same private-queue arrangement as the pen:
-// glfwPollEvents reads the socket, wl_pointer_lock_dispatch runs our listeners.
-// While the lock holds, wl_pointer sends no motion, so GLFW's cursor callback goes
-// quiet by itself and relative motion takes over; until it activates, the reverse.
-// A pen's own replayed motion is untouched either way.
-//
-// Never alongside GLFW's lock: two locks on one surface is a protocol error that kills
-// the connection. input.cpp ends this one before any slider capture, and won't start
-// it while GLFW's is held.
+// The request needs the serial of a wl_pointer.enter, so Chisel keeps its own wl_pointer
+// beside GLFW's, on a private queue: glfwPollEvents reads the socket and
+// wl_pointer_warp_dispatch runs our listener. Set up at startup, so the pointer's first
+// enter is heard. A compositor without the protocol gets no wrap at all.
 namespace {
-struct WlLock {
-    wl_display*                       dpy     = nullptr;
-    wl_surface*                       surface = nullptr;
-    wl_event_queue*                   queue   = nullptr;
-    wl_registry*                      reg     = nullptr;
-    wl_seat*                          seat    = nullptr;
-    wl_pointer*                       pointer = nullptr;   // our own, beside GLFW's
-    zwp_pointer_constraints_v1*       cons    = nullptr;
-    zwp_relative_pointer_manager_v1*  relmgr  = nullptr;
-    zwp_locked_pointer_v1*            lock    = nullptr;
-    zwp_relative_pointer_v1*          rel     = nullptr;
-    bool active = false;                 // the compositor says the lock is in force
-    void (*on_motion)(double, double) = nullptr;
-    // After release the lock lives a few more frames, re-sending the hint each one, so
-    // it rides the frames' own commits before the lock goes. Destroying it in the same
-    // breath as the hint's commit is the version that put the pointer back at the
-    // stroke start; this one was user-confirmed. Whether the delay or the grab guard in
-    // input.cpp did the fixing was never isolated — it costs ~50 ms, so it stays.
-    static constexpr int kDeferFrames = 3;
-    int    defer  = -1;                  // frames left before destroy; -1 = not ending
-    double hint_x = 0.0, hint_y = 0.0;   // where the pointer goes; follows motion meanwhile
+struct WlWarp {
+    GLFWwindow*         win     = nullptr;
+    wl_display*         dpy     = nullptr;
+    wl_surface*         surface = nullptr;
+    wl_event_queue*     queue   = nullptr;
+    wl_registry*        reg     = nullptr;
+    wl_seat*            seat    = nullptr;
+    wl_pointer*         pointer = nullptr;   // our own, beside GLFW's
+    wp_pointer_warp_v1* warp    = nullptr;
+    uint32_t enter_serial = 0;
+    bool     entered      = false;           // an enter has been heard (serial valid)
 };
-WlLock* g_wl_lock      = nullptr;
-bool    g_wl_lock_tried = false;         // set up once; a compositor without it stays without
+WlWarp* g_wl_warp = nullptr;
 
-void wll_global(void* d, wl_registry* r, uint32_t name, const char* iface, uint32_t) {
-    WlLock* l = (WlLock*)d;
-    if (!std::strcmp(iface, zwp_pointer_constraints_v1_interface.name))
-        l->cons = (zwp_pointer_constraints_v1*)wl_registry_bind(r, name, &zwp_pointer_constraints_v1_interface, 1);
-    else if (!std::strcmp(iface, zwp_relative_pointer_manager_v1_interface.name))
-        l->relmgr = (zwp_relative_pointer_manager_v1*)wl_registry_bind(r, name, &zwp_relative_pointer_manager_v1_interface, 1);
-    else if (!std::strcmp(iface, wl_seat_interface.name) && !l->seat)
-        l->seat = (wl_seat*)wl_registry_bind(r, name, &wl_seat_interface, 1);
+void wlw_global(void* d, wl_registry* r, uint32_t name, const char* iface, uint32_t) {
+    WlWarp* w = (WlWarp*)d;
+    if (!std::strcmp(iface, wp_pointer_warp_v1_interface.name))
+        w->warp = (wp_pointer_warp_v1*)wl_registry_bind(r, name, &wp_pointer_warp_v1_interface, 1);
+    else if (!std::strcmp(iface, wl_seat_interface.name) && !w->seat)
+        w->seat = (wl_seat*)wl_registry_bind(r, name, &wl_seat_interface, 1);
 }
-void wll_global_remove(void*, wl_registry*, uint32_t) {}
-const wl_registry_listener kWllRegListener = { wll_global, wll_global_remove };
+void wlw_global_remove(void*, wl_registry*, uint32_t) {}
+const wl_registry_listener kWlwRegListener = { wlw_global, wlw_global_remove };
 
-void wll_locked(void* d, zwp_locked_pointer_v1*)   { ((WlLock*)d)->active = true; }
-void wll_unlocked(void* d, zwp_locked_pointer_v1*) { ((WlLock*)d)->active = false; }
-const zwp_locked_pointer_v1_listener kWllLockListener = { wll_locked, wll_unlocked };
-
-// Accelerated deltas, the same curve as ordinary pointer motion, so the feel of a drag
-// doesn't change when it's locked. Dropped until the lock is in force: before that
-// GLFW's absolute motion is still arriving and already counts.
-void wll_motion(void* d, zwp_relative_pointer_v1*, uint32_t, uint32_t,
-                wl_fixed_t dx, wl_fixed_t dy, wl_fixed_t, wl_fixed_t) {
-    WlLock* l = (WlLock*)d;
-    if (!l->active) return;
-    if (l->defer >= 0) {                 // released: the app is done, steer the hint
-        l->hint_x += wl_fixed_to_double(dx);
-        l->hint_y += wl_fixed_to_double(dy);
-        return;
-    }
-    if (l->on_motion) l->on_motion(wl_fixed_to_double(dx), wl_fixed_to_double(dy));
+void wlwp_enter(void* d, wl_pointer*, uint32_t serial, wl_surface*, wl_fixed_t, wl_fixed_t) {
+    WlWarp* w = (WlWarp*)d;
+    w->enter_serial = serial;
+    w->entered = true;
 }
-const zwp_relative_pointer_v1_listener kWllRelListener = { wll_motion };
-
-WlLock* wll_setup(GLFWwindow* win) {
-    if (!win || glfwGetPlatform() != GLFW_PLATFORM_WAYLAND) return nullptr;
-    WlLock* l = new WlLock();
-    l->dpy     = glfwGetWaylandDisplay();
-    l->surface = glfwGetWaylandWindow(win);
-    if (!l->dpy || !l->surface) { delete l; return nullptr; }
-    l->queue = wl_display_create_queue(l->dpy);
-    wl_display* wrapped = (wl_display*)wl_proxy_create_wrapper(l->dpy);
-    wl_proxy_set_queue((wl_proxy*)wrapped, l->queue);
-    l->reg = wl_display_get_registry(wrapped);
-    wl_proxy_wrapper_destroy(wrapped);
-    wl_registry_add_listener(l->reg, &kWllRegListener, l);
-    wl_display_roundtrip_queue(l->dpy, l->queue);
-    if (!l->cons || !l->relmgr || !l->seat) {
-        std::printf("[wrap] Wayland: no pointer-constraints/relative-pointer — the "
-                    "pointer returns where a wrapped drag first crossed the edge\n");
-        std::fflush(stdout);
-        if (l->cons)   zwp_pointer_constraints_v1_destroy(l->cons);
-        if (l->relmgr) zwp_relative_pointer_manager_v1_destroy(l->relmgr);
-        if (l->seat)   wl_seat_destroy(l->seat);
-        wl_registry_destroy(l->reg);
-        wl_event_queue_destroy(l->queue);
-        delete l;
-        return nullptr;
-    }
-    l->pointer = wl_seat_get_pointer(l->seat);   // its events have no listener: dropped
-    return l;
-}
+void wlwp_leave(void*, wl_pointer*, uint32_t, wl_surface*) {}
+void wlwp_motion(void*, wl_pointer*, uint32_t, wl_fixed_t, wl_fixed_t) {}
+void wlwp_button(void*, wl_pointer*, uint32_t, uint32_t, uint32_t, uint32_t) {}
+void wlwp_axis(void*, wl_pointer*, uint32_t, uint32_t, wl_fixed_t) {}
+// The seat is bound at version 1, so only these events can arrive.
+const wl_pointer_listener kWlwPtrListener = { wlwp_enter, wlwp_leave, wlwp_motion,
+                                              wlwp_button, wlwp_axis };
 }  // namespace
 
-static void wll_destroy_lock(WlLock* l) {
-    // The hint is double-buffered surface state: it only counts once committed, and
-    // KWin reads the committed one as the lock is destroyed.
-    zwp_locked_pointer_v1_set_cursor_position_hint(l->lock, wl_fixed_from_double(l->hint_x),
-                                                   wl_fixed_from_double(l->hint_y));
-    wl_surface_commit(l->surface);
-    zwp_locked_pointer_v1_destroy(l->lock);
-    zwp_relative_pointer_v1_destroy(l->rel);
-    l->lock = nullptr;
-    l->rel = nullptr;
-    l->active = false;
-    l->defer = -1;
-    wl_display_flush(l->dpy);
+void wl_pointer_warp_init(GLFWwindow* win) {
+    if (g_wl_warp || !win || glfwGetPlatform() != GLFW_PLATFORM_WAYLAND) return;
+    WlWarp* w = new WlWarp();
+    w->win     = win;
+    w->dpy     = glfwGetWaylandDisplay();
+    w->surface = glfwGetWaylandWindow(win);
+    if (!w->dpy || !w->surface) { delete w; return; }
+    w->queue = wl_display_create_queue(w->dpy);
+    wl_display* wrapped = (wl_display*)wl_proxy_create_wrapper(w->dpy);
+    wl_proxy_set_queue((wl_proxy*)wrapped, w->queue);
+    w->reg = wl_display_get_registry(wrapped);
+    wl_proxy_wrapper_destroy(wrapped);
+    wl_registry_add_listener(w->reg, &kWlwRegListener, w);
+    wl_display_roundtrip_queue(w->dpy, w->queue);
+    if (!w->warp || !w->seat) {
+        std::printf("[wrap] Wayland: compositor has no pointer-warp, drags stop at the window edge\n");
+        std::fflush(stdout);
+        if (w->warp) wp_pointer_warp_v1_destroy(w->warp);
+        if (w->seat) wl_seat_destroy(w->seat);
+        wl_registry_destroy(w->reg);
+        wl_event_queue_destroy(w->queue);
+        delete w;
+        return;
+    }
+    w->pointer = wl_seat_get_pointer(w->seat);   // only its enter serial is used
+    wl_pointer_add_listener(w->pointer, &kWlwPtrListener, w);
+    wl_display_roundtrip_queue(w->dpy, w->queue);   // an enter, if the pointer is already over us
+    g_wl_warp = w;
 }
 
-bool wl_pointer_lock_begin(GLFWwindow* win, void (*on_motion)(double dx, double dy)) {
-    if (!g_wl_lock_tried) { g_wl_lock_tried = true; g_wl_lock = wll_setup(win); }
-    WlLock* l = g_wl_lock;
-    if (!l) return false;
-    if (l->lock && l->defer >= 0) wll_destroy_lock(l);   // last drag's lock, still ending
-    if (l->lock) return true;
-    l->on_motion = on_motion;
-    l->active    = false;
-    l->defer     = -1;
-    l->rel = zwp_relative_pointer_manager_v1_get_relative_pointer(l->relmgr, l->pointer);
-    zwp_relative_pointer_v1_add_listener(l->rel, &kWllRelListener, l);
-    l->lock = zwp_pointer_constraints_v1_lock_pointer(l->cons, l->surface, l->pointer, nullptr,
-                                                      ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_ONESHOT);
-    zwp_locked_pointer_v1_add_listener(l->lock, &kWllLockListener, l);
-    wl_display_flush(l->dpy);
+bool wl_pointer_warp_available() { return g_wl_warp != nullptr; }
+
+bool wl_pointer_warp(double x, double y) {
+    WlWarp* w = g_wl_warp;
+    if (!w || !w->entered) return false;
+    // Outside the surface the request is refused; keep it a pixel inside.
+    int ww = 0, wh = 0;
+    glfwGetWindowSize(w->win, &ww, &wh);
+    x = std::max(1.0, std::min((double)ww - 2, x));
+    y = std::max(1.0, std::min((double)wh - 2, y));
+    wp_pointer_warp_v1_warp_pointer(w->warp, w->surface, w->pointer, wl_fixed_from_double(x),
+                                    wl_fixed_from_double(y), w->enter_serial);
+    wl_display_flush(w->dpy);
     return true;
 }
 
-void wl_pointer_lock_end(double x, double y) {
-    WlLock* l = g_wl_lock;
-    if (!l || !l->lock) return;
-    l->hint_x = x;
-    l->hint_y = y;
-    zwp_locked_pointer_v1_set_cursor_position_hint(l->lock, wl_fixed_from_double(x),
-                                                   wl_fixed_from_double(y));
-    wl_surface_commit(l->surface);
-    wl_display_flush(l->dpy);
-    l->defer = WlLock::kDeferFrames;
-}
-
-bool wl_pointer_lock_active() { return g_wl_lock && g_wl_lock->lock && g_wl_lock->active; }
-
-void wl_pointer_lock_dispatch() {
-    WlLock* l = g_wl_lock;
-    if (!l) return;
-    wl_display_dispatch_queue_pending(l->dpy, l->queue);
-    if (l->lock && l->defer > 0) {
-        // Re-sent every frame: the frame's own present commits it.
-        zwp_locked_pointer_v1_set_cursor_position_hint(l->lock, wl_fixed_from_double(l->hint_x),
-                                                       wl_fixed_from_double(l->hint_y));
-        if (--l->defer == 0) wll_destroy_lock(l);
-    }
+void wl_pointer_warp_dispatch() {
+    if (g_wl_warp) wl_display_dispatch_queue_pending(g_wl_warp->dpy, g_wl_warp->queue);
 }
 #endif
 
@@ -1268,9 +1202,9 @@ unsigned long Tablet::sample_count() const { return 0; }
 #endif
 
 #if !defined(CHISEL_WL_TABLET)
-// No native Wayland here: wrapped drags use GLFW's capture (or a warp, or the browser's).
-bool wl_pointer_lock_begin(GLFWwindow*, void (*)(double, double)) { return false; }
-void wl_pointer_lock_end(double, double) {}
-void wl_pointer_lock_dispatch() {}
-bool wl_pointer_lock_active() { return false; }
+// No native Wayland here: X11 and Windows wrap with glfwSetCursorPos; the browser doesn't wrap.
+void wl_pointer_warp_init(GLFWwindow*) {}
+bool wl_pointer_warp_available() { return false; }
+bool wl_pointer_warp(double, double) { return false; }
+void wl_pointer_warp_dispatch() {}
 #endif
