@@ -107,17 +107,6 @@ fn atomicAddFloat(idx : u32, val : f32) {
     }
 }
 
-fn brush_falloff(dist : f32, radius : f32) -> f32 {
-    let t = dist / radius;
-    let inner = 0.15 + P.hardness * 0.55;
-    if (t <= inner) {
-        return 1.0;
-    }
-    var blend = (t - inner) / (1.0 - inner + 1e-6);
-    blend = blend * blend * (3.0 - 2.0 * blend);
-    return 1.0 - blend;
-}
-
 fn deposit(v : u32, anchor : vec3<f32>, view : vec3<f32>, anchor_n : vec3<f32>,
            vp : vec3<f32>, vn : vec3<f32>, mirrored : u32) {
     let dist = length(vp - anchor);
@@ -152,33 +141,46 @@ fn deposit(v : u32, anchor : vec3<f32>, view : vec3<f32>, anchor_n : vec3<f32>,
         return;
     }
 
-    var w = brush_falloff(dist, P.world_radius);
-    w = w * sample_alpha(vp - anchor, mirrored);
-    w = w * gate_w;
-    if (w <= 0.0) {
+    // The profile is a function of the distance ACROSS the stroke, not to the dab
+    // centre. A radial dab, however sharp, blurs into a rounded groove once a stroke
+    // of them overlaps; shaping the cross-section directly keeps the tip a V. Along
+    // the stroke each dab is just a smooth bump, so neighbours blend. Zero-length
+    // stroke_dir = the stroke's first dab, no axis yet: radial for that one dab.
+    var sdir = vec3<f32>(P.stroke_dir_x, P.stroke_dir_y, P.stroke_dir_z);
+    if (mirrored != 0u) {
+        sdir.x = -sdir.x;
+    }
+    let rel = vp - anchor;
+    let rel_t = rel - dot(rel, anchor_n) * anchor_n;
+    var across = rel_t;
+    var along = 0.0;
+    if (dot(sdir, sdir) > 0.25) {
+        along = dot(rel_t, sdir);
+        across = rel_t - along * sdir;
+    }
+    let xa = length(across) / P.world_radius;
+    if (xa >= 1.0) {
+        return;
+    }
+    let ya = min(abs(along) / P.world_radius, 1.0);
+    let mask = sample_alpha(rel, mirrored) * gate_w * (1.0 - smoothstep(0.0, 1.0, ya));
+    if (mask <= 0.0) {
         return;
     }
 
-    var d = anchor_n * (P.disp_amount * w);
+    // Depth: (1 - x)^k, a cusp on the stroke line. Hardness sets k, i.e. how narrow
+    // and pointed the V is (it used to widen a flat-topped plateau, which is what made
+    // the tip flat and the falloff wide).
+    let k = 1.5 + 2.5 * P.hardness;
+    var d = anchor_n * (P.disp_amount * pow(1.0 - xa, k) * mask);
 
-    if (dist > 1e-6) {
-        let to_anchor = anchor - vp;
-        var tangent = to_anchor - dot(to_anchor, anchor_n) * anchor_n;
-
-        // Squeeze across the stroke, not toward the dab centre. Pulling at the anchor
-        // point means each successive dab yanks the same vertices further down the
-        // path, which drags topology along the stroke. Removing the stroke-parallel
-        // component leaves a pure pinch onto the ridge line.
-        var sdir = vec3<f32>(P.stroke_dir_x, P.stroke_dir_y, P.stroke_dir_z);
-        if (mirrored != 0u) {
-            sdir.x = -sdir.x;
-        }
-        if (dot(sdir, sdir) > 0.25) {
-            tangent = tangent - dot(tangent, sdir) * sdir;
-        }
-
-        d = d + tangent * (w * P.pinch_amount / P.world_radius);
-    }
+    // Pinch: squeeze onto the stroke line, never along it (pulling at the dab centre
+    // drags topology down the path). Weight (1 - x) makes the pull x(1 - x): zero on
+    // the line and at the rim, strongest half-way, so it gathers the flanks into a
+    // tight band and puts vertices in the tip. Order-preserving as long as the per-dab
+    // fraction pinch_amount / R stays below 1 (it is at most 0.35): neighbours
+    // contract toward the line and can't cross.
+    d = d - across * ((1.0 - xa) * mask * P.pinch_amount / P.world_radius);
 
     let base = v * 4u;
     atomicAddFloat(base + 0u, d.x);

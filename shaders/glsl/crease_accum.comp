@@ -77,15 +77,6 @@ void atomicAddFloat(uint idx, float val) {
     }
 }
 
-float brush_falloff(float dist, float radius) {
-    float t = dist / radius;
-    float inner = 0.15 + P.hardness * 0.55;
-    if (t <= inner) return 1.0;
-    float blend = (t - inner) / (1.0 - inner + 1e-6);
-    blend = blend * blend * (3.0 - 2.0 * blend);
-    return 1.0 - blend;
-}
-
 void deposit(uint v, vec3 anchor, vec3 view, vec3 anchor_n, vec3 vp, vec3 vn, uint mirrored) {
     float dist = length(vp - anchor);
     if (dist >= P.world_radius) return;
@@ -103,29 +94,27 @@ void deposit(uint v, vec3 anchor, vec3 view, vec3 anchor_n, vec3 vp, vec3 vn, ui
     gate_w *= smoothstep(-0.6, -0.4, -dot(vn, view));
     if (gate_w <= 0.0) return;
 
-    float w = brush_falloff(dist, P.world_radius);
-    w *= sample_alpha(vp - anchor, mirrored);
-    w *= gate_w;
-    if (w <= 0.0) return;
-
-    vec3 d = anchor_n * (P.disp_amount * w);
-
-    if (dist > 1e-6) {
-        vec3 to_anchor = anchor - vp;
-        vec3 tangent = to_anchor - dot(to_anchor, anchor_n) * anchor_n;
-
-        // Squeeze across the stroke, not toward the dab centre. Pulling at the anchor
-        // point means each successive dab yanks the same vertices further down the
-        // path, which drags topology along the stroke. Removing the stroke-parallel
-        // component leaves a pure pinch onto the ridge line.
-        vec3 sdir = vec3(P.stroke_dir_x, P.stroke_dir_y, P.stroke_dir_z);
-        if (mirrored != 0u) { sdir.x = -sdir.x; }
-        if (dot(sdir, sdir) > 0.25) {
-            tangent = tangent - dot(tangent, sdir) * sdir;
-        }
-
-        d += tangent * (w * P.pinch_amount / P.world_radius);
+    // Cross-section profile + pinch onto the stroke line — see crease_accum.wgsl for
+    // the full rationale (keep the two in lockstep).
+    vec3 sdir = vec3(P.stroke_dir_x, P.stroke_dir_y, P.stroke_dir_z);
+    if (mirrored != 0u) { sdir.x = -sdir.x; }
+    vec3 rel = vp - anchor;
+    vec3 rel_t = rel - dot(rel, anchor_n) * anchor_n;
+    vec3 across = rel_t;
+    float along = 0.0;
+    if (dot(sdir, sdir) > 0.25) {
+        along = dot(rel_t, sdir);
+        across = rel_t - along * sdir;
     }
+    float xa = length(across) / P.world_radius;
+    if (xa >= 1.0) return;
+    float ya = min(abs(along) / P.world_radius, 1.0);
+    float mask = sample_alpha(rel, mirrored) * gate_w * (1.0 - smoothstep(0.0, 1.0, ya));
+    if (mask <= 0.0) return;
+
+    float k = 1.5 + 2.5 * P.hardness;
+    vec3 d = anchor_n * (P.disp_amount * pow(1.0 - xa, k) * mask);
+    d -= across * ((1.0 - xa) * mask * P.pinch_amount / P.world_radius);
 
     uint base = v * 4u;
     atomicAddFloat(base + 0u, d.x);

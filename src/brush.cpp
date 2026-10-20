@@ -1465,7 +1465,10 @@ void BrushStroke::apply_crease(DabContext& ctx, float dab_x, float dab_y,
     // spacing, which read as the brush being weak rather than being a different brush.
     // Kept below Draw's 0.5: the pinch pull below already contributes apparent depth by
     // gathering the band, so matching Draw's constant outright would overshoot.
-    float disp_amount = base_disp * strength * sign * 0.30f;
+    //
+    // 0.30 -> 0.42 with the V-profile (2026-10-20): the cusp carries less volume than the
+    // old flat-topped dab, and this keeps the centre-line depth about where it was.
+    float disp_amount = base_disp * strength * sign * 0.42f;
     // Pinch gathers vertices into a narrow band — that gathering is what reads as
     // sharpness, and it's an absolute width, not a ratio. Scaled linearly it made a
     // low-strength crease shallow AND wide (i.e. a Draw dent), because the band never
