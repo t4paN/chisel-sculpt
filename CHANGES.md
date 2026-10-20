@@ -2,7 +2,7 @@
 
 Short, chronological log of notable changes. Newest on top.
 
-## 2026-10-20 — Layers panel: double-click to rename, drag to reorder
+## 2026-10-20 — v0.3.3 — Layers panel: double-click to rename, drag to reorder
 
 *Built GL, wgpu and web. The user's first hand test found a bug (renaming one layer also
 renamed Base, and Base couldn't be selected); fixed, and the retest passed.*
@@ -12,7 +12,7 @@ renamed Base, and Base couldn't be selected); fixed, and the retest passed.*
 - **Drag a layer row onto another to move it there.** A line on the target's edge shows
   whether it lands above or below. Neither the rename nor the move is undoable yet.
 
-## 2026-10-20 — Edge wrap moves the pointer on Wayland; no wrap in the browser
+## 2026-10-20 — v0.3.3 — Edge wrap moves the pointer on Wayland; no wrap in the browser
 
 *Built GL, wgpu and web; hand-tested by the user on native wgpu (Wayland, KWin 6.8, mouse):
 "perfect wraps all around".*
@@ -25,7 +25,7 @@ renamed Base, and Base couldn't be selected); fixed, and the retest passed.*
 - **The browser no longer wraps.** It can't move the pointer, and capturing it put the
   pointer back wherever the capture began. Slider drags still capture, as before.
 
-## 2026-10-20 — Short strokes land where you aim
+## 2026-10-20 — v0.3.3 — Short strokes land where you aim
 
 *Built GL and wgpu; hand-tested by the user on native wgpu (Wayland, mouse): "felt better".
 Web build not exercised; only the stroke-end fix reaches it.*
@@ -44,7 +44,7 @@ Web build not exercised; only the stroke-end fix reaches it.*
   release point (not beyond, so the move back up isn't drawn) and finishes the stroke one
   frame later.
 
-## 2026-10-20 — Shader checks in CI
+## 2026-10-20 — v0.3.3 — Shader checks in CI
 
 - **Every WGSL shader now goes through the browser's compiler on each push.**
   `tools/check-wgsl.py` hands all 69 (the kernel files plus the render shaders inside
