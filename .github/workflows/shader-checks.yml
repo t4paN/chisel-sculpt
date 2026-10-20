@@ -1,0 +1,39 @@
+name: Shader Checks
+
+# Both halves of every twinned kernel, compiled by the compilers users actually hit:
+# WGSL through the browser's Tint (headless Chrome, software WebGPU), GLSL through
+# Mesa's software GL, plus one GPU-vs-CPU kernel round trip. Catches the shaders
+# naga lets through but the web build rejects. No release artifacts here.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  shaders:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake \
+            libglfw3-dev libgl-dev libglx-dev libegl-dev libx11-dev libxfixes-dev \
+            libgl1-mesa-dri xvfb
+
+      - name: WGSL under Tint (headless Chrome)
+        run: python3 tools/check-wgsl.py --browser google-chrome
+
+      - name: Build GL compute test
+        run: |
+          cmake -B build-gl -S . -DCHISEL_GPU_BACKEND=gl -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-gl --target chisel-gl-compute-test -j$(nproc)
+
+      - name: GL compute test (software GL)
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+        run: xvfb-run -a ./build-gl/chisel-gl-compute-test

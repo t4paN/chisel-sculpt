@@ -2,6 +2,20 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-20 — Shader checks in CI
+
+- **Every WGSL shader now goes through the browser's compiler on each push.**
+  `tools/check-wgsl.py` hands all 69 (the kernel files plus the render shaders inside
+  `src/`) to headless Chrome's WebGPU and fails on anything Tint rejects. The native build's
+  WGSL compiler is more lenient than the browser's, and that gap shipped dead brushes twice;
+  the check catches both of those bugs when they're put back in. Runs locally in ~5 s.
+- **The GL compute test works again and covers every GLSL kernel.** It had drifted: the mask
+  kernel gained its block-list and brush-alpha inputs and a 64-wide workgroup, so the test
+  fed it a stale layout and failed. It now matches, and it compiles all 53 `.comp` files
+  instead of just the 5 SDF ones. The new **Shader Checks** workflow runs both on software
+  GPUs.
+- Dropped an unused GL header from `brush.cpp`.
+
 ## 2026-10-19 — v0.3.2 — Fill bucket stops at paint
 
 *Built GL, wgpu and web. Off-screen test passed (a soft-edged painted line walls a fill,

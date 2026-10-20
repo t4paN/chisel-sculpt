@@ -1,7 +1,6 @@
 #include "brush.h"
 #include "mesh_entity.h"
 #include "scene.h"
-#include <glad/glad.h>
 #include <cmath>
 #include <cstring>
 #include <algorithm>

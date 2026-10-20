@@ -17,6 +17,8 @@
 #include <vector>
 #include <string>
 #include <fstream>
+#include <filesystem>
+#include <algorithm>
 
 #ifndef CHISEL_GLSL_DIR
 #define CHISEL_GLSL_DIR "shaders/glsl"
@@ -85,6 +87,15 @@ int main() {
     std::vector<uint32_t> zeroDirty(vcount + 1, 0u);
     gpu::Buffer dirtyBuf = gpu::create_buffer(dev, zeroDirty.data(), kDirtyBytes, gpu::Usage::Storage | gpu::Usage::CopySrc);
     gpu::Buffer paramsUBO = gpu::create_buffer(dev, nullptr, sizeof(MaskParamsGPU), gpu::Usage::Uniform);
+    // The kernel's later inputs, parked off: no brush alpha (enabled = 0), no block
+    // culling (block_mode = 0), and the dirty region is the whole buffer from word 0.
+    float zeroF = 0.0f; uint32_t zeroU = 0u;
+    gpu::Buffer alphaTex  = gpu::create_buffer(dev, &zeroF, sizeof(zeroF), gpu::Usage::Storage);
+    gpu::Buffer blockList = gpu::create_buffer(dev, &zeroU, sizeof(zeroU), gpu::Usage::Storage);
+    uint32_t alphaParams[12] = {};
+    gpu::Buffer alphaUBO  = gpu::create_buffer(dev, alphaParams, sizeof(alphaParams), gpu::Usage::Uniform);
+    uint32_t region[4] = { 0u, vcount, 0u, 0u };
+    gpu::Buffer regionUBO = gpu::create_buffer(dev, region, sizeof(region), gpu::Usage::Uniform);
     gpu::Buffer staging   = gpu::create_buffer(dev, nullptr, kPosBytes, gpu::Usage::MapRead);  // sized for the largest readback
 
     std::string glsl = loadGlsl("mask_paint.comp");
@@ -93,17 +104,25 @@ int main() {
         { 0,  gpu::Bind::StorageRead,      kPosBytes },
         { 12, gpu::Bind::StorageReadWrite, kMaskBytes },
         { 6,  gpu::Bind::StorageReadWrite, kDirtyBytes },
+        { 40, gpu::Bind::StorageRead,      sizeof(float) },
+        { 45, gpu::Bind::StorageRead,      sizeof(uint32_t) },
+        { 61, gpu::Bind::Uniform,          sizeof(region) },
+        { 62, gpu::Bind::Uniform,          sizeof(alphaParams) },
         { 63, gpu::Bind::Uniform,          sizeof(MaskParamsGPU) },
     };
-    gpu::ComputePipeline maskPipeline = gpu::create_compute_pipeline(dev, gpu::ShaderSources{ nullptr, glsl.c_str() }, maskLayout, 4);
+    gpu::ComputePipeline maskPipeline = gpu::create_compute_pipeline(dev, gpu::ShaderSources{ nullptr, glsl.c_str() }, maskLayout, 8);
     if (!maskPipeline.handle) { std::printf("[gltest] mask pipeline failed\n"); return 2; }
     gpu::BindBufferEntry maskBg[] = {
         { 0,  &posVB,     kPosBytes },
         { 12, &maskBuf,   kMaskBytes },
         { 6,  &dirtyBuf,  kDirtyBytes },
+        { 40, &alphaTex,  sizeof(float) },
+        { 45, &blockList, sizeof(uint32_t) },
+        { 61, &regionUBO, sizeof(region) },
+        { 62, &alphaUBO,  sizeof(alphaParams) },
         { 63, &paramsUBO, sizeof(MaskParamsGPU) },
     };
-    gpu::BindGroup maskBindGroup = gpu::create_bind_group(dev, maskPipeline, maskBg, 4);
+    gpu::BindGroup maskBindGroup = gpu::create_bind_group(dev, maskPipeline, maskBg, 8);
 
     // Fixed dab: triangle 0's centroid, radius 0.45, hardness 0.5, strength 1.
     const float radius = 0.45f, hardness = 0.5f, strength = 1.0f;
@@ -122,7 +141,7 @@ int main() {
     uint32_t zero = 0;
     gpu::write_buffer(dev, dirtyBuf, 0, &zero, sizeof(zero));
 
-    uint32_t groups = (vcount + 255u) / 256u;
+    uint32_t groups = (vcount + 63u) / 64u;   // local_size_x = 64
     gpu::ComputeBatch b = gpu::begin_compute(dev);
     gpu::dispatch(b, maskPipeline, maskBindGroup, groups);
     gpu::copy_buffer(b, dirtyBuf, 0, staging, 0, 4);
@@ -161,38 +180,40 @@ int main() {
     bool pass = (gpuTouched == cpuTouched) && (gpuMasked == cpuMasked) && (std::fabs(gpuMax - cpuMax) < 1e-4f);
     std::printf("[gltest] %s — gpu:: GL backend reproduces the mask kernel\n", pass ? "PASS" : "FAIL");
 
-    // ---- SDF kernel compile smoke check (GLSL only) ----
-    // Validates that the 5 self-contained sdf_*.comp compile + link through the seam
-    // (the main porting risk: the inlined snippets + the anonymous Params UBO). Full
-    // numeric verification is a live in-app mirror-merge. Bind layouts mirror sdf.cpp.
+    // ---- Every GLSL kernel compiles + links through the seam ----
+    // The GLSL half of the shader gate (tools/check-wgsl.py is the WGSL half). The
+    // layout lists every binding the source declares, so the seam's "declared but not
+    // listed" warning stays quiet; a compile check doesn't care about the bind types.
     {
-        using B = gpu::Bind;
-        struct Stem { const char* name; std::vector<gpu::BindEntry> layout; };
-        std::vector<Stem> stems = {
-            { "sdf_count",  { {21,B::StorageRead,0},{22,B::StorageRead,0},{36,B::StorageReadWrite,0},{63,B::Uniform,32} } },
-            { "sdf_expand", { {21,B::StorageRead,0},{22,B::StorageRead,0},{23,B::StorageReadWrite,0},{36,B::StorageRead,0},{37,B::StorageRead,0},{63,B::Uniform,32} } },
-            { "sdf_sign",   { {21,B::StorageRead,0},{22,B::StorageRead,0},{23,B::StorageRead,0},{24,B::StorageReadWrite,0},{63,B::Uniform,48} } },
-            { "sdf_mc",     { {24,B::StorageRead,0},{25,B::StorageReadWrite,0},{26,B::StorageReadWrite,0},{27,B::StorageRead,0},{63,B::Uniform,32} } },
-            { "sdf_nets",   { {24,B::StorageRead,0},{25,B::StorageReadWrite,0},{26,B::StorageReadWrite,0},{63,B::Uniform,32} } },
-        };
-        for (auto& s : stems) {
-            std::string src = loadGlsl((std::string(s.name) + ".comp").c_str());
-            bool ok = false;
-            if (!src.empty()) {
-                gpu::ComputePipeline p = gpu::create_compute_pipeline(
-                    dev, gpu::ShaderSources{ nullptr, src.c_str() }, s.layout.data(), (uint32_t)s.layout.size());
-                ok = (p.handle != 0);
-                gpu::release_compute_pipeline(p);
+        std::vector<std::string> files;
+        for (const auto& e : std::filesystem::directory_iterator(CHISEL_GLSL_DIR))
+            if (e.path().extension() == ".comp") files.push_back(e.path().filename().string());
+        std::sort(files.begin(), files.end());
+        uint32_t failed = 0;
+        for (const auto& name : files) {
+            std::string src = loadGlsl(name.c_str());
+            std::vector<gpu::BindEntry> layout;
+            for (size_t at = src.find("binding"); at != std::string::npos; at = src.find("binding", at + 7)) {
+                size_t i = at + 7;
+                while (i < src.size() && (src[i] == ' ' || src[i] == '=')) ++i;
+                if (i >= src.size() || src[i] < '0' || src[i] > '9') continue;
+                layout.push_back({ (uint32_t)std::stoul(src.substr(i)), gpu::Bind::StorageRead, 0 });
             }
-            std::printf("[gltest] sdf shader %-10s %s\n", s.name, ok ? "compiled" : "FAILED");
-            pass = pass && ok;
+            gpu::ComputePipeline p = gpu::create_compute_pipeline(
+                dev, gpu::ShaderSources{ nullptr, src.c_str() }, layout.data(), (uint32_t)layout.size());
+            if (!p.handle) { std::printf("[gltest] FAILED to compile %s\n", name.c_str()); ++failed; }
+            gpu::release_compute_pipeline(p);
         }
+        std::printf("[gltest] GLSL kernels: %zu compiled, %u failed\n", files.size() - failed, failed);
+        pass = pass && failed == 0 && !files.empty();
     }
 
     gpu::release_compute_pipeline(maskPipeline);
     gpu::release_bind_group(maskBindGroup);
     gpu::release_buffer(posVB); gpu::release_buffer(maskBuf); gpu::release_buffer(dirtyBuf);
     gpu::release_buffer(paramsUBO); gpu::release_buffer(staging);
+    gpu::release_buffer(alphaTex); gpu::release_buffer(blockList);
+    gpu::release_buffer(alphaUBO); gpu::release_buffer(regionUBO);
     glfwDestroyWindow(win);
     glfwTerminate();
     return pass ? 0 : 1;
