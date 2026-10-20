@@ -29,7 +29,12 @@ cp "$BUILD/chisel.wasm" "$STAGE/chisel.wasm"
 
 mkdir -p "$OUT"
 rm -f "$ZIP"
-( cd "$STAGE" && zip -q "$ZIP" index.html chisel.js chisel.wasm )
+# Python's zipfile where zip isn't installed (the desktop has neither zip nor unzip).
+if command -v zip >/dev/null; then
+  ( cd "$STAGE" && zip -q "$ZIP" index.html chisel.js chisel.wasm )
+else
+  ( cd "$STAGE" && python3 -m zipfile -c "$ZIP" index.html chisel.js chisel.wasm )
+fi
 
 echo "packed: $ZIP"
-unzip -l "$ZIP"
+python3 -m zipfile -l "$ZIP"
