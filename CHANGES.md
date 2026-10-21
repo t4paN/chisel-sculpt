@@ -4,7 +4,7 @@ Short, chronological log of notable changes. Newest on top.
 
 ## 2026-10-21 — Brush properties window
 
-*Built GL, wgpu and web; the window itself is not hand-tested yet.*
+*Built GL, wgpu and web. Hand-tested by the user on the desktop.*
 
 - **Burger menu → Brush properties...** opens a window framed like Key bindings. It holds
   the knobs a brush has beyond the four meters, starting with Crease's Dot and Build, which
