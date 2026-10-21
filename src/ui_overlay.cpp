@@ -151,10 +151,10 @@ void draw_voxel_merge_confirm(TextOverlay& text, int resolution, int n_selected,
     text.draw_text("Y remesh   M mirror-remesh   N / ESC cancel", cx - 360.0f, cy + 70.0f,
                   scale, win_w, win_h, CGA(yellow), 1.0f);
 
-    // Subtract option: carve the unselected (red) meshes out of the selected union.
+    // Subtract option: carve the unselected meshes out of the selected union.
     float oy = 100.0f;
     if (n_unselected > 0) {
-        std::snprintf(line, sizeof(line), "- subtract %d red mesh%s (carve)",
+        std::snprintf(line, sizeof(line), "- subtract %d unselected mesh%s (carve)",
                       n_unselected, n_unselected == 1 ? "" : "es");
         text.draw_text(line, cx - 360.0f, cy + oy, scale, win_w, win_h,
                       CGA(light_red), 1.0f);
@@ -1096,18 +1096,6 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
         }
     }
 
-    // Clay phase-2 melt: how strongly clay eases proud verts back to its plane, so
-    // building across an old stroke evens out instead of stacking. 0 = off (proud
-    // detail frozen). Only shown while Clay is the active brush.
-    if (current == BrushType::CLAY) {
-        ImGui::SetNextItemWidth(calc_btn_w("Colour") + calc_btn_w("Density") + 8.0f);
-        ImGui::SliderFloat("##clayMelt", &input.clay_melt, 0.0f, 1.0f, "melt %.2f");
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("How strongly clay cuts raised areas down to its plane "
-                              "(0 = ride over them untouched, 1 = flatten to the plane)");
-
-    }
-
     // Brush-alpha (stamp) picker: Round + built-ins + custom, then a "＋" to load an
     // image. Alphas apply to Draw, Mask and Paint only — the picker is hidden for
     // every other brush (their dabs force the stamp off; see set_alpha_dab). Clay
@@ -1513,11 +1501,20 @@ void draw_settings_menu_items(InputState& input, MultiresInfo mres, bool sync_ta
             // config file". It doesn't touch the scene, but it does wipe every setting
             // and binding the user has made, so it asks Y/N first.
             if (ImGui::Selectable("Brush properties...")) {
+                input.props_page = InputState::PropsPage::BRUSH;
                 input.brush_props_request = true;
                 ImGui::CloseCurrentPopup();
             }
             if (ImGui::IsItemHovered())
                 ui_skin_menu_tip("Settings a brush keeps beyond size, strength and hardness.");
+
+            if (ImGui::Selectable("Unselected colour...")) {
+                input.props_page = InputState::PropsPage::UNSELECTED_COLOUR;
+                input.brush_props_request = true;
+                ImGui::CloseCurrentPopup();
+            }
+            if (ImGui::IsItemHovered())
+                ui_skin_menu_tip("The tint on objects that aren't selected.");
 
             if (ImGui::Selectable("Key bindings...")) {
                 input.keybind_menu_request = true;
@@ -1908,6 +1905,7 @@ void draw_keybind_window(InputState& input, int win_w, int win_h) {
 // Brush properties: the knobs a brush has beyond the four meters, kept out of the docks.
 // Same frame, padding and background as the key bindings window. Changes apply as you
 // drag (and save on the settings debounce), so there is no Save/Cancel, just Close.
+// The same window doubles as the unselected-colour picker (input.props_page).
 void draw_brush_props_window(InputState& input, int win_w, int win_h) {
     if (input.brush_props_request) {
         input.brush_props_request = false;
@@ -1937,8 +1935,10 @@ void draw_brush_props_window(InputState& input, int win_w, int win_h) {
     if (ImGui::BeginPopupModal("##brushprops", nullptr, flags)) {
         if (modern) ui_skin_popup_background();
 
+        const bool colour_page = input.props_page == InputState::PropsPage::UNSELECTED_COLOUR;
         ImGui::TextColored(modern ? ImVec4(0.93f, 0.92f, 0.95f, 1.0f)
-                                  : ImVec4(1.0f, 1.0f, 0.40f, 1.0f), "Brush properties");
+                                  : ImVec4(1.0f, 1.0f, 0.40f, 1.0f),
+                           colour_page ? "Unselected colour" : "Brush properties");
         ImGui::TextDisabled("Changes apply as you drag. Esc closes.");
         ImGui::Separator();
 
@@ -1957,12 +1957,28 @@ void draw_brush_props_window(InputState& input, int win_w, int win_h) {
         };
 
         ImGui::Dummy(ImVec2(0.0f, 4.0f));
-        ImGui::TextColored(accent, "Crease");
-        pct_row("Dot", "##creaseDot", &input.crease_dot, nullptr,
-                "0%: a groove along the stroke. 100%: every dab a round pit.");
-        ImGui::Dummy(ImVec2(0.0f, 2.0f));
-        pct_row("Build", "##creaseBuild", &input.crease_build, "Off",
-                "Hold the brush still and it keeps sinking there. Click and hold: a pit.");
+        if (colour_page) {
+            // The tint multiplies the shaded surface, so a mesh shows a little darker
+            // than the swatch; pick on the light side.
+            ImGui::SetNextItemWidth(260.0f);
+            ImGui::ColorPicker3("##unselTint", input.unselected_tint,
+                                ImGuiColorEditFlags_NoSidePreview | ImGuiColorEditFlags_NoLabel |
+                                ImGuiColorEditFlags_DisplayHex);
+            ImGui::TextDisabled("Multiplies the shading, so meshes read a bit darker.");
+        } else {
+            ImGui::TextColored(accent, "Crease");
+            pct_row("Dot", "##creaseDot", &input.crease_dot, nullptr,
+                    "0%: a groove along the stroke. 100%: every dab a round pit.");
+            ImGui::Dummy(ImVec2(0.0f, 2.0f));
+            pct_row("Build", "##creaseBuild", &input.crease_build, "Off",
+                    "Hold the brush still and it keeps sinking there. Click and hold: a pit.");
+            // Clay melt: how strongly clay eases proud verts back to its plane, so
+            // building across an old stroke evens out instead of stacking.
+            ImGui::Dummy(ImVec2(0.0f, 6.0f));
+            ImGui::TextColored(accent, "Clay");
+            pct_row("Melt", "##clayMelt", &input.clay_melt, "Off",
+                    "How hard clay cuts raised areas down to its plane. Off: rides over them.");
+        }
         ImGui::Dummy(ImVec2(0.0f, 4.0f));
         ImGui::Separator();
 

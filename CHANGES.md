@@ -2,6 +2,19 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-21 — Unselected colour picker; Clay Melt moves to Brush properties
+
+*Built GL, wgpu and web; shader gate 69/69. Hand-tested by the user on the desktop.*
+
+- **Burger menu → Unselected colour...** opens a colour wheel (with a hex field) for the
+  tint on deselected objects, live as you drag and saved with the settings. The tint
+  multiplies the shading, so meshes read a little darker than the swatch. It rides the
+  matcap uniform block's three spare floats, so the layout is unchanged.
+- The default tint is now a neutral light grey, `#A5A5A5`, instead of the dark bordeaux.
+  The merge dialog and the manual say "unselected" instead of "red".
+- **Clay's Melt** left the options dock (all skins) for the Brush properties window, under
+  a Clay heading, as a 0–100% slider.
+
 ## 2026-10-21 — Speed falloff: running start
 
 *Built GL and wgpu. Hand-tested by the user on the desktop.*

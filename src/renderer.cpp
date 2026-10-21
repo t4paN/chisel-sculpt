@@ -7,9 +7,8 @@
 
 // Matcap Params UBO payload — byte-identical to the std140 `Params` block in the
 // matcap shaders (two mat4 = 128 B, then the float tail). The first four floats fit
-// the 144-byte block exactly; flat_shading opened a fifth 16-byte row, so the three
-// pads are what keep the block a multiple of 16 (std140 rounds the size up anyway —
-// they are spelled out so the C++ side and the shader agree by inspection).
+// the 144-byte block exactly; flat_shading opened a fifth 16-byte row, and the deselected
+// tint fills the rest of it as three scalars (a vec3 would align to 16 and move it).
 struct MatcapParamsGPU {
     float view[16];
     float proj[16];
@@ -18,7 +17,7 @@ struct MatcapParamsGPU {
     float paint_visible;
     float matcap_contrast;
     float flat_shading;
-    float _pad[3];
+    float obj_tint[3];   // deselected-object multiplier (InputState::unselected_tint)
 };
 static_assert(sizeof(MatcapParamsGPU) == 160, "matcap Params UBO must be 160 bytes (std140)");
 
@@ -158,7 +157,7 @@ layout(std140, binding=63) uniform Params {
     float uPaintVisible;
     float uMatcapContrast;
     float uFlatShading;
-    float uPad0; float uPad1; float uPad2;
+    float uObjTintR; float uObjTintG; float uObjTintB;
 };
 
 out vec3 vNormView;
@@ -198,7 +197,7 @@ layout(std140, binding=63) uniform Params {
     float uPaintVisible;
     float uMatcapContrast;
     float uFlatShading;
-    float uPad0; float uPad1; float uPad2;
+    float uObjTintR; float uObjTintG; float uObjTintB;
 };
 
 void main() {
@@ -255,9 +254,9 @@ void main() {
     // uPaintVisible folds the albedo out to white when paint is hidden.
     vec3 col = vec3(val) * mix(vec3(1.0), vColor.rgb, uPaintVisible) + vec3(spec);
 
-    // Object selection mask: deselected objects get dark muted tint
+    // Object selection mask: deselected objects get a muted tint (user-set colour)
     if (uObjMask > 0.0) {
-        vec3 tint = vec3(0.35, 0.12, 0.18);
+        vec3 tint = vec3(uObjTintR, uObjTintG, uObjTintB);
         col = mix(col, col * tint, uObjMask);
     }
 
@@ -672,9 +671,9 @@ struct Params {
     paint_visible: f32,
     matcap_contrast: f32,
     flat_shading: f32,
-    pad0: f32,
-    pad1: f32,
-    pad2: f32,
+    obj_tint_r: f32,
+    obj_tint_g: f32,
+    obj_tint_b: f32,
 };
 @group(0) @binding(63) var<uniform> P: Params;
 struct VSOut {
@@ -731,7 +730,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let spec = pow(max(dot(n, H), 0.0), 90.0) * 0.16 * shade * P.matcap_contrast;
     var col = vec3<f32>(val) * mix(vec3<f32>(1.0), in.color.rgb, P.paint_visible) + vec3<f32>(spec);
     if (P.obj_mask > 0.0) {
-        let tint = vec3<f32>(0.35, 0.12, 0.18);
+        let tint = vec3<f32>(P.obj_tint_r, P.obj_tint_g, P.obj_tint_b);
         col = mix(col, col * tint, P.obj_mask);
     }
     let facing = max(n.z, 0.0);
@@ -1673,7 +1672,7 @@ void Renderer::upload_matcap_params(const Camera& cam, int w, int h, bool select
     p.paint_visible = paint_visible;
     p.matcap_contrast = matcap_contrast;
     p.flat_shading = flat_shading;
-    p._pad[0] = p._pad[1] = p._pad[2] = 0.0f;
+    for (int i = 0; i < 3; i++) p.obj_tint[i] = unselected_tint[i];
     gpu::write_buffer(gpu_dev, matcap_ubo, 0, &p, sizeof p);
 }
 

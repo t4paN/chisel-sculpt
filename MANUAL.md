@@ -77,7 +77,7 @@ the camera, so you never have to switch tools just to look around.
 
 ### Clay's own controls
 
-**melt** is a slider that appears in the toolbar only while Clay is active: how hard clay
+**melt** lives in **burger menu → Brush properties...**, under Clay: how hard clay
 cuts raised areas back down to its plane. 0 (default) rides over them untouched, so a
 stroke crosses earlier work smoothly; 1 flattens everything to the stroke plane.
 
@@ -207,7 +207,7 @@ symmetry on that mesh while it is turned, and Chisel says so once rather than le
 find out from a torn seam. Turn it back and symmetry returns.
 
 The selection also drives the voxel merge: selected meshes are the merge set,
-deselected (red-tinted) meshes are bystanders — or carving tools (see Subtract).
+deselected (tinted) meshes are bystanders — or carving tools (see Subtract).
 
 ## Voxel merge (join for print)
 
@@ -219,7 +219,7 @@ printing.
 |---|---|
 | Y | Faithful union of the selection |
 | M | Mirror-symmetric union — the result stays editable under X-mirror |
-| − | **Subtract**: union the selection, then carve away every *unselected* (red) mesh — booleans with your bystander objects as cutters |
+| − | **Subtract**: union the selection, then carve away every *unselected* (tinted) mesh — booleans with your bystander objects as cutters |
 | S | Toggle the extractor: Marching Cubes ↔ Surface Nets (Surface Nets gives a smoother, more even result) |
 | [ / ] | Lower / raise voxel resolution |
 | N / Esc | Cancel |

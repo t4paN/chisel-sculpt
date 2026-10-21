@@ -252,6 +252,10 @@ std::string serialize(const InputState& in) {
                   (double)in.paint_color_alt[0], (double)in.paint_color_alt[1],
                   (double)in.paint_color_alt[2]);
     s += buf;
+    std::snprintf(buf, sizeof(buf), "unselected_tint=%.6g %.6g %.6g\n",
+                  (double)in.unselected_tint[0], (double)in.unselected_tint[1],
+                  (double)in.unselected_tint[2]);
+    s += buf;
 
     for (int i = 0; i < (int)InputProfile::COUNT; i++)
         append_profile(s, in.profiles[i], kProfileKey[i]);
@@ -350,6 +354,7 @@ void apply_global_key(InputState& in, const std::string& key, const std::string&
     else if (key == "paint_visible")       in.paint_visible       = parse_bool(val);
     else if (key == "paint_color")         parse_rgb(val, in.paint_color);
     else if (key == "paint_color_alt")     parse_rgb(val, in.paint_color_alt);
+    else if (key == "unselected_tint")     parse_rgb(val, in.unselected_tint);
     else if (key == "sphere_kind") {
         // Range-checked like every other value on the way in: the blob is
         // user-editable, and an out-of-range enum would come back every launch.
@@ -514,6 +519,7 @@ void settings_reset(InputState& input) {
     for (int i = 0; i < 3; i++) {
         input.paint_color[i]     = fresh.paint_color[i];
         input.paint_color_alt[i] = fresh.paint_color_alt[i];
+        input.unselected_tint[i] = fresh.unselected_tint[i];
     }
     // Live brush fields come back from the restored active profile. sync_live_settings,
     // not current_brush: reset can fire while a smooth lock is held (or Shift is down).

@@ -50,6 +50,9 @@ struct Renderer {
     // back keeps its smooth world normals, so shading this way cannot change a stroke.
     float flat_shading = 0.0f;
 
+    // Multiplier on deselected objects (InputState::unselected_tint). Set per frame.
+    float unselected_tint[3] = { 0.647f, 0.647f, 0.647f };   // #A5A5A5
+
     // Entity-id pick pass — on the gpu:: seam. Renders into the shared screen
     // offscreen target writing linear depth (attachment 0) + entity id (attachment
     // 2). The pass spans pick_begin → N×pick_draw → pick_end.

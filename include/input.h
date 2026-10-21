@@ -272,6 +272,10 @@ struct InputState {
     bool    brush_props_open     = false;
     bool    brush_props_request  = false;
     bool    brush_props_esc      = false;
+    // The same window shows one page at a time: the brush knobs, or the unselected-mesh
+    // colour picker (its own burger entry). One window, so one set of open/Esc plumbing.
+    enum class PropsPage { BRUSH, UNSELECTED_COLOUR };
+    PropsPage props_page         = PropsPage::BRUSH;
 
     // False until the shortcut card has been shown once, then persisted. A first-time
     // user — especially on the itch build, where there is no install step to read a
@@ -293,8 +297,8 @@ struct InputState {
     // (proud on a build, sunk on a carve) back toward it. 0 (default) = ride over:
     // raised areas get nothing added and nothing cut, so a stroke crosses them
     // smoothly instead of terracing them down to the plane. 1 = fully two-sided
-    // Blender-style clay (flattens as it builds — steps raised areas to the stroke
-    // plane). Slider shows only while Clay is active.
+    // two-sided clay (flattens as it builds — steps raised areas to the stroke
+    // plane). Set in the Brush properties window (burger menu).
     float clay_melt = 0.0f;
 
     // Crease Dot (0..1): 0 cuts a groove along the stroke, 1 makes each dab a round pit,
@@ -304,6 +308,11 @@ struct InputState {
     // Brush properties window (burger menu), not the options dock.
     float crease_dot   = 0.6f;
     float crease_build = 0.1f;
+
+    // Colour deselected objects are multiplied by (default: a neutral light grey, #A5A5A5;
+    // was a dark bordeaux until 2026-10-21). Set in the Unselected colour window (burger
+    // menu), saved with the settings.
+    float unselected_tint[3] = { 0.647f, 0.647f, 0.647f };   // #A5A5A5
 
     // Matcap lighting dial (0..1): blends the viewport shading between the old flat
     // ramp (0, keyed off n.y alone) and the keyed/contrasty one (1, directional key

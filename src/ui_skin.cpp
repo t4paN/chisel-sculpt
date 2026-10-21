@@ -1918,23 +1918,11 @@ void options_panel(InputState& input, int win_h) {
     const bool smooth_on = input.is_smooth_active();
     const bool editing = input.interaction_mode == InputState::InteractionMode::EDIT;
     const bool paint_on = editing && current == BrushType::PAINT && !smooth_on;
-    const bool clay_on = editing && current == BrushType::CLAY && !smooth_on;
-    if (!paint_on && !clay_on) return;
+    if (!paint_on) return;   // Clay's Melt moved to the Brush properties window
 
     if (!begin_panel("##mOpts", ImVec2(g_brush_right + 12.0f, (float)win_h - kEdge), ImVec2(0, 1),
                      ImVec2(12, 8), 8.0f, 12.0f)) { end_panel(); return; }
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8, 7));
-    if (clay_on) {
-        label_item(UiFont::Sans, 13.0f, kMuted, "Melt", 0.0f, 30.0f);
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(200.0f);
-        Grow g = grow_begin();
-        ImGui::SliderFloat("##clayMelt", &input.clay_melt, 0.0f, 1.0f, "%.2f");
-        grow_end(g, "##clayMelt");
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("How strongly clay cuts raised areas down to its plane\n"
-                              "(0 = ride over them untouched, 1 = flatten to the plane)");
-    }
     if (paint_on) {
         Grow g = grow_begin();
         const bool to_colour = chip("Colour", !input.paint_target_density);
@@ -2565,17 +2553,6 @@ void y2k_left(InputState& in, int H, const AlphaLibrary* lib) {
 
     // Tool options.
     const bool paint_on = editing && current == BrushType::PAINT && !smooth_on;
-    const bool clay_on = editing && current == BrushType::CLAY && !smooth_on;
-    if (clay_on) {
-        ytext(dl, true, 11.0f, ImVec2(x0 + 2, y), y2k::label, "Melt");
-        char v[12]; std::snprintf(v, sizeof v, "%.2f", in.clay_melt);
-        ytext(dl, true, 11.0f, ImVec2(x0 + w - ysize(true, 11.0f, v).x, y), y2k::value, v);
-        y += 17;
-        float t = y2k_track("##yMelt", dl, ImVec2(x0, y), w, 14.0f, in.clay_melt,
-                            "How strongly clay cuts raised areas down to its plane");
-        if (t >= 0.0f) in.clay_melt = std::max(0.0f, std::min(1.0f, t));
-        y += 24;
-    }
     if (paint_on) {
         ytext(dl, true, 11.0f, ImVec2(x0 + 2, y), y2k::label, "Paint");
         y += 18;
@@ -3569,9 +3546,9 @@ void draw_skin_dialogs(InputState& input, int win_w, int win_h, const DialogInfo
         dlg_tip("Same, but symmetric: stays editable with X-mirror");
         if (info.n_unselected > 0) {
             ImGui::SameLine();
-            std::snprintf(line, sizeof line, "Subtract %d red", info.n_unselected);
+            std::snprintf(line, sizeof line, "Subtract %d unselected", info.n_unselected);
             if (dlg_button("##mgSub", line, "-", false, true)) press_dialog_key(GLFW_KEY_MINUS);
-            dlg_tip("Merge, then carve the red meshes out of it");
+            dlg_tip("Merge, then carve the unselected meshes out of it");
         }
         ImGui::SameLine();
         if (dlg_button("##mgN", "Cancel", "N", false)) press_dialog_key(GLFW_KEY_N);
