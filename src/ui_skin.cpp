@@ -218,6 +218,38 @@ float spring(ImGuiID id, float target, float stiffness = 520.0f, float damping_r
     return s.x;
 }
 void spring_reset(ImGuiID id, float x) { Spring& s = g_springs[id]; s.x = x; s.v = 0; s.init = true; }
+// A shove: adds velocity, so a spring resting at its target swings and settles back.
+void spring_kick(ImGuiID id, float v) {
+    Spring& s = g_springs[id];
+    if (!s.init) { s.x = 0.0f; s.v = 0.0f; s.init = true; }
+    s.v += v;
+}
+
+// Modern skin, tool options dock: whatever the pointer is over swells to 1.15x. The
+// widgets there are partly ImGui's own (sliders, colour swatches, checkbox), which
+// draw at a fixed size, so instead of resizing each one the vertices it just drew are
+// scaled about its centre. The clip rect opens up for the item so the grown edge isn't
+// cut by the panel; the hit area stays the item's real rect.
+struct Grow { ImDrawList* dl; int v0; };
+Grow grow_begin() {
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImGui::PushClipRect(ImVec2(0, 0), ImGui::GetIO().DisplaySize, false);
+    return {dl, dl->VtxBuffer.Size};
+}
+void grow_end(const Grow& g, const char* id) {
+    ImGui::PopClipRect();
+    if (g_dos || g_y2k) return;
+    const bool lit = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled) || ImGui::IsItemActive();
+    const float s = spring(ImGui::GetID(id) ^ 0x6A09E667u, lit ? 1.15f : 1.0f, 720.0f);
+    if (std::fabs(s - 1.0f) < 1e-3f) return;
+    ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+    ImVec2 c((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f);
+    for (int i = g.v0; i < g.dl->VtxBuffer.Size; i++) {
+        ImVec2& p = g.dl->VtxBuffer[i].pos;
+        p.x = c.x + (p.x - c.x) * s;
+        p.y = c.y + (p.y - c.y) * s;
+    }
+}
 
 // ---- Material ----------------------------------------------------------------
 struct Material { float m, fill_a, rim, sheen; };
@@ -507,10 +539,25 @@ bool icon_button(const char* id, Icon icon, float size, const BtnOpts& o) {
     ImGui::PopID();
 
     float s = spring(sid, held ? 0.92f : 1.0f, held ? 1400.0f : 520.0f);
+    // Modern skin: under the pointer the tile swells a little and its icon to 1.15x.
+    // A rail tool that has just become the active one holds its icon at 1.25x and
+    // shoves it sideways, so it swings and settles like the corner key does on a press.
+    const bool modern = !g_dos && !g_y2k;
+    const bool hot = modern && hovered && o.enabled;
+    const bool lead = modern && o.on && o.look == Look::Rail;
+    // Stiffness 720 / 970 and the 106 shove: the 520 / 700 / 90 originals played back at
+    // 0.85x the duration (stiffness x 1/0.85^2, shove x 1/0.85 to keep the swing's reach).
+    float tile = spring(sid ^ 0x3C6EF372u, hot ? 1.06f : 1.0f, 720.0f);
+    float icon_k = spring(sid ^ 0xA54FF53Au, lead ? 1.25f : hot ? 1.15f : 1.0f, 720.0f);
+    static std::unordered_map<ImGuiID, bool> was_on;
+    auto seen = was_on.find(sid);
+    if (lead && seen != was_on.end() && !seen->second) spring_kick(sid ^ 0x510E527Fu, 106.0f * g_k);
+    was_on[sid] = lead;
+    float wiggle = spring(sid ^ 0x510E527Fu, 0.0f, 970.0f, 0.16f);
     ImVec2 c(pos.x + size * 0.5f, pos.y + size * 0.5f);
-    float hs = size * 0.5f * s;
+    float hs = size * 0.5f * s * tile;
     ImVec2 a(c.x - hs, c.y - hs), b(c.x + hs, c.y + hs);
-    float r = (o.look == Look::Rail ? 11.0f : 10.0f) * g_k * s;
+    float r = (o.look == Look::Rail ? 11.0f : 10.0f) * g_k * s * tile;
 
     if (g_dos) {
         // Solid CGA blocks: light cyan = active tool, light magenta = toggle on,
@@ -566,7 +613,7 @@ bool icon_button(const char* id, Icon icon, float size, const BtnOpts& o) {
                           ImDrawFlags_RoundCornersTop);
     }
     if (!o.enabled) icol = with_alpha(icol, 0.35f);
-    draw_icon(dl, icon, c, ipx * s, icol);
+    draw_icon(dl, icon, ImVec2(c.x + wiggle, c.y), ipx * s * icon_k, icol);
     if (o.corner) {
         ImVec2 ks = text_size(UiFont::MonoMedium, 11.0f * g_k, o.corner);
         text_at(dl, UiFont::MonoMedium, 11.0f * g_k, ImVec2(b.x - 4.0f * g_k - ks.x, b.y - 3.0f * g_k - ks.y),
@@ -1881,16 +1928,24 @@ void options_panel(InputState& input, int win_h) {
         label_item(UiFont::Sans, 13.0f, kMuted, "Melt", 0.0f, 30.0f);
         ImGui::SameLine();
         ImGui::SetNextItemWidth(200.0f);
+        Grow g = grow_begin();
         ImGui::SliderFloat("##clayMelt", &input.clay_melt, 0.0f, 1.0f, "%.2f");
+        grow_end(g, "##clayMelt");
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("How strongly clay cuts raised areas down to its plane\n"
                               "(0 = ride over them untouched, 1 = flatten to the plane)");
     }
     if (paint_on) {
-        if (chip("Colour", !input.paint_target_density)) input.paint_target_density = false;
+        Grow g = grow_begin();
+        const bool to_colour = chip("Colour", !input.paint_target_density);
+        grow_end(g, "Colour");
+        if (to_colour) input.paint_target_density = false;
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Paint albedo");
         ImGui::SameLine(0.0f, 4.0f);
-        if (chip("Density", input.paint_target_density)) {
+        g = grow_begin();
+        const bool to_density = chip("Density", input.paint_target_density);
+        grow_end(g, "Density");
+        if (to_density) {
             input.paint_target_density = true;
             input.bucket_active = false;   // the bucket fills colour only
             input.color_pick_active = false;
@@ -1901,11 +1956,15 @@ void options_panel(InputState& input, int win_h) {
         if (!input.paint_target_density) {
             ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10, 10));
             ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 7.0f);
+            g = grow_begin();
             ImGui::ColorEdit3("##paintA", input.paint_color,
                               ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel);
+            grow_end(g, "##paintA");
             ImGui::SameLine(0.0f, 4.0f);
+            g = grow_begin();
             ImGui::ColorEdit3("##paintB", input.paint_color_alt,
                               ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel);
+            grow_end(g, "##paintB");
             ImGui::PopStyleVar(2);
             ImGui::SameLine(0.0f, 10.0f);
             const bool armed = input.color_pick_active || input.bucket_active;
@@ -1922,22 +1981,30 @@ void options_panel(InputState& input, int win_h) {
                 label_item(UiFont::Sans, 13.0f, kMuted, "Rotate", 0.0f, 30.0f);
                 ImGui::SameLine();
                 ImGui::SetNextItemWidth(110.0f);
+                g = grow_begin();
                 ImGui::SliderFloat("##fillAngle", &input.fill_angle, 0.0f, 180.0f, "%.0f\xC2\xB0");
+                grow_end(g, "##fillAngle");
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Pattern rotation");
             }
             if (input.bucket_active) {
                 ImGui::SameLine(0.0f, 14.0f);
+                g = grow_begin();
                 ImGui::Checkbox("Stop at paint", &input.bucket_paint_walls);
+                grow_end(g, "Stop at paint");
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("Paint unlike the colour you click walls the fill in, like the mask");
             }
         } else {
             ImGui::SetNextItemWidth(170.0f);
+            g = grow_begin();
             ImGui::SliderFloat("##densCoarse", &input.density_coarse_mult, 1.0f, 4.0f, "green: edge x%.2f");
+            grow_end(g, "##densCoarse");
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Remesh edge length where painted green (coarse)");
             ImGui::SameLine();
             ImGui::SetNextItemWidth(170.0f);
+            g = grow_begin();
             ImGui::SliderFloat("##densFine", &input.density_fine_mult, 0.2f, 1.0f, "red: edge x%.2f");
+            grow_end(g, "##densFine");
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Remesh edge length where painted red (dense)");
         }
     }

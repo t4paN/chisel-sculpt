@@ -191,14 +191,14 @@ struct InputState {
 
     // "Individual brush sizes" (burger menu). On: brush_size saves/restores per brush
     // exactly the way brush_strength does, so Move can sit at 200px while Paint sits at
-    // 40 and neither disturbs the other. Off (default): one shared size, the historical
-    // behaviour.
+    // 40 and neither disturbs the other. Off (default again since 2026-10-21, after a
+    // stretch defaulting on): one shared size.
     //
     // The TOGGLE persists but the sizes it stashes do not, for the same reason
     // brush_size itself does not. Deliberately NOT folded into BrushSettings: that
     // struct is what ProfileSettings stashes per input device, and size is not a device
     // trait (see the 2026-08-07 note above).
-    bool  per_brush_sizes = true;
+    bool  per_brush_sizes = false;
     float brush_size_of[(int)BrushType::COUNT];
     // Point every slot at the live brush_size. Called when the toggle flips and on
     // settings reset, so neither can make the brush under the cursor jump.
@@ -267,6 +267,12 @@ struct InputState {
     KeyBind keybind_captured     = { GLFW_KEY_UNKNOWN, 0 };
     bool    keybind_esc          = false;
 
+    // Brush properties window (burger menu): per-brush knobs that don't earn a place in
+    // the docks. While it is open key_callback runs no shortcuts; Esc closes it.
+    bool    brush_props_open     = false;
+    bool    brush_props_request  = false;
+    bool    brush_props_esc      = false;
+
     // False until the shortcut card has been shown once, then persisted. A first-time
     // user — especially on the itch build, where there is no install step to read a
     // readme during — has no way to guess that 1-4 are the modes, and no reason to
@@ -290,6 +296,14 @@ struct InputState {
     // Blender-style clay (flattens as it builds — steps raised areas to the stroke
     // plane). Slider shows only while Clay is active.
     float clay_melt = 0.0f;
+
+    // Crease Dot (0..1): 0 cuts a groove along the stroke, 1 makes each dab a round pit,
+    // between is an oval (default 0.6). Crease Build (0..1): 0 = off; above it, holding
+    // the brush still keeps adding dabs where it rests, up to 20 a second at 1, so a
+    // click-and-hold sinks a pit (default 0.1). Both global, like clay_melt; set in the
+    // Brush properties window (burger menu), not the options dock.
+    float crease_dot   = 0.6f;
+    float crease_build = 0.1f;
 
     // Matcap lighting dial (0..1): blends the viewport shading between the old flat
     // ramp (0, keyed off n.y alone) and the keyed/contrasty one (1, directional key

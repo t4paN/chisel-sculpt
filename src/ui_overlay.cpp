@@ -1512,6 +1512,13 @@ void draw_settings_menu_items(InputState& input, MultiresInfo mres, bool sync_ta
             // Now it comes back, so there has to be a way out that is not "hunt down the
             // config file". It doesn't touch the scene, but it does wipe every setting
             // and binding the user has made, so it asks Y/N first.
+            if (ImGui::Selectable("Brush properties...")) {
+                input.brush_props_request = true;
+                ImGui::CloseCurrentPopup();
+            }
+            if (ImGui::IsItemHovered())
+                ui_skin_menu_tip("Settings a brush keeps beyond size, strength and hardness.");
+
             if (ImGui::Selectable("Key bindings...")) {
                 input.keybind_menu_request = true;
                 ImGui::CloseCurrentPopup();
@@ -1896,6 +1903,78 @@ void draw_keybind_window(InputState& input, int win_w, int win_h) {
     ImGui::PopStyleColor();
     ImGui::PopStyleVar(2);
     if (close) input.keybind_menu_open = false;
+}
+
+// Brush properties: the knobs a brush has beyond the four meters, kept out of the docks.
+// Same frame, padding and background as the key bindings window. Changes apply as you
+// drag (and save on the settings debounce), so there is no Save/Cancel, just Close.
+void draw_brush_props_window(InputState& input, int win_w, int win_h) {
+    if (input.brush_props_request) {
+        input.brush_props_request = false;
+        input.brush_props_esc = false;
+        ImGui::OpenPopup("##brushprops");
+    }
+    input.brush_props_open = ImGui::IsPopupOpen("##brushprops");
+    if (!input.brush_props_open) return;
+
+    bool close = false;
+    if (input.brush_props_esc) {
+        input.brush_props_esc = false;
+        close = true;
+    }
+
+    const bool modern = !input.ui_classic();
+    const ImVec4 accent(0.72f, 0.58f, 0.95f, 1.0f);
+
+    ImGui::SetNextWindowPos(ImVec2(win_w * 0.5f, win_h * 0.5f), ImGuiCond_Always,
+                            ImVec2(0.5f, 0.5f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(24, 18));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8, 5));
+    ImGui::PushStyleColor(ImGuiCol_PopupBg, modern ? ImVec4(0, 0, 0, 0)
+                                                   : ImVec4(0.10f, 0.10f, 0.13f, 0.97f));
+    const ImGuiWindowFlags flags = ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar
+                                 | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings;
+    if (ImGui::BeginPopupModal("##brushprops", nullptr, flags)) {
+        if (modern) ui_skin_popup_background();
+
+        ImGui::TextColored(modern ? ImVec4(0.93f, 0.92f, 0.95f, 1.0f)
+                                  : ImVec4(1.0f, 1.0f, 0.40f, 1.0f), "Brush properties");
+        ImGui::TextDisabled("Changes apply as you drag. Esc closes.");
+        ImGui::Separator();
+
+        const float label_w = ImGui::CalcTextSize("Build").x + 16.0f;
+        // One labelled 0-100% slider row with a muted note under it.
+        auto pct_row = [&](const char* label, const char* id, float* v, const char* zero,
+                           const char* note) {
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(label);
+            ImGui::SameLine(label_w + ImGui::GetStyle().WindowPadding.x);
+            ImGui::SetNextItemWidth(240.0f);
+            float pct = *v * 100.0f;
+            if (ImGui::SliderFloat(id, &pct, 0.0f, 100.0f, zero && pct <= 0.0f ? zero : "%.0f%%"))
+                *v = pct * 0.01f;
+            ImGui::TextDisabled("%s", note);
+        };
+
+        ImGui::Dummy(ImVec2(0.0f, 4.0f));
+        ImGui::TextColored(accent, "Crease");
+        pct_row("Dot", "##creaseDot", &input.crease_dot, nullptr,
+                "0%: a groove along the stroke. 100%: every dab a round pit.");
+        ImGui::Dummy(ImVec2(0.0f, 2.0f));
+        pct_row("Build", "##creaseBuild", &input.crease_build, "Off",
+                "Hold the brush still and it keeps sinking there. Click and hold: a pit.");
+        ImGui::Dummy(ImVec2(0.0f, 4.0f));
+        ImGui::Separator();
+
+        const float bw = ImGui::CalcTextSize("Close").x * 3.0f;
+        if (ImGui::Button("Close", ImVec2(bw, 0.0f))) close = true;
+
+        if (close) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(2);
+    if (close) input.brush_props_open = false;
 }
 
 // Trash-can button for one layer row: outline only, no background until hovered (then a

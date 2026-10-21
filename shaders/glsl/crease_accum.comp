@@ -29,7 +29,7 @@ layout(std140, binding = 63) uniform Params {
     vec3  view_b;           //  48..59
     float hardness;         //  60
     vec3  anchor_normal_a;  //  64..75
-    float facing_threshold; //  76
+    float roundness;        //  76  Dot: 0 = line, 1 = round (was facing_threshold)
     vec3  anchor_normal_b;  //  80..91
     uint  use_b;            //  92
     uint  vertex_count;     //  96
@@ -85,7 +85,7 @@ void deposit(uint v, vec3 anchor, vec3 view, vec3 anchor_n, vec3 vp, vec3 vn, ui
     // two in lockstep). Short version: the old binary facing cutoff rejected verts
     // discontinuously across a crease line and along a receding surface, which is
     // what broke oblique strokes into wandering beads. Gate on position instead.
-    // P.facing_threshold is unused now — kept for the 112 B std140 layout.
+    // (The old facing_threshold slot now carries P.roundness, the Dot setting.)
     // Band widens with tilt — see draw_accum.wgsl (keep in lockstep).
     float ct = max(abs(dot(view, anchor_n)), 0.30);
     float behind = dot(vp - anchor, view);
@@ -106,16 +106,23 @@ void deposit(uint v, vec3 anchor, vec3 view, vec3 anchor_n, vec3 vp, vec3 vn, ui
         along = dot(rel_t, sdir);
         across = rel_t - along * sdir;
     }
-    float xa = length(across) / P.world_radius;
+    // Dot: line (0) to round pit (1) — see crease_accum.wgsl.
+    float rnd = clamp(P.roundness, 0.0, 1.0);
+    vec3 spread = across + (rnd * along) * sdir;
+    float xa = length(spread) / P.world_radius;
     if (xa >= 1.0) return;
     float ya = min(abs(along) / P.world_radius, 1.0);
-    float mask = sample_alpha(rel, mirrored) * gate_w * (1.0 - smoothstep(0.0, 1.0, ya));
+    float along_w = mix(1.0 - smoothstep(0.0, 1.0, ya), 1.0, rnd);
+    float mask = sample_alpha(rel, mirrored) * gate_w * along_w;
     if (mask <= 0.0) return;
 
+    // Twin of the WGSL: V body flat at the rim, (1 - x)^10 tip, x(1 - x)^2 pull.
     float k = 1.0 + P.hardness;
-    float shape = 0.8 * pow(1.0 - xa, k) + 0.2 * pow(1.0 - xa, 10.0);
+    float om = 1.0 - xa;
+    float vbody = om * om * (1.0 + xa + 2.0 * xa * xa);
+    float shape = 0.8 * pow(vbody, k) + 0.2 * pow(om, 10.0);
     vec3 d = anchor_n * (P.disp_amount * shape * mask);
-    d -= across * ((1.0 - xa) * mask * P.pinch_amount / P.world_radius);
+    d -= spread * (1.6875 * om * om * mask * P.pinch_amount / P.world_radius);
 
     uint base = v * 4u;
     atomicAddFloat(base + 0u, d.x);

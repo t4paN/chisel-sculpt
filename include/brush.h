@@ -143,6 +143,14 @@ struct BrushStroke {
     // to the axis, and pulling at full strength there yanked the same verts in a fresh
     // direction on every pass until they piled to one side and the normals broke.
     float crease_axis_conf;
+    // The last few anchors with their distance along the stroke, for the axis chord
+    // (see the crease dab). Fixed ring, no allocation in the stroke loop.
+    static constexpr int kCreaseHist = 16;
+    Vec3 crease_hist_p[kCreaseHist];
+    float crease_hist_s[kCreaseHist];
+    int crease_hist_n;      // filled entries, <= kCreaseHist
+    int crease_hist_head;   // index of the newest
+    float crease_path_s;    // stroke length so far, world units
     // Stamp rake: smoothed in-plane angle that turns the alpha stamp to follow the
     // stroke direction (Clay only for now). Travel between dab anchors, projected
     // into the stamp plane, gives a target angle; the current angle eases a quarter

@@ -162,6 +162,7 @@ struct CreaseAccumParams {
     float anchor_normal_a_x, anchor_normal_a_y, anchor_normal_a_z;
     float anchor_normal_b_x, anchor_normal_b_y, anchor_normal_b_z;
     float stroke_dir_x, stroke_dir_y, stroke_dir_z;  // zero length = no axis yet
+    float roundness;   // Dot: 0 = a groove along the stroke, 1 = a round pit per dab
     uint32_t vertex_count;
 };
 

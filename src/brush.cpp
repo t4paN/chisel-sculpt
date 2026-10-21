@@ -981,6 +981,9 @@ BrushStroke::BrushStroke()
     , anchor_cos_tilt(1.0f)
     , crease_axis_valid(false)
     , crease_axis_conf(1.0f)
+    , crease_hist_n(0)
+    , crease_hist_head(0)
+    , crease_path_s(0.0f)
     , cyl_axis_x(0.0f), cyl_axis_y(0.0f), cyl_axis_z(0.0f)
     , screen_slack(1.0f)
     , last_stroke_valid(false)
@@ -1284,6 +1287,9 @@ void BrushStroke::begin(Renderer& renderer, const Camera& cam,
     crease_prev_valid = false;
     crease_axis_valid = false;
     crease_axis_conf = 1.0f;
+    crease_hist_n = 0;
+    crease_hist_head = 0;
+    crease_path_s = 0.0f;
     stamp_prev_valid = false;
     stamp_rake_valid = false;
     stamp_rake_angle = 0.0f;
@@ -1471,7 +1477,8 @@ void BrushStroke::apply_crease(DabContext& ctx, float dab_x, float dab_y,
     // 0.30 -> 0.42 with the V-profile (2026-10-20): the cusp carries less volume than the
     // old flat-topped dab, and this keeps the centre-line depth about where it was.
     // 0.48 with the wide-V body: the user asked for it a bit deeper.
-    float disp_amount = base_disp * strength * sign * 0.48f;
+    // 0.60 with the rim-flat body (2026-10-21): asked deeper again.
+    float disp_amount = base_disp * strength * sign * 0.60f;
     // Pinch gathers vertices into a narrow band — that gathering is what reads as
     // sharpness, and it's an absolute width, not a ratio. Scaled linearly it made a
     // low-strength crease shallow AND wide (i.e. a Draw dent), because the band never
@@ -1486,15 +1493,33 @@ void BrushStroke::apply_crease(DabContext& ctx, float dab_x, float dab_y,
     // noise amplifier: a few percent of R of anchor jitter swings the raw direction
     // by tens of degrees, and since the kernel squeezes ACROSS this axis, that swing
     // IS the ridge wandering. Sub-pixel anchoring cut the jitter at source; the EMA
-    // takes what survives. Weight 0.15 (was 0.35) still follows a deliberate curve,
-    // but a back-and-forth scribble's turnarounds no longer swing it: each swing
-    // re-aimed the squeeze and dragged the same verts somewhere new (2026-10-20).
+    // takes what survives.
+    // The sample is a CHORD, not the last step: from the anchor about 0.6 R back along
+    // the stroke to this one. A long baseline divides the jitter down without an EMA's
+    // lag; the 0.15 EMA it replaces trailed a turn by ~1.4 R, so a curved crease cut
+    // the corner (2026-10-21). The chord lags only ~0.3 R. Where the path folds back
+    // (a scribble's turnaround) the chord is much shorter than the path it spans and
+    // points nowhere in particular, so it is skipped and the axis holds.
     float sdx = 0.0f, sdy = 0.0f, sdz = 0.0f;
     if (crease_prev_valid) {
         Vec3 d = anchor_pos - crease_prev_anchor;
         float dn = d.x * cyl_axis_x + d.y * cyl_axis_y + d.z * cyl_axis_z;
         d.x -= dn * cyl_axis_x; d.y -= dn * cyl_axis_y; d.z -= dn * cyl_axis_z;
         float len = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
+        crease_path_s += len;
+        // Oldest remembered anchor within 0.6 R of path (or the oldest there is).
+        const float reach = 0.6f * anchor_world_radius;
+        int j = crease_hist_head;
+        for (int i = 1; i < crease_hist_n; i++) {
+            int k = (crease_hist_head - i + kCreaseHist) % kCreaseHist;
+            if (crease_path_s - crease_hist_s[k] > reach) break;
+            j = k;
+        }
+        Vec3 ch = anchor_pos - crease_hist_p[j];
+        float cn = ch.x * cyl_axis_x + ch.y * cyl_axis_y + ch.z * cyl_axis_z;
+        ch.x -= cn * cyl_axis_x; ch.y -= cn * cyl_axis_y; ch.z -= cn * cyl_axis_z;
+        const float clen = std::sqrt(ch.x * ch.x + ch.y * ch.y + ch.z * ch.z);
+        const float cpath = crease_path_s - crease_hist_s[j];
         // Ignore steps far below the dab spacing — a near-stationary pen produces a
         // pure-noise direction, and feeding that in would corrupt a good axis.
         if (len > 0.02f * anchor_world_radius) {
@@ -1505,14 +1530,20 @@ void BrushStroke::apply_crease(DabContext& ctx, float dab_x, float dab_y,
             } else {
                 // Flip the incoming sample onto the current axis's hemisphere first:
                 // the axis is an orientation, not a heading, and a 180-degree
-                // disagreement would otherwise cancel it to zero.
+                // disagreement would otherwise cancel it to zero. Agreement is still
+                // judged per step: that's what sees a scribble's sideways turnarounds.
                 float dp = crease_axis.x * ux + crease_axis.y * uy + crease_axis.z * uz;
                 crease_axis_conf += (dp * dp - crease_axis_conf) * 0.5f;
-                if (dp < 0.0f) { ux = -ux; uy = -uy; uz = -uz; }
-                const float a = 0.15f;
-                crease_axis.x += (ux - crease_axis.x) * a;
-                crease_axis.y += (uy - crease_axis.y) * a;
-                crease_axis.z += (uz - crease_axis.z) * a;
+                if (clen > 0.1f * anchor_world_radius && clen > 0.6f * cpath) {
+                    float cx = ch.x / clen, cy = ch.y / clen, cz = ch.z / clen;
+                    if (crease_axis.x * cx + crease_axis.y * cy + crease_axis.z * cz < 0.0f) {
+                        cx = -cx; cy = -cy; cz = -cz;
+                    }
+                    const float a = 0.5f;
+                    crease_axis.x += (cx - crease_axis.x) * a;
+                    crease_axis.y += (cy - crease_axis.y) * a;
+                    crease_axis.z += (cz - crease_axis.z) * a;
+                }
             }
             float al = std::sqrt(crease_axis.x * crease_axis.x +
                                  crease_axis.y * crease_axis.y +
@@ -1536,6 +1567,10 @@ void BrushStroke::apply_crease(DabContext& ctx, float dab_x, float dab_y,
     }
     crease_prev_anchor = anchor_pos;
     crease_prev_valid = true;
+    crease_hist_head = (crease_hist_head + 1) % kCreaseHist;
+    crease_hist_p[crease_hist_head] = anchor_pos;
+    crease_hist_s[crease_hist_head] = crease_path_s;
+    if (crease_hist_n < kCreaseHist) crease_hist_n++;
 
     ctx.compute.ensure_accum_buffer(ctx.vertex_count);
 
@@ -1569,6 +1604,7 @@ void BrushStroke::apply_crease(DabContext& ctx, float dab_x, float dab_y,
     params.stroke_dir_x = sdx;
     params.stroke_dir_y = sdy;
     params.stroke_dir_z = sdz;
+    params.roundness = ctx.input.crease_dot;
     params.vertex_count = ctx.mesh.vertex_count();
 
     set_alpha_dab(ctx, false);

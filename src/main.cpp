@@ -1496,7 +1496,7 @@ int main(int argc, char* argv[]) {
         }
 
         bool imgui_wants_mouse = ImGui::GetIO().WantCaptureMouse;
-        bool dialog_open = input.export_dialog_active || input.import_dialog_active || input.save_dialog_active || input.voxel_merge_confirm_pending || input.drop_confirm_pending || input.help_popup_open || input.keybind_menu_open;
+        bool dialog_open = input.export_dialog_active || input.import_dialog_active || input.save_dialog_active || input.voxel_merge_confirm_pending || input.drop_confirm_pending || input.help_popup_open || input.keybind_menu_open || input.brush_props_open;
         if ((imgui_wants_mouse || dialog_open) && app_state != AppState::SCULPTING) {
             // A press on a panel over the model is the panel's, not a pick or a fill
             // (the bucket's Scale slider sits right over it). Only this frame's press:
@@ -3007,7 +3007,7 @@ int main(int argc, char* argv[]) {
                                 || input.drop_confirm_pending
                                 || input.export_dialog_active || input.import_dialog_active
                                 || input.save_dialog_active
-                                || input.keybind_menu_open;
+                                || input.keybind_menu_open || input.brush_props_open;
                 // The spin keys are whatever Previous/Next alpha are bound to (Q/E by
                 // default) — the same keys step the alpha outside Select mode.
                 const KeyBind& spin_cw  = input.keybinds[(int)KeyAction::BRUSH_NEXT];
@@ -3630,6 +3630,30 @@ int main(int argc, char* argv[]) {
                     spacing = dab_dist / (float)DAB_COUNT_MAX;
                 }
 
+                // Crease Build: while the brush rests (no dab due from movement), keep
+                // dabbing where the last one landed, up to 20 a second at 100%. A pause
+                // longer than a frame doesn't bank dabs: at most one per frame, no backlog.
+                bool hold_dab = false;
+                {
+                    static double hold_prev = 0.0;
+                    static float hold_acc = 0.0f;
+                    const double now = glfwGetTime();
+                    const bool building = input.current_brush == BrushType::CREASE && !is_smooth
+                                       && !is_grab && input.crease_build > 0.0f;
+                    if (first_dab || !building || dab_count > 0) {
+                        hold_acc = 0.0f;
+                    } else {
+                        hold_acc += (float)std::min(now - hold_prev, 0.1);
+                        const float interval = 1.0f / (20.0f * input.crease_build);
+                        if (hold_acc >= interval) {
+                            hold_acc = std::min(hold_acc - interval, interval);
+                            dab_count = 1;
+                            hold_dab = true;
+                        }
+                    }
+                    hold_prev = now;
+                }
+
                 // Decouple stroke strength from dab DENSITY.
                 //
                 // The additive brushes deposit per dab, so material laid per unit of
@@ -3690,6 +3714,9 @@ int main(int argc, char* argv[]) {
                 if (is_grab || first_dab) {
                     dab_px[0] = cur_x;
                     dab_py[0] = cur_y;
+                } else if (hold_dab) {
+                    dab_px[0] = brush_stroke.last_dab_x;
+                    dab_py[0] = brush_stroke.last_dab_y;
                 } else {
                     int k = 0;
                     float to_next = std::max(spacing - brush_stroke.walk_carry, 0.0f);
@@ -3814,6 +3841,8 @@ int main(int argc, char* argv[]) {
                 // dab carries over; with no dab this frame, all of it does.
                 if (is_grab || first_dab)
                     brush_stroke.walk_carry = 0.0f;
+                else if (hold_dab)
+                    brush_stroke.walk_carry = dab_dist;   // a rest dab spends none of the path
                 else
                     brush_stroke.walk_carry = std::max(dab_dist - spacing * (float)dab_count, 0.0f);
                 brush_stroke.walk_x = cur_x;
@@ -3834,7 +3863,7 @@ int main(int argc, char* argv[]) {
         // ---- Cursor visibility ----
         bool non_edit_mode = input.interaction_mode != InputState::InteractionMode::EDIT;
         // Hide the OS cursor while sculpting (we draw our own brush cursor).
-        bool show_os_cursor = input.quit_requested || input.export_dialog_active || input.import_dialog_active || input.save_dialog_active || input.remesh_confirm_pending || input.voxel_merge_confirm_pending || input.drop_confirm_pending || input.reset_confirm_pending || input.help_popup_open || input.keybind_menu_open || imgui_wants_mouse || non_edit_mode;
+        bool show_os_cursor = input.quit_requested || input.export_dialog_active || input.import_dialog_active || input.save_dialog_active || input.remesh_confirm_pending || input.voxel_merge_confirm_pending || input.drop_confirm_pending || input.reset_confirm_pending || input.help_popup_open || input.keybind_menu_open || input.brush_props_open || imgui_wants_mouse || non_edit_mode;
 #ifndef __EMSCRIPTEN__
         // A slider drag owns the cursor mode while it runs: it holds GLFW_CURSOR_DISABLED
         // to capture the pointer. This line ran unconditionally every frame and put the
@@ -3966,7 +3995,7 @@ int main(int argc, char* argv[]) {
         }
 
         // Brush cursor — draw at locked position during slider, normal position otherwise
-        if (!input.quit_requested && !input.export_dialog_active && !input.import_dialog_active && !input.save_dialog_active && !input.remesh_confirm_pending && !input.voxel_merge_confirm_pending && !input.drop_confirm_pending && !input.reset_confirm_pending && !input.help_popup_open && !input.keybind_menu_open && !imgui_wants_mouse && !non_edit_mode) {
+        if (!input.quit_requested && !input.export_dialog_active && !input.import_dialog_active && !input.save_dialog_active && !input.remesh_confirm_pending && !input.voxel_merge_confirm_pending && !input.drop_confirm_pending && !input.reset_confirm_pending && !input.help_popup_open && !input.keybind_menu_open && !input.brush_props_open && !imgui_wants_mouse && !non_edit_mode) {
             float cursor_x, cursor_y;
             if (input.slider_mode != InputState::SliderMode::NONE) {
                 cursor_x = (float)input.slider_start_x;
@@ -4824,6 +4853,7 @@ int main(int argc, char* argv[]) {
 
         // Key bindings window (burger menu). Top level, so every skin shares it.
         draw_keybind_window(input, win_w, win_h);
+        draw_brush_props_window(input, win_w, win_h);
         draw_paint_layers_panel(input, scene, win_w, win_h);
 
         // ---- Error popup ----

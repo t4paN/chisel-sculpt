@@ -2,6 +2,60 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-21 — Brush properties window
+
+*Built GL, wgpu and web; the window itself is not hand-tested yet.*
+
+- **Burger menu → Brush properties...** opens a window framed like Key bindings. It holds
+  the knobs a brush has beyond the four meters, starting with Crease's Dot and Build, which
+  left the options dock. Changes apply as you drag and save with the other settings; Esc or
+  Close shuts it, and shortcuts are off while it is open.
+
+## 2026-10-21 — Crease: Dot and Build
+
+*Built GL, wgpu and web; shader gate 69/69. Hand-tested by the user on the desktop, who set
+the defaults.*
+
+- **Dot** (default 60%): 0% is the groove along the stroke, 100% makes every dab a round
+  pit, and in between each dab is an oval. The pinch blends the same way, onto the line or
+  onto the dab centre. It rides in the crease kernel's old facing-threshold slot, so the
+  uniform block layout is unchanged.
+- **Build** (default 10%, 0 = off): while the brush rests mid-stroke it keeps dabbing where
+  the last dab landed, up to 20 a second at 100%. A click-and-hold sinks a pit. A long
+  pause adds at most one dab per frame, so nothing bursts.
+
+## 2026-10-21 — Crease: rolls into the surface, deeper, follows turns
+
+*Built GL, wgpu and web; shader gate 69/69. Hand-tested by the user on the desktop (shape
+and depth).*
+
+- **Depth profile flat at the rim**: `(1-x)^2 (1 + x + 2x^2)` replaces the straight
+  `(1-x)` flank, which met the surface at an angle and left a visible edge line. The centre
+  keeps its V (slope -1) and the narrow `(1-x)^10` tip; hardness still narrows it.
+- **Pinch eases off at the rim too**: pull `x(1-x)^2`, scaled 27/16 so its peak matches the
+  old pull. Still order-preserving (per-dab fraction at most 0.59 < 1).
+- **Deeper**: depth constant 0.48 → 0.60.
+- **Follows turns**: the squeeze axis now comes from a chord over the last ~0.6 R of the
+  path instead of a 0.15 running average of single steps, which trailed a turn by ~1.4 R.
+  Where the path folds back (a scribble) the chord is skipped and the axis holds, so the
+  scribble fix stands.
+
+## 2026-10-21 — Modern skin: buttons react to the pointer
+
+*Built GL, wgpu and web. Hand-tested by the user on the desktop.*
+
+- **Hover**: the tile grows a little (1.06x) and its icon to 1.15x.
+- **Selected tool or mode** (left rail): the icon holds at 1.25x and gives a short sideways
+  wobble when it becomes active, by click or by shortcut.
+- **Tool options dock**: chips, colour swatches, sliders and the checkbox grow to 1.15x
+  while hovered or dragged (their drawn vertices are scaled; the hit area stays put).
+- All on springs, played at 0.85x the original duration. Classic, DOS and Y2K skins
+  unchanged.
+
+## 2026-10-21 — Individual brush sizes: off by default again
+
+A fresh install (or Reset) starts with one shared brush size; existing settings keep their choice.
+
 ## 2026-10-21 — v0.3.5 — Browser: the ring stays put after a slider drag
 
 *Built web; hand-tested by the user in Chromium and Firefox on the desktop.*

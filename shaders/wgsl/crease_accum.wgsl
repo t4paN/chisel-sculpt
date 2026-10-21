@@ -21,7 +21,7 @@ struct Params {
     view_b           : vec3<f32>,   //  48..59
     hardness         : f32,         //  60
     anchor_normal_a  : vec3<f32>,   //  64..75
-    facing_threshold : f32,         //  76
+    roundness        : f32,         //  76  Dot: 0 = line, 1 = round (was facing_threshold)
     anchor_normal_b  : vec3<f32>,   //  80..91
     use_b            : u32,         //  92
     vertex_count     : u32,         //  96
@@ -127,8 +127,7 @@ fn deposit(v : u32, anchor : vec3<f32>, view : vec3<f32>, anchor_n : vec3<f32>,
     // position space so bulgy forms don't hit a wall. A crease's far flank sits at
     // ≈ the anchor's depth, so it deposits. Far-backfacing verts are still cut as
     // belt-and-suspenders for sheets thinner than the window.
-    // P.facing_threshold is unused now — kept in the block so the 112 B std140
-    // layout stays byte-identical to the C++ upload struct.
+    // (The old facing_threshold slot now carries P.roundness, the Dot setting.)
     // Band widens with tilt — see draw_accum.wgsl. Fixed thresholds amputate the
     // receding half of a grazing footprint, dragging the deposit centroid toward the
     // camera by an amount that varies along a curved stroke.
@@ -158,32 +157,43 @@ fn deposit(v : u32, anchor : vec3<f32>, view : vec3<f32>, anchor_n : vec3<f32>,
         along = dot(rel_t, sdir);
         across = rel_t - along * sdir;
     }
-    let xa = length(across) / P.world_radius;
+    // Dot: put back `roundness` of the along-stroke part, so the profile's distance
+    // runs from across-the-line (0, a groove) to from-the-dab-centre (1, a round pit),
+    // with ovals between. The pinch below squeezes along `spread` too: onto the line
+    // at 0, onto the centre at 1.
+    let rnd = clamp(P.roundness, 0.0, 1.0);
+    let spread = across + (rnd * along) * sdir;
+    let xa = length(spread) / P.world_radius;
     if (xa >= 1.0) {
         return;
     }
     let ya = min(abs(along) / P.world_radius, 1.0);
-    let mask = sample_alpha(rel, mirrored) * gate_w * (1.0 - smoothstep(0.0, 1.0, ya));
+    let along_w = mix(1.0 - smoothstep(0.0, 1.0, ya), 1.0, rnd);
+    let mask = sample_alpha(rel, mirrored) * gate_w * along_w;
     if (mask <= 0.0) {
         return;
     }
 
-    // Depth: a wide V with a sharp point on the stroke line. The body is (1 - x)^k with
-    // k near 1, so the flanks run nearly straight; hardness raises k toward 2 for a
-    // narrower V (it used to widen a flat-topped plateau, which is what made the tip
-    // flat and the falloff wide). A fifth of the depth is a very narrow (1 - x)^10 cut
-    // that sharpens the point itself without narrowing the flanks.
+    // Depth: a wide V with a sharp point on the stroke line. The body is
+    // (1 - x)^2 (1 + x + 2x^2): slope -1 on the line (a V, not a trough), about as deep
+    // as a straight flank through the middle, and flat at the rim, so the groove rolls
+    // into the surface instead of meeting it at an angle (the straight (1 - x) flank
+    // left a visible edge line). Hardness raises it to a power toward 2 for a narrower
+    // V; the rim stays flat. A fifth of the depth is a very narrow (1 - x)^10 cut that
+    // sharpens the point itself without narrowing the flanks.
     let k = 1.0 + P.hardness;
-    let shape = 0.8 * pow(1.0 - xa, k) + 0.2 * pow(1.0 - xa, 10.0);
+    let om = 1.0 - xa;
+    let vbody = om * om * (1.0 + xa + 2.0 * xa * xa);
+    let shape = 0.8 * pow(vbody, k) + 0.2 * pow(om, 10.0);
     var d = anchor_n * (P.disp_amount * shape * mask);
 
     // Pinch: squeeze onto the stroke line, never along it (pulling at the dab centre
-    // drags topology down the path). Weight (1 - x) makes the pull x(1 - x): zero on
-    // the line and at the rim, strongest half-way, so it gathers the flanks into a
-    // tight band and puts vertices in the tip. Order-preserving as long as the per-dab
-    // fraction pinch_amount / R stays below 1 (it is at most 0.35): neighbours
-    // contract toward the line and can't cross.
-    d = d - across * ((1.0 - xa) * mask * P.pinch_amount / P.world_radius);
+    // drags topology down the path). Weight (1 - x)^2 makes the pull x(1 - x)^2: zero
+    // on the line, strongest a third of the way out, and easing to nothing at the rim
+    // like the depth does. 27/16 keeps its peak where the old x(1 - x) pull had it.
+    // Order-preserving while 27/16 * pinch_amount / R < 1 (it is at most 0.59): the
+    // map's slope is 1 - c(1 - x)(1 - 3x) >= 1 - c, so neighbours can't cross.
+    d = d - spread * (1.6875 * om * om * mask * P.pinch_amount / P.world_radius);
 
     let base = v * 4u;
     atomicAddFloat(base + 0u, d.x);

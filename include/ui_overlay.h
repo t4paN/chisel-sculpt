@@ -59,6 +59,8 @@ void draw_help_popup(InputState& input, int win_w, int win_h);
 // Burger menu -> Key bindings: the centred rebinding window. Call once per frame at
 // the top level (outside any ImGui window), after the skin's UI.
 void draw_keybind_window(InputState& input, int win_w, int win_h);
+// Brush properties (burger menu): same frame as the key bindings window.
+void draw_brush_props_window(InputState& input, int win_w, int win_h);
 // Paint layers docker (paint mode, colour target). Shared by every skin.
 void draw_paint_layers_panel(InputState& input, Scene& scene, int win_w, int win_h);
 

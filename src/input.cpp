@@ -1459,6 +1459,10 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
     // through its chained callback, so no shortcut may fire on it too. Releases still
     // pass, so a key held before the field opened can't stay stuck down.
     if (ImGui::GetIO().WantTextInput && action != GLFW_RELEASE) return;
+    if (g_input->brush_props_open) {
+        if (action == GLFW_PRESS && key == GLFW_KEY_ESCAPE) g_input->brush_props_esc = true;
+        return;
+    }
 
     // Fixed keys: the modifier gestures, Esc, the prompt answers and the debug keys.
     if (action == GLFW_PRESS) {

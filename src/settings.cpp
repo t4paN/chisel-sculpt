@@ -221,6 +221,8 @@ std::string serialize(const InputState& in) {
     append_kv(s, "fast_normals",        in.fast_normals);
     append_kv(s, "paint_visible",       in.paint_visible);
     append_kv(s, "clay_melt",           in.clay_melt);
+    append_kv(s, "crease_dot",          in.crease_dot);
+    append_kv(s, "crease_build",        in.crease_build);
     append_kv(s, "density_coarse_mult", in.density_coarse_mult);
     append_kv(s, "density_fine_mult",   in.density_fine_mult);
     // Shortcuts: only the ones that differ from the factory binding, as key.<id>=<glfw
@@ -300,6 +302,8 @@ void apply_global_key(InputState& in, const std::string& key, const std::string&
     // symmetry off.
     if      (key == "matcap_contrast")     in.matcap_contrast     = clampf(std::strtof(val.c_str(), nullptr), 0.0f, 1.0f);
     else if (key == "clay_melt")           in.clay_melt           = clampf(std::strtof(val.c_str(), nullptr), 0.0f, 1.0f);
+    else if (key == "crease_dot")          in.crease_dot          = clampf(std::strtof(val.c_str(), nullptr), 0.0f, 1.0f);
+    else if (key == "crease_build")        in.crease_build        = clampf(std::strtof(val.c_str(), nullptr), 0.0f, 1.0f);
     else if (key == "density_coarse_mult") in.density_coarse_mult = clampf(std::strtof(val.c_str(), nullptr), 1.0f, 4.0f);
     else if (key == "density_fine_mult")   in.density_fine_mult   = clampf(std::strtof(val.c_str(), nullptr), 0.2f, 1.0f);
     else if (key == "per_brush_sizes")     in.per_brush_sizes     = parse_bool(val);
@@ -498,6 +502,8 @@ void settings_reset(InputState& input) {
     input.fast_normals       = fresh.fast_normals;
     input.paint_visible      = fresh.paint_visible;
     input.clay_melt          = fresh.clay_melt;
+    input.crease_dot         = fresh.crease_dot;
+    input.crease_build       = fresh.crease_build;
     input.density_coarse_mult = fresh.density_coarse_mult;
     input.density_fine_mult   = fresh.density_fine_mult;
     input.active_alpha       = fresh.active_alpha;
