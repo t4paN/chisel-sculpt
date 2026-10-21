@@ -2,7 +2,7 @@
 
 Short, chronological log of notable changes. Newest on top.
 
-## 2026-10-21 — Browser: the ring stays put after a slider drag
+## 2026-10-21 — v0.3.5 — Browser: the ring stays put after a slider drag
 
 *Built web; hand-tested by the user in Chromium and Firefox on the desktop.*
 
@@ -15,7 +15,7 @@ Short, chronological log of notable changes. Newest on top.
   gets an offset that continues from the grab point. The offset clears at the canvas edge,
   over menus and panels (so clicks land under the visible arrow), and for pens and fingers.
 
-## 2026-10-21 — Speed falloff thins fast strokes a little
+## 2026-10-21 — v0.3.5 — Speed falloff thins fast strokes a little
 
 *Built GL, wgpu and web; hand-tested by the user on the desktop.*
 
