@@ -4906,10 +4906,10 @@ int main(int argc, char* argv[]) {
         // a slider to 0 or 100 with nothing between. Free pointer: the clientX step,
         // which can't spike. Locked: movementX, minus the event that crosses the lock
         // change and anything too big for one frame of a hand.
-        // The ring stays where a slider drag began. No browser can put the pointer back
-        // there (Firefox on Linux doesn't even hold it still), so Chisel does it on its
-        // side: the position is frozen at the grab point for the whole drag, and when the
-        // drag ends, the next real position gets an offset that continues from the grab
+        // The ring stays where a slider drag began. The position is frozen at the grab
+        // point for the whole drag. A held lock (Chromium) returns the pointer there, apart
+        // from one ghost event at the unlock (see below). Firefox on Linux holds nothing,
+        // so there the next real position gets an offset that continues from the grab
         // point instead of jumping to wherever the pointer went. The offset clears where
         // the hidden pointer must be honest: at the canvas edge (it can't go further),
         // over the UI (the OS arrow is showing there) and for pens and fingers (absolute).
@@ -4921,10 +4921,22 @@ int main(int argc, char* argv[]) {
         var offY = 0;
         var lastX = 0;
         var lastY = 0;
-        Module.chiselSliderBegin = function(x, y) { sliding = true; anchorX = x; anchorY = y; };
+        // Where the real pointer was at the grab, whether a lock actually held during the
+        // drag, and when the drag ended (see the ghost below).
+        var grabX = 0;
+        var grabY = 0;
+        var slideLocked = false;
+        var endT = 0;
+        Module.chiselSliderBegin = function(x, y) {
+            sliding = true; anchorX = x; anchorY = y;
+            grabX = lx; grabY = ly; slideLocked = false;
+        };
         Module.chiselSliderEnd = function(keep) {
             sliding = false;
-            reanchor = keep !== 0;
+            // A held lock puts the real pointer back on the grab point, so the ring already
+            // continues from there; only a lockless drag (Firefox on Linux) needs the offset.
+            reanchor = keep !== 0 && !slideLocked;
+            endT = performance.now();
             lastX = anchorX;
             lastY = anchorY;
         };
@@ -5040,8 +5052,18 @@ int main(int argc, char* argv[]) {
             }
             if (locked) {
                 if (!sliding) { lx += (e.movementX || 0) * k; ly += (e.movementY || 0) * k; }
+                else slideLocked = true;
             } else {
                 lx = (e.clientX - r.left) * k; ly = (e.clientY - r.top) * k;
+                // Chromium's unlock first reports a ghost: the position the hand would have
+                // taken the pointer to, with zero movement. The real pointer arrives back on
+                // the grab point right after. Taking the ghost as real threw the ring a whole
+                // drag's distance (traced 2026-10-21), so it is held on the grab point.
+                if (slideLocked && !sliding && performance.now() - endT < 300
+                    && !e.movementX && !e.movementY
+                    && Math.abs(lx - grabX) + Math.abs(ly - grabY) > 2) {
+                    lx = grabX; ly = grabY;
+                }
             }
             var outX = anchorX;
             var outY = anchorY;

@@ -4,15 +4,16 @@ Short, chronological log of notable changes. Newest on top.
 
 ## 2026-10-21 — Browser: the ring stays put after a slider drag
 
-*Built web; loads clean in Chromium. Not hand-tested yet.*
+*Built web; hand-tested by the user in Chromium and Firefox on the desktop.*
 
 - **After a size/strength/hardness drag, the ring carries on from where it rested** instead
-  of jumping to wherever the pointer went. v0.3.4's fix for the release flash didn't hold.
-  No browser can put the pointer back, so Chisel does it on its side: the position is frozen
-  at the grab point during the drag, and the next real position afterwards gets an offset
-  that continues from there. Works without a pointer lock too, so Firefox on Linux gets it.
-- The offset clears at the canvas edge (the hidden pointer can't go further), over menus and
-  panels (so clicks land under the visible arrow), and for pens and fingers.
+  of jumping a whole drag's distance. v0.3.4's fix for this didn't hold.
+- Cause (traced): when Chromium releases the pointer lock, its first pointer event reports
+  where the hand *would* have taken the pointer, with zero movement; the real pointer lands
+  back on the grab point one event later. That ghost is now held on the grab point.
+- Firefox on Linux has no lock, so the pointer really does move: there the next position
+  gets an offset that continues from the grab point. The offset clears at the canvas edge,
+  over menus and panels (so clicks land under the visible arrow), and for pens and fingers.
 
 ## 2026-10-21 — Speed falloff thins fast strokes a little
 
