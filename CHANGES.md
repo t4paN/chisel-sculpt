@@ -2,6 +2,15 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-21 — Speed falloff: running start
+
+*Built GL and wgpu. Hand-tested by the user on the desktop.*
+
+- A stroke now starts at the speed the hand already had while hovering, instead of from
+  standstill at full strength, so a crease pressed mid-sweep no longer begins with a heavy
+  blob. A pause before pressing still gives a full-strength start. Orbit, pan and slider
+  drags don't count, and cursor warps are ignored.
+
 ## 2026-10-21 — Brush properties window
 
 *Built GL, wgpu and web. Hand-tested by the user on the desktop.*

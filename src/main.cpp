@@ -106,6 +106,12 @@ static constexpr float SPEED_FLOOR = 0.10f;
 static constexpr float SPEED_SIZE_FLOOR = 0.80f;   // a fast stroke thins, never by more than a fifth
 struct StrokeSpeed { float px_s = 0.0f; float x = 0.0f; float y = 0.0f; double t = 0.0; };
 static StrokeSpeed g_stroke_speed;
+// The same smoothing run while hovering, so a stroke pressed mid-motion starts at the speed
+// the hand already had instead of 0 (full strength). A pause before pressing decays it to
+// ~0 on its own. A sample faster than SPEED_TELEPORT is a warp (slider return, window
+// re-entry), not a hand; anything near that speed already sits at the floor.
+static constexpr float SPEED_TELEPORT = 15000.0f;
+static StrokeSpeed g_hover_speed;
 
 // The old MOUSE_STRENGTH_SCALE (0.6) lived here. It is now the per-profile "max brush
 // effect" slider (InputState::max_effect) — same number, same defaults, but reachable.
@@ -2715,6 +2721,26 @@ int main(int argc, char* argv[]) {
             input.drag_mode = InputState::DragMode::NONE;
         }
 
+        // Hover speed, for the stroke's running start (g_hover_speed). Orbit, pan and
+        // slider drags aren't the hand heading into a stroke: re-anchor at zero there.
+        if (app_state == AppState::IDLE) {
+            const double now = glfwGetTime();
+            const float hx = (float)input.mouse_x, hy = (float)input.mouse_y;
+            const float dt = (float)(now - g_hover_speed.t);
+            const bool hovering = input.drag_mode == InputState::DragMode::NONE
+                               || input.drag_mode == InputState::DragMode::SCULPT;
+            if (!hovering) {
+                g_hover_speed = StrokeSpeed{0.0f, hx, hy, now};
+            } else if (dt > 0.0f) {
+                const float v = std::hypot(hx - g_hover_speed.x, hy - g_hover_speed.y) / dt;
+                if (v < SPEED_TELEPORT)
+                    g_hover_speed.px_s += (v - g_hover_speed.px_s) * (1.0f - std::exp(-dt / SPEED_TAU));
+                g_hover_speed.x = hx;
+                g_hover_speed.y = hy;
+                g_hover_speed.t = now;
+            }
+        }
+
         // IDLE → SCULPTING
         if (app_state == AppState::IDLE && input.drag_mode == InputState::DragMode::SCULPT) {
             input.sculpting = true;
@@ -2731,7 +2757,7 @@ int main(int argc, char* argv[]) {
             brush_stroke.walk_x = (float)input.mouse_x;
             brush_stroke.walk_y = (float)input.mouse_y;
             brush_stroke.walk_carry = 0.0f;
-            g_stroke_speed = StrokeSpeed{0.0f, (float)input.mouse_x, (float)input.mouse_y, glfwGetTime()};
+            g_stroke_speed = g_hover_speed;   // updated just above, this frame: a running start
             pushes_at_stroke_start = UndoStack::global_pushes;
             app_state = AppState::SCULPTING;
         }
