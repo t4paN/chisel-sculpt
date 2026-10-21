@@ -2,6 +2,9 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-21 — Clay lays a thicker layer
+Each stroke builds or carves about a third more (layer thickness 0.12 → 0.16 of the radius). User-tested.
+
 ## 2026-10-21 — Paint hardness: wider range, holds at speed
 
 *Built GL, wgpu and web; shader gate 69/69. Hand-tested by the user on the desktop.*

@@ -1712,8 +1712,9 @@ void BrushStroke::apply_draw(DabContext& ctx, float dab_x, float dab_y,
     float base_disp = anchor_world_radius;
     // Clay reads disp_amount as the layer's thickness — the height of the plane it
     // levels up to — not as a per-dab push, so it wants a smaller number for the
-    // same visual weight. Draw's 0.5 lands as a very thick slab here.
-    float disp_scale = clay ? 0.12f : 0.5f;
+    // same visual weight. Draw's 0.5 lands as a very thick slab here. 0.12 read as
+    // timid by hand (2026-10-21), hence 0.16.
+    float disp_scale = clay ? 0.16f : 0.5f;
     float disp_amount = base_disp * strength * (float)stroke_sign * disp_scale;
 
     // Clay's plane height comes from the disc-AVERAGED surface, not the texel under
