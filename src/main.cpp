@@ -3550,7 +3550,14 @@ int main(int argc, char* argv[]) {
                     if (pressure_is_synthetic && !is_grab && input.speed_gain > 0.0f) {
                         const float k = input.speed_gain * g_stroke_speed.px_s / SPEED_REF;
                         eff_strength   *= std::max(SPEED_FLOOR, 1.0f / (1.0f + k));
-                        eff_hardness   *= std::max(SPEED_FLOOR, 1.0f / (1.0f + 0.5f * k));
+                        const float hf  = std::max(SPEED_FLOOR, 1.0f / (1.0f + 0.5f * k));
+                        // Paint feathers the softness instead: scaling hardness itself
+                        // meant full hardness never arrived mid-stroke, and the hard,
+                        // vertex-stepped edge at the top of the slider is the point there.
+                        if (input.current_brush == BrushType::PAINT)
+                            eff_hardness = std::max(0.0f, 1.0f - (1.0f - eff_hardness) / hf);
+                        else
+                            eff_hardness *= hf;
                         eff_brush_size *= std::max(SPEED_SIZE_FLOOR, 1.0f / (1.0f + 0.1f * k));
                     }
                 }

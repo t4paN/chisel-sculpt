@@ -65,7 +65,10 @@ float sample_alpha(vec3 rel, uint mirrored) {
 
 float brush_falloff(float dist, float radius) {
     float t = dist / radius;
-    float inner = 0.15 + P.hardness * 0.55;
+    // 0 fades from the centre; the h^4 term steepens the top so max is a crisp core
+    // out to 0.87 R with a short rim (a fully solid disc read as too hard by hand).
+    float h4 = P.hardness * P.hardness * P.hardness * P.hardness;
+    float inner = P.hardness * 0.56 + h4 * 0.31;
     if (t <= inner) return 1.0;
     float blend = (t - inner) / (1.0 - inner + 1e-6);
     blend = blend * blend * (3.0 - 2.0 * blend);

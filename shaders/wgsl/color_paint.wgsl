@@ -90,7 +90,10 @@ fn sample_alpha(rel : vec3<f32>, mirrored : u32) -> f32 {
 
 fn brush_falloff(dist : f32, radius : f32) -> f32 {
     let t = dist / radius;
-    let inner = 0.15 + P.hardness * 0.55;
+    // 0 fades from the centre; the h^4 term steepens the top so max is a crisp core
+    // out to 0.87 R with a short rim (a fully solid disc read as too hard by hand).
+    let h4 = P.hardness * P.hardness * P.hardness * P.hardness;
+    let inner = P.hardness * 0.56 + h4 * 0.31;
     if (t <= inner) {
         return 1.0;
     }

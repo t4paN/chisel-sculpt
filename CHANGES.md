@@ -2,6 +2,21 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-21 — Paint hardness: wider range, holds at speed
+
+*Built GL, wgpu and web; shader gate 69/69. Hand-tested by the user on the desktop.*
+
+- **Hardness spans further.** 0% now fades from the brush centre (it held solid out to 15%),
+  and 100% is a crisp core out to 87% of the radius with a short rim (was 70%). The top of
+  the slider is steep, so the last stretch is where the edge tightens.
+- **Speed falloff no longer drains paint hardness.** It used to scale hardness down while
+  moving, so 100% never arrived mid-stroke. For paint it now widens the soft rim instead:
+  full stays full, lower settings still feather a little on fast strokes. Sculpt brushes
+  are unchanged.
+- Worth knowing: the alpha stamp (Soft, Ring...) multiplies over hardness and is shared by
+  Draw, Mask and Paint, so a Soft stamp picked for sculpting makes paint fuzzy at any
+  hardness. Round = hardness alone.
+
 ## 2026-10-21 — Unselected colour picker; Clay Melt moves to Brush properties
 
 *Built GL, wgpu and web; shader gate 69/69. Hand-tested by the user on the desktop.*
