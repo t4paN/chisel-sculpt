@@ -1123,6 +1123,7 @@ const RailBrush kRailBrushes[] = {
     {"bPinch",   "Pinch",   KeyAction::BRUSH_PINCH,   Icon::BrushPinch,   BrushType::PINCH},
     {"bMove",    "Move",    KeyAction::BRUSH_MOVE,    Icon::BrushMove,    BrushType::MOVE},
     {"bLimb",    "Limb",    KeyAction::BRUSH_LIMB,    Icon::BrushLimb,    BrushType::LIMB},
+    {"bPose",    "Pose",    KeyAction::BRUSH_POSE,    Icon::BrushPose,    BrushType::POSE},
     {"bSmooth",  "Smooth",  KeyAction::COUNT,         Icon::BrushSmooth,  BrushType::SMOOTH},
     {"bMask",    "Mask",    KeyAction::BRUSH_MASK,    Icon::BrushMask,    BrushType::MASK},
 };
@@ -3416,6 +3417,32 @@ void draw_skin_dialogs(InputState& input, int win_w, int win_h, const DialogInfo
         ImGui::SameLine();
         if (dlg_button("##rsN", "Cancel", "N", true)) press_dialog_key(GLFW_KEY_N);
         dlg_tip("Keep everything as it is (Esc works too)");
+        end_dialog();
+    }
+
+    // ---- Pose brush: clear the rig ---- Same shape as Reset, Cancel the default.
+    if (begin_dialog("##dlgPoseClear", input.pose_clear_confirm_pending, win_w, win_h)) {
+        const float avail = ImGui::GetContentRegionAvail().x;
+        auto centre = [&](float w) {
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.0f, (avail - w) * 0.5f));
+        };
+        const char* title = "Delete all pose spheres?";
+        const char* l1 = "Every sphere and bone on this mesh goes.";
+        const char* l2 = "The sculpt stays as it is.";
+        centre(text_size(UiFont::SansSemibold, 16.0f, title_case(title)).x);
+        dlg_title(title);
+        centre(text_size(UiFont::Sans, 13.0f, l1).x);
+        dlg_text(UiFont::Sans, 13.0f, kMuted, l1);
+        centre(text_size(UiFont::Sans, 13.0f, l2).x);
+        dlg_text(UiFont::Sans, 13.0f, kMuted, l2);
+        ImGui::Dummy(ImVec2(0.0f, 2.0f));
+        const float sp = ImGui::GetStyle().ItemSpacing.x;
+        centre(dlg_button_w("Delete", "Y") + dlg_button_w("Cancel", "N") + sp);
+        if (dlg_button("##pcY", "Delete", "Y", false, true)) press_dialog_key(GLFW_KEY_Y);
+        dlg_tip("Remove the whole rig");
+        ImGui::SameLine();
+        if (dlg_button("##pcN", "Cancel", "N", true)) press_dialog_key(GLFW_KEY_N);
+        dlg_tip("Keep the spheres (Esc works too)");
         end_dialog();
     }
 

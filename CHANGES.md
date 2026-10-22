@@ -2,6 +2,28 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-22 — Pose brush
+
+*Built GL, wgpu and web; shader gate 71/71. Hand-tested by the user on the desktop.*
+
+- **New brush, K.** Drag on the model to lay two linked spheres; each lands in the middle
+  of the volume under the cursor (a ray through the mesh, half-way between where it enters
+  and leaves), sized to that thickness. Ctrl+drag a sphere grows a new one off it.
+- **Dragging a sphere bends the mesh.** Its linked neighbours stay pinned; every bone
+  touching it swings about its other sphere and stretches with the drag, carrying what it
+  reaches. Each bone holds a capsule between its two spheres, fully inside the spheres'
+  radii and fading out past them (hardness sets how far); a vertex takes the weighted
+  average of its bones' moves, so the anchored bones hold the joint region. Only the
+  grabbed set takes part. Rides Move's capture-once spine: undo, symmetry, levels and
+  normals unchanged. Two new kernels, `pose_capture` and `pose_apply` (both languages).
+- **Editing the rig**: wheel or [ ] over a sphere sizes it, Shift+drag moves it alone,
+  right-click removes it, Delete clears the rig after a Y/N prompt. In this brush held
+  Shift is not Smooth; the double-tap lock still is.
+- Spheres draw through the mesh and only while Pose is in hand; the hovered set lights up
+  and the hovered sphere shows its reach. Ctrl+Z on a bend also restores the sphere.
+- Not yet: the rig isn't saved in the project file; adding or removing spheres isn't on
+  the undo stack; 32 bones per linked set.
+
 ## 2026-10-21 — Clay lays a thicker layer
 Each stroke builds or carves about a third more (layer thickness 0.12 → 0.16 of the radius). User-tested.
 

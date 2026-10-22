@@ -1390,8 +1390,10 @@ void BrushStroke::begin(Renderer& renderer, const Camera& cam,
         disp_weight.clear();
     }
     // Both grab brushes capture-once; clear the sticky state at stroke start.
-    if (brush_type == BrushType::MOVE || brush_type == BrushType::LIMB) {
+    if (brush_type == BrushType::MOVE || brush_type == BrushType::LIMB
+        || brush_type == BrushType::POSE) {
         move.reset(vert_count);
+        pose.joint = -1;   // set again by the first pose dab
     }
 }
 
@@ -2012,6 +2014,149 @@ void BrushStroke::apply_limb_gpu(DabContext& ctx, float cursor_dx, float cursor_
                                         ctx.mesh.vertex_count(), ctx.mirror_pairs,
                                         ctx.renderer.ebo);
 
+    if (gpu_touched) {
+        fold_move_capture(*this, ctx);
+    } else if (!capture_pending) {
+        dirty_verts = move.affected_list;
+        snap_and_mirror_dirty(*this, ctx, anchor_pos.x);
+        move.capture_booked = true;
+    }
+
+    gpu_positions_deferred = true;
+}
+
+// Rotation taking unit vector u onto unit vector v, as three columns. The shortest
+// one: the twist about the bone stays where it was, which is what an unconstrained
+// joint should do.
+static void pose_rotation(Vec3 u, Vec3 v, float c0[3], float c1[3], float c2[3]) {
+    float m[3][3];
+    Vec3 k = u.cross(v);
+    float c = u.dot(v);
+    if (c < -0.9999f) {
+        // Folded straight back: any axis across the bone will do.
+        Vec3 a = std::fabs(u.x) < 0.9f ? Vec3(1, 0, 0) : Vec3(0, 1, 0);
+        a = a.cross(u).normalized();
+        const float av[3] = {a.x, a.y, a.z};
+        for (int i = 0; i < 3; i++)
+            for (int j = 0; j < 3; j++) m[i][j] = 2.0f * av[i] * av[j] - (i == j ? 1.0f : 0.0f);
+    } else {
+        // Rodrigues with an unnormalised axis: R = I + K + K^2 / (1 + c).
+        const float kx = k.x, ky = k.y, kz = k.z;
+        const float K[3][3] = {{0, -kz, ky}, {kz, 0, -kx}, {-ky, kx, 0}};
+        const float kv[3] = {kx, ky, kz};
+        const float kk = k.dot(k), inv = 1.0f / (1.0f + c);
+        for (int i = 0; i < 3; i++)
+            for (int j = 0; j < 3; j++)
+                m[i][j] = (i == j ? 1.0f : 0.0f) + K[i][j]
+                        + (kv[i] * kv[j] - (i == j ? kk : 0.0f)) * inv;
+    }
+    for (int i = 0; i < 3; i++) { c0[i] = m[i][0]; c1[i] = m[i][1]; c2[i] = m[i][2]; }
+}
+
+void BrushStroke::apply_pose_gpu(DabContext& ctx, float cursor_dx, float cursor_dy,
+                                 float hardness, PoseRig& rig, int joint) {
+    dirty_verts.clear();
+
+    if (!is_active() || !ctx.compute.has_pose()) return;
+    if (joint < 0 || joint >= (int)rig.joints.size()) return;
+
+    PoseParamsGPU& P = pose.params;
+    if (!move.captured) {
+        ctx.compute.ensure_accum_buffer(ctx.vertex_count);
+        ctx.compute.ensure_move_buffers(ctx.vertex_count);
+
+        pose.joint = joint;
+        pose.start = rig.joints[joint].pos;
+        rig.connected(joint, pose.set);
+
+        // The grabbed set's bones, as they stand now. A bone with the grabbed sphere
+        // at one end moves (it swings about its other end); the rest only hold.
+        P = PoseParamsGPU{};
+        uint32_t n = 0;
+        for (const PoseBone& b : rig.bones) {
+            if (!pose.set[b.a] || n >= (uint32_t)kPoseMaxBones) continue;
+            const PoseJoint& ja = rig.joints[b.a];
+            const PoseJoint& jb = rig.joints[b.b];
+            PoseBoneGPU& g = P.bones[n++];
+            g.a[0] = ja.pos.x; g.a[1] = ja.pos.y; g.a[2] = ja.pos.z; g.a[3] = ja.radius;
+            g.b[0] = jb.pos.x; g.b[1] = jb.pos.y; g.b[2] = jb.pos.z; g.b[3] = jb.radius;
+            g.r0[0] = 1.0f; g.r1[1] = 1.0f; g.r2[2] = 1.0f; g.r1[3] = 1.0f;   // identity, no stretch
+            const bool moves = b.a == joint || b.b == joint;
+            const Vec3 fixed = (b.a == joint ? jb : ja).pos;
+            const Vec3 axis = pose.start - fixed;
+            const float len = axis.length();
+            if (!moves || len < 1e-6f) continue;   // a zero-length bone has no swing
+            const Vec3 u = axis * (1.0f / len);
+            g.f[0] = fixed.x; g.f[1] = fixed.y; g.f[2] = fixed.z; g.f[3] = 1.0f;
+            g.u[0] = u.x; g.u[1] = u.y; g.u[2] = u.z;
+            g.r0[3] = len;
+        }
+        P.bone_count = n;
+        P.vertex_count = ctx.mesh.vertex_count();
+        // Hardness 1: the hold stops a quarter radius past the sphere's skin; 0: it
+        // fades out over two radii.
+        P.soft = 0.25f + 1.75f * (1.0f - hardness);
+        ctx.compute.dispatch_pose_capture(P, ctx.renderer.vbo_pos);
+
+        // Same async capture readback as apply_move_gpu: the apply needs only the
+        // GPU-side list, the CPU bookkeeping catches up when it lands.
+        move.capture_words = 0;
+        move.capture_tk = ctx.compute.kick_move_affected_read(move.capture_words);
+        move.total_dx = move.total_dy = move.total_dz = 0.0f;
+        move.captured = true;
+        // The mirror sink's pivot and the F-focus point.
+        anchor_pos = pose.start;
+        anchor_valid = true;
+    }
+
+    if (move.capture_tk && gpu::ticket_ready(ctx.compute.gpu_dev, move.capture_tk)) {
+        ctx.compute.take_count_list_read(move.capture_tk, move.capture_words,
+                                         move.affected_list);
+        move.capture_tk = 0;
+    }
+    const bool capture_pending = move.capture_tk != 0;
+
+    // The sphere tracks the cursor 1:1 in the plane through it, scaled at its own
+    // depth (foreshortening: under perspective a far sphere needs more world travel
+    // per pixel). Strength isn't read: a joint that lags the hand isn't a joint.
+    float scale = 2.0f * ctx.cam.half_height_at(ctx.cam.view_depth(pose.start))
+                / (float)ctx.win_h;
+    Vec3 fwd = ctx.cam.get_view_direction();
+    Vec3 right = fwd.cross({0, 1, 0}).normalized();
+    Vec3 up = right.cross(fwd).normalized();
+    const float wdx = cursor_dx * scale, wdy = -cursor_dy * scale;
+    move.total_dx += right.x * wdx + up.x * wdy;
+    move.total_dy += right.y * wdx + up.y * wdy;
+    move.total_dz += right.z * wdx + up.z * wdy;
+    const Vec3 m = pose.start + Vec3(move.total_dx, move.total_dy, move.total_dz);
+    rig.joints[joint].pos = m;   // before the empty-capture bail: the sphere moves regardless
+
+    if (!capture_pending && move.affected_list.empty()) return;
+
+    for (uint32_t i = 0; i < P.bone_count; i++) {
+        PoseBoneGPU& g = P.bones[i];
+        if (g.f[3] < 0.5f) continue;
+        const Vec3 fixed(g.f[0], g.f[1], g.f[2]);
+        const Vec3 u(g.u[0], g.u[1], g.u[2]);
+        const Vec3 to = m - fixed;
+        const float len = to.length();
+        if (len < 1e-6f) continue;   // dragged onto its anchor: keep the last swing
+        float c0[3], c1[3], c2[3];
+        pose_rotation(u, to * (1.0f / len), c0, c1, c2);
+        for (int k = 0; k < 3; k++) { g.r0[k] = c0[k]; g.r1[k] = c1[k]; g.r2[k] = c2[k]; }
+        g.r1[3] = len / g.r0[3];
+    }
+    ctx.compute.dispatch_pose_apply(P, ctx.renderer.vbo_pos);
+
+    // From here it is apply_move_gpu's tail: mirror sink, normals, touched list.
+    if (ctx.mirror_pairs)
+        ctx.compute.dispatch_mirror_project_header(ctx.renderer.vbo_pos, ctx.vertex_count,
+                                                   ctx.compute.move_affected_ssbo);
+    if (ctx.compute.has_gpu_normals())
+        ctx.compute.expand_normals_from(ctx.compute.move_affected_ssbo, 0,
+                                        ctx.compute.move_buffers_capacity,
+                                        ctx.mesh.vertex_count(), ctx.mirror_pairs,
+                                        ctx.renderer.ebo);
     if (gpu_touched) {
         fold_move_capture(*this, ctx);
     } else if (!capture_pending) {

@@ -6,6 +6,8 @@
 #include "settings.h"
 #include "brush_alpha.h"
 #include "ui_icons.h"
+#include "pose.h"
+#include "camera.h"
 #include "imgui.h"
 #include <functional>
 #include <cstdio>
@@ -393,6 +395,20 @@ void draw_reset_confirm(TextOverlay& text, int win_w, int win_h) {
     text.draw_text(msg, cx - std::strlen(msg) * 8.0f * msg_scale * 0.5f, msg_y,
                   msg_scale, win_w, win_h, CGA(yellow), 1.0f);
     const char* sub = "Profiles, colours, display and keys go back to defaults. Sculpt untouched.";
+    text.draw_text(sub, cx - std::strlen(sub) * 8.0f * 1.5f * 0.5f, msg_y + 40.0f,
+                  1.5f, win_w, win_h, CGA(light_gray), 1.0f);
+}
+
+void draw_pose_clear_confirm(TextOverlay& text, int win_w, int win_h) {
+    text.draw_panel(0, 0, (float)win_w, (float)win_h,
+                   win_w, win_h, 0.0f, 0.0f, 0.0f, 0.5f);
+    const char* msg = "Delete all pose spheres? (Y/N)";
+    float msg_scale = 3.0f;
+    float cx = (float)win_w * 0.5f;
+    float msg_y = (float)win_h * 0.5f - 40.0f;
+    text.draw_text(msg, cx - std::strlen(msg) * 8.0f * msg_scale * 0.5f, msg_y,
+                  msg_scale, win_w, win_h, CGA(yellow), 1.0f);
+    const char* sub = "Every sphere and bone on this mesh goes. The sculpt stays as it is.";
     text.draw_text(sub, cx - std::strlen(sub) * 8.0f * 1.5f * 0.5f, msg_y + 40.0f,
                   1.5f, win_w, win_h, CGA(light_gray), 1.0f);
 }
@@ -830,8 +846,9 @@ void draw_help_popup(InputState& input, int win_w, int win_h) {
         std::snprintf(k, sizeof(k), "%s %s %s", L(KeyAction::BRUSH_CREASE),
                       L(KeyAction::BRUSH_PINCH), L(KeyAction::BRUSH_MOVE));
         help_row(k, "Crease  Pinch  Move");
-        std::snprintf(k, sizeof(k), "%s %s", L(KeyAction::BRUSH_LIMB), L(KeyAction::BRUSH_MASK));
-        help_row(k, "Limb  Mask");
+        std::snprintf(k, sizeof(k), "%s %s %s", L(KeyAction::BRUSH_LIMB),
+                      L(KeyAction::BRUSH_POSE), L(KeyAction::BRUSH_MASK));
+        help_row(k, "Limb  Pose  Mask");
         std::snprintf(k, sizeof(k), "%s %s", L(KeyAction::BRUSH_PREV), L(KeyAction::BRUSH_NEXT));
         help_row(k, "Cycle alpha (Draw, Mask)");
         std::snprintf(k, sizeof(k), "%s %s", L(KeyAction::PAINT_BUCKET), L(KeyAction::PAINT_PICKER));
@@ -1125,7 +1142,7 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
     y += mode_h + row_gap;
 
     // === Island 3 — Brush column: single vertical column ===
-    // Order: Draw, Clay, Inflate, Crease, Pinch, Move, Limb, Smooth, Mask. Smooth is a lock
+    // Order: Draw, Clay, Inflate, Crease, Pinch, Move, Limb, Pose, Smooth, Mask. Smooth is a lock
     // toggle (not a switch_brush), handled specially in-place. Paint lives in the
     // mode row above, not here.
     ImGui::SetNextWindowPos(ImVec2(margin, y), ImGuiCond_Always);
@@ -1133,7 +1150,7 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
 
     float brush_w = calc_btn_w("Inflate");
 
-    static char btips[9][48];
+    static char btips[10][48];
     auto btip = [&](int i, KeyAction a) {
         std::snprintf(btips[i], sizeof(btips[i]), "Shortcut: %s", input.key_label(a));
         return btips[i];
@@ -1147,8 +1164,9 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
         {"Pinch",   "Pinch",   btip(4, KeyAction::BRUSH_PINCH),   BrushType::PINCH},
         {"Move",    "Move",    btip(5, KeyAction::BRUSH_MOVE),    BrushType::MOVE},
         {"Limb",    "Limb",    btip(6, KeyAction::BRUSH_LIMB),    BrushType::LIMB},
+        {"Pose",    "Pose",    btip(7, KeyAction::BRUSH_POSE),    BrushType::POSE},
         {"Smooth",  "Smooth",  "Shortcut: double-press Shift",    BrushType::SMOOTH},
-        {"Mask",    "Mask",    btip(8, KeyAction::BRUSH_MASK),    BrushType::MASK},
+        {"Mask",    "Mask",    btip(9, KeyAction::BRUSH_MASK),    BrushType::MASK},
     };
 
     for (int i = 0; i < (int)IM_ARRAYSIZE(brushes); i++) {
@@ -1621,6 +1639,66 @@ void draw_gradient_drag(float ax, float ay, float bx, float by) {
     dl->AddCircleFilled(ImVec2(ax, ay), 4.5f, fill);
     dl->AddCircle(ImVec2(bx, by), 6.0f, line, 0, 3.6f);
     dl->AddCircle(ImVec2(bx, by), 6.0f, fill, 0, 1.6f);
+}
+
+void draw_pose_rig(const PoseRig& rig, const Camera& cam, int win_w, int win_h,
+                   int hover, float soft, bool grow) {
+    if (rig.empty()) return;
+    ImDrawList* dl = ImGui::GetBackgroundDrawList();
+    static std::vector<uint8_t> lit;
+    static std::vector<ImVec2>  at;
+    static std::vector<float>   rad;
+    static std::vector<uint8_t> shown;
+    rig.connected(hover, lit);   // all zero when nothing is hovered
+    const size_t n = rig.joints.size();
+    at.resize(n); rad.resize(n); shown.resize(n);
+    for (size_t j = 0; j < n; j++) {
+        const PoseJoint& jt = rig.joints[j];
+        float x, y;
+        cam.world_to_screen(jt.pos, win_w, win_h, x, y);
+        shown[j] = !(cam.perspective && cam.view_depth(jt.pos) <= 1e-4f);
+        at[j] = ImVec2(x, y);
+        rad[j] = std::max(3.0f, jt.radius * pose_px_per_world(cam, jt.pos, win_h));
+    }
+    const ImU32 dark = IM_COL32(20, 20, 20, 170);
+    for (const PoseBone& b : rig.bones) {
+        if (!shown[b.a] || !shown[b.b]) continue;
+        const ImU32 col = lit[b.a] ? IM_COL32(255, 190, 90, 235) : IM_COL32(235, 235, 235, 170);
+        dl->AddLine(at[b.a], at[b.b], dark, 5.0f);
+        dl->AddLine(at[b.a], at[b.b], col, 2.5f);
+    }
+    for (size_t j = 0; j < n; j++) {
+        if (!shown[j]) continue;
+        const bool is_hover = (int)j == hover;
+        const ImU32 fill = is_hover ? IM_COL32(255, 190, 90, 90)
+                         : lit[j]   ? IM_COL32(255, 190, 90, 50)
+                                    : IM_COL32(255, 255, 255, 36);
+        const ImU32 line = is_hover ? IM_COL32(255, 222, 160, 255)
+                         : lit[j]   ? IM_COL32(255, 190, 90, 230)
+                                    : IM_COL32(235, 235, 235, 170);
+        dl->AddCircleFilled(at[j], rad[j], fill, 48);
+        dl->AddCircle(at[j], rad[j], dark, 48, 3.5f);
+        dl->AddCircle(at[j], rad[j], line, 48, is_hover ? 2.0f : 1.5f);
+        if (!is_hover) continue;
+        dl->AddCircle(at[j], rad[j] * (1.0f + soft), IM_COL32(255, 190, 90, 80), 64, 1.0f);
+        if (grow) {
+            const float s = std::min(8.0f, rad[j] * 0.6f);
+            const ImVec2 c = at[j];
+            dl->AddLine(ImVec2(c.x - s, c.y), ImVec2(c.x + s, c.y), dark, 4.0f);
+            dl->AddLine(ImVec2(c.x, c.y - s), ImVec2(c.x, c.y + s), dark, 4.0f);
+            dl->AddLine(ImVec2(c.x - s, c.y), ImVec2(c.x + s, c.y), line, 2.0f);
+            dl->AddLine(ImVec2(c.x, c.y - s), ImVec2(c.x, c.y + s), line, 2.0f);
+        }
+    }
+}
+
+// The pose brush has no footprint to show: a dot at the hotspot, bright over the
+// model or a sphere (a press does something there), dim elsewhere (it orbits).
+void draw_pose_cursor(float x, float y, bool on_target) {
+    ImDrawList* dl = ImGui::GetForegroundDrawList();
+    const int a = on_target ? 235 : 110;
+    dl->AddCircleFilled(ImVec2(x, y), 4.0f, IM_COL32(25, 25, 25, a));
+    dl->AddCircleFilled(ImVec2(x, y), 2.4f, IM_COL32(255, 255, 255, a));
 }
 
 // ---- Key bindings window ------------------------------------------------------------

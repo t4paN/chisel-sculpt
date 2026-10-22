@@ -7,7 +7,7 @@
 // crisp at any size. Path data is copied verbatim from the SVGs; see ui_icons.cpp.
 enum class Icon {
     BrushDraw, BrushClay, BrushInflate, BrushCrease, BrushPinch, BrushMove,
-    BrushLimb, BrushSmooth, BrushMask,
+    BrushLimb, BrushPose, BrushSmooth, BrushMask,
     ModeSculpt, ModeInsert, ModeSelect, ModePaint,
     ViewMirrorX, ViewPaintShow, ViewPaintHide,
     UiShortcuts, UiMenu,

@@ -913,6 +913,7 @@ int main(int argc, char* argv[]) {
         compute.init_pinch();
         compute.init_move();
         compute.init_limb();
+        compute.init_pose();
         compute.init_mask();
         compute.init_density();
         compute.init_color();
@@ -1707,7 +1708,14 @@ int main(int argc, char* argv[]) {
         // Consume scroll for camera zoom
         {
             float scroll = input_consume_scroll();
-            if (std::fabs(scroll) > 0.01f) {
+            // Over a pose sphere the wheel sizes the sphere instead of zooming.
+            PoseRig& rig = scene.active_entity().pose;
+            const int ph = input.pose_hover_joint;
+            if (std::fabs(scroll) > 0.01f && input.pose_brush_on()
+                && ph >= 0 && ph < (int)rig.joints.size()) {
+                rig.joints[ph].radius = std::max(1e-4f,
+                    rig.joints[ph].radius * std::pow(1.1f, scroll));
+            } else if (std::fabs(scroll) > 0.01f) {
                 camera.zoom(scroll);
                 screen_buffers_dirty = true;
             }
@@ -2741,6 +2749,173 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        // ---- Pose brush: hover, laying spheres, sizing them, clearing the rig ----
+        // A sculpt stroke only starts when the press grabbed a sphere (input.cpp); this
+        // block owns everything else the brush does. All of it is user-paced, so the
+        // CPU ray casts here are fine (they never run inside a stroke).
+        {
+            PoseRig& rig = scene.active_entity().pose;
+            struct PoseBuild {
+                bool on = false, new_a = false;
+                int a = -1, b = -1;
+                float px = 0, py = 0, lx = -1, ly = -1;
+            };
+            static PoseBuild build;
+            // Shift+drag relocation: which sphere, and where the cursor sat on it, so
+            // the sphere keeps its offset under the hand instead of jumping to it.
+            struct PoseRelocate { bool on = false; int j = -1; float ox = 0, oy = 0, lx = 0, ly = 0; };
+            static PoseRelocate reloc;
+            const float mx = (float)input.mouse_x, my = (float)input.mouse_y;
+            const bool pose_on = input.pose_brush_on();
+            const bool laying = input.drag_mode == InputState::DragMode::POSE_EDIT
+                             || input.drag_mode == InputState::DragMode::POSE_MOVE;
+
+            if (!pose_on) {
+                input.pose_hover_joint = -1;
+                input.pose_remove_joint = -1;
+            } else if (app_state == AppState::IDLE && !build.on && !reloc.on && !laying
+                       && input.drag_mode != InputState::DragMode::SCULPT) {
+                // Held through a grab: the stroke drives the sphere the press landed on.
+                input.pose_hover_joint = pose_pick(rig, camera, mx, my, win_w, win_h);
+            }
+
+            // Press: a new pair (A at the press, B dragged out), or with Ctrl on a
+            // sphere, a new sphere B grown off it.
+            if (pose_on && app_state == AppState::IDLE && !build.on
+                && input.drag_mode == InputState::DragMode::POSE_EDIT) {
+                scene.materialize_active_cpu();   // the ray cast reads mesh.pos
+                const int h = input.pose_hover_joint;
+                build.new_a = h < 0;
+                int a = h;
+                if (a < 0) {
+                    Vec3 c;
+                    float r;
+                    if (pose_volume_center(*mesh, camera, mx, my, win_w, win_h, c, r)) {
+                        // An open mesh has no far wall to measure: fall back to the ring.
+                        if (r <= 0.0f) r = input.brush_size / pose_px_per_world(camera, c, win_h);
+                        a = rig.add_joint(c, r);
+                    }
+                }
+                if (a >= 0) {
+                    const PoseJoint ja = rig.joints[a];   // a copy: add_joint may reallocate
+                    const int b = rig.add_joint(ja.pos, ja.radius);
+                    if (rig.add_bone(a, b)) {
+                        build.on = true;
+                        build.a = a;
+                        build.b = b;
+                        build.px = mx; build.py = my;
+                        build.lx = build.ly = -1.0f;
+                    } else {
+                        rig.pop_joint();
+                        if (build.new_a) rig.pop_joint();
+                        std::snprintf(input.notification, sizeof(input.notification),
+                                      "A pose set holds at most %d bones", kPoseMaxBones);
+                        input.notification_timer = 2.0f;
+                    }
+                }
+                if (!build.on) input.drag_mode = InputState::DragMode::NONE;
+            }
+
+            // Dragging B out: it sits in the middle of whatever volume is under the
+            // cursor, sized to it; off the model it rides the plane through A.
+            if (build.on && input.drag_mode == InputState::DragMode::POSE_EDIT
+                && (mx != build.lx || my != build.ly)) {
+                build.lx = mx; build.ly = my;
+                const PoseJoint ja = rig.joints[build.a];
+                PoseJoint& jb = rig.joints[build.b];
+                Vec3 c;
+                float r;
+                if (pose_volume_center(*mesh, camera, mx, my, win_w, win_h, c, r)) {
+                    jb.pos = c;
+                    jb.radius = r > 0.0f ? r : ja.radius;
+                } else {
+                    Vec3 o, d;
+                    pose_screen_ray(camera, mx, my, win_w, win_h, o, d);
+                    jb.pos = o + d * camera.view_depth(ja.pos);
+                    jb.radius = ja.radius;
+                }
+            }
+
+            // Release: a click that never dragged makes nothing.
+            if (build.on && input.drag_mode != InputState::DragMode::POSE_EDIT) {
+                if (std::hypot(mx - build.px, my - build.py) < 4.0f) {
+                    rig.pop_joint();
+                    if (build.new_a) rig.pop_joint();
+                }
+                build.on = false;
+                input.pose_hover_joint = -1;   // indices may have shifted; re-picked next frame
+            }
+
+            // Shift+drag: the sphere alone, re-centred in the volume under the cursor (its
+            // size kept, it may have been tuned); off the model it rides its own depth.
+            if (pose_on && app_state == AppState::IDLE && !reloc.on
+                && input.drag_mode == InputState::DragMode::POSE_MOVE) {
+                const int h = input.pose_hover_joint;
+                if (h >= 0 && h < (int)rig.joints.size()) {
+                    scene.materialize_active_cpu();   // the ray cast reads mesh.pos
+                    float sx = mx, sy = my;
+                    camera.world_to_screen(rig.joints[h].pos, win_w, win_h, sx, sy);
+                    reloc = PoseRelocate{true, h, mx - sx, my - sy, mx, my};
+                    rig.forget_moves(h);
+                } else {
+                    input.drag_mode = InputState::DragMode::NONE;
+                }
+            }
+            if (reloc.on && input.drag_mode == InputState::DragMode::POSE_MOVE
+                && (mx != reloc.lx || my != reloc.ly)) {
+                reloc.lx = mx; reloc.ly = my;
+                PoseJoint& jt = rig.joints[reloc.j];
+                const float tx = mx - reloc.ox, ty = my - reloc.oy;
+                Vec3 c;
+                float r;
+                if (pose_volume_center(*mesh, camera, tx, ty, win_w, win_h, c, r)) {
+                    jt.pos = c;
+                } else {
+                    Vec3 o, d;
+                    pose_screen_ray(camera, tx, ty, win_w, win_h, o, d);
+                    jt.pos = o + d * camera.view_depth(jt.pos);
+                }
+            }
+            if (reloc.on && input.drag_mode != InputState::DragMode::POSE_MOVE)
+                reloc.on = false;
+
+            // Right-click on a sphere.
+            if (input.pose_remove_joint >= 0 && app_state == AppState::IDLE
+                && !build.on && !reloc.on) {
+                rig.remove_joint(input.pose_remove_joint);
+                input.pose_remove_joint = -1;
+                input.pose_hover_joint = -1;   // indices shifted; re-picked next frame
+            }
+
+            // [ and ] over a sphere (input.cpp routes them here instead of brush size).
+            if (input.pose_resize_steps != 0) {
+                const int h = input.pose_hover_joint;
+                if (pose_on && h >= 0 && h < (int)rig.joints.size())
+                    rig.joints[h].radius = std::max(1e-4f,
+                        rig.joints[h].radius * std::pow(1.1f, (float)input.pose_resize_steps));
+                input.pose_resize_steps = 0;
+            }
+
+            if (app_state == AppState::IDLE && !build.on && input.pose_delete_key) {
+                input.pose_delete_key = false;
+                if (rig.empty()) {
+                    std::snprintf(input.notification, sizeof(input.notification),
+                                  "No pose spheres to delete");
+                    input.notification_timer = 1.5f;
+                } else {
+                    input.pose_clear_confirm_pending = true;
+                }
+            }
+            if (app_state == AppState::IDLE && input.pose_clear_requested) {
+                input.pose_clear_requested = false;
+                rig.clear();
+                input.pose_hover_joint = -1;
+                std::snprintf(input.notification, sizeof(input.notification),
+                              "Pose spheres deleted");
+                input.notification_timer = 1.5f;
+            }
+        }
+
         // IDLE → SCULPTING
         if (app_state == AppState::IDLE && input.drag_mode == InputState::DragMode::SCULPT) {
             input.sculpting = true;
@@ -2795,6 +2970,18 @@ int main(int argc, char* argv[]) {
                 g_path_stats.report();
                 // Only if this stroke pushed an entry: a stub that never laid a dab
                 // commits nothing, and a blind undo would eat the stroke BEFORE it.
+                // A pose stroke ties its sphere's move to the entry it just pushed, so
+                // Ctrl+Z takes the sphere back with the mesh (PoseRig::on_undo).
+                if (brush_stroke.pose.joint >= 0) {
+                    PoseRig& rig = scene.active_entity().pose;
+                    const int j = brush_stroke.pose.joint;
+                    brush_stroke.pose.joint = -1;
+                    const UndoEntry* top = scene.active_undo().peek_undo();
+                    if (top && j < (int)rig.joints.size()
+                        && UndoStack::global_pushes > pushes_at_stroke_start)
+                        rig.moves.push_back({top->seq, (uint16_t)j,
+                                             brush_stroke.pose.start, rig.joints[j].pos});
+                }
                 if (touch_undo_on_commit) {
                     touch_undo_on_commit = false;
                     if (UndoStack::global_pushes > pushes_at_stroke_start)
@@ -3030,6 +3217,7 @@ int main(int argc, char* argv[]) {
                                 || input.voxel_merge_confirm_pending
                                 || input.drop_level_confirm_pending
                                 || input.reset_confirm_pending
+                                || input.pose_clear_confirm_pending
                                 || input.drop_confirm_pending
                                 || input.export_dialog_active || input.import_dialog_active
                                 || input.save_dialog_active
@@ -3366,7 +3554,10 @@ int main(int argc, char* argv[]) {
                                   "Undid object %s", xforms.last_label());
                     input.notification_timer = 1.5f;
                 } else {
+                    const UndoEntry* top = scene.active_undo().peek_undo();
+                    const uint64_t seq = top ? top->seq : 0;
                     cascade_active(scene.active_undo().undo(scene.active_entity(), scene));
+                    scene.active_entity().pose.on_undo(seq);
                     print_undo_top("ctrl-z");
                 }
                 screen_buffers_dirty = true;
@@ -3381,7 +3572,10 @@ int main(int argc, char* argv[]) {
                                   "Redid object %s", xforms.last_label());
                     input.notification_timer = 1.5f;
                 } else {
+                    const UndoEntry* top = scene.active_undo().peek_redo();
+                    const uint64_t seq = top ? top->seq : 0;
                     cascade_active(scene.active_undo().redo(scene.active_entity(), scene));
+                    scene.active_entity().pose.on_redo(seq);
                     print_undo_top("ctrl-shift-z");
                 }
                 screen_buffers_dirty = true;
@@ -3473,9 +3667,10 @@ int main(int argc, char* argv[]) {
                                  input.current_brush == BrushType::SMOOTH;
                 bool is_move = input.current_brush == BrushType::MOVE;
                 bool is_limb = input.current_brush == BrushType::LIMB;
-                // Both grab brushes capture once and drive per-frame: one dab at the
+                bool is_pose = input.current_brush == BrushType::POSE && !is_smooth;
+                // The grab brushes capture once and drive per-frame: one dab at the
                 // live cursor, no spline interpolation, no dab-spacing advance.
-                bool is_grab = is_move || is_limb;
+                bool is_grab = is_move || is_limb || is_pose;
 
                 // live_brush_slot() rather than a second copy of the same rule: it is
                 // now defined as exactly `is_smooth ? SMOOTH : current_brush`, and the
@@ -3807,6 +4002,10 @@ int main(int argc, char* argv[]) {
                         brush_stroke.apply_move_gpu(ctx, dx, dy, eff_strength, eff_hardness);
                     } else if (is_limb) {
                         brush_stroke.apply_limb_gpu(ctx, dx, dy, eff_strength, eff_hardness);
+                    } else if (is_pose) {
+                        brush_stroke.apply_pose_gpu(ctx, dx, dy, eff_hardness,
+                                                    scene.active_entity().pose,
+                                                    input.pose_hover_joint);
                     } else if (input.current_brush == BrushType::CREASE) {
                         brush_stroke.apply_crease(ctx, dab_x, dab_y, eff_strength, eff_hardness,
                                                   input.is_subtract_active());
@@ -3896,7 +4095,7 @@ int main(int argc, char* argv[]) {
         // ---- Cursor visibility ----
         bool non_edit_mode = input.interaction_mode != InputState::InteractionMode::EDIT;
         // Hide the OS cursor while sculpting (we draw our own brush cursor).
-        bool show_os_cursor = input.quit_requested || input.export_dialog_active || input.import_dialog_active || input.save_dialog_active || input.remesh_confirm_pending || input.voxel_merge_confirm_pending || input.drop_confirm_pending || input.reset_confirm_pending || input.help_popup_open || input.keybind_menu_open || input.brush_props_open || imgui_wants_mouse || non_edit_mode;
+        bool show_os_cursor = input.quit_requested || input.export_dialog_active || input.import_dialog_active || input.save_dialog_active || input.remesh_confirm_pending || input.voxel_merge_confirm_pending || input.drop_confirm_pending || input.reset_confirm_pending || input.pose_clear_confirm_pending || input.help_popup_open || input.keybind_menu_open || input.brush_props_open || imgui_wants_mouse || non_edit_mode;
 #ifndef __EMSCRIPTEN__
         // A slider drag owns the cursor mode while it runs: it holds GLFW_CURSOR_DISABLED
         // to capture the pointer. This line ran unconditionally every frame and put the
@@ -4028,8 +4227,17 @@ int main(int argc, char* argv[]) {
             renderer.draw_debug_mesh(camera, *mesh, win_w, win_h);
         }
 
+        // Pose rig: shown only while the pose brush is in hand. The reach ring uses the
+        // same falloff the stroke will (BrushStroke::apply_pose_gpu).
+        if (input.pose_brush_on() && !non_edit_mode) {
+            const float hard = input.per_brush[(int)BrushType::POSE].hardness;
+            draw_pose_rig(scene.active_entity().pose, camera, win_w, win_h,
+                          input.pose_hover_joint, 0.25f + 1.75f * (1.0f - hard),
+                          input.ctrl_held && app_state == AppState::IDLE);
+        }
+
         // Brush cursor — draw at locked position during slider, normal position otherwise
-        if (!input.quit_requested && !input.export_dialog_active && !input.import_dialog_active && !input.save_dialog_active && !input.remesh_confirm_pending && !input.voxel_merge_confirm_pending && !input.drop_confirm_pending && !input.reset_confirm_pending && !input.help_popup_open && !input.keybind_menu_open && !input.brush_props_open && !imgui_wants_mouse && !non_edit_mode) {
+        if (!input.quit_requested && !input.export_dialog_active && !input.import_dialog_active && !input.save_dialog_active && !input.remesh_confirm_pending && !input.voxel_merge_confirm_pending && !input.drop_confirm_pending && !input.reset_confirm_pending && !input.pose_clear_confirm_pending && !input.help_popup_open && !input.keybind_menu_open && !input.brush_props_open && !imgui_wants_mouse && !non_edit_mode) {
             float cursor_x, cursor_y;
             if (input.slider_mode != InputState::SliderMode::NONE) {
                 cursor_x = (float)input.slider_start_x;
@@ -4042,6 +4250,9 @@ int main(int argc, char* argv[]) {
                 // Armed colour picker: eyedropper glyph instead of the brush
                 // ring — the ring's size/hardness reading is meaningless here.
                 draw_pick_cursor(cursor_x, cursor_y, input.on_model);
+            } else if (input.pose_brush_on() && !input.is_smooth_active()) {
+                draw_pose_cursor(cursor_x, cursor_y,
+                                 input.on_model || input.pose_hover_joint >= 0);
             } else if (input.bucket_active && input.current_brush == BrushType::PAINT
                        && !input.is_smooth_active()) {
                 if (input.bucket_dragging) {
@@ -4151,6 +4362,8 @@ int main(int argc, char* argv[]) {
                                     win_w, win_h);
         if (bitmap_dialogs && input.reset_confirm_pending)
             draw_reset_confirm(text, win_w, win_h);
+        if (bitmap_dialogs && input.pose_clear_confirm_pending)
+            draw_pose_clear_confirm(text, win_w, win_h);
         if (bitmap_dialogs && input.voxel_merge_confirm_pending)
             draw_voxel_merge_confirm(text, input.voxel_merge_resolution,
                                      dlg.n_selected, dlg.n_unselected,

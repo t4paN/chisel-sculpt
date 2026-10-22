@@ -251,6 +251,8 @@ add_executable(chisel
     src/compute_crease_pinch.cpp
     src/compute_move.cpp
     src/compute_limb.cpp
+    src/compute_pose.cpp
+    src/pose.cpp
     src/compute_mask.cpp
     src/compute_density.cpp
     src/compute_color.cpp

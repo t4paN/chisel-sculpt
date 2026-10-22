@@ -225,6 +225,29 @@ struct LimbDragParams {
     uint32_t vertex_count;
 };
 
+// Pose brush: one bone of the grabbed set, byte-identical to pose_*.{comp,wgsl}'s
+// Bone (7 vec4s). Built on the CPU each dab (brush.cpp apply_pose_gpu).
+struct PoseBoneGPU {
+    float a[4];    // joint A xyz at pen-down, w = radius
+    float b[4];    // joint B xyz at pen-down, w = radius
+    float f[4];    // fixed end xyz, w = 1 if the bone moves
+    float r0[4];   // rotation column 0, w = length at pen-down
+    float r1[4];   // rotation column 1, w = stretch
+    float r2[4];   // rotation column 2
+    float u[4];    // unit axis fixed -> moving, at pen-down
+};
+static_assert(sizeof(PoseBoneGPU) == 112, "pose Bone must be 7 vec4s");
+
+// std140 Params block at binding 63, shared by pose_capture and pose_apply.
+struct PoseParamsGPU {
+    uint32_t bone_count;
+    uint32_t vertex_count;
+    float    soft;          // falloff past a sphere's skin, in radii
+    uint32_t _pad0;
+    PoseBoneGPU bones[32];  // kPoseMaxBones
+};
+static_assert(sizeof(PoseParamsGPU) == 16 + 32 * 112, "pose Params UBO must be 3600 bytes");
+
 struct ComputeState {
     bool supported;
     bool has_native_float_atomics;  // GL_NV_shader_atomic_float
@@ -390,6 +413,12 @@ struct ComputeState {
     gpu::Buffer          limb_relax_ubo;       // 32-byte {vertex_count,lambda,tip_bias,tip_dir} block
     gpu::Buffer limb_pos_scratch_ssbo;    // 3 floats per vertex: read-side snapshot for relax ping-pong (seam-owned, Step 2 cont)
     uint32_t limb_scratch_capacity;
+
+    // Pose brush. Rides the move capture buffers (affected list + init positions):
+    // capture gathers what the moving bones reach, apply swings it per dab.
+    gpu::ComputePipeline pose_capture_pipeline;
+    gpu::ComputePipeline pose_apply_pipeline;
+    gpu::Buffer          pose_ubo;               // 3600-byte PoseParamsGPU block
 
     // Compute normals — ported onto the gpu:: seam (Seam Step 2b). Shared per-stroke
     // recompute: one thread per dirty vertex, area-weighted 1-ring face normals. The
@@ -916,6 +945,7 @@ struct ComputeState {
     // Limb (snakehook) readiness (replaces limb_*_program truthiness checks). Needs
     // both its own kernels plus the move capture pieces it rides on (has_move()).
     bool has_limb() const { return limb_drag_pipeline.handle != 0 && limb_relax_pipeline.handle != 0; }
+    bool has_pose() const { return pose_capture_pipeline.handle != 0 && pose_apply_pipeline.handle != 0; }
 
     // Smooth readiness (replaces smooth_accum_program truthiness checks).
     bool has_smooth() const { return smooth_accum_pipeline.handle != 0; }
@@ -985,6 +1015,12 @@ struct ComputeState {
 
     // Readback affected list. Returns count; fills out[].
     uint32_t readback_move_affected(std::vector<uint32_t>& out);
+
+    // Pose brush (compute_pose.cpp). Capture resets and fills the move affected list
+    // + init positions; apply writes positions from init. Needs ensure_move_buffers.
+    bool init_pose();
+    void dispatch_pose_capture(const PoseParamsGPU& params, const gpu::Buffer& pos_vbo);
+    void dispatch_pose_apply(const PoseParamsGPU& params, const gpu::Buffer& pos_vbo);
 
     // Limb (snakehook) brush. Reuses the move capture/weights/affected/mask.
     bool init_limb();

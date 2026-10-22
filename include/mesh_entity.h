@@ -4,6 +4,7 @@
 #include "multires_gpu.h"
 #include "undo.h"
 #include "entity_gpu.h"
+#include "pose.h"
 
 // A self-contained mesh entity: owns its Mesh data and MultiresStack
 // independently of every other entity in the scene.
@@ -29,6 +30,10 @@ struct MeshEntity {
     // entity stops being active, resumed when it is reselected. Undo always
     // targets the active entity, so no cross-entity routing is needed.
     UndoStack     undo;
+
+    // Pose brush spheres and bones on this mesh (pose.h). Shown and used only while
+    // this is the active entity and the pose brush is in hand.
+    PoseRig       pose;
 
     // Static display GL buffers, used when this entity is NOT the active one.
     // The active entity is drawn from the renderer's working buffers instead.

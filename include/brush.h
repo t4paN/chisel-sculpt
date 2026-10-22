@@ -6,6 +6,7 @@
 #include "undo.h"
 #include "multires_stack.h"
 #include "compute.h"
+#include "pose.h"
 #include <vector>
 #include <cmath>
 #include <algorithm>
@@ -270,6 +271,16 @@ struct BrushStroke {
     ColorState color;
     MaskState density;   // density-field stroke state — same scalar shape as mask
 
+    // Pose brush: the grabbed sphere and its set as they stood at pen-down. The
+    // bones' pen-down geometry stays in params; each dab only rewrites the moving
+    // bones' rotation and stretch. Sized for kPoseMaxBones, so no dab allocates.
+    struct PoseGrab {
+        int  joint = -1;
+        Vec3 start;                         // the grabbed sphere at pen-down
+        std::vector<uint8_t> set;           // rig.connected() scratch, pen-down only
+        PoseParamsGPU params = {};
+    } pose;
+
     // RETAINED: Adjacency flood for Move capture + Mask (delete when both get GPU shaders)
 
     // Undo snapshot: records each vertex's pre-stroke position on its first touch
@@ -357,6 +368,14 @@ struct BrushStroke {
     // scales the drag (and the relax amount rides along).
     void apply_limb_gpu(DabContext& ctx, float cursor_dx, float cursor_dy,
                         float strength, float hardness);
+
+    // Pose: the grabbed sphere follows the cursor 1:1 (rig.joints[joint] is moved
+    // live, so it draws where the hand is) and the bones linked to it swing about
+    // their other sphere, carrying what they reach. Move's capture-once spine: the
+    // affected set is fixed at pen-down. hardness = how far past a sphere's skin
+    // the hold fades out.
+    void apply_pose_gpu(DabContext& ctx, float cursor_dx, float cursor_dy,
+                        float hardness, PoseRig& rig, int joint);
 
     // Post-dispatch methods
     void post_dab(DabContext& ctx);

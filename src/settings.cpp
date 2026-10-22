@@ -26,9 +26,9 @@ constexpr float kDebounceSec   = 1.0f;   // quiet time after the last edit befor
 // keying off it would silently orphan every saved brush the day a label changes.
 const char* kBrushKey[(int)BrushType::COUNT] = {
     "draw", "clay", "inflate", "crease", "pinch",
-    "move", "limb", "smooth", "mask", "paint", "bucket"
+    "move", "limb", "pose", "smooth", "mask", "paint", "bucket"
 };
-static_assert((int)BrushType::COUNT == 11, "kBrushKey is out of sync with BrushType");
+static_assert((int)BrushType::COUNT == 12, "kBrushKey is out of sync with BrushType");
 
 const char* kProfileKey[(int)InputProfile::COUNT] = { "mouse", "tablet" };
 

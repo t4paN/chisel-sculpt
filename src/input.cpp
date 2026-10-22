@@ -32,6 +32,8 @@ const KeyActionInfo kKeyActions[(int)KeyAction::COUNT] = {
     {"brush_pinch",   "Sculpt brushes", "Pinch",     nullptr, {GLFW_KEY_V, 0}, KeyScope::Sculpt},
     {"brush_move",    "Sculpt brushes", "Move",      nullptr, {GLFW_KEY_G, 0}, KeyScope::Sculpt},
     {"brush_limb",    "Sculpt brushes", "Limb",      nullptr, {GLFW_KEY_H, 0}, KeyScope::Sculpt},
+    {"brush_pose",    "Sculpt brushes", "Pose",
+        "Drag on the model: two linked spheres. Drag a sphere: bend. Ctrl+drag: grow a new one. Shift+drag: move it alone. Right-click: remove it. Wheel or [ ]: its size. Delete: remove all", {GLFW_KEY_K, 0}, KeyScope::Sculpt},
     {"brush_mask",    "Brushes", "Mask",                nullptr, {GLFW_KEY_M, 0}},
     {"brush_prev",    "Brushes", "Previous alpha",
         "Draw and Mask. In Paint mode: swap colours. In Select mode: hold to spin the selection.", {GLFW_KEY_Q, 0}},
@@ -443,8 +445,11 @@ void InputState::end_frame() {
     bucket_click = false;
 }
 
+// Held Shift is Smooth everywhere except the pose brush, where it relocates a sphere
+// (a pose rig has nothing to smooth). The double-tap lock still smooths there.
 bool InputState::is_smooth_active() const {
-    return smooth_locked || (shift_held && !ctrl_held);
+    return smooth_locked
+        || (shift_held && !ctrl_held && current_brush != BrushType::POSE);
 }
 
 bool InputState::is_subtract_active() const {
@@ -461,6 +466,7 @@ const char* InputState::brush_name() const {
         case BrushType::PINCH:  return is_subtract_active() ? "Pinch (-)"  : "Pinch";
         case BrushType::MOVE:   return "Move";
         case BrushType::LIMB:   return "Limb";
+        case BrushType::POSE:   return "Pose";
         case BrushType::SMOOTH: return "Smooth";
         case BrushType::MASK:   return "Mask";
         case BrushType::PAINT:  return bucket_active ? (is_subtract_active() ? "Fill (erase)" : "Fill")
@@ -1011,6 +1017,23 @@ static void mouse_button_callback(GLFWwindow* w, int button, int action, int mod
                 g_input->bucket_erase = g_input->is_subtract_active();
                 if (g_input->fill_pattern == kFillGradient) g_input->bucket_dragging = true;
                 else                                         g_input->bucket_click = true;
+            } else if (g_input->pose_brush_on() && g_input->pose_hover_joint >= 0
+                       && g_input->shift_held && !g_input->ctrl_held) {
+                // Shift on a sphere relocates it (held Shift isn't Smooth in this brush,
+                // see is_smooth_active).
+                g_input->drag_mode = InputState::DragMode::POSE_MOVE;
+            } else if (g_input->pose_brush_on() && !g_input->is_smooth_active()) {
+                // Pose: a sphere under the cursor is grabbed (the stroke bends the mesh
+                // with it), Ctrl grows a new sphere off it instead. On the model
+                // anywhere else the press lays a new pair. Spheres show through the
+                // mesh, so one hanging past the silhouette still grabs.
+                const bool on_sphere = g_input->pose_hover_joint >= 0;
+                if (on_sphere && !g_input->ctrl_held)
+                    g_input->drag_mode = InputState::DragMode::SCULPT;
+                else if (on_sphere || g_input->on_model)
+                    g_input->drag_mode = InputState::DragMode::POSE_EDIT;
+                else
+                    g_input->drag_mode = InputState::DragMode::ORBIT;
             } else if (g_input->on_model) {
                 g_input->drag_mode = InputState::DragMode::SCULPT;
             } else {
@@ -1037,6 +1060,11 @@ static void mouse_button_callback(GLFWwindow* w, int button, int action, int mod
     if (button == GLFW_MOUSE_BUTTON_RIGHT) {
         bool was_down = g_input->mouse2_down;
         g_input->mouse2_down = (action == GLFW_PRESS);
+        // Pose brush: right-click a sphere to remove it (main.cpp, once idle).
+        if (action == GLFW_PRESS && !was_down && g_input->pose_brush_on()
+            && g_input->pose_hover_joint >= 0 && !g_input->zoom_modifier_held()
+            && g_input->drag_mode == InputState::DragMode::NONE)
+            g_input->pose_remove_joint = g_input->pose_hover_joint;
         // SELECT mode: plain RMB drag scales the selected mesh (a modified RMB is zoom).
         if (action == GLFW_PRESS && !was_down
             && g_input->interaction_mode == InputState::InteractionMode::SELECT
@@ -1182,6 +1210,7 @@ static void run_key_action(GLFWwindow* w, KeyAction a, bool repeat) {
         case KeyAction::BRUSH_MOVE:    pick_brush(BrushType::MOVE);    break;
         // Limb (snakehook): pull + tangential redistribute
         case KeyAction::BRUSH_LIMB:    pick_brush(BrushType::LIMB);    break;
+        case KeyAction::BRUSH_POSE:    pick_brush(BrushType::POSE);    break;
         case KeyAction::BRUSH_MASK:    pick_brush(BrushType::MASK);    break;
         case KeyAction::BRUSH_CREASE:  pick_brush(BrushType::CREASE);  break;
         case KeyAction::PAINT_PICKER:
@@ -1231,6 +1260,11 @@ static void run_key_action(GLFWwindow* w, KeyAction a, bool repeat) {
         // where 8% would round away under the "%.0f" readout.
         case KeyAction::SIZE_DOWN:
         case KeyAction::SIZE_UP: {
+            // Over a pose sphere the size keys size the sphere (main.cpp applies it).
+            if (in.pose_brush_on() && in.pose_hover_joint >= 0) {
+                in.pose_resize_steps += a == KeyAction::SIZE_UP ? 1 : -1;
+                break;
+            }
             float step = std::max(1.0f, in.brush_size * 0.08f);
             in.brush_size = std::max(5.0f, std::min(500.0f,
                 in.brush_size + (a == KeyAction::SIZE_UP ? step : -step)));
@@ -1256,7 +1290,11 @@ static void run_key_action(GLFWwindow* w, KeyAction a, bool repeat) {
             // Voxel merge (join selection for print). Same gating as remesh.
             if (in.mesh_locked && !in.voxel_merge_in_progress) in.voxel_merge_confirm_pending = true;
             break;
-        case KeyAction::DELETE_MESH: in.delete_mesh_requested = true; break;
+        // In the pose brush Delete clears the rig (after a prompt), never the mesh.
+        case KeyAction::DELETE_MESH:
+            if (in.pose_brush_on()) in.pose_delete_key = true;
+            else                    in.delete_mesh_requested = true;
+            break;
 
         case KeyAction::MASK_INVERT: in.mask_invert_requested = true; break;
         case KeyAction::MASK_CLEAR:  in.mask_clear_requested = true; break;
@@ -1303,6 +1341,7 @@ static void handle_modal_key(GLFWwindow* w, int key) {
             else if (in.voxel_merge_confirm_pending) in.voxel_merge_confirm_pending = false;
             else if (in.drop_level_confirm_pending) in.drop_level_confirm_pending = false;
             else if (in.reset_confirm_pending)      in.reset_confirm_pending = false;
+            else if (in.pose_clear_confirm_pending) in.pose_clear_confirm_pending = false;
             else if (in.remesh_confirm_pending)     in.remesh_confirm_pending = false;
             else if (in.export_dialog_active)       in.export_dialog_active = false;
             else if (in.import_dialog_active)       in.import_dialog_active = false;
@@ -1330,6 +1369,9 @@ static void handle_modal_key(GLFWwindow* w, int key) {
             } else if (in.reset_confirm_pending) {
                 in.reset_confirm_pending = false;
                 in.reset_settings_requested = true;
+            } else if (in.pose_clear_confirm_pending) {
+                in.pose_clear_confirm_pending = false;
+                in.pose_clear_requested = true;
             } else if (in.remesh_confirm_pending) {
                 in.remesh_confirm_pending = false;
                 in.remesh_requested = true;
@@ -1342,6 +1384,7 @@ static void handle_modal_key(GLFWwindow* w, int key) {
             else if (merge)                         in.voxel_merge_confirm_pending = false;
             else if (in.drop_level_confirm_pending) in.drop_level_confirm_pending = false;
             else if (in.reset_confirm_pending)      in.reset_confirm_pending = false;
+            else if (in.pose_clear_confirm_pending) in.pose_clear_confirm_pending = false;
             else if (in.remesh_confirm_pending)     in.remesh_confirm_pending = false;
             else if (in.quit_requested)             in.quit_requested = false;
             break;
@@ -1449,6 +1492,7 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
                      || g_input->voxel_merge_confirm_pending
                      || g_input->drop_level_confirm_pending
                      || g_input->reset_confirm_pending
+                     || g_input->pose_clear_confirm_pending
                      || g_input->drop_confirm_pending;
     if (modal_active) {
         if (action == GLFW_PRESS) handle_modal_key(w, key);
@@ -1545,7 +1589,7 @@ static void drop_callback(GLFWwindow* w, int count, const char** paths) {
         g_input->import_dialog_active || g_input->save_dialog_active ||
         g_input->remesh_confirm_pending || g_input->voxel_merge_confirm_pending ||
         g_input->drop_level_confirm_pending || g_input->drop_confirm_pending ||
-        g_input->reset_confirm_pending)
+        g_input->reset_confirm_pending || g_input->pose_clear_confirm_pending)
         return;
     // Only project/model files; anything else gets a notification, not a prompt.
     const char* path = paths[0];
