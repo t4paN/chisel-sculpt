@@ -2,6 +2,11 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-23 — Retopo mode: mirror welds mouths
+
+With mirror on, a stroke across x = 0 is cut there; its longer side builds plus its twin,
+sharing the seam spokes (self-paired, held on x = 0): one symmetric, welded piece. User-tested.
+
 ## 2026-10-23 — Retopo mode: mirror by vertex pairs, bridges
 
 *User-tested.*

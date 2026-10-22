@@ -403,12 +403,19 @@ void emit_grid(RetopoMesh& rm, const Grid& G, int i0, int i1, std::vector<uint32
 // vertex maps to its island's twin of it; an island without twins (one across x = 0,
 // a mouth) lends the vertex sitting at the reflection, if there is one.
 void emit_twin(RetopoMesh& rm, const Grid& G, int i0, int i1, const std::vector<uint32_t>& idx,
-               uint32_t first_new, uint32_t owner) {
+               uint32_t first_new, uint32_t owner, bool seam0, bool seam1) {
     std::vector<uint32_t> tw(idx.size(), ~0u);
     for (int i = i0; i <= i1; i++)
         for (int j = 0; j < G.W; j++) {
             const size_t k = (size_t)i * G.W + j;
             const uint32_t a = idx[k];
+            // A half-mouth's end spoke lies on x = 0: it is its own twin, which is
+            // what welds the two halves into one ring.
+            if (a >= first_new && ((seam0 && i == i0) || (seam1 && i == i1))) {
+                tw[k] = a;
+                rm.mirror[a] = a;
+                continue;
+            }
             if (rm.mirror[a] != ~0u) { tw[k] = rm.mirror[a]; continue; }
             Vec3 p = rm.v[a], nn = rm.n[a];
             p.x = -p.x; nn.x = -nn.x;
@@ -494,6 +501,65 @@ void build_topology(RetopoMesh& rm) {
         const Vec3 b = (rm.v[rm.border_nb[i * 2 + 1]] - rm.v[i]).normalized();
         if (a.dot(b) > -0.7f) rm.pinned[i] = 1;
     }
+}
+
+// A stroke across x = 0 (a mouth) with mirror on: keep its longest run on one side, cut
+// exactly at x = 0, so Build makes that half plus its twin and they meet on the seam.
+// seam0 / seam1: which ends of `out` sit on the seam (a strip's own end doesn't).
+bool half_stroke(const RetopoStroke& s, RetopoStroke& out, bool& seam0, bool& seam1) {
+    const size_t n = s.pts.size();
+    const size_t segs = s.closed ? n : n - 1;
+    // The side holding more of the stroke is the one drawn with care.
+    float lp = 0.0f, ln = 0.0f;
+    for (size_t i = 0; i < segs; i++) {
+        const Vec3 a = s.pts[i], b = s.pts[(i + 1) % n];
+        ((a.x + b.x) > 0.0f ? lp : ln) += (b - a).length();
+    }
+    const float sg = lp >= ln ? 1.0f : -1.0f;
+    auto in = [&](size_t i) { return s.pts[i % n].x * sg > 0.0f; };
+    // Runs of points on that side, in stroke order (closed: starting after a point that
+    // isn't, so no run is split by the wrap). The longest by length wins.
+    size_t start = 0;
+    if (s.closed) { while (start < n && in(start)) start++; if (start == n) return false; start++; }
+    const size_t count = s.closed ? n : n;
+    size_t best_a = 0, best_len = 0;
+    float best_l = -1.0f;
+    for (size_t k = 0; k < count; ) {
+        if (!in(start + k)) { k++; continue; }
+        size_t e = k;
+        float l = 0.0f;
+        while (e + 1 < count && in(start + e + 1)) {
+            l += (s.pts[(start + e + 1) % n] - s.pts[(start + e) % n]).length();
+            e++;
+        }
+        if (l > best_l) { best_l = l; best_a = k; best_len = e - k + 1; }
+        k = e + 1;
+    }
+    if (best_l < 0.0f) return false;
+    out = s;
+    out.pts.clear(); out.nrm.clear(); out.half_w.clear();
+    out.closed = false;
+    // The point where segment i→j crosses x = 0, exactly on the plane.
+    auto cross = [&](size_t i, size_t j) {
+        const Vec3 A = s.pts[i % n], B = s.pts[j % n];
+        const float t = A.x / (A.x - B.x);
+        Vec3 p = A + (B - A) * t;
+        p.x = 0.0f;
+        out.pts.push_back(p);
+        out.nrm.push_back((s.nrm[i % n] + (s.nrm[j % n] - s.nrm[i % n]) * t).normalized());
+        out.half_w.push_back(s.half_w[i % n] + (s.half_w[j % n] - s.half_w[i % n]) * t);
+    };
+    const size_t a = start + best_a, b = a + best_len - 1;
+    seam0 = s.closed || a > 0;
+    seam1 = s.closed || b < n - 1;
+    if (seam0) cross(a - 1, a);
+    for (size_t i = a; i <= b; i++) {
+        out.pts.push_back(s.pts[i % n]);
+        out.nrm.push_back(s.nrm[i % n]);
+        out.half_w.push_back(s.half_w[i % n]);
+    }
+    if (seam1) cross(b, b + 1);
+    return out.pts.size() >= 3;
 }
 
 bool alive(const RetopoMesh& rm, uint32_t i) { return rm.nb_off[i + 1] > rm.nb_off[i]; }
@@ -643,15 +709,19 @@ double retopo_build(RetopoState& st, const Mesh& m, bool mirror) {
     // Donuts first, then strips in the order drawn: a strip joins anything built
     // before it. A stroke wholly on one side of x = 0 gets a twin with mirror on; one
     // that crosses it (a mouth) is built as drawn — symmetrising it is a later job.
-    struct Todo { RetopoStroke s; bool twin; };
+    // With mirror, one that crosses it (a mouth) is cut at x = 0 and built as a half plus
+    // its twin, welded along the seam: symmetric, one piece.
+    struct Todo { RetopoStroke s; bool twin; bool seam0 = false, seam1 = false; };
     std::vector<Todo> todo;
     for (int pass = 0; pass < 2; pass++)
         for (const RetopoStroke& s : st.strokes) {
             if (s.frozen || !s.visible || s.pts.size() < 3 || s.closed != (pass == 0)) continue;
             bool pos = false, neg = false;
             for (const Vec3& p : s.pts) { pos |= p.x > 1e-4f; neg |= p.x < -1e-4f; }
-            todo.push_back({s, mirror && pos != neg});
-            for (float& w : todo.back().s.half_w) w *= s.width;
+            Todo t{s, mirror && pos != neg};
+            if (mirror && pos && neg && half_stroke(s, t.s, t.seam0, t.seam1)) t.twin = true;
+            for (float& w : t.s.half_w) w *= s.width;
+            todo.push_back(std::move(t));
         }
     if (todo.empty() || m.tri_count() == 0) {
         st.built = !st.result.quads.empty();
@@ -690,15 +760,27 @@ double retopo_build(RetopoState& st, const Mesh& m, bool mirror) {
         if (!stroke_grid(t.s, g, G)) continue;
         std::vector<uint32_t> idx((size_t)G.n * G.W, ~0u);
         int i0 = 0, i1 = G.n - 1;
+        // A half-mouth's seam spokes go flat onto x = 0 (the snap can drift a hair).
+        for (int e = 0; e < 2; e++) {
+            if (!(e ? t.seam1 : t.seam0)) continue;
+            const int i = e ? G.n - 1 : 0;
+            for (int j = 0; j < G.W; j++) {
+                G.v[(size_t)i * G.W + j].x = 0.0f;
+                Vec3& nn = G.nrm[(size_t)i * G.W + j];
+                nn.x = 0.0f;
+                if (nn.length() > 1e-6f) nn = nn.normalized();
+            }
+        }
         if (!G.closed && !rm.quads.empty()) {
             dedupe_edges(rm);
             build_topology(rm);
-            joins += join_end(rm, G, 0, t.s.id, i0, i1, idx);
-            joins += join_end(rm, G, 1, t.s.id, i0, i1, idx);
+            // Seam ends meet their twin, not an island.
+            if (!t.seam0) joins += join_end(rm, G, 0, t.s.id, i0, i1, idx);
+            if (!t.seam1) joins += join_end(rm, G, 1, t.s.id, i0, i1, idx);
         }
         const uint32_t first_new = (uint32_t)rm.v.size();
         emit_grid(rm, G, i0, i1, idx, t.s.id);
-        if (t.twin) emit_twin(rm, G, i0, i1, idx, first_new, t.s.id);
+        if (t.twin) emit_twin(rm, G, i0, i1, idx, first_new, t.s.id, t.seam0, t.seam1);
     }
     dedupe_edges(rm);
     st.built = !rm.quads.empty();
