@@ -1399,6 +1399,11 @@ void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
     o.key = input.key_label(KeyAction::MODE_PAINT); o.corner = corner(KeyAction::MODE_PAINT);
     if (icon_button("mPaint", Icon::ModePaint, kRailBtn, o))
         input.enter_paint_mode();
+    ImGui::SameLine();
+    o.on = mode == InputState::InteractionMode::RETOPO; o.tip = "Retopo";
+    o.key = input.key_label(KeyAction::MODE_RETOPO); o.corner = corner(KeyAction::MODE_RETOPO);
+    if (icon_button("mRetopo", Icon::ModeRetopo, kRailBtn, o))
+        input.enter_retopo_mode();
     dock_post(modes_dock);
     // Rest height: a grown modes dock covers the rail instead of shoving it down.
     const float modes_bottom = ImGui::GetWindowPos().y +
@@ -2273,6 +2278,7 @@ void apply_mode(InputState& input, int m) {
         case 1: input.interaction_mode = InputState::InteractionMode::INSERT; break;
         case 2: input.interaction_mode = InputState::InteractionMode::SELECT; break;
         case 3: input.enter_paint_mode(); break;
+        case 4: input.enter_retopo_mode(); break;
     }
 }
 
@@ -2349,23 +2355,25 @@ void y2k_top(InputState& in, int W, const SkinStats& st) {
 
     // Slider shelf row.
     const float cy = kTitleH + (kTopH - kTitleH) * 0.5f;
-    // Mode well: Sculpt / Insert / Select / Paint, the live one an orange tile.
-    static const char* modes[4] = {"Sculpt", "Insert", "Select", "Paint"};
-    const char* mkeys[4] = {in.key_label(KeyAction::MODE_SCULPT), in.key_label(KeyAction::MODE_INSERT),
-                            in.key_label(KeyAction::MODE_SELECT), in.key_label(KeyAction::MODE_PAINT)};
+    // Mode well: Sculpt / Insert / Select / Paint / Retopo, the live one an orange tile.
+    static const char* modes[5] = {"Sculpt", "Insert", "Select", "Paint", "Retopo"};
+    const char* mkeys[5] = {in.key_label(KeyAction::MODE_SCULPT), in.key_label(KeyAction::MODE_INSERT),
+                            in.key_label(KeyAction::MODE_SELECT), in.key_label(KeyAction::MODE_PAINT),
+                            in.key_label(KeyAction::MODE_RETOPO)};
     const bool smooth_on = in.is_smooth_active();
     int mode = in.interaction_mode == InputState::InteractionMode::INSERT ? 1
              : in.interaction_mode == InputState::InteractionMode::SELECT ? 2
+             : in.interaction_mode == InputState::InteractionMode::RETOPO ? 4
              : in.paint_mode ? 3 : 0;
-    float bw[4], total = 4.0f;
-    for (int i = 0; i < 4; i++) {
+    float bw[5], total = 4.0f;
+    for (int i = 0; i < 5; i++) {
         bw[i] = ysize(true, 11.0f, modes[i]).x + ysize(false, 9.0f, mkeys[i]).x + 5.0f + 24.0f;
         total += bw[i] + (i ? 2.0f : 0.0f);
     }
     x = 10.0f;
     inset(dl, ImVec2(x, cy - 15), ImVec2(x + total, cy + 15), 4.0f);
     float bx = x + 2.0f;
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 5; i++) {
         bool hv, held;
         char id[16]; std::snprintf(id, sizeof id, "##ym%d", i);
         ImVec2 a(bx, cy - 13), b(bx + bw[i], cy + 13);
@@ -2400,7 +2408,9 @@ void y2k_top(InputState& in, int W, const SkinStats& st) {
         ytext(dl, true, 11.0f, ImVec2(x + sw - ysize(true, 11.0f, sl[i].val).x, cy - 17), y2k::value, sl[i].val);
         char id[16]; std::snprintf(id, sizeof id, "##ys%d", i);
         float t = y2k_track(id, dl, ImVec2(x, cy + 1), sw, 14.0f, sl[i].pct, nullptr);
-        if (t >= 0.0f && editing) set_feel(in, i, t);
+        // Retopo draws with the brush ring, so Size (only) stays live there.
+        const bool retopo_size = i == 0 && in.interaction_mode == InputState::InteractionMode::RETOPO;
+        if (t >= 0.0f && (editing || retopo_size)) set_feel(in, i, t);
         x += sw + 14.0f;
     }
     // Autosmooth checkbox.
@@ -2449,6 +2459,7 @@ void y2k_left(InputState& in, int H, const AlphaLibrary* lib) {
         const char* nm = in.paint_mode ? "Paint" : "Draw";
         if (mode == InputState::InteractionMode::INSERT)      { icon = Icon::ModeInsert; nm = "Insert"; }
         else if (mode == InputState::InteractionMode::SELECT) { icon = Icon::ModeSelect; nm = "Select"; }
+        else if (mode == InputState::InteractionMode::RETOPO) { icon = Icon::ModeRetopo; nm = "Retopo"; }
         else {
             for (int i = 0; i < count; i++)
                 if (rail_brush_on(in, brushes[i], smooth_on)) { icon = brushes[i].icon; nm = brushes[i].name; break; }

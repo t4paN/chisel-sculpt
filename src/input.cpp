@@ -25,6 +25,8 @@ const KeyActionInfo kKeyActions[(int)KeyAction::COUNT] = {
     {"mode_insert",   "Modes",   "Insert mode",         nullptr, {GLFW_KEY_2, 0}},
     {"mode_select",   "Modes",   "Select mode",         nullptr, {GLFW_KEY_3, 0}},
     {"mode_paint",    "Modes",   "Paint mode",          nullptr, {GLFW_KEY_4, 0}},
+    {"mode_retopo",   "Modes",   "Retopo mode",
+        "Sketch strokes on the model, then Build turns them into quads", {GLFW_KEY_0, 0}},
     {"brush_draw",    "Sculpt brushes", "Draw",      nullptr, {GLFW_KEY_D, 0}, KeyScope::Sculpt},
     {"brush_clay",    "Sculpt brushes", "Clay",      nullptr, {GLFW_KEY_T, 0}, KeyScope::Sculpt},
     {"brush_inflate", "Sculpt brushes", "Inflate",   nullptr, {GLFW_KEY_I, 0}, KeyScope::Sculpt},
@@ -41,6 +43,7 @@ const KeyActionInfo kKeyActions[(int)KeyAction::COUNT] = {
         "Draw and Mask. In Paint mode: swap colours. In Select mode: hold to spin the selection.", {GLFW_KEY_E, 0}},
     {"paint_bucket",  "Paint mode", "Fill bucket",      "Click an unmasked area to fill it. Ctrl: erase it", {GLFW_KEY_B, 0}, KeyScope::Paint},
     {"paint_picker",  "Paint mode", "Colour picker",    "Click the model to pick its colour", {GLFW_KEY_C, 0}, KeyScope::Paint},
+    {"retopo_bar",    "Retopo mode", "Tool bar",         "Show / hide the Build bar", {GLFW_KEY_SPACE, 0}, KeyScope::Retopo},
     {"hold_size",     "Brush feel", "Size",             "Hold and drag", {GLFW_KEY_S, 0}},
     {"hold_strength", "Brush feel", "Strength",         "Hold and drag", {GLFW_KEY_W, 0}},
     {"hold_hardness", "Brush feel", "Hardness",         "Hold and drag", {GLFW_KEY_A, 0}},
@@ -383,6 +386,13 @@ void InputState::enter_paint_mode() {
     bucket_active = false;
     color_pick_active = false;
     subtract_locked = false;
+}
+
+void InputState::enter_retopo_mode() {
+    interaction_mode = InteractionMode::RETOPO;
+    clear_smooth_lock();
+    bucket_active = false;
+    color_pick_active = false;
 }
 
 void InputState::enter_sculpt_mode() {
@@ -999,6 +1009,11 @@ static void mouse_button_callback(GLFWwindow* w, int button, int action, int mod
                 // scene.render_pick over every entity) once drag_mode is SCULPT, so
                 // latch unconditionally here and let that pick sort out hit vs. miss.
                 g_input->drag_mode = InputState::DragMode::SCULPT;
+            } else if (g_input->interaction_mode == InputState::InteractionMode::RETOPO) {
+                // Retopo: a press on the model starts a stroke (main.cpp captures it),
+                // anywhere else orbits, as in Edit.
+                g_input->drag_mode = g_input->on_model ? InputState::DragMode::RETOPO
+                                                       : InputState::DragMode::ORBIT;
             } else if (g_input->on_model && g_input->color_pick_active
                        && g_input->current_brush == BrushType::PAINT
                        && g_input->interaction_mode == InputState::InteractionMode::EDIT) {
@@ -1187,6 +1202,13 @@ static void run_key_action(GLFWwindow* w, KeyAction a, bool repeat) {
             in.enter_paint_mode();
             notify("Paint", 1.0f);
             break;
+        case KeyAction::MODE_RETOPO:
+            in.enter_retopo_mode();
+            notify(in.retopo_bar_open ? "Retopo" : "Retopo: sketch on the model, Space for the Build bar", 2.5f);
+            break;
+        case KeyAction::RETOPO_BAR:
+            if (!repeat) in.retopo_bar_open = !in.retopo_bar_open;
+            break;
         case KeyAction::PAINT_BUCKET:
             // Paint mode's key (KeyScope::Paint): arm the bucket. Again: back to the brush.
             in.interaction_mode = InputState::InteractionMode::EDIT;
@@ -1293,6 +1315,8 @@ static void run_key_action(GLFWwindow* w, KeyAction a, bool repeat) {
             break;
         // In the pose brush Delete clears the rig (after a prompt), never the mesh.
         case KeyAction::DELETE_MESH:
+            // Retopo shows the sculpt but doesn't edit it: Delete must not cost a mesh.
+            if (in.interaction_mode == InputState::InteractionMode::RETOPO) break;
             if (in.pose_brush_on()) in.pose_delete_key = true;
             else                    in.delete_mesh_requested = true;
             break;

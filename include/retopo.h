@@ -1,0 +1,69 @@
+#pragma once
+#include "mesh.h"
+#include <cstdint>
+#include <string>
+#include <vector>
+
+// Retopo mode (key 0): the user sketches fat strokes on the sculpt, Build turns each
+// into a ribbon of quads lying on the surface. A closed stroke is a donut (concentric
+// loops round an eye or a mouth), an open one a strip. Both are the same construction:
+// spokes across the stroke, loops along it. The result is a separate low-poly mesh,
+// CPU-side, that never enters the sculpt engine.
+//
+// Strokes are vector data in world space, not paint: they survive level switches and
+// remeshes of the sculpt, and Build re-snaps them to whatever surface is there now.
+
+struct RetopoStroke {
+    std::vector<Vec3>  pts;      // centreline, on the surface (world)
+    std::vector<Vec3>  nrm;      // surface normal at each point
+    std::vector<float> half_w;   // half the band's width at each point (world)
+    bool closed  = false;        // donut (true) or strip (false)
+    bool visible = true;         // hidden strokes are skipped by Build
+    uint32_t id  = 0;
+    std::string name;
+};
+
+// The low-poly result. Quads are 4 indices each, wound so their normal faces out of
+// the sculpt. Edges are kept unique for the wireframe overlay.
+struct RetopoMesh {
+    std::vector<Vec3>     v;
+    std::vector<Vec3>     n;       // surface normal per vertex (overlay back-face test)
+    std::vector<uint32_t> quads;
+    std::vector<uint32_t> edges;   // 2 per edge
+    std::vector<uint32_t> edge_owner;  // per edge: the RetopoStroke::id it came from (twins share it)
+    void clear() { v.clear(); n.clear(); quads.clear(); edges.clear(); edge_owner.clear(); }
+    uint32_t quad_count() const { return (uint32_t)(quads.size() / 4); }
+};
+
+struct RetopoState {
+    std::vector<RetopoStroke> strokes;
+    std::vector<RetopoStroke> redo;   // strokes taken back by Ctrl+Z, for Ctrl+Shift+Z
+    RetopoStroke live;                // the stroke under the pen
+    bool drawing = false;
+    float last_sx = 0, last_sy = 0;   // screen position of the last captured point
+    uint32_t next_id = 1;
+
+    RetopoMesh result;
+    bool built = false;
+    bool show_result = true;
+    bool show_strokes = true;
+    int  rings = 6;                   // loops across a band, centre loop included = rings+1
+    uint32_t hover_id = 0;            // stroke under the cursor in the bar (0 = none), lit in the overlay
+
+    // Pen-up: keep the stroke if it has enough to build on, decide donut vs strip.
+    // Returns false (and drops it) for a tap.
+    bool finish_live();
+    void undo();
+    void redo_one();
+    void clear_all();
+};
+
+// Rebuild state.result from every visible stroke against the sculpt `m` (positions
+// must be current on the CPU: call Scene::materialize_active_cpu first). With
+// `mirror`, a stroke lying wholly on one side of x=0 gets a mirrored twin.
+// User-paced and CPU-only; returns the build time in ms.
+double retopo_build(RetopoState& st, const Mesh& m, bool mirror);
+
+// Write state.result as a quad OBJ. Returns false if there's nothing to write or the
+// file can't be opened.
+bool retopo_export_obj(const RetopoMesh& rm, const char* path);

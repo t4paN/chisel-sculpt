@@ -8,6 +8,8 @@
 #include "ui_icons.h"
 #include "pose.h"
 #include "camera.h"
+#include "renderer.h"
+#include "retopo.h"
 #include "imgui.h"
 #include <functional>
 #include <cstdio>
@@ -927,7 +929,8 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
 
     BrushType current = input.current_brush;
     bool smooth_on = input.is_smooth_active();
-    bool paint_on  = (current == BrushType::PAINT) && !smooth_on;
+    bool paint_on  = (current == BrushType::PAINT) && !smooth_on
+                  && input.interaction_mode != InputState::InteractionMode::RETOPO;
     InputState::InteractionMode mode = input.interaction_mode;
 
     // Each island is its OWN auto-resizing window so its mouse-capture rect hugs its
@@ -1020,6 +1023,12 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
                             ImVec2(calc_btn_w("Paint"), btn_h), paint_on)) {
             input.enter_paint_mode();
         }
+        ImGui::SameLine();
+        static char rtip[64];
+        std::snprintf(rtip, sizeof(rtip), "Retopo (Shortcut: %s)", input.key_label(KeyAction::MODE_RETOPO));
+        if (squircle_button("RetopoMode", "Retopo", rtip, ImVec2(calc_btn_w("Retopo"), btn_h),
+                            mode == InputState::InteractionMode::RETOPO))
+            input.enter_retopo_mode();
         // Paint-visibility toggle beside the Paint mode button. Hides albedo while
         // sculpting (the paint brush itself always forces it visible).
         ImGui::SameLine();
@@ -2108,6 +2117,7 @@ static bool trash_button(const char* id, float size) {
 // so they mutate the stack and ask for a GPU re-blend.
 void draw_paint_layers_panel(InputState& input, Scene& scene, int win_w, int /*win_h*/) {
     if (input.current_brush != BrushType::PAINT || input.paint_target_density) return;
+    if (input.interaction_mode == InputState::InteractionMode::RETOPO) return;   // own page
     MeshEntity* ent = scene.find_entity(scene.active_mesh_id());
     if (!ent) return;
     const uint32_t eid = ent->id;
@@ -2268,4 +2278,260 @@ void draw_paint_layers_panel(InputState& input, Scene& scene, int win_w, int /*w
     ImGui::EndDisabled();
 
     ImGui::End();
+}
+
+// ---- Retopo mode --------------------------------------------------------------------
+
+namespace {
+
+// Does a surface point at p with normal n face the viewer? Free, needs no plane cache,
+// so it is the one occlusion test that still works mid-orbit.
+bool retopo_facing(const Camera& cam, Vec3 p, Vec3 n) {
+    const Vec3 to_eye = cam.perspective ? cam.get_position() - p : cam.get_view_direction() * -1.0f;
+    return n.dot(to_eye) > 0.0f;
+}
+
+void retopo_band(ImDrawList* dl, const RetopoStroke& s, const Camera& cam, int win_w, int win_h,
+                 ImU32 fill, ImU32 line, bool flip_x) {
+    const size_t n = s.pts.size();
+    if (n < 2) return;
+    static std::vector<ImVec2> at;
+    static std::vector<float>  rad;
+    static std::vector<uint8_t> ok;
+    at.resize(n); rad.resize(n); ok.resize(n);
+    for (size_t i = 0; i < n; i++) {
+        Vec3 p = s.pts[i], nr = s.nrm[i];
+        if (flip_x) { p.x = -p.x; nr.x = -nr.x; }
+        float x, y;
+        ok[i] = cam.world_to_screen(p, win_w, win_h, x, y) && retopo_facing(cam, p, nr)
+             && !(cam.perspective && cam.view_depth(p) <= 1e-4f);
+        at[i] = ImVec2(x, y);
+        const float wpp = 2.0f * cam.half_height_at(cam.view_depth(p)) / (float)win_h;
+        rad[i] = wpp > 0.0f ? s.half_w[i] / wpp : 0.0f;
+    }
+    // Each point's "across" direction comes from neighbours half a band-width away
+    // on either side, not from its own 3 px segment: at that lever arm the hand's
+    // jitter swung every edge of the band and it drew as bristles. Neighbouring
+    // quads then share their edges, so the band is one continuous ribbon.
+    static std::vector<ImVec2> perp;
+    perp.resize(n);
+    auto wrap = [&](long k) -> size_t {
+        if (s.closed) return (size_t)((k % (long)n + (long)n) % (long)n);
+        return (size_t)std::max(0L, std::min((long)n - 1, k));
+    };
+    for (size_t i = 0; i < n; i++) {
+        const float reach = std::max(4.0f, rad[i] * 0.5f);
+        long lo = (long)i, hi = (long)i;
+        float dlo = 0.0f, dhi = 0.0f;
+        for (size_t step = 0; step < n && (dlo < reach || dhi < reach); step++) {
+            if (dlo < reach) { size_t a = wrap(lo), b = wrap(lo - 1); dlo += std::hypot(at[a].x - at[b].x, at[a].y - at[b].y); lo--; }
+            if (dhi < reach) { size_t a = wrap(hi), b = wrap(hi + 1); dhi += std::hypot(at[a].x - at[b].x, at[a].y - at[b].y); hi++; }
+        }
+        const ImVec2 A = at[wrap(lo)], B = at[wrap(hi)];
+        float dx = B.x - A.x, dy = B.y - A.y;
+        const float l = std::sqrt(dx * dx + dy * dy);
+        perp[i] = l > 1e-3f ? ImVec2(-dy / l, dx / l) : ImVec2(0.0f, 0.0f);
+    }
+    // No AA fringe on the fills: two fringes overlapping on a shared edge read as a
+    // seam line across the ribbon.
+    const ImDrawListFlags was = dl->Flags;
+    dl->Flags &= ~ImDrawListFlags_AntiAliasedFill;
+    const size_t segs = s.closed ? n : n - 1;
+    for (size_t i = 0; i < segs; i++) {
+        const size_t j = (i + 1) % n;
+        if (!ok[i] || !ok[j]) continue;
+        const ImVec2 a0(at[i].x + perp[i].x * rad[i], at[i].y + perp[i].y * rad[i]);
+        const ImVec2 a1(at[i].x - perp[i].x * rad[i], at[i].y - perp[i].y * rad[i]);
+        const ImVec2 b0(at[j].x + perp[j].x * rad[j], at[j].y + perp[j].y * rad[j]);
+        const ImVec2 b1(at[j].x - perp[j].x * rad[j], at[j].y - perp[j].y * rad[j]);
+        dl->AddQuadFilled(a0, b0, b1, a1, fill);
+    }
+    dl->Flags = was;
+    for (size_t i = 0; i < segs; i++) {
+        const size_t j = (i + 1) % n;
+        if (ok[i] && ok[j]) dl->AddLine(at[i], at[j], line, 1.5f);
+    }
+}
+
+}  // namespace
+
+void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera& cam,
+                         int win_w, int win_h, bool depth_fresh, bool mirror) {
+    ImDrawList* dl = ImGui::GetBackgroundDrawList();
+    if (st.show_strokes) {
+        auto band = [&](const RetopoStroke& s, int alpha) {
+            const ImU32 fill = s.closed ? IM_COL32(70, 200, 220, alpha) : IM_COL32(255, 175, 70, alpha);
+            const ImU32 line = s.closed ? IM_COL32(150, 235, 245, std::min(255, alpha * 3))
+                                        : IM_COL32(255, 210, 150, std::min(255, alpha * 3));
+            retopo_band(dl, s, cam, win_w, win_h, fill, line, false);
+            if (!mirror) return;
+            bool pos = false, neg = false;
+            for (const Vec3& p : s.pts) { pos |= p.x > 1e-4f; neg |= p.x < -1e-4f; }
+            if (pos != neg)   // the twin Build will make (retopo_build's rule)
+                retopo_band(dl, s, cam, win_w, win_h, fill & 0x3FFFFFFFu, line & 0x5FFFFFFFu, true);
+        };
+        // Hovering a stroke in the bar lights it and dims the rest, hidden ones
+        // included — so you can see what a checkbox or trash can is about to hit.
+        const bool any_hover = st.hover_id != 0;
+        for (const RetopoStroke& s : st.strokes) {
+            const bool lit = s.id == st.hover_id;
+            if (s.visible || lit) band(s, lit ? 130 : any_hover ? 25 : 55);
+        }
+        if (st.drawing && st.live.pts.size() >= 2) band(st.live, 70);
+    }
+    if (!st.built || !st.show_result) return;
+
+    // Wireframe: project every vertex once, then draw an edge only when both ends
+    // can be seen. A vertex is hidden when it faces away, or (cache fresh) sits
+    // deeper than the sculpt's own depth at that pixel by more than a few pixels'
+    // worth of world — the same tolerance as the mirror lobe marker.
+    const RetopoMesh& rm = st.result;
+    static std::vector<ImVec2> at;
+    static std::vector<uint8_t> vis;
+    at.resize(rm.v.size()); vis.resize(rm.v.size());
+    for (size_t i = 0; i < rm.v.size(); i++) {
+        float x, y;
+        bool v = cam.world_to_screen(rm.v[i], win_w, win_h, x, y) && retopo_facing(cam, rm.v[i], rm.n[i]);
+        if (v && depth_fresh && x >= 0 && y >= 0 && x < win_w && y < win_h) {
+            float front = 0.0f;
+            if (renderer.sample_depth((int)x, (int)y, &front) && front < 500.0f) {
+                const float depth = cam.view_depth(rm.v[i]);
+                const float tol = 2.0f * cam.half_height_at(depth) / (float)win_h * 6.0f;
+                v = depth <= front + tol;
+            }
+        }
+        at[i] = ImVec2(x, y);
+        vis[i] = v;
+    }
+    const ImU32 dark = IM_COL32(15, 25, 35, 150), lite = IM_COL32(170, 240, 255, 235);
+    const ImU32 hot = IM_COL32(255, 235, 120, 255), dim = IM_COL32(170, 240, 255, 110);
+    for (size_t e = 0; e + 1 < rm.edges.size(); e += 2) {
+        const uint32_t a = rm.edges[e], b = rm.edges[e + 1];
+        if (!vis[a] || !vis[b]) continue;
+        dl->AddLine(at[a], at[b], dark, rm.edge_owner[e / 2] == st.hover_id ? 4.0f : 3.0f);
+    }
+    for (size_t e = 0; e + 1 < rm.edges.size(); e += 2) {
+        const uint32_t a = rm.edges[e], b = rm.edges[e + 1];
+        if (!vis[a] || !vis[b]) continue;
+        const bool lit = rm.edge_owner[e / 2] == st.hover_id;
+        dl->AddLine(at[a], at[b], lit ? hot : st.hover_id ? dim : lite, lit ? 2.0f : 1.2f);
+    }
+}
+
+// The floating Build bar: bottom centre, Space shows and hides it. Top row = the
+// stroke list, laid out like the paint layers docker (visibility box, name, its own
+// trash can at the end); bottom row = Build and what to build with.
+void draw_retopo_bar(InputState& input, RetopoState& st, int win_w, int win_h) {
+    st.hover_id = 0;   // a closed bar must not leave a stroke lit
+    if (!input.retopo_bar_open) return;
+    ImGui::SetNextWindowPos(ImVec2(win_w * 0.5f, (float)win_h - 18.0f), ImGuiCond_Always,
+                            ImVec2(0.5f, 1.0f));
+    ImGui::SetNextWindowBgAlpha(0.88f);
+    const ImGuiWindowFlags f = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                               ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize |
+                               ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
+                               ImGuiWindowFlags_NoScrollbar;
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10, 8));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 10.0f);
+    if (!ImGui::Begin("##RetopoBar", nullptr, f)) { ImGui::End(); ImGui::PopStyleVar(2); return; }
+
+    const float bh = 34.0f;
+    auto bw = [&](const char* t) { return ImGui::CalcTextSize(t).x + 28.0f; };
+
+    // Stroke list. A trash can deletes for good (Ctrl+Z only walks the newest stroke),
+    // so it sits at the far end of each chip, away from the name.
+    // Rename state, as in the layers docker: which stroke, and whether the field still
+    // needs focus. Static: it has to outlive the frame.
+    static uint32_t rename_id = 0;
+    static bool rename_focus = false;
+    static char rename_buf[48];
+    if (st.strokes.empty()) {
+        ImGui::TextDisabled("Sketch on the model: a closed ring is a donut, an open line a strip");
+    } else {
+        int del = -1;
+        for (int i = 0; i < (int)st.strokes.size(); i++) {
+            RetopoStroke& s = st.strokes[i];
+            ImGui::PushID((int)s.id);
+            if (i > 0) ImGui::SameLine(0.0f, 14.0f);
+            // One group per chip, so hovering any part of it (box, name, can) lights
+            // the stroke on the model.
+            ImGui::BeginGroup();
+            ImGui::Checkbox("##vis", &s.visible);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Build this one / skip it");
+            ImGui::SameLine();
+            const ImVec4 tint = s.closed ? ImVec4(0.55f, 0.90f, 0.95f, 1.0f)
+                                         : ImVec4(1.00f, 0.80f, 0.55f, 1.0f);
+            if (rename_id == s.id) {
+                // Enter or clicking away keeps it, Esc drops it, empty keeps the old name.
+                if (rename_focus) { ImGui::SetKeyboardFocusHere(); rename_focus = false; }
+                ImGui::SetNextItemWidth(110.0f);
+                ImGui::InputText("##rename", rename_buf, sizeof(rename_buf),
+                                 ImGuiInputTextFlags_AutoSelectAll);
+                if (ImGui::IsItemDeactivated()) {
+                    if (!ImGui::IsKeyPressed(ImGuiKey_Escape) && rename_buf[0]) s.name = rename_buf;
+                    rename_id = 0;
+                }
+            } else {
+                ImGui::PushStyleColor(ImGuiCol_Text, tint);
+                ImGui::Selectable(s.name.c_str(), false, 0, ImGui::CalcTextSize(s.name.c_str()));
+                ImGui::PopStyleColor();
+                if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                    rename_id = s.id;
+                    rename_focus = true;
+                    std::snprintf(rename_buf, sizeof(rename_buf), "%s", s.name.c_str());
+                }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Double-click to rename");
+            }
+            ImGui::SameLine();
+            if (trash_button("##del", ImGui::GetFrameHeight())) del = i;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Delete this stroke");
+            ImGui::EndGroup();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem)) st.hover_id = s.id;
+            ImGui::PopID();
+        }
+        if (del >= 0) st.strokes.erase(st.strokes.begin() + del);
+    }
+
+    ImGui::Spacing();
+    if (squircle_button("RtBuild", "Build", "Turn the strokes into quads",
+                        ImVec2(bw("Build") + 16.0f, bh), st.built, !st.strokes.empty()))
+        input.retopo_build_requested = true;
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(120.0f);
+    ImGui::AlignTextToFramePadding();
+    if (ImGui::SliderInt("##rings", &st.rings, 2, 16, "rings %d")) st.rings = std::max(2, st.rings & ~1);
+    // Wheel over the slider steps it by one pair of loops. The bar owns the mouse
+    // while hovered, so the camera zoom never sees this wheel.
+    if (ImGui::IsItemHovered() && ImGui::GetIO().MouseWheel != 0.0f)
+        st.rings = std::max(2, std::min(16, st.rings + (ImGui::GetIO().MouseWheel > 0.0f ? 2 : -2)));
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Loops across each band (even). Quads along the stroke\n"
+                          "come out about as long as they are wide");
+    ImGui::SameLine();
+    if (squircle_button("RtUndo", "Undo stroke", "Take back the newest stroke (Ctrl+Z)",
+                        ImVec2(bw("Undo stroke"), bh), false, !st.strokes.empty()))
+        st.undo();
+    ImGui::SameLine();
+    if (squircle_button("RtClear", "Clear", "Remove every stroke and the result (Ctrl+Shift+Z brings strokes back)",
+                        ImVec2(bw("Clear"), bh), false, !st.strokes.empty() || st.built))
+        st.clear_all();
+    ImGui::SameLine(0.0f, 16.0f);
+    if (squircle_button("RtShowS", "Strokes", "Show / hide the sketched strokes",
+                        ImVec2(bw("Strokes"), bh), st.show_strokes))
+        st.show_strokes = !st.show_strokes;
+    ImGui::SameLine();
+    if (squircle_button("RtShowR", "Wire", "Show / hide the built quads",
+                        ImVec2(bw("Wire"), bh), st.show_result, st.built))
+        st.show_result = !st.show_result;
+    ImGui::SameLine();
+    if (squircle_button("RtExport", "Export OBJ", "Save the quads as an OBJ next to the project",
+                        ImVec2(bw("Export OBJ"), bh), false, st.built))
+        input.retopo_export_requested = true;
+    ImGui::SameLine(0.0f, 16.0f);
+    ImGui::AlignTextToFramePadding();
+    if (st.built) ImGui::Text("%u quads%s", st.result.quad_count(), input.mirror_x ? "  (mirror X)" : "");
+    else          ImGui::TextDisabled(input.mirror_x ? "mirror X on" : "not built");
+
+    ImGui::End();
+    ImGui::PopStyleVar(2);
 }

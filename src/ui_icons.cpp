@@ -77,6 +77,9 @@ const IconDef kIcons[(int)Icon::Count] = {
     // Drawn here: an eyedropper in the picker cursor's pose (tip bottom-left).
     /* PaintPicker  */ {{P("M4 20l1.15-2.85 7.5-7.5 1.7 1.7-7.5 7.5z"), P("M11.5 8.5l4 4"),
                          C(17.2f, 6.8f, 3.2f)}, 3},
+    // Drawn here: a patch of quads bowed over a form — two loops, three spokes.
+    /* ModeRetopo   */ {{P("M3 8c3-3 15-3 18 0"), P("M3 16c3-3 15-3 18 0"),
+                         P("M3 8v8M12 5.75v8M21 8v8")}, 3},
 };
 
 // ---- Minimal SVG path interpreter -------------------------------------------
@@ -301,6 +304,7 @@ const unsigned short kPixel[(int)Icon::Count][16] = {
     /* ui-fs-exit      */ {0x0000,0x0000,0x0C30,0x0C30,0x3C3C,0x3C3C,0x0000,0x0000,0x0000,0x0000,0x3C3C,0x3C3C,0x0C30,0x0C30,0x0000,0x0000},   // drawn here: corners in
     /* paint-bucket    */ {0x0000,0x0000,0x0300,0x0780,0x0CC0,0x1860,0x3030,0x6018,0xFFFC,0x7FF8,0x3FF2,0x1FE7,0x0FC7,0x0782,0x0300,0x0000},   // drawn here
     /* paint-picker    */ {0x0000,0x0000,0x0038,0x007C,0x007C,0x01FC,0x01F8,0x01E0,0x03E0,0x0700,0x0E00,0x1C00,0x3800,0x3000,0x0000,0x0000},   // drawn here
+    /* mode-retopo     */ {0x0000,0x0000,0x07E0,0x1998,0x6186,0x4182,0x4182,0x4182,0x47E2,0x5998,0x6186,0x4182,0x4182,0x4182,0x0000,0x0000},   // drawn here: bowed quad patch
 };
 } // namespace
 

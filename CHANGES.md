@@ -2,6 +2,21 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-22 — Retopo mode (key 0): sketch donuts and strips, Build quads
+
+*Branch `retopo-mode`. User saw eye donuts build live; hover/rename/wheel not yet hand-tested.*
+
+- **Key 0** (far end of the number row, so a missed 4 never lands here). Own key scope:
+  sculpt and paint keys do nothing in it; Ctrl+Z walks the stroke list, Delete is off.
+- **Strokes are fat lines** at the brush ring's width (pen pressure thins them). Back where
+  it started = donut, else strip. Vector data in world space, not paint.
+- **Space** toggles a floating bar, bottom centre: the stroke list (hover lights the stroke
+  and its quads, double-click renames, trash deletes), Build, rings (wheel steps it),
+  stroke/wire toggles, Export OBJ (real quads).
+- **Build** walks spokes across the surface with re-snapping, so loops follow an eye socket;
+  spokes on the inside of a bend are capped so a small eye can't fold. Mirror X builds
+  twins. Result is a separate CPU mesh, never fed to the sculpt.
+
 ## 2026-10-22 — Pose brush hidden, parked until v0.4.x
 
 Gone from both docks, the K key, the help card, the shortcuts list and the manual; the code

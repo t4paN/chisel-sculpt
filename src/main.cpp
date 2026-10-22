@@ -68,6 +68,7 @@
 #include "insert_controller.h"
 #include "ui_overlay.h"
 #include "ui_skin.h"
+#include "retopo.h"
 #include "ui_backdrop.h"
 #include "debug_console.h"
 #include "bench.h"
@@ -1134,6 +1135,7 @@ int main(int argc, char* argv[]) {
     // each use so a mid-frame selection change targets the right stack.
     AppState app_state = AppState::IDLE;
     InsertController insert_ctrl(scene, renderer);
+    RetopoState retopo;   // mode 0: sketched strokes + the quads Build made from them
     // Two-finger take-back (see InputState::touch_revert_requested).
     Camera   camera_at_press;
     bool     touch_undo_on_commit   = false;
@@ -2729,6 +2731,110 @@ int main(int argc, char* argv[]) {
             input.drag_mode = InputState::DragMode::NONE;
         }
 
+        // ---- Retopo mode: stroke capture, its own undo, Build ----
+        // Strokes are sampled off the pen-down plane cache like a brush anchor, so
+        // capture never reads the GPU back. Retopo never edits the sculpt, so the
+        // cache stays good for the whole stroke.
+        {
+            const bool retopo_on = input.interaction_mode == InputState::InteractionMode::RETOPO;
+            if (retopo_on && input.drag_mode == InputState::DragMode::RETOPO
+                && !screen_buffers_dirty) {
+                const float mx = (float)input.mouse_x, my = (float)input.mouse_y;
+                if (!retopo.drawing) {
+                    retopo.drawing = true;
+                    retopo.live = RetopoStroke{};
+                    retopo.last_sx = mx - 1e3f;   // the press point always lands
+                }
+                float d = 0.0f;
+                if (std::hypot(mx - retopo.last_sx, my - retopo.last_sy) >= 3.0f
+                    && renderer.sample_depth_bilinear(mx, my, &d, 0.0f) && d < 500.0f) {
+                    Vec3 cam_pos = camera.get_position();
+                    Vec3 fwd = (camera.target - cam_pos).normalized();
+                    Vec3 right = fwd.cross(Vec3(0, 1, 0)).normalized();
+                    Vec3 up = right.cross(fwd).normalized();
+                    const float half_h = camera.half_height_at(d);
+                    const float half_w = half_h * ((float)win_w / (float)win_h);
+                    const float ndc_x = 2.0f * mx / (float)win_w - 1.0f;
+                    const float ndc_y = 1.0f - 2.0f * my / (float)win_h;
+                    Vec3 p = cam_pos + fwd * d + right * (ndc_x * half_w) + up * (ndc_y * half_h);
+                    float nt[3];
+                    Vec3 n = renderer.sample_normal((int)mx, (int)my, nt)
+                           ? Vec3(nt[0], nt[1], nt[2]).normalized() : fwd * -1.0f;
+                    // Band width = the brush ring, in world units where the pen is.
+                    // Pen pressure thins it, so a stroke can taper.
+                    const float world_per_px = 2.0f * half_h / (float)win_h;
+                    // Same pen test as the brush: plugged in isn't enough, the pen has
+                    // to be what's driving (a resting pen reads ~0 forever).
+                    const bool pen = tablet.available()
+                                  && input.active_profile == InputProfile::TABLET;
+                    const float pr = pen ? std::max(0.2f, tablet.pressure()) : 1.0f;
+                    retopo.live.pts.push_back(p);
+                    retopo.live.nrm.push_back(n);
+                    retopo.live.half_w.push_back(input.brush_size * world_per_px * pr);
+                    retopo.last_sx = mx;
+                    retopo.last_sy = my;
+                }
+            } else if (retopo.drawing) {
+                // Pen up (or the mode changed under it).
+                const bool kept = retopo.finish_live();
+                if (kept) {
+                    std::snprintf(input.notification, sizeof(input.notification), "%s%s",
+                                  retopo.strokes.back().name.c_str(),
+                                  input.retopo_bar_open ? "" : " - Space for the Build bar");
+                    input.notification_timer = 1.5f;
+                }
+            }
+            // Ctrl+Z / Ctrl+Shift+Z walk the stroke list here, never the sculpt's
+            // history: retopo doesn't touch the sculpt.
+            if (retopo_on && (input.undo_requested || input.redo_requested)) {
+                if (input.undo_requested) retopo.undo();
+                else                      retopo.redo_one();
+                input.undo_requested = input.redo_requested = false;
+            }
+            if (input.retopo_build_requested) {
+                input.retopo_build_requested = false;
+                scene.materialize_active_cpu();   // Build snaps onto mesh.pos
+                const double ms = retopo_build(retopo, *mesh, input.mirror_x);
+                if (retopo.built)
+                    std::snprintf(input.notification, sizeof(input.notification),
+                                  "Built %u quads (%.0f ms)", retopo.result.quad_count(), ms);
+                else
+                    std::snprintf(input.notification, sizeof(input.notification),
+                                  "Nothing to build: sketch a stroke first");
+                input.notification_timer = 2.5f;
+            }
+            if (input.retopo_export_requested) {
+                input.retopo_export_requested = false;
+                // No dialog: next to the project (or home), named after it. The
+                // low-poly is a by-product to take elsewhere, not a document.
+#if defined(__EMSCRIPTEN__)
+                const std::string name = "retopo.obj", path = "/" + name;
+#else
+                std::string stem = current_project_path;
+                if (stem.empty()) {
+                    const char* home = std::getenv("HOME");
+                    stem = std::string(home ? home : ".") + "/chisel";
+                } else {
+                    const auto dot = stem.find_last_of('.');
+                    if (dot != std::string::npos && stem.find_last_of('/') < dot) stem.resize(dot);
+                }
+                const std::string path = stem + "-retopo.obj", name = path;
+#endif
+                if (retopo_export_obj(retopo.result, path.c_str())) {
+#if defined(__EMSCRIPTEN__)
+                    web_download_file(path.c_str(), name.c_str());
+#endif
+                    std::snprintf(input.notification, sizeof(input.notification),
+                                  "Exported: %.400s", name.c_str());
+                } else {
+                    std::snprintf(input.notification, sizeof(input.notification),
+                                  retopo.built ? "Export failed: %.400s" : "Build first%.0s",
+                                  name.c_str());
+                }
+                input.notification_timer = 3.0f;
+            }
+        }
+
         // Hover speed, for the stroke's running start (g_hover_speed). Orbit, pan and
         // slider drags aren't the hand heading into a stroke: re-anchor at zero there.
         if (app_state == AppState::IDLE) {
@@ -4096,7 +4202,10 @@ int main(int argc, char* argv[]) {
         }
 
         // ---- Cursor visibility ----
-        bool non_edit_mode = input.interaction_mode != InputState::InteractionMode::EDIT;
+        // Retopo counts as an edit mode here: it shows the brush ring (the band width).
+        const bool retopo_mode = input.interaction_mode == InputState::InteractionMode::RETOPO;
+        bool non_edit_mode = input.interaction_mode != InputState::InteractionMode::EDIT
+                          && !retopo_mode;
         // Hide the OS cursor while sculpting (we draw our own brush cursor).
         bool show_os_cursor = input.quit_requested || input.export_dialog_active || input.import_dialog_active || input.save_dialog_active || input.remesh_confirm_pending || input.voxel_merge_confirm_pending || input.drop_confirm_pending || input.reset_confirm_pending || input.pose_clear_confirm_pending || input.help_popup_open || input.keybind_menu_open || input.brush_props_open || imgui_wants_mouse || non_edit_mode;
 #ifndef __EMSCRIPTEN__
@@ -4248,7 +4357,11 @@ int main(int argc, char* argv[]) {
                 cursor_x = (float)input.mouse_x;
                 cursor_y = (float)input.mouse_y;
             }
-            if (input.color_pick_active) {
+            if (retopo_mode) {
+                renderer.draw_cursor(camera, cursor_x, cursor_y, input.brush_size,
+                                     input.cursor_nx, input.cursor_ny, input.cursor_nz,
+                                     1.0f, 0.5f, win_w, win_h, input.on_model);
+            } else if (input.color_pick_active) {
                 // Armed colour picker: eyedropper glyph instead of the brush
                 // ring — the ring's size/hardness reading is meaningless here.
                 draw_pick_cursor(cursor_x, cursor_y, input.on_model);
@@ -5104,6 +5217,17 @@ int main(int argc, char* argv[]) {
         draw_keybind_window(input, win_w, win_h);
         draw_brush_props_window(input, win_w, win_h);
         draw_paint_layers_panel(input, scene, win_w, win_h);
+        if (input.interaction_mode == InputState::InteractionMode::RETOPO) {
+            const bool cam_moving = input.drag_mode == InputState::DragMode::ORBIT
+                                 || input.drag_mode == InputState::DragMode::PAN
+                                 || input.drag_mode == InputState::DragMode::ZOOM
+                                 || input.mouse2_down || input.mouse3_down;
+            // Bar first: it sets which stroke the cursor is over, and the overlay lights
+            // it the same frame (background list, so it still draws under the bar).
+            draw_retopo_bar(input, retopo, win_w, win_h);
+            draw_retopo_overlay(retopo, renderer, camera, win_w, win_h,
+                                !cam_moving && !screen_buffers_dirty, input.mirror_x);
+        }
 
         // ---- Error popup ----
         if (error_popup_trigger) {
