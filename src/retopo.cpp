@@ -243,8 +243,20 @@ void add_edge(RetopoMesh& rm, uint32_t a, uint32_t b, uint32_t owner) {
     rm.edge_owner.push_back(owner);
 }
 
-// One stroke → one quad ribbon appended to rm.
-void build_stroke(const RetopoStroke& in, const SnapGrid& g, RetopoMesh& rm) {
+// A stroke's spokes before they become quads: n spokes of W vertices, v[i*W + j].
+struct Grid {
+    int n = 0, W = 0;
+    bool closed = false;
+    bool flip = false;              // quad winding that faces out of the sculpt
+    std::vector<Vec3> v, nrm;
+    Vec3 centre(int i) const {
+        const int Q = W - 1;
+        return Q % 2 == 0 ? v[i * W + Q / 2] : (v[i * W + Q / 2] + v[i * W + Q / 2 + 1]) * 0.5f;
+    }
+};
+
+// One stroke → its spokes, walked across the sculpt.
+bool stroke_grid(const RetopoStroke& in, const SnapGrid& g, Grid& G) {
     const int rings = in.rings;
     const float density = in.density;
     RetopoStroke s = in;
@@ -263,7 +275,7 @@ void build_stroke(const RetopoStroke& in, const SnapGrid& g, RetopoMesh& rm) {
     std::vector<float> cw;
     resample(s, step / std::max(0.1f, density), cp, cw);
     const int n = (int)cp.size();
-    if (n < 2) return;
+    if (n < 2) return false;
 
     // Snap the centre samples and take the surface normal there.
     std::vector<Vec3> cn(n);
@@ -309,14 +321,13 @@ void build_stroke(const RetopoStroke& in, const SnapGrid& g, RetopoMesh& rm) {
     // a whole sub-step, |2j - Q| * SUB of them out. Even Q puts one on the centre.
     const int SUB = 3;
     const int W = Q + 1;                           // vertices per spoke
-    const uint32_t base = (uint32_t)rm.v.size();
-    rm.v.resize(base + (size_t)n * W);
-    rm.n.resize(base + (size_t)n * W);
-    rm.v_owner.resize(base + (size_t)n * W, in.id);
+    G.n = n; G.W = W; G.closed = s.closed;
+    G.v.assign((size_t)n * W, Vec3());
+    G.nrm.assign((size_t)n * W, Vec3());
     for (int i = 0; i < n; i++) {
         if (Q % 2 == 0) {
-            rm.v[base + i * W + Q / 2] = cp[i];
-            rm.n[base + i * W + Q / 2] = cn[i];
+            G.v[i * W + Q / 2] = cp[i];
+            G.nrm[i * W + Q / 2] = cn[i];
         }
         for (int sgn = -1; sgn <= 1; sgn += 2) {
             float ext = cw[i];
@@ -335,33 +346,109 @@ void build_stroke(const RetopoStroke& in, const SnapGrid& g, RetopoMesh& rm) {
                 const int out = s_i / SUB;              // = |2j - Q|
                 if ((out + Q) % 2) continue;            // not a vertex position
                 const int col = (Q + sgn * out) / 2;
-                rm.v[base + i * W + col] = p;
-                rm.n[base + i * W + col] = nrm;
+                G.v[i * W + col] = p;
+                G.nrm[i * W + col] = nrm;
             }
         }
     }
 
-    // Quads between neighbouring spokes. Winding is picked from the first quad
-    // against the surface normal so every quad faces out of the sculpt.
-    auto V = [&](int i, int j) { return base + (uint32_t)((i % n) * W + j); };
-    const int spans = s.closed ? n : n - 1;
-    bool flip = false;
-    {
-        Vec3 a = rm.v[V(0, 0)], b = rm.v[V(1, 0)], c = rm.v[V(1, 1)];
-        flip = (b - a).cross(c - a).dot(cn[0]) < 0.0f;
-    }
-    for (int i = 0; i < spans; i++)
+    // Winding is picked from the first quad against the surface normal so every quad
+    // faces out of the sculpt.
+    const Vec3 a = G.v[0], b = G.v[W], c = G.v[W + 1];
+    G.flip = (b - a).cross(c - a).dot(cn[0]) < 0.0f;
+    return true;
+}
+
+// Quads and edges for spokes i0..i1 of G (a closed one wraps), vertex indices from idx.
+void emit_faces(RetopoMesh& rm, const Grid& G, int i0, int i1, const std::vector<uint32_t>& idx,
+                uint32_t owner, bool flip) {
+    const int n = G.n, W = G.W;
+    auto V = [&](int i, int j) { return idx[(size_t)(i % n) * W + j]; };
+    const int span_end = G.closed ? n : i1;
+    for (int i = i0; i < span_end; i++)
         for (int j = 0; j < W - 1; j++) {
             uint32_t q[4] = {V(i, j), V(i + 1, j), V(i + 1, j + 1), V(i, j + 1)};
             if (flip) std::swap(q[1], q[3]);
             rm.quads.insert(rm.quads.end(), q, q + 4);
-            rm.quad_owner.push_back(in.id);
+            rm.quad_owner.push_back(owner);
         }
-    // Edges: the loops (along) and the spokes (across), each once.
-    for (int i = 0; i < spans; i++)
-        for (int j = 0; j < W; j++) add_edge(rm, V(i, j), V(i + 1, j), in.id);
-    for (int i = 0; i < n; i++)
-        for (int j = 0; j < W - 1; j++) add_edge(rm, V(i, j), V(i, j + 1), in.id);
+    // Edges: the loops (along) and the spokes (across). A joined end spoke repeats
+    // the island's own edges; dedupe_edges drops those.
+    for (int i = i0; i < span_end; i++)
+        for (int j = 0; j < W; j++) add_edge(rm, V(i, j), V(i + 1, j), owner);
+    for (int i = i0; i <= i1; i++)
+        for (int j = 0; j < W - 1; j++) add_edge(rm, V(i, j), V(i, j + 1), owner);
+}
+
+// Spokes i0..i1 of G as quads owned by `owner`. A ~0u slot in idx gets a new vertex;
+// any other (a joined end) reuses the island vertex given. Fills idx in.
+void emit_grid(RetopoMesh& rm, const Grid& G, int i0, int i1, std::vector<uint32_t>& idx,
+               uint32_t owner) {
+    for (int i = i0; i <= i1; i++)
+        for (int j = 0; j < G.W; j++) {
+            uint32_t& k = idx[(size_t)i * G.W + j];
+            if (k != ~0u) continue;
+            k = (uint32_t)rm.v.size();
+            rm.v.push_back(G.v[(size_t)i * G.W + j]);
+            rm.n.push_back(G.nrm[(size_t)i * G.W + j]);
+            rm.v_owner.push_back(owner);
+            rm.mirror.push_back(~0u);
+        }
+    emit_faces(rm, G, i0, i1, idx, owner, G.flip);
+}
+
+// The mirror twin of what emit_grid just made: each vertex reflected in x = 0 and
+// paired with its original by index (Grab and Smooth move pairs, never guess by
+// position), quads wound the other way, since a reflection flips handedness. A joined
+// vertex maps to its island's twin of it; an island without twins (one across x = 0,
+// a mouth) lends the vertex sitting at the reflection, if there is one.
+void emit_twin(RetopoMesh& rm, const Grid& G, int i0, int i1, const std::vector<uint32_t>& idx,
+               uint32_t first_new, uint32_t owner) {
+    std::vector<uint32_t> tw(idx.size(), ~0u);
+    for (int i = i0; i <= i1; i++)
+        for (int j = 0; j < G.W; j++) {
+            const size_t k = (size_t)i * G.W + j;
+            const uint32_t a = idx[k];
+            if (rm.mirror[a] != ~0u) { tw[k] = rm.mirror[a]; continue; }
+            Vec3 p = rm.v[a], nn = rm.n[a];
+            p.x = -p.x; nn.x = -nn.x;
+            if (a < first_new) {
+                const int jn = j + 1 < G.W ? j + 1 : j - 1;
+                const float tol = 0.5f * (G.v[k] - G.v[(size_t)i * G.W + jn]).length();
+                float bd = tol * tol;
+                for (uint32_t b = 0; b < first_new; b++) {
+                    const Vec3 d = rm.v[b] - p;
+                    if (d.dot(d) < bd) { bd = d.dot(d); tw[k] = b; }
+                }
+                if (tw[k] != ~0u) continue;
+            }
+            tw[k] = (uint32_t)rm.v.size();
+            rm.v.push_back(p);
+            rm.n.push_back(nn);
+            rm.v_owner.push_back(owner);
+            rm.mirror.push_back(a);
+            if (a >= first_new) rm.mirror[a] = tw[k];
+        }
+    emit_faces(rm, G, i0, i1, tw, owner, !G.flip);
+}
+
+// Merge edges listed twice (a joined end spoke, a weld); the first owner listed keeps it.
+void dedupe_edges(RetopoMesh& rm) {
+    std::vector<std::pair<uint64_t, uint32_t>> es;
+    es.reserve(rm.edge_owner.size());
+    for (size_t e = 0; e < rm.edge_owner.size(); e++) {
+        const uint32_t x = rm.edges[e * 2], y = rm.edges[e * 2 + 1];
+        if (x == y) continue;
+        es.push_back({((uint64_t)std::min(x, y) << 32) | std::max(x, y), rm.edge_owner[e]});
+    }
+    std::stable_sort(es.begin(), es.end(), [](const auto& l, const auto& r) { return l.first < r.first; });
+    rm.edges.clear(); rm.edge_owner.clear();
+    for (size_t i = 0; i < es.size(); i++) {
+        if (i > 0 && es[i].first == es[i - 1].first) continue;
+        rm.edges.push_back((uint32_t)(es[i].first >> 32));
+        rm.edges.push_back((uint32_t)(es[i].first & 0xFFFFFFFFu));
+        rm.edge_owner.push_back(es[i].second);
+    }
 }
 
 // Neighbours and borders for Smooth. A border edge belongs to one quad only.
@@ -409,6 +496,103 @@ void build_topology(RetopoMesh& rm) {
     }
 }
 
+bool alive(const RetopoMesh& rm, uint32_t i) { return rm.nb_off[i + 1] > rm.nb_off[i]; }
+bool on_border(const RetopoMesh& rm, uint32_t i) { return rm.border_nb[i * 2] != ~0u; }
+
+// Distance from p to the nearest quad not owned by `owner`; its owner in `who`.
+float dist_to_others(const RetopoMesh& rm, uint32_t owner, Vec3 p, uint32_t& who) {
+    float best = 1e30f;
+    for (size_t q = 0; q < rm.quad_owner.size(); q++) {
+        if (rm.quad_owner[q] == owner) continue;
+        const Vec3 a = rm.v[rm.quads[q * 4]], b = rm.v[rm.quads[q * 4 + 1]],
+                   c = rm.v[rm.quads[q * 4 + 2]], d = rm.v[rm.quads[q * 4 + 3]];
+        for (int t = 0; t < 2; t++) {
+            const Vec3 x = SnapGrid::closest_on_tri(p, a, t ? c : b, t ? d : c) - p;
+            const float d2 = x.dot(x);
+            if (d2 < best) { best = d2; who = rm.quad_owner[q]; }
+        }
+    }
+    return std::sqrt(best);
+}
+
+// Bridges. A strip end that lands on an island built before it (or stops just short
+// of one) is cut back to that island's outer edge, and its end spoke takes over the
+// island's run of edge vertices that lines up best with it: shared vertices, shared
+// edges, no T-junction. The island keeps its shape; the strip's last row stretches to
+// meet it. `end` 0 = the first spoke, 1 = the last; i0/i1 step in past what's cut.
+// rm's topology must be current.
+bool join_end(RetopoMesh& rm, const Grid& G, int end, uint32_t owner, int& i0, int& i1,
+              std::vector<uint32_t>& idx) {
+    const int W = G.W, dir = end == 0 ? 1 : -1;
+    int ie = end == 0 ? i0 : i1;
+    const float along = (G.centre(ie + dir) - G.centre(ie)).length();
+    // Overlapping = the spoke's centre lies on another island's quads. 0.3 of a step
+    // allows for flat quads on a curved surface.
+    const float eps = std::max(1e-6f, 0.3f * along);
+    uint32_t target = 0;
+    while (i1 - i0 >= 2) {                        // keep a row of quads, at least
+        uint32_t who = 0;
+        if (dist_to_others(rm, owner, G.centre(ie), who) >= eps) break;
+        target = who;
+        if (end == 0) i0++; else i1--;
+        ie += dir;
+    }
+    const Vec3 c = G.centre(ie);
+    const float half = 0.5f * (G.v[(size_t)ie * W + W - 1] - G.v[(size_t)ie * W]).length();
+    // Overlapped: that island's edge. Not: any island's edge within reach of the end.
+    const float reach = std::max(half, along) * 1.5f;
+    uint32_t b0 = ~0u;
+    float bd = target ? 1e30f : reach * reach;
+    for (uint32_t v = 0; v < (uint32_t)rm.v.size(); v++) {
+        if (!alive(rm, v) || !on_border(rm, v) || rm.v_owner[v] == owner) continue;
+        if (target && rm.v_owner[v] != target) continue;
+        const Vec3 d = rm.v[v] - c;
+        if (d.dot(d) < bd) { bd = d.dot(d); b0 = v; }
+    }
+    if (b0 == ~0u) return false;
+    // The edge both ways from b0, then the window of W in a row that sits closest to
+    // the end spoke, in either direction.
+    auto walk = [&](uint32_t from, std::vector<uint32_t>& out) {
+        uint32_t prev = b0, cur = from;
+        while (cur != ~0u && cur != b0 && (int)out.size() < W - 1) {
+            out.push_back(cur);
+            const uint32_t nx = rm.border_nb[cur * 2] == prev ? rm.border_nb[cur * 2 + 1] : rm.border_nb[cur * 2];
+            prev = cur; cur = nx;
+        }
+    };
+    std::vector<uint32_t> L, R, chain;
+    walk(rm.border_nb[b0 * 2], L);
+    walk(rm.border_nb[b0 * 2 + 1], R);
+    chain.assign(L.rbegin(), L.rend());
+    chain.push_back(b0);
+    chain.insert(chain.end(), R.begin(), R.end());
+    float best = 1e30f;
+    int best_s = -1;
+    bool best_rev = false;
+    for (int s0 = 0; s0 + W <= (int)chain.size(); s0++) {
+        bool distinct = true;   // a short loop walked both ways meets itself
+        for (int a = 0; a < W && distinct; a++)
+            for (int b = a + 1; b < W; b++)
+                if (chain[s0 + a] == chain[s0 + b]) { distinct = false; break; }
+        if (!distinct) continue;
+        for (int rev = 0; rev < 2; rev++) {
+            float cost = 0.0f;
+            for (int j = 0; j < W; j++) {
+                const Vec3 d = rm.v[chain[s0 + (rev ? W - 1 - j : j)]] - G.v[(size_t)ie * W + j];
+                cost += d.dot(d);
+            }
+            if (cost < best) { best = cost; best_s = s0; best_rev = rev; }
+        }
+    }
+    if (best_s < 0) return false;
+    // A run far off the strip's end means the edge there doesn't face it: leave it be.
+    const float lim = 2.0f * std::max(half, along);
+    if (best > (float)W * lim * lim) return false;
+    for (int j = 0; j < W; j++)
+        idx[(size_t)ie * W + j] = chain[best_s + (best_rev ? W - 1 - j : j)];
+    return true;
+}
+
 // Copy into dst the quads whose owner passes keep(), the vertices they use, and the
 // kept owners' edges between those vertices.
 template <typename Keep>
@@ -424,11 +608,13 @@ void extract(const RetopoMesh& src, RetopoMesh& dst, Keep keep) {
                 dst.v.push_back(src.v[i]);
                 dst.n.push_back(src.n[i]);
                 dst.v_owner.push_back(src.v_owner[i]);
+                dst.mirror.push_back(src.mirror[i]);   // old index, remapped below
             }
             dst.quads.push_back(remap[i]);
         }
         dst.quad_owner.push_back(src.quad_owner[q]);
     }
+    for (uint32_t& m : dst.mirror) m = m == ~0u ? ~0u : remap[m];
     for (size_t e = 0; e < src.edge_owner.size(); e++) {
         const uint32_t a = remap[src.edges[e * 2]], b = remap[src.edges[e * 2 + 1]];
         if (a == ~0u || b == ~0u || !keep(src.edge_owner[e])) continue;
@@ -437,17 +623,6 @@ void extract(const RetopoMesh& src, RetopoMesh& dst, Keep keep) {
     }
 }
 
-RetopoStroke mirrored(const RetopoStroke& s) {
-    // Reversed as well as reflected: a reflection flips handedness, and walking it
-    // backwards flips it again, so the twin's quads wind the same way as the original's.
-    RetopoStroke m = s;
-    std::reverse(m.pts.begin(), m.pts.end());
-    std::reverse(m.nrm.begin(), m.nrm.end());
-    std::reverse(m.half_w.begin(), m.half_w.end());
-    for (Vec3& p : m.pts) p.x = -p.x;
-    for (Vec3& v : m.nrm) v.x = -v.x;
-    return m;
-}
 
 }  // namespace
 
@@ -465,18 +640,19 @@ double retopo_build(RetopoState& st, const Mesh& m, bool mirror) {
         });
         st.result = std::move(keep);
     }
-    std::vector<RetopoStroke> todo;
-    for (const RetopoStroke& s : st.strokes) {
-        if (s.frozen || !s.visible || s.pts.size() < 3) continue;
-        todo.push_back(s);
-        for (float& w : todo.back().half_w) w *= s.width;
-        if (!mirror) continue;
-        // A stroke wholly on one side gets a twin; one that crosses x=0 (a mouth) is
-        // built as drawn — symmetrising it is a later job.
-        bool pos = false, neg = false;
-        for (const Vec3& p : s.pts) { pos |= p.x > 1e-4f; neg |= p.x < -1e-4f; }
-        if (pos != neg) todo.push_back(mirrored(todo.back()));
-    }
+    // Donuts first, then strips in the order drawn: a strip joins anything built
+    // before it. A stroke wholly on one side of x = 0 gets a twin with mirror on; one
+    // that crosses it (a mouth) is built as drawn — symmetrising it is a later job.
+    struct Todo { RetopoStroke s; bool twin; };
+    std::vector<Todo> todo;
+    for (int pass = 0; pass < 2; pass++)
+        for (const RetopoStroke& s : st.strokes) {
+            if (s.frozen || !s.visible || s.pts.size() < 3 || s.closed != (pass == 0)) continue;
+            bool pos = false, neg = false;
+            for (const Vec3& p : s.pts) { pos |= p.x > 1e-4f; neg |= p.x < -1e-4f; }
+            todo.push_back({s, mirror && pos != neg});
+            for (float& w : todo.back().s.half_w) w *= s.width;
+        }
     if (todo.empty() || m.tri_count() == 0) {
         st.built = !st.result.quads.empty();
         if (st.built) build_topology(st.result);
@@ -490,13 +666,13 @@ double retopo_build(RetopoState& st, const Mesh& m, bool mirror) {
     // A cell about one ring step wide (the finest stroke's): small enough that a query
     // touches few triangles, big enough that the region stays a few hundred thousand cells.
     float max_w = 0.0f, cell = 1e30f;
-    for (const RetopoStroke& s : todo)
-        for (size_t i = 0; i < s.pts.size(); i++) {
-            const Vec3& p = s.pts[i];
-            lo = {std::min(lo.x, p.x), std::min(lo.y, p.y), std::min(lo.z, p.z)};
-            hi = {std::max(hi.x, p.x), std::max(hi.y, p.y), std::max(hi.z, p.z)};
-            max_w = std::max(max_w, s.half_w[i]);
-            cell = std::min(cell, 2.0f * s.half_w[i] / (float)std::max(1, s.rings));
+    for (const Todo& t : todo)
+        for (size_t i = 0; i < t.s.pts.size(); i++) {
+            const Vec3& p = t.s.pts[i];
+            lo = {std::min(lo.x, t.twin ? -std::abs(p.x) : p.x), std::min(lo.y, p.y), std::min(lo.z, p.z)};
+            hi = {std::max(hi.x, t.twin ? std::abs(p.x) : p.x), std::max(hi.y, p.y), std::max(hi.z, p.z)};
+            max_w = std::max(max_w, t.s.half_w[i]);
+            cell = std::min(cell, 2.0f * t.s.half_w[i] / (float)std::max(1, t.s.rings));
         }
     const float pad = max_w * 1.6f;
     lo = lo - Vec3(pad, pad, pad);
@@ -507,14 +683,31 @@ double retopo_build(RetopoState& st, const Mesh& m, bool mirror) {
 
     SnapGrid g;
     g.build(m, lo, hi, cell);
-    for (const RetopoStroke& s : todo) build_stroke(s, g, st.result);
-    st.built = !st.result.quads.empty();
-    if (st.built) build_topology(st.result);
+    RetopoMesh& rm = st.result;
+    int joins = 0;
+    for (const Todo& t : todo) {
+        Grid G;
+        if (!stroke_grid(t.s, g, G)) continue;
+        std::vector<uint32_t> idx((size_t)G.n * G.W, ~0u);
+        int i0 = 0, i1 = G.n - 1;
+        if (!G.closed && !rm.quads.empty()) {
+            dedupe_edges(rm);
+            build_topology(rm);
+            joins += join_end(rm, G, 0, t.s.id, i0, i1, idx);
+            joins += join_end(rm, G, 1, t.s.id, i0, i1, idx);
+        }
+        const uint32_t first_new = (uint32_t)rm.v.size();
+        emit_grid(rm, G, i0, i1, idx, t.s.id);
+        if (t.twin) emit_twin(rm, G, i0, i1, idx, first_new, t.s.id);
+    }
+    dedupe_edges(rm);
+    st.built = !rm.quads.empty();
+    if (st.built) build_topology(rm);
 
     const double ms = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - t0).count();
-    std::printf("[retopo] build: %zu strokes -> %u quads, %zu verts, %zu grid refs, %.1f ms\n",
-                todo.size(), st.result.quad_count(), st.result.v.size(), g.keys.size(), ms);
+    std::printf("[retopo] build: %zu strokes -> %u quads, %zu verts, %d strip ends joined, %.1f ms\n",
+                todo.size(), st.result.quad_count(), st.result.v.size(), joins, ms);
     return ms;
 }
 
@@ -594,9 +787,6 @@ void RetopoState::prune() {
 
 namespace {
 
-bool alive(const RetopoMesh& rm, uint32_t i) { return rm.nb_off[i + 1] > rm.nb_off[i]; }
-bool on_border(const RetopoMesh& rm, uint32_t i) { return rm.border_nb[i * 2] != ~0u; }
-
 // b is a or within two edges of it: welding there would fold a quad onto itself.
 bool near_in_topology(const RetopoMesh& rm, uint32_t a, uint32_t b) {
     for (uint32_t k = rm.nb_off[a]; k < rm.nb_off[a + 1]; k++) {
@@ -612,30 +802,15 @@ bool near_in_topology(const RetopoMesh& rm, uint32_t a, uint32_t b) {
 // duplicates go. a is left behind unreferenced (export skips it).
 void weld(RetopoMesh& rm, uint32_t a, uint32_t b) {
     for (uint32_t& q : rm.quads) if (q == a) q = b;
-    std::vector<std::pair<uint64_t, uint32_t>> es;
-    es.reserve(rm.edge_owner.size());
-    for (size_t e = 0; e < rm.edge_owner.size(); e++) {
-        uint32_t x = rm.edges[e * 2], y = rm.edges[e * 2 + 1];
-        if (x == a) x = b;
-        if (y == a) y = b;
-        if (x == y) continue;
-        es.push_back({((uint64_t)std::min(x, y) << 32) | std::max(x, y), rm.edge_owner[e]});
-    }
-    std::sort(es.begin(), es.end(), [](const auto& l, const auto& r) { return l.first < r.first; });
-    rm.edges.clear(); rm.edge_owner.clear();
-    for (size_t i = 0; i < es.size(); i++) {
-        if (i > 0 && es[i].first == es[i - 1].first) continue;
-        rm.edges.push_back((uint32_t)(es[i].first >> 32));
-        rm.edges.push_back((uint32_t)(es[i].first & 0xFFFFFFFFu));
-        rm.edge_owner.push_back(es[i].second);
-    }
+    for (uint32_t& e : rm.edges) if (e == a) e = b;
+    dedupe_edges(rm);
     build_topology(rm);
 }
 
 // After an edit moved `moved`: freeze their strokes, then weld any moved outer-edge
 // vertex that has reached another outer-edge vertex. The reach is 0.4 of the vertex's
 // shortest edge, so it takes a deliberate push, not a near miss, to zip two edges.
-void after_edit(RetopoState& st, const std::vector<uint32_t>& moved) {
+void after_edit(RetopoState& st, const std::vector<uint32_t>& moved, bool mirror) {
     RetopoMesh& rm = st.result;
     std::vector<uint32_t> touched;
     for (uint32_t i : moved) if (i < rm.v_owner.size()) touched.push_back(rm.v_owner[i]);
@@ -661,13 +836,41 @@ void after_edit(RetopoState& st, const std::vector<uint32_t>& moved) {
         }
         if (best == ~0u) continue;
         touched.push_back(rm.v_owner[best]);
+        const uint32_t pa = mirror ? rm.mirror[a] : ~0u, pb = mirror ? rm.mirror[best] : ~0u;
         weld(rm, a, best);
         welds++;
+        if (pa == best) {
+            // A vertex met its own twin: one vertex now, on the seam.
+            rm.v[best].x = 0.0f;
+            rm.mirror[best] = best;
+        } else if (pa != ~0u && pb != ~0u && pa != pb && alive(rm, pa) && alive(rm, pb)
+                   && !near_in_topology(rm, pa, pb)) {
+            weld(rm, pa, pb);   // the twins weld too, so the sides stay alike
+            welds++;
+        }
     }
+    // A joined group is one piece: freezing one island freezes every island that shares
+    // a vertex with it, or the next Build would rebuild a neighbour out from under the
+    // frozen one's shared vertices.
+    uint32_t max_id = 0;
+    for (uint32_t o : rm.quad_owner) max_id = std::max(max_id, o);
+    std::vector<uint32_t> up(max_id + 1);
+    for (uint32_t i = 0; i <= max_id; i++) up[i] = i;
+    auto root = [&](uint32_t x) { while (up[x] != x) x = up[x] = up[up[x]]; return x; };
+    std::vector<uint32_t> first(rm.v.size(), ~0u);
+    for (size_t q = 0; q < rm.quad_owner.size(); q++)
+        for (int k = 0; k < 4; k++) {
+            uint32_t& f = first[rm.quads[q * 4 + k]];
+            if (f == ~0u) f = rm.quad_owner[q];
+            else          up[root(f)] = root(rm.quad_owner[q]);
+        }
     std::sort(touched.begin(), touched.end());
     touched.erase(std::unique(touched.begin(), touched.end()), touched.end());
-    for (uint32_t id : touched)
-        if (RetopoStroke* s = st.find(id)) s->frozen = true;
+    for (RetopoStroke& s : st.strokes) {
+        if (s.frozen || s.id > max_id) continue;
+        for (uint32_t id : touched)
+            if (id <= max_id && root(id) == root(s.id)) { s.frozen = true; break; }
+    }
     if (welds) std::printf("[retopo] welded %d vertex pair(s)\n", welds);
 }
 
@@ -679,11 +882,38 @@ namespace {
 SnapGrid g_smooth_grid;          // one retopo session at a time; rebuilt every pen-down
 std::vector<Vec3>  g_smooth_old; // Jacobi: every vertex reads last frame's neighbours
 std::vector<float> g_smooth_w;
-// Grab: what the press took, and where it was. Sign -1 = moved as a reflection.
+// Grab: what the press took, and where it was; with mirror, their twins follow.
 std::vector<uint32_t> g_grab_idx;
 std::vector<float>    g_grab_w;
-std::vector<int8_t>   g_grab_sign;
 std::vector<Vec3>     g_grab_start;
+std::vector<uint8_t>  g_grab_in;      // per vertex: taken by the press
+bool g_grab_mirror = false;
+
+// With mirror: set each moved vertex's twin to its reflection, and list both in `out`
+// for after_edit. When both of a pair moved (the ring straddles x = 0) they meet
+// halfway; a seam vertex stays on the seam.
+void mirror_pairs(RetopoMesh& rm, const std::vector<uint32_t>& moved, const std::vector<uint8_t>& in,
+                  std::vector<uint32_t>& out) {
+    out = moved;
+    auto refl = [](Vec3 v) { v.x = -v.x; return v; };
+    for (uint32_t i : moved) {
+        // Welded away mid-drag: it no longer stands for anything, don't let it steer.
+        if (!alive(rm, i)) continue;
+        const uint32_t p = rm.mirror[i];
+        if (p == ~0u || !alive(rm, p)) continue;
+        if (p == i) { rm.v[i].x = 0.0f; continue; }
+        if (in[p]) {
+            if (i > p) continue;
+            const Vec3 m = (rm.v[i] + refl(rm.v[p])) * 0.5f;
+            rm.v[i] = m; rm.v[p] = refl(m);
+            rm.n[p] = refl(rm.n[i]);
+            continue;
+        }
+        rm.v[p] = refl(rm.v[i]);
+        rm.n[p] = refl(rm.n[i]);
+        out.push_back(p);
+    }
+}
 
 // Ring weight of p (normal n) around the cursor: smooth to zero at the edge, zero when
 // it faces away or projects outside.
@@ -726,16 +956,9 @@ int retopo_smooth_dab(RetopoState& st, const Camera& cam, int win_w, int win_h,
     RetopoMesh& rm = st.result;
     if (!st.built || g_smooth_grid.m == nullptr || g_smooth_w.size() != rm.v.size()) return 0;
     const float r2 = radius_px * radius_px;
-    // A vertex counts when it (or, with mirror, its reflection) is under the ring.
-    auto weight = [&](Vec3 p, Vec3 n) { return ring_weight(cam, win_w, win_h, cx, cy, r2, p, n); };
     int moved = 0;
     for (size_t i = 0; i < rm.v.size(); i++) {
-        float w = weight(rm.v[i], rm.n[i]);
-        if (mirror) {
-            Vec3 p = rm.v[i], n = rm.n[i];
-            p.x = -p.x; n.x = -n.x;
-            w = std::max(w, weight(p, n));
-        }
+        const float w = ring_weight(cam, win_w, win_h, cx, cy, r2, rm.v[i], rm.n[i]);
         g_smooth_w[i] = rm.pinned[i] ? 0.0f : w * strength;
         moved += g_smooth_w[i] > 0.0f;
     }
@@ -764,33 +987,32 @@ int retopo_smooth_dab(RetopoState& st, const Camera& cam, int win_w, int win_h,
         Vec3 q, qn;
         if (g_smooth_grid.closest(p + d * std::min(1.0f, w), q, qn)) { rm.v[i] = q; rm.n[i] = qn; }
     }
-    static std::vector<uint32_t> list;
+    static std::vector<uint32_t> list, both;
+    static std::vector<uint8_t> in;
     list.clear();
-    for (size_t i = 0; i < rm.v.size(); i++) if (g_smooth_w[i] > 0.0f) list.push_back((uint32_t)i);
-    after_edit(st, list);
+    in.assign(rm.v.size(), 0);
+    for (size_t i = 0; i < rm.v.size(); i++)
+        if (g_smooth_w[i] > 0.0f) { list.push_back((uint32_t)i); in[i] = 1; }
+    if (mirror) mirror_pairs(rm, list, in, both);
+    after_edit(st, mirror ? both : list, mirror);
     return moved;
 }
 
 int retopo_grab_begin(RetopoState& st, const Camera& cam, int win_w, int win_h,
                       float cx, float cy, float radius_px, bool mirror) {
     const RetopoMesh& rm = st.result;
-    g_grab_idx.clear(); g_grab_w.clear(); g_grab_sign.clear(); g_grab_start.clear();
+    g_grab_idx.clear(); g_grab_w.clear(); g_grab_start.clear();
+    g_grab_in.assign(rm.v.size(), 0);
+    g_grab_mirror = mirror;
     if (!st.built || g_smooth_grid.m == nullptr) return 0;
     const float r2 = radius_px * radius_px;
     for (size_t i = 0; i < rm.v.size(); i++) {
-        float w = ring_weight(cam, win_w, win_h, cx, cy, r2, rm.v[i], rm.n[i]);
-        int8_t sign = 1;
-        if (mirror) {
-            Vec3 p = rm.v[i], n = rm.n[i];
-            p.x = -p.x; n.x = -n.x;
-            const float wm = ring_weight(cam, win_w, win_h, cx, cy, r2, p, n);
-            if (wm > w) { w = wm; sign = -1; }
-        }
+        const float w = ring_weight(cam, win_w, win_h, cx, cy, r2, rm.v[i], rm.n[i]);
         if (w <= 0.0f) continue;
         g_grab_idx.push_back((uint32_t)i);
         g_grab_w.push_back(w);
-        g_grab_sign.push_back(sign);
         g_grab_start.push_back(rm.v[i]);
+        g_grab_in[i] = 1;
     }
     return (int)g_grab_idx.size();
 }
@@ -810,12 +1032,15 @@ void retopo_grab_drag(RetopoState& st, const Camera& cam, int win_w, int win_h,
         // The pointer's pixels, as world distance at this vertex's own depth (the
         // foreshortening term: under perspective a far vertex needs more world per pixel).
         const float wpp = 2.0f * cam.half_height_at(cam.view_depth(p0)) / (float)win_h;
-        Vec3 d = (right * dx_px - up * dy_px) * (wpp * g_grab_w[k]);
-        if (g_grab_sign[k] < 0) d.x = -d.x;   // its reflection was grabbed: move mirrored
+        const Vec3 d = (right * dx_px - up * dy_px) * (wpp * g_grab_w[k]);
         Vec3 q, qn;
         if (g_smooth_grid.closest(p0 + d, q, qn, 8)) { rm.v[i] = q; rm.n[i] = qn; }
     }
-    if (dx_px != 0.0f || dy_px != 0.0f) after_edit(st, g_grab_idx);
+    if (dx_px == 0.0f && dy_px == 0.0f) return;
+    if (g_grab_in.size() != rm.v.size()) g_grab_in.resize(rm.v.size(), 0);   // a weld can't add, but be safe
+    static std::vector<uint32_t> both;
+    if (g_grab_mirror) mirror_pairs(rm, g_grab_idx, g_grab_in, both);
+    after_edit(st, g_grab_mirror ? both : g_grab_idx, g_grab_mirror);
 }
 
 bool retopo_export_obj(const RetopoMesh& rm, const char* path) {

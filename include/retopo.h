@@ -44,6 +44,9 @@ struct RetopoMesh {
     std::vector<uint32_t> edge_owner;  // per edge: the RetopoStroke::id it came from (twins share it)
     std::vector<uint32_t> v_owner;     // per vertex, the same (a welded vertex keeps the survivor's)
     std::vector<uint32_t> quad_owner;  // per quad, the same
+    // Per vertex, its mirror twin (built as its exact reflection), itself on the x = 0
+    // seam, ~0u when it has none. Mirrored edits move pairs by this, never by position.
+    std::vector<uint32_t> mirror;
     // For Smooth: edge neighbours (CSR), and for a border vertex its two border
     // neighbours (pinned = a corner, or not a simple border: it never moves).
     std::vector<uint32_t> nb_off, nb;
@@ -51,7 +54,7 @@ struct RetopoMesh {
     std::vector<uint8_t>  pinned;
     void clear() {
         v.clear(); n.clear(); quads.clear(); edges.clear(); edge_owner.clear();
-        v_owner.clear(); quad_owner.clear();
+        v_owner.clear(); quad_owner.clear(); mirror.clear();
         nb_off.clear(); nb.clear(); border_nb.clear(); pinned.clear();
     }
     uint32_t quad_count() const { return (uint32_t)(quads.size() / 4); }
@@ -107,13 +110,16 @@ uint32_t retopo_pick(const RetopoState& st, const Camera& cam, int win_w, int wi
 
 // Rebuild state.result from every visible stroke against the sculpt `m` (positions
 // must be current on the CPU: call Scene::materialize_active_cpu first). With
-// `mirror`, a stroke lying wholly on one side of x=0 gets a mirrored twin.
+// `mirror`, a stroke lying wholly on one side of x=0 gets a twin: its exact reflection,
+// paired vertex by vertex. Donuts build first, then strips in drawing order; a strip end
+// on (or just short of) an island already built joins its outer edge.
 // User-paced and CPU-only; returns the build time in ms.
 double retopo_build(RetopoState& st, const Mesh& m, bool mirror);
 
 // Editing the built quads. retopo_edit_begin at pen-down for Smooth and Grab alike:
 // it re-reads the sculpt for snapping (must be current on the CPU).
-// Both freeze every stroke whose quads they move, and both weld: an outer-edge vertex
+// Both freeze every stroke whose quads they move (and every island joined to it: a
+// joined group is one piece of geometry), and both weld: an outer-edge vertex
 // that comes within ~0.4 of an edge of another outer-edge vertex (another island, or a
 // part of its own island that isn't its immediate neighbourhood) snaps onto it and the
 // two become one. Inner vertices never weld.
@@ -121,14 +127,14 @@ double retopo_build(RetopoState& st, const Mesh& m, bool mirror);
 // with the cursor: vertices under the ring slide toward their neighbours' average
 // along the surface (interior) or along the border (edges — so a strip keeps its
 // width and a donut its hole), then snap back onto the sculpt. Corners stay put. With
-// mirror, a vertex whose reflection is under the ring moves too, so twins stay twins.
+// mirror, each moved vertex's twin is set to its reflection (welds mirror too).
 // Returns how many vertices moved. A rebuild throws the smoothing away.
 void retopo_edit_begin(RetopoState& st, const Mesh& m);
 int  retopo_smooth_dab(RetopoState& st, const Camera& cam, int win_w, int win_h,
                        float cx, float cy, float radius_px, float strength, bool mirror);
 
 // Grab (G in mode 0): at the press, take every vertex under the ring with a soft
-// falloff (mirror: reflections too, moving mirrored); while dragging, move each by the
+// falloff (mirror: their twins follow as reflections); while dragging, move each by the
 // pointer's screen offset since the press, carried into the world at that vertex's
 // depth, then snap onto the sculpt. Returns how many vertices it holds.
 int  retopo_grab_begin(RetopoState& st, const Camera& cam, int win_w, int win_h,

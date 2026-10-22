@@ -2,6 +2,22 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-23 — Retopo mode: mirror by vertex pairs, bridges
+
+*User-tested.*
+
+- **Mirror pairs.** A twin is now the original's exact reflection, paired vertex by vertex
+  (`RetopoMesh::mirror`). Grab / Smooth move what's under the ring and set each twin to
+  its reflection (both under the ring: they meet halfway); welds mirror; a vertex welded
+  onto its own twin becomes one seam vertex at x = 0. Replaces reflecting world positions,
+  which drifted (user: "doesn't work").
+- **Bridges.** Build makes donuts first, then strips in drawing order. A strip end on (or
+  just short of) an island already built is cut back to its outer edge and its end spoke
+  takes over the island's best-aligned run of edge vertices: shared vertices and edges,
+  no T-junction. The island keeps its shape. Twins bridge through the pair map.
+- Joined islands freeze as a group (editing one would otherwise let the next Build
+  rebuild a neighbour out from under the shared vertices).
+
 ## 2026-10-23 — Retopo mode: per-island settings, selection, right-click menu
 
 *User-tested.*
