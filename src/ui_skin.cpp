@@ -6,6 +6,7 @@
 #include "imgui.h"
 #include "imgui_internal.h"   // ShadeVertsLinearColorGradientKeepAlpha
 #include "ui_fonts_generated.h"
+#include "retopo.h"
 #include <algorithm>
 #include <cctype>
 #include <cstdarg>
@@ -1422,6 +1423,20 @@ void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
     }
     o.side = TipSide::Right;
 
+    // Mode 0 has its own dock: its tools stand where the brushes were, and nothing a
+    // brush owns (alpha swatch, smooth) comes along. One tool so far; more as they come.
+    if (mode == InputState::InteractionMode::RETOPO) {
+        o.on = true; o.tip = "Draw polygon strips";
+        o.key = input.key_label(KeyAction::RETOPO_DRAW); o.corner = corner(KeyAction::RETOPO_DRAW);
+        icon_button("rDraw", Icon::RetopoPencil, kRailBtn, o);
+        g_k = 1.0f;
+        g_rail_bottom = ImGui::GetWindowPos().y + ImGui::GetWindowSize().y;
+        g_rail_right = ImGui::GetWindowPos().x + ImGui::GetWindowSize().x;
+        g_strip_open = false;
+        end_panel();
+        return;
+    }
+
     bool strip_open = false;
     if (input.touch_mode) {
         alpha_at = ImGui::GetCursorScreenPos();
@@ -1882,6 +1897,10 @@ float brush_panel(InputState& input, int win_h) {
         }
         hint("Click the model");
         hint("to place");
+    } else if (mode == InputState::InteractionMode::RETOPO) {
+        // The band width is the brush ring, so Size is the one meter that means anything.
+        heading("Draw polygon strips", nullptr);
+        meter_widget("##mS", input, 0, w, k, !can_grow || big);
     } else if (mode == InputState::InteractionMode::SELECT) {
         heading("Select", nullptr);
         hint("Click to pick");
@@ -3602,4 +3621,126 @@ void draw_skin_dialogs(InputState& input, int win_w, int win_h, const DialogInfo
         dlg_bar(dlg_min_w(), info.merge_progress);
         end_dialog();
     }
+}
+
+// ---- Retopo mode's bar ------------------------------------------------------------
+// Built from the skin's own parts (glass panel, chips, icon buttons, tokens), so it
+// follows whichever skin is live: modern glass, DOS blocks, Y2K's orange.
+// Top row: the strokes, each a chip of eye / name / trash. Hovering any part lights
+// that stroke (and its built quads) on the model; double-click the name to rename.
+// Bottom row: Build (Space does the same), the rings stepper (wheel steps it), stroke tools, view toggles,
+// Export and a readout.
+void draw_retopo_bar(InputState& input, RetopoState& st, int win_w, int win_h) {
+    st.hover_id = 0;
+    const float bh = 34.0f;
+    if (!begin_panel("##RetopoBar", ImVec2(win_w * 0.5f, (float)win_h - kEdge), ImVec2(0.5f, 1.0f),
+                     ImVec2(10.0f, 8.0f), 6.0f, 14.0f)) { end_panel(); return; }
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    BtnOpts o;
+    o.look = Look::Bar; o.side = TipSide::Below; o.icon_px = 18.0f;
+
+    static uint32_t rename_id = 0;
+    static bool rename_focus = false;
+    static char rename_buf[48];
+    const ImU32 donut_col = g_dos ? cga::light_cyan : IM_COL32(0x8C, 0xE3, 0xEE, 255);
+    const ImU32 strip_col = kBrush;
+    if (st.strokes.empty()) {
+        label_item(UiFont::Sans, 13.0f, kMuted,
+                   "Sketch on the model: a closed ring is a donut, an open line a strip", 0.0f, bh);
+    } else {
+        int del = -1;
+        for (int i = 0; i < (int)st.strokes.size(); i++) {
+            RetopoStroke& s = st.strokes[i];
+            ImGui::PushID((int)s.id);
+            if (i > 0) ImGui::SameLine(0.0f, 10.0f);
+            ImGui::BeginGroup();
+            o.on = s.visible; o.tip = s.visible ? "Built (click to skip)" : "Skipped (click to build)";
+            if (icon_button("vis", s.visible ? Icon::ViewPaintShow : Icon::ViewPaintHide, bh, o))
+                s.visible = !s.visible;
+            ImGui::SameLine(0.0f, 4.0f);
+            if (rename_id == s.id) {
+                // Enter or clicking away keeps it, Esc drops it, empty keeps the old name.
+                if (rename_focus) { ImGui::SetKeyboardFocusHere(); rename_focus = false; }
+                ImGui::SetNextItemWidth(110.0f);
+                ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (bh - ImGui::GetFrameHeight()) * 0.5f);
+                ImGui::InputText("##rename", rename_buf, sizeof(rename_buf),
+                                 ImGuiInputTextFlags_AutoSelectAll);
+                if (ImGui::IsItemDeactivated()) {
+                    if (!ImGui::IsKeyPressed(ImGuiKey_Escape) && rename_buf[0]) s.name = rename_buf;
+                    rename_id = 0;
+                }
+            } else {
+                const ImVec2 ts = text_size(UiFont::SansSemibold, 13.0f, s.name.c_str());
+                const ImVec2 p = ImGui::GetCursorScreenPos();
+                ImGui::InvisibleButton("##name", ImVec2(ts.x + 4.0f, bh));
+                text_at(dl, UiFont::SansSemibold, 13.0f, ImVec2(p.x + 2.0f, p.y + (bh - ts.y) * 0.5f),
+                        s.closed ? donut_col : strip_col, s.name.c_str());
+                if (ImGui::IsItemHovered()) {
+                    if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                        rename_id = s.id;
+                        rename_focus = true;
+                        std::snprintf(rename_buf, sizeof(rename_buf), "%s", s.name.c_str());
+                    }
+                    tooltip(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), TipSide::Below,
+                            "Double-click to rename", nullptr);
+                }
+            }
+            ImGui::SameLine(0.0f, 4.0f);
+            o.on = false; o.tip = "Delete this stroke";
+            if (icon_button("del", Icon::UiTrash, bh, o)) del = i;
+            ImGui::EndGroup();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem)) {
+                st.hover_id = s.id;
+                dl->AddRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(),
+                            s.closed ? donut_col : strip_col, rad(9.0f), 0, 1.5f);
+            }
+            ImGui::PopID();
+        }
+        if (del >= 0) st.strokes.erase(st.strokes.begin() + del);
+    }
+
+    // Bottom row.
+    if (chip("Build", false, bh)) input.retopo_build_requested = true;
+    if (ImGui::IsItemHovered()) tooltip(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), TipSide::Below,
+                                        "Turn the strokes into quads", input.key_label(KeyAction::RETOPO_BUILD));
+    // Rings stepper: - / count / +, and the wheel anywhere over it.
+    ImGui::SameLine(0.0f, 14.0f);
+    ImGui::BeginGroup();
+    if (chip("-", false, bh)) st.rings = std::max(2, st.rings - 2);
+    ImGui::SameLine(0.0f, 4.0f);
+    char rl[24];
+    std::snprintf(rl, sizeof rl, "%d rings", st.rings);
+    label_item(UiFont::SansSemibold, 13.0f, kText, rl, 64.0f, bh);
+    ImGui::SameLine(0.0f, 4.0f);
+    if (chip("+", false, bh)) st.rings = std::min(16, st.rings + 2);
+    ImGui::EndGroup();
+    if (ImGui::IsItemHovered()) {
+        const float wh = ImGui::GetIO().MouseWheel;
+        if (wh != 0.0f) st.rings = std::max(2, std::min(16, st.rings + (wh > 0.0f ? 2 : -2)));
+        tooltip(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), TipSide::Below,
+                "Loops across each band (wheel steps it)", nullptr);
+    }
+    ImGui::SameLine(0.0f, 14.0f);
+    o.on = false; o.tip = "Undo stroke"; o.key = input.key_label(KeyAction::UNDO);
+    o.enabled = !st.strokes.empty();
+    if (icon_button("rUndo", Icon::CmdUndo, bh, o)) st.undo();
+    o.key = nullptr; o.enabled = true;
+    ImGui::SameLine(0.0f, 4.0f);
+    if (chip("Clear", false, bh)) st.clear_all();
+    if (ImGui::IsItemHovered()) tooltip(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), TipSide::Below,
+                                        "Remove every stroke (Ctrl+Shift+Z brings them back)", nullptr);
+    ImGui::SameLine(0.0f, 14.0f);
+    if (chip("Strokes", st.show_strokes, bh)) st.show_strokes = !st.show_strokes;
+    ImGui::SameLine(0.0f, 4.0f);
+    if (chip("Wire", st.show_result, bh)) st.show_result = !st.show_result;
+    ImGui::SameLine(0.0f, 14.0f);
+    o.tip = "Export OBJ (quads)"; o.enabled = st.built;
+    if (icon_button("rExport", Icon::CmdExport, bh, o)) input.retopo_export_requested = true;
+    o.enabled = true;
+    ImGui::SameLine(0.0f, 12.0f);
+    char ro[48];
+    if (st.built) std::snprintf(ro, sizeof ro, "%u quads%s", st.result.quad_count(), input.mirror_x ? " \xC2\xB7 mirror X" : "");
+    else          std::snprintf(ro, sizeof ro, "%s", input.mirror_x ? "not built \xC2\xB7 mirror X" : "not built");
+    label_item(UiFont::Mono, 12.0f, kMuted, ro, 0.0f, bh);
+    end_panel();
 }

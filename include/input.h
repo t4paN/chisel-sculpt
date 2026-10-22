@@ -91,7 +91,7 @@ enum class KeyAction : int {
     BRUSH_DRAW, BRUSH_CLAY, BRUSH_INFLATE, BRUSH_CREASE, BRUSH_PINCH,
     BRUSH_MOVE, BRUSH_LIMB, BRUSH_POSE, BRUSH_MASK, BRUSH_PREV, BRUSH_NEXT,
     PAINT_BUCKET, PAINT_PICKER,
-    RETOPO_BAR,
+    RETOPO_BUILD, RETOPO_DRAW,
     HOLD_SIZE, HOLD_STRENGTH, HOLD_HARDNESS, HOLD_SPACING, SIZE_DOWN, SIZE_UP, AUTOSMOOTH,
     LEVEL_UP, LEVEL_DOWN, PROJECT, MIRROR, REMESH, MERGE, DELETE_MESH,
     MASK_INVERT, MASK_CLEAR,
@@ -656,8 +656,7 @@ struct InputState {
     void enter_paint_mode();
     void enter_sculpt_mode();
     void enter_retopo_mode();
-    // Retopo mode's floating bar (Space) and what its buttons ask the main loop for.
-    bool retopo_bar_open = false;
+    // What retopo mode's bar (always up in mode 0) and Space ask the main loop for.
     bool retopo_build_requested = false;
     bool retopo_export_requested = false;
     // Which mode's shortcuts are live: Paint while painting (EDIT in paint mode), else

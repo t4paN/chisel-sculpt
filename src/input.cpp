@@ -43,7 +43,8 @@ const KeyActionInfo kKeyActions[(int)KeyAction::COUNT] = {
         "Draw and Mask. In Paint mode: swap colours. In Select mode: hold to spin the selection.", {GLFW_KEY_E, 0}},
     {"paint_bucket",  "Paint mode", "Fill bucket",      "Click an unmasked area to fill it. Ctrl: erase it", {GLFW_KEY_B, 0}, KeyScope::Paint},
     {"paint_picker",  "Paint mode", "Colour picker",    "Click the model to pick its colour", {GLFW_KEY_C, 0}, KeyScope::Paint},
-    {"retopo_bar",    "Retopo mode", "Tool bar",         "Show / hide the Build bar", {GLFW_KEY_SPACE, 0}, KeyScope::Retopo},
+    {"retopo_build",  "Retopo mode", "Build",            "Turn the strokes into quads (the bar's Build)", {GLFW_KEY_SPACE, 0}, KeyScope::Retopo},
+    {"retopo_draw",   "Retopo mode", "Draw polygon strips", nullptr, {GLFW_KEY_D, 0}, KeyScope::Retopo},
     {"hold_size",     "Brush feel", "Size",             "Hold and drag", {GLFW_KEY_S, 0}},
     {"hold_strength", "Brush feel", "Strength",         "Hold and drag", {GLFW_KEY_W, 0}},
     {"hold_hardness", "Brush feel", "Hardness",         "Hold and drag", {GLFW_KEY_A, 0}},
@@ -1204,10 +1205,14 @@ static void run_key_action(GLFWwindow* w, KeyAction a, bool repeat) {
             break;
         case KeyAction::MODE_RETOPO:
             in.enter_retopo_mode();
-            notify(in.retopo_bar_open ? "Retopo" : "Retopo: sketch on the model, Space for the Build bar", 2.5f);
+            notify("Retopo: sketch on the model, Space builds", 2.0f);
             break;
-        case KeyAction::RETOPO_BAR:
-            if (!repeat) in.retopo_bar_open = !in.retopo_bar_open;
+        case KeyAction::RETOPO_BUILD:
+            if (!repeat) in.retopo_build_requested = true;
+            break;
+        // Mode 0's only tool so far: nothing to switch, but the key answers.
+        case KeyAction::RETOPO_DRAW:
+            if (!repeat) notify("Draw polygon strips", 1.0f);
             break;
         case KeyAction::PAINT_BUCKET:
             // Paint mode's key (KeyScope::Paint): arm the bucket. Again: back to the brush.

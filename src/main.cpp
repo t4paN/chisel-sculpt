@@ -2778,9 +2778,8 @@ int main(int argc, char* argv[]) {
                 // Pen up (or the mode changed under it).
                 const bool kept = retopo.finish_live();
                 if (kept) {
-                    std::snprintf(input.notification, sizeof(input.notification), "%s%s",
-                                  retopo.strokes.back().name.c_str(),
-                                  input.retopo_bar_open ? "" : " - Space for the Build bar");
+                    std::snprintf(input.notification, sizeof(input.notification), "%s - Space builds",
+                                  retopo.strokes.back().name.c_str());
                     input.notification_timer = 1.5f;
                 }
             }

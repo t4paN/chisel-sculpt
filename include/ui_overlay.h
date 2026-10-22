@@ -88,10 +88,8 @@ void draw_pose_cursor(float x, float y, bool on_target);
 // built quads as a wireframe, hiding what faces away or sits behind the sculpt. The
 // depth test reads the plane cache, so pass depth_fresh = false while the camera
 // moves (only the facing test runs then). Background draw list: docks stay on top.
-// The bar is the floating Build bar, bottom centre, shown while input.retopo_bar_open
-// (Space). Both shared by every skin.
+// Shared by every skin. (The Space bar that goes with it is ui_skin.h's draw_retopo_bar.)
 struct RetopoState;
 struct Renderer;
 void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera& cam,
                          int win_w, int win_h, bool depth_fresh, bool mirror);
-void draw_retopo_bar(InputState& input, RetopoState& st, int win_w, int win_h);

@@ -16,6 +16,7 @@ enum class Icon {
     UiFullscreen, UiFullscreenExit,   // web only (a browser tab's one way to drop its bars)
     PaintBucket, PaintPicker,         // the paint dock's fill bucket and colour picker
     ModeRetopo,                       // a quad grid bent over a form
+    RetopoPencil, UiTrash,            // mode 0's draw tool; delete in lists
     Count
 };
 

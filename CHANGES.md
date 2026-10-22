@@ -2,6 +2,14 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-22 — Retopo mode: own dock, the bar in the skin's style, Space builds
+
+*User-tested.* Mode 0's dock replaces the brushes with one pencil, "Draw polygon strips"
+(D, mode 0 only); Tool Options shows just Size. The bar is always up in mode 0 and is
+drawn with the skin's own panel, chips and icons (eye / name / trash per stroke, a
+- rings + stepper). Space now builds instead of toggling the bar. Y2K and classic still
+show the sculpt brushes in mode 0.
+
 ## 2026-10-22 — Retopo mode (key 0): sketch donuts and strips, Build quads
 
 *Branch `retopo-mode`. User saw eye donuts build live; hover/rename/wheel not yet hand-tested.*

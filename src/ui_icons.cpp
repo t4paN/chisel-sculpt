@@ -80,6 +80,10 @@ const IconDef kIcons[(int)Icon::Count] = {
     // Drawn here: a patch of quads bowed over a form — two loops, three spokes.
     /* ModeRetopo   */ {{P("M3 8c3-3 15-3 18 0"), P("M3 16c3-3 15-3 18 0"),
                          P("M3 8v8M12 5.75v8M21 8v8")}, 3},
+    // Drawn here: a pencil, tip bottom-left, the band of its ferrule across it.
+    /* RetopoPencil */ {{P("M4 20l1.2-4.4L16 4.8l3.2 3.2L8.4 18.8z"), P("M13.6 7.2l3.2 3.2"),
+                         P("M5.2 15.6l3.2 3.2")}, 3},
+    /* UiTrash      */ {{P("M4 7h16M9.5 7V4.5h5V7"), P("M6 7l1 13h10l1-13"), P("M10 11v5.5M14 11v5.5")}, 3},
 };
 
 // ---- Minimal SVG path interpreter -------------------------------------------
@@ -305,6 +309,8 @@ const unsigned short kPixel[(int)Icon::Count][16] = {
     /* paint-bucket    */ {0x0000,0x0000,0x0300,0x0780,0x0CC0,0x1860,0x3030,0x6018,0xFFFC,0x7FF8,0x3FF2,0x1FE7,0x0FC7,0x0782,0x0300,0x0000},   // drawn here
     /* paint-picker    */ {0x0000,0x0000,0x0038,0x007C,0x007C,0x01FC,0x01F8,0x01E0,0x03E0,0x0700,0x0E00,0x1C00,0x3800,0x3000,0x0000,0x0000},   // drawn here
     /* mode-retopo     */ {0x0000,0x0000,0x07E0,0x1998,0x6186,0x4182,0x4182,0x4182,0x47E2,0x5998,0x6186,0x4182,0x4182,0x4182,0x0000,0x0000},   // drawn here: bowed quad patch
+    /* retopo-pencil   */ {0x0000,0x001C,0x003E,0x007E,0x00FC,0x01F8,0x03F0,0x07E0,0x0FC0,0x1F80,0x3F00,0x3E00,0x7C00,0x6000,0x0000,0x0000},   // drawn here
+    /* ui-trash        */ {0x0000,0x03C0,0x3FFC,0x3FFC,0x1FF8,0x1998,0x1998,0x1998,0x1998,0x1998,0x1998,0x1998,0x1998,0x1FF8,0x0FF0,0x0000},   // drawn here
 };
 } // namespace
 
