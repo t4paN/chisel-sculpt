@@ -20,6 +20,9 @@ struct RetopoStroke {
     std::vector<float> half_w;   // half the band's width at each point (world)
     bool closed  = false;        // donut (true) or strip (false)
     bool visible = true;         // hidden strokes are skipped by Build
+    // Its quads were grabbed, smoothed or welded: they're geometry now, not a sketch.
+    // Build keeps them as they are (visible or not) and the band stops drawing.
+    bool frozen  = false;
     uint32_t id  = 0;
     std::string name;
 };
@@ -32,6 +35,8 @@ struct RetopoMesh {
     std::vector<uint32_t> quads;
     std::vector<uint32_t> edges;   // 2 per edge
     std::vector<uint32_t> edge_owner;  // per edge: the RetopoStroke::id it came from (twins share it)
+    std::vector<uint32_t> v_owner;     // per vertex, the same (a welded vertex keeps the survivor's)
+    std::vector<uint32_t> quad_owner;  // per quad, the same
     // For Smooth: edge neighbours (CSR), and for a border vertex its two border
     // neighbours (pinned = a corner, or not a simple border: it never moves).
     std::vector<uint32_t> nb_off, nb;
@@ -39,6 +44,7 @@ struct RetopoMesh {
     std::vector<uint8_t>  pinned;
     void clear() {
         v.clear(); n.clear(); quads.clear(); edges.clear(); edge_owner.clear();
+        v_owner.clear(); quad_owner.clear();
         nb_off.clear(); nb.clear(); border_nb.clear(); pinned.clear();
     }
     uint32_t quad_count() const { return (uint32_t)(quads.size() / 4); }
@@ -57,12 +63,20 @@ struct RetopoState {
     bool show_result = true;
     bool show_strokes = true;
     int  rings = 6;                   // loops across a band, centre loop included = rings+1
+    float density = 1.0f;             // spokes along a band: 1 = about square quads (0.5..3)
     uint32_t hover_id = 0;            // stroke under the cursor in the bar (0 = none), lit in the overlay
 
     // Pen-up: keep the stroke if it has enough to build on, decide donut vs strip.
     // Returns false (and drops it) for a tap.
     bool finish_live();
     void undo();
+    // Drop the quads of strokes that no longer exist (trash, undo), right away rather
+    // than at the next Build. Welded neighbours keep the vertices they share.
+    void prune();
+    RetopoStroke* find(uint32_t id) {
+        for (RetopoStroke& s : strokes) if (s.id == id) return &s;
+        return nullptr;
+    }
     void redo_one();
     void clear_all();
 };
@@ -75,6 +89,10 @@ double retopo_build(RetopoState& st, const Mesh& m, bool mirror);
 
 // Editing the built quads. retopo_edit_begin at pen-down for Smooth and Grab alike:
 // it re-reads the sculpt for snapping (must be current on the CPU).
+// Both freeze every stroke whose quads they move, and both weld: an outer-edge vertex
+// that comes within ~0.4 of an edge of another outer-edge vertex (another island, or a
+// part of its own island that isn't its immediate neighbourhood) snaps onto it and the
+// two become one. Inner vertices never weld.
 // Smooth (Shift / double Shift in mode 0): dab every frame
 // with the cursor: vertices under the ring slide toward their neighbours' average
 // along the surface (interior) or along the border (edges — so a strip keeps its

@@ -3677,9 +3677,13 @@ void draw_retopo_bar(InputState& input, RetopoState& st, int win_w, int win_h) {
             ImGui::PushID((int)s.id);
             if (i > 0) ImGui::SameLine(0.0f, 10.0f);
             ImGui::BeginGroup();
-            o.on = s.visible; o.tip = s.visible ? "Built (click to skip)" : "Skipped (click to build)";
+            // Frozen: its quads were edited, Build leaves them be, so there's nothing to skip.
+            o.on = s.visible && !s.frozen; o.enabled = !s.frozen;
+            o.tip = s.frozen ? "Frozen: edited, Build leaves it as it is"
+                  : s.visible ? "Built (click to skip)" : "Skipped (click to build)";
             if (icon_button("vis", s.visible ? Icon::ViewPaintShow : Icon::ViewPaintHide, bh, o))
                 s.visible = !s.visible;
+            o.enabled = true;
             ImGui::SameLine(0.0f, 4.0f);
             if (rename_id == s.id) {
                 // Enter or clicking away keeps it, Esc drops it, empty keeps the old name.
@@ -3697,7 +3701,7 @@ void draw_retopo_bar(InputState& input, RetopoState& st, int win_w, int win_h) {
                 const ImVec2 p = ImGui::GetCursorScreenPos();
                 ImGui::InvisibleButton("##name", ImVec2(ts.x + 4.0f, bh));
                 text_at(dl, UiFont::SansSemibold, 13.0f, ImVec2(p.x + 2.0f, p.y + (bh - ts.y) * 0.5f),
-                        s.closed ? donut_col : strip_col, s.name.c_str());
+                        s.frozen ? kText : s.closed ? donut_col : strip_col, s.name.c_str());
                 if (ImGui::IsItemHovered()) {
                     if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
                         rename_id = s.id;
@@ -3719,63 +3723,94 @@ void draw_retopo_bar(InputState& input, RetopoState& st, int win_w, int win_h) {
             }
             ImGui::PopID();
         }
-        if (del >= 0) st.strokes.erase(st.strokes.begin() + del);
+        if (del >= 0) {
+            st.strokes.erase(st.strokes.begin() + del);
+            st.prune();   // its quads go now, not at the next Build
+        }
     }
 
-    // Bottom row.
+    // Bottom row. The rings / density pair stacks two short sliders, so the row is
+    // taller than a button: everything else sits centred on it (same()).
+    const float sh = std::round(bh * 0.64f), sgap = 3.0f, row_h = sh * 2.0f + sgap;
+    const float row_y = ImGui::GetCursorPosY();
+    const float btn_dy = (row_h - bh) * 0.5f;
+    auto same = [&](float gap) {
+        ImGui::SameLine(0.0f, gap);
+        ImGui::SetCursorPosY(row_y + btn_dy);
+    };
+    ImGui::SetCursorPosY(row_y + btn_dy);
     if (chip("Build", false, bh)) input.retopo_build_requested = true;
     if (ImGui::IsItemHovered()) tooltip(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), TipSide::Below,
                                         "Turn the strokes into quads", input.key_label(KeyAction::RETOPO_BUILD));
-    // Rings slider, 2..16 in pairs, drawn in the skin's colours: a glass track, the
-    // filled part in the "on" tint, the value centred. Click or drag sets it by where
-    // the pointer sits; the wheel steps it.
-    ImGui::SameLine(0.0f, 14.0f);
-    {
+    // A slider in the skin's colours: a glass track, the filled part in the "on" tint,
+    // the value centred. Click or drag sets it by where the pointer sits (returns that
+    // 0..1, or -1); `wheel` gets the wheel's notches while hovered.
+    auto slider = [&](const char* id, float fill, const char* text, const char* tip, float* wheel) {
         const float sw = 150.0f;
         const ImVec2 p = ImGui::GetCursorScreenPos();
-        ImGui::InvisibleButton("##rings", ImVec2(sw, bh));
-        const bool held = ImGui::IsItemActive(), lit = held || ImGui::IsItemHovered();
-        if (held) {
-            const float t = std::max(0.0f, std::min(1.0f, (ImGui::GetIO().MousePos.x - p.x) / sw));
-            st.rings = 2 + 2 * (int)std::lround(t * 7.0f);
-        }
-        const ImVec2 b(p.x + sw, p.y + bh);
-        const float fill = (float)(st.rings - 2) / 14.0f;
-        dl->AddRectFilled(p, b, IM_COL32(255, 255, 255, lit ? 26 : 14), rad(8.0f));
+        ImGui::InvisibleButton(id, ImVec2(sw, sh));
+        const bool held = ImGui::IsItemActive(), hov = ImGui::IsItemHovered(), lit = held || hov;
+        float t = -1.0f;
+        if (held) t = std::max(0.0f, std::min(1.0f, (ImGui::GetIO().MousePos.x - p.x) / sw));
+        *wheel = hov ? ImGui::GetIO().MouseWheel : 0.0f;
+        const ImVec2 b(p.x + sw, p.y + sh);
+        const float r = rad(6.0f);
+        dl->AddRectFilled(p, b, IM_COL32(255, 255, 255, lit ? 26 : 14), r);
         if (fill > 0.0f)
-            dl->AddRectFilled(p, ImVec2(p.x + sw * fill, b.y), kTint, rad(8.0f),
+            dl->AddRectFilled(p, ImVec2(p.x + sw * fill, b.y), kTint, r,
                               fill < 0.99f ? ImDrawFlags_RoundCornersLeft : ImDrawFlags_None);
-        dl->AddRect(p, b, lit ? kAccent : kBorder, rad(8.0f), 0, g_dos ? 2.0f : 1.0f);
-        char rl[24];
-        std::snprintf(rl, sizeof rl, "%d rings", st.rings);
-        const ImVec2 ts = text_size(UiFont::SansSemibold, 13.0f, rl);
-        text_at(dl, UiFont::SansSemibold, 13.0f, ImVec2(p.x + (sw - ts.x) * 0.5f, p.y + (bh - ts.y) * 0.5f),
-                kText, rl);
-    }
-    if (ImGui::IsItemHovered()) {
-        const float wh = ImGui::GetIO().MouseWheel;
-        if (wh != 0.0f) st.rings = std::max(2, std::min(16, st.rings + (wh > 0.0f ? 2 : -2)));
-        tooltip(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), TipSide::Below,
-                "Loops across each band (wheel steps it)", nullptr);
-    }
+        dl->AddRect(p, b, lit ? kAccent : kBorder, r, 0, g_dos ? 2.0f : 1.0f);
+        const ImVec2 ts = text_size(UiFont::SansSemibold, 12.0f, text);
+        text_at(dl, UiFont::SansSemibold, 12.0f, ImVec2(p.x + (sw - ts.x) * 0.5f, p.y + (sh - ts.y) * 0.5f),
+                kText, text);
+        if (hov) tooltip(p, b, TipSide::Below, tip, nullptr);
+        return t;
+    };
     ImGui::SameLine(0.0f, 14.0f);
+    ImGui::SetCursorPosY(row_y);
+    ImGui::BeginGroup();
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(6.0f, sgap));
+    {
+        // Rings: loops across a band, 2..16 in pairs.
+        char txt[24];
+        std::snprintf(txt, sizeof txt, "%d rings", st.rings);
+        float wh;
+        const float t = slider("##rings", (float)(st.rings - 2) / 14.0f, txt,
+                               "Loops across each band (wheel steps it)", &wh);
+        if (t >= 0.0f) st.rings = 2 + 2 * (int)std::lround(t * 7.0f);
+        if (wh != 0.0f) st.rings = std::max(2, std::min(16, st.rings + (wh > 0.0f ? 2 : -2)));
+    }
+    {
+        // Density: spokes along a band, as a multiple of "square quads" (0.5x..3x).
+        char txt[24];
+        std::snprintf(txt, sizeof txt, "density %.1fx", st.density);
+        float wh;
+        const float t = slider("##density", (st.density - 0.5f) / 2.5f, txt,
+                               "Quads along each band: 1x = about square (wheel steps it)", &wh);
+        if (t >= 0.0f) st.density = 0.5f + std::round(t * 25.0f) / 10.0f;
+        if (wh != 0.0f) st.density = std::max(0.5f, std::min(3.0f, st.density + (wh > 0.0f ? 0.1f : -0.1f)));
+        st.density = std::round(st.density * 10.0f) / 10.0f;
+    }
+    ImGui::PopStyleVar();
+    ImGui::EndGroup();
+    same(14.0f);
     o.on = false; o.tip = "Undo stroke"; o.key = input.key_label(KeyAction::UNDO);
     o.enabled = !st.strokes.empty();
     if (icon_button("rUndo", Icon::CmdUndo, bh, o)) st.undo();
     o.key = nullptr; o.enabled = true;
-    ImGui::SameLine(0.0f, 4.0f);
+    same(4.0f);
     if (chip("Clear", false, bh)) st.clear_all();
     if (ImGui::IsItemHovered()) tooltip(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), TipSide::Below,
                                         "Remove every stroke (Ctrl+Shift+Z brings them back)", nullptr);
-    ImGui::SameLine(0.0f, 14.0f);
+    same(14.0f);
     if (chip("Strokes", st.show_strokes, bh)) st.show_strokes = !st.show_strokes;
-    ImGui::SameLine(0.0f, 4.0f);
+    same(4.0f);
     if (chip("Wire", st.show_result, bh)) st.show_result = !st.show_result;
-    ImGui::SameLine(0.0f, 14.0f);
+    same(14.0f);
     o.tip = "Export OBJ (quads)"; o.enabled = st.built;
     if (icon_button("rExport", Icon::CmdExport, bh, o)) input.retopo_export_requested = true;
     o.enabled = true;
-    ImGui::SameLine(0.0f, 12.0f);
+    same(12.0f);
     char ro[48];
     if (st.built) std::snprintf(ro, sizeof ro, "%u quads%s", st.result.quad_count(), input.mirror_x ? " \xC2\xB7 mirror X" : "");
     else          std::snprintf(ro, sizeof ro, "%s", input.mirror_x ? "not built \xC2\xB7 mirror X" : "not built");

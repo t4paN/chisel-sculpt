@@ -2,6 +2,25 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-22 — Retopo mode: frozen islands, edge welding, density slider
+
+*User-tested.*
+
+- **Frozen.** The first grab that moves a stroke's quads, the first smooth that touches
+  them, or a weld freezes that stroke: Build keeps its quads as they are (rings and density
+  no longer reach it), the band stops drawing, Grab and Smooth still edit it. In the bar
+  its name goes white and its eye greys out. Trash / Ctrl+Z drop a stroke's quads at once.
+- **Welding.** While grabbing or smoothing, an outer-edge vertex that comes within 0.4 of
+  its shortest edge of another outer-edge vertex (another island, or a far part of its
+  own) folds into it; duplicate edges merge, both strokes freeze. Inner vertices never
+  weld, nor do vertices within two edges of each other. Export skips folded-away vertices.
+- **Density** slider under rings: quads along a band, 0.5x–3x of square. Both sliders are
+  shorter (0.64), stacked; the bar grows upward to fit.
+- Fixed before commit: Build cleared the result before keeping the frozen quads, so every
+  edited island vanished on the next Build.
+- Known: mirror for Grab/Smooth tests reflected world positions, which doesn't work (user);
+  it should run on vertex pairs. See `retopo-handoff.md` in the working root.
+
 ## 2026-10-22 — Retopo mode: Smooth and Grab on the built quads
 
 *User-tested.* Both work on the result, and both snap every vertex back onto the sculpt.

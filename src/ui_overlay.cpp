@@ -2375,7 +2375,8 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
         const bool any_hover = st.hover_id != 0;
         for (const RetopoStroke& s : st.strokes) {
             const bool lit = s.id == st.hover_id;
-            if (s.visible || lit) band(s, lit ? 130 : any_hover ? 25 : 55);
+            // A frozen stroke is geometry now: no band, only its quads (lit when hovered).
+            if (!s.frozen && (s.visible || lit)) band(s, lit ? 130 : any_hover ? 25 : 55);
         }
         if (st.drawing && st.live.pts.size() >= 2) band(st.live, 70);
     }
