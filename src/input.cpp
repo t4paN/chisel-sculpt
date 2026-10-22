@@ -447,6 +447,7 @@ void InputState::end_frame() {
     path_n = 0;
     mouse1_just_pressed = false;
     mouse1_just_released = false;
+    mouse2_just_released = false;
     release_tail = false;
     enter_pressed = false;
     key_y_pressed = false;
@@ -1077,6 +1078,11 @@ static void mouse_button_callback(GLFWwindow* w, int button, int action, int mod
     if (button == GLFW_MOUSE_BUTTON_RIGHT) {
         bool was_down = g_input->mouse2_down;
         g_input->mouse2_down = (action == GLFW_PRESS);
+        if (action == GLFW_PRESS && !was_down) {
+            g_input->mouse2_press_x = (float)g_input->mouse_x;
+            g_input->mouse2_press_y = (float)g_input->mouse_y;
+        }
+        if (action == GLFW_RELEASE && was_down) g_input->mouse2_just_released = true;
         // Pose brush: right-click a sphere to remove it (main.cpp, once idle).
         if (action == GLFW_PRESS && !was_down && g_input->pose_brush_on()
             && g_input->pose_hover_joint >= 0 && !g_input->zoom_modifier_held()

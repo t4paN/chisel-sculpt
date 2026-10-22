@@ -658,6 +658,12 @@ struct InputState {
     void enter_retopo_mode();
     // What retopo mode's bar (always up in mode 0) and Space ask the main loop for.
     bool retopo_build_requested = false;
+    bool retopo_build_quiet = false;   // a slider asked: rebuild without the toast
+    bool retopo_menu_request = false;  // a right-click on an island: the bar opens its menu
+    // Right button: where it went down, and a one-frame flag on release (retopo's menu
+    // is a click, so main.cpp compares the two to tell it from a zoom drag).
+    float mouse2_press_x = 0.0f, mouse2_press_y = 0.0f;
+    bool mouse2_just_released = false;
     // Mode 0's dock tool. Smooth isn't one of these: it rides Shift, as in sculpt.
     enum class RetopoTool { DRAW, GRAB };
     RetopoTool retopo_tool = RetopoTool::DRAW;

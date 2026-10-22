@@ -2292,7 +2292,7 @@ bool retopo_facing(const Camera& cam, Vec3 p, Vec3 n) {
 }
 
 void retopo_band(ImDrawList* dl, const RetopoStroke& s, const Camera& cam, int win_w, int win_h,
-                 ImU32 fill, ImU32 line, bool flip_x) {
+                 ImU32 fill, ImU32 line, bool flip_x, float wscale) {
     const size_t n = s.pts.size();
     if (n < 2) return;
     static std::vector<ImVec2> at;
@@ -2307,7 +2307,7 @@ void retopo_band(ImDrawList* dl, const RetopoStroke& s, const Camera& cam, int w
              && !(cam.perspective && cam.view_depth(p) <= 1e-4f);
         at[i] = ImVec2(x, y);
         const float wpp = 2.0f * cam.half_height_at(cam.view_depth(p)) / (float)win_h;
-        rad[i] = wpp > 0.0f ? s.half_w[i] / wpp : 0.0f;
+        rad[i] = wpp > 0.0f ? s.half_w[i] * wscale / wpp : 0.0f;
     }
     // Each point's "across" direction comes from neighbours half a band-width away
     // on either side, not from its own 3 px segment: at that lever arm the hand's
@@ -2361,14 +2361,18 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
     if (st.show_strokes) {
         auto band = [&](const RetopoStroke& s, int alpha) {
             const ImU32 fill = s.closed ? IM_COL32(70, 200, 220, alpha) : IM_COL32(255, 175, 70, alpha);
-            const ImU32 line = s.closed ? IM_COL32(150, 235, 245, std::min(255, alpha * 3))
+            // Selected: a white centreline, so the selection reads without a hover.
+            const ImU32 line = s.selected ? IM_COL32(255, 255, 255, 255)
+                             : s.closed ? IM_COL32(150, 235, 245, std::min(255, alpha * 3))
                                         : IM_COL32(255, 210, 150, std::min(255, alpha * 3));
-            retopo_band(dl, s, cam, win_w, win_h, fill, line, false);
+            // The live stroke has no settings yet: it shows what pen-up will give it.
+            const float w = &s == &st.live ? st.width : s.width;
+            retopo_band(dl, s, cam, win_w, win_h, fill, line, false, w);
             if (!mirror) return;
             bool pos = false, neg = false;
             for (const Vec3& p : s.pts) { pos |= p.x > 1e-4f; neg |= p.x < -1e-4f; }
             if (pos != neg)   // the twin Build will make (retopo_build's rule)
-                retopo_band(dl, s, cam, win_w, win_h, fill & 0x3FFFFFFFu, line & 0x5FFFFFFFu, true);
+                retopo_band(dl, s, cam, win_w, win_h, fill & 0x3FFFFFFFu, line & 0x5FFFFFFFu, true, w);
         };
         // Hovering a stroke in the bar lights it and dims the rest, hidden ones
         // included — so you can see what a checkbox or trash can is about to hit.
@@ -2376,7 +2380,7 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
         for (const RetopoStroke& s : st.strokes) {
             const bool lit = s.id == st.hover_id;
             // A frozen stroke is geometry now: no band, only its quads (lit when hovered).
-            if (!s.frozen && (s.visible || lit)) band(s, lit ? 130 : any_hover ? 25 : 55);
+            if (!s.frozen && (s.visible || lit)) band(s, lit ? 130 : s.selected ? 90 : any_hover ? 25 : 55);
         }
         if (st.drawing && st.live.pts.size() >= 2) band(st.live, 70);
     }
@@ -2406,15 +2410,24 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
     }
     const ImU32 dark = IM_COL32(15, 25, 35, 150), lite = IM_COL32(170, 240, 255, 235);
     const ImU32 hot = IM_COL32(255, 235, 120, 255), dim = IM_COL32(170, 240, 255, 110);
+    const ImU32 sel_col = IM_COL32(255, 150, 60, 255);
+    // Selected strokes' ids: a handful at most, a linear look-up is fine.
+    static std::vector<uint32_t> sel;
+    sel.clear();
+    for (const RetopoStroke& s : st.strokes) if (s.selected) sel.push_back(s.id);
+    auto is_sel = [&](uint32_t id) { return std::find(sel.begin(), sel.end(), id) != sel.end(); };
     for (size_t e = 0; e + 1 < rm.edges.size(); e += 2) {
         const uint32_t a = rm.edges[e], b = rm.edges[e + 1];
         if (!vis[a] || !vis[b]) continue;
-        dl->AddLine(at[a], at[b], dark, rm.edge_owner[e / 2] == st.hover_id ? 4.0f : 3.0f);
+        const uint32_t ow = rm.edge_owner[e / 2];
+        dl->AddLine(at[a], at[b], dark, ow == st.hover_id || is_sel(ow) ? 4.0f : 3.0f);
     }
     for (size_t e = 0; e + 1 < rm.edges.size(); e += 2) {
         const uint32_t a = rm.edges[e], b = rm.edges[e + 1];
         if (!vis[a] || !vis[b]) continue;
-        const bool lit = rm.edge_owner[e / 2] == st.hover_id;
-        dl->AddLine(at[a], at[b], lit ? hot : st.hover_id ? dim : lite, lit ? 2.0f : 1.2f);
+        const uint32_t ow = rm.edge_owner[e / 2];
+        const bool lit = ow == st.hover_id, on = is_sel(ow);
+        dl->AddLine(at[a], at[b], lit ? hot : on ? sel_col : st.hover_id ? dim : lite,
+                    lit || on ? 2.0f : 1.2f);
     }
 }

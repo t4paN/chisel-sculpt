@@ -35,6 +35,10 @@ bool RetopoState::finish_live() {
         s.pts.resize(best + 1); s.nrm.resize(best + 1); s.half_w.resize(best + 1);
     }
 
+    s.rings = rings; s.density = density; s.width = width;
+    // The fresh stroke is the selection: the sliders tune it straight away.
+    for (RetopoStroke& o : strokes) o.selected = false;
+    s.selected = true;
     s.id = next_id++;
     char nm[32];
     std::snprintf(nm, sizeof(nm), "%s %u", s.closed ? "Donut" : "Strip", s.id);
@@ -50,6 +54,7 @@ void RetopoState::undo() {
     strokes.pop_back();
     // Its quads go with it; brought back, it is a sketch again until the next Build.
     redo.back().frozen = false;
+    redo.back().selected = false;
     prune();
 }
 
@@ -57,6 +62,22 @@ void RetopoState::redo_one() {
     if (redo.empty()) return;
     strokes.push_back(std::move(redo.back()));
     redo.pop_back();
+}
+
+const char* RetopoState::click_select(uint32_t id, bool add) {
+    RetopoStroke* hit = id ? find(id) : nullptr;
+    if (!add) {
+        for (RetopoStroke& s : strokes) s.selected = &s == hit;
+        return nullptr;
+    }
+    if (!hit) return nullptr;              // Ctrl+click on nothing keeps what's there
+    if (hit->selected) { hit->selected = false; return nullptr; }
+    const RetopoStroke* sel = first_selected();
+    if (sel && sel->frozen != hit->frozen)
+        return hit->frozen ? "Edited islands can't join a selection of editable ones"
+                           : "Editable islands can't join a selection of edited ones";
+    hit->selected = true;
+    return nullptr;
 }
 
 void RetopoState::clear_all() {
@@ -223,18 +244,20 @@ void add_edge(RetopoMesh& rm, uint32_t a, uint32_t b, uint32_t owner) {
 }
 
 // One stroke → one quad ribbon appended to rm.
-void build_stroke(const RetopoStroke& in, const SnapGrid& g, int rings, float density,
-                  RetopoMesh& rm) {
+void build_stroke(const RetopoStroke& in, const SnapGrid& g, RetopoMesh& rm) {
+    const int rings = in.rings;
+    const float density = in.density;
     RetopoStroke s = in;
     smooth_centreline(s, 2);
 
     float avg_w = 0.0f;
     for (float w : s.half_w) avg_w += w;
     avg_w /= (float)s.half_w.size();
-    // `rings` loops across the full band: K steps each side of the centre loop. The
-    // same spacing runs along the stroke, so the quads come out roughly square.
-    const int K = std::max(1, rings / 2);
-    const float step = avg_w / (float)K;
+    // `rings` = quads across the band (1..8), odd counts included: then no vertex sits
+    // on the centreline. The same spacing runs along the stroke at density 1, so the
+    // quads come out about square; lower density stretches them along it.
+    const int Q = std::max(1, rings);
+    const float step = 2.0f * avg_w / (float)Q;
 
     std::vector<Vec3> cp;
     std::vector<float> cw;
@@ -281,31 +304,37 @@ void build_stroke(const RetopoStroke& in, const SnapGrid& g, int rings, float de
     // Walk each spoke out across the surface. Small sub-steps, re-snapping and
     // re-flattening the direction every time, so the spoke follows the surface over
     // a curve (an eye socket) instead of shooting off along a flat tangent.
+    // Spoke vertex j (0..Q) sits at signed distance ext * (2j/Q - 1) from the centre:
+    // each half is walked in Q*SUB sub-steps of ext/(Q*SUB), so every vertex lands on
+    // a whole sub-step, |2j - Q| * SUB of them out. Even Q puts one on the centre.
     const int SUB = 3;
-    const int W = 2 * K + 1;                       // vertices per spoke
+    const int W = Q + 1;                           // vertices per spoke
     const uint32_t base = (uint32_t)rm.v.size();
     rm.v.resize(base + (size_t)n * W);
     rm.n.resize(base + (size_t)n * W);
     rm.v_owner.resize(base + (size_t)n * W, in.id);
     for (int i = 0; i < n; i++) {
-        rm.v[base + i * W + K] = cp[i];
-        rm.n[base + i * W + K] = cn[i];
+        if (Q % 2 == 0) {
+            rm.v[base + i * W + Q / 2] = cp[i];
+            rm.n[base + i * W + Q / 2] = cn[i];
+        }
         for (int sgn = -1; sgn <= 1; sgn += 2) {
             float ext = cw[i];
             // The inside of a bend: spokes converge and cross if the band is wider
             // than the bend's radius (a small eye drawn with a fat brush). Clamp there.
             const float k = curv[i] * (float)sgn;
             if (k > 1e-6f) ext = std::min(ext, 0.8f / k);
-            const float h = ext / (float)(K * SUB);
+            const float h = ext / (float)(Q * SUB);
             Vec3 p = cp[i], nrm = cn[i], dir = side[i] * (float)sgn;
-            for (int j = 1; j <= K; j++) {
-                for (int sub = 0; sub < SUB; sub++) {
-                    Vec3 q, qn;
-                    p = p + dir * h;
-                    if (g.closest(p, q, qn)) { p = q; nrm = qn; }
-                    dir = project_tangent(dir, nrm);
-                }
-                const int col = K + sgn * j;
+            for (int s_i = 1; s_i <= Q * SUB; s_i++) {
+                Vec3 q, qn;
+                p = p + dir * h;
+                if (g.closest(p, q, qn)) { p = q; nrm = qn; }
+                dir = project_tangent(dir, nrm);
+                if (s_i % SUB) continue;
+                const int out = s_i / SUB;              // = |2j - Q|
+                if ((out + Q) % 2) continue;            // not a vertex position
+                const int col = (Q + sgn * out) / 2;
                 rm.v[base + i * W + col] = p;
                 rm.n[base + i * W + col] = nrm;
             }
@@ -440,12 +469,13 @@ double retopo_build(RetopoState& st, const Mesh& m, bool mirror) {
     for (const RetopoStroke& s : st.strokes) {
         if (s.frozen || !s.visible || s.pts.size() < 3) continue;
         todo.push_back(s);
+        for (float& w : todo.back().half_w) w *= s.width;
         if (!mirror) continue;
         // A stroke wholly on one side gets a twin; one that crosses x=0 (a mouth) is
         // built as drawn — symmetrising it is a later job.
         bool pos = false, neg = false;
         for (const Vec3& p : s.pts) { pos |= p.x > 1e-4f; neg |= p.x < -1e-4f; }
-        if (pos != neg) todo.push_back(mirrored(s));
+        if (pos != neg) todo.push_back(mirrored(todo.back()));
     }
     if (todo.empty() || m.tri_count() == 0) {
         st.built = !st.result.quads.empty();
@@ -457,27 +487,27 @@ double retopo_build(RetopoState& st, const Mesh& m, bool mirror) {
     // Region the strokes can reach: their bounds grown by the widest band (spokes walk
     // that far) plus a margin for the snap search.
     Vec3 lo(1e30f, 1e30f, 1e30f), hi(-1e30f, -1e30f, -1e30f);
-    float max_w = 0.0f, min_w = 1e30f;
+    // A cell about one ring step wide (the finest stroke's): small enough that a query
+    // touches few triangles, big enough that the region stays a few hundred thousand cells.
+    float max_w = 0.0f, cell = 1e30f;
     for (const RetopoStroke& s : todo)
         for (size_t i = 0; i < s.pts.size(); i++) {
             const Vec3& p = s.pts[i];
             lo = {std::min(lo.x, p.x), std::min(lo.y, p.y), std::min(lo.z, p.z)};
             hi = {std::max(hi.x, p.x), std::max(hi.y, p.y), std::max(hi.z, p.z)};
             max_w = std::max(max_w, s.half_w[i]);
-            min_w = std::min(min_w, s.half_w[i]);
+            cell = std::min(cell, 2.0f * s.half_w[i] / (float)std::max(1, s.rings));
         }
     const float pad = max_w * 1.6f;
     lo = lo - Vec3(pad, pad, pad);
     hi = hi + Vec3(pad, pad, pad);
-    // A cell about one ring step wide: small enough that a query touches few
-    // triangles, big enough that the region stays a few hundred thousand cells.
-    float cell = std::max(min_w / (float)std::max(1, st.rings / 2), 1e-5f);
+    cell = std::max(cell, 1e-5f);
     const float ext = std::max({hi.x - lo.x, hi.y - lo.y, hi.z - lo.z});
     cell = std::max(cell, ext / 96.0f);
 
     SnapGrid g;
     g.build(m, lo, hi, cell);
-    for (const RetopoStroke& s : todo) build_stroke(s, g, st.rings, st.density, st.result);
+    for (const RetopoStroke& s : todo) build_stroke(s, g, st.result);
     st.built = !st.result.quads.empty();
     if (st.built) build_topology(st.result);
 
@@ -486,6 +516,70 @@ double retopo_build(RetopoState& st, const Mesh& m, bool mirror) {
     std::printf("[retopo] build: %zu strokes -> %u quads, %zu verts, %zu grid refs, %.1f ms\n",
                 todo.size(), st.result.quad_count(), st.result.v.size(), g.keys.size(), ms);
     return ms;
+}
+
+// ---- Picking -----------------------------------------------------------------------
+
+uint32_t retopo_pick(const RetopoState& st, const Camera& cam, int win_w, int win_h,
+                     float x, float y, bool mirror) {
+    auto facing = [&](Vec3 p, Vec3 n) {
+        const Vec3 to_eye = cam.perspective ? cam.get_position() - p : cam.get_view_direction() * -1.0f;
+        return n.dot(to_eye) > 0.0f;
+    };
+    // Built quads first: the cursor inside a front-facing quad, the nearest one wins.
+    const RetopoMesh& rm = st.result;
+    uint32_t best = 0;
+    float best_d = 1e30f;
+    for (size_t q = 0; q < rm.quad_owner.size(); q++) {
+        float sx[4], sy[4];
+        bool ok = true;
+        for (int k = 0; k < 4 && ok; k++)
+            ok = cam.world_to_screen(rm.v[rm.quads[q * 4 + k]], win_w, win_h, sx[k], sy[k]);
+        if (!ok || !facing(rm.v[rm.quads[q * 4]], rm.n[rm.quads[q * 4]])) continue;
+        // Inside = on the same side of all four edges (either winding).
+        int pos = 0, neg = 0;
+        for (int k = 0; k < 4; k++) {
+            const int j = (k + 1) & 3;
+            const float c = (sx[j] - sx[k]) * (y - sy[k]) - (sy[j] - sy[k]) * (x - sx[k]);
+            pos += c > 0.0f; neg += c < 0.0f;
+        }
+        if (pos && neg) continue;
+        const float d = cam.view_depth(rm.v[rm.quads[q * 4]]);
+        if (d < best_d) { best_d = d; best = rm.quad_owner[q]; }
+    }
+    if (best) return best;
+
+    // Then unbuilt strokes: within the band's drawn width of the centreline (at least a
+    // few pixels, for a thin one). Closest relative to its width wins.
+    float best_r = 1.0f;
+    for (const RetopoStroke& s : st.strokes) {
+        if (s.frozen || !s.visible || s.pts.size() < 2) continue;
+        bool pos = false, neg = false;
+        for (const Vec3& p : s.pts) { pos |= p.x > 1e-4f; neg |= p.x < -1e-4f; }
+        const int sides = mirror && pos != neg ? 2 : 1;
+        for (int side = 0; side < sides; side++) {
+            float px = 0, py = 0;
+            bool prev = false;
+            const size_t segs = s.closed ? s.pts.size() + 1 : s.pts.size();
+            for (size_t i = 0; i < segs; i++) {
+                const size_t k = i % s.pts.size();
+                Vec3 p = s.pts[k], n = s.nrm[k];
+                if (side) { p.x = -p.x; n.x = -n.x; }
+                float qx, qy;
+                const bool ok = cam.world_to_screen(p, win_w, win_h, qx, qy) && facing(p, n);
+                if (ok && prev) {
+                    const float ex = qx - px, ey = qy - py, l2 = ex * ex + ey * ey;
+                    const float t = l2 > 0.0f ? std::max(0.0f, std::min(1.0f, ((x - px) * ex + (y - py) * ey) / l2)) : 0.0f;
+                    const float d = std::hypot(x - (px + ex * t), y - (py + ey * t));
+                    const float wpp = 2.0f * cam.half_height_at(cam.view_depth(p)) / (float)win_h;
+                    const float r = std::max(6.0f, wpp > 0.0f ? s.half_w[k] * s.width / wpp : 0.0f);
+                    if (d / r < best_r) { best_r = d / r; best = s.id; }
+                }
+                px = qx; py = qy; prev = ok;
+            }
+        }
+    }
+    return best;
 }
 
 // ---- Prune, freeze, weld ---------------------------------------------------------

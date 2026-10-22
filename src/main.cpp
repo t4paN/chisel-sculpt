@@ -2830,6 +2830,49 @@ int main(int argc, char* argv[]) {
                 }
             }
             if (!retopo_press) retopo_smoothing = retopo_grabbing = false;
+
+            // A click (pressed and let go within a few pixels) picks an island: plain
+            // selects only it, Ctrl adds or takes out, on nothing clears. Shift is Smooth's.
+            // A press on the bar never gets here: ImGui ate mouse1_just_pressed.
+            static bool click_armed = false;
+            static float click_x = 0.0f, click_y = 0.0f;
+            if (retopo_on && input.mouse1_just_pressed && !input.shift_held && !input.alt_held) {
+                click_armed = true;
+                click_x = (float)input.mouse_x;
+                click_y = (float)input.mouse_y;
+            }
+            if (click_armed && std::hypot((float)input.mouse_x - click_x, (float)input.mouse_y - click_y) > 4.0f)
+                click_armed = false;
+            if (click_armed && input.mouse1_just_released) {
+                click_armed = false;
+                if (retopo_on) {
+                    const uint32_t id = retopo_pick(retopo, camera, win_w, win_h, click_x, click_y,
+                                                    input.mirror_x);
+                    if (const char* msg = retopo.click_select(id, input.ctrl_held)) {
+                        std::snprintf(input.notification, sizeof(input.notification), "%s", msg);
+                        input.notification_timer = 2.0f;
+                    }
+                }
+            }
+            // Right-click on an editable island: the rings / density / width menu, for the
+            // selection if the island is in it, else for the island alone.
+            if (retopo_on && input.mouse2_just_released && !imgui_wants_mouse
+                && !input.zoom_modifier_held()
+                && std::hypot((float)input.mouse_x - input.mouse2_press_x,
+                              (float)input.mouse_y - input.mouse2_press_y) <= 4.0f) {
+                const uint32_t id = retopo_pick(retopo, camera, win_w, win_h, input.mouse2_press_x,
+                                                input.mouse2_press_y, input.mirror_x);
+                RetopoStroke* s = id ? retopo.find(id) : nullptr;
+                if (s && s->frozen) {
+                    std::snprintf(input.notification, sizeof(input.notification),
+                                  "%s is edited geometry now: rings, density and width don't reach it",
+                                  s->name.c_str());
+                    input.notification_timer = 2.5f;
+                } else if (s) {
+                    if (!s->selected) retopo.click_select(id, false);
+                    input.retopo_menu_request = true;
+                }
+            }
             // Ctrl+Z / Ctrl+Shift+Z walk the stroke list here, never the sculpt's
             // history: retopo doesn't touch the sculpt.
             if (retopo_on && (input.undo_requested || input.redo_requested)) {
@@ -2841,13 +2884,17 @@ int main(int argc, char* argv[]) {
                 input.retopo_build_requested = false;
                 scene.materialize_active_cpu();   // Build snaps onto mesh.pos
                 const double ms = retopo_build(retopo, *mesh, input.mirror_x);
-                if (retopo.built)
+                const bool quiet = input.retopo_build_quiet;
+                input.retopo_build_quiet = false;
+                if (quiet) {
+                    // Slider drags rebuild every step: the bar's readout says enough.
+                } else if (retopo.built)
                     std::snprintf(input.notification, sizeof(input.notification),
                                   "Built %u quads (%.0f ms)", retopo.result.quad_count(), ms);
                 else
                     std::snprintf(input.notification, sizeof(input.notification),
                                   "Nothing to build: sketch a stroke first");
-                input.notification_timer = 2.5f;
+                if (!quiet) input.notification_timer = 2.5f;
             }
             if (input.retopo_export_requested) {
                 input.retopo_export_requested = false;

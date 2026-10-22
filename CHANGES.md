@@ -2,6 +2,23 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-23 — Retopo mode: per-island settings, selection, right-click menu
+
+*User-tested.*
+
+- **Rings 1–8** (quads across the band, odd counts too: no centre loop), **Density
+  0.1x–1x** (quads along it), new **Width 0.1x–2x** (scales the band as drawn, to rescue a
+  good path drawn with too fat a brush). Labels "Rings: n" etc.; three stacked sliders.
+- **Per island:** each stroke keeps its own rings / density / width (a new one takes the
+  bar's last values). Sliders act on the **selection** only and rebuild at once, quietly;
+  only the moved setting is written, so a multi-selection keeps its other differences.
+  Nothing selected = they set the next stroke. Edited (frozen) selection greys them out.
+- **Selection:** click an island on the model (built quads, or an unbuilt band; mirror
+  twins count) or its name in the bar; Ctrl+click adds / removes; click on nothing
+  clears; a freshly drawn stroke is selected. Edited and editable islands never share a
+  selection. Shown as orange wire, white band centreline, accent outline on the chip.
+- **Right-click** an editable island: the same three sliders in a menu at the pointer.
+
 ## 2026-10-22 — Retopo mode: frozen islands, edge welding, density slider
 
 *User-tested.*

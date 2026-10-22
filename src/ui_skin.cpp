@@ -3647,6 +3647,95 @@ void draw_skin_dialogs(InputState& input, int win_w, int win_h, const DialogInfo
 }
 
 // ---- Retopo mode's bar ------------------------------------------------------------
+
+namespace {
+
+// A slider in the skin's colours: a glass track, the filled part in the "on" tint, the
+// value centred. Click or drag sets it by where the pointer sits (returns that 0..1,
+// or -1); `wheel` gets the wheel's notches while hovered. `dead` draws it greyed and
+// takes no input.
+float retopo_slider(const char* id, float sh, float fill, const char* text, const char* tip,
+                    float* wheel, bool dead) {
+    const float sw = 150.0f;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    ImGui::InvisibleButton(id, ImVec2(sw, sh));
+    const bool hov = ImGui::IsItemHovered();
+    const bool held = !dead && ImGui::IsItemActive(), lit = !dead && (held || hov);
+    float t = -1.0f;
+    if (held) t = std::max(0.0f, std::min(1.0f, (ImGui::GetIO().MousePos.x - p.x) / sw));
+    *wheel = hov && !dead ? ImGui::GetIO().MouseWheel : 0.0f;
+    const ImVec2 b(p.x + sw, p.y + sh);
+    const float r = rad(6.0f);
+    dl->AddRectFilled(p, b, IM_COL32(255, 255, 255, lit ? 26 : dead ? 6 : 14), r);
+    if (fill > 0.0f && !dead)
+        dl->AddRectFilled(p, ImVec2(p.x + sw * fill, b.y), kTint, r,
+                          fill < 0.99f ? ImDrawFlags_RoundCornersLeft : ImDrawFlags_None);
+    dl->AddRect(p, b, lit ? kAccent : kBorder, r, 0, g_dos ? 2.0f : 1.0f);
+    const ImVec2 ts = text_size(UiFont::SansSemibold, 12.0f, text);
+    text_at(dl, UiFont::SansSemibold, 12.0f, ImVec2(p.x + (sw - ts.x) * 0.5f, p.y + (sh - ts.y) * 0.5f),
+            dead ? kMuted : kText, text);
+    if (hov) tooltip(p, b, TipSide::Below, tip, nullptr);
+    return t;
+}
+
+// Rings / density / width, stacked. They show and set the selection's values (its
+// first stroke's), and a change rebuilds at once; only the setting that moved is
+// written, so a multi-selection keeps its other differences. Nothing selected: they
+// set what the next stroke gets. An edited (frozen) selection greys them out.
+void retopo_sliders(InputState& input, RetopoState& st, float sh, float sgap) {
+    const RetopoStroke* sel = st.first_selected();
+    const bool dead = sel && sel->frozen;
+    int rings = sel ? sel->rings : st.rings;
+    float density = sel ? sel->density : st.density, width = sel ? sel->width : st.width;
+    const int rings0 = rings;
+    const float density0 = density, width0 = width;
+    const char* who = dead ? "Edited islands are geometry now: the sliders don't reach them"
+                    : sel ? nullptr : "Nothing selected: sets the next stroke";
+    char tip[3][96];
+    std::snprintf(tip[0], sizeof tip[0], "%s", who ? who : "Quads across the band (wheel steps it)");
+    std::snprintf(tip[1], sizeof tip[1], "%s", who ? who : "Quads along the band: 1x = about square (wheel steps it)");
+    std::snprintf(tip[2], sizeof tip[2], "%s", who ? who : "Band width, as drawn x this (wheel steps it)");
+
+    ImGui::BeginGroup();
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(6.0f, sgap));
+    char txt[24];
+    float wh, t;
+    std::snprintf(txt, sizeof txt, "Rings: %d", rings);
+    t = retopo_slider("##rings", sh, (float)(rings - 1) / 7.0f, txt, tip[0], &wh, dead);
+    if (t >= 0.0f) rings = 1 + (int)std::lround(t * 7.0f);
+    if (wh != 0.0f) rings = std::max(1, std::min(8, rings + (wh > 0.0f ? 1 : -1)));
+
+    std::snprintf(txt, sizeof txt, "Density: %.1fx", density);
+    t = retopo_slider("##density", sh, (density - 0.1f) / 0.9f, txt, tip[1], &wh, dead);
+    if (t >= 0.0f) density = 0.1f + std::round(t * 9.0f) / 10.0f;
+    if (wh != 0.0f) density = std::max(0.1f, std::min(1.0f, density + (wh > 0.0f ? 0.1f : -0.1f)));
+    density = std::round(density * 10.0f) / 10.0f;
+
+    std::snprintf(txt, sizeof txt, "Width: %.1fx", width);
+    t = retopo_slider("##width", sh, (width - 0.1f) / 1.9f, txt, tip[2], &wh, dead);
+    if (t >= 0.0f) width = 0.1f + std::round(t * 19.0f) / 10.0f;
+    if (wh != 0.0f) width = std::max(0.1f, std::min(2.0f, width + (wh > 0.0f ? 0.1f : -0.1f)));
+    width = std::round(width * 10.0f) / 10.0f;
+    ImGui::PopStyleVar();
+    ImGui::EndGroup();
+
+    if (dead || (rings == rings0 && density == density0 && width == width0)) return;
+    if (rings != rings0) st.rings = rings;
+    if (density != density0) st.density = density;
+    if (width != width0) st.width = width;
+    if (!sel) return;
+    for (RetopoStroke& s : st.strokes) {
+        if (!s.selected || s.frozen) continue;
+        if (rings != rings0) s.rings = rings;
+        if (density != density0) s.density = density;
+        if (width != width0) s.width = width;
+    }
+    input.retopo_build_requested = true;
+    input.retopo_build_quiet = true;
+}
+
+}  // namespace
 // Built from the skin's own parts (glass panel, chips, icon buttons, tokens), so it
 // follows whichever skin is live: modern glass, DOS blocks, Y2K's orange.
 // Top row: the strokes, each a chip of eye / name / trash. Hovering any part lights
@@ -3702,6 +3791,12 @@ void draw_retopo_bar(InputState& input, RetopoState& st, int win_w, int win_h) {
                 ImGui::InvisibleButton("##name", ImVec2(ts.x + 4.0f, bh));
                 text_at(dl, UiFont::SansSemibold, 13.0f, ImVec2(p.x + 2.0f, p.y + (bh - ts.y) * 0.5f),
                         s.frozen ? kText : s.closed ? donut_col : strip_col, s.name.c_str());
+                if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
+                    if (const char* msg = st.click_select(s.id, ImGui::GetIO().KeyCtrl)) {
+                        std::snprintf(input.notification, sizeof(input.notification), "%s", msg);
+                        input.notification_timer = 2.0f;
+                    }
+                }
                 if (ImGui::IsItemHovered()) {
                     if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
                         rename_id = s.id;
@@ -3709,13 +3804,15 @@ void draw_retopo_bar(InputState& input, RetopoState& st, int win_w, int win_h) {
                         std::snprintf(rename_buf, sizeof(rename_buf), "%s", s.name.c_str());
                     }
                     tooltip(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), TipSide::Below,
-                            "Double-click to rename", nullptr);
+                            "Click selects, Ctrl+click adds, double-click renames", nullptr);
                 }
             }
             ImGui::SameLine(0.0f, 4.0f);
             o.on = false; o.tip = "Delete this stroke";
             if (icon_button("del", Icon::UiTrash, bh, o)) del = i;
             ImGui::EndGroup();
+            if (s.selected)
+                dl->AddRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), kAccent, rad(9.0f), 0, 2.0f);
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem)) {
                 st.hover_id = s.id;
                 dl->AddRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(),
@@ -3729,9 +3826,9 @@ void draw_retopo_bar(InputState& input, RetopoState& st, int win_w, int win_h) {
         }
     }
 
-    // Bottom row. The rings / density pair stacks two short sliders, so the row is
+    // Bottom row. Rings / density / width stack three short sliders, so the row is
     // taller than a button: everything else sits centred on it (same()).
-    const float sh = std::round(bh * 0.64f), sgap = 3.0f, row_h = sh * 2.0f + sgap;
+    const float sh = std::round(bh * 0.64f), sgap = 3.0f, row_h = sh * 3.0f + sgap * 2.0f;
     const float row_y = ImGui::GetCursorPosY();
     const float btn_dy = (row_h - bh) * 0.5f;
     auto same = [&](float gap) {
@@ -3742,57 +3839,9 @@ void draw_retopo_bar(InputState& input, RetopoState& st, int win_w, int win_h) {
     if (chip("Build", false, bh)) input.retopo_build_requested = true;
     if (ImGui::IsItemHovered()) tooltip(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), TipSide::Below,
                                         "Turn the strokes into quads", input.key_label(KeyAction::RETOPO_BUILD));
-    // A slider in the skin's colours: a glass track, the filled part in the "on" tint,
-    // the value centred. Click or drag sets it by where the pointer sits (returns that
-    // 0..1, or -1); `wheel` gets the wheel's notches while hovered.
-    auto slider = [&](const char* id, float fill, const char* text, const char* tip, float* wheel) {
-        const float sw = 150.0f;
-        const ImVec2 p = ImGui::GetCursorScreenPos();
-        ImGui::InvisibleButton(id, ImVec2(sw, sh));
-        const bool held = ImGui::IsItemActive(), hov = ImGui::IsItemHovered(), lit = held || hov;
-        float t = -1.0f;
-        if (held) t = std::max(0.0f, std::min(1.0f, (ImGui::GetIO().MousePos.x - p.x) / sw));
-        *wheel = hov ? ImGui::GetIO().MouseWheel : 0.0f;
-        const ImVec2 b(p.x + sw, p.y + sh);
-        const float r = rad(6.0f);
-        dl->AddRectFilled(p, b, IM_COL32(255, 255, 255, lit ? 26 : 14), r);
-        if (fill > 0.0f)
-            dl->AddRectFilled(p, ImVec2(p.x + sw * fill, b.y), kTint, r,
-                              fill < 0.99f ? ImDrawFlags_RoundCornersLeft : ImDrawFlags_None);
-        dl->AddRect(p, b, lit ? kAccent : kBorder, r, 0, g_dos ? 2.0f : 1.0f);
-        const ImVec2 ts = text_size(UiFont::SansSemibold, 12.0f, text);
-        text_at(dl, UiFont::SansSemibold, 12.0f, ImVec2(p.x + (sw - ts.x) * 0.5f, p.y + (sh - ts.y) * 0.5f),
-                kText, text);
-        if (hov) tooltip(p, b, TipSide::Below, tip, nullptr);
-        return t;
-    };
     ImGui::SameLine(0.0f, 14.0f);
     ImGui::SetCursorPosY(row_y);
-    ImGui::BeginGroup();
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(6.0f, sgap));
-    {
-        // Rings: loops across a band, 2..16 in pairs.
-        char txt[24];
-        std::snprintf(txt, sizeof txt, "%d rings", st.rings);
-        float wh;
-        const float t = slider("##rings", (float)(st.rings - 2) / 14.0f, txt,
-                               "Loops across each band (wheel steps it)", &wh);
-        if (t >= 0.0f) st.rings = 2 + 2 * (int)std::lround(t * 7.0f);
-        if (wh != 0.0f) st.rings = std::max(2, std::min(16, st.rings + (wh > 0.0f ? 2 : -2)));
-    }
-    {
-        // Density: spokes along a band, as a multiple of "square quads" (0.5x..3x).
-        char txt[24];
-        std::snprintf(txt, sizeof txt, "density %.1fx", st.density);
-        float wh;
-        const float t = slider("##density", (st.density - 0.5f) / 2.5f, txt,
-                               "Quads along each band: 1x = about square (wheel steps it)", &wh);
-        if (t >= 0.0f) st.density = 0.5f + std::round(t * 25.0f) / 10.0f;
-        if (wh != 0.0f) st.density = std::max(0.5f, std::min(3.0f, st.density + (wh > 0.0f ? 0.1f : -0.1f)));
-        st.density = std::round(st.density * 10.0f) / 10.0f;
-    }
-    ImGui::PopStyleVar();
-    ImGui::EndGroup();
+    retopo_sliders(input, st, sh, sgap);
     same(14.0f);
     o.on = false; o.tip = "Undo stroke"; o.key = input.key_label(KeyAction::UNDO);
     o.enabled = !st.strokes.empty();
@@ -3815,5 +3864,32 @@ void draw_retopo_bar(InputState& input, RetopoState& st, int win_w, int win_h) {
     if (st.built) std::snprintf(ro, sizeof ro, "%u quads%s", st.result.quad_count(), input.mirror_x ? " \xC2\xB7 mirror X" : "");
     else          std::snprintf(ro, sizeof ro, "%s", input.mirror_x ? "not built \xC2\xB7 mirror X" : "not built");
     label_item(UiFont::Mono, 12.0f, kMuted, ro, 0.0f, bh);
+
+    // Right-click menu on an island (main.cpp asks): the same three sliders, for the
+    // selection, where the pointer is. A click anywhere else closes it.
+    if (input.retopo_menu_request) {
+        input.retopo_menu_request = false;
+        ImGui::SetNextWindowPos(ImGui::GetIO().MousePos, ImGuiCond_Always);
+        ImGui::OpenPopup("##retopoMenu");
+    }
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f, 8.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(6.0f, 6.0f));
+    if (ImGui::BeginPopup("##retopoMenu", ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoSavedSettings)) {
+        window_panel(12.0f);
+        int n = 0;
+        const RetopoStroke* first = nullptr;
+        for (const RetopoStroke& s : st.strokes) if (s.selected) { n++; if (!first) first = &s; }
+        if (!first || first->frozen) {
+            ImGui::CloseCurrentPopup();   // the selection went away or got edited
+        } else {
+            char head[64];
+            if (n == 1) std::snprintf(head, sizeof head, "%s", first->name.c_str());
+            else        std::snprintf(head, sizeof head, "%d islands", n);
+            label_item(UiFont::SansSemibold, 13.0f, first->closed ? donut_col : strip_col, head, 0.0f, 20.0f);
+            retopo_sliders(input, st, std::round(bh * 0.64f), 3.0f);
+        }
+        ImGui::EndPopup();
+    }
+    ImGui::PopStyleVar(2);
     end_panel();
 }

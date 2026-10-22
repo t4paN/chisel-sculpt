@@ -23,6 +23,13 @@ struct RetopoStroke {
     // Its quads were grabbed, smoothed or welded: they're geometry now, not a sketch.
     // Build keeps them as they are (visible or not) and the band stops drawing.
     bool frozen  = false;
+    bool selected = false;       // the bar's sliders and the right-click menu act on these
+    // Its own build settings, taken from the bar's at pen-up; the sliders change them
+    // only while it's selected.
+    int   rings   = 4;           // quads across the band (1..8)
+    float density = 1.0f;        // quads along it: 1 = about square, down to 0.1
+    float width   = 1.0f;        // band width as drawn x this (0.1..2): rescues a stroke
+                                 // whose path is right but whose brush was too fat
     uint32_t id  = 0;
     std::string name;
 };
@@ -62,8 +69,12 @@ struct RetopoState {
     bool built = false;
     bool show_result = true;
     bool show_strokes = true;
-    int  rings = 6;                   // loops across a band, centre loop included = rings+1
-    float density = 1.0f;             // spokes along a band: 1 = about square quads (0.5..3)
+    // What the next stroke gets (RetopoStroke has the meaning of each). The sliders
+    // show these when nothing is selected, and editing a selection updates them too, so
+    // new strokes follow whatever was set last.
+    int  rings = 4;
+    float density = 1.0f;
+    float width = 1.0f;
     uint32_t hover_id = 0;            // stroke under the cursor in the bar (0 = none), lit in the overlay
 
     // Pen-up: keep the stroke if it has enough to build on, decide donut vs strip.
@@ -79,7 +90,20 @@ struct RetopoState {
     }
     void redo_one();
     void clear_all();
+    // Selection. A click picks one island (0 = clear); Ctrl adds or takes it out.
+    // Frozen and editable islands never share a selection: returns a message saying so
+    // and leaves the selection alone, else nullptr.
+    const char* click_select(uint32_t id, bool add);
+    RetopoStroke* first_selected() {
+        for (RetopoStroke& s : strokes) if (s.selected) return &s;
+        return nullptr;
+    }
 };
+
+// The island under screen point (x, y): a built quad (nearest the eye), else an unbuilt
+// stroke's band, mirror twins included. Returns its stroke id, 0 for none.
+uint32_t retopo_pick(const RetopoState& st, const Camera& cam, int win_w, int win_h,
+                     float x, float y, bool mirror);
 
 // Rebuild state.result from every visible stroke against the sculpt `m` (positions
 // must be current on the CPU: call Scene::materialize_active_cpu first). With
