@@ -2,6 +2,11 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-22 — Pose brush hidden, parked until v0.4.x
+
+Gone from both docks, the K key, the help card, the shortcuts list and the manual; the code
+stays in and builds. The two entries below aren't reachable in this build.
+
 ## 2026-10-22 — Pose brush: bones hug the skin, mirror fixed, tips come along
 
 *Built GL, wgpu and web; shader gate 70/70. Committed before the user's hand test (their call).*

@@ -1123,7 +1123,7 @@ const RailBrush kRailBrushes[] = {
     {"bPinch",   "Pinch",   KeyAction::BRUSH_PINCH,   Icon::BrushPinch,   BrushType::PINCH},
     {"bMove",    "Move",    KeyAction::BRUSH_MOVE,    Icon::BrushMove,    BrushType::MOVE},
     {"bLimb",    "Limb",    KeyAction::BRUSH_LIMB,    Icon::BrushLimb,    BrushType::LIMB},
-    {"bPose",    "Pose",    KeyAction::BRUSH_POSE,    Icon::BrushPose,    BrushType::POSE},
+    // Pose hidden 2026-10-22: parked, not ready for users. Code stays wired.
     {"bSmooth",  "Smooth",  KeyAction::COUNT,         Icon::BrushSmooth,  BrushType::SMOOTH},
     {"bMask",    "Mask",    KeyAction::BRUSH_MASK,    Icon::BrushMask,    BrushType::MASK},
 };

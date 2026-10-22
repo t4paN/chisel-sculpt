@@ -29,7 +29,7 @@ mesh to sculpt; left-drag off the mesh to orbit. That's 90% of the app right the
 
 - **Top toolbar** — Subdiv −/+, Undo, Redo, Export, Save, **+** (incremental save), Load, Merge.
 - **Mode row** — Edit, Insert, Select, Paint, plus the `[ ]` paint-visibility toggle.
-- **Brush column** (Edit mode) — Draw, Clay, Inflate, Crease, Pinch, Move, Limb, Pose, Smooth, Mask.
+- **Brush column** (Edit mode) — Draw, Clay, Inflate, Crease, Pinch, Move, Limb, Smooth, Mask.
 - **HUD panel** (bottom left) — active brush and its size / strength / hardness /
   spacing, triangle and vertex counts, subdivision level, mirror axis, normals mode,
   autosmooth state.
@@ -72,35 +72,8 @@ the camera, so you never have to switch tools just to look around.
 | V | **Pinch** | Pulls vertices toward the stroke centre — tightens edges and detail. |
 | G | **Move** | Grab-and-drag: picks up the surface under the cursor and moves it with you. |
 | H | **Limb** | Snakehook: pulls a tube out of the surface, redistributing and densifying geometry at the tip. Grow arms, tails, horns from nothing. |
-| K | **Pose** | Bend limbs with spheres placed inside them. See Posing below. |
-| Shift | **Smooth** | Hold Shift with any brush to smooth instead (except Pose, where double-tap Shift locks it). In Paint mode it blends colours instead of geometry. |
+| Shift | **Smooth** | Hold Shift with any brush to smooth instead. In Paint mode it blends colours instead of geometry. |
 | M | **Mask** | Paints a protection mask (see Masking below). |
-
-### Posing
-
-The Pose brush (K) bends the mesh around spheres you place inside it, like a quick
-skeleton with no limits on how the joints turn.
-
-- **Drag on the model**: lays two linked spheres. Each settles in the middle of the
-  volume under the cursor, sized to its thickness.
-- **Ctrl+drag a sphere**: grows a new sphere off it, for chains and branches.
-- **Drag a sphere**: moves it, and the mesh with it. The spheres linked to it stay
-  pinned, so dragging a wrist bends the forearm at the elbow. Only that linked set
-  takes part; separate sets elsewhere on the model don't react.
-- **Shift+drag a sphere**: moves the sphere alone, the mesh stays put.
-- **Mouse wheel or [ ] over a sphere**: its size. Each bone holds the limb around it,
-  out to its skin, and only skin joined to that limb: a neighbouring finger stays put.
-  The faint ring on a hovered sphere is how far a bone may look (twice the sphere);
-  **hardness** sets how soft the edge of what moves is. If skin gets left behind on a
-  thick limb, make the spheres bigger.
-- **Tips**: dragging the last sphere of a chain carries everything past it that hangs
-  off that limb (the rest of a finger, a hand past the wrist).
-- **Mirror**: bends the other side to match.
-- **Right-click a sphere**: removes it. **Delete**: removes every sphere (asks first).
-
-The spheres show only while Pose is in hand. Ctrl+Z on a bend also puts its sphere
-back. Not yet: spheres aren't saved with the project, and adding or removing them
-can't be undone. Mirror X mirrors a bend, as with Move. A linked set holds up to 32 bones.
 
 ### Clay's own controls
 

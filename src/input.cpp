@@ -1210,7 +1210,8 @@ static void run_key_action(GLFWwindow* w, KeyAction a, bool repeat) {
         case KeyAction::BRUSH_MOVE:    pick_brush(BrushType::MOVE);    break;
         // Limb (snakehook): pull + tangential redistribute
         case KeyAction::BRUSH_LIMB:    pick_brush(BrushType::LIMB);    break;
-        case KeyAction::BRUSH_POSE:    pick_brush(BrushType::POSE);    break;
+        // Pose is parked (2026-10-22): K does nothing until it's ready for users.
+        case KeyAction::BRUSH_POSE:    break;
         case KeyAction::BRUSH_MASK:    pick_brush(BrushType::MASK);    break;
         case KeyAction::BRUSH_CREASE:  pick_brush(BrushType::CREASE);  break;
         case KeyAction::PAINT_PICKER:

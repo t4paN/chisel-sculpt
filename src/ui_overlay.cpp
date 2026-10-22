@@ -846,9 +846,8 @@ void draw_help_popup(InputState& input, int win_w, int win_h) {
         std::snprintf(k, sizeof(k), "%s %s %s", L(KeyAction::BRUSH_CREASE),
                       L(KeyAction::BRUSH_PINCH), L(KeyAction::BRUSH_MOVE));
         help_row(k, "Crease  Pinch  Move");
-        std::snprintf(k, sizeof(k), "%s %s %s", L(KeyAction::BRUSH_LIMB),
-                      L(KeyAction::BRUSH_POSE), L(KeyAction::BRUSH_MASK));
-        help_row(k, "Limb  Pose  Mask");
+        std::snprintf(k, sizeof(k), "%s %s", L(KeyAction::BRUSH_LIMB), L(KeyAction::BRUSH_MASK));
+        help_row(k, "Limb  Mask");
         std::snprintf(k, sizeof(k), "%s %s", L(KeyAction::BRUSH_PREV), L(KeyAction::BRUSH_NEXT));
         help_row(k, "Cycle alpha (Draw, Mask)");
         std::snprintf(k, sizeof(k), "%s %s", L(KeyAction::PAINT_BUCKET), L(KeyAction::PAINT_PICKER));
@@ -1142,7 +1141,7 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
     y += mode_h + row_gap;
 
     // === Island 3 — Brush column: single vertical column ===
-    // Order: Draw, Clay, Inflate, Crease, Pinch, Move, Limb, Pose, Smooth, Mask. Smooth is a lock
+    // Order: Draw, Clay, Inflate, Crease, Pinch, Move, Limb, Smooth, Mask. Smooth is a lock
     // toggle (not a switch_brush), handled specially in-place. Paint lives in the
     // mode row above, not here.
     ImGui::SetNextWindowPos(ImVec2(margin, y), ImGuiCond_Always);
@@ -1164,7 +1163,7 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
         {"Pinch",   "Pinch",   btip(4, KeyAction::BRUSH_PINCH),   BrushType::PINCH},
         {"Move",    "Move",    btip(5, KeyAction::BRUSH_MOVE),    BrushType::MOVE},
         {"Limb",    "Limb",    btip(6, KeyAction::BRUSH_LIMB),    BrushType::LIMB},
-        {"Pose",    "Pose",    btip(7, KeyAction::BRUSH_POSE),    BrushType::POSE},
+        // Pose (K) hidden 2026-10-22: parked, not ready for users. Code stays wired.
         {"Smooth",  "Smooth",  "Shortcut: double-press Shift",    BrushType::SMOOTH},
         {"Mask",    "Mask",    btip(9, KeyAction::BRUSH_MASK),    BrushType::MASK},
     };
@@ -1830,6 +1829,7 @@ void draw_keybind_window(InputState& input, int win_w, int win_h) {
         float unit_h[kMaxUnits];
         int   units = 0;
         for (int i = 0; i < (int)KeyAction::COUNT; i++) {
+            if (i == (int)KeyAction::BRUSH_POSE) continue;   // hidden while the pose brush is parked
             if (i == 0 || std::strcmp(key_action_info((KeyAction)i).group,
                                       key_action_info((KeyAction)(i - 1)).group) != 0) {
                 unit_first[units] = i;
@@ -1892,6 +1892,7 @@ void draw_keybind_window(InputState& input, int win_w, int win_h) {
                 ImGui::Dummy(ImVec2(0.0f, 4.0f));
                 ImGui::TextColored(accent, "%s", key_action_info((KeyAction)unit_first[u]).group);
                 for (int i = unit_first[u]; i < unit_first[u + 1]; i++) {
+                    if (i == (int)KeyAction::BRUSH_POSE) continue;
                     const KeyActionInfo& info = key_action_info((KeyAction)i);
                     ImGui::PushID(i);
                     ImGui::AlignTextToFramePadding();
