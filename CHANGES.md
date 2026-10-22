@@ -2,6 +2,27 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-22 — Pose brush: bones hug the skin, mirror fixed, tips come along
+
+*Built GL, wgpu and web; shader gate 70/70. Committed before the user's hand test (their call).*
+
+- **Skin envelope instead of a capsule.** At pen-down each bone measures the limb around it:
+  12 slices along it x 16 directions around, the nearest surface facing away from the axis.
+  The bone holds what lies inside that cross-section, whatever its shape (hardness = how
+  soft the edge is), up to twice its spheres' radius.
+- **Connected only.** A vertex inside the envelope only moves if it is reached through the
+  surface from the bone's own skin, so the next finger or the other leg poking into the
+  envelope stays put.
+- **Tips ride the last sphere.** Dragging the free end of a chain cuts the model square to
+  its bone; the piece past the cut that hangs off this limb all comes along. Not a tip (and
+  only a ~3-radius carry) if it runs past twice the bone length, spreads wider than 2.5x the
+  limb at the cut, or touches another sphere.
+- **Mirror tore the mesh; fixed.** The pair-map sink handles each pair once, assuming both
+  sides moved (true for Move); the pose bound one side, so half the pairs averaged and half
+  didn't. With mirror on the rig reflected in x = 0 now binds the other side too.
+- Binding happens on the CPU once per grab and uploads compact; `pose_capture` is gone,
+  `pose_apply` reads per-vertex weights (own + mirrored, four moving bones max).
+
 ## 2026-10-22 — Pose brush
 
 *Built GL, wgpu and web; shader gate 71/71. Hand-tested by the user on the desktop.*

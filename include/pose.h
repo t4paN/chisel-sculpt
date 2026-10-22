@@ -13,8 +13,9 @@ struct Camera;
 // project yet, and creating or deleting spheres is not on the undo stack; moving
 // one is (PoseMove below), because a drag moves the mesh and the two must agree.
 
-// A set's bones all travel to the GPU in one uniform block, so a set is capped. The
-// kernels' Params block is sized for exactly this many (compute_pose.cpp).
+// Bones per set. The binding (pose_bind) samples every bone of the set against the
+// grab's candidate triangles at pen-down, so this keeps that pause short. Only the
+// bones touching the grabbed sphere reach the GPU (kPoseGpuBones, compute.h).
 constexpr int kPoseMaxBones = 32;
 
 struct PoseJoint { Vec3 pos; float radius; };
@@ -66,6 +67,31 @@ bool pose_volume_center(const Mesh& mesh, const Camera& cam, float sx, float sy,
 
 // Screen pixels per world unit at the depth of `p` (the foreshortening term).
 float pose_px_per_world(const Camera& cam, Vec3 p, int h);
+
+// What one grab carries (pose_bind): the vertices, their pen-down positions and,
+// per vertex, one weight per moving bone (lane k = moving[k] below), then the same
+// four for the mirrored rig (zero with mirror off).
+struct PoseBinding {
+    std::vector<uint32_t> ids;
+    std::vector<float>    init;   // 3 per id
+    std::vector<float>    w;      // 8 per id
+};
+
+// Binds the set around `joint` to the mesh at pen-down. Each bone of the set gets a
+// skin envelope: from its axis outward, the nearest surface facing away from it, in
+// 12 slices along the bone x 16 directions around it — the limb's own cross-section,
+// whatever its shape. A free end being dragged (a wrist) carries what hangs off it
+// (the hand): the whole tip past it when that tip is clear of everything else,
+// otherwise to ~3 sphere radii out. A vertex belongs to a bone when it lies
+// inside that envelope (hardness sets the fade past it) AND is connected through the
+// surface to the bone's own skin, so a neighbouring finger or the other leg that
+// pokes into the envelope stays put. At a shared sphere the two bones hand over
+// across the sphere's radius. With mirror, the rig reflected in x = 0 binds the
+// other side too. mesh.pos must be current (materialize first).
+// moving[k] (k < n_moving <= 4): rig bone index for weight lane k.
+void pose_bind(const Mesh& mesh, const PoseRig& rig, int joint,
+               const int* moving, int n_moving, float hardness, bool mirror,
+               PoseBinding& out);
 
 // The sphere under the cursor, or -1. Spheres sit inside the mesh and are drawn
 // through it, so this ignores the surface: of the spheres whose screen disc holds

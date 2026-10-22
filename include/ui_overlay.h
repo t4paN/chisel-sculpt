@@ -75,7 +75,7 @@ void draw_gradient_drag(float ax, float ay, float bx, float by);
 // Pose brush rig, drawn through the mesh (the spheres sit inside it): every sphere
 // as a disc at its projected size, bones as lines between them. The set under the
 // cursor (hover = its sphere, -1 none) is lit; the hovered sphere also shows how far
-// its hold reaches (soft radii past its skin) and, with grow set (Ctrl), a "+".
+// its bones may reach (soft radii past its skin) and, with grow set (Ctrl), a "+".
 // Background draw list, so the docks stay on top. And the pose cursor: a dot.
 struct PoseRig;
 struct Camera;

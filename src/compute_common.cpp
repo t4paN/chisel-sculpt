@@ -281,9 +281,10 @@ void ComputeState::cleanup() {
     gpu::release_buffer(limb_drag_ubo);
     gpu::release_buffer(limb_relax_ubo);
     gpu::release_buffer(limb_pos_scratch_ssbo);
-    gpu::release_compute_pipeline(pose_capture_pipeline);
     gpu::release_compute_pipeline(pose_apply_pipeline);
     gpu::release_buffer(pose_ubo);
+    gpu::release_buffer(pose_weights_ssbo);
+    pose_weights_capacity = 0;
     move_buffers_capacity = 0;
     gpu::release_compute_pipeline(compute_normals_pipeline);
     gpu::release_buffer(compute_normals_ubo);

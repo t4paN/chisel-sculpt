@@ -88,9 +88,14 @@ skeleton with no limits on how the joints turn.
   pinned, so dragging a wrist bends the forearm at the elbow. Only that linked set
   takes part; separate sets elsewhere on the model don't react.
 - **Shift+drag a sphere**: moves the sphere alone, the mesh stays put.
-- **Mouse wheel or [ ] over a sphere**: its size. A sphere holds what lies inside it,
-  fading out past its skin; **hardness** sets how far (the faint ring on a hovered
-  sphere). If skin gets left behind on a bend, make the spheres bigger.
+- **Mouse wheel or [ ] over a sphere**: its size. Each bone holds the limb around it,
+  out to its skin, and only skin joined to that limb: a neighbouring finger stays put.
+  The faint ring on a hovered sphere is how far a bone may look (twice the sphere);
+  **hardness** sets how soft the edge of what moves is. If skin gets left behind on a
+  thick limb, make the spheres bigger.
+- **Tips**: dragging the last sphere of a chain carries everything past it that hangs
+  off that limb (the rest of a finger, a hand past the wrist).
+- **Mirror**: bends the other side to match.
 - **Right-click a sphere**: removes it. **Delete**: removes every sphere (asks first).
 
 The spheres show only while Pose is in hand. Ctrl+Z on a bend also puts its sphere

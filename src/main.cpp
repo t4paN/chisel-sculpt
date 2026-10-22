@@ -2919,6 +2919,9 @@ int main(int argc, char* argv[]) {
         // IDLE → SCULPTING
         if (app_state == AppState::IDLE && input.drag_mode == InputState::DragMode::SCULPT) {
             input.sculpting = true;
+            // A pose grab binds on the CPU at its first dab (pose_bind reads mesh.pos).
+            if (input.current_brush == BrushType::POSE && !input.is_smooth_active())
+                scene.materialize_active_cpu();
 
             // Active entity lives in the working buffers at offset 0; the brush
             // dispatches over its full [0, vertex_count) range.
@@ -4227,12 +4230,11 @@ int main(int argc, char* argv[]) {
             renderer.draw_debug_mesh(camera, *mesh, win_w, win_h);
         }
 
-        // Pose rig: shown only while the pose brush is in hand. The reach ring uses the
-        // same falloff the stroke will (BrushStroke::apply_pose_gpu).
+        // Pose rig: shown only while the pose brush is in hand. The reach ring is the
+        // farthest a bone's skin envelope may extend from it: two sphere radii (pose_bind).
         if (input.pose_brush_on() && !non_edit_mode) {
-            const float hard = input.per_brush[(int)BrushType::POSE].hardness;
             draw_pose_rig(scene.active_entity().pose, camera, win_w, win_h,
-                          input.pose_hover_joint, 0.25f + 1.75f * (1.0f - hard),
+                          input.pose_hover_joint, 1.0f,
                           input.ctrl_held && app_state == AppState::IDLE);
         }
 

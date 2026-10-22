@@ -271,13 +271,13 @@ struct BrushStroke {
     ColorState color;
     MaskState density;   // density-field stroke state — same scalar shape as mask
 
-    // Pose brush: the grabbed sphere and its set as they stood at pen-down. The
-    // bones' pen-down geometry stays in params; each dab only rewrites the moving
-    // bones' rotation and stretch. Sized for kPoseMaxBones, so no dab allocates.
+    // Pose brush: the grabbed sphere at pen-down, the bones touching it (params; each
+    // dab only rewrites their rotation and stretch) and the binding pose_bind made.
+    // Everything is filled at pen-down, so no dab allocates.
     struct PoseGrab {
         int  joint = -1;
         Vec3 start;                         // the grabbed sphere at pen-down
-        std::vector<uint8_t> set;           // rig.connected() scratch, pen-down only
+        PoseBinding bind;
         PoseParamsGPU params = {};
     } pose;
 
