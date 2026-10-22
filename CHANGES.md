@@ -2,6 +2,20 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-22 — Retopo mode: Smooth and Grab on the built quads
+
+*User-tested.* Both work on the result, and both snap every vertex back onto the sculpt.
+
+- **Smooth** (Shift, double Shift locks; dock tile): tangential relax. Interior vertices
+  move toward their neighbours along the surface, border vertices slide only along the
+  border (a strip keeps its width, a donut its hole), corners stay pinned.
+- **Grab** (G, dock tile): the press takes what's under the ring with a soft falloff, the
+  drag carries it, converted to world at each vertex's own depth.
+- Mirror X on: the reflection under the ring moves too, mirrored, so twins stay twins.
+- Tool Options shows Size only; Smooth runs at a fixed strength for now. The rings
+  control is a slider again, in the skin's colours with the value centred.
+- Build regenerates from the strokes, so it discards smoothing and grabs: edit last.
+
 ## 2026-10-22 — Retopo mode: own dock, the bar in the skin's style, Space builds
 
 *User-tested.* Mode 0's dock replaces the brushes with one pencil, "Draw polygon strips"

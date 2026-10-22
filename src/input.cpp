@@ -45,6 +45,7 @@ const KeyActionInfo kKeyActions[(int)KeyAction::COUNT] = {
     {"paint_picker",  "Paint mode", "Colour picker",    "Click the model to pick its colour", {GLFW_KEY_C, 0}, KeyScope::Paint},
     {"retopo_build",  "Retopo mode", "Build",            "Turn the strokes into quads (the bar's Build)", {GLFW_KEY_SPACE, 0}, KeyScope::Retopo},
     {"retopo_draw",   "Retopo mode", "Draw polygon strips", nullptr, {GLFW_KEY_D, 0}, KeyScope::Retopo},
+    {"retopo_grab",   "Retopo mode", "Grab polygon strips", "Drag the built quads around", {GLFW_KEY_G, 0}, KeyScope::Retopo},
     {"hold_size",     "Brush feel", "Size",             "Hold and drag", {GLFW_KEY_S, 0}},
     {"hold_strength", "Brush feel", "Strength",         "Hold and drag", {GLFW_KEY_W, 0}},
     {"hold_hardness", "Brush feel", "Hardness",         "Hold and drag", {GLFW_KEY_A, 0}},
@@ -1210,9 +1211,13 @@ static void run_key_action(GLFWwindow* w, KeyAction a, bool repeat) {
         case KeyAction::RETOPO_BUILD:
             if (!repeat) in.retopo_build_requested = true;
             break;
-        // Mode 0's only tool so far: nothing to switch, but the key answers.
         case KeyAction::RETOPO_DRAW:
-            if (!repeat) notify("Draw polygon strips", 1.0f);
+        case KeyAction::RETOPO_GRAB:
+            if (repeat) break;
+            in.clear_smooth_lock();
+            in.retopo_tool = a == KeyAction::RETOPO_GRAB ? InputState::RetopoTool::GRAB
+                                                         : InputState::RetopoTool::DRAW;
+            notify(a == KeyAction::RETOPO_GRAB ? "Grab polygon strips" : "Draw polygon strips", 1.0f);
             break;
         case KeyAction::PAINT_BUCKET:
             // Paint mode's key (KeyScope::Paint): arm the bucket. Again: back to the brush.

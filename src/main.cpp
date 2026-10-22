@@ -2737,8 +2737,54 @@ int main(int argc, char* argv[]) {
         // cache stays good for the whole stroke.
         {
             const bool retopo_on = input.interaction_mode == InputState::InteractionMode::RETOPO;
-            if (retopo_on && input.drag_mode == InputState::DragMode::RETOPO
-                && !screen_buffers_dirty) {
+            // Smooth (Shift / double Shift) works on the built quads, not the strokes.
+            // Decided at the press: letting go of Shift mid-drag doesn't start a stroke.
+            static bool retopo_smoothing = false;
+            static bool retopo_grabbing = false;
+            const bool retopo_press = retopo_on && input.drag_mode == InputState::DragMode::RETOPO;
+            if (retopo_press && !retopo.drawing
+                && (retopo_smoothing || input.is_smooth_active())) {
+                if (!retopo_smoothing) {
+                    if (!retopo.built) {
+                        std::snprintf(input.notification, sizeof(input.notification),
+                                      "Nothing to smooth: Build first (Space)");
+                        input.notification_timer = 2.0f;
+                        input.drag_mode = InputState::DragMode::NONE;
+                    } else {
+                        scene.materialize_active_cpu();   // the snap re-reads mesh.pos
+                        retopo_edit_begin(retopo, *mesh);
+                        retopo_smoothing = true;
+                    }
+                }
+                if (retopo_smoothing)
+                    retopo_smooth_dab(retopo, camera, win_w, win_h, (float)input.mouse_x,
+                                      // Fixed for now: Size is the only knob (user).
+                                      (float)input.mouse_y, input.brush_size,
+                                      0.5f, input.mirror_x);
+            } else if (retopo_press && !retopo.drawing
+                       && (retopo_grabbing || input.retopo_tool == InputState::RetopoTool::GRAB)) {
+                // Grab: the press takes what's under the ring, the drag carries it.
+                static float grab_x = 0.0f, grab_y = 0.0f;
+                if (!retopo_grabbing) {
+                    if (!retopo.built) {
+                        std::snprintf(input.notification, sizeof(input.notification),
+                                      "Nothing to grab: Build first (Space)");
+                        input.notification_timer = 2.0f;
+                        input.drag_mode = InputState::DragMode::NONE;
+                    } else {
+                        scene.materialize_active_cpu();
+                        retopo_edit_begin(retopo, *mesh);
+                        grab_x = (float)input.mouse_x;
+                        grab_y = (float)input.mouse_y;
+                        retopo_grab_begin(retopo, camera, win_w, win_h, grab_x, grab_y,
+                                          input.brush_size, input.mirror_x);
+                        retopo_grabbing = true;
+                    }
+                }
+                if (retopo_grabbing)
+                    retopo_grab_drag(retopo, camera, win_w, win_h,
+                                     (float)input.mouse_x - grab_x, (float)input.mouse_y - grab_y);
+            } else if (retopo_press && !screen_buffers_dirty) {
                 const float mx = (float)input.mouse_x, my = (float)input.mouse_y;
                 if (!retopo.drawing) {
                     retopo.drawing = true;
@@ -2783,6 +2829,7 @@ int main(int argc, char* argv[]) {
                     input.notification_timer = 1.5f;
                 }
             }
+            if (!retopo_press) retopo_smoothing = retopo_grabbing = false;
             // Ctrl+Z / Ctrl+Shift+Z walk the stroke list here, never the sculpt's
             // history: retopo doesn't touch the sculpt.
             if (retopo_on && (input.undo_requested || input.redo_requested)) {

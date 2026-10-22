@@ -1428,7 +1428,27 @@ void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
     if (mode == InputState::InteractionMode::RETOPO) {
         o.on = true; o.tip = "Draw polygon strips";
         o.key = input.key_label(KeyAction::RETOPO_DRAW); o.corner = corner(KeyAction::RETOPO_DRAW);
-        icon_button("rDraw", Icon::RetopoPencil, kRailBtn, o);
+        using RT = InputState::RetopoTool;
+        o.on = !smooth_on && input.retopo_tool == RT::DRAW;
+        if (icon_button("rDraw", Icon::RetopoPencil, kRailBtn, o)) {
+            input.clear_smooth_lock();
+            input.retopo_tool = RT::DRAW;
+        }
+        o.on = !smooth_on && input.retopo_tool == RT::GRAB; o.tip = "Grab polygon strips";
+        o.key = input.key_label(KeyAction::RETOPO_GRAB); o.corner = corner(KeyAction::RETOPO_GRAB);
+        if (icon_button("rGrab", Icon::BrushMove, kRailBtn, o)) {
+            input.clear_smooth_lock();
+            input.retopo_tool = RT::GRAB;
+        }
+        // Smooth evens out the built quads; same keys as the sculpt Smooth.
+        ImFont* mono = F(UiFont::MonoMedium);
+        o.on = smooth_on; o.tip = "Smooth polygon strips";
+        o.key = "Shift Shift";
+        o.corner = (mono && mono->IsGlyphInFont(0x21E7)) ? "\xE2\x87\xA7\xE2\x87\xA7" : "SS";
+        if (icon_button("rSmooth", Icon::BrushSmooth, kRailBtn, o)) {
+            if (!input.smooth_locked) { input.smooth_locked = true; input.sync_live_settings(); }
+            else input.clear_smooth_lock();
+        }
         g_k = 1.0f;
         g_rail_bottom = ImGui::GetWindowPos().y + ImGui::GetWindowSize().y;
         g_rail_right = ImGui::GetWindowPos().x + ImGui::GetWindowSize().x;
@@ -1898,8 +1918,11 @@ float brush_panel(InputState& input, int win_h) {
         hint("Click the model");
         hint("to place");
     } else if (mode == InputState::InteractionMode::RETOPO) {
-        // The band width is the brush ring, so Size is the one meter that means anything.
-        heading("Draw polygon strips", nullptr);
+        // Size only, for both tools: the ring is the band width when drawing and the
+        // reach when smoothing. Strength / hardness may come later.
+        heading(input.is_smooth_active() ? "Smooth polygon strips"
+                : input.retopo_tool == InputState::RetopoTool::GRAB ? "Grab polygon strips"
+                                                                    : "Draw polygon strips", nullptr);
         meter_widget("##mS", input, 0, w, k, !can_grow || big);
     } else if (mode == InputState::InteractionMode::SELECT) {
         heading("Select", nullptr);
@@ -3703,17 +3726,32 @@ void draw_retopo_bar(InputState& input, RetopoState& st, int win_w, int win_h) {
     if (chip("Build", false, bh)) input.retopo_build_requested = true;
     if (ImGui::IsItemHovered()) tooltip(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), TipSide::Below,
                                         "Turn the strokes into quads", input.key_label(KeyAction::RETOPO_BUILD));
-    // Rings stepper: - / count / +, and the wheel anywhere over it.
+    // Rings slider, 2..16 in pairs, drawn in the skin's colours: a glass track, the
+    // filled part in the "on" tint, the value centred. Click or drag sets it by where
+    // the pointer sits; the wheel steps it.
     ImGui::SameLine(0.0f, 14.0f);
-    ImGui::BeginGroup();
-    if (chip("-", false, bh)) st.rings = std::max(2, st.rings - 2);
-    ImGui::SameLine(0.0f, 4.0f);
-    char rl[24];
-    std::snprintf(rl, sizeof rl, "%d rings", st.rings);
-    label_item(UiFont::SansSemibold, 13.0f, kText, rl, 64.0f, bh);
-    ImGui::SameLine(0.0f, 4.0f);
-    if (chip("+", false, bh)) st.rings = std::min(16, st.rings + 2);
-    ImGui::EndGroup();
+    {
+        const float sw = 150.0f;
+        const ImVec2 p = ImGui::GetCursorScreenPos();
+        ImGui::InvisibleButton("##rings", ImVec2(sw, bh));
+        const bool held = ImGui::IsItemActive(), lit = held || ImGui::IsItemHovered();
+        if (held) {
+            const float t = std::max(0.0f, std::min(1.0f, (ImGui::GetIO().MousePos.x - p.x) / sw));
+            st.rings = 2 + 2 * (int)std::lround(t * 7.0f);
+        }
+        const ImVec2 b(p.x + sw, p.y + bh);
+        const float fill = (float)(st.rings - 2) / 14.0f;
+        dl->AddRectFilled(p, b, IM_COL32(255, 255, 255, lit ? 26 : 14), rad(8.0f));
+        if (fill > 0.0f)
+            dl->AddRectFilled(p, ImVec2(p.x + sw * fill, b.y), kTint, rad(8.0f),
+                              fill < 0.99f ? ImDrawFlags_RoundCornersLeft : ImDrawFlags_None);
+        dl->AddRect(p, b, lit ? kAccent : kBorder, rad(8.0f), 0, g_dos ? 2.0f : 1.0f);
+        char rl[24];
+        std::snprintf(rl, sizeof rl, "%d rings", st.rings);
+        const ImVec2 ts = text_size(UiFont::SansSemibold, 13.0f, rl);
+        text_at(dl, UiFont::SansSemibold, 13.0f, ImVec2(p.x + (sw - ts.x) * 0.5f, p.y + (bh - ts.y) * 0.5f),
+                kText, rl);
+    }
     if (ImGui::IsItemHovered()) {
         const float wh = ImGui::GetIO().MouseWheel;
         if (wh != 0.0f) st.rings = std::max(2, std::min(16, st.rings + (wh > 0.0f ? 2 : -2)));

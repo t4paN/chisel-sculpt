@@ -91,7 +91,7 @@ enum class KeyAction : int {
     BRUSH_DRAW, BRUSH_CLAY, BRUSH_INFLATE, BRUSH_CREASE, BRUSH_PINCH,
     BRUSH_MOVE, BRUSH_LIMB, BRUSH_POSE, BRUSH_MASK, BRUSH_PREV, BRUSH_NEXT,
     PAINT_BUCKET, PAINT_PICKER,
-    RETOPO_BUILD, RETOPO_DRAW,
+    RETOPO_BUILD, RETOPO_DRAW, RETOPO_GRAB,
     HOLD_SIZE, HOLD_STRENGTH, HOLD_HARDNESS, HOLD_SPACING, SIZE_DOWN, SIZE_UP, AUTOSMOOTH,
     LEVEL_UP, LEVEL_DOWN, PROJECT, MIRROR, REMESH, MERGE, DELETE_MESH,
     MASK_INVERT, MASK_CLEAR,
@@ -658,6 +658,9 @@ struct InputState {
     void enter_retopo_mode();
     // What retopo mode's bar (always up in mode 0) and Space ask the main loop for.
     bool retopo_build_requested = false;
+    // Mode 0's dock tool. Smooth isn't one of these: it rides Shift, as in sculpt.
+    enum class RetopoTool { DRAW, GRAB };
+    RetopoTool retopo_tool = RetopoTool::DRAW;
     bool retopo_export_requested = false;
     // Which mode's shortcuts are live: Paint while painting (EDIT in paint mode), else
     // Sculpt (Insert and Select keep the sculpt keys, as before the split). Retopo has

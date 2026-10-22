@@ -329,6 +329,51 @@ void build_stroke(const RetopoStroke& in, const SnapGrid& g, int rings, RetopoMe
         for (int j = 0; j < W - 1; j++) add_edge(rm, V(i, j), V(i, j + 1), in.id);
 }
 
+// Neighbours and borders for Smooth. A border edge belongs to one quad only.
+void build_topology(RetopoMesh& rm) {
+    const uint32_t nv = (uint32_t)rm.v.size();
+    rm.nb_off.assign(nv + 1, 0);
+    for (size_t e = 0; e < rm.edges.size(); e++) rm.nb_off[rm.edges[e] + 1]++;
+    for (uint32_t i = 0; i < nv; i++) rm.nb_off[i + 1] += rm.nb_off[i];
+    rm.nb.resize(rm.edges.size());
+    std::vector<uint32_t> fill(rm.nb_off.begin(), rm.nb_off.end() - 1);
+    for (size_t e = 0; e + 1 < rm.edges.size(); e += 2) {
+        rm.nb[fill[rm.edges[e]]++] = rm.edges[e + 1];
+        rm.nb[fill[rm.edges[e + 1]]++] = rm.edges[e];
+    }
+    std::vector<uint64_t> qe;
+    qe.reserve(rm.quads.size());
+    for (size_t q = 0; q < rm.quads.size(); q += 4)
+        for (int k = 0; k < 4; k++) {
+            uint32_t a = rm.quads[q + k], b = rm.quads[q + (k + 1) % 4];
+            qe.push_back(((uint64_t)std::min(a, b) << 32) | std::max(a, b));
+        }
+    std::sort(qe.begin(), qe.end());
+    rm.border_nb.assign((size_t)nv * 2, ~0u);
+    rm.pinned.assign(nv, 0);
+    std::vector<uint8_t> nborder(nv, 0);
+    for (size_t i = 0; i < qe.size(); ) {
+        size_t j = i;
+        while (j < qe.size() && qe[j] == qe[i]) j++;
+        if (j - i == 1) {
+            const uint32_t a = (uint32_t)(qe[i] >> 32), b = (uint32_t)(qe[i] & 0xFFFFFFFFu);
+            if (nborder[a] < 2) rm.border_nb[a * 2 + nborder[a]] = b;
+            if (nborder[b] < 2) rm.border_nb[b * 2 + nborder[b]] = a;
+            nborder[a]++; nborder[b]++;
+        }
+        i = j;
+    }
+    for (uint32_t i = 0; i < nv; i++) {
+        if (nborder[i] == 0) continue;
+        if (nborder[i] != 2) { rm.pinned[i] = 1; continue; }
+        // A corner (a strip's end): the two border edges meet at an angle rather than
+        // running on through it. Sliding it would round the strip off.
+        const Vec3 a = (rm.v[rm.border_nb[i * 2]] - rm.v[i]).normalized();
+        const Vec3 b = (rm.v[rm.border_nb[i * 2 + 1]] - rm.v[i]).normalized();
+        if (a.dot(b) > -0.7f) rm.pinned[i] = 1;
+    }
+}
+
 RetopoStroke mirrored(const RetopoStroke& s) {
     // Reversed as well as reflected: a reflection flips handedness, and walking it
     // backwards flips it again, so the twin's quads wind the same way as the original's.
@@ -386,12 +431,153 @@ double retopo_build(RetopoState& st, const Mesh& m, bool mirror) {
     g.build(m, lo, hi, cell);
     for (const RetopoStroke& s : todo) build_stroke(s, g, st.rings, st.result);
     st.built = !st.result.quads.empty();
+    if (st.built) build_topology(st.result);
 
     const double ms = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - t0).count();
     std::printf("[retopo] build: %zu strokes -> %u quads, %zu verts, %zu grid refs, %.1f ms\n",
                 todo.size(), st.result.quad_count(), st.result.v.size(), g.keys.size(), ms);
     return ms;
+}
+
+// ---- Smooth ---------------------------------------------------------------------
+
+namespace {
+SnapGrid g_smooth_grid;          // one retopo session at a time; rebuilt every pen-down
+std::vector<Vec3>  g_smooth_old; // Jacobi: every vertex reads last frame's neighbours
+std::vector<float> g_smooth_w;
+// Grab: what the press took, and where it was. Sign -1 = moved as a reflection.
+std::vector<uint32_t> g_grab_idx;
+std::vector<float>    g_grab_w;
+std::vector<int8_t>   g_grab_sign;
+std::vector<Vec3>     g_grab_start;
+
+// Ring weight of p (normal n) around the cursor: smooth to zero at the edge, zero when
+// it faces away or projects outside.
+float ring_weight(const Camera& cam, int win_w, int win_h, float cx, float cy, float r2,
+                  Vec3 p, Vec3 n) {
+    const Vec3 to_eye = cam.perspective ? cam.get_position() - p : cam.get_view_direction() * -1.0f;
+    if (n.dot(to_eye) <= 0.0f) return 0.0f;
+    float x, y;
+    if (!cam.world_to_screen(p, win_w, win_h, x, y)) return 0.0f;
+    const float d2 = (x - cx) * (x - cx) + (y - cy) * (y - cy);
+    if (d2 >= r2) return 0.0f;
+    const float t = 1.0f - d2 / r2;
+    return t * t;
+}
+}
+
+void retopo_edit_begin(RetopoState& st, const Mesh& m) {
+    const RetopoMesh& rm = st.result;
+    if (rm.v.empty() || m.tri_count() == 0) return;
+    Vec3 lo(1e30f, 1e30f, 1e30f), hi(-1e30f, -1e30f, -1e30f);
+    float edge = 0.0f;
+    for (const Vec3& p : rm.v) {
+        lo = {std::min(lo.x, p.x), std::min(lo.y, p.y), std::min(lo.z, p.z)};
+        hi = {std::max(hi.x, p.x), std::max(hi.y, p.y), std::max(hi.z, p.z)};
+    }
+    for (size_t e = 0; e + 1 < rm.edges.size(); e += 2)
+        edge += (rm.v[rm.edges[e]] - rm.v[rm.edges[e + 1]]).length();
+    edge /= (float)std::max<size_t>(1, rm.edges.size() / 2);
+    const float pad = edge * 2.0f;
+    lo = lo - Vec3(pad, pad, pad);
+    hi = hi + Vec3(pad, pad, pad);
+    const float ext = std::max({hi.x - lo.x, hi.y - lo.y, hi.z - lo.z});
+    g_smooth_grid.build(m, lo, hi, std::max(edge * 0.5f, ext / 96.0f));
+    g_smooth_old.resize(rm.v.size());
+    g_smooth_w.resize(rm.v.size());
+}
+
+int retopo_smooth_dab(RetopoState& st, const Camera& cam, int win_w, int win_h,
+                      float cx, float cy, float radius_px, float strength, bool mirror) {
+    RetopoMesh& rm = st.result;
+    if (!st.built || g_smooth_grid.m == nullptr || g_smooth_w.size() != rm.v.size()) return 0;
+    const float r2 = radius_px * radius_px;
+    // A vertex counts when it (or, with mirror, its reflection) is under the ring.
+    auto weight = [&](Vec3 p, Vec3 n) { return ring_weight(cam, win_w, win_h, cx, cy, r2, p, n); };
+    int moved = 0;
+    for (size_t i = 0; i < rm.v.size(); i++) {
+        float w = weight(rm.v[i], rm.n[i]);
+        if (mirror) {
+            Vec3 p = rm.v[i], n = rm.n[i];
+            p.x = -p.x; n.x = -n.x;
+            w = std::max(w, weight(p, n));
+        }
+        g_smooth_w[i] = rm.pinned[i] ? 0.0f : w * strength;
+        moved += g_smooth_w[i] > 0.0f;
+    }
+    if (!moved) return 0;
+    g_smooth_old = rm.v;
+    for (size_t i = 0; i < rm.v.size(); i++) {
+        const float w = g_smooth_w[i];
+        if (w <= 0.0f) continue;
+        const Vec3 p = g_smooth_old[i];
+        Vec3 d;
+        if (rm.border_nb[i * 2] != ~0u) {
+            // Border: slide along the border line only, so widths and holes hold.
+            const Vec3 a = g_smooth_old[rm.border_nb[i * 2]], b = g_smooth_old[rm.border_nb[i * 2 + 1]];
+            const Vec3 t = (b - a).normalized();
+            d = t * ((a + b) * 0.5f - p).dot(t);
+        } else {
+            // Interior: toward the neighbours' average, with the part along the normal
+            // removed (tangential relax): Laplacian alone would sink the patch inward.
+            Vec3 avg;
+            const uint32_t k0 = rm.nb_off[i], k1 = rm.nb_off[i + 1];
+            for (uint32_t k = k0; k < k1; k++) avg += g_smooth_old[rm.nb[k]];
+            avg = avg * (1.0f / (float)std::max(1u, k1 - k0));
+            d = avg - p;
+            d = d - rm.n[i] * d.dot(rm.n[i]);
+        }
+        Vec3 q, qn;
+        if (g_smooth_grid.closest(p + d * std::min(1.0f, w), q, qn)) { rm.v[i] = q; rm.n[i] = qn; }
+    }
+    return moved;
+}
+
+int retopo_grab_begin(RetopoState& st, const Camera& cam, int win_w, int win_h,
+                      float cx, float cy, float radius_px, bool mirror) {
+    const RetopoMesh& rm = st.result;
+    g_grab_idx.clear(); g_grab_w.clear(); g_grab_sign.clear(); g_grab_start.clear();
+    if (!st.built || g_smooth_grid.m == nullptr) return 0;
+    const float r2 = radius_px * radius_px;
+    for (size_t i = 0; i < rm.v.size(); i++) {
+        float w = ring_weight(cam, win_w, win_h, cx, cy, r2, rm.v[i], rm.n[i]);
+        int8_t sign = 1;
+        if (mirror) {
+            Vec3 p = rm.v[i], n = rm.n[i];
+            p.x = -p.x; n.x = -n.x;
+            const float wm = ring_weight(cam, win_w, win_h, cx, cy, r2, p, n);
+            if (wm > w) { w = wm; sign = -1; }
+        }
+        if (w <= 0.0f) continue;
+        g_grab_idx.push_back((uint32_t)i);
+        g_grab_w.push_back(w);
+        g_grab_sign.push_back(sign);
+        g_grab_start.push_back(rm.v[i]);
+    }
+    return (int)g_grab_idx.size();
+}
+
+void retopo_grab_drag(RetopoState& st, const Camera& cam, int win_w, int win_h,
+                      float dx_px, float dy_px) {
+    RetopoMesh& rm = st.result;
+    if (!st.built || g_grab_idx.empty()) return;
+    const Vec3 cam_pos = cam.get_position();
+    const Vec3 fwd = (cam.target - cam_pos).normalized();
+    const Vec3 right = fwd.cross(Vec3(0, 1, 0)).normalized();
+    const Vec3 up = right.cross(fwd).normalized();
+    for (size_t k = 0; k < g_grab_idx.size(); k++) {
+        const uint32_t i = g_grab_idx[k];
+        if (i >= rm.v.size()) continue;
+        const Vec3 p0 = g_grab_start[k];
+        // The pointer's pixels, as world distance at this vertex's own depth (the
+        // foreshortening term: under perspective a far vertex needs more world per pixel).
+        const float wpp = 2.0f * cam.half_height_at(cam.view_depth(p0)) / (float)win_h;
+        Vec3 d = (right * dx_px - up * dy_px) * (wpp * g_grab_w[k]);
+        if (g_grab_sign[k] < 0) d.x = -d.x;   // its reflection was grabbed: move mirrored
+        Vec3 q, qn;
+        if (g_smooth_grid.closest(p0 + d, q, qn, 8)) { rm.v[i] = q; rm.n[i] = qn; }
+    }
 }
 
 bool retopo_export_obj(const RetopoMesh& rm, const char* path) {

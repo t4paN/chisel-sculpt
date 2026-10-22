@@ -1,5 +1,6 @@
 #pragma once
 #include "mesh.h"
+#include "camera.h"
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -31,7 +32,15 @@ struct RetopoMesh {
     std::vector<uint32_t> quads;
     std::vector<uint32_t> edges;   // 2 per edge
     std::vector<uint32_t> edge_owner;  // per edge: the RetopoStroke::id it came from (twins share it)
-    void clear() { v.clear(); n.clear(); quads.clear(); edges.clear(); edge_owner.clear(); }
+    // For Smooth: edge neighbours (CSR), and for a border vertex its two border
+    // neighbours (pinned = a corner, or not a simple border: it never moves).
+    std::vector<uint32_t> nb_off, nb;
+    std::vector<uint32_t> border_nb;   // 2 per vertex; ~0u for interior vertices
+    std::vector<uint8_t>  pinned;
+    void clear() {
+        v.clear(); n.clear(); quads.clear(); edges.clear(); edge_owner.clear();
+        nb_off.clear(); nb.clear(); border_nb.clear(); pinned.clear();
+    }
     uint32_t quad_count() const { return (uint32_t)(quads.size() / 4); }
 };
 
@@ -63,6 +72,27 @@ struct RetopoState {
 // `mirror`, a stroke lying wholly on one side of x=0 gets a mirrored twin.
 // User-paced and CPU-only; returns the build time in ms.
 double retopo_build(RetopoState& st, const Mesh& m, bool mirror);
+
+// Editing the built quads. retopo_edit_begin at pen-down for Smooth and Grab alike:
+// it re-reads the sculpt for snapping (must be current on the CPU).
+// Smooth (Shift / double Shift in mode 0): dab every frame
+// with the cursor: vertices under the ring slide toward their neighbours' average
+// along the surface (interior) or along the border (edges — so a strip keeps its
+// width and a donut its hole), then snap back onto the sculpt. Corners stay put. With
+// mirror, a vertex whose reflection is under the ring moves too, so twins stay twins.
+// Returns how many vertices moved. A rebuild throws the smoothing away.
+void retopo_edit_begin(RetopoState& st, const Mesh& m);
+int  retopo_smooth_dab(RetopoState& st, const Camera& cam, int win_w, int win_h,
+                       float cx, float cy, float radius_px, float strength, bool mirror);
+
+// Grab (G in mode 0): at the press, take every vertex under the ring with a soft
+// falloff (mirror: reflections too, moving mirrored); while dragging, move each by the
+// pointer's screen offset since the press, carried into the world at that vertex's
+// depth, then snap onto the sculpt. Returns how many vertices it holds.
+int  retopo_grab_begin(RetopoState& st, const Camera& cam, int win_w, int win_h,
+                       float cx, float cy, float radius_px, bool mirror);
+void retopo_grab_drag(RetopoState& st, const Camera& cam, int win_w, int win_h,
+                      float dx_px, float dy_px);
 
 // Write state.result as a quad OBJ. Returns false if there's nothing to write or the
 // file can't be opened.
