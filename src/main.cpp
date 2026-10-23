@@ -2762,6 +2762,13 @@ int main(int argc, char* argv[]) {
             static bool retopo_smoothing = false;
             static bool retopo_grabbing = false;
             static bool retopo_erasing = false;
+            // Cut's vertex snap, every frame the knife is out: the overlay lights it, the
+            // press and the pen-up read it.
+            const bool knife = retopo_on && retopo.built && !input.is_smooth_active()
+                            && input.retopo_tool == InputState::RetopoTool::CUT;
+            retopo.snap_v = knife ? retopo_snap_vertex(retopo, camera, win_w, win_h,
+                                                       (float)input.mouse_x, (float)input.mouse_y)
+                                  : ~0u;
             const bool retopo_press = retopo_on && input.drag_mode == InputState::DragMode::RETOPO;
             if (retopo_press && !retopo.drawing
                 && (retopo_smoothing || input.is_smooth_active())) {
@@ -2841,6 +2848,7 @@ int main(int argc, char* argv[]) {
                     input.drag_mode = InputState::DragMode::NONE;
                 } else if (!retopo.cutting) {
                     retopo.cutting = true;
+                    retopo.cut_from_v = retopo.snap_v;
                     retopo.cut_pts.clear();
                     retopo.cut_nrm.clear();
                     retopo.last_sx = mx - 1e3f;   // the press point always lands
@@ -2888,6 +2896,7 @@ int main(int argc, char* argv[]) {
                 }
             } else if (retopo.cutting) {
                 // Pen up: the knife goes through the built quads along the line.
+                retopo.cut_to_v = retopo.snap_v;
                 if (retopo.cut_pts.size() >= 2) {
                     scene.materialize_active_cpu();   // new vertices snap onto mesh.pos
                     const int split = retopo_cut(retopo, *mesh, camera, win_w, win_h, input.mirror_x);
@@ -2900,6 +2909,7 @@ int main(int argc, char* argv[]) {
                     input.notification_timer = 2.0f;
                 }
                 retopo.cutting = false;
+                retopo.cut_from_v = retopo.cut_to_v = ~0u;
                 retopo.cut_pts.clear();
                 retopo.cut_nrm.clear();
             }

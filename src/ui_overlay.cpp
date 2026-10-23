@@ -2464,4 +2464,17 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
         dl->AddLine(at[a], at[b], lit ? hot : on ? sel_col : st.hover_id ? dim : lite,
                     lit || on ? 2.0f : 1.2f);
     }
+    // Cut's vertex snap: the vertex under the pointer gets a ring, the one a cut started
+    // on a filled dot, so a vertex cut is never a surprise.
+    auto mark = [&](uint32_t i, bool filled) {
+        if (i >= rm.v.size()) return;
+        float x, y;
+        if (!cam.world_to_screen(rm.v[i], win_w, win_h, x, y)) return;
+        const ImU32 green = IM_COL32(0, 255, 65, 255), dark = IM_COL32(0, 20, 8, 200);
+        dl->AddCircle(ImVec2(x, y), 6.5f, dark, 16, 4.0f);
+        dl->AddCircle(ImVec2(x, y), 6.5f, green, 16, 2.0f);
+        if (filled) dl->AddCircleFilled(ImVec2(x, y), 3.5f, green, 12);
+    };
+    if (st.cutting) mark(st.cut_from_v, true);
+    if (st.snap_v != st.cut_from_v || !st.cutting) mark(st.snap_v, false);
 }

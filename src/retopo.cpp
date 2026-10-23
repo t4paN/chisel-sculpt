@@ -1255,6 +1255,8 @@ namespace {
 // How much of a crossing's offset from its edge's middle survives the aim. A hand-drawn
 // line wanders; the loop it cuts is wanted straight, so 1/5 along an edge lands at 0.43.
 constexpr float kCutAimKeep = 0.25f;
+// A vertex cut must start or end this close to the vertex (screen pixels): deliberate.
+constexpr float kSnapPx = 8.0f;
 
 // 1 - |cos| of the corner at b: 1 square, 0 folded flat or doubled back.
 float corner_q(Vec3 a, Vec3 b, Vec3 c) {
@@ -1318,12 +1320,35 @@ void rebuild_edges(RetopoMesh& rm) {
 
 }  // namespace
 
+uint32_t retopo_snap_vertex(const RetopoState& st, const Camera& cam, int win_w, int win_h,
+                            float x, float y) {
+    const RetopoMesh& rm = st.result;
+    if (!st.built || rm.nb_off.size() != rm.v.size() + 1) return ~0u;
+    uint32_t best = ~0u;
+    float best_d2 = kSnapPx * kSnapPx;
+    for (uint32_t i = 0; i < (uint32_t)rm.v.size(); i++) {
+        if (!alive(rm, i) || st.hidden(rm.v_owner[i])) continue;
+        const Vec3 to_eye = cam.perspective ? cam.get_position() - rm.v[i] : cam.get_view_direction() * -1.0f;
+        float sx, sy;
+        if (rm.n[i].dot(to_eye) <= 0.0f || !cam.world_to_screen(rm.v[i], win_w, win_h, sx, sy)) continue;
+        const float d2 = (sx - x) * (sx - x) + (sy - y) * (sy - y);
+        if (d2 < best_d2) { best_d2 = d2; best = i; }
+    }
+    return best;
+}
+
 int retopo_cut(RetopoState& st, const Mesh& m, const Camera& cam, int win_w, int win_h,
                bool mirror) {
     RetopoMesh& rm = st.result;
     const size_t np = st.cut_pts.size();
     if (!st.built || np < 2) return 0;
     retopo_edit_begin(st, m);   // the snap grid, for the new vertices
+    const uint32_t from_v = st.cut_from_v < rm.v.size() ? st.cut_from_v : ~0u;
+    const uint32_t to_v   = st.cut_to_v   < rm.v.size() && st.cut_to_v != from_v ? st.cut_to_v : ~0u;
+    // A snapped end starts (or stops) exactly on its vertex, not a few pixels off it.
+    std::vector<Vec3> pts = st.cut_pts;
+    if (from_v != ~0u) pts.front() = rm.v[from_v];
+    if (to_v != ~0u)   pts.back()  = rm.v[to_v];
 
     // The line on screen. Its points lie on the sculpt where the pen was, so they're
     // visible by construction.
@@ -1331,7 +1356,7 @@ int retopo_cut(RetopoState& st, const Mesh& m, const Camera& cam, int win_w, int
     std::vector<uint8_t> lok(np);
     float bx0 = 1e30f, by0 = 1e30f, bx1 = -1e30f, by1 = -1e30f;
     for (size_t i = 0; i < np; i++) {
-        lok[i] = cam.world_to_screen(st.cut_pts[i], win_w, win_h, lx[i], ly[i]);
+        lok[i] = cam.world_to_screen(pts[i], win_w, win_h, lx[i], ly[i]);
         if (!lok[i]) continue;
         bx0 = std::min(bx0, lx[i]); bx1 = std::max(bx1, lx[i]);
         by0 = std::min(by0, ly[i]); by1 = std::max(by1, ly[i]);
@@ -1367,20 +1392,78 @@ int retopo_cut(RetopoState& st, const Mesh& m, const Camera& cam, int win_w, int
             const float wx = lx[i] - sx[a], wy = ly[i] - sy[a];
             const float t = (wx * qy - wy * qx) / den, u = (wx * ry - wy * rx) / den;
             if (t < 0.0f || t > 1.0f || u < 0.0f || u > 1.0f) continue;
+            // Leaving (or reaching) a snapped vertex grazes its own edges right at it:
+            // those aren't crossings, the vertex is the cut point.
+            bool at_snap = false;
+            for (uint32_t sv : {from_v, to_v})
+                if (sv != ~0u && (a == sv || b == sv))
+                    at_snap |= std::hypot(sx[a] + rx * t - sx[sv], sy[a] + ry * t - sy[sv]) < 2.0f * kSnapPx;
+            if (at_snap) continue;
             const Vec3 on_edge = rm.v[a] + (rm.v[b] - rm.v[a]) * t;
-            const Vec3 on_line = st.cut_pts[i] + (st.cut_pts[i + 1] - st.cut_pts[i]) * u;
+            const Vec3 on_line = pts[i] + (pts[i + 1] - pts[i]) * u;
             if ((on_edge - on_line).length() > 0.5f * len) continue;
             at[edge_key(a, b)] = (uint32_t)cx.size();
             cx.push_back({a, b, 0.5f + (t - 0.5f) * kCutAimKeep, (float)i + u});
             break;
         }
     }
-    if (cx.empty()) {
+    auto corners = [&](size_t f, std::vector<uint32_t>& c) { return face_corners(rm, f, c); };
+
+    // Vertex cuts: (face, corner) pairs where the cut starts at a corner instead of on
+    // a side. The start vertex pairs with the face it leaves through: the one that has
+    // both it and the first crossed edge. Likewise the end with the last.
+    std::vector<std::pair<uint32_t, uint32_t>> chords;
+    auto is_chord = [&](uint32_t f, uint32_t v) {
+        return std::find(chords.begin(), chords.end(), std::make_pair(f, v)) != chords.end();
+    };
+    auto chord_face = [&](uint32_t f) {
+        for (auto& ch : chords) if (ch.first == f) return true;
+        return false;
+    };
+    {
+        std::vector<uint32_t> c;
+        // The face with corner v and (a != ~0u) side a-b, or (a == ~0u) corner b not next
+        // to v. ~0u for none.
+        auto face_of = [&](uint32_t v, uint32_t a, uint32_t b) {
+            for (size_t f = 0; f < rm.face_count(); f++) {
+                const int n = corners(f, c);
+                int iv = -1;
+                for (int k = 0; k < n; k++) if (c[k] == v) iv = k;
+                if (iv < 0) continue;
+                for (int k = 0; k < n; k++) {
+                    const uint32_t x = c[k], y = c[(k + 1) % n];
+                    if (a != ~0u && ((x == a && y == b) || (x == b && y == a))) return (uint32_t)f;
+                }
+                if (a == ~0u)
+                    for (int k = 0; k < n; k++)
+                        if (c[k] == b && k != (iv + 1) % n && (k + 1) % n != iv) return (uint32_t)f;
+            }
+            return ~0u;
+        };
+        if (!cx.empty()) {
+            size_t first = 0, last = 0;
+            for (size_t i = 1; i < cx.size(); i++) {
+                if (cx[i].s < cx[first].s) first = i;
+                if (cx[i].s > cx[last].s) last = i;
+            }
+            if (from_v != ~0u) {
+                const uint32_t f = face_of(from_v, cx[first].a, cx[first].b);
+                if (f != ~0u) chords.push_back({f, from_v});
+            }
+            if (to_v != ~0u) {
+                const uint32_t f = face_of(to_v, cx[last].a, cx[last].b);
+                if (f != ~0u && !is_chord(f, to_v)) chords.push_back({f, to_v});
+            }
+        } else if (from_v != ~0u && to_v != ~0u) {
+            // No sides crossed: corner to corner across one face.
+            const uint32_t f = face_of(from_v, ~0u, to_v);
+            if (f != ~0u) { chords.push_back({f, from_v}); chords.push_back({f, to_v}); }
+        }
+    }
+    if (cx.empty() && chords.empty()) {
         std::printf("[retopo] cut: the line crossed no edges\n");
         return 0;
     }
-
-    auto corners = [&](size_t f, std::vector<uint32_t>& c) { return face_corners(rm, f, c); };
 
     // Mirror: each crossing's twin edge is cut at the same place. Where the line itself
     // crossed both sides (drawn over the seam), the earlier crossing leads and the other
@@ -1417,7 +1500,28 @@ int retopo_cut(RetopoState& st, const Mesh& m, const Camera& cam, int win_w, int
             cx[i].twin = j; cx[j].twin = i;
         }
     };
-    if (mirror) pair_twins(true);
+    if (mirror) {
+        pair_twins(true);
+        // A vertex cut's twin: the twin vertex, in the face made of the twin corners.
+        std::vector<uint32_t> c, mk, fk;
+        const size_t nch = chords.size();
+        for (size_t i = 0; i < nch; i++) {
+            const uint32_t mv = rm.mirror[chords[i].second];
+            if (mv == ~0u) continue;
+            corners(chords[i].first, c);
+            mk.clear();
+            for (uint32_t x : c) mk.push_back(rm.mirror[x]);
+            if (std::find(mk.begin(), mk.end(), ~0u) != mk.end()) continue;
+            std::sort(mk.begin(), mk.end());
+            for (size_t f = 0; f < rm.face_count(); f++) {
+                corners(f, fk);
+                std::sort(fk.begin(), fk.end());
+                if (fk != mk) continue;
+                if (!is_chord((uint32_t)f, mv)) chords.push_back({(uint32_t)f, mv});
+                break;
+            }
+        }
+    }
 
     // Quads, not triangles. A face splits into quads only when its outline (corners +
     // cut points) has an even count; a line that stops inside a quad leaves five. So
@@ -1449,8 +1553,9 @@ int retopo_cut(RetopoState& st, const Mesh& m, const Camera& cam, int win_w, int
             work.pop_back();
             const int n = corners(f, c);
             // Only quads and triangles are kept to quads; a bigger face (the eraser's)
-            // takes a lone cut point as one more corner.
-            if (n < 3 || n > 4) continue;
+            // takes a lone cut point as one more corner. A vertex cut's face splits as
+            // asked, triangle or not.
+            if (n < 3 || n > 4 || chord_face(f)) continue;
             int cuts = 0, lone = -1, uncut = -1;
             for (int k = 0; k < n; k++) {
                 if (at.count(edge_key(c[k], c[(k + 1) % n]))) { cuts++; lone = k; }
@@ -1517,20 +1622,32 @@ int retopo_cut(RetopoState& st, const Mesh& m, const Camera& cam, int win_w, int
             auto it = at.find(edge_key(c[k], c[(k + 1) % n]));
             if (it != at.end()) { cut[k] = cx[it->second].vid; cuts++; }
         }
-        if (n < 3 || cuts == 0) {
+        // The outline, and where its cut points sit in it: new points on its sides, and
+        // (vertex cuts) corners. A walk between two neighbouring corners would be a
+        // two-cornered piece: then the corners don't count and it cuts as a plain face.
+        int L = 0, corner_cuts = 0;
+        for (int use_corners = 1; use_corners >= 0; use_corners--) {
+            ring.clear(); ci.clear();
+            corner_cuts = 0;
+            for (int k = 0; k < n; k++) {
+                if (use_corners && is_chord((uint32_t)f, c[k])) { ci.push_back((uint32_t)ring.size()); corner_cuts++; }
+                ring.push_back(c[k]);
+                if (cut[k] != ~0u) { ci.push_back((uint32_t)ring.size()); ring.push_back(cut[k]); }
+            }
+            L = (int)ring.size();
+            bool ok = true;
+            if (ci.size() == 2)
+                for (int k = 0; k < 2; k++) ok &= ((int)ci[(k + 1) % 2] - (int)ci[k] + L) % L >= 2;
+            if (ok || !corner_cuts) break;
+        }
+        cuts = (int)ci.size();
+        if (n < 3 || cuts == 0 || (cuts == 1 && corner_cuts == 1)) {
             out.add(rm.face(f), (int)rm.face_size(f), who);
             continue;
         }
         split++;
         touched.push_back(who);
         const bool quadify = n <= 4;
-        // The outline, and where its cut points sit in it.
-        ring.clear(); ci.clear();
-        for (int k = 0; k < n; k++) {
-            ring.push_back(c[k]);
-            if (cut[k] != ~0u) { ci.push_back((int)ring.size()); ring.push_back(cut[k]); }
-        }
-        const int L = (int)ring.size();
         if (cuts == 1) {
             // A triangle with one cut side is a quad already (a quad's lone cut ran on
             // through its far side above); a bigger face takes the point as a corner.
@@ -1543,7 +1660,7 @@ int retopo_cut(RetopoState& st, const Mesh& m, const Camera& cam, int win_w, int
             centres.push_back({face_key(c), c, v});
             return v;
         };
-        if (cuts == 2 && n == 4 && (ci[1] - ci[0] == 2 || ci[0] + L - ci[1] == 2)) {
+        if (cuts == 2 && n == 4 && !corner_cuts && (ci[1] - ci[0] == 2 || ci[0] + L - ci[1] == 2)) {
             // A corner clipped: the cut turns inside the quad. Three quads round a new
             // vertex M where the turn is (p and q's corner reflected across them), the
             // cut running p -> M -> q and one support from M to the far corner.
@@ -1602,8 +1719,8 @@ int retopo_cut(RetopoState& st, const Mesh& m, const Camera& cam, int win_w, int
     // edges across are in.
     rebuild_edges(rm);
     freeze_touched(st, touched);
-    std::printf("[retopo] cut: %zu edges, %d faces split, now %u faces\n",
-                cx.size(), split, rm.face_count());
+    std::printf("[retopo] cut: %zu edges, %zu vertex end(s), %d faces split, now %u faces\n",
+                cx.size(), chords.size(), split, rm.face_count());
     return split;
 }
 

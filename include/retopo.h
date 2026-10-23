@@ -90,6 +90,9 @@ struct RetopoState {
     // Cut: a bare line on the surface (no band), under the pen while `cutting`.
     std::vector<Vec3> cut_pts, cut_nrm;
     bool cutting = false;
+    // Cut's vertex snap: the built vertex under the pointer (lit while hovering), and the
+    // ones the line started and ended on (~0u = it started / ended on no vertex).
+    uint32_t snap_v = ~0u, cut_from_v = ~0u, cut_to_v = ~0u;
     float last_sx = 0, last_sy = 0;   // screen position of the last captured point
     uint32_t next_id = 1;
 
@@ -190,9 +193,18 @@ void retopo_grab_drag(RetopoState& st, const Camera& cam, int win_w, int win_h,
 // line that stops inside the island runs on through edge middles to its border (or round
 // to meet itself): a dead end inside quads always costs a triangle, a support edge run
 // through doesn't. No vertex is left hanging on an edge. With mirror, each cut edge's twin is cut too,
-// as its exact reflection. Freezes what it cuts. Returns how many faces it split.
+// as its exact reflection. A line that starts (st.cut_from_v) or ends (st.cut_to_v) on a
+// vertex cuts from that vertex itself: the face it leaves splits along a chord from the
+// corner, triangles and all, and the supports leave that face alone. Start and end on
+// two corners of one face and that face splits along the chord between them.
+// Freezes what it cuts. Returns how many faces it split.
 int retopo_cut(RetopoState& st, const Mesh& m, const Camera& cam, int win_w, int win_h,
                bool mirror);
+
+// The built vertex within a few pixels of screen point (x, y), facing the eye and not
+// hidden, nearest first; ~0u for none. Close on purpose: a vertex cut is deliberate.
+uint32_t retopo_snap_vertex(const RetopoState& st, const Camera& cam, int win_w, int win_h,
+                            float x, float y);
 
 // Erase (E in mode 0): a round brush. Each dab takes the inner edge whose middle is
 // nearest the ring's centre (inside the ring; the island's outline stays): its two

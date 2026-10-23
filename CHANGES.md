@@ -2,6 +2,19 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-23 — Retopo mode: Cut snaps to vertices at its ends
+
+*Built live with the user at the keyboard; user-tested.*
+
+With the knife out, a built vertex within 8 px of the pointer gets a green ring. A cut
+that **starts or ends** on a lit vertex (a filled dot marks a snapped start) runs from that
+vertex itself: the face it leaves splits along a chord from the corner to the first cut
+point, no new vertex beside it, and the support runs leave that face alone (triangles and
+poles allowed, user's call). Start and end on two corners of one face and it splits along
+the chord between them, handy across the eraser's big faces. Passing near a vertex
+mid-line doesn't snap: only the ends, and only that close. Mirror snaps the twin.
+Log line gains a vertex-end count.
+
 ## 2026-10-23 — Retopo mode: Erase (E), faces of any size
 
 *Built live with the user at the keyboard; user-tested.*
