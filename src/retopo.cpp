@@ -1045,25 +1045,48 @@ int retopo_smooth_dab(RetopoState& st, const Camera& cam, int win_w, int win_h,
         moved += g_smooth_w[i] > 0.0f;
     }
     if (!moved) return 0;
+    // Slide p along the line through a and b toward their midpoint. Only the part along
+    // the line counts: on a curved loop the midpoint sits inside the curve, and taking
+    // that pull too is what shrinks loops.
+    auto slide = [](Vec3 p, Vec3 a, Vec3 b) {
+        const Vec3 t = (b - a).normalized();
+        return t * ((a + b) * 0.5f - p).dot(t);
+    };
     g_smooth_old = rm.v;
     for (size_t i = 0; i < rm.v.size(); i++) {
         const float w = g_smooth_w[i];
         if (w <= 0.0f || !alive(rm, (uint32_t)i)) continue;
         const Vec3 p = g_smooth_old[i];
+        const uint32_t k0 = rm.nb_off[i], k1 = rm.nb_off[i + 1];
         Vec3 d;
         if (rm.border_nb[i * 2] != ~0u) {
             // Border: slide along the border line only, so widths and holes hold.
-            const Vec3 a = g_smooth_old[rm.border_nb[i * 2]], b = g_smooth_old[rm.border_nb[i * 2 + 1]];
-            const Vec3 t = (b - a).normalized();
-            d = t * ((a + b) * 0.5f - p).dot(t);
+            d = slide(p, g_smooth_old[rm.border_nb[i * 2]], g_smooth_old[rm.border_nb[i * 2 + 1]]);
         } else {
-            // Interior: toward the neighbours' average, with the part along the normal
-            // removed (tangential relax): Laplacian alone would sink the patch inward.
-            Vec3 avg;
-            const uint32_t k0 = rm.nb_off[i], k1 = rm.nb_off[i + 1];
-            for (uint32_t k = k0; k < k1; k++) avg += g_smooth_old[rm.nb[k]];
-            avg = avg * (1.0f / (float)std::max(1u, k1 - k0));
-            d = avg - p;
+            // A grid vertex (four neighbours) has two straight-through pairs, one along
+            // its loop and one across the band: slide along each. Averaging all four
+            // instead pulled every loop toward the inside of its bend, so a donut's
+            // middle loops crept into the hole; even spacing is where this one rests.
+            // Pairs are found by direction (most opposite), so welds can't confuse them.
+            int pa = -1;
+            if (k1 - k0 == 4) {
+                Vec3 u[4];
+                for (int k = 0; k < 4; k++) u[k] = (g_smooth_old[rm.nb[k0 + k]] - p).normalized();
+                float best = -0.3f;   // not opposite enough: not a grid vertex, average instead
+                for (int k = 1; k < 4; k++)
+                    if (u[0].dot(u[k]) < best) { best = u[0].dot(u[k]); pa = k; }
+            }
+            if (pa > 0) {
+                const int r0 = pa == 1 ? 2 : 1, r1 = pa == 3 ? 2 : 3;
+                auto N = [&](int k) { return g_smooth_old[rm.nb[k0 + k]]; };
+                d = slide(p, N(0), N(pa)) + slide(p, N(r0), N(r1));
+            } else {
+                // Anything else (a weld's odd valence): toward the neighbours' average.
+                Vec3 avg;
+                for (uint32_t k = k0; k < k1; k++) avg += g_smooth_old[rm.nb[k]];
+                d = avg * (1.0f / (float)std::max(1u, k1 - k0)) - p;
+            }
+            // Tangential only: along the normal would sink the patch into the sculpt.
             d = d - rm.n[i] * d.dot(rm.n[i]);
         }
         Vec3 q, qn;

@@ -2,6 +2,18 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-23 — Retopo mode: Smooth keeps loop spacing even
+
+*Not yet hand-tested: checked on a flat-donut simulation only.*
+
+The neighbour average pulled every loop toward the inside of its bend; with the borders only
+sliding, a donut's middle loops crept into the hole, and that bunched shape was where it
+settled. A four-neighbour vertex now pairs its neighbours by direction (along the loop,
+across the band) and slides along each pair's line toward its midpoint, like the border
+slide, so even spacing is the resting state. Simulated: loop gaps stay 0.25 each at 20 and
+600 dabs (were 0.12 → 0.40). Odd valence (welds) still averages. Tried and dropped: Taubin
+smoothing, which only delays the same end state.
+
 ## 2026-10-23 — Retopo mode: right-click no longer opens the paint colour wheel
 
 The brush stays Paint underneath mode 0 and the wheel only checked the brush; it now also
