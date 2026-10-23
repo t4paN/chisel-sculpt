@@ -2422,22 +2422,32 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
     if (!st.built || !st.show_result) return;
 
     // Wireframe: project every vertex once, then draw an edge only when both ends
-    // can be seen. A vertex is hidden when it faces away, or (cache fresh) sits
-    // deeper than the sculpt's own depth at that pixel by more than a few pixels'
-    // worth of world — the same tolerance as the mirror lobe marker.
+    // can be seen. A vertex facing away is hidden; one that faces us but (cache fresh)
+    // sits deeper than the sculpt's own depth at that pixel by more than a few pixels'
+    // worth of world (the mirror lobe marker's tolerance) is behind a part of the
+    // sculpt: its edges still show, darker and thinner, never filled. So does one facing
+    // away but only a few quads behind the surface in front of it (an ear's inner fold,
+    // under a lip); deeper than that it's the far side of the model and stays hidden.
+    // vis: 0 hidden, 1 behind the sculpt, 2 in view.
     const RetopoMesh& rm = st.result;
     static std::vector<ImVec2> at;
     static std::vector<uint8_t> vis;
     at.resize(rm.v.size()); vis.resize(rm.v.size());
+    float reach = 0.0f;   // "a few quads": 4x the mean edge
+    for (size_t e = 0; e + 1 < rm.edges.size(); e += 2)
+        reach += (rm.v[rm.edges[e]] - rm.v[rm.edges[e + 1]]).length();
+    reach *= 4.0f / (float)std::max<size_t>(1, rm.edges.size() / 2);
     for (size_t i = 0; i < rm.v.size(); i++) {
         float x, y;
-        bool v = cam.world_to_screen(rm.v[i], win_w, win_h, x, y) && retopo_facing(cam, rm.v[i], rm.n[i]);
-        if (v && depth_fresh && x >= 0 && y >= 0 && x < win_w && y < win_h) {
+        const bool on_screen = cam.world_to_screen(rm.v[i], win_w, win_h, x, y);
+        const bool facing = retopo_facing(cam, rm.v[i], rm.n[i]);
+        uint8_t v = on_screen && facing ? 2 : 0;
+        if (on_screen && depth_fresh && x >= 0 && y >= 0 && x < win_w && y < win_h) {
             float front = 0.0f;
             if (renderer.sample_depth((int)x, (int)y, &front) && front < 500.0f) {
                 const float depth = cam.view_depth(rm.v[i]);
                 const float tol = 2.0f * cam.half_height_at(depth) / (float)win_h * 6.0f;
-                v = depth <= front + tol;
+                if (facing ? depth > front + tol : depth <= front + reach) v = 1;
             }
         }
         at[i] = ImVec2(x, y);
@@ -2451,16 +2461,56 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
     sel.clear();
     for (const RetopoStroke& s : st.strokes) if (s.selected) sel.push_back(s.id);
     auto is_sel = [&](uint32_t id) { return std::find(sel.begin(), sel.end(), id) != sel.end(); };
+    // Faces: a faint fill under the wire, so what's covered reads at a glance. Plain
+    // translucent triangles, no anti-aliased fringe: half the vertices, and neighbours'
+    // fringes would otherwise double up into a seam the wire already draws. Quads and
+    // triangles take the convex path; only Erase's merged n-gons (maybe concave) the
+    // concave one. Hidden if any corner is.
+    {
+        const ImDrawListFlags keep_flags = dl->Flags;
+        dl->Flags &= ~ImDrawListFlags_AntiAliasedFill;
+        static std::vector<ImVec2> poly;
+        for (uint32_t f = 0; f < rm.face_count(); f++) {
+            const uint32_t ow = rm.face_owner[f];
+            if (st.hidden(ow) && ow != st.hover_id) continue;
+            const uint32_t* q = rm.face(f);
+            const uint32_t k = rm.face_size(f);
+            poly.clear();
+            bool ok = true;
+            for (uint32_t i = 0; i < k && ok; i++) {
+                ok = vis[q[i]] == 2;
+                if (i == 0 || q[i] != q[i - 1]) poly.push_back(at[q[i]]);   // welds leave repeats
+            }
+            if (!ok || poly.size() < 3) continue;
+            const ImU32 col = ow == st.hover_id ? IM_COL32(255, 240, 160, 48)
+                            : is_sel(ow)        ? IM_COL32(255, 190, 120, 40)
+                            : st.hover_id       ? IM_COL32(205, 245, 255, 16)
+                                                : IM_COL32(205, 245, 255, 36);
+            if (poly.size() <= 4) dl->AddConvexPolyFilled(poly.data(), (int)poly.size(), col);
+            else                  dl->AddConcavePolyFilled(poly.data(), (int)poly.size(), col);
+        }
+        dl->Flags = keep_flags;
+    }
+    // Behind the sculpt (either end): one dim pass under the rest, no dark outline.
     for (size_t e = 0; e + 1 < rm.edges.size(); e += 2) {
         const uint32_t a = rm.edges[e], b = rm.edges[e + 1];
-        if (!vis[a] || !vis[b]) continue;
+        if (!vis[a] || !vis[b] || (vis[a] == 2 && vis[b] == 2)) continue;
+        const uint32_t ow = rm.edge_owner[e / 2];
+        if (st.hidden(ow) && ow != st.hover_id) continue;
+        const bool lit = ow == st.hover_id, on = is_sel(ow);
+        dl->AddLine(at[a], at[b], lit ? IM_COL32(150, 135, 70, 190) : on ? IM_COL32(150, 90, 40, 170)
+                                  : IM_COL32(70, 110, 130, st.hover_id ? 70 : 150), 1.0f);
+    }
+    for (size_t e = 0; e + 1 < rm.edges.size(); e += 2) {
+        const uint32_t a = rm.edges[e], b = rm.edges[e + 1];
+        if (vis[a] != 2 || vis[b] != 2) continue;
         const uint32_t ow = rm.edge_owner[e / 2];
         if (st.hidden(ow) && ow != st.hover_id) continue;   // its eye is shut (hover still shows it)
         dl->AddLine(at[a], at[b], dark, ow == st.hover_id || is_sel(ow) ? 4.0f : 3.0f);
     }
     for (size_t e = 0; e + 1 < rm.edges.size(); e += 2) {
         const uint32_t a = rm.edges[e], b = rm.edges[e + 1];
-        if (!vis[a] || !vis[b]) continue;
+        if (vis[a] != 2 || vis[b] != 2) continue;
         const uint32_t ow = rm.edge_owner[e / 2];
         if (st.hidden(ow) && ow != st.hover_id) continue;
         const bool lit = ow == st.hover_id, on = is_sel(ow);

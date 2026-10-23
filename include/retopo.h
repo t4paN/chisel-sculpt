@@ -105,6 +105,10 @@ struct RetopoState {
     bool show_result = true;
     bool show_strokes = true;
     uint32_t hover_id = 0;            // stroke under the cursor in the bar (0 = none), lit in the overlay
+    // Where the last press of any retopo tool landed on the sculpt: F frames the piece
+    // nearest it (the island being worked on, not its mirror twin).
+    Vec3 work_pos;
+    bool work_valid = false;
 
     // Pen-up: keep the stroke if it has enough to build on, decide donut vs strip.
     // Returns false (and drops it) for a tap.

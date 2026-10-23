@@ -2,6 +2,21 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-23 — Retopo mode: filled faces, wire through the sculpt, F frames the island at work
+
+*Built live with the user at the keyboard. Fill seen working; the fold fix and the new F not yet tested.*
+
+**Fill:** built faces get a faint pale-blue wash under the wire (yellow for the hovered
+row, orange for the selection, dimmer while another row is hovered). Plain translucent
+triangles, no anti-aliased fringe; Erase's big merged n-gons take the concave fill.
+**Wire through the sculpt:** edges behind another part of the sculpt (facing us but
+deeper than the depth buffer), or facing away but only a few quads behind the surface in
+front of them (an ear's inner fold, under a lip), now draw thin and dark instead of
+vanishing, never filled. The far side of the model stays hidden. Still camera only, as
+before. **F in retopo mode** frames the connected piece of faces nearest the last press of
+any retopo tool (only this side of a mirrored pair; a mouth across x = 0 is one piece), or
+an unbuilt stroke if that's nearer; other modes keep the last-brush-stroke focus.
+
 ## 2026-10-23 — Retopo mode: Merge islands, and Draw bridges between edited islands
 
 *Built live with the user at the keyboard. Merge user-tested; bridges built, not yet tested.*

@@ -2313,12 +2313,70 @@ int main(int argc, char* argv[]) {
         if (input.focus_requested) {
             input.focus_requested = false;
             mesh->compute_bounding_sphere(mesh_center, mesh_radius);
-            if (brush_stroke.last_stroke_valid) {
-                camera.set_target(brush_stroke.last_stroke_pos);
-            } else {
-                camera.set_target(mesh_center);
+            // Retopo (0): frame the piece being worked on, whole, from the current angle:
+            // the connected faces nearest the last press (a mirror twin is a piece of its
+            // own, so only this side), or an unbuilt stroke if one of those is nearer.
+            // No press yet: the newest stroke as drawn (one side too).
+            bool framed = false;
+            if (input.interaction_mode == InputState::InteractionMode::RETOPO && !retopo.strokes.empty()) {
+                const RetopoMesh& rm = retopo.result;
+                const RetopoStroke* stroke = nullptr;
+                uint32_t vert = ~0u;
+                if (retopo.work_valid) {
+                    float best = 1e30f;
+                    if (retopo.built)
+                        for (size_t i = 0; i < rm.v.size(); i++) {
+                            const float d = (rm.v[i] - retopo.work_pos).length();
+                            if (d < best) { best = d; vert = (uint32_t)i; }
+                        }
+                    for (const RetopoStroke& s : retopo.strokes) {
+                        if (s.frozen) continue;
+                        bool has_faces = false;
+                        for (uint32_t o : rm.face_owner) if (o == s.id) { has_faces = true; break; }
+                        if (has_faces && retopo.built) continue;   // its faces stand for it
+                        for (const Vec3& p : s.pts) {
+                            const float d = (p - retopo.work_pos).length();
+                            if (d < best) { best = d; stroke = &s; vert = ~0u; }
+                        }
+                    }
+                } else {
+                    for (const RetopoStroke& s : retopo.strokes)
+                        if (!stroke || s.id > stroke->id) stroke = &s;
+                }
+                Vec3 lo(1e30f, 1e30f, 1e30f), hi(-1e30f, -1e30f, -1e30f);
+                auto grow = [&](Vec3 p) {
+                    lo = {std::min(lo.x, p.x), std::min(lo.y, p.y), std::min(lo.z, p.z)};
+                    hi = {std::max(hi.x, p.x), std::max(hi.y, p.y), std::max(hi.z, p.z)};
+                };
+                if (vert != ~0u) {
+                    // The piece: vertices joined through faces (union-find over corners).
+                    std::vector<uint32_t> up(rm.v.size());
+                    for (uint32_t i = 0; i < up.size(); i++) up[i] = i;
+                    auto root = [&](uint32_t x) {
+                        while (up[x] != x) x = up[x] = up[up[x]];
+                        return x;
+                    };
+                    for (uint32_t f = 0; f < rm.face_count(); f++) {
+                        const uint32_t* q = rm.face(f);
+                        for (uint32_t i = 1; i < rm.face_size(f); i++) up[root(q[i])] = root(q[0]);
+                    }
+                    const uint32_t r0 = root(vert);
+                    for (uint32_t i = 0; i < up.size(); i++) if (root(i) == r0) grow(rm.v[i]);
+                } else if (stroke) {
+                    for (const Vec3& p : stroke->pts) grow(p);
+                }
+                if (lo.x <= hi.x) {
+                    const float r = std::max(0.5f * (hi - lo).length(), mesh_radius * 0.02f);
+                    camera.set_target((lo + hi) * 0.5f);
+                    camera.distance = r * 2.5f;
+                    framed = true;
+                    std::printf("[retopo] focus: %s, radius %.3f\n", vert != ~0u ? "built piece" : "stroke", r);
+                }
             }
-            camera.distance = std::max(camera.distance * 0.675f, mesh_radius * 0.05f);
+            if (!framed) {
+                camera.set_target(brush_stroke.last_stroke_valid ? brush_stroke.last_stroke_pos : mesh_center);
+                camera.distance = std::max(camera.distance * 0.675f, mesh_radius * 0.05f);
+            }
             screen_buffers_dirty = true;
         }
 
@@ -2764,6 +2822,17 @@ int main(int argc, char* argv[]) {
             static bool retopo_erasing = false;
             static bool retopo_erasing_faces = false;   // Ctrl was held at the press
             const bool retopo_press = retopo_on && input.drag_mode == InputState::DragMode::RETOPO;
+            {
+                static bool was_press = false;
+                Vec3 p, n;
+                float wpp;
+                if (retopo_press && !was_press && !screen_buffers_dirty
+                    && retopo_surface_at((float)input.mouse_x, (float)input.mouse_y, p, n, wpp)) {
+                    retopo.work_pos = p;
+                    retopo.work_valid = true;
+                }
+                was_press = retopo_press;
+            }
             if (retopo_press && !retopo.drawing
                 && (retopo_smoothing || input.is_smooth_active())) {
                 if (!retopo_smoothing) {
