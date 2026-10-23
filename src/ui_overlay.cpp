@@ -2517,6 +2517,22 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
         dl->AddLine(at[a], at[b], lit ? hot : on ? sel_col : st.hover_id ? dim : lite,
                     lit || on ? 2.0f : 1.2f);
     }
+    // Double-clicked edge loops: green over the wire, thin where the sculpt is in front.
+    // A picked edge a weld or the eraser took away isn't an edge any more: skipped.
+    for (size_t e = 0; e + 1 < st.loop_edges.size(); e += 2) {
+        const uint32_t a = st.loop_edges[e], b = st.loop_edges[e + 1];
+        if (a >= rm.v.size() || b >= rm.v.size() || !vis[a] || !vis[b]) continue;
+        if (st.hidden(rm.v_owner[a]) || rm.nb_off.size() != rm.v.size() + 1) continue;
+        bool edge = false;
+        for (uint32_t k = rm.nb_off[a]; k < rm.nb_off[a + 1] && !edge; k++) edge = rm.nb[k] == b;
+        if (!edge) continue;
+        if (vis[a] == 2 && vis[b] == 2) {
+            dl->AddLine(at[a], at[b], IM_COL32(0, 20, 8, 220), 5.0f);
+            dl->AddLine(at[a], at[b], IM_COL32(0, 255, 65, 255), 2.5f);
+        } else {
+            dl->AddLine(at[a], at[b], IM_COL32(0, 200, 55, 150), 1.0f);
+        }
+    }
     // Cut's vertex snap: the vertex under the pointer gets a ring, the one a cut started
     // on a filled dot, so a vertex cut is never a surprise.
     auto mark = [&](uint32_t i, bool filled) {

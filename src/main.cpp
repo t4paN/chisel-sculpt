@@ -3021,14 +3021,31 @@ int main(int argc, char* argv[]) {
             }
             if (click_armed && std::hypot((float)input.mouse_x - click_x, (float)input.mouse_y - click_y) > 4.0f)
                 click_armed = false;
+            // A second click soon after, on the same spot, with the pencil out: the edge
+            // loop there instead (the first click already picked its island).
+            static double last_click_t = -1.0;
+            static float last_click_x = 0.0f, last_click_y = 0.0f;
             if (click_armed && input.mouse1_just_released) {
                 click_armed = false;
                 if (retopo_on) {
-                    const uint32_t id = retopo_pick(retopo, camera, win_w, win_h, click_x, click_y,
-                                                    input.mirror_x);
-                    if (const char* msg = retopo.click_select(id, input.ctrl_held)) {
-                        std::snprintf(input.notification, sizeof(input.notification), "%s", msg);
-                        input.notification_timer = 2.0f;
+                    const double now = glfwGetTime();
+                    const bool dbl = input.retopo_tool == InputState::RetopoTool::DRAW
+                                  && now - last_click_t < 0.4
+                                  && std::hypot(click_x - last_click_x, click_y - last_click_y) <= 6.0f;
+                    last_click_t = dbl ? -1.0 : now;   // a third click starts over
+                    last_click_x = click_x;
+                    last_click_y = click_y;
+                    if (dbl) {
+                        retopo_select_loop(retopo, camera, win_w, win_h, click_x, click_y,
+                                           input.ctrl_held, input.mirror_x);
+                    } else {
+                        if (!input.ctrl_held) retopo.loop_edges.clear();
+                        const uint32_t id = retopo_pick(retopo, camera, win_w, win_h, click_x, click_y,
+                                                        input.mirror_x);
+                        if (const char* msg = retopo.click_select(id, input.ctrl_held)) {
+                            std::snprintf(input.notification, sizeof(input.notification), "%s", msg);
+                            input.notification_timer = 2.0f;
+                        }
                     }
                 }
             }

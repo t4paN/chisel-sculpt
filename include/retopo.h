@@ -97,6 +97,11 @@ struct RetopoState {
     uint32_t snap_v = ~0u, cut_from_v = ~0u, cut_to_v = ~0u;
     // Ctrl + Erase: the face that would go, outlined red while Ctrl is held (~0u = none).
     uint32_t face_hover = ~0u;
+    // Edge loops picked by double-click (Draw): 2 vertex ids per edge, mirror twins
+    // included. They index `result`, so whatever renumbers it (Build, undo, prune, any
+    // checkpointed change) drops them; an edge that stops existing (a weld, Erase) just
+    // stops drawing.
+    std::vector<uint32_t> loop_edges;
     float last_sx = 0, last_sy = 0;   // screen position of the last captured point
     uint32_t next_id = 1;
 
@@ -223,6 +228,15 @@ int retopo_cut(RetopoState& st, const Mesh& m, const Camera& cam, int win_w, int
 // hidden, nearest first; ~0u for none. Close on purpose: a vertex cut is deliberate.
 uint32_t retopo_snap_vertex(const RetopoState& st, const Camera& cam, int win_w, int win_h,
                             float x, float y);
+
+// Double-click in Draw: the edge loop through the built edge nearest screen point
+// (x, y) into st.loop_edges. An inner edge runs straight on through every vertex with
+// four quads round it and stops at anything else (a pole, a triangle, the outline); an
+// outline edge follows the outline all the way round (a hole's rim, a strip's edge).
+// `add` (Ctrl) keeps the loops already picked, or takes this one out if it's one of
+// them. With mirror, the twin loop comes along. Returns its edges, 0 = no edge there.
+int retopo_select_loop(RetopoState& st, const Camera& cam, int win_w, int win_h,
+                       float x, float y, bool add, bool mirror);
 
 // Erase (E in mode 0): a round brush. Each dab takes the inner edge whose middle is
 // nearest the ring's centre (inside the ring; the island's outline stays): its two

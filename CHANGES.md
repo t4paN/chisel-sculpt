@@ -2,6 +2,13 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-23 — Retopo mode: double-click picks edge loops
+
+*User-tested.* In Draw, double-click a built edge: its loop goes green. Inner edges run
+straight through four-quad crossings and stop at poles, triangles and the outline; an
+outline edge follows the outline round. Ctrl adds or drops a loop, mirror brings the twin,
+a plain click clears.
+
 ## 2026-10-23 — Retopo mode: filled faces, wire through the sculpt, F frames the island at work
 
 *Built live with the user at the keyboard. Fill seen working; the fold fix and the new F not yet tested.*

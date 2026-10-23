@@ -98,6 +98,7 @@ void restore(RetopoState& st, RetopoSnapshot&& s) {
 void RetopoState::checkpoint(int tag) {
     if (tag != 0 && tag == last_tag) return;
     last_tag = tag;
+    loop_edges.clear();
     push_capped(undo_stack, snapshot_of(*this));
     redo_stack.clear();
 }
@@ -125,6 +126,7 @@ void RetopoState::end_edit() {
 bool RetopoState::undo() {
     if (undo_stack.empty()) return false;
     last_tag = 0;
+    loop_edges.clear();
     push_capped(redo_stack, snapshot_of(*this));
     restore(*this, std::move(undo_stack.back()));
     undo_stack.pop_back();
@@ -134,6 +136,7 @@ bool RetopoState::undo() {
 bool RetopoState::redo() {
     if (redo_stack.empty()) return false;
     last_tag = 0;
+    loop_edges.clear();
     push_capped(undo_stack, snapshot_of(*this));
     restore(*this, std::move(redo_stack.back()));
     redo_stack.pop_back();
@@ -812,6 +815,7 @@ void extract(const RetopoMesh& src, RetopoMesh& dst, Keep keep) {
 
 double retopo_build(RetopoState& st, const Mesh& m, bool mirror) {
     const auto t0 = std::chrono::steady_clock::now();
+    st.loop_edges.clear();   // the vertices get new numbers
 
     // Frozen strokes' quads are carried over untouched (still editable by Grab and
     // Smooth, just out of reach of rings and density); everything else is rebuilt.
@@ -983,6 +987,7 @@ void RetopoState::prune() {
     RetopoMesh keep;
     extract(result, keep, [&](uint32_t owner) { return find(owner) != nullptr; });
     result = std::move(keep);
+    loop_edges.clear();
     built = !result.faces.empty();
     if (built) build_topology(result);
 }
@@ -1362,6 +1367,147 @@ uint32_t retopo_snap_vertex(const RetopoState& st, const Camera& cam, int win_w,
         if (d2 < best_d2) { best_d2 = d2; best = i; }
     }
     return best;
+}
+
+int retopo_select_loop(RetopoState& st, const Camera& cam, int win_w, int win_h,
+                       float x, float y, bool add, bool mirror) {
+    if (!add) st.loop_edges.clear();
+    const RetopoMesh& rm = st.result;
+    const uint32_t nv = (uint32_t)rm.v.size();
+    if (!st.built || rm.nb_off.size() != nv + 1) return 0;
+
+    // The edge under the pointer: both ends facing the eye and on screen, nearest in pixels.
+    uint32_t ea = ~0u, eb = ~0u;
+    float best = kSnapPx;
+    for (size_t e = 0; e + 1 < rm.edges.size(); e += 2) {
+        const uint32_t a = rm.edges[e], b = rm.edges[e + 1];
+        if (a == b || st.hidden(rm.edge_owner[e / 2])) continue;
+        float ax, ay, bx, by;
+        bool ok = true;
+        for (uint32_t i : {a, b}) {
+            const Vec3 to_eye = cam.perspective ? cam.get_position() - rm.v[i] : cam.get_view_direction() * -1.0f;
+            ok = ok && rm.n[i].dot(to_eye) > 0.0f;
+        }
+        if (!ok || !cam.world_to_screen(rm.v[a], win_w, win_h, ax, ay)
+                || !cam.world_to_screen(rm.v[b], win_w, win_h, bx, by)) continue;
+        const float ex = bx - ax, ey = by - ay, l2 = ex * ex + ey * ey;
+        const float t = l2 > 0.0f ? std::max(0.0f, std::min(1.0f, ((x - ax) * ex + (y - ay) * ey) / l2)) : 0.0f;
+        const float d = std::hypot(x - (ax + ex * t), y - (ay + ey * t));
+        if (d < best) { best = d; ea = a; eb = b; }
+    }
+    if (ea == ~0u) return 0;
+
+    // Faces round each vertex (CSR), once per pick: retopo is a few thousand faces.
+    std::vector<uint32_t> vf_off(nv + 1, 0), vf, c;
+    for (size_t f = 0; f < rm.face_count(); f++) {
+        const int n = face_corners(rm, f, c);
+        for (int k = 0; k < n; k++) vf_off[c[k] + 1]++;
+    }
+    for (uint32_t i = 0; i < nv; i++) vf_off[i + 1] += vf_off[i];
+    vf.resize(vf_off[nv]);
+    {
+        std::vector<uint32_t> fill(vf_off.begin(), vf_off.end() - 1);
+        for (size_t f = 0; f < rm.face_count(); f++) {
+            const int n = face_corners(rm, f, c);
+            for (int k = 0; k < n; k++) vf[fill[c[k]]++] = (uint32_t)f;
+        }
+    }
+    // v's faces' sides out of v: for each face, the corners either side of v. `quads`
+    // turns false if any of them isn't a quad.
+    auto around = [&](uint32_t v, std::vector<std::pair<uint32_t, uint32_t>>& sides, bool& quads) {
+        sides.clear();
+        quads = true;
+        for (uint32_t k = vf_off[v]; k < vf_off[v + 1]; k++) {
+            const int n = face_corners(rm, vf[k], c);
+            quads = quads && n == 4;
+            for (int i = 0; i < n; i++)
+                if (c[i] == v) sides.push_back({c[(i + n - 1) % n], c[(i + 1) % n]});
+        }
+    };
+    auto faces_on = [&](uint32_t w, const std::vector<std::pair<uint32_t, uint32_t>>& sides) {
+        int k = 0;
+        for (const auto& s : sides) k += (s.first == w) + (s.second == w);
+        return k;
+    };
+    // The loop's next vertex past b, coming from a; ~0u = it stops at b.
+    std::vector<std::pair<uint32_t, uint32_t>> sides;
+    std::vector<uint32_t> nbs;
+    auto next = [&](uint32_t a, uint32_t b) -> uint32_t {
+        bool quads;
+        around(b, sides, quads);
+        nbs.clear();
+        for (const auto& s : sides)
+            for (uint32_t w : {s.first, s.second})
+                if (std::find(nbs.begin(), nbs.end(), w) == nbs.end()) nbs.push_back(w);
+        if (faces_on(a, sides) == 1) {
+            // On the outline: on round it, through corners too, while it's a simple one.
+            uint32_t on = ~0u;
+            int outline = 0;
+            for (uint32_t w : nbs)
+                if (faces_on(w, sides) == 1) { outline++; if (w != a) on = w; }
+            return outline == 2 ? on : ~0u;
+        }
+        // Inside: straight across a vertex with four quads round it, to the one neighbour
+        // that shares no face with a-b.
+        if (!quads || sides.size() != 4 || nbs.size() != 4) return ~0u;
+        for (uint32_t w : nbs) if (faces_on(w, sides) != 2) return ~0u;
+        uint32_t across = ~0u;
+        for (uint32_t w : nbs) {
+            if (w == a) continue;
+            bool beside = false;
+            for (const auto& s : sides)
+                if ((s.first == a && s.second == w) || (s.first == w && s.second == a)) beside = true;
+            if (!beside) { if (across != ~0u) return ~0u; across = w; }
+        }
+        return across;
+    };
+
+    std::vector<uint64_t> seen{edge_key(ea, eb)};
+    std::vector<uint32_t> loop{ea, eb};
+    bool closed = false;
+    for (int dir = 0; dir < 2 && !closed; dir++) {
+        uint32_t p = dir ? eb : ea, q = dir ? ea : eb;
+        for (size_t step = 0; step < rm.edges.size(); step++) {
+            const uint32_t r = next(p, q);
+            if (r == ~0u || r == p) break;
+            const uint64_t k = edge_key(q, r);
+            if (std::find(seen.begin(), seen.end(), k) != seen.end()) { closed = true; break; }
+            seen.push_back(k);
+            loop.push_back(q); loop.push_back(r);
+            p = q; q = r;
+        }
+    }
+    if (mirror && rm.mirror.size() == nv) {
+        const size_t n = loop.size();
+        for (size_t i = 0; i + 1 < n; i += 2) {
+            const uint32_t a = rm.mirror[loop[i]], b = rm.mirror[loop[i + 1]];
+            if (a >= nv || b >= nv || a == b) continue;
+            const uint64_t k = edge_key(a, b);
+            if (std::find(seen.begin(), seen.end(), k) != seen.end()) continue;   // its own twin
+            seen.push_back(k);
+            loop.push_back(a); loop.push_back(b);
+        }
+    }
+
+    // Ctrl on a loop already picked takes it out; otherwise it joins what's there.
+    bool had = false;
+    for (size_t i = 0; i + 1 < st.loop_edges.size(); i += 2)
+        had |= edge_key(st.loop_edges[i], st.loop_edges[i + 1]) == edge_key(ea, eb);
+    std::vector<uint32_t> keep;
+    for (size_t i = 0; i + 1 < st.loop_edges.size(); i += 2) {
+        const uint64_t k = edge_key(st.loop_edges[i], st.loop_edges[i + 1]);
+        if (std::find(seen.begin(), seen.end(), k) != seen.end()) continue;
+        keep.push_back(st.loop_edges[i]); keep.push_back(st.loop_edges[i + 1]);
+    }
+    if (!had) keep.insert(keep.end(), loop.begin(), loop.end());
+    st.loop_edges.swap(keep);
+    const bool outline = vf_off[ea + 1] - vf_off[ea] > 0 && [&] {
+        bool q; around(ea, sides, q); return faces_on(eb, sides) == 1;
+    }();
+    std::printf("[retopo] loop: %s %zu edge(s), %s, %s; %zu picked in all\n", had ? "dropped" : "picked",
+                loop.size() / 2, outline ? "outline" : "inner", closed ? "closed" : "open",
+                st.loop_edges.size() / 2);
+    return (int)(loop.size() / 2);
 }
 
 int retopo_cut(RetopoState& st, const Mesh& m, const Camera& cam, int win_w, int win_h,
