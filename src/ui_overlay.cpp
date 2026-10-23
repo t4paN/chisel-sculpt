@@ -2419,6 +2419,7 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
     };
     if (st.cutting) thin_line(st.cut_pts, st.cut_nrm, IM_COL32(235, 255, 240, 255));
     if (st.drawing && st.bridge_from) thin_line(st.live.pts, st.live.nrm, IM_COL32(120, 210, 255, 255));
+    if (st.drawing && st.extruding) thin_line(st.live.pts, st.live.nrm, IM_COL32(0, 255, 65, 255));
     if (!st.built || !st.show_result) return;
 
     // Wireframe: project every vertex once, then draw an edge only when both ends

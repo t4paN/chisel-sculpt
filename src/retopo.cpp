@@ -2515,6 +2515,270 @@ const char* retopo_bridge(RetopoState& st, const Mesh& m, const Camera& cam, int
     return nullptr;
 }
 
+// ---- Extrude -----------------------------------------------------------------------
+
+bool retopo_on_loop(const RetopoState& st, const Camera& cam, int win_w, int win_h, float x, float y) {
+    const RetopoMesh& rm = st.result;
+    for (size_t e = 0; e + 1 < st.loop_edges.size(); e += 2) {
+        const uint32_t a = st.loop_edges[e], b = st.loop_edges[e + 1];
+        if (a >= rm.v.size() || b >= rm.v.size()) continue;
+        const Vec3 to_eye = cam.perspective ? cam.get_position() - rm.v[a] : cam.get_view_direction() * -1.0f;
+        float ax, ay, bx, by;
+        if (rm.n[a].dot(to_eye) <= 0.0f || !cam.world_to_screen(rm.v[a], win_w, win_h, ax, ay)
+            || !cam.world_to_screen(rm.v[b], win_w, win_h, bx, by)) continue;
+        const float ex = bx - ax, ey = by - ay, l2 = ex * ex + ey * ey;
+        const float t = l2 > 0.0f ? std::max(0.0f, std::min(1.0f, ((x - ax) * ex + (y - ay) * ey) / l2)) : 0.0f;
+        if (std::hypot(x - (ax + ex * t), y - (ay + ey * t)) < 1.5f * kSnapPx) return true;
+    }
+    return false;
+}
+
+const char* retopo_extrude(RetopoState& st, const Mesh& m, const Camera& cam, int win_w, int win_h,
+                           bool mirror) {
+    RetopoMesh& rm = st.result;
+    const uint32_t nv = (uint32_t)rm.v.size();
+    const std::vector<Vec3>& line = st.live.pts;
+    if (!st.built || line.size() < 2 || st.loop_edges.empty()) return "Pick a loop first (double-click an outline)";
+
+    // The picked edge nearest the line's start, on screen.
+    float lx, ly;
+    cam.world_to_screen(line.front(), win_w, win_h, lx, ly);
+    size_t e0 = ~(size_t)0;
+    float best = 1e30f;
+    for (size_t e = 0; e + 1 < st.loop_edges.size(); e += 2) {
+        const uint32_t a = st.loop_edges[e], b = st.loop_edges[e + 1];
+        float ax, ay, bx, by;
+        if (a >= nv || b >= nv || !cam.world_to_screen(rm.v[a], win_w, win_h, ax, ay)
+            || !cam.world_to_screen(rm.v[b], win_w, win_h, bx, by)) continue;
+        const float ex = bx - ax, ey = by - ay, l2 = ex * ex + ey * ey;
+        const float t = l2 > 0.0f ? std::max(0.0f, std::min(1.0f, ((lx - ax) * ex + (ly - ay) * ey) / l2)) : 0.0f;
+        const float d = std::hypot(lx - (ax + ex * t), ly - (ay + ey * t));
+        if (d < best) { best = d; e0 = e; }
+    }
+    if (e0 == ~(size_t)0) return "Pick a loop first (double-click an outline)";
+
+    // Its chain: the picked edges joined end to end, in order. Open or closed.
+    std::vector<uint32_t> deg(nv, 0);
+    std::vector<uint64_t> sel;
+    for (size_t e = 0; e + 1 < st.loop_edges.size(); e += 2) {
+        const uint32_t a = st.loop_edges[e], b = st.loop_edges[e + 1];
+        if (a >= nv || b >= nv) continue;
+        sel.push_back(edge_key(a, b));
+    }
+    std::sort(sel.begin(), sel.end());
+    sel.erase(std::unique(sel.begin(), sel.end()), sel.end());
+    for (uint64_t k : sel) { deg[k >> 32]++; deg[k & 0xFFFFFFFFu]++; }
+    auto picked = [&](uint32_t a, uint32_t b) { return std::binary_search(sel.begin(), sel.end(), edge_key(a, b)); };
+    auto step_on = [&](uint32_t prev, uint32_t cur) {   // the picked neighbour of cur that isn't prev
+        for (uint32_t k = rm.nb_off[cur]; k < rm.nb_off[cur + 1]; k++) {
+            const uint32_t w = rm.nb[k];
+            if (w != prev && picked(cur, w)) return w;
+        }
+        return ~0u;
+    };
+    const uint32_t ea = st.loop_edges[e0], eb = st.loop_edges[e0 + 1];
+    if (deg[ea] > 2 || deg[eb] > 2) return "That loop branches: pick a simple one";
+    std::vector<uint32_t> C{ea, eb};
+    bool closed = false;
+    for (uint32_t p = ea, q = eb; C.size() <= nv;) {   // forward from eb
+        const uint32_t r = step_on(p, q);
+        if (r == ~0u) break;
+        if (deg[r] > 2) return "That loop branches: pick a simple one";
+        if (r == C.front()) { closed = true; break; }
+        C.push_back(r);
+        p = q; q = r;
+    }
+    if (!closed) {
+        std::vector<uint32_t> back;
+        for (uint32_t p = eb, q = ea; back.size() <= nv;) {
+            const uint32_t r = step_on(p, q);
+            if (r == ~0u) break;
+            if (deg[r] > 2) return "That loop branches: pick a simple one";
+            back.push_back(r);
+            p = q; q = r;
+        }
+        C.insert(C.begin(), back.rbegin(), back.rend());
+    }
+    const int n = (int)C.size();
+    const int ne = closed ? n : n - 1;
+    auto at = [&](int k) { return closed ? C[((k % n) + n) % n] : C[std::max(0, std::min(n - 1, k))]; };
+
+    // Outward, per edge: across it, in the surface, away from the one face it borders.
+    std::vector<uint32_t> fs, c;
+    std::vector<Vec3> out_e(ne);
+    for (int k = 0; k < ne; k++) {
+        const uint32_t a = at(k), b = at(k + 1);
+        faces_with_side(rm, a, b, fs);
+        if (fs.size() != 1)
+            return "Extrude grows from an outline: this loop runs between faces (double-click the island's edge)";
+        const int fc = face_corners(rm, fs[0], c);
+        Vec3 fcen(0, 0, 0);
+        for (int i = 0; i < fc; i++) fcen = fcen + rm.v[c[i]];
+        fcen = fcen * (1.0f / (float)fc);
+        const Vec3 nn = (rm.n[a] + rm.n[b]).normalized();
+        Vec3 o = nn.cross(rm.v[b] - rm.v[a]).normalized();
+        if (o.dot((rm.v[a] + rm.v[b]) * 0.5f - fcen) < 0.0f) o = o * -1.0f;
+        out_e[k] = o;
+    }
+    std::vector<Vec3> out(n);
+    float edge = 0.0f;
+    for (int k = 0; k < ne; k++) edge += (rm.v[at(k + 1)] - rm.v[at(k)]).length();
+    edge /= (float)std::max(1, ne);
+    for (int k = 0; k < n; k++) {
+        Vec3 o(0, 0, 0);
+        if (closed || k > 0)      o = o + out_e[closed ? (k + ne - 1) % ne : k - 1];
+        if (closed || k < n - 1)  o = o + out_e[closed ? k % ne : k];
+        const Vec3 nn = rm.n[C[k]];
+        out[k] = (o - nn * o.dot(nn)).normalized();
+    }
+
+    // How far: the line's end, measured out from the loop vertex nearest its start.
+    int kn = 0;
+    float bd = 1e30f;
+    for (int k = 0; k < n; k++) {
+        const float d = (rm.v[C[k]] - line.front()).length();
+        if (d < bd) { bd = d; kn = k; }
+    }
+    const float dist = (line.back() - rm.v[C[kn]]).dot(out[kn]);
+    if (dist < 0.25f * edge) return "Draw outward, away from the faces the loop borders";
+    const int rows = std::max(1, (int)std::lround(dist / std::max(1e-9f, edge)));
+    const float step = dist / (float)rows;
+
+    // Snap grid over the loop and as far out as it grows.
+    SnapGrid g;
+    {
+        Vec3 lo(1e30f, 1e30f, 1e30f), hi(-1e30f, -1e30f, -1e30f);
+        for (int k = 0; k < n; k++)
+            for (const Vec3 p : {rm.v[C[k]], rm.v[C[k]] + out[k] * dist}) {
+                lo = {std::min(lo.x, p.x), std::min(lo.y, p.y), std::min(lo.z, p.z)};
+                hi = {std::max(hi.x, p.x), std::max(hi.y, p.y), std::max(hi.z, p.z)};
+            }
+        const float pad = edge * 3.0f + dist * 0.5f;
+        lo = lo - Vec3(pad, pad, pad);
+        hi = hi + Vec3(pad, pad, pad);
+        const float ext = std::max({hi.x - lo.x, hi.y - lo.y, hi.z - lo.z});
+        g.build(m, lo, hi, std::max(edge * 0.5f, ext / 96.0f));
+    }
+    auto snap = [&](Vec3 p, Vec3& nn) {
+        Vec3 r;
+        if (g.closest(p, r, nn, 8)) return r;
+        nn = Vec3(0, 0, 0);
+        return p;
+    };
+    auto refl = [](Vec3 v) { v.x = -v.x; return v; };
+
+    // Mirror: the loop across x = 0 is its own twin (vertex k's twin at index tk[k] in
+    // C); else every vertex's twin elsewhere is a twin loop that grows by reflection.
+    bool self = false, twinned = false;
+    std::vector<int> tk(n, -1);
+    if (mirror && rm.mirror.size() == nv) {
+        bool all_in = true, all_out = true;
+        for (int k = 0; k < n; k++) {
+            const uint32_t w = rm.mirror[C[k]];
+            const auto it = w < nv ? std::find(C.begin(), C.end(), w) : C.end();
+            if (it != C.end()) { tk[k] = (int)(it - C.begin()); all_out = false; }
+            else { all_in = false; if (w >= nv) all_out = false; }
+        }
+        self = all_in;
+        twinned = !self && all_out;
+    }
+
+    st.checkpoint();
+    const uint32_t owner = rm.v_owner[C[0]];
+    // Wound against the face on the loop: quad (prev k, prev k+1, new k+1, new k) has the
+    // side C[k] -> C[k+1], which that face must run the other way.
+    bool flip = false;
+    faces_with_side(rm, at(0), at(1), fs);
+    {
+        const int fc = face_corners(rm, fs[0], c);
+        for (int i = 0; i < fc; i++) if (c[i] == at(0) && c[(i + 1) % fc] == at(1)) flip = true;
+    }
+    const uint32_t first_new = (uint32_t)rm.v.size(), first_face = rm.face_count();
+    std::vector<uint32_t> prev(C), cur(n);
+    for (int r = 0; r < rows; r++) {
+        for (int k = 0; k < n; k++) {
+            // Walked across the surface: out a step, onto it, stretched back to the step.
+            const Vec3 p = rm.v[prev[k]];
+            Vec3 dir = out[k] - rm.n[prev[k]] * out[k].dot(rm.n[prev[k]]);
+            if (dir.length() < 1e-9f) dir = out[k];
+            Vec3 q = p + dir.normalized() * step, nn;
+            for (int it = 0; it < 2; it++) {
+                q = snap(q, nn);
+                const Vec3 d = q - p;
+                if (d.length() < 1e-9f) break;
+                q = p + d.normalized() * step;
+            }
+            q = snap(q, nn);
+            rm.v.push_back(q);
+            rm.n.push_back(nn.length() > 0.5f ? nn : rm.n[prev[k]]);
+            rm.v_owner.push_back(owner);
+            rm.mirror.push_back(~0u);
+            cur[k] = (uint32_t)rm.v.size() - 1;
+        }
+        if (self)
+            for (int k = 0; k < n; k++) {
+                const int j = tk[k];
+                if (j < 0) continue;
+                const uint32_t x = cur[k], y = cur[j];
+                if (x == y) { rm.v[x].x = 0.0f; rm.mirror[x] = x; continue; }
+                if (j < k) continue;
+                const Vec3 mid = (rm.v[x] + refl(rm.v[y])) * 0.5f;
+                rm.v[x] = mid; rm.v[y] = refl(mid); rm.n[y] = refl(rm.n[x]);
+                rm.mirror[x] = y; rm.mirror[y] = x;
+            }
+        for (int k = 0; k < ne; k++) {
+            const int k1 = closed ? (k + 1) % n : k + 1;
+            uint32_t q[4] = {prev[k], prev[k1], cur[k1], cur[k]};
+            if (flip) std::reverse(q, q + 4);
+            rm.add_face(q, 4, owner);
+        }
+        prev = cur;
+    }
+    // A twin loop elsewhere: the same growth, reflected vertex by vertex.
+    std::vector<uint32_t> tw_last;
+    if (twinned) {
+        const uint32_t end = (uint32_t)rm.v.size();
+        std::vector<uint32_t> tw(end - first_new, ~0u);
+        auto tw_of = [&](uint32_t v) {
+            if (v < first_new) return rm.mirror[v];
+            uint32_t& w = tw[v - first_new];
+            if (w == ~0u) {
+                w = (uint32_t)rm.v.size();
+                rm.v.push_back(refl(rm.v[v]));
+                rm.n.push_back(refl(rm.n[v]));
+                rm.v_owner.push_back(rm.v_owner[rm.mirror[C[0]]]);
+                rm.mirror.push_back(v);
+                rm.mirror[v] = w;
+            }
+            return w;
+        };
+        const uint32_t nface = rm.face_count();
+        for (uint32_t f = first_face; f < nface; f++) {
+            const uint32_t* q = rm.face(f);
+            const uint32_t t4[4] = {tw_of(q[3]), tw_of(q[2]), tw_of(q[1]), tw_of(q[0])};
+            rm.add_face(t4, 4, rm.v_owner[rm.mirror[C[0]]]);
+        }
+        for (uint32_t v : prev) tw_last.push_back(tw_of(v));
+    }
+
+    std::vector<uint32_t> touched{owner};
+    if (twinned) touched.push_back(rm.v_owner[rm.mirror[C[0]]]);
+    rebuild_edges(rm);
+    freeze_touched(st, touched);
+    // The new outer loop (and its twin) is the pick now: the next stroke carries on.
+    st.loop_edges.clear();
+    for (const std::vector<uint32_t>* L : {&prev, &tw_last})
+        for (int k = 0; k + 1 < (int)L->size() + (closed ? 1 : 0); k++) {
+            if (L->empty()) break;
+            st.loop_edges.push_back((*L)[k]);
+            st.loop_edges.push_back((*L)[(k + 1) % L->size()]);
+        }
+    std::printf("[retopo] extrude: %s loop of %d verts, %d row(s) of %.3f (edge %.3f)%s\n",
+                closed ? "closed" : "open", n, rows, step, edge,
+                self ? ", its own twin" : twinned ? ", twin too" : "");
+    return nullptr;
+}
+
 // ---- Fill --------------------------------------------------------------------------
 
 namespace {

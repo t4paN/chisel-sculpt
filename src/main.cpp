@@ -2935,9 +2935,11 @@ int main(int argc, char* argv[]) {
                     retopo.drawing = true;
                     retopo.live = RetopoStroke{};
                     retopo.last_sx = mx - 1e3f;   // the press point always lands
-                    // Starting on an edited island: this stroke is a bridge out of it.
-                    const uint32_t id = retopo.built ? retopo_pick(retopo, camera, win_w, win_h, mx, my,
-                                                                   input.mirror_x) : 0;
+                    // Starting on a picked loop: this stroke extrudes it. Else, starting on
+                    // an edited island: a bridge out of it.
+                    retopo.extruding = retopo.built && retopo_on_loop(retopo, camera, win_w, win_h, mx, my);
+                    const uint32_t id = retopo.built && !retopo.extruding
+                                      ? retopo_pick(retopo, camera, win_w, win_h, mx, my, input.mirror_x) : 0;
                     const RetopoStroke* on = id ? retopo.find(id) : nullptr;
                     retopo.bridge_from = on && on->frozen ? id : 0;
                 }
@@ -2958,6 +2960,19 @@ int main(int argc, char* argv[]) {
                     retopo.last_sx = mx;
                     retopo.last_sy = my;
                 }
+            } else if (retopo.drawing && retopo.extruding) {
+                // Pen up on an extrude. A few pixels is a click (or half a double-click):
+                // the pick stays, no toast.
+                if (retopo.live.pts.size() >= 3) {
+                    scene.materialize_active_cpu();   // new loops snap onto mesh.pos
+                    const char* why = retopo_extrude(retopo, *mesh, camera, win_w, win_h, input.mirror_x);
+                    std::snprintf(input.notification, sizeof(input.notification), "%s",
+                                  why ? why : "Extruded - draw from the new loop to carry on");
+                    input.notification_timer = why ? 2.5f : 1.5f;
+                }
+                retopo.live = RetopoStroke{};
+                retopo.drawing = false;
+                retopo.extruding = false;
             } else if (retopo.drawing && retopo.bridge_from) {
                 // Pen up on a bridge: built now, it joins geometry, not sketches. A few
                 // pixels is a click (it selects the island), not a bridge: no toast.

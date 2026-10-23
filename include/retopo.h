@@ -96,6 +96,8 @@ struct RetopoState {
     bool drawing = false;
     // Draw started on an edited island (its id): the live stroke is a bridge, not a band.
     uint32_t bridge_from = 0;
+    // Draw started on a picked outline loop: the live stroke extrudes it (a bare line).
+    bool extruding = false;
     // Cut: a bare line on the surface (no band), under the pen while `cutting`.
     std::vector<Vec3> cut_pts, cut_nrm;
     bool cutting = false;
@@ -281,6 +283,19 @@ const char* retopo_bridge(RetopoState& st, const Mesh& m, const Camera& cam, int
 // hole across x = 0 a symmetric one. The islands round a hole become one island and
 // freeze. One undo step. Returns the faces made; `rims` = how many rims they filled.
 int retopo_fill(RetopoState& st, const Mesh& m, bool mirror, int& rims, int& odd);
+
+// Extrude: a Draw stroke that started on a picked loop (st.extruding, the line in
+// st.live). The picked loop nearest the line's start, an outline (open or closed), grows
+// new loops outward across the surface, away from the faces it borders, as far as the line
+// went out: one loop for a short line, more for a long one so the quads stay about square,
+// every loop with the same count of vertices. The outermost new loop becomes the pick, so
+// the next stroke carries on from it. Mirror: a loop across x = 0 grows symmetric, a loop
+// with a twin grows a twin. Freezes its island. Returns nullptr when done, else why not.
+// The press at screen point (x, y) lands on a picked loop (within a few pixels of one of
+// its edges, facing the eye): Draw extrudes it rather than drawing.
+bool retopo_on_loop(const RetopoState& st, const Camera& cam, int win_w, int win_h, float x, float y);
+const char* retopo_extrude(RetopoState& st, const Mesh& m, const Camera& cam, int win_w, int win_h,
+                           bool mirror);
 
 // Write state.result as an OBJ, every face as it is (quads, triangles, bigger ones).
 // Returns false if there's nothing to write or the file can't be opened.

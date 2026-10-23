@@ -2,6 +2,16 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-23 — Retopo mode: extrude a picked loop by drawing out of it
+
+*User-tested.* In Draw, a stroke that starts on a double-clicked outline loop (thin green
+line) grows it: every vertex walks outward across the surface, away from the faces the
+loop borders, as far as the line's end got out (sideways wobble ignored). One new loop for
+a short line, more rows for a long one so the quads stay about square; same vertex count.
+The new outer loop stays picked, so the next stroke carries on. From a hole's inner rim it
+grows into the hole. Mirror: twin loops grow twins, a loop across x = 0 grows symmetric.
+Freezes the island; one undo step. Inner loops are refused (toast).
+
 ## 2026-10-23 — Retopo mode: hole finder and Fill (H)
 
 *User-tested ("worked pretty well"); the ring was not caught in a kept log.*
