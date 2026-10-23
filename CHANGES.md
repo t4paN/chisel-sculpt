@@ -5,7 +5,11 @@ Short, chronological log of notable changes. Newest on top.
 ## 2026-10-23 — Retopo mode: saved in the .chisel file
 
 *File layer self-tested headlessly (round trip bitwise, damaged section, pre-retopo
-reader); the Save/Open wiring in main.cpp not yet hand-tested.* Strokes (path, settings,
+reader), then on 55 real sculpts (paint layers, an 11-mesh scene, 655k-vertex meshes,
+saves back to June): every copy with retopo added loads with the sculpt identical and the
+retopo bit for bit, and the pre-retopo reader gives identical results on all 55. Tests in
+`unused-tools-vault/retopo-save-test/`. The Save/Open wiring in main.cpp not yet
+hand-tested.* Strokes (path, settings,
 name, eye, edited) and the built low-poly (positions, normals, faces of any size, island
 owners, mirror twins) go in an optional **RTPO** chunk after the entities, with its own
 format byte; no file VERSION bump. The low-poly is saved as it is, never rebuilt from the
