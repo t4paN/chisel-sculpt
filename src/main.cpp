@@ -2762,13 +2762,7 @@ int main(int argc, char* argv[]) {
             static bool retopo_smoothing = false;
             static bool retopo_grabbing = false;
             static bool retopo_erasing = false;
-            // Cut's vertex snap, every frame the knife is out: the overlay lights it, the
-            // press and the pen-up read it.
-            const bool knife = retopo_on && retopo.built && !input.is_smooth_active()
-                            && input.retopo_tool == InputState::RetopoTool::CUT;
-            retopo.snap_v = knife ? retopo_snap_vertex(retopo, camera, win_w, win_h,
-                                                       (float)input.mouse_x, (float)input.mouse_y)
-                                  : ~0u;
+            static bool retopo_erasing_faces = false;   // Ctrl was held at the press
             const bool retopo_press = retopo_on && input.drag_mode == InputState::DragMode::RETOPO;
             if (retopo_press && !retopo.drawing
                 && (retopo_smoothing || input.is_smooth_active())) {
@@ -2829,11 +2823,15 @@ int main(int argc, char* argv[]) {
                     } else {
                         retopo.begin_edit();
                         retopo_erasing = true;
+                        retopo_erasing_faces = input.ctrl_held;
                         er_x = mx - 1e3f;   // the press always dabs
                     }
                 }
                 if (retopo_erasing && std::hypot(mx - er_x, my - er_y) >= 2.0f) {
-                    retopo_erase_dab(retopo, camera, win_w, win_h, mx, my, input.brush_size, input.mirror_x);
+                    if (retopo_erasing_faces)
+                        retopo_erase_face_dab(retopo, camera, win_w, win_h, mx, my, input.brush_size, input.mirror_x);
+                    else
+                        retopo_erase_dab(retopo, camera, win_w, win_h, mx, my, input.brush_size, input.mirror_x);
                     er_x = mx;
                     er_y = my;
                 }
@@ -2915,7 +2913,7 @@ int main(int argc, char* argv[]) {
             }
             if (!retopo_press) {
                 if (retopo_smoothing || retopo_grabbing || retopo_erasing) retopo.end_edit();
-                retopo_smoothing = retopo_grabbing = retopo_erasing = false;
+                retopo_smoothing = retopo_grabbing = retopo_erasing = retopo_erasing_faces = false;
             }
             // A slider drag is one undo step; letting go ends it.
             if (!input.mouse1_down) retopo.last_tag = 0;
@@ -2925,7 +2923,9 @@ int main(int argc, char* argv[]) {
             // A press on the bar never gets here: ImGui ate mouse1_just_pressed.
             static bool click_armed = false;
             static float click_x = 0.0f, click_y = 0.0f;
-            if (retopo_on && input.mouse1_just_pressed && !input.shift_held && !input.alt_held) {
+            // Ctrl+click with the eraser deletes a face; it doesn't pick.
+            if (retopo_on && input.mouse1_just_pressed && !input.shift_held && !input.alt_held
+                && !(input.ctrl_held && input.retopo_tool == InputState::RetopoTool::ERASE)) {
                 click_armed = true;
                 click_x = (float)input.mouse_x;
                 click_y = (float)input.mouse_y;
@@ -3020,6 +3020,25 @@ int main(int argc, char* argv[]) {
                 }
                 input.notification_timer = 3.0f;
             }
+
+            // What the pointer is on, for the overlay and the next press: worked out last,
+            // after this frame's edits. A delete or an undo renumbers faces, and an index
+            // taken before it pointed at whatever face slid into that slot (the red outline
+            // jumped across the model for a frame after every delete).
+            // Cut's vertex snap, every frame the knife is out: the overlay lights it, the
+            // press and the pen-up read it.
+            const bool knife = retopo_on && retopo.built && !input.is_smooth_active()
+                            && input.retopo_tool == InputState::RetopoTool::CUT;
+            retopo.snap_v = knife ? retopo_snap_vertex(retopo, camera, win_w, win_h,
+                                                       (float)input.mouse_x, (float)input.mouse_y)
+                                  : ~0u;
+            // Ctrl with the eraser takes whole faces: show which one before it goes.
+            const bool face_eraser = retopo_on && retopo.built && !input.is_smooth_active()
+                                  && input.retopo_tool == InputState::RetopoTool::ERASE
+                                  && (input.ctrl_held || retopo_erasing_faces);
+            retopo.face_hover = face_eraser ? retopo_face_at(retopo, camera, win_w, win_h, (float)input.mouse_x,
+                                                             (float)input.mouse_y, input.brush_size)
+                                            : ~0u;
         }
 
         // Hover speed, for the stroke's running start (g_hover_speed). Orbit, pan and

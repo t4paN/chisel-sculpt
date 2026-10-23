@@ -2,6 +2,18 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-23 — Retopo mode: Ctrl + Erase deletes whole faces
+
+*Built live with the user at the keyboard; user-tested.*
+
+Hold Ctrl with the eraser (E): the face under the ring's centre (else the one whose middle
+is nearest it inside the ring) is outlined red; a click deletes it, outline faces too,
+which edge erasing can't reach. Ctrl+drag takes one more each time the pointer moves on.
+Vertices only that face used go with it; mirror deletes the twin face; one undo step per
+drag; Ctrl+click with the eraser no longer toggles the island's selection. The hover
+lookups (the red face, Cut's vertex ring) now run after the frame's edits: taken before,
+a delete renumbered the faces and the outline jumped across the model for a frame.
+
 ## 2026-10-23 — Retopo mode: Cut snaps to vertices at its ends
 
 *Built live with the user at the keyboard; user-tested.*

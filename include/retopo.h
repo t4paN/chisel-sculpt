@@ -93,6 +93,8 @@ struct RetopoState {
     // Cut's vertex snap: the built vertex under the pointer (lit while hovering), and the
     // ones the line started and ended on (~0u = it started / ended on no vertex).
     uint32_t snap_v = ~0u, cut_from_v = ~0u, cut_to_v = ~0u;
+    // Ctrl + Erase: the face that would go, outlined red while Ctrl is held (~0u = none).
+    uint32_t face_hover = ~0u;
     float last_sx = 0, last_sy = 0;   // screen position of the last captured point
     uint32_t next_id = 1;
 
@@ -213,6 +215,14 @@ uint32_t retopo_snap_vertex(const RetopoState& st, const Camera& cam, int win_w,
 // too. Freezes what it touches. Returns edges removed.
 int retopo_erase_dab(RetopoState& st, const Camera& cam, int win_w, int win_h,
                      float cx, float cy, float radius_px, bool mirror);
+
+// Ctrl + Erase: whole faces. The face under the ring's centre (nearest the eye), else
+// the one whose middle is nearest it inside the ring; ~0u for none. The dab deletes it
+// (and, with mirror, its twin), outline faces too; vertices only it used go with it.
+uint32_t retopo_face_at(const RetopoState& st, const Camera& cam, int win_w, int win_h,
+                        float cx, float cy, float radius_px);
+int retopo_erase_face_dab(RetopoState& st, const Camera& cam, int win_w, int win_h,
+                          float cx, float cy, float radius_px, bool mirror);
 
 // Write state.result as an OBJ, every face as it is (quads, triangles, bigger ones).
 // Returns false if there's nothing to write or the file can't be opened.

@@ -2475,6 +2475,22 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
         dl->AddCircle(ImVec2(x, y), 6.5f, green, 16, 2.0f);
         if (filled) dl->AddCircleFilled(ImVec2(x, y), 3.5f, green, 12);
     };
+    // Ctrl + Erase: the face about to go, outlined red.
+    if (st.face_hover < rm.face_count()) {
+        const uint32_t* q = rm.face(st.face_hover);
+        const uint32_t k = rm.face_size(st.face_hover);
+        static std::vector<ImVec2> poly;
+        poly.clear();
+        for (uint32_t i = 0; i < k; i++) {
+            float x, y;
+            if (!cam.world_to_screen(rm.v[q[i]], win_w, win_h, x, y)) { poly.clear(); break; }
+            poly.push_back(ImVec2(x, y));
+        }
+        if (poly.size() >= 3) {
+            dl->AddPolyline(poly.data(), (int)poly.size(), IM_COL32(20, 0, 0, 200), ImDrawFlags_Closed, 5.0f);
+            dl->AddPolyline(poly.data(), (int)poly.size(), IM_COL32(255, 60, 50, 255), ImDrawFlags_Closed, 2.5f);
+        }
+    }
     if (st.cutting) mark(st.cut_from_v, true);
     if (st.snap_v != st.cut_from_v || !st.cutting) mark(st.snap_v, false);
 }

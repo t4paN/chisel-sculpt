@@ -1952,8 +1952,10 @@ float brush_panel(InputState& input, int win_h) {
         // Cut draws a bare line: no width, so no Size either.
         if (cutting) hint("Drag a line across islands");
         else meter_widget("##mS", input, 0, w, k, !can_grow || big);
-        if (!smoothing && input.retopo_tool == InputState::RetopoTool::ERASE)
+        if (!smoothing && input.retopo_tool == InputState::RetopoTool::ERASE) {
             hint("The edge nearest the centre goes");
+            hint("Ctrl: the whole face goes");
+        }
         if (drawing) {
             meter_widget("##mRings", input, 4, w, k, !can_grow || big);
             meter_widget("##mDensity", input, 5, w, k, !can_grow || big);

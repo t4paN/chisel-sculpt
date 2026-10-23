@@ -1891,6 +1891,82 @@ int retopo_erase_dab(RetopoState& st, const Camera& cam, int win_w, int win_h,
     return gone;
 }
 
+uint32_t retopo_face_at(const RetopoState& st, const Camera& cam, int win_w, int win_h,
+                        float cx, float cy, float radius_px) {
+    const RetopoMesh& rm = st.result;
+    if (!st.built) return ~0u;
+    // The face under the centre (nearest the eye), else the one whose middle is nearest
+    // it inside the ring.
+    uint32_t under = ~0u, near = ~0u;
+    float under_d = 1e30f, near_d2 = radius_px * radius_px;
+    std::vector<float> sx, sy;
+    for (size_t f = 0; f < rm.face_count(); f++) {
+        const uint32_t* q = rm.face(f);
+        const uint32_t k = rm.face_size(f);
+        if (k < 3 || st.hidden(rm.face_owner[f])) continue;
+        const Vec3 to_eye = cam.perspective ? cam.get_position() - rm.v[q[0]] : cam.get_view_direction() * -1.0f;
+        if (rm.n[q[0]].dot(to_eye) <= 0.0f) continue;
+        sx.resize(k); sy.resize(k);
+        bool ok = true;
+        float mx = 0.0f, my = 0.0f;
+        for (uint32_t i = 0; i < k && ok; i++) {
+            ok = cam.world_to_screen(rm.v[q[i]], win_w, win_h, sx[i], sy[i]);
+            mx += sx[i]; my += sy[i];
+        }
+        if (!ok) continue;
+        bool in = false;
+        for (uint32_t i = 0, j = k - 1; i < k; j = i++)
+            if ((sy[i] > cy) != (sy[j] > cy)
+                && cx < sx[j] + (sx[i] - sx[j]) * (cy - sy[j]) / (sy[i] - sy[j])) in = !in;
+        if (in) {
+            const float d = cam.view_depth(rm.v[q[0]]);
+            if (d < under_d) { under_d = d; under = (uint32_t)f; }
+        }
+        mx = mx / (float)k - cx; my = my / (float)k - cy;
+        if (mx * mx + my * my < near_d2) { near_d2 = mx * mx + my * my; near = (uint32_t)f; }
+    }
+    return under != ~0u ? under : near;
+}
+
+int retopo_erase_face_dab(RetopoState& st, const Camera& cam, int win_w, int win_h,
+                          float cx, float cy, float radius_px, bool mirror) {
+    RetopoMesh& rm = st.result;
+    const uint32_t f = retopo_face_at(st, cam, win_w, win_h, cx, cy, radius_px);
+    if (f == ~0u) return 0;
+    std::vector<uint8_t> drop(rm.face_count(), 0);
+    drop[f] = 1;
+    if (mirror) {
+        // Its twin: the face made of its corners' twins.
+        std::vector<uint32_t> c, mk, fk;
+        face_corners(rm, f, c);
+        bool ok = true;
+        for (uint32_t x : c) { mk.push_back(rm.mirror[x]); ok &= mk.back() != ~0u; }
+        if (ok) {
+            std::sort(mk.begin(), mk.end());
+            for (size_t g = 0; g < rm.face_count(); g++) {
+                face_corners(rm, g, fk);
+                std::sort(fk.begin(), fk.end());
+                if (fk == mk) { drop[g] = 1; break; }
+            }
+        }
+    }
+    std::vector<uint32_t> touched;
+    FaceList out;
+    int gone = 0;
+    for (size_t g = 0; g < rm.face_count(); g++) {
+        if (drop[g]) { touched.push_back(rm.face_owner[g]); gone++; continue; }
+        out.add(rm.face(g), (int)rm.face_size(g), rm.face_owner[g]);
+    }
+    out.swap_into(rm);
+    // Vertices only the deleted faces used are left behind unreferenced, like a weld's
+    // (export skips them, nothing else sees them once the edges are rebuilt).
+    rebuild_edges(rm);
+    freeze_touched(st, touched);
+    st.built = rm.face_count() > 0;
+    std::printf("[retopo] erase: %d face(s) deleted, now %u faces\n", gone, rm.face_count());
+    return gone;
+}
+
 bool retopo_export_obj(const RetopoMesh& rm, const char* path) {
     if (rm.faces.empty()) return false;
     FILE* f = std::fopen(path, "wb");
