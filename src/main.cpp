@@ -2866,6 +2866,11 @@ int main(int argc, char* argv[]) {
                     retopo.drawing = true;
                     retopo.live = RetopoStroke{};
                     retopo.last_sx = mx - 1e3f;   // the press point always lands
+                    // Starting on an edited island: this stroke is a bridge out of it.
+                    const uint32_t id = retopo.built ? retopo_pick(retopo, camera, win_w, win_h, mx, my,
+                                                                   input.mirror_x) : 0;
+                    const RetopoStroke* on = id ? retopo.find(id) : nullptr;
+                    retopo.bridge_from = on && on->frozen ? id : 0;
                 }
                 Vec3 p, n;
                 float world_per_px;
@@ -2884,6 +2889,21 @@ int main(int argc, char* argv[]) {
                     retopo.last_sx = mx;
                     retopo.last_sy = my;
                 }
+            } else if (retopo.drawing && retopo.bridge_from) {
+                // Pen up on a bridge: built now, it joins geometry, not sketches. A few
+                // pixels is a click (it selects the island), not a bridge: no toast.
+                if (retopo.live.pts.size() >= 3) {
+                    const uint32_t to = retopo_pick(retopo, camera, win_w, win_h, (float)input.mouse_x,
+                                                    (float)input.mouse_y, input.mirror_x);
+                    scene.materialize_active_cpu();   // its spokes snap onto mesh.pos
+                    const char* why = retopo_bridge(retopo, *mesh, camera, win_w, win_h, to, input.mirror_x);
+                    std::snprintf(input.notification, sizeof(input.notification), "%s",
+                                  why ? why : to ? "Bridged" : "Strip grown out of the edge");
+                    input.notification_timer = why ? 2.5f : 1.5f;
+                }
+                retopo.live = RetopoStroke{};
+                retopo.drawing = false;
+                retopo.bridge_from = 0;
             } else if (retopo.drawing) {
                 // Pen up (or the mode changed under it).
                 const bool kept = retopo.finish_live(input.retopo_rings, input.retopo_density);
@@ -2952,7 +2972,9 @@ int main(int argc, char* argv[]) {
                 const uint32_t id = retopo_pick(retopo, camera, win_w, win_h, input.mouse2_press_x,
                                                 input.mouse2_press_y, input.mirror_x);
                 RetopoStroke* s = id ? retopo.find(id) : nullptr;
-                if (s && s->frozen) {
+                if (s && s->frozen && s->selected && retopo.merge_candidates() >= 2) {
+                    input.retopo_menu_request = true;   // the menu offers Merge
+                } else if (s && s->frozen) {
                     std::snprintf(input.notification, sizeof(input.notification),
                                   "%s is edited geometry now: rings, density and width don't reach it",
                                   s->name.c_str());

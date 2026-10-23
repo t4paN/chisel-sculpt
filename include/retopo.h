@@ -87,6 +87,8 @@ struct RetopoState {
     std::vector<RetopoStroke> strokes;
     RetopoStroke live;                // the stroke under the pen
     bool drawing = false;
+    // Draw started on an edited island (its id): the live stroke is a bridge, not a band.
+    uint32_t bridge_from = 0;
     // Cut: a bare line on the surface (no band), under the pen while `cutting`.
     std::vector<Vec3> cut_pts, cut_nrm;
     bool cutting = false;
@@ -142,6 +144,16 @@ struct RetopoState {
     // Frozen and editable islands never share a selection: returns a message saying so
     // and leaves the selection alone, else nullptr.
     const char* click_select(uint32_t id, bool add);
+    // Merge: the selected edited islands become one, the oldest (first drawn), which
+    // keeps its name, row and selection; the others' rows go and their faces, edges and
+    // vertices are its. Shared or not, nothing moves. Needs two or more; returns how
+    // many went into it (0 = nothing done).
+    int merge_selected();
+    int merge_candidates() const {
+        int n = 0;
+        for (const RetopoStroke& s : strokes) n += s.selected && s.frozen;
+        return n;
+    }
     RetopoStroke* first_selected() {
         for (RetopoStroke& s : strokes) if (s.selected) return &s;
         return nullptr;
@@ -223,6 +235,17 @@ uint32_t retopo_face_at(const RetopoState& st, const Camera& cam, int win_w, int
                         float cx, float cy, float radius_px);
 int retopo_erase_face_dab(RetopoState& st, const Camera& cam, int win_w, int win_h,
                           float cx, float cy, float radius_px, bool mirror);
+
+// Bridge: a Draw stroke that started on an edited island (st.bridge_from, the line in
+// st.live). One strip, one quad wide, from the edge the line first crosses out of that
+// island to the edge it last crosses into `to_id` (another edited island, or the same
+// one), its ends the two edges' own vertices, its width eased from one edge's length to
+// the other's, its steps the size of the quads it joins. to_id 0 = a loose strip grown
+// out of the edge to the line's end. The islands and the bridge become one island (the
+// oldest keeps its name). Mirror: a twin bridge, or, from an island to its own twin, a
+// bridge that is its own twin. Returns nullptr when built, else why not (nothing done).
+const char* retopo_bridge(RetopoState& st, const Mesh& m, const Camera& cam, int win_w, int win_h,
+                          uint32_t to_id, bool mirror);
 
 // Write state.result as an OBJ, every face as it is (quads, triangles, bigger ones).
 // Returns false if there's nothing to write or the file can't be opened.

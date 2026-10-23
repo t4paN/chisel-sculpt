@@ -2396,26 +2396,29 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
             // A frozen stroke is geometry now: no band, only its quads (lit when hovered).
             if (!s.frozen && (s.visible || lit)) band(s, lit ? 130 : s.selected ? 90 : any_hover ? 25 : 55);
         }
-        if (st.drawing && st.live.pts.size() >= 2) band(st.live, 70);
+        if (st.drawing && !st.bridge_from && st.live.pts.size() >= 2) band(st.live, 70);
     }
-    // The cut line under the pen: a thin bright line with a dark edge, no band.
-    if (st.cutting && st.cut_pts.size() >= 2) {
+    // The cut line under the pen: a thin bright line with a dark edge, no band. A bridge
+    // (Draw from an edited island) is drawn the same way in blue: its width comes from
+    // the edges it joins, not the band.
+    auto thin_line = [&](const std::vector<Vec3>& pts, const std::vector<Vec3>& nrm, ImU32 col) {
+        if (pts.size() < 2) return;
         static std::vector<ImVec2> at;
         static std::vector<uint8_t> ok;
-        const size_t n = st.cut_pts.size();
+        const size_t n = pts.size();
         at.resize(n); ok.resize(n);
         for (size_t i = 0; i < n; i++) {
             float x, y;
-            ok[i] = cam.world_to_screen(st.cut_pts[i], win_w, win_h, x, y)
-                 && retopo_facing(cam, st.cut_pts[i], st.cut_nrm[i]);
+            ok[i] = cam.world_to_screen(pts[i], win_w, win_h, x, y) && retopo_facing(cam, pts[i], nrm[i]);
             at[i] = ImVec2(x, y);
         }
         for (int pass = 0; pass < 2; pass++)
             for (size_t i = 0; i + 1 < n; i++)
                 if (ok[i] && ok[i + 1])
-                    dl->AddLine(at[i], at[i + 1], pass ? IM_COL32(235, 255, 240, 255) : IM_COL32(10, 20, 15, 170),
-                                pass ? 1.5f : 3.5f);
-    }
+                    dl->AddLine(at[i], at[i + 1], pass ? col : IM_COL32(10, 20, 15, 170), pass ? 1.5f : 3.5f);
+    };
+    if (st.cutting) thin_line(st.cut_pts, st.cut_nrm, IM_COL32(235, 255, 240, 255));
+    if (st.drawing && st.bridge_from) thin_line(st.live.pts, st.live.nrm, IM_COL32(120, 210, 255, 255));
     if (!st.built || !st.show_result) return;
 
     // Wireframe: project every vertex once, then draw an edge only when both ends

@@ -629,14 +629,15 @@ bool icon_button(const char* id, Icon icon, float size, const BtnOpts& o) {
 }
 
 // Plain-text toggle chip (paint target, skin choice): tinted when on.
-bool chip(const char* label, bool on, float h = 30.0f) {
+// `enabled` false: greyed, no hover, never clicks (still hoverable for its tooltip).
+bool chip(const char* label, bool on, float h = 30.0f, bool enabled = true) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImVec2 ts = text_size(UiFont::Sans, 13.0f, label);
     ImVec2 size(ts.x + 24.0f, h);
     ImVec2 pos = ImGui::GetCursorScreenPos();
-    bool clicked = ImGui::InvisibleButton(label, size);
-    bool hovered = ImGui::IsItemHovered();
-    bool held = ImGui::IsItemActive();
+    bool clicked = ImGui::InvisibleButton(label, size) && enabled;
+    bool hovered = ImGui::IsItemHovered() && enabled;
+    bool held = ImGui::IsItemActive() && enabled;
     float s = spring(ImGui::GetItemID(), held ? 0.94f : 1.0f, held ? 1400.0f : 520.0f);
     ImVec2 c(pos.x + size.x * 0.5f, pos.y + size.y * 0.5f);
     ImVec2 a(c.x - size.x * 0.5f * s, c.y - size.y * 0.5f * s);
@@ -647,14 +648,14 @@ bool chip(const char* label, bool on, float h = 30.0f) {
         dl->AddRect(ImVec2(a.x + 1, a.y + 1), ImVec2(b.x - 1, b.y - 1), on ? cga::light_cyan : cga::light_gray,
                     0.0f, 0, 2.0f);
         text_at(dl, UiFont::Sans, 16.0f, ImVec2(c.x - ts.x * 0.5f, c.y - ts.y * 0.5f),
-                on ? cga::black : cga::white, label);
+                on ? cga::black : enabled ? cga::white : cga::dark_gray, label);
         return clicked;
     }
     if (on) dl->AddRectFilled(a, b, kTint, 8.0f);
     else if (hovered) dl->AddRectFilled(a, b, IM_COL32(255, 255, 255, 18), 8.0f);
     dl->AddRect(a, b, on ? IM_COL32(118, 80, 224, 140) : kBorder, 8.0f);
     text_at(dl, UiFont::Sans, 13.0f * s, ImVec2(c.x - ts.x * 0.5f * s, c.y - ts.y * 0.5f * s),
-            on ? kTintText : kText, label);
+            on ? kTintText : enabled ? kText : kMuted, label);
     return clicked;
 }
 
@@ -4038,6 +4039,14 @@ void draw_retopo_dock(InputState& input, RetopoState& st, int win_w, int win_h) 
     if (chip("Clear", false, bh)) st.clear_all();
     if (ImGui::IsItemHovered()) tooltip(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), TipSide::Left,
                                         "Remove every stroke (Ctrl+Z brings them back)", nullptr);
+    ImGui::SameLine(0.0f, 4.0f);
+    // Live once two or more edited islands are selected (Ctrl+click on the model or here).
+    const int merge_n = st.merge_candidates();
+    if (chip("Merge", false, bh, merge_n >= 2)) st.merge_selected();
+    if (ImGui::IsItemHovered())
+        tooltip(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), TipSide::Left,
+                merge_n >= 2 ? "Merge the selected edited islands into one"
+                             : "Select two or more edited islands to merge (Ctrl+click)", nullptr);
     ImGui::SameLine();
     ImGui::SetCursorPosX(x0 + w - bh);
     o.on = false; o.tip = "Undo"; o.key = input.key_label(KeyAction::UNDO);
@@ -4074,8 +4083,21 @@ void draw_retopo_dock(InputState& input, RetopoState& st, int win_w, int win_h) 
         int n = 0;
         const RetopoStroke* first = nullptr;
         for (const RetopoStroke& s : st.strokes) if (s.selected) { n++; if (!first) first = &s; }
-        if (!first || first->frozen) {
-            ImGui::CloseCurrentPopup();   // the selection went away or got edited
+        if (first && first->frozen) {
+            // Edited islands: no sliders reach them, but two or more can become one.
+            if (st.merge_candidates() < 2) {
+                ImGui::CloseCurrentPopup();
+            } else {
+                char head[64];
+                std::snprintf(head, sizeof head, "%d edited islands", st.merge_candidates());
+                label_item(UiFont::SansSemibold, 13.0f, kText, head, 0.0f, 20.0f);
+                if (chip("Merge", false, sh)) {
+                    st.merge_selected();
+                    ImGui::CloseCurrentPopup();
+                }
+            }
+        } else if (!first) {
+            ImGui::CloseCurrentPopup();   // the selection went away
         } else {
             char head[64];
             if (n == 1) std::snprintf(head, sizeof head, "%s", first->name.c_str());

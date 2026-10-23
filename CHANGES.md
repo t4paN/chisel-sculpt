@@ -2,6 +2,27 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-23 — Retopo mode: Merge islands, and Draw bridges between edited islands
+
+*Built live with the user at the keyboard. Merge user-tested; bridges built, not yet tested.*
+
+**Merge:** with two or more edited islands selected (Ctrl+click), the Polygon Layers
+footer's **Merge** chip goes live (greyed out otherwise, its tooltip says why), and a
+right-click on one of them opens a menu with Merge. The oldest island keeps its name,
+row and selection; the others' faces, edges and vertices become its. Nothing moves or
+welds. One undo step.
+
+**Bridges:** a Draw stroke that starts on an edited island is a bridge, drawn as a thin
+blue line instead of a band. At pen-up it's built straight away: one strip, one quad
+wide, from the border edge the line first crosses out of to the border edge it last
+crosses into on the island it ends on (another one, or the same). Its ends are those
+edges' own vertices, its width eases from one edge's length to the other's, and it's cut
+into steps the size of the quads on those edges. The islands and the bridge become one
+island. Ending on empty sculpt grows a loose strip out of the edge instead; ending on a
+fresh (unedited) island is refused with a toast. Mirror: a twin bridge, or, between an
+island and its own twin, a bridge that is its own twin (spokes paired across x = 0). A
+click without a drag still just selects.
+
 ## 2026-10-23 — Retopo mode: Ctrl + Erase deletes whole faces
 
 *Built live with the user at the keyboard; user-tested.*

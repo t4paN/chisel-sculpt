@@ -156,6 +156,33 @@ const char* RetopoState::click_select(uint32_t id, bool add) {
     return nullptr;
 }
 
+int RetopoState::merge_selected() {
+    if (merge_candidates() < 2) return 0;
+    checkpoint();
+    uint32_t keep = ~0u;
+    for (const RetopoStroke& s : strokes) if (s.selected && s.frozen) keep = std::min(keep, s.id);
+    std::vector<uint8_t> into(next_id, 0);
+    int n = 0;
+    for (const RetopoStroke& s : strokes)
+        if (s.selected && s.frozen && s.id != keep && s.id < next_id) { into[s.id] = 1; n++; }
+    auto remap = [&](std::vector<uint32_t>& owners) {
+        for (uint32_t& o : owners) if (o < into.size() && into[o]) o = keep;
+    };
+    remap(result.face_owner);
+    remap(result.v_owner);
+    remap(result.edge_owner);
+    strokes.erase(std::remove_if(strokes.begin(), strokes.end(), [&](const RetopoStroke& s) {
+        return s.id < into.size() && into[s.id];
+    }), strokes.end());
+    if (RetopoStroke* k = find(keep)) {
+        k->selected = true;
+        // A hidden island merged into a shown one shows; the merged piece is one thing.
+        k->visible = true;
+    }
+    std::printf("[retopo] merge: %d island(s) into id %u\n", n, keep);
+    return n;
+}
+
 void RetopoState::clear_all() {
     if (strokes.empty() && result.faces.empty()) return;
     checkpoint();   // one Ctrl+Z brings it all back
@@ -1965,6 +1992,244 @@ int retopo_erase_face_dab(RetopoState& st, const Camera& cam, int win_w, int win
     st.built = rm.face_count() > 0;
     std::printf("[retopo] erase: %d face(s) deleted, now %u faces\n", gone, rm.face_count());
     return gone;
+}
+
+// ---- Bridge (Draw from an edited island) ------------------------------------------
+
+const char* retopo_bridge(RetopoState& st, const Mesh& m, const Camera& cam, int win_w, int win_h,
+                          uint32_t to_id, bool mirror) {
+    RetopoMesh& rm = st.result;
+    const uint32_t from_id = st.bridge_from;
+    const std::vector<Vec3>& pts = st.live.pts;
+    const size_t np = pts.size();
+    if (!st.built || !from_id || np < 2) return "Draw out of the island's edge to bridge it";
+    if (to_id && (!st.find(to_id) || !st.find(to_id)->frozen))
+        return "Bridges join edited islands only: Build or edit the other one first";
+
+    // The line and the islands' outlines on screen. The bridge leaves `from` where the
+    // line first crosses its edge, and lands where the line last crosses into `to`'s.
+    std::vector<float> lx(np), ly(np);
+    for (size_t i = 0; i < np; i++) cam.world_to_screen(pts[i], win_w, win_h, lx[i], ly[i]);
+    const size_t nv = rm.v.size();
+    std::vector<float> sx(nv), sy(nv);
+    std::vector<uint8_t> vok(nv);
+    for (size_t i = 0; i < nv; i++) vok[i] = cam.world_to_screen(rm.v[i], win_w, win_h, sx[i], sy[i]);
+    struct Hit { uint32_t a, b, owner; float s; };
+    std::vector<Hit> hits;
+    for (size_t e = 0; e + 1 < rm.edges.size(); e += 2) {
+        const uint32_t a = rm.edges[e], b = rm.edges[e + 1], ow = rm.edge_owner[e / 2];
+        if (ow != from_id && ow != to_id) continue;
+        if (!vok[a] || !vok[b] || !(rm.border_nb[a * 2] == b || rm.border_nb[a * 2 + 1] == b)) continue;
+        const float rx = sx[b] - sx[a], ry = sy[b] - sy[a];
+        for (size_t i = 0; i + 1 < np; i++) {
+            const float qx = lx[i + 1] - lx[i], qy = ly[i + 1] - ly[i];
+            const float den = rx * qy - ry * qx;
+            if (std::fabs(den) < 1e-9f) continue;
+            const float wx = lx[i] - sx[a], wy = ly[i] - sy[a];
+            const float t = (wx * qy - wy * qx) / den, u = (wx * ry - wy * rx) / den;
+            if (t < 0.0f || t > 1.0f || u < 0.0f || u > 1.0f) continue;
+            hits.push_back({a, b, ow, (float)i + u});
+        }
+    }
+    const Hit* out = nullptr;
+    for (const Hit& h : hits) if (h.owner == from_id && (!out || h.s < out->s)) out = &h;
+    if (!out) return "Draw out across the island's edge to bridge it";
+    const Hit* in = nullptr;
+    if (to_id)
+        for (const Hit& h : hits)
+            if (h.owner == to_id && h.s > out->s && edge_key(h.a, h.b) != edge_key(out->a, out->b)
+                && (!in || h.s > in->s)) in = &h;
+    if (to_id && !in) return "Land the bridge across the other island's edge";
+
+    // The centreline: from the middle of the edge it leaves, along the line as drawn,
+    // to the middle of the edge it lands on (or the line's end: a loose strip).
+    auto at = [&](float s) {
+        const size_t i = std::min(np - 2, (size_t)s);
+        return pts[i] + (pts[i + 1] - pts[i]) * (s - (float)i);
+    };
+    std::vector<Vec3> line;
+    line.push_back((rm.v[out->a] + rm.v[out->b]) * 0.5f);
+    const float s_end = in ? in->s : (float)(np - 1);
+    for (size_t i = (size_t)std::ceil(out->s); (float)i < s_end && i < np; i++) line.push_back(pts[i]);
+    line.push_back(in ? (rm.v[in->a] + rm.v[in->b]) * 0.5f : at(s_end));
+    std::vector<float> arc(line.size(), 0.0f);
+    for (size_t i = 1; i < line.size(); i++) arc[i] = arc[i - 1] + (line[i] - line[i - 1]).length();
+    const float len = arc.back();
+    auto along = [&](float d) {
+        size_t i = 1;
+        while (i + 1 < arc.size() && arc[i] < d) i++;
+        const float seg = std::max(1e-9f, arc[i] - arc[i - 1]);
+        return line[i - 1] + (line[i] - line[i - 1]) * std::min(1.0f, std::max(0.0f, (d - arc[i - 1]) / seg));
+    };
+
+    // Steps the size of the quads it joins: the mean side of the faces on those edges.
+    std::vector<uint32_t> c, fs;
+    auto face_size_at = [&](uint32_t a, uint32_t b) {
+        float sum = 0.0f;
+        int n = 0;
+        for (size_t f = 0; f < rm.face_count(); f++) {
+            const int k = face_corners(rm, f, c);
+            bool has = false;
+            for (int i = 0; i < k; i++)
+                has |= (c[i] == a && c[(i + 1) % k] == b) || (c[i] == b && c[(i + 1) % k] == a);
+            if (!has) continue;
+            for (int i = 0; i < k; i++) { sum += (rm.v[c[(i + 1) % k]] - rm.v[c[i]]).length(); n++; }
+        }
+        return n ? sum / (float)n : (rm.v[a] - rm.v[b]).length();
+    };
+    float q = face_size_at(out->a, out->b);
+    if (in) q = 0.5f * (q + face_size_at(in->a, in->b));
+    const int n = std::max(1, (int)std::lround(len / std::max(q, 1e-6f)));
+
+    // Which end vertex is on the line's left: the side = normal x heading.
+    auto left_first = [&](uint32_t a, uint32_t b, Vec3 heading) {
+        const Vec3 nn = (rm.n[a] + rm.n[b]).normalized();
+        const Vec3 side = nn.cross(heading);
+        return (rm.v[a] - rm.v[b]).dot(side) > 0.0f;
+    };
+    const Vec3 h0 = (line[std::min<size_t>(1, line.size() - 1)] - line[0]).normalized();
+    const uint32_t LA = left_first(out->a, out->b, h0) ? out->a : out->b;
+    const uint32_t RA = LA == out->a ? out->b : out->a;
+    uint32_t LB = ~0u, RB = ~0u;
+    if (in) {
+        const Vec3 h1 = (line.back() - line[line.size() - 2]).normalized();
+        LB = left_first(in->a, in->b, h1) ? in->a : in->b;
+        RB = LB == in->a ? in->b : in->a;
+    }
+    const float wA = (rm.v[LA] - rm.v[RA]).length();
+    const float wB = in ? (rm.v[LB] - rm.v[RB]).length() : wA;
+    const Vec3 dA = (rm.v[LA] - rm.v[RA]).normalized();
+    const Vec3 dB = in ? (rm.v[LB] - rm.v[RB]).normalized() : dA;
+
+    // The snap grid, over the islands and the line (a loose strip can run past them).
+    SnapGrid g;
+    {
+        Vec3 lo(1e30f, 1e30f, 1e30f), hi(-1e30f, -1e30f, -1e30f);
+        auto grow = [&](Vec3 p) {
+            lo = {std::min(lo.x, p.x), std::min(lo.y, p.y), std::min(lo.z, p.z)};
+            hi = {std::max(hi.x, p.x), std::max(hi.y, p.y), std::max(hi.z, p.z)};
+        };
+        for (const Vec3& p : line) grow(p);
+        const float pad = std::max(wA, wB) * 2.0f + q;
+        lo = lo - Vec3(pad, pad, pad);
+        hi = hi + Vec3(pad, pad, pad);
+        const float ext = std::max({hi.x - lo.x, hi.y - lo.y, hi.z - lo.z});
+        g.build(m, lo, hi, std::max(q * 0.5f, ext / 96.0f));
+    }
+    auto snap = [&](Vec3 p, Vec3& nn) {
+        Vec3 r;
+        if (g.closest(p, r, nn, 8)) return r;
+        nn = Vec3(0, 0, 0);
+        return p;
+    };
+
+    st.checkpoint();
+    // Spokes 1..n-1 (and n for a loose end): centre on the line, across = between the
+    // line's own sideways and the two end edges' directions, width eased from one end
+    // edge's length to the other's.
+    const uint32_t keep = to_id ? std::min(from_id, to_id) : from_id;
+    std::vector<uint32_t> L(n + 1), R(n + 1);
+    L[0] = LA; R[0] = RA;
+    if (in) { L[n] = LB; R[n] = RB; }
+    const uint32_t first_new = (uint32_t)rm.v.size();
+    for (int i = 1; i <= n; i++) {
+        if (i == n && in) break;
+        const float f = (float)i / (float)n;
+        Vec3 nn;
+        const Vec3 cen = snap(along(f * len), nn);
+        const Vec3 tan = (along(std::min(len, (f + 0.5f / n) * len)) - along(std::max(0.0f, (f - 0.5f / n) * len))).normalized();
+        Vec3 side = nn.cross(tan).normalized();
+        const Vec3 ends = (dA * (1.0f - f) + dB * f).normalized();
+        if (side.dot(ends) < 0.0f) side = side * -1.0f;
+        Vec3 across = (side + ends).normalized();
+        across = (across - nn * across.dot(nn)).normalized();
+        const float w = wA + (wB - wA) * f;
+        for (int k = 0; k < 2; k++) {
+            Vec3 vn;
+            const Vec3 p = snap(cen + across * (k ? -0.5f * w : 0.5f * w), vn);
+            rm.v.push_back(p);
+            rm.n.push_back(vn.length() > 0.5f ? vn : nn);
+            rm.v_owner.push_back(keep);
+            rm.mirror.push_back(~0u);
+            (k ? R : L)[i] = (uint32_t)rm.v.size() - 1;
+        }
+    }
+    // Wound against the island's face on the edge it leaves, so the bridge's normals
+    // agree with it (a shared side runs opposite ways in its two faces).
+    bool flip = false;
+    for (size_t f = 0; f < rm.face_count(); f++) {
+        const int k = face_corners(rm, f, c);
+        for (int i = 0; i < k; i++)
+            if (c[i] == RA && c[(i + 1) % k] == LA) flip = true;
+    }
+    auto quad = [&](int i, uint32_t* qd) {
+        qd[0] = L[i]; qd[1] = L[i + 1]; qd[2] = R[i + 1]; qd[3] = R[i];
+        if (flip) std::reverse(qd, qd + 4);
+    };
+    const uint32_t first_face = rm.face_count();
+    for (int i = 0; i < n; i++) { uint32_t qd[4]; quad(i, qd); rm.add_face(qd, 4, keep); }
+
+    // Mirror. A bridge from an island to its own twin is its own twin: spoke i pairs with
+    // spoke n - i, evened out across the seam. Otherwise, with both ends twinned and the
+    // line on one side, it gets a twin bridge, reflected vertex by vertex.
+    int twin = 0;
+    if (mirror && rm.mirror[LA] != ~0u && rm.mirror[RA] != ~0u) {
+        auto refl = [](Vec3 v) { v.x = -v.x; return v; };
+        const bool self = in && ((rm.mirror[LA] == LB && rm.mirror[RA] == RB) || (rm.mirror[LA] == RB && rm.mirror[RA] == LB));
+        bool one_side = true;
+        for (const Vec3& p : line) one_side &= (p.x > 0.0f) == (line[0].x > 0.0f);
+        if (self) {
+            const bool same_rail = rm.mirror[LA] == LB;
+            for (int i = 1; i <= n / 2; i++) {
+                const int j = n - i;
+                for (int k = 0; k < 2; k++) {
+                    const uint32_t x = (k ? R : L)[i];
+                    const uint32_t y = same_rail ? (k ? R : L)[j] : (k ? L : R)[j];
+                    if (x == y) { rm.v[x].x = 0.0f; rm.mirror[x] = x; continue; }
+                    const Vec3 mid = (rm.v[x] + refl(rm.v[y])) * 0.5f;
+                    rm.v[x] = mid; rm.v[y] = refl(mid);
+                    rm.n[y] = refl(rm.n[x]);
+                    rm.mirror[x] = y; rm.mirror[y] = x;
+                }
+            }
+            twin = 1;
+        } else if (one_side && (!in || (rm.mirror[LB] != ~0u && rm.mirror[RB] != ~0u))) {
+            std::vector<uint32_t> tw(rm.v.size(), ~0u);
+            auto tw_of = [&](uint32_t v) {
+                if (v < first_new) return rm.mirror[v];
+                if (tw[v] == ~0u) {
+                    tw[v] = (uint32_t)rm.v.size();
+                    rm.v.push_back(refl(rm.v[v]));
+                    rm.n.push_back(refl(rm.n[v]));
+                    rm.v_owner.push_back(keep);
+                    rm.mirror.push_back(v);
+                    rm.mirror[v] = tw[v];
+                    tw.push_back(~0u);
+                }
+                return tw[v];
+            };
+            for (int i = 0; i < n; i++) {
+                const uint32_t* qd = rm.face(first_face + i);
+                const uint32_t t4[4] = {tw_of(qd[3]), tw_of(qd[2]), tw_of(qd[1]), tw_of(qd[0])};
+                rm.add_face(t4, 4, keep);
+            }
+            twin = 2;
+        }
+    }
+
+    // One piece now: the islands it joins are one island (the oldest keeps its name).
+    if (to_id && to_id != from_id) {
+        const uint32_t gone = keep == from_id ? to_id : from_id;
+        for (std::vector<uint32_t>* ow : {&rm.face_owner, &rm.v_owner, &rm.edge_owner})
+            for (uint32_t& o : *ow) if (o == gone) o = keep;
+        st.strokes.erase(std::remove_if(st.strokes.begin(), st.strokes.end(),
+                                        [&](const RetopoStroke& s) { return s.id == gone; }), st.strokes.end());
+    }
+    rebuild_edges(rm);
+    std::printf("[retopo] bridge: %s, %d quads (step %.3f, width %.3f -> %.3f)%s\n",
+                to_id ? (to_id == from_id ? "within one island" : "two islands joined") : "loose strip",
+                n, q, wA, wB, twin == 1 ? ", its own twin" : twin == 2 ? ", twin built" : "");
+    return nullptr;
 }
 
 bool retopo_export_obj(const RetopoMesh& rm, const char* path) {
