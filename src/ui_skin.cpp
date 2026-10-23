@@ -3742,21 +3742,48 @@ void retopo_sliders(InputState& input, RetopoState& st, float sh, float sgap, fl
 
 }  // namespace
 
-// Retopo mode's dock, right-hand side under the command bar, like paint mode's layer
-// docker: one row per stroke, newest on top (eye / name / trash). Hovering a row lights
-// that stroke and its quads on the model; click selects, Ctrl+click adds, double-click
-// renames. The selection's row opens to show its Rings / Density / Width; with nothing
-// selected those sit under the list and set the next stroke. Build, undo, view toggles,
-// Export and the readout close it. Built from the skin's own parts, so it wears the
-// live skin.
+// Retopo mode's "Polygon Layers" dock, like paint mode's layer docker: one row per
+// stroke, newest on top (eye / name / trash). Hovering a row lights that stroke and its
+// quads on the model; click selects, Ctrl+click adds, double-click renames. The
+// selection's row opens to show its Rings / Density / Width, every other row carries them
+// as a grey footnote; with nothing selected the sliders sit under the list and set the
+// next stroke. Build, undo, view toggles, Export and the readout close it. Built from
+// the skin's own parts, so it wears the live skin.
 void draw_retopo_dock(InputState& input, RetopoState& st, int win_w, int win_h) {
     st.hover_id = 0;
     const float bh = 30.0f, gap = 6.0f;
-    const float w = g_dos ? 300.0f : 236.0f;   // the status panel's width, so the right edge lines up
+    const float row_h = 46.0f, kIn = 5.0f;   // a row, and its content's inset from the row outline
+    const float min_w = (g_dos ? 300.0f : 236.0f) + 20.0f;   // the status panel's width + padding
     const float top = g_cmd_bottom + 12.0f;
     const float bottom = (g_status_top > top ? g_status_top : (float)win_h - kEdge) - 12.0f;
-    if (!begin_panel("##RetopoDock", ImVec2((float)win_w - kEdge, top), ImVec2(1.0f, 0.0f),
-                     ImVec2(10.0f, 10.0f), gap, 14.0f)) { end_panel(); return; }
+    // Its own window, unlike the fixed docks: drag the title (or any empty part) to move
+    // it, an edge or corner to resize it, and the list fills the height. It starts under
+    // the command bar on the right and is kept on screen.
+    const ImGuiWindowFlags flags =
+        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
+        ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoCollapse |
+        ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoBringToFrontOnFocus;
+    ImGui::SetNextWindowPos(ImVec2((float)win_w - kEdge, top), ImGuiCond_FirstUseEver, ImVec2(1.0f, 0.0f));
+    ImGui::SetNextWindowSize(ImVec2(min_w, std::max(320.0f, std::min(560.0f, bottom - top))),
+                             ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSizeConstraints(ImVec2(min_w, 260.0f), ImVec2((float)win_w, (float)win_h));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f, 10.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(gap, gap));
+    // The skin paints the panel itself; the stock corner grip only shows while in use.
+    ImGui::PushStyleColor(ImGuiCol_ResizeGrip, IM_COL32(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_ResizeGripHovered, with_alpha(kAccent, 0.6f));
+    ImGui::PushStyleColor(ImGuiCol_ResizeGripActive, kAccent);
+    const bool shown = ImGui::Begin("##RetopoDock", nullptr, flags);
+    ImGui::PopStyleColor(3);
+    if (!shown) { end_panel(); return; }
+    window_panel(14.0f);
+    {   // A shrinking app window must not strand it off screen.
+        const ImVec2 p = ImGui::GetWindowPos(), sz = ImGui::GetWindowSize();
+        const ImVec2 c(std::max(0.0f, std::min(p.x, (float)win_w - sz.x)),
+                       std::max(0.0f, std::min(p.y, (float)win_h - sz.y)));
+        if (c.x != p.x || c.y != p.y) ImGui::SetWindowPos(c);
+    }
+    const float w = ImGui::GetContentRegionAvail().x;
     BtnOpts o;
     o.look = Look::Bar; o.side = TipSide::Left; o.icon_px = 18.0f;
 
@@ -3769,28 +3796,49 @@ void draw_retopo_dock(InputState& input, RetopoState& st, int win_w, int win_h) 
     const RetopoStroke* first = st.first_selected();
     int n_sel = 0;
     for (const RetopoStroke& s : st.strokes) n_sel += s.selected ? 1 : 0;
+    // The open row: the selection's first stroke, unless it has been edited (frozen):
+    // the sliders can't reach it any more, so it closes to the footnote like the rest.
+    const RetopoStroke* open_s = first && !first->frozen ? first : nullptr;
+    // The moment the open row's island is first edited it collapses in a way you catch
+    // from the corner of your eye: the sliders jiggle and squash away (kSquash), then the
+    // footnote spreads out from its middle (kReveal). Skins without motion just switch.
+    constexpr float kSquash = 0.28f, kReveal = 0.22f;
+    static uint32_t prev_open = 0, anim_id = 0;
+    static double anim_t0 = 0.0;
+    if (prev_open && (!open_s || open_s->id != prev_open))
+        for (const RetopoStroke& s : st.strokes)
+            if (s.id == prev_open && s.frozen && g_motion) { anim_id = s.id; anim_t0 = ImGui::GetTime(); }
+    prev_open = open_s ? open_s->id : 0;
+    const float anim_t = anim_id ? (float)(ImGui::GetTime() - anim_t0) : 0.0f;
+    if (anim_id && anim_t > kSquash + kReveal) anim_id = 0;
+    if (anim_id) input.wake_requested = true;   // keep frames coming until it lands
 
-    label_item(UiFont::SansSemibold, 13.0f, kText, "Strokes", w, 18.0f);
+    label_item(UiFont::SansSemibold, 13.0f, kText, "Polygon Layers", w, 18.0f);
+    // The list takes whatever height the footer leaves. The footer's height is last
+    // frame's measurement (it changes when the next-stroke sliders come and go).
+    static float foot_h = 0.0f;
+    if (foot_h <= 0.0f) foot_h = 16.0f + sh * 3.0f + sgap * 2.0f + 7.0f + bh * 2.0f + 18.0f + gap * 6.0f;
+    const float list_h = std::max(row_h, ImGui::GetContentRegionAvail().y - foot_h);
+    ImGui::BeginChild("##retopoList", ImVec2(w, list_h), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
     if (st.strokes.empty()) {
         label_item(UiFont::Sans, 12.0f, kMuted, "Sketch on the model:", 0.0f, 16.0f);
         label_item(UiFont::Sans, 12.0f, kMuted, "a closed ring is a donut,", 0.0f, 16.0f);
         label_item(UiFont::Sans, 12.0f, kMuted, "an open line a strip", 0.0f, 16.0f);
     } else {
-        // The list scrolls once it would run into the status panel; the footer below it
-        // (next-stroke sliders, buttons, readout) always stays in view.
-        const float foot_h = (first ? 0.0f : 16.0f + sh * 3.0f + sgap * 2.0f + gap * 2.0f)
-                           + 7.0f + bh * 2.0f + 18.0f + gap * 4.0f;
-        const float list_max = std::max(bh * 3.0f, bottom - top - 20.0f - 18.0f - gap - foot_h);
-        ImGui::SetNextWindowSizeConstraints(ImVec2(w, 0.0f), ImVec2(w, list_max));
-        ImGui::BeginChild("##retopoList", ImVec2(w, 0.0f), ImGuiChildFlags_AutoResizeY,
-                          ImGuiWindowFlags_NoBackground);
         ImDrawList* dl = ImGui::GetWindowDrawList();
         const float row_w = w - (ImGui::GetScrollMaxY() > 0.0f ? ImGui::GetStyle().ScrollbarSize + 2.0f : 0.0f);
+        const float ioff = (row_h - bh) * 0.5f;              // icons sit centred in the row
+        const float sx = kIn + bh + 4.0f;                     // sliders start past the eye
+        const float sw = row_w - sx - kIn - 4.0f;             // and stop short of the outline
         int del = -1;
         for (int i = (int)st.strokes.size() - 1; i >= 0; i--) {
             RetopoStroke& s = st.strokes[i];
             ImGui::PushID((int)s.id);
+            const ImVec2 r0 = ImGui::GetCursorScreenPos();   // the row's outline
+            ImVec2 r1(r0.x + row_w, r0.y + row_h);
+            const float lx = ImGui::GetCursorPosX(), ly = ImGui::GetCursorPosY();
             ImGui::BeginGroup();
+            ImGui::SetCursorPos(ImVec2(lx + kIn, ly + ioff));
             // Frozen: its quads were edited, Build leaves them be, so there's nothing to skip.
             o.on = s.visible && !s.frozen; o.enabled = !s.frozen;
             o.tip = s.frozen ? "Frozen: edited, Build leaves it as it is"
@@ -3799,12 +3847,13 @@ void draw_retopo_dock(InputState& input, RetopoState& st, int win_w, int win_h) 
                 s.visible = !s.visible;
             o.enabled = true;
             ImGui::SameLine(0.0f, 4.0f);
-            const float name_w = row_w - 2.0f * bh - 8.0f;
+            ImGui::SetCursorPosY(ly);
+            const float name_w = row_w - 2.0f * bh - 8.0f - 2.0f * kIn;
             if (rename_id == s.id) {
                 // Enter or clicking away keeps it, Esc drops it, empty keeps the old name.
                 if (rename_focus) { ImGui::SetKeyboardFocusHere(); rename_focus = false; }
                 ImGui::SetNextItemWidth(name_w);
-                ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (bh - ImGui::GetFrameHeight()) * 0.5f);
+                ImGui::SetCursorPosY(ly + (row_h - ImGui::GetFrameHeight()) * 0.5f);
                 ImGui::InputText("##rename", rename_buf, sizeof(rename_buf),
                                  ImGuiInputTextFlags_AutoSelectAll);
                 if (ImGui::IsItemDeactivated()) {
@@ -3815,16 +3864,40 @@ void draw_retopo_dock(InputState& input, RetopoState& st, int win_w, int win_h) 
                 // The whole space between eye and trash is the row's button: name on the
                 // left, what it is on the right.
                 const ImVec2 p = ImGui::GetCursorScreenPos();
-                ImGui::InvisibleButton("##name", ImVec2(name_w, bh));
+                ImGui::InvisibleButton("##name", ImVec2(name_w, row_h));
                 if (ImGui::IsItemHovered())
-                    dl->AddRectFilled(p, ImVec2(p.x + name_w, p.y + bh), IM_COL32(255, 255, 255, 14), rad(6.0f));
+                    dl->AddRectFilled(ImVec2(p.x, p.y + ioff), ImVec2(p.x + name_w, p.y + ioff + bh),
+                                      IM_COL32(255, 255, 255, 14), rad(6.0f));
+                // A closed row (not the open one) carries its settings as a grey footnote
+                // under the name instead of sliders; the two lines sit centred as a block.
+                const bool squashing = s.id == anim_id && anim_t < kSquash;
+                const bool open = &s == open_s || squashing;
+                char foot[48];
+                std::snprintf(foot, sizeof foot, "R: %d | D: %.1fx | W: %.1fx", s.rings, s.density, s.width);
                 const ImVec2 ts = text_size(UiFont::SansSemibold, 13.0f, s.name.c_str());
-                text_at(dl, UiFont::SansSemibold, 13.0f, ImVec2(p.x + 6.0f, p.y + (bh - ts.y) * 0.5f),
+                const ImVec2 fs = text_size(UiFont::Mono, 10.5f, foot);
+                const float line_gap = 5.0f;
+                const float name_y = open ? p.y + (row_h - ts.y) * 0.5f
+                                          : p.y + (row_h - ts.y - line_gap - fs.y) * 0.5f;
+                text_at(dl, UiFont::SansSemibold, 13.0f, ImVec2(p.x + 6.0f, name_y),
                         s.frozen ? kText : s.closed ? donut_col : strip_col, s.name.c_str());
                 const char* kind = s.frozen ? "edited" : s.closed ? "donut" : "strip";
                 const ImVec2 ks = text_size(UiFont::Mono, 11.0f, kind);
-                text_at(dl, UiFont::Mono, 11.0f, ImVec2(p.x + name_w - ks.x - 6.0f, p.y + (bh - ks.y) * 0.5f),
+                text_at(dl, UiFont::Mono, 11.0f, ImVec2(p.x + name_w - ks.x - 6.0f, name_y + (ts.y - ks.y) * 0.5f),
                         kMuted, kind);
+                if (!open) {
+                    const ImVec2 fp(p.x + 6.0f, name_y + ts.y + line_gap);
+                    if (s.id == anim_id) {
+                        // The reveal: a clip window opening from the line's middle.
+                        const float u = std::min(1.0f, (anim_t - kSquash) / kReveal);
+                        const float half = fs.x * 0.5f * (1.0f - (1.0f - u) * (1.0f - u)), cx = fp.x + fs.x * 0.5f;
+                        dl->PushClipRect(ImVec2(cx - half, fp.y), ImVec2(cx + half, fp.y + fs.y), true);
+                        text_at(dl, UiFont::Mono, 10.5f, fp, kMuted, foot);
+                        dl->PopClipRect();
+                    } else {
+                        text_at(dl, UiFont::Mono, 10.5f, fp, kMuted, foot);
+                    }
+                }
                 if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
                     if (const char* msg = st.click_select(s.id, ImGui::GetIO().KeyCtrl)) {
                         std::snprintf(input.notification, sizeof(input.notification), "%s", msg);
@@ -3842,26 +3915,58 @@ void draw_retopo_dock(InputState& input, RetopoState& st, int win_w, int win_h) 
                 }
             }
             ImGui::SameLine(0.0f, 4.0f);
+            ImGui::SetCursorPosY(ly + ioff);
             o.on = false; o.tip = "Delete this stroke";
             if (icon_button("del", Icon::UiTrash, bh, o)) del = i;
             ImGui::EndGroup();
-            const ImVec2 r0 = ImGui::GetItemRectMin();
-            ImVec2 r1 = ImGui::GetItemRectMax();
             const bool row_hov = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+            ImGui::SetCursorPosY(ly + row_h + gap);
             // The selection's row opens: its sliders hang under it, indented past the eye.
             // With several selected they set them all, so only the first one opens.
-            if (&s == first) {
-                ImGui::Indent(bh + 4.0f);
+            if (&s == open_s) {
+                ImGui::SetCursorPosY(ly + row_h);
+                ImGui::Indent(sx);
                 if (n_sel > 1) {
                     char head[40];
                     std::snprintf(head, sizeof head, "Sets all %d selected", n_sel);
                     label_item(UiFont::Sans, 12.0f, kMuted, head, 0.0f, 16.0f);
                 }
-                retopo_sliders(input, st, sh, sgap, row_w - bh - 12.0f, TipSide::Left);
-                ImGui::Unindent(bh + 4.0f);
-                r1 = ImVec2(r1.x, ImGui::GetItemRectMax().y + 8.0f);
-                ImGui::Dummy(ImVec2(0.0f, 0.0f));
+                retopo_sliders(input, st, sh, sgap, sw, TipSide::Left);
+                ImGui::Unindent(sx);
+                r1.y = ImGui::GetItemRectMax().y + 9.0f;
+                ImGui::SetCursorScreenPos(ImVec2(r0.x, r1.y + gap));
+            } else if (s.id == anim_id && anim_t < kSquash) {
+                // The squash: stand-ins for the three sliders (they take no input), shaken
+                // sideways in alternate directions and flattened up into the row, the
+                // labels fading out in the first half.
+                const float u = anim_t / kSquash, c = 1.0f - u * u * (3.0f - 2.0f * u);
+                const float shake = 4.0f * std::sin(anim_t * 2.0f * 3.14159265f * 18.0f) * c;
+                const float bx = r0.x + sx, y0 = r1.y, hgt = (sh * 3.0f + sgap * 2.0f) * c;
+                const float fill[3] = {(float)(s.rings - 1) / 7.0f, (s.density - 0.1f) / 0.9f,
+                                       (s.width - 0.1f) / 1.9f};
+                char lab[3][24];
+                std::snprintf(lab[0], sizeof lab[0], "Rings: %d", s.rings);
+                std::snprintf(lab[1], sizeof lab[1], "Density: %.1fx", s.density);
+                std::snprintf(lab[2], sizeof lab[2], "Width: %.1fx", s.width);
+                const float la = std::max(0.0f, 1.0f - u * 2.0f), r = rad(6.0f) * c;
+                for (int k = 0; k < 3; k++) {
+                    const float x = bx + (k % 2 ? -shake : shake), y = y0 + (float)k * (sh + sgap) * c;
+                    const ImVec2 a(x, y), b(x + sw, y + std::max(1.0f, sh * c));
+                    dl->AddRectFilled(a, b, IM_COL32(255, 255, 255, 14), r);
+                    dl->AddRectFilled(a, ImVec2(x + sw * fill[k], b.y), kTint, r);
+                    dl->AddRect(a, b, kBorder, r);
+                    if (la > 0.0f) {
+                        const ImVec2 lt = text_size(UiFont::SansSemibold, 12.0f, lab[k]);
+                        text_at(dl, UiFont::SansSemibold, 12.0f,
+                                ImVec2(x + (sw - lt.x) * 0.5f, a.y + (b.y - a.y - lt.y) * 0.5f),
+                                with_alpha(kText, la), lab[k]);
+                    }
+                }
+                r1.y = y0 + hgt + 9.0f * c;
+                ImGui::SetCursorScreenPos(ImVec2(r0.x, r1.y + gap));
             }
+            ImGui::Dummy(ImVec2(0.0f, 0.0f));
+            ImGui::SetCursorScreenPos(ImVec2(r0.x, r1.y + gap));
             if (s.selected)
                 dl->AddRect(r0, r1, kAccent, rad(9.0f), 0, 2.0f);
             if (row_hov) {
@@ -3870,13 +3975,15 @@ void draw_retopo_dock(InputState& input, RetopoState& st, int win_w, int win_h) 
             }
             ImGui::PopID();
         }
-        ImGui::EndChild();
+        ImGui::Dummy(ImVec2(0.0f, 0.0f));   // the cursor moves above count as the list's extent
         if (del >= 0) {
             st.strokes.erase(st.strokes.begin() + del);
             st.prune();   // its quads go now, not at the next Build
         }
     }
+    ImGui::EndChild();
 
+    const float fy0 = ImGui::GetCursorPosY();
     // Nothing selected: the sliders set what the next stroke gets.
     if (!first) {
         label_item(UiFont::Sans, 12.0f, kMuted, "Next stroke", 0.0f, 16.0f);
@@ -3912,6 +4019,7 @@ void draw_retopo_dock(InputState& input, RetopoState& st, int win_w, int win_h) 
     if (st.built) std::snprintf(ro, sizeof ro, "%u quads%s", st.result.quad_count(), input.mirror_x ? " \xC2\xB7 mirror X" : "");
     else          std::snprintf(ro, sizeof ro, "%s", input.mirror_x ? "not built \xC2\xB7 mirror X" : "not built");
     label_item(UiFont::Mono, 12.0f, kMuted, ro, 0.0f, 18.0f);
+    foot_h = ImGui::GetCursorPosY() - fy0;
 
     // Right-click menu on an island (main.cpp asks): the same three sliders, for the
     // selection, where the pointer is. A click anywhere else closes it.

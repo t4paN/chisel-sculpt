@@ -2,6 +2,24 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-23 — Retopo mode: the bar becomes the Polygon Layers dock
+
+*Layout checked on screenshots with stand-in strokes; not yet hand-tested.*
+
+- **Right-hand dock** in place of the bottom bar (c075114), like paint mode's layers: rows
+  newest on top, eye / name + kind / trash. The first selected row opens to its Rings /
+  Density / Width ("Sets all N selected" for several); nothing selected, the sliders sit
+  under the list as "Next stroke". Footer: Build, Clear, Undo / Strokes, Wire, Export /
+  readout.
+- **Polygon Layers:** movable (drag the title or any empty part), resizable (edges,
+  corner); the list fills the height and scrolls, the footer stays put; kept on screen.
+  Position and size aren't remembered across restarts.
+- **Closed rows** carry their settings as a grey footnote, `R: 3 | D: 0.6x | W: 1.0x`.
+  Rows are 46 px, content inset 5 px from the outline.
+- **First edit collapses the row:** the moment an island freezes, its open row closes; the
+  sliders jiggle and squash away (0.28 s), then the footnote opens from its middle (0.22 s).
+  Edited rows never reopen. DOS, Y2K and motion-off just switch.
+
 ## 2026-10-23 — Retopo mode: Smooth keeps loop spacing even
 
 *Not yet hand-tested: checked on a flat-donut simulation only.*
