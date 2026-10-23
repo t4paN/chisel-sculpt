@@ -4,7 +4,7 @@ Short, chronological log of notable changes. Newest on top.
 
 ## 2026-10-23 — Retopo mode: the bar becomes the Polygon Layers dock
 
-*Layout checked on screenshots with stand-in strokes; not yet hand-tested.*
+*Built live with the user at the keyboard; layout also checked on screenshots.*
 
 - **Right-hand dock** in place of the bottom bar (c075114), like paint mode's layers: rows
   newest on top, eye / name + kind / trash. The first selected row opens to its Rings /
@@ -22,7 +22,7 @@ Short, chronological log of notable changes. Newest on top.
 
 ## 2026-10-23 — Retopo mode: Smooth keeps loop spacing even
 
-*Not yet hand-tested: checked on a flat-donut simulation only.*
+*User-tested: still "not quite right yet" (user); flat-donut simulation below.*
 
 The neighbour average pulled every loop toward the inside of its bend; with the borders only
 sliding, a donut's middle loops crept into the hole, and that bunched shape was where it
@@ -35,7 +35,7 @@ smoothing, which only delays the same end state.
 ## 2026-10-23 — Retopo mode: right-click no longer opens the paint colour wheel
 
 The brush stays Paint underneath mode 0 and the wheel only checked the brush; it now also
-needs the sculpt/paint mode (so insert and select don't get it either). *Not yet hand-tested.*
+needs the sculpt/paint mode (so insert and select don't get it either). *Found and tried live.*
 
 ## 2026-10-23 — Retopo mode: mirror welds mouths
 
