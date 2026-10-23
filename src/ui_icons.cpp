@@ -83,6 +83,10 @@ const IconDef kIcons[(int)Icon::Count] = {
     // Drawn here: a pencil, tip bottom-left, the band of its ferrule across it.
     /* RetopoPencil */ {{P("M4 20l1.2-4.4L16 4.8l3.2 3.2L8.4 18.8z"), P("M13.6 7.2l3.2 3.2"),
                          P("M5.2 15.6l3.2 3.2")}, 3},
+    // Drawn here: a bougatsa knife (the user's), tip to the left: one flat line from the
+    // tip to the handle's end, the edge a quarter circle back from the tip, the heel
+    // straight up to the handle, which runs on back along the spine's line.
+    /* RetopoCut    */ {{P("M4 7H21v3h-7v7a10 10 0 0 1-10-10z")}, 1},
     /* UiTrash      */ {{P("M4 7h16M9.5 7V4.5h5V7"), P("M6 7l1 13h10l1-13"), P("M10 11v5.5M14 11v5.5")}, 3},
 };
 
@@ -270,7 +274,7 @@ void draw_icon(ImDrawList* dl, Icon icon, ImVec2 center, float size, ImU32 col, 
 }
 
 // ---- Pixel set (the DOS skin) ------------------------------------------------
-// The same 31 icons as 16x16 one-bit art, from the handoff's cga-pixel/icons
+// The same icons as 16x16 one-bit art, from the handoff's cga-pixel/icons
 // (pixel_icons.json, converted to row masks: bit 15 = leftmost pixel). Mirror X,
 // Smooth and Merge were hand-drawn there; Inflate is redrawn here to match the
 // vector set (rasterised from the same two circles).
@@ -310,6 +314,7 @@ const unsigned short kPixel[(int)Icon::Count][16] = {
     /* paint-picker    */ {0x0000,0x0000,0x0038,0x007C,0x007C,0x01FC,0x01F8,0x01E0,0x03E0,0x0700,0x0E00,0x1C00,0x3800,0x3000,0x0000,0x0000},   // drawn here
     /* mode-retopo     */ {0x0000,0x0000,0x07E0,0x1998,0x6186,0x4182,0x4182,0x4182,0x47E2,0x5998,0x6186,0x4182,0x4182,0x4182,0x0000,0x0000},   // drawn here: bowed quad patch
     /* retopo-pencil   */ {0x0000,0x001C,0x003E,0x007E,0x00FC,0x01F8,0x03F0,0x07E0,0x0FC0,0x1F80,0x3F00,0x3E00,0x7C00,0x6000,0x0000,0x0000},   // drawn here
+    /* retopo-cut      */ {0x0000,0x0000,0x0000,0x0000,0xFFFE,0x7FFE,0x7FFE,0x7FC0,0x3FC0,0x3FC0,0x1FC0,0x0FC0,0x03C0,0x0000,0x0000,0x0000},   // drawn here: bougatsa knife
     /* ui-trash        */ {0x0000,0x03C0,0x3FFC,0x3FFC,0x1FF8,0x1998,0x1998,0x1998,0x1998,0x1998,0x1998,0x1998,0x1998,0x1FF8,0x0FF0,0x0000},   // drawn here
 };
 } // namespace

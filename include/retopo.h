@@ -67,6 +67,9 @@ struct RetopoState {
     std::vector<RetopoStroke> redo;   // strokes taken back by Ctrl+Z, for Ctrl+Shift+Z
     RetopoStroke live;                // the stroke under the pen
     bool drawing = false;
+    // Cut: a bare line on the surface (no band), under the pen while `cutting`.
+    std::vector<Vec3> cut_pts, cut_nrm;
+    bool cutting = false;
     float last_sx = 0, last_sy = 0;   // screen position of the last captured point
     uint32_t next_id = 1;
 

@@ -2737,6 +2737,26 @@ int main(int argc, char* argv[]) {
         // cache stays good for the whole stroke.
         {
             const bool retopo_on = input.interaction_mode == InputState::InteractionMode::RETOPO;
+            // The sculpt under screen point (mx, my), off the pen-down plane cache: the point,
+            // its normal, and world units per pixel at that depth. False off the model.
+            auto retopo_surface_at = [&](float mx, float my, Vec3& p, Vec3& n, float& world_per_px) {
+                float d = 0.0f;
+                if (!renderer.sample_depth_bilinear(mx, my, &d, 0.0f) || d >= 500.0f) return false;
+                Vec3 cam_pos = camera.get_position();
+                Vec3 fwd = (camera.target - cam_pos).normalized();
+                Vec3 right = fwd.cross(Vec3(0, 1, 0)).normalized();
+                Vec3 up = right.cross(fwd).normalized();
+                const float half_h = camera.half_height_at(d);
+                const float half_w = half_h * ((float)win_w / (float)win_h);
+                const float ndc_x = 2.0f * mx / (float)win_w - 1.0f;
+                const float ndc_y = 1.0f - 2.0f * my / (float)win_h;
+                p = cam_pos + fwd * d + right * (ndc_x * half_w) + up * (ndc_y * half_h);
+                float nt[3];
+                n = renderer.sample_normal((int)mx, (int)my, nt)
+                  ? Vec3(nt[0], nt[1], nt[2]).normalized() : fwd * -1.0f;
+                world_per_px = 2.0f * half_h / (float)win_h;
+                return true;
+            };
             // Smooth (Shift / double Shift) works on the built quads, not the strokes.
             // Decided at the press: letting go of Shift mid-drag doesn't start a stroke.
             static bool retopo_smoothing = false;
@@ -2784,6 +2804,25 @@ int main(int argc, char* argv[]) {
                 if (retopo_grabbing)
                     retopo_grab_drag(retopo, camera, win_w, win_h,
                                      (float)input.mouse_x - grab_x, (float)input.mouse_y - grab_y);
+            } else if (retopo_press && !retopo.drawing && !screen_buffers_dirty
+                       && (retopo.cutting || input.retopo_tool == InputState::RetopoTool::CUT)) {
+                // Cut: a bare line on the surface, sampled like a stroke, no band.
+                const float mx = (float)input.mouse_x, my = (float)input.mouse_y;
+                if (!retopo.cutting) {
+                    retopo.cutting = true;
+                    retopo.cut_pts.clear();
+                    retopo.cut_nrm.clear();
+                    retopo.last_sx = mx - 1e3f;   // the press point always lands
+                }
+                Vec3 p, n;
+                float world_per_px;
+                if (std::hypot(mx - retopo.last_sx, my - retopo.last_sy) >= 3.0f
+                    && retopo_surface_at(mx, my, p, n, world_per_px)) {
+                    retopo.cut_pts.push_back(p);
+                    retopo.cut_nrm.push_back(n);
+                    retopo.last_sx = mx;
+                    retopo.last_sy = my;
+                }
             } else if (retopo_press && !screen_buffers_dirty) {
                 const float mx = (float)input.mouse_x, my = (float)input.mouse_y;
                 if (!retopo.drawing) {
@@ -2791,24 +2830,12 @@ int main(int argc, char* argv[]) {
                     retopo.live = RetopoStroke{};
                     retopo.last_sx = mx - 1e3f;   // the press point always lands
                 }
-                float d = 0.0f;
+                Vec3 p, n;
+                float world_per_px;
                 if (std::hypot(mx - retopo.last_sx, my - retopo.last_sy) >= 3.0f
-                    && renderer.sample_depth_bilinear(mx, my, &d, 0.0f) && d < 500.0f) {
-                    Vec3 cam_pos = camera.get_position();
-                    Vec3 fwd = (camera.target - cam_pos).normalized();
-                    Vec3 right = fwd.cross(Vec3(0, 1, 0)).normalized();
-                    Vec3 up = right.cross(fwd).normalized();
-                    const float half_h = camera.half_height_at(d);
-                    const float half_w = half_h * ((float)win_w / (float)win_h);
-                    const float ndc_x = 2.0f * mx / (float)win_w - 1.0f;
-                    const float ndc_y = 1.0f - 2.0f * my / (float)win_h;
-                    Vec3 p = cam_pos + fwd * d + right * (ndc_x * half_w) + up * (ndc_y * half_h);
-                    float nt[3];
-                    Vec3 n = renderer.sample_normal((int)mx, (int)my, nt)
-                           ? Vec3(nt[0], nt[1], nt[2]).normalized() : fwd * -1.0f;
+                    && retopo_surface_at(mx, my, p, n, world_per_px)) {
                     // Band width = the brush ring, in world units where the pen is.
                     // Pen pressure thins it, so a stroke can taper.
-                    const float world_per_px = 2.0f * half_h / (float)win_h;
                     // Same pen test as the brush: plugged in isn't enough, the pen has
                     // to be what's driving (a resting pen reads ~0 forever).
                     const bool pen = tablet.available()
@@ -2828,6 +2855,12 @@ int main(int argc, char* argv[]) {
                                   retopo.strokes.back().name.c_str());
                     input.notification_timer = 1.5f;
                 }
+            } else if (retopo.cutting) {
+                // Pen up. What a cut does to the islands it crosses is the next step; for
+                // now the line is drawn and goes when the pen lifts.
+                retopo.cutting = false;
+                retopo.cut_pts.clear();
+                retopo.cut_nrm.clear();
             }
             if (!retopo_press) retopo_smoothing = retopo_grabbing = false;
 
@@ -4454,7 +4487,10 @@ int main(int argc, char* argv[]) {
                 // Matrix green (#00FF41): a ring no sculpt brush wears, so the hand
                 // knows it's in retopo before the eye finds the dock.
                 static const float kRetopoGreen[3] = {0.0f, 1.0f, 0.255f};
-                renderer.draw_cursor(camera, cursor_x, cursor_y, input.brush_size,
+                // Cut draws a bare line: a small ring marks the tip, no band width to show.
+                const bool cut = input.retopo_tool == InputState::RetopoTool::CUT
+                              && !input.is_smooth_active();
+                renderer.draw_cursor(camera, cursor_x, cursor_y, cut ? 6.0f : input.brush_size,
                                      input.cursor_nx, input.cursor_ny, input.cursor_nz,
                                      1.0f, 0.5f, win_w, win_h, input.on_model, kRetopoGreen);
             } else if (input.color_pick_active) {

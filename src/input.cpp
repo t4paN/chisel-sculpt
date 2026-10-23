@@ -46,6 +46,7 @@ const KeyActionInfo kKeyActions[(int)KeyAction::COUNT] = {
     {"retopo_build",  "Retopo mode", "Build",            "Turn the strokes into quads (the bar's Build)", {GLFW_KEY_SPACE, 0}, KeyScope::Retopo},
     {"retopo_draw",   "Retopo mode", "Draw polygon strips", nullptr, {GLFW_KEY_D, 0}, KeyScope::Retopo},
     {"retopo_grab",   "Retopo mode", "Grab polygon strips", "Drag the built quads around", {GLFW_KEY_G, 0}, KeyScope::Retopo},
+    {"retopo_cut",    "Retopo mode", "Cut",              "Drag a line across islands", {GLFW_KEY_C, 0}, KeyScope::Retopo},
     {"hold_size",     "Brush feel", "Size",             "Hold and drag", {GLFW_KEY_S, 0}},
     {"hold_strength", "Brush feel", "Strength",         "Hold and drag. In Retopo mode: the next stroke's Density", {GLFW_KEY_W, 0}},
     {"hold_hardness", "Brush feel", "Hardness",         "Hold and drag. In Retopo mode: the next stroke's Rings", {GLFW_KEY_A, 0}},
@@ -1235,11 +1236,14 @@ static void run_key_action(GLFWwindow* w, KeyAction a, bool repeat) {
             break;
         case KeyAction::RETOPO_DRAW:
         case KeyAction::RETOPO_GRAB:
+        case KeyAction::RETOPO_CUT:
             if (repeat) break;
             in.clear_smooth_lock();
             in.retopo_tool = a == KeyAction::RETOPO_GRAB ? InputState::RetopoTool::GRAB
+                           : a == KeyAction::RETOPO_CUT  ? InputState::RetopoTool::CUT
                                                          : InputState::RetopoTool::DRAW;
-            notify(a == KeyAction::RETOPO_GRAB ? "Grab polygon strips" : "Draw polygon strips", 1.0f);
+            notify(a == KeyAction::RETOPO_GRAB ? "Grab polygon strips"
+                   : a == KeyAction::RETOPO_CUT ? "Cut" : "Draw polygon strips", 1.0f);
             break;
         case KeyAction::PAINT_BUCKET:
             // Paint mode's key (KeyScope::Paint): arm the bucket. Again: back to the brush.

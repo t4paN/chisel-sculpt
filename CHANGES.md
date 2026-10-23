@@ -2,6 +2,16 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-23 — Retopo mode: Cut tool (placeholder)
+
+*Built live with the user at the keyboard. A shell: what a cut does isn't decided yet.*
+
+New tool on **C** (mode 0 only; C stays Crease / the colour picker elsewhere), on the rail
+between Draw and Grab, with the user's bougatsa-knife icon (tip left; DOS pixel version
+too). Dragging lays a thin line on the surface, no band; the cursor is a small green ring
+and the tool dock shows "Cut" with a hint instead of Size. On pen-up the line goes.
+Draw and Cut now share one surface sampler (`retopo_surface_at`).
+
 ## 2026-10-23 — Retopo mode: next stroke in the tool dock, eyes that hide, green cursor
 
 *Built live with the user at the keyboard.*

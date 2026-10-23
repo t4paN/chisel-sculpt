@@ -1428,7 +1428,7 @@ void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
     o.side = TipSide::Right;
 
     // Mode 0 has its own dock: its tools stand where the brushes were, and nothing a
-    // brush owns (alpha swatch, smooth) comes along. One tool so far; more as they come.
+    // brush owns (alpha swatch, smooth) comes along.
     if (mode == InputState::InteractionMode::RETOPO) {
         o.on = true; o.tip = "Draw polygon strips";
         o.key = input.key_label(KeyAction::RETOPO_DRAW); o.corner = corner(KeyAction::RETOPO_DRAW);
@@ -1437,6 +1437,12 @@ void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
         if (icon_button("rDraw", Icon::RetopoPencil, kRailBtn, o)) {
             input.clear_smooth_lock();
             input.retopo_tool = RT::DRAW;
+        }
+        o.on = !smooth_on && input.retopo_tool == RT::CUT; o.tip = "Cut";
+        o.key = input.key_label(KeyAction::RETOPO_CUT); o.corner = corner(KeyAction::RETOPO_CUT);
+        if (icon_button("rCut", Icon::RetopoCut, kRailBtn, o)) {
+            input.clear_smooth_lock();
+            input.retopo_tool = RT::CUT;
         }
         o.on = !smooth_on && input.retopo_tool == RT::GRAB; o.tip = "Grab polygon strips";
         o.key = input.key_label(KeyAction::RETOPO_GRAB); o.corner = corner(KeyAction::RETOPO_GRAB);
@@ -1930,11 +1936,15 @@ float brush_panel(InputState& input, int win_h) {
     } else if (mode == InputState::InteractionMode::RETOPO) {
         // Size for every tool: the band as drawn, or the reach of Grab / Smooth. Drawing
         // also plans the next stroke: Rings (A) and Density (W).
-        const bool drawing = !input.is_smooth_active() && input.retopo_tool == InputState::RetopoTool::DRAW;
-        heading(input.is_smooth_active() ? "Smooth polygon strips"
+        const bool smoothing = input.is_smooth_active();
+        const bool drawing = !smoothing && input.retopo_tool == InputState::RetopoTool::DRAW;
+        const bool cutting = !smoothing && input.retopo_tool == InputState::RetopoTool::CUT;
+        heading(smoothing ? "Smooth polygon strips"
                 : input.retopo_tool == InputState::RetopoTool::GRAB ? "Grab polygon strips"
-                                                                    : "Draw polygon strips", nullptr);
-        meter_widget("##mS", input, 0, w, k, !can_grow || big);
+                : cutting ? "Cut" : "Draw polygon strips", nullptr);
+        // Cut draws a bare line: no width, so no Size either.
+        if (cutting) hint("Drag a line across islands");
+        else meter_widget("##mS", input, 0, w, k, !can_grow || big);
         if (drawing) {
             meter_widget("##mRings", input, 4, w, k, !can_grow || big);
             meter_widget("##mDensity", input, 5, w, k, !can_grow || big);
