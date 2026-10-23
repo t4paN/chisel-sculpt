@@ -92,7 +92,7 @@ void ui_skin_menu_tip(const char* fmt, ...) IM_FMTARGS(1);
 // skin's popup colour back, fully opaque. Pop with ImGui::PopStyleColor().
 void ui_skin_push_dropdown_bg();
 
-// Retopo mode's floating bar, bottom centre, always up in mode 0 (the caller gates it).
+// Retopo mode's dock, right-hand side under the command bar, always up in mode 0 (the caller gates it).
 // Drawn with this file's parts so it wears the live skin; call at the top level.
 struct RetopoState;
-void draw_retopo_bar(InputState& input, RetopoState& st, int win_w, int win_h);
+void draw_retopo_dock(InputState& input, RetopoState& st, int win_w, int win_h);

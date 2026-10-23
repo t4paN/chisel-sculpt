@@ -5315,9 +5315,9 @@ int main(int argc, char* argv[]) {
                                  || input.drag_mode == InputState::DragMode::PAN
                                  || input.drag_mode == InputState::DragMode::ZOOM
                                  || input.mouse2_down || input.mouse3_down;
-            // Bar first: it sets which stroke the cursor is over, and the overlay lights
-            // it the same frame (background list, so it still draws under the bar).
-            draw_retopo_bar(input, retopo, win_w, win_h);
+            // Dock first: it sets which stroke the cursor is over, and the overlay lights
+            // it the same frame (background list, so it still draws under the dock).
+            draw_retopo_dock(input, retopo, win_w, win_h);
             draw_retopo_overlay(retopo, renderer, camera, win_w, win_h,
                                 !cam_moving && !screen_buffers_dirty, input.mirror_x);
         }
