@@ -3220,7 +3220,10 @@ void draw_modern_ui(InputState& input, int win_w, int win_h, const AlphaLibrary*
         static bool prev_rmb = false;
         bool rmb_edge = input.mouse2_down && !prev_rmb;
         prev_rmb = input.mouse2_down;
+        // The brush stays Paint underneath other modes (retopo's right-click is its own
+        // menu), so the mode has to be the sculpt/paint one too.
         if (input.current_brush == BrushType::PAINT && !smooth_on && rmb_edge &&
+            input.interaction_mode == InputState::InteractionMode::EDIT &&
             !input.zoom_modifier_held()) {
             ImGui::SetNextWindowPos(ImVec2((float)input.mouse_x, (float)input.mouse_y));
             ImGui::OpenPopup("##paintswatch");

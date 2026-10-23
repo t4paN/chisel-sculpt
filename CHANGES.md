@@ -2,6 +2,11 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-23 — Retopo mode: right-click no longer opens the paint colour wheel
+
+The brush stays Paint underneath mode 0 and the wheel only checked the brush; it now also
+needs the sculpt/paint mode (so insert and select don't get it either). *Not yet hand-tested.*
+
 ## 2026-10-23 — Retopo mode: mirror welds mouths
 
 With mirror on, a stroke across x = 0 is cut there; its longer side builds plus its twin,
