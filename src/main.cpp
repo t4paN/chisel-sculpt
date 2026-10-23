@@ -1136,6 +1136,7 @@ int main(int argc, char* argv[]) {
     AppState app_state = AppState::IDLE;
     InsertController insert_ctrl(scene, renderer);
     RetopoState retopo;   // mode 0: sketched strokes + the quads Build made from them
+    uint64_t clean_retopo_rev = 0;   // retopo.rev as of the last save or load
     // Two-finger take-back (see InputState::touch_revert_requested).
     Camera   camera_at_press;
     bool     touch_undo_on_commit   = false;
@@ -1253,7 +1254,7 @@ int main(int argc, char* argv[]) {
             input.close_requested = false;
             const bool busy = app_state != AppState::IDLE || vmerge_job
                 || input.remesh_requested || input.remesh_in_progress;
-            if (scene.edit_mark() == clean_edit_mark && !busy) {
+            if (scene.edit_mark() == clean_edit_mark && retopo.rev == clean_retopo_rev && !busy) {
                 glfwSetWindowShouldClose(window, GLFW_TRUE);
             } else {
                 input.quit_requested = true;
@@ -4884,6 +4885,9 @@ int main(int argc, char* argv[]) {
                 if (lr == LoadResult::OK && !proj.entities.empty()) {
                     camera = proj.camera;
                     input.mirror_x = proj.mirror_x;
+                    // The file's retopo replaces this session's (none in it = none now).
+                    retopo_load(retopo, std::move(proj.retopo));
+                    clean_retopo_rev = retopo.rev;
                     input.subdiv_level = proj.subdiv_level;
                     input.mesh_locked = true;
                     current_project_path = path;
@@ -5301,6 +5305,10 @@ int main(int argc, char* argv[]) {
             proj.camera       = camera;
             proj.mirror_x     = input.mirror_x;
             proj.subdiv_level = input.subdiv_level;
+            proj.retopo.strokes = retopo.strokes;
+            proj.retopo.result  = retopo.result;
+            proj.retopo.built   = retopo.built;
+            proj.retopo.next_id = retopo.next_id;
             SaveResult sr = save_project(path.c_str(), proj);
             if (sr == SaveResult::OK && input.quit_after_save) {
                 input.quit_after_save = false;
@@ -5310,6 +5318,7 @@ int main(int argc, char* argv[]) {
             if (sr == SaveResult::OK) {
                 current_project_path = path;
                 clean_edit_mark = scene.edit_mark();
+                clean_retopo_rev = retopo.rev;
 #ifdef __EMSCRIPTEN__
                 // A MEMFS "save" only counts once the bytes leave as a download
                 // (which also unlinks the MEMFS copy; Ctrl+S recreates it).

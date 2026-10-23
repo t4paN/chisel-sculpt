@@ -99,6 +99,7 @@ void RetopoState::checkpoint(int tag) {
     if (tag != 0 && tag == last_tag) return;
     last_tag = tag;
     loop_edges.clear();
+    rev++;
     push_capped(undo_stack, snapshot_of(*this));
     redo_stack.clear();
 }
@@ -117,6 +118,7 @@ void RetopoState::end_edit() {
                                  [](const Vec3& l, const Vec3& r) { return l.x == r.x && l.y == r.y && l.z == r.z; });
     if (!same) {
         last_tag = 0;
+        rev++;
         push_capped(undo_stack, std::move(pending));
         redo_stack.clear();
     }
@@ -127,6 +129,7 @@ bool RetopoState::undo() {
     if (undo_stack.empty()) return false;
     last_tag = 0;
     loop_edges.clear();
+    rev++;
     push_capped(redo_stack, snapshot_of(*this));
     restore(*this, std::move(undo_stack.back()));
     undo_stack.pop_back();
@@ -137,6 +140,7 @@ bool RetopoState::redo() {
     if (redo_stack.empty()) return false;
     last_tag = 0;
     loop_edges.clear();
+    rev++;
     push_capped(undo_stack, snapshot_of(*this));
     restore(*this, std::move(redo_stack.back()));
     redo_stack.pop_back();
@@ -3159,6 +3163,25 @@ int retopo_fill(RetopoState& st, const Mesh& m, bool mirror, int& rims, int& odd
     std::printf("[retopo] fill: %d rim(s), %d quads, %d odd rim(s) left; %u holes remain\n",
                 rims, made, odd, (uint32_t)std::count(rm.rim_hole.begin(), rm.rim_hole.end(), 1));
     return made;
+}
+
+void retopo_load(RetopoState& st, RetopoSnapshot&& s) {
+    const bool show_result = st.show_result, show_strokes = st.show_strokes;
+    const uint64_t rev = st.rev + 1;
+    st = RetopoState{};
+    st.show_result = show_result;
+    st.show_strokes = show_strokes;
+    st.rev = rev;
+    st.strokes = std::move(s.strokes);
+    st.result = std::move(s.result);
+    // Ids are never reused: past every stroke and every owner, whatever the file said.
+    uint32_t next = std::max<uint32_t>(1, s.next_id);
+    for (const RetopoStroke& k : st.strokes) next = std::max(next, k.id + 1);
+    for (uint32_t o : st.result.face_owner) next = std::max(next, o + 1);
+    st.next_id = next;
+    st.built = s.built && st.result.face_count() > 0;
+    if (st.built) rebuild_edges(st.result);
+    else          st.result.clear();
 }
 
 bool retopo_export_obj(const RetopoMesh& rm, const char* path) {

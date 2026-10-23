@@ -2,6 +2,19 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-23 — Retopo mode: saved in the .chisel file
+
+*File layer self-tested headlessly (round trip bitwise, damaged section, pre-retopo
+reader); the Save/Open wiring in main.cpp not yet hand-tested.* Strokes (path, settings,
+name, eye, edited) and the built low-poly (positions, normals, faces of any size, island
+owners, mirror twins) go in an optional **RTPO** chunk after the entities, with its own
+format byte; no file VERSION bump. The low-poly is saved as it is, never rebuilt from the
+strokes on load, so a later change to Build can't change an old file. Edges, outlines and
+holes are worked out again on load. Undo history isn't saved. Builds from before this
+skip the chunk and load the sculpt; a damaged chunk costs the retopo, never the sculpt.
+Opening a project replaces the session's retopo (none in the file = none). Closing with
+unsaved retopo work now asks, like sculpting does (`RetopoState::rev`).
+
 ## 2026-10-23 — Retopo mode: build on release, quick sliders by the pen, rings 2, density to 2x
 
 *User-tested.* A donut or strip is built the moment the pen lifts (quiet: no toast, no

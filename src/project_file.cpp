@@ -42,6 +42,11 @@ static constexpr uint32_t MAGIC   = 0x4C534843; // "CHSL" little-endian
 // back in (see write_layr_chunk). The chunk carries its own format byte for growth.
 static constexpr uint32_t VERSION = 7;
 static constexpr uint8_t  LAYR_FORMAT = 1;
+// Retopo (2026-10-23) didn't bump VERSION either: it's an optional RTPO chunk after
+// the entities, skipped by readers that predate it (the sculpt loads, the retopo is
+// just not there). Its own format byte is for growth: a reader takes formats up to
+// its own and fills what an older one lacks with defaults.
+static constexpr uint8_t  RTPO_FORMAT = 1;
 
 struct ChunkHeader {
     char     tag[4];
@@ -284,6 +289,55 @@ static void write_layr_chunk(std::ofstream& f, const EntityRecord& e) {
     write_chunk_end(f, sp);
 }
 
+// RTPO: u8 format, u32 next_id, u8 built, then the strokes and the result.
+// Stroke: u32 id, u32 name length + bytes, u8 flags (1 closed, 2 visible, 4 frozen),
+// i32 rings, f32 density, f32 width, u32 point count, then xyz points, xyz normals,
+// half widths. Result: u32 vertex count, xyz positions, xyz normals, u32 owner and u32
+// mirror twin per vertex; u32 face count, u32 face_off (count + 1), u32 corner count +
+// corners, u32 owner per face. Edges, neighbours, outlines and holes are derived: the
+// loader works them out again. The built faces are saved as they are, never re-derived
+// from the strokes, so a later change to Build can't change an old file's low-poly.
+static void write_vec3s(std::ofstream& f, const std::vector<Vec3>& v) {
+    for (const Vec3& p : v) { write_raw(f, &p.x, 4); write_raw(f, &p.y, 4); write_raw(f, &p.z, 4); }
+}
+static void write_u32s(std::ofstream& f, const std::vector<uint32_t>& v) {
+    if (!v.empty()) write_raw(f, v.data(), v.size() * 4);
+}
+static void write_rtpo_chunk(std::ofstream& f, const RetopoSnapshot& r) {
+    std::streampos sp;
+    write_chunk_begin(f, "RTPO", sp);
+    write_u8(f, RTPO_FORMAT);
+    write_u32(f, r.next_id);
+    write_u8(f, r.built ? 1 : 0);
+    write_u32(f, (uint32_t)r.strokes.size());
+    for (const RetopoStroke& s : r.strokes) {
+        write_u32(f, s.id);
+        write_u32(f, (uint32_t)s.name.size());
+        write_raw(f, s.name.data(), s.name.size());
+        write_u8(f, (s.closed ? 1 : 0) | (s.visible ? 2 : 0) | (s.frozen ? 4 : 0));
+        write_i32(f, s.rings);
+        write_raw(f, &s.density, 4);
+        write_raw(f, &s.width, 4);
+        const size_t n = std::min({s.pts.size(), s.nrm.size(), s.half_w.size()});
+        write_u32(f, (uint32_t)n);
+        for (size_t i = 0; i < n; i++) { write_raw(f, &s.pts[i].x, 4); write_raw(f, &s.pts[i].y, 4); write_raw(f, &s.pts[i].z, 4); }
+        for (size_t i = 0; i < n; i++) { write_raw(f, &s.nrm[i].x, 4); write_raw(f, &s.nrm[i].y, 4); write_raw(f, &s.nrm[i].z, 4); }
+        write_floats(f, s.half_w.data(), n);
+    }
+    const RetopoMesh& m = r.result;
+    write_u32(f, (uint32_t)m.v.size());
+    write_vec3s(f, m.v);
+    write_vec3s(f, m.n);
+    write_u32s(f, m.v_owner);
+    write_u32s(f, m.mirror);
+    write_u32(f, m.face_count());
+    write_u32s(f, m.face_off);
+    write_u32(f, (uint32_t)m.faces.size());
+    write_u32s(f, m.faces);
+    write_u32s(f, m.face_owner);
+    write_chunk_end(f, sp);
+}
+
 SaveResult save_project(const char* path, const ProjectData& data) {
     std::ofstream f(path, std::ios::binary);
     if (!f.is_open()) return SaveResult::ERR_OPEN;
@@ -298,6 +352,8 @@ SaveResult save_project(const char* path, const ProjectData& data) {
         write_enty_chunk(f, e);
         if (!e.mesh.paint_layers.empty()) write_layr_chunk(f, e);
     }
+    if (!data.retopo.strokes.empty() || data.retopo.result.face_count() > 0)
+        write_rtpo_chunk(f, data.retopo);
 
     if (!f.good()) return SaveResult::ERR_WRITE;
     return SaveResult::OK;
@@ -599,6 +655,63 @@ static bool read_layr_chunk(ChunkReader& r, ProjectData& data) {
     return true;
 }
 
+// RTPO (see write_rtpo_chunk). Everything is checked before it's kept: counts against
+// what's left of the chunk, every corner and face offset in range, arrays the sizes the
+// counts say. Anything off and the project loads without its retopo (never without
+// its sculpt). Returns false only to say so on the console.
+static bool read_vec3s(ChunkReader& r, std::vector<Vec3>& out, size_t n) {
+    if (r.remaining() / 12 < n) return false;
+    out.resize(n);
+    for (Vec3& p : out) if (!r.read_raw(&p.x, 4) || !r.read_raw(&p.y, 4) || !r.read_raw(&p.z, 4)) return false;
+    return true;
+}
+static bool read_rtpo_chunk(ChunkReader& r, ProjectData& data) {
+    uint8_t format, built;
+    RetopoSnapshot s;
+    uint32_t ns;
+    if (!r.read_u8(format) || format == 0 || format > RTPO_FORMAT) return false;
+    if (!r.read_u32(s.next_id) || !r.read_u8(built) || !r.read_u32(ns)) return false;
+    if (ns > r.remaining() / 25) return false;   // a stroke takes at least 25 bytes
+    s.built = built != 0;
+    s.strokes.resize(ns);
+    for (RetopoStroke& k : s.strokes) {
+        uint32_t len, npts;
+        uint8_t flags;
+        if (!r.read_u32(k.id) || !r.read_u32(len) || len > r.remaining()) return false;
+        k.name.resize(len);
+        if (len && !r.read_raw(&k.name[0], len)) return false;
+        if (!r.read_u8(flags) || !r.read_i32(k.rings) || !r.read_raw(&k.density, 4)
+            || !r.read_raw(&k.width, 4) || !r.read_u32(npts)) return false;
+        k.closed = flags & 1;
+        k.visible = (flags & 2) != 0;
+        k.frozen = (flags & 4) != 0;
+        k.selected = false;
+        k.rings = std::max(1, std::min(8, k.rings));
+        if (!(k.density >= 0.1f && k.density <= 2.0f)) k.density = 1.0f;   // NaN lands here too
+        if (!(k.width >= 0.1f && k.width <= 2.0f))     k.width = 1.0f;
+        if (npts > r.remaining() / 28) return false;
+        if (!read_vec3s(r, k.pts, npts) || !read_vec3s(r, k.nrm, npts) || !r.read_float_vec(k.half_w, npts))
+            return false;
+    }
+    RetopoMesh& m = s.result;
+    uint32_t nv, nf, nc;
+    if (!r.read_u32(nv) || nv > r.remaining() / 32) return false;
+    if (!read_vec3s(r, m.v, nv) || !read_vec3s(r, m.n, nv) || !r.read_u32_vec(m.v_owner, nv)
+        || !r.read_u32_vec(m.mirror, nv)) return false;
+    if (!r.read_u32(nf) || nf > r.remaining() / 8) return false;
+    if (!r.read_u32_vec(m.face_off, (size_t)nf + 1)) return false;
+    if (!r.read_u32(nc) || nc > r.remaining() / 4 || !r.read_u32_vec(m.faces, nc)) return false;
+    if (!r.read_u32_vec(m.face_owner, nf)) return false;
+    if (m.face_off[0] != 0 || m.face_off[nf] != nc) return false;
+    for (uint32_t i = 0; i < nf; i++) if (m.face_off[i + 1] < m.face_off[i]) return false;
+    for (uint32_t c : m.faces) if (c >= nv) return false;
+    for (uint32_t& t : m.mirror) if (t >= nv) t = ~0u;   // no twin, rather than a wild one
+    data.retopo = std::move(s);
+    std::printf("[retopo] loaded: %zu stroke(s), %u faces, %u verts\n",
+                data.retopo.strokes.size(), nf, nv);
+    return true;
+}
+
 // v2+ reader: file already validated (magic + version ok) and `f` positioned
 // just past the 8-byte header. Layout differences are feature-gated: v3+
 // carries per-vertex paint colour in each mesh body (has_color), v5+ carries
@@ -634,6 +747,12 @@ static LoadResult load_project_v2(std::ifstream& f, std::streamoff file_size,
             if (!read_layr_chunk(cr, data))
                 std::printf("[load] a paint layer section didn't read back: that model "
                             "keeps its flattened picture\n");
+        } else if (std::memcmp(hdr.tag, "RTPO", 4) == 0) {
+            if (!read_rtpo_chunk(cr, data)) {
+                data.retopo = RetopoSnapshot{};
+                std::printf("[load] the retopo section didn't read back: the project "
+                            "loads without it\n");
+            }
         } else if (std::memcmp(hdr.tag, "SCEN", 4) == 0) {
             if (!read_scen_chunk(cr, data)) return LoadResult::ERR_CORRUPT;
             has_scen = true;

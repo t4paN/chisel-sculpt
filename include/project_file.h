@@ -3,6 +3,7 @@
 #include <cstdint>
 #include "camera.h"
 #include "entity_record.h"
+#include "retopo.h"
 
 // A saved Chisel project is the whole multimesh scene: every alive, committed
 // entity (each with its own mesh + multires stack), plus the selection state
@@ -22,6 +23,9 @@ struct ProjectData {
     Camera camera;
     bool   mirror_x     = true;
     int    subdiv_level = 4;
+
+    // Retopo mode's strokes and low-poly, as they stand (no history). Empty = none.
+    RetopoSnapshot retopo;
 };
 
 enum class SaveResult { OK, ERR_OPEN, ERR_WRITE };

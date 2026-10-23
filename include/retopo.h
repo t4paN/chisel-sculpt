@@ -113,6 +113,9 @@ struct RetopoState {
     std::vector<uint32_t> loop_edges;
     float last_sx = 0, last_sy = 0;   // screen position of the last captured point
     uint32_t next_id = 1;
+    // Bumped by every change (each undo step taken, undo, redo, a load): main compares it
+    // with its value at the last save to know there's unsaved retopo work.
+    uint64_t rev = 0;
 
     RetopoMesh result;
     bool built = false;
@@ -296,6 +299,11 @@ int retopo_fill(RetopoState& st, const Mesh& m, bool mirror, int& rims, int& odd
 bool retopo_on_loop(const RetopoState& st, const Camera& cam, int win_w, int win_h, float x, float y);
 const char* retopo_extrude(RetopoState& st, const Mesh& m, const Camera& cam, int win_w, int win_h,
                            bool mirror);
+
+// A saved project's retopo (strokes + result as saved) becomes the session's: history,
+// picks and tools start fresh, edges / outlines / holes are worked out again from the
+// faces. The view toggles (Strokes, Wire) are kept. An empty snapshot clears retopo.
+void retopo_load(RetopoState& st, RetopoSnapshot&& s);
 
 // Write state.result as an OBJ, every face as it is (quads, triangles, bigger ones).
 // Returns false if there's nothing to write or the file can't be opened.
