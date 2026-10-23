@@ -36,8 +36,9 @@ struct RetopoStroke {
     std::string name;
 };
 
-// The low-poly result. Quads are 4 indices each, wound so their normal faces out of
-// the sculpt. Edges are kept unique for the wireframe overlay.
+// The low-poly result. Faces are 4 indices each, wound so their normal faces out of
+// the sculpt; a triangle (only Cut makes them) repeats its last corner: a, b, c, c.
+// Edges are kept unique for the wireframe overlay.
 struct RetopoMesh {
     std::vector<Vec3>     v;
     std::vector<Vec3>     n;       // surface normal per vertex (overlay back-face test)
@@ -100,6 +101,13 @@ struct RetopoState {
     }
     void redo_one();
     void clear_all();
+    // The last cut, which Ctrl+Z takes back before it walks the strokes: the result
+    // before it, and the strokes it froze. Anything else that changes the result (a
+    // stroke, Build, Grab, Smooth, a trash) drops it, so it never lands on stale quads.
+    RetopoMesh before_cut;
+    std::vector<uint32_t> cut_froze;
+    bool can_undo_cut = false;
+    bool undo_cut();
     // Selection. A click picks one island (0 = clear); Ctrl adds or takes it out.
     // Frozen and editable islands never share a selection: returns a message saying so
     // and leaves the selection alone, else nullptr.
@@ -149,6 +157,18 @@ int  retopo_grab_begin(RetopoState& st, const Camera& cam, int win_w, int win_h,
 void retopo_grab_drag(RetopoState& st, const Camera& cam, int win_w, int win_h,
                       float dx_px, float dy_px);
 
-// Write state.result as a quad OBJ. Returns false if there's nothing to write or the
+// Cut (C in mode 0): the knife, along st.cut_pts (on the sculpt, as drawn). Every built
+// edge the line crosses, on the side facing the eye, gets a new vertex, pulled most of
+// the way to the edge's middle (the line is drawn by hand, the loop it makes is wanted
+// straight), and every face around a cut edge splits into quads: across = two, a corner
+// clipped = three round a new turning vertex, crossed 4 times = four round a middle. A
+// line that stops inside the island runs on through edge middles to its border (or round
+// to meet itself): a dead end inside quads always costs a triangle, a support edge run
+// through doesn't. No vertex is left hanging on an edge. With mirror, each cut edge's twin is cut too,
+// as its exact reflection. Freezes what it cuts. Returns how many faces it split.
+int retopo_cut(RetopoState& st, const Mesh& m, const Camera& cam, int win_w, int win_h,
+               bool mirror);
+
+// Write state.result as a quad OBJ (Cut's triangles as triangles). Returns false if there's nothing to write or the
 // file can't be opened.
 bool retopo_export_obj(const RetopoMesh& rm, const char* path);

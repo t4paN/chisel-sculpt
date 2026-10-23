@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <unordered_map>
 
 // ---- Stroke list -------------------------------------------------------------------
 
@@ -45,6 +46,7 @@ bool RetopoState::finish_live(int rings, float density) {
     s.name = nm;
     strokes.push_back(std::move(s));
     redo.clear();
+    can_undo_cut = false;
     return true;
 }
 
@@ -56,6 +58,17 @@ void RetopoState::undo() {
     redo.back().frozen = false;
     redo.back().selected = false;
     prune();
+}
+
+bool RetopoState::undo_cut() {
+    if (!can_undo_cut) return false;
+    can_undo_cut = false;
+    result = std::move(before_cut);
+    before_cut.clear();
+    for (uint32_t id : cut_froze)
+        if (RetopoStroke* s = find(id)) s->frozen = false;
+    built = !result.quads.empty();
+    return true;
 }
 
 void RetopoState::redo_one() {
@@ -475,6 +488,7 @@ void build_topology(RetopoMesh& rm) {
     for (size_t q = 0; q < rm.quads.size(); q += 4)
         for (int k = 0; k < 4; k++) {
             uint32_t a = rm.quads[q + k], b = rm.quads[q + (k + 1) % 4];
+            if (a == b) continue;   // a triangle's repeated corner is no edge
             qe.push_back(((uint64_t)std::min(a, b) << 32) | std::max(a, b));
         }
     std::sort(qe.begin(), qe.end());
@@ -694,6 +708,7 @@ void extract(const RetopoMesh& src, RetopoMesh& dst, Keep keep) {
 
 double retopo_build(RetopoState& st, const Mesh& m, bool mirror) {
     const auto t0 = std::chrono::steady_clock::now();
+    st.can_undo_cut = false;
 
     // Frozen strokes' quads are carried over untouched (still editable by Grab and
     // Smooth, just out of reach of rings and density); everything else is rebuilt.
@@ -860,6 +875,7 @@ uint32_t retopo_pick(const RetopoState& st, const Camera& cam, int win_w, int wi
 // ---- Prune, freeze, weld ---------------------------------------------------------
 
 void RetopoState::prune() {
+    can_undo_cut = false;
     RetopoMesh keep;
     extract(result, keep, [&](uint32_t owner) { return find(owner) != nullptr; });
     result = std::move(keep);
@@ -888,6 +904,8 @@ void weld(RetopoMesh& rm, uint32_t a, uint32_t b) {
     dedupe_edges(rm);
     build_topology(rm);
 }
+
+void freeze_touched(RetopoState& st, std::vector<uint32_t>& touched);
 
 // After an edit moved `moved`: freeze their strokes, then weld any moved outer-edge
 // vertex that has reached another outer-edge vertex. The reach is 0.4 of the vertex's
@@ -931,9 +949,15 @@ void after_edit(RetopoState& st, const std::vector<uint32_t>& moved, bool mirror
             welds++;
         }
     }
-    // A joined group is one piece: freezing one island freezes every island that shares
-    // a vertex with it, or the next Build would rebuild a neighbour out from under the
-    // frozen one's shared vertices.
+    freeze_touched(st, touched);
+    if (welds) std::printf("[retopo] welded %d vertex pair(s)\n", welds);
+}
+
+// A joined group is one piece: freezing one island freezes every island that shares
+// a vertex with it, or the next Build would rebuild a neighbour out from under the
+// frozen one's shared vertices.
+void freeze_touched(RetopoState& st, std::vector<uint32_t>& touched) {
+    RetopoMesh& rm = st.result;
     uint32_t max_id = 0;
     for (uint32_t o : rm.quad_owner) max_id = std::max(max_id, o);
     std::vector<uint32_t> up(max_id + 1);
@@ -953,7 +977,6 @@ void after_edit(RetopoState& st, const std::vector<uint32_t>& moved, bool mirror
         for (uint32_t id : touched)
             if (id <= max_id && root(id) == root(s.id)) { s.frozen = true; break; }
     }
-    if (welds) std::printf("[retopo] welded %d vertex pair(s)\n", welds);
 }
 
 }  // namespace
@@ -1013,6 +1036,7 @@ float ring_weight(const Camera& cam, int win_w, int win_h, float cx, float cy, f
 }
 
 void retopo_edit_begin(RetopoState& st, const Mesh& m) {
+    st.can_undo_cut = false;
     const RetopoMesh& rm = st.result;
     if (rm.v.empty() || m.tri_count() == 0) return;
     Vec3 lo(1e30f, 1e30f, 1e30f), hi(-1e30f, -1e30f, -1e30f);
@@ -1148,11 +1172,379 @@ void retopo_grab_drag(RetopoState& st, const Camera& cam, int win_w, int win_h,
     after_edit(st, g_grab_mirror ? both : g_grab_idx, g_grab_mirror);
 }
 
+// ---- Cut ------------------------------------------------------------------------
+
+namespace {
+
+// How much of a crossing's offset from its edge's middle survives the aim. A hand-drawn
+// line wanders; the loop it cuts is wanted straight, so 1/5 along an edge lands at 0.43.
+constexpr float kCutAimKeep = 0.25f;
+
+// 1 - |cos| of the corner at b: 1 square, 0 folded flat or doubled back.
+float corner_q(Vec3 a, Vec3 b, Vec3 c) {
+    return 1.0f - std::fabs((a - b).normalized().dot((c - b).normalized()));
+}
+float poly_q(const RetopoMesh& rm, const uint32_t* p, int n) {
+    float q = 1.0f;
+    for (int k = 0; k < n; k++)
+        q = std::min(q, corner_q(rm.v[p[(k + n - 1) % n]], rm.v[p[k]], rm.v[p[(k + 1) % n]]));
+    return q;
+}
+
+// One piece of a cut face (3 to 5 corners, in the face's own winding) into the face
+// list. A pentagon becomes a quad and a triangle, split where both come out squarest:
+// that also keeps a triangle from forming on three points of one straight edge.
+void emit_piece(const RetopoMesh& rm, std::vector<uint32_t>& out, std::vector<uint32_t>& owner,
+                const uint32_t* p, int n, uint32_t who) {
+    if (n == 3) { out.insert(out.end(), {p[0], p[1], p[2], p[2]}); owner.push_back(who); return; }
+    if (n == 4) { out.insert(out.end(), p, p + 4); owner.push_back(who); return; }
+    int best = 0;
+    float best_q = -1.0f;
+    for (int i = 0; i < 5; i++) {
+        const uint32_t t[3] = {p[i], p[(i + 1) % 5], p[(i + 2) % 5]};
+        const uint32_t q[4] = {p[(i + 2) % 5], p[(i + 3) % 5], p[(i + 4) % 5], p[i]};
+        const float s = std::min(poly_q(rm, t, 3), poly_q(rm, q, 4));
+        if (s > best_q) { best_q = s; best = i; }
+    }
+    const int i = best;
+    out.insert(out.end(), {p[i], p[(i + 1) % 5], p[(i + 2) % 5], p[(i + 2) % 5]});
+    out.insert(out.end(), {p[(i + 2) % 5], p[(i + 3) % 5], p[(i + 4) % 5], p[i]});
+    owner.push_back(who); owner.push_back(who);
+}
+
+uint64_t edge_key(uint32_t a, uint32_t b) { return ((uint64_t)std::min(a, b) << 32) | std::max(a, b); }
+
+}  // namespace
+
+int retopo_cut(RetopoState& st, const Mesh& m, const Camera& cam, int win_w, int win_h,
+               bool mirror) {
+    RetopoMesh& rm = st.result;
+    const size_t np = st.cut_pts.size();
+    if (!st.built || np < 2) return 0;
+    retopo_edit_begin(st, m);   // the snap grid, for the new vertices
+
+    // The line on screen. Its points lie on the sculpt where the pen was, so they're
+    // visible by construction.
+    std::vector<float> lx(np), ly(np);
+    std::vector<uint8_t> lok(np);
+    float bx0 = 1e30f, by0 = 1e30f, bx1 = -1e30f, by1 = -1e30f;
+    for (size_t i = 0; i < np; i++) {
+        lok[i] = cam.world_to_screen(st.cut_pts[i], win_w, win_h, lx[i], ly[i]);
+        if (!lok[i]) continue;
+        bx0 = std::min(bx0, lx[i]); bx1 = std::max(bx1, lx[i]);
+        by0 = std::min(by0, ly[i]); by1 = std::max(by1, ly[i]);
+    }
+    const size_t nv = rm.v.size();
+    std::vector<float> sx(nv), sy(nv);
+    std::vector<uint8_t> vok(nv);
+    for (size_t i = 0; i < nv; i++) {
+        const Vec3 to_eye = cam.perspective ? cam.get_position() - rm.v[i] : cam.get_view_direction() * -1.0f;
+        vok[i] = cam.world_to_screen(rm.v[i], win_w, win_h, sx[i], sy[i]) && rm.n[i].dot(to_eye) > 0.0f
+              && !st.hidden(rm.v_owner[i]);
+    }
+
+    // Every edge the line crosses, once (a line that doubles back keeps its first pass).
+    // s = how far along the line, for ordering. Seen from the eye, an edge crossing must
+    // also sit on the line's own bit of surface: a front-facing island behind the sculpt
+    // (the far side of a limb) passes the screen test but not this one.
+    struct Cross { uint32_t a, b; float t, s; uint32_t twin = ~0u, vid = ~0u; bool slave = false; };
+    std::vector<Cross> cx;
+    std::unordered_map<uint64_t, uint32_t> at;
+    for (size_t e = 0; e + 1 < rm.edges.size(); e += 2) {
+        const uint32_t a = rm.edges[e], b = rm.edges[e + 1];
+        if (a == b || !vok[a] || !vok[b]) continue;
+        if (std::max(sx[a], sx[b]) < bx0 || std::min(sx[a], sx[b]) > bx1
+            || std::max(sy[a], sy[b]) < by0 || std::min(sy[a], sy[b]) > by1) continue;
+        const float rx = sx[b] - sx[a], ry = sy[b] - sy[a];
+        const float len = (rm.v[b] - rm.v[a]).length();
+        for (size_t i = 0; i + 1 < np; i++) {
+            if (!lok[i] || !lok[i + 1]) continue;
+            const float qx = lx[i + 1] - lx[i], qy = ly[i + 1] - ly[i];
+            const float den = rx * qy - ry * qx;
+            if (std::fabs(den) < 1e-9f) continue;
+            const float wx = lx[i] - sx[a], wy = ly[i] - sy[a];
+            const float t = (wx * qy - wy * qx) / den, u = (wx * ry - wy * rx) / den;
+            if (t < 0.0f || t > 1.0f || u < 0.0f || u > 1.0f) continue;
+            const Vec3 on_edge = rm.v[a] + (rm.v[b] - rm.v[a]) * t;
+            const Vec3 on_line = st.cut_pts[i] + (st.cut_pts[i + 1] - st.cut_pts[i]) * u;
+            if ((on_edge - on_line).length() > 0.5f * len) continue;
+            at[edge_key(a, b)] = (uint32_t)cx.size();
+            cx.push_back({a, b, 0.5f + (t - 0.5f) * kCutAimKeep, (float)i + u});
+            break;
+        }
+    }
+    if (cx.empty()) {
+        std::printf("[retopo] cut: the line crossed no edges\n");
+        return 0;
+    }
+
+    // A face's corners, a triangle's repeated one (or a weld's) dropped. Returns how many.
+    auto corners = [&](size_t f, uint32_t* c) {
+        const uint32_t* q = &rm.quads[f * 4];
+        int n = 0;
+        for (int k = 0; k < 4; k++)
+            if (n == 0 || q[k] != c[n - 1]) c[n++] = q[k];
+        if (n > 1 && c[n - 1] == c[0]) n--;
+        return n;
+    };
+
+    // Mirror: each crossing's twin edge is cut at the same place. Where the line itself
+    // crossed both sides (drawn over the seam), the earlier crossing leads and the other
+    // follows it, so the halves stay exact reflections. `insert` = cut a twin edge the
+    // line missed; without it, only pair up twins that are both cut already.
+    auto pair_twins = [&](bool insert) {
+        std::vector<uint32_t> order(cx.size());
+        for (uint32_t i = 0; i < (uint32_t)order.size(); i++) order[i] = i;
+        std::sort(order.begin(), order.end(), [&](uint32_t l, uint32_t r) { return cx[l].s < cx[r].s; });
+        for (uint32_t i : order) {
+            if (cx[i].slave || cx[i].twin != ~0u) continue;
+            const uint32_t ma = rm.mirror[cx[i].a], mb = rm.mirror[cx[i].b];
+            if (ma == ~0u || mb == ~0u) continue;
+            const uint64_t k = edge_key(ma, mb);
+            if (k == edge_key(cx[i].a, cx[i].b)) {
+                // Its own twin: an edge across the seam (cut at its middle, which is on
+                // the seam) or one lying along it.
+                if (ma == cx[i].b) cx[i].t = 0.5f;
+                cx[i].twin = i;
+                continue;
+            }
+            auto it = at.find(k);
+            uint32_t j;
+            if (it == at.end()) {
+                if (!insert) continue;
+                j = (uint32_t)cx.size();
+                at[k] = j;
+                cx.push_back({ma, mb, cx[i].t, cx[i].s});
+            } else {
+                j = it->second;
+                cx[j].a = ma; cx[j].b = mb; cx[j].t = cx[i].t;
+            }
+            cx[j].slave = true;
+            cx[i].twin = j; cx[j].twin = i;
+        }
+    };
+    if (mirror) pair_twins(true);
+
+    // Quads, not triangles. A face splits into quads only when its outline (corners +
+    // cut points) has an even count; a line that stops inside a quad leaves five. So
+    // such a face gets one more cut, in the middle of the side facing its lone cut (or
+    // of its one uncut side): the support runs on through it, and on through the face
+    // beyond, until it reaches the island's edge or meets the cut again. A wrong count
+    // only ever moves to the next face, so it ends at a border or meets another.
+    {
+        std::unordered_map<uint64_t, std::pair<uint32_t, uint32_t>> faces_of;
+        for (size_t f = 0; f < rm.quad_owner.size(); f++) {
+            uint32_t c[4];
+            const int n = corners(f, c);
+            for (int k = 0; k < n && n >= 3; k++) {
+                auto ins = faces_of.emplace(edge_key(c[k], c[(k + 1) % n]),
+                                            std::make_pair((uint32_t)f, ~0u));
+                if (!ins.second) ins.first->second.second = (uint32_t)f;
+            }
+        }
+        std::vector<uint32_t> work;
+        for (const Cross& c : cx) {
+            auto it = faces_of.find(edge_key(c.a, c.b));
+            if (it == faces_of.end()) continue;
+            work.push_back(it->second.first);
+            if (it->second.second != ~0u) work.push_back(it->second.second);
+        }
+        float s_more = 1e9f;   // ordered after every drawn crossing: those lead in the mirror pairing
+        while (!work.empty()) {
+            const uint32_t f = work.back();
+            work.pop_back();
+            uint32_t c[4];
+            const int n = corners(f, c);
+            if (n < 3) continue;
+            int cuts = 0, lone = -1, uncut = -1;
+            for (int k = 0; k < n; k++) {
+                if (at.count(edge_key(c[k], c[(k + 1) % n]))) { cuts++; lone = k; }
+                else uncut = k;
+            }
+            if (cuts == 0 || (n + cuts) % 2 == 0) continue;
+            const int k = n == 4 && cuts == 1 ? (lone + 2) % 4 : uncut;
+            const uint64_t key = edge_key(c[k], c[(k + 1) % n]);
+            at[key] = (uint32_t)cx.size();
+            cx.push_back({c[k], c[(k + 1) % n], 0.5f, s_more++});
+            const auto& fs = faces_of[key];
+            work.push_back(fs.first == f ? fs.second : fs.first);
+            if (work.back() == ~0u) work.pop_back();   // a border: done
+        }
+    }
+    if (mirror) pair_twins(false);
+
+    // Before anything changes: what Ctrl+Z puts back.
+    st.before_cut = rm;
+    st.cut_froze.clear();
+    for (const RetopoStroke& s : st.strokes) if (!s.frozen) st.cut_froze.push_back(s.id);
+
+    auto add_vertex = [&](Vec3 p, Vec3 n, uint32_t owner) {
+        rm.v.push_back(p); rm.n.push_back(n);
+        rm.v_owner.push_back(owner); rm.mirror.push_back(~0u);
+        return (uint32_t)rm.v.size() - 1;
+    };
+    auto refl = [](Vec3 v) { v.x = -v.x; return v; };
+    auto snapped = [&](Vec3 p, Vec3 n_fallback, Vec3& n) {
+        Vec3 q;
+        if (g_smooth_grid.m && g_smooth_grid.closest(p, q, n)) return q;
+        n = n_fallback.normalized();
+        return p;
+    };
+    for (Cross& c : cx) {
+        if (c.vid != ~0u || c.slave) continue;
+        Vec3 n;
+        Vec3 p = snapped(rm.v[c.a] + (rm.v[c.b] - rm.v[c.a]) * c.t,
+                         rm.n[c.a] + (rm.n[c.b] - rm.n[c.a]) * c.t, n);
+        if (c.twin == (uint32_t)(&c - cx.data())) p.x = 0.0f;
+        c.vid = add_vertex(p, n, rm.v_owner[c.a]);
+        if (c.twin == ~0u) continue;
+        Cross& w = cx[c.twin];
+        if (&w == &c) { rm.mirror[c.vid] = c.vid; continue; }
+        w.vid = add_vertex(refl(p), refl(n), rm.v_owner[w.a]);
+        rm.mirror[c.vid] = w.vid; rm.mirror[w.vid] = c.vid;
+    }
+
+    // Split every face with a cut side. Its outline (corners and cut points, in its own
+    // winding) is cut between consecutive cut points: two of them split it straight
+    // through, three or more meet at a new middle vertex, one (the line ended inside
+    // it) fans from the cut point so it doesn't hang on the edge.
+    std::vector<uint32_t> nq, nown;
+    nq.reserve(rm.quads.size() + cx.size() * 8);
+    nown.reserve(rm.quad_owner.size() + cx.size() * 2);
+    std::vector<uint32_t> touched;
+    struct Centre { uint64_t key_lo, key_hi; uint32_t vid; uint32_t corners[4]; int n; };
+    std::vector<Centre> centres;
+    auto face_key = [](const uint32_t* c, int n, uint64_t& lo, uint64_t& hi) {
+        uint32_t s[4] = {~0u, ~0u, ~0u, ~0u};
+        for (int k = 0; k < n; k++) s[k] = c[k];
+        std::sort(s, s + 4);
+        lo = ((uint64_t)s[0] << 32) | s[1]; hi = ((uint64_t)s[2] << 32) | s[3];
+    };
+    int split = 0;
+    for (size_t f = 0; f < rm.quad_owner.size(); f++) {
+        const uint32_t* q = &rm.quads[f * 4];
+        const uint32_t who = rm.quad_owner[f];
+        uint32_t c[4];
+        const int n = corners(f, c);
+        uint32_t cut[4];
+        int cuts = 0;
+        for (int k = 0; k < n && n >= 3; k++) {
+            auto it = at.find(edge_key(c[k], c[(k + 1) % n]));
+            cut[k] = it == at.end() ? ~0u : cx[it->second].vid;
+            cuts += cut[k] != ~0u;
+        }
+        if (n < 3 || cuts == 0) {
+            nq.insert(nq.end(), q, q + 4);
+            nown.push_back(who);
+            continue;
+        }
+        split++;
+        touched.push_back(who);
+        // The outline, and where its cut points sit in it.
+        uint32_t ring[8];
+        int ci[4], L = 0, m2 = 0;
+        for (int k = 0; k < n; k++) {
+            ring[L++] = c[k];
+            if (cut[k] != ~0u) { ci[m2++] = L; ring[L++] = cut[k]; }
+        }
+        uint32_t piece[6];
+        if (cuts == 1) {
+            // A triangle with one cut side is a quad already (a quad's lone cut ran on
+            // through its far side above; five corners here only if that couldn't be).
+            emit_piece(rm, nq, nown, ring, L, who);
+            continue;
+        }
+        auto add_centre = [&](Vec3 at_p, Vec3 at_n) {
+            Vec3 nn;
+            const uint32_t v = add_vertex(snapped(at_p, at_n, nn), nn, who);
+            Centre ce{};
+            face_key(c, n, ce.key_lo, ce.key_hi);
+            ce.vid = v; ce.n = n;
+            for (int k = 0; k < n; k++) ce.corners[k] = c[k];
+            centres.push_back(ce);
+            return v;
+        };
+        if (cuts == 2 && n == 4 && (ci[1] - ci[0] == 2 || ci[0] + L - ci[1] == 2)) {
+            // A corner clipped: the cut turns inside the quad. Three quads round a new
+            // vertex M where the turn is (p and q's corner reflected across them), the
+            // cut running p -> M -> q and one support from M to the far corner.
+            const int a = ci[1] - ci[0] == 2 ? ci[0] : ci[1];
+            const uint32_t P = ring[a], V1 = ring[(a + 1) % 6], Q = ring[(a + 2) % 6],
+                           V2 = ring[(a + 3) % 6], V3 = ring[(a + 4) % 6], V0 = ring[(a + 5) % 6];
+            const uint32_t M = add_centre(rm.v[P] + rm.v[Q] - rm.v[V1], rm.n[P] + rm.n[Q]);
+            const uint32_t f0[4] = {P, V1, Q, M}, f1[4] = {Q, V2, V3, M}, f2[4] = {V3, V0, P, M};
+            emit_piece(rm, nq, nown, f0, 4, who);
+            emit_piece(rm, nq, nown, f1, 4, who);
+            emit_piece(rm, nq, nown, f2, 4, who);
+            continue;
+        }
+        uint32_t mid = ~0u;
+        if (cuts >= 3) {
+            Vec3 avg, an;
+            for (int k = 0; k < cuts; k++) { avg += rm.v[ring[ci[k]]]; an += rm.n[ring[ci[k]]]; }
+            mid = add_centre(avg * (1.0f / (float)cuts), an);
+        }
+        for (int k = 0; k < cuts; k++) {
+            // From this cut point round to the next, then (three or more) the middle.
+            const int from = ci[k], to = ci[(k + 1) % cuts];
+            int pn = 0;
+            for (int i = from;; i = (i + 1) % L) {
+                piece[pn++] = ring[i];
+                if (i == to && pn > 1) break;
+            }
+            if (mid != ~0u) piece[pn++] = mid;
+            emit_piece(rm, nq, nown, piece, pn, who);
+        }
+    }
+    // Middle vertices of a face and of its twin face pair up the same way.
+    if (mirror)
+        for (Centre& ce : centres) {
+            uint32_t mc[4];
+            bool ok = true;
+            for (int k = 0; k < ce.n && ok; k++) { mc[k] = rm.mirror[ce.corners[k]]; ok = mc[k] != ~0u; }
+            if (!ok || rm.mirror[ce.vid] != ~0u) continue;
+            uint64_t lo, hi;
+            face_key(mc, ce.n, lo, hi);
+            for (Centre& o : centres) {
+                if (o.key_lo != lo || o.key_hi != hi) continue;
+                if (&o == &ce) { rm.v[ce.vid].x = 0.0f; rm.mirror[ce.vid] = ce.vid; }
+                else {
+                    rm.v[o.vid] = refl(rm.v[ce.vid]); rm.n[o.vid] = refl(rm.n[ce.vid]);
+                    rm.mirror[ce.vid] = o.vid; rm.mirror[o.vid] = ce.vid;
+                }
+                break;
+            }
+        }
+    rm.quads.swap(nq);
+    rm.quad_owner.swap(nown);
+
+    // Edges again, from the faces: the cut sides are gone, their halves and the new
+    // edges across are in.
+    rm.edges.clear(); rm.edge_owner.clear();
+    for (size_t f = 0; f < rm.quad_owner.size(); f++)
+        for (int k = 0; k < 4; k++) {
+            const uint32_t a = rm.quads[f * 4 + k], b = rm.quads[f * 4 + (k + 1) % 4];
+            if (a != b) add_edge(rm, a, b, rm.quad_owner[f]);
+        }
+    dedupe_edges(rm);
+    build_topology(rm);
+    freeze_touched(st, touched);
+    // Only the strokes this cut froze go back to editable on Ctrl+Z.
+    st.cut_froze.erase(std::remove_if(st.cut_froze.begin(), st.cut_froze.end(), [&](uint32_t id) {
+        const RetopoStroke* s = st.find(id);
+        return !s || !s->frozen;
+    }), st.cut_froze.end());
+    st.can_undo_cut = true;
+    std::printf("[retopo] cut: %zu edges, %d faces split, now %u faces\n",
+                cx.size(), split, rm.quad_count());
+    return split;
+}
+
 bool retopo_export_obj(const RetopoMesh& rm, const char* path) {
     if (rm.quads.empty()) return false;
     FILE* f = std::fopen(path, "wb");
     if (!f) return false;
-    std::fprintf(f, "# Chisel retopo: %u quads\n", rm.quad_count());
+    std::fprintf(f, "# Chisel retopo: %u faces\n", rm.quad_count());
     // Welds leave folded-away vertices behind: write only the ones a quad uses.
     std::vector<uint32_t> id(rm.v.size(), 0);
     for (uint32_t i : rm.quads) id[i] = 1;
@@ -1162,9 +1554,13 @@ bool retopo_export_obj(const RetopoMesh& rm, const char* path) {
         id[i] = ++next;
         std::fprintf(f, "v %.6f %.6f %.6f\n", rm.v[i].x, rm.v[i].y, rm.v[i].z);
     }
-    for (size_t q = 0; q < rm.quads.size(); q += 4)
-        std::fprintf(f, "f %u %u %u %u\n", id[rm.quads[q]], id[rm.quads[q + 1]],
-                     id[rm.quads[q + 2]], id[rm.quads[q + 3]]);
+    for (size_t q = 0; q < rm.quads.size(); q += 4) {
+        if (rm.quads[q + 3] == rm.quads[q + 2])
+            std::fprintf(f, "f %u %u %u\n", id[rm.quads[q]], id[rm.quads[q + 1]], id[rm.quads[q + 2]]);
+        else
+            std::fprintf(f, "f %u %u %u %u\n", id[rm.quads[q]], id[rm.quads[q + 1]],
+                         id[rm.quads[q + 2]], id[rm.quads[q + 3]]);
+    }
     std::fclose(f);
     return true;
 }

@@ -2,6 +2,26 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-23 — Retopo mode: Cut slices the built quads
+
+*Built live with the user at the keyboard; user-tested.*
+
+The knife (C) now cuts. Every built edge the line crosses, on the side facing you (not
+hidden, not behind the sculpt), gets a new vertex **pulled toward the edge's middle**: it
+keeps a quarter of its offset, so crossing at 1/5 lands near 0.43 and a hand-drawn line
+gives a straight loop. Every face around a cut edge splits, **into quads**: straight
+across = two; a clipped corner = three round a new turning vertex; crossed four times =
+four round a middle. A face only splits cleanly into quads when its outline has an even
+count, so a line that stops inside a quad gets a **support edge** run on through the middle
+of the far side, face after face, to the island's border (or round to meet the cut):
+quads all the way, no dead-end triangle. Nothing is left hanging on an edge.
+Mirror cuts the twin as an exact reflection (a seam-crossing edge is cut on x = 0). A cut
+freezes what it touches. **Ctrl+Z takes back the last cut** before it walks strokes (one
+level; any later stroke, Build, Grab, Smooth or trash drops it). Faces may now be
+triangles (stored a, b, c, c; only older cut paths made them): topology skips the repeated
+corner, OBJ export writes them as triangles. Freezing moved out of `after_edit` into
+`freeze_touched`, shared with Cut.
+
 ## 2026-10-23 — Retopo mode: Cut tool (placeholder)
 
 *Built live with the user at the keyboard. A shell: what a cut does isn't decided yet.*

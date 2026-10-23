@@ -2808,7 +2808,12 @@ int main(int argc, char* argv[]) {
                        && (retopo.cutting || input.retopo_tool == InputState::RetopoTool::CUT)) {
                 // Cut: a bare line on the surface, sampled like a stroke, no band.
                 const float mx = (float)input.mouse_x, my = (float)input.mouse_y;
-                if (!retopo.cutting) {
+                if (!retopo.cutting && !retopo.built) {
+                    std::snprintf(input.notification, sizeof(input.notification),
+                                  "Nothing to cut: Build first (Space)");
+                    input.notification_timer = 2.0f;
+                    input.drag_mode = InputState::DragMode::NONE;
+                } else if (!retopo.cutting) {
                     retopo.cutting = true;
                     retopo.cut_pts.clear();
                     retopo.cut_nrm.clear();
@@ -2816,7 +2821,7 @@ int main(int argc, char* argv[]) {
                 }
                 Vec3 p, n;
                 float world_per_px;
-                if (std::hypot(mx - retopo.last_sx, my - retopo.last_sy) >= 3.0f
+                if (retopo.cutting && std::hypot(mx - retopo.last_sx, my - retopo.last_sy) >= 3.0f
                     && retopo_surface_at(mx, my, p, n, world_per_px)) {
                     retopo.cut_pts.push_back(p);
                     retopo.cut_nrm.push_back(n);
@@ -2856,8 +2861,18 @@ int main(int argc, char* argv[]) {
                     input.notification_timer = 1.5f;
                 }
             } else if (retopo.cutting) {
-                // Pen up. What a cut does to the islands it crosses is the next step; for
-                // now the line is drawn and goes when the pen lifts.
+                // Pen up: the knife goes through the built quads along the line.
+                if (retopo.cut_pts.size() >= 2) {
+                    scene.materialize_active_cpu();   // new vertices snap onto mesh.pos
+                    const int split = retopo_cut(retopo, *mesh, camera, win_w, win_h, input.mirror_x);
+                    if (split)
+                        std::snprintf(input.notification, sizeof(input.notification),
+                                      "Cut through %d faces - Ctrl+Z takes it back", split);
+                    else
+                        std::snprintf(input.notification, sizeof(input.notification),
+                                      "The cut crossed no edges");
+                    input.notification_timer = 2.0f;
+                }
                 retopo.cutting = false;
                 retopo.cut_pts.clear();
                 retopo.cut_nrm.clear();
@@ -2909,8 +2924,17 @@ int main(int argc, char* argv[]) {
             // Ctrl+Z / Ctrl+Shift+Z walk the stroke list here, never the sculpt's
             // history: retopo doesn't touch the sculpt.
             if (retopo_on && (input.undo_requested || input.redo_requested)) {
-                if (input.undo_requested) retopo.undo();
-                else                      retopo.redo_one();
+                if (input.undo_requested) {
+                    // The last cut first, if nothing has changed since; then strokes.
+                    if (retopo.undo_cut()) {
+                        std::snprintf(input.notification, sizeof(input.notification), "Cut undone");
+                        input.notification_timer = 1.5f;
+                    } else {
+                        retopo.undo();
+                    }
+                } else {
+                    retopo.redo_one();
+                }
                 input.undo_requested = input.redo_requested = false;
             }
             if (input.retopo_build_requested) {
