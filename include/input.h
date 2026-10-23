@@ -662,6 +662,7 @@ struct InputState {
     bool retopo_fill_requested = false;    // H / the dock's Fill: quads over holes
     bool retopo_build_quiet = false;   // a slider asked: rebuild without the toast
     bool retopo_menu_request = false;  // a right-click on an island: the bar opens its menu
+    bool retopo_menu_auto = false;     // a stroke was just drawn: its sliders float by the pen
     // Right button: where it went down, and a one-frame flag on release (retopo's menu
     // is a click, so main.cpp compares the two to tell it from a zoom drag).
     float mouse2_press_x = 0.0f, mouse2_press_y = 0.0f;
@@ -671,7 +672,7 @@ struct InputState {
     RetopoTool retopo_tool = RetopoTool::DRAW;
     // What the next stroke gets (RetopoStroke has the meaning of each), set in the tool
     // dock or by holding A / W. Its band is the brush Size as drawn, so no width here.
-    int   retopo_rings = 4;
+    int   retopo_rings = 2;
     float retopo_density = 1.0f;
     bool retopo_export_requested = false;
     // Which mode's shortcuts are live: Paint while painting (EDIT in paint mode), else

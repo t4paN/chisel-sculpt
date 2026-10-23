@@ -564,7 +564,7 @@ static void apply_slider_delta(float dx) {
             }
             case InputState::SliderMode::DENSITY: {
                 const float lo = (0.1f - g_input->slider_start_value) * 500.0f;
-                const float hi = (1.0f - g_input->slider_start_value) * 500.0f;
+                const float hi = (2.0f - g_input->slider_start_value) * 500.0f;
                 g_input->slider_accum = std::max(lo, std::min(hi, g_input->slider_accum));
                 g_input->retopo_density =
                     std::round((g_input->slider_start_value + g_input->slider_accum / 500.0f) * 10.0f) / 10.0f;
@@ -1231,7 +1231,7 @@ static void run_key_action(GLFWwindow* w, KeyAction a, bool repeat) {
             break;
         case KeyAction::MODE_RETOPO:
             in.enter_retopo_mode();
-            notify("Retopo: sketch on the model, Space builds", 2.0f);
+            notify("Retopo: sketch on the model", 2.0f);
             break;
         case KeyAction::RETOPO_BUILD:
             if (!repeat) in.retopo_build_requested = true;

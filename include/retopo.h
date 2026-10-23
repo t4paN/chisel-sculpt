@@ -28,8 +28,8 @@ struct RetopoStroke {
     bool selected = false;       // the bar's sliders and the right-click menu act on these
     // Its own build settings, taken from the bar's at pen-up; the sliders change them
     // only while it's selected.
-    int   rings   = 4;           // quads across the band (1..8)
-    float density = 1.0f;        // quads along it: 1 = about square, down to 0.1
+    int   rings   = 2;           // quads across the band (1..8)
+    float density = 1.0f;        // quads along it: 1 = about square, 0.1 to 2
     float width   = 1.0f;        // band width as drawn x this (0.1..2): rescues a stroke
                                  // whose path is right but whose brush was too fat
     uint32_t id  = 0;

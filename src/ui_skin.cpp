@@ -1766,7 +1766,7 @@ void meter_widget(const char* id, InputState& in, int which, float w, float k = 
     static const char* labels[6] = {"Size", "Strength", "Hardness", "Spacing", "Rings", "Density"};
     const float vals[6] = {in.brush_size / 500.0f, in.brush_strength,
                            in.brush_hardness, in.brush_spacing,
-                           (float)(in.retopo_rings - 1) / 7.0f, (in.retopo_density - 0.1f) / 0.9f};
+                           (float)(in.retopo_rings - 1) / 7.0f, (in.retopo_density - 0.1f) / 1.9f};
     char value[16];
     if (which == 0)      std::snprintf(value, sizeof value, "%.0f", in.brush_size);
     else if (which == 4) std::snprintf(value, sizeof value, "%d", in.retopo_rings);
@@ -2251,7 +2251,7 @@ void slider_hud(const InputState& input) {
             pct = (float)(input.retopo_rings - 1) / 7.0f; break;
         case InputState::SliderMode::DENSITY:
             name = "Density"; std::snprintf(val, sizeof val, "%.1fx", input.retopo_density);
-            pct = (input.retopo_density - 0.1f) / 0.9f; break;
+            pct = (input.retopo_density - 0.1f) / 1.9f; break;
         default: return;
     }
     pct = std::max(0.0f, std::min(1.0f, pct));
@@ -2380,7 +2380,7 @@ void set_feel(InputState& in, int which, float t) {
         case 3: in.brush_spacing = std::max(0.05f, std::min(t, max_spacing_for(slot)));
                 in.per_brush[(int)slot].spacing = in.brush_spacing; break;
         case 4: in.retopo_rings = 1 + (int)std::lround(t * 7.0f); break;
-        case 5: in.retopo_density = 0.1f + std::round(t * 9.0f) / 10.0f; break;
+        case 5: in.retopo_density = 0.1f + std::round(t * 19.0f) / 10.0f; break;
     }
 }
 
@@ -3762,9 +3762,9 @@ void retopo_sliders(InputState& input, RetopoState& st, float sh, float sgap, fl
     if (wh != 0.0f) rings = std::max(1, std::min(8, rings + (wh > 0.0f ? 1 : -1)));
 
     std::snprintf(txt, sizeof txt, "Density: %.1fx", density);
-    t = retopo_slider("##density", sw, sh, (density - 0.1f) / 0.9f, txt, tip[2], side, &wh, dead);
-    if (t >= 0.0f) density = 0.1f + std::round(t * 9.0f) / 10.0f;
-    if (wh != 0.0f) density = std::max(0.1f, std::min(1.0f, density + (wh > 0.0f ? 0.1f : -0.1f)));
+    t = retopo_slider("##density", sw, sh, (density - 0.1f) / 1.9f, txt, tip[2], side, &wh, dead);
+    if (t >= 0.0f) density = 0.1f + std::round(t * 19.0f) / 10.0f;
+    if (wh != 0.0f) density = std::max(0.1f, std::min(2.0f, density + (wh > 0.0f ? 0.1f : -0.1f)));
     density = std::round(density * 10.0f) / 10.0f;
     ImGui::PopStyleVar();
     ImGui::EndGroup();
@@ -4126,4 +4126,42 @@ void draw_retopo_dock(InputState& input, RetopoState& st, int win_w, int win_h) 
     }
     ImGui::PopStyleVar(2);
     end_panel();
+
+    // A stroke just drawn: the same sliders float beside where the pen let go, for it
+    // (it's the selection). Not a popup: a popup swallows the next click outside it just
+    // to close, and that click is the next stroke. This one only holds the mouse while
+    // hovered; a press anywhere else closes it and still draws. Gone too once the
+    // selection is something else (empty, edited, a click on another island).
+    static bool quick = false;
+    static ImVec2 quick_at, quick_size(190.0f, 150.0f);
+    if (input.retopo_menu_auto) {
+        input.retopo_menu_auto = false;
+        quick = true;
+        const ImVec2 mp = ImGui::GetIO().MousePos;
+        quick_at = ImVec2(mp.x + 24.0f, mp.y + 16.0f);
+    }
+    if (quick && ImGui::IsPopupOpen("##retopoMenu")) quick = false;   // right-click wins
+    const RetopoStroke* qs = quick ? st.first_selected() : nullptr;
+    if (quick && (!qs || qs->frozen || input.interaction_mode != InputState::InteractionMode::RETOPO))
+        quick = false;
+    if (quick) {
+        // On screen: flip to the pointer's other side when it would run off an edge.
+        ImVec2 p = quick_at;
+        if (p.x + quick_size.x > win_w - 8.0f) p.x = quick_at.x - 48.0f - quick_size.x;
+        if (p.y + quick_size.y > win_h - 8.0f) p.y = std::max(8.0f, (float)win_h - 8.0f - quick_size.y);
+        begin_panel("##retopoQuick", p, ImVec2(0, 0), ImVec2(10.0f, 8.0f), 6.0f, 12.0f);
+        int n = 0;
+        for (const RetopoStroke& s : st.strokes) n += s.selected;
+        char head[64];
+        if (n == 1) std::snprintf(head, sizeof head, "%s", qs->name.c_str());
+        else        std::snprintf(head, sizeof head, "%d islands", n);
+        label_item(UiFont::SansSemibold, 13.0f, qs->closed ? donut_col : strip_col, head, 0.0f, 20.0f);
+        retopo_sliders(input, st, sh, sgap, 150.0f, TipSide::Below);
+        quick_size = ImGui::GetWindowSize();
+        const bool over = ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows
+                                                 | ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+        if (!over && !ImGui::IsAnyItemActive() && (ImGui::IsMouseClicked(0) || ImGui::IsMouseClicked(1)))
+            quick = false;
+        end_panel();
+    }
 }

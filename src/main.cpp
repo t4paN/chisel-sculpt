@@ -2992,9 +2992,11 @@ int main(int argc, char* argv[]) {
                 // Pen up (or the mode changed under it).
                 const bool kept = retopo.finish_live(input.retopo_rings, input.retopo_density);
                 if (kept) {
-                    std::snprintf(input.notification, sizeof(input.notification), "%s - Space builds",
-                                  retopo.strokes.back().name.c_str());
-                    input.notification_timer = 1.5f;
+                    // Built on release, no Space needed. Quiet: finish_live took the undo
+                    // step (one Ctrl+Z takes the stroke and its quads), and no toast.
+                    input.retopo_build_requested = true;
+                    input.retopo_build_quiet = true;
+                    input.retopo_menu_auto = true;   // its sliders, right where the pen let go
                 }
             } else if (retopo.cutting) {
                 // Pen up: the knife goes through the built quads along the line.

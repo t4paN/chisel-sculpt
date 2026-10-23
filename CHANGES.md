@@ -2,6 +2,16 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-23 — Retopo mode: build on release, quick sliders by the pen, rings 2, density to 2x
+
+*User-tested.* A donut or strip is built the moment the pen lifts (quiet: no toast, no
+extra undo step, one Ctrl+Z takes stroke and quads); Space / Build stay for rebuilding
+after sculpting. The new stroke's Size / Rings / Density float in a small panel beside
+where the pen let go: not a popup (a popup eats the next click outside it, which is the
+next stroke), so a press elsewhere closes it and still draws; right-click's menu takes
+over, a changed selection closes it. Rings default 2 (was 4). Density runs 0.1x to 2x
+(was 1x) on every control: island sliders, tool dock, hold W, HUD.
+
 ## 2026-10-23 — Retopo mode: extrude a picked loop by drawing out of it
 
 *User-tested.* In Draw, a stroke that starts on a double-clicked outline loop (thin green

@@ -346,7 +346,7 @@ void draw_slider(TextOverlay& text, const InputState& input, int win_w, int win_
             break;
         case InputState::SliderMode::DENSITY:
             sname = "Density";
-            value = (input.retopo_density - 0.1f) / 0.9f * 100.0f;
+            value = (input.retopo_density - 0.1f) / 1.9f * 100.0f;
             break;
         default: break;
     }
