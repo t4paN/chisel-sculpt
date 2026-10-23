@@ -2491,6 +2491,31 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
         }
         dl->Flags = keep_flags;
     }
+    // Holes (outlines that aren't a piece's outer edge): a wash over the gap, green when
+    // its count of sides is even (Fill makes it quads), amber when odd, rim drawn the same.
+    // Only when the whole rim is in view: a half-seen rim would fill the wrong shape.
+    {
+        const ImDrawListFlags keep_flags = dl->Flags;
+        dl->Flags &= ~ImDrawListFlags_AntiAliasedFill;
+        static std::vector<ImVec2> poly;
+        for (uint32_t r = 0; r < rm.rim_count(); r++) {
+            if (!rm.rim_hole[r]) continue;
+            poly.clear();
+            bool ok = true;
+            for (uint32_t k = rm.rim_off[r]; k < rm.rim_off[r + 1] && ok; k++) {
+                const uint32_t v = rm.rim[k];
+                ok = vis[v] == 2 && !(st.hidden(rm.v_owner[v]) && rm.v_owner[v] != st.hover_id);
+                poly.push_back(at[v]);
+            }
+            if (!ok || poly.size() < 3) continue;
+            const bool even = poly.size() % 2 == 0;
+            dl->AddConcavePolyFilled(poly.data(), (int)poly.size(),
+                                     even ? IM_COL32(60, 230, 120, 60) : IM_COL32(255, 170, 40, 70));
+            dl->AddPolyline(poly.data(), (int)poly.size(),
+                            even ? IM_COL32(90, 240, 140, 200) : IM_COL32(255, 180, 60, 220), ImDrawFlags_Closed, 1.5f);
+        }
+        dl->Flags = keep_flags;
+    }
     // Behind the sculpt (either end): one dim pass under the rest, no dark outline.
     for (size_t e = 0; e + 1 < rm.edges.size(); e += 2) {
         const uint32_t a = rm.edges[e], b = rm.edges[e + 1];

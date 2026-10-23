@@ -3098,6 +3098,27 @@ int main(int argc, char* argv[]) {
                                   "Nothing to build: sketch a stroke first");
                 if (!quiet) input.notification_timer = 2.5f;
             }
+            if (input.retopo_fill_requested) {
+                input.retopo_fill_requested = false;
+                if (retopo.built) scene.materialize_active_cpu();   // the fill snaps onto mesh.pos
+                int rims = 0, odd = 0;
+                const int made = retopo_fill(retopo, *mesh, input.mirror_x, rims, odd);
+                if (made && odd)
+                    std::snprintf(input.notification, sizeof(input.notification),
+                                  "Filled %d hole%s with %d quads; %d with an odd count of sides left open",
+                                  rims, rims == 1 ? "" : "s", made, odd);
+                else if (made)
+                    std::snprintf(input.notification, sizeof(input.notification),
+                                  "Filled %d hole%s with %d quads - Ctrl+Z takes it back",
+                                  rims, rims == 1 ? "" : "s", made);
+                else if (odd)
+                    std::snprintf(input.notification, sizeof(input.notification),
+                                  "Odd count of sides: all-quad fill needs an even one (cut a loop into the rim)");
+                else
+                    std::snprintf(input.notification, sizeof(input.notification),
+                                  "No holes to fill (double-click an outline to fill it anyway)");
+                input.notification_timer = 2.5f;
+            }
             if (input.retopo_export_requested) {
                 input.retopo_export_requested = false;
                 // No dialog: next to the project (or home), named after it. The

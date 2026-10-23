@@ -4047,6 +4047,17 @@ void draw_retopo_dock(InputState& input, RetopoState& st, int win_w, int win_h) 
         tooltip(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), TipSide::Left,
                 merge_n >= 2 ? "Merge the selected edited islands into one"
                              : "Select two or more edited islands to merge (Ctrl+click)", nullptr);
+    ImGui::SameLine(0.0f, 4.0f);
+    // Holes: green = an even count of sides (fills with quads), amber = odd.
+    int holes = 0, holes_odd = 0;
+    for (uint32_t r = 0; r < st.result.rim_count(); r++)
+        if (st.result.rim_hole[r]) { holes++; holes_odd += (st.result.rim_off[r + 1] - st.result.rim_off[r]) % 2; }
+    if (chip("Fill", false, bh, st.built && (holes > 0 || !st.loop_edges.empty()))) input.retopo_fill_requested = true;
+    if (ImGui::IsItemHovered())
+        tooltip(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), TipSide::Left,
+                !st.loop_edges.empty() ? "Fill the double-clicked outline loops with quads"
+                                       : "Fill every green hole with quads (double-click an outline to fill just that)",
+                input.key_label(KeyAction::RETOPO_FILL));
     ImGui::SameLine();
     ImGui::SetCursorPosX(x0 + w - bh);
     o.on = false; o.tip = "Undo"; o.key = input.key_label(KeyAction::UNDO);
@@ -4063,8 +4074,14 @@ void draw_retopo_dock(InputState& input, RetopoState& st, int win_w, int win_h) 
     if (icon_button("rExport", Icon::CmdExport, bh, o)) input.retopo_export_requested = true;
     o.enabled = true;
 
-    char ro[48];
-    if (st.built) std::snprintf(ro, sizeof ro, "%u faces%s", st.result.face_count(), input.mirror_x ? " \xC2\xB7 mirror X" : "");
+    char ro[96];
+    if (st.built && holes_odd)
+        std::snprintf(ro, sizeof ro, "%u faces \xC2\xB7 %d hole%s (%d odd)%s", st.result.face_count(), holes,
+                      holes == 1 ? "" : "s", holes_odd, input.mirror_x ? " \xC2\xB7 mirror X" : "");
+    else if (st.built && holes)
+        std::snprintf(ro, sizeof ro, "%u faces \xC2\xB7 %d hole%s%s", st.result.face_count(), holes,
+                      holes == 1 ? "" : "s", input.mirror_x ? " \xC2\xB7 mirror X" : "");
+    else if (st.built) std::snprintf(ro, sizeof ro, "%u faces%s", st.result.face_count(), input.mirror_x ? " \xC2\xB7 mirror X" : "");
     else          std::snprintf(ro, sizeof ro, "%s", input.mirror_x ? "not built \xC2\xB7 mirror X" : "not built");
     label_item(UiFont::Mono, 12.0f, kMuted, ro, 0.0f, 18.0f);
     foot_h = ImGui::GetCursorPosY() - fy0;

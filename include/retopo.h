@@ -57,10 +57,17 @@ struct RetopoMesh {
     std::vector<uint32_t> nb_off, nb;
     std::vector<uint32_t> border_nb;   // 2 per vertex; ~0u for interior vertices
     std::vector<uint8_t>  pinned;
+    // Every closed outline, walked round (rim r = rim[rim_off[r] .. rim_off[r + 1]), as
+    // many sides as vertices), and whether it's a hole: any outline of a piece but its
+    // longest, which is the piece's outer edge. Found with the rest of the topology.
+    std::vector<uint32_t> rim_off{0}, rim;
+    std::vector<uint8_t>  rim_hole;
+    uint32_t rim_count() const { return (uint32_t)rim_hole.size(); }
     void clear() {
         v.clear(); n.clear(); faces.clear(); face_off.assign(1, 0); edges.clear(); edge_owner.clear();
         v_owner.clear(); face_owner.clear(); mirror.clear();
         nb_off.clear(); nb.clear(); border_nb.clear(); pinned.clear();
+        rim_off.assign(1, 0); rim.clear(); rim_hole.clear();
     }
     void add_face(const uint32_t* p, int k, uint32_t owner) {
         faces.insert(faces.end(), p, p + k);
@@ -264,6 +271,16 @@ int retopo_erase_face_dab(RetopoState& st, const Camera& cam, int win_w, int win
 // bridge that is its own twin. Returns nullptr when built, else why not (nothing done).
 const char* retopo_bridge(RetopoState& st, const Mesh& m, const Camera& cam, int win_w, int win_h,
                           uint32_t to_id, bool mirror);
+
+// Fill (H in mode 0, the dock's Fill): quads over holes. With edge loops picked
+// (double-click), every picked loop that is a whole outline, hole or outer edge; else
+// every hole. A rim of N = 2(m + n) sides becomes an m x n grid: four corners where the
+// rim turns most (sides as near square as they allow), the inside spread from the four
+// sides and snapped onto the sculpt `m` (current on the CPU). An odd rim can't be all
+// quads: left alone, counted in `odd`. Mirror: a hole's twin gets the reflected fill, a
+// hole across x = 0 a symmetric one. The islands round a hole become one island and
+// freeze. One undo step. Returns the faces made; `rims` = how many rims they filled.
+int retopo_fill(RetopoState& st, const Mesh& m, bool mirror, int& rims, int& odd);
 
 // Write state.result as an OBJ, every face as it is (quads, triangles, bigger ones).
 // Returns false if there's nothing to write or the file can't be opened.

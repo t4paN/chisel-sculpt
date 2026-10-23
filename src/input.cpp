@@ -48,6 +48,7 @@ const KeyActionInfo kKeyActions[(int)KeyAction::COUNT] = {
     {"retopo_grab",   "Retopo mode", "Grab polygon strips", "Drag the built quads around", {GLFW_KEY_G, 0}, KeyScope::Retopo},
     {"retopo_cut",    "Retopo mode", "Cut",              "Drag a line across islands", {GLFW_KEY_C, 0}, KeyScope::Retopo},
     {"retopo_erase",  "Retopo mode", "Erase",            "Brush over the built quads: the edge nearest the ring's centre goes", {GLFW_KEY_E, 0}, KeyScope::Retopo},
+    {"retopo_fill",   "Retopo mode", "Fill holes",       "Quads over every even hole, or over the outline loops double-clicked", {GLFW_KEY_H, 0}, KeyScope::Retopo},
     {"hold_size",     "Brush feel", "Size",             "Hold and drag", {GLFW_KEY_S, 0}},
     {"hold_strength", "Brush feel", "Strength",         "Hold and drag. In Retopo mode: the next stroke's Density", {GLFW_KEY_W, 0}},
     {"hold_hardness", "Brush feel", "Hardness",         "Hold and drag. In Retopo mode: the next stroke's Rings", {GLFW_KEY_A, 0}},
@@ -1234,6 +1235,9 @@ static void run_key_action(GLFWwindow* w, KeyAction a, bool repeat) {
             break;
         case KeyAction::RETOPO_BUILD:
             if (!repeat) in.retopo_build_requested = true;
+            break;
+        case KeyAction::RETOPO_FILL:
+            if (!repeat) in.retopo_fill_requested = true;
             break;
         case KeyAction::RETOPO_DRAW:
         case KeyAction::RETOPO_GRAB:

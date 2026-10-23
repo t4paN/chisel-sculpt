@@ -2,6 +2,22 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-23 — Retopo mode: hole finder and Fill (H)
+
+*User-tested ("worked pretty well"); the ring was not caught in a kept log.*
+
+**Finder:** every closed outline is found with the rest of the topology (no per-frame
+cost); in each connected piece the longest is its outer edge, any other is a hole. Holes
+get a wash, green for an even count of sides (all-quad fillable), amber for odd; the dock
+readout counts them. **Fill:** H or the dock's Fill chip fills the double-clicked outline
+loops (outer edges too), else every hole; odd rims are left open with a toast. Rims of 12+
+sides get a ring of quads walked across the surface just inside, then an m x n grid whose
+corners sit where the loop turns most. The inside is **aimed down the opening's area
+normal** onto the first surface facing back (a socket's floor, a bulging eyeball), not
+snapped to the nearest surface, which piled every vertex onto the socket wall; the relax
+only slides along the surface. Mirror: a hole's twin gets the reflected fill, a hole across
+x = 0 a symmetric one. The islands round a hole merge and freeze. One undo step.
+
 ## 2026-10-23 — Retopo mode: double-click picks edge loops
 
 *User-tested.* In Draw, double-click a built edge: its loop goes green. Inner edges run

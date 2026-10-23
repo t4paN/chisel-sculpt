@@ -299,6 +299,74 @@ struct SnapGrid {
         out_n = (b - a).cross(c - a).normalized();
         return true;
     }
+
+    // The first triangle facing back at the ray (o + d t, d unit, 0 <= t <= tmax),
+    // walking the cells it passes through in order (Amanatides & Woo). Triangles seen
+    // from behind are passed through: from inside a lip, the ray goes on to the surface
+    // it was aimed at. False when it leaves the grid or reaches tmax without one.
+    bool ray(Vec3 o, Vec3 d, float tmax, Vec3& hit, Vec3& hit_n) const {
+        const float O[3] = {o.x, o.y, o.z}, D[3] = {d.x, d.y, d.z}, L0[3] = {lo.x, lo.y, lo.z};
+        const int nc[3] = {nx, ny, nz};
+        float t0 = 0.0f, t1 = tmax;
+        for (int a = 0; a < 3; a++) {
+            const float hi = L0[a] + nc[a] * cell;
+            if (std::fabs(D[a]) < 1e-12f) {
+                if (O[a] < L0[a] || O[a] > hi) return false;
+                continue;
+            }
+            float ta = (L0[a] - O[a]) / D[a], tb = (hi - O[a]) / D[a];
+            if (ta > tb) std::swap(ta, tb);
+            t0 = std::max(t0, ta);
+            t1 = std::min(t1, tb);
+        }
+        if (t0 > t1) return false;
+        int c[3], step[3];
+        float tnext[3], tdelta[3];
+        for (int a = 0; a < 3; a++) {
+            c[a] = clampi((int)std::floor((O[a] + D[a] * t0 - L0[a]) / cell), nc[a]);
+            step[a] = D[a] > 0.0f ? 1 : -1;
+            if (std::fabs(D[a]) < 1e-12f) { tnext[a] = tdelta[a] = 1e30f; continue; }
+            tnext[a] = (L0[a] + (c[a] + (D[a] > 0.0f ? 1 : 0)) * cell - O[a]) / D[a];
+            tdelta[a] = cell / std::fabs(D[a]);
+        }
+        for (;;) {
+            const float exit = std::min({tnext[0], tnext[1], tnext[2], t1});
+            float best = 1e30f;
+            uint32_t best_t = 0xFFFFFFFFu;
+            const uint64_t k = (uint64_t)cell_of(c[0], c[1], c[2]) << 32;
+            for (auto it = std::lower_bound(keys.begin(), keys.end(), k);
+                 it != keys.end() && (*it >> 32) == (k >> 32); ++it) {
+                const uint32_t t = (uint32_t)(*it & 0xFFFFFFFFu);
+                const Vec3 a = P(m->indices[t * 3]), e1 = P(m->indices[t * 3 + 1]) - a,
+                           e2 = P(m->indices[t * 3 + 2]) - a;
+                if (e1.cross(e2).dot(d) >= 0.0f) continue;   // seen from behind
+                const Vec3 pv = d.cross(e2);
+                const float det = e1.dot(pv);
+                if (std::fabs(det) < 1e-20f) continue;
+                const float inv = 1.0f / det;
+                const Vec3 tv = o - a;
+                const float u = tv.dot(pv) * inv;
+                if (u < 0.0f || u > 1.0f) continue;
+                const Vec3 qv = tv.cross(e1);
+                const float v = d.dot(qv) * inv;
+                if (v < 0.0f || u + v > 1.0f) continue;
+                const float th = e2.dot(qv) * inv;
+                if (th >= t0 && th <= t1 && th < best) { best = th; best_t = t; }
+            }
+            // A triangle spans cells: a hit past this cell may hide a nearer one in the next.
+            if (best_t != 0xFFFFFFFFu && best <= exit) {
+                hit = o + d * best;
+                const Vec3 a = P(m->indices[best_t * 3]);
+                hit_n = (P(m->indices[best_t * 3 + 1]) - a).cross(P(m->indices[best_t * 3 + 2]) - a).normalized();
+                return true;
+            }
+            const int a = tnext[0] < tnext[1] ? (tnext[0] < tnext[2] ? 0 : 2) : (tnext[1] < tnext[2] ? 1 : 2);
+            if (tnext[a] > t1) return false;
+            c[a] += step[a];
+            if (c[a] < 0 || c[a] >= nc[a]) return false;
+            tnext[a] += tdelta[a];
+        }
+    }
 };
 
 Vec3 project_tangent(Vec3 v, Vec3 n) { return (v - n * v.dot(n)).normalized(); }
@@ -621,6 +689,75 @@ void build_topology(RetopoMesh& rm) {
         const Vec3 b = (rm.v[rm.border_nb[i * 2 + 1]] - rm.v[i]).normalized();
         if (a.dot(b) > -0.7f) rm.pinned[i] = 1;
     }
+
+    // Outlines, walked round edge by edge. A vertex where two outlines touch (a weld at
+    // one point) has four outer edges: the walk takes any unused one, so the two may come
+    // out as one figure-eight rim, still closed. A walk that dead-ends isn't a rim.
+    rm.rim_off.assign(1, 0); rm.rim.clear(); rm.rim_hole.clear();
+    std::vector<uint32_t> bo(nv + 1, 0), bn, be;   // outer edges per vertex (CSR): other end, edge
+    std::vector<std::pair<uint32_t, uint32_t>> outer;
+    for (size_t i = 0; i < qe.size(); ) {
+        size_t j = i;
+        while (j < qe.size() && qe[j] == qe[i]) j++;
+        if (j - i == 1) outer.push_back({(uint32_t)(qe[i] >> 32), (uint32_t)(qe[i] & 0xFFFFFFFFu)});
+        i = j;
+    }
+    if (outer.empty()) return;
+    for (const auto& e : outer) { bo[e.first + 1]++; bo[e.second + 1]++; }
+    for (uint32_t i = 0; i < nv; i++) bo[i + 1] += bo[i];
+    bn.resize(bo[nv]); be.resize(bo[nv]);
+    {
+        std::vector<uint32_t> fill(bo.begin(), bo.end() - 1);
+        for (uint32_t e = 0; e < (uint32_t)outer.size(); e++) {
+            const uint32_t a = outer[e].first, b = outer[e].second;
+            bn[fill[a]] = b; be[fill[a]++] = e;
+            bn[fill[b]] = a; be[fill[b]++] = e;
+        }
+    }
+    std::vector<uint8_t> used(outer.size(), 0);
+    std::vector<uint32_t> walk;
+    std::vector<float> rim_len;
+    for (uint32_t e0 = 0; e0 < (uint32_t)outer.size(); e0++) {
+        if (used[e0]) continue;
+        used[e0] = 1;
+        const uint32_t start = outer[e0].first;
+        uint32_t cur = outer[e0].second;
+        walk.assign(1, start);
+        float len = (rm.v[cur] - rm.v[start]).length();
+        bool closed = false;
+        while (walk.size() <= outer.size()) {
+            if (cur == start) { closed = true; break; }
+            walk.push_back(cur);
+            uint32_t nx = ~0u;
+            for (uint32_t k = bo[cur]; k < bo[cur + 1]; k++)
+                if (!used[be[k]]) { used[be[k]] = 1; nx = bn[k]; break; }
+            if (nx == ~0u) break;
+            len += (rm.v[nx] - rm.v[cur]).length();
+            cur = nx;
+        }
+        if (!closed || walk.size() < 3) continue;
+        rm.rim.insert(rm.rim.end(), walk.begin(), walk.end());
+        rm.rim_off.push_back((uint32_t)rm.rim.size());
+        rim_len.push_back(len);
+    }
+    // Pieces: vertices joined by faces (union-find). Each piece's longest rim is its
+    // outer edge; every other rim of it is a hole.
+    std::vector<uint32_t> up(nv);
+    for (uint32_t i = 0; i < nv; i++) up[i] = i;
+    auto root = [&](uint32_t x) { while (up[x] != x) x = up[x] = up[up[x]]; return x; };
+    for (size_t f = 0; f < rm.face_count(); f++) {
+        const uint32_t* q = rm.face(f);
+        for (uint32_t k = 1; k < rm.face_size(f); k++) up[root(q[k])] = root(q[0]);
+    }
+    const uint32_t nr = (uint32_t)rim_len.size();
+    rm.rim_hole.assign(nr, 1);
+    std::vector<uint32_t> longest(nv, ~0u);   // per piece root: its longest rim
+    for (uint32_t r = 0; r < nr; r++) {
+        uint32_t& l = longest[root(rm.rim[rm.rim_off[r]])];
+        if (l == ~0u || rim_len[r] > rim_len[l]) l = r;
+    }
+    for (uint32_t r = 0; r < nr; r++)
+        if (longest[root(rm.rim[rm.rim_off[r]])] == r) rm.rim_hole[r] = 0;
 }
 
 // A stroke across x = 0 (a mouth) with mirror on: keep its longest run on one side, cut
@@ -2376,6 +2513,388 @@ const char* retopo_bridge(RetopoState& st, const Mesh& m, const Camera& cam, int
                 to_id ? (to_id == from_id ? "within one island" : "two islands joined") : "loose strip",
                 n, q, wA, wB, twin == 1 ? ", its own twin" : twin == 2 ? ", twin built" : "");
     return nullptr;
+}
+
+// ---- Fill --------------------------------------------------------------------------
+
+namespace {
+// The aim starts this far above the rim (x its size: an eyeball can bulge out past it)
+// and reaches this far below (a socket deeper than its opening is wide is rare).
+constexpr float kFillAbove = 0.25f, kFillBelow = 1.5f;
+// Rims with this many sides or more get a ring of quads inside before the grid.
+constexpr int kFillRingMin = 12;
+}  // namespace
+
+int retopo_fill(RetopoState& st, const Mesh& m, bool mirror, int& rims, int& odd) {
+    rims = odd = 0;
+    RetopoMesh& rm = st.result;
+    const uint32_t nr = rm.rim_count();
+    if (!st.built || nr == 0) return 0;
+    auto rim_n = [&](uint32_t r) { return rm.rim_off[r + 1] - rm.rim_off[r]; };
+    auto rim_v = [&](uint32_t r, uint32_t k) { return rm.rim[rm.rim_off[r] + k % rim_n(r)]; };
+
+    // Which rims: the picked loops that are whole outlines, else every hole. Hidden
+    // islands' rims stay as they are.
+    std::vector<uint8_t> want(nr, 0);
+    bool picked = false;
+    if (!st.loop_edges.empty()) {
+        std::vector<uint64_t> sel;
+        for (size_t i = 0; i + 1 < st.loop_edges.size(); i += 2)
+            sel.push_back(edge_key(st.loop_edges[i], st.loop_edges[i + 1]));
+        std::sort(sel.begin(), sel.end());
+        for (uint32_t r = 0; r < nr; r++) {
+            bool all = true;
+            for (uint32_t k = 0; k < rim_n(r) && all; k++)
+                all = std::binary_search(sel.begin(), sel.end(), edge_key(rim_v(r, k), rim_v(r, k + 1)));
+            want[r] = all;
+            picked |= all;
+        }
+    }
+    if (!picked)
+        for (uint32_t r = 0; r < nr; r++) want[r] = rm.rim_hole[r];
+    for (uint32_t r = 0; r < nr; r++)
+        for (uint32_t k = 0; k < rim_n(r) && want[r]; k++)
+            if (st.hidden(rm.v_owner[rim_v(r, k)])) want[r] = 0;
+
+    // Mirror: each rim's twin (its vertices' twins, all in one rim of the same size).
+    // A rim that is its own twin straddles x = 0.
+    std::vector<uint32_t> rim_of(rm.v.size(), ~0u), twin(nr, ~0u);
+    for (uint32_t r = 0; r < nr; r++)
+        for (uint32_t k = 0; k < rim_n(r); k++) rim_of[rim_v(r, k)] = r;
+    if (mirror && rm.mirror.size() == rm.v.size())
+        for (uint32_t r = 0; r < nr; r++) {
+            const uint32_t t0 = rm.mirror[rim_v(r, 0)];
+            const uint32_t t = t0 < rim_of.size() ? rim_of[t0] : ~0u;
+            bool ok = t != ~0u && rim_n(t) == rim_n(r);
+            for (uint32_t k = 0; k < rim_n(r) && ok; k++) {
+                const uint32_t w = rm.mirror[rim_v(r, k)];
+                ok = w < rim_of.size() && rim_of[w] == t;
+            }
+            if (ok) twin[r] = t;
+        }
+    // A twin pair is filled once, from the side found first; the other is its
+    // reflection (picking either side fills both).
+    for (uint32_t r = 0; r < nr; r++)
+        if (twin[r] != ~0u && twin[r] > r && want[r]) want[twin[r]] = 0;
+    for (uint32_t r = 0; r < nr; r++)
+        if (want[r] && rim_n(r) % 2) { odd++; want[r] = 0; }
+    uint32_t todo = 0;
+    for (uint32_t r = 0; r < nr; r++) todo += want[r];
+    if (!todo) return 0;
+
+    // Each rim's facing: its area normal (Newell), turned to agree with the vertices'
+    // own normals, and its size. The inside is aimed down this normal onto the sculpt,
+    // not to the nearest surface: across a deep socket the nearest surface is the wall
+    // just under the rim, and everything would pile up there.
+    auto rim_facing = [&](uint32_t rr, Vec3& cen, float& diam) {
+        Vec3 nw(0, 0, 0), ns(0, 0, 0);
+        cen = Vec3(0, 0, 0);
+        const uint32_t n = rim_n(rr);
+        for (uint32_t k = 0; k < n; k++) {
+            const Vec3 a = rm.v[rim_v(rr, k)], b = rm.v[rim_v(rr, k + 1)];
+            nw = nw + Vec3((a.y - b.y) * (a.z + b.z), (a.z - b.z) * (a.x + b.x), (a.x - b.x) * (a.y + b.y));
+            ns = ns + rm.n[rim_v(rr, k)];
+            cen = cen + a;
+        }
+        cen = cen * (1.0f / (float)n);
+        diam = 0.0f;
+        for (uint32_t k = 0; k < n; k++) diam = std::max(diam, 2.0f * (rm.v[rim_v(rr, k)] - cen).length());
+        if (nw.length() < 1e-12f) nw = ns;
+        if (nw.dot(ns) < 0.0f) nw = nw * -1.0f;
+        return nw.normalized();
+    };
+
+    // The snap grid over every rim being filled (and its twin), deep enough for the aim.
+    SnapGrid g;
+    float edge = 0.0f;
+    {
+        Vec3 lo(1e30f, 1e30f, 1e30f), hi(-1e30f, -1e30f, -1e30f);
+        auto grow = [&](Vec3 p) {
+            lo = {std::min(lo.x, p.x), std::min(lo.y, p.y), std::min(lo.z, p.z)};
+            hi = {std::max(hi.x, p.x), std::max(hi.y, p.y), std::max(hi.z, p.z)};
+        };
+        int ne = 0;
+        for (uint32_t r = 0; r < nr; r++) {
+            if (!want[r]) continue;
+            for (uint32_t rr : {r, twin[r]}) {
+                if (rr == ~0u) continue;
+                Vec3 cen;
+                float diam;
+                const Vec3 nf = rim_facing(rr, cen, diam);
+                for (uint32_t k = 0; k < rim_n(rr); k++) {
+                    const Vec3 p = rm.v[rim_v(rr, k)];
+                    grow(p);
+                    grow(p + nf * (kFillAbove * diam));
+                    grow(p - nf * (kFillBelow * diam));
+                    edge += (rm.v[rim_v(rr, k + 1)] - p).length();
+                    ne++;
+                }
+            }
+        }
+        edge /= (float)std::max(1, ne);
+        const float pad = edge * 3.0f;
+        lo = lo - Vec3(pad, pad, pad);
+        hi = hi + Vec3(pad, pad, pad);
+        const float ext = std::max({hi.x - lo.x, hi.y - lo.y, hi.z - lo.z});
+        g.build(m, lo, hi, std::max(edge * 0.5f, ext / 96.0f));
+    }
+    auto snap = [&](Vec3 p, Vec3& nn) {
+        Vec3 r;
+        if (g.closest(p, r, nn, 8)) return r;
+        nn = Vec3(0, 0, 0);
+        return p;
+    };
+    auto refl = [](Vec3 v) { v.x = -v.x; return v; };
+
+    st.checkpoint();
+    std::vector<uint32_t> touched;
+    std::vector<Vec3> L;
+    std::vector<uint32_t> Li, Ri, c;
+    int made = 0;
+    for (uint32_t r = 0; r < nr; r++) {
+        if (!want[r]) continue;
+        const int N = (int)rim_n(r), h = N / 2;
+        Ri.resize(N);
+        for (int k = 0; k < N; k++) Ri[k] = rim_v(r, k);
+        for (uint32_t k : Ri) touched.push_back(rm.v_owner[k]);
+        const bool self = twin[r] == r;
+        // Its own twin: the reflection maps rim vertex k to vertex (t - k) mod N.
+        int t = 0;
+        if (self) for (int k = 0; k < N; k++) if (Ri[k] == rm.mirror[Ri[0]]) t = k;
+        auto md = [&](int k) { return ((k % N) + N) % N; };
+        Vec3 cen;
+        float diam;
+        const Vec3 nf = rim_facing(r, cen, diam);
+        const uint32_t owner = rm.v_owner[Ri[0]];
+        const uint32_t first_new = (uint32_t)rm.v.size();
+        auto add_vertex = [&](Vec3 p, Vec3 nn) {
+            rm.v.push_back(p);
+            rm.n.push_back(nn.length() > 0.5f ? nn : nf);
+            rm.v_owner.push_back(owner);
+            rm.mirror.push_back(~0u);
+            return (uint32_t)rm.v.size() - 1;
+        };
+        // Down the rim's facing from a little above the rim, onto the first surface
+        // that faces back (the socket's floor, or an eyeball that bulges out past the
+        // rim); nearest surface only if the aim finds none.
+        auto aim = [&](Vec3 p, Vec3& nn) {
+            Vec3 hit, hn;
+            const float up = kFillAbove * diam;
+            if (g.ray(p + nf * up, nf * -1.0f, up + kFillBelow * diam, hit, hn)) { nn = hn; return hit; }
+            return snap(p, nn);
+        };
+
+        // The ring: one loop of quads just inside the rim, each vertex walked across
+        // the surface (snapped and re-stretched to a rim edge's length, like Build's
+        // spokes) so it hugs a socket's wall instead of jumping to its floor. The grid
+        // then fills what's left: its four corners sit inside, off the rim.
+        const bool ring = N >= kFillRingMin;
+        float rim_edge = 0.0f;
+        for (int k = 0; k < N; k++) rim_edge += (rm.v[Ri[md(k + 1)]] - rm.v[Ri[k]]).length();
+        rim_edge /= (float)N;
+        Li = Ri;
+        if (ring) {
+            for (int k = 0; k < N; k++) {
+                const Vec3 p = rm.v[Ri[k]];
+                const Vec3 tg = rm.v[Ri[md(k + 1)]] - rm.v[Ri[md(k - 1)]];
+                Vec3 in = nf.cross(tg).normalized();
+                if (in.dot(cen - p) < 0.0f) in = in * -1.0f;
+                // A rim edge in, but never near the middle: a narrow hole's two sides
+                // would cross.
+                Vec3 off = cen - p;
+                off = off - nf * off.dot(nf);
+                const float step = std::min(rim_edge, 0.45f * off.length());
+                Vec3 q = p + in * step, nn;
+                for (int it = 0; it < 3; it++) {
+                    q = snap(q, nn);
+                    const Vec3 d = q - p;
+                    if (d.length() < 1e-9f) break;
+                    q = p + d.normalized() * step;
+                }
+                q = snap(q, nn);
+                Li[k] = add_vertex(q, nn);
+            }
+        }
+        L.resize(N);
+        for (int k = 0; k < N; k++) L[k] = rm.v[Li[k]];
+
+        // Corners: four where the loop turns most, opposite sides the same count (m, n,
+        // m, n), quads as near square as the side lengths allow.
+        std::vector<float> turn(N), arc(N + 1, 0.0f);
+        for (int k = 0; k < N; k++) {
+            const Vec3 a = (L[k] - L[md(k - 1)]).normalized(), b = (L[md(k + 1)] - L[k]).normalized();
+            turn[k] = 1.0f - a.dot(b);
+            arc[k + 1] = arc[k] + (L[md(k + 1)] - L[k]).length();
+        }
+        auto span = [&](int a, int n) {   // length from vertex a, n sides on
+            const int b = a + n;
+            return b <= N ? arc[b] - arc[a] : arc[N] - arc[a] + arc[b - N];
+        };
+        int bs = 0, bm = std::max(1, h / 2);
+        float best = -1e30f;
+        for (int s = 0; s < h; s++)
+            for (int mm = 1; mm < h; mm++) {
+                const int nn = h - mm;
+                const int cs[4] = {s, md(s + mm), md(s + h), md(s + h + mm)};
+                if (self) {
+                    bool sym = true;
+                    for (int a = 0; a < 4 && sym; a++) {
+                        const int w = md(t - cs[a]);
+                        sym = w == cs[0] || w == cs[1] || w == cs[2] || w == cs[3];
+                    }
+                    if (!sym) continue;
+                }
+                const float s1 = span(cs[0], mm), s2 = span(cs[1], nn), s3 = span(cs[2], mm), s4 = span(cs[3], nn);
+                const float aspect = std::fabs(std::log(((s1 + s3) / mm) / std::max(1e-9f, (s2 + s4) / nn)));
+                const float score = turn[cs[0]] + turn[cs[1]] + turn[cs[2]] + turn[cs[3]] - 0.5f * aspect
+                                  - 0.25f * (std::fabs(std::log(s1 / std::max(1e-9f, s3))) + std::fabs(std::log(s2 / std::max(1e-9f, s4))));
+                if (score > best) { best = score; bs = s; bm = mm; }
+            }
+        const int M = bm, Nn = h - bm;   // grid: M quads one way, Nn the other
+
+        // Grid (M + 1) x (Nn + 1): its outside is the loop, from corner bs round.
+        // bottom (i, 0) = L[bs + i], right (M, j) = L[bs + M + j],
+        // top (i, Nn) = L[bs + h + (M - i)], left (0, j) = L[bs + h + M + (Nn - j)].
+        const int GW = M + 1, GH = Nn + 1;
+        std::vector<uint32_t> gi(GW * GH, ~0u);
+        auto G = [&](int i, int j) -> uint32_t& { return gi[j * GW + i]; };
+        for (int i = 0; i <= M; i++) { G(i, 0) = Li[md(bs + i)]; G(i, Nn) = Li[md(bs + h + (M - i))]; }
+        for (int j = 0; j <= Nn; j++) { G(M, j) = Li[md(bs + M + j)]; G(0, j) = Li[md(bs + h + M + (Nn - j))]; }
+        // Inside: Coons (each point blended from the four sides, minus the corners'
+        // double count), aimed down the rim's facing onto the sculpt.
+        const Vec3 P00 = rm.v[G(0, 0)], P10 = rm.v[G(M, 0)], P01 = rm.v[G(0, Nn)], P11 = rm.v[G(M, Nn)];
+        for (int j = 1; j < Nn; j++)
+            for (int i = 1; i < M; i++) {
+                const float u = (float)i / M, v = (float)j / Nn;
+                const Vec3 p = rm.v[G(i, 0)] * (1 - v) + rm.v[G(i, Nn)] * v
+                             + rm.v[G(0, j)] * (1 - u) + rm.v[G(M, j)] * u
+                             - (P00 * ((1 - u) * (1 - v)) + P10 * (u * (1 - v)) + P01 * ((1 - u) * v) + P11 * (u * v));
+                Vec3 nn;
+                const Vec3 q = aim(p, nn);
+                G(i, j) = add_vertex(q, nn);
+            }
+        // Relax: each inside vertex toward its four neighbours' middle, but only along
+        // the surface (the part along its normal dropped), then back onto it. A plain
+        // average would lift the floor of a socket toward the rim, and the nearest
+        // surface from there is the wall again.
+        std::vector<Vec3> tmp(GW * GH);
+        for (int pass = 0; pass < 4 && M > 1 && Nn > 1; pass++) {
+            for (int j = 1; j < Nn; j++)
+                for (int i = 1; i < M; i++) {
+                    const Vec3 p = rm.v[G(i, j)], n = rm.n[G(i, j)];
+                    Vec3 d = (rm.v[G(i - 1, j)] + rm.v[G(i + 1, j)] + rm.v[G(i, j - 1)] + rm.v[G(i, j + 1)]) * 0.25f - p;
+                    d = d - n * d.dot(n);
+                    tmp[j * GW + i] = p + d;
+                }
+            for (int j = 1; j < Nn; j++)
+                for (int i = 1; i < M; i++) {
+                    Vec3 nn;
+                    rm.v[G(i, j)] = snap(tmp[j * GW + i], nn);
+                    if (nn.length() > 0.5f) rm.n[G(i, j)] = nn;
+                }
+        }
+        // Its own twin: pair the new vertices with their reflections and even them out
+        // (ring and grid are symmetric, the corners were chosen so); on the seam, x = 0.
+        if (self) {
+            const uint32_t end = (uint32_t)rm.v.size();
+            for (uint32_t x = first_new; x < end; x++) {
+                if (rm.mirror[x] != ~0u) continue;
+                uint32_t y = x;
+                float bd = 1e30f;
+                for (uint32_t z = first_new; z < end; z++) {
+                    if (rm.mirror[z] != ~0u && z != x) continue;
+                    const Vec3 d = rm.v[z] - refl(rm.v[x]);
+                    if (d.dot(d) < bd) { bd = d.dot(d); y = z; }
+                }
+                if (y == x) { rm.v[x].x = 0.0f; rm.mirror[x] = x; continue; }
+                const Vec3 mid = (rm.v[x] + refl(rm.v[y])) * 0.5f;
+                rm.v[x] = mid; rm.v[y] = refl(mid); rm.n[y] = refl(rm.n[x]);
+                rm.mirror[x] = y; rm.mirror[y] = x;
+            }
+        }
+        // Wound against the face already on the rim: a shared side runs opposite ways
+        // in its two faces. The ring's quad k has the side R[k] -> R[k + 1]; the grid's
+        // (0, 0) has L[bs] -> L[bs + 1], the same way round as the ring's inner side
+        // runs the other way, so one flip suits both.
+        bool flip = false;
+        for (size_t f = 0; f < rm.face_count() && !flip; f++) {
+            const int k = face_corners(rm, f, c);
+            for (int i = 0; i < k; i++) if (c[i] == Ri[0] && c[(i + 1) % k] == Ri[1]) flip = true;
+        }
+        const uint32_t first_face = rm.face_count();
+        if (ring)
+            for (int k = 0; k < N; k++) {
+                uint32_t q[4] = {Ri[k], Ri[md(k + 1)], Li[md(k + 1)], Li[k]};
+                if (flip) std::reverse(q, q + 4);
+                rm.add_face(q, 4, owner);
+            }
+        for (int j = 0; j < Nn; j++)
+            for (int i = 0; i < M; i++) {
+                uint32_t q[4] = {G(i, j), G(i + 1, j), G(i + 1, j + 1), G(i, j + 1)};
+                if (flip) std::reverse(q, q + 4);
+                rm.add_face(q, 4, owner);
+            }
+        const int nq = M * Nn + (ring ? N : 0);
+        made += nq;
+        rims++;
+        std::printf("[retopo] fill: rim of %d sides -> %s%d x %d grid, %d quads (depth %.3f of %.3f across)%s\n",
+                    N, ring ? "ring + " : "", M, Nn, nq,
+                    [&] { float dmax = 0; for (uint32_t x = first_new; x < rm.v.size(); x++)
+                              dmax = std::max(dmax, (cen - rm.v[x]).dot(nf)); return dmax; }(), diam,
+                    self ? ", its own twin" : twin[r] != ~0u ? ", twin too" : "");
+
+        // A separate twin: its fill is this one reflected, vertex by vertex.
+        if (twin[r] != ~0u && !self) {
+            for (uint32_t k : Ri) touched.push_back(rm.v_owner[rm.mirror[k]]);
+            const uint32_t end = (uint32_t)rm.v.size();
+            std::vector<uint32_t> tw(end - first_new, ~0u);
+            auto tw_of = [&](uint32_t v) {
+                if (v < first_new) return rm.mirror[v];
+                uint32_t& w = tw[v - first_new];
+                if (w == ~0u) {
+                    w = (uint32_t)rm.v.size();
+                    rm.v.push_back(refl(rm.v[v]));
+                    rm.n.push_back(refl(rm.n[v]));
+                    rm.v_owner.push_back(rm.v_owner[rm.mirror[Ri[0]]]);
+                    rm.mirror.push_back(v);
+                    rm.mirror[v] = w;
+                }
+                return w;
+            };
+            const uint32_t nface = rm.face_count();
+            for (uint32_t f = first_face; f < nface; f++) {
+                const uint32_t* q = rm.face(f);
+                const uint32_t t4[4] = {tw_of(q[3]), tw_of(q[2]), tw_of(q[1]), tw_of(q[0])};
+                rm.add_face(t4, 4, rm.v_owner[rm.mirror[Ri[0]]]);
+            }
+            made += nq;
+            rims++;
+        }
+    }
+
+    // One piece now: every island round a filled rim joins the oldest of them, and it's
+    // geometry (frozen) from here on.
+    std::sort(touched.begin(), touched.end());
+    touched.erase(std::unique(touched.begin(), touched.end()), touched.end());
+    uint32_t keep = ~0u;
+    for (uint32_t id : touched) if (st.find(id)) keep = std::min(keep, id);
+    if (keep != ~0u) {
+        for (uint32_t id : touched) if (RetopoStroke* s = st.find(id)) s->frozen = true;
+        for (std::vector<uint32_t>* ow : {&rm.face_owner, &rm.v_owner, &rm.edge_owner})
+            for (uint32_t& o : *ow) if (std::binary_search(touched.begin(), touched.end(), o)) o = keep;
+        bool vis = false, sel = false;
+        for (const RetopoStroke& s : st.strokes)
+            if (s.id != keep && std::binary_search(touched.begin(), touched.end(), s.id)) { vis |= s.visible; sel |= s.selected; }
+        st.strokes.erase(std::remove_if(st.strokes.begin(), st.strokes.end(), [&](const RetopoStroke& s) {
+            return s.id != keep && std::binary_search(touched.begin(), touched.end(), s.id);
+        }), st.strokes.end());
+        if (RetopoStroke* k = st.find(keep)) { k->visible |= vis; k->selected |= sel; }
+    }
+    st.loop_edges.clear();
+    rebuild_edges(rm);
+    std::printf("[retopo] fill: %d rim(s), %d quads, %d odd rim(s) left; %u holes remain\n",
+                rims, made, odd, (uint32_t)std::count(rm.rim_hole.begin(), rm.rim_hole.end(), 1));
+    return made;
 }
 
 bool retopo_export_obj(const RetopoMesh& rm, const char* path) {
