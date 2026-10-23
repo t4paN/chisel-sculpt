@@ -40,41 +40,104 @@ bool RetopoState::finish_live(int rings, float density) {
     // The fresh stroke is the selection: the sliders tune it straight away.
     for (RetopoStroke& o : strokes) o.selected = false;
     s.selected = true;
+    checkpoint();
     s.id = next_id++;
     char nm[32];
     std::snprintf(nm, sizeof(nm), "%s %u", s.closed ? "Donut" : "Strip", s.id);
     s.name = nm;
     strokes.push_back(std::move(s));
-    redo.clear();
-    can_undo_cut = false;
     return true;
 }
 
-void RetopoState::undo() {
-    if (strokes.empty()) return;
-    redo.push_back(std::move(strokes.back()));
-    strokes.pop_back();
-    // Its quads go with it; brought back, it is a sketch again until the next Build.
-    redo.back().frozen = false;
-    redo.back().selected = false;
-    prune();
+// ---- History -----------------------------------------------------------------------
+
+size_t RetopoSnapshot::bytes() const {
+    size_t b = result.v.size() * (2 * sizeof(Vec3) + 3 * sizeof(uint32_t) + 3)
+             + result.quads.size() * sizeof(uint32_t) * 2
+             + result.edges.size() * sizeof(uint32_t) * 3;
+    for (const RetopoStroke& k : strokes) b += k.pts.size() * (2 * sizeof(Vec3) + sizeof(float)) + 128;
+    return b;
 }
 
-bool RetopoState::undo_cut() {
-    if (!can_undo_cut) return false;
-    can_undo_cut = false;
-    result = std::move(before_cut);
-    before_cut.clear();
-    for (uint32_t id : cut_froze)
-        if (RetopoStroke* s = find(id)) s->frozen = false;
-    built = !result.quads.empty();
+namespace {
+// Plenty for a session of retopo; the byte cap keeps a huge one inside the web build's heap.
+constexpr size_t kHistorySteps = 64;
+constexpr size_t kHistoryBytes = 64u << 20;
+
+RetopoSnapshot snapshot_of(const RetopoState& st) {
+    RetopoSnapshot s;
+    s.strokes = st.strokes;
+    s.result = st.result;
+    s.built = st.built;
+    s.next_id = st.next_id;
+    return s;
+}
+
+void push_capped(std::vector<RetopoSnapshot>& stack, RetopoSnapshot&& s) {
+    stack.push_back(std::move(s));
+    size_t total = 0;
+    for (const RetopoSnapshot& x : stack) total += x.bytes();
+    size_t drop = 0;
+    while (stack.size() - drop > 1 && (stack.size() - drop > kHistorySteps || total > kHistoryBytes))
+        total -= stack[drop++].bytes();
+    stack.erase(stack.begin(), stack.begin() + drop);
+}
+
+// Put a step back, keeping what isn't history: the eyes and the selection stay as the
+// user has them now (a stroke that comes back gets its own from back then).
+void restore(RetopoState& st, RetopoSnapshot&& s) {
+    for (RetopoStroke& k : s.strokes)
+        if (const RetopoStroke* now = st.find(k.id)) { k.visible = now->visible; k.selected = now->selected; }
+    st.strokes = std::move(s.strokes);
+    st.result = std::move(s.result);
+    st.built = s.built;
+    st.next_id = std::max(st.next_id, s.next_id);   // ids are never reused
+}
+}  // namespace
+
+void RetopoState::checkpoint(int tag) {
+    if (tag != 0 && tag == last_tag) return;
+    last_tag = tag;
+    push_capped(undo_stack, snapshot_of(*this));
+    redo_stack.clear();
+}
+
+void RetopoState::begin_edit() {
+    pending = snapshot_of(*this);
+    has_pending = true;
+}
+
+void RetopoState::end_edit() {
+    if (!has_pending) return;
+    has_pending = false;
+    const RetopoMesh& a = pending.result;
+    const bool same = a.quads == result.quads && a.v.size() == result.v.size()
+                   && std::equal(a.v.begin(), a.v.end(), result.v.begin(),
+                                 [](const Vec3& l, const Vec3& r) { return l.x == r.x && l.y == r.y && l.z == r.z; });
+    if (!same) {
+        last_tag = 0;
+        push_capped(undo_stack, std::move(pending));
+        redo_stack.clear();
+    }
+    pending = RetopoSnapshot{};
+}
+
+bool RetopoState::undo() {
+    if (undo_stack.empty()) return false;
+    last_tag = 0;
+    push_capped(redo_stack, snapshot_of(*this));
+    restore(*this, std::move(undo_stack.back()));
+    undo_stack.pop_back();
     return true;
 }
 
-void RetopoState::redo_one() {
-    if (redo.empty()) return;
-    strokes.push_back(std::move(redo.back()));
-    redo.pop_back();
+bool RetopoState::redo() {
+    if (redo_stack.empty()) return false;
+    last_tag = 0;
+    push_capped(undo_stack, snapshot_of(*this));
+    restore(*this, std::move(redo_stack.back()));
+    redo_stack.pop_back();
+    return true;
 }
 
 const char* RetopoState::click_select(uint32_t id, bool add) {
@@ -94,8 +157,9 @@ const char* RetopoState::click_select(uint32_t id, bool add) {
 }
 
 void RetopoState::clear_all() {
-    // Clear goes onto the redo stack in reverse, so Ctrl+Shift+Z can walk them back.
-    while (!strokes.empty()) undo();
+    if (strokes.empty() && result.quads.empty()) return;
+    checkpoint();   // one Ctrl+Z brings it all back
+    strokes.clear();
     result.clear();
     built = false;
 }
@@ -708,7 +772,6 @@ void extract(const RetopoMesh& src, RetopoMesh& dst, Keep keep) {
 
 double retopo_build(RetopoState& st, const Mesh& m, bool mirror) {
     const auto t0 = std::chrono::steady_clock::now();
-    st.can_undo_cut = false;
 
     // Frozen strokes' quads are carried over untouched (still editable by Grab and
     // Smooth, just out of reach of rings and density); everything else is rebuilt.
@@ -875,7 +938,6 @@ uint32_t retopo_pick(const RetopoState& st, const Camera& cam, int win_w, int wi
 // ---- Prune, freeze, weld ---------------------------------------------------------
 
 void RetopoState::prune() {
-    can_undo_cut = false;
     RetopoMesh keep;
     extract(result, keep, [&](uint32_t owner) { return find(owner) != nullptr; });
     result = std::move(keep);
@@ -1036,7 +1098,6 @@ float ring_weight(const Camera& cam, int win_w, int win_h, float cx, float cy, f
 }
 
 void retopo_edit_begin(RetopoState& st, const Mesh& m) {
-    st.can_undo_cut = false;
     const RetopoMesh& rm = st.result;
     if (rm.v.empty() || m.tri_count() == 0) return;
     Vec3 lo(1e30f, 1e30f, 1e30f), hi(-1e30f, -1e30f, -1e30f);
@@ -1214,6 +1275,28 @@ void emit_piece(const RetopoMesh& rm, std::vector<uint32_t>& out, std::vector<ui
 
 uint64_t edge_key(uint32_t a, uint32_t b) { return ((uint64_t)std::min(a, b) << 32) | std::max(a, b); }
 
+// A face's corners, a triangle's repeated one (or a weld's) dropped. Returns how many.
+int face_corners(const RetopoMesh& rm, size_t f, uint32_t* c) {
+    const uint32_t* q = &rm.quads[f * 4];
+    int n = 0;
+    for (int k = 0; k < 4; k++)
+        if (n == 0 || q[k] != c[n - 1]) c[n++] = q[k];
+    if (n > 1 && c[n - 1] == c[0]) n--;
+    return n;
+}
+
+// Faces again from scratch after a face edit: edges from their sides, then topology.
+void rebuild_edges(RetopoMesh& rm) {
+    rm.edges.clear(); rm.edge_owner.clear();
+    for (size_t f = 0; f < rm.quad_owner.size(); f++)
+        for (int k = 0; k < 4; k++) {
+            const uint32_t a = rm.quads[f * 4 + k], b = rm.quads[f * 4 + (k + 1) % 4];
+            if (a != b) add_edge(rm, a, b, rm.quad_owner[f]);
+        }
+    dedupe_edges(rm);
+    build_topology(rm);
+}
+
 }  // namespace
 
 int retopo_cut(RetopoState& st, const Mesh& m, const Camera& cam, int win_w, int win_h,
@@ -1278,15 +1361,7 @@ int retopo_cut(RetopoState& st, const Mesh& m, const Camera& cam, int win_w, int
         return 0;
     }
 
-    // A face's corners, a triangle's repeated one (or a weld's) dropped. Returns how many.
-    auto corners = [&](size_t f, uint32_t* c) {
-        const uint32_t* q = &rm.quads[f * 4];
-        int n = 0;
-        for (int k = 0; k < 4; k++)
-            if (n == 0 || q[k] != c[n - 1]) c[n++] = q[k];
-        if (n > 1 && c[n - 1] == c[0]) n--;
-        return n;
-    };
+    auto corners = [&](size_t f, uint32_t* c) { return face_corners(rm, f, c); };
 
     // Mirror: each crossing's twin edge is cut at the same place. Where the line itself
     // crossed both sides (drawn over the seam), the earlier crossing leads and the other
@@ -1373,10 +1448,7 @@ int retopo_cut(RetopoState& st, const Mesh& m, const Camera& cam, int win_w, int
     }
     if (mirror) pair_twins(false);
 
-    // Before anything changes: what Ctrl+Z puts back.
-    st.before_cut = rm;
-    st.cut_froze.clear();
-    for (const RetopoStroke& s : st.strokes) if (!s.frozen) st.cut_froze.push_back(s.id);
+    st.checkpoint();   // before anything changes
 
     auto add_vertex = [&](Vec3 p, Vec3 n, uint32_t owner) {
         rm.v.push_back(p); rm.n.push_back(n);
@@ -1520,21 +1592,8 @@ int retopo_cut(RetopoState& st, const Mesh& m, const Camera& cam, int win_w, int
 
     // Edges again, from the faces: the cut sides are gone, their halves and the new
     // edges across are in.
-    rm.edges.clear(); rm.edge_owner.clear();
-    for (size_t f = 0; f < rm.quad_owner.size(); f++)
-        for (int k = 0; k < 4; k++) {
-            const uint32_t a = rm.quads[f * 4 + k], b = rm.quads[f * 4 + (k + 1) % 4];
-            if (a != b) add_edge(rm, a, b, rm.quad_owner[f]);
-        }
-    dedupe_edges(rm);
-    build_topology(rm);
+    rebuild_edges(rm);
     freeze_touched(st, touched);
-    // Only the strokes this cut froze go back to editable on Ctrl+Z.
-    st.cut_froze.erase(std::remove_if(st.cut_froze.begin(), st.cut_froze.end(), [&](uint32_t id) {
-        const RetopoStroke* s = st.find(id);
-        return !s || !s->frozen;
-    }), st.cut_froze.end());
-    st.can_undo_cut = true;
     std::printf("[retopo] cut: %zu edges, %d faces split, now %u faces\n",
                 cx.size(), split, rm.quad_count());
     return split;

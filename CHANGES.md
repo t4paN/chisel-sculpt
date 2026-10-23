@@ -2,6 +2,19 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-23 — Retopo mode: real undo
+
+*Built live with the user at the keyboard; user-tested.*
+
+Ctrl+Z / Ctrl+Shift+Z in mode 0 now walk **everything**: strokes, Build, slider drags (one
+step per drag), Grab, Smooth, Cut, trash and Clear. Never the sculpt. One history for all
+islands, not one each: welds, bridges and cuts share vertices between islands, so undoing
+one alone could tear its neighbour. Each step is a whole copy of retopo (strokes + quads),
+~100 KB for a typical session, in CPU memory: 64 steps / 64 MB cap. The GPU undo isn't
+involved; retopo never lives on the GPU. A Grab or Smooth press that moves nothing isn't a
+step. Eyes and selection aren't history: undo leaves them as they are. Replaces the
+stroke-only undo and Cut's one-level stopgap; the dock button is plain "Undo" now.
+
 ## 2026-10-23 — Retopo mode: Cut slices the built quads
 
 *Built live with the user at the keyboard; user-tested.*

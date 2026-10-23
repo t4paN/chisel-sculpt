@@ -2772,6 +2772,7 @@ int main(int argc, char* argv[]) {
                         input.drag_mode = InputState::DragMode::NONE;
                     } else {
                         scene.materialize_active_cpu();   // the snap re-reads mesh.pos
+                        retopo.begin_edit();
                         retopo_edit_begin(retopo, *mesh);
                         retopo_smoothing = true;
                     }
@@ -2793,6 +2794,7 @@ int main(int argc, char* argv[]) {
                         input.drag_mode = InputState::DragMode::NONE;
                     } else {
                         scene.materialize_active_cpu();
+                        retopo.begin_edit();
                         retopo_edit_begin(retopo, *mesh);
                         grab_x = (float)input.mouse_x;
                         grab_y = (float)input.mouse_y;
@@ -2877,7 +2879,12 @@ int main(int argc, char* argv[]) {
                 retopo.cut_pts.clear();
                 retopo.cut_nrm.clear();
             }
-            if (!retopo_press) retopo_smoothing = retopo_grabbing = false;
+            if (!retopo_press) {
+                if (retopo_smoothing || retopo_grabbing) retopo.end_edit();
+                retopo_smoothing = retopo_grabbing = false;
+            }
+            // A slider drag is one undo step; letting go ends it.
+            if (!input.mouse1_down) retopo.last_tag = 0;
 
             // A click (pressed and let go within a few pixels) picks an island: plain
             // selects only it, Ctrl adds or takes out, on nothing clears. Shift is Smooth's.
@@ -2924,24 +2931,20 @@ int main(int argc, char* argv[]) {
             // Ctrl+Z / Ctrl+Shift+Z walk the stroke list here, never the sculpt's
             // history: retopo doesn't touch the sculpt.
             if (retopo_on && (input.undo_requested || input.redo_requested)) {
-                if (input.undo_requested) {
-                    // The last cut first, if nothing has changed since; then strokes.
-                    if (retopo.undo_cut()) {
-                        std::snprintf(input.notification, sizeof(input.notification), "Cut undone");
-                        input.notification_timer = 1.5f;
-                    } else {
-                        retopo.undo();
-                    }
-                } else {
-                    retopo.redo_one();
+                const bool ok = input.undo_requested ? retopo.undo() : retopo.redo();
+                if (!ok) {
+                    std::snprintf(input.notification, sizeof(input.notification),
+                                  input.undo_requested ? "Nothing to undo" : "Nothing to redo");
+                    input.notification_timer = 1.2f;
                 }
                 input.undo_requested = input.redo_requested = false;
             }
             if (input.retopo_build_requested) {
                 input.retopo_build_requested = false;
                 scene.materialize_active_cpu();   // Build snaps onto mesh.pos
-                const double ms = retopo_build(retopo, *mesh, input.mirror_x);
                 const bool quiet = input.retopo_build_quiet;
+                if (!quiet) retopo.checkpoint();   // a slider took its step at the drag's start
+                const double ms = retopo_build(retopo, *mesh, input.mirror_x);
                 input.retopo_build_quiet = false;
                 if (quiet) {
                     // Slider drags rebuild every step: the bar's readout says enough.

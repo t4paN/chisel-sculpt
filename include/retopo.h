@@ -63,9 +63,19 @@ struct RetopoMesh {
     uint32_t quad_count() const { return (uint32_t)(quads.size() / 4); }
 };
 
+// One step of retopo history: everything an edit can change. Retopo is small (a few
+// thousand vertices), so a whole copy per step costs ~100 KB and can't drift the way a
+// diff can. Eyes and selection aren't history: undo leaves them as they are.
+struct RetopoSnapshot {
+    std::vector<RetopoStroke> strokes;
+    RetopoMesh result;
+    bool built = false;
+    uint32_t next_id = 1;
+    size_t bytes() const;
+};
+
 struct RetopoState {
     std::vector<RetopoStroke> strokes;
-    std::vector<RetopoStroke> redo;   // strokes taken back by Ctrl+Z, for Ctrl+Shift+Z
     RetopoStroke live;                // the stroke under the pen
     bool drawing = false;
     // Cut: a bare line on the surface (no band), under the pen while `cutting`.
@@ -83,7 +93,21 @@ struct RetopoState {
     // Pen-up: keep the stroke if it has enough to build on, decide donut vs strip.
     // Returns false (and drops it) for a tap.
     bool finish_live(int rings, float density);
-    void undo();
+    // History (Ctrl+Z / Ctrl+Shift+Z in mode 0, never the sculpt's), one stack for every
+    // island: welds, bridges and cuts share vertices between islands, so undoing one
+    // alone could tear its neighbour. checkpoint() before any change; `tag` != 0 folds
+    // repeats of the same change into one step (a slider drag) until the tag is reset.
+    std::vector<RetopoSnapshot> undo_stack, redo_stack;
+    int last_tag = 0;
+    void checkpoint(int tag = 0);
+    // Grab and Smooth: the press takes the step, the release keeps it only if the
+    // quads moved (a press on empty space isn't an undo step).
+    RetopoSnapshot pending;
+    bool has_pending = false;
+    void begin_edit();
+    void end_edit();
+    bool undo();
+    bool redo();
     // Drop the quads of strokes that no longer exist (trash, undo), right away rather
     // than at the next Build. Welded neighbours keep the vertices they share.
     void prune();
@@ -99,15 +123,7 @@ struct RetopoState {
         hidden_ids.assign(next_id, 0);
         for (const RetopoStroke& s : strokes) if (!s.visible && s.id < next_id) hidden_ids[s.id] = 1;
     }
-    void redo_one();
     void clear_all();
-    // The last cut, which Ctrl+Z takes back before it walks the strokes: the result
-    // before it, and the strokes it froze. Anything else that changes the result (a
-    // stroke, Build, Grab, Smooth, a trash) drops it, so it never lands on stale quads.
-    RetopoMesh before_cut;
-    std::vector<uint32_t> cut_froze;
-    bool can_undo_cut = false;
-    bool undo_cut();
     // Selection. A click picks one island (0 = clear); Ctrl adds or takes it out.
     // Frozen and editable islands never share a selection: returns a message saying so
     // and leaves the selection alone, else nullptr.

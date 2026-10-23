@@ -3758,6 +3758,7 @@ void retopo_sliders(InputState& input, RetopoState& st, float sh, float sgap, fl
     ImGui::EndGroup();
 
     if (dead || (rings == rings0 && density == density0 && width == width0)) return;
+    st.checkpoint(1);   // a whole drag is one undo step
     for (RetopoStroke& s : st.strokes) {
         if (!s.selected || s.frozen) continue;
         if (rings != rings0) s.rings = rings;
@@ -4009,6 +4010,7 @@ void draw_retopo_dock(InputState& input, RetopoState& st, int win_w, int win_h) 
         }
         ImGui::Dummy(ImVec2(0.0f, 0.0f));   // the cursor moves above count as the list's extent
         if (del >= 0) {
+            st.checkpoint();
             st.strokes.erase(st.strokes.begin() + del);
             st.prune();   // its quads go now, not at the next Build
         }
@@ -4024,11 +4026,11 @@ void draw_retopo_dock(InputState& input, RetopoState& st, int win_w, int win_h) 
     ImGui::SameLine(0.0f, 4.0f);
     if (chip("Clear", false, bh)) st.clear_all();
     if (ImGui::IsItemHovered()) tooltip(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), TipSide::Left,
-                                        "Remove every stroke (Ctrl+Shift+Z brings them back)", nullptr);
+                                        "Remove every stroke (Ctrl+Z brings them back)", nullptr);
     ImGui::SameLine();
     ImGui::SetCursorPosX(x0 + w - bh);
-    o.on = false; o.tip = "Undo stroke"; o.key = input.key_label(KeyAction::UNDO);
-    o.enabled = !st.strokes.empty();
+    o.on = false; o.tip = "Undo"; o.key = input.key_label(KeyAction::UNDO);
+    o.enabled = !st.undo_stack.empty();
     if (icon_button("rUndo", Icon::CmdUndo, bh, o)) st.undo();
     o.key = nullptr; o.enabled = true;
 
