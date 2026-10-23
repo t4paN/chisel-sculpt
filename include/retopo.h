@@ -36,17 +36,19 @@ struct RetopoStroke {
     std::string name;
 };
 
-// The low-poly result. Faces are 4 indices each, wound so their normal faces out of
-// the sculpt; a triangle (only Cut makes them) repeats its last corner: a, b, c, c.
+// The low-poly result. Faces have any number of corners: Build makes quads, Cut keeps
+// to quads where it can, the eraser merges faces into bigger ones. Face f's corners are
+// faces[face_off[f] .. face_off[f + 1]), wound so its normal faces out of the sculpt.
 // Edges are kept unique for the wireframe overlay.
 struct RetopoMesh {
     std::vector<Vec3>     v;
     std::vector<Vec3>     n;       // surface normal per vertex (overlay back-face test)
-    std::vector<uint32_t> quads;
+    std::vector<uint32_t> faces;
+    std::vector<uint32_t> face_off{0};  // face count + 1
     std::vector<uint32_t> edges;   // 2 per edge
     std::vector<uint32_t> edge_owner;  // per edge: the RetopoStroke::id it came from (twins share it)
     std::vector<uint32_t> v_owner;     // per vertex, the same (a welded vertex keeps the survivor's)
-    std::vector<uint32_t> quad_owner;  // per quad, the same
+    std::vector<uint32_t> face_owner;  // per face, the same
     // Per vertex, its mirror twin (built as its exact reflection), itself on the x = 0
     // seam, ~0u when it has none. Mirrored edits move pairs by this, never by position.
     std::vector<uint32_t> mirror;
@@ -56,11 +58,18 @@ struct RetopoMesh {
     std::vector<uint32_t> border_nb;   // 2 per vertex; ~0u for interior vertices
     std::vector<uint8_t>  pinned;
     void clear() {
-        v.clear(); n.clear(); quads.clear(); edges.clear(); edge_owner.clear();
-        v_owner.clear(); quad_owner.clear(); mirror.clear();
+        v.clear(); n.clear(); faces.clear(); face_off.assign(1, 0); edges.clear(); edge_owner.clear();
+        v_owner.clear(); face_owner.clear(); mirror.clear();
         nb_off.clear(); nb.clear(); border_nb.clear(); pinned.clear();
     }
-    uint32_t quad_count() const { return (uint32_t)(quads.size() / 4); }
+    void add_face(const uint32_t* p, int k, uint32_t owner) {
+        faces.insert(faces.end(), p, p + k);
+        face_off.push_back((uint32_t)faces.size());
+        face_owner.push_back(owner);
+    }
+    uint32_t face_count() const { return (uint32_t)face_owner.size(); }
+    uint32_t face_size(size_t f) const { return face_off[f + 1] - face_off[f]; }
+    const uint32_t* face(size_t f) const { return faces.data() + face_off[f]; }
 };
 
 // One step of retopo history: everything an edit can change. Retopo is small (a few
@@ -185,6 +194,14 @@ void retopo_grab_drag(RetopoState& st, const Camera& cam, int win_w, int win_h,
 int retopo_cut(RetopoState& st, const Mesh& m, const Camera& cam, int win_w, int win_h,
                bool mirror);
 
-// Write state.result as a quad OBJ (Cut's triangles as triangles). Returns false if there's nothing to write or the
-// file can't be opened.
+// Erase (E in mode 0): a round brush. Each dab takes the inner edge whose middle is
+// nearest the ring's centre (inside the ring; the island's outline stays): its two
+// faces become one, of any size. An end left as a point on a straight line dissolves,
+// so a whole support line erased gives its quads back. With mirror, the twin edge goes
+// too. Freezes what it touches. Returns edges removed.
+int retopo_erase_dab(RetopoState& st, const Camera& cam, int win_w, int win_h,
+                     float cx, float cy, float radius_px, bool mirror);
+
+// Write state.result as an OBJ, every face as it is (quads, triangles, bigger ones).
+// Returns false if there's nothing to write or the file can't be opened.
 bool retopo_export_obj(const RetopoMesh& rm, const char* path);

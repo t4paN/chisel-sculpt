@@ -1444,6 +1444,12 @@ void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
             input.clear_smooth_lock();
             input.retopo_tool = RT::CUT;
         }
+        o.on = !smooth_on && input.retopo_tool == RT::ERASE; o.tip = "Erase edges";
+        o.key = input.key_label(KeyAction::RETOPO_ERASE); o.corner = corner(KeyAction::RETOPO_ERASE);
+        if (icon_button("rErase", Icon::RetopoErase, kRailBtn, o)) {
+            input.clear_smooth_lock();
+            input.retopo_tool = RT::ERASE;
+        }
         o.on = !smooth_on && input.retopo_tool == RT::GRAB; o.tip = "Grab polygon strips";
         o.key = input.key_label(KeyAction::RETOPO_GRAB); o.corner = corner(KeyAction::RETOPO_GRAB);
         if (icon_button("rGrab", Icon::BrushMove, kRailBtn, o)) {
@@ -1941,10 +1947,13 @@ float brush_panel(InputState& input, int win_h) {
         const bool cutting = !smoothing && input.retopo_tool == InputState::RetopoTool::CUT;
         heading(smoothing ? "Smooth polygon strips"
                 : input.retopo_tool == InputState::RetopoTool::GRAB ? "Grab polygon strips"
+                : input.retopo_tool == InputState::RetopoTool::ERASE ? "Erase edges"
                 : cutting ? "Cut" : "Draw polygon strips", nullptr);
         // Cut draws a bare line: no width, so no Size either.
         if (cutting) hint("Drag a line across islands");
         else meter_widget("##mS", input, 0, w, k, !can_grow || big);
+        if (!smoothing && input.retopo_tool == InputState::RetopoTool::ERASE)
+            hint("The edge nearest the centre goes");
         if (drawing) {
             meter_widget("##mRings", input, 4, w, k, !can_grow || big);
             meter_widget("##mDensity", input, 5, w, k, !can_grow || big);
@@ -4039,12 +4048,12 @@ void draw_retopo_dock(InputState& input, RetopoState& st, int win_w, int win_h) 
     if (chip("Wire", st.show_result, bh)) st.show_result = !st.show_result;
     ImGui::SameLine();
     ImGui::SetCursorPosX(x0 + w - bh);
-    o.tip = "Export OBJ (quads)"; o.enabled = st.built;
+    o.tip = "Export OBJ"; o.enabled = st.built;
     if (icon_button("rExport", Icon::CmdExport, bh, o)) input.retopo_export_requested = true;
     o.enabled = true;
 
     char ro[48];
-    if (st.built) std::snprintf(ro, sizeof ro, "%u quads%s", st.result.quad_count(), input.mirror_x ? " \xC2\xB7 mirror X" : "");
+    if (st.built) std::snprintf(ro, sizeof ro, "%u faces%s", st.result.face_count(), input.mirror_x ? " \xC2\xB7 mirror X" : "");
     else          std::snprintf(ro, sizeof ro, "%s", input.mirror_x ? "not built \xC2\xB7 mirror X" : "not built");
     label_item(UiFont::Mono, 12.0f, kMuted, ro, 0.0f, 18.0f);
     foot_h = ImGui::GetCursorPosY() - fy0;

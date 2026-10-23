@@ -88,6 +88,8 @@ const IconDef kIcons[(int)Icon::Count] = {
     // straight up to the handle, which runs on back along the spine's line.
     /* RetopoCut    */ {{P("M4 7H21v3h-7v7a10 10 0 0 1-10-10z")}, 1},
     /* UiTrash      */ {{P("M4 7h16M9.5 7V4.5h5V7"), P("M6 7l1 13h10l1-13"), P("M10 11v5.5M14 11v5.5")}, 3},
+    // Drawn here: an eraser block tipped over, its rubber end bottom-left, on the line it rubs.
+    /* RetopoErase  */ {{P("M4 14L13 5l6 6-9 9z"), P("M8 10l6 6"), P("M10 20h10")}, 3},
 };
 
 // ---- Minimal SVG path interpreter -------------------------------------------
@@ -316,6 +318,7 @@ const unsigned short kPixel[(int)Icon::Count][16] = {
     /* retopo-pencil   */ {0x0000,0x001C,0x003E,0x007E,0x00FC,0x01F8,0x03F0,0x07E0,0x0FC0,0x1F80,0x3F00,0x3E00,0x7C00,0x6000,0x0000,0x0000},   // drawn here
     /* retopo-cut      */ {0x0000,0x0000,0x0000,0x0000,0xFFFE,0x7FFE,0x7FFE,0x7FC0,0x3FC0,0x3FC0,0x1FC0,0x0FC0,0x03C0,0x0000,0x0000,0x0000},   // drawn here: bougatsa knife
     /* ui-trash        */ {0x0000,0x03C0,0x3FFC,0x3FFC,0x1FF8,0x1998,0x1998,0x1998,0x1998,0x1998,0x1998,0x1998,0x1998,0x1FF8,0x0FF0,0x0000},   // drawn here
+    /* retopo-erase    */ {0x0000,0x0000,0x0000,0x0080,0x01C0,0x03E0,0x03F0,0x0DF0,0x1EE0,0x1F40,0x0F80,0x0700,0x0200,0x01FC,0x0000,0x0000},   // drawn here: tipped eraser
 };
 } // namespace
 

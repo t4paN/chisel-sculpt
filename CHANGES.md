@@ -2,6 +2,26 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-23 — Retopo mode: Erase (E), faces of any size
+
+*Built live with the user at the keyboard; user-tested.*
+
+- **Erase** on **E** (mode 0 only; E stays Next alpha elsewhere), rail button under Cut with
+  a tipped-eraser icon (DOS pixel version too), red ring, Size with S. A round brush: each
+  dab takes the one inner edge whose middle is nearest the ring's centre (inside the
+  ring), at the press and each time the pointer moves on; holding still takes nothing more.
+  The two faces either side become one, of any size. An end left as a point on a straight
+  line (within ~30°) dissolves, so erasing a whole support line gives the quads back; a
+  line left poking into the new face is folded away. The island's outline isn't erasable
+  (that would delete faces, not join them). Mirror erases the twin. Freezes what it
+  touches; a drag is one undo step.
+- **Faces of any size.** `RetopoMesh` stores polygons (`faces` + `face_off` +
+  `face_owner`) instead of 4-index quads; triangles are 3 corners now, not a, b, c, c.
+  Picking uses an even-odd test (merged faces needn't be convex), welds' bridge distance
+  fans each face, export writes every face as it is. Cut splits big faces too but only
+  keeps quads and triangles to quads (no support edges run through a big face).
+- Readouts say "faces"; the dock's export tip is plain "Export OBJ".
+
 ## 2026-10-23 — Retopo mode: real undo
 
 *Built live with the user at the keyboard; user-tested.*

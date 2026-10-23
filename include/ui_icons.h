@@ -17,6 +17,7 @@ enum class Icon {
     PaintBucket, PaintPicker,         // the paint dock's fill bucket and colour picker
     ModeRetopo,                       // a quad grid bent over a form
     RetopoPencil, RetopoCut, UiTrash, // mode 0's draw and cut tools; delete in lists
+    RetopoErase,                      // mode 0's eraser
     Count
 };
 

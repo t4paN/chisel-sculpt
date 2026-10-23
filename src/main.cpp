@@ -2761,6 +2761,7 @@ int main(int argc, char* argv[]) {
             // Decided at the press: letting go of Shift mid-drag doesn't start a stroke.
             static bool retopo_smoothing = false;
             static bool retopo_grabbing = false;
+            static bool retopo_erasing = false;
             const bool retopo_press = retopo_on && input.drag_mode == InputState::DragMode::RETOPO;
             if (retopo_press && !retopo.drawing
                 && (retopo_smoothing || input.is_smooth_active())) {
@@ -2806,6 +2807,29 @@ int main(int argc, char* argv[]) {
                 if (retopo_grabbing)
                     retopo_grab_drag(retopo, camera, win_w, win_h,
                                      (float)input.mouse_x - grab_x, (float)input.mouse_y - grab_y);
+            } else if (retopo_press && !retopo.drawing
+                       && (retopo_erasing || input.retopo_tool == InputState::RetopoTool::ERASE)) {
+                // Erase: a dab at the press and each time the pointer moves on. Holding
+                // still takes nothing more, so it only eats where it's led.
+                static float er_x = 0.0f, er_y = 0.0f;
+                const float mx = (float)input.mouse_x, my = (float)input.mouse_y;
+                if (!retopo_erasing) {
+                    if (!retopo.built) {
+                        std::snprintf(input.notification, sizeof(input.notification),
+                                      "Nothing to erase: Build first (Space)");
+                        input.notification_timer = 2.0f;
+                        input.drag_mode = InputState::DragMode::NONE;
+                    } else {
+                        retopo.begin_edit();
+                        retopo_erasing = true;
+                        er_x = mx - 1e3f;   // the press always dabs
+                    }
+                }
+                if (retopo_erasing && std::hypot(mx - er_x, my - er_y) >= 2.0f) {
+                    retopo_erase_dab(retopo, camera, win_w, win_h, mx, my, input.brush_size, input.mirror_x);
+                    er_x = mx;
+                    er_y = my;
+                }
             } else if (retopo_press && !retopo.drawing && !screen_buffers_dirty
                        && (retopo.cutting || input.retopo_tool == InputState::RetopoTool::CUT)) {
                 // Cut: a bare line on the surface, sampled like a stroke, no band.
@@ -2880,8 +2904,8 @@ int main(int argc, char* argv[]) {
                 retopo.cut_nrm.clear();
             }
             if (!retopo_press) {
-                if (retopo_smoothing || retopo_grabbing) retopo.end_edit();
-                retopo_smoothing = retopo_grabbing = false;
+                if (retopo_smoothing || retopo_grabbing || retopo_erasing) retopo.end_edit();
+                retopo_smoothing = retopo_grabbing = retopo_erasing = false;
             }
             // A slider drag is one undo step; letting go ends it.
             if (!input.mouse1_down) retopo.last_tag = 0;
@@ -2950,7 +2974,7 @@ int main(int argc, char* argv[]) {
                     // Slider drags rebuild every step: the bar's readout says enough.
                 } else if (retopo.built)
                     std::snprintf(input.notification, sizeof(input.notification),
-                                  "Built %u quads (%.0f ms)", retopo.result.quad_count(), ms);
+                                  "Built %u faces (%.0f ms)", retopo.result.face_count(), ms);
                 else
                     std::snprintf(input.notification, sizeof(input.notification),
                                   "Nothing to build: sketch a stroke first");
@@ -4517,9 +4541,14 @@ int main(int argc, char* argv[]) {
                 // Cut draws a bare line: a small ring marks the tip, no band width to show.
                 const bool cut = input.retopo_tool == InputState::RetopoTool::CUT
                               && !input.is_smooth_active();
+                // The eraser's ring is red: it takes things away.
+                static const float kEraseRed[3] = {1.0f, 0.25f, 0.2f};
+                const bool erase = input.retopo_tool == InputState::RetopoTool::ERASE
+                                && !input.is_smooth_active();
                 renderer.draw_cursor(camera, cursor_x, cursor_y, cut ? 6.0f : input.brush_size,
                                      input.cursor_nx, input.cursor_ny, input.cursor_nz,
-                                     1.0f, 0.5f, win_w, win_h, input.on_model, kRetopoGreen);
+                                     1.0f, 0.5f, win_w, win_h, input.on_model,
+                                     erase ? kEraseRed : kRetopoGreen);
             } else if (input.color_pick_active) {
                 // Armed colour picker: eyedropper glyph instead of the brush
                 // ring — the ring's size/hardness reading is meaningless here.
