@@ -2,6 +2,24 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-23 — Retopo mode: next stroke in the tool dock, eyes that hide, green cursor
+
+*Built live with the user at the keyboard.*
+
+- **Next stroke** is planned in the tool dock (bottom left), under Draw polygon strips:
+  **S Size**, **A Rings**, **W Density**. Holding A or W and dragging steps them (a ring per
+  40 px, a tenth of density per 50 px) with the usual readout; in mode 0 those keys used to
+  move strength and hardness, which retopo doesn't use. A new stroke takes them and
+  Size x1.0 (its band is the brush Size as drawn). The "Next stroke" sliders left
+  Polygon Layers, and island sliders no longer rewrite what the next stroke gets.
+- **Width is Size** everywhere in mode 0. Island sliders and the footnote follow the tool
+  dock's order: Size, Rings, Density (`S: 1.0x | R: 3 | D: 0.6x`), the footnote 12 px and
+  centred under the name; the dock starts 24 px wider to fit it.
+- **The eye works:** white while shown, grey once hidden. A hidden island's band and
+  wireframe leave the model, and picking, Grab, Smooth and welds pass it by; hovering its
+  row still lights it. Build and Export still take it. Edited islands' eyes work too.
+- **Matrix-green cursor** (`#00FF41`) in mode 0: ring, shadow, centre cross and the Size bar.
+
 ## 2026-10-23 — Retopo mode: the bar becomes the Polygon Layers dock
 
 *Built live with the user at the keyboard; layout also checked on screenshots.*

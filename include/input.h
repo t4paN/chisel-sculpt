@@ -447,7 +447,8 @@ struct InputState {
     float density_fine_mult   = 0.5f;
 
     // Slider drag mode (S/W/A/O key held + dragging)
-    enum class SliderMode { NONE, SIZE, STRENGTH, HARDNESS, SPACING };
+    // RINGS / DENSITY: in retopo mode A and W drive the next stroke's settings instead.
+    enum class SliderMode { NONE, SIZE, STRENGTH, HARDNESS, SPACING, RINGS, DENSITY };
     SliderMode slider_mode;
     double slider_start_x;
     double slider_start_y;
@@ -667,6 +668,10 @@ struct InputState {
     // Mode 0's dock tool. Smooth isn't one of these: it rides Shift, as in sculpt.
     enum class RetopoTool { DRAW, GRAB };
     RetopoTool retopo_tool = RetopoTool::DRAW;
+    // What the next stroke gets (RetopoStroke has the meaning of each), set in the tool
+    // dock or by holding A / W. Its band is the brush Size as drawn, so no width here.
+    int   retopo_rings = 4;
+    float retopo_density = 1.0f;
     bool retopo_export_requested = false;
     // Which mode's shortcuts are live: Paint while painting (EDIT in paint mode), else
     // Sculpt (Insert and Select keep the sculpt keys, as before the split). Retopo has

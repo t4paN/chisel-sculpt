@@ -340,6 +340,14 @@ void draw_slider(TextOverlay& text, const InputState& input, int win_w, int win_
             sname = "Spacing";
             value = input.brush_spacing * 100.0f;
             break;
+        case InputState::SliderMode::RINGS:
+            sname = "Rings";
+            value = (float)(input.retopo_rings - 1) / 7.0f * 100.0f;
+            break;
+        case InputState::SliderMode::DENSITY:
+            sname = "Density";
+            value = (input.retopo_density - 0.1f) / 0.9f * 100.0f;
+            break;
         default: break;
     }
 
@@ -361,9 +369,14 @@ void draw_slider(TextOverlay& text, const InputState& input, int win_w, int win_
     text.draw_panel(bar_x, bar_y, bar_w * fill_pct, bar_h,
                    win_w, win_h, CGA(yellow), 0.9f);
 
-    std::snprintf(buf, sizeof(buf), "%s: %.0f%s",
-                 sname, value,
-                 input.slider_mode == InputState::SliderMode::SIZE ? "" : "%");
+    if (input.slider_mode == InputState::SliderMode::RINGS)
+        std::snprintf(buf, sizeof(buf), "%s: %d", sname, input.retopo_rings);
+    else if (input.slider_mode == InputState::SliderMode::DENSITY)
+        std::snprintf(buf, sizeof(buf), "%s: %.1fx", sname, input.retopo_density);
+    else
+        std::snprintf(buf, sizeof(buf), "%s: %.0f%s",
+                     sname, value,
+                     input.slider_mode == InputState::SliderMode::SIZE ? "" : "%");
     text.draw_text(buf, bar_x, bar_y - 20.0f, 2.0f,
                   win_w, win_h, CGA(yellow), 1.0f);
 }
@@ -2366,8 +2379,8 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
             const ImU32 line = s.selected ? IM_COL32(255, 255, 255, 255)
                              : s.closed ? IM_COL32(150, 235, 245, std::min(255, alpha * 3))
                                         : IM_COL32(255, 210, 150, std::min(255, alpha * 3));
-            // The live stroke has no settings yet: it shows what pen-up will give it.
-            const float w = &s == &st.live ? st.width : s.width;
+            // The live stroke has no settings yet: pen-up gives it 1x.
+            const float w = &s == &st.live ? 1.0f : s.width;
             retopo_band(dl, s, cam, win_w, win_h, fill, line, false, w);
             if (!mirror) return;
             bool pos = false, neg = false;
@@ -2421,12 +2434,14 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
         const uint32_t a = rm.edges[e], b = rm.edges[e + 1];
         if (!vis[a] || !vis[b]) continue;
         const uint32_t ow = rm.edge_owner[e / 2];
+        if (st.hidden(ow) && ow != st.hover_id) continue;   // its eye is shut (hover still shows it)
         dl->AddLine(at[a], at[b], dark, ow == st.hover_id || is_sel(ow) ? 4.0f : 3.0f);
     }
     for (size_t e = 0; e + 1 < rm.edges.size(); e += 2) {
         const uint32_t a = rm.edges[e], b = rm.edges[e + 1];
         if (!vis[a] || !vis[b]) continue;
         const uint32_t ow = rm.edge_owner[e / 2];
+        if (st.hidden(ow) && ow != st.hover_id) continue;
         const bool lit = ow == st.hover_id, on = is_sel(ow);
         dl->AddLine(at[a], at[b], lit ? hot : on ? sel_col : st.hover_id ? dim : lite,
                     lit || on ? 2.0f : 1.2f);

@@ -47,8 +47,8 @@ const KeyActionInfo kKeyActions[(int)KeyAction::COUNT] = {
     {"retopo_draw",   "Retopo mode", "Draw polygon strips", nullptr, {GLFW_KEY_D, 0}, KeyScope::Retopo},
     {"retopo_grab",   "Retopo mode", "Grab polygon strips", "Drag the built quads around", {GLFW_KEY_G, 0}, KeyScope::Retopo},
     {"hold_size",     "Brush feel", "Size",             "Hold and drag", {GLFW_KEY_S, 0}},
-    {"hold_strength", "Brush feel", "Strength",         "Hold and drag", {GLFW_KEY_W, 0}},
-    {"hold_hardness", "Brush feel", "Hardness",         "Hold and drag", {GLFW_KEY_A, 0}},
+    {"hold_strength", "Brush feel", "Strength",         "Hold and drag. In Retopo mode: the next stroke's Density", {GLFW_KEY_W, 0}},
+    {"hold_hardness", "Brush feel", "Hardness",         "Hold and drag. In Retopo mode: the next stroke's Rings", {GLFW_KEY_A, 0}},
     {"hold_spacing",  "Brush feel", "Spacing",          "Hold and drag", {GLFW_KEY_O, 0}},
     {"size_down",     "Brush feel", "Size down",        "Repeats while held", {GLFW_KEY_LEFT_BRACKET, 0}},
     {"size_up",       "Brush feel", "Size up",          "Repeats while held", {GLFW_KEY_RIGHT_BRACKET, 0}},
@@ -549,6 +549,22 @@ static void apply_slider_delta(float dx) {
                 delta = std::max(min_delta, std::min(max_delta, delta));
                 g_input->slider_accum = delta / 0.001f;
                 g_input->brush_spacing = g_input->slider_start_value + delta;
+                break;
+            }
+            // Stepped: a ring per 40 px, a tenth of density per 50 px.
+            case InputState::SliderMode::RINGS: {
+                const float lo = (1.0f - g_input->slider_start_value) * 40.0f;
+                const float hi = (8.0f - g_input->slider_start_value) * 40.0f;
+                g_input->slider_accum = std::max(lo, std::min(hi, g_input->slider_accum));
+                g_input->retopo_rings = (int)std::lround(g_input->slider_start_value + g_input->slider_accum / 40.0f);
+                break;
+            }
+            case InputState::SliderMode::DENSITY: {
+                const float lo = (0.1f - g_input->slider_start_value) * 500.0f;
+                const float hi = (1.0f - g_input->slider_start_value) * 500.0f;
+                g_input->slider_accum = std::max(lo, std::min(hi, g_input->slider_accum));
+                g_input->retopo_density =
+                    std::round((g_input->slider_start_value + g_input->slider_accum / 500.0f) * 10.0f) / 10.0f;
                 break;
             }
             default: break;
@@ -1282,10 +1298,19 @@ static void run_key_action(GLFWwindow* w, KeyAction a, bool repeat) {
 
         case KeyAction::HOLD_SIZE:
             begin_slider_drag(w, InputState::SliderMode::SIZE, in.brush_size); break;
+        // Retopo has no strength or hardness: there W and A plan the next stroke.
         case KeyAction::HOLD_STRENGTH:
-            begin_slider_drag(w, InputState::SliderMode::STRENGTH, in.brush_strength); break;
+            if (in.interaction_mode == InputState::InteractionMode::RETOPO)
+                begin_slider_drag(w, InputState::SliderMode::DENSITY, in.retopo_density);
+            else
+                begin_slider_drag(w, InputState::SliderMode::STRENGTH, in.brush_strength);
+            break;
         case KeyAction::HOLD_HARDNESS:
-            begin_slider_drag(w, InputState::SliderMode::HARDNESS, in.brush_hardness); break;
+            if (in.interaction_mode == InputState::InteractionMode::RETOPO)
+                begin_slider_drag(w, InputState::SliderMode::RINGS, (float)in.retopo_rings);
+            else
+                begin_slider_drag(w, InputState::SliderMode::HARDNESS, in.brush_hardness);
+            break;
         case KeyAction::HOLD_SPACING:
             begin_slider_drag(w, InputState::SliderMode::SPACING, in.brush_spacing); break;
 

@@ -6,7 +6,7 @@
 
 // ---- Stroke list -------------------------------------------------------------------
 
-bool RetopoState::finish_live() {
+bool RetopoState::finish_live(int rings, float density) {
     RetopoStroke s = std::move(live);
     live = RetopoStroke{};
     drawing = false;
@@ -35,7 +35,7 @@ bool RetopoState::finish_live() {
         s.pts.resize(best + 1); s.nrm.resize(best + 1); s.half_w.resize(best + 1);
     }
 
-    s.rings = rings; s.density = density; s.width = width;
+    s.rings = rings; s.density = density; s.width = 1.0f;   // the brush Size already set its band
     // The fresh stroke is the selection: the sliders tune it straight away.
     for (RetopoStroke& o : strokes) o.selected = false;
     s.selected = true;
@@ -715,7 +715,7 @@ double retopo_build(RetopoState& st, const Mesh& m, bool mirror) {
     std::vector<Todo> todo;
     for (int pass = 0; pass < 2; pass++)
         for (const RetopoStroke& s : st.strokes) {
-            if (s.frozen || !s.visible || s.pts.size() < 3 || s.closed != (pass == 0)) continue;
+            if (s.frozen || s.pts.size() < 3 || s.closed != (pass == 0)) continue;
             bool pos = false, neg = false;
             for (const Vec3& p : s.pts) { pos |= p.x > 1e-4f; neg |= p.x < -1e-4f; }
             Todo t{s, mirror && pos != neg};
@@ -810,7 +810,7 @@ uint32_t retopo_pick(const RetopoState& st, const Camera& cam, int win_w, int wi
         bool ok = true;
         for (int k = 0; k < 4 && ok; k++)
             ok = cam.world_to_screen(rm.v[rm.quads[q * 4 + k]], win_w, win_h, sx[k], sy[k]);
-        if (!ok || !facing(rm.v[rm.quads[q * 4]], rm.n[rm.quads[q * 4]])) continue;
+        if (!ok || st.hidden(rm.quad_owner[q]) || !facing(rm.v[rm.quads[q * 4]], rm.n[rm.quads[q * 4]])) continue;
         // Inside = on the same side of all four edges (either winding).
         int pos = 0, neg = 0;
         for (int k = 0; k < 4; k++) {
@@ -909,7 +909,7 @@ void after_edit(RetopoState& st, const std::vector<uint32_t>& moved, bool mirror
         float best_d2 = tol * tol;
         uint32_t best = ~0u;
         for (uint32_t b : border) {
-            if (b == a || !alive(rm, b) || !on_border(rm, b)) continue;
+            if (b == a || !alive(rm, b) || !on_border(rm, b) || st.hidden(rm.v_owner[b])) continue;
             const Vec3 d = rm.v[b] - rm.v[a];
             const float d2 = d.dot(d);
             if (d2 >= best_d2 || near_in_topology(rm, a, b)) continue;
@@ -1041,7 +1041,7 @@ int retopo_smooth_dab(RetopoState& st, const Camera& cam, int win_w, int win_h,
     int moved = 0;
     for (size_t i = 0; i < rm.v.size(); i++) {
         const float w = ring_weight(cam, win_w, win_h, cx, cy, r2, rm.v[i], rm.n[i]);
-        g_smooth_w[i] = rm.pinned[i] ? 0.0f : w * strength;
+        g_smooth_w[i] = rm.pinned[i] || st.hidden(rm.v_owner[i]) ? 0.0f : w * strength;
         moved += g_smooth_w[i] > 0.0f;
     }
     if (!moved) return 0;
@@ -1113,7 +1113,7 @@ int retopo_grab_begin(RetopoState& st, const Camera& cam, int win_w, int win_h,
     const float r2 = radius_px * radius_px;
     for (size_t i = 0; i < rm.v.size(); i++) {
         const float w = ring_weight(cam, win_w, win_h, cx, cy, r2, rm.v[i], rm.n[i]);
-        if (w <= 0.0f) continue;
+        if (w <= 0.0f || st.hidden(rm.v_owner[i])) continue;
         g_grab_idx.push_back((uint32_t)i);
         g_grab_w.push_back(w);
         g_grab_start.push_back(rm.v[i]);

@@ -520,6 +520,7 @@ struct BtnOpts {
     const char* corner = nullptr;  // small key label in the tile's corner (rail)
     TipSide side = TipSide::Below;
     float icon_px = 20.0f;
+    ImU32 icol = 0;             // the icon's colour instead of the skin's (0 = the skin's)
 };
 
 // Square icon button. Press squashes it to 0.92 with an inset shade and it springs
@@ -571,6 +572,7 @@ bool icon_button(const char* id, Icon icon, float size, const BtnOpts& o) {
         else if (hovered && o.enabled) bg = cga::dark_gray;
         if (bg) dl->AddRectFilled(ImVec2(pos.x, pos.y), ImVec2(pos.x + size, pos.y + size), bg);
         if (!o.enabled) icol = cga::dark_gray;
+        if (o.icol && !o.on) icol = o.icol;
         draw_pixel_icon(dl, icon, c, g_k > 1.0f ? 4.0f : 2.0f, icol);
         if (o.corner) {
             // 8 px is the only crisp size that fits a corner (16 would cover the icon),
@@ -613,6 +615,7 @@ bool icon_button(const char* id, Icon icon, float size, const BtnOpts& o) {
         dl->AddRectFilled(a, ImVec2(b.x, a.y + 3.0f), IM_COL32(0, 0, 0, 40), r,
                           ImDrawFlags_RoundCornersTop);
     }
+    if (o.icol && !o.on) icol = o.icol;
     if (!o.enabled) icol = with_alpha(icol, 0.35f);
     draw_icon(dl, icon, ImVec2(c.x + wiggle, c.y), ipx * s * icon_k, icol);
     if (o.corner) {
@@ -1728,7 +1731,7 @@ void command_panel(InputState& input, int win_w, int win_h, MultiresInfo mres, c
 void set_feel(InputState& in, int which, float t);   // below, shared with the 2000s tracks
 
 // One row of the brush-settings stack (which: 0 size, 1 strength, 2 hardness,
-// 3 spacing), `w` wide: key badge, label, value at the right edge, and a bar underneath.
+// 3 spacing; retopo's 4 rings, 5 density), `w` wide: key badge, label, value at the right edge, and a bar underneath.
 // The whole row is the hit area: click or drag anywhere on it to set the value by where
 // the pointer sits across it, as on the 2000s tracks. The value is applied before the
 // row is drawn, so the bar shows this frame's value. A click springs the bar to its new
@@ -1746,13 +1749,16 @@ void meter_widget(const char* id, InputState& in, int which, float w, float k = 
     const bool dragging = held && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 2.0f);
     if (held) set_feel(in, which, (ImGui::GetIO().MousePos.x - p.x) / w);
 
-    static const char* keys[4]   = {"S", "W", "A", "O"};
-    static const char* labels[4] = {"Size", "Strength", "Hardness", "Spacing"};
-    const float vals[4] = {in.brush_size / 500.0f, in.brush_strength,
-                           in.brush_hardness, in.brush_spacing};
+    static const char* keys[6]   = {"S", "W", "A", "O", "A", "W"};
+    static const char* labels[6] = {"Size", "Strength", "Hardness", "Spacing", "Rings", "Density"};
+    const float vals[6] = {in.brush_size / 500.0f, in.brush_strength,
+                           in.brush_hardness, in.brush_spacing,
+                           (float)(in.retopo_rings - 1) / 7.0f, (in.retopo_density - 0.1f) / 0.9f};
     char value[16];
-    if (which == 0) std::snprintf(value, sizeof value, "%.0f", in.brush_size);
-    else            std::snprintf(value, sizeof value, "%.0f%%", vals[which] * 100.0f);
+    if (which == 0)      std::snprintf(value, sizeof value, "%.0f", in.brush_size);
+    else if (which == 4) std::snprintf(value, sizeof value, "%d", in.retopo_rings);
+    else if (which == 5) std::snprintf(value, sizeof value, "%.1fx", in.retopo_density);
+    else                 std::snprintf(value, sizeof value, "%.0f%%", vals[which] * 100.0f);
 
     if (g_dos) {
         // Board D: "S Size  70" — cyan key, gray label, green value, no bar.
@@ -1781,7 +1787,7 @@ void meter_widget(const char* id, InputState& in, int which, float w, float k = 
     if (dragging) spring_reset(sid, target);
     // A hold-key (S/W/A/O) drag leaves the bar where it was; on release it springs to
     // the new value at twice the click speed (4x the stiffness, same damping).
-    static bool after_key[4] = {};
+    static bool after_key[6] = {};
     float pct;
     if (in.slider_mode != InputState::SliderMode::NONE && g_springs[sid].init) {
         after_key[which] = true;
@@ -1798,7 +1804,9 @@ void meter_widget(const char* id, InputState& in, int which, float w, float k = 
                       IM_COL32(255, 255, 255, lit ? 56 : 26), 2.0f * k);
     // Size wears the ring's own colour, so it moves with Hardness like the cursor does.
     ImU32 col = kText;
-    if (which == 0) {
+    if (which == 0 && in.interaction_mode == InputState::InteractionMode::RETOPO) {
+        col = IM_COL32(0x00, 0xFF, 0x41, 255);   // retopo's ring is matrix green (main.cpp)
+    } else if (which == 0) {
         float rgb[3];
         brush_cursor_rgb(in.brush_hardness, rgb);
         col = IM_COL32((int)(rgb[0] * 255.0f), (int)(rgb[1] * 255.0f), (int)(rgb[2] * 255.0f), 255);
@@ -1920,12 +1928,17 @@ float brush_panel(InputState& input, int win_h) {
         hint("Click the model");
         hint("to place");
     } else if (mode == InputState::InteractionMode::RETOPO) {
-        // Size only, for both tools: the ring is the band width when drawing and the
-        // reach when smoothing. Strength / hardness may come later.
+        // Size for every tool: the band as drawn, or the reach of Grab / Smooth. Drawing
+        // also plans the next stroke: Rings (A) and Density (W).
+        const bool drawing = !input.is_smooth_active() && input.retopo_tool == InputState::RetopoTool::DRAW;
         heading(input.is_smooth_active() ? "Smooth polygon strips"
                 : input.retopo_tool == InputState::RetopoTool::GRAB ? "Grab polygon strips"
                                                                     : "Draw polygon strips", nullptr);
         meter_widget("##mS", input, 0, w, k, !can_grow || big);
+        if (drawing) {
+            meter_widget("##mRings", input, 4, w, k, !can_grow || big);
+            meter_widget("##mDensity", input, 5, w, k, !can_grow || big);
+        }
     } else if (mode == InputState::InteractionMode::SELECT) {
         heading("Select", nullptr);
         hint("Click to pick");
@@ -2211,6 +2224,12 @@ void slider_hud(const InputState& input) {
         case InputState::SliderMode::SPACING:
             name = "Spacing"; std::snprintf(val, sizeof val, "%.0f%%", input.brush_spacing * 100.0f);
             pct = input.brush_spacing; break;
+        case InputState::SliderMode::RINGS:
+            name = "Rings"; std::snprintf(val, sizeof val, "%d", input.retopo_rings);
+            pct = (float)(input.retopo_rings - 1) / 7.0f; break;
+        case InputState::SliderMode::DENSITY:
+            name = "Density"; std::snprintf(val, sizeof val, "%.1fx", input.retopo_density);
+            pct = (input.retopo_density - 0.1f) / 0.9f; break;
         default: return;
     }
     pct = std::max(0.0f, std::min(1.0f, pct));
@@ -2338,6 +2357,8 @@ void set_feel(InputState& in, int which, float t) {
         case 2: in.brush_hardness = std::max(0.01f, t); in.per_brush[(int)slot].hardness = in.brush_hardness; break;
         case 3: in.brush_spacing = std::max(0.05f, std::min(t, max_spacing_for(slot)));
                 in.per_brush[(int)slot].spacing = in.brush_spacing; break;
+        case 4: in.retopo_rings = 1 + (int)std::lround(t * 7.0f); break;
+        case 5: in.retopo_density = 0.1f + std::round(t * 9.0f) / 10.0f; break;
     }
 }
 
@@ -3684,52 +3705,49 @@ float retopo_slider(const char* id, float sw, float sh, float fill, const char* 
     return t;
 }
 
-// Rings / density / width, stacked. They show and set the selection's values (its
+// Size / rings / density, stacked. They show and set the selection's values (its
 // first stroke's), and a change rebuilds at once; only the setting that moved is
-// written, so a multi-selection keeps its other differences. Nothing selected: they
-// set what the next stroke gets. An edited (frozen) selection greys them out.
+// written, so a multi-selection keeps its other differences. The next stroke's
+// settings live in the tool dock, not here. An edited (frozen) selection greys them out.
 void retopo_sliders(InputState& input, RetopoState& st, float sh, float sgap, float sw, TipSide side) {
     const RetopoStroke* sel = st.first_selected();
-    const bool dead = sel && sel->frozen;
-    int rings = sel ? sel->rings : st.rings;
-    float density = sel ? sel->density : st.density, width = sel ? sel->width : st.width;
+    if (!sel) return;
+    const bool dead = sel->frozen;
+    int rings = sel->rings;
+    float density = sel->density, width = sel->width;
     const int rings0 = rings;
     const float density0 = density, width0 = width;
-    const char* who = dead ? "Edited islands are geometry now: the sliders don't reach them"
-                    : sel ? nullptr : "Nothing selected: sets the next stroke";
+    const char* who = dead ? "Edited islands are geometry now: the sliders don't reach them" : nullptr;
     char tip[3][96];
-    std::snprintf(tip[0], sizeof tip[0], "%s", who ? who : "Quads across the band (wheel steps it)");
-    std::snprintf(tip[1], sizeof tip[1], "%s", who ? who : "Quads along the band: 1x = about square (wheel steps it)");
-    std::snprintf(tip[2], sizeof tip[2], "%s", who ? who : "Band width, as drawn x this (wheel steps it)");
+    std::snprintf(tip[0], sizeof tip[0], "%s", who ? who : "Band size, as drawn x this (wheel steps it)");
+    std::snprintf(tip[1], sizeof tip[1], "%s", who ? who : "Quads across the band (wheel steps it)");
+    std::snprintf(tip[2], sizeof tip[2], "%s", who ? who : "Quads along the band: 1x = about square (wheel steps it)");
 
+    // Size, Rings, Density: the tool dock's order.
     ImGui::BeginGroup();
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(6.0f, sgap));
     char txt[24];
     float wh, t;
+    std::snprintf(txt, sizeof txt, "Size: %.1fx", width);
+    t = retopo_slider("##size", sw, sh, (width - 0.1f) / 1.9f, txt, tip[0], side, &wh, dead);
+    if (t >= 0.0f) width = 0.1f + std::round(t * 19.0f) / 10.0f;
+    if (wh != 0.0f) width = std::max(0.1f, std::min(2.0f, width + (wh > 0.0f ? 0.1f : -0.1f)));
+    width = std::round(width * 10.0f) / 10.0f;
+
     std::snprintf(txt, sizeof txt, "Rings: %d", rings);
-    t = retopo_slider("##rings", sw, sh, (float)(rings - 1) / 7.0f, txt, tip[0], side, &wh, dead);
+    t = retopo_slider("##rings", sw, sh, (float)(rings - 1) / 7.0f, txt, tip[1], side, &wh, dead);
     if (t >= 0.0f) rings = 1 + (int)std::lround(t * 7.0f);
     if (wh != 0.0f) rings = std::max(1, std::min(8, rings + (wh > 0.0f ? 1 : -1)));
 
     std::snprintf(txt, sizeof txt, "Density: %.1fx", density);
-    t = retopo_slider("##density", sw, sh, (density - 0.1f) / 0.9f, txt, tip[1], side, &wh, dead);
+    t = retopo_slider("##density", sw, sh, (density - 0.1f) / 0.9f, txt, tip[2], side, &wh, dead);
     if (t >= 0.0f) density = 0.1f + std::round(t * 9.0f) / 10.0f;
     if (wh != 0.0f) density = std::max(0.1f, std::min(1.0f, density + (wh > 0.0f ? 0.1f : -0.1f)));
     density = std::round(density * 10.0f) / 10.0f;
-
-    std::snprintf(txt, sizeof txt, "Width: %.1fx", width);
-    t = retopo_slider("##width", sw, sh, (width - 0.1f) / 1.9f, txt, tip[2], side, &wh, dead);
-    if (t >= 0.0f) width = 0.1f + std::round(t * 19.0f) / 10.0f;
-    if (wh != 0.0f) width = std::max(0.1f, std::min(2.0f, width + (wh > 0.0f ? 0.1f : -0.1f)));
-    width = std::round(width * 10.0f) / 10.0f;
     ImGui::PopStyleVar();
     ImGui::EndGroup();
 
     if (dead || (rings == rings0 && density == density0 && width == width0)) return;
-    if (rings != rings0) st.rings = rings;
-    if (density != density0) st.density = density;
-    if (width != width0) st.width = width;
-    if (!sel) return;
     for (RetopoStroke& s : st.strokes) {
         if (!s.selected || s.frozen) continue;
         if (rings != rings0) s.rings = rings;
@@ -3745,15 +3763,16 @@ void retopo_sliders(InputState& input, RetopoState& st, float sh, float sgap, fl
 // Retopo mode's "Polygon Layers" dock, like paint mode's layer docker: one row per
 // stroke, newest on top (eye / name / trash). Hovering a row lights that stroke and its
 // quads on the model; click selects, Ctrl+click adds, double-click renames. The
-// selection's row opens to show its Rings / Density / Width, every other row carries them
-// as a grey footnote; with nothing selected the sliders sit under the list and set the
-// next stroke. Build, undo, view toggles, Export and the readout close it. Built from
+// selection's row opens to show its Size / Rings / Density, every other row carries them
+// as a grey footnote. The next stroke's settings are in the tool dock. Build, undo, view toggles, Export and the readout close it. Built from
 // the skin's own parts, so it wears the live skin.
 void draw_retopo_dock(InputState& input, RetopoState& st, int win_w, int win_h) {
     st.hover_id = 0;
+    st.refresh_hidden();   // eyes, deletes, undo: whatever changed since last frame
     const float bh = 30.0f, gap = 6.0f;
     const float row_h = 46.0f, kIn = 5.0f;   // a row, and its content's inset from the row outline
-    const float min_w = (g_dos ? 300.0f : 236.0f) + 20.0f;   // the status panel's width + padding
+    // Wide enough for the 12 px footnote under a row's name; the status panel's is 236.
+    const float min_w = (g_dos ? 320.0f : 260.0f) + 20.0f;
     const float top = g_cmd_bottom + 12.0f;
     const float bottom = (g_status_top > top ? g_status_top : (float)win_h - kEdge) - 12.0f;
     // Its own window, unlike the fixed docks: drag the title (or any empty part) to move
@@ -3839,13 +3858,16 @@ void draw_retopo_dock(InputState& input, RetopoState& st, int win_w, int win_h) 
             const float lx = ImGui::GetCursorPosX(), ly = ImGui::GetCursorPosY();
             ImGui::BeginGroup();
             ImGui::SetCursorPos(ImVec2(lx + kIn, ly + ioff));
-            // Frozen: its quads were edited, Build leaves them be, so there's nothing to skip.
-            o.on = s.visible && !s.frozen; o.enabled = !s.frozen;
-            o.tip = s.frozen ? "Frozen: edited, Build leaves it as it is"
-                  : s.visible ? "Built (click to skip)" : "Skipped (click to build)";
-            if (icon_button("vis", s.visible ? Icon::ViewPaintShow : Icon::ViewPaintHide, bh, o))
+            // The eye: white like the trash can while it shows, grey once hidden (no tile
+            // either way: it's a switch, not a mode).
+            o.on = false;
+            o.tip = s.visible ? "Hide it on the model" : "Show it on the model";
+            o.icol = s.visible ? 0 : kMuted;
+            if (icon_button("vis", s.visible ? Icon::ViewPaintShow : Icon::ViewPaintHide, bh, o)) {
                 s.visible = !s.visible;
-            o.enabled = true;
+                st.refresh_hidden();
+            }
+            o.icol = 0;
             ImGui::SameLine(0.0f, 4.0f);
             ImGui::SetCursorPosY(ly);
             const float name_w = row_w - 2.0f * bh - 8.0f - 2.0f * kIn;
@@ -3873,9 +3895,9 @@ void draw_retopo_dock(InputState& input, RetopoState& st, int win_w, int win_h) 
                 const bool squashing = s.id == anim_id && anim_t < kSquash;
                 const bool open = &s == open_s || squashing;
                 char foot[48];
-                std::snprintf(foot, sizeof foot, "R: %d | D: %.1fx | W: %.1fx", s.rings, s.density, s.width);
+                std::snprintf(foot, sizeof foot, "S: %.1fx | R: %d | D: %.1fx", s.width, s.rings, s.density);
                 const ImVec2 ts = text_size(UiFont::SansSemibold, 13.0f, s.name.c_str());
-                const ImVec2 fs = text_size(UiFont::Mono, 10.5f, foot);
+                const ImVec2 fs = text_size(UiFont::Mono, 12.0f, foot);
                 const float line_gap = 5.0f;
                 const float name_y = open ? p.y + (row_h - ts.y) * 0.5f
                                           : p.y + (row_h - ts.y - line_gap - fs.y) * 0.5f;
@@ -3886,16 +3908,16 @@ void draw_retopo_dock(InputState& input, RetopoState& st, int win_w, int win_h) 
                 text_at(dl, UiFont::Mono, 11.0f, ImVec2(p.x + name_w - ks.x - 6.0f, name_y + (ts.y - ks.y) * 0.5f),
                         kMuted, kind);
                 if (!open) {
-                    const ImVec2 fp(p.x + 6.0f, name_y + ts.y + line_gap);
+                    const ImVec2 fp(p.x + std::max(2.0f, (name_w - fs.x) * 0.5f), name_y + ts.y + line_gap);   // centred
                     if (s.id == anim_id) {
                         // The reveal: a clip window opening from the line's middle.
                         const float u = std::min(1.0f, (anim_t - kSquash) / kReveal);
                         const float half = fs.x * 0.5f * (1.0f - (1.0f - u) * (1.0f - u)), cx = fp.x + fs.x * 0.5f;
                         dl->PushClipRect(ImVec2(cx - half, fp.y), ImVec2(cx + half, fp.y + fs.y), true);
-                        text_at(dl, UiFont::Mono, 10.5f, fp, kMuted, foot);
+                        text_at(dl, UiFont::Mono, 12.0f, fp, kMuted, foot);
                         dl->PopClipRect();
                     } else {
-                        text_at(dl, UiFont::Mono, 10.5f, fp, kMuted, foot);
+                        text_at(dl, UiFont::Mono, 12.0f, fp, kMuted, foot);
                     }
                 }
                 if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
@@ -3942,12 +3964,12 @@ void draw_retopo_dock(InputState& input, RetopoState& st, int win_w, int win_h) 
                 const float u = anim_t / kSquash, c = 1.0f - u * u * (3.0f - 2.0f * u);
                 const float shake = 4.0f * std::sin(anim_t * 2.0f * 3.14159265f * 18.0f) * c;
                 const float bx = r0.x + sx, y0 = r1.y, hgt = (sh * 3.0f + sgap * 2.0f) * c;
-                const float fill[3] = {(float)(s.rings - 1) / 7.0f, (s.density - 0.1f) / 0.9f,
-                                       (s.width - 0.1f) / 1.9f};
+                const float fill[3] = {(s.width - 0.1f) / 1.9f, (float)(s.rings - 1) / 7.0f,
+                                       (s.density - 0.1f) / 0.9f};
                 char lab[3][24];
-                std::snprintf(lab[0], sizeof lab[0], "Rings: %d", s.rings);
-                std::snprintf(lab[1], sizeof lab[1], "Density: %.1fx", s.density);
-                std::snprintf(lab[2], sizeof lab[2], "Width: %.1fx", s.width);
+                std::snprintf(lab[0], sizeof lab[0], "Size: %.1fx", s.width);
+                std::snprintf(lab[1], sizeof lab[1], "Rings: %d", s.rings);
+                std::snprintf(lab[2], sizeof lab[2], "Density: %.1fx", s.density);
                 const float la = std::max(0.0f, 1.0f - u * 2.0f), r = rad(6.0f) * c;
                 for (int k = 0; k < 3; k++) {
                     const float x = bx + (k % 2 ? -shake : shake), y = y0 + (float)k * (sh + sgap) * c;
@@ -3984,12 +4006,6 @@ void draw_retopo_dock(InputState& input, RetopoState& st, int win_w, int win_h) 
     ImGui::EndChild();
 
     const float fy0 = ImGui::GetCursorPosY();
-    // Nothing selected: the sliders set what the next stroke gets.
-    if (!first) {
-        label_item(UiFont::Sans, 12.0f, kMuted, "Next stroke", 0.0f, 16.0f);
-        retopo_sliders(input, st, sh, sgap, w, TipSide::Left);
-    }
-
     hdivider(w, 0.0f, kDivider, 7.0f);
     const float x0 = ImGui::GetCursorPosX();
     if (chip("Build", false, bh)) input.retopo_build_requested = true;

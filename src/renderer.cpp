@@ -1828,11 +1828,12 @@ void brush_cursor_rgb(float hardness, float* out) {
 
 void Renderer::draw_cursor(const Camera& cam, float cx, float cy, float radius,
                            float nx, float ny, float nz, float hardness, float strength,
-                           int w, int h, bool on_model) {
+                           int w, int h, bool on_model, const float* tint) {
     // Hardness is the tint alone; the ring's weight is strength's (below). The opacity
     // used to ride hardness too (0.75..0.90) and is held at that range's middle.
     float rgb[3];
     brush_cursor_rgb(hardness, rgb);
+    if (tint) { rgb[0] = tint[0]; rgb[1] = tint[1]; rgb[2] = tint[2]; }
     float cr = rgb[0], cg = rgb[1], cb = rgb[2];
     const float ca = 0.825f;
 

@@ -253,10 +253,11 @@ struct Renderer {
     void pick_draw(uint32_t entity_id, const gpu::Buffer& pos_vbo, const gpu::Buffer& ebo, uint32_t index_count);
     void pick_end();
     void read_id_region(int x, int y, int w, int h, uint32_t* out);
-    // Hardness sets the ring's tint, strength its weight.
+    // Hardness sets the ring's tint, strength its weight. `tint` (rgb) overrides the
+    // hardness tint: a mode's own colour (retopo's green).
     void draw_cursor(const Camera& cam, float cx, float cy, float radius,
                      float nx, float ny, float nz, float hardness, float strength,
-                     int w, int h, bool on_model);
+                     int w, int h, bool on_model, const float* tint = nullptr);
     // Symmetry lobe marker: the centre crosshair only, in the inverse of the
     // brush tint. Caller supplies the already-projected screen position of the
     // mirrored anchor (main.cpp), since only it knows the mirror plane.

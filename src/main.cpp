@@ -2822,7 +2822,7 @@ int main(int argc, char* argv[]) {
                 }
             } else if (retopo.drawing) {
                 // Pen up (or the mode changed under it).
-                const bool kept = retopo.finish_live();
+                const bool kept = retopo.finish_live(input.retopo_rings, input.retopo_density);
                 if (kept) {
                     std::snprintf(input.notification, sizeof(input.notification), "%s - Space builds",
                                   retopo.strokes.back().name.c_str());
@@ -4451,9 +4451,12 @@ int main(int argc, char* argv[]) {
                 cursor_y = (float)input.mouse_y;
             }
             if (retopo_mode) {
+                // Matrix green (#00FF41): a ring no sculpt brush wears, so the hand
+                // knows it's in retopo before the eye finds the dock.
+                static const float kRetopoGreen[3] = {0.0f, 1.0f, 0.255f};
                 renderer.draw_cursor(camera, cursor_x, cursor_y, input.brush_size,
                                      input.cursor_nx, input.cursor_ny, input.cursor_nz,
-                                     1.0f, 0.5f, win_w, win_h, input.on_model);
+                                     1.0f, 0.5f, win_w, win_h, input.on_model, kRetopoGreen);
             } else if (input.color_pick_active) {
                 // Armed colour picker: eyedropper glyph instead of the brush
                 // ring — the ring's size/hardness reading is meaningless here.

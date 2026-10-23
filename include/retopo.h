@@ -19,7 +19,9 @@ struct RetopoStroke {
     std::vector<Vec3>  nrm;      // surface normal at each point
     std::vector<float> half_w;   // half the band's width at each point (world)
     bool closed  = false;        // donut (true) or strip (false)
-    bool visible = true;         // hidden strokes are skipped by Build
+    // Its eye. Hidden: no band, no wireframe, and picking, Grab, Smooth and welds pass
+    // it by; Build and Export still take it (it's out of sight, not out of the mesh).
+    bool visible = true;
     // Its quads were grabbed, smoothed or welded: they're geometry now, not a sketch.
     // Build keeps them as they are (visible or not) and the band stops drawing.
     bool frozen  = false;
@@ -72,17 +74,11 @@ struct RetopoState {
     bool built = false;
     bool show_result = true;
     bool show_strokes = true;
-    // What the next stroke gets (RetopoStroke has the meaning of each). The sliders
-    // show these when nothing is selected, and editing a selection updates them too, so
-    // new strokes follow whatever was set last.
-    int  rings = 4;
-    float density = 1.0f;
-    float width = 1.0f;
     uint32_t hover_id = 0;            // stroke under the cursor in the bar (0 = none), lit in the overlay
 
     // Pen-up: keep the stroke if it has enough to build on, decide donut vs strip.
     // Returns false (and drops it) for a tap.
-    bool finish_live();
+    bool finish_live(int rings, float density);
     void undo();
     // Drop the quads of strokes that no longer exist (trash, undo), right away rather
     // than at the next Build. Welded neighbours keep the vertices they share.
@@ -90,6 +86,14 @@ struct RetopoState {
     RetopoStroke* find(uint32_t id) {
         for (RetopoStroke& s : strokes) if (s.id == id) return &s;
         return nullptr;
+    }
+    // Owner id -> hidden by its eye, for the per-vertex checks (a table, not a search
+    // per vertex). The dock refreshes it every frame; an id past its end is visible.
+    std::vector<uint8_t> hidden_ids;
+    bool hidden(uint32_t owner) const { return owner < hidden_ids.size() && hidden_ids[owner]; }
+    void refresh_hidden() {
+        hidden_ids.assign(next_id, 0);
+        for (const RetopoStroke& s : strokes) if (!s.visible && s.id < next_id) hidden_ids[s.id] = 1;
     }
     void redo_one();
     void clear_all();
