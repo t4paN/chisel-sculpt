@@ -2,6 +2,26 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-24 — Retopo mode: Del dissolves picked edges
+
+*User-tested; also checked headlessly on a quad grid (`unused-tools-vault/retopo-dissolve-test/`).*
+With edges picked, Del removes them and merges the faces either side into one; the picked
+edges' vertices left with only two edges go too, so a dissolved row's cross edges run
+straight through. A run that stops mid-mesh leaves a five-sided face where it ends. Mirror
+takes the twin row. Outline edges are refused with a toast for now. One undo step. Del
+still never touches the sculpt in this mode.
+
+## 2026-10-24 — Retopo mode: Shift+Ctrl+click picks the shortest edge path
+
+*User-tested.* In Draw, Shift+Ctrl+click an edge to add the shortest run of edges from the
+last edge picked (double-click or the previous Shift+Ctrl+click) to it; it becomes the
+next run's start. Both ends on one outline: the run follows the outline the short way
+round, so Extrude can grow just that stretch. Elsewhere it takes the shortest way across
+the quads. With nothing to carry on from, it starts a fresh pick. Mirror adds the twins.
+Extrude now also takes a press within half an edge's screen length of the pick (12 px at
+least), judged where the pen went down: before, most presses on a short run of big quads
+missed it and drew a one-quad bridge instead.
+
 ## 2026-10-23 — Retopo mode: saved in the .chisel file
 
 *File layer self-tested headlessly (round trip bitwise, damaged section, pre-retopo

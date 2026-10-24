@@ -660,6 +660,7 @@ struct InputState {
     // What retopo mode's bar (always up in mode 0) and Space ask the main loop for.
     bool retopo_build_requested = false;
     bool retopo_fill_requested = false;    // H / the dock's Fill: quads over holes
+    bool retopo_dissolve_requested = false;  // Del in mode 0: dissolve the picked edges
     bool retopo_build_quiet = false;   // a slider asked: rebuild without the toast
     bool retopo_menu_request = false;  // a right-click on an island: the bar opens its menu
     bool retopo_menu_auto = false;     // a stroke was just drawn: its sliders float by the pen

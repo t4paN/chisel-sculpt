@@ -2823,8 +2823,19 @@ int main(int argc, char* argv[]) {
             static bool retopo_erasing = false;
             static bool retopo_erasing_faces = false;   // Ctrl was held at the press
             const bool retopo_press = retopo_on && input.drag_mode == InputState::DragMode::RETOPO;
+            // Shift+Ctrl in Draw: a path-pick click (below), never a stroke. Decided at the press.
+            static bool retopo_path_press = false;
+            // Where the pen went down. A stroke can start a few frames later (plane cache
+            // still dirty) with the pen already moving; what it starts on is judged here.
+            static float retopo_press_x = 0.0f, retopo_press_y = 0.0f;
             {
                 static bool was_press = false;
+                if (retopo_press && !was_press) {
+                    retopo_path_press = input.shift_held && input.ctrl_held
+                                     && input.retopo_tool == InputState::RetopoTool::DRAW;
+                    retopo_press_x = (float)input.mouse_x;
+                    retopo_press_y = (float)input.mouse_y;
+                }
                 Vec3 p, n;
                 float wpp;
                 if (retopo_press && !was_press && !screen_buffers_dirty
@@ -2930,7 +2941,7 @@ int main(int argc, char* argv[]) {
                     retopo.last_sx = mx;
                     retopo.last_sy = my;
                 }
-            } else if (retopo_press && !screen_buffers_dirty) {
+            } else if (retopo_press && !screen_buffers_dirty && !retopo_path_press) {
                 const float mx = (float)input.mouse_x, my = (float)input.mouse_y;
                 if (!retopo.drawing) {
                     retopo.drawing = true;
@@ -2938,9 +2949,10 @@ int main(int argc, char* argv[]) {
                     retopo.last_sx = mx - 1e3f;   // the press point always lands
                     // Starting on a picked loop: this stroke extrudes it. Else, starting on
                     // an edited island: a bridge out of it.
-                    retopo.extruding = retopo.built && retopo_on_loop(retopo, camera, win_w, win_h, mx, my);
+                    const float px = retopo_press_x, py = retopo_press_y;
+                    retopo.extruding = retopo.built && retopo_on_loop(retopo, camera, win_w, win_h, px, py);
                     const uint32_t id = retopo.built && !retopo.extruding
-                                      ? retopo_pick(retopo, camera, win_w, win_h, mx, my, input.mirror_x) : 0;
+                                      ? retopo_pick(retopo, camera, win_w, win_h, px, py, input.mirror_x) : 0;
                     const RetopoStroke* on = id ? retopo.find(id) : nullptr;
                     retopo.bridge_from = on && on->frozen ? id : 0;
                 }
@@ -3026,14 +3038,18 @@ int main(int argc, char* argv[]) {
             if (!input.mouse1_down) retopo.last_tag = 0;
 
             // A click (pressed and let go within a few pixels) picks an island: plain
-            // selects only it, Ctrl adds or takes out, on nothing clears. Shift is Smooth's.
+            // selects only it, Ctrl adds or takes out, on nothing clears. Shift is Smooth's,
+            // except Shift+Ctrl in Draw: the shortest edge path from the last edge picked.
             // A press on the bar never gets here: ImGui ate mouse1_just_pressed.
-            static bool click_armed = false;
+            static bool click_armed = false, click_path = false;
             static float click_x = 0.0f, click_y = 0.0f;
             // Ctrl+click with the eraser deletes a face; it doesn't pick.
-            if (retopo_on && input.mouse1_just_pressed && !input.shift_held && !input.alt_held
+            const bool path_mods = input.shift_held && input.ctrl_held
+                                && input.retopo_tool == InputState::RetopoTool::DRAW;
+            if (retopo_on && input.mouse1_just_pressed && (!input.shift_held || path_mods) && !input.alt_held
                 && !(input.ctrl_held && input.retopo_tool == InputState::RetopoTool::ERASE)) {
                 click_armed = true;
+                click_path = path_mods;
                 click_x = (float)input.mouse_x;
                 click_y = (float)input.mouse_y;
             }
@@ -3045,7 +3061,14 @@ int main(int argc, char* argv[]) {
             static float last_click_x = 0.0f, last_click_y = 0.0f;
             if (click_armed && input.mouse1_just_released) {
                 click_armed = false;
-                if (retopo_on) {
+                if (retopo_on && click_path) {
+                    last_click_t = -1.0;   // never half of a double-click
+                    if (retopo_select_path(retopo, camera, win_w, win_h, click_x, click_y, input.mirror_x) < 0) {
+                        std::snprintf(input.notification, sizeof(input.notification),
+                                      "No edges join those two: separate islands");
+                        input.notification_timer = 2.0f;
+                    }
+                } else if (retopo_on) {
                     const double now = glfwGetTime();
                     const bool dbl = input.retopo_tool == InputState::RetopoTool::DRAW
                                   && now - last_click_t < 0.4
@@ -3135,6 +3158,15 @@ int main(int argc, char* argv[]) {
                 else
                     std::snprintf(input.notification, sizeof(input.notification),
                                   "No holes to fill (double-click an outline to fill it anyway)");
+                input.notification_timer = 2.5f;
+            }
+            if (input.retopo_dissolve_requested) {
+                input.retopo_dissolve_requested = false;
+                int n = 0;
+                const char* why = retopo_dissolve(retopo, input.mirror_x, n);
+                if (why) std::snprintf(input.notification, sizeof(input.notification), "%s", why);
+                else     std::snprintf(input.notification, sizeof(input.notification),
+                                       "Dissolved %d edge%s - Ctrl+Z takes it back", n, n == 1 ? "" : "s");
                 input.notification_timer = 2.5f;
             }
             if (input.retopo_export_requested) {

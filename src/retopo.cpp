@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <queue>
 #include <unordered_map>
 
 // ---- Stroke list -------------------------------------------------------------------
@@ -1510,15 +1511,12 @@ uint32_t retopo_snap_vertex(const RetopoState& st, const Camera& cam, int win_w,
     return best;
 }
 
-int retopo_select_loop(RetopoState& st, const Camera& cam, int win_w, int win_h,
-                       float x, float y, bool add, bool mirror) {
-    if (!add) st.loop_edges.clear();
+namespace {
+// The edge under the pointer: both ends facing the eye and on screen, nearest in pixels.
+bool edge_under(const RetopoState& st, const Camera& cam, int win_w, int win_h, float x, float y,
+                uint32_t& ea, uint32_t& eb) {
     const RetopoMesh& rm = st.result;
-    const uint32_t nv = (uint32_t)rm.v.size();
-    if (!st.built || rm.nb_off.size() != nv + 1) return 0;
-
-    // The edge under the pointer: both ends facing the eye and on screen, nearest in pixels.
-    uint32_t ea = ~0u, eb = ~0u;
+    ea = eb = ~0u;
     float best = kSnapPx;
     for (size_t e = 0; e + 1 < rm.edges.size(); e += 2) {
         const uint32_t a = rm.edges[e], b = rm.edges[e + 1];
@@ -1536,7 +1534,20 @@ int retopo_select_loop(RetopoState& st, const Camera& cam, int win_w, int win_h,
         const float d = std::hypot(x - (ax + ex * t), y - (ay + ey * t));
         if (d < best) { best = d; ea = a; eb = b; }
     }
-    if (ea == ~0u) return 0;
+    return ea != ~0u;
+}
+}  // namespace
+
+int retopo_select_loop(RetopoState& st, const Camera& cam, int win_w, int win_h,
+                       float x, float y, bool add, bool mirror) {
+    if (!add) st.loop_edges.clear();
+    st.path_a = st.path_b = ~0u;
+    const RetopoMesh& rm = st.result;
+    const uint32_t nv = (uint32_t)rm.v.size();
+    if (!st.built || rm.nb_off.size() != nv + 1) return 0;
+
+    uint32_t ea, eb;
+    if (!edge_under(st, cam, win_w, win_h, x, y, ea, eb)) return 0;
 
     // Faces round each vertex (CSR), once per pick: retopo is a few thousand faces.
     std::vector<uint32_t> vf_off(nv + 1, 0), vf, c;
@@ -1640,7 +1651,10 @@ int retopo_select_loop(RetopoState& st, const Camera& cam, int win_w, int win_h,
         if (std::find(seen.begin(), seen.end(), k) != seen.end()) continue;
         keep.push_back(st.loop_edges[i]); keep.push_back(st.loop_edges[i + 1]);
     }
-    if (!had) keep.insert(keep.end(), loop.begin(), loop.end());
+    if (!had) {
+        keep.insert(keep.end(), loop.begin(), loop.end());
+        st.path_a = ea; st.path_b = eb;   // a Shift+Ctrl+click runs on from here
+    }
     st.loop_edges.swap(keep);
     const bool outline = vf_off[ea + 1] - vf_off[ea] > 0 && [&] {
         bool q; around(ea, sides, q); return faces_on(eb, sides) == 1;
@@ -1649,6 +1663,111 @@ int retopo_select_loop(RetopoState& st, const Camera& cam, int win_w, int win_h,
                 loop.size() / 2, outline ? "outline" : "inner", closed ? "closed" : "open",
                 st.loop_edges.size() / 2);
     return (int)(loop.size() / 2);
+}
+
+int retopo_select_path(RetopoState& st, const Camera& cam, int win_w, int win_h,
+                       float x, float y, bool mirror) {
+    const RetopoMesh& rm = st.result;
+    const uint32_t nv = (uint32_t)rm.v.size();
+    if (!st.built || rm.nb_off.size() != nv + 1) return 0;
+    uint32_t ta, tb;
+    if (!edge_under(st, cam, win_w, win_h, x, y, ta, tb)) return 0;
+
+    std::vector<uint64_t> have;
+    for (size_t i = 0; i + 1 < st.loop_edges.size(); i += 2)
+        have.push_back(edge_key(st.loop_edges[i], st.loop_edges[i + 1]));
+    std::sort(have.begin(), have.end());
+    const uint32_t pa = st.path_a, pb = st.path_b;
+    const bool from = pa < nv && pb < nv && std::binary_search(have.begin(), have.end(), edge_key(pa, pb));
+    if (from && edge_key(pa, pb) == edge_key(ta, tb)) return 0;
+    // No run to carry on (nothing picked, or what's picked came from Extrude or a loop
+    // dropped): a fresh pick. Joining the old one gave Extrude a branched or wrong chain.
+    if (!from) { st.loop_edges.clear(); have.clear(); }
+
+    std::vector<uint32_t> run;   // 2 per edge
+    const char* how = "first edge";
+    // Both ends on one outline: along it, not across the faces. A run that cuts through
+    // the inside isn't an outline chain, and Extrude needs one.
+    int r_from = -1, r_to = -1;
+    uint32_t k_from = 0, k_to = 0;
+    for (uint32_t r = 0; from && r < rm.rim_count(); r++) {
+        const uint32_t o = rm.rim_off[r], n = rm.rim_off[r + 1] - o;
+        for (uint32_t k = 0; k < n; k++) {
+            const uint64_t key = edge_key(rm.rim[o + k], rm.rim[o + (k + 1) % n]);
+            if (key == edge_key(pa, pb)) { r_from = (int)r; k_from = k; }
+            if (key == edge_key(ta, tb)) { r_to = (int)r; k_to = k; }
+        }
+    }
+    if (!from) {
+        run = {ta, tb};
+    } else if (r_from >= 0 && r_from == r_to) {
+        // Rim side k runs rim[k] -> rim[k + 1]. Forward or back from the start side to
+        // the clicked one, whichever is shorter on the surface.
+        const uint32_t o = rm.rim_off[r_from], n = rm.rim_off[r_from + 1] - o;
+        auto side_len = [&](uint32_t k) { return (rm.v[rm.rim[o + (k + 1) % n]] - rm.v[rm.rim[o + k % n]]).length(); };
+        const uint32_t n_fwd = (k_to + n - k_from) % n, n_bwd = (k_from + n - k_to) % n;
+        float fwd = 0.0f, bwd = 0.0f;
+        for (uint32_t i = 1; i <= n_fwd; i++) fwd += side_len(k_from + i);
+        for (uint32_t i = 1; i <= n_bwd; i++) bwd += side_len(k_from + n - i);
+        for (uint32_t i = 1; i <= (fwd <= bwd ? n_fwd : n_bwd); i++) {
+            const uint32_t k = fwd <= bwd ? k_from + i : k_from + n - i;
+            run.push_back(rm.rim[o + k % n]);
+            run.push_back(rm.rim[o + (k + 1) % n]);
+        }
+        how = "along the outline";
+    } else {
+        // Anywhere else: the shortest way over the edges (Dijkstra by length), from
+        // either end of the start edge to either end of the clicked one.
+        std::vector<float> dist(nv, 1e30f);
+        std::vector<uint32_t> prev(nv, ~0u);
+        using QE = std::pair<float, uint32_t>;
+        std::priority_queue<QE, std::vector<QE>, std::greater<QE>> q;
+        dist[pa] = dist[pb] = 0.0f;
+        q.push({0.0f, pa});
+        q.push({0.0f, pb});
+        uint32_t end = ~0u;
+        while (!q.empty()) {
+            const auto [d, u] = q.top();
+            q.pop();
+            if (d > dist[u]) continue;
+            if (u == ta || u == tb) { end = u; break; }
+            for (uint32_t k = rm.nb_off[u]; k < rm.nb_off[u + 1]; k++) {
+                const uint32_t w = rm.nb[k];
+                if (st.hidden(rm.v_owner[w])) continue;
+                const float nd = d + (rm.v[w] - rm.v[u]).length();
+                if (nd < dist[w]) { dist[w] = nd; prev[w] = u; q.push({nd, w}); }
+            }
+        }
+        if (end == ~0u) {
+            std::printf("[retopo] path: no edges join those two\n");
+            return -1;
+        }
+        for (uint32_t u = end; prev[u] != ~0u; u = prev[u]) { run.push_back(prev[u]); run.push_back(u); }
+        run.push_back(ta);
+        run.push_back(tb);
+        how = "across";
+    }
+    if (mirror && rm.mirror.size() == nv) {
+        const size_t n = run.size();
+        for (size_t i = 0; i + 1 < n; i += 2) {
+            const uint32_t a = rm.mirror[run[i]], b = rm.mirror[run[i + 1]];
+            if (a < nv && b < nv && a != b) { run.push_back(a); run.push_back(b); }
+        }
+    }
+    int added = 0;
+    for (size_t i = 0; i + 1 < run.size(); i += 2) {
+        const uint64_t k = edge_key(run[i], run[i + 1]);
+        const auto at = std::lower_bound(have.begin(), have.end(), k);
+        if (at != have.end() && *at == k) continue;
+        have.insert(at, k);
+        st.loop_edges.push_back(run[i]);
+        st.loop_edges.push_back(run[i + 1]);
+        added++;
+    }
+    st.path_a = ta; st.path_b = tb;
+    std::printf("[retopo] path: %d edge(s) added, %s; %zu picked in all\n", added, how,
+                st.loop_edges.size() / 2);
+    return added;
 }
 
 int retopo_cut(RetopoState& st, const Mesh& m, const Camera& cam, int win_w, int win_h,
@@ -2281,6 +2400,132 @@ int retopo_erase_face_dab(RetopoState& st, const Camera& cam, int win_w, int win
     return gone;
 }
 
+// ---- Dissolve (Del on picked edges) ------------------------------------------------
+
+const char* retopo_dissolve(RetopoState& st, bool mirror, int& dissolved) {
+    dissolved = 0;
+    RetopoMesh& rm = st.result;
+    const uint32_t nv = (uint32_t)rm.v.size();
+    if (!st.built || st.loop_edges.empty()) return "Pick edges first: double-click a loop, Shift+Ctrl+click a run";
+
+    std::vector<uint64_t> sel;
+    for (size_t i = 0; i + 1 < st.loop_edges.size(); i += 2) {
+        const uint32_t a = st.loop_edges[i], b = st.loop_edges[i + 1];
+        if (a >= nv || b >= nv || a == b) continue;
+        sel.push_back(edge_key(a, b));
+        if (mirror && rm.mirror.size() == nv) {
+            const uint32_t ta = rm.mirror[a], tb = rm.mirror[b];
+            if (ta < nv && tb < nv && ta != tb) sel.push_back(edge_key(ta, tb));
+        }
+    }
+    std::sort(sel.begin(), sel.end());
+    sel.erase(std::unique(sel.begin(), sel.end()), sel.end());
+    auto picked = [&](uint32_t a, uint32_t b) { return std::binary_search(sel.begin(), sel.end(), edge_key(a, b)); };
+
+    // Each picked edge's faces. Two = they merge; one = the outline, nothing to merge
+    // with (refused for now, user); none = an edge that stopped existing.
+    const uint32_t nf = rm.face_count();
+    std::vector<uint32_t> fa(sel.size(), ~0u), fb(sel.size(), ~0u), cnt(sel.size(), 0);
+    std::vector<uint32_t> c;
+    for (uint32_t f = 0; f < nf; f++) {
+        const int n = face_corners(rm, f, c);
+        for (int k = 0; k < n; k++) {
+            const uint64_t key = edge_key(c[k], c[(k + 1) % n]);
+            const auto it = std::lower_bound(sel.begin(), sel.end(), key);
+            if (it == sel.end() || *it != key) continue;
+            const size_t i = (size_t)(it - sel.begin());
+            (cnt[i]++ == 0 ? fa[i] : fb[i]) = f;
+        }
+    }
+    std::vector<uint32_t> up(nf);
+    for (uint32_t f = 0; f < nf; f++) up[f] = f;
+    auto root = [&](uint32_t x) { while (up[x] != x) x = up[x] = up[up[x]]; return x; };
+    for (size_t i = 0; i < sel.size(); i++) {
+        if (cnt[i] == 0) continue;
+        if (cnt[i] == 1) return "Outline edges can't be dissolved: pick edges with quads on both sides";
+        if (cnt[i] > 2 || fa[i] == fb[i]) return "That edge isn't between two faces: can't dissolve it";
+        up[root(fa[i])] = root(fb[i]);
+        dissolved++;
+    }
+    if (!dissolved) return "Those edges are gone: pick again";
+
+    // Each group of faces joined across picked edges becomes one face: its sides that
+    // aren't picked, walked round in the faces' own winding.
+    std::vector<std::vector<uint32_t>> members(nf);
+    for (uint32_t f = 0; f < nf; f++) members[root(f)].push_back(f);
+    FaceList out;
+    std::vector<uint32_t> touched, from, to, poly;
+    int merged = 0, made = 0;
+    for (uint32_t r = 0; r < nf; r++) {
+        if (members[r].empty()) continue;
+        if (members[r].size() == 1) {
+            out.add(rm.face(r), (int)rm.face_size(r), rm.face_owner[r]);
+            continue;
+        }
+        from.clear(); to.clear();
+        for (uint32_t f : members[r]) {
+            touched.push_back(rm.face_owner[f]);
+            const int n = face_corners(rm, f, c);
+            for (int k = 0; k < n; k++)
+                if (!picked(c[k], c[(k + 1) % n])) { from.push_back(c[k]); to.push_back(c[(k + 1) % n]); }
+        }
+        // A side starting where another does: the merged face would pinch or ring round
+        // a hole. A walk that can't go on or ends early: the faces either side are wound
+        // opposite ways. Neither is one face.
+        for (size_t i = 0; i < from.size(); i++)
+            for (size_t j = i + 1; j < from.size(); j++)
+                if (from[i] == from[j]) return "Dissolving there would make a face with a hole in it";
+        poly.clear();
+        uint32_t at = from.empty() ? ~0u : from[0];
+        for (size_t step = 0; step < from.size(); step++) {
+            const size_t i = (size_t)(std::find(from.begin(), from.end(), at) - from.begin());
+            if (i == from.size()) return "The faces there are flipped against each other: can't merge them";
+            poly.push_back(at);
+            at = to[i];
+            if (at == from[0]) break;
+        }
+        if (poly.size() != from.size() || poly.size() < 3)
+            return "Dissolving there would make a face with a hole in it";
+        out.add(poly.data(), (int)poly.size(), rm.face_owner[members[r][0]]);
+        merged += (int)members[r].size();
+        made++;
+    }
+
+    // The picked edges' vertices left with two edges (up and down a dissolved row, or an
+    // outline vertex the row ended on) go: the two edges become one.
+    std::vector<uint8_t> cand(nv, 0);
+    for (uint64_t k : sel) { cand[k >> 32] = 1; cand[k & 0xFFFFFFFFu] = 1; }
+    std::vector<uint64_t> near;
+    for (size_t f = 0; f + 1 < out.off.size(); f++)
+        for (uint32_t k = out.off[f]; k < out.off[f + 1]; k++) {
+            const uint32_t a = out.faces[k], b = out.faces[k + 1 < out.off[f + 1] ? k + 1 : out.off[f]];
+            if (cand[a] || cand[b]) near.push_back(edge_key(a, b));
+        }
+    std::sort(near.begin(), near.end());
+    near.erase(std::unique(near.begin(), near.end()), near.end());
+    std::vector<uint32_t> deg(nv, 0);
+    for (uint64_t k : near) { deg[k >> 32]++; deg[k & 0xFFFFFFFFu]++; }
+    int gone = 0;
+    for (uint32_t i = 0; i < nv; i++) gone += cand[i] && deg[i] == 2;
+    FaceList fin;
+    for (size_t f = 0; f + 1 < out.off.size(); f++) {
+        poly.clear();
+        for (uint32_t k = out.off[f]; k < out.off[f + 1]; k++)
+            if (!(cand[out.faces[k]] && deg[out.faces[k]] == 2)) poly.push_back(out.faces[k]);
+        if (poly.size() < 3) return "Dissolving there would leave a face with under three corners";
+        fin.add(poly.data(), (int)poly.size(), out.owner[f]);
+    }
+
+    st.checkpoint();   // one Ctrl+Z brings the row back
+    fin.swap_into(rm);
+    // The dropped vertices stay behind unreferenced, like an erase's.
+    rebuild_edges(rm);
+    freeze_touched(st, touched);
+    std::printf("[retopo] dissolve: %d edge(s), %d faces merged into %d, %d vertices gone, now %u faces\n",
+                dissolved, merged, made, gone, rm.face_count());
+    return nullptr;
+}
+
 // ---- Bridge (Draw from an edited island) ------------------------------------------
 
 const char* retopo_bridge(RetopoState& st, const Mesh& m, const Camera& cam, int win_w, int win_h,
@@ -2523,6 +2768,10 @@ const char* retopo_bridge(RetopoState& st, const Mesh& m, const Camera& cam, int
 
 bool retopo_on_loop(const RetopoState& st, const Camera& cam, int win_w, int win_h, float x, float y) {
     const RetopoMesh& rm = st.result;
+    // The margin grows with the edge: a pen-down just inside the quad beside a long edge
+    // means that edge. 12 px alone missed most presses on a short run of big quads, which
+    // then drew a one-quad bridge instead (user, 2026-10-24).
+    float best = 1e30f, best_lim = 0.0f;
     for (size_t e = 0; e + 1 < st.loop_edges.size(); e += 2) {
         const uint32_t a = st.loop_edges[e], b = st.loop_edges[e + 1];
         if (a >= rm.v.size() || b >= rm.v.size()) continue;
@@ -2532,9 +2781,14 @@ bool retopo_on_loop(const RetopoState& st, const Camera& cam, int win_w, int win
             || !cam.world_to_screen(rm.v[b], win_w, win_h, bx, by)) continue;
         const float ex = bx - ax, ey = by - ay, l2 = ex * ex + ey * ey;
         const float t = l2 > 0.0f ? std::max(0.0f, std::min(1.0f, ((x - ax) * ex + (y - ay) * ey) / l2)) : 0.0f;
-        if (std::hypot(x - (ax + ex * t), y - (ay + ey * t)) < 1.5f * kSnapPx) return true;
+        const float d = std::hypot(x - (ax + ex * t), y - (ay + ey * t));
+        const float lim = std::max(1.5f * kSnapPx, 0.5f * std::sqrt(l2));
+        if (d - lim < best - best_lim) { best = d; best_lim = lim; }
     }
-    return false;
+    if (!st.loop_edges.empty())
+        std::printf("[retopo] press %.0f px from the pick (counts within %.0f): %s\n", best, best_lim,
+                    best < best_lim ? "extrude" : "not on it");
+    return best < best_lim;
 }
 
 const char* retopo_extrude(RetopoState& st, const Mesh& m, const Camera& cam, int win_w, int win_h,

@@ -62,7 +62,7 @@ const KeyActionInfo kKeyActions[(int)KeyAction::COUNT] = {
     {"mirror",        "Shape",   "Mirror X",            nullptr, {GLFW_KEY_X, 0}},
     {"remesh",        "Shape",   "Remesh",              nullptr, {GLFW_KEY_SLASH, 0}},
     {"merge",         "Shape",   "SDF merge",           nullptr, {GLFW_KEY_J, 0}},
-    {"delete_mesh",   "Shape",   "Delete object",       nullptr, {GLFW_KEY_DELETE, 0}},
+    {"delete_mesh",   "Shape",   "Delete object",       "In Retopo mode: dissolve the picked edges", {GLFW_KEY_DELETE, 0}},
     {"mask_invert",   "Mask",    "Invert mask",         nullptr, {GLFW_KEY_I, C}},
     {"mask_clear",    "Mask",    "Clear mask",          nullptr, {GLFW_KEY_A, C}},
     {"focus",         "View",    "Focus",               nullptr, {GLFW_KEY_F, 0}},
@@ -1369,7 +1369,11 @@ static void run_key_action(GLFWwindow* w, KeyAction a, bool repeat) {
         // In the pose brush Delete clears the rig (after a prompt), never the mesh.
         case KeyAction::DELETE_MESH:
             // Retopo shows the sculpt but doesn't edit it: Delete must not cost a mesh.
-            if (in.interaction_mode == InputState::InteractionMode::RETOPO) break;
+            // There it dissolves the picked edges instead.
+            if (in.interaction_mode == InputState::InteractionMode::RETOPO) {
+                if (!repeat) in.retopo_dissolve_requested = true;
+                break;
+            }
             if (in.pose_brush_on()) in.pose_delete_key = true;
             else                    in.delete_mesh_requested = true;
             break;

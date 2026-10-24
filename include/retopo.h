@@ -111,6 +111,9 @@ struct RetopoState {
     // checkpointed change) drops them; an edge that stops existing (a weld, Erase) just
     // stops drawing.
     std::vector<uint32_t> loop_edges;
+    // The edge a Shift+Ctrl+click path starts from: the last one clicked to pick. Only
+    // trusted while it's still in loop_edges (whatever renumbers clears those).
+    uint32_t path_a = ~0u, path_b = ~0u;
     float last_sx = 0, last_sy = 0;   // screen position of the last captured point
     uint32_t next_id = 1;
     // Bumped by every change (each undo step taken, undo, redo, a load): main compares it
@@ -250,6 +253,14 @@ uint32_t retopo_snap_vertex(const RetopoState& st, const Camera& cam, int win_w,
 int retopo_select_loop(RetopoState& st, const Camera& cam, int win_w, int win_h,
                        float x, float y, bool add, bool mirror);
 
+// Shift+Ctrl+click in Draw: the shortest run of edges from the last edge picked to the
+// edge under (x, y) joins st.loop_edges, and that edge is the next run's start. Both on
+// one outline: the run stays on it, the short way round, so Extrude can take it. With
+// nothing picked yet it picks just that edge. Returns the edges added (0 = none), -1 =
+// nothing joins the two (separate islands).
+int retopo_select_path(RetopoState& st, const Camera& cam, int win_w, int win_h,
+                       float x, float y, bool mirror);
+
 // Erase (E in mode 0): a round brush. Each dab takes the inner edge whose middle is
 // nearest the ring's centre (inside the ring; the island's outline stays): its two
 // faces become one, of any size. An end left as a point on a straight line dissolves,
@@ -263,6 +274,13 @@ int retopo_erase_dab(RetopoState& st, const Camera& cam, int win_w, int win_h,
 // (and, with mirror, its twin), outline faces too; vertices only it used go with it.
 uint32_t retopo_face_at(const RetopoState& st, const Camera& cam, int win_w, int win_h,
                         float cx, float cy, float radius_px);
+
+// Del with edges picked: each picked edge goes and the faces either side become one;
+// then the picked edges' vertices left with only two edges go too, joining those two
+// (a dissolved row: the edges across it run straight through). Mirror takes the twins.
+// Outline edges are refused. One undo step; freezes what it touches. Returns nullptr
+// when done (`dissolved` = edges taken), else why not.
+const char* retopo_dissolve(RetopoState& st, bool mirror, int& dissolved);
 int retopo_erase_face_dab(RetopoState& st, const Camera& cam, int win_w, int win_h,
                           float cx, float cy, float radius_px, bool mirror);
 
@@ -294,8 +312,9 @@ int retopo_fill(RetopoState& st, const Mesh& m, bool mirror, int& rims, int& odd
 // every loop with the same count of vertices. The outermost new loop becomes the pick, so
 // the next stroke carries on from it. Mirror: a loop across x = 0 grows symmetric, a loop
 // with a twin grows a twin. Freezes its island. Returns nullptr when done, else why not.
-// The press at screen point (x, y) lands on a picked loop (within a few pixels of one of
-// its edges, facing the eye): Draw extrudes it rather than drawing.
+// The press at screen point (x, y) lands on a picked loop (within half an edge's screen
+// length of one of its edges, a few pixels at least, facing the eye): Draw extrudes it
+// rather than drawing.
 bool retopo_on_loop(const RetopoState& st, const Camera& cam, int win_w, int win_h, float x, float y);
 const char* retopo_extrude(RetopoState& st, const Mesh& m, const Camera& cam, int win_w, int win_h,
                            bool mirror);
