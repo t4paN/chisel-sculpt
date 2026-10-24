@@ -916,9 +916,151 @@ bool join_end(RetopoMesh& rm, const Grid& G, int end, uint32_t owner, int& i0, i
     // A run far off the strip's end means the edge there doesn't face it: leave it be.
     const float lim = 2.0f * std::max(half, along);
     if (best > (float)W * lim * lim) return false;
+    // So does one that runs along the strip rather than across its end (a strip drawn
+    // beside an island starts next to it): that's join_side's, and taking it here laid
+    // the end spoke down the island's edge.
+    if (W >= 2) {
+        const Vec3 run = rm.v[chain[best_s + W - 1]] - rm.v[chain[best_s]];
+        const Vec3 spoke = G.v[(size_t)ie * W + W - 1] - G.v[(size_t)ie * W];
+        const float lr = run.length(), ls = spoke.length();
+        if (lr > 1e-9f && ls > 1e-9f && std::fabs(run.dot(spoke)) < 0.7f * lr * ls) return false;
+    }
     for (int j = 0; j < W; j++)
         idx[(size_t)ie * W + j] = chain[best_s + (best_rev ? W - 1 - j : j)];
     return true;
+}
+
+// Sides. A strip drawn alongside an island built before it (its band's edge on or near
+// that island's outer edge) zips onto it: over the stretch where its side runs along
+// the edge, the spokes are re-laid one per island edge vertex, the side vertex IS that
+// vertex, and the rest of each spoke shifts across with it, fading out to the far side.
+// Shared vertices and edges, the island's loops run on into the strip, no T-junction
+// (the user's "parallel strips magnetise", 2026-10-24). One side per strip: zipping
+// both would need the two islands' vertex counts to agree. Returns the island vertices
+// taken; rm's topology must be current.
+int join_side(RetopoMesh& rm, const SnapGrid& g, Grid& G, uint32_t owner, int i0, int& i1,
+              std::vector<uint32_t>& idx) {
+    const int W = G.W, Q = W - 1;
+    if (G.closed || Q < 1 || i1 - i0 < 1) return 0;
+    std::vector<uint32_t> border;
+    for (uint32_t v = 0; v < (uint32_t)rm.v.size(); v++)
+        if (alive(rm, v) && on_border(rm, v) && rm.v_owner[v] != owner && rm.border_nb[v * 2] != ~0u)
+            border.push_back(v);
+    if (border.empty()) return 0;
+
+    // Per side, each spoke's side vertex: the island edge vertex within reach (3/4 of
+    // the strip's own quad there, across or along, whichever is bigger), if any. The
+    // longest unbroken run on one island wins, either side.
+    int best_s = -1, best_a = 0, best_b = -1;
+    std::vector<uint32_t> near((size_t)G.n), best_near;
+    for (int s : {0, Q}) {
+        const int sn = s == 0 ? 1 : Q - 1;
+        for (int i = i0; i <= i1; i++) {
+            near[i] = ~0u;
+            if (idx[(size_t)i * W + s] != ~0u) continue;   // a joined end spoke's corner
+            const Vec3 p = G.v[(size_t)i * W + s];
+            const int in = i < i1 ? i + 1 : i - 1;
+            const float r = 0.75f * std::max((G.v[(size_t)i * W + sn] - p).length(),
+                                             (G.v[(size_t)in * W + s] - p).length());
+            float bd = r * r;
+            for (uint32_t b : border) {
+                const Vec3 d = rm.v[b] - p;
+                if (d.dot(d) < bd) { bd = d.dot(d); near[i] = b; }
+            }
+        }
+        for (int a = i0; a <= i1;) {
+            if (near[a] == ~0u) { a++; continue; }
+            int b = a;
+            while (b + 1 <= i1 && near[b + 1] != ~0u && rm.v_owner[near[b + 1]] == rm.v_owner[near[a]]) b++;
+            if (b > a && near[b] != near[a] && b - a > best_b - best_a) {
+                best_s = s; best_a = a; best_b = b; best_near = near;
+            }
+            a = b + 1;
+        }
+    }
+    if (best_s < 0) {
+        std::printf("[retopo] zip: no stretch of either side within reach of an island's edge\n");
+        return 0;
+    }
+    const int s = best_s, ra = best_a, rb = best_b;
+
+    // The island's edge from the run's first vertex to its last, the short way.
+    const uint32_t bA = best_near[ra], bB = best_near[rb];
+    const size_t lim = (size_t)(4 * (rb - ra) + 8);
+    std::vector<uint32_t> chain;
+    for (int dir = 0; dir < 2; dir++) {
+        std::vector<uint32_t> c{bA};
+        uint32_t prev = bA, cur = rm.border_nb[bA * 2 + dir];
+        while (cur != ~0u && cur != bA && c.size() <= lim) {
+            c.push_back(cur);
+            if (cur == bB) break;
+            const uint32_t nx = rm.border_nb[cur * 2] == prev ? rm.border_nb[cur * 2 + 1] : rm.border_nb[cur * 2];
+            prev = cur; cur = nx;
+        }
+        if (c.back() == bB && (chain.empty() || c.size() < chain.size())) chain.swap(c);
+    }
+    if (chain.size() < 2) {
+        std::printf("[retopo] zip: side %d, spokes %d..%d near the edge, but the edge between "
+                    "can't be walked (a corner where outlines touch?)\n", s, ra, rb);
+        return 0;
+    }
+    const int m = (int)chain.size();
+
+    // Where along the run each chain vertex sits: nearest point on the side's polyline,
+    // as a spoke index with a fraction, kept in order.
+    std::vector<float> t(m);
+    for (int k = 0; k < m; k++) {
+        const Vec3 p = rm.v[chain[k]];
+        float bd = 1e30f;
+        for (int i = ra; i < rb; i++) {
+            const Vec3 a = G.v[(size_t)i * W + s], e = G.v[(size_t)(i + 1) * W + s] - a;
+            const float l2 = e.dot(e);
+            const float u = l2 > 0.0f ? std::max(0.0f, std::min(1.0f, (p - a).dot(e) / l2)) : 0.0f;
+            const Vec3 d = a + e * u - p;
+            if (d.dot(d) < bd) { bd = d.dot(d); t[k] = (float)i + u; }
+        }
+        if (k > 0) t[k] = std::max(t[k], t[k - 1]);
+    }
+    t[0] = (float)ra;
+    t[m - 1] = (float)rb;
+
+    // The new spokes, spliced in for ra..rb.
+    std::vector<Vec3> nv, nn;
+    std::vector<uint32_t> ni;
+    for (int i = 0; i < ra; i++)
+        for (int j = 0; j < W; j++) {
+            nv.push_back(G.v[(size_t)i * W + j]); nn.push_back(G.nrm[(size_t)i * W + j]);
+            ni.push_back(idx[(size_t)i * W + j]);
+        }
+    for (int k = 0; k < m; k++) {
+        const int a = std::min((int)t[k], rb - 1);
+        const float u = t[k] - (float)a;
+        auto row = [&](int j) { return G.v[(size_t)a * W + j] * (1.0f - u) + G.v[(size_t)(a + 1) * W + j] * u; };
+        const Vec3 shift = rm.v[chain[k]] - row(s);
+        for (int j = 0; j < W; j++) {
+            if (j == s) {
+                nv.push_back(rm.v[chain[k]]); nn.push_back(rm.n[chain[k]]); ni.push_back(chain[k]);
+                continue;
+            }
+            const float w = 1.0f - (float)std::abs(j - s) / (float)Q;
+            Vec3 p = row(j) + shift * w, q, qn;
+            Vec3 pn = G.nrm[(size_t)a * W + j];
+            if (g.closest(p, q, qn)) { p = q; pn = qn; }
+            nv.push_back(p); nn.push_back(pn); ni.push_back(~0u);
+        }
+    }
+    for (int i = rb + 1; i < G.n; i++)
+        for (int j = 0; j < W; j++) {
+            nv.push_back(G.v[(size_t)i * W + j]); nn.push_back(G.nrm[(size_t)i * W + j]);
+            ni.push_back(idx[(size_t)i * W + j]);
+        }
+    G.v.swap(nv);
+    G.nrm.swap(nn);
+    idx.swap(ni);
+    std::printf("[retopo] zip: side %d, spokes %d..%d of %d onto %d island vertices\n", s, ra, rb, G.n, m);
+    G.n += m - (rb - ra + 1);
+    i1 += m - (rb - ra + 1);
+    return m;
 }
 
 // Copy into dst the faces whose owner passes keep(), the vertices they use, and the
@@ -1018,7 +1160,7 @@ double retopo_build(RetopoState& st, const Mesh& m, bool mirror) {
     SnapGrid g;
     g.build(m, lo, hi, cell);
     RetopoMesh& rm = st.result;
-    int joins = 0;
+    int joins = 0, zips = 0;
     for (const Todo& t : todo) {
         Grid G;
         if (!stroke_grid(t.s, g, G)) continue;
@@ -1041,6 +1183,8 @@ double retopo_build(RetopoState& st, const Mesh& m, bool mirror) {
             // Seam ends meet their twin, not an island.
             if (!t.seam0) joins += join_end(rm, G, 0, t.s.id, i0, i1, idx);
             if (!t.seam1) joins += join_end(rm, G, 1, t.s.id, i0, i1, idx);
+            // A half-mouth's spokes are pinned to the seam: re-laying them would tear it.
+            if (!t.seam0 && !t.seam1) zips += join_side(rm, g, G, t.s.id, i0, i1, idx) > 0;
         }
         const uint32_t first_new = (uint32_t)rm.v.size();
         emit_grid(rm, G, i0, i1, idx, t.s.id);
@@ -1052,8 +1196,8 @@ double retopo_build(RetopoState& st, const Mesh& m, bool mirror) {
 
     const double ms = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - t0).count();
-    std::printf("[retopo] build: %zu strokes -> %u faces, %zu verts, %d strip ends joined, %.1f ms\n",
-                todo.size(), st.result.face_count(), st.result.v.size(), joins, ms);
+    std::printf("[retopo] build: %zu strokes -> %u faces, %zu verts, %d strip ends joined, %d sides zipped, %.1f ms\n",
+                todo.size(), st.result.face_count(), st.result.v.size(), joins, zips, ms);
     return ms;
 }
 
@@ -2524,6 +2668,92 @@ const char* retopo_dissolve(RetopoState& st, bool mirror, int& dissolved) {
     std::printf("[retopo] dissolve: %d edge(s), %d faces merged into %d, %d vertices gone, now %u faces\n",
                 dissolved, merged, made, gone, rm.face_count());
     return nullptr;
+}
+
+// ---- Alongside (Draw from an island, along its edge) -------------------------------
+
+bool retopo_alongside(RetopoState& st) {
+    const RetopoMesh& rm = st.result;
+    RetopoStroke& L = st.live;
+    const size_t np = L.pts.size();
+    if (!st.built || np < 3 || L.half_w.size() != np || rm.nb_off.size() != rm.v.size() + 1) return false;
+
+    // The outer edges, each with the way out of its one face, in the surface.
+    std::unordered_map<uint64_t, uint32_t> face_of;
+    std::vector<uint32_t> c;
+    for (uint32_t f = 0; f < rm.face_count(); f++) {
+        if (st.hidden(rm.face_owner[f])) continue;
+        const int n = face_corners(rm, f, c);
+        for (int k = 0; k < n; k++) {
+            const uint64_t key = edge_key(c[k], c[(k + 1) % n]);
+            auto it = face_of.find(key);
+            if (it == face_of.end()) face_of.emplace(key, f);
+            else                     it->second = ~0u;   // two faces: not an outer edge
+        }
+    }
+    struct Side { Vec3 a, e, out; };
+    std::vector<Side> sides;
+    for (const auto& [key, f] : face_of) {
+        if (f == ~0u) continue;
+        const uint32_t a = (uint32_t)(key >> 32), b = (uint32_t)(key & 0xFFFFFFFFu);
+        Vec3 mid(0, 0, 0);
+        const int n = face_corners(rm, f, c);
+        for (int k = 0; k < n; k++) mid = mid + rm.v[c[k]];
+        mid = mid * (1.0f / (float)n);
+        const Vec3 e = rm.v[b] - rm.v[a];
+        Vec3 out = (rm.n[a] + rm.n[b]).cross(e).normalized();
+        if (out.dot(rm.v[a] + e * 0.5f - mid) < 0.0f) out = out * -1.0f;
+        sides.push_back({rm.v[a], e, out});
+    }
+    if (sides.empty()) return false;
+
+    // Each line point: the nearest outer edge, how far out of it the point sits (signed,
+    // + = outside), and whether the line runs along it there: within a band's width and
+    // within ~45 degrees of parallel.
+    std::vector<float> off(np, 0.0f);
+    std::vector<Vec3> out(np);
+    std::vector<uint8_t> near(np, 0);
+    float total = 0.0f, along = 0.0f;
+    for (size_t i = 0; i < np; i++) {
+        const Vec3 p = L.pts[i];
+        float bd = 1e30f;
+        const Side* best = nullptr;
+        Vec3 at;
+        for (const Side& s : sides) {
+            const float l2 = s.e.dot(s.e);
+            const float u = l2 > 0.0f ? std::max(0.0f, std::min(1.0f, (p - s.a).dot(s.e) / l2)) : 0.0f;
+            const Vec3 q = s.a + s.e * u, d = p - q;
+            if (d.dot(d) < bd) { bd = d.dot(d); best = &s; at = q; }
+        }
+        const Vec3 t = L.pts[std::min(np - 1, i + 1)] - L.pts[i > 0 ? i - 1 : 0];
+        const float seg = 0.5f * t.length();
+        total += seg;
+        if (!best || std::sqrt(bd) > 2.0f * L.half_w[i]) continue;
+        near[i] = 1;
+        off[i] = (p - at).dot(best->out);
+        out[i] = best->out;
+        const float le = best->e.length();
+        if (le > 1e-9f && seg > 1e-9f && std::fabs(t.dot(best->e)) > 0.7f * 2.0f * seg * le) along += seg;
+    }
+    std::printf("[retopo] alongside: %.0f%% of the line runs along an edge%s\n",
+                total > 0.0f ? 100.0f * along / total : 0.0f, along >= 0.6f * total ? ": a strip beside it" : "");
+    if (along < 0.6f * total) return false;
+
+    // Slide it off: the band's near edge onto the island's (centre half a band out).
+    // Points that strayed from the edge carry their neighbour's shift; a light smooth
+    // keeps it from kinking where the nearest edge changes.
+    std::vector<Vec3> shift(np, Vec3(0, 0, 0));
+    for (size_t i = 0; i < np; i++)
+        if (near[i]) shift[i] = out[i] * (L.half_w[i] - off[i]);
+    for (size_t i = 1; i < np; i++) if (!near[i] && near[i - 1]) { shift[i] = shift[i - 1]; near[i] = 1; }
+    for (size_t i = np - 1; i-- > 0;) if (!near[i] && near[i + 1]) { shift[i] = shift[i + 1]; near[i] = 1; }
+    for (int pass = 0; pass < 3; pass++) {
+        std::vector<Vec3> s2 = shift;
+        for (size_t i = 1; i + 1 < np; i++) s2[i] = (shift[i - 1] + shift[i] * 2.0f + shift[i + 1]) * 0.25f;
+        shift.swap(s2);
+    }
+    for (size_t i = 0; i < np; i++) L.pts[i] = L.pts[i] + shift[i];   // Build snaps them back on
+    return true;
 }
 
 // ---- Bridge (Draw from an edited island) ------------------------------------------

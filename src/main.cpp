@@ -2989,7 +2989,15 @@ int main(int argc, char* argv[]) {
             } else if (retopo.drawing && retopo.bridge_from) {
                 // Pen up on a bridge: built now, it joins geometry, not sketches. A few
                 // pixels is a click (it selects the island), not a bridge: no toast.
-                if (retopo.live.pts.size() >= 3) {
+                // A line that ran along the island's edge instead is a strip beside it:
+                // slid off the island and kept like any stroke, Build zips it on.
+                if (retopo.live.pts.size() >= 3 && retopo_alongside(retopo)) {
+                    if (retopo.finish_live(input.retopo_rings, input.retopo_density)) {
+                        input.retopo_build_requested = true;
+                        input.retopo_build_quiet = true;
+                        input.retopo_menu_auto = true;
+                    }
+                } else if (retopo.live.pts.size() >= 3) {
                     const uint32_t to = retopo_pick(retopo, camera, win_w, win_h, (float)input.mouse_x,
                                                     (float)input.mouse_y, input.mirror_x);
                     scene.materialize_active_cpu();   // its spokes snap onto mesh.pos

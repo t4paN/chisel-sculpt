@@ -292,6 +292,12 @@ int retopo_erase_face_dab(RetopoState& st, const Camera& cam, int win_w, int win
 // out of the edge to the line's end. The islands and the bridge become one island (the
 // oldest keeps its name). Mirror: a twin bridge, or, from an island to its own twin, a
 // bridge that is its own twin. Returns nullptr when built, else why not (nothing done).
+// Pen-up on a stroke that started on an edited island: true when most of the line ran
+// along an island's outer edge (within a band's width, near parallel) rather than out
+// of it. The live line is then slid off the island, its band's near edge onto the
+// island's, to be kept as a plain strip that Build zips on (join_side). False = a bridge.
+bool retopo_alongside(RetopoState& st);
+
 const char* retopo_bridge(RetopoState& st, const Mesh& m, const Camera& cam, int win_w, int win_h,
                           uint32_t to_id, bool mirror);
 

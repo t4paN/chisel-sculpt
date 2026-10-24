@@ -2,6 +2,21 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-24 — Retopo mode: strips drawn beside an island zip onto it
+
+*Partly user-tested: in the app 2 of 3 strips drawn along an edited island's edge
+zipped, 1 didn't (cause not yet known, now logged). Headless tests pass
+(`unused-tools-vault/retopo-zip-test/`): parallel strips touching, with a gap,
+overlapping, denser or sparser, mirror on, drawn on an edited island's edge; far apart
+stays separate; head-on end joins unchanged.* At Build, a strip whose long side runs
+within ~3/4 of a quad of an earlier island's outline zips onto it: over that stretch its
+spokes are re-laid one per island edge vertex, sharing them, so the island's loops run
+on into the strip. Redone every Build, so the strip keeps its sliders. One side per
+strip. A stroke that starts on an edited island but runs mostly (60%) along its edge is
+now such a strip, slid off the island so its band's edge meets the island's, instead of
+a bridge. Strip ends now only join an edge they run into, not one running along the
+strip (that laid the end spoke down a neighbour's side).
+
 ## 2026-10-24 — Retopo mode: Del dissolves picked edges
 
 *User-tested; also checked headlessly on a quad grid (`unused-tools-vault/retopo-dissolve-test/`).*
