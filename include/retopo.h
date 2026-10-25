@@ -488,6 +488,34 @@ const char* retopo_symmetrize(RetopoState& st, const Mesh& m, int keep, int& fac
 // faces. The view toggles (Strokes, Wire) are kept. An empty snapshot clears retopo.
 void retopo_load(RetopoState& st, RetopoSnapshot&& s);
 
+// The other way: the session's retopo into a project about to be saved. An open wand
+// menu is settled first (a plain preview goes, a spine's fill stays).
+void retopo_save(RetopoState& st, RetopoSnapshot& out);
+
 // Write state.result as an OBJ, every face as it is (quads, triangles, bigger ones).
 // Returns false if there's nothing to write or the file can't be opened.
 bool retopo_export_obj(const RetopoMesh& rm, const char* path);
+
+// ---- The main loop's side (retopo_input.cpp) ----
+struct InputState;
+class Scene;
+struct Renderer;
+struct Tablet;
+// F in mode 0: frames the piece being worked on. False = nothing to frame, the
+// sculpt's own framing applies.
+bool retopo_focus(const RetopoState& retopo, Camera& camera, float mesh_radius);
+// Once a frame, every mode (a stroke still drawing ends when the mode changes under
+// it): pen and clicks, retopo's own undo, Build / Fill / Symmetrize / Dissolve
+// requests, then the hover snaps for the overlay.
+void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& mesh,
+                  Renderer& renderer, const Camera& camera, const Tablet& tablet,
+                  int win_w, int win_h, bool screen_buffers_dirty, bool imgui_wants_mouse);
+// Writes the built quads as an OBJ beside the project (or in home) and toasts how it
+// went. Returns the path written, empty on failure.
+std::string retopo_export(const RetopoState& retopo, InputState& input, const std::string& project_path);
+// The green ring (red for the eraser, a dot for Cut and the wand).
+void draw_retopo_cursor(Renderer& renderer, const Camera& camera, const InputState& input,
+                        float cursor_x, float cursor_y, int win_w, int win_h);
+// The dock and the overlay, mode 0 only.
+void draw_retopo_ui(InputState& input, RetopoState& retopo, Renderer& renderer, const Camera& camera,
+                    int win_w, int win_h, bool screen_buffers_dirty);

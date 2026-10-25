@@ -254,6 +254,7 @@ add_executable(chisel
     src/compute_pose.cpp
     src/pose.cpp
     src/retopo.cpp
+    src/retopo_input.cpp
     src/compute_mask.cpp
     src/compute_density.cpp
     src/compute_color.cpp

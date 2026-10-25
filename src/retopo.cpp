@@ -5985,6 +5985,15 @@ void retopo_load(RetopoState& st, RetopoSnapshot&& s) {
     else          st.result.clear();
 }
 
+void retopo_save(RetopoState& st, RetopoSnapshot& out) {
+    // A plain wand preview isn't work to save; a spine's fill is.
+    retopo_wand_close(st, st.wand_keep_shown ? st.wand_shown : -1);
+    out.strokes = st.strokes;
+    out.result  = st.result;
+    out.built   = st.built;
+    out.next_id = st.next_id;
+}
+
 bool retopo_export_obj(const RetopoMesh& rm, const char* path) {
     if (rm.faces.empty()) return false;
     FILE* f = std::fopen(path, "wb");
