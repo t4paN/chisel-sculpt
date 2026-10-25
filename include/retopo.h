@@ -328,6 +328,12 @@ uint32_t retopo_face_at(const RetopoState& st, const Camera& cam, int win_w, int
 // Outline edges are refused. One undo step; freezes what it touches. Returns nullptr
 // when done (`dissolved` = edges taken), else why not.
 const char* retopo_dissolve(RetopoState& st, bool mirror, int& dissolved);
+
+// The alarm for faces laid over faces (2026-10-25: a double-layered patch, cause unknown):
+// two faces running the same side the same way, or a side under three or more faces.
+// Prints [retopo-audit] with the first few faces' corners when it finds any; silent when
+// clean. main runs it once per change (st.rev). Returns how many sides were bad.
+int retopo_audit(const RetopoState& st);
 int retopo_erase_face_dab(RetopoState& st, const Camera& cam, int win_w, int win_h,
                           float cx, float cy, float radius_px, bool mirror);
 

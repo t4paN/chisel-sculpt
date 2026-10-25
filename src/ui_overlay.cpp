@@ -2451,13 +2451,23 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
     for (size_t i = 0; i < rm.v.size(); i++) {
         float x, y;
         const bool on_screen = cam.world_to_screen(rm.v[i], win_w, win_h, x, y);
-        const bool facing = retopo_facing(cam, rm.v[i], rm.n[i]);
+        // How square-on the surface is here (1 = facing us, 0 = edge-on). A vertex
+        // just past edge-on still counts as facing: on a curve seen side-on half the
+        // silhouette's vertices tip a hair away and their edges used to vanish.
+        Vec3 to_eye = cam.perspective ? cam.get_position() - rm.v[i] : cam.get_view_direction() * -1.0f;
+        const float te = to_eye.length(), nl = rm.n[i].length();
+        const float cosv = te > 1e-6f && nl > 1e-6f ? rm.n[i].dot(to_eye) / (te * nl) : 1.0f;
+        const bool facing = cosv > -0.15f;
         uint8_t v = on_screen && facing ? 2 : 0;
         if (on_screen && depth_fresh && x >= 0 && y >= 0 && x < win_w && y < win_h) {
             float front = 0.0f;
             if (renderer.sample_depth((int)x, (int)y, &front) && front < 500.0f) {
                 const float depth = cam.view_depth(rm.v[i]);
-                const float tol = 2.0f * cam.half_height_at(depth) / (float)win_h * 6.0f;
+                // Seen edge-on, one pixel of screen spans many pixels' worth of depth
+                // (about 1 / cos), so a flat 6 px slack called most vertices on an
+                // oblique surface "behind the sculpt" and drew them dim. Scale it.
+                const float tol = 2.0f * cam.half_height_at(depth) / (float)win_h
+                                * 6.0f / std::max(std::fabs(cosv), 0.15f);
                 if (facing ? depth > front + tol : depth <= front + reach) v = 1;
             }
         }
@@ -2551,7 +2561,7 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
         if (st.hidden(ow) && ow != st.hover_id) continue;
         const bool lit = ow == st.hover_id, on = is_sel(ow);
         dl->AddLine(at[a], at[b], lit ? hot : on ? sel_col : st.hover_id ? dim : lite,
-                    lit || on ? 2.0f : 1.2f);
+                    lit || on ? 2.0f : 1.5f);
     }
     // Double-clicked edge loops: green over the wire, thin where the sculpt is in front.
     // A picked edge a weld or the eraser took away isn't an edge any more: skipped.

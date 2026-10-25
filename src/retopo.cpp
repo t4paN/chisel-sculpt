@@ -94,6 +94,12 @@ constexpr float kAlongsideReach = 2.0f;
 constexpr float kNotchLegCos = 0.5f;
 //   Gap-joining lines (notch, edge to vertex) may lie over faces for this share at most.
 constexpr float kOpenSpaceOver = 0.3f;
+//   Mirror on: a line runs down the seam (and is forced onto it, symmetric) when its
+//   longest stretch within one band width of x = 0 holds this share of its length, and
+//   laid flat on x = 0 that stretch keeps kSeamFlatShare of its length (a short stroke
+//   across the seam flattens to nothing, so it stays a mouth).
+constexpr float kSeamLineShare = 0.6f;
+constexpr float kSeamFlatShare = 0.5f;
 
 constexpr size_t kHistorySteps = 64;
 constexpr size_t kHistoryBytes = 64u << 20;
@@ -635,9 +641,10 @@ void emit_grid(RetopoMesh& rm, const Grid& G, int i0, int i1, std::vector<uint32
 // paired with its original by index (Grab and Smooth move pairs, never guess by
 // position), quads wound the other way, since a reflection flips handedness. A joined
 // vertex maps to its island's twin of it; an island without twins (one across x = 0,
-// a mouth) lends the vertex sitting at the reflection, if there is one.
+// a mouth) lends the vertex sitting at the reflection, if there is one. seam_j: a strip
+// run down the seam (seam_strip) has that rail on x = 0, its own twin like a seam spoke.
 void emit_twin(RetopoMesh& rm, const Grid& G, int i0, int i1, const std::vector<uint32_t>& idx,
-               uint32_t first_new, uint32_t owner, bool seam0, bool seam1) {
+               uint32_t first_new, uint32_t owner, bool seam0, bool seam1, int seam_j) {
     std::vector<uint32_t> tw(idx.size(), ~0u);
     for (int i = i0; i <= i1; i++)
         for (int j = 0; j < G.W; j++) {
@@ -645,7 +652,7 @@ void emit_twin(RetopoMesh& rm, const Grid& G, int i0, int i1, const std::vector<
             const uint32_t a = idx[k];
             // A half-mouth's end spoke lies on x = 0: it is its own twin, which is
             // what welds the two halves into one ring.
-            if (a >= first_new && ((seam0 && i == i0) || (seam1 && i == i1))) {
+            if (a >= first_new && ((seam0 && i == i0) || (seam1 && i == i1) || j == seam_j)) {
                 tw[k] = a;
                 rm.mirror[a] = a;
                 continue;
@@ -807,6 +814,73 @@ void build_topology(RetopoMesh& rm) {
     }
     for (uint32_t r = 0; r < nr; r++)
         if (longest[root(rm.rim[rm.rim_off[r]])] == r) rm.rim_hole[r] = 0;
+}
+
+// Mirror on, a line drawn down the seam rather than across it: it gets forced onto x = 0
+// (2026-10-25: a strip down the middle wandered over the seam, hooked off into -x as a
+// J, and was built as drawn). reach[i]: how far from x = 0 point i may stray. The
+// longest stretch within reach (the one from point 0, if from_start) must hold
+// kSeamLineShare of the line and, flat on x = 0, keep kSeamFlatShare of its length.
+// keep: that stretch's points, a quarter reach apart at least, cut where it first turns
+// back on itself once flat (a hook's curl would fold the strip over).
+bool seam_line(const std::vector<Vec3>& pts, const std::vector<float>& reach, bool from_start,
+               std::vector<size_t>& keep) {
+    const size_t n = pts.size();
+    if (n < 2) return false;
+    float total = 0.0f;
+    for (size_t i = 0; i + 1 < n; i++) total += (pts[i + 1] - pts[i]).length();
+    auto near = [&](size_t i) { return std::fabs(pts[i].x) <= reach[i]; };
+    size_t a = 0, b = 0;
+    float best = -1.0f;
+    for (size_t i = 0; i < n; ) {
+        if (!near(i)) { if (from_start) break; i++; continue; }
+        size_t e = i;
+        float l = 0.0f;
+        while (e + 1 < n && near(e + 1)) { l += (pts[e + 1] - pts[e]).length(); e++; }
+        if (l > best) { best = l; a = i; b = e; }
+        if (from_start) break;
+        i = e + 1;
+    }
+    if (best <= 0.0f || best < kSeamLineShare * total) return false;
+    auto flat = [&](size_t i) { Vec3 p = pts[i]; p.x = 0.0f; return p; };
+    keep.assign(1, a);
+    Vec3 heading(0, 0, 0);
+    float flat_len = 0.0f;
+    for (size_t i = a + 1; i <= b; i++) {
+        const Vec3 d = flat(i) - flat(keep.back());
+        if (d.length() < 0.25f * reach[i]) continue;
+        if (heading.dot(d) < 0.0f) break;
+        heading = d;
+        flat_len += d.length();
+        keep.push_back(i);
+    }
+    float raw = 0.0f;
+    for (size_t i = a; i < keep.back(); i++) raw += (pts[i + 1] - pts[i]).length();
+    return keep.size() >= 2 && flat_len >= kSeamFlatShare * raw;
+}
+
+// A strip drawn down the seam, mirror on: built as a half from x = 0 out to the side
+// most of it was drawn on, plus its twin, so the seam is a rail of vertices (as across a
+// mouth) and the quads keep the size drawn: two across where one was drawn.
+bool seam_strip(const RetopoStroke& s, RetopoStroke& out) {
+    if (s.closed || s.pts.size() < 3) return false;
+    std::vector<float> reach(s.pts.size());
+    for (size_t i = 0; i < reach.size(); i++) reach[i] = 2.0f * s.half_w[i] * s.width;
+    std::vector<size_t> keep;
+    if (!seam_line(s.pts, reach, false, keep)) return false;
+    float side = 0.0f;
+    for (size_t i : keep) side += s.pts[i].x;
+    const float sg = side >= 0.0f ? 1.0f : -1.0f;
+    out = s;
+    out.pts.clear(); out.nrm.clear(); out.half_w.clear();
+    for (size_t i : keep) {
+        Vec3 p = s.pts[i];
+        p.x = sg * s.half_w[i] * s.width;   // the half's centre: one rail on x = 0
+        out.pts.push_back(p);
+        out.nrm.push_back(s.nrm[i]);
+        out.half_w.push_back(s.half_w[i]);
+    }
+    return out.pts.size() >= 3;
 }
 
 // A stroke across x = 0 (a mouth) with mirror on: keep its longest run on one side, cut
@@ -1162,11 +1236,12 @@ double retopo_build(RetopoState& st, const Mesh& m, bool mirror) {
         st.result = std::move(keep);
     }
     // Donuts first, then strips in the order drawn: a strip joins anything built
-    // before it. A stroke wholly on one side of x = 0 gets a twin with mirror on; one
-    // that crosses it (a mouth) is built as drawn — symmetrising it is a later job.
+    // before it. A stroke wholly on one side of x = 0 gets a twin with mirror on.
     // With mirror, one that crosses it (a mouth) is cut at x = 0 and built as a half plus
     // its twin, welded along the seam: symmetric, one piece.
-    struct Todo { RetopoStroke s; bool twin; bool seam0 = false, seam1 = false; };
+    // One drawn down the seam (seam_strip) is forced onto it: a half plus its twin
+    // sharing a rail on x = 0, whichever side of the seam it wandered to.
+    struct Todo { RetopoStroke s; bool twin; bool seam0 = false, seam1 = false, rail = false; };
     std::vector<Todo> todo;
     for (int pass = 0; pass < 2; pass++)
         for (const RetopoStroke& s : st.strokes) {
@@ -1174,7 +1249,8 @@ double retopo_build(RetopoState& st, const Mesh& m, bool mirror) {
             bool pos = false, neg = false;
             for (const Vec3& p : s.pts) { pos |= p.x > 1e-4f; neg |= p.x < -1e-4f; }
             Todo t{s, mirror && pos != neg};
-            if (mirror && pos && neg && half_stroke(s, t.s, t.seam0, t.seam1)) t.twin = true;
+            if (mirror && seam_strip(s, t.s)) t.twin = t.rail = true;
+            else if (mirror && pos && neg && half_stroke(s, t.s, t.seam0, t.seam1)) t.twin = true;
             for (float& w : t.s.half_w) w *= s.width;
             todo.push_back(std::move(t));
         }
@@ -1215,6 +1291,26 @@ double retopo_build(RetopoState& st, const Mesh& m, bool mirror) {
         if (!stroke_grid(t.s, g, G)) continue;
         std::vector<uint32_t> idx((size_t)G.n * G.W, ~0u);
         int i0 = 0, i1 = G.n - 1;
+        // A seam strip's rail: the outer column nearer x = 0, laid flat on it.
+        int seam_j = -1;
+        auto flat_rail = [&]() {
+            if (seam_j < 0) return;
+            for (int i = 0; i < G.n; i++) {
+                G.v[(size_t)i * G.W + seam_j].x = 0.0f;
+                Vec3& nn = G.nrm[(size_t)i * G.W + seam_j];
+                nn.x = 0.0f;
+                if (nn.length() > 1e-6f) nn = nn.normalized();
+            }
+        };
+        if (t.rail) {
+            float x0 = 0.0f, x1 = 0.0f;
+            for (int i = 0; i < G.n; i++) {
+                x0 += std::fabs(G.v[(size_t)i * G.W].x);
+                x1 += std::fabs(G.v[(size_t)i * G.W + G.W - 1].x);
+            }
+            seam_j = x0 <= x1 ? 0 : G.W - 1;
+            flat_rail();
+        }
         // A half-mouth's seam spokes go flat onto x = 0 (the snap can drift a hair).
         for (int e = 0; e < 2; e++) {
             if (!(e ? t.seam1 : t.seam0)) continue;
@@ -1240,10 +1336,11 @@ double retopo_build(RetopoState& st, const Mesh& m, bool mirror) {
                 const int i = e ? G.n - 1 : 0;
                 for (int j = 0; j < G.W; j++) G.v[(size_t)i * G.W + j].x = 0.0f;
             }
+            flat_rail();   // a zip may have pulled it off
         }
         const uint32_t first_new = (uint32_t)rm.v.size();
         emit_grid(rm, G, i0, i1, idx, t.s.id);
-        if (t.twin) emit_twin(rm, G, i0, i1, idx, first_new, t.s.id, t.seam0, t.seam1);
+        if (t.twin) emit_twin(rm, G, i0, i1, idx, first_new, t.s.id, t.seam0, t.seam1, seam_j);
     }
     dedupe_edges(rm);
     st.built = !rm.faces.empty();
@@ -2600,6 +2697,49 @@ int retopo_erase_face_dab(RetopoState& st, const Camera& cam, int win_w, int win
 
 // ---- Dissolve (Del on picked edges) ------------------------------------------------
 
+int retopo_audit(const RetopoState& st) {
+    const RetopoMesh& rm = st.result;
+    // Every side, both ways round: (lo, hi, forward?, face).
+    struct Side { uint32_t lo, hi, fwd, f; };
+    std::vector<Side> sides;
+    std::vector<uint32_t> c;
+    for (uint32_t f = 0; f < rm.face_count(); f++) {
+        const int n = face_corners(rm, f, c);
+        for (int k = 0; k < n && n >= 2; k++) {
+            const uint32_t a = c[k], b = c[(k + 1) % n];
+            if (a != b) sides.push_back({std::min(a, b), std::max(a, b), a < b ? 1u : 0u, f});
+        }
+    }
+    std::sort(sides.begin(), sides.end(), [](const Side& x, const Side& y) {
+        return x.lo != y.lo ? x.lo < y.lo : x.hi != y.hi ? x.hi < y.hi : x.fwd < y.fwd;
+    });
+    int same_way = 0, crowded = 0;
+    std::vector<uint32_t> bad_faces;
+    for (size_t i = 0; i < sides.size(); ) {
+        size_t j = i;
+        while (j < sides.size() && sides[j].lo == sides[i].lo && sides[j].hi == sides[i].hi) j++;
+        bool dup = false;
+        for (size_t k = i + 1; k < j; k++) dup |= sides[k].fwd == sides[k - 1].fwd;
+        if (j - i > 2) crowded++;
+        else if (dup) same_way++;
+        if (j - i > 2 || dup)
+            for (size_t k = i; k < j; k++)
+                if (std::find(bad_faces.begin(), bad_faces.end(), sides[k].f) == bad_faces.end()) bad_faces.push_back(sides[k].f);
+        i = j;
+    }
+    if (!same_way && !crowded) return 0;
+    std::printf("[retopo-audit] %d side(s) run the same way by two faces (one over the other), "
+                "%d under 3+ faces; %zu face(s) involved:", same_way, crowded, bad_faces.size());
+    for (size_t i = 0; i < bad_faces.size() && i < 6; i++) {
+        const int n = face_corners(rm, bad_faces[i], c);
+        std::printf(" [f%u:", bad_faces[i]);
+        for (int k = 0; k < n; k++) std::printf(" v%u(%.2f,%.2f,%.2f)", c[k], rm.v[c[k]].x, rm.v[c[k]].y, rm.v[c[k]].z);
+        std::printf("]");
+    }
+    std::printf("\n");
+    return same_way + crowded;
+}
+
 const char* retopo_dissolve(RetopoState& st, bool mirror, int& dissolved) {
     dissolved = 0;
     RetopoMesh& rm = st.result;
@@ -2873,6 +3013,40 @@ const char* retopo_bridge(RetopoState& st, const Mesh& m, const Camera& cam, int
     // that first sample would make the heading run along the edge.
     for (size_t i = (size_t)std::floor(out->s) + 1; (float)i < s_end && i < np; i++) line.push_back(pts[i]);
     line.push_back(in ? (rm.v[in->a] + rm.v[in->b]) * 0.5f : at(s_end));
+
+    // Mirror on, a line run down the seam (seam_line, reach = the strip's width) is forced
+    // onto it. Off an edge across the seam: centred on x = 0, its own twin (seam 1). Off an
+    // edge with one end on the seam: that end's rail runs down x = 0 and the far side gets
+    // a twin (seam 2), like a band down the seam. A landing edge has to be the same kind,
+    // and reached: a line cut short of it stays as drawn.
+    int seam = 0;
+    uint32_t seam_v = ~0u;   // seam 2: the start edge's end on x = 0
+    if (mirror && rm.mirror.size() == nv) {
+        auto kind = [&](uint32_t a, uint32_t b) {
+            if (rm.mirror[a] == b && a != b) return 1;
+            return (rm.mirror[a] == a) != (rm.mirror[b] == b) ? 2 : 0;
+        };
+        const int k = kind(out->a, out->b);
+        std::vector<size_t> keep;
+        const std::vector<float> reach(line.size(), (rm.v[out->a] - rm.v[out->b]).length());
+        if (k && (!in || kind(in->a, in->b) == k) && seam_line(line, reach, true, keep)
+            && (!in || keep.back() == line.size() - 1)) {
+            seam = k;
+            seam_v = rm.mirror[out->a] == out->a ? out->a : out->b;
+            const uint32_t far = seam_v == out->a ? out->b : out->a;
+            const float x = k == 1 ? 0.0f : (rm.v[far].x > 0.0f ? 0.5f : -0.5f) * reach[0];
+            std::vector<Vec3> flat;
+            flat.push_back(line[0]);   // the edges' own middles stay where they are
+            for (size_t i = 1; i < keep.size(); i++) {
+                if (in && keep[i] == line.size() - 1) break;
+                Vec3 p = line[keep[i]];
+                p.x = x;
+                flat.push_back(p);
+            }
+            if (in) flat.push_back(line.back());
+            line.swap(flat);
+        }
+    }
     std::vector<float> arc(line.size(), 0.0f);
     for (size_t i = 1; i < line.size(); i++) arc[i] = arc[i - 1] + (line[i] - line[i - 1]).length();
     const float len = arc.back();
@@ -3019,14 +3193,38 @@ const char* retopo_bridge(RetopoState& st, const Mesh& m, const Camera& cam, int
 
     // Mirror. A bridge from an island to its own twin is its own twin: spoke i pairs with
     // spoke n - i, evened out across the seam. Otherwise, with both ends twinned and the
-    // line on one side, it gets a twin bridge, reflected vertex by vertex.
+    // line on one side, it gets a twin bridge, reflected vertex by vertex. One forced onto
+    // the seam (above) is its own twin spoke by spoke, or gets a twin sharing its seam rail.
     int twin = 0;
     if (mirror && rm.mirror[LA] != ~0u && rm.mirror[RA] != ~0u) {
         auto refl = [](Vec3 v) { v.x = -v.x; return v; };
         const bool self = in && ((rm.mirror[LA] == LB && rm.mirror[RA] == RB) || (rm.mirror[LA] == RB && rm.mirror[RA] == LB));
         bool one_side = true;
         for (const Vec3& p : line) one_side &= (p.x > 0.0f) == (line[0].x > 0.0f);
-        if (self) {
+        const int last = in ? n - 1 : n;   // spokes made here; a landing edge's are the island's
+        if (seam == 2 && !self) {
+            // The rail from the seam vertex lies on x = 0, its own twin; the twin bridge
+            // below reflects the rest and shares it.
+            const std::vector<uint32_t>& rail = seam_v == LA ? L : R;
+            for (int i = 1; i <= last; i++) {
+                const uint32_t x = rail[i];
+                rm.v[x].x = 0.0f;
+                rm.n[x].x = 0.0f;
+                if (rm.n[x].length() > 1e-6f) rm.n[x] = rm.n[x].normalized();
+                rm.mirror[x] = x;
+            }
+        }
+        if (seam == 1) {
+            // Centred on the seam: each spoke's ends are each other's twins.
+            for (int i = 1; i <= last; i++) {
+                const uint32_t x = L[i], y = R[i];
+                const Vec3 mid = (rm.v[x] + refl(rm.v[y])) * 0.5f;
+                rm.v[x] = mid; rm.v[y] = refl(mid);
+                rm.n[y] = refl(rm.n[x]);
+                rm.mirror[x] = y; rm.mirror[y] = x;
+            }
+            twin = 1;
+        } else if (self) {
             const bool same_rail = rm.mirror[LA] == LB;
             for (int i = 1; i <= n / 2; i++) {
                 const int j = n - i;
@@ -3041,10 +3239,10 @@ const char* retopo_bridge(RetopoState& st, const Mesh& m, const Camera& cam, int
                 }
             }
             twin = 1;
-        } else if (one_side && (!in || (rm.mirror[LB] != ~0u && rm.mirror[RB] != ~0u))) {
+        } else if (seam == 2 || (one_side && (!in || (rm.mirror[LB] != ~0u && rm.mirror[RB] != ~0u)))) {
             std::vector<uint32_t> tw(rm.v.size(), ~0u);
             auto tw_of = [&](uint32_t v) {
-                if (v < first_new) return rm.mirror[v];
+                if (v < first_new || rm.mirror[v] == v) return rm.mirror[v];
                 if (tw[v] == ~0u) {
                     tw[v] = (uint32_t)rm.v.size();
                     rm.v.push_back(refl(rm.v[v]));
@@ -3074,9 +3272,10 @@ const char* retopo_bridge(RetopoState& st, const Mesh& m, const Camera& cam, int
                                         [&](const RetopoStroke& s) { return s.id == gone; }), st.strokes.end());
     }
     rebuild_edges(rm);
-    std::printf("[retopo] bridge: %s, %d quads (step %.3f, width %.3f -> %.3f)%s\n",
+    std::printf("[retopo] bridge: %s, %d quads (step %.3f, width %.3f -> %.3f)%s%s\n",
                 to_id ? (to_id == from_id ? "within one island" : "two islands joined") : "loose strip",
-                n, q, wA, wB, twin == 1 ? ", its own twin" : twin == 2 ? ", twin built" : "");
+                n, q, wA, wB, twin == 1 ? ", its own twin" : twin == 2 ? ", twin built" : "",
+                seam ? ", forced onto the seam" : "");
     return nullptr;
 }
 
@@ -3443,6 +3642,30 @@ int fill_rims(RetopoState& st, const Mesh& m, bool mirror, int& rims, int& odd, 
         if (twin[r] != ~0u && twin[r] > r && want[r]) want[twin[r]] = 0;
     for (uint32_t r = 0; r < nr; r++)
         if (want[r] && rim_n(r) % 2) { odd++; want[r] = 0; }
+    // No twin rim, but every rim vertex has its pair and the pairs' sides are all open:
+    // the twin gap is there, only not a hole of its own (an outline running into it makes
+    // it part of that outline; 2026-10-25, Fill filled one of a pair). Its fill is this
+    // one reflected all the same. Otherwise say why, so a lopsided fill isn't a mystery.
+    std::vector<uint8_t> loose(nr, 0);
+    if (mirror && rm.mirror.size() == rm.v.size())
+        for (uint32_t r = 0; r < nr; r++) {
+            if (!want[r] || twin[r] != ~0u) continue;
+            const char* why = nullptr;
+            for (uint32_t k = 0; k < rim_n(r) && !why; k++) {
+                const uint32_t v = rim_v(r, k), w = rm.mirror[v];
+                if (w >= rm.v.size()) why = "a rim vertex has no mirror pair";
+                else if (w == v || rim_of[w] == r) why = "it reaches over x = 0 but isn't its own reflection";
+            }
+            for (uint32_t k = 0; k < rim_n(r) && !why; k++) {
+                const uint32_t a = rm.mirror[rim_v(r, k)], b = rm.mirror[rim_v(r, k + 1)];
+                // Open = one face along it (border_nb keeps two neighbours, so it can't
+                // tell at a vertex where an outline touches the gap).
+                if (has_side(rm, a, b) == has_side(rm, b, a))
+                    why = "the mirror side isn't open there (faces already, or edges not joined)";
+            }
+            loose[r] = !why;
+            if (why && record) std::printf("[retopo] fill: no twin for the rim of %u sides: %s\n", rim_n(r), why);
+        }
     uint32_t todo = 0;
     for (uint32_t r = 0; r < nr; r++) todo += want[r];
     if (!todo) return 0;
@@ -3521,6 +3744,11 @@ int fill_rims(RetopoState& st, const Mesh& m, bool mirror, int& rims, int& odd, 
         const int N = (int)rim_n(r), h = N / 2;
         Ri.resize(N);
         for (int k = 0; k < N; k++) Ri[k] = rim_v(r, k);
+        // Still open all round? A twin filled earlier in this pass may have covered it
+        // (rims found as each other's twin only one way round were filled twice).
+        bool open = true;
+        for (int k = 0; k < N && open; k++) open = has_side(rm, Ri[k], Ri[(k + 1) % N]) != has_side(rm, Ri[(k + 1) % N], Ri[k]);
+        if (!open) continue;
         for (uint32_t k : Ri) touched.push_back(rm.v_owner[k]);
         const bool self = twin[r] == r;
         // Its own twin: the reflection maps rim vertex k to vertex (t - k) mod N.
@@ -3702,10 +3930,16 @@ int fill_rims(RetopoState& st, const Mesh& m, bool mirror, int& rims, int& odd, 
                     N, ring ? "ring + " : "", M, Nn, nq,
                     [&] { float dmax = 0; for (uint32_t x = first_new; x < rm.v.size(); x++)
                               dmax = std::max(dmax, (cen - rm.v[x]).dot(nf)); return dmax; }(), diam,
-                    self ? ", its own twin" : twin[r] != ~0u ? ", twin too" : "");
+                    self ? ", its own twin" : twin[r] != ~0u ? ", twin too" : loose[r] ? ", twin too (by vertex pairs)" : "");
 
-        // A separate twin: its fill is this one reflected, vertex by vertex.
-        if (twin[r] != ~0u && !self) {
+        // A separate twin: its fill is this one reflected, vertex by vertex (unless
+        // something already closed it).
+        bool twin_open = (twin[r] != ~0u || loose[r]) && !self;
+        for (int k = 0; k < N && twin_open; k++) {
+            const uint32_t a = rm.mirror[Ri[k]], b = rm.mirror[Ri[(k + 1) % N]];
+            twin_open = has_side(rm, a, b) != has_side(rm, b, a);
+        }
+        if (twin_open) {
             for (uint32_t k : Ri) touched.push_back(rm.v_owner[rm.mirror[k]]);
             const uint32_t end = (uint32_t)rm.v.size();
             std::vector<uint32_t> tw(end - first_new, ~0u);
@@ -4147,7 +4381,23 @@ bool fewest_fill(RetopoState& st, const std::vector<uint32_t>& R, bool mirror) {
         cut.faces(Q, 0, N - 1, F);
     }
     if (F.empty()) return false;
+    // A hole whose twin is elsewhere and still open: the same faces there too (2026-10-25:
+    // Fewest faces filled one of a mirrored pair and left the other open). Rim vertices
+    // only, so the twin rim is the whole job; emit_rim_faces winds it against its island.
+    std::vector<uint32_t> Rt;
+    if (mirror && t < 0 && rm.mirror.size() == rm.v.size()) {
+        for (uint32_t v : R) {
+            const uint32_t w = rm.mirror[v];
+            if (w >= rm.v.size() || w == v || std::find(R.begin(), R.end(), w) != R.end()) { Rt.clear(); break; }
+            Rt.push_back(w);
+        }
+        for (size_t k = 0; k < Rt.size(); k++) {
+            const uint32_t a = Rt[k], b = Rt[(k + 1) % Rt.size()];
+            if (has_side(rm, a, b) == has_side(rm, b, a)) { Rt.clear(); break; }   // open: one face along it
+        }
+    }
     emit_rim_faces(st, R, F);
+    if (!Rt.empty()) emit_rim_faces(st, Rt, F);
     return true;
 }
 

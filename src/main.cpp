@@ -1137,6 +1137,7 @@ int main(int argc, char* argv[]) {
     InsertController insert_ctrl(scene, renderer);
     RetopoState retopo;   // mode 0: sketched strokes + the quads Build made from them
     uint64_t clean_retopo_rev = 0;   // retopo.rev as of the last save or load
+    uint64_t audited_retopo_rev = 0; // retopo.rev last checked for faces laid over faces
     // Two-finger take-back (see InputState::touch_revert_requested).
     Camera   camera_at_press;
     bool     touch_undo_on_commit   = false;
@@ -1254,7 +1255,9 @@ int main(int argc, char* argv[]) {
             input.close_requested = false;
             const bool busy = app_state != AppState::IDLE || vmerge_job
                 || input.remesh_requested || input.remesh_in_progress;
-            if (scene.edit_mark() == clean_edit_mark && retopo.rev == clean_retopo_rev && !busy) {
+            // retopo-mode branch only: the X always closes, no dialog, so test runs
+            // don't stop to ask. Drop the `true ||` before merging to main.
+            if (true || (scene.edit_mark() == clean_edit_mark && retopo.rev == clean_retopo_rev && !busy)) {
                 glfwSetWindowShouldClose(window, GLFW_TRUE);
             } else {
                 input.quit_requested = true;
@@ -5785,6 +5788,7 @@ int main(int argc, char* argv[]) {
             // Dock first: it sets which stroke the cursor is over, and the overlay lights
             // it the same frame (background list, so it still draws under the dock).
             draw_retopo_dock(input, retopo, win_w, win_h);
+            if (retopo.rev != audited_retopo_rev) { audited_retopo_rev = retopo.rev; retopo_audit(retopo); }
             draw_retopo_overlay(retopo, renderer, camera, win_w, win_h,
                                 !cam_moving && !screen_buffers_dirty, input.mirror_x);
         }

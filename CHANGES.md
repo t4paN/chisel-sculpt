@@ -2,6 +2,13 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-25 — Retopo mode: seam strokes, mirrored fills, overlap alarm
+
+- Mirror on: a stroke drawn down x = 0 is forced onto it — a vertex rail on the seam plus its twin; a hook that turns back is cut.
+- Fill and the wand's Fewest faces now fill a hole's mirror twin too, and never fill a gap twice.
+- `[retopo-audit]` in the log names faces laid over faces, once per change.
+- The wire stays bright on surfaces seen edge-on.
+
 ## 2026-10-25 — Retopo mode: one snap reach
 
 Cut's vertex snap, edge picks and loop/path clicks now reach 14 px, the same as Draw's orange dot (Cut was 8 px).
