@@ -2886,29 +2886,40 @@ const char* retopo_bridge(RetopoState& st, const Mesh& m, const Camera& cam, int
     };
 
     st.checkpoint();
-    // Spokes 1..n-1 (and n for a loose end): centre on the line, across = between the
-    // line's own sideways and the two end edges' directions, width eased from one end
-    // edge's length to the other's.
+    // Spokes 1..n-1 (and n for a loose end): centre on the line, across = the line's own
+    // left (normal x heading, the side LA and LB were picked on), leaning toward an end
+    // edge's direction only within a couple of quads of it, width eased from one end
+    // edge's length to the other's. The lean used to run the whole length, flipped to
+    // agree with the start edge: once the line turned back on itself (a J), that put
+    // the spoke's ends on the wrong rails and the quad there twisted.
     const uint32_t keep = to_id ? std::min(from_id, to_id) : from_id;
     std::vector<uint32_t> L(n + 1), R(n + 1);
     L[0] = LA; R[0] = RA;
     if (in) { L[n] = LB; R[n] = RB; }
     const uint32_t first_new = (uint32_t)rm.v.size();
+    const float step = len / (float)n;
     for (int i = 1; i <= n; i++) {
         if (i == n && in) break;
         const float f = (float)i / (float)n;
         Vec3 nn;
         const Vec3 cen = snap(along(f * len), nn);
         const Vec3 tan = (along(std::min(len, (f + 0.5f / n) * len)) - along(std::max(0.0f, (f - 0.5f / n) * len))).normalized();
-        Vec3 side = nn.cross(tan).normalized();
-        const Vec3 ends = (dA * (1.0f - f) + dB * f).normalized();
-        if (side.dot(ends) < 0.0f) side = side * -1.0f;
-        Vec3 across = (side + ends).normalized();
+        const Vec3 side = nn.cross(tan).normalized();
+        const float wa = std::max(0.0f, 1.0f - f * len / (2.0f * q));
+        const float wb = in ? std::max(0.0f, 1.0f - (1.0f - f) * len / (2.0f * q)) : 0.0f;
+        Vec3 across = side + dA * wa + dB * wb;
         across = (across - nn * across.dot(nn)).normalized();
         const float w = wA + (wB - wA) * f;
         for (int k = 0; k < 2; k++) {
-            Vec3 vn;
-            const Vec3 p = snap(cen + across * (k ? -0.5f * w : 0.5f * w), vn);
+            // A bend tighter than the strip is wide: the inside rail would step back past
+            // the last spoke and fold the quad over. Pull that end in until it moves on.
+            const Vec3 prev = rm.v[(k ? R : L)[i - 1]];
+            float o = 0.5f * w;
+            Vec3 vn, p = snap(cen + across * (k ? -o : o), vn);
+            for (int it = 0; it < 6 && (p - prev).dot(tan) < 0.25f * step; it++) {
+                o *= 0.6f;
+                p = snap(cen + across * (k ? -o : o), vn);
+            }
             rm.v.push_back(p);
             rm.n.push_back(vn.length() > 0.5f ? vn : nn);
             rm.v_owner.push_back(keep);

@@ -2,6 +2,18 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-25 — Retopo mode: loose bridge strips no longer twist on a J
+
+*Headless-tested only (`unused-tools-vault/retopo-bridge-turn-test/`): a J out of a
+ring, hooks from 1.2 down to 0.3 strip-widths, 2 to 4 flipped quads each before, none
+after.* A strip grown out of an island's edge whose line turned back on itself (a J) put
+a twisted quad in the hook. Each spoke leaned toward the start edge's direction along the
+whole strip, flipped to agree with it; once the line had turned past a right angle that
+swapped the spoke's ends between the rails. Spokes now follow the line's own left,
+leaning to an end edge only within a couple of quads of it, and on a bend tighter than the
+strip is wide the inside end is pulled in rather than stepping back past the last spoke.
+Present since bridges came in (2026-10-23).
+
 ## 2026-10-25 — Retopo mode: Fewest faces, Grid without ring, spines across a hole
 
 *User-tested in part: Fewest faces and Grid no ring on a near-symmetric seam hole
