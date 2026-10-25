@@ -253,6 +253,7 @@ add_executable(chisel
     src/compute_limb.cpp
     src/compute_pose.cpp
     src/pose.cpp
+    src/web_bridge.cpp
     src/compute_mask.cpp
     src/compute_density.cpp
     src/compute_color.cpp
