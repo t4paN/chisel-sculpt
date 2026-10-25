@@ -107,6 +107,12 @@ struct RetopoState {
     // Cut's vertex snap: the built vertex under the pointer (lit while hovering), and the
     // ones the line started and ended on (~0u = it started / ended on no vertex).
     uint32_t snap_v = ~0u, cut_from_v = ~0u, cut_to_v = ~0u;
+    // Draw's snap (retopo_draw_snap): the vertex a line would start or end on (orange
+    // dot), else the edge (bold blue, draw_t = how far along it from draw_ea).
+    uint32_t draw_v = ~0u, draw_ea = ~0u, draw_eb = ~0u;
+    float draw_t = 0.0f;
+    // The vertex the live line started on (its press was on an orange dot), ~0u = none.
+    uint32_t line_from_v = ~0u;
     // Ctrl + Erase: the face that would go, outlined red while Ctrl is held (~0u = none).
     uint32_t face_hover = ~0u;
     // Edge loops picked by double-click (Draw): 2 vertex ids per edge, mirror twins
@@ -257,8 +263,22 @@ int retopo_cut(RetopoState& st, const Mesh& m, const Camera& cam, int win_w, int
 
 // The built vertex within a few pixels of screen point (x, y), facing the eye and not
 // hidden, nearest first; ~0u for none. Close on purpose: a vertex cut is deliberate.
+// `px` > 0 widens it (Draw's lines use kRetopoDrawSnapPx).
 uint32_t retopo_snap_vertex(const RetopoState& st, const Camera& cam, int win_w, int win_h,
-                            float x, float y);
+                            float x, float y, float px = 0.0f);
+
+// Draw's snap reach. Wider than Cut's: lines across gaps start and end on vertices all
+// the time, and hitting one by hand at 8 px took the user several tries.
+constexpr float kRetopoDrawSnapPx = 14.0f;
+
+// What a Draw line starting or ending at (x, y) lands on, into st.draw_v (a vertex,
+// preferred) or st.draw_ea/eb/t (an edge). `any` = everything in reach (the end of a
+// line already drawing); else only what a press there would draw a line from: an edited
+// island's vertices and edges, any hole's rim vertices. retopo_draw_snap_point: where
+// that is on the surface; false = nothing lit.
+void retopo_draw_snap(RetopoState& st, const Camera& cam, int win_w, int win_h,
+                      float x, float y, bool any);
+bool retopo_draw_snap_point(const RetopoState& st, Vec3& p, Vec3& n);
 
 // Double-click in Draw: the edge loop through the built edge nearest screen point
 // (x, y) into st.loop_edges. An inner edge runs straight on through every vertex with
@@ -380,6 +400,20 @@ uint32_t retopo_hole_vertex(const RetopoState& st, const Camera& cam, int win_w,
 bool retopo_spine_gesture(const RetopoState& st, const Camera& cam, int win_w, int win_h, float ex, float ey);
 const char* retopo_wand_open_spine(RetopoState& st, const Mesh& m, const Camera& cam, int win_w, int win_h,
                                    float ex, float ey, bool mirror);
+
+// Notch: a Draw line from one outline vertex (st.line_from_v, the press's orange dot) to
+// another of the same outline (st.draw_v at pen-up), across open space. The notch is the
+// short way round the outline between them, plus its legs: the outline carried on past
+// both ends, in step, while it keeps heading out of the notch (a Pi's walls below the
+// line). A flat mouth joins the legs' feet with new vertices, as many as close it in
+// quads, and the line runs through it as a spine. No legs (the line drawn across the
+// mouth itself): the line is the mouth. Mirror: across the seam its halves are twins;
+// off it, the twin notch gets the same faces. retopo_notch_gesture: whether the live line
+// makes one (logs why not); retopo_wand_open_notch: the wand's menu over it, the first
+// fill shown and kept, as for a spine. `m` as for retopo_wand_open.
+bool retopo_notch_gesture(const RetopoState& st, const Camera& cam, int win_w, int win_h, bool mirror);
+const char* retopo_wand_open_notch(RetopoState& st, const Mesh& m, const Camera& cam, int win_w, int win_h,
+                                   bool mirror);
 
 // A saved project's retopo (strokes + result as saved) becomes the session's: history,
 // picks and tools start fresh, edges / outlines / holes are worked out again from the

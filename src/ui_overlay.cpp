@@ -2589,4 +2589,17 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
     }
     if (st.cutting) mark(st.cut_from_v, true);
     if (st.snap_v != st.cut_from_v || !st.cutting) mark(st.snap_v, false);
+    // Draw's snap: an orange dot on the vertex a line starts or ends on, else the edge
+    // in bold blue, so a line meant for a vertex never quietly lands on an edge.
+    if (st.draw_v < rm.v.size() && vis[st.draw_v] == 2) {
+        float x, y;
+        if (cam.world_to_screen(rm.v[st.draw_v], win_w, win_h, x, y)) {
+            dl->AddCircleFilled(ImVec2(x, y), 6.5f, IM_COL32(30, 12, 0, 220), 16);
+            dl->AddCircleFilled(ImVec2(x, y), 4.5f, IM_COL32(255, 150, 30, 255), 16);
+        }
+    } else if (st.draw_ea < rm.v.size() && st.draw_eb < rm.v.size()
+               && vis[st.draw_ea] == 2 && vis[st.draw_eb] == 2) {
+        dl->AddLine(at[st.draw_ea], at[st.draw_eb], IM_COL32(5, 15, 30, 220), 6.0f);
+        dl->AddLine(at[st.draw_ea], at[st.draw_eb], IM_COL32(120, 210, 255, 255), 3.0f);
+    }
 }

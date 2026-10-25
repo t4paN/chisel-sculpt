@@ -2828,6 +2828,9 @@ int main(int argc, char* argv[]) {
             // Where the pen went down. A stroke can start a few frames later (plane cache
             // still dirty) with the pen already moving; what it starts on is judged here.
             static float retopo_press_x = 0.0f, retopo_press_y = 0.0f;
+            // The press landed on a lit vertex or edge: the line's first point goes there.
+            static bool retopo_snap_first = false;
+            static Vec3 retopo_snap_p, retopo_snap_n;
             {
                 static bool was_press = false;
                 if (retopo_press && !was_press) {
@@ -2844,6 +2847,28 @@ int main(int argc, char* argv[]) {
                     retopo.work_valid = true;
                 }
                 was_press = retopo_press;
+            }
+            // Pen-up of a line (bridge, spine) on a lit vertex or edge: it ends exactly
+            // there. The last sample, if it's that close anyway, moves onto it.
+            if (!retopo_press && retopo.drawing && !retopo.extruding
+                && (retopo.bridge_from || retopo.spine_from != ~0u) && !retopo.live.pts.empty()) {
+                retopo_draw_snap(retopo, camera, win_w, win_h, (float)input.mouse_x, (float)input.mouse_y, true);
+                Vec3 sp, sn;
+                if (retopo_draw_snap_point(retopo, sp, sn)) {
+                    float lx, ly, qx, qy;
+                    const bool close = retopo.live.pts.size() >= 2
+                        && camera.world_to_screen(retopo.live.pts.back(), win_w, win_h, lx, ly)
+                        && camera.world_to_screen(sp, win_w, win_h, qx, qy)
+                        && std::hypot(lx - qx, ly - qy) < 4.0f;
+                    if (close) {
+                        retopo.live.pts.back() = sp;
+                        retopo.live.nrm.back() = sn;
+                    } else {
+                        retopo.live.pts.push_back(sp);
+                        retopo.live.nrm.push_back(sn);
+                        retopo.live.half_w.push_back(retopo.live.half_w.back());
+                    }
+                }
             }
             if (retopo_press && !retopo.drawing
                 && (retopo_smoothing || input.is_smooth_active())) {
@@ -2961,6 +2986,25 @@ int main(int argc, char* argv[]) {
                     // On a hole's rim vertex: maybe a spine across it (judged at pen-up).
                     retopo.spine_from = retopo.extruding ? ~0u
                                       : retopo_hole_vertex(retopo, camera, win_w, win_h, px, py);
+                    // On a lit vertex or edge (orange dot / bold blue): the line starts
+                    // exactly there. An edited island's lit outline corner is a bridge
+                    // even where the press itself falls just off its faces.
+                    retopo_snap_first = false;
+                    retopo.line_from_v = ~0u;
+                    if (retopo.built && !retopo.extruding) {
+                        retopo_draw_snap(retopo, camera, win_w, win_h, px, py, false);
+                        Vec3 sp, sn;
+                        if (retopo_draw_snap_point(retopo, sp, sn)) {
+                            const uint32_t sv = retopo.draw_v != ~0u ? retopo.draw_v : retopo.draw_ea;
+                            const RetopoStroke* so = retopo.find(retopo.result.v_owner[sv]);
+                            if (!retopo.bridge_from && retopo.spine_from == ~0u && so && so->frozen)
+                                retopo.bridge_from = so->id;
+                            retopo_snap_first = retopo.bridge_from || retopo.spine_from != ~0u;
+                            if (retopo_snap_first) retopo.line_from_v = retopo.draw_v;
+                            retopo_snap_p = sp;
+                            retopo_snap_n = sn;
+                        }
+                    }
                 }
                 Vec3 p, n;
                 float world_per_px;
@@ -2978,6 +3022,10 @@ int main(int argc, char* argv[]) {
                     retopo.live.half_w.push_back(input.brush_size * world_per_px * pr);
                     retopo.last_sx = mx;
                     retopo.last_sy = my;
+                    if (retopo_snap_first && retopo.live.pts.size() == 1) {
+                        retopo.live.pts[0] = retopo_snap_p;
+                        retopo.live.nrm[0] = retopo_snap_n;
+                    }
                 }
             } else if (retopo.drawing && retopo.spine_from != ~0u
                        && retopo_spine_gesture(retopo, camera, win_w, win_h,
@@ -2998,6 +3046,23 @@ int main(int argc, char* argv[]) {
                 retopo.drawing = false;
                 retopo.bridge_from = 0;
                 retopo.spine_from = ~0u;
+            } else if (retopo.drawing && retopo.line_from_v != ~0u && retopo.draw_v != ~0u
+                       && retopo_notch_gesture(retopo, camera, win_w, win_h, input.mirror_x)) {
+                // Pen up on a line from an outline vertex to another of the same outline,
+                // across open space: the notch between them closes, its menu beside it.
+                scene.materialize_active_cpu();   // the mouth snaps onto mesh.pos
+                const char* why = retopo_wand_open_notch(retopo, *mesh, camera, win_w, win_h, input.mirror_x);
+                if (why) {
+                    std::snprintf(input.notification, sizeof(input.notification), "%s", why);
+                    input.notification_timer = 2.5f;
+                } else {
+                    input.retopo_wand_request = true;
+                }
+                retopo.live = RetopoStroke{};
+                retopo.drawing = false;
+                retopo.bridge_from = 0;
+                retopo.spine_from = ~0u;
+                retopo.line_from_v = ~0u;
             } else if (retopo.drawing && retopo.extruding) {
                 // Pen up on an extrude. A few pixels is a click (or half a double-click):
                 // the pick stays, no toast.
@@ -3264,6 +3329,16 @@ int main(int argc, char* argv[]) {
             retopo.snap_v = knife ? retopo_snap_vertex(retopo, camera, win_w, win_h,
                                                        (float)input.mouse_x, (float)input.mouse_y)
                                   : ~0u;
+            // Draw's snap: before a press, what a line would start on; during a bridge or a
+            // spine, what it would end on. Nothing while a band is drawing (it doesn't snap).
+            const bool line_live = retopo.drawing && !retopo.extruding
+                                && (retopo.bridge_from || retopo.spine_from != ~0u);
+            if (retopo_on && retopo.built && !input.is_smooth_active() && !retopo.wand_open
+                && input.retopo_tool == InputState::RetopoTool::DRAW && (!retopo.drawing || line_live))
+                retopo_draw_snap(retopo, camera, win_w, win_h, (float)input.mouse_x, (float)input.mouse_y,
+                                 line_live);
+            else
+                retopo.draw_v = retopo.draw_ea = retopo.draw_eb = ~0u;
             // Ctrl with the eraser takes whole faces: show which one before it goes.
             const bool face_eraser = retopo_on && retopo.built && !input.is_smooth_active()
                                   && input.retopo_tool == InputState::RetopoTool::ERASE

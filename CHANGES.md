@@ -2,6 +2,20 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-25 — Retopo mode: Draw snaps to vertices, a line across a notch closes it
+
+*User-tested: a notch off the seam closed wall to wall, 16 quads with its twin. Also
+headless (`unused-tools-vault/retopo-notch-test/`): a seam Π, a line across its mouth,
+mirror off, an off-seam pair, and two lines that must not count.* Draw now shows what a
+line will start or end on: an orange dot on a vertex, else the edge in bold blue (14 px
+reach), and the line's ends land exactly there. Hitting a vertex used to take several
+tries, and each miss built a bridge off an edge instead. A line from one outline vertex
+to another of the same outline, across open space, closes the notch between them: its
+walls carry on as legs while they head out of the notch, a flat mouth joins their feet
+with new vertices, and the line runs through as a spine (the wand's menu opens beside
+it). Across the seam the halves are exact twins; off it the twin notch fills too. The
+first case of `retopo-closing-rules.md` in the CHISEL root.
+
 ## 2026-10-25 — Retopo mode: loose bridge strips no longer twist on a J
 
 *Headless-tested only (`unused-tools-vault/retopo-bridge-turn-test/`): a J out of a
