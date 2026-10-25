@@ -2,6 +2,23 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-25 — Retopo mode: Wand (Q), pick how a hole is filled
+
+*Partly user-tested: one 24-side hole across x = 0 offered all five fills, Columns kept.
+Staggered, Rows, Grid via the wand, Esc / click-away and Ctrl+Z after a keep: not yet.*
+A new dock tool. Click inside a hole and a menu pops up by the pen with every way to fill
+it, each with its count of quads and triangles; hovering one puts it on the model, a
+click keeps it (one undo step), Esc or a click elsewhere leaves the hole as it was. The
+options are all worked out at the click, so hovering is a swap, not a rebuild. With
+mirror, a hole across x = 0 gets ladders made only of new edges between its own rim
+vertices: **Columns** (the two seam points joined, then pairs outward along both
+halves; a triangle each side when a half's count is even, one in the middle when the
+rim's is odd), two **staggered** Columns (one half started a step on, which moves the
+triangles to the middle or away entirely), and **Rows** (every vertex to its twin across
+the seam). Even rims also get Fill's grid. So an odd hole across the seam, which Fill
+leaves open, can now be closed with one triangle in the middle. Undo, Build, Fill,
+Export, a tool switch or a save first puts back the hole as it was.
+
 ## 2026-10-24 — Retopo mode: strips drawn beside an island zip onto it
 
 *Partly user-tested: in the app 2 of 3 strips drawn along an edited island's edge

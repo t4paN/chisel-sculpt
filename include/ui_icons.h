@@ -18,6 +18,7 @@ enum class Icon {
     ModeRetopo,                       // a quad grid bent over a form
     RetopoPencil, RetopoCut, UiTrash, // mode 0's draw and cut tools; delete in lists
     RetopoErase,                      // mode 0's eraser
+    RetopoWand,                       // mode 0's wand (hole fills)
     Count
 };
 

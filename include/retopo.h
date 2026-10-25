@@ -122,6 +122,18 @@ struct RetopoState {
 
     RetopoMesh result;
     bool built = false;
+    // Wand: a hole clicked, its fills worked out whole at the click (see retopo_wand_open).
+    // While open, `result` shows wand_base or one option swapped in; nothing is history
+    // until one is kept.
+    struct WandOption {
+        char label[32];
+        char counts[48];
+        RetopoSnapshot after;
+    };
+    std::vector<WandOption> wand_opts;
+    RetopoSnapshot wand_base;
+    bool wand_open = false;
+    int  wand_shown = -1;           // the option swapped in, -1 = the hole as it was
     bool show_result = true;
     bool show_strokes = true;
     uint32_t hover_id = 0;            // stroke under the cursor in the bar (0 = none), lit in the overlay
@@ -324,6 +336,26 @@ int retopo_fill(RetopoState& st, const Mesh& m, bool mirror, int& rims, int& odd
 bool retopo_on_loop(const RetopoState& st, const Camera& cam, int win_w, int win_h, float x, float y);
 const char* retopo_extrude(RetopoState& st, const Mesh& m, const Camera& cam, int win_w, int win_h,
                            bool mirror);
+
+// Wand (Q in mode 0): the hole under screen point (x, y) (the nearest one whose rim,
+// as seen, contains the point), and every way it can be filled, each applied to a copy
+// and kept whole in st.wand_opts, so hovering one is a swap, not a rebuild. Even rims
+// get Fill's grid; with mirror, a hole across x = 0 also gets ladders, which add no
+// vertices, only edges between the rim's own:
+//   Columns: the rim's two seam points joined, then pairs outward along both halves
+//            (top i with bottom i) until they meet at the sides: a triangle there when
+//            a half's count is even, one in the middle when the rim's is odd.
+//   Shifted: the same with one half started a step on, which moves the triangles from
+//            the sides to the middle or away entirely.
+//   Rows:    each rim vertex to its twin, straight across the seam.
+// `m` must be current on the CPU (the grid snaps onto it). Returns nullptr when the menu
+// has options, else why not (nothing changes).
+const char* retopo_wand_open(RetopoState& st, const Mesh& m, const Camera& cam, int win_w, int win_h,
+                             float x, float y, bool mirror);
+// Show option k (-1 = the hole as it was) while the menu is open.
+void retopo_wand_show(RetopoState& st, int k);
+// Close the menu: keep option k as one undo step, or k = -1 to leave the hole open.
+void retopo_wand_close(RetopoState& st, int keep);
 
 // A saved project's retopo (strokes + result as saved) becomes the session's: history,
 // picks and tools start fresh, edges / outlines / holes are worked out again from the

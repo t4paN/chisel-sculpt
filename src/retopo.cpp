@@ -3275,9 +3275,31 @@ namespace {
 constexpr float kFillAbove = 0.25f, kFillBelow = 1.5f;
 // Rims with this many sides or more get a ring of quads inside before the grid.
 constexpr int kFillRingMin = 12;
-}  // namespace
 
-int retopo_fill(RetopoState& st, const Mesh& m, bool mirror, int& rims, int& odd) {
+// One piece now: every island round a filled rim joins the oldest of them, and it's
+// geometry (frozen) from here on.
+void join_round(RetopoState& st, std::vector<uint32_t>& touched) {
+    RetopoMesh& rm = st.result;
+    std::sort(touched.begin(), touched.end());
+    touched.erase(std::unique(touched.begin(), touched.end()), touched.end());
+    uint32_t keep = ~0u;
+    for (uint32_t id : touched) if (st.find(id)) keep = std::min(keep, id);
+    if (keep == ~0u) return;
+    for (uint32_t id : touched) if (RetopoStroke* s = st.find(id)) s->frozen = true;
+    for (std::vector<uint32_t>* ow : {&rm.face_owner, &rm.v_owner, &rm.edge_owner})
+        for (uint32_t& o : *ow) if (std::binary_search(touched.begin(), touched.end(), o)) o = keep;
+    bool vis = false, sel = false;
+    for (const RetopoStroke& s : st.strokes)
+        if (s.id != keep && std::binary_search(touched.begin(), touched.end(), s.id)) { vis |= s.visible; sel |= s.selected; }
+    st.strokes.erase(std::remove_if(st.strokes.begin(), st.strokes.end(), [&](const RetopoStroke& s) {
+        return s.id != keep && std::binary_search(touched.begin(), touched.end(), s.id);
+    }), st.strokes.end());
+    if (RetopoStroke* k = st.find(keep)) { k->visible |= vis; k->selected |= sel; }
+}
+
+// Fill's work. only_rim >= 0: that rim alone (the wand), picks ignored; record = false:
+// no undo step (the wand works on a copy and takes its own step when one is kept).
+int fill_rims(RetopoState& st, const Mesh& m, bool mirror, int& rims, int& odd, int only_rim, bool record) {
     rims = odd = 0;
     RetopoMesh& rm = st.result;
     const uint32_t nr = rm.rim_count();
@@ -3289,7 +3311,11 @@ int retopo_fill(RetopoState& st, const Mesh& m, bool mirror, int& rims, int& odd
     // islands' rims stay as they are.
     std::vector<uint8_t> want(nr, 0);
     bool picked = false;
-    if (!st.loop_edges.empty()) {
+    if (only_rim >= 0) {
+        if ((uint32_t)only_rim >= nr) return 0;
+        want[only_rim] = 1;
+        picked = true;
+    } else if (!st.loop_edges.empty()) {
         std::vector<uint64_t> sel;
         for (size_t i = 0; i + 1 < st.loop_edges.size(); i += 2)
             sel.push_back(edge_key(st.loop_edges[i], st.loop_edges[i + 1]));
@@ -3398,7 +3424,7 @@ int retopo_fill(RetopoState& st, const Mesh& m, bool mirror, int& rims, int& odd
     };
     auto refl = [](Vec3 v) { v.x = -v.x; return v; };
 
-    st.checkpoint();
+    if (record) st.checkpoint();
     std::vector<uint32_t> touched;
     std::vector<Vec3> L;
     std::vector<uint32_t> Li, Ri, c;
@@ -3589,7 +3615,7 @@ int retopo_fill(RetopoState& st, const Mesh& m, bool mirror, int& rims, int& odd
         const int nq = M * Nn + (ring ? N : 0);
         made += nq;
         rims++;
-        std::printf("[retopo] fill: rim of %d sides -> %s%d x %d grid, %d quads (depth %.3f of %.3f across)%s\n",
+        if (record) std::printf("[retopo] fill: rim of %d sides -> %s%d x %d grid, %d quads (depth %.3f of %.3f across)%s\n",
                     N, ring ? "ring + " : "", M, Nn, nq,
                     [&] { float dmax = 0; for (uint32_t x = first_new; x < rm.v.size(); x++)
                               dmax = std::max(dmax, (cen - rm.v[x]).dot(nf)); return dmax; }(), diam,
@@ -3624,29 +3650,241 @@ int retopo_fill(RetopoState& st, const Mesh& m, bool mirror, int& rims, int& odd
         }
     }
 
-    // One piece now: every island round a filled rim joins the oldest of them, and it's
-    // geometry (frozen) from here on.
-    std::sort(touched.begin(), touched.end());
-    touched.erase(std::unique(touched.begin(), touched.end()), touched.end());
-    uint32_t keep = ~0u;
-    for (uint32_t id : touched) if (st.find(id)) keep = std::min(keep, id);
-    if (keep != ~0u) {
-        for (uint32_t id : touched) if (RetopoStroke* s = st.find(id)) s->frozen = true;
-        for (std::vector<uint32_t>* ow : {&rm.face_owner, &rm.v_owner, &rm.edge_owner})
-            for (uint32_t& o : *ow) if (std::binary_search(touched.begin(), touched.end(), o)) o = keep;
-        bool vis = false, sel = false;
-        for (const RetopoStroke& s : st.strokes)
-            if (s.id != keep && std::binary_search(touched.begin(), touched.end(), s.id)) { vis |= s.visible; sel |= s.selected; }
-        st.strokes.erase(std::remove_if(st.strokes.begin(), st.strokes.end(), [&](const RetopoStroke& s) {
-            return s.id != keep && std::binary_search(touched.begin(), touched.end(), s.id);
-        }), st.strokes.end());
-        if (RetopoStroke* k = st.find(keep)) { k->visible |= vis; k->selected |= sel; }
-    }
+    join_round(st, touched);
     st.loop_edges.clear();
     rebuild_edges(rm);
-    std::printf("[retopo] fill: %d rim(s), %d quads, %d odd rim(s) left; %u holes remain\n",
-                rims, made, odd, (uint32_t)std::count(rm.rim_hole.begin(), rm.rim_hole.end(), 1));
+    if (record)
+        std::printf("[retopo] fill: %d rim(s), %d quads, %d odd rim(s) left; %u holes remain\n",
+                    rims, made, odd, (uint32_t)std::count(rm.rim_hole.begin(), rm.rim_hole.end(), 1));
     return made;
+}
+}  // namespace
+
+int retopo_fill(RetopoState& st, const Mesh& m, bool mirror, int& rims, int& odd) {
+    return fill_rims(st, m, mirror, rims, odd, -1, true);
+}
+
+// ---- Wand ----------------------------------------------------------------------
+
+namespace {
+// The hole whose rim, on screen, holds (x, y), facing the eye; nearest by its middle.
+int hole_under(const RetopoState& st, const Camera& cam, int win_w, int win_h, float x, float y) {
+    const RetopoMesh& rm = st.result;
+    int best = -1;
+    float best_d = 1e30f;
+    std::vector<float> sx, sy;
+    for (uint32_t r = 0; r < rm.rim_count(); r++) {
+        if (!rm.rim_hole[r]) continue;
+        const uint32_t k0 = rm.rim_off[r], n = rm.rim_off[r + 1] - k0;
+        if (n < 3) continue;
+        sx.resize(n); sy.resize(n);
+        bool ok = true;
+        Vec3 cen(0, 0, 0), ns(0, 0, 0);
+        for (uint32_t i = 0; i < n && ok; i++) {
+            const uint32_t v = rm.rim[k0 + i];
+            ok = !st.hidden(rm.v_owner[v]) && cam.world_to_screen(rm.v[v], win_w, win_h, sx[i], sy[i]);
+            cen = cen + rm.v[v];
+            ns = ns + rm.n[v];
+        }
+        if (!ok) continue;
+        cen = cen * (1.0f / (float)n);
+        const Vec3 to_eye = cam.perspective ? cam.get_position() - cen : cam.get_view_direction() * -1.0f;
+        if (ns.dot(to_eye) <= 0.0f) continue;   // its twin round the back
+        bool in = false;
+        for (uint32_t i = 0, j = n - 1; i < n; j = i++)
+            if ((sy[i] > y) != (sy[j] > y)
+                && x < sx[j] + (sx[i] - sx[j]) * (y - sy[j]) / (sy[i] - sy[j])) in = !in;
+        if (!in) continue;
+        const float d = cam.view_depth(cen);
+        if (d < best_d) { best_d = d; best = (int)r; }
+    }
+    return best;
+}
+
+// Ladders over a rim that is its own twin (see retopo_wand_open). kind 0 = Columns,
+// 1 and 2 = Columns with one half started a step on (bottom, top), 3 = Rows. Only new
+// faces between the rim's own vertices. False = this kind doesn't fit (nothing done).
+bool ladder_fill(RetopoState& st, uint32_t r, int kind) {
+    RetopoMesh& rm = st.result;
+    const int N = (int)(rm.rim_off[r + 1] - rm.rim_off[r]);
+    if (N < 3 || rm.mirror.size() != rm.v.size()) return false;
+    std::vector<uint32_t> R(rm.rim.begin() + rm.rim_off[r], rm.rim.begin() + rm.rim_off[r + 1]);
+    auto md = [&](int k) { return ((k % N) + N) % N; };
+    // Its own twin: the reflection takes rim vertex k to vertex t - k.
+    int t = -1;
+    for (int k = 0; k < N; k++) if (R[k] == rm.mirror[R[0]]) t = k;
+    if (t < 0) return false;
+    for (int k = 0; k < N; k++) if (rm.mirror[R[k]] != R[md(t - k)]) return false;
+    // In half-steps (vertex k at 2k, the side after it at 2k + 1) the seam crosses the rim
+    // at t and t + N: a vertex where that's even, a side's middle where it's odd. Half A
+    // runs up from the first crossing to the second, half B on round from there; each
+    // has E + 1 vertices and A(i)'s twin is B(E - i).
+    const int a0 = (t + 1) / 2, E = (t + N) / 2 - a0, b0 = (t + N + 1) / 2;
+    if (E < 1) return false;
+    auto A = [&](int i) { return md(a0 + i); };
+    auto B = [&](int i) { return md(b0 + i); };
+
+    // Faces as rim indices, every rim side in them running up the rim (so one flip below
+    // suits them all).
+    std::vector<std::vector<int>> F;
+    if (kind == 3) {
+        for (int i = 0; i < E; i++) {
+            std::vector<int> f{A(i), A(i + 1), B(E - i - 1), B(E - i)};
+            f.erase(std::unique(f.begin(), f.end()), f.end());
+            if (f.size() > 1 && f.front() == f.back()) f.pop_back();
+            if (f.size() < 3) return false;
+            F.push_back(f);
+        }
+    } else {
+        const int i0 = kind == 2 ? 1 : 0, j0 = kind == 1 ? E - 1 : E;
+        if (j0 - i0 < 1) return false;
+        // Rungs from (i, j) inward: the pair after each is (i + 1, j - 1); they meet at the
+        // sides in a rim side (all quads) or a vertex (a triangle).
+        auto ladder = [&](auto H, int i, int j) {
+            for (; j - i >= 3; i++, j--) F.push_back({H(i), H(i + 1), H(j - 1), H(j)});
+            if (j - i == 2) F.push_back({H(i), H(i + 1), H(j)});
+        };
+        ladder(A, i0, j0);
+        ladder(B, E - j0, E - i0);
+        // The middle: between the first rung and its twin, round both seam crossings.
+        std::vector<int> P;
+        auto walk = [&](int x, int y) { for (int k = x;; k = md(k + 1)) { P.push_back(k); if (k == y) break; } };
+        walk(A(j0), B(E - j0));
+        walk(B(E - i0), A(i0));
+        P.erase(std::unique(P.begin(), P.end()), P.end());
+        if (P.size() > 1 && P.front() == P.back()) P.pop_back();
+        const int p = (int)P.size();
+        if (p == 3 || p == 4) {
+            F.push_back(P);
+        } else if (p == 5 || p == 6) {
+            // Split along a chord that is its own reflection: twins, or two seam vertices.
+            int bx = -1, by = -1, bq = -1;
+            for (int x = 0; x < p; x++)
+                for (int y = x + 2; y < p; y++) {
+                    const uint32_t u = R[P[x]], w = R[P[y]];
+                    const bool sym = rm.mirror[u] == w || (rm.mirror[u] == u && rm.mirror[w] == w);
+                    const int s1 = y - x + 1, s2 = p - (y - x) + 1;
+                    if (!sym || s1 < 3 || s1 > 4 || s2 < 3 || s2 > 4) continue;
+                    if (s1 + s2 > bq) { bq = s1 + s2; bx = x; by = y; }
+                }
+            if (bx < 0) return false;
+            F.emplace_back(P.begin() + bx, P.begin() + by + 1);
+            std::vector<int> g(P.begin() + by, P.end());
+            g.insert(g.end(), P.begin(), P.begin() + bx + 1);
+            F.push_back(g);
+        } else if (p > 6) {
+            return false;
+        }
+    }
+    if (F.empty()) return false;
+
+    // Wound against the faces already on the rim, as Fill does.
+    bool flip = false;
+    std::vector<uint32_t> c;
+    for (size_t f = 0; f < rm.face_count() && !flip; f++) {
+        const int k = face_corners(rm, f, c);
+        for (int i = 0; i < k; i++) if (c[i] == R[0] && c[(i + 1) % k] == R[1]) flip = true;
+    }
+    const uint32_t owner = rm.v_owner[R[0]];
+    std::vector<uint32_t> q;
+    for (const std::vector<int>& f : F) {
+        q.clear();
+        for (int k : f) q.push_back(R[k]);
+        if (flip) std::reverse(q.begin(), q.end());
+        rm.add_face(q.data(), (int)q.size(), owner);
+    }
+    std::vector<uint32_t> touched;
+    for (uint32_t v : R) touched.push_back(rm.v_owner[v]);
+    join_round(st, touched);
+    rebuild_edges(rm);
+    return true;
+}
+
+// A step put back as it was: preview swaps, selection and eyes included.
+void put(RetopoState& st, const RetopoSnapshot& s) {
+    st.strokes = s.strokes;
+    st.result = s.result;
+    st.built = s.built;
+    st.next_id = std::max(st.next_id, s.next_id);
+}
+}  // namespace
+
+const char* retopo_wand_open(RetopoState& st, const Mesh& m, const Camera& cam, int win_w, int win_h,
+                             float x, float y, bool mirror) {
+    retopo_wand_close(st, -1);
+    if (!st.built) return "Nothing built yet: Build first (Space)";
+    const int r = hole_under(st, cam, win_w, win_h, x, y);
+    if (r < 0) return "Click inside a hole (the green or amber wash)";
+    st.loop_edges.clear();
+    st.wand_base = snapshot_of(st);
+    const RetopoMesh& base = st.wand_base.result;
+    const uint32_t N = base.rim_off[r + 1] - base.rim_off[r], fc0 = base.face_count();
+    std::vector<std::vector<uint32_t>> seen;   // each option's new faces, to drop repeats
+    auto attempt = [&](const char* label, auto&& apply) {
+        put(st, st.wand_base);
+        if (!apply()) return;
+        const RetopoMesh& rm = st.result;
+        int quads = 0, tris = 0, other = 0;
+        std::vector<uint32_t> sig;
+        for (uint32_t f = fc0; f < rm.face_count(); f++) {
+            const uint32_t k = rm.face_size(f);
+            (k == 4 ? quads : k == 3 ? tris : other)++;
+            std::vector<uint32_t> c(rm.face(f), rm.face(f) + k);
+            std::sort(c.begin(), c.end());
+            sig.insert(sig.end(), c.begin(), c.end());
+            sig.push_back(~0u);
+        }
+        if (quads + tris + other == 0) return;
+        for (const std::vector<uint32_t>& z : seen) if (z == sig) return;
+        seen.push_back(sig);
+        RetopoState::WandOption o;
+        std::snprintf(o.label, sizeof o.label, "%s", label);
+        if (tris) std::snprintf(o.counts, sizeof o.counts, "%d quad%s, %d tri%s", quads, quads == 1 ? "" : "s",
+                                tris, tris == 1 ? "" : "s");
+        else      std::snprintf(o.counts, sizeof o.counts, "%d quad%s", quads, quads == 1 ? "" : "s");
+        o.after = snapshot_of(st);
+        st.wand_opts.push_back(std::move(o));
+    };
+    if (mirror) {
+        attempt("Columns",            [&] { return ladder_fill(st, (uint32_t)r, 0); });
+        attempt("Columns, staggered", [&] { return ladder_fill(st, (uint32_t)r, 1); });
+        attempt("Columns, staggered flip", [&] { return ladder_fill(st, (uint32_t)r, 2); });
+        attempt("Rows",               [&] { return ladder_fill(st, (uint32_t)r, 3); });
+    }
+    if (N % 2 == 0)
+        attempt("Grid", [&] { int rims = 0, odd = 0; return fill_rims(st, m, mirror, rims, odd, r, false) > 0; });
+    put(st, st.wand_base);
+    if (st.wand_opts.empty()) {
+        st.wand_base = RetopoSnapshot{};
+        return mirror ? "Nothing fits this hole yet: odd count of sides, and not across the mirror line"
+                      : "Odd count of sides: turn mirror on for a hole across x = 0, or cut a loop into the rim";
+    }
+    st.wand_open = true;
+    st.wand_shown = -1;
+    std::printf("[retopo] wand: rim of %u sides, %zu option(s):", N, st.wand_opts.size());
+    for (const RetopoState::WandOption& o : st.wand_opts) std::printf(" [%s: %s]", o.label, o.counts);
+    std::printf("\n");
+    return nullptr;
+}
+
+void retopo_wand_show(RetopoState& st, int k) {
+    if (!st.wand_open || k == st.wand_shown || k >= (int)st.wand_opts.size()) return;
+    put(st, k < 0 ? st.wand_base : st.wand_opts[k].after);
+    st.wand_shown = k;
+}
+
+void retopo_wand_close(RetopoState& st, int keep) {
+    if (!st.wand_open) return;
+    put(st, st.wand_base);
+    if (keep >= 0 && keep < (int)st.wand_opts.size()) {
+        st.checkpoint();
+        put(st, st.wand_opts[keep].after);
+        std::printf("[retopo] wand: kept %s (%s)\n", st.wand_opts[keep].label, st.wand_opts[keep].counts);
+    }
+    st.wand_opts.clear();
+    st.wand_base = RetopoSnapshot{};
+    st.wand_open = false;
+    st.wand_shown = -1;
 }
 
 void retopo_load(RetopoState& st, RetopoSnapshot&& s) {

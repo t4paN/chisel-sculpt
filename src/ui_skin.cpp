@@ -1457,6 +1457,12 @@ void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
             input.clear_smooth_lock();
             input.retopo_tool = RT::GRAB;
         }
+        o.on = !smooth_on && input.retopo_tool == RT::WAND; o.tip = "Wand: click a hole, pick a fill";
+        o.key = input.key_label(KeyAction::RETOPO_WAND); o.corner = corner(KeyAction::RETOPO_WAND);
+        if (icon_button("rWand", Icon::RetopoWand, kRailBtn, o)) {
+            input.clear_smooth_lock();
+            input.retopo_tool = RT::WAND;
+        }
         // Smooth evens out the built quads; same keys as the sculpt Smooth.
         ImFont* mono = F(UiFont::MonoMedium);
         o.on = smooth_on; o.tip = "Smooth polygon strips";
@@ -1949,9 +1955,12 @@ float brush_panel(InputState& input, int win_h) {
         heading(smoothing ? "Smooth polygon strips"
                 : input.retopo_tool == InputState::RetopoTool::GRAB ? "Grab polygon strips"
                 : input.retopo_tool == InputState::RetopoTool::ERASE ? "Erase edges"
+                : input.retopo_tool == InputState::RetopoTool::WAND ? "Wand"
                 : cutting ? "Cut" : "Draw polygon strips", nullptr);
-        // Cut draws a bare line: no width, so no Size either.
+        const bool wand = !smoothing && input.retopo_tool == InputState::RetopoTool::WAND;
+        // Cut draws a bare line and the wand only clicks: no width, so no Size either.
         if (cutting) hint("Drag a line across islands");
+        else if (wand) { hint("Click a hole"); hint("Hover a fill to see it"); hint("Click it to keep it"); }
         else meter_widget("##mS", input, 0, w, k, !can_grow || big);
         if (!smoothing && input.retopo_tool == InputState::RetopoTool::ERASE) {
             hint("The edge nearest the centre goes");
@@ -4123,6 +4132,39 @@ void draw_retopo_dock(InputState& input, RetopoState& st, int win_w, int win_h) 
             retopo_sliders(input, st, sh, sgap, 150.0f, TipSide::Below);
         }
         ImGui::EndPopup();
+    }
+    // Wand (main.cpp opened it on a hole): every way to fill it. Hovering one puts it on
+    // the model (the last one hovered stays up), a click keeps it; closing the menu any
+    // other way (click away, Esc) leaves the hole as it was.
+    if (input.retopo_wand_request) {
+        input.retopo_wand_request = false;
+        const ImVec2 mp = ImGui::GetIO().MousePos;
+        ImGui::SetNextWindowPos(ImVec2(mp.x + 18.0f, mp.y + 12.0f), ImGuiCond_Always);
+        ImGui::OpenPopup("##retopoWand");
+    }
+    if (st.wand_open) {
+        if (ImGui::BeginPopup("##retopoWand", ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoSavedSettings)) {
+            window_panel(12.0f);
+            label_item(UiFont::SansSemibold, 13.0f, kText, "Fill this hole", 0.0f, 20.0f);
+            int keep = -2;
+            for (int k = 0; k < (int)st.wand_opts.size(); k++) {
+                ImGui::PushID(k);
+                if (chip(st.wand_opts[k].label, st.wand_shown == k, bh)) keep = k;
+                if (ImGui::IsItemHovered()) retopo_wand_show(st, k);
+                ImGui::SameLine(0.0f, 8.0f);
+                label_item(UiFont::Mono, 12.0f, kMuted, st.wand_opts[k].counts, 0.0f, bh);
+                ImGui::PopID();
+            }
+            label_item(UiFont::Sans, 12.0f, kMuted, "Click one to keep it \xC2\xB7 Esc leaves the hole open", 0.0f, 18.0f);
+            if (ImGui::IsKeyPressed(ImGuiKey_Escape)) keep = -1;
+            if (keep >= -1) {
+                retopo_wand_close(st, keep);
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        } else {
+            retopo_wand_close(st, -1);   // clicked away
+        }
     }
     ImGui::PopStyleVar(2);
     end_panel();

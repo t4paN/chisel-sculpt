@@ -2941,6 +2941,9 @@ int main(int argc, char* argv[]) {
                     retopo.last_sx = mx;
                     retopo.last_sy = my;
                 }
+            } else if (retopo_press && !retopo.drawing
+                       && input.retopo_tool == InputState::RetopoTool::WAND) {
+                // The wand only clicks: the release opens the hole's menu (below).
             } else if (retopo_press && !screen_buffers_dirty && !retopo_path_press) {
                 const float mx = (float)input.mouse_x, my = (float)input.mouse_y;
                 if (!retopo.drawing) {
@@ -3044,6 +3047,14 @@ int main(int argc, char* argv[]) {
             }
             // A slider drag is one undo step; letting go ends it.
             if (!input.mouse1_down) retopo.last_tag = 0;
+            // The wand's menu is a preview: anything else that edits puts the hole back
+            // as it was first, so it never acts on (or saves) a fill nobody kept.
+            if (retopo.wand_open
+                && (!retopo_on || input.retopo_tool != InputState::RetopoTool::WAND || input.is_smooth_active()
+                    || input.undo_requested || input.redo_requested || input.retopo_build_requested
+                    || input.retopo_fill_requested || input.retopo_dissolve_requested
+                    || input.retopo_export_requested))
+                retopo_wand_close(retopo, -1);
 
             // A click (pressed and let go within a few pixels) picks an island: plain
             // selects only it, Ctrl adds or takes out, on nothing clears. Shift is Smooth's,
@@ -3084,7 +3095,16 @@ int main(int argc, char* argv[]) {
                     last_click_t = dbl ? -1.0 : now;   // a third click starts over
                     last_click_x = click_x;
                     last_click_y = click_y;
-                    if (dbl) {
+                    if (input.retopo_tool == InputState::RetopoTool::WAND) {
+                        scene.materialize_active_cpu();   // the grid option snaps onto mesh.pos
+                        if (const char* why = retopo_wand_open(retopo, *mesh, camera, win_w, win_h,
+                                                               click_x, click_y, input.mirror_x)) {
+                            std::snprintf(input.notification, sizeof(input.notification), "%s", why);
+                            input.notification_timer = 2.5f;
+                        } else {
+                            input.retopo_wand_request = true;
+                        }
+                    } else if (dbl) {
                         retopo_select_loop(retopo, camera, win_w, win_h, click_x, click_y,
                                            input.ctrl_held, input.mirror_x);
                     } else {
@@ -4754,8 +4774,9 @@ int main(int argc, char* argv[]) {
                 // Matrix green (#00FF41): a ring no sculpt brush wears, so the hand
                 // knows it's in retopo before the eye finds the dock.
                 static const float kRetopoGreen[3] = {0.0f, 1.0f, 0.255f};
-                // Cut draws a bare line: a small ring marks the tip, no band width to show.
-                const bool cut = input.retopo_tool == InputState::RetopoTool::CUT
+                // Cut draws a bare line and the wand only clicks: a small ring marks the tip.
+                const bool cut = (input.retopo_tool == InputState::RetopoTool::CUT
+                                  || input.retopo_tool == InputState::RetopoTool::WAND)
                               && !input.is_smooth_active();
                 // The eraser's ring is red: it takes things away.
                 static const float kEraseRed[3] = {1.0f, 0.25f, 0.2f};
@@ -5345,6 +5366,7 @@ int main(int argc, char* argv[]) {
             proj.camera       = camera;
             proj.mirror_x     = input.mirror_x;
             proj.subdiv_level = input.subdiv_level;
+            retopo_wand_close(retopo, -1);   // a preview isn't work to save
             proj.retopo.strokes = retopo.strokes;
             proj.retopo.result  = retopo.result;
             proj.retopo.built   = retopo.built;
