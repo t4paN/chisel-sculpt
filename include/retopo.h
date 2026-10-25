@@ -273,14 +273,13 @@ void retopo_grab_drag(RetopoState& st, const Camera& cam, int win_w, int win_h,
 int retopo_cut(RetopoState& st, const Mesh& m, const Camera& cam, int win_w, int win_h,
                bool mirror);
 
-// The built vertex within a few pixels of screen point (x, y), facing the eye and not
-// hidden, nearest first; ~0u for none. Close on purpose: a vertex cut is deliberate.
-// `px` > 0 widens it (Draw's lines use kRetopoDrawSnapPx).
+// The built vertex within kRetopoDrawSnapPx of screen point (x, y), facing the eye and
+// not hidden, nearest first; ~0u for none. `px` > 0 sets another reach.
 uint32_t retopo_snap_vertex(const RetopoState& st, const Camera& cam, int win_w, int win_h,
                             float x, float y, float px = 0.0f);
 
-// Draw's snap reach. Wider than Cut's: lines across gaps start and end on vertices all
-// the time, and hitting one by hand at 8 px took the user several tries.
+// The one screen snap reach, every retopo tool (Draw's dots, Cut's vertex ends, edge
+// and loop picks). It was 8 px; hitting a vertex by hand at that took several tries.
 constexpr float kRetopoDrawSnapPx = 14.0f;
 
 // What a Draw line starting or ending at (x, y) lands on, into st.draw_v (a vertex,

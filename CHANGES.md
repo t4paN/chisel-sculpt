@@ -2,6 +2,10 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-25 — Retopo mode: one snap reach
+
+Cut's vertex snap, edge picks and loop/path clicks now reach 14 px, the same as Draw's orange dot (Cut was 8 px).
+
 ## 2026-10-25 — Retopo mode: housekeeping
 
 No behaviour change (every headless retopo test's output byte-identical before and after): the join, weld and snap tolerances now sit in one named "Reach" block atop `retopo.cpp`, and six copies of the face-winding check, two of the open-space check and the line pen-up resets became one helper each.

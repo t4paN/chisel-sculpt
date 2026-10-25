@@ -68,8 +68,10 @@ namespace {
 // Screen reaches are pixels; world reaches are fractions of the local edge or quad, so
 // they scale with the topology, not the sculpt. (Draw's snap, kRetopoDrawSnapPx, is in
 // retopo.h: the overlay needs it too.)
-//   Cut: a vertex cut must start or end this close to the vertex: deliberate.
-constexpr float kSnapPx = 8.0f;
+//   Screen snaps (Cut's vertex ends, edge picks, loop/path clicks): the same reach as
+//   Draw's lines. Cut used a tighter 8 px "to be deliberate" until 2026-10-25; the user
+//   found that too fiddly and asked for one reach everywhere.
+constexpr float kSnapPx = kRetopoDrawSnapPx;
 //   Edits (Grab, Smooth): a moved outline vertex welds to another outline vertex this
 //   close, as a share of its shortest edge: a deliberate push, not a near miss.
 constexpr float kEditWeldFrac = 0.4f;
