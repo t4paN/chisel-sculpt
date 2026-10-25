@@ -2,6 +2,15 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-25 — Retopo mode: mask, symmetrize, corner bridge
+
+*User-tested on a full head retopo.*
+
+- Mask (M): freezes vertices against Grab, Smooth and Erase; Ctrl unmasks, Shift softens its edge; saved with the project.
+- Symmetrize (panel): keep +X or -X, rebuild the other half as its mirror; drops faces laid over faces.
+- A line round an inside corner bridges as a triangle fan, its near-miss corner welded.
+- The wire no longer clips when zoomed in; F frames the last-worked area.
+
 ## 2026-10-25 — Retopo mode: seam strokes, mirrored fills, overlap alarm
 
 - Mirror on: a stroke drawn down x = 0 is forced onto it — a vertex rail on the seam plus its twin; a hook that turns back is cut.

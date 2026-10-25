@@ -50,6 +50,7 @@ const KeyActionInfo kKeyActions[(int)KeyAction::COUNT] = {
     {"retopo_erase",  "Retopo mode", "Erase",            "Brush over the built quads: the edge nearest the ring's centre goes", {GLFW_KEY_E, 0}, KeyScope::Retopo},
     {"retopo_fill",   "Retopo mode", "Fill holes",       "Quads over every even hole, or over the outline loops double-clicked", {GLFW_KEY_H, 0}, KeyScope::Retopo},
     {"retopo_wand",   "Retopo mode", "Wand",             "Click a hole: hover the ways to fill it, click one to keep it", {GLFW_KEY_Q, 0}, KeyScope::Retopo},
+    {"retopo_mask",   "Retopo mode", "Mask",             "Freeze vertices against Grab, Smooth and Erase. Ctrl unmasks, Shift softens the edge", {GLFW_KEY_M, 0}, KeyScope::Retopo},
     {"hold_size",     "Brush feel", "Size",             "Hold and drag", {GLFW_KEY_S, 0}},
     {"hold_strength", "Brush feel", "Strength",         "Hold and drag. In Retopo mode: the next stroke's Density", {GLFW_KEY_W, 0}},
     {"hold_hardness", "Brush feel", "Hardness",         "Hold and drag. In Retopo mode: the next stroke's Rings", {GLFW_KEY_A, 0}},
@@ -1245,17 +1246,20 @@ static void run_key_action(GLFWwindow* w, KeyAction a, bool repeat) {
         case KeyAction::RETOPO_CUT:
         case KeyAction::RETOPO_ERASE:
         case KeyAction::RETOPO_WAND:
+        case KeyAction::RETOPO_MASK:
             if (repeat) break;
             in.clear_smooth_lock();
             in.retopo_tool = a == KeyAction::RETOPO_GRAB  ? InputState::RetopoTool::GRAB
                            : a == KeyAction::RETOPO_CUT   ? InputState::RetopoTool::CUT
                            : a == KeyAction::RETOPO_ERASE ? InputState::RetopoTool::ERASE
                            : a == KeyAction::RETOPO_WAND  ? InputState::RetopoTool::WAND
+                           : a == KeyAction::RETOPO_MASK  ? InputState::RetopoTool::MASK
                                                           : InputState::RetopoTool::DRAW;
             notify(a == KeyAction::RETOPO_GRAB ? "Grab polygon strips"
                    : a == KeyAction::RETOPO_CUT ? "Cut"
                    : a == KeyAction::RETOPO_ERASE ? "Erase"
-                   : a == KeyAction::RETOPO_WAND ? "Wand: click a hole" : "Draw polygon strips", 1.0f);
+                   : a == KeyAction::RETOPO_WAND ? "Wand: click a hole"
+                   : a == KeyAction::RETOPO_MASK ? "Mask: Ctrl unmasks, Shift softens the edge" : "Draw polygon strips", 1.0f);
             break;
         case KeyAction::PAINT_BUCKET:
             // Paint mode's key (KeyScope::Paint): arm the bucket. Again: back to the brush.

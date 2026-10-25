@@ -45,8 +45,9 @@ static constexpr uint8_t  LAYR_FORMAT = 1;
 // Retopo (2026-10-23) didn't bump VERSION either: it's an optional RTPO chunk after
 // the entities, skipped by readers that predate it (the sculpt loads, the retopo is
 // just not there). Its own format byte is for growth: a reader takes formats up to
-// its own and fills what an older one lacks with defaults.
-static constexpr uint8_t  RTPO_FORMAT = 1;
+// its own and fills what an older one lacks with defaults. Format 2 (2026-10-25) adds
+// the vertex mask; a format 1 file loads with nothing masked.
+static constexpr uint8_t  RTPO_FORMAT = 2;
 
 struct ChunkHeader {
     char     tag[4];
@@ -294,7 +295,7 @@ static void write_layr_chunk(std::ofstream& f, const EntityRecord& e) {
 // i32 rings, f32 density, f32 width, u32 point count, then xyz points, xyz normals,
 // half widths. Result: u32 vertex count, xyz positions, xyz normals, u32 owner and u32
 // mirror twin per vertex; u32 face count, u32 face_off (count + 1), u32 corner count +
-// corners, u32 owner per face. Edges, neighbours, outlines and holes are derived: the
+// corners, u32 owner per face; (format 2) f32 mask per vertex. Edges, neighbours, outlines and holes are derived: the
 // loader works them out again. The built faces are saved as they are, never re-derived
 // from the strokes, so a later change to Build can't change an old file's low-poly.
 static void write_vec3s(std::ofstream& f, const std::vector<Vec3>& v) {
@@ -335,6 +336,7 @@ static void write_rtpo_chunk(std::ofstream& f, const RetopoSnapshot& r) {
     write_u32(f, (uint32_t)m.faces.size());
     write_u32s(f, m.faces);
     write_u32s(f, m.face_owner);
+    for (uint32_t i = 0; i < (uint32_t)m.v.size(); i++) { const float k = m.mask_at(i); write_raw(f, &k, 4); }
     write_chunk_end(f, sp);
 }
 
@@ -706,6 +708,10 @@ static bool read_rtpo_chunk(ChunkReader& r, ProjectData& data) {
     for (uint32_t i = 0; i < nf; i++) if (m.face_off[i + 1] < m.face_off[i]) return false;
     for (uint32_t c : m.faces) if (c >= nv) return false;
     for (uint32_t& t : m.mirror) if (t >= nv) t = ~0u;   // no twin, rather than a wild one
+    if (format >= 2) {
+        if (!r.read_float_vec(m.mask, nv)) return false;
+        for (float& k : m.mask) if (!(k >= 0.0f && k <= 1.0f)) k = 0.0f;   // NaN lands here too
+    }
     data.retopo = std::move(s);
     std::printf("[retopo] loaded: %zu stroke(s), %u faces, %u verts\n",
                 data.retopo.strokes.size(), nf, nv);

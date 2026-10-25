@@ -2448,9 +2448,14 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
     for (size_t e = 0; e + 1 < rm.edges.size(); e += 2)
         reach += (rm.v[rm.edges[e]] - rm.v[rm.edges[e + 1]]).length();
     reach *= 4.0f / (float)std::max<size_t>(1, rm.edges.size() / 2);
+    const float edge_mean = reach / 4.0f;
     for (size_t i = 0; i < rm.v.size(); i++) {
         float x, y;
-        const bool on_screen = cam.world_to_screen(rm.v[i], win_w, win_h, x, y);
+        // Past the window's edge still counts: its edges run off the screen and get
+        // clipped there. Treating it as hidden dropped every edge and face with a corner
+        // off screen, so zooming in even a little ate the wire round the borders.
+        const bool on_screen = cam.world_to_screen(rm.v[i], win_w, win_h, x, y)
+                            || !cam.perspective || cam.view_depth(rm.v[i]) > 1e-4f;
         // How square-on the surface is here (1 = facing us, 0 = edge-on). A vertex
         // just past edge-on still counts as facing: on a curve seen side-on half the
         // silhouette's vertices tip a hair away and their edges used to vanish.
@@ -2466,8 +2471,12 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
                 // Seen edge-on, one pixel of screen spans many pixels' worth of depth
                 // (about 1 / cos), so a flat 6 px slack called most vertices on an
                 // oblique surface "behind the sculpt" and drew them dim. Scale it.
-                const float tol = 2.0f * cam.half_height_at(depth) / (float)win_h
-                                * 6.0f / std::max(std::fabs(cosv), 0.15f);
+                // And never under one mean edge of world: in pixels alone the slack
+                // shrinks as you zoom in, until vertices a hair under the sculpt (after
+                // a level change, say) read as hidden. Anything that really hides a
+                // vertex sits further in front than one of its quads.
+                const float tol = std::max(edge_mean, 2.0f * cam.half_height_at(depth) / (float)win_h
+                                                      * 6.0f / std::max(std::fabs(cosv), 0.15f));
                 if (facing ? depth > front + tol : depth <= front + reach) v = 1;
             }
         }
@@ -2509,6 +2518,15 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
                                                 : IM_COL32(205, 245, 255, 36);
             if (poly.size() <= 4) dl->AddConvexPolyFilled(poly.data(), (int)poly.size(), col);
             else                  dl->AddConcavePolyFilled(poly.data(), (int)poly.size(), col);
+            // Masked: darkened by its corners' mean mask, as a masked sculpt is.
+            float mk = 0.0f;
+            for (uint32_t i = 0; i < k; i++) mk += rm.mask_at(q[i]);
+            mk /= (float)k;
+            if (mk > 0.01f) {
+                const ImU32 shade = IM_COL32(8, 12, 22, (int)(170.0f * std::min(1.0f, mk)));
+                if (poly.size() <= 4) dl->AddConvexPolyFilled(poly.data(), (int)poly.size(), shade);
+                else                  dl->AddConcavePolyFilled(poly.data(), (int)poly.size(), shade);
+            }
         }
         dl->Flags = keep_flags;
     }

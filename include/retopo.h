@@ -52,6 +52,11 @@ struct RetopoMesh {
     // Per vertex, its mirror twin (built as its exact reflection), itself on the x = 0
     // seam, ~0u when it has none. Mirrored edits move pairs by this, never by position.
     std::vector<uint32_t> mirror;
+    // Per vertex, the mask (M in mode 0): 0 free .. 1 frozen against Grab, Smooth and
+    // Erase. Shorter than v means the rest are 0: vertices are only ever appended, so a
+    // new one starts free without every builder having to grow this.
+    std::vector<float> mask;
+    float mask_at(uint32_t i) const { return i < mask.size() ? mask[i] : 0.0f; }
     // For Smooth: edge neighbours (CSR), and for a border vertex its two border
     // neighbours (pinned = a corner, or not a simple border: it never moves).
     std::vector<uint32_t> nb_off, nb;
@@ -65,7 +70,7 @@ struct RetopoMesh {
     uint32_t rim_count() const { return (uint32_t)rim_hole.size(); }
     void clear() {
         v.clear(); n.clear(); faces.clear(); face_off.assign(1, 0); edges.clear(); edge_owner.clear();
-        v_owner.clear(); face_owner.clear(); mirror.clear();
+        v_owner.clear(); face_owner.clear(); mirror.clear(); mask.clear();
         nb_off.clear(); nb.clear(); border_nb.clear(); pinned.clear();
         rim_off.assign(1, 0); rim.clear(); rim_hole.clear();
     }
@@ -256,6 +261,21 @@ int  retopo_grab_begin(RetopoState& st, const Camera& cam, int win_w, int win_h,
                        float cx, float cy, float radius_px, bool mirror);
 void retopo_grab_drag(RetopoState& st, const Camera& cam, int win_w, int win_h,
                       float dx_px, float dy_px);
+
+// Mask (M in mode 0), the sculpt Mask brush on the built vertices: each dab adds
+// strength x falloff (the sculpt brush's curve, its hardness) within radius_px, or takes
+// it away (unmask = Ctrl), clamped to 0..1. Smooth (Shift) blends each vertex's mask
+// toward its neighbours' average instead: a soft edge. Mirror: twins take the same
+// value. Masked vertices hold still under Grab and Smooth (by 1 - mask) and Erase
+// leaves anything touching them. Painting freezes the island, like any edit, so the
+// next Build keeps it. Returns how many vertices changed.
+int retopo_mask_dab(RetopoState& st, const Camera& cam, int win_w, int win_h, float cx, float cy,
+                    float radius_px, float strength, float hardness, bool unmask, bool mirror);
+int retopo_mask_smooth_dab(RetopoState& st, const Camera& cam, int win_w, int win_h, float cx, float cy,
+                           float radius_px, float strength, float hardness, bool mirror);
+// Ctrl+I / Ctrl+A in mode 0: every built vertex's mask flipped / zeroed. One undo step.
+void retopo_mask_invert(RetopoState& st);
+void retopo_mask_clear(RetopoState& st);
 
 // Cut (C in mode 0): the knife, along st.cut_pts (on the sculpt, as drawn). Every built
 // edge the line crosses, on the side facing the eye, gets a new vertex, pulled most of
@@ -451,6 +471,17 @@ bool retopo_edge_vertex_gesture(const RetopoState& st, const Camera& cam, int wi
 const char* retopo_lasso_cleanup(RetopoState& st, const Camera& cam, int win_w, int win_h,
                                  const std::vector<float>& xy, bool mirror);
 const char* retopo_wand_open_edge_vertex(RetopoState& st, const Camera& cam, int win_w, int win_h, bool mirror);
+
+// Symmetrize (the panel's button): keep one half (keep > 0: +X, screen right seen from
+// the front; < 0: -X), throw the other away and rebuild it as the kept half's exact
+// reflection, every vertex paired with its twin. Vertices on the seam (their own twins,
+// or a hair from x = 0 with no twin) go onto x = 0. A face across the seam stays as it is
+// when its far corners have partners on the kept side (their twins, else the kept vertex
+// nearest their reflection); a piece where any doesn't is cut at x = 0 instead, the new
+// seam vertices snapped onto the sculpt `m` (current on the CPU). Islands wholly on the
+// far side go, the rest freeze. One undo step. nullptr when done (`faces` = the count
+// now), else why not (nothing changed).
+const char* retopo_symmetrize(RetopoState& st, const Mesh& m, int keep, int& faces);
 
 // A saved project's retopo (strokes + result as saved) becomes the session's: history,
 // picks and tools start fresh, edges / outlines / holes are worked out again from the

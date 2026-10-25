@@ -91,7 +91,7 @@ enum class KeyAction : int {
     BRUSH_DRAW, BRUSH_CLAY, BRUSH_INFLATE, BRUSH_CREASE, BRUSH_PINCH,
     BRUSH_MOVE, BRUSH_LIMB, BRUSH_POSE, BRUSH_MASK, BRUSH_PREV, BRUSH_NEXT,
     PAINT_BUCKET, PAINT_PICKER,
-    RETOPO_BUILD, RETOPO_DRAW, RETOPO_GRAB, RETOPO_CUT, RETOPO_ERASE, RETOPO_FILL, RETOPO_WAND,
+    RETOPO_BUILD, RETOPO_DRAW, RETOPO_GRAB, RETOPO_CUT, RETOPO_ERASE, RETOPO_FILL, RETOPO_WAND, RETOPO_MASK,
     HOLD_SIZE, HOLD_STRENGTH, HOLD_HARDNESS, HOLD_SPACING, SIZE_DOWN, SIZE_UP, AUTOSMOOTH,
     LEVEL_UP, LEVEL_DOWN, PROJECT, MIRROR, REMESH, MERGE, DELETE_MESH,
     MASK_INVERT, MASK_CLEAR,
@@ -661,6 +661,7 @@ struct InputState {
     bool retopo_build_requested = false;
     bool retopo_fill_requested = false;    // H / the dock's Fill: quads over holes
     bool retopo_dissolve_requested = false;  // Del in mode 0: dissolve the picked edges
+    int  retopo_symmetrize_request = 0;      // the panel's Symmetrize: +1 keep +X, -1 keep -X
     bool retopo_build_quiet = false;   // a slider asked: rebuild without the toast
     bool retopo_menu_request = false;  // a right-click on an island: the bar opens its menu
     bool retopo_wand_request = false;  // the wand opened a hole's options: the bar shows them
@@ -670,7 +671,7 @@ struct InputState {
     float mouse2_press_x = 0.0f, mouse2_press_y = 0.0f;
     bool mouse2_just_released = false;
     // Mode 0's dock tool. Smooth isn't one of these: it rides Shift, as in sculpt.
-    enum class RetopoTool { DRAW, GRAB, CUT, ERASE, WAND };
+    enum class RetopoTool { DRAW, GRAB, CUT, ERASE, WAND, MASK };
     RetopoTool retopo_tool = RetopoTool::DRAW;
     // What the next stroke gets (RetopoStroke has the meaning of each), set in the tool
     // dock or by holding A / W. Its band is the brush Size as drawn, so no width here.

@@ -2320,7 +2320,9 @@ int main(int argc, char* argv[]) {
             // Retopo (0): frame the piece being worked on, whole, from the current angle:
             // the connected faces nearest the last press (a mirror twin is a piece of its
             // own, so only this side), or an unbuilt stroke if one of those is nearer.
-            // No press yet: the newest stroke as drawn (one side too).
+            // A piece bigger than a few quads round the press (a cage over the whole
+            // model) frames just that neighbourhood, centred on the press: framing it
+            // whole is framing the sculpt. No press yet: the newest stroke as drawn.
             bool framed = false;
             if (input.interaction_mode == InputState::InteractionMode::RETOPO && !retopo.strokes.empty()) {
                 const RetopoMesh& rm = retopo.result;
@@ -2370,8 +2372,17 @@ int main(int argc, char* argv[]) {
                     for (const Vec3& p : stroke->pts) grow(p);
                 }
                 if (lo.x <= hi.x) {
-                    const float r = std::max(0.5f * (hi - lo).length(), mesh_radius * 0.02f);
-                    camera.set_target((lo + hi) * 0.5f);
+                    float r = std::max(0.5f * (hi - lo).length(), mesh_radius * 0.02f);
+                    Vec3 c = (lo + hi) * 0.5f;
+                    if (vert != ~0u) {
+                        float edge = 0.0f;
+                        for (size_t e = 0; e + 1 < rm.edges.size(); e += 2)
+                            edge += (rm.v[rm.edges[e]] - rm.v[rm.edges[e + 1]]).length();
+                        edge /= (float)std::max<size_t>(1, rm.edges.size() / 2);
+                        const float near_r = std::max(6.0f * edge, mesh_radius * 0.02f);
+                        if (r > near_r) { r = near_r; c = retopo.work_pos; }
+                    }
+                    camera.set_target(c);
                     camera.distance = r * 2.5f;
                     framed = true;
                     std::printf("[retopo] focus: %s, radius %.3f\n", vert != ~0u ? "built piece" : "stroke", r);
@@ -2825,6 +2836,8 @@ int main(int argc, char* argv[]) {
             static bool retopo_grabbing = false;
             static bool retopo_erasing = false;
             static bool retopo_erasing_faces = false;   // Ctrl was held at the press
+            static bool retopo_masking = false;
+            static bool retopo_mask_smooth = false;     // Shift was held at the press: soften the edge
             const bool retopo_press = retopo_on && input.drag_mode == InputState::DragMode::RETOPO;
             // Shift+Ctrl in Draw: a path-pick click (below), never a stroke. Decided at the press.
             static bool retopo_path_press = false;
@@ -2900,6 +2913,32 @@ int main(int argc, char* argv[]) {
                 }
             }
             if (retopo_press && !retopo.drawing
+                && (retopo_masking || (input.retopo_tool == InputState::RetopoTool::MASK && !retopo_smoothing))) {
+                // Mask: the sculpt Mask brush's own strength and hardness, Ctrl unmasks,
+                // Shift (at the press) blends the mask toward its neighbours instead.
+                if (!retopo_masking) {
+                    if (!retopo.built) {
+                        std::snprintf(input.notification, sizeof(input.notification),
+                                      "Nothing to mask: Build first (Space)");
+                        input.notification_timer = 2.0f;
+                        input.drag_mode = InputState::DragMode::NONE;
+                    } else {
+                        retopo.begin_edit();
+                        retopo_masking = true;
+                        retopo_mask_smooth = input.is_smooth_active();
+                    }
+                }
+                if (retopo_masking) {
+                    const BrushSettings& mb = input.per_brush[(int)BrushType::MASK];
+                    if (retopo_mask_smooth)
+                        retopo_mask_smooth_dab(retopo, camera, win_w, win_h, (float)input.mouse_x, (float)input.mouse_y,
+                                               input.brush_size, 0.5f, mb.hardness, input.mirror_x);
+                    else
+                        retopo_mask_dab(retopo, camera, win_w, win_h, (float)input.mouse_x, (float)input.mouse_y,
+                                        input.brush_size, mb.strength, mb.hardness, input.is_subtract_active(),
+                                        input.mirror_x);
+                }
+            } else if (retopo_press && !retopo.drawing
                 && (retopo_smoothing || input.is_smooth_active())) {
                 if (!retopo_smoothing) {
                     if (!retopo.built) {
@@ -3157,8 +3196,9 @@ int main(int argc, char* argv[]) {
                 retopo.cut_nrm.clear();
             }
             if (!retopo_press) {
-                if (retopo_smoothing || retopo_grabbing || retopo_erasing) retopo.end_edit();
+                if (retopo_smoothing || retopo_grabbing || retopo_erasing || retopo_masking) retopo.end_edit();
                 retopo_smoothing = retopo_grabbing = retopo_erasing = retopo_erasing_faces = false;
+                retopo_masking = retopo_mask_smooth = false;
             }
             // A slider drag is one undo step; letting go ends it.
             if (!input.mouse1_down) retopo.last_tag = 0;
@@ -3171,7 +3211,7 @@ int main(int argc, char* argv[]) {
                     || (!retopo.wand_keep_shown && input.retopo_tool != InputState::RetopoTool::WAND)
                     || input.undo_requested || input.redo_requested || input.retopo_build_requested
                     || input.retopo_fill_requested || input.retopo_dissolve_requested
-                    || input.retopo_export_requested))
+                    || input.retopo_symmetrize_request || input.retopo_export_requested))
                 retopo_wand_close(retopo, retopo.wand_keep_shown ? retopo.wand_shown : -1);
 
             // A click (pressed and let go within a few pixels) picks an island: plain
@@ -3304,6 +3344,18 @@ int main(int argc, char* argv[]) {
                 else
                     std::snprintf(input.notification, sizeof(input.notification),
                                   "No holes to fill (double-click an outline to fill it anyway)");
+                input.notification_timer = 2.5f;
+            }
+            if (input.retopo_symmetrize_request) {
+                const int keep = input.retopo_symmetrize_request;
+                input.retopo_symmetrize_request = 0;
+                if (retopo.built) scene.materialize_active_cpu();   // seam cuts snap onto mesh.pos
+                int faces = 0;
+                const char* why = retopo_symmetrize(retopo, *mesh, keep, faces);
+                if (why) std::snprintf(input.notification, sizeof(input.notification), "%s", why);
+                else     std::snprintf(input.notification, sizeof(input.notification),
+                                       "Symmetrized from %s: %d faces - Ctrl+Z takes it back",
+                                       keep > 0 ? "+X" : "-X", faces);
                 input.notification_timer = 2.5f;
             }
             if (input.retopo_dissolve_requested) {
@@ -4000,6 +4052,12 @@ int main(int argc, char* argv[]) {
                 }
             }
 
+            // Mode 0: Ctrl+I / Ctrl+A act on the retopo mask; the sculpt's stays as it is.
+            if (input.interaction_mode == InputState::InteractionMode::RETOPO) {
+                if (input.mask_invert_requested) retopo_mask_invert(retopo);
+                if (input.mask_clear_requested) retopo_mask_clear(retopo);
+                input.mask_invert_requested = input.mask_clear_requested = false;
+            }
             // Mask invert (Ctrl+I)
             if (input.mask_invert_requested) {
                 input.mask_invert_requested = false;

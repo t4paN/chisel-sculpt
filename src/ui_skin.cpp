@@ -1463,6 +1463,12 @@ void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
             input.clear_smooth_lock();
             input.retopo_tool = RT::WAND;
         }
+        o.on = !smooth_on && input.retopo_tool == RT::MASK; o.tip = "Mask: Ctrl unmasks, Shift softens the edge";
+        o.key = input.key_label(KeyAction::RETOPO_MASK); o.corner = corner(KeyAction::RETOPO_MASK);
+        if (icon_button("rMask", Icon::BrushMask, kRailBtn, o)) {
+            input.clear_smooth_lock();
+            input.retopo_tool = RT::MASK;
+        }
         // Smooth evens out the built quads; same keys as the sculpt Smooth.
         ImFont* mono = F(UiFont::MonoMedium);
         o.on = smooth_on; o.tip = "Smooth polygon strips";
@@ -1952,7 +1958,9 @@ float brush_panel(InputState& input, int win_h) {
         const bool smoothing = input.is_smooth_active();
         const bool drawing = !smoothing && input.retopo_tool == InputState::RetopoTool::DRAW;
         const bool cutting = !smoothing && input.retopo_tool == InputState::RetopoTool::CUT;
-        heading(smoothing ? "Smooth polygon strips"
+        const bool masking = input.retopo_tool == InputState::RetopoTool::MASK;
+        heading(masking ? (smoothing ? "Soften the mask edge" : "Mask")
+                : smoothing ? "Smooth polygon strips"
                 : input.retopo_tool == InputState::RetopoTool::GRAB ? "Grab polygon strips"
                 : input.retopo_tool == InputState::RetopoTool::ERASE ? "Erase edges"
                 : input.retopo_tool == InputState::RetopoTool::WAND ? "Wand"
@@ -1965,6 +1973,12 @@ float brush_panel(InputState& input, int win_h) {
         if (!smoothing && input.retopo_tool == InputState::RetopoTool::ERASE) {
             hint("The edge nearest the centre goes");
             hint("Ctrl: the whole face goes");
+        }
+        if (masking) {
+            hint("Frozen for Grab, Smooth, Erase");
+            hint("Ctrl: unmask");
+            hint("Shift: soften the edge");
+            hint("Ctrl+I invert, Ctrl+A clear");
         }
         if (drawing) {
             meter_widget("##mRings", input, 4, w, k, !can_grow || big);
@@ -4082,6 +4096,29 @@ void draw_retopo_dock(InputState& input, RetopoState& st, int win_w, int win_h) 
     o.tip = "Export OBJ"; o.enabled = st.built;
     if (icon_button("rExport", Icon::CmdExport, bh, o)) input.retopo_export_requested = true;
     o.enabled = true;
+
+    // Symmetrize asks which half is the base first: the button can't know which one the
+    // user got right.
+    if (chip("Symmetrize", false, bh, st.built)) {
+        ImGui::SetNextWindowPos(ImVec2(ImGui::GetItemRectMin().x, ImGui::GetItemRectMax().y + 4.0f));
+        ImGui::OpenPopup("##retopoSym");
+    }
+    if (ImGui::IsItemHovered())
+        tooltip(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), TipSide::Left,
+                st.built ? "Keep one half, rebuild the other as its mirror image" : "Build first", nullptr);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f, 8.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(6.0f, 6.0f));
+    if (ImGui::BeginPopup("##retopoSym", ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoSavedSettings)) {
+        window_panel(12.0f);
+        label_item(UiFont::SansSemibold, 13.0f, kText, "Keep which half?", 0.0f, 20.0f);
+        if (chip("+X  (right)", false, bh)) { input.retopo_symmetrize_request = 1; ImGui::CloseCurrentPopup(); }
+        ImGui::SameLine(0.0f, 6.0f);
+        if (chip("-X  (left)", false, bh)) { input.retopo_symmetrize_request = -1; ImGui::CloseCurrentPopup(); }
+        label_item(UiFont::Sans, 12.0f, kMuted, "Seen from the front \xC2\xB7 the other half is replaced", 0.0f, 18.0f);
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape)) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+    ImGui::PopStyleVar(2);
 
     char ro[96];
     if (st.built && holes_odd)
