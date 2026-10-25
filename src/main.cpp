@@ -2863,6 +2863,17 @@ int main(int argc, char* argv[]) {
                 }
                 retopo.lasso.clear();
             }
+            // A line's pen-up that opened a wand menu (spine, notch, edge to vertex): the
+            // menu goes up, or the toast says why not; the line is done either way.
+            auto line_menu = [&](const char* why) {
+                if (why) {
+                    std::snprintf(input.notification, sizeof(input.notification), "%s", why);
+                    input.notification_timer = 2.5f;
+                } else {
+                    input.retopo_wand_request = true;
+                }
+                retopo.end_line();
+            };
             // Pen-up of a line (bridge, spine) on a lit vertex or edge: it ends exactly
             // there. The last sample, if it's that close anyway, moves onto it.
             if (!retopo_press && retopo.drawing && !retopo.extruding
@@ -3066,48 +3077,19 @@ int main(int argc, char* argv[]) {
                 const char* why = retopo_wand_open_spine(retopo, *mesh, camera, win_w, win_h,
                                                          (float)input.mouse_x, (float)input.mouse_y,
                                                          input.mirror_x);
-                if (why) {
-                    std::snprintf(input.notification, sizeof(input.notification), "%s", why);
-                    input.notification_timer = 2.5f;
-                } else {
-                    input.retopo_wand_request = true;
-                }
-                retopo.live = RetopoStroke{};
-                retopo.drawing = false;
-                retopo.bridge_from = 0;
-                retopo.spine_from = ~0u;
+                line_menu(why);
             } else if (retopo.drawing && retopo.line_from_v != ~0u && retopo.draw_v != ~0u
                        && retopo_notch_gesture(retopo, camera, win_w, win_h, input.mirror_x)) {
                 // Pen up on a line from an outline vertex to another of the same outline,
                 // across open space: the notch between them closes, its menu beside it.
                 scene.materialize_active_cpu();   // the mouth snaps onto mesh.pos
                 const char* why = retopo_wand_open_notch(retopo, *mesh, camera, win_w, win_h, input.mirror_x);
-                if (why) {
-                    std::snprintf(input.notification, sizeof(input.notification), "%s", why);
-                    input.notification_timer = 2.5f;
-                } else {
-                    input.retopo_wand_request = true;
-                }
-                retopo.live = RetopoStroke{};
-                retopo.drawing = false;
-                retopo.bridge_from = 0;
-                retopo.spine_from = ~0u;
-                retopo.line_from_v = ~0u;
+                line_menu(why);
             } else if (retopo.drawing && retopo_edge_vertex_gesture(retopo, camera, win_w, win_h)) {
                 // Pen up on a line from an outline edge to an outline vertex (or back):
                 // one quad joins them, its menu beside it (the wedge closed or not).
                 const char* why = retopo_wand_open_edge_vertex(retopo, camera, win_w, win_h, input.mirror_x);
-                if (why) {
-                    std::snprintf(input.notification, sizeof(input.notification), "%s", why);
-                    input.notification_timer = 2.5f;
-                } else {
-                    input.retopo_wand_request = true;
-                }
-                retopo.live = RetopoStroke{};
-                retopo.drawing = false;
-                retopo.bridge_from = 0;
-                retopo.spine_from = ~0u;
-                retopo.line_from_v = retopo.line_from_ea = retopo.line_from_eb = ~0u;
+                line_menu(why);
             } else if (retopo.drawing && retopo.extruding) {
                 // Pen up on an extrude. A few pixels is a click (or half a double-click):
                 // the pick stays, no toast.
@@ -3118,18 +3100,15 @@ int main(int argc, char* argv[]) {
                                   why ? why : "Extruded - draw from the new loop to carry on");
                     input.notification_timer = why ? 2.5f : 1.5f;
                 }
-                retopo.live = RetopoStroke{};
-                retopo.drawing = false;
-                retopo.extruding = false;
+                retopo.end_line();
             } else if (retopo.drawing && retopo.bridge_from) {
                 // Pen up on a bridge: built now, it joins geometry, not sketches. A few
                 // pixels is a click (it selects the island), not a bridge: no toast.
                 // A line that ran along the island's edge instead is a strip beside it:
                 // slid off the island and kept like any stroke, Build zips it on.
                 if (retopo.live.pts.size() >= 3 && retopo_alongside(retopo)) {
-                    const bool kept_beside = retopo.finish_live(input.retopo_rings, input.retopo_density);
-                    if (kept_beside) input.retopo_rings = 1;   // more rings are a one-off
-                    if (kept_beside) {
+                    if (retopo.finish_live(input.retopo_rings, input.retopo_density)) {
+                        input.retopo_rings = 1;   // more rings are a one-off (user)
                         input.retopo_build_requested = true;
                         input.retopo_build_quiet = true;
                         input.retopo_menu_auto = true;
@@ -3143,14 +3122,12 @@ int main(int argc, char* argv[]) {
                                   why ? why : to ? "Bridged" : "Strip grown out of the edge");
                     input.notification_timer = why ? 2.5f : 1.5f;
                 }
-                retopo.live = RetopoStroke{};
-                retopo.drawing = false;
-                retopo.bridge_from = 0;
+                retopo.end_line();
             } else if (retopo.drawing) {
                 // Pen up (or the mode changed under it).
                 const bool kept = retopo.finish_live(input.retopo_rings, input.retopo_density);
-                if (kept) input.retopo_rings = 1;   // more rings are a one-off (user)
                 if (kept) {
+                    input.retopo_rings = 1;   // more rings are a one-off (user)
                     // Built on release, no Space needed. Quiet: finish_live took the undo
                     // step (one Ctrl+Z takes the stroke and its quads), and no toast.
                     input.retopo_build_requested = true;

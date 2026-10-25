@@ -2,6 +2,10 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-25 — Retopo mode: housekeeping
+
+No behaviour change (every headless retopo test's output byte-identical before and after): the join, weld and snap tolerances now sit in one named "Reach" block atop `retopo.cpp`, and six copies of the face-winding check, two of the open-space check and the line pen-up resets became one helper each.
+
 ## 2026-10-25 — Retopo mode: edge to vertex, wand lasso cleanup, strips zip across the seam, no bow-ties
 
 *Edge to vertex user-tested ("works, confirmed"). The rest headless-tested only:

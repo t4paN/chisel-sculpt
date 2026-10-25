@@ -156,6 +156,14 @@ struct RetopoState {
     Vec3 work_pos;
     bool work_valid = false;
 
+    // Pen-up of a line (spine, notch, edge to vertex, extrude, bridge): drop it and
+    // everything its press recorded, whichever rule took it.
+    void end_line() {
+        live = RetopoStroke{};
+        drawing = extruding = false;
+        bridge_from = 0;
+        spine_from = line_from_v = line_from_ea = line_from_eb = ~0u;
+    }
     // Pen-up: keep the stroke if it has enough to build on, decide donut vs strip.
     // Returns false (and drops it) for a tap.
     bool finish_live(int rings, float density);

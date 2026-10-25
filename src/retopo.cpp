@@ -63,6 +63,36 @@ size_t RetopoSnapshot::bytes() const {
 
 namespace {
 // Plenty for a session of retopo; the byte cap keeps a huge one inside the web build's heap.
+// ---- Reach: "is this meant to touch that?" -------------------------------------
+// Every tolerance that decides whether two pieces join, weld or snap, in one place.
+// Screen reaches are pixels; world reaches are fractions of the local edge or quad, so
+// they scale with the topology, not the sculpt. (Draw's snap, kRetopoDrawSnapPx, is in
+// retopo.h: the overlay needs it too.)
+//   Cut: a vertex cut must start or end this close to the vertex: deliberate.
+constexpr float kSnapPx = 8.0f;
+//   Edits (Grab, Smooth): a moved outline vertex welds to another outline vertex this
+//   close, as a share of its shortest edge: a deliberate push, not a near miss.
+constexpr float kEditWeldFrac = 0.4f;
+//   Wand lasso: vertices closer than this share of their edges' mean length are one
+//   that missed its weld (hand merges, zips a hair off): the user's slivers sat at ~0.15.
+constexpr float kLassoMergeFrac = 0.35f;
+//   Build, side zip: a strip's side vertex takes an island outline vertex within this
+//   share of the strip's own quad there (across or along, whichever is bigger).
+constexpr float kZipReach = 0.75f;
+//   Build, end join: an island outline run within this many quad sizes of a strip's end.
+constexpr float kEndJoinReach = 2.0f;
+//   Two directions count as running alongside within ~45 degrees (|cos| above this):
+//   an end join refuses a run that parallel to the strip, alongside wants one.
+constexpr float kParallelCos = 0.7f;
+//   A bridge line is a strip beside an island when this share of it runs alongside an
+//   outline edge, within kAlongsideReach half-widths of the band.
+constexpr float kAlongsideShare = 0.6f;
+constexpr float kAlongsideReach = 2.0f;
+//   Notch legs keep going while each next outline edge heads out within ~60 degrees.
+constexpr float kNotchLegCos = 0.5f;
+//   Gap-joining lines (notch, edge to vertex) may lie over faces for this share at most.
+constexpr float kOpenSpaceOver = 0.3f;
+
 constexpr size_t kHistorySteps = 64;
 constexpr size_t kHistoryBytes = 64u << 20;
 
@@ -428,6 +458,17 @@ int face_corners(const RetopoMesh& rm, size_t f, std::vector<uint32_t>& c) {
         if (c.empty() || q[i] != c.back()) c.push_back(q[i]);
     while (c.size() > 1 && c.back() == c.front()) c.pop_back();
     return (int)c.size();
+}
+
+// Whether some face already runs a -> b. New faces on an outline go the other way round
+// (a shared side runs opposite ways in its two faces), so their normals agree.
+bool has_side(const RetopoMesh& rm, uint32_t a, uint32_t b) {
+    std::vector<uint32_t> c;
+    for (size_t f = 0; f < rm.face_count(); f++) {
+        const int k = face_corners(rm, f, c);
+        for (int i = 0; i < k; i++) if (c[i] == a && c[(i + 1) % k] == b) return true;
+    }
+    return false;
 }
 
 void add_edge(RetopoMesh& rm, uint32_t a, uint32_t b, uint32_t owner) {
@@ -915,7 +956,7 @@ bool join_end(RetopoMesh& rm, const Grid& G, int end, uint32_t owner, int& i0, i
     }
     if (best_s < 0) return false;
     // A run far off the strip's end means the edge there doesn't face it: leave it be.
-    const float lim = 2.0f * std::max(half, along);
+    const float lim = kEndJoinReach * std::max(half, along);
     if (best > (float)W * lim * lim) return false;
     // So does one that runs along the strip rather than across its end (a strip drawn
     // beside an island starts next to it): that's join_side's, and taking it here laid
@@ -924,7 +965,7 @@ bool join_end(RetopoMesh& rm, const Grid& G, int end, uint32_t owner, int& i0, i
         const Vec3 run = rm.v[chain[best_s + W - 1]] - rm.v[chain[best_s]];
         const Vec3 spoke = G.v[(size_t)ie * W + W - 1] - G.v[(size_t)ie * W];
         const float lr = run.length(), ls = spoke.length();
-        if (lr > 1e-9f && ls > 1e-9f && std::fabs(run.dot(spoke)) < 0.7f * lr * ls) return false;
+        if (lr > 1e-9f && ls > 1e-9f && std::fabs(run.dot(spoke)) < kParallelCos * lr * ls) return false;
     }
     for (int j = 0; j < W; j++)
         idx[(size_t)ie * W + j] = chain[best_s + (best_rev ? W - 1 - j : j)];
@@ -964,7 +1005,7 @@ int join_side(RetopoMesh& rm, const SnapGrid& g, Grid& G, uint32_t owner, int i0
             const bool pinned = (pin0 && i == 0) || (pin1 && i == G.n - 1);
             const Vec3 p = G.v[(size_t)i * W + s];
             const int in = i < i1 ? i + 1 : i - 1;
-            const float r = 0.75f * std::max((G.v[(size_t)i * W + sn] - p).length(),
+            const float r = kZipReach * std::max((G.v[(size_t)i * W + sn] - p).length(),
                                              (G.v[(size_t)in * W + s] - p).length());
             float bd = r * r;
             for (uint32_t b : border) {
@@ -1330,7 +1371,7 @@ void after_edit(RetopoState& st, const std::vector<uint32_t>& moved, bool mirror
         float emin = 1e30f;
         for (uint32_t k = rm.nb_off[a]; k < rm.nb_off[a + 1]; k++)
             emin = std::min(emin, (rm.v[rm.nb[k]] - rm.v[a]).length());
-        const float tol = 0.4f * emin;
+        const float tol = kEditWeldFrac * emin;
         float best_d2 = tol * tol;
         uint32_t best = ~0u;
         for (uint32_t b : border) {
@@ -1585,8 +1626,6 @@ namespace {
 // How much of a crossing's offset from its edge's middle survives the aim. A hand-drawn
 // line wanders; the loop it cuts is wanted straight, so 1/5 along an edge lands at 0.43.
 constexpr float kCutAimKeep = 0.25f;
-// A vertex cut must start or end this close to the vertex (screen pixels): deliberate.
-constexpr float kSnapPx = 8.0f;
 
 // 1 - |cos| of the corner at b: 1 square, 0 folded flat or doubled back.
 float corner_q(Vec3 a, Vec3 b, Vec3 c) {
@@ -2741,16 +2780,16 @@ bool retopo_alongside(RetopoState& st) {
         const Vec3 t = L.pts[std::min(np - 1, i + 1)] - L.pts[i > 0 ? i - 1 : 0];
         const float seg = 0.5f * t.length();
         total += seg;
-        if (!best || std::sqrt(bd) > 2.0f * L.half_w[i]) continue;
+        if (!best || std::sqrt(bd) > kAlongsideReach * L.half_w[i]) continue;
         near[i] = 1;
         off[i] = (p - at).dot(best->out);
         out[i] = best->out;
         const float le = best->e.length();
-        if (le > 1e-9f && seg > 1e-9f && std::fabs(t.dot(best->e)) > 0.7f * 2.0f * seg * le) along += seg;
+        if (le > 1e-9f && seg > 1e-9f && std::fabs(t.dot(best->e)) > kParallelCos * 2.0f * seg * le) along += seg;
     }
     std::printf("[retopo] alongside: %.0f%% of the line runs along an edge%s\n",
-                total > 0.0f ? 100.0f * along / total : 0.0f, along >= 0.6f * total ? ": a strip beside it" : "");
-    if (along < 0.6f * total) return false;
+                total > 0.0f ? 100.0f * along / total : 0.0f, along >= kAlongsideShare * total ? ": a strip beside it" : "");
+    if (along < kAlongsideShare * total) return false;
 
     // Slide it off: the band's near edge onto the island's (centre half a band out).
     // Points that strayed from the edge carry their neighbour's shift; a light smooth
@@ -2968,12 +3007,7 @@ const char* retopo_bridge(RetopoState& st, const Mesh& m, const Camera& cam, int
     }
     // Wound against the island's face on the edge it leaves, so the bridge's normals
     // agree with it (a shared side runs opposite ways in its two faces).
-    bool flip = false;
-    for (size_t f = 0; f < rm.face_count(); f++) {
-        const int k = face_corners(rm, f, c);
-        for (int i = 0; i < k; i++)
-            if (c[i] == RA && c[(i + 1) % k] == LA) flip = true;
-    }
+    const bool flip = has_side(rm, RA, LA);
     auto quad = [&](int i, uint32_t* qd) {
         qd[0] = L[i]; qd[1] = L[i + 1]; qd[2] = R[i + 1]; qd[3] = R[i];
         if (flip) std::reverse(qd, qd + 4);
@@ -3645,11 +3679,7 @@ int fill_rims(RetopoState& st, const Mesh& m, bool mirror, int& rims, int& odd, 
         // in its two faces. The ring's quad k has the side R[k] -> R[k + 1]; the grid's
         // (0, 0) has L[bs] -> L[bs + 1], the same way round as the ring's inner side
         // runs the other way, so one flip suits both.
-        bool flip = false;
-        for (size_t f = 0; f < rm.face_count() && !flip; f++) {
-            const int k = face_corners(rm, f, c);
-            for (int i = 0; i < k; i++) if (c[i] == Ri[0] && c[(i + 1) % k] == Ri[1]) flip = true;
-        }
+        const bool flip = has_side(rm, Ri[0], Ri[1]);
         const uint32_t first_face = rm.face_count();
         if (ring)
             for (int k = 0; k < N; k++) {
@@ -3789,12 +3819,7 @@ int rim_reflection(const RetopoMesh& rm, const std::vector<uint32_t>& R) {
 // rim, wound against the faces already on it; the islands round it become one.
 void emit_rim_faces(RetopoState& st, const std::vector<uint32_t>& R, const std::vector<std::vector<int>>& F) {
     RetopoMesh& rm = st.result;
-    bool flip = false;
-    std::vector<uint32_t> c;
-    for (size_t f = 0; f < rm.face_count() && !flip; f++) {
-        const int k = face_corners(rm, f, c);
-        for (int i = 0; i < k; i++) if (c[i] == R[0] && c[(i + 1) % k] == R[1]) flip = true;
-    }
+    const bool flip = has_side(rm, R[0], R[1]);
     const uint32_t owner = rm.v_owner[R[0]];
     std::vector<uint32_t> q;
     for (const std::vector<int>& f : F) {
@@ -4464,8 +4489,19 @@ const char* retopo_wand_open_spine(RetopoState& st, const Mesh& m, const Camera&
 // ---- Notch ---------------------------------------------------------------------
 
 namespace {
-// Legs keep going while each next outline edge heads out of the notch within ~60 degrees.
-constexpr float kNotchLegCos = 0.5f;
+// Lines that join across a gap (notch, edge to vertex) must cross open space: false when
+// the middle three fifths of the line mostly lie over faces (more than kOpenSpaceOver).
+bool over_faces(const RetopoState& st, const Camera& cam, int win_w, int win_h, const std::vector<Vec3>& L) {
+    int over = 0, all = 0;
+    for (size_t i = L.size() / 5; i < L.size() - L.size() / 5; i++) {
+        float x, y;
+        if (!cam.world_to_screen(L[i], win_w, win_h, x, y)) continue;
+        over += retopo_face_at(st, cam, win_w, win_h, x, y, 0.0f) != ~0u;
+        all++;
+    }
+    return all && (float)over > kOpenSpaceOver * (float)all;
+}
+
 
 // The notch a line from outline vertex a to outline vertex b closes (see
 // retopo_wand_open_notch). With `m`, its mouth too, snapped onto the sculpt; without,
@@ -4493,15 +4529,7 @@ const char* notch_find(const RetopoState& st, const Mesh* m, const Camera& cam, 
     const int fwd = ((ib - ia) % M + M) % M;
     const int dir = fwd <= M - fwd ? 1 : -1, nP = std::min(fwd, M - fwd);
     if (nP < 2) return "Those two are neighbours: nothing between them to close";
-    // Across open space: the line's middle mostly over no face.
-    int over = 0, all = 0;
-    for (size_t i = L.size() / 5; i < L.size() - L.size() / 5; i++) {
-        float x, y;
-        if (!cam.world_to_screen(L[i], win_w, win_h, x, y)) continue;
-        over += retopo_face_at(st, cam, win_w, win_h, x, y, 0.0f) != ~0u;
-        all++;
-    }
-    if (all && over * 10 > all * 3) return "That line runs over faces: a notch closes across open space";
+    if (over_faces(st, cam, win_w, win_h, L)) return "That line runs over faces: a notch closes across open space";
     // Out of the notch: from the middle of the outline round it toward the line's middle.
     Vec3 pc(0, 0, 0);
     for (int s = 0; s <= nP; s++) pc = pc + rm.v[O(ia + dir * s)];
@@ -4647,16 +4675,8 @@ const char* edge_vertex_find(const RetopoState& st, const Camera& cam, int win_w
     if (!(rm.border_nb[ea * 2] == eb || rm.border_nb[ea * 2 + 1] == eb)) return "That edge isn't on an outline";
     if (!on_border(rm, v)) return "That vertex isn't on an outline";
     if (v == ea || v == eb) return "The vertex is on that edge";
-    // Across open space, as a notch: the line's middle mostly over no face.
-    const std::vector<Vec3>& L = st.live.pts;
-    int over = 0, all = 0;
-    for (size_t i = L.size() / 5; i < L.size() - L.size() / 5; i++) {
-        float x, y;
-        if (!cam.world_to_screen(L[i], win_w, win_h, x, y)) continue;
-        over += retopo_face_at(st, cam, win_w, win_h, x, y, 0.0f) != ~0u;
-        all++;
-    }
-    if (all && over * 10 > all * 3) return "That line runs over faces: edge to vertex joins across open space";
+    if (over_faces(st, cam, win_w, win_h, st.live.pts))
+        return "That line runs over faces: edge to vertex joins across open space";
     // Per side of v (which neighbour the quad takes): the shortest rungs that don't cross,
     // either way round. Crossing is judged flat, in the plane of the corners' mean normal.
     float side_len[2] = {1e30f, 1e30f};
@@ -4698,12 +4718,7 @@ const char* edge_vertex_find(const RetopoState& st, const Camera& cam, int win_w
 bool edge_vertex_fill(RetopoState& st, const EdgeVertex& ev, bool wedge, bool mirror) {
     RetopoMesh& rm = st.result;
     if (wedge && ev.vo == ~0u) return false;
-    bool flip = false;
-    std::vector<uint32_t> c;
-    for (size_t f = 0; f < rm.face_count() && !flip; f++) {
-        const int k = face_corners(rm, f, c);
-        for (int i = 0; i < k; i++) if (c[i] == ev.x && c[(i + 1) % k] == ev.y) flip = true;
-    }
+    const bool flip = has_side(rm, ev.x, ev.y);
     const uint32_t owner = rm.v_owner[ev.v], f0 = rm.face_count();
     std::vector<std::vector<uint32_t>> F{{ev.x, ev.y, ev.vn, ev.v}};
     if (wedge) F.push_back({ev.x, ev.v, ev.vo});
@@ -4774,11 +4789,6 @@ const char* retopo_wand_open_edge_vertex(RetopoState& st, const Camera& cam, int
 
 // ---- Lasso cleanup (wand drag) --------------------------------------------------
 
-namespace {
-// Two vertices closer than this share of their edges' mean length are one that missed
-// its weld (hand merges, zips a hair off): the user's slivers sat at ~0.15.
-constexpr float kLassoMergeFrac = 0.35f;
-}  // namespace
 
 const char* retopo_lasso_cleanup(RetopoState& st, const Camera& cam, int win_w, int win_h,
                                  const std::vector<float>& xy, bool mirror) {
@@ -4857,8 +4867,6 @@ const char* retopo_lasso_cleanup(RetopoState& st, const Camera& cam, int win_w, 
     // does a second copy of one already there.
     FaceList out;
     std::vector<uint32_t> c;
-    std::vector<std::vector<uint32_t>> seen_keys;
-    std::vector<uint64_t> keys;
     int dropped = 0;
     std::vector<std::pair<std::vector<uint32_t>, uint32_t>> kept;
     for (size_t f = 0; f < rm.face_count(); f++) {
@@ -4917,12 +4925,7 @@ const char* retopo_lasso_cleanup(RetopoState& st, const Camera& cam, int win_w, 
         for (uint32_t k = 0; k < n; k++) all &= in[rm.rim[k0 + k]] != 0;
         if (!all) continue;
         std::vector<uint32_t> R(rm.rim.begin() + k0, rm.rim.begin() + k0 + n);
-        bool flip = false;
-        for (size_t f = 0; f < rm.face_count() && !flip; f++) {
-            const int k = face_corners(rm, f, c);
-            for (int i = 0; i < k; i++) if (c[i] == R[0] && c[(i + 1) % k] == R[1]) flip = true;
-        }
-        if (flip) std::reverse(R.begin(), R.end());
+        if (has_side(rm, R[0], R[1])) std::reverse(R.begin(), R.end());
         rm.add_face(R.data(), (int)n, rm.v_owner[R[0]]);
         touched.push_back(rm.v_owner[R[0]]);
         filled++;
@@ -5089,12 +5092,7 @@ const char* spine_fill(RetopoState& st, const std::vector<uint32_t>& R, int r, c
         add(g);
     }
     // Wound against the faces already on the rim, as Fill does.
-    bool flip = false;
-    std::vector<uint32_t> c;
-    for (size_t f = 0; f < rm.face_count() && !flip; f++) {
-        const int kk = face_corners(rm, f, c);
-        for (int i = 0; i < kk; i++) if (c[i] == R[0] && c[(i + 1) % kk] == R[1]) flip = true;
-    }
+    const bool flip = has_side(rm, R[0], R[1]);
     const uint32_t first_face = rm.face_count();
     for (std::vector<uint32_t>& f : F) {
         if (flip) std::reverse(f.begin(), f.end());
