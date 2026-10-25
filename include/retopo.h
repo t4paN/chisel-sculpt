@@ -98,6 +98,9 @@ struct RetopoState {
     uint32_t bridge_from = 0;
     // Draw started on a picked outline loop: the live stroke extrudes it (a bare line).
     bool extruding = false;
+    // Draw started on a hole's rim vertex (its id, ~0u = not): if the line runs through
+    // the hole to another vertex of that rim, it's a spine (retopo_spine), not a bridge.
+    uint32_t spine_from = ~0u;
     // Cut: a bare line on the surface (no band), under the pen while `cutting`.
     std::vector<Vec3> cut_pts, cut_nrm;
     bool cutting = false;
@@ -134,6 +137,7 @@ struct RetopoState {
     RetopoSnapshot wand_base;
     bool wand_open = false;
     int  wand_shown = -1;           // the option swapped in, -1 = the hole as it was
+    bool wand_keep_shown = false;   // opened by a spine: closing it keeps what's shown
     bool show_result = true;
     bool show_strokes = true;
     uint32_t hover_id = 0;            // stroke under the cursor in the bar (0 = none), lit in the overlay
@@ -356,6 +360,26 @@ const char* retopo_wand_open(RetopoState& st, const Mesh& m, const Camera& cam, 
 void retopo_wand_show(RetopoState& st, int k);
 // Close the menu: keep option k as one undo step, or k = -1 to leave the hole open.
 void retopo_wand_close(RetopoState& st, int keep);
+
+// Spine: a Draw line from a hole's rim vertex (st.spine_from) across the hole to another
+// vertex of the same rim. The line becomes a run of edges (its vertices on the line, as
+// many as the shorter side of the rim has edges, less two), and each of its vertices gets
+// a rung out to the rim on both sides, so the quads grow from the line toward the ring.
+// The faces at its two ends each take two rim edges, so they're quads too; a side with
+// more edges than the other folds the extra into a triangle against the rim. Mirror: a
+// spine from seam vertex to seam vertex of a hole across x = 0 lies on the seam and is
+// its own twin; a hole with a twin elsewhere gets the reflection. One undo step.
+// retopo_hole_vertex: the hole rim vertex within a few pixels of (x, y), ~0u for none.
+// retopo_spine_gesture: whether the live line (released at ex, ey) ran through that
+// hole and ended on its rim; false = it's an ordinary stroke (nothing judged yet).
+// retopo_wand_open_spine: the wand's menu over that hole with the spine's fills first
+// ("Your line", and the same with triangles at its ends), the first already shown and
+// kept unless another is picked (closing the menu keeps it, Esc takes it back). `m` as
+// for retopo_wand_open. nullptr when open, else why not (nothing changed).
+uint32_t retopo_hole_vertex(const RetopoState& st, const Camera& cam, int win_w, int win_h, float x, float y);
+bool retopo_spine_gesture(const RetopoState& st, const Camera& cam, int win_w, int win_h, float ex, float ey);
+const char* retopo_wand_open_spine(RetopoState& st, const Mesh& m, const Camera& cam, int win_w, int win_h,
+                                   float ex, float ey, bool mirror);
 
 // A saved project's retopo (strokes + result as saved) becomes the session's: history,
 // picks and tools start fresh, edges / outlines / holes are worked out again from the

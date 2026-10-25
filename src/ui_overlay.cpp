@@ -2396,7 +2396,7 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
             // A frozen stroke is geometry now: no band, only its quads (lit when hovered).
             if (!s.frozen && (s.visible || lit)) band(s, lit ? 130 : s.selected ? 90 : any_hover ? 25 : 55);
         }
-        if (st.drawing && !st.bridge_from && st.live.pts.size() >= 2) band(st.live, 70);
+        if (st.drawing && !st.bridge_from && st.spine_from == ~0u && st.live.pts.size() >= 2) band(st.live, 70);
     }
     // The cut line under the pen: a thin bright line with a dark edge, no band. A bridge
     // (Draw from an edited island) is drawn the same way in blue: its width comes from
@@ -2418,7 +2418,8 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
                     dl->AddLine(at[i], at[i + 1], pass ? col : IM_COL32(10, 20, 15, 170), pass ? 1.5f : 3.5f);
     };
     if (st.cutting) thin_line(st.cut_pts, st.cut_nrm, IM_COL32(235, 255, 240, 255));
-    if (st.drawing && st.bridge_from) thin_line(st.live.pts, st.live.nrm, IM_COL32(120, 210, 255, 255));
+    if (st.drawing && (st.bridge_from || st.spine_from != ~0u))
+        thin_line(st.live.pts, st.live.nrm, IM_COL32(120, 210, 255, 255));
     if (st.drawing && st.extruding) thin_line(st.live.pts, st.live.nrm, IM_COL32(0, 255, 65, 255));
     if (!st.built || !st.show_result) return;
 

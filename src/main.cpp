@@ -2958,6 +2958,9 @@ int main(int argc, char* argv[]) {
                                       ? retopo_pick(retopo, camera, win_w, win_h, px, py, input.mirror_x) : 0;
                     const RetopoStroke* on = id ? retopo.find(id) : nullptr;
                     retopo.bridge_from = on && on->frozen ? id : 0;
+                    // On a hole's rim vertex: maybe a spine across it (judged at pen-up).
+                    retopo.spine_from = retopo.extruding ? ~0u
+                                      : retopo_hole_vertex(retopo, camera, win_w, win_h, px, py);
                 }
                 Vec3 p, n;
                 float world_per_px;
@@ -2976,6 +2979,25 @@ int main(int argc, char* argv[]) {
                     retopo.last_sx = mx;
                     retopo.last_sy = my;
                 }
+            } else if (retopo.drawing && retopo.spine_from != ~0u
+                       && retopo_spine_gesture(retopo, camera, win_w, win_h,
+                                               (float)input.mouse_x, (float)input.mouse_y)) {
+                // Pen up on a spine: from a rim vertex through the hole to another. Its fill
+                // goes up at once with the wand's menu beside it for the other ways.
+                scene.materialize_active_cpu();   // the menu's grid snaps onto mesh.pos
+                const char* why = retopo_wand_open_spine(retopo, *mesh, camera, win_w, win_h,
+                                                         (float)input.mouse_x, (float)input.mouse_y,
+                                                         input.mirror_x);
+                if (why) {
+                    std::snprintf(input.notification, sizeof(input.notification), "%s", why);
+                    input.notification_timer = 2.5f;
+                } else {
+                    input.retopo_wand_request = true;
+                }
+                retopo.live = RetopoStroke{};
+                retopo.drawing = false;
+                retopo.bridge_from = 0;
+                retopo.spine_from = ~0u;
             } else if (retopo.drawing && retopo.extruding) {
                 // Pen up on an extrude. A few pixels is a click (or half a double-click):
                 // the pick stays, no toast.
@@ -3049,12 +3071,15 @@ int main(int argc, char* argv[]) {
             if (!input.mouse1_down) retopo.last_tag = 0;
             // The wand's menu is a preview: anything else that edits puts the hole back
             // as it was first, so it never acts on (or saves) a fill nobody kept.
+            // A spine's menu keeps what it shows (the line was drawn on purpose), so Ctrl+Z
+            // then takes the spine itself back.
             if (retopo.wand_open
-                && (!retopo_on || input.retopo_tool != InputState::RetopoTool::WAND || input.is_smooth_active()
+                && (!retopo_on || input.is_smooth_active()
+                    || (!retopo.wand_keep_shown && input.retopo_tool != InputState::RetopoTool::WAND)
                     || input.undo_requested || input.redo_requested || input.retopo_build_requested
                     || input.retopo_fill_requested || input.retopo_dissolve_requested
                     || input.retopo_export_requested))
-                retopo_wand_close(retopo, -1);
+                retopo_wand_close(retopo, retopo.wand_keep_shown ? retopo.wand_shown : -1);
 
             // A click (pressed and let go within a few pixels) picks an island: plain
             // selects only it, Ctrl adds or takes out, on nothing clears. Shift is Smooth's,
@@ -5366,7 +5391,8 @@ int main(int argc, char* argv[]) {
             proj.camera       = camera;
             proj.mirror_x     = input.mirror_x;
             proj.subdiv_level = input.subdiv_level;
-            retopo_wand_close(retopo, -1);   // a preview isn't work to save
+            // A plain wand preview isn't work to save; a spine's fill is.
+            retopo_wand_close(retopo, retopo.wand_keep_shown ? retopo.wand_shown : -1);
             proj.retopo.strokes = retopo.strokes;
             proj.retopo.result  = retopo.result;
             proj.retopo.built   = retopo.built;

@@ -2,6 +2,29 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-25 — Retopo mode: Fewest faces, Grid without ring, spines across a hole
+
+*User-tested in part: Fewest faces and Grid no ring on a near-symmetric seam hole
+("going great"), the spine drawn top to bottom ("kinda works"). The spine's wand menu
+is headless-tested only (`unused-tools-vault/retopo-wand-test/`): the user's hole traced
+from a screenshot, spines seam to seam, off-seam and lopsided, all closed and manifold.*
+Three new wand options and a gesture. **Fewest faces** fills a hole with triangles and
+quads of its own rim vertices only, choosing among every way to cut it: each face costs
+one, a triangle a bit more (more toward the hole's middle, so they end up at its ends),
+slivers and long thin kites priced out; across the seam the cut is symmetric. On the
+user's tall hole it gives rows with a triangle and two quads at each end (8 faces where
+the grid made 56); on a mouth-shaped one, columns. **Grid, no ring** is Fill's grid
+without the ring of quads it lays inside rims of 12 sides or more. A hole across x = 0
+whose vertices have no exact mirror twins (a donut drawn over the seam in one stroke) now
+counts as a seam hole when its reflection lands within 3/4 of an edge of itself, so it
+gets the ladders too. **Spine**: in Draw, press on a hole's rim vertex, draw through the
+hole and let go on another vertex of the same rim: the line becomes a run of edges, and
+quads grow from it to the rim on both sides (its end faces take two rim edges, so they're
+quads; a lopsided rim folds the extra into triangles against it). From seam vertex to
+seam vertex it lies on x = 0 and is its own twin. Its fill goes up at once with the wand's
+menu beside it ("Your line", "Your line, tris at its ends", then the hole's usual
+options): clicking away keeps what's shown, Esc takes it back.
+
 ## 2026-10-25 — Retopo mode: Wand (Q), pick how a hole is filled
 
 *Partly user-tested: one 24-side hole across x = 0 offered all five fills, Columns kept.

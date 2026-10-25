@@ -4155,7 +4155,9 @@ void draw_retopo_dock(InputState& input, RetopoState& st, int win_w, int win_h) 
                 label_item(UiFont::Mono, 12.0f, kMuted, st.wand_opts[k].counts, 0.0f, bh);
                 ImGui::PopID();
             }
-            label_item(UiFont::Sans, 12.0f, kMuted, "Click one to keep it \xC2\xB7 Esc leaves the hole open", 0.0f, 18.0f);
+            label_item(UiFont::Sans, 12.0f, kMuted,
+                       st.wand_keep_shown ? "Click away keeps it \xC2\xB7 Esc takes it back"
+                                          : "Click one to keep it \xC2\xB7 Esc leaves the hole open", 0.0f, 18.0f);
             if (ImGui::IsKeyPressed(ImGuiKey_Escape)) keep = -1;
             if (keep >= -1) {
                 retopo_wand_close(st, keep);
@@ -4163,7 +4165,8 @@ void draw_retopo_dock(InputState& input, RetopoState& st, int win_w, int win_h) 
             }
             ImGui::EndPopup();
         } else {
-            retopo_wand_close(st, -1);   // clicked away
+            // Clicked away: a plain wand menu leaves the hole, a spine's keeps its fill.
+            retopo_wand_close(st, st.wand_keep_shown ? st.wand_shown : -1);
         }
     }
     ImGui::PopStyleVar(2);
