@@ -940,7 +940,7 @@ bool join_end(RetopoMesh& rm, const Grid& G, int end, uint32_t owner, int& i0, i
 // both would need the two islands' vertex counts to agree. Returns the island vertices
 // taken; rm's topology must be current.
 int join_side(RetopoMesh& rm, const SnapGrid& g, Grid& G, uint32_t owner, int i0, int& i1,
-              std::vector<uint32_t>& idx) {
+              std::vector<uint32_t>& idx, bool pin0, bool pin1) {
     const int W = G.W, Q = W - 1;
     if (G.closed || Q < 1 || i1 - i0 < 1) return 0;
     std::vector<uint32_t> border;
@@ -959,12 +959,17 @@ int join_side(RetopoMesh& rm, const SnapGrid& g, Grid& G, uint32_t owner, int i0
         for (int i = i0; i <= i1; i++) {
             near[i] = ~0u;
             if (idx[(size_t)i * W + s] != ~0u) continue;   // a joined end spoke's corner
+            // A half-mouth's seam spoke lies on x = 0 and must stay there (it welds the
+            // halves): it may only take the island's own vertex on the seam.
+            const bool pinned = (pin0 && i == 0) || (pin1 && i == G.n - 1);
             const Vec3 p = G.v[(size_t)i * W + s];
             const int in = i < i1 ? i + 1 : i - 1;
             const float r = 0.75f * std::max((G.v[(size_t)i * W + sn] - p).length(),
                                              (G.v[(size_t)in * W + s] - p).length());
             float bd = r * r;
             for (uint32_t b : border) {
+                if (pinned && !(rm.mirror.size() == rm.v.size() ? rm.mirror[b] == b : std::fabs(rm.v[b].x) < 1e-5f))
+                    continue;
                 const Vec3 d = rm.v[b] - p;
                 if (d.dot(d) < bd) { bd = d.dot(d); near[i] = b; }
             }
@@ -1184,8 +1189,14 @@ double retopo_build(RetopoState& st, const Mesh& m, bool mirror) {
             // Seam ends meet their twin, not an island.
             if (!t.seam0) joins += join_end(rm, G, 0, t.s.id, i0, i1, idx);
             if (!t.seam1) joins += join_end(rm, G, 1, t.s.id, i0, i1, idx);
-            // A half-mouth's spokes are pinned to the seam: re-laying them would tear it.
-            if (!t.seam0 && !t.seam1) zips += join_side(rm, g, G, t.s.id, i0, i1, idx) > 0;
+            // A half-mouth zips too (a strip across the seam drawn beside an island);
+            // its seam spoke only onto the island's seam vertex, then flat on x = 0 again.
+            zips += join_side(rm, g, G, t.s.id, i0, i1, idx, t.seam0, t.seam1) > 0;
+            for (int e = 0; e < 2; e++) {
+                if (!(e ? t.seam1 : t.seam0)) continue;
+                const int i = e ? G.n - 1 : 0;
+                for (int j = 0; j < G.W; j++) G.v[(size_t)i * G.W + j].x = 0.0f;
+            }
         }
         const uint32_t first_new = (uint32_t)rm.v.size();
         emit_grid(rm, G, i0, i1, idx, t.s.id);
@@ -2817,7 +2828,9 @@ const char* retopo_bridge(RetopoState& st, const Mesh& m, const Camera& cam, int
     std::vector<Vec3> line;
     line.push_back((rm.v[out->a] + rm.v[out->b]) * 0.5f);
     const float s_end = in ? in->s : (float)(np - 1);
-    for (size_t i = (size_t)std::ceil(out->s); (float)i < s_end && i < np; i++) line.push_back(pts[i]);
+    // Samples strictly past the crossing: a line snapped onto the edge starts ON it, and
+    // that first sample would make the heading run along the edge.
+    for (size_t i = (size_t)std::floor(out->s) + 1; (float)i < s_end && i < np; i++) line.push_back(pts[i]);
     line.push_back(in ? (rm.v[in->a] + rm.v[in->b]) * 0.5f : at(s_end));
     std::vector<float> arc(line.size(), 0.0f);
     for (size_t i = 1; i < line.size(); i++) arc[i] = arc[i - 1] + (line[i] - line[i - 1]).length();
@@ -2854,12 +2867,14 @@ const char* retopo_bridge(RetopoState& st, const Mesh& m, const Camera& cam, int
         const Vec3 side = nn.cross(heading);
         return (rm.v[a] - rm.v[b]).dot(side) > 0.0f;
     };
-    const Vec3 h0 = (line[std::min<size_t>(1, line.size() - 1)] - line[0]).normalized();
+    // Headings from half a quad in, not the first sample: a sample a hair off the edge
+    // points anywhere, and picked the rails at random (a bow-tie quad, 2026-10-25).
+    const Vec3 h0 = (along(std::min(len, 0.5f * q)) - line[0]).normalized();
     const uint32_t LA = left_first(out->a, out->b, h0) ? out->a : out->b;
     const uint32_t RA = LA == out->a ? out->b : out->a;
     uint32_t LB = ~0u, RB = ~0u;
     if (in) {
-        const Vec3 h1 = (line.back() - line[line.size() - 2]).normalized();
+        const Vec3 h1 = (line.back() - along(std::max(0.0f, len - 0.5f * q))).normalized();
         LB = left_first(in->a, in->b, h1) ? in->a : in->b;
         RB = LB == in->a ? in->b : in->a;
     }
@@ -2915,6 +2930,7 @@ const char* retopo_bridge(RetopoState& st, const Mesh& m, const Camera& cam, int
         Vec3 across = side + dA * wa + dB * wb;
         across = (across - nn * across.dot(nn)).normalized();
         const float w = wA + (wB - wA) * f;
+        Vec3 sp[2], sn[2];
         for (int k = 0; k < 2; k++) {
             // A bend tighter than the strip is wide: the inside rail would step back past
             // the last spoke and fold the quad over. Pull that end in until it moves on.
@@ -2925,12 +2941,30 @@ const char* retopo_bridge(RetopoState& st, const Mesh& m, const Camera& cam, int
                 o *= 0.6f;
                 p = snap(cen + across * (k ? -o : o), vn);
             }
-            rm.v.push_back(p);
-            rm.n.push_back(vn.length() > 0.5f ? vn : nn);
+            sp[k] = p;
+            sn[k] = vn.length() > 0.5f ? vn : nn;
+        }
+        // Whatever picked the sides, the rails must not cross: a spoke whose ends sit
+        // nearer the other rail's last vertex is a bow-tie waiting to happen. Swap it.
+        const Vec3 pl = rm.v[L[i - 1]], pr = rm.v[R[i - 1]];
+        if ((sp[1] - pl).length() + (sp[0] - pr).length() < (sp[0] - pl).length() + (sp[1] - pr).length()) {
+            std::swap(sp[0], sp[1]);
+            std::swap(sn[0], sn[1]);
+        }
+        for (int k = 0; k < 2; k++) {
+            rm.v.push_back(sp[k]);
+            rm.n.push_back(sn[k]);
             rm.v_owner.push_back(keep);
             rm.mirror.push_back(~0u);
             (k ? R : L)[i] = (uint32_t)rm.v.size() - 1;
         }
+    }
+    // The landing edge's ends too: picked by heading, kept only if the rails don't cross.
+    if (in) {
+        const Vec3 pl = rm.v[L[n - 1]], pr = rm.v[R[n - 1]];
+        if ((rm.v[R[n]] - pl).length() + (rm.v[L[n]] - pr).length()
+            < (rm.v[L[n]] - pl).length() + (rm.v[R[n]] - pr).length())
+            std::swap(L[n], R[n]);
     }
     // Wound against the island's face on the edge it leaves, so the bridge's normals
     // agree with it (a shared side runs opposite ways in its two faces).
@@ -4584,6 +4618,354 @@ const char* retopo_wand_open_notch(RetopoState& st, const Mesh& m, const Camera&
     retopo_wand_show(st, show);
     st.wand_keep_shown = true;
     return nullptr;
+}
+
+// ---- Edge to vertex ------------------------------------------------------------
+
+namespace {
+// The quad x, y, vn, v: outline edge (x, y) rung over to outline vertex v and its outline
+// neighbour vn; vo is v's other neighbour (the wedge side, past v from vn).
+struct EdgeVertex { uint32_t x = ~0u, y = ~0u, v = ~0u, vn = ~0u, vo = ~0u; };
+
+// Which edge and vertex the live line joins: started on a lit edge and ended on a lit
+// vertex, or the other way round. False = neither.
+bool edge_vertex_ends(const RetopoState& st, uint32_t& ea, uint32_t& eb, uint32_t& v) {
+    if (st.line_from_ea != ~0u && st.draw_v != ~0u) { ea = st.line_from_ea; eb = st.line_from_eb; v = st.draw_v; return true; }
+    if (st.line_from_v != ~0u && st.draw_ea != ~0u) { ea = st.draw_ea; eb = st.draw_eb; v = st.line_from_v; return true; }
+    return false;
+}
+
+// The quads that fit, one per side of the vertex (best rungs first); empty = why says.
+const char* edge_vertex_find(const RetopoState& st, const Camera& cam, int win_w, int win_h,
+                             std::vector<EdgeVertex>& out) {
+    out.clear();
+    const RetopoMesh& rm = st.result;
+    uint32_t ea, eb, v;
+    if (!st.built || !edge_vertex_ends(st, ea, eb, v)) return "Draw from an outline edge to an outline vertex";
+    const uint32_t nv = (uint32_t)rm.v.size();
+    if (ea >= nv || eb >= nv || v >= nv || rm.border_nb.size() != 2 * (size_t)nv) return "Nothing to join there";
+    if (!(rm.border_nb[ea * 2] == eb || rm.border_nb[ea * 2 + 1] == eb)) return "That edge isn't on an outline";
+    if (!on_border(rm, v)) return "That vertex isn't on an outline";
+    if (v == ea || v == eb) return "The vertex is on that edge";
+    // Across open space, as a notch: the line's middle mostly over no face.
+    const std::vector<Vec3>& L = st.live.pts;
+    int over = 0, all = 0;
+    for (size_t i = L.size() / 5; i < L.size() - L.size() / 5; i++) {
+        float x, y;
+        if (!cam.world_to_screen(L[i], win_w, win_h, x, y)) continue;
+        over += retopo_face_at(st, cam, win_w, win_h, x, y, 0.0f) != ~0u;
+        all++;
+    }
+    if (all && over * 10 > all * 3) return "That line runs over faces: edge to vertex joins across open space";
+    // Per side of v (which neighbour the quad takes): the shortest rungs that don't cross,
+    // either way round. Crossing is judged flat, in the plane of the corners' mean normal.
+    float side_len[2] = {1e30f, 1e30f};
+    EdgeVertex side_ev[2];
+    for (int side = 0; side < 2; side++) {
+        const uint32_t vn = rm.border_nb[v * 2 + side], vo = rm.border_nb[v * 2 + 1 - side];
+        if (vn >= nv || vn == ea || vn == eb) continue;
+        float& best = side_len[side];
+        EdgeVertex& ev = side_ev[side];
+        for (int way = 0; way < 2; way++) {
+            const uint32_t x = way ? eb : ea, y = way ? ea : eb;
+            const Vec3 nn = (rm.n[x] + rm.n[y] + rm.n[v] + rm.n[vn]).normalized();
+            Vec3 u = (rm.v[y] - rm.v[x]);
+            u = (u - nn * u.dot(nn)).normalized();
+            const Vec3 w = nn.cross(u);
+            auto flat = [&](uint32_t i, float& a, float& b) { a = rm.v[i].dot(u); b = rm.v[i].dot(w); };
+            float x0, y0, x1, y1, x2, y2, x3, y3;
+            flat(x, x0, y0); flat(v, x1, y1); flat(y, x2, y2); flat(vn, x3, y3);
+            const float rx = x1 - x0, ry = y1 - y0, qx = x3 - x2, qy = y3 - y2, den = rx * qy - ry * qx;
+            bool cross = false;
+            if (std::fabs(den) > 1e-12f) {
+                const float t = ((x2 - x0) * qy - (y2 - y0) * qx) / den, k = ((x2 - x0) * ry - (y2 - y0) * rx) / den;
+                cross = t > 0.0f && t < 1.0f && k > 0.0f && k < 1.0f;
+            }
+            const float len = (rm.v[v] - rm.v[x]).length() + (rm.v[vn] - rm.v[y]).length();
+            if (cross || len >= best) continue;
+            best = len;
+            ev = {x, y, v, vn, vo < nv && vo != x && vo != y ? vo : ~0u};
+        }
+    }
+    const int first = side_len[1] < side_len[0] ? 1 : 0;
+    for (int side : {first, 1 - first})
+        if (side_len[side] < 1e29f) out.push_back(side_ev[side]);
+    return out.empty() ? "No quad fits between that edge and vertex" : nullptr;
+}
+
+// Adds the quad (and with `wedge` the triangle x, v, vo), wound against the faces already
+// on the edge; with mirror, the twin too unless it's its own; the pieces become one.
+bool edge_vertex_fill(RetopoState& st, const EdgeVertex& ev, bool wedge, bool mirror) {
+    RetopoMesh& rm = st.result;
+    if (wedge && ev.vo == ~0u) return false;
+    bool flip = false;
+    std::vector<uint32_t> c;
+    for (size_t f = 0; f < rm.face_count() && !flip; f++) {
+        const int k = face_corners(rm, f, c);
+        for (int i = 0; i < k; i++) if (c[i] == ev.x && c[(i + 1) % k] == ev.y) flip = true;
+    }
+    const uint32_t owner = rm.v_owner[ev.v], f0 = rm.face_count();
+    std::vector<std::vector<uint32_t>> F{{ev.x, ev.y, ev.vn, ev.v}};
+    if (wedge) F.push_back({ev.x, ev.v, ev.vo});
+    for (std::vector<uint32_t>& f : F) {
+        if (flip) std::reverse(f.begin(), f.end());
+        rm.add_face(f.data(), (int)f.size(), owner);
+    }
+    std::vector<uint32_t> touched{rm.v_owner[ev.x], rm.v_owner[ev.y], rm.v_owner[ev.v], rm.v_owner[ev.vn]};
+    if (mirror && rm.mirror.size() == rm.v.size()) {
+        std::vector<uint32_t> mine{ev.x, ev.y, ev.v, ev.vn}, twins;
+        if (wedge) mine.push_back(ev.vo);
+        bool ok = true;
+        for (uint32_t i : mine) { ok &= rm.mirror[i] < rm.v.size(); if (ok) twins.push_back(rm.mirror[i]); }
+        std::vector<uint32_t> a = mine, b = twins;
+        std::sort(a.begin(), a.end());
+        std::sort(b.begin(), b.end());
+        if (ok && a != b) reflect_new_faces(st, (uint32_t)rm.v.size(), f0, rm.v_owner[rm.mirror[ev.v]], touched);
+    }
+    join_round(st, touched);
+    rebuild_edges(rm);
+    return true;
+}
+}  // namespace
+
+bool retopo_edge_vertex_gesture(const RetopoState& st, const Camera& cam, int win_w, int win_h) {
+    uint32_t ea, eb, v;
+    if (!edge_vertex_ends(st, ea, eb, v)) return false;
+    std::vector<EdgeVertex> ev;
+    const char* why = edge_vertex_find(st, cam, win_w, win_h, ev);
+    if (why) std::printf("[retopo] edge to vertex: no (%s)\n", why);
+    return !why;
+}
+
+const char* retopo_wand_open_edge_vertex(RetopoState& st, const Camera& cam, int win_w, int win_h, bool mirror) {
+    retopo_wand_close(st, -1);
+    std::vector<EdgeVertex> ev;
+    if (const char* why = edge_vertex_find(st, cam, win_w, win_h, ev)) return why;
+    st.loop_edges.clear();
+    st.wand_base = snapshot_of(st);
+    // The vertex brings both its outline neighbours (user's rule): three vertices to the
+    // edge's two, a quad on one side of it and a triangle on the other. The quad with the
+    // better rungs first, then the other way round, then the quad alone.
+    auto option = [&](const EdgeVertex& e, bool wedge, const char* label) {
+        put(st, st.wand_base);
+        if (!edge_vertex_fill(st, e, wedge, mirror)) return;
+        RetopoState::WandOption o;
+        std::snprintf(o.label, sizeof o.label, "%s", label);
+        std::snprintf(o.counts, sizeof o.counts, "%s", wedge ? "1 quad, 1 tri" : "1 quad");
+        o.after = snapshot_of(st);
+        st.wand_opts.push_back(std::move(o));
+    };
+    option(ev[0], true, "Both neighbours");
+    if (ev.size() > 1) option(ev[1], true, "Both neighbours, flipped");
+    option(ev[0], false, "One quad");
+    put(st, st.wand_base);
+    if (st.wand_opts.empty()) { st.wand_base = RetopoSnapshot{}; return "No quad fits there"; }
+    st.wand_open = true;
+    st.wand_keep_shown = false;
+    st.wand_shown = -1;
+    std::printf("[retopo] edge to vertex:");
+    for (const RetopoState::WandOption& o : st.wand_opts) std::printf(" [%s: %s]", o.label, o.counts);
+    std::printf("\n");
+    // Drawn on purpose: the first is up at once and stays unless another is picked.
+    retopo_wand_show(st, 0);
+    st.wand_keep_shown = true;
+    return nullptr;
+}
+
+// ---- Lasso cleanup (wand drag) --------------------------------------------------
+
+namespace {
+// Two vertices closer than this share of their edges' mean length are one that missed
+// its weld (hand merges, zips a hair off): the user's slivers sat at ~0.15.
+constexpr float kLassoMergeFrac = 0.35f;
+}  // namespace
+
+const char* retopo_lasso_cleanup(RetopoState& st, const Camera& cam, int win_w, int win_h,
+                                 const std::vector<float>& xy, bool mirror) {
+    static char msg[160];
+    RetopoMesh& rm = st.result;
+    const uint32_t nv = (uint32_t)rm.v.size();
+    const size_t np = xy.size() / 2;
+    if (!st.built || np < 3 || rm.nb_off.size() != nv + 1) return "Nothing built to clean up";
+
+    // What the lasso holds: vertices in use, facing the eye, inside it on screen; with
+    // mirror, their twins too.
+    std::vector<uint8_t> in(nv, 0);
+    std::vector<uint32_t> S;
+    for (uint32_t v = 0; v < nv; v++) {
+        if (!alive(rm, v) || st.hidden(rm.v_owner[v])) continue;
+        const Vec3 to_eye = cam.perspective ? cam.get_position() - rm.v[v] : cam.get_view_direction() * -1.0f;
+        float x, y;
+        if (rm.n[v].dot(to_eye) <= 0.0f || !cam.world_to_screen(rm.v[v], win_w, win_h, x, y)) continue;
+        bool inside = false;
+        for (size_t a = 0, c = np - 1; a < np; c = a++) {
+            const float ax = xy[a * 2], ay = xy[a * 2 + 1], cx = xy[c * 2], cy = xy[c * 2 + 1];
+            if ((ay > y) != (cy > y) && x < cx + (ax - cx) * (y - cy) / (ay - cy)) inside = !inside;
+        }
+        if (inside) { in[v] = 1; S.push_back(v); }
+    }
+    const bool pairs = mirror && rm.mirror.size() == nv;
+    if (pairs)
+        for (size_t k = 0, n = S.size(); k < n; k++) {
+            const uint32_t w = rm.mirror[S[k]];
+            if (w < nv && !in[w] && alive(rm, w)) { in[w] = 1; S.push_back(w); }
+        }
+    if (S.empty()) return "Lasso some vertices to clean up";
+
+    // Merge by distance, the reach set per vertex by its own edges.
+    std::vector<float> reach(nv, 0.0f);
+    for (uint32_t v : S) {
+        float sum = 0.0f;
+        const uint32_t k0 = rm.nb_off[v], k1 = rm.nb_off[v + 1];
+        for (uint32_t k = k0; k < k1; k++) sum += (rm.v[rm.nb[k]] - rm.v[v]).length();
+        reach[v] = k1 > k0 ? kLassoMergeFrac * sum / (float)(k1 - k0) : 0.0f;
+    }
+    std::vector<uint32_t> up(nv);
+    for (uint32_t v = 0; v < nv; v++) up[v] = v;
+    auto root = [&](uint32_t x) { while (up[x] != x) x = up[x] = up[up[x]]; return x; };
+    for (size_t i = 0; i < S.size(); i++)
+        for (size_t j = i + 1; j < S.size(); j++) {
+            const uint32_t a = S[i], b = S[j];
+            const float r = std::min(reach[a], reach[b]);
+            const Vec3 d = rm.v[a] - rm.v[b];
+            if (d.dot(d) < r * r) {
+                const uint32_t ra = root(a), rb = root(b);
+                if (ra != rb) up[std::max(ra, rb)] = std::min(ra, rb);
+            }
+        }
+    // Each group to its lowest index, at the group's middle; a group on the seam (a seam
+    // vertex in it, or a vertex and its own twin) flat onto x = 0.
+    std::vector<Vec3> sum_p(nv), sum_n(nv);
+    std::vector<int> cnt(nv, 0);
+    std::vector<uint8_t> seam(nv, 0);
+    int merged = 0;
+    for (uint32_t v : S) {
+        const uint32_t r = root(v);
+        sum_p[r] = sum_p[r] + rm.v[v];
+        sum_n[r] = sum_n[r] + rm.n[v];
+        cnt[r]++;
+        if (pairs && (rm.mirror[v] == v || (rm.mirror[v] < nv && root(rm.mirror[v]) == r))) seam[r] = 1;
+    }
+    std::vector<uint32_t> touched;
+    for (uint32_t v : S) {
+        const uint32_t r = root(v);
+        if (v != r) { merged++; touched.push_back(rm.v_owner[v]); touched.push_back(rm.v_owner[r]); }
+    }
+
+    // The faces again: merged corners repeat, so runs collapse; a face left with under
+    // three corners (it spanned the gap that closed) or pinched on a corner goes, and so
+    // does a second copy of one already there.
+    FaceList out;
+    std::vector<uint32_t> c;
+    std::vector<std::vector<uint32_t>> seen_keys;
+    std::vector<uint64_t> keys;
+    int dropped = 0;
+    std::vector<std::pair<std::vector<uint32_t>, uint32_t>> kept;
+    for (size_t f = 0; f < rm.face_count(); f++) {
+        c.clear();
+        const uint32_t* q = rm.face(f);
+        for (uint32_t i = 0; i < rm.face_size(f); i++) {
+            const uint32_t v = in[q[i]] ? root(q[i]) : q[i];
+            if (c.empty() || c.back() != v) c.push_back(v);
+        }
+        while (c.size() > 1 && c.back() == c.front()) c.pop_back();
+        std::vector<uint32_t> sorted = c;
+        std::sort(sorted.begin(), sorted.end());
+        const bool pinched = std::adjacent_find(sorted.begin(), sorted.end()) != sorted.end();
+        if (c.size() < 3 || pinched) { dropped++; touched.push_back(rm.face_owner[f]); continue; }
+        bool dup = false;
+        for (const auto& k : kept) dup |= k.first == sorted;
+        if (dup) { dropped++; continue; }
+        kept.push_back({sorted, rm.face_owner[f]});
+        out.add(c.data(), (int)c.size(), rm.face_owner[f]);
+    }
+    // The history step is taken at the end, from this copy, only if something changed.
+    RetopoMesh before = rm;
+    for (uint32_t v : S) {
+        const uint32_t r = root(v);
+        if (v != r || cnt[r] < 2) continue;
+        rm.v[r] = sum_p[r] * (1.0f / (float)cnt[r]);
+        if (sum_n[r].length() > 1e-9f) rm.n[r] = sum_n[r].normalized();
+        if (seam[r]) rm.v[r].x = 0.0f;
+    }
+    if (pairs) {
+        for (uint32_t v : S) {
+            const uint32_t r = root(v);
+            if (seam[r]) { rm.mirror[r] = r; continue; }
+            const uint32_t w = rm.mirror[v];
+            if (w < nv) rm.mirror[r] = in[w] ? root(w) : w;
+        }
+        // Twins' groups average to exact reflections of each other.
+        for (uint32_t v : S) {
+            const uint32_t r = root(v), w = rm.mirror[r];
+            if (v != r || w >= nv || w == r || w < r) continue;
+            Vec3 m = (rm.v[r] + Vec3(-rm.v[w].x, rm.v[w].y, rm.v[w].z)) * 0.5f;
+            rm.v[r] = m;
+            rm.v[w] = Vec3(-m.x, m.y, m.z);
+        }
+    }
+    out.swap_into(rm);
+    rebuild_edges(rm);
+
+    // Small holes the welds left (3 or 4 sides, every corner in the lasso): one face.
+    int filled = 0;
+    for (uint32_t r = 0; r < rm.rim_count(); r++) {
+        if (!rm.rim_hole[r]) continue;
+        const uint32_t k0 = rm.rim_off[r], n = rm.rim_off[r + 1] - k0;
+        if (n < 3 || n > 4) continue;
+        bool all = true;
+        for (uint32_t k = 0; k < n; k++) all &= in[rm.rim[k0 + k]] != 0;
+        if (!all) continue;
+        std::vector<uint32_t> R(rm.rim.begin() + k0, rm.rim.begin() + k0 + n);
+        bool flip = false;
+        for (size_t f = 0; f < rm.face_count() && !flip; f++) {
+            const int k = face_corners(rm, f, c);
+            for (int i = 0; i < k; i++) if (c[i] == R[0] && c[(i + 1) % k] == R[1]) flip = true;
+        }
+        if (flip) std::reverse(R.begin(), R.end());
+        rm.add_face(R.data(), (int)n, rm.v_owner[R[0]]);
+        touched.push_back(rm.v_owner[R[0]]);
+        filled++;
+    }
+    if (filled) rebuild_edges(rm);
+    if (merged == 0 && dropped == 0 && filled == 0) {
+        rm = std::move(before);   // nothing changed: no empty step in the history
+        std::snprintf(msg, sizeof msg, "Nothing to clean in there (%zu vertices, none close enough to weld)", S.size());
+        return msg;
+    }
+    std::swap(rm, before);
+    st.checkpoint();
+    std::swap(rm, before);
+    // Pieces the welds joined are one piece now (the oldest keeps its name); the rest of
+    // what was touched is frozen, as any edit does.
+    {
+        uint32_t max_id = 0;
+        for (uint32_t o : rm.face_owner) max_id = std::max(max_id, o);
+        std::vector<uint32_t> grp(max_id + 1), first(rm.v.size(), ~0u);
+        for (uint32_t i = 0; i <= max_id; i++) grp[i] = i;
+        auto top = [&](uint32_t x) { while (grp[x] != x) x = grp[x] = grp[grp[x]]; return x; };
+        for (size_t q = 0; q < rm.face_count(); q++)
+            for (uint32_t k = rm.face_off[q]; k < rm.face_off[q + 1]; k++) {
+                uint32_t& f = first[rm.faces[k]];
+                if (f == ~0u) f = rm.face_owner[q];
+                else          grp[top(f)] = top(rm.face_owner[q]);
+            }
+        std::sort(touched.begin(), touched.end());
+        touched.erase(std::unique(touched.begin(), touched.end()), touched.end());
+        std::vector<uint8_t> done(max_id + 1, 0);
+        for (uint32_t id : touched) {
+            if (id > max_id || done[top(id)]) continue;
+            done[top(id)] = 1;
+            std::vector<uint32_t> group;
+            for (uint32_t o = 0; o <= max_id; o++) if (top(o) == top(id) && st.find(o)) group.push_back(o);
+            if (group.size() > 1) join_round(st, group);
+        }
+    }
+    freeze_touched(st, touched);
+    std::printf("[retopo] lasso: %zu vertices, %d welded, %d faces dropped, %d small holes filled, now %u faces\n",
+                S.size(), merged, dropped, filled, rm.face_count());
+    std::snprintf(msg, sizeof msg, "Cleaned: %d welded, %d faces dropped, %d holes closed", merged, dropped, filled);
+    return msg;
 }
 
 namespace {

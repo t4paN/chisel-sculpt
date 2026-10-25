@@ -674,7 +674,8 @@ struct InputState {
     RetopoTool retopo_tool = RetopoTool::DRAW;
     // What the next stroke gets (RetopoStroke has the meaning of each), set in the tool
     // dock or by holding A / W. Its band is the brush Size as drawn, so no width here.
-    int   retopo_rings = 2;
+    // Rings go back to 1 after every stroke (user, 2026-10-25): more is a one-off.
+    int   retopo_rings = 1;
     float retopo_density = 1.0f;
     bool retopo_export_requested = false;
     // Which mode's shortcuts are live: Paint while painting (EDIT in paint mode), else

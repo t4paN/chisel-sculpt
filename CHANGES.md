@@ -2,6 +2,25 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-25 — Retopo mode: edge to vertex, wand lasso cleanup, strips zip across the seam, no bow-ties
+
+*Edge to vertex user-tested ("works, confirmed"). The rest headless-tested only:
+`unused-tools-vault/retopo-lasso-test/`, `retopo-zip-test/` (mouth_beside),
+`retopo-bridge-turn-test/` (on-edge starts), `retopo-notch-test/edge_vertex_test.cpp`.*
+A Draw line from a lit outline edge to a lit outline vertex (or back) joins them: the
+vertex brings both its outline neighbours, so the edge's two corners meet three
+vertices as a quad and a triangle; the wand's menu offers it flipped or as the quad
+alone. **Wand drag = lasso:** inside it, vertices that missed their weld (closer than a
+third of their edges) merge at their middle, faces left degenerate or doubled go, edges
+re-derive from the faces, 3–4-sided holes get a face, and pieces now joined become one;
+one undo step. A strip across the seam (built as a half plus its twin) never zipped
+onto an island beside it; now it does, its seam spoke welding only to the island's own
+seam vertex. Bridges grown off an edge put a bow-tie quad in about two of five short
+lines once Draw's snap started them exactly on the edge (the heading came from a sample
+on the edge itself); the heading is now read half a quad in, and every spoke is
+swapped back if its ends would cross the rails. New strokes are 1 ring, and the
+next-stroke setting goes back to 1 after each stroke.
+
 ## 2026-10-25 — Retopo mode: Draw snaps to vertices, a line across a notch closes it
 
 *User-tested: a notch off the seam closed wall to wall, 16 quads with its twin. Also

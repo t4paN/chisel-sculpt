@@ -28,7 +28,7 @@ struct RetopoStroke {
     bool selected = false;       // the bar's sliders and the right-click menu act on these
     // Its own build settings, taken from the bar's at pen-up; the sliders change them
     // only while it's selected.
-    int   rings   = 2;           // quads across the band (1..8)
+    int   rings   = 1;           // quads across the band (1..8)
     float density = 1.0f;        // quads along it: 1 = about square, 0.1 to 2
     float width   = 1.0f;        // band width as drawn x this (0.1..2): rescues a stroke
                                  // whose path is right but whose brush was too fat
@@ -113,6 +113,10 @@ struct RetopoState {
     float draw_t = 0.0f;
     // The vertex the live line started on (its press was on an orange dot), ~0u = none.
     uint32_t line_from_v = ~0u;
+    // Wand drag: the lasso so far, screen x, y pairs (empty = none).
+    std::vector<float> lasso;
+    // ...or the edge it started on (its press was on a bold blue edge).
+    uint32_t line_from_ea = ~0u, line_from_eb = ~0u;
     // Ctrl + Erase: the face that would go, outlined red while Ctrl is held (~0u = none).
     uint32_t face_hover = ~0u;
     // Edge loops picked by double-click (Draw): 2 vertex ids per edge, mirror twins
@@ -414,6 +418,26 @@ const char* retopo_wand_open_spine(RetopoState& st, const Mesh& m, const Camera&
 bool retopo_notch_gesture(const RetopoState& st, const Camera& cam, int win_w, int win_h, bool mirror);
 const char* retopo_wand_open_notch(RetopoState& st, const Mesh& m, const Camera& cam, int win_w, int win_h,
                                    bool mirror);
+
+// Edge to vertex: a Draw line from a lit outline edge (st.line_from_ea/eb) to a lit
+// outline vertex (st.draw_v at pen-up), or the other way round, across open space. The
+// vertex brings both its outline neighbours (user's rule): a quad from the edge to the
+// vertex and the neighbour with the shorter uncrossed rungs, and a triangle from the
+// edge's near corner to the vertex and its other neighbour. The wand's menu has that,
+// the same flipped, and the quad alone. Mirror: the twin too, unless it's its own.
+// retopo_edge_vertex_gesture logs why not.
+bool retopo_edge_vertex_gesture(const RetopoState& st, const Camera& cam, int win_w, int win_h);
+
+// Wand drag = lasso (xy = screen points, x, y pairs): topology cleanup inside it. The
+// vertices it holds (facing, in use; with mirror their twins too) weld when closer than
+// ~1/3 of their edges' mean length, each group at its middle (on x = 0 if it's on the
+// seam); faces left with under three corners or pinched go, as do second copies; edges
+// are re-derived from the faces, so ones between welded vertices go with them. Then
+// holes of 3 or 4 sides wholly inside get a face. One undo step (none if nothing
+// changed). Returns the toast text.
+const char* retopo_lasso_cleanup(RetopoState& st, const Camera& cam, int win_w, int win_h,
+                                 const std::vector<float>& xy, bool mirror);
+const char* retopo_wand_open_edge_vertex(RetopoState& st, const Camera& cam, int win_w, int win_h, bool mirror);
 
 // A saved project's retopo (strokes + result as saved) becomes the session's: history,
 // picks and tools start fresh, edges / outlines / holes are worked out again from the

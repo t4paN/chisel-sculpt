@@ -2421,6 +2421,15 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
     if (st.drawing && (st.bridge_from || st.spine_from != ~0u))
         thin_line(st.live.pts, st.live.nrm, IM_COL32(120, 210, 255, 255));
     if (st.drawing && st.extruding) thin_line(st.live.pts, st.live.nrm, IM_COL32(0, 255, 65, 255));
+    // The wand's lasso: drawn as dragged, its closing side dimmer (it closes on release).
+    if (st.lasso.size() >= 4) {
+        static std::vector<ImVec2> lp;
+        lp.clear();
+        for (size_t i = 0; i + 1 < st.lasso.size(); i += 2) lp.push_back(ImVec2(st.lasso[i], st.lasso[i + 1]));
+        dl->AddPolyline(lp.data(), (int)lp.size(), IM_COL32(10, 20, 15, 170), 0, 3.5f);
+        dl->AddPolyline(lp.data(), (int)lp.size(), IM_COL32(255, 200, 90, 255), 0, 1.5f);
+        dl->AddLine(lp.back(), lp.front(), IM_COL32(255, 200, 90, 110), 1.0f);
+    }
     if (!st.built || !st.show_result) return;
 
     // Wireframe: project every vertex once, then draw an edge only when both ends
