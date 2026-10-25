@@ -217,7 +217,7 @@ endif()
 # The gpu:: seam backend source is the only backend-specific app source: GL uses
 # gl_backend.cpp + the glad loader lib; WebGPU uses webgpu_backend.cpp + wgpu.
 if(CHISEL_GPU_BACKEND STREQUAL "webgpu")
-    set(CHISEL_BACKEND_SRC src/gpu/webgpu_backend.cpp)
+    set(CHISEL_BACKEND_SRC src/gpu/webgpu_backend.cpp src/gpu/wgpu_surface.cpp)
 else()
     set(CHISEL_BACKEND_SRC src/gpu/gl_backend.cpp)
 endif()
