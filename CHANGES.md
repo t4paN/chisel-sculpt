@@ -2,6 +2,12 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-26 — Retopo: seam lock, no faces over faces from edge to vertex
+
+- Mirror on: Grab and Smooth stop a vertex on x = 0 instead of carrying it across; its twin stays its reflection, outline pairs that meet there weld into one seam vertex.
+- Edge to vertex never lays a face over another: a quad whose far side runs the way an existing face does is skipped (another fitting quad is used), and an option whose wedge or twin would overlap isn't offered. This was the doubled wedge (an edge joined to a corner of its own mirror twin).
+- Headless: `unused-tools-vault/retopo-seamlock-test/` (both fail on the old code).
+
 ## 2026-10-26 — Retopo mode (key 0) merged into main
 
 - Branch `retopo-mode` joins main on top of the main.cpp split; logic stays in `retopo.cpp` + `retopo_input.cpp`, entries below are its history.

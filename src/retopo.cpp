@@ -1543,6 +1543,16 @@ std::vector<float>    g_grab_w;
 std::vector<Vec3>     g_grab_start;
 std::vector<uint8_t>  g_grab_in;      // per vertex: taken by the press
 bool g_grab_mirror = false;
+// Per vertex, its side of x = 0 at pen-down (+1 / -1, 0 = a seam vertex). With mirror,
+// Grab and Smooth never carry a vertex across: it stops on x = 0 (user's rule,
+// 2026-10-26), so a half can't fold over its twin. Coincident pairs left on the seam
+// weld in after_edit when they're outline vertices; anything else is a hand fix.
+std::vector<int8_t>   g_side;
+
+void hold_side(Vec3& q, uint32_t i) {
+    if (i >= g_side.size()) return;
+    if ((g_side[i] > 0 && q.x < 0.0f) || (g_side[i] < 0 && q.x > 0.0f)) q.x = 0.0f;
+}
 
 // With mirror: set each moved vertex's twin to its reflection, and list both in `out`
 // for after_edit. When both of a pair moved (the ring straddles x = 0) they meet
@@ -1604,6 +1614,18 @@ void retopo_edit_begin(RetopoState& st, const Mesh& m) {
     g_smooth_grid.build(m, lo, hi, std::max(edge * 0.5f, ext / 96.0f));
     g_smooth_old.resize(rm.v.size());
     g_smooth_w.resize(rm.v.size());
+    // A vertex already on x = 0 that isn't its own twin (one stopped there by an
+    // earlier stroke) belongs to the side its neighbours are on.
+    g_side.assign(rm.v.size(), 0);
+    const bool topo = rm.nb_off.size() == rm.v.size() + 1;
+    for (uint32_t i = 0; i < (uint32_t)rm.v.size(); i++) {
+        float x = rm.v[i].x;
+        if (std::fabs(x) <= 1e-6f && i < rm.mirror.size() && rm.mirror[i] != i && topo) {
+            x = 0.0f;
+            for (uint32_t k = rm.nb_off[i]; k < rm.nb_off[i + 1]; k++) x += rm.v[rm.nb[k]].x;
+        }
+        g_side[i] = x > 1e-6f ? 1 : x < -1e-6f ? -1 : 0;
+    }
 }
 
 int retopo_smooth_dab(RetopoState& st, const Camera& cam, int win_w, int win_h,
@@ -1663,7 +1685,10 @@ int retopo_smooth_dab(RetopoState& st, const Camera& cam, int win_w, int win_h,
             d = d - rm.n[i] * d.dot(rm.n[i]);
         }
         Vec3 q, qn;
-        if (g_smooth_grid.closest(p + d * std::min(1.0f, w), q, qn)) { rm.v[i] = q; rm.n[i] = qn; }
+        if (g_smooth_grid.closest(p + d * std::min(1.0f, w), q, qn)) {
+            if (mirror) hold_side(q, (uint32_t)i);
+            rm.v[i] = q; rm.n[i] = qn;
+        }
     }
     static std::vector<uint32_t> list, both;
     static std::vector<uint8_t> in;
@@ -1713,7 +1738,10 @@ void retopo_grab_drag(RetopoState& st, const Camera& cam, int win_w, int win_h,
         const float wpp = 2.0f * cam.half_height_at(cam.view_depth(p0)) / (float)win_h;
         const Vec3 d = (right * dx_px - up * dy_px) * (wpp * g_grab_w[k]);
         Vec3 q, qn;
-        if (g_smooth_grid.closest(p0 + d, q, qn, 8)) { rm.v[i] = q; rm.n[i] = qn; }
+        if (g_smooth_grid.closest(p0 + d, q, qn, 8)) {
+            if (g_grab_mirror) hold_side(q, i);
+            rm.v[i] = q; rm.n[i] = qn;
+        }
     }
     if (dx_px == 0.0f && dy_px == 0.0f) return;
     if (g_grab_in.size() != rm.v.size()) g_grab_in.resize(rm.v.size(), 0);   // a weld can't add, but be safe
@@ -5275,6 +5303,14 @@ const char* edge_vertex_find(const RetopoState& st, const Camera& cam, int win_w
             }
             const float len = (rm.v[v] - rm.v[x]).length() + (rm.v[vn] - rm.v[y]).length();
             if (cross || len >= best) continue;
+            // Wound against the faces on the edge (as edge_vertex_fill will), the quad's
+            // other sides must not run the way a face already does: that is a face laid
+            // over another (an edge joined to a corner of its own mirror twin did it).
+            uint32_t q[4] = {x, y, vn, v};
+            if (has_side(rm, x, y)) std::reverse(q, q + 4);
+            bool over = false;
+            for (int i = 0; i < 4 && !over; i++) over = has_side(rm, q[i], q[(i + 1) % 4]);
+            if (over) continue;
             best = len;
             ev = {x, y, v, vn, vo < nv && vo != x && vo != y ? vo : ~0u};
         }
@@ -5287,6 +5323,24 @@ const char* edge_vertex_find(const RetopoState& st, const Camera& cam, int win_w
 
 // Adds the quad (and with `wedge` the triangle x, v, vo), wound against the faces already
 // on the edge; with mirror, the twin too unless it's its own; the pieces become one.
+// True when a face from f0 on runs a side the same way as another face (one over the
+// other). Faces before f0 are only compared against the new ones, so an old overlap
+// elsewhere doesn't block anything.
+bool new_faces_double(const RetopoMesh& rm, uint32_t f0) {
+    std::vector<std::pair<uint32_t, uint32_t>> old, made;
+    std::vector<uint32_t> c;
+    for (uint32_t f = 0; f < rm.face_count(); f++) {
+        const int k = face_corners(rm, f, c);
+        for (int i = 0; i < k; i++) (f < f0 ? old : made).push_back({c[i], c[(i + 1) % k]});
+    }
+    std::sort(old.begin(), old.end());
+    std::sort(made.begin(), made.end());
+    if (std::adjacent_find(made.begin(), made.end()) != made.end()) return true;
+    for (const auto& e : made)
+        if (std::binary_search(old.begin(), old.end(), e)) return true;
+    return false;
+}
+
 bool edge_vertex_fill(RetopoState& st, const EdgeVertex& ev, bool wedge, bool mirror) {
     RetopoMesh& rm = st.result;
     if (wedge && ev.vo == ~0u) return false;
@@ -5309,6 +5363,8 @@ bool edge_vertex_fill(RetopoState& st, const EdgeVertex& ev, bool wedge, bool mi
         std::sort(b.begin(), b.end());
         if (ok && a != b) reflect_new_faces(st, (uint32_t)rm.v.size(), f0, rm.v_owner[rm.mirror[ev.v]], touched);
     }
+    // The wedge, or the twin, landing over a face: not an option (the wand puts the base back).
+    if (new_faces_double(rm, f0)) return false;
     join_round(st, touched);
     rebuild_edges(rm);
     return true;
