@@ -28,6 +28,7 @@ struct Vec3;
 struct Renderer;
 struct SceneSnapshot;
 struct ProjectionStats;
+struct TextOverlay;
 
 struct App {
     GLFWwindow*&      window;
@@ -57,9 +58,15 @@ struct App {
     int&              max_level;            // --max-level
     bool&             swallow_level_switch;
     bool&             remesh_chained_from_merge;
+    TextOverlay&      text;
+    float&            fps_display;
 #ifdef __EMSCRIPTEN__
     char            (&web_save_name)[96];
     char            (&web_export_name)[96];
+#endif
+#ifdef CHISEL_BACKEND_WEBGPU
+    int&              fbw;        // the size the surface was last configured at
+    int&              fbh;
 #endif
 };
 
@@ -79,3 +86,7 @@ void app_ops_remesh_and_merge(App& a);   // remesh run, SDF merge kick-off + per
 // app_files.cpp: open/import, the dev auto-import hooks, save, save-as, incremental
 // save, export, and their dialogs (native file browser, web name prompts + picker).
 void app_files_frame(App& a);
+
+// app_render.cpp: cursor visibility, the scene pass, overlays and dialogs, then (after
+// app_files_frame) the button islands, panels, error popup, ImGui render and present.
+void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse);

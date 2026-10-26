@@ -256,6 +256,7 @@ add_executable(chisel
     src/web_bridge.cpp
     src/app_files.cpp
     src/app_ops.cpp
+    src/app_render.cpp
     src/compute_mask.cpp
     src/compute_density.cpp
     src/compute_color.cpp
