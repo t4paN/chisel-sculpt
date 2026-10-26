@@ -11,7 +11,8 @@ Short, chronological log of notable changes. Newest on top.
 - File work (open/import, save, save-as, incremental, export, both dialog sets, dev auto-import) → `app_files.cpp`.
 - One-shot ops (C picker, fill bucket, level switch, delete level, focus/snap views, remesh, SDF merge) + their shared helpers → `app_ops.cpp`.
 - Drawing (cursor visibility, scene pass, overlays, button islands, panels, ImGui pass, present) → `app_render.cpp`.
-- `App` (`app.h`) holds references to main()'s locals so moved code reads unchanged; main.cpp 5487 → 2996 lines.
+- IDLE update (camera drags, Select-mode move/scale/spin, mask ops, undo/redo, one-shots) → `app_idle.cpp`; user-tested on GL.
+- `App` (`app.h`) holds references to main()'s locals so moved code reads unchanged; main.cpp 5487 → 2349 lines.
 
 ## 2026-10-22 — Pose brush hidden, parked until v0.4.x
 
