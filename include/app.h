@@ -26,6 +26,7 @@ class  ObjectXformStack;
 struct VoxelMergeJob;
 struct Vec3;
 struct Renderer;
+struct SceneSnapshot;
 
 struct App {
     GLFWwindow*&      window;
@@ -50,6 +51,8 @@ struct App {
     std::string&      error_popup_msg;
     bool&             error_popup_trigger;
     Renderer&         renderer;
+    SceneSnapshot&    rescue;
+    int&              rescue_shown;
 #ifdef __EMSCRIPTEN__
     char            (&web_save_name)[96];
     char            (&web_export_name)[96];
@@ -58,6 +61,9 @@ struct App {
 
 // app_ops.cpp: the frame's shared helpers, once lambdas inside main()'s frame.
 void app_refresh_active_gpu_residency(App& a);
+void app_print_undo_top(App& a, const char* tag);
+void app_take_rescue(App& a, const char* op);
+void app_arm_geometry_handoff(App& a, const Mesh& m);
 
 // app_ops.cpp: the frame's one-shot user operations, each called where it ran in main.
 void app_ops_paint_clicks(App& app, int win_w, int win_h);   // C colour picker, fill bucket

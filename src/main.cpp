@@ -759,7 +759,7 @@ int main(int argc, char* argv[]) {
     App app{window, input, scene, mesh, multires, camera, compute, brush_stroke, alpha_lib,
             xforms, vmerge_job, app_state, mesh_center, mesh_radius, screen_buffers_dirty,
             clean_edit_mark, cli_open_path, default_browse_path, current_project_path,
-            error_popup_msg, error_popup_trigger, renderer
+            error_popup_msg, error_popup_trigger, renderer, rescue, rescue_shown
 #ifdef __EMSCRIPTEN__
             , web_save_name, web_export_name
 #endif
@@ -1348,31 +1348,7 @@ int main(int argc, char* argv[]) {
 
         app_ops_paint_clicks(app, win_w, win_h);   // app_ops.cpp: C colour picker, fill bucket
 
-        // Debug helper: print undo stack top after key operations
-        auto print_undo_top = [&](const char* tag) {
-            UndoStack& undo_stack = scene.active_undo();
-            const UndoEntry* e = undo_stack.peek_undo();
-            if (e) {
-                if (e->kind == UndoEntry::Kind::PROJECTION)
-                    std::printf("[undo-trace][%s] depth=%zu top=PROJECTION target_level=%d\n",
-                                tag, undo_stack.undo_depth(), e->target_level);
-                else if (e->kind == UndoEntry::Kind::LEVEL)
-                    std::printf("[undo-trace][%s] depth=%zu top=LEVEL from=%d to=%d proj=%d\n",
-                                tag, undo_stack.undo_depth(), e->from_level, e->to_level,
-                                (int)!e->before.empty());
-                else if (e->kind == UndoEntry::Kind::MASK)
-                    std::printf("[undo-trace][%s] depth=%zu top=MASK verts=%zu\n",
-                                tag, undo_stack.undo_depth(), e->verts.size());
-                else if (e->kind == UndoEntry::Kind::PAINT)
-                    std::printf("[undo-trace][%s] depth=%zu top=PAINT verts=%zu\n",
-                                tag, undo_stack.undo_depth(), e->verts.size());
-                else
-                    std::printf("[undo-trace][%s] depth=%zu top=STROKE level=%d targets_base=%d disp_index=%d\n",
-                                tag, undo_stack.undo_depth(), e->level, (int)e->targets_base, e->disp_index);
-            } else {
-                std::printf("[undo-trace][%s] depth=%zu (empty)\n", tag, undo_stack.undo_depth());
-            }
-        };
+        auto print_undo_top = [&](const char* tag) { app_print_undo_top(app, tag); };
 
         // Phase 1 GPU residency: full re-upload of the active entity's mirrored
         // level after any wholesale CPU mutation (lock, level switch, projection,
@@ -1425,40 +1401,8 @@ int main(int argc, char* argv[]) {
 
         auto refresh_active_gpu_residency = [&]() { app_refresh_active_gpu_residency(app); };
 
-        // Prepare + capture the rescue snapshot, shared by '/' and 'J'. Frees the
-        // undo history, bakes the scene down to the triangle cap, then copies the
-        // stacks. Lives here rather than outside the loop because it needs
-        // refresh_active_gpu_residency, which is itself a per-frame lambda.
-        auto take_rescue = [&](const char* op) {
-            int baked = snapshot_prepare(scene, compute);
-            if (baked < 0) { rescue.clear(); return; }   // over cap, unprotected
-            if (baked > 0) {
-                // snapshot_prepare rebuilt the scene through load_entities to
-                // re-cascade the baked stacks, so every cached pointer is stale.
-                mesh     = &scene.active_mesh();
-                multires = &scene.active_multires();
-                scene.refresh_mirror_map();
-                scene.sync();
-                refresh_active_gpu_residency();
-                mesh->compute_bounding_sphere(mesh_center, mesh_radius);
-                screen_buffers_dirty = true;
-            }
-            rescue.levels_baked = baked;
-            snapshot_capture(rescue, scene, op);
-            rescue_shown = -1;
-        };
-        // Arm the renderer's one-shot geometry handoff for the sync following a
-        // GPU cascade replay: the working VBOs/EBO then fill by GPU→GPU copy from
-        // the replay scratch (positions/normals) and the VRAM level tables
-        // (indices). No-op when the replay didn't run (CPU fallback).
-        auto arm_geometry_handoff = [&](const Mesh& m) {
-            if (!compute.cascade_out_valid || !compute.cascade_out_pos) return;
-            if (compute.cascade_out_passes <= 0 ||
-                compute.cascade_out_passes >= (int)compute.cascade_levels.size()) return;
-            renderer.set_geometry_source(compute.cascade_out_pos, &compute.cascade_norm_ssbo,
-                                         &compute.cascade_levels[compute.cascade_out_passes].indices,
-                                         m.vertex_count(), (uint32_t)m.indices.size());
-        };
+        auto take_rescue = [&](const char* op) { app_take_rescue(app, op); };
+        auto arm_geometry_handoff = [&](const Mesh& m) { app_arm_geometry_handoff(app, m); };
 
         // Multires level switch (D / Shift-D post-lock). Recorded on the undo
         // timeline as a LEVEL entry so Ctrl-Z retraces the literal action sequence

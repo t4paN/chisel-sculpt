@@ -81,6 +81,81 @@ void app_refresh_active_gpu_residency(App& a) {
     compute.cascade_out_valid = false;
 }
 
+// Debug helper: print undo stack top after key operations
+void app_print_undo_top(App& a, const char* tag) {
+    auto& scene = a.scene;
+    UndoStack& undo_stack = scene.active_undo();
+    const UndoEntry* e = undo_stack.peek_undo();
+    if (e) {
+        if (e->kind == UndoEntry::Kind::PROJECTION)
+            std::printf("[undo-trace][%s] depth=%zu top=PROJECTION target_level=%d\n",
+                        tag, undo_stack.undo_depth(), e->target_level);
+        else if (e->kind == UndoEntry::Kind::LEVEL)
+            std::printf("[undo-trace][%s] depth=%zu top=LEVEL from=%d to=%d proj=%d\n",
+                        tag, undo_stack.undo_depth(), e->from_level, e->to_level,
+                        (int)!e->before.empty());
+        else if (e->kind == UndoEntry::Kind::MASK)
+            std::printf("[undo-trace][%s] depth=%zu top=MASK verts=%zu\n",
+                        tag, undo_stack.undo_depth(), e->verts.size());
+        else if (e->kind == UndoEntry::Kind::PAINT)
+            std::printf("[undo-trace][%s] depth=%zu top=PAINT verts=%zu\n",
+                        tag, undo_stack.undo_depth(), e->verts.size());
+        else
+            std::printf("[undo-trace][%s] depth=%zu top=STROKE level=%d targets_base=%d disp_index=%d\n",
+                        tag, undo_stack.undo_depth(), e->level, (int)e->targets_base, e->disp_index);
+    } else {
+        std::printf("[undo-trace][%s] depth=%zu (empty)\n", tag, undo_stack.undo_depth());
+    }
+}
+
+// Prepare + capture the rescue snapshot, shared by '/' and 'J'. Frees the
+// undo history, bakes the scene down to the triangle cap, then copies the
+// stacks. Lives here rather than outside the loop because it needs
+// refresh_active_gpu_residency, which is itself a per-frame lambda.
+void app_take_rescue(App& a, const char* op) {
+    auto& scene = a.scene;
+    auto& compute = a.compute;
+    auto& rescue = a.rescue;
+    auto& rescue_shown = a.rescue_shown;
+    auto& mesh = a.mesh;
+    auto& multires = a.multires;
+    auto& mesh_center = a.mesh_center;
+    auto& mesh_radius = a.mesh_radius;
+    auto& screen_buffers_dirty = a.screen_buffers_dirty;
+    auto refresh_active_gpu_residency = [&]() { app_refresh_active_gpu_residency(a); };
+    int baked = snapshot_prepare(scene, compute);
+    if (baked < 0) { rescue.clear(); return; }   // over cap, unprotected
+    if (baked > 0) {
+        // snapshot_prepare rebuilt the scene through load_entities to
+        // re-cascade the baked stacks, so every cached pointer is stale.
+        mesh     = &scene.active_mesh();
+        multires = &scene.active_multires();
+        scene.refresh_mirror_map();
+        scene.sync();
+        refresh_active_gpu_residency();
+        mesh->compute_bounding_sphere(mesh_center, mesh_radius);
+        screen_buffers_dirty = true;
+    }
+    rescue.levels_baked = baked;
+    snapshot_capture(rescue, scene, op);
+    rescue_shown = -1;
+}
+
+// Arm the renderer's one-shot geometry handoff for the sync following a
+// GPU cascade replay: the working VBOs/EBO then fill by GPU→GPU copy from
+// the replay scratch (positions/normals) and the VRAM level tables
+// (indices). No-op when the replay didn't run (CPU fallback).
+void app_arm_geometry_handoff(App& a, const Mesh& m) {
+    auto& compute = a.compute;
+    auto& renderer = a.renderer;
+    if (!compute.cascade_out_valid || !compute.cascade_out_pos) return;
+    if (compute.cascade_out_passes <= 0 ||
+        compute.cascade_out_passes >= (int)compute.cascade_levels.size()) return;
+    renderer.set_geometry_source(compute.cascade_out_pos, &compute.cascade_norm_ssbo,
+                                 &compute.cascade_levels[compute.cascade_out_passes].indices,
+                                 m.vertex_count(), (uint32_t)m.indices.size());
+}
+
 // Colour picker and fill bucket: both read the screen FBO under a click on the active
 // entity. (`app`, not `a`: the bucket keeps its own `a`, the gradient's start point.)
 void app_ops_paint_clicks(App& app, int win_w, int win_h) {
