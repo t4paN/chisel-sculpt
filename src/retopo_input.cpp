@@ -901,6 +901,7 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
         }
         if (!press && seam_stroke) retopo.end_edit();
         seam_stroke = press;
+        retopo.seam_painting = press;
     }
 }
 

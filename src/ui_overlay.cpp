@@ -2516,8 +2516,9 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
     // the island hovered or picked there bright and the rest faint.
     const bool tint = uv && st.uv.fits(rm) && st.uv.key == uv_topology_key(rm);
     const bool island_lit = tint && (st.uv_hover < st.uv.charts || st.uv_sel < st.uv.charts);
-    // The bake preview stands in for the sculpt: no fill or wire over it, only seams and
-    // the brush's marks, so what's judged is the baked maps.
+    // The bake preview stands in for the sculpt: no fill, wire, seams or loops over it,
+    // only the brush's ring, so what's judged is the baked maps. Seams come back while a
+    // seam stroke is under the pen: painting them blind would be guesswork.
     const bool baked = uv && st.bake.showing();
     if (!baked) {
         const ImDrawListFlags keep_flags = dl->Flags;
@@ -2608,7 +2609,7 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
                     lit || on ? 2.0f : 1.5f);
     }
     // UV seams: red over the wire, thin where the sculpt is in front.
-    {
+    if (!baked || st.seam_painting) {
         static std::vector<uint32_t> seams;
         retopo_seam_edges(rm, seams);
         for (size_t e = 0; e + 1 < seams.size(); e += 2) {
@@ -2624,7 +2625,7 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
     }
     // Double-clicked edge loops: green over the wire, thin where the sculpt is in front.
     // A picked edge a weld or the eraser took away isn't an edge any more: skipped.
-    for (size_t e = 0; e + 1 < st.loop_edges.size(); e += 2) {
+    for (size_t e = 0; e + 1 < st.loop_edges.size() && !baked; e += 2) {
         const uint32_t a = st.loop_edges[e], b = st.loop_edges[e + 1];
         if (a >= rm.v.size() || b >= rm.v.size() || !vis[a] || !vis[b]) continue;
         if (st.hidden(rm.v_owner[a]) || rm.nb_off.size() != rm.v.size() + 1) continue;

@@ -7,7 +7,7 @@ Short, chronological log of notable changes. Newest on top.
 - Bake section in the UV panel: Normal and Colour maps, 512 to 4K, Reach (how far either side of the retopo mesh it looks), Green down for engines that read normal maps flipped.
 - One ray per texel from the retopo mesh to the nearest outward-facing sculpt; tangents in MikkTSpace (`external/mikktspace`, zlib), so other apps decode the map the same way.
 - Runs a slice a frame with a progress bar and Stop; leaving UV mode stops it.
-- Preview: the retopo mesh wearing the maps in place of the sculpt; wire and island tints step aside, seams stay.
+- Preview: the retopo mesh wearing the maps in place of the sculpt, with no wire, tints, seams or loops over it; seams show only while a seam stroke is under the pen.
 - Save writes `<name>-retopo-normal.png` / `-color.png` (`stb_image_write`, public domain); downloads on web.
 - OBJ export writes the retopo mesh's smooth normals (`vn`), the ones the bake used.
 - Headless: `unused-tools-vault/bake-test/`.

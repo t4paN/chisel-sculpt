@@ -153,6 +153,7 @@ struct RetopoState {
     // UV mode: the vertex the seam brush is on (a ring in the overlay), and whether it erases.
     uint32_t seam_v = ~0u;
     bool seam_erase = false;
+    bool seam_painting = false;   // a seam stroke is under the pen (the bake preview shows seams then)
     // UV mode: the island the pointer is on in the panel (list or preview) and the one
     // picked there; ~0u = none. The overlay lights them on the model.
     uint32_t uv_hover = ~0u, uv_sel = ~0u;
