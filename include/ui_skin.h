@@ -98,3 +98,5 @@ struct RetopoState;
 void draw_retopo_dock(InputState& input, RetopoState& st, int win_w, int win_h);
 // UV mode's panel (key 9): the layout, Unwrap, Export. Drawn instead of the retopo dock.
 void draw_uv_dock(InputState& input, RetopoState& st, int win_w, int win_h);
+// A UV island's colour (the UV panel's, and the model's tint in UV mode).
+ImU32 uv_island_color(uint32_t island, float alpha);

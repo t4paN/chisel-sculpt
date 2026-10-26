@@ -667,6 +667,12 @@ struct InputState {
     void enter_uv_mode();
     bool uv_unwrap_requested = false;  // the UV panel's Unwrap
     bool uv_seams_clear_requested = false;  // its Clear seams
+    // The panel's big layout view: the frame it was last drawn on (it's out while that's
+    // this frame or the last), and Esc for it. While it's out key_callback runs no
+    // shortcuts. A frame stamp, not a flag, so a view that stops being drawn can't
+    // leave the keys dead.
+    int  uv_preview_frame = -10;
+    bool uv_preview_esc = false;
     // What retopo mode's bar (always up in mode 0) and Space ask the main loop for.
     bool retopo_build_requested = false;
     bool retopo_fill_requested = false;    // H / the dock's Fill: quads over holes

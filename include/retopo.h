@@ -104,8 +104,11 @@ struct UvLayout {
     // The seams it was cut along (uv_seam_key): different now = painted since, worth an
     // Unwrap again (the layout itself still works).
     uint64_t seam_key = 0;
+    // Island names (the UV panel's layer list, double-click renames): one per island,
+    // empty = not named, shown as "Island N".
+    std::vector<std::string> names;
     bool empty() const { return uv.empty(); }
-    void clear() { uv.clear(); face_chart.clear(); charts = 0; used = 0.0f; key = 0; seam_key = 0; }
+    void clear() { uv.clear(); face_chart.clear(); names.clear(); charts = 0; used = 0.0f; key = 0; seam_key = 0; }
     // Sized for rm (a cheap guard for a file or a bug; the key is the real test).
     bool fits(const RetopoMesh& rm) const {
         return uv.size() == rm.faces.size() * 2 && face_chart.size() == rm.face_count();
@@ -146,6 +149,9 @@ struct RetopoState {
     // UV mode: the vertex the seam brush is on (a ring in the overlay), and whether it erases.
     uint32_t seam_v = ~0u;
     bool seam_erase = false;
+    // UV mode: the island the pointer is on in the panel (list or preview) and the one
+    // picked there; ~0u = none. The overlay lights them on the model.
+    uint32_t uv_hover = ~0u, uv_sel = ~0u;
     // Draw's snap (retopo_draw_snap): the vertex a line would start or end on (orange
     // dot), else the edge (bold blue, draw_t = how far along it from draw_ea).
     uint32_t draw_v = ~0u, draw_ea = ~0u, draw_eb = ~0u;

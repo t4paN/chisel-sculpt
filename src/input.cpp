@@ -1609,6 +1609,10 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
         if (action == GLFW_PRESS && key == GLFW_KEY_ESCAPE) g_input->brush_props_esc = true;
         return;
     }
+    if (ImGui::GetFrameCount() - g_input->uv_preview_frame <= 1) {
+        if (action == GLFW_PRESS && key == GLFW_KEY_ESCAPE) g_input->uv_preview_esc = true;
+        return;
+    }
 
     // Fixed keys: the modifier gestures, Esc, the prompt answers and the debug keys.
     if (action == GLFW_PRESS) {

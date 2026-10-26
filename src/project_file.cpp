@@ -52,7 +52,8 @@ static constexpr uint8_t  RTPO_FORMAT = 2;
 // a format 3 RTPO: readers up to RTPO 2 refuse a newer RTPO format whole, and that would
 // lose an older build its retopo just because the file also has UVs.
 // Format 2 adds the seams' key (UvLayout::seam_key); a format 1 layout reads with 0.
-static constexpr uint8_t  RTUV_FORMAT = 2;
+// Format 3 adds the island names.
+static constexpr uint8_t  RTUV_FORMAT = 3;
 // UV seams, the same way: an optional RTSM chunk after RTPO. They're there whether or not
 // anything has been unwrapped, so they don't ride in RTUV.
 static constexpr uint8_t  RTSM_FORMAT = 1;
@@ -349,7 +350,8 @@ static void write_rtpo_chunk(std::ofstream& f, const RetopoSnapshot& r) {
 }
 
 // RTUV: u8 format, u64 topology key, u32 islands, f32 used, u32 corner count, then u,v
-// per corner (RTPO's corner order) and u32 island per face. Only written with an RTPO
+// per corner (RTPO's corner order), u32 island per face, u64 seam key (v2), then u32 name
+// count and each name as u32 length + bytes (v3). Only written with an RTPO
 // whose result it was made for; the loader drops it if the counts don't match.
 static void write_rtuv_chunk(std::ofstream& f, const RetopoSnapshot& r) {
     std::streampos sp;
@@ -362,6 +364,11 @@ static void write_rtuv_chunk(std::ofstream& f, const RetopoSnapshot& r) {
     write_floats(f, r.uv.uv.data(), r.uv.uv.size());
     write_u32s(f, r.uv.face_chart);
     write_raw(f, &r.uv.seam_key, 8);
+    write_u32(f, (uint32_t)r.uv.names.size());
+    for (const std::string& n : r.uv.names) {
+        write_u32(f, (uint32_t)n.size());
+        write_raw(f, n.data(), n.size());
+    }
     write_chunk_end(f, sp);
 }
 
@@ -770,6 +777,17 @@ static bool read_rtuv_chunk(ChunkReader& r, ProjectData& data) {
     for (float& t : L.uv) if (!(t >= 0.0f && t <= 1.0f)) t = 0.0f;   // NaN lands here too
     for (uint32_t& c : L.face_chart) if (c >= L.charts) c = ~0u;
     if (format >= 2 && !r.read_raw(&L.seam_key, 8)) return false;
+    if (format >= 3) {
+        uint32_t nn;
+        if (!r.read_u32(nn) || nn > L.charts) return false;
+        L.names.resize(nn);
+        for (std::string& n : L.names) {
+            uint32_t len;
+            if (!r.read_u32(len) || len > r.remaining()) return false;
+            n.resize(len);
+            if (len && !r.read_raw(&n[0], len)) return false;
+        }
+    }
     if (!L.fits(m)) return false;
     data.retopo.uv = std::move(L);
     std::printf("[uv] loaded: %u islands over %u faces\n", data.retopo.uv.charts, m.face_count());

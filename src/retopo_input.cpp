@@ -10,6 +10,7 @@
 #include "ui_overlay.h"
 #include "ui_skin.h"
 #include <algorithm>
+#include <map>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -673,8 +674,32 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
     if (input.uv_unwrap_requested) {
         input.uv_unwrap_requested = false;
         double ms = 0.0;
+        UvLayout old = std::move(retopo.uv);
         const char* why = retopo.built ? uv_unwrap(retopo.result, UvSettings(), retopo.uv, ms)
                                        : "Build a retopo mesh in mode 0 first";
+        // Names carry over to the new island that took most of a named one's faces
+        // (biggest overlaps first, one name each). Only over the same faces: once the
+        // mesh changed, face numbers mean other faces.
+        if (!why && !old.names.empty() && old.fits(retopo.result) && old.key == retopo.uv.key) {
+            UvLayout& L = retopo.uv;
+            std::map<std::pair<uint32_t, uint32_t>, uint32_t> both;   // (old, new) -> faces in both
+            for (size_t f = 0; f < L.face_chart.size(); f++) {
+                const uint32_t a = old.face_chart[f], b = L.face_chart[f];
+                if (a < old.names.size() && !old.names[a].empty() && b < L.charts) both[{a, b}]++;
+            }
+            std::vector<std::pair<uint32_t, std::pair<uint32_t, uint32_t>>> order;
+            for (const auto& kv : both) order.push_back({kv.second, kv.first});
+            std::sort(order.begin(), order.end(), [](const auto& x, const auto& y) { return x.first > y.first; });
+            L.names.assign(L.charts, std::string());
+            std::vector<uint8_t> used(old.names.size(), 0);
+            for (const auto& o : order) {
+                const uint32_t a = o.second.first, b = o.second.second;
+                if (used[a] || !L.names[b].empty()) continue;
+                L.names[b] = old.names[a];
+                used[a] = 1;
+            }
+        }
+        retopo.uv_sel = retopo.uv_hover = ~0u;
         if (why) std::snprintf(input.notification, sizeof(input.notification), "%s", why);
         else     std::snprintf(input.notification, sizeof(input.notification), "Unwrapped: %u islands, %.0f%% of the square",
                                retopo.uv.charts, retopo.uv.used * 100.0f);
@@ -892,5 +917,5 @@ void draw_retopo_ui(InputState& input, RetopoState& retopo, Renderer& renderer, 
     else               draw_retopo_dock(input, retopo, win_w, win_h);
     if (retopo.rev != audited_rev) { audited_rev = retopo.rev; retopo_audit(retopo); }
     draw_retopo_overlay(retopo, renderer, camera, win_w, win_h,
-                        !cam_moving && !screen_buffers_dirty, input.mirror_x);
+                        !cam_moving && !screen_buffers_dirty, input.mirror_x, input.uv_on());
 }

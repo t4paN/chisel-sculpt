@@ -10,6 +10,7 @@
 #include "camera.h"
 #include "renderer.h"
 #include "retopo.h"
+#include "uv_unwrap.h"
 #include "imgui.h"
 #include <functional>
 #include <cstdio>
@@ -2375,7 +2376,7 @@ void retopo_band(ImDrawList* dl, const RetopoStroke& s, const Camera& cam, int w
 }  // namespace
 
 void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera& cam,
-                         int win_w, int win_h, bool depth_fresh, bool mirror) {
+                         int win_w, int win_h, bool depth_fresh, bool mirror, bool uv) {
     ImDrawList* dl = ImGui::GetBackgroundDrawList();
     if (st.show_strokes) {
         auto band = [&](const RetopoStroke& s, int alpha) {
@@ -2511,6 +2512,10 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
     // fringes would otherwise double up into a seam the wire already draws. Quads and
     // triangles take the convex path; only Erase's merged n-gons (maybe concave) the
     // concave one. Hidden if any corner is.
+    // UV mode with a fresh layout: each face in its island's colour (the UV panel's),
+    // the island hovered or picked there bright and the rest faint.
+    const bool tint = uv && st.uv.fits(rm) && st.uv.key == uv_topology_key(rm);
+    const bool island_lit = tint && (st.uv_hover < st.uv.charts || st.uv_sel < st.uv.charts);
     {
         const ImDrawListFlags keep_flags = dl->Flags;
         dl->Flags &= ~ImDrawListFlags_AntiAliasedFill;
@@ -2527,7 +2532,10 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
                 if (i == 0 || q[i] != q[i - 1]) poly.push_back(at[q[i]]);   // welds leave repeats
             }
             if (!ok || poly.size() < 3) continue;
-            const ImU32 col = ow == st.hover_id ? IM_COL32(255, 240, 160, 48)
+            const uint32_t isl = tint ? st.uv.face_chart[f] : ~0u;
+            const ImU32 col = isl != ~0u ? uv_island_color(isl, isl == st.uv_hover || isl == st.uv_sel ? 0.45f
+                                                                : island_lit ? 0.08f : 0.24f)
+                            : ow == st.hover_id ? IM_COL32(255, 240, 160, 48)
                             : is_sel(ow)        ? IM_COL32(255, 190, 120, 40)
                             : st.hover_id       ? IM_COL32(205, 245, 255, 16)
                                                 : IM_COL32(205, 245, 255, 36);
