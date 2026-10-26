@@ -3602,6 +3602,8 @@ const char* retopo_bridge(RetopoState& st, const Mesh& m, const Camera& cam, int
     // line on one side, it gets a twin bridge, reflected vertex by vertex. One forced onto
     // the seam (above) is its own twin spoke by spoke, or gets a twin sharing its seam rail.
     int twin = 0;
+    // Mirror on but no twin: why, for the log (it used to skip silently).
+    const char* no_twin = mirror ? "no twin: the edge it leaves has no mirror pair" : nullptr;
     if (mirror && rm.mirror[LA] != ~0u && rm.mirror[RA] != ~0u) {
         auto refl = [](Vec3 v) { v.x = -v.x; return v; };
         const bool self = in && ((rm.mirror[LA] == LB && rm.mirror[RA] == RB) || (rm.mirror[LA] == RB && rm.mirror[RA] == LB));
@@ -3666,8 +3668,11 @@ const char* retopo_bridge(RetopoState& st, const Mesh& m, const Camera& cam, int
                 rm.add_face(t4, 4, keep);
             }
             twin = 2;
+        } else {
+            no_twin = !one_side ? "no twin: the line crosses x = 0" : "no twin: the edge it lands on has no mirror pair";
         }
     }
+    if (twin) no_twin = nullptr;
 
     // One piece now: the islands it joins are one island (the oldest keeps its name).
     if (to_id && to_id != from_id) {
@@ -3678,10 +3683,10 @@ const char* retopo_bridge(RetopoState& st, const Mesh& m, const Camera& cam, int
                                         [&](const RetopoStroke& s) { return s.id == gone; }), st.strokes.end());
     }
     rebuild_edges(rm);
-    std::printf("[retopo] bridge: %s, %d quads (step %.3f, width %.3f -> %.3f)%s%s\n",
+    std::printf("[retopo] bridge: %s, %d quads (step %.3f, width %.3f -> %.3f)%s%s%s%s\n",
                 to_id ? (to_id == from_id ? "within one island" : "two islands joined") : "loose strip",
                 n, q, wA, wB, twin == 1 ? ", its own twin" : twin == 2 ? ", twin built" : "",
-                seam ? ", forced onto the seam" : "");
+                seam ? ", forced onto the seam" : "", no_twin ? ", " : "", no_twin ? no_twin : "");
     return nullptr;
 }
 
