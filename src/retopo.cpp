@@ -6124,6 +6124,24 @@ void retopo_save(RetopoState& st, RetopoSnapshot& out) {
     out.uv      = st.uv;
 }
 
+void retopo_smooth_normals(const RetopoMesh& rm, std::vector<Vec3>& out) {
+    out.assign(rm.v.size(), Vec3());
+    for (uint32_t f = 0; f < rm.face_count(); f++) {
+        const uint32_t* q = rm.face(f);
+        const uint32_t k = rm.face_size(f);
+        Vec3 fn;   // Newell: right for a quad that isn't quite flat
+        for (uint32_t j = 0; j < k; j++) fn += rm.v[q[j]].cross(rm.v[q[(j + 1) % k]]);
+        fn = fn.normalized();
+        for (uint32_t j = 0; j < k; j++) {
+            const Vec3 a = (rm.v[q[(j + k - 1) % k]] - rm.v[q[j]]).normalized();
+            const Vec3 b = (rm.v[q[(j + 1) % k]] - rm.v[q[j]]).normalized();
+            const float c = std::max(-1.0f, std::min(1.0f, a.dot(b)));
+            out[q[j]] += fn * std::acos(c);
+        }
+    }
+    for (Vec3& n : out) n = n.normalized();
+}
+
 bool retopo_export_obj(const RetopoMesh& rm, const char* path, const UvLayout* uv) {
     if (rm.faces.empty()) return false;
     if (uv && !uv->fits(rm)) uv = nullptr;
@@ -6139,15 +6157,23 @@ bool retopo_export_obj(const RetopoMesh& rm, const char* path, const UvLayout* u
         id[i] = ++next;
         std::fprintf(f, "v %.6f %.6f %.6f\n", rm.v[i].x, rm.v[i].y, rm.v[i].z);
     }
+    // Normals the bake used, one per written vertex (vn k = v k): left to the importer,
+    // each app smooths its own way and a baked normal map shades wrong on top.
+    std::vector<Vec3> vn;
+    retopo_smooth_normals(rm, vn);
+    for (size_t i = 0; i < rm.v.size(); i++)
+        if (id[i]) std::fprintf(f, "vn %.6f %.6f %.6f\n", vn[i].x, vn[i].y, vn[i].z);
     // One vt per face corner, in corner order: corner k is vt k + 1. Corners that share
     // a vertex inside one island repeat the same value; OBJ readers weld those.
     if (uv)
         for (size_t k = 0; k < rm.faces.size(); k++) std::fprintf(f, "vt %.6f %.6f\n", uv->uv[2 * k], uv->uv[2 * k + 1]);
+    std::fprintf(f, "s 1\n");
     for (size_t q = 0; q < rm.face_count(); q++) {
         std::fprintf(f, "f");
         for (uint32_t k = rm.face_off[q]; k < rm.face_off[q + 1]; k++) {
-            if (uv) std::fprintf(f, " %u/%u", id[rm.faces[k]], k + 1);
-            else    std::fprintf(f, " %u", id[rm.faces[k]]);
+            const uint32_t v = id[rm.faces[k]];
+            if (uv) std::fprintf(f, " %u/%u/%u", v, k + 1, v);
+            else    std::fprintf(f, " %u//%u", v, v);
         }
         std::fprintf(f, "\n");
     }

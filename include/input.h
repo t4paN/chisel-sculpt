@@ -667,6 +667,9 @@ struct InputState {
     void enter_uv_mode();
     bool uv_unwrap_requested = false;  // the UV panel's Unwrap
     bool uv_seams_clear_requested = false;  // its Clear seams
+    bool uv_bake_requested = false;         // its Bake (settings in RetopoState::bake)
+    bool uv_bake_cancel_requested = false;  // ...Stop, while one runs
+    bool uv_bake_save_requested = false;    // ...Save maps (PNG next to the project; downloads on web)
     // The panel's big layout view: the frame it was last drawn on (it's out while that's
     // this frame or the last), and Esc for it. While it's out key_callback runs no
     // shortcuts. A frame stamp, not a flag, so a view that stops being drawn can't

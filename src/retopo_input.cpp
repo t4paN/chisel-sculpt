@@ -9,6 +9,9 @@
 #include "tablet.h"
 #include "ui_overlay.h"
 #include "ui_skin.h"
+#if defined(__EMSCRIPTEN__)
+#include "web_bridge.h"
+#endif
 #include <algorithm>
 #include <map>
 #include <chrono>
@@ -715,6 +718,44 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
         input.notification_timer = 2.5f;
         retopo.rev++;   // a new layout is unsaved work
     }
+    // Bake (bake.h): started from the UV panel, run a slice a frame while UV mode is up.
+    // Leaving UV mode stops it: mode 0 or sculpting could change the low or the sculpt
+    // under a job that read them at the start.
+    bake_refresh(retopo.bake, retopo.result, retopo.uv, retopo.rev);
+    if (input.uv_bake_requested) {
+        input.uv_bake_requested = false;
+        scene.materialize_active_cpu();   // the rays read mesh.pos
+        const char* why = bake_start(retopo.bake, retopo.result, retopo.uv, mesh);
+        if (why) {
+            std::snprintf(input.notification, sizeof(input.notification), "%s", why);
+            input.notification_timer = 2.5f;
+        }
+    }
+    if (retopo.bake.running() && (input.uv_bake_cancel_requested || !input.uv_on())) {
+        bake_cancel(retopo.bake);
+        std::snprintf(input.notification, sizeof(input.notification), "Bake stopped");
+        input.notification_timer = 2.0f;
+    }
+    input.uv_bake_cancel_requested = false;
+    if (retopo.bake.running()) {
+        // ~12 ms a frame: the window keeps answering (orbit to look round mid-bake).
+        const char* why = nullptr;
+        const int r = bake_step(retopo.bake, mesh, 12.0, &why);
+        if (r == 1) {
+            const BakeResult& b = retopo.bake.result;
+            if (b.missed > 0.02f)
+                std::snprintf(input.notification, sizeof(input.notification),
+                              "Baked %dpx in %.1f s - %.0f%% of it found no sculpt: raise Reach",
+                              b.res, b.ms / 1000.0, b.missed * 100.0f);
+            else
+                std::snprintf(input.notification, sizeof(input.notification), "Baked %dpx in %.1f s", b.res, b.ms / 1000.0);
+            input.notification_timer = 3.0f;
+        } else if (r < 0 && why) {
+            std::snprintf(input.notification, sizeof(input.notification), "%s", why);
+            input.notification_timer = 2.5f;
+        }
+        input.wake_requested = true;   // next slice next frame, even with the pen still
+    }
     if (input.uv_seams_clear_requested) {
         input.uv_seams_clear_requested = false;
         if (retopo_seams_clear(retopo)) {
@@ -866,9 +907,12 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
 // The low-poly is a by-product to take elsewhere, not a document: no dialog, next to
 // the project (or home), named after it. Web writes it to MEMFS for main.cpp to hand
 // to the browser.
-std::string retopo_export(const RetopoState& retopo, InputState& input, const std::string& project_path) {
+// Where retopo's exports go: next to the project as <name>-retopo..., ~/chisel-retopo...
+// before it's saved; the web build writes to its in-memory disk and downloads.
+static std::string export_stem(const std::string& project_path) {
 #if defined(__EMSCRIPTEN__)
-    const std::string name = "retopo.obj", path = "/" + name;
+    (void)project_path;
+    return "/retopo";
 #else
     std::string stem = project_path;
     if (stem.empty()) {
@@ -878,7 +922,16 @@ std::string retopo_export(const RetopoState& retopo, InputState& input, const st
         const auto dot = stem.find_last_of('.');
         if (dot != std::string::npos && stem.find_last_of('/') < dot) stem.resize(dot);
     }
-    const std::string path = stem + "-retopo.obj", name = path;
+    return stem + "-retopo";
+#endif
+}
+
+std::string retopo_export(const RetopoState& retopo, InputState& input, const std::string& project_path) {
+    const std::string path = export_stem(project_path) + ".obj";
+#if defined(__EMSCRIPTEN__)
+    const std::string name = path.substr(1);
+#else
+    const std::string name = path;
 #endif
     // UVs go along when there's a layout made for the mesh as it is now.
     const bool uv_ok = !retopo.uv.empty() && retopo.uv.fits(retopo.result)
@@ -892,6 +945,28 @@ std::string retopo_export(const RetopoState& retopo, InputState& input, const st
                       retopo.built ? "Export failed: %.400s" : "Build first%.0s", name.c_str());
     input.notification_timer = 3.0f;
     return ok ? path : std::string();
+}
+
+void retopo_bake_save(const RetopoState& retopo, InputState& input, const std::string& project_path) {
+    const BakeResult& r = retopo.bake.result;
+    const std::string stem = export_stem(project_path);
+    int wrote = 0;
+    std::string last;
+    for (int which = 0; which < 2; which++) {
+        if (!(which == 0 ? r.has_normal : r.has_color)) continue;
+        const std::string path = stem + (which == 0 ? "-normal.png" : "-color.png");
+        if (!bake_write_png(r, which, path.c_str())) continue;
+        wrote++;
+        last = path;
+#if defined(__EMSCRIPTEN__)
+        web_download_file(path.c_str(), path.c_str() + 1);
+#endif
+    }
+    if (r.empty())  std::snprintf(input.notification, sizeof(input.notification), "Bake first");
+    else if (!wrote) std::snprintf(input.notification, sizeof(input.notification), "Couldn't write the maps next to %.400s", stem.c_str());
+    else std::snprintf(input.notification, sizeof(input.notification), "Saved %d map%s: %.400s", wrote,
+                       wrote == 1 ? "" : "s", wrote == 1 ? last.c_str() : (stem + "-*.png").c_str());
+    input.notification_timer = 3.0f;
 }
 
 void draw_retopo_cursor(Renderer& renderer, const Camera& camera, const InputState& input,

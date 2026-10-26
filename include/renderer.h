@@ -53,6 +53,14 @@ struct Renderer {
     // Multiplier on deselected objects (InputState::unselected_tint). Set per frame.
     float unselected_tint[3] = { 0.647f, 0.647f, 0.647f };   // #A5A5A5
 
+    // UV mode's bake preview (bake.h): the retopo mesh as a triangle soup wearing the
+    // baked maps, drawn in place of the sculpt it was baked from. Its own buffers and
+    // textures, re-uploaded only when the bake's serial changes.
+    gpu::RenderPipeline baked_pipeline;
+    gpu::Buffer  baked_ubo, baked_pos, baked_nrm, baked_tan, baked_uv;
+    gpu::Texture baked_color_tex, baked_normal_tex;
+    uint32_t     baked_corners = 0, baked_serial = 0;
+
     // Entity-id pick pass — on the gpu:: seam. Renders into the shared screen
     // offscreen target writing linear depth (attachment 0) + entity id (attachment
     // 2). The pass spans pick_begin → N×pick_draw → pick_end.
@@ -244,6 +252,13 @@ struct Renderer {
     void upload_display(EntityGpu& g, const Mesh& mesh);
     void free_display(EntityGpu& g);
     void draw_display(const Camera& cam, EntityGpu& g, int w, int h, bool selected);
+
+    // Bake preview: upload_baked is a no-op while `serial` is the one it holds; a null
+    // map gets a neutral 1x1 stand-in. draw_baked draws it depth-tested into the scene.
+    void upload_baked(uint32_t serial, const float* pos, const float* nrm, const float* tan,
+                      const float* uv, uint32_t corners, int res,
+                      const uint8_t* color_rgba, const uint8_t* normal_rgba);
+    void draw_baked(const Camera& cam, int w, int h, bool use_normal, bool use_color, bool flip_green);
 
     // Entity-id pick pass. Draw all entities (active working VAO + inactive
     // display VAOs) into the screen FBO writing linear depth (attachment 0) and

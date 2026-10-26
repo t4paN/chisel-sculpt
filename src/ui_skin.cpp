@@ -4479,11 +4479,13 @@ void draw_uv_dock(InputState& input, RetopoState& st, int win_w, int win_h) {
         }
     }
 
-    static bool list_open = true;
+    static bool list_open = true, bake_open = true;
     label_item(UiFont::SansSemibold, 13.0f, kText, "UV Layout", w, 18.0f);
-    // What sits under the square: readout, buttons, the list's header, and (open) room
-    // for three rows. The square takes the rest, up to the full width.
-    const float below = 18.0f + bh + 20.0f + gap * 4.0f + (list_open && have ? row_h * 3.0f + gap * 3.0f : 0.0f);
+    // What sits under the square: readout, buttons, the bake's header and (open) its
+    // rows, the list's header, and (open) room for three rows. The square takes the
+    // rest, up to the full width.
+    const float bake_h = 20.0f + gap + (bake_open ? bh * 3.0f + ImGui::GetFrameHeight() + 16.0f + gap * 5.0f : 0.0f);
+    const float below = 18.0f + bh + bake_h + 20.0f + gap * 4.0f + (list_open && have ? row_h * 3.0f + gap * 3.0f : 0.0f);
     const float side = std::max(80.0f, std::min(w, ImGui::GetContentRegionAvail().y - below));
     const ImVec2 o0 = ImGui::GetCursorScreenPos();
     const ImVec2 sq0(o0.x + std::floor((w - side) * 0.5f), o0.y), sq1(sq0.x + side, sq0.y + side);
@@ -4552,6 +4554,99 @@ void draw_uv_dock(InputState& input, RetopoState& st, int win_w, int win_h) {
     o.look = Look::Bar; o.side = TipSide::Left; o.icon_px = 18.0f;
     o.tip = fresh ? "Export OBJ with UVs" : "Export OBJ (unwrap first for UVs)"; o.enabled = st.built;
     if (icon_button("uvExport", Icon::CmdExport, bh, o)) input.retopo_export_requested = true;
+
+    // Bake (bake.h): the sculpt under the retopo mesh into textures on this layout.
+    {
+        BakeState& bk = st.bake;
+        BakeSettings& bs = bk.settings;
+        const ImVec2 h0 = ImGui::GetCursorScreenPos();
+        ImGui::InvisibleButton("##uvBakeHead", ImVec2(w, 20.0f));
+        if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) bake_open = !bake_open;
+        if (ImGui::IsItemHovered())
+            dl->AddRectFilled(h0, ImVec2(h0.x + w, h0.y + 20.0f), IM_COL32(255, 255, 255, 14), rad(4.0f));
+        const float cy = h0.y + 10.0f, cx = h0.x + 8.0f;
+        if (bake_open) dl->AddTriangleFilled(ImVec2(cx - 4.0f, cy - 2.0f), ImVec2(cx + 4.0f, cy - 2.0f), ImVec2(cx, cy + 3.0f), kMuted);
+        else           dl->AddTriangleFilled(ImVec2(cx - 2.0f, cy - 4.0f), ImVec2(cx - 2.0f, cy + 4.0f), ImVec2(cx + 3.0f, cy), kMuted);
+        const ImVec2 ts = text_size(UiFont::SansSemibold, 13.0f, "Bake");
+        text_at(dl, UiFont::SansSemibold, 13.0f, ImVec2(h0.x + 18.0f, cy - ts.y * 0.5f), kText, "Bake");
+        auto tip = [](const char* t) {
+            if (ImGui::IsItemHovered())
+                tooltip(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), TipSide::Left, t, nullptr);
+        };
+        const bool idle = !bk.running();
+        if (bake_open) {
+            // Which maps, and the normal map's green.
+            if (chip("Normal", bs.normal, bh, idle)) bs.normal = !bs.normal;
+            tip("Normal map: the sculpt's detail, in the retopo mesh's tangent space");
+            ImGui::SameLine();
+            if (chip("Colour", bs.color, bh, idle)) bs.color = !bs.color;
+            tip("Colour map: the paint, every visible layer merged");
+            ImGui::SameLine();
+            if (chip("Green down", bs.flip_green, bh, idle && bs.normal)) bs.flip_green = !bs.flip_green;
+            tip("Normal map green flipped (DirectX style), for engines that read it that way. Off: green up");
+            // Size.
+            static const int sizes[4] = {512, 1024, 2048, 4096};
+            static const char* size_lab[4] = {"512", "1K", "2K", "4K"};
+            for (int i = 0; i < 4; i++) {
+                if (i) ImGui::SameLine();
+                if (chip(size_lab[i], bs.resolution == sizes[i], bh, idle)) bs.resolution = sizes[i];
+                tip(i == 3 ? "4096 x 4096 (slow on big sculpts)" : "Texture size, in pixels a side");
+            }
+            // Reach: how far off the retopo surface a ray may find the sculpt.
+            ImGui::SetNextItemWidth(w);
+            ImGui::BeginDisabled(!idle);
+            ImGui::SliderFloat("##bakeReach", &bs.reach, 0.1f, 4.0f, "reach %.1f edges");
+            ImGui::EndDisabled();
+            tip("How far either side of the retopo mesh the bake looks for the sculpt, in its edge lengths. "
+                "Raise it where the bake says pixels found nothing; lower it if a nearby part bleeds in");
+            // Go / progress, then the result's switches.
+            const float x1 = ImGui::GetCursorPosX();
+            if (idle) {
+                const bool can = fresh && (bs.normal || bs.color);
+                if (chip(bk.result.empty() ? "Bake" : "Bake again", false, bh, can)) input.uv_bake_requested = true;
+                tip(!st.built ? "Build a retopo mesh in mode 0 first"
+                    : !fresh  ? "Unwrap first: the bake goes onto the UV layout"
+                    : !(bs.normal || bs.color) ? "Pick a map to bake"
+                              : "Bake the sculpt under the retopo mesh into these maps");
+            } else {
+                // A bar in the button's place: how far, and what it's doing.
+                const float pw = std::max(80.0f, w - 70.0f - gap);
+                const ImVec2 p0 = ImGui::GetCursorScreenPos(), p1(p0.x + pw, p0.y + bh);
+                ImGui::Dummy(ImVec2(pw, bh));
+                dl->AddRectFilled(p0, p1, IM_COL32(0, 0, 0, 70), rad(8.0f));
+                const float f = std::max(0.0f, std::min(1.0f, bake_progress(bk)));
+                if (f > 0.0f) dl->AddRectFilled(p0, ImVec2(p0.x + std::max(8.0f, pw * f), p1.y), with_alpha(kAccent, 0.55f), rad(8.0f));
+                dl->AddRect(p0, p1, kBorder, rad(8.0f));
+                char lab[64];
+                std::snprintf(lab, sizeof lab, "%s %.0f%%", bake_phase(bk), f * 100.0f);
+                const ImVec2 ls = text_size(UiFont::Sans, 12.0f, lab);
+                text_at(dl, UiFont::Sans, 12.0f, ImVec2(p0.x + (pw - ls.x) * 0.5f, p0.y + (bh - ls.y) * 0.5f), kText, lab);
+                ImGui::SameLine();
+                if (chip("Stop", false, bh)) input.uv_bake_cancel_requested = true;
+            }
+            if (idle) {
+                ImGui::SameLine();
+                if (chip("Preview", bk.preview, bh, !bk.result.empty())) bk.preview = !bk.preview;
+                tip(bk.result.empty() ? "Bake first" : "Show the retopo mesh wearing the bake, in place of the sculpt");
+                ImGui::SameLine();
+                ImGui::SetCursorPosX(x1 + w - bh);
+                BtnOpts so;
+                so.look = Look::Bar; so.side = TipSide::Left; so.icon_px = 18.0f;
+                so.tip = "Save the maps as PNG"; so.enabled = !bk.result.empty();
+                if (icon_button("uvBakeSave", Icon::CmdSave, bh, so)) input.uv_bake_save_requested = true;
+            }
+            // Readout: what the last bake was, and whether it still fits the mesh.
+            char ro2[96];
+            const BakeResult& r = bk.result;
+            if (!idle) std::snprintf(ro2, sizeof ro2, "baking at %dpx: orbit away, it keeps going", bs.resolution);
+            else if (r.empty()) std::snprintf(ro2, sizeof ro2, "not baked yet");
+            else if (!bk.fresh) std::snprintf(ro2, sizeof ro2, "out of date: the mesh changed, bake again");
+            else if (r.missed > 0.0005f) std::snprintf(ro2, sizeof ro2, "%dpx \xC2\xB7 %.1f s \xC2\xB7 %.1f%% found no sculpt", r.res, r.ms / 1000.0, r.missed * 100.0f);
+            else std::snprintf(ro2, sizeof ro2, "%dpx \xC2\xB7 %.1f s \xC2\xB7 %s%s", r.res, r.ms / 1000.0,
+                               r.has_normal ? "normal" : "", r.has_color ? (r.has_normal ? " + colour" : "colour") : "");
+            label_item(UiFont::Mono, 12.0f, idle && !r.empty() && (!bk.fresh || r.missed > 0.02f) ? kText : kMuted, ro2, 0.0f, 16.0f);
+        }
+    }
 
     // The islands' header: click folds the list away (the square grows into the room).
     {

@@ -157,6 +157,7 @@ struct BindGroup {
     uint32_t     binding[kMaxBindings] = {};
     unsigned int buffer[kMaxBindings]  = {};
     unsigned int tex_handle = 0;             // sampled texture bound at unit 0 (0 = none)
+    unsigned int tex2_handle = 0;            // second one, at unit kTexture2Binding
 #endif
 };
 BindGroup create_bind_group(Device&, ComputePipeline&,
@@ -284,6 +285,10 @@ enum class TexFormat : uint32_t;  // defined with the offscreen-target section b
 // `layout(binding=kTextureBinding) uniform sampler2D` (its own binding namespace).
 static const uint32_t kTextureBinding = 0;
 static const uint32_t kSamplerBinding = 1;
+// A second texture (RenderPipelineDesc::sampled_texture2: the baked preview's normal
+// map beside its colour map) binds here; GLSL samples it from unit kTexture2Binding.
+static const uint32_t kTexture2Binding = 2;
+static const uint32_t kSampler2Binding = 3;
 
 struct Texture {
     int width = 0, height = 0;
@@ -296,8 +301,10 @@ struct Texture {
 #endif
 };
 // Create an R8 sampled texture of w×h and upload `data` (w*h bytes, one per texel),
-// nearest min/mag filtering. release_texture frees the backend objects.
-Texture create_sampled_texture(Device&, int w, int h, const void* data);
+// nearest min/mag filtering. rgba: RGBA8 instead (w*h*4 bytes) and linear filtering, for
+// images seen at any size (baked maps). Row 0 of `data` is texture coordinate 0 on both
+// backends. release_texture frees the backend objects.
+Texture create_sampled_texture(Device&, int w, int h, const void* data, bool rgba = false);
 void    release_texture(Texture&);
 
 struct RenderPipelineDesc {
@@ -310,6 +317,7 @@ struct RenderPipelineDesc {
     bool     depth_write = false;
     bool     blend       = false;  // straight alpha: src_alpha / one_minus_src_alpha
     bool     sampled_texture = false; // fragment samples one R8 texture (the font atlas)
+    bool     sampled_texture2 = false; // ...and a second one (needs sampled_texture too)
     // Colour-target format signature. WebGPU bakes the colour-attachment count +
     // formats (and the depth format) into the pipeline, so a render pipeline is tied
     // to the render-pass layout it draws into; GL ignores this (FBO compatibility is
@@ -350,7 +358,8 @@ void release_render_pipeline(RenderPipeline&);
 // slot's GL target from the render pipeline's layout). `tex` is the sampled texture
 // for a sampled_texture pipeline (the font atlas) — null for the UBO-only pipelines.
 BindGroup create_bind_group(Device&, RenderPipeline&, const BindBufferEntry* entries,
-                            uint32_t entry_count, const Texture* tex = nullptr);
+                            uint32_t entry_count, const Texture* tex = nullptr,
+                            const Texture* tex2 = nullptr);
 
 // A render target: the default framebuffer (swapchain) for now; offscreen MRT
 // (the picking FBO) grows this struct in the picking slice. `clear` clears colour

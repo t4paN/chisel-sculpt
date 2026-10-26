@@ -2516,7 +2516,10 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
     // the island hovered or picked there bright and the rest faint.
     const bool tint = uv && st.uv.fits(rm) && st.uv.key == uv_topology_key(rm);
     const bool island_lit = tint && (st.uv_hover < st.uv.charts || st.uv_sel < st.uv.charts);
-    {
+    // The bake preview stands in for the sculpt: no fill or wire over it, only seams and
+    // the brush's marks, so what's judged is the baked maps.
+    const bool baked = uv && st.bake.showing();
+    if (!baked) {
         const ImDrawListFlags keep_flags = dl->Flags;
         dl->Flags &= ~ImDrawListFlags_AntiAliasedFill;
         static std::vector<ImVec2> poly;
@@ -2556,7 +2559,7 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
     // Holes (outlines that aren't a piece's outer edge): a wash over the gap, green when
     // its count of sides is even (Fill makes it quads), amber when odd, rim drawn the same.
     // Only when the whole rim is in view: a half-seen rim would fill the wrong shape.
-    {
+    if (!baked) {
         const ImDrawListFlags keep_flags = dl->Flags;
         dl->Flags &= ~ImDrawListFlags_AntiAliasedFill;
         static std::vector<ImVec2> poly;
@@ -2579,7 +2582,7 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
         dl->Flags = keep_flags;
     }
     // Behind the sculpt (either end): one dim pass under the rest, no dark outline.
-    for (size_t e = 0; e + 1 < rm.edges.size(); e += 2) {
+    for (size_t e = 0; e + 1 < rm.edges.size() && !baked; e += 2) {
         const uint32_t a = rm.edges[e], b = rm.edges[e + 1];
         if (!vis[a] || !vis[b] || (vis[a] == 2 && vis[b] == 2)) continue;
         const uint32_t ow = rm.edge_owner[e / 2];
@@ -2588,14 +2591,14 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
         dl->AddLine(at[a], at[b], lit ? IM_COL32(150, 135, 70, 190) : on ? IM_COL32(150, 90, 40, 170)
                                   : IM_COL32(70, 110, 130, st.hover_id ? 70 : 150), 1.0f);
     }
-    for (size_t e = 0; e + 1 < rm.edges.size(); e += 2) {
+    for (size_t e = 0; e + 1 < rm.edges.size() && !baked; e += 2) {
         const uint32_t a = rm.edges[e], b = rm.edges[e + 1];
         if (vis[a] != 2 || vis[b] != 2) continue;
         const uint32_t ow = rm.edge_owner[e / 2];
         if (st.hidden(ow) && ow != st.hover_id) continue;   // its eye is shut (hover still shows it)
         dl->AddLine(at[a], at[b], dark, ow == st.hover_id || is_sel(ow) ? 4.0f : 3.0f);
     }
-    for (size_t e = 0; e + 1 < rm.edges.size(); e += 2) {
+    for (size_t e = 0; e + 1 < rm.edges.size() && !baked; e += 2) {
         const uint32_t a = rm.edges[e], b = rm.edges[e + 1];
         if (vis[a] != 2 || vis[b] != 2) continue;
         const uint32_t ow = rm.edge_owner[e / 2];

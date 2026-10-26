@@ -1,6 +1,7 @@
 #pragma once
 #include "mesh.h"
 #include "camera.h"
+#include "bake.h"
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -185,6 +186,8 @@ struct RetopoState {
     bool built = false;
     // UV mode's layout of `result` (empty = never unwrapped). Not history; see UvLayout.
     UvLayout uv;
+    // UV mode's bake of the sculpt onto that layout (bake.h). Not history either.
+    BakeState bake;
     // Wand: a hole clicked, its fills worked out whole at the click (see retopo_wand_open).
     // While open, `result` shows wand_base or one option swapped in; nothing is history
     // until one is kept.
@@ -568,10 +571,16 @@ void retopo_load(RetopoState& st, RetopoSnapshot&& s);
 // menu is settled first (a plain preview goes, a spine's fill stays).
 void retopo_save(RetopoState& st, RetopoSnapshot& out);
 
-// Write state.result as an OBJ, every face as it is (quads, triangles, bigger ones).
-// With uv (a layout made for rm: the caller checks it's current), each corner gets its
-// vt too. Returns false if there's nothing to write or the file can't be opened.
+// Write state.result as an OBJ, every face as it is (quads, triangles, bigger ones),
+// with retopo_smooth_normals as its vn. With uv (a layout made for rm: the caller checks
+// it's current), each corner gets its vt too. Returns false if there's nothing to write
+// or the file can't be opened.
 bool retopo_export_obj(const RetopoMesh& rm, const char* path, const UvLayout* uv = nullptr);
+// The low's own smooth normal per vertex: its faces' normals, each weighted by the
+// corner's angle (zero for a vertex no face uses). Not RetopoMesh::n, the sculpt's normal
+// under it: a normal map is decoded against the low's shading normals, so the bake and
+// the exported vn must both be these.
+void retopo_smooth_normals(const RetopoMesh& rm, std::vector<Vec3>& out);
 
 // UV seams (UV mode's brush). Painting hops vertex to vertex: retopo_seam_path marks
 // (erase: unmarks) the shortest run of edges from a to b, and with mirror their twins.
@@ -621,6 +630,9 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
 // Writes the built quads as an OBJ beside the project (or in home) and toasts how it
 // went. Returns the path written, empty on failure.
 std::string retopo_export(const RetopoState& retopo, InputState& input, const std::string& project_path);
+// The bake's maps as PNGs beside it (<name>-retopo-normal.png / -color.png; downloaded on
+// web), toasting how it went.
+void retopo_bake_save(const RetopoState& retopo, InputState& input, const std::string& project_path);
 // The green ring (red for the eraser, a dot for Cut and the wand).
 void draw_retopo_cursor(Renderer& renderer, const Camera& camera, const InputState& input,
                         float cursor_x, float cursor_y, int win_w, int win_h);

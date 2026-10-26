@@ -743,6 +743,160 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
 }
 )WGSL";
 
+// ---- Bake preview (UV mode) ----------------------------------------------------------
+// The retopo mesh as a triangle soup wearing the baked maps: the colour map as albedo,
+// the normal map decoded in the MikkTSpace frame it was baked in (n = x T + y B + z N,
+// B = sign * cross(N, T), all as interpolated), lit by the sculpt's own matcap formula
+// so the two read alike when toggled. Colour map at texture binding 0, normal map at 2.
+struct BakedParamsGPU {
+    float view[16];
+    float proj[16];
+    float use_normal;
+    float use_color;
+    float flip_green;
+    float matcap_contrast;
+};
+static_assert(sizeof(BakedParamsGPU) == 144, "baked Params UBO must be 144 bytes (std140)");
+
+static const char* baked_vert_src = R"(
+#version 430 core
+layout(location=0) in vec3 aPos;
+layout(location=1) in vec3 aNorm;
+layout(location=2) in vec4 aTan;
+layout(location=3) in vec2 aUV;
+layout(std140, binding=63) uniform Params {
+    mat4 uView;
+    mat4 uProj;
+    float uUseNormal;
+    float uUseColor;
+    float uFlipGreen;
+    float uMatcapContrast;
+};
+out vec3 vN;
+out vec3 vT;
+out float vSign;
+out vec2 vUV;
+void main() {
+    // The view is a pure rotation (plus a move), so tangent frames turn with it intact.
+    mat3 m = mat3(uView);
+    vN = m * aNorm;
+    vT = m * aTan.xyz;
+    vSign = aTan.w;
+    vUV = aUV;
+    gl_Position = uProj * (uView * vec4(aPos, 1.0));
+}
+)";
+
+static const char* baked_frag_src = R"(
+#version 430 core
+in vec3 vN;
+in vec3 vT;
+in float vSign;
+in vec2 vUV;
+out vec4 fragColor;
+layout(std140, binding=63) uniform Params {
+    mat4 uView;
+    mat4 uProj;
+    float uUseNormal;
+    float uUseColor;
+    float uFlipGreen;
+    float uMatcapContrast;
+};
+layout(binding=0) uniform sampler2D uColorMap;
+layout(binding=2) uniform sampler2D uNormalMap;
+void main() {
+    // UV v runs up (OBJ), the maps' row 0 is the top: texture t = 1 - v.
+    vec2 st = vec2(vUV.x, 1.0 - vUV.y);
+    vec4 cs = texture(uColorMap, st);
+    vec3 tn = texture(uNormalMap, st).rgb * 2.0 - 1.0;
+    if (uFlipGreen > 0.5) tn.y = -tn.y;
+    vec3 B = vSign * cross(vN, vT);
+    vec3 n = normalize(vN);
+    if (uUseNormal > 0.5) n = normalize(tn.x * vT + tn.y * B + tn.z * vN);
+    // The sculpt's matcap (matcap_frag_src), without mask, tint or flat shading.
+    float rim = 1.0 - abs(n.z);
+    float rim2 = rim * rim;
+    float top = n.y * 0.5 + 0.5;
+    float val_flat = (0.35 + 0.45 * top + 0.15 * (1.0 - rim2)) * (1.0 - rim2 * 0.3);
+    vec3 L = normalize(vec3(-0.30, 0.62, 0.72));
+    float key = mix(0.35, 1.0, max(dot(n, L), 0.0));
+    key *= key;
+    float fill = n.y * 0.5 + 0.5;
+    float val_key = (0.05 + 0.66 * key + 0.14 * fill) * (1.0 - rim2 * 0.45);
+    float val = mix(val_flat, val_key, uMatcapContrast);
+    vec3 H = normalize(L + vec3(0.0, 0.0, 1.0));
+    float spec = pow(max(dot(n, H), 0.0), 90.0) * 0.16 * uMatcapContrast;
+    vec3 alb = uUseColor > 0.5 ? cs.rgb : vec3(1.0);
+    fragColor = vec4(vec3(val) * alb + vec3(spec), 1.0);
+}
+)";
+
+static const char* baked_wgsl_src = R"WGSL(
+struct Params {
+    view: mat4x4<f32>,
+    proj: mat4x4<f32>,
+    use_normal: f32,
+    use_color: f32,
+    flip_green: f32,
+    matcap_contrast: f32,
+};
+@group(0) @binding(63) var<uniform> P: Params;
+@group(0) @binding(0) var color_tex: texture_2d<f32>;
+@group(0) @binding(1) var color_smp: sampler;
+@group(0) @binding(2) var normal_tex: texture_2d<f32>;
+@group(0) @binding(3) var normal_smp: sampler;
+struct VSOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) nrm: vec3<f32>,
+    @location(1) tng: vec3<f32>,
+    @location(2) sgn: f32,
+    @location(3) uv: vec2<f32>,
+};
+@vertex
+fn vs_main(@location(0) aPos: vec3<f32>, @location(1) aNorm: vec3<f32>,
+           @location(2) aTan: vec4<f32>, @location(3) aUV: vec2<f32>) -> VSOut {
+    var o: VSOut;
+    let m = mat3x3<f32>(P.view[0].xyz, P.view[1].xyz, P.view[2].xyz);
+    o.nrm = m * aNorm;
+    o.tng = m * aTan.xyz;
+    o.sgn = aTan.w;
+    o.uv = aUV;
+    o.pos = P.proj * (P.view * vec4<f32>(aPos, 1.0));
+    return o;
+}
+@fragment
+fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
+    // See the GLSL twin. Both maps are sampled up front: textureSample must sit in
+    // uniform control flow, and the toggles below are only choices.
+    let st = vec2<f32>(in.uv.x, 1.0 - in.uv.y);
+    let cs = textureSample(color_tex, color_smp, st);
+    let ms = textureSample(normal_tex, normal_smp, st);
+    var tn = ms.rgb * 2.0 - vec3<f32>(1.0);
+    let flip = P.flip_green > 0.5;
+    if (flip) { tn.y = -tn.y; }
+    let bt = in.sgn * cross(in.nrm, in.tng);
+    var n = normalize(in.nrm);
+    let mapped = P.use_normal > 0.5;
+    if (mapped) { n = normalize(tn.x * in.tng + tn.y * bt + tn.z * in.nrm); }
+    let rim = 1.0 - abs(n.z);
+    let rim2 = rim * rim;
+    let top = n.y * 0.5 + 0.5;
+    let val_flat = (0.35 + 0.45 * top + 0.15 * (1.0 - rim2)) * (1.0 - rim2 * 0.3);
+    let L = normalize(vec3<f32>(-0.30, 0.62, 0.72));
+    var key = mix(0.35, 1.0, max(dot(n, L), 0.0));
+    key = key * key;
+    let fill = n.y * 0.5 + 0.5;
+    let val_key = (0.05 + 0.66 * key + 0.14 * fill) * (1.0 - rim2 * 0.45);
+    let val = mix(val_flat, val_key, P.matcap_contrast);
+    let H = normalize(L + vec3<f32>(0.0, 0.0, 1.0));
+    let spec = pow(max(dot(n, H), 0.0), 90.0) * 0.16 * P.matcap_contrast;
+    var alb = vec3<f32>(1.0);
+    let painted = P.use_color > 0.5;
+    if (painted) { alb = cs.rgb; }
+    return vec4<f32>(vec3<f32>(val) * alb + vec3<f32>(spec), 1.0);
+}
+)WGSL";
+
 // Pick MRT: writes depth@0 + id@2, but the pipeline declares all 4 screen-target
 // attachments, so the fragment must output all 4 (WebGPU rejects partial writes).
 static const char* pick_wgsl_src = R"WGSL(
@@ -1014,6 +1168,14 @@ Renderer::~Renderer() {
     gpu::release_buffer(bg_vbuf);
     gpu::release_render_pipeline(matcap_pipeline);
     gpu::release_buffer(matcap_ubo);
+    gpu::release_render_pipeline(baked_pipeline);
+    gpu::release_buffer(baked_ubo);
+    gpu::release_buffer(baked_pos);
+    gpu::release_buffer(baked_nrm);
+    gpu::release_buffer(baked_tan);
+    gpu::release_buffer(baked_uv);
+    gpu::release_texture(baked_color_tex);
+    gpu::release_texture(baked_normal_tex);
     gpu::release_render_pipeline(cursor_pipeline);
     gpu::release_render_pipeline(shadow_pipeline);
     gpu::release_render_pipeline(crosshair_pipeline);
@@ -1095,6 +1257,34 @@ void Renderer::init() {
         if (!matcap_pipeline.handle) std::fprintf(stderr, "[renderer] matcap pipeline failed\n");
         else std::printf("[renderer] matcap pipeline compiled (gpu:: seam)\n");
         matcap_ubo = gpu::create_buffer(gpu_dev, nullptr, sizeof(MatcapParamsGPU), gpu::Usage::Uniform);
+    }
+
+    // Bake preview (UV mode): pos/norm/tangent/uv soup, both maps sampled.
+    {
+        gpu::VertexAttr attrs[] = {
+            { 0, gpu::VertexFormat::F32x3, 0, 0 },
+            { 1, gpu::VertexFormat::F32x3, 1, 0 },
+            { 2, gpu::VertexFormat::F32x4, 2, 0 },
+            { 3, gpu::VertexFormat::F32x2, 3, 0 },
+        };
+        gpu::VertexSlot slots[] = {
+            { 3 * sizeof(float) }, { 3 * sizeof(float) }, { 4 * sizeof(float) }, { 2 * sizeof(float) },
+        };
+        gpu::BindEntry binds[] = {{ 63, gpu::Bind::Uniform, sizeof(BakedParamsGPU) }};
+        gpu::RenderPipelineDesc d;
+        d.shaders.wgsl = baked_wgsl_src;
+        d.shaders.vert_glsl = baked_vert_src;
+        d.shaders.frag_glsl = baked_frag_src;
+        d.attrs = attrs; d.attr_count = 4;
+        d.slots = slots; d.slot_count = 4;
+        d.binds = binds; d.bind_count = 1;
+        d.topology = gpu::Topology::Triangles;
+        d.depth_test = true; d.depth_write = true;
+        d.sampled_texture = true; d.sampled_texture2 = true;
+        baked_pipeline = gpu::create_render_pipeline(gpu_dev, d);
+        if (!baked_pipeline.handle) std::fprintf(stderr, "[renderer] baked pipeline failed\n");
+        else std::printf("[renderer] baked pipeline compiled (gpu:: seam)\n");
+        baked_ubo = gpu::create_buffer(gpu_dev, nullptr, sizeof(BakedParamsGPU), gpu::Usage::Uniform);
     }
 
     // Entity-id pick pass — on the gpu:: seam. One pos attribute (slot 0) + a
@@ -1748,6 +1938,56 @@ void Renderer::draw_display(const Camera& cam, EntityGpu& g, int w, int h, bool 
     gpu::set_vertex_buffer(rp, 3, g.vbo_color);
     gpu::set_index_buffer(rp, g.ebo);
     gpu::draw_indexed(rp, g.index_count);
+    gpu::end_render_pass(rp);
+    gpu::release_bind_group(grp);
+}
+
+// ---- Bake preview ----
+
+void Renderer::upload_baked(uint32_t serial, const float* pos, const float* nrm, const float* tan,
+                            const float* uv, uint32_t corners, int res,
+                            const uint8_t* color_rgba, const uint8_t* normal_rgba) {
+    if (serial == baked_serial && baked_corners == corners) return;
+    baked_serial = serial;
+    baked_corners = corners;
+    if (!corners) return;
+    ensure_buffer(gpu_dev, baked_pos, pos, (uint64_t)corners * 3 * sizeof(float), gpu::Usage::Vertex);
+    ensure_buffer(gpu_dev, baked_nrm, nrm, (uint64_t)corners * 3 * sizeof(float), gpu::Usage::Vertex);
+    ensure_buffer(gpu_dev, baked_tan, tan, (uint64_t)corners * 4 * sizeof(float), gpu::Usage::Vertex);
+    ensure_buffer(gpu_dev, baked_uv, uv, (uint64_t)corners * 2 * sizeof(float), gpu::Usage::Vertex);
+    // A map that wasn't baked still needs something bound (WebGPU wants every binding):
+    // one texel of its neutral value, white paint or a flat normal.
+    static const uint8_t white[4] = {255, 255, 255, 255}, flat[4] = {128, 128, 255, 255};
+    gpu::release_texture(baked_color_tex);
+    gpu::release_texture(baked_normal_tex);
+    baked_color_tex = color_rgba ? gpu::create_sampled_texture(gpu_dev, res, res, color_rgba, true)
+                                 : gpu::create_sampled_texture(gpu_dev, 1, 1, white, true);
+    baked_normal_tex = normal_rgba ? gpu::create_sampled_texture(gpu_dev, res, res, normal_rgba, true)
+                                   : gpu::create_sampled_texture(gpu_dev, 1, 1, flat, true);
+}
+
+void Renderer::draw_baked(const Camera& cam, int w, int h, bool use_normal, bool use_color, bool flip_green) {
+    if (!baked_corners || !baked_pipeline.handle) return;
+    BakedParamsGPU p;
+    cam.get_view_matrix(p.view);
+    cam.get_projection_matrix(p.proj, (float)w / (float)h);
+    p.use_normal = use_normal ? 1.0f : 0.0f;
+    p.use_color = use_color ? 1.0f : 0.0f;
+    p.flip_green = flip_green ? 1.0f : 0.0f;
+    p.matcap_contrast = matcap_contrast;
+    gpu::write_buffer(gpu_dev, baked_ubo, 0, &p, sizeof p);
+
+    gpu::RenderTarget target; target.width = w; target.height = h;
+    gpu::RenderPass rp = gpu::begin_render_pass(gpu_dev, target);
+    gpu::set_pipeline(rp, baked_pipeline);
+    gpu::BindBufferEntry be[] = {{ 63, &baked_ubo, sizeof(BakedParamsGPU) }};
+    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, baked_pipeline, be, 1, &baked_color_tex, &baked_normal_tex);
+    gpu::set_bind_group(rp, baked_pipeline, grp);
+    gpu::set_vertex_buffer(rp, 0, baked_pos);
+    gpu::set_vertex_buffer(rp, 1, baked_nrm);
+    gpu::set_vertex_buffer(rp, 2, baked_tan);
+    gpu::set_vertex_buffer(rp, 3, baked_uv);
+    gpu::draw(rp, baked_corners);
     gpu::end_render_pass(rp);
     gpu::release_bind_group(grp);
 }
