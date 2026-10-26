@@ -71,6 +71,179 @@ static void triangulate(const RetopoMesh& rm, uint32_t f, std::vector<uint32_t>&
     out.insert(out.end(), ring.begin(), ring.end());
 }
 
+// One island laid flat by least-squares conformal maps: every triangle keeps its angles
+// as well as it can, and the island's own border goes wherever that puts it. Two
+// vertices are pinned (the pair farthest apart, on the border if there is one), the
+// rest solved by conjugate gradients from a flat projection as the first guess.
+// `tris` are triangle numbers into wv (3 vertex copies each); positions are pos[orig[copy]].
+// Writes uv (2 per copy) for the island's copies, in mesh units.
+struct LscmResult { bool closed = false; bool mirrored = false; uint32_t folds = 0; };
+
+static LscmResult lscm(const std::vector<Vec3>& pos, const std::vector<uint32_t>& orig,
+                       const std::vector<uint32_t>& wv, const std::vector<uint32_t>& tris, std::vector<float>& uv) {
+    LscmResult res;
+    if (tris.empty()) return res;
+    // The island's copies, numbered 0..n-1.
+    std::map<uint32_t, uint32_t> local;
+    std::vector<uint32_t> copy;
+    for (uint32_t t : tris)
+        for (int j = 0; j < 3; j++)
+            if (local.emplace(wv[3 * t + j], (uint32_t)copy.size()).second) copy.push_back(wv[3 * t + j]);
+    const uint32_t n = (uint32_t)copy.size();
+    auto P = [&](uint32_t i) { return pos[orig[copy[i]]]; };
+
+    // Its border: edges only one triangle uses. A piece with none (closed) can't lie flat;
+    // a ring or a tube can (as a flat ring, squeezed on the inside).
+    std::map<uint64_t, int> edge_use;
+    for (uint32_t t : tris)
+        for (int j = 0; j < 3; j++) {
+            const uint32_t a = local[wv[3 * t + j]], b = local[wv[3 * t + (j + 1) % 3]];
+            edge_use[((uint64_t)std::min(a, b) << 32) | std::max(a, b)]++;
+        }
+    std::vector<uint8_t> border(n, 0);
+    for (const auto& e : edge_use)
+        if (e.second == 1) border[(uint32_t)(e.first >> 32)] = border[(uint32_t)e.first] = 1;
+
+    // First guess: projected onto the island's mean plane, seen from the side its faces
+    // face (so it isn't mirrored).
+    Vec3 nsum, mid;
+    for (uint32_t i = 0; i < n; i++) mid += P(i);
+    mid = mid * (1.0f / (float)n);
+    for (uint32_t t : tris) {
+        const Vec3 a = pos[orig[wv[3 * t]]], b = pos[orig[wv[3 * t + 1]]], d = pos[orig[wv[3 * t + 2]]];
+        nsum += (b - a).cross(d - a);
+    }
+    Vec3 nz = nsum.length() > 1e-20f ? nsum.normalized() : Vec3(0, 0, 1);
+    Vec3 ax = std::fabs(nz.x) < 0.9f ? Vec3(1, 0, 0) : Vec3(0, 1, 0);
+    ax = (ax - nz * ax.dot(nz)).normalized();
+    const Vec3 ay = nz.cross(ax);
+    std::vector<double> x(2 * (size_t)n);   // u's, then v's
+    for (uint32_t i = 0; i < n; i++) { x[i] = (P(i) - mid).dot(ax); x[n + i] = (P(i) - mid).dot(ay); }
+
+    // Pins: the farthest pair (two sweeps), among border vertices if there are any.
+    const bool any_border = std::find(border.begin(), border.end(), 1) != border.end();
+    res.closed = !any_border;
+    auto far_from = [&](uint32_t from) {
+        uint32_t best = from; float bd = -1.0f;
+        for (uint32_t i = 0; i < n; i++) {
+            if (any_border && !border[i]) continue;
+            const float d = (P(i) - P(from)).length();
+            if (d > bd) { bd = d; best = i; }
+        }
+        return best;
+    };
+    uint32_t start = 0;
+    for (uint32_t i = 0; i < n; i++) if (border[i]) { start = i; break; }
+    const uint32_t p0 = far_from(start), p1 = far_from(p0);
+
+    // Each triangle in its own plane: corners q0 = (0,0), q1 = (|e|,0), q2 above the
+    // x axis. Conformal means sum_j W_j U_j = 0 (complex), W_j the edge opposite corner j
+    // (q_{j+2} - q_{j+1}), U_j = u_j + i v_j; weighted by 1/sqrt(area) so each triangle
+    // counts by its size. Two real rows per triangle.
+    struct Row { uint32_t c[3]; double a[3], b[3]; };
+    std::vector<Row> rows;
+    rows.reserve(tris.size());
+    for (uint32_t t : tris) {
+        Row r;
+        Vec3 Q[3];
+        for (int j = 0; j < 3; j++) { r.c[j] = local[wv[3 * t + j]]; Q[j] = P(r.c[j]); }
+        const Vec3 e1 = Q[1] - Q[0], e2 = Q[2] - Q[0];
+        const double l1 = e1.length();
+        const Vec3 nn = e1.cross(e2);
+        if (l1 < 1e-12 || nn.length() < 1e-14f) continue;   // degenerate: no say
+        const Vec3 xa = e1 * (float)(1.0 / l1), ya = nn.normalized().cross(xa);
+        const double qx[3] = {0.0, l1, e2.dot(xa)}, qy[3] = {0.0, 0.0, e2.dot(ya)};
+        const double s = 1.0 / std::sqrt(l1 * qy[2]);
+        for (int j = 0; j < 3; j++) {
+            const int a = (j + 1) % 3, b = (j + 2) % 3;
+            r.a[j] = (qx[b] - qx[a]) * s;
+            r.b[j] = (qy[b] - qy[a]) * s;
+        }
+        rows.push_back(r);
+    }
+    // M = AᵀA applied to y, as rows of A: re = sum a u - b v, im = sum b u + a v.
+    auto apply = [&](const std::vector<double>& y, std::vector<double>& out) {
+        std::fill(out.begin(), out.end(), 0.0);
+        for (const Row& r : rows) {
+            double re = 0.0, im = 0.0;
+            for (int j = 0; j < 3; j++) {
+                re += r.a[j] * y[r.c[j]] - r.b[j] * y[n + r.c[j]];
+                im += r.b[j] * y[r.c[j]] + r.a[j] * y[n + r.c[j]];
+            }
+            for (int j = 0; j < 3; j++) {
+                out[r.c[j]]     += r.a[j] * re + r.b[j] * im;
+                out[n + r.c[j]] += -r.b[j] * re + r.a[j] * im;
+            }
+        }
+    };
+    std::vector<double> diag(2 * (size_t)n, 0.0);
+    for (const Row& r : rows)
+        for (int j = 0; j < 3; j++) {
+            const double d = r.a[j] * r.a[j] + r.b[j] * r.b[j];
+            diag[r.c[j]] += d;
+            diag[n + r.c[j]] += d;
+        }
+    // Fixed: the pins, and any vertex only degenerate triangles touch (no equation).
+    std::vector<uint8_t> fixed(2 * (size_t)n, 0);
+    fixed[p0] = fixed[n + p0] = fixed[p1] = fixed[n + p1] = 1;
+    for (size_t i = 0; i < diag.size(); i++) if (diag[i] <= 0.0) fixed[i] = 1;
+
+    // Preconditioned conjugate gradients on the free entries.
+    std::vector<double> r(2 * (size_t)n), z(r.size()), p(r.size()), Ap(r.size());
+    apply(x, r);
+    for (size_t i = 0; i < r.size(); i++) r[i] = fixed[i] ? 0.0 : -r[i];
+    for (size_t i = 0; i < r.size(); i++) z[i] = fixed[i] ? 0.0 : r[i] / diag[i];
+    p = z;
+    double rz = 0.0, r0 = 0.0;
+    for (size_t i = 0; i < r.size(); i++) { rz += r[i] * z[i]; r0 += r[i] * r[i]; }
+    const uint32_t max_it = std::max(200u, 4u * n);
+    for (uint32_t it = 0; it < max_it && r0 > 0.0; it++) {
+        apply(p, Ap);
+        double pAp = 0.0;
+        for (size_t i = 0; i < p.size(); i++) if (!fixed[i]) pAp += p[i] * Ap[i];
+        if (pAp <= 0.0) break;
+        const double al = rz / pAp;
+        double rr = 0.0;
+        for (size_t i = 0; i < p.size(); i++) {
+            if (fixed[i]) continue;
+            x[i] += al * p[i];
+            r[i] -= al * Ap[i];
+            rr += r[i] * r[i];
+        }
+        if (rr < 1e-16 * r0) break;
+        double rz2 = 0.0;
+        for (size_t i = 0; i < r.size(); i++) {
+            z[i] = fixed[i] ? 0.0 : r[i] / diag[i];
+            rz2 += r[i] * z[i];
+        }
+        const double be = rz2 / rz;
+        rz = rz2;
+        for (size_t i = 0; i < p.size(); i++) p[i] = fixed[i] ? 0.0 : z[i] + be * p[i];
+    }
+
+    // Area in UV against area on the mesh: the scale, and (signed) whether it came out
+    // mirrored, which a conformal map shouldn't; folds = triangles turned over.
+    double a_uv = 0.0, a_3d = 0.0;
+    for (uint32_t t : tris) {
+        const uint32_t a = local[wv[3 * t]], b = local[wv[3 * t + 1]], d = local[wv[3 * t + 2]];
+        a_uv += 0.5 * ((x[b] - x[a]) * (x[n + d] - x[n + a]) - (x[d] - x[a]) * (x[n + b] - x[n + a]));
+        a_3d += 0.5 * (P(b) - P(a)).cross(P(d) - P(a)).length();
+    }
+    res.mirrored = a_uv < 0.0;
+    const double sc = std::fabs(a_uv) > 1e-30 ? std::sqrt(a_3d / std::fabs(a_uv)) : 1.0;
+    for (uint32_t i = 0; i < n; i++) {
+        uv[2 * copy[i]]     = (float)((res.mirrored ? -x[i] : x[i]) * sc);
+        uv[2 * copy[i] + 1] = (float)(x[n + i] * sc);
+    }
+    for (uint32_t t : tris) {
+        const uint32_t a = wv[3 * t], b = wv[3 * t + 1], d = wv[3 * t + 2];
+        const float ar = (uv[2 * b] - uv[2 * a]) * (uv[2 * d + 1] - uv[2 * a + 1])
+                       - (uv[2 * d] - uv[2 * a]) * (uv[2 * b + 1] - uv[2 * a + 1]);
+        res.folds += ar < 0.0f;
+    }
+    return res;
+}
+
 const char* uv_unwrap(const RetopoMesh& rm, const UvSettings& s, UvLayout& out, double& ms) {
     out.clear();
     ms = 0.0;
@@ -78,9 +251,7 @@ const char* uv_unwrap(const RetopoMesh& rm, const UvSettings& s, UvLayout& out, 
     if (nf == 0) return "no retopo mesh to unwrap (Build one in mode 0 first)";
     const auto t0 = std::chrono::steady_clock::now();
 
-    // xatlas takes polygons too, but that path mis-indexes faces it rejects as degenerate
-    // (it writes them as if every face were a triangle) and can still split one quad's
-    // triangles between islands. So it gets triangles, and the quads are put back below.
+    // Faces as triangles (the flattening works on triangles), quads put back below.
     // tri_corner holds, per triangle corner, which corner of rm.faces it came from.
     std::vector<uint32_t> tri_idx, tri_corner, tri_face, local;
     for (uint32_t f = 0; f < nf; f++) {
@@ -95,17 +266,16 @@ const char* uv_unwrap(const RetopoMesh& rm, const UvSettings& s, UvLayout& out, 
     }
     const uint32_t nt = (uint32_t)tri_face.size();
 
-    // Painted seams: the mesh xatlas gets is really cut there. Each vertex on a seam is
-    // split into one copy per wedge (the faces round it between seams), and each copy is
-    // nudged a hair (a thousandth of the way) towards its own wedge's faces, so xatlas no
-    // longer finds the copies at one point and the seam is an open border to it. A closed
-    // loop of seams cuts a piece off; an open one (a slit) opens as a slit. Splitting
-    // alone isn't enough: xatlas re-links copies at one position, and its "normal seam"
-    // rule is only kept while islands grow; their later merge ignores it (2026-10-26).
+    // Islands are exactly what the painted seams (and the mesh's own borders) fence off:
+    // nothing else is cut. Each vertex on a seam is split into one copy per wedge (the
+    // faces round it between seams); everything joined through a shared vertex copy is
+    // one island. xatlas segments by its own cost rules and can't be told to stop, so it
+    // only packs (pass 2); the flattening is ours (lscm, above).
     std::vector<uint32_t> seam_e;
     retopo_seam_edges(rm, seam_e);
-    std::vector<Vec3> xa_pos;
-    std::vector<uint32_t> xa_idx = tri_idx;   // what xatlas gets: tri_idx with seam vertices split
+    std::vector<uint32_t> wv = tri_idx;    // per triangle corner: its vertex copy
+    std::vector<uint32_t> orig(rm.v.size());   // per copy: the mesh vertex
+    for (uint32_t i = 0; i < orig.size(); i++) orig[i] = i;
     if (!seam_e.empty()) {
         std::vector<uint64_t> seam_k;
         std::vector<uint8_t> on_seam(rm.v.size(), 0);
@@ -136,157 +306,63 @@ const char* uv_unwrap(const RetopoMesh& rm, const UvSettings& s, UvLayout& out, 
                 }
             }
         }
-        // Each wedge's pull: the mean of its faces' centres.
-        std::vector<Vec3> pull(rm.faces.size());
-        std::vector<uint32_t> pulls(rm.faces.size(), 0);
-        for (uint32_t f = 0; f < nf; f++) {
-            const uint32_t o = rm.face_off[f], k = rm.face_size(f);
-            Vec3 mid;
-            for (uint32_t j = 0; j < k; j++) mid += rm.v[rm.faces[o + j]];
-            mid = mid * (1.0f / (float)k);
-            for (uint32_t j = 0; j < k; j++)
-                if (on_seam[rm.faces[o + j]]) { const uint32_t r = root(o + j); pull[r] += mid; pulls[r]++; }
-        }
-        // Copies: the first wedge round a vertex keeps its number, the rest get new ones;
-        // every wedge's copy moves its thousandth.
-        xa_pos = rm.v;
+        // Copies: the first wedge round a vertex keeps its number, the rest get new ones.
         std::vector<uint32_t> wedge_vert(rm.faces.size(), ~0u), wedges_at(rm.v.size(), 0);
         for (uint32_t i = 0; i < tri_idx.size(); i++) {
             const uint32_t v = tri_idx[i];
             if (!on_seam[v]) continue;
             const uint32_t r = root(tri_corner[i]);
             if (wedge_vert[r] == ~0u) {
-                const Vec3 p = rm.v[v] + (pull[r] * (1.0f / (float)std::max(1u, pulls[r])) - rm.v[v]) * 1e-3f;
-                if (wedges_at[v]++ == 0) { wedge_vert[r] = v; xa_pos[v] = p; }
-                else { wedge_vert[r] = (uint32_t)xa_pos.size(); xa_pos.push_back(p); }
+                if (wedges_at[v]++ == 0) wedge_vert[r] = v;
+                else { wedge_vert[r] = (uint32_t)orig.size(); orig.push_back(v); }
             }
-            xa_idx[i] = wedge_vert[r];
+            wv[i] = wedge_vert[r];
         }
     }
+    const uint32_t nw = (uint32_t)orig.size();
+    // Islands: copies joined by the triangles they share.
+    std::vector<uint32_t> isl(nw);
+    {
+        std::vector<uint32_t> up(nw);
+        for (uint32_t i = 0; i < nw; i++) up[i] = i;
+        auto root = [&](uint32_t x) { while (up[x] != x) x = up[x] = up[up[x]]; return x; };
+        for (uint32_t t = 0; t < nt; t++) {
+            up[root(wv[3 * t + 1])] = root(wv[3 * t]);
+            up[root(wv[3 * t + 2])] = root(wv[3 * t]);
+        }
+        std::vector<uint32_t> num(nw, ~0u);
+        for (uint32_t t = 0; t < nt; t++) {
+            const uint32_t r = root(wv[3 * t]);
+            if (num[r] == ~0u) num[r] = out.charts++;
+        }
+        for (uint32_t i = 0; i < nw; i++) isl[i] = num[root(i)];
+    }
+    out.face_chart.assign(nf, ~0u);
+    uint32_t orphans = 0;
+    for (uint32_t t = 0; t < nt; t++) out.face_chart[tri_face[t]] = isl[wv[3 * t]];
+    for (uint32_t c : out.face_chart) orphans += c == ~0u;
 
-    xatlas::MeshDecl decl;
-    const std::vector<Vec3>& pos = seam_e.empty() ? rm.v : xa_pos;
-    decl.vertexPositionData   = pos.data();
-    decl.vertexPositionStride = sizeof(Vec3);
-    decl.vertexCount          = (uint32_t)pos.size();
-    decl.indexData            = xa_idx.data();
-    decl.indexFormat          = xatlas::IndexFormat::UInt32;
-    decl.indexCount           = (uint32_t)xa_idx.size();
-    // No normals: rm.n is the sculpt's normal under each vertex, which can disagree with
-    // the low-poly face it's on. Seams should follow the low-poly surface.
-    xatlas::Atlas* atlas = xatlas::Create();
-    const xatlas::AddMeshError err = xatlas::AddMesh(atlas, decl);
-    if (err != xatlas::AddMeshError::Success) {
-        xatlas::Destroy(atlas);
-        std::printf("[uv] xatlas refused the mesh: %s\n", xatlas::StringForEnum(err));
-        return "the unwrapper refused the mesh (see the console)";
-    }
-    xatlas::ChartOptions co;
-    co.maxCost = s.max_cost;
-    co.fixWinding = true;
-    // Only the islands' shapes are kept from this pass, so its packing is a quick one;
-    // pass 2 packs for real once the islands are repaired. Never let xatlas's packer turn
-    // an island: both its turns are reflections (the quarter turn swaps u and v; the
-    // turn onto the long axis projects onto a frame that can be left-handed), so they
-    // hand islands back mirrored. We turn them ourselves before pass 2.
-    xatlas::PackOptions quick;
-    quick.rotateCharts = quick.rotateChartsToAxis = false;
-    xatlas::Generate(atlas, co, quick);
-    if (atlas->meshCount != 1 || atlas->meshes[0].indexCount != tri_idx.size()) {
-        xatlas::Destroy(atlas);
-        return "the unwrapper produced nothing";
-    }
-    xatlas::Mesh& m = atlas->meshes[0];
-
-    // With the turns off this should find nothing, but fixWinding only looks at one face
-    // per island: count each island's backwards triangles anyway and mirror a backwards
-    // island across its own box. Safe here: pass 2 packs it afresh.
-    std::vector<uint32_t> neg(m.chartCount, 0), tot(m.chartCount, 0);
-    std::vector<float> u_lo(m.chartCount, 1e30f), u_hi(m.chartCount, -1e30f);
-    for (uint32_t t = 0; t < nt; t++) {
-        const xatlas::Vertex& a = m.vertexArray[m.indexArray[3 * t]];
-        const xatlas::Vertex& b = m.vertexArray[m.indexArray[3 * t + 1]];
-        const xatlas::Vertex& d = m.vertexArray[m.indexArray[3 * t + 2]];
-        if (a.chartIndex < 0) continue;
-        const float area = (b.uv[0] - a.uv[0]) * (d.uv[1] - a.uv[1]) - (d.uv[0] - a.uv[0]) * (b.uv[1] - a.uv[1]);
-        tot[a.chartIndex]++;
-        neg[a.chartIndex] += area < 0.0f;
-    }
-    for (uint32_t v = 0; v < m.vertexCount; v++) {
-        const int32_t c = m.vertexArray[v].chartIndex;
-        if (c < 0) continue;
-        u_lo[c] = std::min(u_lo[c], m.vertexArray[v].uv[0]);
-        u_hi[c] = std::max(u_hi[c], m.vertexArray[v].uv[0]);
-    }
-    uint32_t mirrored = 0;
-    for (uint32_t c = 0; c < m.chartCount; c++) mirrored += 2 * neg[c] > tot[c];
-    for (uint32_t v = 0; v < m.vertexCount; v++) {
-        const int32_t c = m.vertexArray[v].chartIndex;
-        if (c >= 0 && 2 * neg[c] > tot[c]) m.vertexArray[v].uv[0] = u_lo[c] + u_hi[c] - m.vertexArray[v].uv[0];
+    // Each island laid flat, then scaled so its area in UV matches its area on the mesh
+    // (pass 2 packs them all at one scale, so a big island stays big).
+    std::vector<std::vector<uint32_t>> isl_tris(out.charts);
+    for (uint32_t t = 0; t < nt; t++) isl_tris[isl[wv[3 * t]]].push_back(t);
+    std::vector<float> wuv(2 * (size_t)nw, 0.0f);
+    out.needs_cut.assign(out.charts, 0);
+    uint32_t mirrored = 0, folds = 0, not_flat = 0;
+    for (uint32_t c = 0; c < out.charts; c++) {
+        const LscmResult r = lscm(rm.v, orig, wv, isl_tris[c], wuv);
+        mirrored += r.mirrored;
+        folds += r.folds;
+        if (r.closed || r.folds) { out.needs_cut[c] = 1; not_flat++; }
     }
 
-    // Each face goes to the island most of its triangles landed in; its corners take their
-    // UVs from those triangles. A rejected (degenerate) triangle has no island. `flat` is
-    // in pass 1's units: one scale for every island, which is all pass 2 needs.
+    // Corner UVs from their copies. `flat` is in mesh units: one scale for every island,
+    // which is all pass 2 needs.
     std::vector<float> flat(rm.faces.size() * 2, 0.0f);
     std::vector<uint8_t> have(rm.faces.size(), 0);
-    out.face_chart.assign(nf, ~0u);
-    uint32_t split = 0, unfolded = 0, orphans = 0;
-    for (uint32_t t = 0, f = 0; f < nf; f++) {
-        const uint32_t t0f = t;
-        while (t < nt && tri_face[t] == f) t++;
-        uint32_t best = ~0u, best_n = 0;
-        for (uint32_t a = t0f; a < t; a++) {
-            const int32_t ca = m.vertexArray[m.indexArray[3 * a]].chartIndex;
-            if (ca < 0) continue;
-            uint32_t n = 0;
-            for (uint32_t b = t0f; b < t; b++) n += m.vertexArray[m.indexArray[3 * b]].chartIndex == ca;
-            if (n > best_n) { best_n = n; best = (uint32_t)ca; }
-        }
-        if (best == ~0u) { orphans++; continue; }
-        if (best_n != t - t0f) split++;
-        out.face_chart[f] = best;
-        for (uint32_t a = 3 * t0f; a < 3 * t; a++) {
-            const xatlas::Vertex& v = m.vertexArray[m.indexArray[a]];
-            if (v.chartIndex != (int32_t)best) continue;
-            // No v flip: v up (OBJ) is how xatlas keeps a face's winding; flipping it
-            // would mirror every island.
-            flat[2 * tri_corner[a]]     = v.uv[0];
-            flat[2 * tri_corner[a] + 1] = v.uv[1];
-            have[tri_corner[a]] = 1;
-        }
-        // A corner only the off-island triangles reached: unfold it into this island across
-        // its two neighbours, keeping the 3D triangle's shape and the island's scale.
-        // Repeat for an n-gon that lost more than one. Pass 2 makes room for it.
-        const uint32_t o = rm.face_off[f], k = rm.face_size(f);
-        for (bool again = true; again;) {
-            again = false;
-            for (uint32_t j = 0; j < k; j++) {
-                const uint32_t c = o + j, cp = o + (j + k - 1) % k, cn = o + (j + 1) % k;
-                if (have[c] || !have[cp] || !have[cn]) continue;
-                const Vec3 P = rm.v[rm.faces[cp]], N = rm.v[rm.faces[cn]], X = rm.v[rm.faces[c]];
-                const Vec3 e = N - P;
-                const float L3 = e.length();
-                const float eu = flat[2 * cn] - flat[2 * cp], ev = flat[2 * cn + 1] - flat[2 * cp + 1];
-                if (L3 < 1e-12f || eu * eu + ev * ev < 1e-24f) continue;
-                // X in the edge's frame: along it, and across it.
-                const float along = (X - P).dot(e) / (L3 * L3);
-                const float across = (X - P - e * along).length() / L3;
-                // Corners run counter-clockwise in UV, so going cp -> c -> cn, X sits to
-                // the right of the cp -> cn edge.
-                flat[2 * c]     = flat[2 * cp]     + eu * along + ev * across;
-                flat[2 * c + 1] = flat[2 * cp + 1] + ev * along - eu * across;
-                have[c] = 1; unfolded++; again = true;
-            }
-        }
-    }
-    const uint32_t charts1 = m.chartCount;
-    xatlas::Destroy(atlas);
-    // Islands numbered 0..n-1 again: one whose every face went to a neighbour is gone.
-    {
-        std::vector<uint32_t> renum(charts1, ~0u);
-        for (uint32_t& c : out.face_chart)
-            if (c != ~0u) { if (renum[c] == ~0u) renum[c] = out.charts++; c = renum[c]; }
+    for (uint32_t i = 0; i < wv.size(); i++) {
+        flat[2 * tri_corner[i]]     = wuv[2 * wv[i]];
+        flat[2 * tri_corner[i] + 1] = wuv[2 * wv[i] + 1];
     }
 
     // Each island turned (a true rotation, never a reflection) so its long axis lies along
@@ -324,7 +400,7 @@ const char* uv_unwrap(const RetopoMesh& rm, const UvSettings& s, UvLayout& out, 
         }
     }
 
-    // ---- Pass 2: pack the repaired islands into the square, with padding. xatlas finds
+    // ---- Pass 2: pack the islands into the square, with padding. xatlas finds
     // the islands by shared UV corners; one vertex per (island, mesh vertex, UV) keeps a
     // seam vertex's two copies apart, and the island as material keeps islands from
     // merging where they happen to touch.
@@ -356,7 +432,7 @@ const char* uv_unwrap(const RetopoMesh& rm, const UvSettings& s, UvLayout& out, 
     ud.indexFormat      = xatlas::IndexFormat::UInt32;
     ud.indexCount       = (uint32_t)pidx.size();
     ud.faceMaterialData = pmat.data();
-    atlas = xatlas::Create();
+    xatlas::Atlas* atlas = xatlas::Create();
     if (xatlas::AddUvMesh(atlas, ud) != xatlas::AddMeshError::Success) {
         xatlas::Destroy(atlas);
         out.clear();
@@ -365,7 +441,10 @@ const char* uv_unwrap(const RetopoMesh& rm, const UvSettings& s, UvLayout& out, 
     xatlas::PackOptions po;
     po.resolution = (uint32_t)s.resolution;
     po.padding    = (uint32_t)s.padding;
-    po.rotateCharts = po.rotateChartsToAxis = false;   // see pass 1: they mirror
+    // Never let xatlas's packer turn an island: both its turns are reflections (the
+    // quarter turn swaps u and v; the turn onto the long axis projects onto a frame that
+    // can be left-handed), so they hand islands back mirrored. Ours above is a rotation.
+    po.rotateCharts = po.rotateChartsToAxis = false;
     xatlas::Generate(atlas, xatlas::ChartOptions(), po);   // on a UV mesh: find its islands, then pack
 
     const char* why = nullptr;
@@ -424,7 +503,7 @@ const char* uv_unwrap(const RetopoMesh& rm, const UvSettings& s, UvLayout& out, 
     ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     if (why) { out.clear(); return why; }
     std::printf("[uv] unwrap: %u faces, %zu painted seam edge(s) -> %u islands, %.0f%% of the square used, %.1f ms"
-                " (mirrored back %u, BACKWARDS AFTER PACKING %u, split faces %u, corners unfolded %u, faces in no island %u, corners dotted %u)\n",
-                nf, seam_e.size() / 2, out.charts, used * 100.0f, ms, mirrored, turned, split, unfolded, orphans, dotted);
+                " (not flat-able %u, folded triangles %u, mirrored back %u, BACKWARDS AFTER PACKING %u, faces in no island %u, corners dotted %u)\n",
+                nf, seam_e.size() / 2, out.charts, used * 100.0f, ms, not_flat, folds, mirrored, turned, orphans, dotted);
     return nullptr;
 }

@@ -4624,11 +4624,15 @@ void draw_uv_dock(InputState& input, RetopoState& st, int win_w, int win_h) {
                 text_at(ldl, UiFont::SansSemibold, 13.0f, ImVec2(tx, r0.y + (row_h - ts.y) * 0.5f), kText, nm);
             }
             ldl->AddRectFilled(s0, ImVec2(s0.x + sw, s0.y + sw), uv_island_color(i, fresh ? 0.95f : 0.4f), rad(3.0f));
+            // Folded over itself (the unwrap's flag): said in place of the face count.
+            const bool folded = i < L.needs_cut.size() && L.needs_cut[i];
             char fc[24];
-            std::snprintf(fc, sizeof fc, "%u face%s", isl_faces[i], isl_faces[i] == 1 ? "" : "s");
+            if (folded) std::snprintf(fc, sizeof fc, "folds: add a seam");
+            else        std::snprintf(fc, sizeof fc, "%u face%s", isl_faces[i], isl_faces[i] == 1 ? "" : "s");
             const ImVec2 fs = text_size(UiFont::Mono, 11.0f, fc);
             if (rename_isl != i)
-                text_at(ldl, UiFont::Mono, 11.0f, ImVec2(r1.x - kIn - fs.x, r0.y + (row_h - fs.y) * 0.5f), kMuted, fc);
+                text_at(ldl, UiFont::Mono, 11.0f, ImVec2(r1.x - kIn - fs.x, r0.y + (row_h - fs.y) * 0.5f),
+                        folded ? kAlert : kMuted, fc);
             if (open) {
                 // Texel density: how big this island is in the square for its size on the
                 // mesh, against the layout as a whole (1x = average; 2x = twice the pixels

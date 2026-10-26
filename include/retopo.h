@@ -107,8 +107,11 @@ struct UvLayout {
     // Island names (the UV panel's layer list, double-click renames): one per island,
     // empty = not named, shown as "Island N".
     std::vector<std::string> names;
+    // Per island, from the unwrap (not saved): 1 = it came out folded over itself (or is
+    // closed, with no border at all); a seam across it would open it.
+    std::vector<uint8_t> needs_cut;
     bool empty() const { return uv.empty(); }
-    void clear() { uv.clear(); face_chart.clear(); names.clear(); charts = 0; used = 0.0f; key = 0; seam_key = 0; }
+    void clear() { uv.clear(); face_chart.clear(); names.clear(); needs_cut.clear(); charts = 0; used = 0.0f; key = 0; seam_key = 0; }
     // Sized for rm (a cheap guard for a file or a bug; the key is the real test).
     bool fits(const RetopoMesh& rm) const {
         return uv.size() == rm.faces.size() * 2 && face_chart.size() == rm.face_count();

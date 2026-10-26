@@ -701,8 +701,17 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
         }
         retopo.uv_sel = retopo.uv_hover = ~0u;
         if (why) std::snprintf(input.notification, sizeof(input.notification), "%s", why);
-        else     std::snprintf(input.notification, sizeof(input.notification), "Unwrapped: %u islands, %.0f%% of the square",
-                               retopo.uv.charts, retopo.uv.used * 100.0f);
+        else {
+            uint32_t folded = 0;
+            for (uint8_t c : retopo.uv.needs_cut) folded += c;
+            if (folded)
+                std::snprintf(input.notification, sizeof(input.notification),
+                              "Unwrapped: %u islands - %u fold%s over: paint a seam across %s",
+                              retopo.uv.charts, folded, folded == 1 ? "s" : "", folded == 1 ? "it" : "them");
+            else
+                std::snprintf(input.notification, sizeof(input.notification), "Unwrapped: %u islands, %.0f%% of the square",
+                              retopo.uv.charts, retopo.uv.used * 100.0f);
+        }
         input.notification_timer = 2.5f;
         retopo.rev++;   // a new layout is unsaved work
     }
