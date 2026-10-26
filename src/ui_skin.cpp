@@ -4206,8 +4206,88 @@ void draw_retopo_dock(InputState& input, RetopoState& st, int win_w, int win_h) 
             retopo_wand_close(st, st.wand_keep_shown ? st.wand_shown : -1);
         }
     }
+    // Wand right-click (main.cpp asks): Copy the piece under the pointer, Paste the copy
+    // onto the lasso drawn round bare sculpt. Paste stays greyed until both exist.
+    if (input.retopo_clip_menu_request) {
+        input.retopo_clip_menu_request = false;
+        ImGui::SetNextWindowPos(ImGui::GetIO().MousePos, ImGuiCond_Always);
+        ImGui::OpenPopup("##retopoClip");
+    }
+    if (ImGui::BeginPopup("##retopoClip", ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoSavedSettings)) {
+        window_panel(12.0f);
+        const bool can_copy = st.built && st.clip_face < st.result.face_count();
+        const bool can_paste = st.has_clip() && st.paste_ready;
+        if (chip("Copy island", false, bh, can_copy)) {
+            input.retopo_copy_request = true;
+            ImGui::CloseCurrentPopup();
+        }
+        if (ImGui::IsItemHovered())
+            tooltip(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), TipSide::Left,
+                    can_copy ? "Copy the piece under the pointer" : "Right-click on an island to copy it", nullptr);
+        if (chip("Paste island", false, bh, can_paste)) {
+            input.retopo_paste_request = true;
+            ImGui::CloseCurrentPopup();
+        }
+        if (ImGui::IsItemHovered())
+            tooltip(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), TipSide::Left,
+                    can_paste ? "Drop the copy onto the lasso, fitted to what's there"
+                    : st.has_clip() ? "Drag the wand round bare sculpt first: that's where it goes"
+                                    : "Copy an island first", nullptr);
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape)) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
     ImGui::PopStyleVar(2);
     end_panel();
+
+    // A paste just made: Scale / Twist / Offset float by the pointer and re-make it live
+    // (one undo step, whatever they do). Like the stroke panel below: not a popup, so a
+    // press elsewhere closes it and still does what it does.
+    static ImVec2 paste_at, paste_size(190.0f, 150.0f);
+    if (input.retopo_paste_panel) {
+        input.retopo_paste_panel = false;
+        const ImVec2 mp = ImGui::GetIO().MousePos;
+        paste_at = ImVec2(mp.x + 24.0f, mp.y + 16.0f);
+    }
+    if (st.paste_open && input.interaction_mode == InputState::InteractionMode::RETOPO) {
+        ImVec2 p = paste_at;
+        if (p.x + paste_size.x > win_w - 8.0f) p.x = paste_at.x - 48.0f - paste_size.x;
+        if (p.y + paste_size.y > win_h - 8.0f) p.y = std::max(8.0f, (float)win_h - 8.0f - paste_size.y);
+        begin_panel("##retopoPaste", p, ImVec2(0, 0), ImVec2(10.0f, 8.0f), 6.0f, 12.0f);
+        char head[96];
+        std::snprintf(head, sizeof head, "Pasted %s", st.clip.name.c_str());
+        label_item(UiFont::SansSemibold, 13.0f, st.clip.closed ? donut_col : strip_col, head, 0.0f, 20.0f);
+        ImGui::BeginGroup();
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(6.0f, sgap));
+        float scale = st.paste_scale, twist = st.paste_twist, offset = st.paste_offset, wh, t;
+        char txt[32];
+        std::snprintf(txt, sizeof txt, "Scale: %.2fx", scale);
+        t = retopo_slider("##pscale", 150.0f, sh, (scale - 0.5f) / 1.5f, txt,
+                          "Bigger or smaller than the fit worked out (wheel steps it)", TipSide::Below, &wh, false);
+        if (t >= 0.0f) scale = 0.5f + std::round(t * 30.0f) / 20.0f;
+        if (wh != 0.0f) scale = std::max(0.5f, std::min(2.0f, scale + (wh > 0.0f ? 0.05f : -0.05f)));
+        std::snprintf(txt, sizeof txt, "Twist: %.0f\xC2\xB0", twist);
+        t = retopo_slider("##ptwist", 150.0f, sh, (twist + 180.0f) / 360.0f, txt,
+                          "Turn it round the surface's axis (wheel steps it)", TipSide::Below, &wh, false);
+        if (t >= 0.0f) twist = -180.0f + std::round(t * 72.0f) * 5.0f;
+        if (wh != 0.0f) twist = std::max(-180.0f, std::min(180.0f, twist + (wh > 0.0f ? 5.0f : -5.0f)));
+        std::snprintf(txt, sizeof txt, "Offset: %+.2f", offset);
+        t = retopo_slider("##poffset", 150.0f, sh, (offset + 1.0f) / 2.0f, txt,
+                          "Slide it along the axis: up or down a horn (wheel steps it)", TipSide::Below, &wh, false);
+        if (t >= 0.0f) offset = -1.0f + std::round(t * 40.0f) / 20.0f;
+        if (wh != 0.0f) offset = std::max(-1.0f, std::min(1.0f, offset + (wh > 0.0f ? 0.05f : -0.05f)));
+        ImGui::PopStyleVar();
+        ImGui::EndGroup();
+        if (scale != st.paste_scale || twist != st.paste_twist || offset != st.paste_offset) {
+            st.paste_scale = scale; st.paste_twist = twist; st.paste_offset = offset;
+            input.retopo_paste_redo = true;
+        }
+        paste_size = ImGui::GetWindowSize();
+        const bool over = ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows
+                                                 | ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+        if (!over && !ImGui::IsAnyItemActive() && (ImGui::IsMouseClicked(0) || ImGui::IsMouseClicked(1)))
+            retopo_paste_close(st);
+        end_panel();
+    }
 
     // A stroke just drawn: the same sliders float beside where the pen let go, for it
     // (it's the selection). Not a popup: a popup swallows the next click outside it just

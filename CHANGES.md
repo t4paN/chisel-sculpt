@@ -2,6 +2,15 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-26 — Retopo: copy an island, paste it onto another part of the sculpt
+
+- Wand right-click: Copy island (the piece under the pointer) / Paste island (greyed until there's a copy and a target).
+- With a copy held, a wand lasso round bare sculpt marks where it goes (cyan outline); a lasso over built quads still cleans up.
+- The paste fits by pose: the sculpt under the copy and inside the lasso are measured alike (centre, axis, spread), the piece moves, tilts and scales across, snaps on, gets four Smooth passes. Across x = 0 from its source it's mirrored, not turned; mirror on adds its twin.
+- A panel by the pointer re-makes it live: Scale, Twist, Offset (along the axis). The whole paste is one undo step.
+- Clipboard is session-only. Smooth's step is now `relax_dir`, shared with the paste.
+- Headless: `unused-tools-vault/retopo-paste-test/` (ring off one cone onto a bigger tilted one, and onto its mirror).
+
 ## 2026-10-26 — Retopo: joined strips space their rows evenly
 
 - A strip whose ends join an island (or whose side zips) re-spaces its rows evenly along each column, between the joined vertices, then snaps back onto the sculpt: no more tight middle with stretched end quads. Live with the Rings/Density sliders; strips that join nothing build as before.

@@ -666,6 +666,13 @@ struct InputState {
     bool retopo_menu_request = false;  // a right-click on an island: the bar opens its menu
     bool retopo_wand_request = false;  // the wand opened a hole's options: the bar shows them
     bool retopo_menu_auto = false;     // a stroke was just drawn: its sliders float by the pen
+    // Wand copy / paste: a right-click opens the Copy / Paste menu; its picks and the
+    // paste panel's slider moves come back to the main loop (they need the sculpt).
+    bool retopo_clip_menu_request = false;
+    bool retopo_copy_request = false;
+    bool retopo_paste_request = false;
+    bool retopo_paste_panel = false;   // a paste was just made: its sliders float by the pointer
+    bool retopo_paste_redo = false;
     // Right button: where it went down, and a one-frame flag on release (retopo's menu
     // is a click, so main.cpp compares the two to tell it from a zoom drag).
     float mouse2_press_x = 0.0f, mouse2_press_y = 0.0f;

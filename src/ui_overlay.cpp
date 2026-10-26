@@ -2430,6 +2430,16 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
         dl->AddPolyline(lp.data(), (int)lp.size(), IM_COL32(255, 200, 90, 255), 0, 1.5f);
         dl->AddLine(lp.back(), lp.front(), IM_COL32(255, 200, 90, 110), 1.0f);
     }
+    // A paste target (a lasso let go on bare sculpt with something copied): closed, in
+    // the clipboard's cyan, while the view is still the one it was drawn in.
+    if (st.paste_ready && st.paste_lasso.size() >= 6
+        && (cam.get_position() - st.paste_eye).length() <= 1e-4f * std::max(1e-3f, cam.distance)) {
+        static std::vector<ImVec2> pp;
+        pp.clear();
+        for (size_t i = 0; i + 1 < st.paste_lasso.size(); i += 2) pp.push_back(ImVec2(st.paste_lasso[i], st.paste_lasso[i + 1]));
+        dl->AddPolyline(pp.data(), (int)pp.size(), IM_COL32(10, 20, 15, 170), ImDrawFlags_Closed, 3.5f);
+        dl->AddPolyline(pp.data(), (int)pp.size(), IM_COL32(140, 227, 238, 255), ImDrawFlags_Closed, 1.5f);
+    }
     if (!st.built || !st.show_result) return;
 
     // Wireframe: project every vertex once, then draw an edge only when both ends

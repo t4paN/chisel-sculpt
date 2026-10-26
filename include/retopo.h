@@ -161,6 +161,37 @@ struct RetopoState {
     Vec3 work_pos;
     bool work_valid = false;
 
+    // Copy / paste (Wand right-click). The clipboard: one piece's faces as they were,
+    // and the sculpt's pose under it (retopo_measure, looking down the piece's own axis,
+    // so the view it was copied from doesn't matter). Session only: not history, not saved.
+    struct Clip {
+        std::vector<Vec3> v, n;
+        std::vector<uint32_t> faces, face_off{0};
+        Vec3 c, a;                    // the sculpt under it: centre and axis
+        float size = 0.0f;            // and its spread round that axis
+        std::string name;
+        bool closed = false;
+    } clip;
+    bool has_clip() const { return !clip.v.empty(); }
+    uint32_t clip_face = ~0u;         // the face a wand right-click landed on (Copy takes its piece)
+    // The paste target: a wand lasso let go on bare sculpt while something's copied,
+    // measured at release. Its outline draws only while the view is where it was drawn
+    // (paste_eye); the target holds until it's pasted on or another lasso replaces it.
+    std::vector<float> paste_lasso;
+    Vec3 paste_eye;
+    Vec3 paste_c, paste_a;
+    float paste_size = 0.0f;
+    bool paste_ready = false;
+    // A paste just made: the panel's sliders re-make it from paste_base (one undo step
+    // whatever they do) until the panel closes.
+    bool paste_open = false;
+    RetopoSnapshot paste_base;
+    uint32_t paste_id = 0;            // the pasted island's stroke id
+    float paste_scale = 1.0f;         // x the size the fit worked out
+    float paste_twist = 0.0f;         // degrees round the target's axis
+    float paste_offset = 0.0f;        // along the axis, x the target's size
+    bool paste_mirror = false;        // mirror was on at the paste: a twin comes along
+
     // Pen-up of a line (spine, notch, edge to vertex, extrude, bridge): drop it and
     // everything its press recorded, whichever rule took it.
     void end_line() {
@@ -495,6 +526,27 @@ void retopo_save(RetopoState& st, RetopoSnapshot& out);
 // Write state.result as an OBJ, every face as it is (quads, triangles, bigger ones).
 // Returns false if there's nothing to write or the file can't be opened.
 bool retopo_export_obj(const RetopoMesh& rm, const char* path);
+
+// Copy / paste an island (Wand right-click), fitted onto another part of the sculpt.
+// retopo_measure: the sculpt's pose over a patch of triangles, given their centres p
+// and area-weighted normals n (the cross product, length = 2 x area): centre and axis
+// (area-weighted means) and size (RMS distance from the axis through the centre).
+// False when the patch is empty or faces every way at once.
+bool retopo_measure(const std::vector<Vec3>& p, const std::vector<Vec3>& n, Vec3& c, Vec3& a, float& size);
+// Copy: the piece holding face f (its faces joined through shared vertices: a mirror twin
+// is a piece of its own) into st.clip, with the pose of the sculpt `m` inside its outer
+// outline seen down the piece's own axis (a donut round a horn: the horn and the ring).
+// nullptr when copied, else why not.
+const char* retopo_copy(RetopoState& st, const Mesh& m, uint32_t f);
+// Paste: st.clip onto the target (st.paste_c / paste_a / paste_size): moved, tilted from
+// its old axis onto the new one, scaled by size, mirrored instead of turned when the
+// target is across x = 0 from where it was copied; then snapped onto `m` (current on the
+// CPU) and smoothed a few passes. A new edited island; with mirror, its twin too. One
+// undo step; the panel's sliders call retopo_paste_redo, which makes it again from
+// before the paste with st.paste_scale / twist / offset. retopo_paste_close ends that.
+const char* retopo_paste(RetopoState& st, const Mesh& m, bool mirror);
+void retopo_paste_redo(RetopoState& st, const Mesh& m);
+void retopo_paste_close(RetopoState& st);
 
 // ---- The main loop's side (retopo_input.cpp) ----
 struct InputState;

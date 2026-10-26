@@ -1629,6 +1629,53 @@ void mirror_pairs(RetopoMesh& rm, const std::vector<uint32_t>& moved, const std:
     }
 }
 
+// Smooth's step for vertex i, read off `old` (last pass's positions, Jacobi): the way
+// it slides toward even spacing with its neighbours, along the surface. Paste's
+// clean-up pass uses it too.
+Vec3 relax_dir(const RetopoMesh& rm, const std::vector<Vec3>& old, uint32_t i) {
+    // Slide p along the line through a and b toward their midpoint. Only the part along
+    // the line counts: on a curved loop the midpoint sits inside the curve, and taking
+    // that pull too is what shrinks loops.
+    auto slide = [](Vec3 p, Vec3 a, Vec3 b) {
+        const Vec3 t = (b - a).normalized();
+        return t * ((a + b) * 0.5f - p).dot(t);
+    };
+    const Vec3 p = old[i];
+    const uint32_t k0 = rm.nb_off[i], k1 = rm.nb_off[i + 1];
+    Vec3 d;
+    if (rm.border_nb[i * 2] != ~0u) {
+        // Border: slide along the border line only, so widths and holes hold.
+        d = slide(p, old[rm.border_nb[i * 2]], old[rm.border_nb[i * 2 + 1]]);
+    } else {
+        // A grid vertex (four neighbours) has two straight-through pairs, one along
+        // its loop and one across the band: slide along each. Averaging all four
+        // instead pulled every loop toward the inside of its bend, so a donut's
+        // middle loops crept into the hole; even spacing is where this one rests.
+        // Pairs are found by direction (most opposite), so welds can't confuse them.
+        int pa = -1;
+        if (k1 - k0 == 4) {
+            Vec3 u[4];
+            for (int k = 0; k < 4; k++) u[k] = (old[rm.nb[k0 + k]] - p).normalized();
+            float best = -0.3f;   // not opposite enough: not a grid vertex, average instead
+            for (int k = 1; k < 4; k++)
+                if (u[0].dot(u[k]) < best) { best = u[0].dot(u[k]); pa = k; }
+        }
+        if (pa > 0) {
+            const int r0 = pa == 1 ? 2 : 1, r1 = pa == 3 ? 2 : 3;
+            auto N = [&](int k) { return old[rm.nb[k0 + k]]; };
+            d = slide(p, N(0), N(pa)) + slide(p, N(r0), N(r1));
+        } else {
+            // Anything else (a weld's odd valence): toward the neighbours' average.
+            Vec3 avg;
+            for (uint32_t k = k0; k < k1; k++) avg += old[rm.nb[k]];
+            d = avg * (1.0f / (float)std::max(1u, k1 - k0)) - p;
+        }
+        // Tangential only: along the normal would sink the patch into the sculpt.
+        d = d - rm.n[i] * d.dot(rm.n[i]);
+    }
+    return d;
+}
+
 // Ring weight of p (normal n) around the cursor: smooth to zero at the edge, zero when
 // it faces away or projects outside.
 float ring_weight(const Camera& cam, int win_w, int win_h, float cx, float cy, float r2,
@@ -1689,50 +1736,12 @@ int retopo_smooth_dab(RetopoState& st, const Camera& cam, int win_w, int win_h,
         moved += g_smooth_w[i] > 0.0f;
     }
     if (!moved) return 0;
-    // Slide p along the line through a and b toward their midpoint. Only the part along
-    // the line counts: on a curved loop the midpoint sits inside the curve, and taking
-    // that pull too is what shrinks loops.
-    auto slide = [](Vec3 p, Vec3 a, Vec3 b) {
-        const Vec3 t = (b - a).normalized();
-        return t * ((a + b) * 0.5f - p).dot(t);
-    };
     g_smooth_old = rm.v;
     for (size_t i = 0; i < rm.v.size(); i++) {
         const float w = g_smooth_w[i];
         if (w <= 0.0f || !alive(rm, (uint32_t)i)) continue;
         const Vec3 p = g_smooth_old[i];
-        const uint32_t k0 = rm.nb_off[i], k1 = rm.nb_off[i + 1];
-        Vec3 d;
-        if (rm.border_nb[i * 2] != ~0u) {
-            // Border: slide along the border line only, so widths and holes hold.
-            d = slide(p, g_smooth_old[rm.border_nb[i * 2]], g_smooth_old[rm.border_nb[i * 2 + 1]]);
-        } else {
-            // A grid vertex (four neighbours) has two straight-through pairs, one along
-            // its loop and one across the band: slide along each. Averaging all four
-            // instead pulled every loop toward the inside of its bend, so a donut's
-            // middle loops crept into the hole; even spacing is where this one rests.
-            // Pairs are found by direction (most opposite), so welds can't confuse them.
-            int pa = -1;
-            if (k1 - k0 == 4) {
-                Vec3 u[4];
-                for (int k = 0; k < 4; k++) u[k] = (g_smooth_old[rm.nb[k0 + k]] - p).normalized();
-                float best = -0.3f;   // not opposite enough: not a grid vertex, average instead
-                for (int k = 1; k < 4; k++)
-                    if (u[0].dot(u[k]) < best) { best = u[0].dot(u[k]); pa = k; }
-            }
-            if (pa > 0) {
-                const int r0 = pa == 1 ? 2 : 1, r1 = pa == 3 ? 2 : 3;
-                auto N = [&](int k) { return g_smooth_old[rm.nb[k0 + k]]; };
-                d = slide(p, N(0), N(pa)) + slide(p, N(r0), N(r1));
-            } else {
-                // Anything else (a weld's odd valence): toward the neighbours' average.
-                Vec3 avg;
-                for (uint32_t k = k0; k < k1; k++) avg += g_smooth_old[rm.nb[k]];
-                d = avg * (1.0f / (float)std::max(1u, k1 - k0)) - p;
-            }
-            // Tangential only: along the normal would sink the patch into the sculpt.
-            d = d - rm.n[i] * d.dot(rm.n[i]);
-        }
+        const Vec3 d = relax_dir(rm, g_smooth_old, (uint32_t)i);
         Vec3 q, qn;
         if (g_smooth_grid.closest(p + d * std::min(1.0f, w), q, qn)) {
             if (mirror) hold_side(q, (uint32_t)i);
@@ -6120,4 +6129,252 @@ bool retopo_export_obj(const RetopoMesh& rm, const char* path) {
     }
     std::fclose(f);
     return true;
+}
+
+// ---- Copy / paste ------------------------------------------------------------------
+//
+// The user's "horn ring" (2026-10-26): copy a donut off one horn, lasso the next horn,
+// paste, and the ring drops onto it. The fit is a pose match, not a shape match: the
+// sculpt under the copy and the sculpt in the lasso are each measured the same way
+// (retopo_measure: centre, axis, spread), the piece rides from one pose to the other,
+// then snaps onto the surface and is smoothed. What the pose can't know (twist, how high
+// up the horn, a lasso drawn loose) is the panel's Scale / Twist / Offset.
+
+bool retopo_measure(const std::vector<Vec3>& p, const std::vector<Vec3>& n, Vec3& c, Vec3& a, float& size) {
+    double W = 0.0;
+    Vec3 cs, ns;
+    for (size_t i = 0; i < p.size(); i++) {
+        const float w = n[i].length();
+        cs += p[i] * w;
+        ns += n[i];
+        W += w;
+    }
+    // Facing every way at once (a whole closed shell) has no axis.
+    if (W <= 0.0 || ns.length() < 0.05f * (float)W) return false;
+    c = cs * (float)(1.0 / W);
+    a = ns.normalized();
+    double s2 = 0.0;
+    for (size_t i = 0; i < p.size(); i++) {
+        Vec3 d = p[i] - c;
+        d = d - a * d.dot(a);
+        s2 += (double)n[i].length() * d.dot(d);
+    }
+    size = (float)std::sqrt(s2 / W);
+    return size > 0.0f;
+}
+
+namespace {
+// v turned by angle about unit axis k (Rodrigues).
+Vec3 turn_about(Vec3 v, Vec3 k, float angle) {
+    const float c = std::cos(angle), s = std::sin(angle);
+    return v * c + k.cross(v) * s + k * (k.dot(v) * (1.0f - c));
+}
+
+// v turned by the smallest rotation that takes unit a onto unit b.
+Vec3 turn_onto(Vec3 v, Vec3 a, Vec3 b) {
+    Vec3 k = a.cross(b);
+    const float s = k.length(), c = a.dot(b);
+    if (s < 1e-6f) {
+        if (c > 0.0f) return v;
+        // Opposite: half a turn about any line square to a.
+        k = a.cross(std::fabs(a.x) < 0.9f ? Vec3(1, 0, 0) : Vec3(0, 1, 0)).normalized();
+        return turn_about(v, k, 3.14159265f);
+    }
+    return turn_about(v, k * (1.0f / s), std::atan2(s, c));
+}
+
+// The clip placed on the target with the panel's settings, as a new island (paste_id),
+// onto `m`, smoothed; its twin with mirror. st.result is whatever it's pasted into.
+void paste_apply(RetopoState& st, const Mesh& m) {
+    const RetopoState::Clip& C = st.clip;
+    RetopoMesh& rm = st.result;
+    // Across x = 0 from where it was copied: its mirror image, not a turn (user's call).
+    const bool flip = C.c.x * st.paste_c.x < 0.0f && std::fabs(C.c.x) > 0.25f * C.size
+                   && std::fabs(st.paste_c.x) > 0.25f * st.paste_size;
+    auto refl = [&](Vec3 v) { if (flip) v.x = -v.x; return v; };
+    const Vec3 cs = refl(C.c), as = refl(C.a), at = st.paste_a;
+    const float k = st.paste_scale * st.paste_size / std::max(C.size, 1e-9f);
+    const float tw = st.paste_twist * 3.14159265f / 180.0f;
+    const Vec3 ct = st.paste_c + at * (st.paste_offset * st.paste_size);
+
+    const uint32_t v0 = (uint32_t)rm.v.size(), f0 = rm.face_count(), id = st.paste_id;
+    for (size_t i = 0; i < C.v.size(); i++) {
+        const Vec3 d = turn_about(turn_onto(refl(C.v[i]) - cs, as, at), at, tw) * k;
+        rm.v.push_back(ct + d);
+        rm.n.push_back(turn_about(turn_onto(refl(C.n[i]), as, at), at, tw));
+        rm.v_owner.push_back(id);
+        rm.mirror.push_back(~0u);
+    }
+    std::vector<uint32_t> q;
+    for (size_t f = 0; f + 1 < C.face_off.size(); f++) {
+        q.assign(C.faces.begin() + C.face_off[f], C.faces.begin() + C.face_off[f + 1]);
+        for (uint32_t& x : q) x += v0;
+        if (flip) std::reverse(q.begin(), q.end());   // a mirror image winds the other way
+        rm.add_face(q.data(), (int)q.size(), id);
+    }
+
+    // Onto the sculpt: a grid over where it landed, then the snap, then a few passes of
+    // Smooth's own step (the target is never quite the same shape), snapping each.
+    Vec3 lo(1e30f, 1e30f, 1e30f), hi(-1e30f, -1e30f, -1e30f);
+    for (uint32_t i = v0; i < rm.v.size(); i++) {
+        const Vec3& p = rm.v[i];
+        lo = {std::min(lo.x, p.x), std::min(lo.y, p.y), std::min(lo.z, p.z)};
+        hi = {std::max(hi.x, p.x), std::max(hi.y, p.y), std::max(hi.z, p.z)};
+    }
+    float edge = 0.0f;
+    int ne = 0;
+    for (uint32_t f = f0; f < rm.face_count(); f++)
+        for (uint32_t j = 0; j < rm.face_size(f); j++, ne++)
+            edge += (rm.v[rm.face(f)[j]] - rm.v[rm.face(f)[(j + 1) % rm.face_size(f)]]).length();
+    edge /= (float)std::max(1, ne);
+    const float pad = std::max(edge * 2.0f, 0.5f * st.paste_size);
+    lo = lo - Vec3(pad, pad, pad);
+    hi = hi + Vec3(pad, pad, pad);
+    const float ext = std::max({hi.x - lo.x, hi.y - lo.y, hi.z - lo.z});
+    SnapGrid g;
+    g.build(m, lo, hi, std::max(edge * 0.5f, ext / 96.0f));
+    int lost = 0;
+    for (uint32_t i = v0; i < rm.v.size(); i++) {
+        Vec3 p, pn;
+        if (g.closest(rm.v[i], p, pn, 16)) { rm.v[i] = p; rm.n[i] = pn; }
+        else lost++;
+    }
+    rebuild_edges(rm);
+    std::vector<Vec3> old;
+    for (int pass = 0; pass < 4; pass++) {
+        old = rm.v;
+        for (uint32_t i = v0; i < rm.v.size(); i++) {
+            if (rm.pinned[i] || !alive(rm, i)) continue;
+            Vec3 p, pn;
+            if (g.closest(old[i] + relax_dir(rm, old, i) * 0.5f, p, pn)) { rm.v[i] = p; rm.n[i] = pn; }
+        }
+    }
+
+    // Mirror: the twin, when the piece sits wholly on one side of x = 0.
+    bool pos = false, neg = false;
+    for (uint32_t i = v0; i < rm.v.size(); i++) { pos |= rm.v[i].x > 1e-6f; neg |= rm.v[i].x < -1e-6f; }
+    const bool twin = st.paste_mirror && pos != neg;
+    if (twin) {
+        std::vector<uint32_t> touched;
+        reflect_new_faces(st, v0, f0, id, touched);
+        rebuild_edges(rm);
+    }
+
+    RetopoStroke s;
+    s.id = id;
+    s.frozen = true;
+    s.closed = C.closed;
+    s.name = C.name + " copy";
+    for (RetopoStroke& o : st.strokes) o.selected = false;
+    s.selected = true;
+    st.strokes.push_back(s);
+    st.built = true;
+    st.rev++;
+    std::printf("[retopo] paste: %zu faces, scale %.2f (x%.2f), twist %.0f, offset %.2f%s%s%s\n",
+                C.face_off.size() - 1, k, st.paste_scale, st.paste_twist, st.paste_offset,
+                flip ? ", mirrored across x = 0" : "", twin ? ", twin too" : "",
+                lost ? ", some vertices found no surface" : "");
+}
+}  // namespace
+
+const char* retopo_copy(RetopoState& st, const Mesh& m, uint32_t f) {
+    const RetopoMesh& rm = st.result;
+    if (!st.built || f >= rm.face_count()) return "Right-click on an island to copy it";
+    // The piece: faces joined through shared vertices (union-find over corners).
+    std::vector<uint32_t> up(rm.v.size());
+    for (uint32_t i = 0; i < up.size(); i++) up[i] = i;
+    auto root = [&](uint32_t x) { while (up[x] != x) x = up[x] = up[up[x]]; return x; };
+    for (uint32_t k = 0; k < rm.face_count(); k++)
+        for (uint32_t j = 1; j < rm.face_size(k); j++) up[root(rm.face(k)[j])] = root(rm.face(k)[0]);
+    const uint32_t r0 = root(rm.face(f)[0]);
+
+    RetopoState::Clip C;
+    std::vector<uint32_t> local(rm.v.size(), ~0u);
+    Vec3 axis;
+    for (uint32_t k = 0; k < rm.face_count(); k++) {
+        if (root(rm.face(k)[0]) != r0) continue;
+        for (uint32_t j = 0; j < rm.face_size(k); j++) {
+            const uint32_t v = rm.face(k)[j];
+            if (local[v] == ~0u) {
+                local[v] = (uint32_t)C.v.size();
+                C.v.push_back(rm.v[v]);
+                C.n.push_back(rm.n[v]);
+                axis += rm.n[v];
+            }
+            C.faces.push_back(local[v]);
+        }
+        C.face_off.push_back((uint32_t)C.faces.size());
+    }
+    if (axis.length() < 1e-6f) return "That piece faces every way at once: nothing to fit it by";
+    axis = axis.normalized();
+
+    // Its outer outline (the piece's one rim that isn't a hole), flat in the plane
+    // square to the piece's axis: what the sculpt is measured inside.
+    const Vec3 u = axis.cross(std::fabs(axis.x) < 0.9f ? Vec3(1, 0, 0) : Vec3(0, 1, 0)).normalized();
+    const Vec3 w = axis.cross(u);
+    std::vector<float> ox, oy;
+    for (uint32_t r = 0; r < rm.rim_count() && ox.empty(); r++) {
+        if (rm.rim_hole[r] || root(rm.rim[rm.rim_off[r]]) != r0) continue;
+        for (uint32_t k = rm.rim_off[r]; k < rm.rim_off[r + 1]; k++) {
+            ox.push_back(rm.v[rm.rim[k]].dot(u));
+            oy.push_back(rm.v[rm.rim[k]].dot(w));
+        }
+    }
+    if (ox.size() < 3) return "That piece has no outline to copy by";
+    float x0 = 1e30f, x1 = -1e30f, y0 = 1e30f, y1 = -1e30f, h0 = 0.0f, reach = 0.0f;
+    for (size_t i = 0; i < ox.size(); i++) {
+        x0 = std::min(x0, ox[i]); x1 = std::max(x1, ox[i]);
+        y0 = std::min(y0, oy[i]); y1 = std::max(y1, oy[i]);
+    }
+    for (const Vec3& p : C.v) h0 += p.dot(axis);
+    h0 /= (float)C.v.size();
+    reach = 4.0f * std::max(x1 - x0, y1 - y0);   // how far along the axis the sculpt counts
+    std::vector<Vec3> P, N;
+    for (uint32_t t = 0; t < m.tri_count(); t++) {
+        const Vec3 a = m.get_pos(m.indices[t * 3]), b = m.get_pos(m.indices[t * 3 + 1]),
+                   c = m.get_pos(m.indices[t * 3 + 2]);
+        const Vec3 n = (b - a).cross(c - a), mid = (a + b + c) * (1.0f / 3.0f);
+        if (n.dot(axis) <= 0.0f || std::fabs(mid.dot(axis) - h0) > reach) continue;
+        const float x = mid.dot(u), y = mid.dot(w);
+        if (x < x0 || x > x1 || y < y0 || y > y1) continue;
+        bool in = false;
+        for (size_t i = 0, j = ox.size() - 1; i < ox.size(); j = i++)
+            if ((oy[i] > y) != (oy[j] > y) && x < ox[j] + (ox[i] - ox[j]) * (y - oy[j]) / (oy[i] - oy[j])) in = !in;
+        if (in) { P.push_back(mid); N.push_back(n); }
+    }
+    if (!retopo_measure(P, N, C.c, C.a, C.size)) return "No sculpt under that piece to measure it by";
+    const RetopoStroke* s = st.find(rm.face_owner[f]);
+    C.name = s ? s->name : "Island";
+    C.closed = s && s->closed;
+    std::printf("[retopo] copy: %s, %zu faces, %zu verts; sculpt under it %zu tris, axis (%.2f,%.2f,%.2f), size %.3f\n",
+                C.name.c_str(), C.face_off.size() - 1, C.v.size(), P.size(), C.a.x, C.a.y, C.a.z, C.size);
+    st.clip = std::move(C);
+    return nullptr;
+}
+
+const char* retopo_paste(RetopoState& st, const Mesh& m, bool mirror) {
+    if (!st.has_clip()) return "Nothing copied: right-click an island with the wand, Copy island";
+    if (!st.paste_ready) return "Lasso where it goes first: drag the wand round bare sculpt";
+    st.checkpoint();   // one Ctrl+Z takes the paste back, sliders and all
+    st.paste_base = snapshot_of(st);
+    st.paste_id = st.next_id++;
+    st.paste_scale = 1.0f;
+    st.paste_twist = st.paste_offset = 0.0f;
+    st.paste_mirror = mirror;
+    st.paste_open = true;
+    paste_apply(st, m);
+    st.paste_ready = false;
+    st.paste_lasso.clear();
+    return nullptr;
+}
+
+void retopo_paste_redo(RetopoState& st, const Mesh& m) {
+    if (!st.paste_open) return;
+    put(st, st.paste_base);
+    paste_apply(st, m);
+}
+
+void retopo_paste_close(RetopoState& st) {
+    st.paste_open = false;
+    st.paste_base = RetopoSnapshot{};
 }

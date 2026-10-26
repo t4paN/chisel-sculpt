@@ -158,7 +158,65 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
             x0 = std::min(x0, retopo.lasso[i]); x1 = std::max(x1, retopo.lasso[i]);
             y0 = std::min(y0, retopo.lasso[i + 1]); y1 = std::max(y1, retopo.lasso[i + 1]);
         }
-        if (retopo_on && retopo.lasso.size() >= 6 && std::max(x1 - x0, y1 - y0) > 8.0f) {
+        const std::vector<float>& L = retopo.lasso;
+        auto inside = [&](float x, float y) {
+            bool in = false;
+            for (size_t i = 0, j = L.size() - 2; i + 1 < L.size(); j = i, i += 2)
+                if ((L[i + 1] > y) != (L[j + 1] > y)
+                    && x < L[j] + (L[i] - L[j]) * (y - L[j + 1]) / (L[i + 1] - L[j + 1])) in = !in;
+            return in;
+        };
+        // With something copied, a lasso round bare sculpt (no built vertex facing out
+        // of it) marks where the paste goes; anything else is a cleanup, as ever.
+        bool bare = retopo_on && retopo.has_clip();
+        if (bare && retopo.built) {
+            const RetopoMesh& rm = retopo.result;
+            const Vec3 to_eye = camera.get_view_direction() * -1.0f;
+            for (size_t i = 0; i < rm.v.size() && bare; i++) {
+                float sx, sy;
+                const Vec3 te = camera.perspective ? camera.get_position() - rm.v[i] : to_eye;
+                if (rm.n[i].dot(te) > 0.0f && camera.world_to_screen(rm.v[i], win_w, win_h, sx, sy)
+                    && sx >= x0 && sx <= x1 && sy >= y0 && sy <= y1 && inside(sx, sy))
+                    bare = false;
+            }
+        }
+        if (retopo_on && L.size() >= 6 && std::max(x1 - x0, y1 - y0) > 8.0f && bare) {
+            // The sculpt inside it, seen and facing: triangle centres and their
+            // area-weighted normals, measured the way the copy was.
+            scene.materialize_active_cpu();
+            std::vector<Vec3> P, N;
+            const Vec3 eye = camera.get_position(), fwd = camera.get_view_direction();
+            for (uint32_t t = 0; t < mesh.tri_count(); t++) {
+                const Vec3 a = mesh.get_pos(mesh.indices[t * 3]), b = mesh.get_pos(mesh.indices[t * 3 + 1]),
+                           c = mesh.get_pos(mesh.indices[t * 3 + 2]);
+                const Vec3 n = (b - a).cross(c - a), mid = (a + b + c) * (1.0f / 3.0f);
+                if (n.dot(camera.perspective ? eye - mid : fwd * -1.0f) <= 0.0f) continue;
+                float sx, sy;
+                if (!camera.world_to_screen(mid, win_w, win_h, sx, sy)
+                    || sx < x0 || sx > x1 || sy < y0 || sy > y1 || !inside(sx, sy)) continue;
+                // Hidden behind other sculpt (the head under a horn seen from above):
+                // deeper than the depth at its pixel by more than a few pixels' worth.
+                float d = 0.0f;
+                if (!screen_buffers_dirty && renderer.sample_depth_bilinear(sx, sy, &d, 0.0f) && d < 500.0f) {
+                    const float wpp = 2.0f * camera.half_height_at(d) / (float)win_h;
+                    if (camera.view_depth(mid) - d > 8.0f * wpp) continue;
+                }
+                P.push_back(mid);
+                N.push_back(n);
+            }
+            if (retopo_measure(P, N, retopo.paste_c, retopo.paste_a, retopo.paste_size)) {
+                retopo.paste_ready = true;
+                retopo.paste_lasso = L;
+                retopo.paste_eye = eye;
+                std::printf("[retopo] paste target: %zu tris, axis (%.2f,%.2f,%.2f), size %.3f\n", P.size(),
+                            retopo.paste_a.x, retopo.paste_a.y, retopo.paste_a.z, retopo.paste_size);
+                std::snprintf(input.notification, sizeof(input.notification),
+                              "Right-click: Paste %s here", retopo.clip.name.c_str());
+            } else {
+                std::snprintf(input.notification, sizeof(input.notification), "No sculpt in that lasso to paste on");
+            }
+            input.notification_timer = 2.5f;
+        } else if (retopo_on && L.size() >= 6 && std::max(x1 - x0, y1 - y0) > 8.0f) {
             if (retopo.wand_open) retopo_wand_close(retopo, retopo.wand_keep_shown ? retopo.wand_shown : -1);
             std::snprintf(input.notification, sizeof(input.notification), "%s",
                           retopo_lasso_cleanup(retopo, camera, win_w, win_h, retopo.lasso, input.mirror_x));
@@ -493,6 +551,12 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
     // as it was first, so it never acts on (or saves) a fill nobody kept.
     // A spine's menu keeps what it shows (the line was drawn on purpose), so Ctrl+Z
     // then takes the spine itself back.
+    // A paste's panel ends (the paste stays) when anything else edits or the mode goes.
+    if (retopo.paste_open
+        && (!retopo_on || retopo_press || input.undo_requested || input.redo_requested
+            || input.retopo_build_requested || input.retopo_fill_requested
+            || input.retopo_dissolve_requested || input.retopo_symmetrize_request))
+        retopo_paste_close(retopo);
     if (retopo.wand_open
         && (!retopo_on || input.is_smooth_active()
             || (!retopo.wand_keep_shown && input.retopo_tool != InputState::RetopoTool::WAND)
@@ -573,7 +637,12 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
         const uint32_t id = retopo_pick(retopo, camera, win_w, win_h, input.mouse2_press_x,
                                         input.mouse2_press_y, input.mirror_x);
         RetopoStroke* s = id ? retopo.find(id) : nullptr;
-        if (s && s->frozen && s->selected && retopo.merge_candidates() >= 2) {
+        if (input.retopo_tool == InputState::RetopoTool::WAND) {
+            // The wand's own menu: Copy the piece under the pointer, Paste onto the lasso.
+            retopo.clip_face = retopo_face_at(retopo, camera, win_w, win_h, input.mouse2_press_x,
+                                              input.mouse2_press_y, kRetopoDrawSnapPx);
+            input.retopo_clip_menu_request = true;
+        } else if (s && s->frozen && s->selected && retopo.merge_candidates() >= 2) {
             input.retopo_menu_request = true;   // the menu offers Merge
         } else if (s && s->frozen) {
             std::snprintf(input.notification, sizeof(input.notification),
@@ -645,6 +714,32 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
                                "Symmetrized from %s: %d faces - Ctrl+Z takes it back",
                                keep > 0 ? "+X" : "-X", faces);
         input.notification_timer = 2.5f;
+    }
+    if (input.retopo_copy_request) {
+        input.retopo_copy_request = false;
+        scene.materialize_active_cpu();   // the copy measures the sculpt under the piece
+        const char* why = retopo_copy(retopo, mesh, retopo.clip_face);
+        if (why) std::snprintf(input.notification, sizeof(input.notification), "%s", why);
+        else     std::snprintf(input.notification, sizeof(input.notification),
+                               "Copied %s - lasso bare sculpt with the wand, then right-click to paste",
+                               retopo.clip.name.c_str());
+        input.notification_timer = 3.0f;
+    }
+    if (input.retopo_paste_request) {
+        input.retopo_paste_request = false;
+        if (retopo.wand_open) retopo_wand_close(retopo, retopo.wand_keep_shown ? retopo.wand_shown : -1);
+        scene.materialize_active_cpu();   // the paste snaps onto mesh.pos
+        if (const char* why = retopo_paste(retopo, mesh, input.mirror_x)) {
+            std::snprintf(input.notification, sizeof(input.notification), "%s", why);
+            input.notification_timer = 2.5f;
+        } else {
+            input.retopo_paste_panel = true;
+        }
+    }
+    if (input.retopo_paste_redo) {
+        input.retopo_paste_redo = false;
+        scene.materialize_active_cpu();
+        retopo_paste_redo(retopo, mesh);
     }
     if (input.retopo_dissolve_requested) {
         input.retopo_dissolve_requested = false;
