@@ -2,9 +2,9 @@
 
 Short, chronological log of notable changes. Newest on top.
 
-## 2026-10-26 — main.cpp split into files (pure moves) — UNTESTED
+## 2026-10-26 — main.cpp split into files (pure moves)
 
-*GL, wgpu and web build without warnings; Tint check + GL compute test pass. Strokes and level-ups ran clean on GL through the file-work step; the ops/render steps and the file + web side aren't hand-tested yet.*
+*User smoke-tested on GL, native wgpu and web: sculpt, undo/redo across levels, paint, bucket, picker, remesh, SDF merge, save/reopen, OBJ/PLY import and export, quit prompt.*
 
 - Browser glue (page callbacks, download, pickers, DOM listeners) → `web_bridge.cpp`.
 - WebGPU startup (surface, adapter, device) → `gpu/wgpu_surface.cpp` as `wgpu_init()`.
