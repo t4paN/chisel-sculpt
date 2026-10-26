@@ -2,6 +2,13 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-26 — Retopo wiring out of main.cpp — UNTESTED
+
+*Built GL, wgpu and web, no warnings. Not yet run by hand.*
+
+- Pen/click handling, undo, Build/Fill/Symmetrize/Dissolve, F framing, ring, dock + overlay, OBJ export → `retopo_input.cpp`; main.cpp's retopo share went from +762 lines to +43.
+- `retopo_save` mirrors `retopo_load`; double-click timing uses the C++ clock instead of GLFW's (same 0.4 s).
+
 ## 2026-10-25 — Retopo mode: mask, symmetrize, corner bridge
 
 *User-tested on a full head retopo.*
