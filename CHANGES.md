@@ -2,6 +2,9 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-26 — v0.3.7 released: retopology mode
+GitHub release (AppImage + Windows zip) and itch on all three channels (html5, linux, windows); web build checked in Chromium first, no shader or validation errors. README and MANUAL gained the Retopology section.
+
 ## 2026-10-26 — Retopo: copy an island, paste it onto another part of the sculpt
 
 - Wand right-click: Copy island (the piece under the pointer) / Paste island (greyed until there's a copy and a target).
