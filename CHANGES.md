@@ -2,6 +2,9 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-26 — v0.3.6 released
+GitHub release (AppImage + Windows zip) and itch on all three channels (html5, linux, windows); web build checked in Chromium first, no shader or validation errors.
+
 ## 2026-10-26 — main.cpp split into files (pure moves)
 
 *User smoke-tested on GL, native wgpu and web: sculpt, undo/redo across levels, paint, bucket, picker, remesh, SDF merge, save/reopen, OBJ/PLY import and export, quit prompt.*
