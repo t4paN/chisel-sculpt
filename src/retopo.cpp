@@ -6102,6 +6102,7 @@ void retopo_load(RetopoState& st, RetopoSnapshot&& s) {
     st.built = s.built && st.result.face_count() > 0;
     if (st.built) rebuild_edges(st.result);
     else          st.result.clear();
+    if (st.built && s.uv.fits(st.result)) st.uv = std::move(s.uv);
 }
 
 void retopo_save(RetopoState& st, RetopoSnapshot& out) {
@@ -6111,13 +6112,15 @@ void retopo_save(RetopoState& st, RetopoSnapshot& out) {
     out.result  = st.result;
     out.built   = st.built;
     out.next_id = st.next_id;
+    out.uv      = st.uv;
 }
 
-bool retopo_export_obj(const RetopoMesh& rm, const char* path) {
+bool retopo_export_obj(const RetopoMesh& rm, const char* path, const UvLayout* uv) {
     if (rm.faces.empty()) return false;
+    if (uv && !uv->fits(rm)) uv = nullptr;
     FILE* f = std::fopen(path, "wb");
     if (!f) return false;
-    std::fprintf(f, "# Chisel retopo: %u faces\n", rm.face_count());
+    std::fprintf(f, "# Chisel retopo: %u faces%s\n", rm.face_count(), uv ? ", UVs" : "");
     // Welds leave folded-away vertices behind: write only the ones a quad uses.
     std::vector<uint32_t> id(rm.v.size(), 0);
     for (uint32_t i : rm.faces) id[i] = 1;
@@ -6127,9 +6130,16 @@ bool retopo_export_obj(const RetopoMesh& rm, const char* path) {
         id[i] = ++next;
         std::fprintf(f, "v %.6f %.6f %.6f\n", rm.v[i].x, rm.v[i].y, rm.v[i].z);
     }
+    // One vt per face corner, in corner order: corner k is vt k + 1. Corners that share
+    // a vertex inside one island repeat the same value; OBJ readers weld those.
+    if (uv)
+        for (size_t k = 0; k < rm.faces.size(); k++) std::fprintf(f, "vt %.6f %.6f\n", uv->uv[2 * k], uv->uv[2 * k + 1]);
     for (size_t q = 0; q < rm.face_count(); q++) {
         std::fprintf(f, "f");
-        for (uint32_t k = rm.face_off[q]; k < rm.face_off[q + 1]; k++) std::fprintf(f, " %u", id[rm.faces[k]]);
+        for (uint32_t k = rm.face_off[q]; k < rm.face_off[q + 1]; k++) {
+            if (uv) std::fprintf(f, " %u/%u", id[rm.faces[k]], k + 1);
+            else    std::fprintf(f, " %u", id[rm.faces[k]]);
+        }
         std::fprintf(f, "\n");
     }
     std::fclose(f);

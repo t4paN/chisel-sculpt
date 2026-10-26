@@ -3,6 +3,7 @@
 // overlay + dock. retopo.cpp is the geometry; this is the wiring, kept out of main.cpp.
 #include "scene.h"          // first: pulls in glad, which must precede any GL header
 #include "retopo.h"
+#include "uv_unwrap.h"
 #include "input.h"
 #include "renderer.h"
 #include "tablet.h"
@@ -96,7 +97,8 @@ bool retopo_focus(const RetopoState& retopo, Camera& camera, float mesh_radius) 
 void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& mesh,
                   Renderer& renderer, const Camera& camera, const Tablet& tablet,
                   int win_w, int win_h, bool screen_buffers_dirty, bool imgui_wants_mouse) {
-    const bool retopo_on = input.interaction_mode == InputState::InteractionMode::RETOPO;
+    // UV mode (key 9) is RETOPO without the tools: nothing here acts on the pen there.
+    const bool retopo_on = input.retopo_tools_on();
     // The sculpt under screen point (mx, my), off the pen-down plane cache: the point,
     // its normal, and world units per pixel at that depth. False off the model.
     auto retopo_surface_at = [&](float mx, float my, Vec3& p, Vec3& n, float& world_per_px) {
@@ -656,7 +658,10 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
     }
     // Ctrl+Z / Ctrl+Shift+Z walk the stroke list here, never the sculpt's
     // history: retopo doesn't touch the sculpt.
-    if (retopo_on && (input.undo_requested || input.redo_requested)) {
+    // UV mode too: it shows the retopo, so its Ctrl+Z is retopo's (an undo can bring the
+    // mesh an older layout was made for back, and the layout with it: see UvLayout::key).
+    if (input.interaction_mode == InputState::InteractionMode::RETOPO
+        && (input.undo_requested || input.redo_requested)) {
         const bool ok = input.undo_requested ? retopo.undo() : retopo.redo();
         if (!ok) {
             std::snprintf(input.notification, sizeof(input.notification),
@@ -664,6 +669,17 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
             input.notification_timer = 1.2f;
         }
         input.undo_requested = input.redo_requested = false;
+    }
+    if (input.uv_unwrap_requested) {
+        input.uv_unwrap_requested = false;
+        double ms = 0.0;
+        const char* why = retopo.built ? uv_unwrap(retopo.result, UvSettings(), retopo.uv, ms)
+                                       : "Build a retopo mesh in mode 0 first";
+        if (why) std::snprintf(input.notification, sizeof(input.notification), "%s", why);
+        else     std::snprintf(input.notification, sizeof(input.notification), "Unwrapped: %u islands, %.0f%% of the square",
+                               retopo.uv.charts, retopo.uv.used * 100.0f);
+        input.notification_timer = 2.5f;
+        retopo.rev++;   // a new layout is unsaved work
     }
     if (input.retopo_build_requested) {
         input.retopo_build_requested = false;
@@ -798,9 +814,13 @@ std::string retopo_export(const RetopoState& retopo, InputState& input, const st
     }
     const std::string path = stem + "-retopo.obj", name = path;
 #endif
-    const bool ok = retopo_export_obj(retopo.result, path.c_str());
+    // UVs go along when there's a layout made for the mesh as it is now.
+    const bool uv_ok = !retopo.uv.empty() && retopo.uv.fits(retopo.result)
+                    && retopo.uv.key == uv_topology_key(retopo.result);
+    const bool ok = retopo_export_obj(retopo.result, path.c_str(), uv_ok ? &retopo.uv : nullptr);
     if (ok)
-        std::snprintf(input.notification, sizeof(input.notification), "Exported: %.400s", name.c_str());
+        std::snprintf(input.notification, sizeof(input.notification), "Exported%s: %.400s",
+                      uv_ok ? " with UVs" : "", name.c_str());
     else
         std::snprintf(input.notification, sizeof(input.notification),
                       retopo.built ? "Export failed: %.400s" : "Build first%.0s", name.c_str());
@@ -836,7 +856,8 @@ void draw_retopo_ui(InputState& input, RetopoState& retopo, Renderer& renderer, 
                          || input.mouse2_down || input.mouse3_down;
     // Dock first: it sets which stroke the cursor is over, and the overlay lights it
     // the same frame (background list, so it still draws under the dock).
-    draw_retopo_dock(input, retopo, win_w, win_h);
+    if (input.uv_mode) draw_uv_dock(input, retopo, win_w, win_h);
+    else               draw_retopo_dock(input, retopo, win_w, win_h);
     if (retopo.rev != audited_rev) { audited_rev = retopo.rev; retopo_audit(retopo); }
     draw_retopo_overlay(retopo, renderer, camera, win_w, win_h,
                         !cam_moving && !screen_buffers_dirty, input.mirror_x);

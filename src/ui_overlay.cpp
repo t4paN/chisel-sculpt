@@ -1040,8 +1040,13 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
         static char rtip[64];
         std::snprintf(rtip, sizeof(rtip), "Retopo (Shortcut: %s)", input.key_label(KeyAction::MODE_RETOPO));
         if (squircle_button("RetopoMode", "Retopo", rtip, ImVec2(calc_btn_w("Retopo"), btn_h),
-                            mode == InputState::InteractionMode::RETOPO))
+                            input.retopo_tools_on()))
             input.enter_retopo_mode();
+        ImGui::SameLine();
+        static char utip[64];
+        std::snprintf(utip, sizeof(utip), "UV (Shortcut: %s)", input.key_label(KeyAction::MODE_UV));
+        if (squircle_button("UvMode", "UV", utip, ImVec2(calc_btn_w("UV"), btn_h), input.uv_on()))
+            input.enter_uv_mode();
         // Paint-visibility toggle beside the Paint mode button. Hides albedo while
         // sculpting (the paint brush itself always forces it visible).
         ImGui::SameLine();

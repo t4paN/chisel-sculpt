@@ -306,6 +306,7 @@ const char* uv_unwrap(const RetopoMesh& rm, const UvSettings& s, UvLayout& out, 
                 if (!have[o + j] && src != ~0u) { out.uv[2 * (o + j)] = out.uv[2 * src]; out.uv[2 * (o + j) + 1] = out.uv[2 * src + 1]; }
         }
         out.key = uv_topology_key(rm);
+        out.used = used;
     }
     xatlas::Destroy(atlas);
     ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();

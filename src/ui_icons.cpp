@@ -92,6 +92,8 @@ const IconDef kIcons[(int)Icon::Count] = {
     /* RetopoErase  */ {{P("M4 14L13 5l6 6-9 9z"), P("M8 10l6 6"), P("M10 20h10")}, 3},
     // Drawn here: a wand, tip top-right, a four-point spark off the tip.
     /* RetopoWand   */ {{P("M3.5 20.5L13 11"), P("M16.5 2.5v3M16.5 9.5v3M11.5 7.5h3M18.5 7.5h3")}, 2},
+    // Drawn here: a square of texture, two of its four squares filled (a checker).
+    /* ModeUv       */ {{R(4, 4, 16, 16, 2), F("M6 6h6v6H6z"), F("M12 12h6v6h-6z")}, 3},
 };
 
 // ---- Minimal SVG path interpreter -------------------------------------------
@@ -322,6 +324,7 @@ const unsigned short kPixel[(int)Icon::Count][16] = {
     /* ui-trash        */ {0x0000,0x03C0,0x3FFC,0x3FFC,0x1FF8,0x1998,0x1998,0x1998,0x1998,0x1998,0x1998,0x1998,0x1998,0x1FF8,0x0FF0,0x0000},   // drawn here
     /* retopo-erase    */ {0x0000,0x0000,0x0000,0x0080,0x01C0,0x03E0,0x03F0,0x0DF0,0x1EE0,0x1F40,0x0F80,0x0700,0x0200,0x01FC,0x0000,0x0000},   // drawn here: tipped eraser
     /* retopo-wand     */ {0x0000,0x0020,0x0020,0x00D8,0x0020,0x0020,0x0180,0x0300,0x0600,0x0C00,0x1800,0x3000,0x6000,0x4000,0x0000,0x0000},   // drawn here: wand + spark
+    /* mode-uv         */ {0x0000,0x0000,0x3FFC,0x3F04,0x3F04,0x3F04,0x3F04,0x3F04,0x20FC,0x20FC,0x20FC,0x20FC,0x20FC,0x3FFC,0x0000,0x0000},   // drawn here: checkered square
 };
 } // namespace
 

@@ -27,6 +27,8 @@ const KeyActionInfo kKeyActions[(int)KeyAction::COUNT] = {
     {"mode_paint",    "Modes",   "Paint mode",          nullptr, {GLFW_KEY_4, 0}},
     {"mode_retopo",   "Modes",   "Retopo mode",
         "Sketch strokes on the model, then Build turns them into quads", {GLFW_KEY_0, 0}},
+    {"mode_uv",       "Modes",   "UV mode",
+        "Lay the retopo mesh flat for texturing (Unwrap in its panel)", {GLFW_KEY_9, 0}},
     {"brush_draw",    "Sculpt brushes", "Draw",      nullptr, {GLFW_KEY_D, 0}, KeyScope::Sculpt},
     {"brush_clay",    "Sculpt brushes", "Clay",      nullptr, {GLFW_KEY_T, 0}, KeyScope::Sculpt},
     {"brush_inflate", "Sculpt brushes", "Inflate",   nullptr, {GLFW_KEY_I, 0}, KeyScope::Sculpt},
@@ -397,9 +399,15 @@ void InputState::enter_paint_mode() {
 
 void InputState::enter_retopo_mode() {
     interaction_mode = InteractionMode::RETOPO;
+    uv_mode = false;
     clear_smooth_lock();
     bucket_active = false;
     color_pick_active = false;
+}
+
+void InputState::enter_uv_mode() {
+    enter_retopo_mode();
+    uv_mode = true;
 }
 
 void InputState::enter_sculpt_mode() {
@@ -1035,9 +1043,9 @@ static void mouse_button_callback(GLFWwindow* w, int button, int action, int mod
                 g_input->drag_mode = InputState::DragMode::SCULPT;
             } else if (g_input->interaction_mode == InputState::InteractionMode::RETOPO) {
                 // Retopo: a press on the model starts a stroke (main.cpp captures it),
-                // anywhere else orbits, as in Edit.
-                g_input->drag_mode = g_input->on_model ? InputState::DragMode::RETOPO
-                                                       : InputState::DragMode::ORBIT;
+                // anywhere else orbits, as in Edit. UV has no tools: it always orbits.
+                g_input->drag_mode = g_input->on_model && !g_input->uv_mode ? InputState::DragMode::RETOPO
+                                                                            : InputState::DragMode::ORBIT;
             } else if (g_input->on_model && g_input->color_pick_active
                        && g_input->current_brush == BrushType::PAINT
                        && g_input->interaction_mode == InputState::InteractionMode::EDIT) {
@@ -1235,6 +1243,10 @@ static void run_key_action(GLFWwindow* w, KeyAction a, bool repeat) {
             in.enter_retopo_mode();
             notify("Retopo: sketch on the model", 2.0f);
             break;
+        case KeyAction::MODE_UV:
+            in.enter_uv_mode();
+            notify("UV: Unwrap lays the retopo mesh flat", 2.0f);
+            break;
         case KeyAction::RETOPO_BUILD:
             if (!repeat) in.retopo_build_requested = true;
             break;
@@ -1379,7 +1391,7 @@ static void run_key_action(GLFWwindow* w, KeyAction a, bool repeat) {
             // Retopo shows the sculpt but doesn't edit it: Delete must not cost a mesh.
             // There it dissolves the picked edges instead.
             if (in.interaction_mode == InputState::InteractionMode::RETOPO) {
-                if (!repeat) in.retopo_dissolve_requested = true;
+                if (!repeat && !in.uv_mode) in.retopo_dissolve_requested = true;
                 break;
             }
             if (in.pose_brush_on()) in.pose_delete_key = true;

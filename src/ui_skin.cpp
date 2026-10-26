@@ -7,6 +7,7 @@
 #include "imgui_internal.h"   // ShadeVertsLinearColorGradientKeepAlpha
 #include "ui_fonts_generated.h"
 #include "retopo.h"
+#include "uv_unwrap.h"
 #include <algorithm>
 #include <cctype>
 #include <cstdarg>
@@ -1406,15 +1407,28 @@ void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
     if (icon_button("mPaint", Icon::ModePaint, kRailBtn, o))
         input.enter_paint_mode();
     ImGui::SameLine();
-    o.on = mode == InputState::InteractionMode::RETOPO; o.tip = "Retopo";
+    o.on = input.retopo_tools_on(); o.tip = "Retopo";
     o.key = input.key_label(KeyAction::MODE_RETOPO); o.corner = corner(KeyAction::MODE_RETOPO);
     if (icon_button("mRetopo", Icon::ModeRetopo, kRailBtn, o))
         input.enter_retopo_mode();
+    ImGui::SameLine();
+    o.on = input.uv_on(); o.tip = "UV";
+    o.key = input.key_label(KeyAction::MODE_UV); o.corner = corner(KeyAction::MODE_UV);
+    if (icon_button("mUv", Icon::ModeUv, kRailBtn, o))
+        input.enter_uv_mode();
     dock_post(modes_dock);
     // Rest height: a grown modes dock covers the rail instead of shoving it down.
     const float modes_bottom = ImGui::GetWindowPos().y +
         (modes_dock.rest.y > 0.0f ? modes_dock.rest.y : ImGui::GetWindowSize().y);
     end_panel();
+
+    // UV mode has no tools, so no rail.
+    if (input.uv_on()) {
+        g_rail_bottom = modes_bottom;
+        g_rail_right = kEdge;
+        g_strip_open = false;
+        return;
+    }
 
     // The touch rail is one brush button, drawn at its grown size from the start
     // (kRailTouchK): no grow tap, the first tap already opens the strip. The desktop
@@ -1952,6 +1966,10 @@ float brush_panel(InputState& input, int win_h) {
         }
         hint("Click the model");
         hint("to place");
+    } else if (input.uv_on()) {
+        heading("UV", nullptr);
+        hint("Unwrap in the UV panel");
+        hint("Drag to look around");
     } else if (mode == InputState::InteractionMode::RETOPO) {
         // Size for every tool: the band as drawn, or the reach of Grab / Smooth. Drawing
         // also plans the next stroke: Rings (A) and Density (W).
@@ -2387,6 +2405,7 @@ void apply_mode(InputState& input, int m) {
         case 2: input.interaction_mode = InputState::InteractionMode::SELECT; break;
         case 3: input.enter_paint_mode(); break;
         case 4: input.enter_retopo_mode(); break;
+        case 5: input.enter_uv_mode(); break;
     }
 }
 
@@ -2465,25 +2484,26 @@ void y2k_top(InputState& in, int W, const SkinStats& st) {
 
     // Slider shelf row.
     const float cy = kTitleH + (kTopH - kTitleH) * 0.5f;
-    // Mode well: Sculpt / Insert / Select / Paint / Retopo, the live one an orange tile.
-    static const char* modes[5] = {"Sculpt", "Insert", "Select", "Paint", "Retopo"};
-    const char* mkeys[5] = {in.key_label(KeyAction::MODE_SCULPT), in.key_label(KeyAction::MODE_INSERT),
+    // Mode well: Sculpt / Insert / Select / Paint / Retopo / UV, the live one an orange tile.
+    static const char* modes[6] = {"Sculpt", "Insert", "Select", "Paint", "Retopo", "UV"};
+    const char* mkeys[6] = {in.key_label(KeyAction::MODE_SCULPT), in.key_label(KeyAction::MODE_INSERT),
                             in.key_label(KeyAction::MODE_SELECT), in.key_label(KeyAction::MODE_PAINT),
-                            in.key_label(KeyAction::MODE_RETOPO)};
+                            in.key_label(KeyAction::MODE_RETOPO), in.key_label(KeyAction::MODE_UV)};
     const bool smooth_on = in.is_smooth_active();
     int mode = in.interaction_mode == InputState::InteractionMode::INSERT ? 1
              : in.interaction_mode == InputState::InteractionMode::SELECT ? 2
+             : in.uv_on() ? 5
              : in.interaction_mode == InputState::InteractionMode::RETOPO ? 4
              : in.paint_mode ? 3 : 0;
-    float bw[5], total = 4.0f;
-    for (int i = 0; i < 5; i++) {
+    float bw[6], total = 4.0f;
+    for (int i = 0; i < 6; i++) {
         bw[i] = ysize(true, 11.0f, modes[i]).x + ysize(false, 9.0f, mkeys[i]).x + 5.0f + 24.0f;
         total += bw[i] + (i ? 2.0f : 0.0f);
     }
     x = 10.0f;
     inset(dl, ImVec2(x, cy - 15), ImVec2(x + total, cy + 15), 4.0f);
     float bx = x + 2.0f;
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < 6; i++) {
         bool hv, held;
         char id[16]; std::snprintf(id, sizeof id, "##ym%d", i);
         ImVec2 a(bx, cy - 13), b(bx + bw[i], cy + 13);
@@ -2519,7 +2539,7 @@ void y2k_top(InputState& in, int W, const SkinStats& st) {
         char id[16]; std::snprintf(id, sizeof id, "##ys%d", i);
         float t = y2k_track(id, dl, ImVec2(x, cy + 1), sw, 14.0f, sl[i].pct, nullptr);
         // Retopo draws with the brush ring, so Size (only) stays live there.
-        const bool retopo_size = i == 0 && in.interaction_mode == InputState::InteractionMode::RETOPO;
+        const bool retopo_size = i == 0 && in.retopo_tools_on();
         if (t >= 0.0f && (editing || retopo_size)) set_feel(in, i, t);
         x += sw + 14.0f;
     }
@@ -2569,6 +2589,7 @@ void y2k_left(InputState& in, int H, const AlphaLibrary* lib) {
         const char* nm = in.paint_mode ? "Paint" : "Draw";
         if (mode == InputState::InteractionMode::INSERT)      { icon = Icon::ModeInsert; nm = "Insert"; }
         else if (mode == InputState::InteractionMode::SELECT) { icon = Icon::ModeSelect; nm = "Select"; }
+        else if (in.uv_on()) { icon = Icon::ModeUv; nm = "UV"; }
         else if (mode == InputState::InteractionMode::RETOPO) { icon = Icon::ModeRetopo; nm = "Retopo"; }
         else {
             for (int i = 0; i < count; i++)
@@ -4326,4 +4347,107 @@ void draw_retopo_dock(InputState& input, RetopoState& st, int win_w, int win_h) 
             quick = false;
         end_panel();
     }
+}
+
+// UV mode's panel: the layout as a flat picture (each island its own colour), Unwrap
+// and Export. Same window manners as the retopo dock, and the same spot: only one of
+// the two is ever up.
+void draw_uv_dock(InputState& input, RetopoState& st, int win_w, int win_h) {
+    st.hover_id = 0;   // no stroke list here to hover, so the overlay lights none
+    const float bh = 30.0f, gap = 6.0f;
+    const float min_w = (g_dos ? 320.0f : 260.0f) + 20.0f;
+    const float top = g_cmd_bottom + 12.0f;
+    const float bottom = (g_status_top > top ? g_status_top : (float)win_h - kEdge) - 12.0f;
+    const ImGuiWindowFlags flags =
+        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
+        ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoCollapse |
+        ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoBringToFrontOnFocus;
+    ImGui::SetNextWindowPos(ImVec2((float)win_w - kEdge, top), ImGuiCond_FirstUseEver, ImVec2(1.0f, 0.0f));
+    ImGui::SetNextWindowSize(ImVec2(min_w + 60.0f, std::max(360.0f, std::min(480.0f, bottom - top))),
+                             ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSizeConstraints(ImVec2(min_w, 300.0f), ImVec2((float)win_w, (float)win_h));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f, 10.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(gap, gap));
+    ImGui::PushStyleColor(ImGuiCol_ResizeGrip, IM_COL32(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_ResizeGripHovered, with_alpha(kAccent, 0.6f));
+    ImGui::PushStyleColor(ImGuiCol_ResizeGripActive, kAccent);
+    const bool shown = ImGui::Begin("##UvDock", nullptr, flags);
+    ImGui::PopStyleColor(3);
+    if (!shown) { end_panel(); return; }
+    window_panel(14.0f);
+    {   // A shrinking app window must not strand it off screen.
+        const ImVec2 p = ImGui::GetWindowPos(), sz = ImGui::GetWindowSize();
+        const ImVec2 c(std::max(0.0f, std::min(p.x, (float)win_w - sz.x)),
+                       std::max(0.0f, std::min(p.y, (float)win_h - sz.y)));
+        if (c.x != p.x || c.y != p.y) ImGui::SetWindowPos(c);
+    }
+    const float w = ImGui::GetContentRegionAvail().x;
+    const RetopoMesh& rm = st.result;
+    const UvLayout& L = st.uv;
+    // Hashing the corner lists is a few microseconds for a retopo mesh: cheaper than
+    // trusting every edit to say it changed the faces.
+    const bool have = st.built && !L.empty() && L.fits(rm);
+    const bool fresh = have && L.key == uv_topology_key(rm);
+
+    label_item(UiFont::SansSemibold, 13.0f, kText, "UV Layout", w, 18.0f);
+    const float foot_h = 18.0f + bh + gap * 3.0f;
+    const float side = std::max(80.0f, std::min(w, ImGui::GetContentRegionAvail().y - foot_h));
+    const ImVec2 o0 = ImGui::GetCursorScreenPos();
+    const ImVec2 sq0(o0.x + std::floor((w - side) * 0.5f), o0.y), sq1(sq0.x + side, sq0.y + side);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(sq0, sq1, IM_COL32(0, 0, 0, 70), g_dos ? 0.0f : rad(4.0f));
+    if (have) {
+        // An island's colour: a golden-ratio walk round the hue circle, so neighbours in
+        // the packing's order never come out alike. DOS cycles its own palette instead.
+        static const ImU32 kDos[] = {cga::light_cyan, cga::light_green, cga::yellow, cga::light_magenta, cga::light_red};
+        auto island_col = [](uint32_t c, float a) {
+            if (g_dos) return with_alpha(kDos[c % 5], a);
+            float r, g, b;
+            ImGui::ColorConvertHSVtoRGB(std::fmod(c * 0.618034f, 1.0f), 0.55f, 0.95f, r, g, b);
+            return ImGui::GetColorU32(ImVec4(r, g, b, a));
+        };
+        const float k = fresh ? 1.0f : 0.35f;
+        auto at = [&](uint32_t corner) {   // v up in UV, y down on screen
+            return ImVec2(sq0.x + L.uv[2 * corner] * side, sq1.y - L.uv[2 * corner + 1] * side);
+        };
+        ImVec2 pts[64];
+        for (uint32_t f = 0; f < rm.face_count(); f++) {
+            const uint32_t c = L.face_chart[f];
+            if (c == ~0u) continue;
+            const uint32_t o = rm.face_off[f], n = std::min<uint32_t>(rm.face_size(f), 64);
+            for (uint32_t j = 0; j < n; j++) pts[j] = at(o + j);
+            dl->AddConvexPolyFilled(pts, (int)n, island_col(c, 0.30f * k));
+            dl->AddPolyline(pts, (int)n, island_col(c, 0.95f * k), ImDrawFlags_Closed, 1.0f);
+        }
+    }
+    dl->AddRect(sq0, sq1, kDivider, g_dos ? 0.0f : rad(4.0f));
+    if (!fresh) {
+        const char* msg = !st.built ? "Build a retopo mesh in mode 0"
+                        : have      ? "Out of date: the mesh changed"
+                                    : "Not unwrapped yet";
+        ImFont* fnt = F(UiFont::Sans);
+        const ImVec2 ts = fnt ? fnt->CalcTextSizeA(12.0f, FLT_MAX, 0.0f, msg) : ImVec2(0, 0);
+        dl->AddText(fnt, 12.0f, ImVec2(sq0.x + (side - ts.x) * 0.5f, sq0.y + (side - ts.y) * 0.5f), kMuted, msg);
+    }
+    ImGui::Dummy(ImVec2(w, side));
+
+    char ro[96];
+    if (fresh) std::snprintf(ro, sizeof ro, "%u islands \xC2\xB7 %.0f%% of the square", L.charts, L.used * 100.0f);
+    else if (st.built) std::snprintf(ro, sizeof ro, "%u faces", rm.face_count());
+    else std::snprintf(ro, sizeof ro, "no retopo mesh");
+    label_item(UiFont::Mono, 12.0f, kMuted, ro, 0.0f, 18.0f);
+
+    const float x0 = ImGui::GetCursorPosX();
+    if (chip(have ? "Unwrap again" : "Unwrap", false, bh, st.built)) input.uv_unwrap_requested = true;
+    if (ImGui::IsItemHovered())
+        tooltip(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), TipSide::Left,
+                st.built ? "Cut the retopo mesh into islands and lay them flat" : "Build a retopo mesh in mode 0 first",
+                nullptr);
+    ImGui::SameLine();
+    ImGui::SetCursorPosX(x0 + w - bh);
+    BtnOpts o;
+    o.look = Look::Bar; o.side = TipSide::Left; o.icon_px = 18.0f;
+    o.tip = fresh ? "Export OBJ with UVs" : "Export OBJ (unwrap first for UVs)"; o.enabled = st.built;
+    if (icon_button("uvExport", Icon::CmdExport, bh, o)) input.retopo_export_requested = true;
+    end_panel();
 }

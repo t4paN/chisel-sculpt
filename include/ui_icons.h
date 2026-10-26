@@ -19,6 +19,7 @@ enum class Icon {
     RetopoPencil, RetopoCut, UiTrash, // mode 0's draw and cut tools; delete in lists
     RetopoErase,                      // mode 0's eraser
     RetopoWand,                       // mode 0's wand (hole fills)
+    ModeUv,                           // UV mode: a checkered square
     Count
 };
 

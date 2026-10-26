@@ -84,6 +84,26 @@ struct RetopoMesh {
     const uint32_t* face(size_t f) const { return faces.data() + face_off[f]; }
 };
 
+// UV mode's (key 9) layout of `result`, made by uv_unwrap (uv_unwrap.h). UVs belong to
+// face corners, not vertices: a vertex on a seam sits in two islands at once and has a
+// different UV in each. So it runs parallel to RetopoMesh::faces, the way an OBJ's
+// "f v/vt" does.
+struct UvLayout {
+    std::vector<float>    uv;          // 2 per face corner, parallel to RetopoMesh::faces; 0..1, v up (OBJ); faces run counter-clockwise, as in 3D
+    std::vector<uint32_t> face_chart;  // per face, the island it landed in (~0u = none: degenerate)
+    uint32_t charts = 0;
+    float    used = 0.0f;              // how much of the square the islands cover, 0..1
+    // The topology it was made for (uv_topology_key). Moving vertices keeps a layout
+    // usable (just stretched); adding, cutting or erasing faces doesn't.
+    uint64_t key = 0;
+    bool empty() const { return uv.empty(); }
+    void clear() { uv.clear(); face_chart.clear(); charts = 0; used = 0.0f; key = 0; }
+    // Sized for rm (a cheap guard for a file or a bug; the key is the real test).
+    bool fits(const RetopoMesh& rm) const {
+        return uv.size() == rm.faces.size() * 2 && face_chart.size() == rm.face_count();
+    }
+};
+
 // One step of retopo history: everything an edit can change. Retopo is small (a few
 // thousand vertices), so a whole copy per step costs ~100 KB and can't drift the way a
 // diff can. Eyes and selection aren't history: undo leaves them as they are.
@@ -92,6 +112,9 @@ struct RetopoSnapshot {
     RetopoMesh result;
     bool built = false;
     uint32_t next_id = 1;
+    // Only for saving and loading (retopo_save / retopo_load): history steps leave it
+    // empty. A layout isn't an edit; undo makes it stale or fresh again by its key.
+    UvLayout uv;
     size_t bytes() const;
 };
 
@@ -140,6 +163,8 @@ struct RetopoState {
 
     RetopoMesh result;
     bool built = false;
+    // UV mode's layout of `result` (empty = never unwrapped). Not history; see UvLayout.
+    UvLayout uv;
     // Wand: a hole clicked, its fills worked out whole at the click (see retopo_wand_open).
     // While open, `result` shows wand_base or one option swapped in; nothing is history
     // until one is kept.
@@ -524,8 +549,9 @@ void retopo_load(RetopoState& st, RetopoSnapshot&& s);
 void retopo_save(RetopoState& st, RetopoSnapshot& out);
 
 // Write state.result as an OBJ, every face as it is (quads, triangles, bigger ones).
-// Returns false if there's nothing to write or the file can't be opened.
-bool retopo_export_obj(const RetopoMesh& rm, const char* path);
+// With uv (a layout made for rm: the caller checks it's current), each corner gets its
+// vt too. Returns false if there's nothing to write or the file can't be opened.
+bool retopo_export_obj(const RetopoMesh& rm, const char* path, const UvLayout* uv = nullptr);
 
 // Copy / paste an island (Wand right-click), fitted onto another part of the sculpt.
 // retopo_measure: the sculpt's pose over a patch of triangles, given their centres p

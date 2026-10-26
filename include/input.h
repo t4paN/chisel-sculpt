@@ -87,7 +87,7 @@ struct ProfileSettings {
 // saved rebind of it is silently dropped. Append new actions anywhere; order is only
 // the order the Key bindings window lists them in.
 enum class KeyAction : int {
-    MODE_SCULPT, MODE_INSERT, MODE_SELECT, MODE_PAINT, MODE_RETOPO,
+    MODE_SCULPT, MODE_INSERT, MODE_SELECT, MODE_PAINT, MODE_RETOPO, MODE_UV,
     BRUSH_DRAW, BRUSH_CLAY, BRUSH_INFLATE, BRUSH_CREASE, BRUSH_PINCH,
     BRUSH_MOVE, BRUSH_LIMB, BRUSH_POSE, BRUSH_MASK, BRUSH_PREV, BRUSH_NEXT,
     PAINT_BUCKET, PAINT_PICKER,
@@ -115,7 +115,7 @@ constexpr int kKeyModMask = GLFW_MOD_CONTROL | GLFW_MOD_SHIFT | GLFW_MOD_ALT;
 // what lets one letter mean a sculpt brush in one and a paint tool in the other.
 // Global keys (view, files, mask, brush feel) work everywhere, but in the mode that
 // owns a scoped key, that key wins over a Global one bound to the same letter.
-enum class KeyScope : uint8_t { Global, Sculpt, Paint, Retopo };
+enum class KeyScope : uint8_t { Global, Sculpt, Paint, Retopo, Uv };
 
 struct KeyActionInfo {
     const char* id;      // on-disk name, stable forever
@@ -626,6 +626,13 @@ struct InputState {
     // never drop a sculptor into it.
     enum class InteractionMode { EDIT, INSERT, SELECT, RETOPO };
     InteractionMode interaction_mode;
+    // UV (key 9): RETOPO with this set, the way Paint is EDIT with paint_mode. It shows
+    // the retopo mesh and its overlay but none of its tools: the pen orbits, retopo's
+    // keys are dead, and its dock gives way to the UV panel. Only means anything in
+    // RETOPO; enter_retopo_mode clears it.
+    bool uv_mode = false;
+    bool uv_on() const { return interaction_mode == InteractionMode::RETOPO && uv_mode; }
+    bool retopo_tools_on() const { return interaction_mode == InteractionMode::RETOPO && !uv_mode; }
 
     // Insert-mode primitive selected in the shape picker (INSERT mode UI).
     enum class InsertShape { SPHERE, BOX, CYLINDER };
@@ -657,6 +664,8 @@ struct InputState {
     void enter_paint_mode();
     void enter_sculpt_mode();
     void enter_retopo_mode();
+    void enter_uv_mode();
+    bool uv_unwrap_requested = false;  // the UV panel's Unwrap
     // What retopo mode's bar (always up in mode 0) and Space ask the main loop for.
     bool retopo_build_requested = false;
     bool retopo_fill_requested = false;    // H / the dock's Fill: quads over holes
@@ -690,7 +699,7 @@ struct InputState {
     // Sculpt (Insert and Select keep the sculpt keys, as before the split). Retopo has
     // its own, so no brush key reaches into it.
     KeyScope key_scope() const {
-        if (interaction_mode == InteractionMode::RETOPO) return KeyScope::Retopo;
+        if (interaction_mode == InteractionMode::RETOPO) return uv_mode ? KeyScope::Uv : KeyScope::Retopo;
         return paint_mode && interaction_mode == InteractionMode::EDIT ? KeyScope::Paint
                                                                       : KeyScope::Sculpt;
     }

@@ -48,6 +48,10 @@ static constexpr uint8_t  LAYR_FORMAT = 1;
 // its own and fills what an older one lacks with defaults. Format 2 (2026-10-25) adds
 // the vertex mask; a format 1 file loads with nothing masked.
 static constexpr uint8_t  RTPO_FORMAT = 2;
+// UV mode's layout (2026-10-26) rides in its own optional RTUV chunk after RTPO, not in
+// a format 3 RTPO: readers up to RTPO 2 refuse a newer RTPO format whole, and that would
+// lose an older build its retopo just because the file also has UVs.
+static constexpr uint8_t  RTUV_FORMAT = 1;
 
 struct ChunkHeader {
     char     tag[4];
@@ -340,6 +344,22 @@ static void write_rtpo_chunk(std::ofstream& f, const RetopoSnapshot& r) {
     write_chunk_end(f, sp);
 }
 
+// RTUV: u8 format, u64 topology key, u32 islands, f32 used, u32 corner count, then u,v
+// per corner (RTPO's corner order) and u32 island per face. Only written with an RTPO
+// whose result it was made for; the loader drops it if the counts don't match.
+static void write_rtuv_chunk(std::ofstream& f, const RetopoSnapshot& r) {
+    std::streampos sp;
+    write_chunk_begin(f, "RTUV", sp);
+    write_u8(f, RTUV_FORMAT);
+    write_raw(f, &r.uv.key, 8);
+    write_u32(f, r.uv.charts);
+    write_raw(f, &r.uv.used, 4);
+    write_u32(f, (uint32_t)(r.uv.uv.size() / 2));
+    write_floats(f, r.uv.uv.data(), r.uv.uv.size());
+    write_u32s(f, r.uv.face_chart);
+    write_chunk_end(f, sp);
+}
+
 SaveResult save_project(const char* path, const ProjectData& data) {
     std::ofstream f(path, std::ios::binary);
     if (!f.is_open()) return SaveResult::ERR_OPEN;
@@ -356,6 +376,8 @@ SaveResult save_project(const char* path, const ProjectData& data) {
     }
     if (!data.retopo.strokes.empty() || data.retopo.result.face_count() > 0)
         write_rtpo_chunk(f, data.retopo);
+    if (!data.retopo.uv.empty() && data.retopo.uv.fits(data.retopo.result))
+        write_rtuv_chunk(f, data.retopo);
 
     if (!f.good()) return SaveResult::ERR_WRITE;
     return SaveResult::OK;
@@ -718,6 +740,24 @@ static bool read_rtpo_chunk(ChunkReader& r, ProjectData& data) {
     return true;
 }
 
+// RTUV (see write_rtuv_chunk). Read after RTPO: it must fit the result just loaded.
+static bool read_rtuv_chunk(ChunkReader& r, ProjectData& data) {
+    uint8_t format;
+    UvLayout L;
+    uint32_t nc;
+    if (!r.read_u8(format) || format == 0 || format > RTUV_FORMAT) return false;
+    if (!r.read_raw(&L.key, 8) || !r.read_u32(L.charts) || !r.read_raw(&L.used, 4) || !r.read_u32(nc)) return false;
+    const RetopoMesh& m = data.retopo.result;
+    if (nc != m.faces.size() || nc > r.remaining() / 8) return false;
+    if (!r.read_float_vec(L.uv, (size_t)nc * 2) || !r.read_u32_vec(L.face_chart, m.face_count())) return false;
+    for (float& t : L.uv) if (!(t >= 0.0f && t <= 1.0f)) t = 0.0f;   // NaN lands here too
+    for (uint32_t& c : L.face_chart) if (c >= L.charts) c = ~0u;
+    if (!L.fits(m)) return false;
+    data.retopo.uv = std::move(L);
+    std::printf("[uv] loaded: %u islands over %u faces\n", data.retopo.uv.charts, m.face_count());
+    return true;
+}
+
 // v2+ reader: file already validated (magic + version ok) and `f` positioned
 // just past the 8-byte header. Layout differences are feature-gated: v3+
 // carries per-vertex paint colour in each mesh body (has_color), v5+ carries
@@ -758,6 +798,11 @@ static LoadResult load_project_v2(std::ifstream& f, std::streamoff file_size,
                 data.retopo = RetopoSnapshot{};
                 std::printf("[load] the retopo section didn't read back: the project "
                             "loads without it\n");
+            }
+        } else if (std::memcmp(hdr.tag, "RTUV", 4) == 0) {
+            if (!read_rtuv_chunk(cr, data)) {
+                data.retopo.uv.clear();
+                std::printf("[load] the UV layout didn't read back: unwrap again in UV mode\n");
             }
         } else if (std::memcmp(hdr.tag, "SCEN", 4) == 0) {
             if (!read_scen_chunk(cr, data)) return LoadResult::ERR_CORRUPT;

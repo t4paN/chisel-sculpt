@@ -60,7 +60,8 @@ void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse) {
 #endif
     // ---- Cursor visibility ----
     // Retopo counts as an edit mode here: it shows the brush ring (the band width).
-    const bool retopo_mode = input.interaction_mode == InputState::InteractionMode::RETOPO;
+    // UV has no tools, so it keeps the OS pointer.
+    const bool retopo_mode = input.retopo_tools_on();
     bool non_edit_mode = input.interaction_mode != InputState::InteractionMode::EDIT
                       && !retopo_mode;
     // Hide the OS cursor while sculpting (we draw our own brush cursor).
