@@ -107,18 +107,23 @@ const char* uv_unwrap(const RetopoMesh& rm, const UvSettings& s, UvLayout& out, 
     xatlas::ChartOptions co;
     co.maxCost = s.max_cost;
     co.fixWinding = true;
-    // Only the islands' shapes are kept from this pass, so its packing is the default
-    // quick one; pass 2 packs for real once the islands are repaired.
-    xatlas::Generate(atlas, co, xatlas::PackOptions());
+    // Only the islands' shapes are kept from this pass, so its packing is a quick one;
+    // pass 2 packs for real once the islands are repaired. Never let xatlas's packer turn
+    // an island: both its turns are reflections (the quarter turn swaps u and v; the
+    // turn onto the long axis projects onto a frame that can be left-handed), so they
+    // hand islands back mirrored. We turn them ourselves before pass 2.
+    xatlas::PackOptions quick;
+    quick.rotateCharts = quick.rotateChartsToAxis = false;
+    xatlas::Generate(atlas, co, quick);
     if (atlas->meshCount != 1 || atlas->meshes[0].indexCount != tri_idx.size()) {
         xatlas::Destroy(atlas);
         return "the unwrapper produced nothing";
     }
     xatlas::Mesh& m = atlas->meshes[0];
 
-    // fixWinding looks at one face per island and still hands back whole islands mirrored
-    // (half of them on a real retopo, 2026-10-26; never part of one). So count each
-    // island's backwards triangles and mirror the island back across its own box.
+    // With the turns off this should find nothing, but fixWinding only looks at one face
+    // per island: count each island's backwards triangles anyway and mirror a backwards
+    // island across its own box. Safe here: pass 2 packs it afresh.
     std::vector<uint32_t> neg(m.chartCount, 0), tot(m.chartCount, 0);
     std::vector<float> u_lo(m.chartCount, 1e30f), u_hi(m.chartCount, -1e30f);
     for (uint32_t t = 0; t < nt; t++) {
@@ -207,6 +212,41 @@ const char* uv_unwrap(const RetopoMesh& rm, const UvSettings& s, UvLayout& out, 
             if (c != ~0u) { if (renum[c] == ~0u) renum[c] = out.charts++; c = renum[c]; }
     }
 
+    // Each island turned (a true rotation, never a reflection) so its long axis lies along
+    // u: the principal axis of its corners, about their centre. That's the packing help
+    // xatlas's own turns gave, without the mirroring.
+    {
+        std::vector<double> sx(out.charts, 0.0), sy(out.charts, 0.0), n(out.charts, 0.0),
+                            sxx(out.charts, 0.0), syy(out.charts, 0.0), sxy(out.charts, 0.0);
+        for (uint32_t f = 0; f < nf; f++) {
+            const uint32_t c = out.face_chart[f];
+            if (c == ~0u) continue;
+            for (uint32_t j = rm.face_off[f]; j < rm.face_off[f + 1]; j++) {
+                const double x = flat[2 * j], y = flat[2 * j + 1];
+                sx[c] += x; sy[c] += y; n[c] += 1.0;
+                sxx[c] += x * x; syy[c] += y * y; sxy[c] += x * y;
+            }
+        }
+        std::vector<float> cs(out.charts, 1.0f), sn(out.charts, 0.0f), mx(out.charts), my(out.charts);
+        for (uint32_t c = 0; c < out.charts; c++) {
+            if (n[c] <= 0.0) continue;
+            mx[c] = (float)(sx[c] / n[c]); my[c] = (float)(sy[c] / n[c]);
+            const double cxx = sxx[c] / n[c] - mx[c] * (double)mx[c], cyy = syy[c] / n[c] - my[c] * (double)my[c];
+            const double cxy = sxy[c] / n[c] - mx[c] * (double)my[c];
+            const double a = -0.5 * std::atan2(2.0 * cxy, cxx - cyy);   // turn the major axis onto u
+            cs[c] = (float)std::cos(a); sn[c] = (float)std::sin(a);
+        }
+        for (uint32_t f = 0; f < nf; f++) {
+            const uint32_t c = out.face_chart[f];
+            if (c == ~0u) continue;
+            for (uint32_t j = rm.face_off[f]; j < rm.face_off[f + 1]; j++) {
+                const float x = flat[2 * j] - mx[c], y = flat[2 * j + 1] - my[c];
+                flat[2 * j]     = mx[c] + x * cs[c] - y * sn[c];
+                flat[2 * j + 1] = my[c] + x * sn[c] + y * cs[c];
+            }
+        }
+    }
+
     // ---- Pass 2: pack the repaired islands into the square, with padding. xatlas finds
     // the islands by shared UV corners; one vertex per (island, mesh vertex, UV) keeps a
     // seam vertex's two copies apart, and the island as material keeps islands from
@@ -248,6 +288,7 @@ const char* uv_unwrap(const RetopoMesh& rm, const UvSettings& s, UvLayout& out, 
     xatlas::PackOptions po;
     po.resolution = (uint32_t)s.resolution;
     po.padding    = (uint32_t)s.padding;
+    po.rotateCharts = po.rotateChartsToAxis = false;   // see pass 1: they mirror
     xatlas::Generate(atlas, xatlas::ChartOptions(), po);   // on a UV mesh: find its islands, then pack
 
     const char* why = nullptr;
@@ -272,12 +313,11 @@ const char* uv_unwrap(const RetopoMesh& rm, const UvSettings& s, UvLayout& out, 
             out.uv[2 * tri_corner[i] + 1] = v.uv[1] * ih;
             have[tri_corner[i]] = 1;
         }
-        // The packer turns some islands a quarter turn by swapping u and v, which mirrors
-        // them (likely what pass 1's mirrored islands were too). Same cure: per island,
-        // signed area over its faces; mostly backwards = mirror it across its own box.
+        // Tripwire: with the packer's turns off, no island should come out backwards.
+        // (Mirroring one here would be wrong anyway: islands nest by shape, so flipping
+        // one across its box lands it on its neighbours. That was the 2026-10-26 overlap.)
         {
             std::vector<double> area(out.charts, 0.0);
-            std::vector<float> lo(out.charts, 1e30f), hi(out.charts, -1e30f);
             for (uint32_t f = 0; f < nf; f++) {
                 const uint32_t c = out.face_chart[f];
                 if (c == ~0u) continue;
@@ -285,13 +325,7 @@ const char* uv_unwrap(const RetopoMesh& rm, const UvSettings& s, UvLayout& out, 
                 for (uint32_t j = 0; j < k; j++) {
                     const uint32_t a = o + j, b = o + (j + 1) % k;
                     area[c] += (double)out.uv[2 * a] * out.uv[2 * b + 1] - (double)out.uv[2 * b] * out.uv[2 * a + 1];
-                    if (have[a]) { lo[c] = std::min(lo[c], out.uv[2 * a]); hi[c] = std::max(hi[c], out.uv[2 * a]); }
                 }
-            }
-            for (uint32_t f = 0; f < nf; f++) {
-                const uint32_t c = out.face_chart[f];
-                if (c == ~0u || area[c] >= 0.0) continue;
-                for (uint32_t j = rm.face_off[f]; j < rm.face_off[f + 1]; j++) out.uv[2 * j] = lo[c] + hi[c] - out.uv[2 * j];
             }
             for (uint32_t c = 0; c < out.charts; c++) turned += area[c] < 0.0;
         }
@@ -312,7 +346,7 @@ const char* uv_unwrap(const RetopoMesh& rm, const UvSettings& s, UvLayout& out, 
     ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     if (why) { out.clear(); return why; }
     std::printf("[uv] unwrap: %u faces -> %u islands, %.0f%% of the square used, %.1f ms"
-                " (mirrored back %u + %u after packing, split faces %u, corners unfolded %u, faces in no island %u, corners dotted %u)\n",
+                " (mirrored back %u, BACKWARDS AFTER PACKING %u, split faces %u, corners unfolded %u, faces in no island %u, corners dotted %u)\n",
                 nf, out.charts, used * 100.0f, ms, mirrored, turned, split, unfolded, orphans, dotted);
     return nullptr;
 }
