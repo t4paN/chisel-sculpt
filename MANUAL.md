@@ -55,6 +55,7 @@ mesh to sculpt; left-drag off the mesh to orbit. That's 90% of the app right the
 | 2 | **Insert** | Dropping new sphere primitives into the scene |
 | 3 | **Select** | Picking, moving, scaling, deleting whole objects |
 | 4 | **Paint** | Vertex-colour painting |
+| 0 | **Retopo** | Drawing a clean low-poly over the sculpt (see [Retopology](#retopology-retopo-mode-0)) |
 
 ## Sculpting (Edit mode)
 
@@ -257,6 +258,64 @@ Paint lives on the base cage of the multires stack, so it survives level switche
 subdivision, remeshing, and voxel merges. PLY export carries it out of the app,
 standing upright (Z-up, the way Blender reads PLY); re-importing a Chisel PLY turns it
 back.
+
+## Retopology (Retopo mode, 0)
+
+A low-poly cage drawn by hand over the sculpt, for baking and game use. It lives beside
+the sculpt and never changes it: the sculpt can keep changing underneath, and the cage
+snaps back onto whatever is there. It works on the **active object**, so select the one
+you mean before pressing `0`.
+
+**Strokes become quads.** Draw a fat stroke and it is built the moment the pen lifts:
+closed (back near its start) it is a **donut** (rings round an eye or a mouth), open it
+is a **strip**. A small panel by the pen sets its **Size**, **Rings** (quads across) and
+**Density** (quads along). A strip whose end reaches another island joins it; one drawn
+alongside an island zips onto its edge. Strokes are listed in the dock, one row each, with
+an eye, a name and the same sliders.
+
+Once grabbed, smoothed, cut or joined, an island is **edited geometry**: Build keeps it as
+it is, and lines drawn from its lit vertices (orange dot) or edges (bold blue) connect
+things instead of drawing new strips.
+
+| Input | Action |
+|---|---|
+| D | Draw: strips and donuts; from an edited island, lines (below) |
+| G | Grab: drag the built quads (soft falloff), they stay on the surface |
+| Shift + drag | Smooth: even out the quads under the ring; outlines slide along themselves |
+| C | Cut: a line across the quads splits every face it crosses; starts and ends snap to vertices |
+| E | Erase: the edge nearest the ring goes, its two faces become one. Ctrl + E: whole faces |
+| M | Mask: freeze vertices against Grab, Smooth and Erase. Ctrl unmasks, Shift softens; Ctrl+I inverts, Ctrl+A clears |
+| Q | Wand (below) |
+| H | Fill every hole with an even number of sides (or just the outlines double-clicked) |
+| Space | Build: rebuild every unedited stroke |
+| Del | Dissolve the picked edges |
+| Double-click an edge | Pick its edge loop (Ctrl adds or drops one) |
+| Shift + Ctrl + click | Pick the shortest run of edges from the last edge picked |
+| F | Frame the piece being worked on |
+| RMB on an island | Its Size / Rings / Density, or Merge for several edited islands |
+| Ctrl+Z / Ctrl+Shift+Z | Retopo's own undo; the sculpt's history is left alone |
+
+**Lines from an edited island** (Draw, starting on a lit vertex or edge): out into open
+space or across to another island, a one-quad-wide **bridge**; from a hole's rim through
+the hole to the rim again, a **spine** with the hole filled round it; vertex to vertex of
+one outline across a notch, the **notch** closes; outline edge to outline vertex, the gap
+closes with a quad. Starting on a picked loop **extrudes** it as far as the line goes.
+
+**Wand (Q).** Click a hole: every way to fill it is listed, hovering one shows it on the
+model, a click keeps it. Drag a lasso: cleanup inside it (near-miss vertices weld,
+slivers and second copies go, tiny holes close). Right-click an island: **Copy island**.
+Then lasso bare sculpt where the copy should go, right-click, **Paste island**: it is
+moved, tilted and scaled to fit what is inside the lasso (lasso looking straight down
+at it: a horn from above), snapped on and smoothed, with **Scale / Twist / Offset** to
+correct it. Pasted across the middle it comes out mirrored.
+
+**Mirror.** With `X` on, everything is built twice, the second half the exact reflection
+of the first. Grab and Smooth never carry a vertex across the middle: it stops on it.
+The dock's **Symmetrize** keeps one half and rebuilds the other from it.
+
+The cage is saved in the `.chisel` project. **Export** (the dock) writes it as an OBJ
+next to the project (in the browser it downloads as `retopo.obj`): quads as quads, ready
+to bake the sculpt onto in another app.
 
 ## Camera
 
