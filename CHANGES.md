@@ -2,6 +2,11 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-26 — Retopo: joined strips space their rows evenly
+
+- A strip whose ends join an island (or whose side zips) re-spaces its rows evenly along each column, between the joined vertices, then snaps back onto the sculpt: no more tight middle with stretched end quads. Live with the Rings/Density sliders; strips that join nothing build as before.
+- Headless: `unused-tools-vault/retopo-even-test/` (longest/shortest quad 1.01–1.11, was 1.58–2.33).
+
 ## 2026-10-26 — Retopo: seam lock, no faces over faces from edge to vertex
 
 - Mirror on: Grab and Smooth stop a vertex on x = 0 instead of carrying it across; its twin stays its reflection, outline pairs that meet there weld into one seam vertex.

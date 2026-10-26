@@ -1050,6 +1050,53 @@ bool join_end(RetopoMesh& rm, const Grid& G, int end, uint32_t owner, int& i0, i
     return true;
 }
 
+// After a strip's ends joined (or a side zipped): its rows were laid evenly along the
+// line as drawn, then the joined rows jumped to the islands' edges, so the quads next
+// to them stretched while the middle stayed tight (user's screenshot, 2026-10-26). Per
+// column, the free vertices are spaced evenly by length along that column's own path,
+// between the pinned ones (joined/zipped vertices, the end rows), then snapped back
+// onto the sculpt. One pass, so slider drags stay live. seam_j = a rail on x = 0.
+void even_out_rows(const RetopoMesh& rm, const SnapGrid& g, Grid& G, int i0, int i1,
+                   const std::vector<uint32_t>& idx, int seam_j) {
+    const int W = G.W;
+    if (i1 - i0 < 2) return;
+    std::vector<Vec3> P;
+    std::vector<float> L;
+    for (int j = 0; j < W; j++) {
+        auto at = [&](int i) {
+            const uint32_t k = idx[(size_t)i * W + j];
+            return k != ~0u ? rm.v[k] : G.v[(size_t)i * W + j];
+        };
+        P.clear(); L.clear();
+        for (int i = i0; i <= i1; i++) {
+            P.push_back(at(i));
+            L.push_back(L.empty() ? 0.0f : L.back() + (P.back() - P[P.size() - 2]).length());
+        }
+        // Point at arc length t along P (the path as it stood, not as it's being moved).
+        auto along = [&](float t) {
+            size_t k = 1;
+            while (k + 1 < L.size() && L[k] < t) k++;
+            const float seg = L[k] - L[k - 1];
+            const float u = seg > 1e-12f ? std::clamp((t - L[k - 1]) / seg, 0.0f, 1.0f) : 0.0f;
+            return P[k - 1] + (P[k] - P[k - 1]) * u;
+        };
+        int a = i0;
+        for (int b = i0 + 1; b <= i1; b++) {
+            if (b < i1 && idx[(size_t)b * W + j] == ~0u) continue;
+            // a and b pinned: the rows between them evenly spaced.
+            for (int i = a + 1; i < b; i++) {
+                const float t = L[a - i0] + (L[b - i0] - L[a - i0]) * (float)(i - a) / (float)(b - a);
+                Vec3 q, qn;
+                if (!g.closest(along(t), q, qn)) continue;
+                if (j == seam_j) { q.x = 0.0f; qn.x = 0.0f; if (qn.length() > 1e-6f) qn = qn.normalized(); }
+                G.v[(size_t)i * W + j] = q;
+                G.nrm[(size_t)i * W + j] = qn;
+            }
+            a = b;
+        }
+    }
+}
+
 // Sides. A strip drawn alongside an island built before it (its band's edge on or near
 // that island's outer edge) zips onto it: over the stretch where its side runs along
 // the edge, the spokes are re-laid one per island edge vertex, the side vertex IS that
@@ -1329,11 +1376,13 @@ double retopo_build(RetopoState& st, const Mesh& m, bool mirror) {
             dedupe_edges(rm);
             build_topology(rm);
             // Seam ends meet their twin, not an island.
+            const int joins0 = joins, zips0 = zips;
             if (!t.seam0) joins += join_end(rm, G, 0, t.s.id, i0, i1, idx);
             if (!t.seam1) joins += join_end(rm, G, 1, t.s.id, i0, i1, idx);
             // A half-mouth zips too (a strip across the seam drawn beside an island);
             // its seam spoke only onto the island's seam vertex, then flat on x = 0 again.
             zips += join_side(rm, g, G, t.s.id, i0, i1, idx, t.seam0, t.seam1) > 0;
+            if (joins != joins0 || zips != zips0) even_out_rows(rm, g, G, i0, i1, idx, seam_j);
             for (int e = 0; e < 2; e++) {
                 if (!(e ? t.seam1 : t.seam0)) continue;
                 const int i = e ? G.n - 1 : 0;
