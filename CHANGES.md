@@ -2,6 +2,15 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-26 — main.cpp split into files (pure moves) — UNTESTED
+
+*Built GL, wgpu and web, no warnings; native wgpu startup checked. Not yet smoke-tested by hand.*
+
+- Browser glue (page callbacks, download, pickers, DOM listeners) → `web_bridge.cpp`.
+- WebGPU startup (surface, adapter, device) → `gpu/wgpu_surface.cpp` as `wgpu_init()`.
+- File work (open/import, save, save-as, incremental, export, both dialog sets, dev auto-import) → `app_files.cpp`.
+- `App` (`app.h`) holds references to main()'s locals so moved code reads unchanged; main.cpp 5487 → 4077 lines.
+
 ## 2026-10-22 — Pose brush hidden, parked until v0.4.x
 
 Gone from both docks, the K key, the help card, the shortcuts list and the manual; the code
