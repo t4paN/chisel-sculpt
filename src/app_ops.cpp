@@ -1,17 +1,11 @@
 // The frame's one-shot operations and shared helpers, moved out of main.cpp as is.
 #include "scene.h"          // first: pulls in glad, which must precede any GL header
 #include <GLFW/glfw3.h>
-#ifdef __EMSCRIPTEN__
-#include <emscripten.h>
-#endif
 #include "app.h"
-#include <csignal>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
 #include <cmath>
-#include <climits>
-#include <cctype>
 #include <algorithm>
 #include <string>
 
@@ -20,39 +14,18 @@
 #include "renderer.h"
 #include "input.h"
 #include "settings.h"
-#include "text_overlay.h"
 #include "brush.h"
-#include "tablet.h"
 #include "undo.h"
 #include "multires_stack.h"
 #include "remesh.h"
 #include "compute.h"
-#include "chisel_debug.h"
-#include "scene.h"
 #include "sdf.h"
 #include "insert_controller.h"
 #include "ui_overlay.h"
 #include "ui_skin.h"
-#include "web_bridge.h"
-#include "gpu/wgpu_surface.h"
-#include "ui_backdrop.h"
-#include "debug_console.h"
-#include "bench.h"
-#include "imgui.h"
-#include "imgui_internal.h"   // InputEventsQueue: the idle frame skip reads it
-#include "imgui_impl_glfw.h"
-#ifdef CHISEL_BACKEND_WEBGPU
-#include "imgui_impl_wgpu.h"
-#else
-#include "imgui_impl_opengl3.h"
-#endif
-#include "ImGuiFileDialog.h"
 #include "brush_alpha.h"
-#include "project_file.h"
 #include "scene_snapshot.h"
 #include "object_xform.h"
-#include <string>
-#include <filesystem>
 
 // Reports the projection truth check when it ran (CHISEL_PROJECT_CHECK=1, or a
 // CHISEL_DEBUG_MULTIRES build). project_down_to_level promises that cascading back to
