@@ -1043,9 +1043,9 @@ static void mouse_button_callback(GLFWwindow* w, int button, int action, int mod
                 g_input->drag_mode = InputState::DragMode::SCULPT;
             } else if (g_input->interaction_mode == InputState::InteractionMode::RETOPO) {
                 // Retopo: a press on the model starts a stroke (main.cpp captures it),
-                // anywhere else orbits, as in Edit. UV has no tools: it always orbits.
-                g_input->drag_mode = g_input->on_model && !g_input->uv_mode ? InputState::DragMode::RETOPO
-                                                                            : InputState::DragMode::ORBIT;
+                // anywhere else orbits, as in Edit. In UV mode the stroke paints seams.
+                g_input->drag_mode = g_input->on_model ? InputState::DragMode::RETOPO
+                                                       : InputState::DragMode::ORBIT;
             } else if (g_input->on_model && g_input->color_pick_active
                        && g_input->current_brush == BrushType::PAINT
                        && g_input->interaction_mode == InputState::InteractionMode::EDIT) {
@@ -1245,7 +1245,7 @@ static void run_key_action(GLFWwindow* w, KeyAction a, bool repeat) {
             break;
         case KeyAction::MODE_UV:
             in.enter_uv_mode();
-            notify("UV: Unwrap lays the retopo mesh flat", 2.0f);
+            notify("UV: paint seams on the model, then Unwrap", 2.0f);
             break;
         case KeyAction::RETOPO_BUILD:
             if (!repeat) in.retopo_build_requested = true;

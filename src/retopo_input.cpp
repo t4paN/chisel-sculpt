@@ -681,6 +681,13 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
         input.notification_timer = 2.5f;
         retopo.rev++;   // a new layout is unsaved work
     }
+    if (input.uv_seams_clear_requested) {
+        input.uv_seams_clear_requested = false;
+        if (retopo_seams_clear(retopo)) {
+            std::snprintf(input.notification, sizeof(input.notification), "Seams cleared - Ctrl+Z takes it back");
+            input.notification_timer = 2.5f;
+        }
+    }
     if (input.retopo_build_requested) {
         input.retopo_build_requested = false;
         scene.materialize_active_cpu();   // Build snaps onto mesh.pos
@@ -795,6 +802,31 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
     retopo.face_hover = face_eraser ? retopo_face_at(retopo, camera, win_w, win_h, (float)input.mouse_x,
                                                      (float)input.mouse_y, input.brush_size)
                                     : ~0u;
+
+    // UV mode's one tool, the seam brush: the pen hops vertex to vertex (the nearest
+    // one in reach), and each hop marks the edges between (Ctrl: unmarks). One stroke
+    // is one undo step.
+    {
+        static bool seam_stroke = false;
+        static uint32_t seam_last = ~0u;
+        const bool uv = input.uv_on() && retopo.built;
+        const bool press = uv && input.drag_mode == InputState::DragMode::RETOPO;
+        if (press && !seam_stroke) {
+            retopo.begin_edit();
+            retopo.seam_erase = input.ctrl_held;   // decided at the press, like the eraser
+            seam_last = ~0u;
+        }
+        if (!press) retopo.seam_erase = input.ctrl_held;
+        retopo.seam_v = uv && !input.alt_held ? retopo_snap_vertex(retopo, camera, win_w, win_h,
+                                                                   (float)input.mouse_x, (float)input.mouse_y)
+                                              : ~0u;
+        if (press && retopo.seam_v != ~0u && retopo.seam_v != seam_last) {
+            if (seam_last != ~0u) retopo_seam_path(retopo, seam_last, retopo.seam_v, retopo.seam_erase, input.mirror_x);
+            seam_last = retopo.seam_v;
+        }
+        if (!press && seam_stroke) retopo.end_edit();
+        seam_stroke = press;
+    }
 }
 
 // The low-poly is a by-product to take elsewhere, not a document: no dialog, next to

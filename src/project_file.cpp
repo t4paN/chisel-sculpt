@@ -51,7 +51,11 @@ static constexpr uint8_t  RTPO_FORMAT = 2;
 // UV mode's layout (2026-10-26) rides in its own optional RTUV chunk after RTPO, not in
 // a format 3 RTPO: readers up to RTPO 2 refuse a newer RTPO format whole, and that would
 // lose an older build its retopo just because the file also has UVs.
-static constexpr uint8_t  RTUV_FORMAT = 1;
+// Format 2 adds the seams' key (UvLayout::seam_key); a format 1 layout reads with 0.
+static constexpr uint8_t  RTUV_FORMAT = 2;
+// UV seams, the same way: an optional RTSM chunk after RTPO. They're there whether or not
+// anything has been unwrapped, so they don't ride in RTUV.
+static constexpr uint8_t  RTSM_FORMAT = 1;
 
 struct ChunkHeader {
     char     tag[4];
@@ -357,6 +361,17 @@ static void write_rtuv_chunk(std::ofstream& f, const RetopoSnapshot& r) {
     write_u32(f, (uint32_t)(r.uv.uv.size() / 2));
     write_floats(f, r.uv.uv.data(), r.uv.uv.size());
     write_u32s(f, r.uv.face_chart);
+    write_raw(f, &r.uv.seam_key, 8);
+    write_chunk_end(f, sp);
+}
+
+// RTSM: u8 format, u32 seam count, then 2 u32 vertex ids per seam (RTPO's numbering).
+static void write_rtsm_chunk(std::ofstream& f, const RetopoSnapshot& r) {
+    std::streampos sp;
+    write_chunk_begin(f, "RTSM", sp);
+    write_u8(f, RTSM_FORMAT);
+    write_u32(f, (uint32_t)(r.result.seams.size() / 2));
+    write_u32s(f, r.result.seams);
     write_chunk_end(f, sp);
 }
 
@@ -376,6 +391,8 @@ SaveResult save_project(const char* path, const ProjectData& data) {
     }
     if (!data.retopo.strokes.empty() || data.retopo.result.face_count() > 0)
         write_rtpo_chunk(f, data.retopo);
+    if (data.retopo.result.face_count() > 0 && !data.retopo.result.seams.empty())
+        write_rtsm_chunk(f, data.retopo);
     if (!data.retopo.uv.empty() && data.retopo.uv.fits(data.retopo.result))
         write_rtuv_chunk(f, data.retopo);
 
@@ -752,9 +769,33 @@ static bool read_rtuv_chunk(ChunkReader& r, ProjectData& data) {
     if (!r.read_float_vec(L.uv, (size_t)nc * 2) || !r.read_u32_vec(L.face_chart, m.face_count())) return false;
     for (float& t : L.uv) if (!(t >= 0.0f && t <= 1.0f)) t = 0.0f;   // NaN lands here too
     for (uint32_t& c : L.face_chart) if (c >= L.charts) c = ~0u;
+    if (format >= 2 && !r.read_raw(&L.seam_key, 8)) return false;
     if (!L.fits(m)) return false;
     data.retopo.uv = std::move(L);
     std::printf("[uv] loaded: %u islands over %u faces\n", data.retopo.uv.charts, m.face_count());
+    return true;
+}
+
+// RTSM (see write_rtsm_chunk). Read after RTPO: every id must be one of its vertices.
+static bool read_rtsm_chunk(ChunkReader& r, ProjectData& data) {
+    uint8_t format;
+    uint32_t n;
+    if (!r.read_u8(format) || format == 0 || format > RTSM_FORMAT || !r.read_u32(n) || n > r.remaining() / 8) return false;
+    std::vector<uint32_t> ids;
+    if (!r.read_u32_vec(ids, (size_t)n * 2)) return false;
+    const size_t nv = data.retopo.result.v.size();
+    std::vector<uint64_t> keys;
+    for (size_t i = 0; i < ids.size(); i += 2) {
+        const uint32_t a = std::min(ids[i], ids[i + 1]), b = std::max(ids[i], ids[i + 1]);
+        if (b >= nv || a == b) return false;
+        keys.push_back(((uint64_t)a << 32) | b);
+    }
+    std::sort(keys.begin(), keys.end());   // the users binary-search them
+    keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+    std::vector<uint32_t>& out = data.retopo.result.seams;
+    out.clear();
+    for (uint64_t k : keys) { out.push_back((uint32_t)(k >> 32)); out.push_back((uint32_t)k); }
+    std::printf("[uv] loaded: %zu seam edge(s)\n", keys.size());
     return true;
 }
 
@@ -798,6 +839,11 @@ static LoadResult load_project_v2(std::ifstream& f, std::streamoff file_size,
                 data.retopo = RetopoSnapshot{};
                 std::printf("[load] the retopo section didn't read back: the project "
                             "loads without it\n");
+            }
+        } else if (std::memcmp(hdr.tag, "RTSM", 4) == 0) {
+            if (!read_rtsm_chunk(cr, data)) {
+                data.retopo.result.seams.clear();
+                std::printf("[load] the UV seams didn't read back: the project loads without them\n");
             }
         } else if (std::memcmp(hdr.tag, "RTUV", 4) == 0) {
             if (!read_rtuv_chunk(cr, data)) {

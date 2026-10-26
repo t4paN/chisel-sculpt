@@ -2596,6 +2596,21 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
         dl->AddLine(at[a], at[b], lit ? hot : on ? sel_col : st.hover_id ? dim : lite,
                     lit || on ? 2.0f : 1.5f);
     }
+    // UV seams: red over the wire, thin where the sculpt is in front.
+    {
+        static std::vector<uint32_t> seams;
+        retopo_seam_edges(rm, seams);
+        for (size_t e = 0; e + 1 < seams.size(); e += 2) {
+            const uint32_t a = seams[e], b = seams[e + 1];
+            if (!vis[a] || !vis[b] || st.hidden(rm.v_owner[a])) continue;
+            if (vis[a] == 2 && vis[b] == 2) {
+                dl->AddLine(at[a], at[b], IM_COL32(30, 0, 0, 220), 5.0f);
+                dl->AddLine(at[a], at[b], IM_COL32(255, 50, 40, 255), 2.5f);
+            } else {
+                dl->AddLine(at[a], at[b], IM_COL32(220, 40, 30, 150), 1.0f);
+            }
+        }
+    }
     // Double-clicked edge loops: green over the wire, thin where the sculpt is in front.
     // A picked edge a weld or the eraser took away isn't an edge any more: skipped.
     for (size_t e = 0; e + 1 < st.loop_edges.size(); e += 2) {
@@ -2638,6 +2653,12 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
             dl->AddPolyline(poly.data(), (int)poly.size(), IM_COL32(20, 0, 0, 200), ImDrawFlags_Closed, 5.0f);
             dl->AddPolyline(poly.data(), (int)poly.size(), IM_COL32(255, 60, 50, 255), ImDrawFlags_Closed, 2.5f);
         }
+    }
+    // The seam brush's vertex: a red ring, white when Ctrl would erase.
+    if (st.seam_v < rm.v.size() && vis[st.seam_v] == 2) {
+        const ImVec2 p = at[st.seam_v];
+        dl->AddCircle(p, 7.0f, IM_COL32(20, 0, 0, 200), 16, 4.0f);
+        dl->AddCircle(p, 7.0f, st.seam_erase ? IM_COL32(255, 255, 255, 255) : IM_COL32(255, 50, 40, 255), 16, 2.0f);
     }
     if (st.cutting) mark(st.cut_from_v, true);
     if (st.snap_v != st.cut_from_v || !st.cutting) mark(st.snap_v, false);

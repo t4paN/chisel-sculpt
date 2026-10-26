@@ -1967,9 +1967,10 @@ float brush_panel(InputState& input, int win_h) {
         hint("Click the model");
         hint("to place");
     } else if (input.uv_on()) {
-        heading("UV", nullptr);
-        hint("Unwrap in the UV panel");
-        hint("Drag to look around");
+        heading("Seams", nullptr);
+        hint("Drag along the mesh: paint seams");
+        hint("Ctrl+drag: erase seams");
+        hint("Unwrap cuts along them");
     } else if (mode == InputState::InteractionMode::RETOPO) {
         // Size for every tool: the band as drawn, or the reach of Grab / Smooth. Drawing
         // also plans the next stroke: Rings (A) and Density (W).
@@ -4431,11 +4432,18 @@ void draw_uv_dock(InputState& input, RetopoState& st, int win_w, int win_h) {
     }
     ImGui::Dummy(ImVec2(w, side));
 
+    // Seams painted since the unwrap: the layout still works, it just isn't cut there yet.
+    static std::vector<uint32_t> seams;
+    retopo_seam_edges(rm, seams);
+    const size_t ns = seams.size() / 2;
+    const bool seams_moved = fresh && L.seam_key != uv_seam_key(rm);
     char ro[96];
-    if (fresh) std::snprintf(ro, sizeof ro, "%u islands \xC2\xB7 %.0f%% of the square", L.charts, L.used * 100.0f);
-    else if (st.built) std::snprintf(ro, sizeof ro, "%u faces", rm.face_count());
+    if (seams_moved) std::snprintf(ro, sizeof ro, "seams changed: Unwrap again");
+    else if (fresh) std::snprintf(ro, sizeof ro, "%u islands \xC2\xB7 %.0f%% \xC2\xB7 %zu seam edge%s", L.charts,
+                                  L.used * 100.0f, ns, ns == 1 ? "" : "s");
+    else if (st.built) std::snprintf(ro, sizeof ro, "%u faces \xC2\xB7 %zu seam edge%s", rm.face_count(), ns, ns == 1 ? "" : "s");
     else std::snprintf(ro, sizeof ro, "no retopo mesh");
-    label_item(UiFont::Mono, 12.0f, kMuted, ro, 0.0f, 18.0f);
+    label_item(UiFont::Mono, 12.0f, seams_moved ? kText : kMuted, ro, 0.0f, 18.0f);
 
     const float x0 = ImGui::GetCursorPosX();
     if (chip(have ? "Unwrap again" : "Unwrap", false, bh, st.built)) input.uv_unwrap_requested = true;
@@ -4443,6 +4451,11 @@ void draw_uv_dock(InputState& input, RetopoState& st, int win_w, int win_h) {
         tooltip(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), TipSide::Left,
                 st.built ? "Cut the retopo mesh into islands and lay them flat" : "Build a retopo mesh in mode 0 first",
                 nullptr);
+    ImGui::SameLine();
+    if (chip("Clear seams", false, bh, ns > 0)) input.uv_seams_clear_requested = true;
+    if (ImGui::IsItemHovered())
+        tooltip(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), TipSide::Left,
+                "Remove every painted seam (Ctrl+Z takes it back)", nullptr);
     ImGui::SameLine();
     ImGui::SetCursorPosX(x0 + w - bh);
     BtnOpts o;

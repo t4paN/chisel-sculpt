@@ -57,7 +57,7 @@ bool RetopoState::finish_live(int rings, float density) {
 size_t RetopoSnapshot::bytes() const {
     size_t b = result.v.size() * (2 * sizeof(Vec3) + 3 * sizeof(uint32_t) + 3)
              + (result.faces.size() + result.face_off.size()) * sizeof(uint32_t) * 2
-             + result.edges.size() * sizeof(uint32_t) * 3;
+             + result.edges.size() * sizeof(uint32_t) * 3 + result.seams.size() * sizeof(uint32_t);
     for (const RetopoStroke& k : strokes) b += k.pts.size() * (2 * sizeof(Vec3) + sizeof(float)) + 128;
     return b;
 }
@@ -155,7 +155,7 @@ void RetopoState::end_edit() {
     has_pending = false;
     const RetopoMesh& a = pending.result;
     const bool same = a.faces == result.faces && a.face_off == result.face_off && a.v.size() == result.v.size()
-                   && a.mask == result.mask
+                   && a.mask == result.mask && a.seams == result.seams
                    && std::equal(a.v.begin(), a.v.end(), result.v.begin(),
                                  [](const Vec3& l, const Vec3& r) { return l.x == r.x && l.y == r.y && l.z == r.z; });
     if (!same) {
@@ -1259,6 +1259,15 @@ void extract(const RetopoMesh& src, RetopoMesh& dst, Keep keep) {
         dst.face_owner.push_back(src.face_owner[f]);
     }
     for (uint32_t& m : dst.mirror) m = m == ~0u ? ~0u : remap[m];
+    // Seams follow their vertices' new numbers (re-sorted: the order was by the old ones).
+    std::vector<uint64_t> sk;
+    for (size_t i = 0; i + 1 < src.seams.size(); i += 2) {
+        const uint32_t a = remap[src.seams[i]], b = remap[src.seams[i + 1]];
+        if (a != ~0u && b != ~0u && a != b) sk.push_back(((uint64_t)std::min(a, b) << 32) | std::max(a, b));
+    }
+    std::sort(sk.begin(), sk.end());
+    sk.erase(std::unique(sk.begin(), sk.end()), sk.end());
+    for (uint64_t k : sk) { dst.seams.push_back((uint32_t)(k >> 32)); dst.seams.push_back((uint32_t)k); }
     for (size_t e = 0; e < src.edge_owner.size(); e++) {
         const uint32_t a = remap[src.edges[e * 2]], b = remap[src.edges[e * 2 + 1]];
         if (a == ~0u || b == ~0u || !keep(src.edge_owner[e])) continue;
@@ -6143,6 +6152,81 @@ bool retopo_export_obj(const RetopoMesh& rm, const char* path, const UvLayout* u
         std::fprintf(f, "\n");
     }
     std::fclose(f);
+    return true;
+}
+
+// ---- UV seams ----------------------------------------------------------------------
+
+void retopo_seam_edges(const RetopoMesh& rm, std::vector<uint32_t>& out) {
+    out.clear();
+    const uint32_t nv = (uint32_t)rm.v.size();
+    if (rm.nb_off.size() != nv + 1) return;
+    for (size_t i = 0; i + 1 < rm.seams.size(); i += 2) {
+        const uint32_t a = rm.seams[i], b = rm.seams[i + 1];
+        if (a >= nv || b >= nv) continue;
+        bool edge = false;
+        for (uint32_t k = rm.nb_off[a]; k < rm.nb_off[a + 1] && !edge; k++) edge = rm.nb[k] == b;
+        if (edge) { out.push_back(a); out.push_back(b); }
+    }
+}
+
+int retopo_seam_path(RetopoState& st, uint32_t from, uint32_t to, bool erase, bool mirror) {
+    RetopoMesh& rm = st.result;
+    const uint32_t nv = (uint32_t)rm.v.size();
+    if (!st.built || from >= nv || to >= nv || from == to || rm.nb_off.size() != nv + 1) return 0;
+    // The shortest way over the edges (Dijkstra by length), as the path pick does. Brush
+    // samples are a few pixels apart, so this is usually one or two edges.
+    std::vector<float> dist(nv, 1e30f);
+    std::vector<uint32_t> prev(nv, ~0u);
+    using QE = std::pair<float, uint32_t>;
+    std::priority_queue<QE, std::vector<QE>, std::greater<QE>> q;
+    dist[from] = 0.0f;
+    q.push({0.0f, from});
+    while (!q.empty()) {
+        const auto [d, u] = q.top();
+        q.pop();
+        if (d > dist[u]) continue;
+        if (u == to) break;
+        for (uint32_t k = rm.nb_off[u]; k < rm.nb_off[u + 1]; k++) {
+            const uint32_t w = rm.nb[k];
+            if (st.hidden(rm.v_owner[w])) continue;
+            const float nd = d + (rm.v[w] - rm.v[u]).length();
+            if (nd < dist[w]) { dist[w] = nd; prev[w] = u; q.push({nd, w}); }
+        }
+    }
+    if (prev[to] == ~0u) return 0;
+    std::vector<uint64_t> have;
+    for (size_t i = 0; i + 1 < rm.seams.size(); i += 2) have.push_back(edge_key(rm.seams[i], rm.seams[i + 1]));
+    std::vector<uint64_t> path;
+    std::vector<uint32_t> touched;
+    for (uint32_t u = to; prev[u] != ~0u; u = prev[u]) {
+        path.push_back(edge_key(prev[u], u));
+        touched.push_back(rm.v_owner[u]);
+        touched.push_back(rm.v_owner[prev[u]]);
+        // Mirror: the twin edge too, when both ends have twins (on the x = 0 seam a
+        // vertex is its own twin, so an edge along it is its own).
+        const uint32_t ta = mirror && u < rm.mirror.size() ? rm.mirror[u] : ~0u;
+        const uint32_t tb = mirror && prev[u] < rm.mirror.size() ? rm.mirror[prev[u]] : ~0u;
+        if (ta < nv && tb < nv && ta != tb) { path.push_back(edge_key(ta, tb)); touched.push_back(rm.v_owner[ta]); }
+    }
+    int changed = 0;
+    for (uint64_t k : path) {
+        const auto it = std::lower_bound(have.begin(), have.end(), k);
+        const bool there = it != have.end() && *it == k;
+        if (erase && there)        { have.erase(it); changed++; }
+        else if (!erase && !there) { have.insert(it, k); changed++; }
+    }
+    if (!changed) return 0;
+    rm.seams.clear();
+    for (uint64_t k : have) { rm.seams.push_back((uint32_t)(k >> 32)); rm.seams.push_back((uint32_t)k); }
+    freeze_touched(st, touched);
+    return changed;
+}
+
+bool retopo_seams_clear(RetopoState& st) {
+    if (st.result.seams.empty()) return false;
+    st.checkpoint();
+    st.result.seams.clear();
     return true;
 }
 

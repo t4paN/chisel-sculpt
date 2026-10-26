@@ -18,6 +18,14 @@ uint64_t uv_topology_key(const RetopoMesh& rm) {
     return h;
 }
 
+uint64_t uv_seam_key(const RetopoMesh& rm) {
+    std::vector<uint32_t> e;
+    retopo_seam_edges(rm, e);
+    uint64_t h = 1469598103934665603ull;
+    for (uint32_t i : e) for (int b = 0; b < 4; b++) { h ^= (i >> (8 * b)) & 0xff; h *= 1099511628211ull; }
+    return h;
+}
+
 // Ear-clip face f into triangles, as corner positions within the face (0..k-1), in the
 // face's own plane (Newell normal). Quads are most of a retopo mesh, but the eraser
 // merges faces into bigger, sometimes concave ones, and a fan would fold those.
@@ -87,14 +95,83 @@ const char* uv_unwrap(const RetopoMesh& rm, const UvSettings& s, UvLayout& out, 
     }
     const uint32_t nt = (uint32_t)tri_face.size();
 
-    // ---- Pass 1: xatlas cuts the mesh into islands and flattens each one.
+    // Painted seams: the mesh xatlas gets is really cut there. Each vertex on a seam is
+    // split into one copy per wedge (the faces round it between seams), and each copy is
+    // nudged a hair (a thousandth of the way) towards its own wedge's faces, so xatlas no
+    // longer finds the copies at one point and the seam is an open border to it. A closed
+    // loop of seams cuts a piece off; an open one (a slit) opens as a slit. Splitting
+    // alone isn't enough: xatlas re-links copies at one position, and its "normal seam"
+    // rule is only kept while islands grow; their later merge ignores it (2026-10-26).
+    std::vector<uint32_t> seam_e;
+    retopo_seam_edges(rm, seam_e);
+    std::vector<Vec3> xa_pos;
+    std::vector<uint32_t> xa_idx = tri_idx;   // what xatlas gets: tri_idx with seam vertices split
+    if (!seam_e.empty()) {
+        std::vector<uint64_t> seam_k;
+        std::vector<uint8_t> on_seam(rm.v.size(), 0);
+        for (size_t i = 0; i < seam_e.size(); i += 2) {
+            seam_k.push_back(((uint64_t)std::min(seam_e[i], seam_e[i + 1]) << 32) | std::max(seam_e[i], seam_e[i + 1]));
+            on_seam[seam_e[i]] = on_seam[seam_e[i + 1]] = 1;
+        }
+        std::sort(seam_k.begin(), seam_k.end());
+        auto is_seam = [&](uint32_t a, uint32_t b) {
+            return std::binary_search(seam_k.begin(), seam_k.end(), ((uint64_t)std::min(a, b) << 32) | std::max(a, b));
+        };
+        // Wedges: a seam vertex's corners, joined across the non-seam edges they share.
+        std::vector<uint32_t> up(rm.faces.size());
+        for (uint32_t c = 0; c < up.size(); c++) up[c] = c;
+        auto root = [&](uint32_t x) { while (up[x] != x) x = up[x] = up[up[x]]; return x; };
+        std::map<std::pair<uint64_t, uint32_t>, uint32_t> at_edge;   // (edge, its end v) -> a corner at v beside it
+        for (uint32_t f = 0; f < nf; f++) {
+            const uint32_t o = rm.face_off[f], k = rm.face_size(f);
+            for (uint32_t j = 0; j < k; j++) {
+                const uint32_t v = rm.faces[o + j];
+                if (!on_seam[v]) continue;
+                for (uint32_t w : {rm.faces[o + (j + 1) % k], rm.faces[o + (j + k - 1) % k]}) {
+                    if (w == v || is_seam(v, w)) continue;
+                    const auto key = std::make_pair(((uint64_t)std::min(v, w) << 32) | std::max(v, w), v);
+                    const auto it = at_edge.find(key);
+                    if (it == at_edge.end()) at_edge.emplace(key, o + j);
+                    else up[root(o + j)] = root(it->second);
+                }
+            }
+        }
+        // Each wedge's pull: the mean of its faces' centres.
+        std::vector<Vec3> pull(rm.faces.size());
+        std::vector<uint32_t> pulls(rm.faces.size(), 0);
+        for (uint32_t f = 0; f < nf; f++) {
+            const uint32_t o = rm.face_off[f], k = rm.face_size(f);
+            Vec3 mid;
+            for (uint32_t j = 0; j < k; j++) mid += rm.v[rm.faces[o + j]];
+            mid = mid * (1.0f / (float)k);
+            for (uint32_t j = 0; j < k; j++)
+                if (on_seam[rm.faces[o + j]]) { const uint32_t r = root(o + j); pull[r] += mid; pulls[r]++; }
+        }
+        // Copies: the first wedge round a vertex keeps its number, the rest get new ones;
+        // every wedge's copy moves its thousandth.
+        xa_pos = rm.v;
+        std::vector<uint32_t> wedge_vert(rm.faces.size(), ~0u), wedges_at(rm.v.size(), 0);
+        for (uint32_t i = 0; i < tri_idx.size(); i++) {
+            const uint32_t v = tri_idx[i];
+            if (!on_seam[v]) continue;
+            const uint32_t r = root(tri_corner[i]);
+            if (wedge_vert[r] == ~0u) {
+                const Vec3 p = rm.v[v] + (pull[r] * (1.0f / (float)std::max(1u, pulls[r])) - rm.v[v]) * 1e-3f;
+                if (wedges_at[v]++ == 0) { wedge_vert[r] = v; xa_pos[v] = p; }
+                else { wedge_vert[r] = (uint32_t)xa_pos.size(); xa_pos.push_back(p); }
+            }
+            xa_idx[i] = wedge_vert[r];
+        }
+    }
+
     xatlas::MeshDecl decl;
-    decl.vertexPositionData   = rm.v.data();
+    const std::vector<Vec3>& pos = seam_e.empty() ? rm.v : xa_pos;
+    decl.vertexPositionData   = pos.data();
     decl.vertexPositionStride = sizeof(Vec3);
-    decl.vertexCount          = (uint32_t)rm.v.size();
-    decl.indexData            = tri_idx.data();
+    decl.vertexCount          = (uint32_t)pos.size();
+    decl.indexData            = xa_idx.data();
     decl.indexFormat          = xatlas::IndexFormat::UInt32;
-    decl.indexCount           = (uint32_t)tri_idx.size();
+    decl.indexCount           = (uint32_t)xa_idx.size();
     // No normals: rm.n is the sculpt's normal under each vertex, which can disagree with
     // the low-poly face it's on. Seams should follow the low-poly surface.
     xatlas::Atlas* atlas = xatlas::Create();
@@ -340,13 +417,14 @@ const char* uv_unwrap(const RetopoMesh& rm, const UvSettings& s, UvLayout& out, 
                 if (!have[o + j] && src != ~0u) { out.uv[2 * (o + j)] = out.uv[2 * src]; out.uv[2 * (o + j) + 1] = out.uv[2 * src + 1]; }
         }
         out.key = uv_topology_key(rm);
+        out.seam_key = uv_seam_key(rm);
         out.used = used;
     }
     xatlas::Destroy(atlas);
     ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     if (why) { out.clear(); return why; }
-    std::printf("[uv] unwrap: %u faces -> %u islands, %.0f%% of the square used, %.1f ms"
+    std::printf("[uv] unwrap: %u faces, %zu painted seam edge(s) -> %u islands, %.0f%% of the square used, %.1f ms"
                 " (mirrored back %u, BACKWARDS AFTER PACKING %u, split faces %u, corners unfolded %u, faces in no island %u, corners dotted %u)\n",
-                nf, out.charts, used * 100.0f, ms, mirrored, turned, split, unfolded, orphans, dotted);
+                nf, seam_e.size() / 2, out.charts, used * 100.0f, ms, mirrored, turned, split, unfolded, orphans, dotted);
     return nullptr;
 }

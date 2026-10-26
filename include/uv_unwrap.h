@@ -17,7 +17,10 @@ struct UvSettings {
 
 // A hash of rm's faces (corners and counts), to tell when a layout has gone stale.
 uint64_t uv_topology_key(const RetopoMesh& rm);
+// A hash of the seams that are still edges: has the user painted since the unwrap?
+uint64_t uv_seam_key(const RetopoMesh& rm);
 
-// Unwrap rm into out. Returns nullptr on success, else why not (out is left cleared).
+// Unwrap rm into out. Every painted seam (rm.seams) is cut; xatlas may cut more where a
+// piece won't lie flat otherwise. Returns nullptr on success, else why not (out is left cleared).
 // ms = how long it took.
 const char* uv_unwrap(const RetopoMesh& rm, const UvSettings& s, UvLayout& out, double& ms);

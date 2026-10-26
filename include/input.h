@@ -666,6 +666,7 @@ struct InputState {
     void enter_retopo_mode();
     void enter_uv_mode();
     bool uv_unwrap_requested = false;  // the UV panel's Unwrap
+    bool uv_seams_clear_requested = false;  // its Clear seams
     // What retopo mode's bar (always up in mode 0) and Space ask the main loop for.
     bool retopo_build_requested = false;
     bool retopo_fill_requested = false;    // H / the dock's Fill: quads over holes
