@@ -2,6 +2,16 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-26 — UV mode (key 9): unwrap the retopo mesh along painted seams
+
+- Branch `uv-unwrap`. Drag on the model paints seams vertex to vertex (Ctrl erases, mirror paints the twin); one stroke is one undo step; Clear seams in the panel.
+- Unwrap cuts along the painted seams and the mesh's own borders, nowhere else; each island is flattened conformally (LSCM), then evened out as-rigid-as-possible so domes don't come out lopsided.
+- xatlas (MIT, `external/xatlas`) only packs the islands into the square; its turns are off (they mirrored islands), ours are true rotations.
+- Panel: the layout in a square, double-click for a big centred view (scroll zooms, middle-drag pans, Esc or a click outside flies it back).
+- Islands as layers under it: hover tints the island on the model, click opens its share of the square and texel density, double-click renames; an island that folds over says so.
+- Saved in `.chisel` (optional RTSM seams + RTUV layout chunks, older readers skip them); OBJ export writes the UVs (`vt`).
+- Headless: `unused-tools-vault/uv-unwrap-test/` (seams open, a loop makes 2 islands, save round trip, `symmetry_probe.cpp` for left/right scale).
+
 ## 2026-10-26 — v0.3.7 released: retopology mode
 GitHub release (AppImage + Windows zip) and itch on all three channels (html5, linux, windows); web build checked in Chromium first, no shader or validation errors. README and MANUAL gained the Retopology section.
 
