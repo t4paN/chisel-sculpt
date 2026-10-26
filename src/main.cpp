@@ -235,24 +235,6 @@ static bool sample_on_model(Renderer& renderer, int x, int y, int screen_h, bool
     return true;
 }
 
-// Reports the projection truth check when it ran (CHISEL_PROJECT_CHECK=1, or a
-// CHISEL_DEBUG_MULTIRES build). project_down_to_level promises that cascading back to
-// L_max reproduces the pre-projection surface EXACTLY, so any real distance here is a
-// broken contract, not a tolerance to tune. Silent when the check did not run, so the
-// normal log is unchanged.
-//
-// The 1e-4 line is a heuristic, not a spec: a few cascade steps of float arithmetic on
-// O(1) coordinates land around 1e-6, while a mean edge at L9 is ~5e-3 — so anything at
-// 1e-4 is already far outside rounding and heading for visible.
-static void report_projection_check(const ProjectionStats& ps) {
-    if (!ps.checked) return;
-    const bool bad = ps.max_reconstruction_error > 1e-4;
-    std::printf("[project] CHECK reconstruction max error %.6g (worst vert %u)%s\n",
-                ps.max_reconstruction_error, ps.worst_vertex,
-                bad ? "  <-- LOSSY, cascade does not reproduce the surface" : "  ok");
-    std::fflush(stdout);
-}
-
 #if !defined(__EMSCRIPTEN__) && !defined(_WIN32)
 // Set by SIGTERM / SIGHUP, consumed by the frame loop (a handler may only touch a
 // sig_atomic_t; the dialog is raised from the loop).
@@ -759,7 +741,8 @@ int main(int argc, char* argv[]) {
     App app{window, input, scene, mesh, multires, camera, compute, brush_stroke, alpha_lib,
             xforms, vmerge_job, app_state, mesh_center, mesh_radius, screen_buffers_dirty,
             clean_edit_mark, cli_open_path, default_browse_path, current_project_path,
-            error_popup_msg, error_popup_trigger, renderer, rescue, rescue_shown
+            error_popup_msg, error_popup_trigger, renderer, rescue, rescue_shown,
+            max_level, swallow_level_switch
 #ifdef __EMSCRIPTEN__
             , web_save_name, web_export_name
 #endif
@@ -1404,203 +1387,7 @@ int main(int argc, char* argv[]) {
         auto take_rescue = [&](const char* op) { app_take_rescue(app, op); };
         auto arm_geometry_handoff = [&](const Mesh& m) { app_arm_geometry_handoff(app, m); };
 
-        // Multires level switch (D / Shift-D post-lock). Recorded on the undo
-        // timeline as a LEVEL entry so Ctrl-Z retraces the literal action sequence
-        // (…draw, subd-up, draw, subd-down…) with the view level following along.
-        if (input.level_switch_delta != 0 && swallow_level_switch) {
-            // Drop input queued while the previous switch froze the frame —
-            // keymashing D must not stack further multi-second builds.
-            input.level_switch_delta = 0;
-        }
-        swallow_level_switch = false;
-        if (input.level_switch_delta != 0 && app_state != AppState::IDLE) {
-            // Mid-stroke D: the cascade would rebuild the mesh under the live
-            // brush (pen-down FBO cache, GPU accumulators, dirty lists all
-            // reference the old buffers) — crash. Level switch is idle-only.
-            input.level_switch_delta = 0;
-        }
-        if (input.level_switch_delta != 0) {
-            int delta = input.level_switch_delta;
-            input.level_switch_delta = 0;
-            const int from   = multires->current_level;
-            const int target = from + delta;
-            // Subdivision guard: before going up a level, predict the largest
-            // resulting GPU buffer against the limits the device actually granted.
-            // Subdividing quadruples tris; the index SSBO and CSR adjacency both
-            // weigh tris x 12 bytes and are the biggest allocations. Refusing here
-            // beats attempting the build and losing the device (WebGPU treats an
-            // over-limit buffer as a validation error -> device loss).
-            if (delta > 0) {
-                const uint64_t tris_next  = (uint64_t)mesh->tri_count() * 4ull;
-                const uint64_t bytes_next = tris_next * 12ull;
-                const gpu::DeviceLimits dl = gpu::device_limits();
-                const uint64_t budget = dl.max_buffer_size < dl.max_storage_binding_size
-                                      ? dl.max_buffer_size : dl.max_storage_binding_size;
-                if (bytes_next > budget) {
-                    std::snprintf(input.notification, sizeof(input.notification),
-                                  "Subdivision would exceed GPU limits (%.1fM tris)",
-                                  (double)tris_next / 1e6);
-                    input.notification_timer = 4.0f;
-                    std::printf("[multires] refused L%d -> L%d: %.1fM tris needs %llu MB, device grants %llu MB\n",
-                                from, target, (double)tris_next / 1e6,
-                                (unsigned long long)(bytes_next >> 20),
-                                (unsigned long long)(budget >> 20));
-                    delta = 0;
-                }
-            }
-            const double switch_t0 = glfwGetTime();
-            if (delta != 0 && target >= multires->base_level && target <= max_level) {
-                scene.materialize_active_cpu();  // 2b: projection/cascade read disp/base
-                UndoEntry lvl_e;
-                lvl_e.kind       = UndoEntry::Kind::LEVEL;
-                lvl_e.from_level = from;
-                lvl_e.to_level   = target;
-                if (delta < 0) {
-                    // Auto-project before descending: bake detail from L_max down to
-                    // target. The snapshot rides on the LEVEL entry — undo restores it,
-                    // redo replays the projection.
-                    const int L_max = multires->base_level + (int)multires->disp.size();
-                    capture_projection_snapshot(*multires, target, lvl_e.before);
-                    ProjectionStats ps = project_down_to_level(*multires, target);
-                    std::printf("[project] auto L%d -> L%d in %.2f ms\n", L_max, target, ps.elapsed_ms);
-                    report_projection_check(ps);
-                }
-                scene.active_undo().push(std::move(lvl_e));
-                multires->current_level = target;
-                multires_sync_paint(*multires, *mesh);
-                if (scene.alive_count() <= 1) {
-                    // Paint/mask ride the cascade (finest-level planes) — no
-                    // save/restore needed across the rebuild.
-                    cascade_to_level(*multires, *mesh, target, &compute);
-                    arm_geometry_handoff(*mesh);
-                    scene.refresh_mirror_map();
-                    scene.sync();  // rebinds active: rebuilds adjacency from new topology
-                } else {
-                    Mesh solo;
-                    cascade_to_level(*multires, solo, target, &compute);
-                    arm_geometry_handoff(solo);
-                    scene.splice_active(solo);  // splice_active marks topo dirty
-                    scene.refresh_mirror_map();
-                }
-                refresh_active_gpu_residency();
-                mesh->compute_bounding_sphere(mesh_center, mesh_radius);
-                screen_buffers_dirty = true;
-                std::printf("[multires] switched to level %d (%u verts, %u tris) in %.1f ms\n",
-                            target, mesh->vertex_count(), mesh->tri_count(),
-                            (glfwGetTime() - switch_t0) * 1000.0);
-                print_undo_top("level-switch");
-                // A switch slow enough to freeze the frame has stale input queued
-                // behind it (GLFW delivers it all in the next poll) — swallow it.
-                if (glfwGetTime() - switch_t0 > 0.15)
-                    swallow_level_switch = true;
-            }
-        }
-
-        // Delete the highest subdivision level (burger menu -> Y/N confirm).
-        // Destructive and deliberately NOT undoable: the whole point is to hand
-        // the top layer's memory back, and an undo entry holding it would give
-        // exactly none of that back. The history is cleared instead — its STROKE
-        // entries carry vert ids from a level that no longer exists, and a LEVEL
-        // entry replaying upward would resurrect the level as a flat zero layer.
-        if (input.drop_level_requested) {
-            input.drop_level_requested = false;
-            const int L_max = multires->base_level + (int)multires->disp.size();
-            if (!multires->locked || multires->disp.empty()) {
-                std::snprintf(input.notification, sizeof(input.notification),
-                              "No subdivision level to delete");
-                input.notification_timer = 2.5f;
-            } else if (app_state != AppState::IDLE) {
-                // Same reason the level switch is idle-only: the cascade would
-                // rebuild the mesh out from under a live stroke.
-                std::snprintf(input.notification, sizeof(input.notification),
-                              "Finish the stroke first");
-                input.notification_timer = 2.0f;
-            } else {
-                const double drop_t0 = glfwGetTime();
-                scene.mark_edited();
-                const int target = L_max - 1;
-                scene.materialize_active_cpu();  // projection/cascade read disp/base
-
-                // Bake first, then drop: the same inverse-Loop projection a level-down
-                // does, so the form survives into the layer below and only the
-                // residual detail dies with the layer.
-                ProjectionStats ps = project_down_to_level(*multires, target);
-                report_projection_check(ps);
-                // Only forced down if the view was ON the layer being removed —
-                // deleting L5 while editing at L3 must leave you at L3.
-                if (multires->current_level > target) multires->current_level = target;
-                const int view = multires->current_level;
-                multires_sync_paint(*multires, *mesh);   // fold paint in BEFORE the planes shrink
-                multires_drop_top_level(*multires);
-
-                scene.active_undo().clear(&compute);
-                xforms.clear();          // history wiped means history wiped
-                // Grow-only GPU mirror still sized for the removed level; drop it
-                // so the refresh below re-allocates at the new (smaller) level.
-                scene.active_entity().multires_gpu.cleanup();
-
-                if (scene.alive_count() <= 1) {
-                    cascade_to_level(*multires, *mesh, view, &compute);
-                    arm_geometry_handoff(*mesh);
-                    scene.refresh_mirror_map();
-                    scene.sync();
-                } else {
-                    Mesh solo;
-                    cascade_to_level(*multires, solo, view, &compute);
-                    arm_geometry_handoff(solo);
-                    scene.splice_active(solo);
-                    scene.refresh_mirror_map();
-                }
-                refresh_active_gpu_residency();
-                mesh->compute_bounding_sphere(mesh_center, mesh_radius);
-                screen_buffers_dirty = true;
-                std::snprintf(input.notification, sizeof(input.notification),
-                              "Deleted subdiv level %d - max is now L%d (%.2fM tris here)",
-                              L_max, target, (double)mesh->tri_count() / 1e6);
-                input.notification_timer = 3.0f;
-                std::printf("[multires] delete L%d: projected in %.2f ms, max now L%d, "
-                            "viewing L%d (%u verts, %u tris), total %.1f ms\n",
-                            L_max, ps.elapsed_ms, target, view, mesh->vertex_count(),
-                            mesh->tri_count(), (glfwGetTime() - drop_t0) * 1000.0);
-            }
-        }
-
-        // Handle focus request (F key)
-        if (input.focus_requested) {
-            input.focus_requested = false;
-            mesh->compute_bounding_sphere(mesh_center, mesh_radius);
-            if (brush_stroke.last_stroke_valid) {
-                camera.set_target(brush_stroke.last_stroke_pos);
-            } else {
-                camera.set_target(mesh_center);
-            }
-            camera.distance = std::max(camera.distance * 0.675f, mesh_radius * 0.05f);
-            screen_buffers_dirty = true;
-        }
-
-        // Snap views (F1/F2/F3)
-        if (input.snap_view_requested != InputState::SnapView::NONE) {
-            mesh->compute_bounding_sphere(mesh_center, mesh_radius);
-            camera.set_target(mesh_center);
-            camera.distance = mesh_radius * 2.5f;
-            switch (input.snap_view_requested) {
-                case InputState::SnapView::FRONT:
-                    camera.yaw = 0.0f;
-                    camera.pitch = 0.0f;
-                    break;
-                case InputState::SnapView::SIDE:
-                    camera.yaw = (float)(M_PI / 2.0);
-                    camera.pitch = 0.0f;
-                    break;
-                case InputState::SnapView::TOP:
-                    camera.yaw = 0.0f;
-                    camera.pitch = (float)(M_PI / 2.0 - 0.001);
-                    break;
-                default: break;
-            }
-            input.snap_view_requested = InputState::SnapView::NONE;
-            screen_buffers_dirty = true;
-        }
+        app_ops_levels_and_views(app);   // app_ops.cpp: D / Shift-D, delete top level, F, F1-F3
 
         // ---- Density-view colour swap ----
         // While the paint brush targets the density field, the colour VBO shows

@@ -27,6 +27,7 @@ struct VoxelMergeJob;
 struct Vec3;
 struct Renderer;
 struct SceneSnapshot;
+struct ProjectionStats;
 
 struct App {
     GLFWwindow*&      window;
@@ -53,13 +54,17 @@ struct App {
     Renderer&         renderer;
     SceneSnapshot&    rescue;
     int&              rescue_shown;
+    int&              max_level;            // --max-level
+    bool&             swallow_level_switch;
 #ifdef __EMSCRIPTEN__
     char            (&web_save_name)[96];
     char            (&web_export_name)[96];
 #endif
 };
 
-// app_ops.cpp: the frame's shared helpers, once lambdas inside main()'s frame.
+// app_ops.cpp: the frame's shared helpers, once lambdas inside main()'s frame (or, for
+// report_projection_check, a static of main.cpp).
+void report_projection_check(const ProjectionStats& ps);
 void app_refresh_active_gpu_residency(App& a);
 void app_print_undo_top(App& a, const char* tag);
 void app_take_rescue(App& a, const char* op);
@@ -67,6 +72,7 @@ void app_arm_geometry_handoff(App& a, const Mesh& m);
 
 // app_ops.cpp: the frame's one-shot user operations, each called where it ran in main.
 void app_ops_paint_clicks(App& app, int win_w, int win_h);   // C colour picker, fill bucket
+void app_ops_levels_and_views(App& a);   // D / Shift-D, delete top level, F focus, F1-F3 views
 
 // app_files.cpp: open/import, the dev auto-import hooks, save, save-as, incremental
 // save, export, and their dialogs (native file browser, web name prompts + picker).
