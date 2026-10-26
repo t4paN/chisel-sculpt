@@ -10,6 +10,7 @@
 // frame) and its edits go nowhere. Check: grep -nE 'auto [a-z_]+ = a\.' src/app_*.cpp
 #include <cstdint>
 #include <string>
+#include <vector>
 
 enum class AppState { IDLE, SCULPTING };
 
@@ -60,6 +61,11 @@ struct App {
     bool&             remesh_chained_from_merge;
     TextOverlay&      text;
     float&            fps_display;
+    Vec3&             rot_axis;     // Select-mode Q/E spin: view axis latched at spin start
+    bool&             rot_active;
+    double&           rot_last_time;
+    std::vector<uint32_t>& rot_dirty;
+    Vec3&             scale_pivot;  // latched on the first frame of an RMB scale drag
 #ifdef __EMSCRIPTEN__
     char            (&web_save_name)[96];
     char            (&web_export_name)[96];
@@ -90,3 +96,7 @@ void app_files_frame(App& a);
 // app_render.cpp: cursor visibility, the scene pass, overlays and dialogs, then (after
 // app_files_frame) the button islands, panels, error popup, ImGui render and present.
 void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse);
+
+// app_idle.cpp: the IDLE state's update (camera drags, Select-mode move / scale / spin,
+// mask ops, undo/redo, IDLE-only one-shots). dx, dy = this frame's mouse delta.
+void app_idle_update(App& a, int win_w, int win_h, float dx, float dy);
