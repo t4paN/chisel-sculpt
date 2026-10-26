@@ -128,8 +128,7 @@ void app_print_undo_top(App& a, const char* tag) {
 
 // Prepare + capture the rescue snapshot, shared by '/' and 'J'. Frees the
 // undo history, bakes the scene down to the triangle cap, then copies the
-// stacks. Lives here rather than outside the loop because it needs
-// refresh_active_gpu_residency, which is itself a per-frame lambda.
+// stacks.
 void app_take_rescue(App& a, const char* op) {
     auto& scene = a.scene;
     auto& compute = a.compute;

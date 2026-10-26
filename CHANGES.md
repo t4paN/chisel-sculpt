@@ -4,12 +4,14 @@ Short, chronological log of notable changes. Newest on top.
 
 ## 2026-10-26 — main.cpp split into files (pure moves) — UNTESTED
 
-*Built GL, wgpu and web, no warnings; native wgpu startup checked. Not yet smoke-tested by hand.*
+*GL, wgpu and web build without warnings; Tint check + GL compute test pass. Strokes, undo and level switches ran clean on GL through the file-work step; the ops/render steps and the file + web side aren't hand-tested yet.*
 
 - Browser glue (page callbacks, download, pickers, DOM listeners) → `web_bridge.cpp`.
 - WebGPU startup (surface, adapter, device) → `gpu/wgpu_surface.cpp` as `wgpu_init()`.
 - File work (open/import, save, save-as, incremental, export, both dialog sets, dev auto-import) → `app_files.cpp`.
-- `App` (`app.h`) holds references to main()'s locals so moved code reads unchanged; main.cpp 5487 → 4077 lines.
+- One-shot ops (C picker, fill bucket, level switch, delete level, focus/snap views, remesh, SDF merge) + their shared helpers → `app_ops.cpp`.
+- Drawing (cursor visibility, scene pass, overlays, button islands, panels, ImGui pass, present) → `app_render.cpp`.
+- `App` (`app.h`) holds references to main()'s locals so moved code reads unchanged; main.cpp 5487 → 2996 lines.
 
 ## 2026-10-22 — Pose brush hidden, parked until v0.4.x
 
