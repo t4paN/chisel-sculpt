@@ -742,7 +742,7 @@ int main(int argc, char* argv[]) {
             xforms, vmerge_job, app_state, mesh_center, mesh_radius, screen_buffers_dirty,
             clean_edit_mark, cli_open_path, default_browse_path, current_project_path,
             error_popup_msg, error_popup_trigger, renderer, rescue, rescue_shown,
-            max_level, swallow_level_switch
+            max_level, swallow_level_switch, remesh_chained_from_merge
 #ifdef __EMSCRIPTEN__
             , web_save_name, web_export_name
 #endif
@@ -1384,7 +1384,6 @@ int main(int argc, char* argv[]) {
 
         auto refresh_active_gpu_residency = [&]() { app_refresh_active_gpu_residency(app); };
 
-        auto take_rescue = [&](const char* op) { app_take_rescue(app, op); };
         auto arm_geometry_handoff = [&](const Mesh& m) { app_arm_geometry_handoff(app, m); };
 
         app_ops_levels_and_views(app);   // app_ops.cpp: D / Shift-D, delete top level, F, F1-F3
@@ -1436,204 +1435,7 @@ int main(int argc, char* argv[]) {
         // ---- File dialogs (ImGuiFileDialog) ----
         // Handled in the ImGui widget section below (after rendering).
 
-        // ---- Remesh execution ----
-        // A remesh runs inside this one frame, so the "Remeshing..." panel would never
-        // reach the screen: the first frame only raises remesh_in_progress (the panel
-        // draws and presents), the next one does the work.
-        static bool remesh_shown = false;
-        if (input.remesh_requested && !remesh_shown) {
-            remesh_shown = true;
-            input.remesh_in_progress = true;
-        } else if (input.remesh_requested) {
-            remesh_shown = false;
-            input.remesh_requested = false;
-            input.remesh_in_progress = true;
-
-            scene.materialize_active_cpu();  // 2b: remesh reads the live surface (mesh.pos)
-
-            // Adaptive-remesh guard (density spec Q2): a red-heavy field at a
-            // small fine-mult can explode tri counts the same way keymashed
-            // subdivision does. Same predicted-size check, same refusal toast.
-            bool remesh_refused = false;
-            // The detail slider multiplies the count on either path, so it rides
-            // the same guard — a x4 on a big mesh is the uniform version of the
-            // red-heavy field this was written for.
-            const float detail = input.remesh_detail;
-            if (!mesh->density.empty() || detail > 1.0f) {
-                const uint64_t base_pred = mesh->density.empty()
-                    ? (uint64_t)mesh->tri_count()
-                    : predict_adaptive_tris(*mesh, 0.0f, input.density_coarse_mult,
-                                            input.density_fine_mult);
-                const uint64_t tris_pred = (uint64_t)((double)base_pred * std::max(1.0f, detail));
-                const uint64_t bytes_pred = tris_pred * 12ull;  // index/CSR SSBOs
-                const gpu::DeviceLimits dl = gpu::device_limits();
-                const uint64_t budget = dl.max_buffer_size < dl.max_storage_binding_size
-                                      ? dl.max_buffer_size : dl.max_storage_binding_size;
-                if (bytes_pred > budget) {
-                    std::snprintf(input.notification, sizeof(input.notification),
-                                  "Remesh would exceed GPU limits (%.1fM tris)",
-                                  (double)tris_pred / 1e6);
-                    input.notification_timer = 4.0f;
-                    std::printf("[remesh] refused: %.1fM predicted tris needs %llu MB, device grants %llu MB\n",
-                                (double)tris_pred / 1e6,
-                                (unsigned long long)(bytes_pred >> 20),
-                                (unsigned long long)(budget >> 20));
-                    remesh_refused = true;
-                }
-            }
-
-            // Rescue copy before the topology goes. A second remesh replaces the
-            // first's snapshot — one step back means the LAST remesh — but a
-            // remesh chained off a merge leaves the merge's snapshot alone.
-            if (!remesh_refused && !remesh_chained_from_merge) take_rescue("remesh");
-
-            // Destructive remesh breaks topology mirror — switch to spatial
-            // mode afterward. Mirror setting (input.mirror_x) is preserved.
-            RemeshResult result;
-            if (!remesh_refused)
-                result = perform_remesh(*mesh, *multires, 0.0f, 10,
-                                        compute.supported ? &compute : nullptr,
-                                        input.density_coarse_mult,
-                                        input.density_fine_mult,
-                                        input.remesh_keep_detail,
-                                        input.remesh_detail);
-
-            if (result.success) {
-                scene.mark_edited();
-                mesh->mask.clear();
-                // perform_remesh rebuilt the ACTIVE entity's mesh + multires base
-                // in place. Leave every other entity untouched — only the active
-                // one was remeshed. Its topology is fresh (base level 0), so reset
-                // its subdiv level, refresh its mirror map, and re-sync the working
-                // set. Spatial mirror mode: destructive remesh breaks topology mirror.
-                scene.set_mirror_topology(false);
-                scene.active_entity().subdiv_level = 0;
-                // Remesh is single-entity: it only rebuilt the active mesh, so a
-                // leftover multi-selection is stale. Collapse it to the active
-                // entity now — clears the deselected tint and keeps downstream
-                // ops (edit-mode entry, merge) from acting on a mixed set.
-                scene.collapse_selection_to_active();
-                scene.refresh_mirror_map();
-                scene.sync();
-                mesh = &scene.active_mesh();
-                multires = &scene.active_multires();
-                // Same resync as the voxel merge: the GPU copy of the base still
-                // holds the PRE-remesh mesh, and strokes at the base level are
-                // diffed against it and later materialized from it. Without this,
-                // every stroke after a remesh landed as old-mesh positions at the
-                // new mesh's ids — invisible until the next level change rebuilt
-                // the model from them (2026-09-25).
-                refresh_active_gpu_residency();
-                screen_buffers_dirty = true;
-                brush_stroke.vertex_count = 0;
-                brush_stroke.phase = StrokePhase::NONE;
-                app_state = AppState::IDLE;
-                if (result.selected_tris > 0) { scene.active_undo().clear(&compute); xforms.clear(); }
-                std::snprintf(input.notification, sizeof(input.notification),
-                              "Remesh: %u sel, %u/%u -> %u/%u v/t (spatial mirror)",
-                              result.selected_tris,
-                              result.old_verts, result.old_tris,
-                              result.new_verts, result.new_tris);
-                input.notification_timer = 4.0f;
-            } else if (!remesh_refused) {
-                // Nothing changed, so there is nothing this remesh can rescue —
-                // but a chained one must leave the merge's snapshot standing.
-                if (!remesh_chained_from_merge) rescue.clear();
-                std::printf("[remesh] FAILED: %s\n", result.error.c_str());
-                std::snprintf(input.notification, sizeof(input.notification),
-                              "Remesh FAILED — check console");
-                input.notification_timer = 4.0f;
-            }
-
-            remesh_chained_from_merge = false;
-            input.remesh_in_progress = false;
-        }
-
-        // ---- Voxel merge execution (SDF join-for-print) ----
-        // Kick off a merge: build the job (gather/grid/alloc/compile), then let the
-        // per-frame advance below tick it to completion. The merge spans frames so the
-        // window stays responsive and the progress HUD animates (the winding-sign pass
-        // alone is seconds at R>=128).
-        if (input.voxel_merge_requested) {
-            input.voxel_merge_requested = false;
-            if (!compute.supported) {
-                std::snprintf(input.notification, sizeof(input.notification),
-                              "SDF remesh needs GPU compute (unavailable)");
-                input.notification_timer = 4.0f;
-            } else if (!vmerge_job) {
-                take_rescue("SDF remesh");
-                scene.materialize_active_cpu();  // 2b: merge reads the live surface (mesh.pos)
-                if (const char* dump = std::getenv("CHISEL_MERGE_SRC_DUMP"))   // dev: pre-merge mesh
-                    scene.active_mesh().export_obj(dump);
-                vmerge_job = voxel_merge_begin(scene, compute,
-                                               input.voxel_merge_resolution,
-                                               input.voxel_merge_mirror,
-                                               input.voxel_merge_surface_nets,
-                                               input.voxel_merge_subtract,
-                                               input.remesh_keep_detail);
-                input.voxel_merge_in_progress = true;
-            }
-        }
-
-        // Advance an in-flight merge by one budgeted step.
-        if (vmerge_job) {
-            VoxelMergeResult vm;
-            VoxelMergeStatus st = voxel_merge_tick(scene, compute, *vmerge_job, vm);
-            if (st != VoxelMergeStatus::Working) {
-                voxel_merge_destroy(vmerge_job);
-                vmerge_job = nullptr;
-                input.voxel_merge_in_progress = false;
-
-                if (st == VoxelMergeStatus::Done && vm.success) {
-                    scene.mark_edited();
-                    // Mirror merge yields a tessellation-symmetric mesh → topology
-                    // mirror gives an exact partner map. Faithful merge is generic
-                    // geometry → spatial mirror. Either way refresh from the fresh mesh.
-                    scene.set_mirror_topology(input.voxel_merge_mirror);
-                    scene.refresh_mirror_map();
-                    scene.sync();
-                    mesh = &scene.active_mesh();
-                    multires = &scene.active_multires();
-                    // The merge replaces the active entity wholesale; resync the
-                    // GPU-residency mirror to the fresh mesh's current level so the
-                    // Phase-2 diff/apply shaders read a valid disp/base layer.
-                    refresh_active_gpu_residency();
-                    mesh->compute_bounding_sphere(mesh_center, mesh_radius);
-                    screen_buffers_dirty = true;
-                    brush_stroke.vertex_count = 0;
-                    brush_stroke.phase = StrokePhase::NONE;
-                    app_state = AppState::IDLE;
-                    bool watertight = (vm.boundary_edges == 0 && vm.nonmanifold_edges == 0);
-                    std::snprintf(input.notification, sizeof(input.notification),
-                                  "SDF remesh %u -> %u v / %u t (R=%u, %.0f ms) | %s: %u comp, %u bnd, %u nonmf",
-                                  vm.in_entities, vm.out_verts, vm.out_tris,
-                                  vm.R, vm.elapsed_ms,
-                                  watertight ? "watertight" : "NOT watertight",
-                                  vm.components, vm.boundary_edges, vm.nonmanifold_edges);
-                    input.notification_timer = 6.0f;
-                    std::printf("[voxel-merge] %s\n", input.notification);
-                    // Dev hook: CHISEL_MERGE_DUMP=<path.obj> writes the result for offline checks.
-                    if (const char* dump = std::getenv("CHISEL_MERGE_DUMP"))
-                        mesh->export_obj(dump);
-                    // Chain the adaptive remesh: the merge output is uniform-dense
-                    // MC soup; when it carries a painted density field the user
-                    // wants the topology to follow it right away (D in the merge
-                    // dialog opts out). Runs through the normal remesh block next
-                    // frame — same GPU-limit guard, same notification.
-                    if (input.voxel_merge_adaptive && !mesh->density.empty()) {
-                        std::printf("[voxel-merge] density field present -> chaining adaptive remesh\n");
-                        input.remesh_requested = true;
-                        remesh_chained_from_merge = true;
-                    }
-                } else {
-                    rescue.clear();   // scene untouched, nothing to revert to
-                    std::printf("[voxel-merge] FAILED: %s\n", vm.error.c_str());
-                    std::snprintf(input.notification, sizeof(input.notification),
-                                  "SDF remesh failed: %.200s", vm.error.c_str());
-                    input.notification_timer = 4.0f;
-                }
-            }
-        }
+        app_ops_remesh_and_merge(app);   // app_ops.cpp: remesh, SDF merge start + step
 
         // Mouse delta (shared by camera and sculpt)
         float dx = (float)(input.mouse_x - input.prev_mouse_x);

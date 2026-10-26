@@ -56,6 +56,7 @@ struct App {
     int&              rescue_shown;
     int&              max_level;            // --max-level
     bool&             swallow_level_switch;
+    bool&             remesh_chained_from_merge;
 #ifdef __EMSCRIPTEN__
     char            (&web_save_name)[96];
     char            (&web_export_name)[96];
@@ -73,6 +74,7 @@ void app_arm_geometry_handoff(App& a, const Mesh& m);
 // app_ops.cpp: the frame's one-shot user operations, each called where it ran in main.
 void app_ops_paint_clicks(App& app, int win_w, int win_h);   // C colour picker, fill bucket
 void app_ops_levels_and_views(App& a);   // D / Shift-D, delete top level, F focus, F1-F3 views
+void app_ops_remesh_and_merge(App& a);   // remesh run, SDF merge kick-off + per-frame step
 
 // app_files.cpp: open/import, the dev auto-import hooks, save, save-as, incremental
 // save, export, and their dialogs (native file browser, web name prompts + picker).
