@@ -140,7 +140,7 @@ static LscmResult lscm(const std::vector<Vec3>& pos, const std::vector<uint32_t>
     // x axis. Conformal means sum_j W_j U_j = 0 (complex), W_j the edge opposite corner j
     // (q_{j+2} - q_{j+1}), U_j = u_j + i v_j; weighted by 1/sqrt(area) so each triangle
     // counts by its size. Two real rows per triangle.
-    struct Row { uint32_t c[3]; double a[3], b[3]; };
+    struct Row { uint32_t c[3]; double a[3], b[3], qx[3], qy[3], w[3]; };
     std::vector<Row> rows;
     rows.reserve(tris.size());
     for (uint32_t t : tris) {
@@ -158,6 +158,11 @@ static LscmResult lscm(const std::vector<Vec3>& pos, const std::vector<uint32_t>
             const int a = (j + 1) % 3, b = (j + 2) % 3;
             r.a[j] = (qx[b] - qx[a]) * s;
             r.b[j] = (qy[b] - qy[a]) * s;
+            r.qx[j] = qx[j];
+            r.qy[j] = qy[j];
+            // The cotangent of the angle at corner j: the weight of the edge facing it.
+            const double ux = qx[a] - qx[j], uy = qy[a] - qy[j], vx = qx[b] - qx[j], vy = qy[b] - qy[j];
+            r.w[j] = 0.5 * (ux * vx + uy * vy) / std::max(1e-300, ux * vy - uy * vx);
         }
         rows.push_back(r);
     }
@@ -219,6 +224,112 @@ static LscmResult lscm(const std::vector<Vec3>& pos, const std::vector<uint32_t>
         const double be = rz2 / rz;
         rz = rz2;
         for (size_t i = 0; i < p.size(); i++) p[i] = fixed[i] ? 0.0 : z[i] + be * p[i];
+    }
+
+    // Conformal alone isn't enough on a dome (a face, the back of a head): a curved cap has
+    // a whole family of conformal flattenings, like shining a light on it from different
+    // spots, and they score alike, so the solve settles on a lopsided one, big on one
+    // side and shrinking toward the other like a road into the horizon (2026-10-26,
+    // Goggins: one half 1.75x the other). As-rigid-as-possible fixes the sizes: each
+    // triangle is held to the nearest turned copy of its true shape (local step), then
+    // the vertices are re-solved to fit those (global step, the cotangent Laplacian).
+    // Started from the conformal map, a few rounds settle it.
+    if (!rows.empty()) {
+        // L (cotangent weights) as a sparse matrix over the vertices, built once.
+        std::vector<std::map<uint32_t, double>> Lm(n);
+        for (const Row& r : rows)
+            for (int j = 0; j < 3; j++) {
+                const uint32_t a = r.c[(j + 1) % 3], b = r.c[(j + 2) % 3];
+                Lm[a][b] -= r.w[j]; Lm[b][a] -= r.w[j];
+                Lm[a][a] += r.w[j]; Lm[b][b] += r.w[j];
+            }
+        std::vector<uint32_t> off(n + 1, 0), col;
+        std::vector<double> val, ldiag(n, 0.0);
+        for (uint32_t i = 0; i < n; i++) {
+            for (const auto& kv : Lm[i]) { col.push_back(kv.first); val.push_back(kv.second); if (kv.first == i) ldiag[i] = kv.second; }
+            off[i + 1] = (uint32_t)col.size();
+        }
+        // One vertex holds still (the island may otherwise drift); a vertex with no
+        // weight of its own (only degenerate triangles) too.
+        std::vector<uint8_t> hold(n, 0);
+        hold[p0] = 1;
+        for (uint32_t i = 0; i < n; i++) if (ldiag[i] <= 1e-300) hold[i] = 1;
+        auto solve = [&](double* y, const std::vector<double>& rhs) {   // L y = rhs, PCG from y
+            std::vector<double> rr(n), zz(n), pp(n), Ap(n);
+            auto mul = [&](const double* in, std::vector<double>& o) {
+                for (uint32_t i = 0; i < n; i++) {
+                    double acc = 0.0;
+                    for (uint32_t k = off[i]; k < off[i + 1]; k++) acc += val[k] * in[col[k]];
+                    o[i] = acc;
+                }
+            };
+            mul(y, Ap);
+            double rz = 0.0, r0 = 0.0;
+            for (uint32_t i = 0; i < n; i++) {
+                rr[i] = hold[i] ? 0.0 : rhs[i] - Ap[i];
+                zz[i] = hold[i] ? 0.0 : rr[i] / ldiag[i];
+                pp[i] = zz[i];
+                rz += rr[i] * zz[i]; r0 += rr[i] * rr[i];
+            }
+            for (uint32_t it = 0; it < 4 * n + 100 && r0 > 0.0; it++) {
+                mul(pp.data(), Ap);
+                double pAp = 0.0;
+                for (uint32_t i = 0; i < n; i++) if (!hold[i]) pAp += pp[i] * Ap[i];
+                if (pAp <= 0.0) break;
+                const double al = rz / pAp;
+                double rn = 0.0, rz2 = 0.0;
+                for (uint32_t i = 0; i < n; i++) {
+                    if (hold[i]) continue;
+                    y[i] += al * pp[i];
+                    rr[i] -= al * Ap[i];
+                    rn += rr[i] * rr[i];
+                }
+                if (rn < 1e-20 * r0) break;
+                for (uint32_t i = 0; i < n; i++) { zz[i] = hold[i] ? 0.0 : rr[i] / ldiag[i]; rz2 += rr[i] * zz[i]; }
+                const double be = rz2 / rz;
+                rz = rz2;
+                for (uint32_t i = 0; i < n; i++) pp[i] = hold[i] ? 0.0 : zz[i] + be * pp[i];
+            }
+        };
+        // The conformal map's size is arbitrary: bring it to true size first, so the
+        // turned copies (true size) and the map agree on scale.
+        double au = 0.0, a3 = 0.0;
+        for (const Row& r : rows) {
+            const uint32_t a = r.c[0], b = r.c[1], d = r.c[2];
+            au += 0.5 * ((x[b] - x[a]) * (x[n + d] - x[n + a]) - (x[d] - x[a]) * (x[n + b] - x[n + a]));
+            a3 += 0.5 * r.qx[1] * r.qy[2];
+        }
+        if (au > 1e-30) {   // a mirrored conformal map (shouldn't happen) is left as it is
+            const double k = std::sqrt(a3 / au);
+            for (double& t : x) t *= k;
+            std::vector<double> bu(n), bv(n);
+            for (int round = 0; round < 12; round++) {
+                std::fill(bu.begin(), bu.end(), 0.0);
+                std::fill(bv.begin(), bv.end(), 0.0);
+                for (const Row& r : rows) {
+                    // Local: the turn that best fits the triangle's current UV shape.
+                    double s00 = 0.0, s01 = 0.0, s10 = 0.0, s11 = 0.0;
+                    for (int j = 0; j < 3; j++) {
+                        const int a = (j + 1) % 3, b = (j + 2) % 3;
+                        const double du = x[r.c[a]] - x[r.c[b]], dv = x[n + r.c[a]] - x[n + r.c[b]];
+                        const double dx = r.qx[a] - r.qx[b], dy = r.qy[a] - r.qy[b];
+                        s00 += r.w[j] * du * dx; s01 += r.w[j] * du * dy;
+                        s10 += r.w[j] * dv * dx; s11 += r.w[j] * dv * dy;
+                    }
+                    const double th = std::atan2(s10 - s01, s00 + s11), cs = std::cos(th), sn = std::sin(th);
+                    // Global's right-hand side: each edge's turned true vector, both ends.
+                    for (int j = 0; j < 3; j++) {
+                        const int a = (j + 1) % 3, b = (j + 2) % 3;
+                        const double dx = r.qx[a] - r.qx[b], dy = r.qy[a] - r.qy[b];
+                        const double ru = cs * dx - sn * dy, rv = sn * dx + cs * dy;
+                        bu[r.c[a]] += r.w[j] * ru; bv[r.c[a]] += r.w[j] * rv;
+                        bu[r.c[b]] -= r.w[j] * ru; bv[r.c[b]] -= r.w[j] * rv;
+                    }
+                }
+                solve(x.data(), bu);
+                solve(x.data() + n, bv);
+            }
+        }
     }
 
     // Area in UV against area on the mesh: the scale, and (signed) whether it came out
