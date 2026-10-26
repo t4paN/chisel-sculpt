@@ -15,6 +15,10 @@ enum class Icon {
     CmdExport, CmdMerge,
     UiFullscreen, UiFullscreenExit,   // web only (a browser tab's one way to drop its bars)
     PaintBucket, PaintPicker,         // the paint dock's fill bucket and colour picker
+    ModeRetopo,                       // a quad grid bent over a form
+    RetopoPencil, RetopoCut, UiTrash, // mode 0's draw and cut tools; delete in lists
+    RetopoErase,                      // mode 0's eraser
+    RetopoWand,                       // mode 0's wand (hole fills)
     Count
 };
 

@@ -82,3 +82,14 @@ struct Camera;
 void draw_pose_rig(const PoseRig& rig, const Camera& cam, int win_w, int win_h,
                    int hover, float soft, bool grow);
 void draw_pose_cursor(float x, float y, bool on_target);
+
+// Retopo mode (key 0). The overlay draws every stroke as a translucent band at its
+// width (donuts teal, strips amber; mirrored twins ghosted when mirror is on) and the
+// built quads as a wireframe, hiding what faces away or sits behind the sculpt. The
+// depth test reads the plane cache, so pass depth_fresh = false while the camera
+// moves (only the facing test runs then). Background draw list: docks stay on top.
+// Shared by every skin. (The dock that goes with it is ui_skin.h's draw_retopo_dock.)
+struct RetopoState;
+struct Renderer;
+void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera& cam,
+                         int win_w, int win_h, bool depth_fresh, bool mirror);

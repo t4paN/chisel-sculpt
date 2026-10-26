@@ -25,6 +25,7 @@
 #include "insert_controller.h"
 #include "ui_overlay.h"
 #include "ui_skin.h"
+#include "retopo.h"
 #include "imgui.h"
 #include "ImGuiFileDialog.h"
 #include "brush_alpha.h"
@@ -64,6 +65,8 @@ void app_files_frame(App& a) {
     auto& mesh_radius = a.mesh_radius;
     auto& screen_buffers_dirty = a.screen_buffers_dirty;
     auto& clean_edit_mark = a.clean_edit_mark;
+    auto& retopo = a.retopo;
+    auto& clean_retopo_rev = a.clean_retopo_rev;
     auto& cli_open_path = a.cli_open_path;
     auto& default_browse_path = a.default_browse_path;
     auto& current_project_path = a.current_project_path;
@@ -87,6 +90,9 @@ void app_files_frame(App& a) {
             if (lr == LoadResult::OK && !proj.entities.empty()) {
                 camera = proj.camera;
                 input.mirror_x = proj.mirror_x;
+                // The file's retopo replaces this session's (none in it = none now).
+                retopo_load(retopo, std::move(proj.retopo));
+                clean_retopo_rev = retopo.rev;
                 input.subdiv_level = proj.subdiv_level;
                 input.mesh_locked = true;
                 current_project_path = path;
@@ -504,6 +510,7 @@ void app_files_frame(App& a) {
         proj.camera       = camera;
         proj.mirror_x     = input.mirror_x;
         proj.subdiv_level = input.subdiv_level;
+        retopo_save(retopo, proj.retopo);
         SaveResult sr = save_project(path.c_str(), proj);
         if (sr == SaveResult::OK && input.quit_after_save) {
             input.quit_after_save = false;
@@ -513,6 +520,7 @@ void app_files_frame(App& a) {
         if (sr == SaveResult::OK) {
             current_project_path = path;
             clean_edit_mark = scene.edit_mark();
+            clean_retopo_rev = retopo.rev;
 #ifdef __EMSCRIPTEN__
             // A MEMFS "save" only counts once the bytes leave as a download
             // (which also unlinks the MEMFS copy; Ctrl+S recreates it).

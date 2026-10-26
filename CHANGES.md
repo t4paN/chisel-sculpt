@@ -2,6 +2,12 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-26 — Retopo mode (key 0) merged into main
+
+- Branch `retopo-mode` joins main on top of the main.cpp split; logic stays in `retopo.cpp` + `retopo_input.cpp`, entries below are its history.
+- main.cpp keeps the per-frame `retopo_frame` call and export; the hooks went where the split put their neighbours: save/open → `app_files.cpp`, F framing → `app_ops.cpp`, Ctrl+I / Ctrl+A on the retopo mask → `app_idle.cpp`, ring cursor + panel → `app_render.cpp`.
+- The quit prompt is back on the window's X and counts unsaved retopo work.
+
 ## 2026-10-26 — v0.3.6 released
 GitHub release (AppImage + Windows zip) and itch on all three channels (html5, linux, windows); web build checked in Chromium first, no shader or validation errors.
 
@@ -16,6 +22,480 @@ GitHub release (AppImage + Windows zip) and itch on all three channels (html5, l
 - Drawing (cursor visibility, scene pass, overlays, button islands, panels, ImGui pass, present) → `app_render.cpp`.
 - IDLE update (camera drags, Select-mode move/scale/spin, mask ops, undo/redo, one-shots) → `app_idle.cpp`; user-tested on GL.
 - `App` (`app.h`) holds references to main()'s locals so moved code reads unchanged; main.cpp 5487 → 2349 lines.
+## 2026-10-25 — Retopo mode: mask, symmetrize, corner bridge
+
+*User-tested on a full head retopo.*
+
+- Mask (M): freezes vertices against Grab, Smooth and Erase; Ctrl unmasks, Shift softens its edge; saved with the project.
+- Symmetrize (panel): keep +X or -X, rebuild the other half as its mirror; drops faces laid over faces.
+- A line round an inside corner bridges as a triangle fan, its near-miss corner welded.
+- The wire no longer clips when zoomed in; F frames the last-worked area.
+
+## 2026-10-25 — Retopo mode: seam strokes, mirrored fills, overlap alarm
+
+- Mirror on: a stroke drawn down x = 0 is forced onto it — a vertex rail on the seam plus its twin; a hook that turns back is cut.
+- Fill and the wand's Fewest faces now fill a hole's mirror twin too, and never fill a gap twice.
+- `[retopo-audit]` in the log names faces laid over faces, once per change.
+- The wire stays bright on surfaces seen edge-on.
+
+## 2026-10-25 — Retopo mode: one snap reach
+
+Cut's vertex snap, edge picks and loop/path clicks now reach 14 px, the same as Draw's orange dot (Cut was 8 px).
+
+## 2026-10-25 — Retopo mode: housekeeping
+
+No behaviour change (every headless retopo test's output byte-identical before and after): the join, weld and snap tolerances now sit in one named "Reach" block atop `retopo.cpp`, and six copies of the face-winding check, two of the open-space check and the line pen-up resets became one helper each.
+
+## 2026-10-25 — Retopo mode: edge to vertex, wand lasso cleanup, strips zip across the seam, no bow-ties
+
+*Edge to vertex user-tested ("works, confirmed"). The rest headless-tested only:
+`unused-tools-vault/retopo-lasso-test/`, `retopo-zip-test/` (mouth_beside),
+`retopo-bridge-turn-test/` (on-edge starts), `retopo-notch-test/edge_vertex_test.cpp`.*
+A Draw line from a lit outline edge to a lit outline vertex (or back) joins them: the
+vertex brings both its outline neighbours, so the edge's two corners meet three
+vertices as a quad and a triangle; the wand's menu offers it flipped or as the quad
+alone. **Wand drag = lasso:** inside it, vertices that missed their weld (closer than a
+third of their edges) merge at their middle, faces left degenerate or doubled go, edges
+re-derive from the faces, 3–4-sided holes get a face, and pieces now joined become one;
+one undo step. A strip across the seam (built as a half plus its twin) never zipped
+onto an island beside it; now it does, its seam spoke welding only to the island's own
+seam vertex. Bridges grown off an edge put a bow-tie quad in about two of five short
+lines once Draw's snap started them exactly on the edge (the heading came from a sample
+on the edge itself); the heading is now read half a quad in, and every spoke is
+swapped back if its ends would cross the rails. New strokes are 1 ring, and the
+next-stroke setting goes back to 1 after each stroke.
+
+## 2026-10-25 — Retopo mode: Draw snaps to vertices, a line across a notch closes it
+
+*User-tested: a notch off the seam closed wall to wall, 16 quads with its twin. Also
+headless (`unused-tools-vault/retopo-notch-test/`): a seam Π, a line across its mouth,
+mirror off, an off-seam pair, and two lines that must not count.* Draw now shows what a
+line will start or end on: an orange dot on a vertex, else the edge in bold blue (14 px
+reach), and the line's ends land exactly there. Hitting a vertex used to take several
+tries, and each miss built a bridge off an edge instead. A line from one outline vertex
+to another of the same outline, across open space, closes the notch between them: its
+walls carry on as legs while they head out of the notch, a flat mouth joins their feet
+with new vertices, and the line runs through as a spine (the wand's menu opens beside
+it). Across the seam the halves are exact twins; off it the twin notch fills too. The
+first case of `retopo-closing-rules.md` in the CHISEL root.
+
+## 2026-10-25 — Retopo mode: loose bridge strips no longer twist on a J
+
+*Headless-tested only (`unused-tools-vault/retopo-bridge-turn-test/`): a J out of a
+ring, hooks from 1.2 down to 0.3 strip-widths, 2 to 4 flipped quads each before, none
+after.* A strip grown out of an island's edge whose line turned back on itself (a J) put
+a twisted quad in the hook. Each spoke leaned toward the start edge's direction along the
+whole strip, flipped to agree with it; once the line had turned past a right angle that
+swapped the spoke's ends between the rails. Spokes now follow the line's own left,
+leaning to an end edge only within a couple of quads of it, and on a bend tighter than the
+strip is wide the inside end is pulled in rather than stepping back past the last spoke.
+Present since bridges came in (2026-10-23).
+
+## 2026-10-25 — Retopo mode: Fewest faces, Grid without ring, spines across a hole
+
+*User-tested in part: Fewest faces and Grid no ring on a near-symmetric seam hole
+("going great"), the spine drawn top to bottom ("kinda works"). The spine's wand menu
+is headless-tested only (`unused-tools-vault/retopo-wand-test/`): the user's hole traced
+from a screenshot, spines seam to seam, off-seam and lopsided, all closed and manifold.*
+Three new wand options and a gesture. **Fewest faces** fills a hole with triangles and
+quads of its own rim vertices only, choosing among every way to cut it: each face costs
+one, a triangle a bit more (more toward the hole's middle, so they end up at its ends),
+slivers and long thin kites priced out; across the seam the cut is symmetric. On the
+user's tall hole it gives rows with a triangle and two quads at each end (8 faces where
+the grid made 56); on a mouth-shaped one, columns. **Grid, no ring** is Fill's grid
+without the ring of quads it lays inside rims of 12 sides or more. A hole across x = 0
+whose vertices have no exact mirror twins (a donut drawn over the seam in one stroke) now
+counts as a seam hole when its reflection lands within 3/4 of an edge of itself, so it
+gets the ladders too. **Spine**: in Draw, press on a hole's rim vertex, draw through the
+hole and let go on another vertex of the same rim: the line becomes a run of edges, and
+quads grow from it to the rim on both sides (its end faces take two rim edges, so they're
+quads; a lopsided rim folds the extra into triangles against it). From seam vertex to
+seam vertex it lies on x = 0 and is its own twin. Its fill goes up at once with the wand's
+menu beside it ("Your line", "Your line, tris at its ends", then the hole's usual
+options): clicking away keeps what's shown, Esc takes it back.
+
+## 2026-10-25 — Retopo mode: Wand (Q), pick how a hole is filled
+
+*Partly user-tested: one 24-side hole across x = 0 offered all five fills, Columns kept.
+Staggered, Rows, Grid via the wand, Esc / click-away and Ctrl+Z after a keep: not yet.*
+A new dock tool. Click inside a hole and a menu pops up by the pen with every way to fill
+it, each with its count of quads and triangles; hovering one puts it on the model, a
+click keeps it (one undo step), Esc or a click elsewhere leaves the hole as it was. The
+options are all worked out at the click, so hovering is a swap, not a rebuild. With
+mirror, a hole across x = 0 gets ladders made only of new edges between its own rim
+vertices: **Columns** (the two seam points joined, then pairs outward along both
+halves; a triangle each side when a half's count is even, one in the middle when the
+rim's is odd), two **staggered** Columns (one half started a step on, which moves the
+triangles to the middle or away entirely), and **Rows** (every vertex to its twin across
+the seam). Even rims also get Fill's grid. So an odd hole across the seam, which Fill
+leaves open, can now be closed with one triangle in the middle. Undo, Build, Fill,
+Export, a tool switch or a save first puts back the hole as it was.
+
+## 2026-10-24 — Retopo mode: strips drawn beside an island zip onto it
+
+*Partly user-tested: in the app 2 of 3 strips drawn along an edited island's edge
+zipped, 1 didn't (cause not yet known, now logged). Headless tests pass
+(`unused-tools-vault/retopo-zip-test/`): parallel strips touching, with a gap,
+overlapping, denser or sparser, mirror on, drawn on an edited island's edge; far apart
+stays separate; head-on end joins unchanged.* At Build, a strip whose long side runs
+within ~3/4 of a quad of an earlier island's outline zips onto it: over that stretch its
+spokes are re-laid one per island edge vertex, sharing them, so the island's loops run
+on into the strip. Redone every Build, so the strip keeps its sliders. One side per
+strip. A stroke that starts on an edited island but runs mostly (60%) along its edge is
+now such a strip, slid off the island so its band's edge meets the island's, instead of
+a bridge. Strip ends now only join an edge they run into, not one running along the
+strip (that laid the end spoke down a neighbour's side).
+
+## 2026-10-24 — Retopo mode: Del dissolves picked edges
+
+*User-tested; also checked headlessly on a quad grid (`unused-tools-vault/retopo-dissolve-test/`).*
+With edges picked, Del removes them and merges the faces either side into one; the picked
+edges' vertices left with only two edges go too, so a dissolved row's cross edges run
+straight through. A run that stops mid-mesh leaves a five-sided face where it ends. Mirror
+takes the twin row. Outline edges are refused with a toast for now. One undo step. Del
+still never touches the sculpt in this mode.
+
+## 2026-10-24 — Retopo mode: Shift+Ctrl+click picks the shortest edge path
+
+*User-tested.* In Draw, Shift+Ctrl+click an edge to add the shortest run of edges from the
+last edge picked (double-click or the previous Shift+Ctrl+click) to it; it becomes the
+next run's start. Both ends on one outline: the run follows the outline the short way
+round, so Extrude can grow just that stretch. Elsewhere it takes the shortest way across
+the quads. With nothing to carry on from, it starts a fresh pick. Mirror adds the twins.
+Extrude now also takes a press within half an edge's screen length of the pick (12 px at
+least), judged where the pen went down: before, most presses on a short run of big quads
+missed it and drew a one-quad bridge instead.
+
+## 2026-10-23 — Retopo mode: saved in the .chisel file
+
+*File layer self-tested headlessly (round trip bitwise, damaged section, pre-retopo
+reader), then on 55 real sculpts (paint layers, an 11-mesh scene, 655k-vertex meshes,
+saves back to June): every copy with retopo added loads with the sculpt identical and the
+retopo bit for bit, and the pre-retopo reader gives identical results on all 55. Tests in
+`unused-tools-vault/retopo-save-test/`. Save/Open in the app
+user-tested.* Strokes (path, settings,
+name, eye, edited) and the built low-poly (positions, normals, faces of any size, island
+owners, mirror twins) go in an optional **RTPO** chunk after the entities, with its own
+format byte; no file VERSION bump. The low-poly is saved as it is, never rebuilt from the
+strokes on load, so a later change to Build can't change an old file. Edges, outlines and
+holes are worked out again on load. Undo history isn't saved. Builds from before this
+skip the chunk and load the sculpt; a damaged chunk costs the retopo, never the sculpt.
+Opening a project replaces the session's retopo (none in the file = none). Closing with
+unsaved retopo work now asks, like sculpting does (`RetopoState::rev`).
+
+## 2026-10-23 — Retopo mode: build on release, quick sliders by the pen, rings 2, density to 2x
+
+*User-tested.* A donut or strip is built the moment the pen lifts (quiet: no toast, no
+extra undo step, one Ctrl+Z takes stroke and quads); Space / Build stay for rebuilding
+after sculpting. The new stroke's Size / Rings / Density float in a small panel beside
+where the pen let go: not a popup (a popup eats the next click outside it, which is the
+next stroke), so a press elsewhere closes it and still draws; right-click's menu takes
+over, a changed selection closes it. Rings default 2 (was 4). Density runs 0.1x to 2x
+(was 1x) on every control: island sliders, tool dock, hold W, HUD.
+
+## 2026-10-23 — Retopo mode: extrude a picked loop by drawing out of it
+
+*User-tested.* In Draw, a stroke that starts on a double-clicked outline loop (thin green
+line) grows it: every vertex walks outward across the surface, away from the faces the
+loop borders, as far as the line's end got out (sideways wobble ignored). One new loop for
+a short line, more rows for a long one so the quads stay about square; same vertex count.
+The new outer loop stays picked, so the next stroke carries on. From a hole's inner rim it
+grows into the hole. Mirror: twin loops grow twins, a loop across x = 0 grows symmetric.
+Freezes the island; one undo step. Inner loops are refused (toast).
+
+## 2026-10-23 — Retopo mode: hole finder and Fill (H)
+
+*User-tested ("worked pretty well"); the ring was not caught in a kept log.*
+
+**Finder:** every closed outline is found with the rest of the topology (no per-frame
+cost); in each connected piece the longest is its outer edge, any other is a hole. Holes
+get a wash, green for an even count of sides (all-quad fillable), amber for odd; the dock
+readout counts them. **Fill:** H or the dock's Fill chip fills the double-clicked outline
+loops (outer edges too), else every hole; odd rims are left open with a toast. Rims of 12+
+sides get a ring of quads walked across the surface just inside, then an m x n grid whose
+corners sit where the loop turns most. The inside is **aimed down the opening's area
+normal** onto the first surface facing back (a socket's floor, a bulging eyeball), not
+snapped to the nearest surface, which piled every vertex onto the socket wall; the relax
+only slides along the surface. Mirror: a hole's twin gets the reflected fill, a hole across
+x = 0 a symmetric one. The islands round a hole merge and freeze. One undo step.
+
+## 2026-10-23 — Retopo mode: double-click picks edge loops
+
+*User-tested.* In Draw, double-click a built edge: its loop goes green. Inner edges run
+straight through four-quad crossings and stop at poles, triangles and the outline; an
+outline edge follows the outline round. Ctrl adds or drops a loop, mirror brings the twin,
+a plain click clears.
+
+## 2026-10-23 — Retopo mode: filled faces, wire through the sculpt, F frames the island at work
+
+*Built live with the user at the keyboard. Fill seen working; the fold fix and the new F not yet tested.*
+
+**Fill:** built faces get a faint pale-blue wash under the wire (yellow for the hovered
+row, orange for the selection, dimmer while another row is hovered). Plain translucent
+triangles, no anti-aliased fringe; Erase's big merged n-gons take the concave fill.
+**Wire through the sculpt:** edges behind another part of the sculpt (facing us but
+deeper than the depth buffer), or facing away but only a few quads behind the surface in
+front of them (an ear's inner fold, under a lip), now draw thin and dark instead of
+vanishing, never filled. The far side of the model stays hidden. Still camera only, as
+before. **F in retopo mode** frames the connected piece of faces nearest the last press of
+any retopo tool (only this side of a mirrored pair; a mouth across x = 0 is one piece), or
+an unbuilt stroke if that's nearer; other modes keep the last-brush-stroke focus.
+
+## 2026-10-23 — Retopo mode: Merge islands, and Draw bridges between edited islands
+
+*Built live with the user at the keyboard. Merge user-tested; bridges built, not yet tested.*
+
+**Merge:** with two or more edited islands selected (Ctrl+click), the Polygon Layers
+footer's **Merge** chip goes live (greyed out otherwise, its tooltip says why), and a
+right-click on one of them opens a menu with Merge. The oldest island keeps its name,
+row and selection; the others' faces, edges and vertices become its. Nothing moves or
+welds. One undo step.
+
+**Bridges:** a Draw stroke that starts on an edited island is a bridge, drawn as a thin
+blue line instead of a band. At pen-up it's built straight away: one strip, one quad
+wide, from the border edge the line first crosses out of to the border edge it last
+crosses into on the island it ends on (another one, or the same). Its ends are those
+edges' own vertices, its width eases from one edge's length to the other's, and it's cut
+into steps the size of the quads on those edges. The islands and the bridge become one
+island. Ending on empty sculpt grows a loose strip out of the edge instead; ending on a
+fresh (unedited) island is refused with a toast. Mirror: a twin bridge, or, between an
+island and its own twin, a bridge that is its own twin (spokes paired across x = 0). A
+click without a drag still just selects.
+
+## 2026-10-23 — Retopo mode: Ctrl + Erase deletes whole faces
+
+*Built live with the user at the keyboard; user-tested.*
+
+Hold Ctrl with the eraser (E): the face under the ring's centre (else the one whose middle
+is nearest it inside the ring) is outlined red; a click deletes it, outline faces too,
+which edge erasing can't reach. Ctrl+drag takes one more each time the pointer moves on.
+Vertices only that face used go with it; mirror deletes the twin face; one undo step per
+drag; Ctrl+click with the eraser no longer toggles the island's selection. The hover
+lookups (the red face, Cut's vertex ring) now run after the frame's edits: taken before,
+a delete renumbered the faces and the outline jumped across the model for a frame.
+
+## 2026-10-23 — Retopo mode: Cut snaps to vertices at its ends
+
+*Built live with the user at the keyboard; user-tested.*
+
+With the knife out, a built vertex within 8 px of the pointer gets a green ring. A cut
+that **starts or ends** on a lit vertex (a filled dot marks a snapped start) runs from that
+vertex itself: the face it leaves splits along a chord from the corner to the first cut
+point, no new vertex beside it, and the support runs leave that face alone (triangles and
+poles allowed, user's call). Start and end on two corners of one face and it splits along
+the chord between them, handy across the eraser's big faces. Passing near a vertex
+mid-line doesn't snap: only the ends, and only that close. Mirror snaps the twin.
+Log line gains a vertex-end count.
+
+## 2026-10-23 — Retopo mode: Erase (E), faces of any size
+
+*Built live with the user at the keyboard; user-tested.*
+
+- **Erase** on **E** (mode 0 only; E stays Next alpha elsewhere), rail button under Cut with
+  a tipped-eraser icon (DOS pixel version too), red ring, Size with S. A round brush: each
+  dab takes the one inner edge whose middle is nearest the ring's centre (inside the
+  ring), at the press and each time the pointer moves on; holding still takes nothing more.
+  The two faces either side become one, of any size. An end left as a point on a straight
+  line (within ~30°) dissolves, so erasing a whole support line gives the quads back; a
+  line left poking into the new face is folded away. The island's outline isn't erasable
+  (that would delete faces, not join them). Mirror erases the twin. Freezes what it
+  touches; a drag is one undo step.
+- **Faces of any size.** `RetopoMesh` stores polygons (`faces` + `face_off` +
+  `face_owner`) instead of 4-index quads; triangles are 3 corners now, not a, b, c, c.
+  Picking uses an even-odd test (merged faces needn't be convex), welds' bridge distance
+  fans each face, export writes every face as it is. Cut splits big faces too but only
+  keeps quads and triangles to quads (no support edges run through a big face).
+- Readouts say "faces"; the dock's export tip is plain "Export OBJ".
+
+## 2026-10-23 — Retopo mode: real undo
+
+*Built live with the user at the keyboard; user-tested.*
+
+Ctrl+Z / Ctrl+Shift+Z in mode 0 now walk **everything**: strokes, Build, slider drags (one
+step per drag), Grab, Smooth, Cut, trash and Clear. Never the sculpt. One history for all
+islands, not one each: welds, bridges and cuts share vertices between islands, so undoing
+one alone could tear its neighbour. Each step is a whole copy of retopo (strokes + quads),
+~100 KB for a typical session, in CPU memory: 64 steps / 64 MB cap. The GPU undo isn't
+involved; retopo never lives on the GPU. A Grab or Smooth press that moves nothing isn't a
+step. Eyes and selection aren't history: undo leaves them as they are. Replaces the
+stroke-only undo and Cut's one-level stopgap; the dock button is plain "Undo" now.
+
+## 2026-10-23 — Retopo mode: Cut slices the built quads
+
+*Built live with the user at the keyboard; user-tested.*
+
+The knife (C) now cuts. Every built edge the line crosses, on the side facing you (not
+hidden, not behind the sculpt), gets a new vertex **pulled toward the edge's middle**: it
+keeps a quarter of its offset, so crossing at 1/5 lands near 0.43 and a hand-drawn line
+gives a straight loop. Every face around a cut edge splits, **into quads**: straight
+across = two; a clipped corner = three round a new turning vertex; crossed four times =
+four round a middle. A face only splits cleanly into quads when its outline has an even
+count, so a line that stops inside a quad gets a **support edge** run on through the middle
+of the far side, face after face, to the island's border (or round to meet the cut):
+quads all the way, no dead-end triangle. Nothing is left hanging on an edge.
+Mirror cuts the twin as an exact reflection (a seam-crossing edge is cut on x = 0). A cut
+freezes what it touches. **Ctrl+Z takes back the last cut** before it walks strokes (one
+level; any later stroke, Build, Grab, Smooth or trash drops it). Faces may now be
+triangles (stored a, b, c, c; only older cut paths made them): topology skips the repeated
+corner, OBJ export writes them as triangles. Freezing moved out of `after_edit` into
+`freeze_touched`, shared with Cut.
+
+## 2026-10-23 — Retopo mode: Cut tool (placeholder)
+
+*Built live with the user at the keyboard. A shell: what a cut does isn't decided yet.*
+
+New tool on **C** (mode 0 only; C stays Crease / the colour picker elsewhere), on the rail
+between Draw and Grab, with the user's bougatsa-knife icon (tip left; DOS pixel version
+too). Dragging lays a thin line on the surface, no band; the cursor is a small green ring
+and the tool dock shows "Cut" with a hint instead of Size. On pen-up the line goes.
+Draw and Cut now share one surface sampler (`retopo_surface_at`).
+
+## 2026-10-23 — Retopo mode: next stroke in the tool dock, eyes that hide, green cursor
+
+*Built live with the user at the keyboard.*
+
+- **Next stroke** is planned in the tool dock (bottom left), under Draw polygon strips:
+  **S Size**, **A Rings**, **W Density**. Holding A or W and dragging steps them (a ring per
+  40 px, a tenth of density per 50 px) with the usual readout; in mode 0 those keys used to
+  move strength and hardness, which retopo doesn't use. A new stroke takes them and
+  Size x1.0 (its band is the brush Size as drawn). The "Next stroke" sliders left
+  Polygon Layers, and island sliders no longer rewrite what the next stroke gets.
+- **Width is Size** everywhere in mode 0. Island sliders and the footnote follow the tool
+  dock's order: Size, Rings, Density (`S: 1.0x | R: 3 | D: 0.6x`), the footnote 12 px and
+  centred under the name; the dock starts 24 px wider to fit it.
+- **The eye works:** white while shown, grey once hidden. A hidden island's band and
+  wireframe leave the model, and picking, Grab, Smooth and welds pass it by; hovering its
+  row still lights it. Build and Export still take it. Edited islands' eyes work too.
+- **Matrix-green cursor** (`#00FF41`) in mode 0: ring, shadow, centre cross and the Size bar.
+
+## 2026-10-23 — Retopo mode: the bar becomes the Polygon Layers dock
+
+*Built live with the user at the keyboard; layout also checked on screenshots.*
+
+- **Right-hand dock** in place of the bottom bar (c075114), like paint mode's layers: rows
+  newest on top, eye / name + kind / trash. The first selected row opens to its Rings /
+  Density / Width ("Sets all N selected" for several); nothing selected, the sliders sit
+  under the list as "Next stroke". Footer: Build, Clear, Undo / Strokes, Wire, Export /
+  readout.
+- **Polygon Layers:** movable (drag the title or any empty part), resizable (edges,
+  corner); the list fills the height and scrolls, the footer stays put; kept on screen.
+  Position and size aren't remembered across restarts.
+- **Closed rows** carry their settings as a grey footnote, `R: 3 | D: 0.6x | W: 1.0x`.
+  Rows are 46 px, content inset 5 px from the outline.
+- **First edit collapses the row:** the moment an island freezes, its open row closes; the
+  sliders jiggle and squash away (0.28 s), then the footnote opens from its middle (0.22 s).
+  Edited rows never reopen. DOS, Y2K and motion-off just switch.
+
+## 2026-10-23 — Retopo mode: Smooth keeps loop spacing even
+
+*User-tested: still "not quite right yet" (user); flat-donut simulation below.*
+
+The neighbour average pulled every loop toward the inside of its bend; with the borders only
+sliding, a donut's middle loops crept into the hole, and that bunched shape was where it
+settled. A four-neighbour vertex now pairs its neighbours by direction (along the loop,
+across the band) and slides along each pair's line toward its midpoint, like the border
+slide, so even spacing is the resting state. Simulated: loop gaps stay 0.25 each at 20 and
+600 dabs (were 0.12 → 0.40). Odd valence (welds) still averages. Tried and dropped: Taubin
+smoothing, which only delays the same end state.
+
+## 2026-10-23 — Retopo mode: right-click no longer opens the paint colour wheel
+
+The brush stays Paint underneath mode 0 and the wheel only checked the brush; it now also
+needs the sculpt/paint mode (so insert and select don't get it either). *Found and tried live.*
+
+## 2026-10-23 — Retopo mode: mirror welds mouths
+
+With mirror on, a stroke across x = 0 is cut there; its longer side builds plus its twin,
+sharing the seam spokes (self-paired, held on x = 0): one symmetric, welded piece. User-tested.
+
+## 2026-10-23 — Retopo mode: mirror by vertex pairs, bridges
+
+*User-tested.*
+
+- **Mirror pairs.** A twin is now the original's exact reflection, paired vertex by vertex
+  (`RetopoMesh::mirror`). Grab / Smooth move what's under the ring and set each twin to
+  its reflection (both under the ring: they meet halfway); welds mirror; a vertex welded
+  onto its own twin becomes one seam vertex at x = 0. Replaces reflecting world positions,
+  which drifted (user: "doesn't work").
+- **Bridges.** Build makes donuts first, then strips in drawing order. A strip end on (or
+  just short of) an island already built is cut back to its outer edge and its end spoke
+  takes over the island's best-aligned run of edge vertices: shared vertices and edges,
+  no T-junction. The island keeps its shape. Twins bridge through the pair map.
+- Joined islands freeze as a group (editing one would otherwise let the next Build
+  rebuild a neighbour out from under the shared vertices).
+
+## 2026-10-23 — Retopo mode: per-island settings, selection, right-click menu
+
+*User-tested.*
+
+- **Rings 1–8** (quads across the band, odd counts too: no centre loop), **Density
+  0.1x–1x** (quads along it), new **Width 0.1x–2x** (scales the band as drawn, to rescue a
+  good path drawn with too fat a brush). Labels "Rings: n" etc.; three stacked sliders.
+- **Per island:** each stroke keeps its own rings / density / width (a new one takes the
+  bar's last values). Sliders act on the **selection** only and rebuild at once, quietly;
+  only the moved setting is written, so a multi-selection keeps its other differences.
+  Nothing selected = they set the next stroke. Edited (frozen) selection greys them out.
+- **Selection:** click an island on the model (built quads, or an unbuilt band; mirror
+  twins count) or its name in the bar; Ctrl+click adds / removes; click on nothing
+  clears; a freshly drawn stroke is selected. Edited and editable islands never share a
+  selection. Shown as orange wire, white band centreline, accent outline on the chip.
+- **Right-click** an editable island: the same three sliders in a menu at the pointer.
+
+## 2026-10-22 — Retopo mode: frozen islands, edge welding, density slider
+
+*User-tested.*
+
+- **Frozen.** The first grab that moves a stroke's quads, the first smooth that touches
+  them, or a weld freezes that stroke: Build keeps its quads as they are (rings and density
+  no longer reach it), the band stops drawing, Grab and Smooth still edit it. In the bar
+  its name goes white and its eye greys out. Trash / Ctrl+Z drop a stroke's quads at once.
+- **Welding.** While grabbing or smoothing, an outer-edge vertex that comes within 0.4 of
+  its shortest edge of another outer-edge vertex (another island, or a far part of its
+  own) folds into it; duplicate edges merge, both strokes freeze. Inner vertices never
+  weld, nor do vertices within two edges of each other. Export skips folded-away vertices.
+- **Density** slider under rings: quads along a band, 0.5x–3x of square. Both sliders are
+  shorter (0.64), stacked; the bar grows upward to fit.
+- Fixed before commit: Build cleared the result before keeping the frozen quads, so every
+  edited island vanished on the next Build.
+- Known: mirror for Grab/Smooth tests reflected world positions, which doesn't work (user);
+  it should run on vertex pairs. See `retopo-handoff.md` in the working root.
+
+## 2026-10-22 — Retopo mode: Smooth and Grab on the built quads
+
+*User-tested.* Both work on the result, and both snap every vertex back onto the sculpt.
+
+- **Smooth** (Shift, double Shift locks; dock tile): tangential relax. Interior vertices
+  move toward their neighbours along the surface, border vertices slide only along the
+  border (a strip keeps its width, a donut its hole), corners stay pinned.
+- **Grab** (G, dock tile): the press takes what's under the ring with a soft falloff, the
+  drag carries it, converted to world at each vertex's own depth.
+- Mirror X on: the reflection under the ring moves too, mirrored, so twins stay twins.
+- Tool Options shows Size only; Smooth runs at a fixed strength for now. The rings
+  control is a slider again, in the skin's colours with the value centred.
+- Build regenerates from the strokes, so it discards smoothing and grabs: edit last.
+
+## 2026-10-22 — Retopo mode: own dock, the bar in the skin's style, Space builds
+
+*User-tested.* Mode 0's dock replaces the brushes with one pencil, "Draw polygon strips"
+(D, mode 0 only); Tool Options shows just Size. The bar is always up in mode 0 and is
+drawn with the skin's own panel, chips and icons (eye / name / trash per stroke, a
+- rings + stepper). Space now builds instead of toggling the bar. Y2K and classic still
+show the sculpt brushes in mode 0.
+
+## 2026-10-22 — Retopo mode (key 0): sketch donuts and strips, Build quads
+
+*Branch `retopo-mode`. User saw eye donuts build live; hover/rename/wheel not yet hand-tested.*
+
+- **Key 0** (far end of the number row, so a missed 4 never lands here). Own key scope:
+  sculpt and paint keys do nothing in it; Ctrl+Z walks the stroke list, Delete is off.
+- **Strokes are fat lines** at the brush ring's width (pen pressure thins them). Back where
+  it started = donut, else strip. Vector data in world space, not paint.
+- **Space** toggles a floating bar, bottom centre: the stroke list (hover lights the stroke
+  and its quads, double-click renames, trash deletes), Build, rings (wheel steps it),
+  stroke/wire toggles, Export OBJ (real quads).
+- **Build** walks spokes across the surface with re-snapping, so loops follow an eye socket;
+  spokes on the inside of a bend are capped so a small eye can't fold. Mirror X builds
+  twins. Result is a separate CPU mesh, never fed to the sculpt.
 
 ## 2026-10-22 — Pose brush hidden, parked until v0.4.x
 

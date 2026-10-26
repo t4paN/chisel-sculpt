@@ -23,6 +23,7 @@
 #include "insert_controller.h"
 #include "ui_overlay.h"
 #include "ui_skin.h"
+#include "retopo.h"
 #include "brush_alpha.h"
 #include "scene_snapshot.h"
 #include "object_xform.h"
@@ -573,12 +574,13 @@ void app_ops_levels_and_views(App& a) {
     if (input.focus_requested) {
         input.focus_requested = false;
         mesh->compute_bounding_sphere(mesh_center, mesh_radius);
-        if (brush_stroke.last_stroke_valid) {
-            camera.set_target(brush_stroke.last_stroke_pos);
-        } else {
-            camera.set_target(mesh_center);
+        // Retopo (0) frames the piece being worked on (retopo_focus).
+        const bool framed = input.interaction_mode == InputState::InteractionMode::RETOPO
+                         && retopo_focus(a.retopo, camera, mesh_radius);
+        if (!framed) {
+            camera.set_target(brush_stroke.last_stroke_valid ? brush_stroke.last_stroke_pos : mesh_center);
+            camera.distance = std::max(camera.distance * 0.675f, mesh_radius * 0.05f);
         }
-        camera.distance = std::max(camera.distance * 0.675f, mesh_radius * 0.05f);
         screen_buffers_dirty = true;
     }
 

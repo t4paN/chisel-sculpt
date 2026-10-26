@@ -25,6 +25,8 @@ const KeyActionInfo kKeyActions[(int)KeyAction::COUNT] = {
     {"mode_insert",   "Modes",   "Insert mode",         nullptr, {GLFW_KEY_2, 0}},
     {"mode_select",   "Modes",   "Select mode",         nullptr, {GLFW_KEY_3, 0}},
     {"mode_paint",    "Modes",   "Paint mode",          nullptr, {GLFW_KEY_4, 0}},
+    {"mode_retopo",   "Modes",   "Retopo mode",
+        "Sketch strokes on the model, then Build turns them into quads", {GLFW_KEY_0, 0}},
     {"brush_draw",    "Sculpt brushes", "Draw",      nullptr, {GLFW_KEY_D, 0}, KeyScope::Sculpt},
     {"brush_clay",    "Sculpt brushes", "Clay",      nullptr, {GLFW_KEY_T, 0}, KeyScope::Sculpt},
     {"brush_inflate", "Sculpt brushes", "Inflate",   nullptr, {GLFW_KEY_I, 0}, KeyScope::Sculpt},
@@ -41,9 +43,17 @@ const KeyActionInfo kKeyActions[(int)KeyAction::COUNT] = {
         "Draw and Mask. In Paint mode: swap colours. In Select mode: hold to spin the selection.", {GLFW_KEY_E, 0}},
     {"paint_bucket",  "Paint mode", "Fill bucket",      "Click an unmasked area to fill it. Ctrl: erase it", {GLFW_KEY_B, 0}, KeyScope::Paint},
     {"paint_picker",  "Paint mode", "Colour picker",    "Click the model to pick its colour", {GLFW_KEY_C, 0}, KeyScope::Paint},
+    {"retopo_build",  "Retopo mode", "Build",            "Turn the strokes into quads (the bar's Build)", {GLFW_KEY_SPACE, 0}, KeyScope::Retopo},
+    {"retopo_draw",   "Retopo mode", "Draw polygon strips", nullptr, {GLFW_KEY_D, 0}, KeyScope::Retopo},
+    {"retopo_grab",   "Retopo mode", "Grab polygon strips", "Drag the built quads around", {GLFW_KEY_G, 0}, KeyScope::Retopo},
+    {"retopo_cut",    "Retopo mode", "Cut",              "Drag a line across islands", {GLFW_KEY_C, 0}, KeyScope::Retopo},
+    {"retopo_erase",  "Retopo mode", "Erase",            "Brush over the built quads: the edge nearest the ring's centre goes", {GLFW_KEY_E, 0}, KeyScope::Retopo},
+    {"retopo_fill",   "Retopo mode", "Fill holes",       "Quads over every even hole, or over the outline loops double-clicked", {GLFW_KEY_H, 0}, KeyScope::Retopo},
+    {"retopo_wand",   "Retopo mode", "Wand",             "Click a hole: hover the ways to fill it, click one to keep it", {GLFW_KEY_Q, 0}, KeyScope::Retopo},
+    {"retopo_mask",   "Retopo mode", "Mask",             "Freeze vertices against Grab, Smooth and Erase. Ctrl unmasks, Shift softens the edge", {GLFW_KEY_M, 0}, KeyScope::Retopo},
     {"hold_size",     "Brush feel", "Size",             "Hold and drag", {GLFW_KEY_S, 0}},
-    {"hold_strength", "Brush feel", "Strength",         "Hold and drag", {GLFW_KEY_W, 0}},
-    {"hold_hardness", "Brush feel", "Hardness",         "Hold and drag", {GLFW_KEY_A, 0}},
+    {"hold_strength", "Brush feel", "Strength",         "Hold and drag. In Retopo mode: the next stroke's Density", {GLFW_KEY_W, 0}},
+    {"hold_hardness", "Brush feel", "Hardness",         "Hold and drag. In Retopo mode: the next stroke's Rings", {GLFW_KEY_A, 0}},
     {"hold_spacing",  "Brush feel", "Spacing",          "Hold and drag", {GLFW_KEY_O, 0}},
     {"size_down",     "Brush feel", "Size down",        "Repeats while held", {GLFW_KEY_LEFT_BRACKET, 0}},
     {"size_up",       "Brush feel", "Size up",          "Repeats while held", {GLFW_KEY_RIGHT_BRACKET, 0}},
@@ -54,7 +64,7 @@ const KeyActionInfo kKeyActions[(int)KeyAction::COUNT] = {
     {"mirror",        "Shape",   "Mirror X",            nullptr, {GLFW_KEY_X, 0}},
     {"remesh",        "Shape",   "Remesh",              nullptr, {GLFW_KEY_SLASH, 0}},
     {"merge",         "Shape",   "SDF merge",           nullptr, {GLFW_KEY_J, 0}},
-    {"delete_mesh",   "Shape",   "Delete object",       nullptr, {GLFW_KEY_DELETE, 0}},
+    {"delete_mesh",   "Shape",   "Delete object",       "In Retopo mode: dissolve the picked edges", {GLFW_KEY_DELETE, 0}},
     {"mask_invert",   "Mask",    "Invert mask",         nullptr, {GLFW_KEY_I, C}},
     {"mask_clear",    "Mask",    "Clear mask",          nullptr, {GLFW_KEY_A, C}},
     {"focus",         "View",    "Focus",               nullptr, {GLFW_KEY_F, 0}},
@@ -385,6 +395,13 @@ void InputState::enter_paint_mode() {
     subtract_locked = false;
 }
 
+void InputState::enter_retopo_mode() {
+    interaction_mode = InteractionMode::RETOPO;
+    clear_smooth_lock();
+    bucket_active = false;
+    color_pick_active = false;
+}
+
 void InputState::enter_sculpt_mode() {
     interaction_mode = InteractionMode::EDIT;
     paint_mode = false;
@@ -435,6 +452,7 @@ void InputState::end_frame() {
     path_n = 0;
     mouse1_just_pressed = false;
     mouse1_just_released = false;
+    mouse2_just_released = false;
     release_tail = false;
     enter_pressed = false;
     key_y_pressed = false;
@@ -536,6 +554,22 @@ static void apply_slider_delta(float dx) {
                 delta = std::max(min_delta, std::min(max_delta, delta));
                 g_input->slider_accum = delta / 0.001f;
                 g_input->brush_spacing = g_input->slider_start_value + delta;
+                break;
+            }
+            // Stepped: a ring per 40 px, a tenth of density per 50 px.
+            case InputState::SliderMode::RINGS: {
+                const float lo = (1.0f - g_input->slider_start_value) * 40.0f;
+                const float hi = (8.0f - g_input->slider_start_value) * 40.0f;
+                g_input->slider_accum = std::max(lo, std::min(hi, g_input->slider_accum));
+                g_input->retopo_rings = (int)std::lround(g_input->slider_start_value + g_input->slider_accum / 40.0f);
+                break;
+            }
+            case InputState::SliderMode::DENSITY: {
+                const float lo = (0.1f - g_input->slider_start_value) * 500.0f;
+                const float hi = (2.0f - g_input->slider_start_value) * 500.0f;
+                g_input->slider_accum = std::max(lo, std::min(hi, g_input->slider_accum));
+                g_input->retopo_density =
+                    std::round((g_input->slider_start_value + g_input->slider_accum / 500.0f) * 10.0f) / 10.0f;
                 break;
             }
             default: break;
@@ -999,6 +1033,11 @@ static void mouse_button_callback(GLFWwindow* w, int button, int action, int mod
                 // scene.render_pick over every entity) once drag_mode is SCULPT, so
                 // latch unconditionally here and let that pick sort out hit vs. miss.
                 g_input->drag_mode = InputState::DragMode::SCULPT;
+            } else if (g_input->interaction_mode == InputState::InteractionMode::RETOPO) {
+                // Retopo: a press on the model starts a stroke (main.cpp captures it),
+                // anywhere else orbits, as in Edit.
+                g_input->drag_mode = g_input->on_model ? InputState::DragMode::RETOPO
+                                                       : InputState::DragMode::ORBIT;
             } else if (g_input->on_model && g_input->color_pick_active
                        && g_input->current_brush == BrushType::PAINT
                        && g_input->interaction_mode == InputState::InteractionMode::EDIT) {
@@ -1060,6 +1099,11 @@ static void mouse_button_callback(GLFWwindow* w, int button, int action, int mod
     if (button == GLFW_MOUSE_BUTTON_RIGHT) {
         bool was_down = g_input->mouse2_down;
         g_input->mouse2_down = (action == GLFW_PRESS);
+        if (action == GLFW_PRESS && !was_down) {
+            g_input->mouse2_press_x = (float)g_input->mouse_x;
+            g_input->mouse2_press_y = (float)g_input->mouse_y;
+        }
+        if (action == GLFW_RELEASE && was_down) g_input->mouse2_just_released = true;
         // Pose brush: right-click a sphere to remove it (main.cpp, once idle).
         if (action == GLFW_PRESS && !was_down && g_input->pose_brush_on()
             && g_input->pose_hover_joint >= 0 && !g_input->zoom_modifier_held()
@@ -1187,6 +1231,36 @@ static void run_key_action(GLFWwindow* w, KeyAction a, bool repeat) {
             in.enter_paint_mode();
             notify("Paint", 1.0f);
             break;
+        case KeyAction::MODE_RETOPO:
+            in.enter_retopo_mode();
+            notify("Retopo: sketch on the model", 2.0f);
+            break;
+        case KeyAction::RETOPO_BUILD:
+            if (!repeat) in.retopo_build_requested = true;
+            break;
+        case KeyAction::RETOPO_FILL:
+            if (!repeat) in.retopo_fill_requested = true;
+            break;
+        case KeyAction::RETOPO_DRAW:
+        case KeyAction::RETOPO_GRAB:
+        case KeyAction::RETOPO_CUT:
+        case KeyAction::RETOPO_ERASE:
+        case KeyAction::RETOPO_WAND:
+        case KeyAction::RETOPO_MASK:
+            if (repeat) break;
+            in.clear_smooth_lock();
+            in.retopo_tool = a == KeyAction::RETOPO_GRAB  ? InputState::RetopoTool::GRAB
+                           : a == KeyAction::RETOPO_CUT   ? InputState::RetopoTool::CUT
+                           : a == KeyAction::RETOPO_ERASE ? InputState::RetopoTool::ERASE
+                           : a == KeyAction::RETOPO_WAND  ? InputState::RetopoTool::WAND
+                           : a == KeyAction::RETOPO_MASK  ? InputState::RetopoTool::MASK
+                                                          : InputState::RetopoTool::DRAW;
+            notify(a == KeyAction::RETOPO_GRAB ? "Grab polygon strips"
+                   : a == KeyAction::RETOPO_CUT ? "Cut"
+                   : a == KeyAction::RETOPO_ERASE ? "Erase"
+                   : a == KeyAction::RETOPO_WAND ? "Wand: click a hole"
+                   : a == KeyAction::RETOPO_MASK ? "Mask: Ctrl unmasks, Shift softens the edge" : "Draw polygon strips", 1.0f);
+            break;
         case KeyAction::PAINT_BUCKET:
             // Paint mode's key (KeyScope::Paint): arm the bucket. Again: back to the brush.
             in.interaction_mode = InputState::InteractionMode::EDIT;
@@ -1244,10 +1318,19 @@ static void run_key_action(GLFWwindow* w, KeyAction a, bool repeat) {
 
         case KeyAction::HOLD_SIZE:
             begin_slider_drag(w, InputState::SliderMode::SIZE, in.brush_size); break;
+        // Retopo has no strength or hardness: there W and A plan the next stroke.
         case KeyAction::HOLD_STRENGTH:
-            begin_slider_drag(w, InputState::SliderMode::STRENGTH, in.brush_strength); break;
+            if (in.interaction_mode == InputState::InteractionMode::RETOPO)
+                begin_slider_drag(w, InputState::SliderMode::DENSITY, in.retopo_density);
+            else
+                begin_slider_drag(w, InputState::SliderMode::STRENGTH, in.brush_strength);
+            break;
         case KeyAction::HOLD_HARDNESS:
-            begin_slider_drag(w, InputState::SliderMode::HARDNESS, in.brush_hardness); break;
+            if (in.interaction_mode == InputState::InteractionMode::RETOPO)
+                begin_slider_drag(w, InputState::SliderMode::RINGS, (float)in.retopo_rings);
+            else
+                begin_slider_drag(w, InputState::SliderMode::HARDNESS, in.brush_hardness);
+            break;
         case KeyAction::HOLD_SPACING:
             begin_slider_drag(w, InputState::SliderMode::SPACING, in.brush_spacing); break;
 
@@ -1293,6 +1376,12 @@ static void run_key_action(GLFWwindow* w, KeyAction a, bool repeat) {
             break;
         // In the pose brush Delete clears the rig (after a prompt), never the mesh.
         case KeyAction::DELETE_MESH:
+            // Retopo shows the sculpt but doesn't edit it: Delete must not cost a mesh.
+            // There it dissolves the picked edges instead.
+            if (in.interaction_mode == InputState::InteractionMode::RETOPO) {
+                if (!repeat) in.retopo_dissolve_requested = true;
+                break;
+            }
             if (in.pose_brush_on()) in.pose_delete_key = true;
             else                    in.delete_mesh_requested = true;
             break;

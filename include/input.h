@@ -87,10 +87,11 @@ struct ProfileSettings {
 // saved rebind of it is silently dropped. Append new actions anywhere; order is only
 // the order the Key bindings window lists them in.
 enum class KeyAction : int {
-    MODE_SCULPT, MODE_INSERT, MODE_SELECT, MODE_PAINT,
+    MODE_SCULPT, MODE_INSERT, MODE_SELECT, MODE_PAINT, MODE_RETOPO,
     BRUSH_DRAW, BRUSH_CLAY, BRUSH_INFLATE, BRUSH_CREASE, BRUSH_PINCH,
     BRUSH_MOVE, BRUSH_LIMB, BRUSH_POSE, BRUSH_MASK, BRUSH_PREV, BRUSH_NEXT,
     PAINT_BUCKET, PAINT_PICKER,
+    RETOPO_BUILD, RETOPO_DRAW, RETOPO_GRAB, RETOPO_CUT, RETOPO_ERASE, RETOPO_FILL, RETOPO_WAND, RETOPO_MASK,
     HOLD_SIZE, HOLD_STRENGTH, HOLD_HARDNESS, HOLD_SPACING, SIZE_DOWN, SIZE_UP, AUTOSMOOTH,
     LEVEL_UP, LEVEL_DOWN, PROJECT, MIRROR, REMESH, MERGE, DELETE_MESH,
     MASK_INVERT, MASK_CLEAR,
@@ -114,7 +115,7 @@ constexpr int kKeyModMask = GLFW_MOD_CONTROL | GLFW_MOD_SHIFT | GLFW_MOD_ALT;
 // what lets one letter mean a sculpt brush in one and a paint tool in the other.
 // Global keys (view, files, mask, brush feel) work everywhere, but in the mode that
 // owns a scoped key, that key wins over a Global one bound to the same letter.
-enum class KeyScope : uint8_t { Global, Sculpt, Paint };
+enum class KeyScope : uint8_t { Global, Sculpt, Paint, Retopo };
 
 struct KeyActionInfo {
     const char* id;      // on-disk name, stable forever
@@ -446,7 +447,8 @@ struct InputState {
     float density_fine_mult   = 0.5f;
 
     // Slider drag mode (S/W/A/O key held + dragging)
-    enum class SliderMode { NONE, SIZE, STRENGTH, HARDNESS, SPACING };
+    // RINGS / DENSITY: in retopo mode A and W drive the next stroke's settings instead.
+    enum class SliderMode { NONE, SIZE, STRENGTH, HARDNESS, SPACING, RINGS, DENSITY };
     SliderMode slider_mode;
     double slider_start_x;
     double slider_start_y;
@@ -468,7 +470,7 @@ struct InputState {
     // stroking — the press either started a new pair or grew one off a sphere.
     // POSE_MOVE: Shift+drag on a sphere, relocating it alone (the mesh stays put).
     enum class DragMode { NONE, ORBIT, SCULPT, PAN, ZOOM, MOVE_OBJECT, SCALE_OBJECT,
-                          POSE_EDIT, POSE_MOVE };
+                          POSE_EDIT, POSE_MOVE, RETOPO };
     DragMode drag_mode;
 
     // Quit confirmation
@@ -619,7 +621,10 @@ struct InputState {
     bool mask_clear_requested;    // Ctrl+A (when mask brush active)
 
     // Multi-mesh interaction modes (1/2/3 keys)
-    enum class InteractionMode { EDIT, INSERT, SELECT };
+    // RETOPO (key 0): sketch strokes on the sculpt, Build turns them into quads
+    // (retopo.h). The far end of the number row on purpose — a missed 4 or 5 must
+    // never drop a sculptor into it.
+    enum class InteractionMode { EDIT, INSERT, SELECT, RETOPO };
     InteractionMode interaction_mode;
 
     // Insert-mode primitive selected in the shape picker (INSERT mode UI).
@@ -651,9 +656,34 @@ struct InputState {
     // and out of paint mode; the paint brush gives way to Draw, a Mask brush stays.
     void enter_paint_mode();
     void enter_sculpt_mode();
+    void enter_retopo_mode();
+    // What retopo mode's bar (always up in mode 0) and Space ask the main loop for.
+    bool retopo_build_requested = false;
+    bool retopo_fill_requested = false;    // H / the dock's Fill: quads over holes
+    bool retopo_dissolve_requested = false;  // Del in mode 0: dissolve the picked edges
+    int  retopo_symmetrize_request = 0;      // the panel's Symmetrize: +1 keep +X, -1 keep -X
+    bool retopo_build_quiet = false;   // a slider asked: rebuild without the toast
+    bool retopo_menu_request = false;  // a right-click on an island: the bar opens its menu
+    bool retopo_wand_request = false;  // the wand opened a hole's options: the bar shows them
+    bool retopo_menu_auto = false;     // a stroke was just drawn: its sliders float by the pen
+    // Right button: where it went down, and a one-frame flag on release (retopo's menu
+    // is a click, so main.cpp compares the two to tell it from a zoom drag).
+    float mouse2_press_x = 0.0f, mouse2_press_y = 0.0f;
+    bool mouse2_just_released = false;
+    // Mode 0's dock tool. Smooth isn't one of these: it rides Shift, as in sculpt.
+    enum class RetopoTool { DRAW, GRAB, CUT, ERASE, WAND, MASK };
+    RetopoTool retopo_tool = RetopoTool::DRAW;
+    // What the next stroke gets (RetopoStroke has the meaning of each), set in the tool
+    // dock or by holding A / W. Its band is the brush Size as drawn, so no width here.
+    // Rings go back to 1 after every stroke (user, 2026-10-25): more is a one-off.
+    int   retopo_rings = 1;
+    float retopo_density = 1.0f;
+    bool retopo_export_requested = false;
     // Which mode's shortcuts are live: Paint while painting (EDIT in paint mode), else
-    // Sculpt (Insert and Select keep the sculpt keys, as before the split).
+    // Sculpt (Insert and Select keep the sculpt keys, as before the split). Retopo has
+    // its own, so no brush key reaches into it.
     KeyScope key_scope() const {
+        if (interaction_mode == InteractionMode::RETOPO) return KeyScope::Retopo;
         return paint_mode && interaction_mode == InteractionMode::EDIT ? KeyScope::Paint
                                                                       : KeyScope::Sculpt;
     }

@@ -68,6 +68,7 @@
 #include "insert_controller.h"
 #include "ui_overlay.h"
 #include "ui_skin.h"
+#include "retopo.h"
 #include "web_bridge.h"
 #include "gpu/wgpu_surface.h"
 #include "app.h"
@@ -673,6 +674,8 @@ int main(int argc, char* argv[]) {
     // each use so a mid-frame selection change targets the right stack.
     AppState app_state = AppState::IDLE;
     InsertController insert_ctrl(scene, renderer);
+    RetopoState retopo;   // mode 0: sketched strokes + the quads Build made from them
+    uint64_t clean_retopo_rev = 0;   // retopo.rev as of the last save or load
     // Two-finger take-back (see InputState::touch_revert_requested).
     Camera   camera_at_press;
     bool     touch_undo_on_commit   = false;
@@ -743,7 +746,8 @@ int main(int argc, char* argv[]) {
             clean_edit_mark, cli_open_path, default_browse_path, current_project_path,
             error_popup_msg, error_popup_trigger, renderer, rescue, rescue_shown,
             max_level, swallow_level_switch, remesh_chained_from_merge, text, fps_display,
-            rot_axis, rot_active, rot_last_time, rot_dirty, scale_pivot
+            rot_axis, rot_active, rot_last_time, rot_dirty, scale_pivot,
+            retopo, clean_retopo_rev
 #ifdef __EMSCRIPTEN__
             , web_save_name, web_export_name
 #endif
@@ -804,7 +808,7 @@ int main(int argc, char* argv[]) {
             input.close_requested = false;
             const bool busy = app_state != AppState::IDLE || vmerge_job
                 || input.remesh_requested || input.remesh_in_progress;
-            if (scene.edit_mark() == clean_edit_mark && !busy) {
+            if (scene.edit_mark() == clean_edit_mark && retopo.rev == clean_retopo_rev && !busy) {
                 glfwSetWindowShouldClose(window, GLFW_TRUE);
             } else {
                 input.quit_requested = true;
@@ -1576,6 +1580,17 @@ int main(int argc, char* argv[]) {
             && input.drag_mode == InputState::DragMode::SCULPT
             && input.interaction_mode != InputState::InteractionMode::EDIT) {
             input.drag_mode = InputState::DragMode::NONE;
+        }
+
+        // ---- Retopo mode (retopo_input.cpp): pen, clicks, its own undo, Build ----
+        retopo_frame(retopo, input, scene, *mesh, renderer, camera, tablet, win_w, win_h,
+                     screen_buffers_dirty, imgui_wants_mouse);
+        if (input.retopo_export_requested) {
+            input.retopo_export_requested = false;
+            const std::string path = retopo_export(retopo, input, current_project_path);
+#if defined(__EMSCRIPTEN__)
+            if (!path.empty()) web_download_file(path.c_str(), "retopo.obj");
+#endif
         }
 
         // Hover speed, for the stroke's running start (g_hover_speed). Orbit, pan and

@@ -23,6 +23,7 @@
 #include "insert_controller.h"
 #include "ui_overlay.h"
 #include "ui_skin.h"
+#include "retopo.h"
 #include "gpu/wgpu_surface.h"
 #include "ui_backdrop.h"
 #include "debug_console.h"
@@ -58,7 +59,10 @@ void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse) {
     auto& fbh = a.fbh;
 #endif
     // ---- Cursor visibility ----
-    bool non_edit_mode = input.interaction_mode != InputState::InteractionMode::EDIT;
+    // Retopo counts as an edit mode here: it shows the brush ring (the band width).
+    const bool retopo_mode = input.interaction_mode == InputState::InteractionMode::RETOPO;
+    bool non_edit_mode = input.interaction_mode != InputState::InteractionMode::EDIT
+                      && !retopo_mode;
     // Hide the OS cursor while sculpting (we draw our own brush cursor).
     bool show_os_cursor = input.quit_requested || input.export_dialog_active || input.import_dialog_active || input.save_dialog_active || input.remesh_confirm_pending || input.voxel_merge_confirm_pending || input.drop_confirm_pending || input.reset_confirm_pending || input.pose_clear_confirm_pending || input.help_popup_open || input.keybind_menu_open || input.brush_props_open || imgui_wants_mouse || non_edit_mode;
 #ifndef __EMSCRIPTEN__
@@ -210,7 +214,9 @@ void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse) {
             cursor_x = (float)input.mouse_x;
             cursor_y = (float)input.mouse_y;
         }
-        if (input.color_pick_active) {
+        if (retopo_mode) {
+            draw_retopo_cursor(renderer, camera, input, cursor_x, cursor_y, win_w, win_h);
+        } else if (input.color_pick_active) {
             // Armed colour picker: eyedropper glyph instead of the brush
             // ring — the ring's size/hardness reading is meaningless here.
             draw_pick_cursor(cursor_x, cursor_y, input.on_model);
@@ -393,6 +399,8 @@ void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse) {
     draw_keybind_window(input, win_w, win_h);
     draw_brush_props_window(input, win_w, win_h);
     draw_paint_layers_panel(input, scene, win_w, win_h);
+    if (input.interaction_mode == InputState::InteractionMode::RETOPO)
+        draw_retopo_ui(input, a.retopo, renderer, camera, win_w, win_h, screen_buffers_dirty);
 
     // ---- Error popup ----
     if (error_popup_trigger) {

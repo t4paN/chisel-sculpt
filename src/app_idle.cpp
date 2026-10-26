@@ -22,6 +22,7 @@
 #include "insert_controller.h"
 #include "ui_overlay.h"
 #include "ui_skin.h"
+#include "retopo.h"
 #include "scene_snapshot.h"
 #include "object_xform.h"
 
@@ -403,6 +404,12 @@ void app_idle_update(App& a, int win_w, int win_h, float dx, float dy) {
         }
     }
 
+    // Mode 0: Ctrl+I / Ctrl+A act on the retopo mask; the sculpt's stays as it is.
+    if (input.interaction_mode == InputState::InteractionMode::RETOPO) {
+        if (input.mask_invert_requested) retopo_mask_invert(a.retopo);
+        if (input.mask_clear_requested) retopo_mask_clear(a.retopo);
+        input.mask_invert_requested = input.mask_clear_requested = false;
+    }
     // Mask invert (Ctrl+I)
     if (input.mask_invert_requested) {
         input.mask_invert_requested = false;

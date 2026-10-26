@@ -8,6 +8,8 @@
 #include "ui_icons.h"
 #include "pose.h"
 #include "camera.h"
+#include "renderer.h"
+#include "retopo.h"
 #include "imgui.h"
 #include <functional>
 #include <cstdio>
@@ -338,6 +340,14 @@ void draw_slider(TextOverlay& text, const InputState& input, int win_w, int win_
             sname = "Spacing";
             value = input.brush_spacing * 100.0f;
             break;
+        case InputState::SliderMode::RINGS:
+            sname = "Rings";
+            value = (float)(input.retopo_rings - 1) / 7.0f * 100.0f;
+            break;
+        case InputState::SliderMode::DENSITY:
+            sname = "Density";
+            value = (input.retopo_density - 0.1f) / 1.9f * 100.0f;
+            break;
         default: break;
     }
 
@@ -359,9 +369,14 @@ void draw_slider(TextOverlay& text, const InputState& input, int win_w, int win_
     text.draw_panel(bar_x, bar_y, bar_w * fill_pct, bar_h,
                    win_w, win_h, CGA(yellow), 0.9f);
 
-    std::snprintf(buf, sizeof(buf), "%s: %.0f%s",
-                 sname, value,
-                 input.slider_mode == InputState::SliderMode::SIZE ? "" : "%");
+    if (input.slider_mode == InputState::SliderMode::RINGS)
+        std::snprintf(buf, sizeof(buf), "%s: %d", sname, input.retopo_rings);
+    else if (input.slider_mode == InputState::SliderMode::DENSITY)
+        std::snprintf(buf, sizeof(buf), "%s: %.1fx", sname, input.retopo_density);
+    else
+        std::snprintf(buf, sizeof(buf), "%s: %.0f%s",
+                     sname, value,
+                     input.slider_mode == InputState::SliderMode::SIZE ? "" : "%");
     text.draw_text(buf, bar_x, bar_y - 20.0f, 2.0f,
                   win_w, win_h, CGA(yellow), 1.0f);
 }
@@ -927,7 +942,8 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
 
     BrushType current = input.current_brush;
     bool smooth_on = input.is_smooth_active();
-    bool paint_on  = (current == BrushType::PAINT) && !smooth_on;
+    bool paint_on  = (current == BrushType::PAINT) && !smooth_on
+                  && input.interaction_mode != InputState::InteractionMode::RETOPO;
     InputState::InteractionMode mode = input.interaction_mode;
 
     // Each island is its OWN auto-resizing window so its mouse-capture rect hugs its
@@ -1020,6 +1036,12 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
                             ImVec2(calc_btn_w("Paint"), btn_h), paint_on)) {
             input.enter_paint_mode();
         }
+        ImGui::SameLine();
+        static char rtip[64];
+        std::snprintf(rtip, sizeof(rtip), "Retopo (Shortcut: %s)", input.key_label(KeyAction::MODE_RETOPO));
+        if (squircle_button("RetopoMode", "Retopo", rtip, ImVec2(calc_btn_w("Retopo"), btn_h),
+                            mode == InputState::InteractionMode::RETOPO))
+            input.enter_retopo_mode();
         // Paint-visibility toggle beside the Paint mode button. Hides albedo while
         // sculpting (the paint brush itself always forces it visible).
         ImGui::SameLine();
@@ -1201,7 +1223,8 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
     static bool prev_rmb = false;
     bool rmb_edge = input.mouse2_down && !prev_rmb;
     prev_rmb = input.mouse2_down;
-    if (current == BrushType::PAINT && !smooth_on && rmb_edge && !input.zoom_modifier_held()) {
+    if (current == BrushType::PAINT && !smooth_on && rmb_edge && !input.zoom_modifier_held() &&
+        input.interaction_mode == InputState::InteractionMode::EDIT) {
         ImGui::SetNextWindowPos(ImVec2((float)input.mouse_x, (float)input.mouse_y));
         ImGui::OpenPopup("##paintswatch");
     }
@@ -2108,6 +2131,7 @@ static bool trash_button(const char* id, float size) {
 // so they mutate the stack and ask for a GPU re-blend.
 void draw_paint_layers_panel(InputState& input, Scene& scene, int win_w, int /*win_h*/) {
     if (input.current_brush != BrushType::PAINT || input.paint_target_density) return;
+    if (input.interaction_mode == InputState::InteractionMode::RETOPO) return;   // own page
     MeshEntity* ent = scene.find_entity(scene.active_mesh_id());
     if (!ent) return;
     const uint32_t eid = ent->id;
@@ -2268,4 +2292,351 @@ void draw_paint_layers_panel(InputState& input, Scene& scene, int win_w, int /*w
     ImGui::EndDisabled();
 
     ImGui::End();
+}
+
+// ---- Retopo mode --------------------------------------------------------------------
+
+namespace {
+
+// Does a surface point at p with normal n face the viewer? Free, needs no plane cache,
+// so it is the one occlusion test that still works mid-orbit.
+bool retopo_facing(const Camera& cam, Vec3 p, Vec3 n) {
+    const Vec3 to_eye = cam.perspective ? cam.get_position() - p : cam.get_view_direction() * -1.0f;
+    return n.dot(to_eye) > 0.0f;
+}
+
+void retopo_band(ImDrawList* dl, const RetopoStroke& s, const Camera& cam, int win_w, int win_h,
+                 ImU32 fill, ImU32 line, bool flip_x, float wscale) {
+    const size_t n = s.pts.size();
+    if (n < 2) return;
+    static std::vector<ImVec2> at;
+    static std::vector<float>  rad;
+    static std::vector<uint8_t> ok;
+    at.resize(n); rad.resize(n); ok.resize(n);
+    for (size_t i = 0; i < n; i++) {
+        Vec3 p = s.pts[i], nr = s.nrm[i];
+        if (flip_x) { p.x = -p.x; nr.x = -nr.x; }
+        float x, y;
+        ok[i] = cam.world_to_screen(p, win_w, win_h, x, y) && retopo_facing(cam, p, nr)
+             && !(cam.perspective && cam.view_depth(p) <= 1e-4f);
+        at[i] = ImVec2(x, y);
+        const float wpp = 2.0f * cam.half_height_at(cam.view_depth(p)) / (float)win_h;
+        rad[i] = wpp > 0.0f ? s.half_w[i] * wscale / wpp : 0.0f;
+    }
+    // Each point's "across" direction comes from neighbours half a band-width away
+    // on either side, not from its own 3 px segment: at that lever arm the hand's
+    // jitter swung every edge of the band and it drew as bristles. Neighbouring
+    // quads then share their edges, so the band is one continuous ribbon.
+    static std::vector<ImVec2> perp;
+    perp.resize(n);
+    auto wrap = [&](long k) -> size_t {
+        if (s.closed) return (size_t)((k % (long)n + (long)n) % (long)n);
+        return (size_t)std::max(0L, std::min((long)n - 1, k));
+    };
+    for (size_t i = 0; i < n; i++) {
+        const float reach = std::max(4.0f, rad[i] * 0.5f);
+        long lo = (long)i, hi = (long)i;
+        float dlo = 0.0f, dhi = 0.0f;
+        for (size_t step = 0; step < n && (dlo < reach || dhi < reach); step++) {
+            if (dlo < reach) { size_t a = wrap(lo), b = wrap(lo - 1); dlo += std::hypot(at[a].x - at[b].x, at[a].y - at[b].y); lo--; }
+            if (dhi < reach) { size_t a = wrap(hi), b = wrap(hi + 1); dhi += std::hypot(at[a].x - at[b].x, at[a].y - at[b].y); hi++; }
+        }
+        const ImVec2 A = at[wrap(lo)], B = at[wrap(hi)];
+        float dx = B.x - A.x, dy = B.y - A.y;
+        const float l = std::sqrt(dx * dx + dy * dy);
+        perp[i] = l > 1e-3f ? ImVec2(-dy / l, dx / l) : ImVec2(0.0f, 0.0f);
+    }
+    // No AA fringe on the fills: two fringes overlapping on a shared edge read as a
+    // seam line across the ribbon.
+    const ImDrawListFlags was = dl->Flags;
+    dl->Flags &= ~ImDrawListFlags_AntiAliasedFill;
+    const size_t segs = s.closed ? n : n - 1;
+    for (size_t i = 0; i < segs; i++) {
+        const size_t j = (i + 1) % n;
+        if (!ok[i] || !ok[j]) continue;
+        const ImVec2 a0(at[i].x + perp[i].x * rad[i], at[i].y + perp[i].y * rad[i]);
+        const ImVec2 a1(at[i].x - perp[i].x * rad[i], at[i].y - perp[i].y * rad[i]);
+        const ImVec2 b0(at[j].x + perp[j].x * rad[j], at[j].y + perp[j].y * rad[j]);
+        const ImVec2 b1(at[j].x - perp[j].x * rad[j], at[j].y - perp[j].y * rad[j]);
+        dl->AddQuadFilled(a0, b0, b1, a1, fill);
+    }
+    dl->Flags = was;
+    for (size_t i = 0; i < segs; i++) {
+        const size_t j = (i + 1) % n;
+        if (ok[i] && ok[j]) dl->AddLine(at[i], at[j], line, 1.5f);
+    }
+}
+
+}  // namespace
+
+void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera& cam,
+                         int win_w, int win_h, bool depth_fresh, bool mirror) {
+    ImDrawList* dl = ImGui::GetBackgroundDrawList();
+    if (st.show_strokes) {
+        auto band = [&](const RetopoStroke& s, int alpha) {
+            const ImU32 fill = s.closed ? IM_COL32(70, 200, 220, alpha) : IM_COL32(255, 175, 70, alpha);
+            // Selected: a white centreline, so the selection reads without a hover.
+            const ImU32 line = s.selected ? IM_COL32(255, 255, 255, 255)
+                             : s.closed ? IM_COL32(150, 235, 245, std::min(255, alpha * 3))
+                                        : IM_COL32(255, 210, 150, std::min(255, alpha * 3));
+            // The live stroke has no settings yet: pen-up gives it 1x.
+            const float w = &s == &st.live ? 1.0f : s.width;
+            retopo_band(dl, s, cam, win_w, win_h, fill, line, false, w);
+            if (!mirror) return;
+            bool pos = false, neg = false;
+            for (const Vec3& p : s.pts) { pos |= p.x > 1e-4f; neg |= p.x < -1e-4f; }
+            if (pos != neg)   // the twin Build will make (retopo_build's rule)
+                retopo_band(dl, s, cam, win_w, win_h, fill & 0x3FFFFFFFu, line & 0x5FFFFFFFu, true, w);
+        };
+        // Hovering a stroke in the bar lights it and dims the rest, hidden ones
+        // included — so you can see what a checkbox or trash can is about to hit.
+        const bool any_hover = st.hover_id != 0;
+        for (const RetopoStroke& s : st.strokes) {
+            const bool lit = s.id == st.hover_id;
+            // A frozen stroke is geometry now: no band, only its quads (lit when hovered).
+            if (!s.frozen && (s.visible || lit)) band(s, lit ? 130 : s.selected ? 90 : any_hover ? 25 : 55);
+        }
+        if (st.drawing && !st.bridge_from && st.spine_from == ~0u && st.live.pts.size() >= 2) band(st.live, 70);
+    }
+    // The cut line under the pen: a thin bright line with a dark edge, no band. A bridge
+    // (Draw from an edited island) is drawn the same way in blue: its width comes from
+    // the edges it joins, not the band.
+    auto thin_line = [&](const std::vector<Vec3>& pts, const std::vector<Vec3>& nrm, ImU32 col) {
+        if (pts.size() < 2) return;
+        static std::vector<ImVec2> at;
+        static std::vector<uint8_t> ok;
+        const size_t n = pts.size();
+        at.resize(n); ok.resize(n);
+        for (size_t i = 0; i < n; i++) {
+            float x, y;
+            ok[i] = cam.world_to_screen(pts[i], win_w, win_h, x, y) && retopo_facing(cam, pts[i], nrm[i]);
+            at[i] = ImVec2(x, y);
+        }
+        for (int pass = 0; pass < 2; pass++)
+            for (size_t i = 0; i + 1 < n; i++)
+                if (ok[i] && ok[i + 1])
+                    dl->AddLine(at[i], at[i + 1], pass ? col : IM_COL32(10, 20, 15, 170), pass ? 1.5f : 3.5f);
+    };
+    if (st.cutting) thin_line(st.cut_pts, st.cut_nrm, IM_COL32(235, 255, 240, 255));
+    if (st.drawing && (st.bridge_from || st.spine_from != ~0u))
+        thin_line(st.live.pts, st.live.nrm, IM_COL32(120, 210, 255, 255));
+    if (st.drawing && st.extruding) thin_line(st.live.pts, st.live.nrm, IM_COL32(0, 255, 65, 255));
+    // The wand's lasso: drawn as dragged, its closing side dimmer (it closes on release).
+    if (st.lasso.size() >= 4) {
+        static std::vector<ImVec2> lp;
+        lp.clear();
+        for (size_t i = 0; i + 1 < st.lasso.size(); i += 2) lp.push_back(ImVec2(st.lasso[i], st.lasso[i + 1]));
+        dl->AddPolyline(lp.data(), (int)lp.size(), IM_COL32(10, 20, 15, 170), 0, 3.5f);
+        dl->AddPolyline(lp.data(), (int)lp.size(), IM_COL32(255, 200, 90, 255), 0, 1.5f);
+        dl->AddLine(lp.back(), lp.front(), IM_COL32(255, 200, 90, 110), 1.0f);
+    }
+    if (!st.built || !st.show_result) return;
+
+    // Wireframe: project every vertex once, then draw an edge only when both ends
+    // can be seen. A vertex facing away is hidden; one that faces us but (cache fresh)
+    // sits deeper than the sculpt's own depth at that pixel by more than a few pixels'
+    // worth of world (the mirror lobe marker's tolerance) is behind a part of the
+    // sculpt: its edges still show, darker and thinner, never filled. So does one facing
+    // away but only a few quads behind the surface in front of it (an ear's inner fold,
+    // under a lip); deeper than that it's the far side of the model and stays hidden.
+    // vis: 0 hidden, 1 behind the sculpt, 2 in view.
+    const RetopoMesh& rm = st.result;
+    static std::vector<ImVec2> at;
+    static std::vector<uint8_t> vis;
+    at.resize(rm.v.size()); vis.resize(rm.v.size());
+    float reach = 0.0f;   // "a few quads": 4x the mean edge
+    for (size_t e = 0; e + 1 < rm.edges.size(); e += 2)
+        reach += (rm.v[rm.edges[e]] - rm.v[rm.edges[e + 1]]).length();
+    reach *= 4.0f / (float)std::max<size_t>(1, rm.edges.size() / 2);
+    const float edge_mean = reach / 4.0f;
+    for (size_t i = 0; i < rm.v.size(); i++) {
+        float x, y;
+        // Past the window's edge still counts: its edges run off the screen and get
+        // clipped there. Treating it as hidden dropped every edge and face with a corner
+        // off screen, so zooming in even a little ate the wire round the borders.
+        const bool on_screen = cam.world_to_screen(rm.v[i], win_w, win_h, x, y)
+                            || !cam.perspective || cam.view_depth(rm.v[i]) > 1e-4f;
+        // How square-on the surface is here (1 = facing us, 0 = edge-on). A vertex
+        // just past edge-on still counts as facing: on a curve seen side-on half the
+        // silhouette's vertices tip a hair away and their edges used to vanish.
+        Vec3 to_eye = cam.perspective ? cam.get_position() - rm.v[i] : cam.get_view_direction() * -1.0f;
+        const float te = to_eye.length(), nl = rm.n[i].length();
+        const float cosv = te > 1e-6f && nl > 1e-6f ? rm.n[i].dot(to_eye) / (te * nl) : 1.0f;
+        const bool facing = cosv > -0.15f;
+        uint8_t v = on_screen && facing ? 2 : 0;
+        if (on_screen && depth_fresh && x >= 0 && y >= 0 && x < win_w && y < win_h) {
+            float front = 0.0f;
+            if (renderer.sample_depth((int)x, (int)y, &front) && front < 500.0f) {
+                const float depth = cam.view_depth(rm.v[i]);
+                // Seen edge-on, one pixel of screen spans many pixels' worth of depth
+                // (about 1 / cos), so a flat 6 px slack called most vertices on an
+                // oblique surface "behind the sculpt" and drew them dim. Scale it.
+                // And never under one mean edge of world: in pixels alone the slack
+                // shrinks as you zoom in, until vertices a hair under the sculpt (after
+                // a level change, say) read as hidden. Anything that really hides a
+                // vertex sits further in front than one of its quads.
+                const float tol = std::max(edge_mean, 2.0f * cam.half_height_at(depth) / (float)win_h
+                                                      * 6.0f / std::max(std::fabs(cosv), 0.15f));
+                if (facing ? depth > front + tol : depth <= front + reach) v = 1;
+            }
+        }
+        at[i] = ImVec2(x, y);
+        vis[i] = v;
+    }
+    const ImU32 dark = IM_COL32(15, 25, 35, 150), lite = IM_COL32(170, 240, 255, 235);
+    const ImU32 hot = IM_COL32(255, 235, 120, 255), dim = IM_COL32(170, 240, 255, 110);
+    const ImU32 sel_col = IM_COL32(255, 150, 60, 255);
+    // Selected strokes' ids: a handful at most, a linear look-up is fine.
+    static std::vector<uint32_t> sel;
+    sel.clear();
+    for (const RetopoStroke& s : st.strokes) if (s.selected) sel.push_back(s.id);
+    auto is_sel = [&](uint32_t id) { return std::find(sel.begin(), sel.end(), id) != sel.end(); };
+    // Faces: a faint fill under the wire, so what's covered reads at a glance. Plain
+    // translucent triangles, no anti-aliased fringe: half the vertices, and neighbours'
+    // fringes would otherwise double up into a seam the wire already draws. Quads and
+    // triangles take the convex path; only Erase's merged n-gons (maybe concave) the
+    // concave one. Hidden if any corner is.
+    {
+        const ImDrawListFlags keep_flags = dl->Flags;
+        dl->Flags &= ~ImDrawListFlags_AntiAliasedFill;
+        static std::vector<ImVec2> poly;
+        for (uint32_t f = 0; f < rm.face_count(); f++) {
+            const uint32_t ow = rm.face_owner[f];
+            if (st.hidden(ow) && ow != st.hover_id) continue;
+            const uint32_t* q = rm.face(f);
+            const uint32_t k = rm.face_size(f);
+            poly.clear();
+            bool ok = true;
+            for (uint32_t i = 0; i < k && ok; i++) {
+                ok = vis[q[i]] == 2;
+                if (i == 0 || q[i] != q[i - 1]) poly.push_back(at[q[i]]);   // welds leave repeats
+            }
+            if (!ok || poly.size() < 3) continue;
+            const ImU32 col = ow == st.hover_id ? IM_COL32(255, 240, 160, 48)
+                            : is_sel(ow)        ? IM_COL32(255, 190, 120, 40)
+                            : st.hover_id       ? IM_COL32(205, 245, 255, 16)
+                                                : IM_COL32(205, 245, 255, 36);
+            if (poly.size() <= 4) dl->AddConvexPolyFilled(poly.data(), (int)poly.size(), col);
+            else                  dl->AddConcavePolyFilled(poly.data(), (int)poly.size(), col);
+            // Masked: darkened by its corners' mean mask, as a masked sculpt is.
+            float mk = 0.0f;
+            for (uint32_t i = 0; i < k; i++) mk += rm.mask_at(q[i]);
+            mk /= (float)k;
+            if (mk > 0.01f) {
+                const ImU32 shade = IM_COL32(8, 12, 22, (int)(170.0f * std::min(1.0f, mk)));
+                if (poly.size() <= 4) dl->AddConvexPolyFilled(poly.data(), (int)poly.size(), shade);
+                else                  dl->AddConcavePolyFilled(poly.data(), (int)poly.size(), shade);
+            }
+        }
+        dl->Flags = keep_flags;
+    }
+    // Holes (outlines that aren't a piece's outer edge): a wash over the gap, green when
+    // its count of sides is even (Fill makes it quads), amber when odd, rim drawn the same.
+    // Only when the whole rim is in view: a half-seen rim would fill the wrong shape.
+    {
+        const ImDrawListFlags keep_flags = dl->Flags;
+        dl->Flags &= ~ImDrawListFlags_AntiAliasedFill;
+        static std::vector<ImVec2> poly;
+        for (uint32_t r = 0; r < rm.rim_count(); r++) {
+            if (!rm.rim_hole[r]) continue;
+            poly.clear();
+            bool ok = true;
+            for (uint32_t k = rm.rim_off[r]; k < rm.rim_off[r + 1] && ok; k++) {
+                const uint32_t v = rm.rim[k];
+                ok = vis[v] == 2 && !(st.hidden(rm.v_owner[v]) && rm.v_owner[v] != st.hover_id);
+                poly.push_back(at[v]);
+            }
+            if (!ok || poly.size() < 3) continue;
+            const bool even = poly.size() % 2 == 0;
+            dl->AddConcavePolyFilled(poly.data(), (int)poly.size(),
+                                     even ? IM_COL32(60, 230, 120, 60) : IM_COL32(255, 170, 40, 70));
+            dl->AddPolyline(poly.data(), (int)poly.size(),
+                            even ? IM_COL32(90, 240, 140, 200) : IM_COL32(255, 180, 60, 220), ImDrawFlags_Closed, 1.5f);
+        }
+        dl->Flags = keep_flags;
+    }
+    // Behind the sculpt (either end): one dim pass under the rest, no dark outline.
+    for (size_t e = 0; e + 1 < rm.edges.size(); e += 2) {
+        const uint32_t a = rm.edges[e], b = rm.edges[e + 1];
+        if (!vis[a] || !vis[b] || (vis[a] == 2 && vis[b] == 2)) continue;
+        const uint32_t ow = rm.edge_owner[e / 2];
+        if (st.hidden(ow) && ow != st.hover_id) continue;
+        const bool lit = ow == st.hover_id, on = is_sel(ow);
+        dl->AddLine(at[a], at[b], lit ? IM_COL32(150, 135, 70, 190) : on ? IM_COL32(150, 90, 40, 170)
+                                  : IM_COL32(70, 110, 130, st.hover_id ? 70 : 150), 1.0f);
+    }
+    for (size_t e = 0; e + 1 < rm.edges.size(); e += 2) {
+        const uint32_t a = rm.edges[e], b = rm.edges[e + 1];
+        if (vis[a] != 2 || vis[b] != 2) continue;
+        const uint32_t ow = rm.edge_owner[e / 2];
+        if (st.hidden(ow) && ow != st.hover_id) continue;   // its eye is shut (hover still shows it)
+        dl->AddLine(at[a], at[b], dark, ow == st.hover_id || is_sel(ow) ? 4.0f : 3.0f);
+    }
+    for (size_t e = 0; e + 1 < rm.edges.size(); e += 2) {
+        const uint32_t a = rm.edges[e], b = rm.edges[e + 1];
+        if (vis[a] != 2 || vis[b] != 2) continue;
+        const uint32_t ow = rm.edge_owner[e / 2];
+        if (st.hidden(ow) && ow != st.hover_id) continue;
+        const bool lit = ow == st.hover_id, on = is_sel(ow);
+        dl->AddLine(at[a], at[b], lit ? hot : on ? sel_col : st.hover_id ? dim : lite,
+                    lit || on ? 2.0f : 1.5f);
+    }
+    // Double-clicked edge loops: green over the wire, thin where the sculpt is in front.
+    // A picked edge a weld or the eraser took away isn't an edge any more: skipped.
+    for (size_t e = 0; e + 1 < st.loop_edges.size(); e += 2) {
+        const uint32_t a = st.loop_edges[e], b = st.loop_edges[e + 1];
+        if (a >= rm.v.size() || b >= rm.v.size() || !vis[a] || !vis[b]) continue;
+        if (st.hidden(rm.v_owner[a]) || rm.nb_off.size() != rm.v.size() + 1) continue;
+        bool edge = false;
+        for (uint32_t k = rm.nb_off[a]; k < rm.nb_off[a + 1] && !edge; k++) edge = rm.nb[k] == b;
+        if (!edge) continue;
+        if (vis[a] == 2 && vis[b] == 2) {
+            dl->AddLine(at[a], at[b], IM_COL32(0, 20, 8, 220), 5.0f);
+            dl->AddLine(at[a], at[b], IM_COL32(0, 255, 65, 255), 2.5f);
+        } else {
+            dl->AddLine(at[a], at[b], IM_COL32(0, 200, 55, 150), 1.0f);
+        }
+    }
+    // Cut's vertex snap: the vertex under the pointer gets a ring, the one a cut started
+    // on a filled dot, so a vertex cut is never a surprise.
+    auto mark = [&](uint32_t i, bool filled) {
+        if (i >= rm.v.size()) return;
+        float x, y;
+        if (!cam.world_to_screen(rm.v[i], win_w, win_h, x, y)) return;
+        const ImU32 green = IM_COL32(0, 255, 65, 255), dark = IM_COL32(0, 20, 8, 200);
+        dl->AddCircle(ImVec2(x, y), 6.5f, dark, 16, 4.0f);
+        dl->AddCircle(ImVec2(x, y), 6.5f, green, 16, 2.0f);
+        if (filled) dl->AddCircleFilled(ImVec2(x, y), 3.5f, green, 12);
+    };
+    // Ctrl + Erase: the face about to go, outlined red.
+    if (st.face_hover < rm.face_count()) {
+        const uint32_t* q = rm.face(st.face_hover);
+        const uint32_t k = rm.face_size(st.face_hover);
+        static std::vector<ImVec2> poly;
+        poly.clear();
+        for (uint32_t i = 0; i < k; i++) {
+            float x, y;
+            if (!cam.world_to_screen(rm.v[q[i]], win_w, win_h, x, y)) { poly.clear(); break; }
+            poly.push_back(ImVec2(x, y));
+        }
+        if (poly.size() >= 3) {
+            dl->AddPolyline(poly.data(), (int)poly.size(), IM_COL32(20, 0, 0, 200), ImDrawFlags_Closed, 5.0f);
+            dl->AddPolyline(poly.data(), (int)poly.size(), IM_COL32(255, 60, 50, 255), ImDrawFlags_Closed, 2.5f);
+        }
+    }
+    if (st.cutting) mark(st.cut_from_v, true);
+    if (st.snap_v != st.cut_from_v || !st.cutting) mark(st.snap_v, false);
+    // Draw's snap: an orange dot on the vertex a line starts or ends on, else the edge
+    // in bold blue, so a line meant for a vertex never quietly lands on an edge.
+    if (st.draw_v < rm.v.size() && vis[st.draw_v] == 2) {
+        float x, y;
+        if (cam.world_to_screen(rm.v[st.draw_v], win_w, win_h, x, y)) {
+            dl->AddCircleFilled(ImVec2(x, y), 6.5f, IM_COL32(30, 12, 0, 220), 16);
+            dl->AddCircleFilled(ImVec2(x, y), 4.5f, IM_COL32(255, 150, 30, 255), 16);
+        }
+    } else if (st.draw_ea < rm.v.size() && st.draw_eb < rm.v.size()
+               && vis[st.draw_ea] == 2 && vis[st.draw_eb] == 2) {
+        dl->AddLine(at[st.draw_ea], at[st.draw_eb], IM_COL32(5, 15, 30, 220), 6.0f);
+        dl->AddLine(at[st.draw_ea], at[st.draw_eb], IM_COL32(120, 210, 255, 255), 3.0f);
+    }
 }
