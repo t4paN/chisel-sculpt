@@ -25,6 +25,7 @@ struct AlphaLibrary;
 class  ObjectXformStack;
 struct VoxelMergeJob;
 struct Vec3;
+struct Renderer;
 
 struct App {
     GLFWwindow*&      window;
@@ -48,6 +49,7 @@ struct App {
     std::string&      current_project_path;
     std::string&      error_popup_msg;
     bool&             error_popup_trigger;
+    Renderer&         renderer;
 #ifdef __EMSCRIPTEN__
     char            (&web_save_name)[96];
     char            (&web_export_name)[96];
@@ -56,6 +58,9 @@ struct App {
 
 // app_ops.cpp: the frame's shared helpers, once lambdas inside main()'s frame.
 void app_refresh_active_gpu_residency(App& a);
+
+// app_ops.cpp: the frame's one-shot user operations, each called where it ran in main.
+void app_ops_paint_clicks(App& app, int win_w, int win_h);   // C colour picker, fill bucket
 
 // app_files.cpp: open/import, the dev auto-import hooks, save, save-as, incremental
 // save, export, and their dialogs (native file browser, web name prompts + picker).
