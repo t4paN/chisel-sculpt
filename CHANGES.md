@@ -2,6 +2,12 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-27 — Remesh: mirror seam fix ("triangles within triangles")
+
+- The seam tidy-up before the mirror checks its result; a tri folded over its neighbour is rolled back and its verts held still.
+- Thin blades on the seam (crests, mohawks) keep a sliver of thickness instead of being flattened into the plane, so no edge ends up with four tris.
+- Headless: `remesh-seam-harness/` (31 shapes x 4 details; non-manifold 44 -> 0).
+
 ## 2026-10-27 — UV mode: bake the sculpt into normal + colour maps
 
 - Bake section in the UV panel: Normal and Colour maps, 512 to 4K, Reach (how far either side of the retopo mesh it looks), Green down for engines that read normal maps flipped.
