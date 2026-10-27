@@ -2,6 +2,14 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-27 — Remesh: no more pyramids, stretched areas densify
+
+- Valence-3 verts (a vert inside a tri wired to its corners, the "flattened pyramid") are removed after each collapse, and flips no longer create them.
+- Long skinny tris in a stretched area can split again: the split's 15° gate now only refuses making a tri worse than it already is (strict 15° kept near the mirror seam and pins).
+- The seam tidy-up's doubled tris (fins) are swept before the reflection.
+- Drift readout says its max is capped by the search and counts faces facing away from the original.
+- Dev hook `CHISEL_REMESH_SRC_DUMP=<obj>` writes the mesh going in. Harness (124 runs): valence-3 2650 -> 30, flipped 10 -> 0, seam slivers 56 -> 18, same speed.
+
 ## 2026-10-27 — Sliders no longer yank the pointer back to an edge wrap
 
 - Wayland: after an orbit wrapped the pointer, releasing a W/A/S slider could put it back at the edge the wrap left from. A slider release now warps the pointer to the drag start explicitly; a wrap still in flight is re-aimed there.

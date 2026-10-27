@@ -682,6 +682,10 @@ void app_ops_remesh_and_merge(App& a) {
 
         // Destructive remesh breaks topology mirror — switch to spatial
         // mode afterward. Mirror setting (input.mirror_x) is preserved.
+        // Dev hook: CHISEL_REMESH_SRC_DUMP=<path.obj> writes the mesh going IN.
+        if (!remesh_refused)
+            if (const char* dump = std::getenv("CHISEL_REMESH_SRC_DUMP"))
+                mesh->export_obj(dump);
         RemeshResult result;
         if (!remesh_refused)
             result = perform_remesh(*mesh, *multires, 0.0f, 10,

@@ -586,6 +586,105 @@ static uint32_t remove_doubled_tris(Mesh& m) {
     return removed;
 }
 
+// Valence-3 verts: one vert inside a tri, wired to its three corners — the
+// "tri within a tri" that reads as a flattened pyramid. No other pass can
+// remove one: every flip of a spoke would recreate an existing rim edge, the
+// smooth parks the vert at the tri's centroid, and collapse refuses any edge
+// with a valence-3 end. So delete it here: the three fan tris become the
+// outer tri (the rim edges already exist, so no new edge is made). Leaves the
+// dead tris degenerate-marked for rebuild_all's compaction. Needs current CPU
+// adjacency.
+static uint32_t remove_valence3(Mesh& m, const std::vector<uint32_t>& tri_selected,
+                                const std::vector<uint32_t>& pinned, float seam_tol) {
+    const uint32_t vc = m.vertex_count();
+    if (m.vert_tri_offset.size() != (size_t)vc + 1) return 0;
+    auto nfan = [&](uint32_t v) { return m.vert_tri_offset[v+1] - m.vert_tri_offset[v]; };
+    auto masked = [&](uint32_t v) { return v < (uint32_t)m.mask.size() && m.mask[v] >= 1.0f; };
+    std::vector<uint8_t> claimed(vc, 0);
+    uint32_t removed = 0;
+
+    for (uint32_t v = 0; v < vc; v++) {
+        if (nfan(v) != 3 || claimed[v]) continue;
+        if (v < (uint32_t)pinned.size() && pinned[v]) continue;
+        if (std::fabs(m.pos_x[v]) < seam_tol) continue;   // the seam passes own those
+        const uint32_t* fan = &m.vert_tri_list[m.vert_tri_offset[v]];
+        bool sel = true;
+        for (int k = 0; k < 3; k++)
+            if (fan[k] >= (uint32_t)tri_selected.size() || !tri_selected[fan[k]]) sel = false;
+        if (!sel) continue;
+
+        // Rotate the first fan tri to (v, p, q); the third corner r is the one
+        // vert of the other two tris that isn't v, p or q. (p, q, r) then keeps
+        // the fan's winding: rim edge p->q runs the same way it did in (v, p, q).
+        uint32_t t0 = fan[0];
+        uint32_t i0 = m.indices[t0*3], i1 = m.indices[t0*3+1], i2 = m.indices[t0*3+2];
+        uint32_t p, q;
+        if      (i0 == v) { p = i1; q = i2; }
+        else if (i1 == v) { p = i2; q = i0; }
+        else              { p = i0; q = i1; }
+        uint32_t r = INVALID;
+        for (int k = 1; k < 3 && r == INVALID; k++)
+            for (int j = 0; j < 3; j++) {
+                uint32_t u = m.indices[fan[k]*3+j];
+                if (u != v && u != p && u != q) { r = u; break; }
+            }
+        if (r == INVALID) continue;
+        // Closed fan only: on an open border three tris can fan over 4 corners.
+        bool closed = true;
+        for (int k = 1; k < 3; k++)
+            for (int j = 0; j < 3; j++) {
+                uint32_t u = m.indices[fan[k]*3+j];
+                if (u != v && u != p && u != q && u != r) closed = false;
+            }
+        if (!closed) continue;
+
+        // A corner at valence 3 would drop to 2 (a tetrahedron's tip).
+        if (claimed[p] || claimed[q] || claimed[r]) continue;
+        if (nfan(p) <= 3 || nfan(q) <= 3 || nfan(r) <= 3) continue;
+        // Masked: never mint or rewrite a protected tri.
+        if (masked(v) || masked(p) || masked(q) || masked(r)) continue;
+        // (p, q, r) already in the mesh = a closed tetrahedron or a fin in waiting.
+        bool exists = false;
+        for (uint32_t j = m.vert_tri_offset[p]; j < m.vert_tri_offset[p+1] && !exists; j++) {
+            uint32_t t = m.vert_tri_list[j];
+            if (tri_contains_vert(m, t, q) && tri_contains_vert(m, t, r) && !tri_contains_vert(m, t, v))
+                exists = true;
+        }
+        if (exists) continue;
+
+        // A real spike stays: only verts that sit near the outer tri's plane
+        // (the flattened pyramid) go. Height over the plane vs the rim size.
+        Vec3 P = m.get_pos(p), Q = m.get_pos(q), R = m.get_pos(r), X = m.get_pos(v);
+        Vec3 n = (Q - P).cross(R - P);
+        float nl = n.length();
+        if (nl < 1e-20f) continue;
+        float rim = ((Q - P).length() + (R - Q).length() + (P - R).length()) * (1.0f / 3.0f);
+        if (std::fabs((X - P).dot(n)) / nl > 0.25f * rim) continue;
+        // The outer tri must face the way the fan did.
+        Vec3 fan_n = tri_normal(m, fan[0]) + tri_normal(m, fan[1]) + tri_normal(m, fan[2]);
+        if (fan_n.dot(n) <= 0.0f) continue;
+        // ...and must not be a sliver itself: three corners nearly in line
+        // (a vert squeezed onto a seam or a crease) trade a pyramid for a
+        // needle, which is worse. Smallest angle of the outer tri vs 15°.
+        {
+            Vec3 e0 = Q - P, e1 = R - Q, e2 = P - R;
+            float l0 = e0.length(), l1 = e1.length(), l2 = e2.length();
+            if (l0 < 1e-12f || l1 < 1e-12f || l2 < 1e-12f) continue;
+            float c0 = -(e2.dot(e0)) / (l2 * l0);   // angle at P
+            float c1 = -(e0.dot(e1)) / (l0 * l1);   // angle at Q
+            float c2 = -(e1.dot(e2)) / (l1 * l2);   // angle at R
+            if (std::max({c0, c1, c2}) > 0.966f) continue;   // cos 15°
+        }
+
+        m.indices[t0*3+0] = p; m.indices[t0*3+1] = q; m.indices[t0*3+2] = r;
+        for (int k = 1; k < 3; k++)
+            m.indices[fan[k]*3+0] = m.indices[fan[k]*3+1] = m.indices[fan[k]*3+2] = 0;
+        claimed[v] = claimed[p] = claimed[q] = claimed[r] = 1;
+        removed++;
+    }
+    return removed;
+}
+
 // ---------------------------------------------------------------------------
 // Pass 1: Split long edges
 // ---------------------------------------------------------------------------
@@ -724,7 +823,21 @@ static uint32_t split_long_edges(Mesh& m, EdgeTable& et,
 
             Vec3 vm_p = {mx, my, mz};
 
-            // Pre-check: would the split create thin triangles? Skip if so.
+            // Pre-check: would the split create thin triangles? Skip if so —
+            // but judged against the tri being split, not an absolute 15°.
+            // A midpoint split keeps the angles at the edge's two ends, so a
+            // tri that is already a needle (a stretched band: 5:1 is ~11°)
+            // could never pass an absolute test, and the band stayed coarse
+            // forever. Splitting is how a needle gets fixed; only refuse a
+            // split that makes things worse than they already are.
+            // Not near pins or the seam, though: there the split keeps the
+            // needle and leaves it to the next collapse, which is fenced off
+            // around pins — a razor crest on the seam bred 100+ needles and
+            // non-manifold mirror edges. Those keep the absolute 15°.
+            auto fenced = [&](uint32_t v) {
+                return (v < (uint32_t)pinned.size() && pinned[v]) ||
+                       std::fabs(m.pos_x[v]) < 2.0f * seam_tol;
+            };
             bool angle_ok = true;
             uint32_t check_tris[2] = { se.tri_a, se.tri_b };
             for (uint32_t tri : check_tris) {
@@ -737,12 +850,16 @@ static uint32_t split_long_edges(Mesh& m, EdgeTable& et,
                 if (va_pos < 0 || vb_pos < 0) continue;
                 Vec3 pa = m.get_pos(va);
                 Vec3 pb = m.get_pos(vb);
-                Vec3 pc = m.get_pos(m.indices[tri*3 + (3 - va_pos - vb_pos)]);
+                uint32_t vc_ = m.indices[tri*3 + (3 - va_pos - vb_pos)];
+                Vec3 pc = m.get_pos(vc_);
                 // Check modified triangle (va, vm, vc) and new triangle (vm, vb, vc).
                 // cos > MAX_TRI_COS ⇔ angle < MIN_TRI_ANGLE.
                 float cos_mod = max_tri_cos(pa, vm_p, pc);
                 float cos_new = max_tri_cos(vm_p, pb, pc);
-                if (cos_mod > MAX_TRI_COS || cos_new > MAX_TRI_COS) {
+                float cos_lim = MAX_TRI_COS;
+                if (!fenced(va) && !fenced(vb) && !fenced(vc_))
+                    cos_lim = std::max(MAX_TRI_COS, max_tri_cos(pa, pb, pc) + 1e-4f);
+                if (cos_mod > cos_lim || cos_new > cos_lim) {
                     angle_ok = false;
                     break;
                 }
@@ -1344,6 +1461,9 @@ static uint32_t flip_edges(Mesh& m, EdgeTable& et,
             int val_b = valence[vb];
             int val_c = valence[vc];
             int val_d = valence[vd];
+            // Never leave an end at valence 3: that is a vert inside a tri,
+            // which no later flip can undo (see remove_valence3).
+            if (val_a <= 4 || val_b <= 4) continue;
 
             int dev_before = std::abs(val_a - 6) + std::abs(val_b - 6) +
                              std::abs(val_c - 6) + std::abs(val_d - 6);
@@ -2410,6 +2530,10 @@ static void mirror_positive_half(Mesh& m, float seam_tol, float target_edge, Com
     // Snap near-seam +x verts onto x=0 and weld, so the seam is a clean single
     // edge-loop before we reflect. Kills the clip slivers (see consolidate_seam).
     consolidate_seam(m, seam_tol, target_edge);
+    // Its welds can fold a seam tri back onto a neighbour with the same three
+    // verts (a fin), which the reflection would turn into a non-manifold edge.
+    if (uint32_t n = remove_doubled_tris(m))
+        std::printf("[seam-consolidate] removed %u doubled tris\n", n);
     lift_inplane_interior(m, seam_tol, target_edge);
     REMESH_TOPO_TRACE(m, "mirror consolidate-seam", 0, 0, -1);
     STAGE_DUMP(m, "consolidate");
@@ -3678,6 +3802,14 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
         uint32_t n_collapse = collapse_short_edges(mesh, et, tri_selected, pinned, low, seam_tol, &sel_mask, tlen);
         t_collapse += since(ts);
 
+        // Collapse is what makes valence-3 verts now (each one drops the two
+        // tips' valence; flips refuse to). Clearing them here shares the
+        // rebuild below instead of paying for one of their own — that extra
+        // reselect + readback cost up to 30% on small meshes. Collapse leaves
+        // tri_selected/pinned aligned but not the CPU adjacency, hence the build.
+        mesh.build_adjacency();
+        uint32_t n_val3 = remove_valence3(mesh, tri_selected, pinned, seam_tol);
+
         // Sweep fins before they propagate: split refines them into more fins,
         // and every later pass is blind to them.
         FIN_STAGE("after-collapse", iter);
@@ -3686,7 +3818,7 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
             std::printf("[remesh] iter %d: removed %u doubled tris\n", iter, n_doubled);
         REMESH_TOPO_TRACE(mesh, "dedup iter", iter, (int)n_doubled, -1);
 
-        if (n_collapse > 0 || n_doubled > 0) {
+        if (n_collapse > 0 || n_doubled > 0 || n_val3 > 0) {
             ts = tick();
             rebuild_all();
             // Rebuilt AFTER rebuild_all, not before: rebuild_all compacts, and
@@ -3728,11 +3860,11 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
             t_project += since(ts);
         }
 
-        uint32_t total_ops = n_split + n_collapse + n_flip;
+        uint32_t total_ops = n_split + n_collapse + n_flip + n_val3;
         uint32_t threshold = std::max<uint32_t>(8, mesh.tri_count() / 1000);
         iters_done = iter + 1;
-        std::printf("[remesh] iter %d: %u split, %u collapse, %u flip (threshold=%u)\n",
-                    iter, n_split, n_collapse, n_flip, threshold);
+        std::printf("[remesh] iter %d: %u split, %u collapse, %u flip, %u valence-3 (threshold=%u)\n",
+                    iter, n_split, n_collapse, n_flip, n_val3, threshold);
         if (total_ops < threshold) {
             std::printf("[remesh] converged at iter %d (%u ops < %u threshold)\n",
                         iter, total_ops, threshold);
@@ -3754,6 +3886,13 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
         std::vector<float> dists;
         dists.reserve(mesh.tri_count() / 4);
         const uint32_t tc = mesh.tri_count();
+        // The search only reaches one grid cell (= one target edge), so a face
+        // with nothing in reach drops out and "max" can never pass 100%. Most
+        // such faces just lie outside the reference region (the selection grows
+        // past it as the remesh runs), so count only the telling case: original
+        // surface IS within an edge, but none of it faces this face's way — a
+        // fold, a flip, or a face that wandered to the far side of a thin part.
+        uint32_t facing_away = 0;
         for (uint32_t t = 0; t < tc; t++) {
             if (tri_is_degenerate(mesh, t)) continue;
             Vec3 a = mesh.get_pos(mesh.indices[t*3]), b = mesh.get_pos(mesh.indices[t*3+1]),
@@ -3761,6 +3900,7 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
             Vec3 cen = (a + b + c) * (1.0f / 3.0f);
             Vec3 cp; float d;
             if (ref.closest(cen, tri_normal(mesh, t).normalized(), cp, d)) dists.push_back(d);
+            else if (ref.closest(cen, Vec3(0, 0, 0), cp, d)) facing_away++;
         }
         if (!dists.empty()) {
             std::sort(dists.begin(), dists.end());
@@ -3768,11 +3908,12 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
             for (float d : dists) sum += d;
             const float pct = 100.0f / target_edge_length;
             std::printf("[remesh] DRIFT from original (%s): mean %.2f%%  p95 %.2f%%  "
-                        "max %.1f%% of edge  over %zu faces\n",
+                        "max %.1f%% of edge (search limit 100%%)  over %zu faces, "
+                        "%u facing away from the original\n",
                         keep_detail ? "keep-detail ON" : "keep-detail OFF",
                         (float)(sum / dists.size()) * pct,
                         dists[dists.size() * 95 / 100] * pct,
-                        dists.back() * pct, dists.size());
+                        dists.back() * pct, dists.size(), facing_away);
         }
     }
 
