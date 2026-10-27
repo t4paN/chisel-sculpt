@@ -2,6 +2,11 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-27 — Remesh: more even triangle sizes
+
+- The remesh smoothing pulls each vert toward the area-weighted centre of its tris, so big and small tris no longer sit side by side. Plain averaging stays on sharp rings and within 1.5 edges of the mirror seam.
+- Wolfie: tri-size spread 0.19 -> 0.13, edges within ±20% of the median 94% -> 98%. Harness (124 runs): flipped 0, non-manifold 0, seam slivers 18 -> 10, valence-3 30 -> 12, 5% faster.
+
 ## 2026-10-27 — Remesh: no more pyramids, stretched areas densify
 
 - Valence-3 verts (a vert inside a tri wired to its corners, the "flattened pyramid") are removed after each collapse, and flips no longer create them.

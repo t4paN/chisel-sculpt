@@ -87,6 +87,37 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     }
     nbr_centroid = nbr_centroid / f32(nbr_count);
 
+    // Area-weighted centroid of the ring's tris. The plain neighbour average
+    // settles wherever the ring is balanced by COUNT, which leaves big and small
+    // tris side by side; weighting by area pulls each vert toward its larger
+    // tris until they even out. Only on a near-flat ring (every tri within 30
+    // degrees of the vertex normal) and away from the seam: on a knife crest or
+    // next to the fenced seam band the pull stretched edges and bred slivers.
+    // seam_tol is 1% of the target edge, so 150x = 1.5 edges.
+    let vn = vec3<f32>(normals[v*3u+0u], normals[v*3u+1u], normals[v*3u+2u]);
+    let vn_len = length(vn);
+    let off_seam = abs(in_pos[v*3u]) > 150.0 * P.seam_tol;
+    let vn_ok = vn_len > 1e-12;
+    var ring_flat = off_seam && vn_ok;
+    var area_acc = vec3<f32>(0.0);
+    var area_sum = 0.0;
+    for (var j = t_start; j < t_end; j = j + 1u) {
+        if (!ring_flat) { break; }
+        let t = adj_csr[list_base + j];
+        let i0 = indices[t*3u];
+        let i1 = indices[t*3u+1u];
+        let i2 = indices[t*3u+2u];
+        let p0 = vec3<f32>(in_pos[i0*3u], in_pos[i0*3u+1u], in_pos[i0*3u+2u]);
+        let p1 = vec3<f32>(in_pos[i1*3u], in_pos[i1*3u+1u], in_pos[i1*3u+2u]);
+        let p2 = vec3<f32>(in_pos[i2*3u], in_pos[i2*3u+1u], in_pos[i2*3u+2u]);
+        let tn = cross(p1 - p0, p2 - p0);
+        let tl = length(tn);
+        if (tl < 1e-30 || dot(tn, vn) < 0.866 * tl * vn_len) { ring_flat = false; }
+        area_acc = area_acc + tl * (p0 + p1 + p2) / 3.0;
+        area_sum = area_sum + tl;
+    }
+    if (ring_flat && area_sum > 1e-30) { nbr_centroid = area_acc / area_sum; }
+
     let pos = vec3<f32>(in_pos[v*3u+0u], in_pos[v*3u+1u], in_pos[v*3u+2u]);
     // A degenerate (zero-length) vertex normal has no tangent plane to project onto.
     // normalize() of a zero vector is 0/0 -> NaN, which poisons the post-remesh mirror
