@@ -4,8 +4,10 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <unordered_map>
+#include <unordered_set>
 #include <functional>
 #include <limits>
 #include <vector>
@@ -432,6 +434,95 @@ static bool tri_same_winding(uint32_t a0, uint32_t a1, uint32_t a2,
            (a0 == b2 && a1 == b0 && a2 == b1);
 }
 
+#ifdef CHISEL_DEBUG_REMESH
+// Fin catcher (CHISEL_FIN_DUMP=<dir>). remove_doubled_tris deletes fins the
+// moment they appear, so nothing downstream ever shows one. This writes each
+// caught pair to <dir>/fins.csv and its neighbourhood (every tri with a corner
+// within g_fin_radius of the fin) to <dir>/fin-NNN.obj, fin tris in group
+// "fin", so they can be rendered and looked at before they are swept.
+static const char* g_fin_stage  = "?";
+static int         g_fin_iter   = -1;
+static float       g_fin_radius = 0.0f;
+static int         g_fin_count  = 0;
+
+static void fin_dump(const Mesh& m, uint32_t ta, uint32_t tb, bool opposing) {
+    const char* dir = std::getenv("CHISEL_FIN_DUMP");
+    if (!dir) return;
+    const int id = g_fin_count++;
+    const uint32_t* a = &m.indices[ta*3];
+    const uint32_t* b = &m.indices[tb*3];
+    Vec3 p0 = m.get_pos(a[0]), p1 = m.get_pos(a[1]), p2 = m.get_pos(a[2]);
+    Vec3 c = (p0 + p1 + p2) * (1.0f / 3.0f);
+    float area = 0.5f * (p1 - p0).cross(p2 - p0).length();
+    float emax = std::max(edge_length(m, a[0], a[1]),
+                 std::max(edge_length(m, a[1], a[2]), edge_length(m, a[2], a[0])));
+    char path[1024];
+    std::snprintf(path, sizeof(path), "%s/fins.csv", dir);
+    if (FILE* f = std::fopen(path, "a")) {
+        std::fprintf(f, "%d,%s,%d,%s,%.6f,%.6f,%.6f,%u,%u,%u,%u,%u,%u,%.8f,%.6f\n",
+                     id, g_fin_stage, g_fin_iter, opposing ? "opposing" : "duplicate",
+                     c.x, c.y, c.z, a[0], a[1], a[2], b[0], b[1], b[2], area, emax);
+        std::fclose(f);
+    }
+    if (id >= 60) return;   // CSV keeps counting; patches stop
+    const float r2 = g_fin_radius * g_fin_radius;
+    std::vector<uint32_t> remap(m.vertex_count(), INVALID);
+    std::vector<uint32_t> verts, surf, fin;
+    const uint32_t tc = m.tri_count();
+    for (uint32_t t = 0; t < tc; t++) {
+        bool near = false;
+        for (int k = 0; k < 3 && !near; k++) {
+            Vec3 d = m.get_pos(m.indices[t*3+k]) - c;
+            near = d.dot(d) <= r2;
+        }
+        if (!near) continue;
+        for (int k = 0; k < 3; k++) {
+            uint32_t v = m.indices[t*3+k];
+            if (remap[v] == INVALID) { remap[v] = (uint32_t)verts.size(); verts.push_back(v); }
+        }
+        (t == ta || t == tb ? fin : surf).push_back(t);
+    }
+    std::snprintf(path, sizeof(path), "%s/fin-%03d.obj", dir, id);
+    FILE* f = std::fopen(path, "w");
+    if (!f) return;
+    std::fprintf(f, "# fin %d stage=%s iter=%d %s centre %.6f %.6f %.6f\n",
+                 id, g_fin_stage, g_fin_iter, opposing ? "opposing" : "duplicate", c.x, c.y, c.z);
+    for (uint32_t v : verts)
+        std::fprintf(f, "v %.7f %.7f %.7f\n", m.pos_x[v], m.pos_y[v], m.pos_z[v]);
+    auto faces = [&](const char* g, const std::vector<uint32_t>& ts) {
+        std::fprintf(f, "g %s\n", g);
+        for (uint32_t t : ts)
+            std::fprintf(f, "f %u %u %u\n", remap[m.indices[t*3]] + 1,
+                         remap[m.indices[t*3+1]] + 1, remap[m.indices[t*3+2]] + 1);
+    };
+    faces("surface", surf);
+    faces("fin", fin);
+    std::fclose(f);
+}
+#define FIN_STAGE(s, i) (g_fin_stage = (s), g_fin_iter = (i))
+// Stage dump (CHISEL_STAGE_DUMP=<dir>): the whole mesh as <dir>/NN-<name>.obj at
+// each mirror sub-step, so a seam defect can be pinned to the step that made it.
+static int g_stage_n = 0;
+static void stage_dump(const Mesh& m, const char* name) {
+    const char* dir = std::getenv("CHISEL_STAGE_DUMP");
+    if (!dir) return;
+    char path[1024];
+    std::snprintf(path, sizeof(path), "%s/%02d-%s.obj", dir, g_stage_n++, name);
+    FILE* f = std::fopen(path, "w");
+    if (!f) return;
+    const uint32_t vc = m.vertex_count(), tc = m.tri_count();
+    for (uint32_t v = 0; v < vc; v++)
+        std::fprintf(f, "v %.7f %.7f %.7f\n", m.pos_x[v], m.pos_y[v], m.pos_z[v]);
+    for (uint32_t t = 0; t < tc; t++)
+        std::fprintf(f, "f %u %u %u\n", m.indices[t*3]+1, m.indices[t*3+1]+1, m.indices[t*3+2]+1);
+    std::fclose(f);
+}
+#define STAGE_DUMP(m, n) stage_dump((m), (n))
+#else
+#define FIN_STAGE(s, i) ((void)0)
+#define STAGE_DUMP(m, n) ((void)0)
+#endif
+
 static uint32_t remove_doubled_tris(Mesh& m) {
     const uint32_t tc = m.tri_count();
     if (tc == 0) return 0;
@@ -469,6 +560,9 @@ static uint32_t remove_doubled_tris(Mesh& m) {
         if (q0 > q1) std::swap(q0, q1);
         if (q0 != s0 || q1 != s1 || q2 != s2) continue;
 
+#ifdef CHISEL_DEBUG_REMESH
+        fin_dump(m, prev, t, !tri_same_winding(i0, i1, i2, p0, p1, p2));
+#endif
         if (tri_same_winding(i0, i1, i2, p0, p1, p2)) {
             drop[t] = 1;                    // exact duplicate — keep one
             removed += 1;
@@ -1476,15 +1570,36 @@ static void compact_mesh(Mesh& m, std::vector<float>* aux, std::vector<float>* a
 // touches one seam vert isn't flattened. Running on the +x half *before*
 // reflection makes the seam a clean single edge-loop, so the mirror is symmetric
 // by construction — no twin-chasing through mirror_x_map.
-static uint32_t consolidate_seam(Mesh& m, float seam_tol, float target_edge) {
+// Vertex identity that survives everything this pass does to a vertex: snap
+// only zeroes x, weld/decimate keep the survivor where it was, and compaction
+// renumbers. (y, z) bits are the one handle all three leave alone.
+static uint64_t seam_key(const Mesh& m, uint32_t v) {
+    uint32_t y, z;
+    std::memcpy(&y, &m.pos_y[v], 4);
+    std::memcpy(&z, &m.pos_z[v], 4);
+    return ((uint64_t)y << 32) | z;
+}
+
+static uint32_t consolidate_seam_pass(Mesh& m, float seam_tol, float target_edge,
+                                      const std::unordered_set<uint64_t>& held,
+                                      const std::unordered_set<uint64_t>& frozen) {
     float snap_band  = target_edge * 0.45f;   // how close to the plane counts as "should be on it"
     float max_edge   = target_edge * 0.6f;    // only snap across genuinely short seam edges (= `low`)
     float weld_tol   = target_edge * 0.0625f; // matches the GPU weld pass
     float weld_sq    = weld_tol * weld_tol;
     float short_seam = target_edge * 0.5f;    // seam edges under this get decimated (stage 3)
     bool has_mask = !m.mask.empty();
-    auto masked = [&](uint32_t v) -> bool {
+    auto is_masked = [&](uint32_t v) -> bool {
         return has_mask && v < (uint32_t)m.mask.size() && m.mask[v] >= 1.0f;
+    };
+    // A previous attempt folded the seam through these (consolidate_seam).
+    // Held verts may not slide onto the plane but may still merge into a seam
+    // neighbour; frozen ones may do neither. Neither weld nor decimate.
+    auto in_set = [&](const std::unordered_set<uint64_t>& set, uint32_t v) {
+        return !set.empty() && set.count(seam_key(m, v)) != 0;
+    };
+    auto masked = [&](uint32_t v) -> bool {
+        return is_masked(v) || in_set(held, v) || in_set(frozen, v);
     };
 
     // Drop tris that went degenerate, or that collapsed flat onto the seam
@@ -1504,7 +1619,7 @@ static uint32_t consolidate_seam(Mesh& m, float seam_tol, float target_edge) {
                             std::fabs(m.pos_x[i1]) < seam_tol &&
                             std::fabs(m.pos_x[i2]) < seam_tol;
             // Preserve fully-masked tris — they're carried across as-is.
-            if (all_seam && !(masked(i0) && masked(i1) && masked(i2))) { culled++; continue; }
+            if (all_seam && !(is_masked(i0) && is_masked(i1) && is_masked(i2))) { culled++; continue; }
             kept.push_back(i0); kept.push_back(i1); kept.push_back(i2);
         }
         m.indices = std::move(kept);
@@ -1534,10 +1649,12 @@ static uint32_t consolidate_seam(Mesh& m, float seam_tol, float target_edge) {
 
     // --- 1. Snap near-seam verts onto the plane ---
     uint32_t snapped = 0;
+    std::vector<uint32_t> to_merge;
     for (uint32_t v = 0; v < vc; v++) {
         float ax = std::fabs(m.pos_x[v]);
         if (ax < seam_tol || ax > snap_band) continue;
-        if (masked(v)) continue;
+        if (is_masked(v) || in_set(frozen, v)) continue;
+        if (in_set(held, v)) { to_merge.push_back(v); continue; }
 
         bool snap = false;
         uint32_t s = m.vert_tri_offset[v];
@@ -1555,6 +1672,76 @@ static uint32_t consolidate_seam(Mesh& m, float seam_tol, float target_edge) {
         m.pos_x[v] = 0.0f;
         at_seam[v] = 1;
         snapped++;
+    }
+
+    // --- 1b. Merge held verts into their nearest seam neighbour ---
+    // A held vert still leaves the sliver its snap was meant to kill; merging
+    // it removes the sliver without sliding anything sideways. Link condition
+    // (v and nv may share only the two verts opposite their edge, or the merge
+    // glues the surface to itself) and a 60° fan guard. The ops share one
+    // adjacency snapshot, so each claims its whole 1-ring: two merges sharing a
+    // neighbour would each pass checks the other invalidates.
+    uint32_t merged = 0;
+    if (!to_merge.empty()) {
+        std::vector<uint32_t> into(vc);
+        for (uint32_t v = 0; v < vc; v++) into[v] = v;
+        std::vector<uint8_t> claimed(vc, 0);
+        std::vector<uint32_t> rv, rn;
+        auto ring = [&](uint32_t v, std::vector<uint32_t>& out) {
+            out.clear();
+            for (uint32_t j = m.vert_tri_offset[v]; j < m.vert_tri_offset[v + 1]; j++)
+                for (int k = 0; k < 3; k++) {
+                    uint32_t u = m.indices[m.vert_tri_list[j]*3+k];
+                    if (u != v && std::find(out.begin(), out.end(), u) == out.end()) out.push_back(u);
+                }
+        };
+        for (uint32_t v : to_merge) {
+            if (claimed[v]) continue;
+            ring(v, rv);
+            uint32_t best = INVALID;
+            float best_len = max_edge;
+            for (uint32_t u : rv) {
+                if (!at_seam[u] || masked(u) || claimed[u]) continue;
+                float l = edge_length(m, v, u);
+                if (l < best_len) { best_len = l; best = u; }
+            }
+            if (best == INVALID) continue;
+            bool busy = false;
+            for (uint32_t u : rv) busy |= claimed[u] != 0;
+            if (busy) continue;
+            ring(best, rn);
+            int common = 0;
+            for (uint32_t u : rv)
+                if (std::find(rn.begin(), rn.end(), u) != rn.end()) common++;
+            if (common != 2) continue;
+            Vec3 pb = m.get_pos(best);
+            bool folds = false;
+            for (uint32_t j = m.vert_tri_offset[v]; j < m.vert_tri_offset[v + 1] && !folds; j++) {
+                uint32_t tri = m.vert_tri_list[j];
+                if (tri_contains_vert(m, tri, best)) continue;   // dies with the merge
+                Vec3 p[3];
+                for (int k = 0; k < 3; k++) {
+                    uint32_t u = m.indices[tri*3+k];
+                    p[k] = (u == v) ? pb : m.get_pos(u);
+                }
+                Vec3 before = tri_normal(m, tri);
+                Vec3 after  = (p[1] - p[0]).cross(p[2] - p[0]);
+                float lb = before.length(), la = after.length();
+                folds = la <= 1e-12f * (lb + 1e-30f) || before.dot(after) < 0.5f * lb * la;
+            }
+            if (folds) continue;
+            into[v] = best;
+            claimed[v] = claimed[best] = 1;
+            for (uint32_t u : rv) claimed[u] = 1;
+            merged++;
+        }
+        if (merged > 0) {
+            for (uint32_t& idx : m.indices) idx = into[idx];
+            cull_and_compact();
+            m.build_adjacency();
+            vc = m.vertex_count();
+            mark_seam();
+        }
     }
 
     // --- 2. Weld coincident seam verts in (y,z) within weld_tol ---
@@ -1639,8 +1826,48 @@ static uint32_t consolidate_seam(Mesh& m, float seam_tol, float target_edge) {
     std::vector<uint8_t> touched(nvc, 0);
     uint32_t decimated = 0;
 
+    // Held verts (a previous attempt folded through one of these merges) get a
+    // stricter merge rather than none: left alone, the short seam edge stays as
+    // a pair of tiny tris. Strict = the link condition (the pair may share only
+    // the verts opposite their edge) plus a 60° fan guard instead of a sign
+    // test, tried b-into-a and then a-into-b.
+    auto merge_folds = [&](uint32_t a, uint32_t b) -> bool {
+        Vec3 pa = m.get_pos(a);
+        for (uint32_t j = m.vert_tri_offset[b]; j < m.vert_tri_offset[b + 1]; j++) {
+            uint32_t tri = m.vert_tri_list[j];
+            if (tri_contains_vert(m, tri, a)) continue;
+            Vec3 p[3];
+            for (int k = 0; k < 3; k++) {
+                uint32_t u = m.indices[tri*3+k];
+                p[k] = (u == b) ? pa : m.get_pos(u);
+            }
+            Vec3 before = tri_normal(m, tri);
+            Vec3 after  = (p[1] - p[0]).cross(p[2] - p[0]);
+            float lb = before.length(), la = after.length();
+            if (la <= 1e-12f * (lb + 1e-30f) || before.dot(after) < 0.5f * lb * la) return true;
+        }
+        return false;
+    };
+    auto link_ok = [&](uint32_t a, uint32_t b) -> bool {
+        std::vector<uint32_t> na, nb;
+        int shared_tris = 0;
+        for (uint32_t j = m.vert_tri_offset[a]; j < m.vert_tri_offset[a + 1]; j++) {
+            uint32_t tri = m.vert_tri_list[j];
+            if (tri_contains_vert(m, tri, b)) shared_tris++;
+            for (int k = 0; k < 3; k++) na.push_back(m.indices[tri*3+k]);
+        }
+        for (uint32_t j = m.vert_tri_offset[b]; j < m.vert_tri_offset[b + 1]; j++)
+            for (int k = 0; k < 3; k++) nb.push_back(m.indices[m.vert_tri_list[j]*3+k]);
+        std::sort(na.begin(), na.end()); na.erase(std::unique(na.begin(), na.end()), na.end());
+        std::sort(nb.begin(), nb.end()); nb.erase(std::unique(nb.begin(), nb.end()), nb.end());
+        int common = 0;
+        for (uint32_t u : na)
+            if (u != a && u != b && std::binary_search(nb.begin(), nb.end(), u)) common++;
+        return common == shared_tris;
+    };
+
     for (uint32_t a = 0; a < nvc; a++) {
-        if (!at_seam[a] || touched[a] || masked(a)) continue;
+        if (!at_seam[a] || touched[a] || is_masked(a) || in_set(frozen, a)) continue;
         uint32_t s = m.vert_tri_offset[a], e = m.vert_tri_offset[a + 1];
         bool merged = false;
         for (uint32_t j = s; j < e && !merged; j++) {
@@ -1648,10 +1875,19 @@ static uint32_t consolidate_seam(Mesh& m, float seam_tol, float target_edge) {
             for (int k = 0; k < 3; k++) {
                 uint32_t b = m.indices[tri*3+k];
                 if (b == a || b >= nvc) continue;
-                if (!at_seam[b] || touched[b] || masked(b)) continue;
+                if (!at_seam[b] || touched[b] || is_masked(b) || in_set(frozen, b)) continue;
                 if (edge_length(m, a, b) >= short_seam) continue;
-                if (merge_inverts(a, b)) continue;
-                dec[b] = a;
+                uint32_t keep = a, gone = b;
+                if (in_set(held, a) || in_set(held, b)) {
+                    if (!link_ok(a, b)) continue;
+                    if (merge_folds(a, b)) {
+                        if (merge_folds(b, a)) continue;
+                        keep = b; gone = a;
+                    }
+                } else if (merge_inverts(a, b)) {
+                    continue;
+                }
+                dec[gone] = keep;
                 touched[a] = touched[b] = 1;
                 decimated++;
                 merged = true;
@@ -1666,10 +1902,214 @@ static uint32_t consolidate_seam(Mesh& m, float seam_tol, float target_edge) {
         culled2 = cull_and_compact();
     }
 
-    std::printf("[seam-consolidate] snapped %u, welded %u, decimated %u short seam "
-                "edges, culled %u sliver tris\n",
-                snapped, welded, decimated, culled + culled2);
+    std::printf("[seam-consolidate] snapped %u, merged %u, welded %u, decimated %u short "
+                "seam edges, culled %u sliver tris (%zu held, %zu frozen)\n",
+                snapped, merged, welded, decimated, culled + culled2, held.size(), frozen.size());
     return snapped + welded + decimated;
+}
+
+
+// Every op in the pass above is judged on the mesh as it stands, but they
+// interact: a snap that folds a tri is often rescued by the weld that follows
+// (it collapses the folded tri to nothing), and sometimes is not. Judging each
+// snap alone refused harmless ones and left the clip slivers they exist to
+// kill. So judge the RESULT instead: run the pass, look for tris near the seam
+// that now face against the surface they came from, and if the pass made any,
+// roll back and rerun with those verts held still. A tri folded over on the
+// half mesh is the "triangles within triangles" once reflected — the mirror
+// doubles it into an overlap with non-manifold edges on the seam.
+//
+// "The surface they came from" is the pre-pass vertex normal, looked up by
+// seam_key. A dihedral test can't be used here: a knife crest sculpted along
+// the seam has neighbours >120° apart and is not a fold, and treating it as
+// one held back the very snaps that clean such crests up.
+using SeamNormals = std::unordered_map<uint64_t, Vec3>;
+
+static SeamNormals seam_ref_normals(const Mesh& m, float band) {
+    SeamNormals ref;
+    const uint32_t tc = m.tri_count();
+    for (uint32_t t = 0; t < tc; t++) {
+        const uint32_t* f = &m.indices[t*3];
+        bool near = false;
+        for (int k = 0; k < 3; k++) near |= std::fabs(m.pos_x[f[k]]) < 2.0f * band;
+        if (!near) continue;
+        Vec3 n = tri_normal(m, t);   // area-weighted
+        for (int k = 0; k < 3; k++) ref[seam_key(m, f[k])] = ref[seam_key(m, f[k])] + n;
+    }
+    return ref;
+}
+
+// Keys of verts of tris (near the seam) that face against `ref`, plus both
+// ends of any edge lying IN the plane with a tri on each side of it — the half
+// surface touching x=0 away from its rim, which is what a blade thinner than
+// the snap band becomes once its walls are pulled flat. The reflection gives
+// that edge four tris: non-manifold. with_ring widens to the tris' 1-ring.
+static uint32_t seam_band_flips(const Mesh& m, float band, float seam_tol, const SeamNormals& ref,
+                                std::unordered_set<uint64_t>& out, bool with_ring = false) {
+    const uint32_t tc = m.tri_count();
+    std::unordered_set<uint32_t> bad;
+    std::unordered_map<uint64_t, uint32_t> first;
+    auto near = [&](uint32_t v) { return std::fabs(m.pos_x[v]) < band; };
+    auto in_band = [&](uint32_t t) {
+        const uint32_t* f = &m.indices[t*3];
+        return near(f[0]) || near(f[1]) || near(f[2]);
+    };
+    uint32_t count = 0;
+    for (uint32_t t = 0; t < tc; t++) {
+        if (!in_band(t)) continue;
+        const uint32_t* f = &m.indices[t*3];
+        Vec3 r{0.0f, 0.0f, 0.0f};
+        for (int k = 0; k < 3; k++) {
+            auto it = ref.find(seam_key(m, f[k]));
+            if (it != ref.end()) r = r + it->second;
+        }
+        if (tri_normal(m, t).dot(r) < 0.0f) {
+            count++;
+            for (int k = 0; k < 3; k++) bad.insert(f[k]);
+        }
+        for (int e = 0; e < 3; e++) {
+            uint32_t a = f[e], b = f[(e+1)%3];
+            if (std::fabs(m.pos_x[a]) >= seam_tol || std::fabs(m.pos_x[b]) >= seam_tol) continue;
+            uint64_t k = ((uint64_t)std::min(a, b) << 32) | std::max(a, b);
+            if (!first.emplace(k, t).second) { count++; bad.insert(a); bad.insert(b); }
+        }
+    }
+    for (uint32_t v : bad) out.insert(seam_key(m, v));
+    if (with_ring && !bad.empty())
+        for (uint32_t t = 0; t < tc; t++) {
+            if (!in_band(t)) continue;
+            const uint32_t* f = &m.indices[t*3];
+            if (bad.count(f[0]) || bad.count(f[1]) || bad.count(f[2]))
+                for (int k = 0; k < 3; k++) out.insert(seam_key(m, f[k]));
+        }
+    return count;
+}
+
+// A blade thinner than the snap band (a mohawk, a crest sculpted with mirror
+// on) loses its walls to the snap: both sides land on x=0, and the half mesh
+// is left touching the plane along edges that still have a tri on each side.
+// The reflection gives each such edge four tris — non-manifold, and seen as
+// triangles stacked inside triangles. Lift the endpoints that are not on the
+// seam rim a hair off the plane: the blade gets back a sliver of thickness,
+// they get mirror twins of their own, and the edge stays two-sided. Rim verts
+// stay put, or the seam would open.
+static uint32_t lift_inplane_interior(Mesh& m, float seam_tol, float target_edge) {
+    const uint32_t tc = m.tri_count();
+    std::unordered_map<uint64_t, uint32_t> uses;
+    uses.reserve((size_t)tc * 3);
+    for (uint32_t t = 0; t < tc; t++)
+        for (int e = 0; e < 3; e++) {
+            uint32_t a = m.indices[t*3+e], b = m.indices[t*3+(e+1)%3];
+            uses[((uint64_t)std::min(a, b) << 32) | std::max(a, b)]++;
+        }
+    std::vector<uint8_t> rim(m.vertex_count(), 0);
+    for (const auto& [k, n] : uses)
+        if (n == 1) rim[(uint32_t)(k >> 32)] = rim[(uint32_t)k] = 1;
+    const bool has_mask = !m.mask.empty();
+    const float lift = target_edge * 0.05f;   // clear of seam_tol (1% of an edge)
+    uint32_t lifted = 0;
+    for (const auto& [k, n] : uses) {
+        if (n != 2) continue;
+        uint32_t ends[2] = { (uint32_t)(k >> 32), (uint32_t)k };
+        if (std::fabs(m.pos_x[ends[0]]) >= seam_tol || std::fabs(m.pos_x[ends[1]]) >= seam_tol)
+            continue;
+        for (uint32_t v : ends) {
+            if (rim[v] || m.pos_x[v] >= seam_tol) continue;
+            if (has_mask && v < (uint32_t)m.mask.size() && m.mask[v] >= 1.0f) continue;
+            m.pos_x[v] = lift;
+            lifted++;
+        }
+    }
+    // An edge whose two ends are BOTH on the rim (the rim pinching against
+    // itself) can't be fixed by moving either end. Split it instead, at a
+    // midpoint lifted the same hair off the plane: its two tris become four,
+    // none of them with an edge in the plane.
+    std::vector<uint64_t> chords;
+    for (const auto& [k, n] : uses) {
+        if (n != 2) continue;
+        uint32_t a = (uint32_t)(k >> 32), b = (uint32_t)k;
+        if (std::fabs(m.pos_x[a]) < seam_tol && std::fabs(m.pos_x[b]) < seam_tol)
+            chords.push_back(k);
+    }
+    uint32_t split = 0;
+    for (uint64_t k : chords) {
+        uint32_t a = (uint32_t)(k >> 32), b = (uint32_t)k;
+        // A masked end may belong to a protected tri, and those never change.
+        if (has_mask && ((a < m.mask.size() && m.mask[a] >= 1.0f) ||
+                         (b < m.mask.size() && m.mask[b] >= 1.0f))) continue;
+        uint32_t mid = (uint32_t)m.pos_x.size();
+        m.pos_x.push_back(lift);
+        m.pos_y.push_back(0.5f * (m.pos_y[a] + m.pos_y[b]));
+        m.pos_z.push_back(0.5f * (m.pos_z[a] + m.pos_z[b]));
+        Vec3 n = Vec3{m.norm_x[a] + m.norm_x[b], m.norm_y[a] + m.norm_y[b],
+                      m.norm_z[a] + m.norm_z[b]};
+        float nl = n.length();
+        if (nl > 1e-8f) n = n * (1.0f / nl);
+        m.norm_x.push_back(n.x); m.norm_y.push_back(n.y); m.norm_z.push_back(n.z);
+        if (!m.mask.empty())
+            m.mask.push_back(0.5f * ((a < m.mask.size() ? m.mask[a] : 0.0f) +
+                                     (b < m.mask.size() ? m.mask[b] : 0.0f)));
+        if (!m.color.empty())
+            m.color.push_back(color_lerp(a < m.color.size() ? m.color[a] : 0xFFFFFFFFu,
+                                         b < m.color.size() ? m.color[b] : 0xFFFFFFFFu, 0.5f));
+        paint_layers_each_stored(m.paint_layers, [&](std::vector<uint32_t>& L) {
+            L.push_back(color_lerp(L[a], L[b], 0.5f));
+        });
+        if (!m.density.empty())
+            m.density.push_back(0.5f * ((a < m.density.size() ? m.density[a] : 0.5f) +
+                                        (b < m.density.size() ? m.density[b] : 0.5f)));
+        const uint32_t cur_tc = m.tri_count();
+        for (uint32_t t = 0; t < cur_tc; t++) {
+            for (int e = 0; e < 3; e++) {
+                uint32_t p = m.indices[t*3+e], q = m.indices[t*3+(e+1)%3];
+                if (!((p == a && q == b) || (p == b && q == a))) continue;
+                uint32_t r = m.indices[t*3+(e+2)%3];
+                m.indices[t*3+0] = p; m.indices[t*3+1] = mid; m.indices[t*3+2] = r;
+                m.indices.push_back(mid); m.indices.push_back(q); m.indices.push_back(r);
+                break;
+            }
+        }
+        split++;
+    }
+    if (lifted + split > 0)
+        std::printf("[seam-consolidate] lifted %u verts off the plane, split %u rim-to-rim "
+                    "edges (blade thinner than the snap band)\n", lifted, split);
+    return lifted + split;
+}
+
+static uint32_t consolidate_seam(Mesh& m, float seam_tol, float target_edge) {
+    const float band = target_edge * 0.45f;   // = the pass's snap band
+    const SeamNormals ref = seam_ref_normals(m, band);
+    std::unordered_set<uint64_t> seen, held, frozen;
+    // A tri that already faced the wrong way (the edge ops upstream can leave
+    // one) is not the pass's doing; the count to beat is what came in.
+    const uint32_t incoming = seam_band_flips(m, band, seam_tol, ref, seen);
+    const Mesh input = m;
+    for (int attempt = 0; attempt < 8; attempt++) {
+        uint32_t ops = consolidate_seam_pass(m, seam_tol, target_edge, held, frozen);
+        std::unordered_set<uint64_t> bad;
+        uint32_t n_bad = seam_band_flips(m, band, seam_tol, ref, bad);
+        if (n_bad <= incoming) return ops;
+        // Escalate the offending verts: free -> held -> frozen. If they all
+        // were frozen already (a neighbour's op folded them), freeze the 1-ring.
+        size_t grew = 0;
+        for (uint64_t k : bad)
+            if (held.insert(k).second || frozen.insert(k).second) grew++;
+        if (grew == 0) {
+            std::unordered_set<uint64_t> ring;
+            seam_band_flips(m, band, seam_tol, ref, ring, true);
+            for (uint64_t k : ring)
+                if (frozen.insert(k).second) grew++;
+        }
+        std::printf("[seam-consolidate] attempt %d left %u tris facing the wrong way "
+                    "(came in with %u), holding %zu more verts\n", attempt, n_bad, incoming, grew);
+        m = input;
+        if (grew == 0) break;
+    }
+    // Nothing held still was enough: leave the seam as the clip made it. Its
+    // slivers are thin but face the right way; a fold reflects into an overlap.
+    std::printf("[seam-consolidate] gave up, seam left as clipped\n");
+    return 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -1726,6 +2166,7 @@ static void mirror_positive_half(Mesh& m, float seam_tol, float target_edge, Com
         }
     }
     if (any_weld) compact_mesh(m);
+    STAGE_DUMP(m, "gpu-snapweld");
 
     // Re-snapshot after potential compaction
     vc = m.vertex_count();
@@ -1914,6 +2355,7 @@ static void mirror_positive_half(Mesh& m, float seam_tol, float target_edge, Com
         m.indices = std::move(filtered);
     }
     REMESH_TOPO_TRACE(m, "mirror seam-split", 0, 0, -1);
+    STAGE_DUMP(m, "split");
 
     // Re-snapshot counts after splitting
     vc = m.vertex_count();
@@ -1963,11 +2405,14 @@ static void mirror_positive_half(Mesh& m, float seam_tol, float target_edge, Com
 
     // Compact to remove orphaned vertices before mirroring
     compact_mesh(m);
+    STAGE_DUMP(m, "clip");
 
     // Snap near-seam +x verts onto x=0 and weld, so the seam is a clean single
     // edge-loop before we reflect. Kills the clip slivers (see consolidate_seam).
     consolidate_seam(m, seam_tol, target_edge);
+    lift_inplane_interior(m, seam_tol, target_edge);
     REMESH_TOPO_TRACE(m, "mirror consolidate-seam", 0, 0, -1);
+    STAGE_DUMP(m, "consolidate");
 
     // Re-snapshot after compaction
     vc = m.vertex_count();
@@ -2143,6 +2588,7 @@ static void mirror_positive_half(Mesh& m, float seam_tol, float target_edge, Com
                 "%u verts %u tris\n",
                 paired, seam, unpaired, m.vertex_count(), m.tri_count());
     REMESH_TOPO_TRACE(m, "mirror reflect", 0, 0, -1);
+    STAGE_DUMP(m, "reflect");
 
     // --- Connected-component cleanup ---
     // Union-find over triangle connectivity. Discard all components except the
@@ -3211,6 +3657,9 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
     // Baseline BEFORE any edge op, so a defect present in the incoming mesh is
     // attributed to the input rather than to whichever pass runs first.
     REMESH_TOPO_RESET(mesh);
+#ifdef CHISEL_DEBUG_REMESH
+    g_fin_radius = 5.0f * target_edge_length;
+#endif
 
     for (int iter = 0; iter < iterations; iter++) {
         auto ts = tick();
@@ -3231,6 +3680,7 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
 
         // Sweep fins before they propagate: split refines them into more fins,
         // and every later pass is blind to them.
+        FIN_STAGE("after-collapse", iter);
         uint32_t n_doubled = remove_doubled_tris(mesh);
         if (n_doubled > 0)
             std::printf("[remesh] iter %d: removed %u doubled tris\n", iter, n_doubled);
@@ -3329,6 +3779,7 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
     // Final sweep before the mirror — the reflection duplicates whatever it is
     // handed, so a fin that survives to here comes out as two fins.
     {
+        FIN_STAGE("pre-mirror (after flip+smooth)", iters_done);
         uint32_t n_doubled = remove_doubled_tris(mesh);
         if (n_doubled > 0)
             std::printf("[remesh] pre-mirror: removed %u doubled tris\n", n_doubled);
@@ -3338,6 +3789,7 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
     compact_mesh(mesh);
 
     audit_open_edges(mesh, seam_tol, "pre-mirror", target_edge_length);
+    STAGE_DUMP(mesh, "pre-mirror");
 
     mirror_positive_half(mesh, seam_tol, target_edge_length, cs);
 
@@ -3351,6 +3803,7 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
     // can strip a tri that was propping up its neighbours. Everything before
     // here got a repair pass at entry; this one had none.
     repair_flipped_tris(mesh, seam_tol);
+    STAGE_DUMP(mesh, "final");
 
     // Replace multires stack (fresh level-0 lock on the new topology). Paint
     // planes restart from the remeshed surface: colour survived the remesh

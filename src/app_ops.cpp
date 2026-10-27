@@ -1,4 +1,5 @@
 // The frame's one-shot operations and shared helpers, moved out of main.cpp as is.
+#include "debug_console.h"
 #include "scene.h"          // first: pulls in glad, which must precede any GL header
 #include <GLFW/glfw3.h>
 #include "app.h"
@@ -690,6 +691,16 @@ void app_ops_remesh_and_merge(App& a) {
                                     input.remesh_keep_detail,
                                     input.remesh_detail);
 
+        // Dev hook: CHISEL_REMESH_DUMP=<path.obj> writes the remesh result;
+        // CHISEL_AUTO_QUIT=1 then exits, so a scripted run ends on its own.
+        if (result.success)
+            if (const char* dump = std::getenv("CHISEL_REMESH_DUMP"))
+                mesh->export_obj(dump);
+        if (std::getenv("CHISEL_AUTO_QUIT")) {
+            std::fflush(stdout);
+            debug_console::pump();   // stdout is piped through the ~ console
+            std::_Exit(result.success ? 0 : 3);
+        }
         if (result.success) {
             scene.mark_edited();
             mesh->mask.clear();
