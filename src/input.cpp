@@ -516,6 +516,10 @@ static double g_slider_last_raw_x = 0;
 // (tablet.cpp) without ever moving it, so an unchanged value at release means the pen,
 // not the mouse, did the drag.
 static double g_slider_begin_vx = 0, g_slider_begin_vy = 0;
+#if !defined(__EMSCRIPTEN__)
+// Set at a slider release: the next pointer report is checked against the drag start.
+static bool g_slider_check_return = false;
+#endif
 static GLFWwindow* g_window = nullptr;
 
 // Slider drag: accumulate a horizontal delta into the active slider, clamped so
@@ -682,6 +686,10 @@ static void begin_slider_drag(GLFWwindow* w, InputState::SliderMode mode, float 
 #endif
 }
 
+#if !defined(__EMSCRIPTEN__)
+static void slider_return_warp(double x, double y, bool mouse_dragged);   // see Edge wrap
+#endif
+
 // warp_back = false is the abandon path (focus loss): hand the cursor back where it
 // actually is rather than teleporting it into a window the user has already left.
 static void end_slider_drag(GLFWwindow* w, bool warp_back) {
@@ -716,6 +724,10 @@ static void end_slider_drag(GLFWwindow* w, bool warp_back) {
 #endif
     slider_capture(w, false);
 #if !defined(__EMSCRIPTEN__)
+    if (w && warp_back) {
+        slider_return_warp(g_input->slider_start_x, g_input->slider_start_y, mouse_dragged);
+        g_slider_check_return = true;
+    }
     // TEMPORARY, pairs with the trace in begin_slider_drag. If GLFW reports the asked-for
     // position here but the pointer still visibly jumps on the next move, then GLFW's
     // idea of the cursor and the compositor's have diverged — a different bug from the
@@ -816,6 +828,26 @@ bool wrap_cursor(GLFWwindow* window, InputState& input, int win_w, int win_h) {
 #endif
 }
 
+// A slider release leaves the pointer where the drag began, which is where the ring
+// already is. Releasing the capture alone should do that, but after an orbit wrap a
+// slider release sometimes put the pointer back at the edge the wrap left from
+// (2026-10-27). So on Wayland it is also warped to the drag start. A wrap still in
+// flight is re-aimed at that spot, so its stale reports keep being dropped.
+// mouse_dragged is false when a pen drove the slider: the mouse wasn't touched then,
+// and a wrap still in flight is the only reason to move it.
+#if !defined(__EMSCRIPTEN__)
+static void slider_return_warp(double x, double y, bool mouse_dragged) {
+    if (!on_wayland() || !wl_pointer_warp_available()) return;
+    if (!mouse_dragged && !g_warp_pending) return;
+    if (!wl_pointer_warp(x, y)) return;
+    if (g_warp_pending) {
+        g_warp_to_x = x;
+        g_warp_to_y = y;
+        g_warp_time = glfwGetTime();
+    }
+}
+#endif
+
 #ifndef __EMSCRIPTEN__
 // A slider drag holds the pointer captured and hidden. If focus leaves while the key is
 // still down the release never arrives, so without this the cursor would stay trapped
@@ -847,6 +879,20 @@ static void cursor_pos_callback(GLFWwindow* w, double x, double y) {
         apply_slider_delta(dx);
         return;
     }
+    // TEMPORARY (2026-10-27, slider-after-wrap jump): where the pointer first shows up
+    // after a slider release. Logged before the wrap filter below, so a stale report it
+    // drops is still seen.
+    if (g_slider_check_return) {
+        g_slider_check_return = false;
+        const double off = std::hypot(x - g_input->slider_start_x, y - g_input->slider_start_y);
+        if (off > 4.0) {
+            std::printf("[slider] after release the pointer reported (%.0f, %.0f), %.0f px "
+                        "from the drag start (%.0f, %.0f); wrap in flight %d, from (%.0f, %.0f)\n",
+                        x, y, off, g_input->slider_start_x, g_input->slider_start_y,
+                        g_warp_pending ? 1 : 0, g_warp_from_x, g_warp_from_y);
+            std::fflush(stdout);
+        }
+    }
     // A Wayland edge wrap still in flight: drop the reports from before it (see Edge wrap).
     if (g_warp_pending) {
         const double to   = std::hypot(x - g_warp_to_x, y - g_warp_to_y);
@@ -856,6 +902,9 @@ static void cursor_pos_callback(GLFWwindow* w, double x, double y) {
             g_warp_misses = 0;
         } else if (glfwGetTime() - g_warp_time > kWarpTimeout) {
             g_warp_pending = false;
+            std::printf("[wrap] warp to (%.0f, %.0f) never landed, pointer at (%.0f, %.0f)\n",
+                        g_warp_to_x, g_warp_to_y, x, y);
+            std::fflush(stdout);
             if (++g_warp_misses >= 2) {
                 g_warp_off = true;
                 std::printf("[wrap] the compositor ignores pointer warps, edge wrap off\n");

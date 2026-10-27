@@ -2,6 +2,11 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-27 — Sliders no longer yank the pointer back to an edge wrap
+
+- Wayland: after an orbit wrapped the pointer, releasing a W/A/S slider could put it back at the edge the wrap left from. A slider release now warps the pointer to the drag start explicitly; a wrap still in flight is re-aimed there.
+- Logs: `[slider] after release ...` (first pointer report off the drag start) and `[wrap] warp ... never landed`, kept while the cause is pinned down.
+
 ## 2026-10-27 — Remesh: mirror seam fix ("triangles within triangles")
 
 - The seam tidy-up before the mirror checks its result; a tri folded over its neighbour is rolled back and its verts held still.
