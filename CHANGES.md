@@ -2,6 +2,11 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-27 — Remesh progress bar
+
+- The remesh runs one pass per frame on a copy of the mesh and swaps it in at the end, so the window keeps drawing and the panel shows a real percentage (bar in the modern skins, % in Classic).
+- Strokes, level switches and undo wait until it finishes. Headless output is byte-identical to the one-frame remesh.
+
 ## 2026-10-27 — Remesh: more even triangle sizes
 
 - The remesh smoothing pulls each vert toward the area-weighted centre of its tris, so big and small tris no longer sit side by side. Plain averaging stays on sharp rings and within 1.5 edges of the mirror seam.

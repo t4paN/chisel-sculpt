@@ -604,6 +604,7 @@ struct InputState {
     // Remesh (/ key)
     bool remesh_requested;
     bool remesh_in_progress;
+    float remesh_progress = 0.0f;   // 0..1 while a remesh job runs
     bool remesh_confirm_pending;
 
     // Voxel merge (SDF join-for-print) — Merge button / J key

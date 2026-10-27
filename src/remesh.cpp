@@ -3407,12 +3407,64 @@ void pick_soup_sources(const Mesh& m, const std::vector<float>& pos,
 // Top-level entry point
 // ---------------------------------------------------------------------------
 
-RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
-                            float target_edge_length, int iterations,
-                            ComputeState* cs,
-                            float density_coarse_mult, float density_fine_mult,
-                            bool keep_detail, float detail) {
+// ---------------------------------------------------------------------------
+// The remesh as a job that spans frames, one step per frame (setup, each outer
+// iteration, drift, mirror), so the window keeps drawing and the progress bar
+// moves. It works on a private copy of the mesh: between steps the app keeps
+// rendering and reading the old one, and only the last step hands the result
+// back. Members keep the names the single-function remesh gave its locals.
+// ---------------------------------------------------------------------------
+struct RemeshJob {
+    static constexpr int SUPPORT_RINGS = 2;
+    Mesh*          out_mesh;
+    MultiresStack& stack;
+    ComputeState*  cs;
+    Mesh           mesh;              // the work copy
+    float target_edge_length = 0.0f, detail = 1.0f;
+    float density_coarse_mult = 2.0f, density_fine_mult = 0.5f;
+    int   iterations = 10;
+    bool  keep_detail = true;
+
     RemeshResult r;
+    std::chrono::steady_clock::time_point t0;
+    float high = 0.0f, low = 0.0f, seam_tol = 0.0f, select_target = 0.0f;
+    bool  detail_offset = false, adaptive = false, using_mask = false;
+    EdgeTable et;
+    std::vector<float>  target_len;   // per-vert target edge; empty = uniform
+    std::vector<float>* tlen = nullptr;
+    std::vector<uint32_t> tri_selected, pinned;
+    std::vector<float>    sel_mask, smooth_weights;
+    uint32_t raw_selected = 0, total_selected = 0;
+    RefSurface ref;
+    bool carrying = false;            // paint layers are in their dense carry form
+
+    int stage = 0;                    // 0 setup, 1 iterating, 2 drift, 3 mirror, 4 done
+    int iter = 0, iters_done = 0;
+    double t_split = 0.0, t_collapse = 0.0, t_flip = 0.0, t_rebuild = 0.0, t_project = 0.0;
+
+    RemeshJob(Mesh& m, MultiresStack& st, ComputeState* c)
+        : out_mesh(&m), stack(st), cs(c), mesh(m) {}
+    ~RemeshJob() {
+        if (carrying) paint_layers_end_carry(mesh.paint_layers, mesh.vertex_count());
+    }
+    static std::chrono::steady_clock::time_point tick() { return std::chrono::steady_clock::now(); }
+    static double since(std::chrono::steady_clock::time_point a) {
+        return std::chrono::duration<double, std::milli>(
+                   std::chrono::steady_clock::now() - a).count();
+    }
+
+    bool setup();          // false = finished already (error, or nothing to do)
+    bool step();
+    void finish_drift();
+    void finish_mirror();
+    void apply_mask_pins();
+    void compute_weights_cpu();
+    void rebuild_all();
+    void rebuild_after_flip();
+    void rebuild_after_smooth();
+};
+
+bool RemeshJob::setup() {
     r.old_verts = mesh.vertex_count();
     r.old_tris  = mesh.tri_count();
 
@@ -3425,18 +3477,18 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
     if (cs == nullptr || !cs->supported) {
         r.error = "GPU compute unavailable - remesh needs a compute-capable device";
         std::printf("[remesh] abort: %s\n", r.error.c_str());
-        return r;
+        return false;
     }
     if (r.old_verts == 0 || r.old_tris == 0) {
         r.error = "mesh is empty";
         std::printf("[remesh] abort: %s\n", r.error.c_str());
-        return r;
+        return false;
     }
     if (mesh.indices.size() % 3 != 0) {
         r.error = "index buffer is not a whole number of triangles";
         std::printf("[remesh] abort: %s (%zu indices)\n",
                     r.error.c_str(), mesh.indices.size());
-        return r;
+        return false;
     }
     {
         // One linear scan for out-of-range indices. Everything downstream
@@ -3449,11 +3501,11 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
             r.error = "index buffer references out-of-range vertices";
             std::printf("[remesh] abort: %s (index %u >= %u verts)\n",
                         r.error.c_str(), bad, r.old_verts);
-            return r;
+            return false;
         }
     }
 
-    auto t0 = std::chrono::steady_clock::now();
+    t0 = std::chrono::steady_clock::now();
 
     // Ensure adjacency is built
     if (mesh.vert_tri_offset.empty()) mesh.build_adjacency();
@@ -3463,7 +3515,7 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
         target_edge_length = compute_mean_edge_length(mesh);
     // Tri count goes as 1/edge², so a count multiplier is an edge divisor of √x.
     detail = std::min(4.0f, std::max(0.25f, detail));
-    const bool detail_offset = std::fabs(detail - 1.0f) > 0.01f;
+    detail_offset = std::fabs(detail - 1.0f) > 0.01f;
     if (detail_offset) {
         // 0.87: aiming the 0.8-1.4 band at the input's mean edge settles ~15%
         // LONGER on average — measured 0.74x/0.76x the promised count at x0.5/x2
@@ -3472,15 +3524,14 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
         std::printf("[remesh] detail x%.2f: target edge %.4f\n", detail, target_edge_length);
     }
 
-    float high = 1.4f * target_edge_length;
-    float low  = 0.8f * target_edge_length;   // canonical 4/3:4/5 band (was 0.6 — too wide, left fine tris)
-    float seam_tol = std::max(1e-5f, target_edge_length * 0.01f);
+    high = 1.4f * target_edge_length;
+    low  = 0.8f * target_edge_length;   // canonical 4/3:4/5 band (was 0.6 — too wide, left fine tris)
+    seam_tol = std::max(1e-5f, target_edge_length * 0.01f);
 
     // Repair brush-induced flipped tris before the edge ops can amplify them.
     repair_flipped_tris(mesh, seam_tol);
 
     // Build edge table
-    EdgeTable et;
     et.build(mesh);
 
     // ---- Adaptive sizing (spec §4): painted density field → per-vertex
@@ -3488,8 +3539,7 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
     // multiplicative): density 0 → L_base×coarse_mult, 1 → L_base×fine_mult,
     // 0.5 → exactly L_base when coarse×fine == 1. Empty field = uniform path,
     // byte-identical to before the feature existed.
-    std::vector<float> target_len;   // per-vert; empty = uniform
-    const bool adaptive = !mesh.density.empty() &&
+    adaptive = !mesh.density.empty() &&
                           density_coarse_mult != density_fine_mult;
     if (adaptive) {
         const float lc = std::log(std::max(0.01f, density_coarse_mult));
@@ -3523,7 +3573,7 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
                     "(coarse x%.2f, fine x%.2f), graded in %d sweeps\n",
                     density_coarse_mult, density_fine_mult, sweeps);
     }
-    std::vector<float>* tlen = adaptive ? &target_len : nullptr;
+    tlen = adaptive ? &target_len : nullptr;
 
     // With a painted field every tri is a sizing candidate (its local band
     // decides what happens) — the stretched-only heuristic would skip painted
@@ -3532,21 +3582,18 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
     // An offset target is the same story: the stretched-only test flags edges
     // LONGER than the target, so a coarser target would select almost nothing
     // and a coarse remesh would do nothing at all. The whole mesh is in play.
-    const float select_target = (adaptive || detail_offset) ? 0.0f : target_edge_length;
+    select_target = (adaptive || detail_offset) ? 0.0f : target_edge_length;
 
     // Decide selection strategy: mask-driven or auto-detect.
     // tri_selected mirrors remesh_trisel_ssbo on GPU; we only readback when CPU
     // consumers (split/collapse/flip, counts) need it.
-    bool using_mask = !mesh.mask.empty();
-    std::vector<uint32_t> tri_selected;
-    static constexpr int SUPPORT_RINGS = 2;
+    using_mask = !mesh.mask.empty();
 
     // Selection mask, binarized once at entry and maintained across topology ops
     // (split appends with an AND rule, compact_mesh remaps). Selection is driven
     // by THIS instead of live mask values: split midpoints get averaged mask
     // values that drift across the 0.5 threshold, which made the core border —
     // and with it the pinned set — churn on every rebuild.
-    std::vector<float> sel_mask;
     if (using_mask) {
         sel_mask.resize(mesh.mask.size());
         for (size_t i = 0; i < mesh.mask.size(); i++)
@@ -3575,7 +3622,7 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
     cs->readback_trisel(mesh.tri_count(), tri_selected);
 
     // Count before growing (non-mask path grows later)
-    uint32_t raw_selected = 0;
+    raw_selected = 0;
     for (uint32_t b : tri_selected) if (b) raw_selected++;
 
     if (raw_selected == 0) {
@@ -3587,17 +3634,14 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
         r.success = true;
         std::printf("[remesh] no stretched triangles found, nothing to do (%.1f ms)\n",
                     r.elapsed_ms);
-        return r;
+        return false;
     }
 
     // From here the mesh is rebuilt. Stored paint layers ride along dense, cut to this
     // level's verts (a prefix of the finer levels'), and every colour step below
     // repeats on them; they pack again for the new topology on the way out.
     paint_layers_begin_carry(mesh.paint_layers, mesh.vertex_count());
-    struct CarryEnd {
-        Mesh& m;
-        ~CarryEnd() { paint_layers_end_carry(m.paint_layers, m.vertex_count()); }
-    } carry_end{mesh};
+    carrying = true;   // ended by finish_mirror()
 
     // Non-mask path: grow for smooth transition (on GPU).
     if (!using_mask) {
@@ -3611,14 +3655,13 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
     // Final readback after grow + mirror — CPU now has the authoritative selection.
     cs->readback_trisel(mesh.tri_count(), tri_selected);
 
-    uint32_t total_selected = 0;
+    total_selected = 0;
     for (uint32_t b : tri_selected) if (b) total_selected++;
     r.selected_tris = total_selected;
 
     // Reference copy of the surface the remesh may touch: the selection plus a
     // 4-ring margin (later reselections can reach a little past the first one).
     // Built in both modes — the drift readout at the end needs it either way.
-    RefSurface ref;
     {
         auto tr = std::chrono::steady_clock::now();
         const uint32_t vc = mesh.vertex_count(), tc = mesh.tri_count();
@@ -3644,18 +3687,7 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
     }
 
     // Find pinned boundary vertices (includes mirror seam). tri_sel already on GPU.
-    std::vector<uint32_t> pinned;
 
-    // Fully-masked verts are hard pins regardless of selection topology: the
-    // grown selection reaches SUPPORT_RINGS into masked territory, and without
-    // this the smooth pass and collapse midpoints could move protected geometry.
-    auto apply_mask_pins = [&]() {
-        if (!using_mask) return;
-        uint32_t n = std::min<uint32_t>(mesh.vertex_count(), (uint32_t)mesh.mask.size());
-        n = std::min<uint32_t>(n, (uint32_t)pinned.size());
-        for (uint32_t v = 0; v < n; v++)
-            if (mesh.mask[v] >= 1.0f) pinned[v] = 1u;
-    };
 
     cs->dispatch_find_pinned(mesh.vertex_count(), mesh.tri_count(),
                              mesh.pos_x.data(), mesh.pos_y.data(), mesh.pos_z.data(),
@@ -3672,111 +3704,17 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
     }
     apply_mask_pins();
 
-    // Per-vertex smoothing weights (mask path only): mask-proportional falloff,
-    // computed on CPU and uploaded by dispatch_remesh_smooth. weight = 1 - mask
-    // for any unpinned vert touching the selection — a continuous transition
-    // instead of the old 2-ring quantized ramp, which hit zero exactly where the
-    // border band needed relaxing most.
-    std::vector<float> smooth_weights;
-    auto compute_weights_cpu = [&]() {
-        if (!using_mask) return;
-        uint32_t vc = mesh.vertex_count();
-        smooth_weights.assign(vc, 0.0f);
-        for (uint32_t v = 0; v < vc; v++) {
-            if (v < (uint32_t)pinned.size() && pinned[v]) continue;
-            uint32_t ts = mesh.vert_tri_offset[v];
-            uint32_t te = mesh.vert_tri_offset[v + 1];
-            bool any_sel = false;
-            for (uint32_t j = ts; j < te; j++) {
-                uint32_t t = mesh.vert_tri_list[j];
-                if (t < (uint32_t)tri_selected.size() && tri_selected[t]) { any_sel = true; break; }
-            }
-            if (!any_sel) continue;
-            float mv = (v < (uint32_t)mesh.mask.size()) ? mesh.mask[v] : 0.0f;
-            smooth_weights[v] = std::max(0.0f, 1.0f - mv);
-        }
-    };
     compute_weights_cpu();
 
     std::printf("[remesh] %u raw selected, %u total (after grow+support), "
                 "target_edge=%.4f, %d iters\n",
                 raw_selected, total_selected, target_edge_length, iterations);
 
-    // Helper: full rebuild of all transient state after topology changes
-    auto rebuild_all = [&]() {
-        compact_mesh(mesh, &sel_mask, tlen);
-        mesh.mirror_x_map.clear();
-        mesh.build_adjacency();
-        cs->upload_adjacency(mesh.vert_tri_offset.data(),
-                             (uint32_t)mesh.vert_tri_offset.size(),
-                             mesh.vert_tri_list.data(),
-                             (uint32_t)mesh.vert_tri_list.size());
-        mesh.recompute_normals();
-
-        if (using_mask) {
-            cs->dispatch_select_unmasked(mesh.vertex_count(), mesh.tri_count(),
-                mesh.indices.data(),
-                sel_mask.data(), (uint32_t)sel_mask.size());
-            cs->dispatch_grow_selection(mesh.vertex_count(), mesh.tri_count(), SUPPORT_RINGS);
-        } else {
-            cs->dispatch_select_stretched(mesh.vertex_count(), mesh.tri_count(),
-                mesh.indices.data(),
-                mesh.pos_x.data(), mesh.pos_y.data(), mesh.pos_z.data(),
-                select_target);
-            cs->dispatch_grow_selection(mesh.vertex_count(), mesh.tri_count(), 8);
-        }
-
-        // mirror_x_map was just cleared, so mirror spread is naturally a no-op
-        // until the final mirror_positive_half pass — no dispatch needed here.
-
-        cs->readback_trisel(mesh.tri_count(), tri_selected);
-
-        cs->dispatch_find_pinned(mesh.vertex_count(), mesh.tri_count(),
-                                 mesh.pos_x.data(), mesh.pos_y.data(), mesh.pos_z.data(),
-                                 seam_tol, pinned);
-        uint32_t vc = mesh.vertex_count();
-        if (pinned.size() < vc) pinned.resize(vc, 0u);
-        for (uint32_t v = 0; v < vc; v++)
-            if (pinned[v] && std::fabs(mesh.pos_x[v]) < seam_tol)
-                mesh.pos_x[v] = 0.0f;
-        apply_mask_pins();
-        compute_weights_cpu();
-    };
-
-    // Flip changes indices but not vertex/tri count and not which verts belong
-    // to the selection (flip is gated on both adjacent tris being selected,
-    // and the four involved verts keep the same set of adjacent selected tris).
-    // So pinned, weights, selection, and mirror map are all
-    // invariant — just refresh CPU+GPU adjacency and recompute normals.
-    auto rebuild_after_flip = [&]() {
-        mesh.build_adjacency();
-        cs->upload_adjacency(mesh.vert_tri_offset.data(),
-                             (uint32_t)mesh.vert_tri_offset.size(),
-                             mesh.vert_tri_list.data(),
-                             (uint32_t)mesh.vert_tri_list.size());
-        mesh.recompute_normals();
-    };
-
-    // Smooth touches positions only — no topology change, pinned verts don't
-    // move (shader gates on pinned[v]), so adjacency/selection/pinned/weights
-    // are all still valid. Only normals need refreshing for the next iter's
-    // split-midpoint normal interpolation.
-    auto rebuild_after_smooth = [&]() {
-        mesh.recompute_normals();
-    };
-
     // Remeshing iterations — rebuild topology where it changes.
     // Convergence break: once split+collapse+flip drops below max(8, 0.1% of tri count)
     // the next iter buys ~nothing topologically (Botsch-Kobbelt observation), so we
     // run a final smooth and bail. Floor of 8 prevents tiny meshes from doing all
     // 10 iters for 1-2 trivial ops.
-    int iters_done = 0;
-    double t_split = 0.0, t_collapse = 0.0, t_flip = 0.0, t_rebuild = 0.0, t_project = 0.0;
-    auto tick = [] { return std::chrono::steady_clock::now(); };
-    auto since = [](std::chrono::steady_clock::time_point a) {
-        return std::chrono::duration<double, std::milli>(
-                   std::chrono::steady_clock::now() - a).count();
-    };
 
     // Baseline BEFORE any edge op, so a defect present in the incoming mesh is
     // attributed to the input rather than to whichever pass runs first.
@@ -3784,94 +3722,200 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
 #ifdef CHISEL_DEBUG_REMESH
     g_fin_radius = 5.0f * target_edge_length;
 #endif
+    return true;
+}
 
-    for (int iter = 0; iter < iterations; iter++) {
-        auto ts = tick();
-        uint32_t n_split = split_long_edges(mesh, et, tri_selected, pinned, high, seam_tol, &sel_mask, tlen);
-        t_split += since(ts);
+// Fully-masked verts are hard pins regardless of selection topology: the
+// grown selection reaches SUPPORT_RINGS into masked territory, and without
+// this the smooth pass and collapse midpoints could move protected geometry.
+void RemeshJob::apply_mask_pins() {
+    if (!using_mask) return;
+    uint32_t n = std::min<uint32_t>(mesh.vertex_count(), (uint32_t)mesh.mask.size());
+    n = std::min<uint32_t>(n, (uint32_t)pinned.size());
+    for (uint32_t v = 0; v < n; v++)
+        if (mesh.mask[v] >= 1.0f) pinned[v] = 1u;
+}
 
-        // Skip the rebuild when a pass changed nothing. split_long_edges and
-        // collapse_short_edges both rebuild adjacency and the edge table
-        // internally, so with zero ops the topology, normals and GPU-side CSR
-        // are already exactly what rebuild_all would reproduce. Every skipped
-        // call saves two GPU readback stalls plus a full-mesh reselect — and
-        // the late iterations, which is most of them, do little or nothing.
-        if (n_split > 0) { ts = tick(); rebuild_all(); t_rebuild += since(ts); }
-
-        ts = tick();
-        uint32_t n_collapse = collapse_short_edges(mesh, et, tri_selected, pinned, low, seam_tol, &sel_mask, tlen);
-        t_collapse += since(ts);
-
-        // Collapse is what makes valence-3 verts now (each one drops the two
-        // tips' valence; flips refuse to). Clearing them here shares the
-        // rebuild below instead of paying for one of their own — that extra
-        // reselect + readback cost up to 30% on small meshes. Collapse leaves
-        // tri_selected/pinned aligned but not the CPU adjacency, hence the build.
-        mesh.build_adjacency();
-        uint32_t n_val3 = remove_valence3(mesh, tri_selected, pinned, seam_tol);
-
-        // Sweep fins before they propagate: split refines them into more fins,
-        // and every later pass is blind to them.
-        FIN_STAGE("after-collapse", iter);
-        uint32_t n_doubled = remove_doubled_tris(mesh);
-        if (n_doubled > 0)
-            std::printf("[remesh] iter %d: removed %u doubled tris\n", iter, n_doubled);
-        REMESH_TOPO_TRACE(mesh, "dedup iter", iter, (int)n_doubled, -1);
-
-        if (n_collapse > 0 || n_doubled > 0 || n_val3 > 0) {
-            ts = tick();
-            rebuild_all();
-            // Rebuilt AFTER rebuild_all, not before: rebuild_all compacts, and
-            // a compaction renumbers verts and tris out from under the edge
-            // table that flip_edges is about to walk.
-            et.build(mesh);
-            t_rebuild += since(ts);
+// Per-vertex smoothing weights (mask path only): mask-proportional falloff,
+// computed on CPU and uploaded by dispatch_remesh_smooth. weight = 1 - mask
+// for any unpinned vert touching the selection — a continuous transition
+// instead of the old 2-ring quantized ramp, which hit zero exactly where the
+// border band needed relaxing most.
+void RemeshJob::compute_weights_cpu() {
+    if (!using_mask) return;
+    uint32_t vc = mesh.vertex_count();
+    smooth_weights.assign(vc, 0.0f);
+    for (uint32_t v = 0; v < vc; v++) {
+        if (v < (uint32_t)pinned.size() && pinned[v]) continue;
+        uint32_t ts = mesh.vert_tri_offset[v];
+        uint32_t te = mesh.vert_tri_offset[v + 1];
+        bool any_sel = false;
+        for (uint32_t j = ts; j < te; j++) {
+            uint32_t t = mesh.vert_tri_list[j];
+            if (t < (uint32_t)tri_selected.size() && tri_selected[t]) { any_sel = true; break; }
         }
-
-        ts = tick();
-        // cos 15°: a flip may turn a face by at most that much in keep-detail mode.
-        uint32_t n_flip = flip_edges(mesh, et, tri_selected, pinned,
-                                     keep_detail ? 0.966f : -2.0f);
-        t_flip += since(ts);
-        if (n_flip > 0) rebuild_after_flip();
-
-        if (cs->has_remesh_smooth()) {
-            cs->dispatch_remesh_smooth(
-                mesh.vertex_count(), mesh.tri_count(),
-                mesh.indices.data(),
-                mesh.pos_x.data(), mesh.pos_y.data(), mesh.pos_z.data(),
-                mesh.norm_x.data(), mesh.norm_y.data(), mesh.norm_z.data(),
-                smooth_weights, pinned,
-                0.8f, seam_tol,
-                mesh.pos_x.data(), mesh.pos_y.data(), mesh.pos_z.data());
-        }
-        // Control point: smoothing moves positions only, so this must never
-        // fire. If it does, the smooth kernel is corrupting indices.
-        REMESH_TOPO_TRACE(mesh, "smooth iter", iter, 0, -1);
-
-        // Collapse midpoints and the smooth's tangent-plane steps both leave
-        // the surface; one sweep over the free verts brings all of them back.
-        // Normals are a step stale here (pre-smooth), which only feeds the
-        // facing test — a 0.3 cosine gate has plenty of slack for that.
-        if (keep_detail) {
-            ts = tick();
-            project_to_ref(mesh, ref, tri_selected, pinned, seam_tol, 0.5f * target_edge_length,
-                           0, mesh.vertex_count());
-            t_project += since(ts);
-        }
-
-        uint32_t total_ops = n_split + n_collapse + n_flip + n_val3;
-        uint32_t threshold = std::max<uint32_t>(8, mesh.tri_count() / 1000);
-        iters_done = iter + 1;
-        std::printf("[remesh] iter %d: %u split, %u collapse, %u flip, %u valence-3 (threshold=%u)\n",
-                    iter, n_split, n_collapse, n_flip, n_val3, threshold);
-        if (total_ops < threshold) {
-            std::printf("[remesh] converged at iter %d (%u ops < %u threshold)\n",
-                        iter, total_ops, threshold);
-            break;
-        }
-        if (iter + 1 < iterations) rebuild_after_smooth();
+        if (!any_sel) continue;
+        float mv = (v < (uint32_t)mesh.mask.size()) ? mesh.mask[v] : 0.0f;
+        smooth_weights[v] = std::max(0.0f, 1.0f - mv);
     }
+}
+
+// Helper: full rebuild of all transient state after topology changes
+void RemeshJob::rebuild_all() {
+    compact_mesh(mesh, &sel_mask, tlen);
+    mesh.mirror_x_map.clear();
+    mesh.build_adjacency();
+    cs->upload_adjacency(mesh.vert_tri_offset.data(),
+                         (uint32_t)mesh.vert_tri_offset.size(),
+                         mesh.vert_tri_list.data(),
+                         (uint32_t)mesh.vert_tri_list.size());
+    mesh.recompute_normals();
+
+    if (using_mask) {
+        cs->dispatch_select_unmasked(mesh.vertex_count(), mesh.tri_count(),
+            mesh.indices.data(),
+            sel_mask.data(), (uint32_t)sel_mask.size());
+        cs->dispatch_grow_selection(mesh.vertex_count(), mesh.tri_count(), SUPPORT_RINGS);
+    } else {
+        cs->dispatch_select_stretched(mesh.vertex_count(), mesh.tri_count(),
+            mesh.indices.data(),
+            mesh.pos_x.data(), mesh.pos_y.data(), mesh.pos_z.data(),
+            select_target);
+        cs->dispatch_grow_selection(mesh.vertex_count(), mesh.tri_count(), 8);
+    }
+
+    // mirror_x_map was just cleared, so mirror spread is naturally a no-op
+    // until the final mirror_positive_half pass — no dispatch needed here.
+
+    cs->readback_trisel(mesh.tri_count(), tri_selected);
+
+    cs->dispatch_find_pinned(mesh.vertex_count(), mesh.tri_count(),
+                             mesh.pos_x.data(), mesh.pos_y.data(), mesh.pos_z.data(),
+                             seam_tol, pinned);
+    uint32_t vc = mesh.vertex_count();
+    if (pinned.size() < vc) pinned.resize(vc, 0u);
+    for (uint32_t v = 0; v < vc; v++)
+        if (pinned[v] && std::fabs(mesh.pos_x[v]) < seam_tol)
+            mesh.pos_x[v] = 0.0f;
+    apply_mask_pins();
+    compute_weights_cpu();
+}
+
+// Flip changes indices but not vertex/tri count and not which verts belong
+// to the selection (flip is gated on both adjacent tris being selected,
+// and the four involved verts keep the same set of adjacent selected tris).
+// So pinned, weights, selection, and mirror map are all
+// invariant — just refresh CPU+GPU adjacency and recompute normals.
+void RemeshJob::rebuild_after_flip() {
+    mesh.build_adjacency();
+    cs->upload_adjacency(mesh.vert_tri_offset.data(),
+                         (uint32_t)mesh.vert_tri_offset.size(),
+                         mesh.vert_tri_list.data(),
+                         (uint32_t)mesh.vert_tri_list.size());
+    mesh.recompute_normals();
+}
+
+// Smooth touches positions only — no topology change, pinned verts don't
+// move (shader gates on pinned[v]), so adjacency/selection/pinned/weights
+// are all still valid. Only normals need refreshing for the next iter's
+// split-midpoint normal interpolation.
+void RemeshJob::rebuild_after_smooth() {
+    mesh.recompute_normals();
+}
+
+// One outer iteration (split, collapse, valence-3, flip, smooth, project).
+// Returns true when the loop is done: converged or out of iterations.
+bool RemeshJob::step() {
+    auto ts = tick();
+    uint32_t n_split = split_long_edges(mesh, et, tri_selected, pinned, high, seam_tol, &sel_mask, tlen);
+    t_split += since(ts);
+
+    // Skip the rebuild when a pass changed nothing. split_long_edges and
+    // collapse_short_edges both rebuild adjacency and the edge table
+    // internally, so with zero ops the topology, normals and GPU-side CSR
+    // are already exactly what rebuild_all would reproduce. Every skipped
+    // call saves two GPU readback stalls plus a full-mesh reselect — and
+    // the late iterations, which is most of them, do little or nothing.
+    if (n_split > 0) { ts = tick(); rebuild_all(); t_rebuild += since(ts); }
+
+    ts = tick();
+    uint32_t n_collapse = collapse_short_edges(mesh, et, tri_selected, pinned, low, seam_tol, &sel_mask, tlen);
+    t_collapse += since(ts);
+
+    // Collapse is what makes valence-3 verts now (each one drops the two
+    // tips' valence; flips refuse to). Clearing them here shares the
+    // rebuild below instead of paying for one of their own — that extra
+    // reselect + readback cost up to 30% on small meshes. Collapse leaves
+    // tri_selected/pinned aligned but not the CPU adjacency, hence the build.
+    mesh.build_adjacency();
+    uint32_t n_val3 = remove_valence3(mesh, tri_selected, pinned, seam_tol);
+
+    // Sweep fins before they propagate: split refines them into more fins,
+    // and every later pass is blind to them.
+    FIN_STAGE("after-collapse", iter);
+    uint32_t n_doubled = remove_doubled_tris(mesh);
+    if (n_doubled > 0)
+        std::printf("[remesh] iter %d: removed %u doubled tris\n", iter, n_doubled);
+    REMESH_TOPO_TRACE(mesh, "dedup iter", iter, (int)n_doubled, -1);
+
+    if (n_collapse > 0 || n_doubled > 0 || n_val3 > 0) {
+        ts = tick();
+        rebuild_all();
+        // Rebuilt AFTER rebuild_all, not before: rebuild_all compacts, and
+        // a compaction renumbers verts and tris out from under the edge
+        // table that flip_edges is about to walk.
+        et.build(mesh);
+        t_rebuild += since(ts);
+    }
+
+    ts = tick();
+    // cos 15°: a flip may turn a face by at most that much in keep-detail mode.
+    uint32_t n_flip = flip_edges(mesh, et, tri_selected, pinned,
+                                 keep_detail ? 0.966f : -2.0f);
+    t_flip += since(ts);
+    if (n_flip > 0) rebuild_after_flip();
+
+    if (cs->has_remesh_smooth()) {
+        cs->dispatch_remesh_smooth(
+            mesh.vertex_count(), mesh.tri_count(),
+            mesh.indices.data(),
+            mesh.pos_x.data(), mesh.pos_y.data(), mesh.pos_z.data(),
+            mesh.norm_x.data(), mesh.norm_y.data(), mesh.norm_z.data(),
+            smooth_weights, pinned,
+            0.8f, seam_tol,
+            mesh.pos_x.data(), mesh.pos_y.data(), mesh.pos_z.data());
+    }
+    // Control point: smoothing moves positions only, so this must never
+    // fire. If it does, the smooth kernel is corrupting indices.
+    REMESH_TOPO_TRACE(mesh, "smooth iter", iter, 0, -1);
+
+    // Collapse midpoints and the smooth's tangent-plane steps both leave
+    // the surface; one sweep over the free verts brings all of them back.
+    // Normals are a step stale here (pre-smooth), which only feeds the
+    // facing test — a 0.3 cosine gate has plenty of slack for that.
+    if (keep_detail) {
+        ts = tick();
+        project_to_ref(mesh, ref, tri_selected, pinned, seam_tol, 0.5f * target_edge_length,
+                       0, mesh.vertex_count());
+        t_project += since(ts);
+    }
+
+    uint32_t total_ops = n_split + n_collapse + n_flip + n_val3;
+    uint32_t threshold = std::max<uint32_t>(8, mesh.tri_count() / 1000);
+    iters_done = iter + 1;
+    std::printf("[remesh] iter %d: %u split, %u collapse, %u flip, %u valence-3 (threshold=%u)\n",
+                iter, n_split, n_collapse, n_flip, n_val3, threshold);
+    if (total_ops < threshold) {
+        std::printf("[remesh] converged at iter %d (%u ops < %u threshold)\n",
+                    iter, total_ops, threshold);
+        return true;
+    }
+    if (iter + 1 < iterations) rebuild_after_smooth();
+    return ++iter >= iterations;
+}
+
+// Loop timings and the drift readout.
+void RemeshJob::finish_drift() {
     std::printf("[remesh] outer loop: %d/%d iters (split %.0f ms, collapse %.0f ms, "
                 "flip %.0f ms, rebuild %.0f ms, project %.0f ms)\n",
                 iters_done, iterations, t_split, t_collapse, t_flip, t_rebuild, t_project);
@@ -3916,7 +3960,10 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
                         dists.back() * pct, dists.size(), facing_away);
         }
     }
+}
 
+// Fin sweep, mirror, final repair, fresh multires lock.
+void RemeshJob::finish_mirror() {
     // Final sweep before the mirror — the reflection duplicates whatever it is
     // handed, so a fin that survives to here comes out as two fins.
     {
@@ -3991,8 +4038,69 @@ RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
                 "(%.1f ms, edge=%.4f, iters=%d)\n",
                 r.old_verts, r.old_tris, r.new_verts, r.new_tris,
                 r.elapsed_ms, target_edge_length, iterations);
-    return r;
+    paint_layers_end_carry(mesh.paint_layers, mesh.vertex_count());
+    carrying = false;
 }
+
+RemeshJob* remesh_begin(Mesh& mesh, MultiresStack& stack,
+                        float target_edge_length, int iterations, ComputeState* cs,
+                        float density_coarse_mult, float density_fine_mult,
+                        bool keep_detail, float detail) {
+    RemeshJob* j = new RemeshJob(mesh, stack, cs);
+    j->target_edge_length  = target_edge_length;
+    j->iterations          = iterations;
+    j->density_coarse_mult = density_coarse_mult;
+    j->density_fine_mult   = density_fine_mult;
+    j->keep_detail         = keep_detail;
+    j->detail              = detail;
+    return j;
+}
+
+bool remesh_tick(RemeshJob& j, RemeshResult& out) {
+    switch (j.stage) {
+    case 0:
+        if (j.setup()) { j.stage = 1; return false; }
+        // Finished early. "Nothing to do" has still repaired flipped tris on
+        // the way in, so a success hands the copy back like a full run does.
+        if (j.r.success) *j.out_mesh = std::move(j.mesh);
+        j.stage = 4;
+        out = j.r;
+        return true;
+    case 1:
+        if (j.step()) j.stage = 2;
+        return false;
+    case 2:
+        j.finish_drift();
+        j.stage = 3;
+        return false;
+    case 3:
+        j.finish_mirror();
+        *j.out_mesh = std::move(j.mesh);
+        j.stage = 4;
+        out = j.r;
+        return true;
+    default:
+        out = j.r;
+        return true;
+    }
+}
+
+// Steps done over steps planned (setup, each iteration, drift, mirror). A loop
+// that converges early jumps ahead.
+float remesh_progress(const RemeshJob& j) {
+    const float total = (float)(j.iterations + 3);
+    float done;
+    switch (j.stage) {
+    case 0:  done = 0.0f; break;
+    case 1:  done = 1.0f + (float)j.iter; break;
+    case 2:  done = 1.0f + (float)j.iterations; break;
+    case 3:  done = 2.0f + (float)j.iterations; break;
+    default: done = total; break;
+    }
+    return done / total;
+}
+
+void remesh_destroy(RemeshJob* j) { delete j; }
 
 uint64_t predict_adaptive_tris(const Mesh& mesh, float target_edge_length,
                                float coarse_mult, float fine_mult) {

@@ -410,6 +410,8 @@ void app_ops_levels_and_views(App& a) {
     auto print_undo_top = [&](const char* tag) { app_print_undo_top(a, tag); };
     auto refresh_active_gpu_residency = [&]() { app_refresh_active_gpu_residency(a); };
     auto arm_geometry_handoff = [&](const Mesh& m) { app_arm_geometry_handoff(a, m); };
+    // A remesh job owns the mesh until its last step: no level switch under it.
+    if (input.remesh_in_progress) input.level_switch_delta = 0;
     // Multires level switch (D / Shift-D post-lock). Recorded on the undo
     // timeline as a LEVEL entry so Ctrl-Z retraces the literal action sequence
     // (…draw, subd-up, draw, subd-down…) with the view level following along.
@@ -610,8 +612,8 @@ void app_ops_levels_and_views(App& a) {
     }
 }
 
-// Remesh and SDF merge: the remesh runs inside one frame (after a frame that shows its
-// panel), the merge spans frames, one budgeted step each.
+// Remesh and SDF merge: both span frames, one budgeted step each, so their panels
+// show real progress and the window keeps drawing.
 void app_ops_remesh_and_merge(App& a) {
     auto& input = a.input;
     auto& scene = a.scene;
@@ -630,13 +632,15 @@ void app_ops_remesh_and_merge(App& a) {
     auto refresh_active_gpu_residency = [&]() { app_refresh_active_gpu_residency(a); };
     auto take_rescue = [&](const char* op) { app_take_rescue(a, op); };
     // ---- Remesh execution ----
-    // A remesh runs inside this one frame, so the "Remeshing..." panel would never
-    // reach the screen: the first frame only raises remesh_in_progress (the panel
-    // draws and presents), the next one does the work.
+    // The remesh is a job: setup, each outer iteration and the two finishing
+    // passes are one step a frame. The first frame only raises remesh_in_progress
+    // so the panel is up before setup (the slowest step) runs.
     static bool remesh_shown = false;
+    static RemeshJob* remesh_job = nullptr;
     if (input.remesh_requested && !remesh_shown) {
         remesh_shown = true;
         input.remesh_in_progress = true;
+        input.remesh_progress = 0.0f;
     } else if (input.remesh_requested) {
         remesh_shown = false;
         input.remesh_requested = false;
@@ -686,14 +690,29 @@ void app_ops_remesh_and_merge(App& a) {
         if (!remesh_refused)
             if (const char* dump = std::getenv("CHISEL_REMESH_SRC_DUMP"))
                 mesh->export_obj(dump);
-        RemeshResult result;
         if (!remesh_refused)
-            result = perform_remesh(*mesh, *multires, 0.0f, 10,
-                                    compute.supported ? &compute : nullptr,
-                                    input.density_coarse_mult,
-                                    input.density_fine_mult,
-                                    input.remesh_keep_detail,
-                                    input.remesh_detail);
+            remesh_job = remesh_begin(*mesh, *multires, 0.0f, 10,
+                                      compute.supported ? &compute : nullptr,
+                                      input.density_coarse_mult,
+                                      input.density_fine_mult,
+                                      input.remesh_keep_detail,
+                                      input.remesh_detail);
+        else {
+            remesh_chained_from_merge = false;
+            input.remesh_in_progress = false;
+            if (std::getenv("CHISEL_AUTO_QUIT")) {   // scripted run: a refusal ends it too
+                std::fflush(stdout);
+                debug_console::pump();
+                std::_Exit(3);
+            }
+        }
+    }
+
+    // Advance an in-flight remesh by one step; the rest runs once it is done.
+    RemeshResult result;
+    if (remesh_job && remesh_tick(*remesh_job, result)) {
+        remesh_destroy(remesh_job);
+        remesh_job = nullptr;
 
         // Dev hook: CHISEL_REMESH_DUMP=<path.obj> writes the remesh result;
         // CHISEL_AUTO_QUIT=1 then exits, so a scripted run ends on its own.
@@ -708,8 +727,7 @@ void app_ops_remesh_and_merge(App& a) {
         if (result.success) {
             scene.mark_edited();
             mesh->mask.clear();
-            // perform_remesh rebuilt the ACTIVE entity's mesh + multires base
-            // in place. Leave every other entity untouched — only the active
+            // The remesh rebuilt the ACTIVE entity's mesh + multires base. Leave every other entity untouched — only the active
             // one was remeshed. Its topology is fresh (base level 0), so reset
             // its subdiv level, refresh its mirror map, and re-sync the working
             // set. Spatial mirror mode: destructive remesh breaks topology mirror.
@@ -742,7 +760,7 @@ void app_ops_remesh_and_merge(App& a) {
                           result.old_verts, result.old_tris,
                           result.new_verts, result.new_tris);
             input.notification_timer = 4.0f;
-        } else if (!remesh_refused) {
+        } else {
             // Nothing changed, so there is nothing this remesh can rescue —
             // but a chained one must leave the merge's snapshot standing.
             if (!remesh_chained_from_merge) rescue.clear();
@@ -755,6 +773,7 @@ void app_ops_remesh_and_merge(App& a) {
         remesh_chained_from_merge = false;
         input.remesh_in_progress = false;
     }
+    if (remesh_job) input.remesh_progress = remesh_progress(*remesh_job);
 
     // ---- Voxel merge execution (SDF join-for-print) ----
     // Kick off a merge: build the job (gather/grid/alloc/compile), then let the

@@ -17,14 +17,22 @@ struct RemeshResult {
     uint32_t selected_tris = 0;
 };
 
-RemeshResult perform_remesh(Mesh& mesh, MultiresStack& stack,
-                            float target_edge_length = 0.0f,
-                            int iterations = 10,
-                            ComputeState* cs = nullptr,
-                            float density_coarse_mult = 2.0f,
-                            float density_fine_mult = 0.5f,
-                            bool keep_detail = true,   // snap to the original surface + guard flips
-                            float detail = 1.0f);      // tri-count multiplier on the auto target
+// The remesh runs as a job across frames, one step per frame, on a private copy
+// of `mesh`; the last step writes the result back into `mesh` and resets `stack`.
+// Both must outlive the job. Tick once a frame until it returns true; `out` then
+// holds the result. Destroying an unfinished job leaves `mesh` as it was.
+struct RemeshJob;
+RemeshJob* remesh_begin(Mesh& mesh, MultiresStack& stack,
+                        float target_edge_length = 0.0f,
+                        int iterations = 10,
+                        ComputeState* cs = nullptr,
+                        float density_coarse_mult = 2.0f,
+                        float density_fine_mult = 0.5f,
+                        bool keep_detail = true,   // snap to the original surface + guard flips
+                        float detail = 1.0f);      // tri-count multiplier on the auto target
+bool  remesh_tick(RemeshJob& job, RemeshResult& out);
+float remesh_progress(const RemeshJob& job);       // 0..1
+void  remesh_destroy(RemeshJob* job);
 
 // Predicted post-remesh triangle count when a painted density field drives
 // adaptive sizing (each tri refines toward its local target edge length).

@@ -3633,11 +3633,12 @@ void draw_skin_dialogs(InputState& input, int win_w, int win_h, const DialogInfo
         end_dialog();
     }
 
-    // ---- Remesh: running. Remesh runs inside a single frame, so this is the panel the
-    // app freezes on (main.cpp holds the remesh back one frame so it gets drawn).
+    // ---- Remesh: running (a job across frames, one pass per frame, so the bar moves) ----
     if (begin_dialog("##dlgRemeshRun", input.remesh_in_progress, win_w, win_h)) {
-        dlg_title("Remeshing...");
-        dlg_text(UiFont::Sans, 13.0f, kMuted, "This can take a few seconds on a big mesh.");
+        char line[48];
+        std::snprintf(line, sizeof line, "Remeshing...  %d%%", (int)(input.remesh_progress * 100.0f + 0.5f));
+        dlg_title(line);
+        dlg_bar(dlg_min_w(), input.remesh_progress);
         end_dialog();
     }
 

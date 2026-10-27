@@ -12,7 +12,7 @@ void draw_drop_confirm(TextOverlay& text, const char* path, int win_w, int win_h
 // get the scene under its triangle cap (0 = none, -1 = cannot fit, no rescue).
 // Shown in the prompt because baking is destructive and the Y is the consent.
 void draw_remesh_confirm(TextOverlay& text, int levels_to_bake, int win_w, int win_h);
-void draw_remesh_progress(TextOverlay& text, int win_w, int win_h);
+void draw_remesh_progress(TextOverlay& text, int win_w, int win_h, float progress);
 void draw_voxel_merge_confirm(TextOverlay& text, int resolution, int n_selected,
                              int n_unselected, bool surface_nets,
                              bool has_density, bool adaptive, int levels_to_bake,

@@ -355,7 +355,7 @@ void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse) {
                                  dlg.has_density, input.voxel_merge_adaptive,
                                  dlg.levels_to_bake, win_w, win_h);
     if (bitmap_dialogs && input.remesh_in_progress)
-        draw_remesh_progress(text, win_w, win_h);
+        draw_remesh_progress(text, win_w, win_h, input.remesh_progress);
     if (bitmap_dialogs && input.voxel_merge_in_progress)
         draw_voxel_merge_progress(text, win_w, win_h, dlg.merge_progress);
     // The bitmap HUD belongs to the classic skin; the modern skin draws its own
