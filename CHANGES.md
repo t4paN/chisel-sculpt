@@ -2,6 +2,11 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-28 — Slider release ignores a stale pointer report
+
+- Wayland: ~13 ms after a slider release the compositor can report the previous slider's drag start; reports far from the return spot are now dropped until the return lands (half the releases in a session hit it).
+- Log: `[slider] return warp ... never landed` if a return times out.
+
 ## 2026-10-28 — Retopo: wand lasso on bare sculpt fills it with a grid
 
 - A wand lasso round sculpt with no retopo inside makes a new island of quads: a ring along the outline, a grid in the rest, snapped onto the surface.

@@ -836,10 +836,23 @@ bool wrap_cursor(GLFWwindow* window, InputState& input, int win_w, int win_h) {
 // mouse_dragged is false when a pen drove the slider: the mouse wasn't touched then,
 // and a wrap still in flight is the only reason to move it.
 #if !defined(__EMSCRIPTEN__)
+// The return warp races a stale report too: after the release the compositor sometimes
+// sends an old position (the PREVIOUS slider's drag start, to the pixel, 2026-10-27), and
+// it can arrive after the warp's own report. So reports far from the drag start are
+// dropped until one lands near it, for at most kWarpTimeout.
+static bool   g_return_pending = false;
+static double g_return_x = 0.0, g_return_y = 0.0;
+static double g_return_time = 0.0;
+static constexpr double kReturnRadius = 24.0;
+
 static void slider_return_warp(double x, double y, bool mouse_dragged) {
     if (!on_wayland() || !wl_pointer_warp_available()) return;
     if (!mouse_dragged && !g_warp_pending) return;
     if (!wl_pointer_warp(x, y)) return;
+    g_return_pending = true;
+    g_return_x = x;
+    g_return_y = y;
+    g_return_time = glfwGetTime();
     if (g_warp_pending) {
         g_warp_to_x = x;
         g_warp_to_y = y;
@@ -891,6 +904,21 @@ static void cursor_pos_callback(GLFWwindow* w, double x, double y) {
                         x, y, off, g_input->slider_start_x, g_input->slider_start_y,
                         g_warp_pending ? 1 : 0, g_warp_from_x, g_warp_from_y);
             std::fflush(stdout);
+        }
+    }
+    // A slider return warp in flight: drop stale reports (see slider_return_warp).
+    if (g_return_pending) {
+        const double off = std::hypot(x - g_return_x, y - g_return_y);
+        const double age = glfwGetTime() - g_return_time;
+        if (off <= kReturnRadius) {
+            g_return_pending = false;
+        } else if (age > kWarpTimeout) {
+            g_return_pending = false;
+            std::printf("[slider] return warp to (%.0f, %.0f) never landed, pointer at "
+                        "(%.0f, %.0f)\n", g_return_x, g_return_y, x, y);
+            std::fflush(stdout);
+        } else {
+            return;
         }
     }
     // A Wayland edge wrap still in flight: drop the reports from before it (see Edge wrap).
