@@ -1272,6 +1272,9 @@ int main(int argc, char* argv[]) {
                 && ph >= 0 && ph < (int)rig.joints.size()) {
                 rig.joints[ph].radius = std::max(1e-4f,
                     rig.joints[ph].radius * std::pow(1.1f, scroll));
+            } else if (std::fabs(scroll) > 0.01f && retopo.grid_open) {
+                // A lasso grid just made: the wheel sets its density (retopo_frame).
+                retopo.grid_wheel += scroll;
             } else if (std::fabs(scroll) > 0.01f) {
                 camera.zoom(scroll);
                 screen_buffers_dirty = true;

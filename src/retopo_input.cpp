@@ -172,9 +172,10 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
                     && x < L[j] + (L[i] - L[j]) * (y - L[j + 1]) / (L[i + 1] - L[j + 1])) in = !in;
             return in;
         };
-        // With something copied, a lasso round bare sculpt (no built vertex facing out
-        // of it) marks where the paste goes; anything else is a cleanup, as ever.
-        bool bare = retopo_on && retopo.has_clip();
+        // A lasso round bare sculpt (no built vertex facing out of it) fills it with a
+        // grid, and with something copied marks where the paste goes too (a paste there
+        // takes the grid's place); anything else is a cleanup, as ever.
+        bool bare = retopo_on;
         if (bare && retopo.built) {
             const RetopoMesh& rm = retopo.result;
             const Vec3 to_eye = camera.get_view_direction() * -1.0f;
@@ -187,9 +188,45 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
             }
         }
         if (retopo_on && L.size() >= 6 && std::max(x1 - x0, y1 - y0) > 8.0f && bare) {
+            if (retopo.wand_open) retopo_wand_close(retopo, retopo.wand_keep_shown ? retopo.wand_shown : -1);
+            scene.materialize_active_cpu();   // the grid snaps onto mesh.pos
+            // The outline on the sculpt, off the plane cache: the lasso's points that land
+            // on the model. Its first count of sides: one per ~kGridPx of lasso on screen.
+            constexpr float kGridPx = 28.0f;
+            std::vector<Vec3> gp, gn;
+            size_t missed = 0;
+            float perim_px = 0.0f;
+            for (size_t i = 0; i + 1 < L.size(); i += 2) {
+                Vec3 p, n;
+                float wpp;
+                if (!screen_buffers_dirty && retopo_surface_at(L[i], L[i + 1], p, n, wpp)) {
+                    gp.push_back(p);
+                    gn.push_back(n);
+                } else {
+                    missed++;
+                }
+                const size_t j = (i + 2) % L.size();
+                perim_px += std::hypot(L[j] - L[i], L[j + 1] - L[i + 1]);
+            }
+            const char* grid_why = nullptr;
+            if (gp.size() < 6 || missed * 8 > L.size()) {   // over a quarter of it off the model
+                grid_why = "Keep the lasso on the model to fill it with a grid";
+            } else {
+                const int sides = 2 * std::clamp((int)std::lround(perim_px / (2.0f * kGridPx)), 4, 128);
+                grid_why = retopo_grid(retopo, mesh, gp, gn, sides, input.mirror_x);
+            }
+            if (grid_why) {
+                std::snprintf(input.notification, sizeof(input.notification), "%s", grid_why);
+            } else {
+                std::snprintf(input.notification, sizeof(input.notification),
+                              "Grid: %u quads - scroll for more or fewer, click on to keep",
+                              retopo.result.face_count() - retopo.grid_base.result.face_count());
+            }
+            input.notification_timer = 3.0f;
+        }
+        if (retopo_on && L.size() >= 6 && std::max(x1 - x0, y1 - y0) > 8.0f && bare && retopo.has_clip()) {
             // The sculpt inside it, seen and facing: triangle centres and their
             // area-weighted normals, measured the way the copy was.
-            scene.materialize_active_cpu();
             std::vector<Vec3> P, N;
             const Vec3 eye = camera.get_position(), fwd = camera.get_view_direction();
             for (uint32_t t = 0; t < mesh.tri_count(); t++) {
@@ -216,13 +253,18 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
                 retopo.paste_eye = eye;
                 std::printf("[retopo] paste target: %zu tris, axis (%.2f,%.2f,%.2f), size %.3f\n", P.size(),
                             retopo.paste_a.x, retopo.paste_a.y, retopo.paste_a.z, retopo.paste_size);
-                std::snprintf(input.notification, sizeof(input.notification),
-                              "Right-click: Paste %s here", retopo.clip.name.c_str());
-            } else {
+                if (retopo.grid_open)
+                    std::snprintf(input.notification, sizeof(input.notification),
+                                  "Grid: scroll for more or fewer - right-click: Paste %s instead",
+                                  retopo.clip.name.c_str());
+                else
+                    std::snprintf(input.notification, sizeof(input.notification),
+                                  "Right-click: Paste %s here", retopo.clip.name.c_str());
+            } else if (!retopo.grid_open) {
                 std::snprintf(input.notification, sizeof(input.notification), "No sculpt in that lasso to paste on");
             }
-            input.notification_timer = 2.5f;
-        } else if (retopo_on && L.size() >= 6 && std::max(x1 - x0, y1 - y0) > 8.0f) {
+            input.notification_timer = 3.0f;
+        } else if (retopo_on && L.size() >= 6 && std::max(x1 - x0, y1 - y0) > 8.0f && !bare) {
             if (retopo.wand_open) retopo_wand_close(retopo, retopo.wand_keep_shown ? retopo.wand_shown : -1);
             std::snprintf(input.notification, sizeof(input.notification), "%s",
                           retopo_lasso_cleanup(retopo, camera, win_w, win_h, retopo.lasso, input.mirror_x));
@@ -563,6 +605,30 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
             || input.retopo_build_requested || input.retopo_fill_requested
             || input.retopo_dissolve_requested || input.retopo_symmetrize_request))
         retopo_paste_close(retopo);
+    // A lasso grid stays as it is (the wheel no longer re-makes it) on the same.
+    if (retopo.grid_open
+        && (!retopo_on || retopo_press || input.undo_requested || input.redo_requested
+            || input.retopo_build_requested || input.retopo_fill_requested
+            || input.retopo_dissolve_requested || input.retopo_symmetrize_request))
+        retopo_grid_close(retopo);
+    // The wheel over an open grid (main.cpp passes it here instead of zooming): each
+    // notch about 15% more or fewer sides round the outline, at least one quad's worth.
+    if (retopo.grid_open && std::fabs(retopo.grid_wheel) >= 0.99f) {
+        const int notches = std::clamp((int)std::lround(retopo.grid_wheel), -4, 4);
+        retopo.grid_wheel = 0.0f;
+        int s = retopo.grid_sides;
+        for (int k = 0; k < std::abs(notches); k++)
+            s = notches > 0 ? std::max(s + 2, 2 * (int)std::lround(s * 1.15f / 2.0f))
+                            : std::min(s - 2, 2 * (int)std::lround(s / 1.15f / 2.0f));
+        s = std::clamp(s, 8, 512);
+        if (s != retopo.grid_sides) {
+            scene.materialize_active_cpu();   // the grid snaps onto mesh.pos
+            retopo_grid_redo(retopo, mesh, s);
+            std::snprintf(input.notification, sizeof(input.notification), "Grid: %u quads",
+                          retopo.result.face_count() - retopo.grid_base.result.face_count());
+            input.notification_timer = 2.0f;
+        }
+    }
     if (retopo.wand_open
         && (!retopo_on || input.is_smooth_active()
             || (!retopo.wand_keep_shown && input.retopo_tool != InputState::RetopoTool::WAND)
@@ -826,6 +892,8 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
     if (input.retopo_paste_request) {
         input.retopo_paste_request = false;
         if (retopo.wand_open) retopo_wand_close(retopo, retopo.wand_keep_shown ? retopo.wand_shown : -1);
+        // A grid on the same lasso goes first: the paste takes its place, not its top.
+        if (retopo.grid_open && retopo.paste_ready) retopo_grid_cancel(retopo);
         scene.materialize_active_cpu();   // the paste snaps onto mesh.pos
         if (const char* why = retopo_paste(retopo, mesh, input.mirror_x)) {
             std::snprintf(input.notification, sizeof(input.notification), "%s", why);

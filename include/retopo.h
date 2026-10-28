@@ -240,6 +240,17 @@ struct RetopoState {
     float paste_twist = 0.0f;         // degrees round the target's axis
     float paste_offset = 0.0f;        // along the axis, x the target's size
     bool paste_mirror = false;        // mirror was on at the paste: a twin comes along
+    // Lasso grid: a wand lasso let go on bare sculpt fills its outline with a new island
+    // of quads. While open the wheel re-makes it from grid_base with more or fewer
+    // sides round the outline (one undo step whatever it does); the next press, edit or
+    // mode change keeps it.
+    bool grid_open = false;
+    RetopoSnapshot grid_base;
+    uint32_t grid_id = 0;
+    std::vector<Vec3> grid_pts, grid_nrm;   // the outline on the sculpt, as lassoed
+    int grid_sides = 0;                     // vertices round the outline (even)
+    bool grid_mirror = false;
+    float grid_wheel = 0.0f;                // notches waiting: main.cpp adds, retopo_frame takes
 
     // Pen-up of a line (spine, notch, edge to vertex, extrude, bridge): drop it and
     // everything its press recorded, whichever rule took it.
@@ -613,6 +624,18 @@ const char* retopo_copy(RetopoState& st, const Mesh& m, uint32_t f);
 const char* retopo_paste(RetopoState& st, const Mesh& m, bool mirror);
 void retopo_paste_redo(RetopoState& st, const Mesh& m);
 void retopo_paste_close(RetopoState& st);
+// Lasso grid: the outline `pts` (on the sculpt, with its normals, in order round) as a
+// new edited island, all quads: `sides` vertices round it, a ring just inside, and
+// Fill's grid in the rest (corners where the ring turns most, sides as near square as
+// they allow, aimed down the outline's facing onto `m` and relaxed along it). With
+// mirror and the outline wholly on one side, its twin too. One undo step; the wheel
+// calls retopo_grid_redo with a new count until retopo_grid_close. retopo_grid_cancel
+// takes an open grid back whole, history included (a paste onto the same lasso).
+const char* retopo_grid(RetopoState& st, const Mesh& m, const std::vector<Vec3>& pts,
+                        const std::vector<Vec3>& nrm, int sides, bool mirror);
+void retopo_grid_redo(RetopoState& st, const Mesh& m, int sides);
+void retopo_grid_close(RetopoState& st);
+void retopo_grid_cancel(RetopoState& st);
 
 // ---- The main loop's side (retopo_input.cpp) ----
 struct InputState;

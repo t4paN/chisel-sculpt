@@ -2,6 +2,14 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-28 — Retopo: wand lasso on bare sculpt fills it with a grid
+
+- A wand lasso round sculpt with no retopo inside makes a new island of quads: a ring along the outline, a grid in the rest, snapped onto the surface.
+- The mouse wheel re-makes it denser or sparser (~15% a notch) until the next click or edit; the whole grid is one undo step.
+- Corners go where the outline turns most, split so the inside quads come out near square; sharp corners are mitred, narrow shapes skip the ring.
+- Mirror on with the lasso on one side: the twin comes along. With an island copied, right-click Paste takes the grid's place.
+- Headless: `unused-tools-vault/retopo-grid-test/` (circles, an oval cap on a ball, a 2:1 rectangle, a long oval, the mirror twin).
+
 ## 2026-10-27 — Remesh progress bar
 
 - The remesh runs one pass per frame on a copy of the mesh and swaps it in at the end, so the window keeps drawing and the panel shows a real percentage (bar in the modern skins, % in Classic).
