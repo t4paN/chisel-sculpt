@@ -8,7 +8,8 @@ Short, chronological log of notable changes. Newest on top.
 - The mouse wheel re-makes it denser or sparser (~15% a notch) until the next click or edit; the whole grid is one undo step.
 - Corners go where the outline turns most, split so the inside quads come out near square; sharp corners are mitred, narrow shapes skip the ring.
 - Mirror on with the lasso on one side: the twin comes along. With an island copied, right-click Paste takes the grid's place.
-- Headless: `unused-tools-vault/retopo-grid-test/` (circles, an oval cap on a ball, a 2:1 rectangle, a long oval, the mirror twin).
+- Mirror on with the lasso across the middle: the grid is made on one half with the middle line as a grid side, then mirrored; both halves share the middle vertices, so it's one symmetric grid. Crossing more than once each way is refused.
+- Headless: `unused-tools-vault/retopo-grid-test/` (circles, an oval cap on a ball, a 2:1 rectangle, a long oval, the mirror twin, grids across the middle).
 
 ## 2026-10-27 — Remesh progress bar
 

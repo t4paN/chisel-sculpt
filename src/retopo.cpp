@@ -4872,15 +4872,18 @@ std::vector<uint32_t> notch_rim(RetopoState& st, const Notch& nt) {
 }
 
 // The faces from first_face on, reflected across x = 0 onto their twins: a vertex older
-// than first_v by its mirror pair, a newer one by a new reflected vertex.
+// than first_v by its mirror pair, a newer one by a new reflected vertex. With
+// `shared_seam`, a new vertex already its own twin (on x = 0) stays one vertex, so the
+// two halves meet on it instead of side by side.
 void reflect_new_faces(RetopoState& st, uint32_t first_v, uint32_t first_face, uint32_t tw_owner,
-                       std::vector<uint32_t>& touched) {
+                       std::vector<uint32_t>& touched, bool shared_seam = false) {
     RetopoMesh& rm = st.result;
     auto refl = [](Vec3 v) { v.x = -v.x; return v; };
     const uint32_t end = (uint32_t)rm.v.size();
     std::vector<uint32_t> tw(end - first_v, ~0u);
     auto tw_of = [&](uint32_t v) {
         if (v < first_v) { touched.push_back(rm.v_owner[rm.mirror[v]]); return rm.mirror[v]; }
+        if (shared_seam && rm.mirror[v] == v) return v;
         uint32_t& w = tw[v - first_v];
         if (w == ~0u) {
             w = (uint32_t)rm.v.size();
@@ -6515,41 +6518,71 @@ const char* grid_apply(RetopoState& st, const Mesh& m) {
     RetopoMesh& rm = st.result;
     const std::vector<Vec3>& B = st.grid_pts;
     const size_t nb = B.size();
-    const int N = st.grid_sides, h = N / 2;
-    if (nb < 3 || N < 8 || N % 2) return "That lasso is too small for a grid";
-    auto md = [&](int k) { return ((k % N) + N) % N; };
+    if (nb < 3 || st.grid_sides < 8 || st.grid_sides % 2) return "That lasso is too small for a grid";
+    float per_all = 0.0f;
+    for (size_t k = 0; k < nb; k++) per_all += (B[(k + 1) % nb] - B[k]).length();
+    const float edge = per_all / (float)st.grid_sides;
+
+    // Mirror on and the lasso across x = 0: the grid is made on the half holding more of
+    // the outline, the middle line one of its sides, and the twin shares that side's
+    // vertices (one grid across, not two side by side). The half's outline: the run A from
+    // where the lasso crosses onto that half round to where it crosses back, then along
+    // x = 0 to the start.
+    auto sd = [](const Vec3& p) { return p.x < 0.0f ? -1 : 1; };
+    int crossings = 0;
+    float len_pos = 0.0f, len_neg = 0.0f;
+    for (size_t k = 0; k < nb; k++) {
+        const Vec3 a = B[k], b = B[(k + 1) % nb];
+        crossings += sd(a) != sd(b);
+        (a.x + b.x >= 0.0f ? len_pos : len_neg) += (b - a).length();
+    }
+    const bool half = st.grid_mirror && crossings > 0;
+    if (half && crossings != 2) return "For a mirrored grid, cross the middle line once each way";
+    const int s = len_pos >= len_neg ? 1 : -1;   // the half kept
+    std::vector<Vec3> A;
+    Vec3 c0, c1;
+    if (half) {
+        size_t i0 = 0, i1 = 0;
+        for (size_t k = 0; k < nb; k++) {
+            const int a = sd(B[k]), b = sd(B[(k + 1) % nb]);
+            if (a != s && b == s) i0 = k;
+            if (a == s && b != s) i1 = k;
+        }
+        auto on_middle = [&](size_t k) {
+            const Vec3 a = B[k], b = B[(k + 1) % nb];
+            Vec3 p = a + (b - a) * (a.x / (a.x - b.x));
+            p.x = 0.0f;
+            return p;
+        };
+        c0 = on_middle(i0);
+        c1 = on_middle(i1);
+        A.push_back(c0);
+        for (size_t k = (i0 + 1) % nb;; k = (k + 1) % nb) {
+            A.push_back(B[k]);
+            if (k == i1) break;
+        }
+        A.push_back(c1);
+    }
+    const std::vector<Vec3>& H = half ? A : B;   // closed: a half's last side is c1 -> c0
 
     // The outline's facing (its area normal, turned to agree with the sculpt's normals
     // under it), centre and size: the inside is aimed down this, as Fill aims down a rim's.
     Vec3 nw(0, 0, 0), ns(0, 0, 0), cen(0, 0, 0);
-    for (size_t k = 0; k < nb; k++) {
-        const Vec3 a = B[k], b = B[(k + 1) % nb];
+    for (size_t k = 0; k < H.size(); k++) {
+        const Vec3 a = H[k], b = H[(k + 1) % H.size()];
         nw = nw + Vec3((a.y - b.y) * (a.z + b.z), (a.z - b.z) * (a.x + b.x), (a.x - b.x) * (a.y + b.y));
-        ns = ns + st.grid_nrm[k];
         cen = cen + a;
     }
-    cen = cen * (1.0f / (float)nb);
+    for (const Vec3& n : st.grid_nrm) ns = ns + n;
+    cen = cen * (1.0f / (float)H.size());
     float diam = 0.0f;
-    for (const Vec3& p : B) diam = std::max(diam, 2.0f * (p - cen).length());
+    for (const Vec3& p : H) diam = std::max(diam, 2.0f * (p - cen).length());
     if (nw.length() < 1e-12f) nw = ns;
     if (nw.dot(ns) < 0.0f) nw = nw * -1.0f;
     if (nw.length() < 1e-12f || diam < 1e-9f) return "No surface under that lasso";
     const Vec3 nf = nw.normalized();
 
-    // N vertices evenly round the outline, by length.
-    std::vector<float> acc(nb + 1, 0.0f);
-    for (size_t k = 0; k < nb; k++) acc[k + 1] = acc[k] + (B[(k + 1) % nb] - B[k]).length();
-    const float per = acc[nb], edge = per / (float)N;
-    std::vector<Vec3> O(N), On(N);
-    for (int k = 0, seg = 0; k < N; k++) {
-        const float t = per * (float)k / (float)N;
-        while (seg + 1 < (int)nb && acc[seg + 1] < t) seg++;
-        const float sl = acc[seg + 1] - acc[seg];
-        const float f = sl > 1e-12f ? (t - acc[seg]) / sl : 0.0f;
-        O[k] = B[seg] + (B[(seg + 1) % nb] - B[seg]) * f;
-    }
-
-    // The snap grid round it, deep enough for the aim.
+    // The snap grid round the whole lasso, deep enough for the aim.
     SnapGrid g;
     {
         Vec3 lo(1e30f, 1e30f, 1e30f), hi(-1e30f, -1e30f, -1e30f);
@@ -6583,14 +6616,76 @@ const char* grid_apply(RetopoState& st, const Mesh& m) {
         if (g.ray(p + nf * up, nf * -1.0f, up + kFillBelow * diam, hit, hn)) { nn = hn; return hit; }
         return snap(p, nn);
     };
-    for (int k = 0; k < N; k++) O[k] = snap(O[k], On[k]);
+    // A half's vertices: those on the middle line stay on it, the rest stay off it, on
+    // the kept half (a relax pass could pull one across, under its own twin).
+    auto snap_mid = [&](Vec3 p, Vec3& nn) {
+        for (int it = 0; it < 2; it++) { p = snap(p, nn); p.x = 0.0f; }
+        if (nn.length() < 0.5f) nn = nf;
+        nn.x = 0.0f;
+        nn = nn.length() > 1e-6f ? nn.normalized() : Vec3(0, 0, 0);
+        return p;
+    };
+    auto keep = [&](Vec3 p) {
+        if (half && p.x * s < 0.02f * edge) p.x = s * 0.02f * edge;
+        return p;
+    };
+    // P's length in k even steps: k + 1 points into `out`, both ends included.
+    auto resample = [](const std::vector<Vec3>& P, int k, Vec3* out) {
+        std::vector<float> acc(P.size(), 0.0f);
+        for (size_t i = 1; i < P.size(); i++) acc[i] = acc[i - 1] + (P[i] - P[i - 1]).length();
+        for (int j = 0, seg = 0; j <= k; j++) {
+            const float t = acc.back() * (float)j / (float)k;
+            while (seg + 2 < (int)P.size() && acc[seg + 1] < t) seg++;
+            const float sl = acc[seg + 1] - acc[seg];
+            const float f = sl > 1e-12f ? std::min(1.0f, (t - acc[seg]) / sl) : 0.0f;
+            out[j] = P[seg] + (P[seg + 1] - P[seg]) * f;
+        }
+    };
+
+    // N vertices evenly round the outline, by length. A half: na sides along A, the rest
+    // along x = 0, the two counts of one parity (the middle line is a grid side, and the
+    // side facing it across the grid needs as many).
+    int N = st.grid_sides, na = 0;
+    std::vector<Vec3> O, On;
+    if (!half) {
+        std::vector<Vec3> P = B;
+        P.push_back(B[0]);
+        O.resize(N + 1);
+        resample(P, N, O.data());
+        O.pop_back();
+        On.resize(N);
+        for (int k = 0; k < N; k++) O[k] = snap(O[k], On[k]);
+    } else {
+        // The middle line between the crossings, onto the sculpt (over a dome the chord
+        // runs under the surface, shorter than the side it becomes).
+        std::vector<Vec3> S(17);
+        for (int i = 0; i <= 16; i++) {
+            Vec3 nn;
+            S[i] = snap_mid(c1 + (c0 - c1) * ((float)i / 16.0f), nn);
+        }
+        float a_len = 0.0f, s_len = 0.0f;
+        for (size_t i = 1; i < A.size(); i++) a_len += (A[i] - A[i - 1]).length();
+        for (size_t i = 1; i < S.size(); i++) s_len += (S[i] - S[i - 1]).length();
+        const int nm = std::max(3, (int)std::lround(s_len / edge));
+        na = nm + 2 * std::max(1, (int)std::lround((a_len / edge - (float)nm) * 0.5f));
+        N = na + nm;
+        O.resize(N + 1);
+        resample(A, na, O.data());
+        resample(S, nm, O.data() + na);   // O[na] = c1 again, O[N] = c0
+        O.pop_back();
+        On.resize(N);
+        for (int k = 0; k < N; k++) O[k] = k == 0 || k >= na ? snap_mid(O[k], On[k]) : keep(snap(O[k], On[k]));
+    }
+    auto md = [&](int k) { return ((k % N) + N) % N; };
 
     // The ring: one loop of quads just inside the outline, so the grid's four corners
     // sit inside and the outline itself stays one smooth loop. Each vertex steps in a
     // quad's length along the mitred inward direction (the mean of its two sides'
     // normals, longer at a corner: a drawn rectangle's corner quads folded without it).
     // A shape too narrow for a ring and a grid side by side (a thin oval at a low count)
-    // gets the grid alone: the ring squeezed it flat.
+    // gets the grid alone: the ring squeezed it flat. A half's ring runs along A only,
+    // its ends one side in along x = 0: the grid meets the middle line itself, its lines
+    // crossing into the twin's.
     std::vector<Vec3> sn(N);   // each side's inward normal, along the surface
     float wind = 0.0f;
     for (int k = 0; k < N; k++) {
@@ -6605,9 +6700,10 @@ const char* grid_apply(RetopoState& st, const Mesh& m) {
         room = std::min(room, 0.45f * off.length());
     }
     const bool ring = N >= kFillRingMin && room >= 0.75f * edge;
+    const int r0 = half ? 1 : 0, r1 = half ? na : N;   // the ring vertices that step in
     std::vector<Vec3> L = O, Ln = On;
-    if (ring)
-        for (int k = 0; k < N; k++) {
+    if (ring) {
+        for (int k = r0; k < r1; k++) {
             const Vec3 p = O[k];
             Vec3 in = (sn[md(k - 1)] + sn[k]).normalized();
             const float miter = 1.0f / std::max(0.5f, in.dot(sn[k]));
@@ -6621,8 +6717,15 @@ const char* grid_apply(RetopoState& st, const Mesh& m) {
                 if (d.length() < 1e-9f) break;
                 q = p + d.normalized() * step;
             }
-            L[k] = snap(q, Ln[k]);
+            L[k] = keep(snap(q, Ln[k]));
         }
+        if (half) {
+            L[0] = O[N - 1];
+            Ln[0] = On[N - 1];
+            L[na] = O[na + 1];
+            Ln[na] = On[na + 1];
+        }
+    }
     // Then evened out along its own loop: at a sharp corner the corner and both its
     // neighbours step in onto one point, and round a tip tighter than a quad the steps
     // cross. Three plain passes untangle; then passes that only slide along the loop
@@ -6630,7 +6733,7 @@ const char* grid_apply(RetopoState& st, const Mesh& m) {
     if (ring) {
         std::vector<Vec3> t(N);
         for (int pass = 0; pass < 3 + kGridRingSlides; pass++) {
-            for (int k = 0; k < N; k++) {
+            for (int k = r0; k < r1; k++) {
                 const Vec3 a = L[md(k - 1)], b = L[md(k + 1)];
                 Vec3 d = (a + b) * 0.5f - L[k];
                 if (pass >= 3) {
@@ -6639,43 +6742,9 @@ const char* grid_apply(RetopoState& st, const Mesh& m) {
                 }
                 t[k] = L[k] + d * 0.5f;
             }
-            for (int k = 0; k < N; k++) L[k] = snap(t[k], Ln[k]);
+            for (int k = r0; k < r1; k++) L[k] = keep(snap(t[k], Ln[k]));
         }
     }
-
-    // Corners: four where the ring turns most, opposite sides the same count (m, n, m,
-    // n), quads as near square as the shape allows. Not Fill's square test: that one
-    // reads the spacing along a rim, and an outline resampled evenly is spaced alike
-    // whatever the split, so a round lasso came out 11 x 1. Here it's the distance
-    // across, side middle to opposite side middle, over the quads that span it.
-    std::vector<float> turn(N), arc(N + 1, 0.0f);
-    for (int k = 0; k < N; k++) {
-        const Vec3 a = (L[k] - L[md(k - 1)]).normalized(), b = (L[md(k + 1)] - L[k]).normalized();
-        turn[k] = 1.0f - a.dot(b);
-        arc[k + 1] = arc[k] + (L[md(k + 1)] - L[k]).length();
-    }
-    auto span = [&](int a, int n) {
-        const int b = a + n;
-        return b <= N ? arc[b] - arc[a] : arc[N] - arc[a] + arc[b - N];
-    };
-    auto mid = [&](int a, int n) {   // the middle of the side from vertex a, n sides on
-        return n % 2 ? (L[md(a + n / 2)] + L[md(a + n / 2 + 1)]) * 0.5f : L[md(a + n / 2)];
-    };
-    int bs = 0, bm = std::max(1, h / 2);
-    float best = -1e30f;
-    for (int s = 0; s < h; s++)
-        for (int mm = 1; mm < h; mm++) {
-            const int nn = h - mm;
-            const int cs[4] = {s, md(s + mm), md(s + h), md(s + h + mm)};
-            const float s1 = span(cs[0], mm), s2 = span(cs[1], nn), s3 = span(cs[2], mm), s4 = span(cs[3], nn);
-            const float wide = (mid(cs[1], nn) - mid(cs[3], nn)).length();   // spanned by mm quads
-            const float tall = (mid(cs[0], mm) - mid(cs[2], mm)).length();   // spanned by nn quads
-            const float aspect = std::fabs(std::log((wide / mm) / std::max(1e-9f, tall / nn)));
-            const float score = turn[cs[0]] + turn[cs[1]] + turn[cs[2]] + turn[cs[3]] - aspect
-                              - 0.25f * (std::fabs(std::log(s1 / std::max(1e-9f, s3))) + std::fabs(std::log(s2 / std::max(1e-9f, s4))));
-            if (score > best) { best = score; bs = s; bm = mm; }
-        }
-    const int M = bm, Nn = h - bm;
 
     const uint32_t id = st.grid_id, v0 = (uint32_t)rm.v.size(), f0 = rm.face_count();
     auto add_vertex = [&](Vec3 p, Vec3 nn) {
@@ -6685,16 +6754,72 @@ const char* grid_apply(RetopoState& st, const Mesh& m) {
         rm.mirror.push_back(~0u);
         return (uint32_t)rm.v.size() - 1;
     };
-    std::vector<uint32_t> Oi(N), Li(N);
+    // Li: the loop the grid fills, K round. A half's with a ring: the ring's inside, then
+    // the middle line between the ring's ends.
+    std::vector<uint32_t> Oi(N), Li;
     for (int k = 0; k < N; k++) Oi[k] = add_vertex(O[k], On[k]);
-    for (int k = 0; k < N; k++) Li[k] = ring ? add_vertex(L[k], Ln[k]) : Oi[k];
+    if (half) {
+        rm.mirror[Oi[0]] = Oi[0];
+        for (int k = na; k < N; k++) rm.mirror[Oi[k]] = Oi[k];
+    }
+    if (!ring) Li = Oi;
+    else if (!half) for (int k = 0; k < N; k++) Li.push_back(add_vertex(L[k], Ln[k]));
+    else {
+        Li.push_back(Oi[N - 1]);
+        for (int k = 1; k < na; k++) Li.push_back(add_vertex(L[k], Ln[k]));
+        for (int k = na + 1; k < N - 1; k++) Li.push_back(Oi[k]);
+    }
+    const int K = (int)Li.size(), h = K / 2;
+    auto mk = [&](int k) { return ((k % K) + K) % K; };
+    std::vector<Vec3> Lp(K);
+    for (int k = 0; k < K; k++) Lp[k] = rm.v[Li[k]];
 
-    // Grid (M + 1) x (Nn + 1), its outside the ring from corner bs round, as in Fill.
+    // Corners: four where the ring turns most, opposite sides the same count (m, n, m,
+    // n), quads as near square as the shape allows. Not Fill's square test: that one
+    // reads the spacing along a rim, and an outline resampled evenly is spaced alike
+    // whatever the split, so a round lasso came out 11 x 1. Here it's the distance
+    // across, side middle to opposite side middle, over the quads that span it. A half
+    // has no choice: the middle line is the first side.
+    int bs = 0, bm = std::max(1, h / 2);
+    if (half) {
+        bs = na;
+        bm = K - na;
+    } else {
+        std::vector<float> turn(K), arc(K + 1, 0.0f);
+        for (int k = 0; k < K; k++) {
+            const Vec3 a = (Lp[k] - Lp[mk(k - 1)]).normalized(), b = (Lp[mk(k + 1)] - Lp[k]).normalized();
+            turn[k] = 1.0f - a.dot(b);
+            arc[k + 1] = arc[k] + (Lp[mk(k + 1)] - Lp[k]).length();
+        }
+        auto span = [&](int a, int n) {
+            const int b = a + n;
+            return b <= K ? arc[b] - arc[a] : arc[K] - arc[a] + arc[b - K];
+        };
+        auto mid = [&](int a, int n) {   // the middle of the side from vertex a, n sides on
+            return n % 2 ? (Lp[mk(a + n / 2)] + Lp[mk(a + n / 2 + 1)]) * 0.5f : Lp[mk(a + n / 2)];
+        };
+        float best = -1e30f;
+        for (int s0 = 0; s0 < h; s0++)
+            for (int mm = 1; mm < h; mm++) {
+                const int nn = h - mm;
+                const int cs[4] = {s0, mk(s0 + mm), mk(s0 + h), mk(s0 + h + mm)};
+                const float s1 = span(cs[0], mm), s2 = span(cs[1], nn), s3 = span(cs[2], mm), s4 = span(cs[3], nn);
+                const float wide = (mid(cs[1], nn) - mid(cs[3], nn)).length();   // spanned by mm quads
+                const float tall = (mid(cs[0], mm) - mid(cs[2], mm)).length();   // spanned by nn quads
+                const float aspect = std::fabs(std::log((wide / mm) / std::max(1e-9f, tall / nn)));
+                const float score = turn[cs[0]] + turn[cs[1]] + turn[cs[2]] + turn[cs[3]] - aspect
+                                  - 0.25f * (std::fabs(std::log(s1 / std::max(1e-9f, s3))) + std::fabs(std::log(s2 / std::max(1e-9f, s4))));
+                if (score > best) { best = score; bs = s0; bm = mm; }
+            }
+    }
+    const int M = bm, Nn = h - bm;
+
+    // Grid (M + 1) x (Nn + 1), its outside the loop from corner bs round, as in Fill.
     const int GW = M + 1, GH = Nn + 1;
     std::vector<uint32_t> gi(GW * GH, ~0u);
     auto G = [&](int i, int j) -> uint32_t& { return gi[j * GW + i]; };
-    for (int i = 0; i <= M; i++) { G(i, 0) = Li[md(bs + i)]; G(i, Nn) = Li[md(bs + h + (M - i))]; }
-    for (int j = 0; j <= Nn; j++) { G(M, j) = Li[md(bs + M + j)]; G(0, j) = Li[md(bs + h + M + (Nn - j))]; }
+    for (int i = 0; i <= M; i++) { G(i, 0) = Li[mk(bs + i)]; G(i, Nn) = Li[mk(bs + h + (M - i))]; }
+    for (int j = 0; j <= Nn; j++) { G(M, j) = Li[mk(bs + M + j)]; G(0, j) = Li[mk(bs + h + M + (Nn - j))]; }
     const Vec3 P00 = rm.v[G(0, 0)], P10 = rm.v[G(M, 0)], P01 = rm.v[G(0, Nn)], P11 = rm.v[G(M, Nn)];
     for (int j = 1; j < Nn; j++)
         for (int i = 1; i < M; i++) {
@@ -6703,7 +6828,7 @@ const char* grid_apply(RetopoState& st, const Mesh& m) {
                          + rm.v[G(0, j)] * (1 - u) + rm.v[G(M, j)] * u
                          - (P00 * ((1 - u) * (1 - v)) + P10 * (u * (1 - v)) + P01 * ((1 - u) * v) + P11 * (u * v));
             Vec3 nn;
-            const Vec3 q = aim(p, nn);
+            const Vec3 q = keep(aim(p, nn));
             G(i, j) = add_vertex(q, nn);
         }
     // Relax along the surface, then back onto it (Fill's). A bigger grid gets more
@@ -6722,7 +6847,7 @@ const char* grid_apply(RetopoState& st, const Mesh& m) {
         for (int j = 1; j < Nn; j++)
             for (int i = 1; i < M; i++) {
                 Vec3 nn;
-                rm.v[G(i, j)] = snap(tmp[j * GW + i], nn);
+                rm.v[G(i, j)] = keep(snap(tmp[j * GW + i], nn));
                 if (nn.length() > 0.5f) rm.n[G(i, j)] = nn;
             }
     }
@@ -6732,7 +6857,7 @@ const char* grid_apply(RetopoState& st, const Mesh& m) {
     // turned over together if they face into the sculpt.
     std::vector<uint32_t> Q;
     if (ring)
-        for (int k = 0; k < N; k++) Q.insert(Q.end(), {Oi[k], Oi[md(k + 1)], Li[md(k + 1)], Li[k]});
+        for (int k = 0; k < r1; k++) Q.insert(Q.end(), {Oi[k], Oi[md(k + 1)], Li[mk(k + 1)], Li[k]});
     for (int j = 0; j < Nn; j++)
         for (int i = 0; i < M; i++) Q.insert(Q.end(), {G(i, j), G(i + 1, j), G(i + 1, j + 1), G(i, j + 1)});
     float facing = 0.0f;
@@ -6746,28 +6871,30 @@ const char* grid_apply(RetopoState& st, const Mesh& m) {
     }
     rebuild_edges(rm);
 
-    // Mirror: the twin, when the grid sits wholly on one side of x = 0 (as a paste).
+    // Mirror: the twin, when the grid sits wholly on one side of x = 0 (as a paste), or
+    // was made on one half (sharing the middle line's vertices).
     bool pos = false, neg = false;
     for (uint32_t i = v0; i < rm.v.size(); i++) { pos |= rm.v[i].x > 1e-6f; neg |= rm.v[i].x < -1e-6f; }
-    const bool twin = st.grid_mirror && pos != neg;
+    const bool twin = half || (st.grid_mirror && pos != neg);
     if (twin) {
         std::vector<uint32_t> touched;
-        reflect_new_faces(st, v0, f0, id, touched);
+        reflect_new_faces(st, v0, f0, id, touched, half);
         rebuild_edges(rm);
     }
 
-    RetopoStroke s;
-    s.id = id;
-    s.frozen = true;
-    s.closed = true;
-    s.name = "Grid";
+    RetopoStroke stroke;
+    stroke.id = id;
+    stroke.frozen = true;
+    stroke.closed = true;
+    stroke.name = "Grid";
     for (RetopoStroke& o : st.strokes) o.selected = false;
-    s.selected = true;
-    st.strokes.push_back(s);
+    stroke.selected = true;
+    st.strokes.push_back(stroke);
     st.built = true;
     st.rev++;
     std::printf("[retopo] grid: %d round, %d x %d inside%s, %u faces%s\n", N, M, Nn,
-                ring ? " a ring" : "", rm.face_count() - f0, twin ? ", twin too" : "");
+                ring ? " a ring" : "", rm.face_count() - f0,
+                half ? ", made on one half and mirrored across x = 0" : twin ? ", twin too" : "");
     return nullptr;
 }
 }  // namespace
