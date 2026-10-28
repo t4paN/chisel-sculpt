@@ -523,6 +523,9 @@ void app_idle_update(App& a, int win_w, int win_h, float dx, float dy) {
     // reads come from the event loop, so blocking here would deadlock the frame.
     // The request stays set and fires on a later frame, once the stroke's own
     // finalize/post_frame drain has emptied the queue.
+    // A remesh job swaps the mesh out on its last step and clears the history;
+    // an undo landing mid-job would be overwritten anyway.
+    if (input.remesh_in_progress) input.undo_requested = input.redo_requested = false;
     const bool undo_reads_pending =
         (input.undo_requested || input.redo_requested)
         && brush_stroke.dab_readbacks_pending();

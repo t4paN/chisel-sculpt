@@ -1060,7 +1060,7 @@ int main(int argc, char* argv[]) {
         }
 
         bool imgui_wants_mouse = ImGui::GetIO().WantCaptureMouse;
-        bool dialog_open = input.export_dialog_active || input.import_dialog_active || input.save_dialog_active || input.voxel_merge_confirm_pending || input.drop_confirm_pending || input.help_popup_open || input.keybind_menu_open || input.brush_props_open;
+        bool dialog_open = input.export_dialog_active || input.import_dialog_active || input.save_dialog_active || input.voxel_merge_confirm_pending || input.drop_confirm_pending || input.remesh_in_progress || input.help_popup_open || input.keybind_menu_open || input.brush_props_open;
         if ((imgui_wants_mouse || dialog_open) && app_state != AppState::SCULPTING) {
             // A press on a panel over the model is the panel's, not a pick or a fill
             // (the bucket's Scale slider sits right over it). Only this frame's press:

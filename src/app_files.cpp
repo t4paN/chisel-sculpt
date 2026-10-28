@@ -284,6 +284,14 @@ void app_files_frame(App& a) {
         }
         if (auto_remesh_frames > 0 && ++auto_remesh_frames > 12 &&
             app_state == AppState::IDLE && !input.remesh_in_progress) {
+            // CHISEL_AUTO_MASK_Y=<y>: fully mask everything above y first, so
+            // a scripted run exercises the masked-remesh invariant.
+            if (const char* my = std::getenv("CHISEL_AUTO_MASK_Y")) {
+                const float y0 = (float)std::atof(my);
+                mesh->mask.assign(mesh->vertex_count(), 0.0f);
+                for (uint32_t v = 0; v < mesh->vertex_count(); v++)
+                    if (mesh->pos_y[v] > y0) mesh->mask[v] = 1.0f;
+            }
             input.remesh_requested = true;
             auto_remesh_frames = 0;
         }

@@ -119,11 +119,13 @@ void draw_remesh_confirm(TextOverlay& text, int levels_to_bake, int win_w, int w
     draw_rescue_line(text, levels_to_bake, msg_x, msg_y + 34.0f, msg_scale, win_w, win_h);
 }
 
-void draw_remesh_progress(TextOverlay& text, int win_w, int win_h) {
+void draw_remesh_progress(TextOverlay& text, int win_w, int win_h, float progress) {
     float msg_scale = 3.0f;
     float msg_x = (float)win_w * 0.5f - 180.0f;
     float msg_y = (float)win_h * 0.5f - 20.0f;
-    text.draw_text("Remeshing...", msg_x, msg_y, msg_scale,
+    char line[48];
+    std::snprintf(line, sizeof(line), "Remeshing... %d%%", (int)(progress * 100.0f + 0.5f));
+    text.draw_text(line, msg_x, msg_y, msg_scale,
                   win_w, win_h, CGA(light_green), 1.0f);
 }
 

@@ -2,10 +2,34 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-27 — Remesh progress bar
+
+- The remesh runs one pass per frame on a copy of the mesh and swaps it in at the end, so the window keeps drawing and the panel shows a real percentage (bar in the modern skins, % in Classic).
+- Strokes, level switches and undo wait until it finishes. Headless output is byte-identical to the one-frame remesh.
+
+## 2026-10-27 — Remesh: more even triangle sizes
+
+- The remesh smoothing pulls each vert toward the area-weighted centre of its tris, so big and small tris no longer sit side by side. Plain averaging stays on sharp rings and within 1.5 edges of the mirror seam.
+- Wolfie: tri-size spread 0.19 -> 0.13, edges within ±20% of the median 94% -> 98%. Harness (124 runs): flipped 0, non-manifold 0, seam slivers 18 -> 10, valence-3 30 -> 12, 5% faster.
+
+## 2026-10-27 — Remesh: no more pyramids, stretched areas densify
+
+- Valence-3 verts (a vert inside a tri wired to its corners, the "flattened pyramid") are removed after each collapse, and flips no longer create them.
+- Long skinny tris in a stretched area can split again: the split's 15° gate now only refuses making a tri worse than it already is (strict 15° kept near the mirror seam and pins).
+- The seam tidy-up's doubled tris (fins) are swept before the reflection.
+- Drift readout says its max is capped by the search and counts faces facing away from the original.
+- Dev hook `CHISEL_REMESH_SRC_DUMP=<obj>` writes the mesh going in. Harness (124 runs): valence-3 2650 -> 30, flipped 10 -> 0, seam slivers 56 -> 18, same speed.
+
 ## 2026-10-27 — Sliders no longer yank the pointer back to an edge wrap
 
 - Wayland: after an orbit wrapped the pointer, releasing a W/A/S slider could put it back at the edge the wrap left from. A slider release now warps the pointer to the drag start explicitly; a wrap still in flight is re-aimed there.
 - Logs: `[slider] after release ...` (first pointer report off the drag start) and `[wrap] warp ... never landed`, kept while the cause is pinned down.
+
+## 2026-10-27 — Remesh: mirror seam fix ("triangles within triangles")
+
+- The seam tidy-up before the mirror checks its result; a tri folded over its neighbour is rolled back and its verts held still.
+- Thin blades on the seam (crests, mohawks) keep a sliver of thickness instead of being flattened into the plane, so no edge ends up with four tris.
+- Headless: `remesh-seam-harness/` (31 shapes x 4 details; non-manifold 44 -> 0).
 
 ## 2026-10-27 — UV mode: bake the sculpt into normal + colour maps
 
