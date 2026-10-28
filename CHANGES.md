@@ -7,6 +7,26 @@ Short, chronological log of notable changes. Newest on top.
 - Wayland: after an orbit wrapped the pointer, releasing a W/A/S slider could put it back at the edge the wrap left from. A slider release now warps the pointer to the drag start explicitly; a wrap still in flight is re-aimed there.
 - Logs: `[slider] after release ...` (first pointer report off the drag start) and `[wrap] warp ... never landed`, kept while the cause is pinned down.
 
+## 2026-10-27 — UV mode: bake the sculpt into normal + colour maps
+
+- Bake section in the UV panel: Normal and Colour maps, 512 to 4K, Reach (how far either side of the retopo mesh it looks), Green down for engines that read normal maps flipped.
+- One ray per texel from the retopo mesh to the nearest outward-facing sculpt; tangents in MikkTSpace (`external/mikktspace`, zlib), so other apps decode the map the same way.
+- Runs a slice a frame with a progress bar and Stop; leaving UV mode stops it.
+- Preview: the retopo mesh wearing the maps in place of the sculpt, with no wire, tints, seams or loops over it; seams show only while a seam stroke is under the pen.
+- Save writes `<name>-retopo-normal.png` / `-color.png` (`stb_image_write`, public domain); downloads on web.
+- OBJ export writes the retopo mesh's smooth normals (`vn`), the ones the bake used.
+- Headless: `unused-tools-vault/bake-test/`.
+
+## 2026-10-26 — UV mode (key 9): unwrap the retopo mesh along painted seams
+
+- Branch `uv-unwrap`. Drag on the model paints seams vertex to vertex (Ctrl erases, mirror paints the twin); one stroke is one undo step; Clear seams in the panel.
+- Unwrap cuts along the painted seams and the mesh's own borders, nowhere else; each island is flattened conformally (LSCM), then evened out as-rigid-as-possible so domes don't come out lopsided.
+- xatlas (MIT, `external/xatlas`) only packs the islands into the square; its turns are off (they mirrored islands), ours are true rotations.
+- Panel: the layout in a square, double-click for a big centred view (scroll zooms, middle-drag pans, Esc or a click outside flies it back).
+- Islands as layers under it: hover tints the island on the model, click opens its share of the square and texel density, double-click renames; an island that folds over says so.
+- Saved in `.chisel` (optional RTSM seams + RTUV layout chunks, older readers skip them); OBJ export writes the UVs (`vt`).
+- Headless: `unused-tools-vault/uv-unwrap-test/` (seams open, a loop makes 2 islands, save round trip, `symmetry_probe.cpp` for left/right scale).
+
 ## 2026-10-26 — v0.3.7 released: retopology mode
 GitHub release (AppImage + Windows zip) and itch on all three channels (html5, linux, windows); web build checked in Chromium first, no shader or validation errors. README and MANUAL gained the Retopology section.
 

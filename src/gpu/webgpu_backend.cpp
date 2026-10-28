@@ -413,7 +413,7 @@ RenderPipeline create_render_pipeline(Device& dev, const RenderPipelineDesc& d) 
     // shaders read the same Params block — plus, for a sampled_texture pipeline (the
     // font atlas), a fragment-stage texture + sampler at kTextureBinding/kSamplerBinding.
     if (d.bind_count > 0 || d.sampled_texture) {
-        WGPUBindGroupLayoutEntry stackEnt[kMaxBindings + 2] = {};
+        WGPUBindGroupLayoutEntry stackEnt[kMaxBindings + 4] = {};
         uint32_t n = d.bind_count < kMaxBindings ? d.bind_count : kMaxBindings;
         for (uint32_t i = 0; i < n; ++i) {
             stackEnt[i].binding = d.binds[i].binding;
@@ -421,13 +421,13 @@ RenderPipeline create_render_pipeline(Device& dev, const RenderPipelineDesc& d) 
             stackEnt[i].buffer.type = to_wgpu_bind(d.binds[i].type);
             stackEnt[i].buffer.minBindingSize = d.binds[i].min_size;
         }
-        if (d.sampled_texture) {
-            stackEnt[n].binding = kTextureBinding;
+        for (int k = 0; k < (d.sampled_texture ? (d.sampled_texture2 ? 2 : 1) : 0); ++k) {
+            stackEnt[n].binding = k ? kTexture2Binding : kTextureBinding;
             stackEnt[n].visibility = WGPUShaderStage_Fragment;
-            stackEnt[n].texture.sampleType = WGPUTextureSampleType_Float;   // R8Unorm is filterable
+            stackEnt[n].texture.sampleType = WGPUTextureSampleType_Float;   // R8/RGBA8 Unorm: filterable
             stackEnt[n].texture.viewDimension = WGPUTextureViewDimension_2D;
             ++n;
-            stackEnt[n].binding = kSamplerBinding;
+            stackEnt[n].binding = k ? kSampler2Binding : kSamplerBinding;
             stackEnt[n].visibility = WGPUShaderStage_Fragment;
             stackEnt[n].sampler.type = WGPUSamplerBindingType_Filtering;
             ++n;
@@ -526,9 +526,10 @@ void release_render_pipeline(RenderPipeline& p) {
 }
 
 BindGroup create_bind_group(Device& dev, RenderPipeline& pipe,
-                            const BindBufferEntry* entries, uint32_t n, const Texture* tex) {
+                            const BindBufferEntry* entries, uint32_t n, const Texture* tex,
+                            const Texture* tex2) {
     BindGroup g;
-    WGPUBindGroupEntry stackEnt[kMaxBindings + 2] = {};
+    WGPUBindGroupEntry stackEnt[kMaxBindings + 4] = {};
     uint32_t cnt = n < kMaxBindings ? n : kMaxBindings;
     for (uint32_t i = 0; i < cnt; ++i) {
         stackEnt[i].binding = entries[i].binding;
@@ -542,6 +543,14 @@ BindGroup create_bind_group(Device& dev, RenderPipeline& pipe,
         ++cnt;
         stackEnt[cnt].binding = kSamplerBinding;
         stackEnt[cnt].sampler = tex->sampler;
+        ++cnt;
+    }
+    if (tex2) {
+        stackEnt[cnt].binding = kTexture2Binding;
+        stackEnt[cnt].textureView = tex2->view;
+        ++cnt;
+        stackEnt[cnt].binding = kSampler2Binding;
+        stackEnt[cnt].sampler = tex2->sampler;
         ++cnt;
     }
     WGPUBindGroupDescriptor bgd = {};
@@ -615,13 +624,13 @@ void end_render_pass(RenderPass& rp) {
 
 // ---- Sampled texture (the font atlas) ----------------------------------------
 
-Texture create_sampled_texture(Device& dev, int w, int h, const void* data) {
+Texture create_sampled_texture(Device& dev, int w, int h, const void* data, bool rgba) {
     Texture t; t.width = w; t.height = h;
     WGPUTextureDescriptor td = {};
     td.usage = WGPUTextureUsage_TextureBinding | WGPUTextureUsage_CopyDst;
     td.dimension = WGPUTextureDimension_2D;
     td.size = { (uint32_t)w, (uint32_t)h, 1 };
-    td.format = WGPUTextureFormat_R8Unorm;
+    td.format = rgba ? WGPUTextureFormat_RGBA8Unorm : WGPUTextureFormat_R8Unorm;
     td.mipLevelCount = 1; td.sampleCount = 1;
     t.handle = wgpuDeviceCreateTexture(dev.device, &td);
     t.view   = wgpuTextureCreateView(t.handle, nullptr);
@@ -633,18 +642,19 @@ Texture create_sampled_texture(Device& dev, int w, int h, const void* data) {
         dst.origin = { 0, 0, 0 };
         dst.aspect = WGPUTextureAspect_All;
         WGPUTexelCopyBufferLayout layout = {};
-        layout.bytesPerRow  = (uint32_t)w;       // R8: one byte per texel, no row padding
+        const uint32_t bpp = rgba ? 4u : 1u;
+        layout.bytesPerRow  = (uint32_t)w * bpp; // writeTexture needs no 256-byte row padding
         layout.rowsPerImage = (uint32_t)h;
         WGPUExtent3D ext = { (uint32_t)w, (uint32_t)h, 1 };
-        wgpuQueueWriteTexture(dev.queue, &dst, data, (size_t)w * h, &layout, &ext);
+        wgpuQueueWriteTexture(dev.queue, &dst, data, (size_t)w * h * bpp, &layout, &ext);
     }
 
     WGPUSamplerDescriptor sd = {};
     sd.addressModeU = WGPUAddressMode_ClampToEdge;
     sd.addressModeV = WGPUAddressMode_ClampToEdge;
     sd.addressModeW = WGPUAddressMode_ClampToEdge;
-    sd.magFilter = WGPUFilterMode_Nearest;
-    sd.minFilter = WGPUFilterMode_Nearest;
+    sd.magFilter = rgba ? WGPUFilterMode_Linear : WGPUFilterMode_Nearest;
+    sd.minFilter = rgba ? WGPUFilterMode_Linear : WGPUFilterMode_Nearest;
     sd.mipmapFilter = WGPUMipmapFilterMode_Nearest;
     sd.maxAnisotropy = 1;
     t.sampler = wgpuDeviceCreateSampler(dev.device, &sd);

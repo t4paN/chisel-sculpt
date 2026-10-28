@@ -60,7 +60,8 @@ void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse) {
 #endif
     // ---- Cursor visibility ----
     // Retopo counts as an edit mode here: it shows the brush ring (the band width).
-    const bool retopo_mode = input.interaction_mode == InputState::InteractionMode::RETOPO;
+    // UV has no tools, so it keeps the OS pointer.
+    const bool retopo_mode = input.retopo_tools_on();
     bool non_edit_mode = input.interaction_mode != InputState::InteractionMode::EDIT
                       && !retopo_mode;
     // Hide the OS cursor while sculpting (we draw our own brush cursor).
@@ -166,6 +167,18 @@ void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse) {
 
     // Mesh: N draws. The active entity is drawn from the working VAO; every
     // other alive entity from its static display VAO. Depth test composes them.
+    // UV mode with a bake to preview: the retopo mesh wearing it stands in for the
+    // sculpt it was baked from (the active one, the one retopo works on).
+    const BakeState& bake = a.retopo.bake;
+    const bool baked = input.uv_on() && bake.showing();
+    if (baked) {
+        const BakeResult& r = bake.result;
+        renderer.upload_baked(r.serial, r.pos.data(), r.nrm.data(), r.tan.data(), r.uv.data(), r.corners(),
+                              r.res, r.has_color ? r.color_rgba.data() : nullptr,
+                              r.has_normal ? r.normal_rgba.data() : nullptr);
+        renderer.draw_baked(camera, win_w, win_h, r.has_normal, r.has_color && renderer.paint_visible > 0.5f,
+                            r.flip_green);
+    }
     {
         const std::vector<uint32_t>& sel = scene.selected_ids();
         uint32_t active_id = scene.active_mesh_id();
@@ -176,6 +189,7 @@ void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse) {
             // everything) → every entity tinted: a fully-deselected scene.
             bool selected = false;
             for (uint32_t id : sel) if (id == up->id) { selected = true; break; }
+            if (up->id == active_id && baked) continue;
             if (up->id == active_id)
                 renderer.draw_mesh(camera, win_w, win_h,
                                    (uint32_t)scene.active_mesh().indices.size(),

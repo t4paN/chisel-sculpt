@@ -222,6 +222,22 @@ else()
     set(CHISEL_BACKEND_SRC src/gpu/gl_backend.cpp)
 endif()
 
+# xatlas (vendored, MIT): the UV unwrapper behind mode 9. Single-threaded on purpose:
+# the web build has no pthreads, and a retopo mesh unwraps in milliseconds anyway, so
+# one code path everywhere beats a faster desktop that behaves differently.
+add_library(xatlas STATIC external/xatlas/xatlas.cpp)
+target_compile_definitions(xatlas PRIVATE XA_MULTITHREADED=0)
+if(NOT MSVC)
+    target_compile_options(xatlas PRIVATE -w)  # third-party; its warnings aren't ours to fix
+endif()
+
+# MikkTSpace (vendored, zlib): the tangent frames the normal-map bake writes against,
+# the convention engines and DCCs rebuild from normals + UVs. Plain C, one file.
+add_library(mikktspace STATIC external/mikktspace/mikktspace.c)
+if(NOT MSVC)
+    target_compile_options(mikktspace PRIVATE -w)
+endif()
+
 # Main executable
 if(NOT WIN32 AND NOT EMSCRIPTEN)
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -no-pie")
@@ -260,6 +276,8 @@ add_executable(chisel
     src/app_idle.cpp
     src/retopo.cpp
     src/retopo_input.cpp
+    src/uv_unwrap.cpp
+    src/bake.cpp
     src/compute_mask.cpp
     src/compute_density.cpp
     src/compute_color.cpp
@@ -297,6 +315,7 @@ else()
     target_compile_definitions(chisel PRIVATE CHISEL_BACKEND_GL)
 endif()
 add_dependencies(chisel chisel_shaders chisel_fonts)
+target_link_libraries(chisel PRIVATE xatlas mikktspace)
 
 # Emscripten web build: emdawnwebgpu port + emulated GLFW (compile+link), ASYNCIFY
 # for the event-loop-yielding async readbacks, memory growth, and an .html shell.

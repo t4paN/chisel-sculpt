@@ -1,6 +1,7 @@
 #pragma once
 #include "mesh.h"
 #include "camera.h"
+#include "bake.h"
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -57,6 +58,11 @@ struct RetopoMesh {
     // new one starts free without every builder having to grow this.
     std::vector<float> mask;
     float mask_at(uint32_t i) const { return i < mask.size() ? mask[i] : 0.0f; }
+    // UV seams (painted in UV mode, key 9): 2 vertex ids per edge, lower id first, sorted.
+    // Unwrap always cuts there. Ids ride along when vertices are renumbered (Build, prune);
+    // a pair that has stopped being an edge (a Cut split it, a weld retired an end) is
+    // skipped by its users: see retopo_seam_edges.
+    std::vector<uint32_t> seams;
     // For Smooth: edge neighbours (CSR), and for a border vertex its two border
     // neighbours (pinned = a corner, or not a simple border: it never moves).
     std::vector<uint32_t> nb_off, nb;
@@ -70,7 +76,7 @@ struct RetopoMesh {
     uint32_t rim_count() const { return (uint32_t)rim_hole.size(); }
     void clear() {
         v.clear(); n.clear(); faces.clear(); face_off.assign(1, 0); edges.clear(); edge_owner.clear();
-        v_owner.clear(); face_owner.clear(); mirror.clear(); mask.clear();
+        v_owner.clear(); face_owner.clear(); mirror.clear(); mask.clear(); seams.clear();
         nb_off.clear(); nb.clear(); border_nb.clear(); pinned.clear();
         rim_off.assign(1, 0); rim.clear(); rim_hole.clear();
     }
@@ -84,6 +90,35 @@ struct RetopoMesh {
     const uint32_t* face(size_t f) const { return faces.data() + face_off[f]; }
 };
 
+// UV mode's (key 9) layout of `result`, made by uv_unwrap (uv_unwrap.h). UVs belong to
+// face corners, not vertices: a vertex on a seam sits in two islands at once and has a
+// different UV in each. So it runs parallel to RetopoMesh::faces, the way an OBJ's
+// "f v/vt" does.
+struct UvLayout {
+    std::vector<float>    uv;          // 2 per face corner, parallel to RetopoMesh::faces; 0..1, v up (OBJ); faces run counter-clockwise, as in 3D
+    std::vector<uint32_t> face_chart;  // per face, the island it landed in (~0u = none: degenerate)
+    uint32_t charts = 0;
+    float    used = 0.0f;              // how much of the square the islands cover, 0..1
+    // The topology it was made for (uv_topology_key). Moving vertices keeps a layout
+    // usable (just stretched); adding, cutting or erasing faces doesn't.
+    uint64_t key = 0;
+    // The seams it was cut along (uv_seam_key): different now = painted since, worth an
+    // Unwrap again (the layout itself still works).
+    uint64_t seam_key = 0;
+    // Island names (the UV panel's layer list, double-click renames): one per island,
+    // empty = not named, shown as "Island N".
+    std::vector<std::string> names;
+    // Per island, from the unwrap (not saved): 1 = it came out folded over itself (or is
+    // closed, with no border at all); a seam across it would open it.
+    std::vector<uint8_t> needs_cut;
+    bool empty() const { return uv.empty(); }
+    void clear() { uv.clear(); face_chart.clear(); names.clear(); needs_cut.clear(); charts = 0; used = 0.0f; key = 0; seam_key = 0; }
+    // Sized for rm (a cheap guard for a file or a bug; the key is the real test).
+    bool fits(const RetopoMesh& rm) const {
+        return uv.size() == rm.faces.size() * 2 && face_chart.size() == rm.face_count();
+    }
+};
+
 // One step of retopo history: everything an edit can change. Retopo is small (a few
 // thousand vertices), so a whole copy per step costs ~100 KB and can't drift the way a
 // diff can. Eyes and selection aren't history: undo leaves them as they are.
@@ -92,6 +127,9 @@ struct RetopoSnapshot {
     RetopoMesh result;
     bool built = false;
     uint32_t next_id = 1;
+    // Only for saving and loading (retopo_save / retopo_load): history steps leave it
+    // empty. A layout isn't an edit; undo makes it stale or fresh again by its key.
+    UvLayout uv;
     size_t bytes() const;
 };
 
@@ -112,6 +150,13 @@ struct RetopoState {
     // Cut's vertex snap: the built vertex under the pointer (lit while hovering), and the
     // ones the line started and ended on (~0u = it started / ended on no vertex).
     uint32_t snap_v = ~0u, cut_from_v = ~0u, cut_to_v = ~0u;
+    // UV mode: the vertex the seam brush is on (a ring in the overlay), and whether it erases.
+    uint32_t seam_v = ~0u;
+    bool seam_erase = false;
+    bool seam_painting = false;   // a seam stroke is under the pen (the bake preview shows seams then)
+    // UV mode: the island the pointer is on in the panel (list or preview) and the one
+    // picked there; ~0u = none. The overlay lights them on the model.
+    uint32_t uv_hover = ~0u, uv_sel = ~0u;
     // Draw's snap (retopo_draw_snap): the vertex a line would start or end on (orange
     // dot), else the edge (bold blue, draw_t = how far along it from draw_ea).
     uint32_t draw_v = ~0u, draw_ea = ~0u, draw_eb = ~0u;
@@ -140,6 +185,10 @@ struct RetopoState {
 
     RetopoMesh result;
     bool built = false;
+    // UV mode's layout of `result` (empty = never unwrapped). Not history; see UvLayout.
+    UvLayout uv;
+    // UV mode's bake of the sculpt onto that layout (bake.h). Not history either.
+    BakeState bake;
     // Wand: a hole clicked, its fills worked out whole at the click (see retopo_wand_open).
     // While open, `result` shows wand_base or one option swapped in; nothing is history
     // until one is kept.
@@ -523,9 +572,26 @@ void retopo_load(RetopoState& st, RetopoSnapshot&& s);
 // menu is settled first (a plain preview goes, a spine's fill stays).
 void retopo_save(RetopoState& st, RetopoSnapshot& out);
 
-// Write state.result as an OBJ, every face as it is (quads, triangles, bigger ones).
-// Returns false if there's nothing to write or the file can't be opened.
-bool retopo_export_obj(const RetopoMesh& rm, const char* path);
+// Write state.result as an OBJ, every face as it is (quads, triangles, bigger ones),
+// with retopo_smooth_normals as its vn. With uv (a layout made for rm: the caller checks
+// it's current), each corner gets its vt too. Returns false if there's nothing to write
+// or the file can't be opened.
+bool retopo_export_obj(const RetopoMesh& rm, const char* path, const UvLayout* uv = nullptr);
+// The low's own smooth normal per vertex: its faces' normals, each weighted by the
+// corner's angle (zero for a vertex no face uses). Not RetopoMesh::n, the sculpt's normal
+// under it: a normal map is decoded against the low's shading normals, so the bake and
+// the exported vn must both be these.
+void retopo_smooth_normals(const RetopoMesh& rm, std::vector<Vec3>& out);
+
+// UV seams (UV mode's brush). Painting hops vertex to vertex: retopo_seam_path marks
+// (erase: unmarks) the shortest run of edges from a to b, and with mirror their twins.
+// Like any edit it freezes the islands it touches, so Build keeps their vertices, and the
+// seams with them. Returns how many edges changed.
+int retopo_seam_path(RetopoState& st, uint32_t a, uint32_t b, bool erase, bool mirror);
+// The seams that are still edges of rm, 2 ids each: what Unwrap cuts and the overlay draws.
+void retopo_seam_edges(const RetopoMesh& rm, std::vector<uint32_t>& out);
+// Every seam gone (one undo step). False if there were none.
+bool retopo_seams_clear(RetopoState& st);
 
 // Copy / paste an island (Wand right-click), fitted onto another part of the sculpt.
 // retopo_measure: the sculpt's pose over a patch of triangles, given their centres p
@@ -565,6 +631,9 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
 // Writes the built quads as an OBJ beside the project (or in home) and toasts how it
 // went. Returns the path written, empty on failure.
 std::string retopo_export(const RetopoState& retopo, InputState& input, const std::string& project_path);
+// The bake's maps as PNGs beside it (<name>-retopo-normal.png / -color.png; downloaded on
+// web), toasting how it went.
+void retopo_bake_save(const RetopoState& retopo, InputState& input, const std::string& project_path);
 // The green ring (red for the eraser, a dot for Cut and the wand).
 void draw_retopo_cursor(Renderer& renderer, const Camera& camera, const InputState& input,
                         float cursor_x, float cursor_y, int win_w, int win_h);

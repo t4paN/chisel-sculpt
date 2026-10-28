@@ -92,4 +92,4 @@ void draw_pose_cursor(float x, float y, bool on_target);
 struct RetopoState;
 struct Renderer;
 void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera& cam,
-                         int win_w, int win_h, bool depth_fresh, bool mirror);
+                         int win_w, int win_h, bool depth_fresh, bool mirror, bool uv = false);

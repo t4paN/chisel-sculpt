@@ -10,6 +10,7 @@
 #include "camera.h"
 #include "renderer.h"
 #include "retopo.h"
+#include "uv_unwrap.h"
 #include "imgui.h"
 #include <functional>
 #include <cstdio>
@@ -1040,8 +1041,13 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
         static char rtip[64];
         std::snprintf(rtip, sizeof(rtip), "Retopo (Shortcut: %s)", input.key_label(KeyAction::MODE_RETOPO));
         if (squircle_button("RetopoMode", "Retopo", rtip, ImVec2(calc_btn_w("Retopo"), btn_h),
-                            mode == InputState::InteractionMode::RETOPO))
+                            input.retopo_tools_on()))
             input.enter_retopo_mode();
+        ImGui::SameLine();
+        static char utip[64];
+        std::snprintf(utip, sizeof(utip), "UV (Shortcut: %s)", input.key_label(KeyAction::MODE_UV));
+        if (squircle_button("UvMode", "UV", utip, ImVec2(calc_btn_w("UV"), btn_h), input.uv_on()))
+            input.enter_uv_mode();
         // Paint-visibility toggle beside the Paint mode button. Hides albedo while
         // sculpting (the paint brush itself always forces it visible).
         ImGui::SameLine();
@@ -2370,7 +2376,7 @@ void retopo_band(ImDrawList* dl, const RetopoStroke& s, const Camera& cam, int w
 }  // namespace
 
 void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera& cam,
-                         int win_w, int win_h, bool depth_fresh, bool mirror) {
+                         int win_w, int win_h, bool depth_fresh, bool mirror, bool uv) {
     ImDrawList* dl = ImGui::GetBackgroundDrawList();
     if (st.show_strokes) {
         auto band = [&](const RetopoStroke& s, int alpha) {
@@ -2506,7 +2512,15 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
     // fringes would otherwise double up into a seam the wire already draws. Quads and
     // triangles take the convex path; only Erase's merged n-gons (maybe concave) the
     // concave one. Hidden if any corner is.
-    {
+    // UV mode with a fresh layout: each face in its island's colour (the UV panel's),
+    // the island hovered or picked there bright and the rest faint.
+    const bool tint = uv && st.uv.fits(rm) && st.uv.key == uv_topology_key(rm);
+    const bool island_lit = tint && (st.uv_hover < st.uv.charts || st.uv_sel < st.uv.charts);
+    // The bake preview stands in for the sculpt: no fill, wire, seams or loops over it,
+    // only the brush's ring, so what's judged is the baked maps. Seams come back while a
+    // seam stroke is under the pen: painting them blind would be guesswork.
+    const bool baked = uv && st.bake.showing();
+    if (!baked) {
         const ImDrawListFlags keep_flags = dl->Flags;
         dl->Flags &= ~ImDrawListFlags_AntiAliasedFill;
         static std::vector<ImVec2> poly;
@@ -2522,7 +2536,10 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
                 if (i == 0 || q[i] != q[i - 1]) poly.push_back(at[q[i]]);   // welds leave repeats
             }
             if (!ok || poly.size() < 3) continue;
-            const ImU32 col = ow == st.hover_id ? IM_COL32(255, 240, 160, 48)
+            const uint32_t isl = tint ? st.uv.face_chart[f] : ~0u;
+            const ImU32 col = isl != ~0u ? uv_island_color(isl, isl == st.uv_hover || isl == st.uv_sel ? 0.45f
+                                                                : island_lit ? 0.08f : 0.24f)
+                            : ow == st.hover_id ? IM_COL32(255, 240, 160, 48)
                             : is_sel(ow)        ? IM_COL32(255, 190, 120, 40)
                             : st.hover_id       ? IM_COL32(205, 245, 255, 16)
                                                 : IM_COL32(205, 245, 255, 36);
@@ -2543,7 +2560,7 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
     // Holes (outlines that aren't a piece's outer edge): a wash over the gap, green when
     // its count of sides is even (Fill makes it quads), amber when odd, rim drawn the same.
     // Only when the whole rim is in view: a half-seen rim would fill the wrong shape.
-    {
+    if (!baked) {
         const ImDrawListFlags keep_flags = dl->Flags;
         dl->Flags &= ~ImDrawListFlags_AntiAliasedFill;
         static std::vector<ImVec2> poly;
@@ -2566,7 +2583,7 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
         dl->Flags = keep_flags;
     }
     // Behind the sculpt (either end): one dim pass under the rest, no dark outline.
-    for (size_t e = 0; e + 1 < rm.edges.size(); e += 2) {
+    for (size_t e = 0; e + 1 < rm.edges.size() && !baked; e += 2) {
         const uint32_t a = rm.edges[e], b = rm.edges[e + 1];
         if (!vis[a] || !vis[b] || (vis[a] == 2 && vis[b] == 2)) continue;
         const uint32_t ow = rm.edge_owner[e / 2];
@@ -2575,14 +2592,14 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
         dl->AddLine(at[a], at[b], lit ? IM_COL32(150, 135, 70, 190) : on ? IM_COL32(150, 90, 40, 170)
                                   : IM_COL32(70, 110, 130, st.hover_id ? 70 : 150), 1.0f);
     }
-    for (size_t e = 0; e + 1 < rm.edges.size(); e += 2) {
+    for (size_t e = 0; e + 1 < rm.edges.size() && !baked; e += 2) {
         const uint32_t a = rm.edges[e], b = rm.edges[e + 1];
         if (vis[a] != 2 || vis[b] != 2) continue;
         const uint32_t ow = rm.edge_owner[e / 2];
         if (st.hidden(ow) && ow != st.hover_id) continue;   // its eye is shut (hover still shows it)
         dl->AddLine(at[a], at[b], dark, ow == st.hover_id || is_sel(ow) ? 4.0f : 3.0f);
     }
-    for (size_t e = 0; e + 1 < rm.edges.size(); e += 2) {
+    for (size_t e = 0; e + 1 < rm.edges.size() && !baked; e += 2) {
         const uint32_t a = rm.edges[e], b = rm.edges[e + 1];
         if (vis[a] != 2 || vis[b] != 2) continue;
         const uint32_t ow = rm.edge_owner[e / 2];
@@ -2591,9 +2608,24 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
         dl->AddLine(at[a], at[b], lit ? hot : on ? sel_col : st.hover_id ? dim : lite,
                     lit || on ? 2.0f : 1.5f);
     }
+    // UV seams: red over the wire, thin where the sculpt is in front.
+    if (!baked || st.seam_painting) {
+        static std::vector<uint32_t> seams;
+        retopo_seam_edges(rm, seams);
+        for (size_t e = 0; e + 1 < seams.size(); e += 2) {
+            const uint32_t a = seams[e], b = seams[e + 1];
+            if (!vis[a] || !vis[b] || st.hidden(rm.v_owner[a])) continue;
+            if (vis[a] == 2 && vis[b] == 2) {
+                dl->AddLine(at[a], at[b], IM_COL32(30, 0, 0, 220), 5.0f);
+                dl->AddLine(at[a], at[b], IM_COL32(255, 50, 40, 255), 2.5f);
+            } else {
+                dl->AddLine(at[a], at[b], IM_COL32(220, 40, 30, 150), 1.0f);
+            }
+        }
+    }
     // Double-clicked edge loops: green over the wire, thin where the sculpt is in front.
     // A picked edge a weld or the eraser took away isn't an edge any more: skipped.
-    for (size_t e = 0; e + 1 < st.loop_edges.size(); e += 2) {
+    for (size_t e = 0; e + 1 < st.loop_edges.size() && !baked; e += 2) {
         const uint32_t a = st.loop_edges[e], b = st.loop_edges[e + 1];
         if (a >= rm.v.size() || b >= rm.v.size() || !vis[a] || !vis[b]) continue;
         if (st.hidden(rm.v_owner[a]) || rm.nb_off.size() != rm.v.size() + 1) continue;
@@ -2633,6 +2665,12 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
             dl->AddPolyline(poly.data(), (int)poly.size(), IM_COL32(20, 0, 0, 200), ImDrawFlags_Closed, 5.0f);
             dl->AddPolyline(poly.data(), (int)poly.size(), IM_COL32(255, 60, 50, 255), ImDrawFlags_Closed, 2.5f);
         }
+    }
+    // The seam brush's vertex: a red ring, white when Ctrl would erase.
+    if (st.seam_v < rm.v.size() && vis[st.seam_v] == 2) {
+        const ImVec2 p = at[st.seam_v];
+        dl->AddCircle(p, 7.0f, IM_COL32(20, 0, 0, 200), 16, 4.0f);
+        dl->AddCircle(p, 7.0f, st.seam_erase ? IM_COL32(255, 255, 255, 255) : IM_COL32(255, 50, 40, 255), 16, 2.0f);
     }
     if (st.cutting) mark(st.cut_from_v, true);
     if (st.snap_v != st.cut_from_v || !st.cutting) mark(st.snap_v, false);

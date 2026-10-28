@@ -3,12 +3,17 @@
 // overlay + dock. retopo.cpp is the geometry; this is the wiring, kept out of main.cpp.
 #include "scene.h"          // first: pulls in glad, which must precede any GL header
 #include "retopo.h"
+#include "uv_unwrap.h"
 #include "input.h"
 #include "renderer.h"
 #include "tablet.h"
 #include "ui_overlay.h"
 #include "ui_skin.h"
+#if defined(__EMSCRIPTEN__)
+#include "web_bridge.h"
+#endif
 #include <algorithm>
+#include <map>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -96,7 +101,8 @@ bool retopo_focus(const RetopoState& retopo, Camera& camera, float mesh_radius) 
 void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& mesh,
                   Renderer& renderer, const Camera& camera, const Tablet& tablet,
                   int win_w, int win_h, bool screen_buffers_dirty, bool imgui_wants_mouse) {
-    const bool retopo_on = input.interaction_mode == InputState::InteractionMode::RETOPO;
+    // UV mode (key 9) is RETOPO without the tools: nothing here acts on the pen there.
+    const bool retopo_on = input.retopo_tools_on();
     // The sculpt under screen point (mx, my), off the pen-down plane cache: the point,
     // its normal, and world units per pixel at that depth. False off the model.
     auto retopo_surface_at = [&](float mx, float my, Vec3& p, Vec3& n, float& world_per_px) {
@@ -656,7 +662,10 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
     }
     // Ctrl+Z / Ctrl+Shift+Z walk the stroke list here, never the sculpt's
     // history: retopo doesn't touch the sculpt.
-    if (retopo_on && (input.undo_requested || input.redo_requested)) {
+    // UV mode too: it shows the retopo, so its Ctrl+Z is retopo's (an undo can bring the
+    // mesh an older layout was made for back, and the layout with it: see UvLayout::key).
+    if (input.interaction_mode == InputState::InteractionMode::RETOPO
+        && (input.undo_requested || input.redo_requested)) {
         const bool ok = input.undo_requested ? retopo.undo() : retopo.redo();
         if (!ok) {
             std::snprintf(input.notification, sizeof(input.notification),
@@ -664,6 +673,95 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
             input.notification_timer = 1.2f;
         }
         input.undo_requested = input.redo_requested = false;
+    }
+    if (input.uv_unwrap_requested) {
+        input.uv_unwrap_requested = false;
+        double ms = 0.0;
+        UvLayout old = std::move(retopo.uv);
+        const char* why = retopo.built ? uv_unwrap(retopo.result, UvSettings(), retopo.uv, ms)
+                                       : "Build a retopo mesh in mode 0 first";
+        // Names carry over to the new island that took most of a named one's faces
+        // (biggest overlaps first, one name each). Only over the same faces: once the
+        // mesh changed, face numbers mean other faces.
+        if (!why && !old.names.empty() && old.fits(retopo.result) && old.key == retopo.uv.key) {
+            UvLayout& L = retopo.uv;
+            std::map<std::pair<uint32_t, uint32_t>, uint32_t> both;   // (old, new) -> faces in both
+            for (size_t f = 0; f < L.face_chart.size(); f++) {
+                const uint32_t a = old.face_chart[f], b = L.face_chart[f];
+                if (a < old.names.size() && !old.names[a].empty() && b < L.charts) both[{a, b}]++;
+            }
+            std::vector<std::pair<uint32_t, std::pair<uint32_t, uint32_t>>> order;
+            for (const auto& kv : both) order.push_back({kv.second, kv.first});
+            std::sort(order.begin(), order.end(), [](const auto& x, const auto& y) { return x.first > y.first; });
+            L.names.assign(L.charts, std::string());
+            std::vector<uint8_t> used(old.names.size(), 0);
+            for (const auto& o : order) {
+                const uint32_t a = o.second.first, b = o.second.second;
+                if (used[a] || !L.names[b].empty()) continue;
+                L.names[b] = old.names[a];
+                used[a] = 1;
+            }
+        }
+        retopo.uv_sel = retopo.uv_hover = ~0u;
+        if (why) std::snprintf(input.notification, sizeof(input.notification), "%s", why);
+        else {
+            uint32_t folded = 0;
+            for (uint8_t c : retopo.uv.needs_cut) folded += c;
+            if (folded)
+                std::snprintf(input.notification, sizeof(input.notification),
+                              "Unwrapped: %u islands - %u fold%s over: paint a seam across %s",
+                              retopo.uv.charts, folded, folded == 1 ? "s" : "", folded == 1 ? "it" : "them");
+            else
+                std::snprintf(input.notification, sizeof(input.notification), "Unwrapped: %u islands, %.0f%% of the square",
+                              retopo.uv.charts, retopo.uv.used * 100.0f);
+        }
+        input.notification_timer = 2.5f;
+        retopo.rev++;   // a new layout is unsaved work
+    }
+    // Bake (bake.h): started from the UV panel, run a slice a frame while UV mode is up.
+    // Leaving UV mode stops it: mode 0 or sculpting could change the low or the sculpt
+    // under a job that read them at the start.
+    bake_refresh(retopo.bake, retopo.result, retopo.uv, retopo.rev);
+    if (input.uv_bake_requested) {
+        input.uv_bake_requested = false;
+        scene.materialize_active_cpu();   // the rays read mesh.pos
+        const char* why = bake_start(retopo.bake, retopo.result, retopo.uv, mesh);
+        if (why) {
+            std::snprintf(input.notification, sizeof(input.notification), "%s", why);
+            input.notification_timer = 2.5f;
+        }
+    }
+    if (retopo.bake.running() && (input.uv_bake_cancel_requested || !input.uv_on())) {
+        bake_cancel(retopo.bake);
+        std::snprintf(input.notification, sizeof(input.notification), "Bake stopped");
+        input.notification_timer = 2.0f;
+    }
+    input.uv_bake_cancel_requested = false;
+    if (retopo.bake.running()) {
+        // ~12 ms a frame: the window keeps answering (orbit to look round mid-bake).
+        const char* why = nullptr;
+        const int r = bake_step(retopo.bake, mesh, 12.0, &why);
+        if (r == 1) {
+            const BakeResult& b = retopo.bake.result;
+            if (b.missed > 0.02f)
+                std::snprintf(input.notification, sizeof(input.notification),
+                              "Baked %dpx in %.1f s - %.0f%% of it found no sculpt: raise Reach",
+                              b.res, b.ms / 1000.0, b.missed * 100.0f);
+            else
+                std::snprintf(input.notification, sizeof(input.notification), "Baked %dpx in %.1f s", b.res, b.ms / 1000.0);
+            input.notification_timer = 3.0f;
+        } else if (r < 0 && why) {
+            std::snprintf(input.notification, sizeof(input.notification), "%s", why);
+            input.notification_timer = 2.5f;
+        }
+        input.wake_requested = true;   // next slice next frame, even with the pen still
+    }
+    if (input.uv_seams_clear_requested) {
+        input.uv_seams_clear_requested = false;
+        if (retopo_seams_clear(retopo)) {
+            std::snprintf(input.notification, sizeof(input.notification), "Seams cleared - Ctrl+Z takes it back");
+            input.notification_timer = 2.5f;
+        }
     }
     if (input.retopo_build_requested) {
         input.retopo_build_requested = false;
@@ -779,14 +877,43 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
     retopo.face_hover = face_eraser ? retopo_face_at(retopo, camera, win_w, win_h, (float)input.mouse_x,
                                                      (float)input.mouse_y, input.brush_size)
                                     : ~0u;
+
+    // UV mode's one tool, the seam brush: the pen hops vertex to vertex (the nearest
+    // one in reach), and each hop marks the edges between (Ctrl: unmarks). One stroke
+    // is one undo step.
+    {
+        static bool seam_stroke = false;
+        static uint32_t seam_last = ~0u;
+        const bool uv = input.uv_on() && retopo.built;
+        const bool press = uv && input.drag_mode == InputState::DragMode::RETOPO;
+        if (press && !seam_stroke) {
+            retopo.begin_edit();
+            retopo.seam_erase = input.ctrl_held;   // decided at the press, like the eraser
+            seam_last = ~0u;
+        }
+        if (!press) retopo.seam_erase = input.ctrl_held;
+        retopo.seam_v = uv && !input.alt_held ? retopo_snap_vertex(retopo, camera, win_w, win_h,
+                                                                   (float)input.mouse_x, (float)input.mouse_y)
+                                              : ~0u;
+        if (press && retopo.seam_v != ~0u && retopo.seam_v != seam_last) {
+            if (seam_last != ~0u) retopo_seam_path(retopo, seam_last, retopo.seam_v, retopo.seam_erase, input.mirror_x);
+            seam_last = retopo.seam_v;
+        }
+        if (!press && seam_stroke) retopo.end_edit();
+        seam_stroke = press;
+        retopo.seam_painting = press;
+    }
 }
 
 // The low-poly is a by-product to take elsewhere, not a document: no dialog, next to
 // the project (or home), named after it. Web writes it to MEMFS for main.cpp to hand
 // to the browser.
-std::string retopo_export(const RetopoState& retopo, InputState& input, const std::string& project_path) {
+// Where retopo's exports go: next to the project as <name>-retopo..., ~/chisel-retopo...
+// before it's saved; the web build writes to its in-memory disk and downloads.
+static std::string export_stem(const std::string& project_path) {
 #if defined(__EMSCRIPTEN__)
-    const std::string name = "retopo.obj", path = "/" + name;
+    (void)project_path;
+    return "/retopo";
 #else
     std::string stem = project_path;
     if (stem.empty()) {
@@ -796,16 +923,51 @@ std::string retopo_export(const RetopoState& retopo, InputState& input, const st
         const auto dot = stem.find_last_of('.');
         if (dot != std::string::npos && stem.find_last_of('/') < dot) stem.resize(dot);
     }
-    const std::string path = stem + "-retopo.obj", name = path;
+    return stem + "-retopo";
 #endif
-    const bool ok = retopo_export_obj(retopo.result, path.c_str());
+}
+
+std::string retopo_export(const RetopoState& retopo, InputState& input, const std::string& project_path) {
+    const std::string path = export_stem(project_path) + ".obj";
+#if defined(__EMSCRIPTEN__)
+    const std::string name = path.substr(1);
+#else
+    const std::string name = path;
+#endif
+    // UVs go along when there's a layout made for the mesh as it is now.
+    const bool uv_ok = !retopo.uv.empty() && retopo.uv.fits(retopo.result)
+                    && retopo.uv.key == uv_topology_key(retopo.result);
+    const bool ok = retopo_export_obj(retopo.result, path.c_str(), uv_ok ? &retopo.uv : nullptr);
     if (ok)
-        std::snprintf(input.notification, sizeof(input.notification), "Exported: %.400s", name.c_str());
+        std::snprintf(input.notification, sizeof(input.notification), "Exported%s: %.400s",
+                      uv_ok ? " with UVs" : "", name.c_str());
     else
         std::snprintf(input.notification, sizeof(input.notification),
                       retopo.built ? "Export failed: %.400s" : "Build first%.0s", name.c_str());
     input.notification_timer = 3.0f;
     return ok ? path : std::string();
+}
+
+void retopo_bake_save(const RetopoState& retopo, InputState& input, const std::string& project_path) {
+    const BakeResult& r = retopo.bake.result;
+    const std::string stem = export_stem(project_path);
+    int wrote = 0;
+    std::string last;
+    for (int which = 0; which < 2; which++) {
+        if (!(which == 0 ? r.has_normal : r.has_color)) continue;
+        const std::string path = stem + (which == 0 ? "-normal.png" : "-color.png");
+        if (!bake_write_png(r, which, path.c_str())) continue;
+        wrote++;
+        last = path;
+#if defined(__EMSCRIPTEN__)
+        web_download_file(path.c_str(), path.c_str() + 1);
+#endif
+    }
+    if (r.empty())  std::snprintf(input.notification, sizeof(input.notification), "Bake first");
+    else if (!wrote) std::snprintf(input.notification, sizeof(input.notification), "Couldn't write the maps next to %.400s", stem.c_str());
+    else std::snprintf(input.notification, sizeof(input.notification), "Saved %d map%s: %.400s", wrote,
+                       wrote == 1 ? "" : "s", wrote == 1 ? last.c_str() : (stem + "-*.png").c_str());
+    input.notification_timer = 3.0f;
 }
 
 void draw_retopo_cursor(Renderer& renderer, const Camera& camera, const InputState& input,
@@ -836,8 +998,9 @@ void draw_retopo_ui(InputState& input, RetopoState& retopo, Renderer& renderer, 
                          || input.mouse2_down || input.mouse3_down;
     // Dock first: it sets which stroke the cursor is over, and the overlay lights it
     // the same frame (background list, so it still draws under the dock).
-    draw_retopo_dock(input, retopo, win_w, win_h);
+    if (input.uv_mode) draw_uv_dock(input, retopo, win_w, win_h);
+    else               draw_retopo_dock(input, retopo, win_w, win_h);
     if (retopo.rev != audited_rev) { audited_rev = retopo.rev; retopo_audit(retopo); }
     draw_retopo_overlay(retopo, renderer, camera, win_w, win_h,
-                        !cam_moving && !screen_buffers_dirty, input.mirror_x);
+                        !cam_moving && !screen_buffers_dirty, input.mirror_x, input.uv_on());
 }

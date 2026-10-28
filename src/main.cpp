@@ -1585,6 +1585,10 @@ int main(int argc, char* argv[]) {
         // ---- Retopo mode (retopo_input.cpp): pen, clicks, its own undo, Build ----
         retopo_frame(retopo, input, scene, *mesh, renderer, camera, tablet, win_w, win_h,
                      screen_buffers_dirty, imgui_wants_mouse);
+        if (input.uv_bake_save_requested) {
+            input.uv_bake_save_requested = false;
+            retopo_bake_save(retopo, input, current_project_path);
+        }
         if (input.retopo_export_requested) {
             input.retopo_export_requested = false;
             const std::string path = retopo_export(retopo, input, current_project_path);

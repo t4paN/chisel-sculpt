@@ -387,7 +387,8 @@ void release_render_pipeline(RenderPipeline& p) {
 }
 
 BindGroup create_bind_group(Device&, RenderPipeline& pipe,
-                            const BindBufferEntry* entries, uint32_t n, const Texture* tex) {
+                            const BindBufferEntry* entries, uint32_t n, const Texture* tex,
+                            const Texture* tex2) {
     BindGroup g;
     g.count = (n < kMaxBindings) ? n : kMaxBindings;
     for (uint32_t i = 0; i < g.count; ++i) {
@@ -399,6 +400,7 @@ BindGroup create_bind_group(Device&, RenderPipeline& pipe,
         g.target[i] = tgt;
     }
     g.tex_handle = tex ? tex->handle : 0;
+    g.tex2_handle = tex2 ? tex2->handle : 0;
     return g;
 }
 
@@ -432,6 +434,11 @@ void set_bind_group(RenderPass&, RenderPipeline&, BindGroup& g) {
     if (g.tex_handle) {                       // sampled_texture pipeline (font atlas)
         glActiveTexture(GL_TEXTURE0 + kTextureBinding);
         glBindTexture(GL_TEXTURE_2D, g.tex_handle);
+    }
+    if (g.tex2_handle) {
+        glActiveTexture(GL_TEXTURE0 + kTexture2Binding);
+        glBindTexture(GL_TEXTURE_2D, g.tex2_handle);
+        glActiveTexture(GL_TEXTURE0);         // the rest of the app assumes unit 0
     }
 }
 
@@ -479,14 +486,15 @@ void end_render_pass(RenderPass& rp) {
 
 // ---- Sampled texture (the font atlas) ----------------------------------------
 
-Texture create_sampled_texture(Device&, int w, int h, const void* data) {
+Texture create_sampled_texture(Device&, int w, int h, const void* data, bool rgba) {
     Texture t; t.width = w; t.height = h;
     glGenTextures(1, &t.handle);
     glBindTexture(GL_TEXTURE_2D, t.handle);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);   // R8 rows are unaligned
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, w, h, 0, GL_RED, GL_UNSIGNED_BYTE, data);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    if (rgba) glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
+    else      glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, w, h, 0, GL_RED, GL_UNSIGNED_BYTE, data);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, rgba ? GL_LINEAR : GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, rgba ? GL_LINEAR : GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glBindTexture(GL_TEXTURE_2D, 0);
