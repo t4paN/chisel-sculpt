@@ -4401,7 +4401,62 @@ int fill_rims(RetopoState& st, const Mesh& m, bool mirror, int& rims, int& odd, 
 }
 }  // namespace
 
+void retopo_mark_mouths(RetopoState& st, const Mesh& m) {
+    RetopoMesh& rm = st.result;
+    std::vector<uint32_t> cand;
+    for (uint32_t r = 0; r < rm.rim_count(); r++)
+        if (!rm.rim_hole[r]) cand.push_back(r);
+    if (cand.empty() || m.tri_count() == 0) return;
+    // The way each walks against its faces: +1 as its first edge's face runs, -1 against.
+    std::vector<int8_t> agree(cand.size(), 0);
+    for (size_t f = 0; f < rm.face_count(); f++) {
+        const uint32_t* q = rm.face(f);
+        const uint32_t k = rm.face_size(f);
+        for (uint32_t j = 0; j < k; j++)
+            for (size_t c = 0; c < cand.size(); c++) {
+                const uint32_t a = rm.rim[rm.rim_off[cand[c]]], b = rm.rim[rm.rim_off[cand[c]] + 1];
+                if (q[j] == a && q[(j + 1) % k] == b) agree[c] = 1;
+                if (q[j] == b && q[(j + 1) % k] == a) agree[c] = -1;
+            }
+    }
+    auto P = [&](uint32_t i) { return Vec3(m.pos_x[i], m.pos_y[i], m.pos_z[i]); };
+    for (size_t c = 0; c < cand.size(); c++) {
+        if (!agree[c]) continue;
+        const uint32_t r = cand[c], k0 = rm.rim_off[r], n = rm.rim_off[r + 1] - k0;
+        Vec3 cen(0, 0, 0), area(0, 0, 0);
+        for (uint32_t i = 0; i < n; i++) cen = cen + rm.v[rm.rim[k0 + i]];
+        cen = cen * (1.0f / (float)n);
+        float rad = 0.0f;
+        for (uint32_t i = 0; i < n; i++) {
+            const Vec3 p = rm.v[rm.rim[k0 + i]];
+            area = area + (p - cen).cross(rm.v[rm.rim[k0 + (i + 1) % n]] - cen);
+            rad += (p - cen).length();
+        }
+        rad /= (float)n;
+        if (area.length() < 1e-12f || rad < 1e-9f) continue;
+        const Vec3 in_dir = area.normalized() * (float)agree[c];   // through the gap, inward
+        // The sculpt nearest the rim's middle, within a fifth of its size (an arm loop's
+        // middle is a whole radius from any surface): a cheap box test first, since this
+        // scans every triangle.
+        const float reach = 0.2f * rad;
+        float best = reach * reach;
+        Vec3 best_n(0, 0, 0);
+        for (uint32_t t = 0; t < m.tri_count(); t++) {
+            const Vec3 a = P(m.indices[t * 3]), b = P(m.indices[t * 3 + 1]), d = P(m.indices[t * 3 + 2]);
+            if (std::min({a.x, b.x, d.x}) > cen.x + reach || std::max({a.x, b.x, d.x}) < cen.x - reach
+                || std::min({a.y, b.y, d.y}) > cen.y + reach || std::max({a.y, b.y, d.y}) < cen.y - reach
+                || std::min({a.z, b.z, d.z}) > cen.z + reach || std::max({a.z, b.z, d.z}) < cen.z - reach) continue;
+            const Vec3 q = SnapGrid::closest_on_tri(cen, a, b, d) - cen;
+            const float dd = q.dot(q);
+            if (dd < best) { best = dd; best_n = (b - a).cross(d - a); }
+        }
+        if (best_n.length() < 1e-20f) continue;
+        if (best_n.normalized().dot(in_dir) < -0.5f) rm.rim_hole[r] = 1;
+    }
+}
+
 int retopo_fill(RetopoState& st, const Mesh& m, bool mirror, int& rims, int& odd) {
+    retopo_mark_mouths(st, m);
     return fill_rims(st, m, mirror, rims, odd, -1, true);
 }
 
@@ -4430,7 +4485,9 @@ int hole_under(const RetopoState& st, const Camera& cam, int win_w, int win_h, f
         if (!ok) continue;
         cen = cen * (1.0f / (float)n);
         const Vec3 to_eye = cam.perspective ? cam.get_position() - cen : cam.get_view_direction() * -1.0f;
-        if (ns.dot(to_eye) <= 0.0f) continue;   // its twin round the back
+        // Its twin round the back. A mouth on a sharp edge (its normals the walls', all
+        // across it) can't tell: let it through, the nearest still wins.
+        if (ns.length() > 0.3f * (float)n && ns.dot(to_eye) <= 0.0f) continue;
         bool in = false;
         for (uint32_t i = 0, j = n - 1; i < n; j = i++)
             if ((sy[i] > y) != (sy[j] > y)
@@ -5006,6 +5063,7 @@ const char* retopo_wand_open(RetopoState& st, const Mesh& m, const Camera& cam, 
                              float x, float y, bool mirror) {
     retopo_wand_close(st, -1);
     if (!st.built) return "Nothing built yet: Build first (Space)";
+    retopo_mark_mouths(st, m);
     const int r = hole_under(st, cam, win_w, win_h, x, y);
     if (r < 0) return "Click inside a hole (the green or amber wash)";
     return wand_menu(st, m, r, mirror, nullptr);

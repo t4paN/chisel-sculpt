@@ -474,6 +474,11 @@ const char* retopo_bridge(RetopoState& st, const Mesh& m, const Camera& cam, int
 // hole across x = 0 a symmetric one. The islands round a hole become one island and
 // freeze. One undo step. Returns the faces made; `rims` = how many rims they filled.
 int retopo_fill(RetopoState& st, const Mesh& m, bool mirror, int& rims, int& odd);
+// A piece's longest rim is its outer edge, unless it's a mouth: a tube capped at one end
+// (a cylinder wrapped, its top filled) has only the open end left. That rim is a hole when
+// the sculpt across its middle faces out through it, against the way its faces run. Scans
+// the sculpt's triangles, so it runs at user-paced moments (Fill, Wand, an edit settling).
+void retopo_mark_mouths(RetopoState& st, const Mesh& m);
 
 // Extrude: a Draw stroke that started on a picked loop (st.extruding, the line in
 // st.live). The picked loop nearest the line's start, an outline (open or closed), grows

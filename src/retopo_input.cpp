@@ -132,6 +132,18 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
     static bool retopo_masking = false;
     static bool retopo_mask_smooth = false;     // Shift was held at the press: soften the edge
     const bool retopo_press = retopo_on && input.drag_mode == InputState::DragMode::RETOPO;
+    // Mouths (a capped tube's open end) are holes too, but telling one takes the sculpt:
+    // marked once an edit settles, so the wash shows on them. Every rebuild unmarks them.
+    {
+        static uint64_t mouth_key = ~0ull;
+        const RetopoMesh& rm = retopo.result;
+        const uint64_t key = ((uint64_t)retopo.rev << 40) ^ ((uint64_t)rm.face_count() << 20) ^ rm.v.size();
+        if (retopo_on && !retopo_press && retopo.built && key != mouth_key) {
+            scene.materialize_active_cpu();
+            retopo_mark_mouths(retopo, mesh);
+            mouth_key = key;
+        }
+    }
     // Shift+Ctrl in Draw: a path-pick click (below), never a stroke. Decided at the press.
     static bool retopo_path_press = false;
     // Where the pen went down. A stroke can start a few frames later (plane cache
@@ -193,13 +205,37 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
             // The outline on the sculpt, off the plane cache: the lasso's points that land
             // on the model. Its first count of sides: one per ~kGridPx of lasso on screen.
             constexpr float kGridPx = 28.0f;
+            // Only the sculpt piece most of the lasso lands on counts: a mirrored insert is
+            // two pieces in one mesh, and a lasso slipping off one onto its twin peeking out
+            // behind made one outline across both, mirrored through the middle (2026-10-29).
+            // Pieces by union-find over the triangles; user-paced, once per lasso.
+            std::vector<uint32_t> piece(mesh.vertex_count());
+            for (uint32_t i = 0; i < (uint32_t)piece.size(); i++) piece[i] = i;
+            auto root = [&](uint32_t x) { while (piece[x] != x) x = piece[x] = piece[piece[x]]; return x; };
+            for (uint32_t t = 0; t < mesh.tri_count(); t++) {
+                const uint32_t a = root(mesh.indices[t * 3]);
+                piece[root(mesh.indices[t * 3 + 1])] = a;
+                piece[root(mesh.indices[t * 3 + 2])] = root(a);
+            }
+            std::vector<uint32_t> hit_piece(L.size() / 2, ~0u);
+            std::map<uint32_t, size_t> per_piece;
+            for (size_t i = 0; i + 1 < L.size(); i += 2) {
+                uint32_t tid;
+                if (renderer.sample_triid((int)L[i], (int)L[i + 1], &tid) && tid < mesh.tri_count())
+                    per_piece[hit_piece[i / 2] = root(mesh.indices[tid * 3])]++;
+            }
+            uint32_t main_piece = ~0u;
+            size_t main_hits = 0;
+            for (const auto& [pc, hits] : per_piece)
+                if (hits > main_hits) { main_hits = hits; main_piece = pc; }
             std::vector<Vec3> gp, gn;
             size_t missed = 0;
             float perim_px = 0.0f;
             for (size_t i = 0; i + 1 < L.size(); i += 2) {
                 Vec3 p, n;
                 float wpp;
-                if (!screen_buffers_dirty && retopo_surface_at(L[i], L[i + 1], p, n, wpp)) {
+                if (!screen_buffers_dirty && hit_piece[i / 2] == main_piece
+                    && retopo_surface_at(L[i], L[i + 1], p, n, wpp)) {
                     gp.push_back(p);
                     gn.push_back(n);
                 } else {

@@ -2,6 +2,11 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-29 — Retopo: capped tube mouths fill, lasso grids stay on one piece
+
+- A piece's longest rim was always its outer edge, so a cylinder wrapped and capped at one end left its mouth unfillable; now it's a hole when the sculpt across its middle faces out through it (Fill, Wand, the wash).
+- Wand lasso grid: only the sculpt piece most of the lasso lands on counts; a stroke slipping off a mirrored insert onto its twin behind made one outline across both, mirrored through the middle.
+
 ## 2026-10-28 — Slider release ignores a stale pointer report
 
 - Wayland: ~13 ms after a slider release the compositor can report the previous slider's drag start; reports far from the return spot are now dropped until the return lands (half the releases in a session hit it).
