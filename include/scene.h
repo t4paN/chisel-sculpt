@@ -125,6 +125,9 @@ public:
     uint32_t          alive_count() const;
 
     bool select(uint32_t entity_id);
+    // Make the mesh active but keep the selection (adding it if it was out): UV mode
+    // picks an island on any mesh it shows without dropping the others from the view.
+    bool focus(uint32_t entity_id);
     void refresh_for_edit_mode();
 
     // Entity-id pick pass: draw all alive entities (active working VAO + inactive

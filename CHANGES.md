@@ -2,6 +2,13 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-30 — UV: atlas across meshes, islands moved by hand
+
+- The UV panel lists the meshes: click shows one's layout, Ctrl+click adds it to the square; the active mesh's arrow folds out its islands. The list scrolls past four rows and sits above Bake. Islands are no longer renamed.
+- Unwrap and Re-pack act on every mesh in the square: two or more share one texture (an atlas), each island at its real size so texel density matches. Re-pack keeps islands as they are; the readout warns when meshes overlap.
+- Big view: Unwrap and Re-pack under the square; drag moves islands, Ctrl+click picks several, Q / E turn them (Shift: exact quarter turns). One undo step each.
+- The vendored xatlas library is gone.
+
 ## 2026-10-30 — UV: our own island packer
 
 - Unwrap packs islands by shape, biggest first, turning them a quarter turn when that fits better (never mirrored); small islands tuck into the gaps.

@@ -13,6 +13,7 @@
 struct UvSettings {
     int   resolution = 1024;  // the texture it's packed for: padding is in its pixels
     int   padding    = 4;     // pixels between islands, so a baked texture doesn't bleed
+    bool  pack       = true;  // false: uv_unwrap leaves the islands flat, in mesh units, for uv_pack
 };
 
 // A hash of rm's faces (corners and counts), to tell when a layout has gone stale.
@@ -24,3 +25,10 @@ uint64_t uv_seam_key(const RetopoMesh& rm);
 // that can't lie flat (closed, say) is still laid out, folded; out.needs_cut says which. Returns nullptr on success, else why not (out is left cleared).
 // ms = how long it took.
 const char* uv_unwrap(const RetopoMesh& rm, const UvSettings& s, UvLayout& out, double& ms);
+
+// Several layouts packed into one square together (an atlas: one texture for every mesh
+// in it), or one layout re-packed as it is. Each island keeps its shape and is scaled to
+// its size on its mesh, so texel density matches across them all. Rewrites each layout's
+// uv and used. nullptr on success, else why not (the layouts are left as they were).
+struct UvPackPart { const RetopoMesh* rm; UvLayout* L; };
+const char* uv_pack(const std::vector<UvPackPart>& parts, const UvSettings& s, double& ms);

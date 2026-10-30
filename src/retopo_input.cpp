@@ -777,49 +777,99 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
         }
         input.undo_requested = input.redo_requested = false;
     }
-    if (input.uv_unwrap_requested) {
-        input.uv_unwrap_requested = false;
+    // Unwrap and Re-pack act on every mesh the UV panel shows: the active one and the
+    // rest of the selection, each with a built retopo. Two or more share one square (an
+    // atlas: one texture for all of them), each island at its size on its mesh.
+    if (input.uv_unwrap_requested || input.uv_repack_requested) {
+        const bool repack = !input.uv_unwrap_requested;
+        input.uv_unwrap_requested = input.uv_repack_requested = false;
+        std::vector<MeshEntity*> on;
+        auto take = [&](uint32_t id) {
+            MeshEntity* e = scene.find_entity(id);
+            if (e && e->alive && !e->preview && e->retopo.built && std::find(on.begin(), on.end(), e) == on.end())
+                on.push_back(e);
+        };
+        take(scene.active_mesh_id());
+        for (uint32_t id : scene.selected_ids()) take(id);
+        char who[64];
+        const char* why = on.empty() ? "Build a retopo mesh in mode 0 first" : nullptr;
+        uint32_t skipped = 0, islands = 0, folded = 0;
         double ms = 0.0;
-        UvLayout old = std::move(retopo.uv);
-        const char* why = retopo.built ? uv_unwrap(retopo.result, UvSettings(), retopo.uv, ms)
-                                       : "Build a retopo mesh in mode 0 first";
-        // Names carry over to the new island that took most of a named one's faces
-        // (biggest overlaps first, one name each). Only over the same faces: once the
-        // mesh changed, face numbers mean other faces.
-        if (!why && !old.names.empty() && old.fits(retopo.result) && old.key == retopo.uv.key) {
-            UvLayout& L = retopo.uv;
-            std::map<std::pair<uint32_t, uint32_t>, uint32_t> both;   // (old, new) -> faces in both
-            for (size_t f = 0; f < L.face_chart.size(); f++) {
-                const uint32_t a = old.face_chart[f], b = L.face_chart[f];
-                if (a < old.names.size() && !old.names[a].empty() && b < L.charts) both[{a, b}]++;
+        std::vector<UvPackPart> parts;
+        if (!why && repack) {
+            // Re-pack: the layouts as they are (hand-moved islands included), packed again.
+            for (MeshEntity* e : on) {
+                const UvLayout& L = e->retopo.uv;
+                if (L.empty() || !L.fits(e->retopo.result) || L.key != uv_topology_key(e->retopo.result)) { skipped++; continue; }
+                e->retopo.checkpoint();
+                parts.push_back(UvPackPart{&e->retopo.result, &e->retopo.uv});
             }
-            std::vector<std::pair<uint32_t, std::pair<uint32_t, uint32_t>>> order;
-            for (const auto& kv : both) order.push_back({kv.second, kv.first});
-            std::sort(order.begin(), order.end(), [](const auto& x, const auto& y) { return x.first > y.first; });
-            L.names.assign(L.charts, std::string());
-            std::vector<uint8_t> used(old.names.size(), 0);
-            for (const auto& o : order) {
-                const uint32_t a = o.second.first, b = o.second.second;
-                if (used[a] || !L.names[b].empty()) continue;
-                L.names[b] = old.names[a];
-                used[a] = 1;
+            if (parts.empty()) why = "Unwrap first: nothing to re-pack";
+            else why = uv_pack(parts, UvSettings(), ms);
+        } else if (!why) {
+            UvSettings us;
+            us.pack = on.size() == 1;   // several: each flattened, then all packed as one
+            for (MeshEntity* e : on) {
+                RetopoState& rt = e->retopo;
+                double one = 0.0;
+                UvLayout old = std::move(rt.uv);
+                const char* w = uv_unwrap(rt.result, us, rt.uv, one);
+                ms += one;
+                if (w) {
+                    Scene::display_name(*e, who, sizeof who);
+                    std::snprintf(input.notification, sizeof(input.notification), "%s: %s", who, w);
+                    why = input.notification;
+                    break;
+                }
+                // Names carry over to the new island that took most of a named one's
+                // faces (biggest overlaps first, one name each). Only over the same faces:
+                // once the mesh changed, face numbers mean other faces.
+                if (!old.names.empty() && old.fits(rt.result) && old.key == rt.uv.key) {
+                    UvLayout& L = rt.uv;
+                    std::map<std::pair<uint32_t, uint32_t>, uint32_t> both;   // (old, new) -> faces in both
+                    for (size_t f = 0; f < L.face_chart.size(); f++) {
+                        const uint32_t x = old.face_chart[f], y = L.face_chart[f];
+                        if (x < old.names.size() && !old.names[x].empty() && y < L.charts) both[{x, y}]++;
+                    }
+                    std::vector<std::pair<uint32_t, std::pair<uint32_t, uint32_t>>> order;
+                    for (const auto& kv : both) order.push_back({kv.second, kv.first});
+                    std::sort(order.begin(), order.end(), [](const auto& x, const auto& y) { return x.first > y.first; });
+                    L.names.assign(L.charts, std::string());
+                    std::vector<uint8_t> used(old.names.size(), 0);
+                    for (const auto& o : order) {
+                        const uint32_t x = o.second.first, y = o.second.second;
+                        if (used[x] || !L.names[y].empty()) continue;
+                        L.names[y] = old.names[x];
+                        used[x] = 1;
+                    }
+                }
+                for (uint8_t c : rt.uv.needs_cut) folded += c;
+                parts.push_back(UvPackPart{&rt.result, &rt.uv});
             }
+            if (!why && parts.size() > 1) {
+                double pm = 0.0;
+                why = uv_pack(parts, UvSettings(), pm);
+                ms += pm;
+            }
+            // A failed atlas leaves flat, unpacked islands behind: no layout beats that.
+            if (why) for (const UvPackPart& p : parts) p.L->clear();
         }
-        retopo.uv_sel = retopo.uv_hover = ~0u;
-        if (why) std::snprintf(input.notification, sizeof(input.notification), "%s", why);
-        else {
-            uint32_t folded = 0;
-            for (uint8_t c : retopo.uv.needs_cut) folded += c;
-            if (folded)
-                std::snprintf(input.notification, sizeof(input.notification),
-                              "Unwrapped: %u islands - %u fold%s over: paint a seam across %s",
-                              retopo.uv.charts, folded, folded == 1 ? "s" : "", folded == 1 ? "it" : "them");
-            else
-                std::snprintf(input.notification, sizeof(input.notification), "Unwrapped: %u islands, %.0f%% of the square",
-                              retopo.uv.charts, retopo.uv.used * 100.0f);
+        float used = 0.0f;
+        for (const UvPackPart& p : parts) { islands += p.L->charts; used += p.L->used; }
+        for (MeshEntity* e : on) { e->retopo.uv_sel = e->retopo.uv_hover = ~0u; e->retopo.rev++; }   // unsaved work
+        if (why) {
+            if (why != input.notification) std::snprintf(input.notification, sizeof(input.notification), "%s", why);
+        } else {
+            char what[48];
+            if (parts.size() == 1) std::snprintf(what, sizeof what, "%u islands", islands);
+            else std::snprintf(what, sizeof what, "%zu meshes, %u islands", parts.size(), islands);
+            char tail[64] = "";
+            if (skipped) std::snprintf(tail, sizeof tail, " - %u not unwrapped, left out", skipped);
+            else if (folded) std::snprintf(tail, sizeof tail, " - %u fold%s over: paint a seam across", folded, folded == 1 ? "s" : "");
+            std::snprintf(input.notification, sizeof(input.notification), "%s: %s, %.0f%% of the square%s",
+                          repack ? "Re-packed" : "Unwrapped", what, used * 100.0f, tail);
         }
         input.notification_timer = 2.5f;
-        retopo.rev++;   // a new layout is unsaved work
     }
     // Bake (bake.h): started from the UV panel, run a slice a frame while UV mode is up.
     // Leaving UV mode stops it: mode 0 or sculpting could change the low or the sculpt
@@ -1103,8 +1153,8 @@ void draw_retopo_cursor(Renderer& renderer, const Camera& camera, const InputSta
                          erase ? kEraseRed : kRetopoGreen);
 }
 
-void draw_retopo_ui(InputState& input, RetopoState& retopo, Renderer& renderer, const Camera& camera,
-                    int win_w, int win_h, bool screen_buffers_dirty) {
+void draw_retopo_ui(InputState& input, RetopoState& retopo, UvMeshRow* uv_rows, int uv_n, Renderer& renderer,
+                    const Camera& camera, int win_w, int win_h, bool screen_buffers_dirty) {
     static uint64_t audited_rev = 0;   // retopo.rev last checked for faces laid over faces
     const bool cam_moving = input.drag_mode == InputState::DragMode::ORBIT
                          || input.drag_mode == InputState::DragMode::PAN
@@ -1112,7 +1162,7 @@ void draw_retopo_ui(InputState& input, RetopoState& retopo, Renderer& renderer, 
                          || input.mouse2_down || input.mouse3_down;
     // Dock first: it sets which stroke the cursor is over, and the overlay lights it
     // the same frame (background list, so it still draws under the dock).
-    if (input.uv_mode) draw_uv_dock(input, retopo, win_w, win_h);
+    if (input.uv_mode) draw_uv_dock(input, retopo, uv_rows, uv_n, win_w, win_h);
     else               draw_retopo_dock(input, retopo, win_w, win_h);
     if (retopo.rev != audited_rev) { audited_rev = retopo.rev; retopo_audit(retopo); }
     draw_retopo_overlay(retopo, renderer, camera, win_w, win_h,

@@ -446,8 +446,28 @@ void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse) {
             if (input.mesh_layers_changed) { input.mesh_layers_changed = false; scene.mark_edited(); }
         }
     }
-    if (input.interaction_mode == InputState::InteractionMode::RETOPO)
-        draw_retopo_ui(input, scene.active_entity().retopo, renderer, camera, win_w, win_h, screen_buffers_dirty);
+    if (input.interaction_mode == InputState::InteractionMode::RETOPO) {
+        // UV mode's panel lists every mesh (it picks which ones the square shows).
+        static std::vector<UvMeshRow> uv_rows;
+        static std::vector<std::array<char, 24>> uv_names;
+        uv_rows.clear();
+        if (input.uv_mode) {
+            const std::vector<uint32_t>& sel = scene.selected_ids();
+            if (uv_names.size() < scene.entities().size()) uv_names.resize(scene.entities().size());
+            for (auto& up : scene.entities()) {
+                if (!up || !up->alive || up->preview) continue;
+                UvMeshRow r;
+                r.id = up->id;
+                r.shown = Scene::display_name(*up, uv_names[uv_rows.size()].data(), 24);
+                r.st = &up->retopo;
+                r.active = up->id == scene.active_mesh_id();
+                r.selected = std::find(sel.begin(), sel.end(), up->id) != sel.end();
+                uv_rows.push_back(r);
+            }
+        }
+        draw_retopo_ui(input, scene.active_entity().retopo, uv_rows.data(), (int)uv_rows.size(), renderer, camera,
+                       win_w, win_h, screen_buffers_dirty);
+    }
 
     // ---- Error popup ----
     if (error_popup_trigger) {

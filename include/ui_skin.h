@@ -112,7 +112,16 @@ struct MeshLayerRow {
 };
 void draw_mesh_layers_dock(InputState& input, MeshLayerRow* rows, int n, int win_w, int win_h);
 
-// UV mode's panel (key 9): the layout, Unwrap, Export. Drawn instead of the retopo dock.
-void draw_uv_dock(InputState& input, RetopoState& st, int win_w, int win_h);
+// UV mode's panel (key 9): the layout, Unwrap, Re-pack, the meshes, Bake. Drawn instead of
+// the retopo dock. One row per mesh, filled by the caller from the scene; the square shows
+// the active mesh's layout and the other selected meshes' with it (an atlas when they
+// were packed together). Clicks come back through input.mesh_layer_pick / uv_focus.
+struct UvMeshRow {
+    uint32_t     id = 0;
+    const char*  shown = nullptr;    // the mesh's name, or "Mesh <id>"
+    RetopoState* st = nullptr;       // its retopo (its layout lives there)
+    bool         active = false, selected = false;
+};
+void draw_uv_dock(InputState& input, RetopoState& st, UvMeshRow* rows, int n, int win_w, int win_h);
 // A UV island's colour (the UV panel's, and the model's tint in UV mode).
 ImU32 uv_island_color(uint32_t island, float alpha);

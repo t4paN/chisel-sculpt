@@ -404,6 +404,21 @@ void app_idle_update(App& a, int win_w, int win_h, float dx, float dy) {
             screen_buffers_dirty = true;
         }
     }
+    // UV mode's panel picked an island on another mesh it shows: that mesh becomes the
+    // active one (its undo, its bake), the others stay in the view.
+    if (input.uv_focus) {
+        const uint32_t id = input.uv_focus;
+        input.uv_focus = 0;
+        if (id != scene.active_mesh_id() && scene.focus(id)) {
+            mesh = &scene.active_mesh();
+            multires = &scene.active_multires();
+            scene.refresh_mirror_map();
+            mesh->compute_bounding_sphere(mesh_center, mesh_radius);
+            brush_stroke.vertex_count = 0;
+            brush_stroke.phase = StrokePhase::NONE;
+            screen_buffers_dirty = true;
+        }
+    }
     // ...or renamed (through the scene, so Ctrl+Z can take it back).
     if (input.mesh_layer_rename) {
         scene.rename_entity(input.mesh_layer_rename, input.mesh_layer_rename_to);

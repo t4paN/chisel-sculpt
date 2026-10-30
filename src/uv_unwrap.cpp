@@ -713,10 +713,10 @@ const char* uv_unwrap(const RetopoMesh& rm, const UvSettings& s, UvLayout& out, 
         if (r.closed || r.folds) { out.needs_cut[c] = 1; not_flat++; }
     }
 
-    // Corner UVs from their copies. `flat` is in mesh units: one scale for every island,
-    // which is all pass 2 needs.
-    std::vector<float> flat(rm.faces.size() * 2, 0.0f);
-    std::vector<uint8_t> have(rm.faces.size(), 0);
+    // Corner UVs from their copies, in mesh units: one scale for every island, which is
+    // all the packer needs (it scales each island back to its size on the mesh anyway).
+    std::vector<float>& flat = out.uv;
+    flat.assign(rm.faces.size() * 2, 0.0f);
     for (uint32_t i = 0; i < wv.size(); i++) {
         flat[2 * tri_corner[i]]     = wuv[2 * wv[i]];
         flat[2 * tri_corner[i] + 1] = wuv[2 * wv[i] + 1];
@@ -757,76 +757,110 @@ const char* uv_unwrap(const RetopoMesh& rm, const UvSettings& s, UvLayout& out, 
         }
     }
 
-    // ---- Pass 2: pack the islands into the square, with padding. The grid is at most
-    // 512 cells a side (2 px a cell at 1024), the padding rounded up to whole cells.
+    out.key = uv_topology_key(rm);
+    out.seam_key = uv_seam_key(rm);
+    ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    std::printf("[uv] unwrap: %u faces, %zu painted seam edge(s) -> %u islands, %.1f ms"
+                " (not flat-able %u, folded triangles %u, mirrored back %u, faces in no island %u)\n",
+                nf, seam_e.size() / 2, out.charts, ms, not_flat, folds, mirrored, orphans);
+    if (!s.pack) return nullptr;
+
+    // ---- Pass 2: pack the islands into the square.
+    double pms = 0.0;
+    const char* why = uv_pack({UvPackPart{&rm, &out}}, s, pms);
+    ms += pms;
+    if (why) { out.clear(); return why; }
+    return nullptr;
+}
+
+const char* uv_pack(const std::vector<UvPackPart>& parts, const UvSettings& s, double& ms) {
+    ms = 0.0;
+    const auto t0 = std::chrono::steady_clock::now();
+    // Every island of every part as triangles (faces fanned: a fan covers even a concave
+    // face, which is all the grid needs), scaled back to its size on its mesh, so a
+    // centimetre gets the same pixels on every mesh in the square.
+    std::vector<std::vector<float>> isl;
+    std::vector<uint32_t> first(parts.size(), 0);   // per part: its first island in isl
+    std::vector<float> k;                            // per island: layout units -> mesh units
+    for (size_t p = 0; p < parts.size(); p++) {
+        const RetopoMesh& rm = *parts[p].rm;
+        const UvLayout& L = *parts[p].L;
+        if (!L.fits(rm)) return "a layout doesn't fit its mesh: Unwrap it again";
+        first[p] = (uint32_t)isl.size();
+        std::vector<double> a3(L.charts, 0.0), auv(L.charts, 0.0);
+        for (uint32_t f = 0; f < rm.face_count(); f++) {
+            const uint32_t c = L.face_chart[f];
+            if (c >= L.charts) continue;
+            const uint32_t o = rm.face_off[f], m = rm.face_size(f);
+            Vec3 cr;
+            double a2 = 0.0;
+            for (uint32_t j = 0; j < m; j++) {
+                const uint32_t q = o + j, r = o + (j + 1) % m;
+                cr += rm.v[rm.faces[q]].cross(rm.v[rm.faces[r]]);
+                a2 += (double)L.uv[2 * q] * L.uv[2 * r + 1] - (double)L.uv[2 * r] * L.uv[2 * q + 1];
+            }
+            a3[c] += cr.length() * 0.5;
+            auv[c] += std::fabs(a2) * 0.5;
+        }
+        for (uint32_t c = 0; c < L.charts; c++)
+            k.push_back(auv[c] > 1e-20 && a3[c] > 0.0 ? (float)std::sqrt(a3[c] / auv[c]) : 1.0f);
+        isl.resize(isl.size() + L.charts);
+        for (uint32_t f = 0; f < rm.face_count(); f++) {
+            const uint32_t c = L.face_chart[f];
+            if (c >= L.charts) continue;
+            const uint32_t o = rm.face_off[f], m = rm.face_size(f), i = first[p] + c;
+            for (uint32_t j = 1; j + 1 < m; j++)
+                for (uint32_t q : {o, o + j, o + j + 1}) {
+                    isl[i].push_back(L.uv[2 * q] * k[i]);
+                    isl[i].push_back(L.uv[2 * q + 1] * k[i]);
+                }
+        }
+    }
+    if (isl.empty()) return "no islands to pack: Unwrap first";
+    // The grid is at most 512 cells a side (2 px a cell at 1024), the padding rounded up
+    // to whole cells.
     const int res = std::max(1, s.resolution);
     const int n = std::min(512, res);
     const int pad = std::max(1, (int)std::ceil(s.padding * (float)n / res - 1e-4f));
-    std::vector<std::vector<float>> isl_flat(out.charts);
-    for (uint32_t c = 0; c < out.charts; c++)
-        for (uint32_t t : isl_tris[c])
-            for (int k = 0; k < 3; k++) {
-                isl_flat[c].push_back(flat[2 * tri_corner[3 * t + k]]);
-                isl_flat[c].push_back(flat[2 * tri_corner[3 * t + k] + 1]);
-            }
     std::vector<PackPlace> at;
-    const float sc = pack_islands(isl_flat, n, pad, at);
+    const float sc = pack_islands(isl, n, pad, at);
+    if (sc <= 0.0f) return "the islands didn't fit one texture";
 
-    const char* why = nullptr;
-    double used = 0.0;
-    uint32_t turned = 0, dotted = 0;
-    if (sc <= 0.0f) {
-        why = "the islands didn't fit one texture";
-    } else {
-        out.uv.assign(rm.faces.size() * 2, 0.0f);
-        std::fill(have.begin(), have.end(), 0);
-        for (uint32_t f = 0; f < nf; f++) {
-            const uint32_t c = out.face_chart[f];
-            if (c == ~0u) continue;
-            const PackPlace& P = at[c];
-            for (uint32_t j = rm.face_off[f]; j < rm.face_off[f + 1]; j++) {
+    double all = 0.0;
+    uint32_t turned = 0;
+    for (size_t p = 0; p < parts.size(); p++) {
+        const RetopoMesh& rm = *parts[p].rm;
+        UvLayout& L = *parts[p].L;
+        std::vector<double> area(L.charts, 0.0);
+        double used = 0.0;
+        for (uint32_t f = 0; f < rm.face_count(); f++) {
+            const uint32_t c = L.face_chart[f];
+            if (c >= L.charts) continue;
+            const uint32_t i = first[p] + c;
+            const PackPlace& P = at[i];
+            const uint32_t o = rm.face_off[f], m = rm.face_size(f);
+            for (uint32_t j = o; j < o + m; j++) {
                 float x, y;
-                pack_turn(P.q, flat[2 * j], flat[2 * j + 1], x, y);
-                out.uv[2 * j]     = ((x - P.mnx) * sc + pad + P.x) / n;
-                out.uv[2 * j + 1] = ((y - P.mny) * sc + pad + P.y) / n;
-                have[j] = 1;
+                pack_turn(P.q, L.uv[2 * j] * k[i], L.uv[2 * j + 1] * k[i], x, y);
+                L.uv[2 * j]     = ((x - P.mnx) * sc + pad + P.x) / n;
+                L.uv[2 * j + 1] = ((y - P.mny) * sc + pad + P.y) / n;
             }
-        }
-        // Tripwire: the packer only rotates, so no island should come out backwards.
-        // How much of the square is used: the islands' own area, face by face.
-        {
-            std::vector<double> area(out.charts, 0.0);
-            for (uint32_t f = 0; f < nf; f++) {
-                const uint32_t c = out.face_chart[f];
-                if (c == ~0u) continue;
-                const uint32_t o = rm.face_off[f], k = rm.face_size(f);
-                double a2 = 0.0;
-                for (uint32_t j = 0; j < k; j++) {
-                    const uint32_t a = o + j, b = o + (j + 1) % k;
-                    a2 += (double)out.uv[2 * a] * out.uv[2 * b + 1] - (double)out.uv[2 * b] * out.uv[2 * a + 1];
-                }
-                area[c] += a2;
-                used += std::fabs(a2) * 0.5;
+            // How much of the square it uses (the islands' own area), and the tripwire:
+            // the packer only rotates, so no island should come out backwards.
+            double a2 = 0.0;
+            for (uint32_t j = 0; j < m; j++) {
+                const uint32_t a = o + j, b = o + (j + 1) % m;
+                a2 += (double)L.uv[2 * a] * L.uv[2 * b + 1] - (double)L.uv[2 * b] * L.uv[2 * a + 1];
             }
-            for (uint32_t c = 0; c < out.charts; c++) turned += area[c] < 0.0;
+            area[c] += a2;
+            used += std::fabs(a2) * 0.5;
         }
-        // A face in no island takes its first placed corner: a dot, not a stray line.
-        for (uint32_t f = 0; f < nf; f++) {
-            const uint32_t o = rm.face_off[f], k = rm.face_size(f);
-            uint32_t src = ~0u;
-            for (uint32_t j = 0; j < k && src == ~0u; j++) if (have[o + j]) src = o + j;
-            for (uint32_t j = 0; j < k; j++) dotted += !have[o + j];
-            for (uint32_t j = 0; j < k; j++)
-                if (!have[o + j] && src != ~0u) { out.uv[2 * (o + j)] = out.uv[2 * src]; out.uv[2 * (o + j) + 1] = out.uv[2 * src + 1]; }
-        }
-        out.key = uv_topology_key(rm);
-        out.seam_key = uv_seam_key(rm);
-        out.used = (float)std::min(1.0, used);
+        for (uint32_t c = 0; c < L.charts; c++) turned += area[c] < 0.0;
+        L.used = (float)std::min(1.0, used);
+        all += used;
     }
     ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-    if (why) { out.clear(); return why; }
-    std::printf("[uv] unwrap: %u faces, %zu painted seam edge(s) -> %u islands, %.0f%% of the square used, %.1f ms"
-                " (not flat-able %u, folded triangles %u, mirrored back %u, BACKWARDS AFTER PACKING %u, faces in no island %u, corners dotted %u)\n",
-                nf, seam_e.size() / 2, out.charts, used * 100.0, ms, not_flat, folds, mirrored, turned, orphans, dotted);
+    std::printf("[uv] pack: %zu islands from %zu mesh%s, %.0f%% of the square used, %.1f ms (BACKWARDS %u)\n",
+                isl.size(), parts.size(), parts.size() == 1 ? "" : "es", all * 100.0, ms, turned);
     return nullptr;
 }

@@ -666,7 +666,9 @@ struct InputState {
     void enter_sculpt_mode();
     void enter_retopo_mode();
     void enter_uv_mode();
-    bool uv_unwrap_requested = false;  // the UV panel's Unwrap
+    bool uv_unwrap_requested = false;  // the UV panel's Unwrap (every mesh it shows, packed together)
+    bool uv_repack_requested = false;  // its Re-pack: the shown layouts packed again, as they are
+    uint32_t uv_focus = 0;             // this mesh becomes the active one, the selection kept
     bool uv_seams_clear_requested = false;  // its Clear seams
     bool uv_bake_requested = false;         // its Bake (settings in RetopoState::bake)
     bool uv_bake_cancel_requested = false;  // ...Stop, while one runs

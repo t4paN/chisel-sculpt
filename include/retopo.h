@@ -696,6 +696,7 @@ void retopo_bake_save(const RetopoState& retopo, InputState& input, const std::s
 // The green ring (red for the eraser, a dot for Cut and the wand).
 void draw_retopo_cursor(Renderer& renderer, const Camera& camera, const InputState& input,
                         float cursor_x, float cursor_y, int win_w, int win_h);
-// The dock and the overlay, mode 0 only.
-void draw_retopo_ui(InputState& input, RetopoState& retopo, Renderer& renderer, const Camera& camera,
-                    int win_w, int win_h, bool screen_buffers_dirty);
+// The dock and the overlay, mode 0 and UV mode (whose panel lists the meshes: uv_rows).
+struct UvMeshRow;
+void draw_retopo_ui(InputState& input, RetopoState& retopo, UvMeshRow* uv_rows, int uv_n, Renderer& renderer,
+                    const Camera& camera, int win_w, int win_h, bool screen_buffers_dirty);

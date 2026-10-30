@@ -4528,15 +4528,17 @@ ImU32 uv_island_color(uint32_t c, float a) {
 namespace {
 
 // The layout drawn into a square on screen (top-left o, size side), magnified `zoom`
-// times round UV point c; k dims it (a stale layout). Islands lit_a / lit_b stand out
-// and the rest fade. With pick, returns the island under `mouse` (~0u for none).
+// times round UV point c; k dims it (a stale layout). Islands lit_a / lit_b (and any
+// marked in lit_mask, one byte per island) stand out and the rest fade. With pick,
+// returns the island under `mouse` (~0u for none).
 uint32_t draw_uv_islands(ImDrawList* dl, const RetopoMesh& rm, const UvLayout& L, ImVec2 o, float side,
-                         float zoom, ImVec2 c, float k, uint32_t lit_a, uint32_t lit_b, bool pick, ImVec2 mouse) {
+                         float zoom, ImVec2 c, float k, uint32_t lit_a, uint32_t lit_b, bool pick, ImVec2 mouse,
+                         const std::vector<uint8_t>* lit_mask = nullptr) {
     const float s = side * zoom, mx = o.x + side * 0.5f, my = o.y + side * 0.5f;
     auto at = [&](uint32_t corner) {   // v up in UV, y down on screen
         return ImVec2(mx + (L.uv[2 * corner] - c.x) * s, my - (L.uv[2 * corner + 1] - c.y) * s);
     };
-    const bool any_lit = lit_a < L.charts || lit_b < L.charts;
+    const bool any_lit = lit_a < L.charts || lit_b < L.charts || lit_mask;
     uint32_t under = ~0u;
     ImVec2 pts[64];
     for (uint32_t f = 0; f < rm.face_count(); f++) {
@@ -4544,7 +4546,7 @@ uint32_t draw_uv_islands(ImDrawList* dl, const RetopoMesh& rm, const UvLayout& L
         if (isl == ~0u) continue;
         const uint32_t base = rm.face_off[f], n = std::min<uint32_t>(rm.face_size(f), 64);
         for (uint32_t j = 0; j < n; j++) pts[j] = at(base + j);
-        const bool lit = isl == lit_a || isl == lit_b;
+        const bool lit = isl == lit_a || isl == lit_b || (lit_mask && isl < lit_mask->size() && (*lit_mask)[isl]);
         dl->AddConvexPolyFilled(pts, (int)n, uv_island_color(isl, (any_lit ? (lit ? 0.6f : 0.12f) : 0.30f) * k));
         dl->AddPolyline(pts, (int)n, uv_island_color(isl, (any_lit && !lit ? 0.35f : 0.95f) * k),
                         ImDrawFlags_Closed, lit ? 1.5f : 1.0f);
@@ -4562,12 +4564,55 @@ uint32_t draw_uv_islands(ImDrawList* dl, const RetopoMesh& rm, const UvLayout& L
 
 }  // namespace
 
+namespace {
+
+// Do any two of these layouts cover the same spot? Sampled at 256 x 256 points: islands
+// packed together keep the padding apart, so a point inside two of them is an overlap.
+bool layouts_overlap(const std::vector<const RetopoState*>& ls) {
+    const int N = 256;
+    static std::vector<int8_t> own;
+    own.assign((size_t)N * N, -1);
+    for (size_t i = 0; i < ls.size(); i++) {
+        const RetopoMesh& rm = ls[i]->result;
+        const UvLayout& L = ls[i]->uv;
+        for (uint32_t f = 0; f < rm.face_count(); f++) {
+            if (L.face_chart[f] >= L.charts) continue;
+            const uint32_t o = rm.face_off[f], m = rm.face_size(f);
+            for (uint32_t j = 1; j + 1 < m; j++) {
+                const uint32_t c[3] = {o, o + j, o + j + 1};
+                float x[3], y[3];
+                for (int k = 0; k < 3; k++) { x[k] = L.uv[2 * c[k]] * N - 0.5f; y[k] = L.uv[2 * c[k] + 1] * N - 0.5f; }
+                const float d = (x[1] - x[0]) * (y[2] - y[0]) - (x[2] - x[0]) * (y[1] - y[0]);
+                if (std::fabs(d) < 1e-12f) continue;
+                const int x0 = std::max(0, (int)std::ceil(std::min({x[0], x[1], x[2]})));
+                const int x1 = std::min(N - 1, (int)std::floor(std::max({x[0], x[1], x[2]})));
+                const int y0 = std::max(0, (int)std::ceil(std::min({y[0], y[1], y[2]})));
+                const int y1 = std::min(N - 1, (int)std::floor(std::max({y[0], y[1], y[2]})));
+                for (int py = y0; py <= y1; py++)
+                    for (int px = x0; px <= x1; px++) {
+                        const float a = ((x[1] - px) * (y[2] - py) - (x[2] - px) * (y[1] - py)) / d;
+                        const float b = ((x[2] - px) * (y[0] - py) - (x[0] - px) * (y[2] - py)) / d;
+                        if (a < 0.0f || b < 0.0f || a + b > 1.0f) continue;
+                        int8_t& w = own[(size_t)py * N + px];
+                        if (w >= 0 && w != (int8_t)i) return true;
+                        w = (int8_t)i;
+                    }
+            }
+        }
+    }
+    return false;
+}
+
+}  // namespace
+
 // UV mode's dock, in the retopo dock's spot and with its window manners (only one of the
 // two is ever up): the layout in a square (double-click it for the big view, below), its
-// readout and buttons, then the islands as layers: hover lights one on the model and
-// in the square, click opens its row (share of the square, texel density), double-click
-// renames. Names ride in the layout, carried over by Unwrap again.
-void draw_uv_dock(InputState& input, RetopoState& st, int win_w, int win_h) {
+// readout and buttons, the meshes, then Bake. The square shows the active mesh's islands
+// and, faded, the other selected meshes': an atlas once they're packed together, a pile
+// to Re-pack until then. The mesh list picks them (click; Ctrl+click adds one), and the
+// active mesh's row folds out its islands: hover lights one on the model and in the
+// square, click opens its readout (share of the square, texel density).
+void draw_uv_dock(InputState& input, RetopoState& st, UvMeshRow* rows, int nrows, int win_w, int win_h) {
     st.hover_id = 0;   // no stroke list here to hover, so the overlay lights none
     st.uv_hover = ~0u;
     static uint32_t last_hover = ~0u;   // last frame's, for drawing before this frame's is known
@@ -4579,7 +4624,19 @@ void draw_uv_dock(InputState& input, RetopoState& st, int win_w, int win_h) {
     // The frame it opened on: that frame's click is the double-click's second half, which
     // the big view mustn't read as a click outside (without motion it's already centred).
     static int big_frame = -1;
-    const float bh = 30.0f, gap = 6.0f, row_h = 36.0f, kIn = 8.0f;
+    // The big view's picked islands (Ctrl+click adds and drops them; any mesh shown), and
+    // a drag of them: pressed, and whether it has moved yet (a click that doesn't move is
+    // a pick, not an undo step).
+    struct Pick { RetopoState* st; uint32_t isl; };
+    static std::vector<Pick> picked;
+    static bool drag_armed = false, drag_on = false;
+    static ImVec2 drag_from;
+    static Pick press{nullptr, ~0u};   // a plain press on a picked island: just it, if no drag follows
+    auto is_picked = [&](const RetopoState* t, uint32_t isl) {
+        for (const Pick& q : picked) if (q.st == t && q.isl == isl) return true;
+        return false;
+    };
+    const float bh = 30.0f, gap = 6.0f, row_h = 36.0f, sub_h = 30.0f, kIn = 8.0f;
     const float min_w = (g_dos ? 320.0f : 260.0f) + 20.0f;
     const float top = g_cmd_bottom + 12.0f;
     const float bottom = (g_status_top > top ? g_status_top : (float)win_h - kEdge) - 12.0f;
@@ -4596,9 +4653,9 @@ void draw_uv_dock(InputState& input, RetopoState& st, int win_w, int win_h) {
     ImGui::PushStyleColor(ImGuiCol_ResizeGrip, IM_COL32(0, 0, 0, 0));
     ImGui::PushStyleColor(ImGuiCol_ResizeGripHovered, with_alpha(kAccent, 0.6f));
     ImGui::PushStyleColor(ImGuiCol_ResizeGripActive, kAccent);
-    const bool shown = ImGui::Begin("##UvDock", nullptr, flags);
+    const bool shown_win = ImGui::Begin("##UvDock", nullptr, flags);
     ImGui::PopStyleColor(3);
-    if (!shown) { end_panel(); return; }
+    if (!shown_win) { end_panel(); return; }
     window_panel(14.0f);
     {   // A shrinking app window must not strand it off screen.
         const ImVec2 p = ImGui::GetWindowPos(), sz = ImGui::GetWindowSize();
@@ -4606,6 +4663,10 @@ void draw_uv_dock(InputState& input, RetopoState& st, int win_w, int win_h) {
                        std::max(0.0f, std::min(p.y, (float)win_h - sz.y)));
         if (c.x != p.x || c.y != p.y) ImGui::SetWindowPos(c);
     }
+    auto tip = [](const char* t) {
+        if (ImGui::IsItemHovered())
+            tooltip(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), TipSide::Left, t, nullptr);
+    };
     const float w = ImGui::GetContentRegionAvail().x;
     const RetopoMesh& rm = st.result;
     UvLayout& L = st.uv;
@@ -4615,8 +4676,39 @@ void draw_uv_dock(InputState& input, RetopoState& st, int win_w, int win_h) {
     const bool fresh = have && L.key == uv_topology_key(rm);
     if (!have || st.uv_sel >= L.charts) st.uv_sel = ~0u;
     if (have && L.names.size() < L.charts) L.names.resize(L.charts);
+    const bool baking = st.bake.running();   // the active mesh stays put until it's done
 
-    // Per island: faces, area in the square and on the mesh (for the open row's readout).
+    // What the square shows: the other selected meshes with a layout first (drawn under),
+    // the active mesh last (on top, and the first to take hover and clicks).
+    struct Shown { UvMeshRow* r; bool fresh; };
+    static std::vector<Shown> shown;
+    shown.clear();
+    bool any_built = false;
+    UvMeshRow* act_row = nullptr;
+    for (int i = 0; i < nrows; i++) {
+        UvMeshRow& r = rows[i];
+        if (r.active) act_row = &r;
+        if (!(r.active || r.selected) || !r.st->built) continue;
+        any_built = true;
+        const UvLayout& l = r.st->uv;
+        if (r.active || l.empty() || !l.fits(r.st->result)) continue;
+        shown.push_back({&r, l.key == uv_topology_key(r.st->result)});
+    }
+    if (have && act_row) shown.push_back({act_row, fresh});
+    const bool many = shown.size() > 1;
+    bool any_fresh = false;
+    for (const Shown& s : shown) any_fresh |= s.fresh;
+    // The other meshes keep no island picked once the active one is someone else.
+    for (int i = 0; i < nrows; i++)
+        if (!rows[i].active && rows[i].id != input.uv_focus) rows[i].st->uv_sel = ~0u;
+    // Picks on a mesh that left the square, or an island its layout no longer has, go.
+    picked.erase(std::remove_if(picked.begin(), picked.end(), [&](const Pick& q) {
+        for (const Shown& sh : shown) if (sh.r->st == q.st) return q.isl >= q.st->uv.charts;
+        return true;
+    }), picked.end());
+
+    // Per island of the active mesh: faces, area in the square and on the mesh (for the
+    // open row's readout).
     static std::vector<uint32_t> isl_faces;
     static std::vector<double> isl_uv, isl_3d;
     double uv_sum = 0.0, d3_sum = 0.0;
@@ -4643,13 +4735,59 @@ void draw_uv_dock(InputState& input, RetopoState& st, int win_w, int win_h) {
         }
     }
 
+    // A click on an island: on the active mesh it's picked; on another shown mesh that
+    // mesh becomes the active one (next frame), so its undo and bake are the ones in reach.
+    auto pick_island = [&](UvMeshRow* r, uint32_t isl) {
+        if (!r || r->active) { st.uv_sel = r ? isl : ~0u; return; }
+        if (baking) return;
+        st.uv_sel = ~0u;
+        r->st->uv_sel = isl;
+        input.uv_focus = r->id;
+    };
+    // Every shown layout into a square on screen; returns the island under `mouse` and
+    // (hit) whose it is. The active mesh's draw bright, the others faded behind it.
+    auto draw_all = [&](ImDrawList* d, ImVec2 o, float side, float zoom, ImVec2 c, bool pick, ImVec2 mouse,
+                        UvMeshRow*& hit, bool with_picks) -> uint32_t {
+        uint32_t under = ~0u;
+        hit = nullptr;
+        static std::vector<uint8_t> mask;
+        for (const Shown& s : shown) {
+            RetopoState& t = *s.r->st;
+            const bool a = s.r->active;
+            const float k = (s.fresh ? 1.0f : 0.35f) * (a || !many ? 1.0f : 0.5f);
+            bool any = false;
+            if (with_picks) {
+                mask.assign(t.uv.charts, 0);
+                for (const Pick& q : picked) if (q.st == &t) { mask[q.isl] = 1; any = true; }
+            }
+            const uint32_t u = draw_uv_islands(d, t.result, t.uv, o, side, zoom, c, k, t.uv_sel,
+                                               a ? last_hover : ~0u, pick, mouse, any ? &mask : nullptr);
+            if (u != ~0u) { under = u; hit = s.r; }
+        }
+        return under;
+    };
+
+    // The mesh list's rows, worked out first: the square takes whatever room they leave.
     static bool list_open = true, bake_open = true;
+    static uint32_t open_id = 0;   // the mesh whose islands are folded out under its row
+    const bool islands_out = have && act_row && open_id == act_row->id;
+    const float detail_h = 2.0f * 16.0f + 6.0f;
+    float list_full = 0.0f;
+    for (int i = 0; i < nrows; i++) list_full += row_h + gap;
+    if (islands_out) list_full += (float)L.charts * (sub_h + gap) + (st.uv_sel < L.charts ? detail_h : 0.0f);
+    list_full = std::max(0.0f, list_full - gap);
+    const float list_h = std::min(list_full, 4.0f * (row_h + gap) - gap);   // past four rows it scrolls
+    // Unwrap, Re-pack, Clear seams and Export share a row when it's wide enough.
+    const float w_btn = text_size(UiFont::Sans, 13.0f, "Unwrap").x + text_size(UiFont::Sans, 13.0f, "Re-pack").x
+                      + text_size(UiFont::Sans, 13.0f, "Clear seams").x + 3.0f * 24.0f;
+    const bool one_row = w_btn + bh + 3.0f * gap <= w;
+
     label_item(UiFont::SansSemibold, 13.0f, kText, "UV Layout", w, 18.0f);
-    // What sits under the square: readout, buttons, the bake's header and (open) its
-    // rows, the list's header, and (open) room for three rows. The square takes the
-    // rest, up to the full width.
+    // What sits under the square: readout, buttons, the list's header and (open) its rows,
+    // the bake's header and (open) its rows. The square takes the rest, up to the full width.
     const float bake_h = 20.0f + gap + (bake_open ? bh * 3.0f + ImGui::GetFrameHeight() + 16.0f + gap * 5.0f : 0.0f);
-    const float below = 18.0f + bh + bake_h + 20.0f + gap * 4.0f + (list_open && have ? row_h * 3.0f + gap * 3.0f : 0.0f);
+    const float below = 18.0f + bh + (one_row ? 0.0f : bh + gap) + 20.0f + (list_open ? list_h + gap : 0.0f)
+                      + bake_h + gap * 4.0f;
     const float side = std::max(80.0f, std::min(w, ImGui::GetContentRegionAvail().y - below));
     const ImVec2 o0 = ImGui::GetCursorScreenPos();
     const ImVec2 sq0(o0.x + std::floor((w - side) * 0.5f), o0.y), sq1(sq0.x + side, sq0.y + side);
@@ -4660,29 +4798,29 @@ void draw_uv_dock(InputState& input, RetopoState& st, int win_w, int win_h) {
     dl->AddRectFilled(sq0, sq1, IM_COL32(0, 0, 0, 70), g_dos ? 0.0f : rad(4.0f));
     ImGui::SetCursorScreenPos(sq0);
     ImGui::InvisibleButton("##uvsquare", ImVec2(side, side));
-    const bool sq_hov = ImGui::IsItemHovered() && have && !big;
-    if (have && big_a <= 0.0f) {
+    const bool sq_hov = ImGui::IsItemHovered() && !shown.empty() && !big;
+    if (!shown.empty() && big_a <= 0.0f) {
         const ImVec2 m = ImGui::GetIO().MousePos;
-        const uint32_t under = draw_uv_islands(dl, rm, L, sq0, side, 1.0f, ImVec2(0.5f, 0.5f), fresh ? 1.0f : 0.35f,
-                                               st.uv_sel, last_hover, sq_hov, m);
+        UvMeshRow* hit = nullptr;
+        const uint32_t under = draw_all(dl, sq0, side, 1.0f, ImVec2(0.5f, 0.5f), sq_hov, m, hit, false);
         if (sq_hov) {
-            st.uv_hover = under;
+            if (hit && hit->active) st.uv_hover = under;
             if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
                 big = true;
                 big_frame = ImGui::GetFrameCount();
                 big_zoom = 1.0f;
                 big_c = ImVec2(0.5f, 0.5f);
             } else if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
-                st.uv_sel = under;
+                pick_island(hit, under);
             }
-            tooltip(sq0, sq1, TipSide::Left, "Double-click: look closer", nullptr);
+            tooltip(sq0, sq1, TipSide::Left, "Double-click: look closer, move islands by hand", nullptr);
         }
     }
     dl->AddRect(sq0, sq1, kDivider, g_dos ? 0.0f : rad(4.0f));
-    if (!fresh) {
-        const char* msg = !st.built ? "Build a retopo mesh in mode 0"
-                        : have      ? "Out of date: the mesh changed"
-                                    : "Not unwrapped yet";
+    if (!any_fresh) {
+        const char* msg = !any_built ? "Build a retopo mesh in mode 0"
+                        : have       ? "Out of date: the mesh changed"
+                                     : "Not unwrapped yet";
         ImFont* fnt = F(UiFont::Sans);
         const ImVec2 ts = fnt ? fnt->CalcTextSizeA(12.0f, FLT_MAX, 0.0f, msg) : ImVec2(0, 0);
         dl->AddText(fnt, 12.0f, ImVec2(sq0.x + (side - ts.x) * 0.5f, sq0.y + (side - ts.y) * 0.5f), kMuted, msg);
@@ -4693,25 +4831,61 @@ void draw_uv_dock(InputState& input, RetopoState& st, int win_w, int win_h) {
     retopo_seam_edges(rm, seams);
     const size_t ns = seams.size() / 2;
     const bool seams_moved = fresh && L.seam_key != uv_seam_key(rm);
+    // Several meshes in the square: do they share it, or lie on top of each other?
+    // Checked again only when one of them changed.
+    static uint64_t ov_key = 0;
+    static bool ov = false;
+    if (many) {
+        uint64_t k = 1469598103934665603ull;
+        for (const Shown& s : shown) { k = (k ^ s.r->id) * 1099511628211ull; k = (k ^ s.r->st->rev) * 1099511628211ull; }
+        if (drag_on) k = ov_key;   // not every frame of a drag
+        if (k != ov_key) {
+            ov_key = k;
+            static std::vector<const RetopoState*> ls;
+            ls.clear();
+            for (const Shown& s : shown) ls.push_back(s.r->st);
+            ov = layouts_overlap(ls);
+        }
+    }
     char ro[96];
-    if (seams_moved) std::snprintf(ro, sizeof ro, "seams changed: Unwrap again");
+    bool loud = seams_moved;
+    if (many) {
+        uint32_t isl = 0;
+        float used = 0.0f;
+        for (const Shown& s : shown) { isl += s.r->st->uv.charts; used += s.r->st->uv.used; }
+        if (ov) { std::snprintf(ro, sizeof ro, "%zu meshes overlap: Re-pack them", shown.size()); loud = true; }
+        else std::snprintf(ro, sizeof ro, "%zu meshes \xC2\xB7 %u islands \xC2\xB7 %.0f%%", shown.size(), isl, used * 100.0f);
+    }
+    else if (seams_moved) std::snprintf(ro, sizeof ro, "seams changed: Unwrap again");
     else if (fresh) std::snprintf(ro, sizeof ro, "%u islands \xC2\xB7 %.0f%% \xC2\xB7 %zu seam edge%s", L.charts,
                                   L.used * 100.0f, ns, ns == 1 ? "" : "s");
     else if (st.built) std::snprintf(ro, sizeof ro, "%u faces \xC2\xB7 %zu seam edge%s", rm.face_count(), ns, ns == 1 ? "" : "s");
     else std::snprintf(ro, sizeof ro, "no retopo mesh");
-    label_item(UiFont::Mono, 12.0f, seams_moved ? kText : kMuted, ro, 0.0f, 18.0f);
+    label_item(UiFont::Mono, 12.0f, loud ? kText : kMuted, ro, 0.0f, 18.0f);
 
+    // Unwrap and Re-pack: the dock's and the big view's, the same requests.
+    static char unwrap_tip[96], repack_tip[96];
+    if (many) {
+        std::snprintf(unwrap_tip, sizeof unwrap_tip, "Unwrap the %zu meshes shown into one square (an atlas)", shown.size());
+        std::snprintf(repack_tip, sizeof repack_tip, "Pack the %zu meshes' islands into one square together, as they are", shown.size());
+    } else {
+        std::snprintf(unwrap_tip, sizeof unwrap_tip, "%s", any_built ? "Cut the retopo mesh into islands and lay them flat"
+                                                                    : "Build a retopo mesh in mode 0 first");
+        std::snprintf(repack_tip, sizeof repack_tip, "%s", any_fresh ? "Pack the islands again, as they are (moved ones too)"
+                                                                    : "Unwrap first");
+    }
+    auto unwrap_buttons = [&]() {
+        if (chip("Unwrap", false, bh, any_built && !baking)) input.uv_unwrap_requested = true;
+        tip(unwrap_tip);
+        ImGui::SameLine();
+        if (chip("Re-pack", false, bh, any_fresh && !baking)) input.uv_repack_requested = true;
+        tip(repack_tip);
+    };
     const float x0 = ImGui::GetCursorPosX();
-    if (chip(have ? "Unwrap again" : "Unwrap", false, bh, st.built)) input.uv_unwrap_requested = true;
-    if (ImGui::IsItemHovered())
-        tooltip(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), TipSide::Left,
-                st.built ? "Cut the retopo mesh into islands and lay them flat" : "Build a retopo mesh in mode 0 first",
-                nullptr);
-    ImGui::SameLine();
+    unwrap_buttons();
+    if (one_row) ImGui::SameLine();
     if (chip("Clear seams", false, bh, ns > 0)) input.uv_seams_clear_requested = true;
-    if (ImGui::IsItemHovered())
-        tooltip(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), TipSide::Left,
-                "Remove every painted seam (Ctrl+Z takes it back)", nullptr);
+    tip("Remove every painted seam (Ctrl+Z takes it back)");
     ImGui::SameLine();
     ImGui::SetCursorPosX(x0 + w - bh);
     BtnOpts o;
@@ -4719,24 +4893,140 @@ void draw_uv_dock(InputState& input, RetopoState& st, int win_w, int win_h) {
     o.tip = fresh ? "Export OBJ with UVs" : "Export OBJ (unwrap first for UVs)"; o.enabled = st.built;
     if (icon_button("uvExport", Icon::CmdExport, bh, o)) input.retopo_export_requested = true;
 
-    // Bake (bake.h): the sculpt under the retopo mesh into textures on this layout.
-    {
-        BakeState& bk = st.bake;
-        BakeSettings& bs = bk.settings;
+    // A section header: click folds it away (the square grows into the room).
+    auto section = [&](const char* id, const char* label, bool& open) {
         const ImVec2 h0 = ImGui::GetCursorScreenPos();
-        ImGui::InvisibleButton("##uvBakeHead", ImVec2(w, 20.0f));
-        if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) bake_open = !bake_open;
+        ImGui::InvisibleButton(id, ImVec2(w, 20.0f));
+        if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) open = !open;
         if (ImGui::IsItemHovered())
             dl->AddRectFilled(h0, ImVec2(h0.x + w, h0.y + 20.0f), IM_COL32(255, 255, 255, 14), rad(4.0f));
         const float cy = h0.y + 10.0f, cx = h0.x + 8.0f;
-        if (bake_open) dl->AddTriangleFilled(ImVec2(cx - 4.0f, cy - 2.0f), ImVec2(cx + 4.0f, cy - 2.0f), ImVec2(cx, cy + 3.0f), kMuted);
-        else           dl->AddTriangleFilled(ImVec2(cx - 2.0f, cy - 4.0f), ImVec2(cx - 2.0f, cy + 4.0f), ImVec2(cx + 3.0f, cy), kMuted);
-        const ImVec2 ts = text_size(UiFont::SansSemibold, 13.0f, "Bake");
-        text_at(dl, UiFont::SansSemibold, 13.0f, ImVec2(h0.x + 18.0f, cy - ts.y * 0.5f), kText, "Bake");
-        auto tip = [](const char* t) {
-            if (ImGui::IsItemHovered())
-                tooltip(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), TipSide::Left, t, nullptr);
-        };
+        if (open) dl->AddTriangleFilled(ImVec2(cx - 4.0f, cy - 2.0f), ImVec2(cx + 4.0f, cy - 2.0f), ImVec2(cx, cy + 3.0f), kMuted);
+        else      dl->AddTriangleFilled(ImVec2(cx - 2.0f, cy - 4.0f), ImVec2(cx - 2.0f, cy + 4.0f), ImVec2(cx + 3.0f, cy), kMuted);
+        const ImVec2 ts = text_size(UiFont::SansSemibold, 13.0f, label);
+        text_at(dl, UiFont::SansSemibold, 13.0f, ImVec2(h0.x + 18.0f, cy - ts.y * 0.5f), kText, label);
+    };
+
+    // ---- The meshes, newest on top as in the Meshes dock. Click shows one's layout,
+    // Ctrl+click adds it to the square. The active one's arrow folds its islands out.
+    char mhead[32];
+    std::snprintf(mhead, sizeof mhead, "Meshes (%d)", nrows);
+    section("##uvListHead", mhead, list_open);
+    if (list_open && nrows > 0) {
+        ImGui::BeginChild("##uvMeshes", ImVec2(w, std::max(row_h, list_h)), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
+        ImDrawList* ldl = ImGui::GetWindowDrawList();
+        const float row_w = w - (ImGui::GetScrollMaxY() > 0.0f ? ImGui::GetStyle().ScrollbarSize + 2.0f : 0.0f);
+        const double mean = d3_sum > 0.0 ? uv_sum / d3_sum : 0.0;
+        for (int ri = nrows - 1; ri >= 0; ri--) {
+            UvMeshRow& r = rows[ri];
+            const RetopoState& t = *r.st;
+            ImGui::PushID((int)r.id);
+            const ImVec2 r0 = ImGui::GetCursorScreenPos(), r1(r0.x + row_w, r0.y + row_h);
+            const bool lay = t.built && !t.uv.empty() && t.uv.fits(t.result);
+            const bool can_fold = r.active && have;
+            // The fold arrow (the active mesh with islands only), then the name.
+            const float aw = can_fold ? 22.0f : 0.0f;
+            if (can_fold) {
+                ImGui::SetCursorScreenPos(r0);
+                ImGui::InvisibleButton("##fold", ImVec2(aw + kIn, row_h));
+                if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) open_id = islands_out ? 0 : r.id;
+                tip(islands_out ? "Fold its islands away" : "Show its islands");
+                const bool ah = ImGui::IsItemHovered();
+                const float cx = r0.x + kIn + 7.0f, cy = r0.y + row_h * 0.5f;
+                const ImU32 ac = ah ? kText : kMuted;
+                if (islands_out) ldl->AddTriangleFilled(ImVec2(cx - 5.0f, cy - 3.0f), ImVec2(cx + 5.0f, cy - 3.0f), ImVec2(cx, cy + 4.0f), ac);
+                else             ldl->AddTriangleFilled(ImVec2(cx - 3.0f, cy - 5.0f), ImVec2(cx - 3.0f, cy + 5.0f), ImVec2(cx + 4.0f, cy), ac);
+            }
+            const ImVec2 n0(r0.x + aw + (can_fold ? kIn : 0.0f), r0.y);
+            ImGui::SetCursorScreenPos(n0);
+            ImGui::InvisibleButton("##row", ImVec2(r1.x - n0.x, row_h));
+            const bool row_hov = ImGui::IsItemHovered();
+            if (row_hov) ldl->AddRectFilled(r0, r1, IM_COL32(255, 255, 255, 14), rad(9.0f));
+            if (ImGui::IsItemClicked(ImGuiMouseButton_Left) && !baking) {
+                input.mesh_layer_pick = r.id;
+                input.mesh_layer_pick_add = ImGui::GetIO().KeyCtrl;
+            }
+            tip(baking ? "Baking: Stop it or let it finish before switching meshes"
+                       : "Click shows its layout, Ctrl+click adds it to the square (Unwrap or Re-pack them together for an atlas)");
+            char foot[32];
+            if (!t.built) std::snprintf(foot, sizeof foot, "no retopo");
+            else if (!lay) std::snprintf(foot, sizeof foot, "not unwrapped");
+            else if (t.uv.key != uv_topology_key(t.result)) std::snprintf(foot, sizeof foot, "out of date");
+            else std::snprintf(foot, sizeof foot, "%u island%s", t.uv.charts, t.uv.charts == 1 ? "" : "s");
+            const UiFont nf = r.active ? UiFont::SansSemibold : UiFont::Sans;
+            const ImVec2 ts = text_size(nf, 13.0f, r.shown), fs = text_size(UiFont::Mono, 11.0f, foot);
+            const float tx = n0.x + (can_fold ? 2.0f : kIn);
+            ldl->PushClipRect(ImVec2(tx, r0.y), ImVec2(r1.x - kIn - fs.x - 8.0f, r1.y), true);
+            text_at(ldl, nf, 13.0f, ImVec2(tx, r0.y + (row_h - ts.y) * 0.5f), t.built ? kText : kMuted, r.shown);
+            ldl->PopClipRect();
+            text_at(ldl, UiFont::Mono, 11.0f, ImVec2(r1.x - kIn - fs.x, r0.y + (row_h - fs.y) * 0.5f), kMuted, foot);
+            if (r.active)        ldl->AddRect(r0, r1, kAccent, rad(9.0f), 0, 2.0f);
+            else if (r.selected) ldl->AddRect(r0, r1, with_alpha(kAccent, 0.45f), rad(9.0f), 0, 1.5f);
+            ImGui::SetCursorScreenPos(ImVec2(r0.x, r1.y + gap));
+
+            // Its islands, folded out: indented under it.
+            if (r.active && islands_out) {
+                const float ind = 18.0f;
+                for (uint32_t i = 0; i < L.charts; i++) {
+                    ImGui::PushID((int)i);
+                    const ImVec2 s0r = ImGui::GetCursorScreenPos();
+                    const ImVec2 i0(s0r.x + ind, s0r.y);
+                    const bool open = i == st.uv_sel;
+                    const float rh = open ? sub_h + detail_h : sub_h;
+                    const ImVec2 i1(r0.x + row_w, i0.y + rh);
+                    ImGui::SetCursorScreenPos(i0);
+                    ImGui::InvisibleButton("##isl", ImVec2(i1.x - i0.x, rh));
+                    const bool ih = ImGui::IsItemHovered();
+                    if (ih) {
+                        ldl->AddRectFilled(i0, i1, IM_COL32(255, 255, 255, 14), rad(8.0f));
+                        st.uv_hover = i;
+                        if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) st.uv_sel = open ? ~0u : i;
+                        tip("Click opens it");
+                    }
+                    char nm[48];
+                    if (L.names[i].empty()) std::snprintf(nm, sizeof nm, "Island %u", i + 1);
+                    else                    std::snprintf(nm, sizeof nm, "%s", L.names[i].c_str());
+                    const float sw = 12.0f;
+                    const ImVec2 sp(i0.x + kIn, i0.y + (sub_h - sw) * 0.5f);
+                    ldl->AddRectFilled(sp, ImVec2(sp.x + sw, sp.y + sw), uv_island_color(i, fresh ? 0.95f : 0.4f), rad(3.0f));
+                    const ImVec2 ns2 = text_size(UiFont::Sans, 13.0f, nm);
+                    text_at(ldl, UiFont::Sans, 13.0f, ImVec2(sp.x + sw + 8.0f, i0.y + (sub_h - ns2.y) * 0.5f), kText, nm);
+                    // Folded over itself (the unwrap's flag): said in place of the face count.
+                    const bool folded = i < L.needs_cut.size() && L.needs_cut[i];
+                    char fc[24];
+                    if (folded) std::snprintf(fc, sizeof fc, "folds: add a seam");
+                    else        std::snprintf(fc, sizeof fc, "%u face%s", isl_faces[i], isl_faces[i] == 1 ? "" : "s");
+                    const ImVec2 fcs = text_size(UiFont::Mono, 11.0f, fc);
+                    text_at(ldl, UiFont::Mono, 11.0f, ImVec2(i1.x - kIn - fcs.x, i0.y + (sub_h - fcs.y) * 0.5f),
+                            folded ? kAlert : kMuted, fc);
+                    if (open) {
+                        // Texel density: how big this island is in the square for its size on
+                        // the mesh, against the layout as a whole (1x = average; 2x = twice
+                        // the pixels across).
+                        char l1[48], l2[48];
+                        std::snprintf(l1, sizeof l1, "Share of the square: %.1f%%", isl_uv[i] * 100.0);
+                        std::snprintf(l2, sizeof l2, "Texel density: %.2fx",
+                                      mean > 0.0 && isl_3d[i] > 0.0 ? std::sqrt(isl_uv[i] / isl_3d[i] / mean) : 0.0);
+                        text_at(ldl, UiFont::Mono, 12.0f, ImVec2(sp.x + sw + 8.0f, i0.y + sub_h - 2.0f), kMuted, l1);
+                        text_at(ldl, UiFont::Mono, 12.0f, ImVec2(sp.x + sw + 8.0f, i0.y + sub_h + 14.0f), kMuted, l2);
+                        ldl->AddRect(i0, i1, kAccent, rad(8.0f), 0, 2.0f);
+                    }
+                    if (ih || i == last_hover) ldl->AddRect(i0, i1, uv_island_color(i, 1.0f), rad(8.0f), 0, 1.5f);
+                    ImGui::SetCursorScreenPos(ImVec2(s0r.x, i1.y + gap));
+                    ImGui::PopID();
+                }
+            }
+            ImGui::PopID();
+        }
+        ImGui::Dummy(ImVec2(0.0f, 0.0f));
+        ImGui::EndChild();
+    }
+
+    // ---- Bake (bake.h): the sculpt under the retopo mesh into textures on this layout.
+    {
+        BakeState& bk = st.bake;
+        BakeSettings& bs = bk.settings;
+        section("##uvBakeHead", "Bake", bake_open);
         const bool idle = !bk.running();
         if (bake_open) {
             // Which maps, and the normal map's green.
@@ -4771,7 +5061,7 @@ void draw_uv_dock(InputState& input, RetopoState& st, int win_w, int win_h) {
                 tip(!st.built ? "Build a retopo mesh in mode 0 first"
                     : !fresh  ? "Unwrap first: the bake goes onto the UV layout"
                     : !(bs.normal || bs.color) ? "Pick a map to bake"
-                              : "Bake the sculpt under the retopo mesh into these maps");
+                              : "Bake the active mesh's sculpt under its retopo mesh into these maps");
             } else {
                 // A bar in the button's place: how far, and what it's doing.
                 const float pw = std::max(80.0f, w - 70.0f - gap);
@@ -4811,124 +5101,39 @@ void draw_uv_dock(InputState& input, RetopoState& st, int win_w, int win_h) {
             label_item(UiFont::Mono, 12.0f, idle && !r.empty() && (!bk.fresh || r.missed > 0.02f) ? kText : kMuted, ro2, 0.0f, 16.0f);
         }
     }
-
-    // The islands' header: click folds the list away (the square grows into the room).
-    {
-        const ImVec2 h0 = ImGui::GetCursorScreenPos();
-        ImGui::InvisibleButton("##uvListHead", ImVec2(w, 20.0f));
-        if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) list_open = !list_open;
-        if (ImGui::IsItemHovered())
-            dl->AddRectFilled(h0, ImVec2(h0.x + w, h0.y + 20.0f), IM_COL32(255, 255, 255, 14), rad(4.0f));
-        const float cy = h0.y + 10.0f, cx = h0.x + 8.0f;
-        if (list_open) dl->AddTriangleFilled(ImVec2(cx - 4.0f, cy - 2.0f), ImVec2(cx + 4.0f, cy - 2.0f), ImVec2(cx, cy + 3.0f), kMuted);
-        else           dl->AddTriangleFilled(ImVec2(cx - 2.0f, cy - 4.0f), ImVec2(cx - 2.0f, cy + 4.0f), ImVec2(cx + 3.0f, cy), kMuted);
-        char head[32];
-        if (have) std::snprintf(head, sizeof head, "Islands (%u)", L.charts);
-        else      std::snprintf(head, sizeof head, "Islands");
-        const ImVec2 ts = text_size(UiFont::SansSemibold, 13.0f, head);
-        text_at(dl, UiFont::SansSemibold, 13.0f, ImVec2(h0.x + 18.0f, cy - ts.y * 0.5f), kText, head);
-    }
-    static uint32_t rename_isl = ~0u;
-    static bool rename_focus = false;
-    static char rename_buf[48];
-    if (!have) rename_isl = ~0u;
-    if (list_open && !have) {
-        label_item(UiFont::Sans, 12.0f, kMuted, "Unwrap to list the islands", 0.0f, 16.0f);
-    } else if (list_open) {
-        ImGui::BeginChild("##uvList", ImVec2(w, std::max(row_h, ImGui::GetContentRegionAvail().y)),
-                          ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
-        ImDrawList* ldl = ImGui::GetWindowDrawList();
-        const float row_w = w - (ImGui::GetScrollMaxY() > 0.0f ? ImGui::GetStyle().ScrollbarSize + 2.0f : 0.0f);
-        const double mean = d3_sum > 0.0 ? uv_sum / d3_sum : 0.0;
-        for (uint32_t i = 0; i < L.charts; i++) {
-            ImGui::PushID((int)i);
-            const ImVec2 r0 = ImGui::GetCursorScreenPos();
-            const bool open = i == st.uv_sel;
-            const float rh = open ? row_h + 2.0f * 16.0f + 6.0f : row_h;
-            const ImVec2 r1(r0.x + row_w, r0.y + rh);
-            char nm[48];
-            if (L.names[i].empty()) std::snprintf(nm, sizeof nm, "Island %u", i + 1);
-            else                    std::snprintf(nm, sizeof nm, "%s", L.names[i].c_str());
-            const float sw = 14.0f, tx = r0.x + kIn + sw + 8.0f;
-            const ImVec2 s0(r0.x + kIn, r0.y + (row_h - sw) * 0.5f);
-            bool row_hov = false;
-            if (rename_isl == i) {
-                // Enter or clicking away keeps it, Esc drops it, empty keeps the old name.
-                ImGui::SetCursorScreenPos(ImVec2(tx - 4.0f, r0.y + (row_h - ImGui::GetFrameHeight()) * 0.5f));
-                if (rename_focus) { ImGui::SetKeyboardFocusHere(); rename_focus = false; }
-                ImGui::SetNextItemWidth(r1.x - tx - kIn + 4.0f);
-                ImGui::InputText("##rename", rename_buf, sizeof(rename_buf), ImGuiInputTextFlags_AutoSelectAll);
-                if (ImGui::IsItemDeactivated()) {
-                    if (!ImGui::IsKeyPressed(ImGuiKey_Escape) && rename_buf[0]) { L.names[i] = rename_buf; st.rev++; }
-                    rename_isl = ~0u;
-                }
-            } else {
-                ImGui::SetCursorScreenPos(r0);
-                ImGui::InvisibleButton("##row", ImVec2(row_w, rh));
-                row_hov = ImGui::IsItemHovered();
-                if (row_hov) {
-                    ldl->AddRectFilled(r0, r1, IM_COL32(255, 255, 255, 14), rad(9.0f));
-                    st.uv_hover = i;
-                    if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
-                        rename_isl = i;
-                        rename_focus = true;
-                        st.uv_sel = i;
-                        std::snprintf(rename_buf, sizeof(rename_buf), "%s", nm);
-                    } else if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
-                        st.uv_sel = open ? ~0u : i;
-                    }
-                    tooltip(r0, r1, TipSide::Left, "Click opens it, double-click renames", nullptr);
-                }
-                const ImVec2 ts = text_size(UiFont::SansSemibold, 13.0f, nm);
-                text_at(ldl, UiFont::SansSemibold, 13.0f, ImVec2(tx, r0.y + (row_h - ts.y) * 0.5f), kText, nm);
-            }
-            ldl->AddRectFilled(s0, ImVec2(s0.x + sw, s0.y + sw), uv_island_color(i, fresh ? 0.95f : 0.4f), rad(3.0f));
-            // Folded over itself (the unwrap's flag): said in place of the face count.
-            const bool folded = i < L.needs_cut.size() && L.needs_cut[i];
-            char fc[24];
-            if (folded) std::snprintf(fc, sizeof fc, "folds: add a seam");
-            else        std::snprintf(fc, sizeof fc, "%u face%s", isl_faces[i], isl_faces[i] == 1 ? "" : "s");
-            const ImVec2 fs = text_size(UiFont::Mono, 11.0f, fc);
-            if (rename_isl != i)
-                text_at(ldl, UiFont::Mono, 11.0f, ImVec2(r1.x - kIn - fs.x, r0.y + (row_h - fs.y) * 0.5f),
-                        folded ? kAlert : kMuted, fc);
-            if (open) {
-                // Texel density: how big this island is in the square for its size on the
-                // mesh, against the layout as a whole (1x = average; 2x = twice the pixels
-                // across).
-                char l1[48], l2[48];
-                std::snprintf(l1, sizeof l1, "Share of the square: %.1f%%", isl_uv[i] * 100.0);
-                std::snprintf(l2, sizeof l2, "Texel density: %.2fx",
-                              mean > 0.0 && isl_3d[i] > 0.0 ? std::sqrt(isl_uv[i] / isl_3d[i] / mean) : 0.0);
-                text_at(ldl, UiFont::Mono, 12.0f, ImVec2(tx, r0.y + row_h - 2.0f), kMuted, l1);
-                text_at(ldl, UiFont::Mono, 12.0f, ImVec2(tx, r0.y + row_h + 14.0f), kMuted, l2);
-                ldl->AddRect(r0, r1, kAccent, rad(9.0f), 0, 2.0f);
-            }
-            if (row_hov || i == last_hover) ldl->AddRect(r0, r1, uv_island_color(i, 1.0f), rad(9.0f), 0, 1.5f);
-            ImGui::SetCursorScreenPos(ImVec2(r0.x, r1.y + gap));
-            ImGui::Dummy(ImVec2(0.0f, 0.0f));
-            ImGui::PopID();
-        }
-        ImGui::EndChild();
-    }
     end_panel();
 
     // The big view: the square flies out to the middle of the screen over a dimmed
-    // backdrop. Scroll zooms round the pointer, the middle button pans, hovering and
-    // clicking islands works as in the dock; Esc or a click outside sends it back.
-    // While it's out nothing reaches the model (the backdrop is an ImGui window, so
-    // the app sees ImGui wanting the mouse), and key_callback hands Esc to it.
-    if (big && (!have || input.uv_preview_esc)) big = false;
+    // backdrop. Scroll zooms round the pointer, the middle button pans, left-drag moves
+    // an island (one undo step a drag; dragging another mesh's makes that one active, so
+    // Ctrl+Z reaches it); Unwrap and Re-pack sit under it. Esc or a click outside sends
+    // it back. While it's out nothing reaches the model (the backdrop is an ImGui window,
+    // so the app sees ImGui wanting the mouse), and key_callback hands Esc to it.
+    if (big && (shown.empty() || input.uv_preview_esc)) big = false;
     input.uv_preview_esc = false;
     const float dt = ImGui::GetIO().DeltaTime;
     if (!g_motion) big_a = big ? 1.0f : 0.0f;
     else           big_a = std::max(0.0f, std::min(1.0f, big_a + (big ? dt : -dt) / 0.2f));
     if (big_a > 0.0f && big_a < 1.0f) input.wake_requested = true;   // frames until it lands
-    if (big_a <= 0.0f || !have) return;
+    ImGuiIO& io = ImGui::GetIO();
+    // A drag ends with the button, or if the view went away under it.
+    if (drag_armed && (!io.MouseDown[ImGuiMouseButton_Left] || !big)) {
+        if (drag_on) {   // moved islands are unsaved work (and a stale bake)
+            std::vector<RetopoState*> done;
+            for (const Pick& q : picked)
+                if (std::find(done.begin(), done.end(), q.st) == done.end()) { q.st->rev++; done.push_back(q.st); }
+        }
+        else if (press.st) picked.assign(1, press);
+        drag_armed = drag_on = false;
+        press = Pick{nullptr, ~0u};
+    }
+    if (!big) picked.clear();
+    if (big_a <= 0.0f || shown.empty()) { last_hover = st.uv_hover; return; }
     input.uv_preview_frame = ImGui::GetFrameCount();
     const float e = big_a * big_a * (3.0f - 2.0f * big_a);
-    const float side_t = std::floor(std::min((float)win_w, (float)win_h - 60.0f) * 0.8f);
-    const ImVec2 p_t(std::floor(((float)win_w - side_t) * 0.5f), std::floor(((float)win_h - side_t) * 0.5f) - 12.0f);
+    const float foot_h = bh + 14.0f;
+    const float side_t = std::floor(std::min((float)win_w, (float)win_h - 60.0f - foot_h) * 0.8f);
+    const ImVec2 p_t(std::floor(((float)win_w - side_t) * 0.5f), std::floor(((float)win_h - side_t - foot_h) * 0.5f));
     const float bs = dock_side + (side_t - dock_side) * e;
     const ImVec2 p(dock_o.x + (p_t.x - dock_o.x) * e, dock_o.y + (p_t.y - dock_o.y) * e);
     ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
@@ -4943,12 +5148,13 @@ void draw_uv_dock(InputState& input, RetopoState& st, int win_w, int win_h) {
     ImGui::PopStyleVar(2);
     ImDrawList* bdl = ImGui::GetWindowDrawList();
     bdl->AddRectFilled(ImVec2(0.0f, 0.0f), ImVec2((float)win_w, (float)win_h), IM_COL32(0, 0, 0, (int)(140.0f * e)));
-    const float pad = 10.0f * e, foot = 26.0f * e;
-    panel_bg(bdl, ImVec2(p.x - pad, p.y - pad), ImVec2(p.x + bs + pad, p.y + bs + pad + foot), 14.0f);
+    const float pad = 10.0f * e, foot = foot_h * e;
+    const ImVec2 panel0(p.x - pad, p.y - pad), panel1(p.x + bs + pad, p.y + bs + pad + foot);
+    panel_bg(bdl, panel0, panel1, 14.0f);
     bdl->AddRectFilled(p, ImVec2(p.x + bs, p.y + bs), IM_COL32(0, 0, 0, 70), g_dos ? 0.0f : rad(4.0f));
-    ImGuiIO& io = ImGui::GetIO();
     const ImVec2 m = io.MousePos;
     const bool inside = m.x >= p.x && m.y >= p.y && m.x < p.x + bs && m.y < p.y + bs;
+    const bool on_panel = m.x >= panel0.x && m.y >= panel0.y && m.x < panel1.x && m.y < panel1.y;
     if (big) {
         const float mx = p.x + bs * 0.5f, my = p.y + bs * 0.5f;
         if (inside && io.MouseWheel != 0.0f) {
@@ -4975,31 +5181,166 @@ void draw_uv_dock(InputState& input, RetopoState& st, int win_w, int win_h) {
         }
         bdl->AddRect(a, ImVec2(a.x + s, a.y + s), kDivider);
     }
-    const uint32_t under = draw_uv_islands(bdl, rm, L, p, bs, big_zoom, big_c, fresh ? 1.0f : 0.35f,
-                                           st.uv_sel, last_hover, big && inside, m);
+    UvMeshRow* hit = nullptr;
+    const uint32_t under = draw_all(bdl, p, bs, big_zoom, big_c, big && inside && !drag_on, m, hit, true);
     bdl->PopClipRect();
     bdl->AddRect(p, ImVec2(p.x + bs, p.y + bs), kDivider, g_dos ? 0.0f : rad(4.0f));
     if (big && ImGui::GetFrameCount() != big_frame) {
-        if (inside) st.uv_hover = under;
-        if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && inside) {
-            big_zoom = 1.0f;   // double-click: the whole square again
+        if (inside && hit && hit->active) st.uv_hover = under;
+        if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && inside && under == ~0u) {
+            big_zoom = 1.0f;   // double-click on the empty square: the whole square again
             big_c = ImVec2(0.5f, 0.5f);
         } else if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-            if (inside) st.uv_sel = under;
-            else        big = false;
+            if (inside) {
+                // Plain click: just that island (or, on one already picked, keep the set so
+                // the drag takes them all); on nothing, none. Ctrl+click adds or drops one.
+                const bool ctrl = io.KeyCtrl;
+                const bool ok = hit && under != ~0u && (hit->active || !baking);
+                if (!ok) {
+                    if (!ctrl) { picked.clear(); pick_island(nullptr, ~0u); }
+                } else if (ctrl && is_picked(hit->st, under)) {
+                    picked.erase(std::remove_if(picked.begin(), picked.end(), [&](const Pick& q) {
+                        return q.st == hit->st && q.isl == under; }), picked.end());
+                    if (hit->st->uv_sel == under) hit->st->uv_sel = ~0u;
+                } else {
+                    if (!ctrl && is_picked(hit->st, under) && picked.size() > 1) press = Pick{hit->st, under};
+                    if (!ctrl && !is_picked(hit->st, under)) picked.clear();
+                    if (!is_picked(hit->st, under)) picked.push_back({hit->st, under});
+                    pick_island(hit, under);
+                    drag_armed = true;
+                    drag_from = m;
+                    drag_on = false;
+                }
+            } else if (!on_panel) {
+                big = false;
+            }
+        }
+    }
+    // Moving the picked islands: the press armed it; past a few pixels they move together,
+    // one undo step a drag (per mesh they're on). The set stays inside the square
+    // (anything past the edge would bake to nothing).
+    if (drag_armed && big && !picked.empty()) {
+        if (!drag_on && std::hypot(m.x - drag_from.x, m.y - drag_from.y) > 3.0f) {
+            std::vector<RetopoState*> done;
+            for (const Pick& q : picked)
+                if (std::find(done.begin(), done.end(), q.st) == done.end()) { q.st->checkpoint(); done.push_back(q.st); }
+            drag_on = true;
+        }
+        if (drag_on && (io.MouseDelta.x != 0.0f || io.MouseDelta.y != 0.0f)) {
+            float lo_u = 1e30f, lo_v = 1e30f, hi_u = -1e30f, hi_v = -1e30f;
+            for (const Pick& q : picked) {
+                const RetopoMesh& dm = q.st->result;
+                const UvLayout& dL = q.st->uv;
+                for (uint32_t f = 0; f < dm.face_count(); f++) {
+                    if (dL.face_chart[f] != q.isl) continue;
+                    for (uint32_t j = dm.face_off[f]; j < dm.face_off[f + 1]; j++) {
+                        lo_u = std::min(lo_u, dL.uv[2 * j]); hi_u = std::max(hi_u, dL.uv[2 * j]);
+                        lo_v = std::min(lo_v, dL.uv[2 * j + 1]); hi_v = std::max(hi_v, dL.uv[2 * j + 1]);
+                    }
+                }
+            }
+            const float s = bs * big_zoom;
+            const float du = std::max(-lo_u, std::min(1.0f - hi_u, io.MouseDelta.x / s));
+            const float dv = std::max(-lo_v, std::min(1.0f - hi_v, -io.MouseDelta.y / s));
+            for (const Pick& q : picked) {
+                const RetopoMesh& dm = q.st->result;
+                UvLayout& dL = q.st->uv;
+                for (uint32_t f = 0; f < dm.face_count(); f++) {
+                    if (dL.face_chart[f] != q.isl) continue;
+                    for (uint32_t j = dm.face_off[f]; j < dm.face_off[f + 1]; j++) { dL.uv[2 * j] += du; dL.uv[2 * j + 1] += dv; }
+                }
+            }
+        }
+        input.wake_requested = true;
+    }
+    // Q / E turn the picked islands round the middle of the set, as Select mode spins
+    // meshes: held, a quarter turn a second (E clockwise); with Shift, exactly a quarter
+    // turn a press. Always a true rotation, never a mirror. One undo step a turn (per
+    // mesh the islands are on), and the set stays in the square.
+    {
+        struct Corner { UvLayout* L; uint32_t j; float u, v; };
+        static std::vector<Corner> from;
+        static std::vector<RetopoState*> turning;
+        static float ang = 0.0f;
+        static ImVec2 pivot;
+        const bool qd = ImGui::IsKeyDown(ImGuiKey_Q), ed = ImGui::IsKeyDown(ImGuiKey_E);
+        float step = 0.0f;
+        if (big && !picked.empty() && !drag_on) {
+            if (io.KeyShift) {
+                if (ImGui::IsKeyPressed(ImGuiKey_Q, false)) step = 1.5707963f;
+                if (ImGui::IsKeyPressed(ImGuiKey_E, false)) step = -1.5707963f;
+            } else if (qd != ed) {
+                step = (qd ? 1.0f : -1.0f) * 1.5707963f * std::min(io.DeltaTime, 0.1f);
+            }
+        }
+        if (step != 0.0f && turning.empty()) {
+            // The turn's start: the corners as they are, one undo step per mesh.
+            from.clear();
+            float lo_u = 1e30f, lo_v = 1e30f, hi_u = -1e30f, hi_v = -1e30f;
+            for (const Pick& q : picked) {
+                if (std::find(turning.begin(), turning.end(), q.st) == turning.end()) { q.st->checkpoint(); turning.push_back(q.st); }
+                const RetopoMesh& dm = q.st->result;
+                UvLayout& dL = q.st->uv;
+                for (uint32_t f = 0; f < dm.face_count(); f++) {
+                    if (dL.face_chart[f] != q.isl) continue;
+                    for (uint32_t j = dm.face_off[f]; j < dm.face_off[f + 1]; j++) {
+                        from.push_back({&dL, j, dL.uv[2 * j], dL.uv[2 * j + 1]});
+                        lo_u = std::min(lo_u, dL.uv[2 * j]); hi_u = std::max(hi_u, dL.uv[2 * j]);
+                        lo_v = std::min(lo_v, dL.uv[2 * j + 1]); hi_v = std::max(hi_v, dL.uv[2 * j + 1]);
+                    }
+                }
+            }
+            pivot = ImVec2((lo_u + hi_u) * 0.5f, (lo_v + hi_v) * 0.5f);
+            ang = 0.0f;
+        }
+        if (step != 0.0f && !turning.empty()) {
+            // From the start's corners each time, so a long turn doesn't drift; then
+            // slid back inside the square if it now pokes out (when it fits at all).
+            ang += step;
+            const float cs = std::cos(ang), sn = std::sin(ang);
+            float lo_u = 1e30f, lo_v = 1e30f, hi_u = -1e30f, hi_v = -1e30f;
+            for (const Corner& c : from) {
+                const float x = c.u - pivot.x, y = c.v - pivot.y;
+                const float u = pivot.x + x * cs - y * sn, v = pivot.y + x * sn + y * cs;
+                c.L->uv[2 * c.j] = u;
+                c.L->uv[2 * c.j + 1] = v;
+                lo_u = std::min(lo_u, u); hi_u = std::max(hi_u, u);
+                lo_v = std::min(lo_v, v); hi_v = std::max(hi_v, v);
+            }
+            const float su = hi_u - lo_u > 1.0f ? 0.0f : lo_u < 0.0f ? -lo_u : hi_u > 1.0f ? 1.0f - hi_u : 0.0f;
+            const float sv = hi_v - lo_v > 1.0f ? 0.0f : lo_v < 0.0f ? -lo_v : hi_v > 1.0f ? 1.0f - hi_v : 0.0f;
+            if (su != 0.0f || sv != 0.0f)
+                for (const Corner& c : from) { c.L->uv[2 * c.j] += su; c.L->uv[2 * c.j + 1] += sv; }
+            input.wake_requested = true;
+        }
+        if (!turning.empty() && (!big || !(qd || ed))) {   // let go: the turn is done
+            for (RetopoState* t : turning) t->rev++;
+            turning.clear();
+            from.clear();
         }
     }
     if (e > 0.6f) {
-        // Under the square: the island under the pointer (or the zoom), then the keys.
-        char left[64];
-        if (under < L.charts && !L.names[under].empty()) std::snprintf(left, sizeof left, "%s", L.names[under].c_str());
-        else if (under < L.charts) std::snprintf(left, sizeof left, "Island %u", under + 1);
+        // Under the square: Unwrap and Re-pack, the island under the pointer (or the
+        // zoom), then the keys.
+        ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + bs + 8.0f));
+        unwrap_buttons();
+        const float bx = ImGui::GetItemRectMax().x + 14.0f;
+        char left[96];
+        if (hit && under != ~0u) {
+            const UvLayout& hl = hit->st->uv;
+            char isl[48];
+            if (under < hl.names.size() && !hl.names[under].empty()) std::snprintf(isl, sizeof isl, "%s", hl.names[under].c_str());
+            else std::snprintf(isl, sizeof isl, "Island %u", under + 1);
+            if (many) std::snprintf(left, sizeof left, "%s \xC2\xB7 %s", isl, hit->shown);
+            else      std::snprintf(left, sizeof left, "%s", isl);
+        } else if (picked.size() > 1) std::snprintf(left, sizeof left, "%zu islands picked", picked.size());
         else std::snprintf(left, sizeof left, "%.0f%%", big_zoom * 100.0f);
-        const char* keys = "Scroll zoom \xC2\xB7 Middle-drag pan \xC2\xB7 Double-click fit \xC2\xB7 Esc back";
-        const float ty = p.y + bs + 6.0f;
-        text_at(bdl, UiFont::SansSemibold, 12.0f, ImVec2(p.x, ty), kText, left);
+        const char* keys = "Drag moves \xC2\xB7 Ctrl+click adds \xC2\xB7 Q/E turn \xC2\xB7 Scroll zoom \xC2\xB7 Middle-drag pan \xC2\xB7 Double-click fit \xC2\xB7 Esc back";
+        const float ty = p.y + bs + 8.0f + (bh - 14.0f) * 0.5f;
+        text_at(bdl, UiFont::SansSemibold, 12.0f, ImVec2(bx, ty), kText, left);
         const ImVec2 ks = text_size(UiFont::Sans, 12.0f, keys);
-        text_at(bdl, UiFont::Sans, 12.0f, ImVec2(p.x + bs - ks.x, ty), kMuted, keys);
+        if (p.x + bs - ks.x > bx + text_size(UiFont::SansSemibold, 12.0f, left).x + 12.0f)
+            text_at(bdl, UiFont::Sans, 12.0f, ImVec2(p.x + bs - ks.x, ty), kMuted, keys);
     }
     ImGui::End();
     last_hover = st.uv_hover;

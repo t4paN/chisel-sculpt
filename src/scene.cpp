@@ -466,6 +466,15 @@ bool Scene::select(uint32_t entity_id) {
     return true;
 }
 
+bool Scene::focus(uint32_t entity_id) {
+    if (!find_entity(entity_id)) return false;
+    std::vector<uint32_t> keep = selected_ids_;
+    set_active(entity_id);
+    if (std::find(keep.begin(), keep.end(), entity_id) == keep.end()) keep.push_back(entity_id);
+    selected_ids_ = std::move(keep);
+    return true;
+}
+
 void Scene::refresh_for_edit_mode() {
     // Make the active entity authoritative for editing. The old code did
     // set_active(0) for the single-mesh case, but entity ids start at 1 — id 0
