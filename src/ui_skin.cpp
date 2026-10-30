@@ -3920,8 +3920,8 @@ void draw_mesh_layers_dock(InputState& input, MeshLayerRow* rows, int n, int win
             ImGui::InputText("##rename", rename_buf, sizeof(rename_buf), ImGuiInputTextFlags_AutoSelectAll);
             if (ImGui::IsItemDeactivated()) {
                 if (!ImGui::IsKeyPressed(ImGuiKey_Escape) && rename_buf[0]) {
-                    *r.name = rename_buf;
-                    input.mesh_layers_changed = true;
+                    input.mesh_layer_rename = r.id;   // via Scene::rename_entity, for undo
+                    std::snprintf(input.mesh_layer_rename_to, sizeof input.mesh_layer_rename_to, "%s", rename_buf);
                 }
                 rename_id = 0;
             }

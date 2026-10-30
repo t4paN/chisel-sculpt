@@ -3,6 +3,7 @@
 #include "camera.h"
 #include "bake.h"
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -590,6 +591,19 @@ void retopo_load(RetopoState& st, RetopoSnapshot&& s);
 // the UVs split. Strokes don't survive an OBJ: Build would start the low over. False if
 // the object has no faces.
 bool retopo_from_obj(const ObjPart& p, RetopoSnapshot& out);
+
+// Select mode moved, scaled or turned the sculpt: its retopo goes along, history and any
+// open menu's options included, or an undo would put it back where the sculpt no longer
+// is. `run` is the very map the sculpt just got (live or replayed), handed every point as
+// a scratch Mesh: positions in pos_*, their normals in norm_*. `size` multiplies world
+// widths (a stroke's half_w): the scale factor, else 1.
+void retopo_transform(RetopoState& st, const std::function<void(Mesh&)>& run, float size);
+
+// SDF merge welded `from`'s sculpt into `into`'s: its retopo joins too, as one undo step
+// on `into`. Ids are renumbered past `into`'s, so strokes, eyes and twins stay apart.
+// A UV layout survives only when one side had faces (two layouts would overlap in the
+// square); returns false when one was dropped, so the caller can say re-unwrap.
+bool retopo_absorb(RetopoState& into, RetopoState& from);
 
 // The other way: the session's retopo into a project about to be saved. An open wand
 // menu is settled first (a plain preview goes, a spine's fill stays).

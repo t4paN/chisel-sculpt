@@ -620,6 +620,8 @@ int main(int argc, char* argv[]) {
     // last countdown figure put on screen, -1 meaning "not announced yet".
     SceneSnapshot rescue;
     int rescue_shown = -1;
+    // The same countdown for a deleted mesh held for undo (Scene::age_deleted).
+    int deleted_shown = -1;
     // Q/E object spin (SELECT mode). Each entity's pivot is latched in its own
     // ObjectXformTarget on the gesture's first frame — a bounding centre is
     // rotation-invariant in exact arithmetic but not in floating point, and
@@ -1098,6 +1100,28 @@ int main(int argc, char* argv[]) {
                               "%s reverts the %s - %d stroke%s left",
                               input.key_label(KeyAction::UNDO),
                               rescue.op, left, left == 1 ? "" : "s");
+                input.notification_timer = 2.5f;
+            }
+        }
+
+        // Age a deleted mesh held for undo: freed after Scene::DELETE_GRACE edits, the
+        // countdown shown like the rescue's whenever the line is free.
+        {
+            std::string held;
+            bool freed = false;
+            const int left = scene.age_deleted(held, freed);
+            if (freed) {
+                std::snprintf(input.notification, sizeof(input.notification),
+                              "Undo can no longer bring back the deleted mesh");
+                input.notification_timer = 2.0f;
+            }
+            if (left == 0) deleted_shown = -1;
+            else if (left != deleted_shown && left < Scene::DELETE_GRACE && input.notification_timer <= 0.0f) {
+                deleted_shown = left;
+                std::snprintf(input.notification, sizeof(input.notification),
+                              "%s brings back %s - %d stroke%s left",
+                              input.key_label(KeyAction::UNDO), held.c_str(),
+                              left, left == 1 ? "" : "s");
                 input.notification_timer = 2.5f;
             }
         }

@@ -712,6 +712,8 @@ struct InputState {
     uint32_t mesh_layer_pick = 0;
     bool     mesh_layer_pick_add = false;
     uint32_t mesh_layer_delete = 0;
+    uint32_t mesh_layer_rename = 0;          // this mesh takes mesh_layer_rename_to
+    char     mesh_layer_rename_to[64] = {};
     bool     mesh_layers_changed = false;
     bool     mesh_dock_folded = false;
     // Which mode's shortcuts are live: Paint while painting (EDIT in paint mode), else

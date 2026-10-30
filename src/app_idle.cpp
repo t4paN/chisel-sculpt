@@ -171,6 +171,7 @@ void app_idle_update(App& a, int win_w, int win_h, float dx, float dy) {
                 // agree, which is also what makes their undo an honest
                 // inverse rather than an over-correction.
                 if (e->multires.locked) move_mesh(e->multires.base);
+                retopo_transform(e->retopo, move_mesh, 1.0f);   // its low comes along
 
                 std::vector<uint32_t> local_dirty(vc);
                 for (uint32_t i = 0; i < vc; i++) local_dirty[i] = i;
@@ -239,6 +240,7 @@ void app_idle_update(App& a, int win_w, int win_h, float dx, float dy) {
                     xt.factor *= f;
                     scale_mesh(e->mesh);
                     if (e->multires.locked) scale_mesh(e->multires.base);   // see move
+                    retopo_transform(e->retopo, scale_mesh, f);
                     // Scaling a symmetric piece about an off-plane pivot
                     // takes it off the mirror plane, and no topology changed,
                     // so nothing else would re-measure. See the stroke gate.
@@ -339,6 +341,7 @@ void app_idle_update(App& a, int win_w, int win_h, float dx, float dy) {
                                         xt.mirror_lobes);
                     };
                     rotate_mesh(e->mesh);
+                    retopo_transform(e->retopo, rotate_mesh, 1.0f);
                     if (e->multires.locked) {
                         // The base cage has to turn with the surface or the
                         // next cascade regenerates the mesh unrotated.
@@ -401,6 +404,11 @@ void app_idle_update(App& a, int win_w, int win_h, float dx, float dy) {
             screen_buffers_dirty = true;
         }
     }
+    // ...or renamed (through the scene, so Ctrl+Z can take it back).
+    if (input.mesh_layer_rename) {
+        scene.rename_entity(input.mesh_layer_rename, input.mesh_layer_rename_to);
+        input.mesh_layer_rename = 0;
+    }
     // ...or its trash confirmed: make that one the selected mesh, then the Delete path.
     if (input.mesh_layer_delete) {
         const uint32_t id = input.mesh_layer_delete;
@@ -423,15 +431,17 @@ void app_idle_update(App& a, int win_w, int win_h, float dx, float dy) {
             } else if (r.deleted) {
                 mesh = &scene.active_mesh();
                 multires = &scene.active_multires();
-                // The deleted entity's undo history dies with it; the
+                // The deleted entity is held, history and all, for
+                // Scene::DELETE_GRACE edits (Ctrl+Z brings it back); the
                 // now-active entity keeps its own. No clear here.
                 brush_stroke.vertex_count = 0;
                 brush_stroke.phase = StrokePhase::NONE;
                 mesh->compute_bounding_sphere(mesh_center, mesh_radius);
                 screen_buffers_dirty = true;
                 std::snprintf(input.notification, sizeof(input.notification),
-                              "Deleted %s, now on %s", gone,
-                              Scene::display_name(scene.active_entity(), buf, sizeof buf));
+                              "Deleted %s, now on %s - %s brings it back", gone,
+                              Scene::display_name(scene.active_entity(), buf, sizeof buf),
+                              input.key_label(KeyAction::UNDO));
                 input.notification_timer = 2.0f;
             }
         }
@@ -565,7 +575,8 @@ void app_idle_update(App& a, int win_w, int win_h, float dx, float dy) {
 
     if (input.undo_requested && !undo_reads_pending
         && rescue.valid() && rescue.edits_left() > 0
-        && !scene.active_undo().can_undo() && !xforms.can_undo()) {
+        && !scene.active_undo().can_undo() && !xforms.can_undo()
+        && scene.mesh_op_seq() <= rescue.edits_at_capture) {
         input.undo_requested = false;
         const char* what = rescue.op;
         snapshot_restore(rescue, scene);
@@ -613,7 +624,12 @@ void app_idle_update(App& a, int win_w, int win_h, float dx, float dy) {
 
     const UndoEntry* utop = scene.active_undo().peek_undo();
     const UndoEntry* rtop = scene.active_undo().peek_redo();
-    const bool xform_undo_next = xforms.can_undo()
+    // A mesh deleted or renamed in the dock: undoable from any mode, when it's the
+    // newest thing on the clock. No redo (a re-delete is one click).
+    const uint64_t mop = scene.mesh_op_seq();
+    const bool meshop_undo_next = mop
+        && (!utop || mop > utop->seq) && (!xforms.can_undo() || mop > xforms.undo_seq());
+    const bool xform_undo_next = !meshop_undo_next && xforms.can_undo()
         && (!utop || xforms.undo_seq() > utop->seq);
     const bool xform_redo_next = xforms.can_redo()
         && (!rtop || xforms.redo_seq() < rtop->seq);
@@ -623,7 +639,7 @@ void app_idle_update(App& a, int win_w, int win_h, float dx, float dy) {
     // transform IS scene-level, and it is driven from Select mode, so it
     // has to stay reachable there.
     bool undo_allowed = input.interaction_mode == InputState::InteractionMode::EDIT;
-    if (input.undo_requested && !undo_allowed && xform_undo_next) undo_allowed = true;
+    if (input.undo_requested && !undo_allowed && (xform_undo_next || meshop_undo_next)) undo_allowed = true;
     if (input.redo_requested && !undo_allowed && xform_redo_next) undo_allowed = true;
     if ((input.undo_requested || input.redo_requested) && !undo_allowed
         && !undo_reads_pending) {
@@ -642,6 +658,19 @@ void app_idle_update(App& a, int win_w, int win_h, float dx, float dy) {
             std::snprintf(input.notification, sizeof(input.notification),
                           "Undo the newer edits on mesh %u first", xform_blocker);
             input.notification_timer = 2.5f;
+        } else if (meshop_undo_next) {
+            std::string what;
+            if (scene.undo_mesh_op(what)) {
+                mesh = &scene.active_mesh();
+                multires = &scene.active_multires();
+                scene.refresh_mirror_map();
+                refresh_active_gpu_residency();
+                mesh->compute_bounding_sphere(mesh_center, mesh_radius);
+                brush_stroke.vertex_count = 0;
+                brush_stroke.phase = StrokePhase::NONE;
+                std::snprintf(input.notification, sizeof(input.notification), "%s", what.c_str());
+                input.notification_timer = 2.0f;
+            }
         } else if (xform_undo_next) {
             xforms.undo(scene);
             if (xforms.last_was_spin()) refresh_active_gpu_residency();

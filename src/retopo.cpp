@@ -6287,6 +6287,109 @@ bool retopo_from_obj(const ObjPart& p, RetopoSnapshot& out) {
     return true;
 }
 
+void retopo_transform(RetopoState& st, const std::function<void(Mesh&)>& run, float size) {
+    // Every point the retopo keeps, live and in history, each with its normal if it has one.
+    // Gathered in one order, mapped, scattered back in the same order.
+    auto each = [&](auto&& fn) {
+        auto mesh = [&](RetopoMesh& rm) {
+            for (size_t i = 0; i < rm.v.size(); i++) fn(rm.v[i], i < rm.n.size() ? &rm.n[i] : nullptr);
+        };
+        auto strokes = [&](std::vector<RetopoStroke>& ks) {
+            for (RetopoStroke& k : ks)
+                for (size_t i = 0; i < k.pts.size(); i++) fn(k.pts[i], i < k.nrm.size() ? &k.nrm[i] : nullptr);
+        };
+        auto snap = [&](RetopoSnapshot& s) { mesh(s.result); strokes(s.strokes); };
+        mesh(st.result); strokes(st.strokes);
+        for (RetopoSnapshot& s : st.undo_stack) snap(s);
+        for (RetopoSnapshot& s : st.redo_stack) snap(s);
+        snap(st.pending); snap(st.wand_base); snap(st.paste_base); snap(st.grid_base);
+        for (auto& o : st.wand_opts) snap(o.after);
+    };
+    Mesh m;
+    each([&](Vec3& p, Vec3* n) {
+        m.pos_x.push_back(p.x); m.pos_y.push_back(p.y); m.pos_z.push_back(p.z);
+        const Vec3 d = n ? *n : Vec3(0, 0, 1);
+        m.norm_x.push_back(d.x); m.norm_y.push_back(d.y); m.norm_z.push_back(d.z);
+    });
+    if (m.pos_x.empty()) return;
+    run(m);
+    size_t i = 0;
+    each([&](Vec3& p, Vec3* n) {
+        p = Vec3(m.pos_x[i], m.pos_y[i], m.pos_z[i]);
+        if (n) *n = Vec3(m.norm_x[i], m.norm_y[i], m.norm_z[i]);
+        i++;
+    });
+    if (size != 1.0f) {
+        auto widths = [&](std::vector<RetopoStroke>& ks) { for (RetopoStroke& k : ks) for (float& w : k.half_w) w *= size; };
+        auto snap = [&](RetopoSnapshot& s) { widths(s.strokes); };
+        widths(st.strokes);
+        for (RetopoSnapshot& s : st.undo_stack) snap(s);
+        for (RetopoSnapshot& s : st.redo_stack) snap(s);
+        snap(st.pending); snap(st.wand_base); snap(st.paste_base); snap(st.grid_base);
+        for (auto& o : st.wand_opts) snap(o.after);
+    }
+    st.rev++;
+}
+
+bool retopo_absorb(RetopoState& into, RetopoState& from) {
+    retopo_wand_close(from, -1);
+    RetopoMesh& a = into.result;
+    const RetopoMesh& b = from.result;
+    const bool a_faces = into.built && a.face_count() > 0;
+    const bool b_faces = from.built && b.face_count() > 0;
+    if (from.strokes.empty() && !b_faces) return true;
+    retopo_wand_close(into, -1);
+    into.checkpoint();
+
+    // from's ids 1.. become into's next_id..; vertices and faces go after into's.
+    const uint32_t id_off = into.next_id - 1, v_off = a_faces ? (uint32_t)a.v.size() : 0;
+    auto id = [&](uint32_t o) { return o + id_off; };
+    for (RetopoStroke k : from.strokes) { k.id = id(k.id); k.selected = false; into.strokes.push_back(std::move(k)); }
+    into.next_id = std::max(into.next_id, from.next_id + id_off);
+
+    bool uv_kept = true;
+    if (b_faces) {
+        const bool b_uv = !from.uv.empty() && from.uv.fits(b) && from.uv.key == uv_topology_key(b);
+        if (!a_faces) {
+            a.clear();
+        } else {
+            // Per-vertex arrays line up with v before b's go after them (mask may be
+            // short by design: the rest are 0).
+            a.n.resize(a.v.size()); a.v_owner.resize(a.v.size(), 0);
+            a.mirror.resize(a.v.size(), ~0u); a.mask.resize(a.v.size(), 0.0f);
+        }
+        for (uint32_t i = 0; i < (uint32_t)b.v.size(); i++) {
+            a.v.push_back(b.v[i]);
+            a.n.push_back(i < b.n.size() ? b.n[i] : Vec3(0, 0, 1));
+            a.v_owner.push_back(id(i < b.v_owner.size() ? b.v_owner[i] : 0));
+            const uint32_t t = i < b.mirror.size() ? b.mirror[i] : ~0u;
+            a.mirror.push_back(t == ~0u ? t : t + v_off);
+            a.mask.push_back(b.mask_at(i));
+        }
+        for (uint32_t f = 0; f < b.face_count(); f++) {
+            std::vector<uint32_t> c(b.face(f), b.face(f) + b.face_size(f));
+            for (uint32_t& v : c) v += v_off;
+            a.add_face(c.data(), (int)c.size(), id(b.face_owner[f]));
+        }
+        for (uint32_t v : b.seams) a.seams.push_back(v + v_off);   // still sorted after a's
+        rebuild_edges(a);
+        into.built = true;
+        // Only one side ever had faces: its layout still fits, renumbered (ids moved
+        // only if a had faces, in which case it's dropped anyway).
+        if (!a_faces && b_uv) {
+            into.uv = from.uv;
+            into.uv.key = uv_topology_key(a);
+            into.uv.seam_key = uv_seam_key(a);
+        } else if (a_faces) {
+            uv_kept = into.uv.empty() && !b_uv;
+            into.uv.clear();
+        }
+    }
+    into.refresh_hidden();
+    into.rev++;
+    return uv_kept;
+}
+
 void retopo_save(RetopoState& st, RetopoSnapshot& out) {
     // A plain wand preview isn't work to save; a spine's fill is.
     retopo_wand_close(st, st.wand_keep_shown ? st.wand_shown : -1);

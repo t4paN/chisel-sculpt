@@ -248,6 +248,10 @@ void ObjectXformStack::apply(const ObjectXform& x, bool inverse, Scene& scene) {
 
         uint32_t vc = e->mesh.vertex_count();
         run(e->mesh);
+        // The low rides along, as it did live (retopo_transform).
+        const float size = x.kind != ObjectXform::Kind::SCALE ? 1.0f
+                         : inverse ? 1.0f / t.factor : t.factor;
+        retopo_transform(e->retopo, run, size);
         // Any of the three can leave the mesh off the world mirror plane, and none
         // of them touches topology, so the cached symmetry verdict would otherwise
         // never be re-measured. (spin_apply_mesh already does this; move and scale

@@ -836,6 +836,11 @@ void app_ops_remesh_and_merge(App& a) {
                               vm.R, vm.elapsed_ms,
                               watertight ? "watertight" : "NOT watertight",
                               vm.components, vm.boundary_edges, vm.nonmanifold_edges);
+                if (scene.merge_uv_dropped()) {
+                    const size_t at = std::strlen(input.notification);
+                    std::snprintf(input.notification + at, sizeof(input.notification) - at,
+                                  " | retopos joined, UVs need a re-unwrap");
+                }
                 input.notification_timer = 6.0f;
                 std::printf("[voxel-merge] %s\n", input.notification);
                 // Dev hook: CHISEL_MERGE_DUMP=<path.obj> writes the result for offline checks.

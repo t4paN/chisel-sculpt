@@ -164,7 +164,10 @@ public:
     // the inputs' multires stacks are dropped (topology changed entirely).
     // Returns the merged entity id, or 0 if there is nothing to merge.
     // Does NOT call sync() — caller does mirror refresh + sync after.
+    // The other selected meshes' retopos join the carrier's (retopo_absorb);
+    // merge_uv_dropped() says a UV layout had to go.
     uint32_t merge_selected_into(const Mesh& welded, uint32_t subdiv_level);
+    bool merge_uv_dropped() const { return merge_uv_dropped_; }
 
     // ---- Deletion ----
     struct DeleteResult {
@@ -174,6 +177,22 @@ public:
         uint32_t new_selected_id    = 0;
     };
     DeleteResult delete_selected();
+
+    // ---- Undo for the Meshes dock: delete and rename ----
+    // Both stamp UndoStack's scene-wide clock, so Ctrl+Z takes one when it's newer than
+    // the active mesh's sculpt history and the object transforms. A deleted mesh is
+    // kept whole (sculpt, retopo, its own history) for DELETE_GRACE edits, then freed:
+    // a high-res mesh is too big to keep around in a 32-bit browser heap.
+    static constexpr int DELETE_GRACE = 3;
+    void     rename_entity(uint32_t id, const std::string& name);
+    uint64_t mesh_op_seq() const;            // newest undoable op's stamp, 0 = none
+    // Undo the newest op; `what` says what came back. 0 = nothing to undo, else the
+    // mesh it touched (a restored mesh comes back active).
+    uint32_t undo_mesh_op(std::string& what);
+    // Deleted meshes past their grace are freed (`freed` says one just was). The newest
+    // still held: its name and edits left (0 = none held), for the countdown toast.
+    int      age_deleted(std::string& name, bool& freed);
+    void     clear_mesh_ops() { mesh_ops_.clear(); }
 
     // ---- INSERT preview lifecycle ----
     uint32_t add_preview(const Mesh& src, uint32_t subdiv_level);
@@ -215,6 +234,14 @@ private:
     int      load_flattened_ = 0;
     uint64_t edits_          = 0;
     std::vector<uint32_t> selected_ids_;
+    bool merge_uv_dropped_ = false;
+    struct MeshOp {
+        uint64_t seq = 0;
+        uint32_t id  = 0;
+        std::string old_name;                // rename: what it was called before
+        std::unique_ptr<MeshEntity> gone;    // delete: the mesh itself
+    };
+    std::vector<MeshOp> mesh_ops_;           // oldest first
 
     bool mirror_use_topology_ = true;
     std::vector<std::vector<uint32_t>> icosphere_mirror_cache_;

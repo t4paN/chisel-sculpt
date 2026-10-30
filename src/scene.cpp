@@ -507,8 +507,15 @@ void Scene::load_entities(std::vector<EntityRecord>& records,
                           const std::vector<uint32_t>& selected,
                           uint32_t next_id) {
     // In-session rebuilds keep a surviving entity's live retopo (its history too).
+    // Not when the rebuild brings back an entity that's gone (reverting an SDF merge):
+    // the survivor's live retopo absorbed the gone ones' (retopo_absorb), which come
+    // back with their own copies, so everyone takes the copy.
+    bool revives = false;
+    for (const EntityRecord& rec : records)
+        revives = revives || (rec.keep_live_retopo && !find_entity(rec.id));
     std::vector<std::pair<uint32_t, RetopoState>> live;
     for (auto& up : entities_) {
+        if (revives) break;
         if (!up || !up->alive) continue;
         for (const EntityRecord& rec : records)
             if (rec.keep_live_retopo && rec.id == up->id) {
@@ -516,6 +523,8 @@ void Scene::load_entities(std::vector<EntityRecord>& records,
                 break;
             }
     }
+    // Held deletes and renames point at the outgoing scene (and its ids may be reused).
+    mesh_ops_.clear();
     // Tear down the current scene, releasing each entity's display VAO.
     for (auto& up : entities_)
         if (up) renderer_.free_display(up->gpu);
@@ -623,6 +632,7 @@ uint32_t Scene::reset_to_single_mesh(uint32_t subdiv_level) {
     // Caller has already set active_entity()->mesh to the desired state.
     MeshEntity* keep = active_entity_();
     if (!keep && !entities_.empty()) keep = entities_.front().get();
+    mesh_ops_.clear();   // a new sculpt: nothing from the old scene comes back
 
     // Remove all others
     std::vector<uint32_t> to_remove;
@@ -658,10 +668,15 @@ uint32_t Scene::merge_selected_into(const Mesh& welded, uint32_t subdiv_level) {
     MeshEntity* keep = find_entity(keep_id);
     if (!keep) return 0;
 
-    // Drop every OTHER selected entity (unselected entities are preserved).
+    // Drop every OTHER selected entity (unselected entities are preserved), after
+    // handing its retopo to the carrier: the welded sculpt sits where theirs did.
     std::vector<uint32_t> drop;
     for (uint32_t id : selected_ids_)
         if (id != keep_id) drop.push_back(id);
+    merge_uv_dropped_ = false;
+    for (uint32_t id : drop)
+        if (MeshEntity* e = find_entity(id))
+            merge_uv_dropped_ |= !retopo_absorb(keep->retopo, e->retopo);
     for (uint32_t id : drop) remove_entity_(id);
 
     // Replace the carrier's mesh; topology changed entirely → drop its multires
@@ -696,7 +711,24 @@ Scene::DeleteResult Scene::delete_selected() {
     }
 
     uint32_t del_id = sel->id;
-    remove_entity_(del_id);
+    // Kept for undo, not destroyed. Its CPU copy must be the truth first: a GPU-resident
+    // active mesh can be ahead of it.
+    if (del_id == active_id_) materialize_active_cpu();
+    for (auto it = entities_.begin(); it != entities_.end(); ++it) {
+        if (!*it || (*it)->id != del_id) continue;
+        renderer_.free_display((*it)->gpu);
+        (*it)->alive = false;
+        if (bound_active_id_ == del_id) bound_active_id_ = 0;
+        MeshOp op;
+        op.seq  = UndoStack::next_seq();
+        op.id   = del_id;
+        op.gone = std::move(*it);
+        entities_.erase(it);
+        mesh_ops_.push_back(std::move(op));
+        break;
+    }
+    for (auto it = selected_ids_.begin(); it != selected_ids_.end(); )
+        it = (*it == del_id) ? selected_ids_.erase(it) : it + 1;
 
     // Select the first surviving entity
     uint32_t new_sel = 0;
@@ -710,6 +742,72 @@ Scene::DeleteResult Scene::delete_selected() {
     r.deleted_id       = del_id;
     r.new_selected_id  = new_sel;
     return r;
+}
+
+// ---- Undo for delete / rename ----
+
+void Scene::rename_entity(uint32_t id, const std::string& name) {
+    MeshEntity* e = find_entity(id);
+    if (!e || e->name == name) return;
+    MeshOp op;
+    op.seq = UndoStack::next_seq();
+    op.id = id;
+    op.old_name = e->name;
+    e->name = name;
+    mesh_ops_.push_back(std::move(op));
+    // Renames are a few bytes each; only the count wants a cap.
+    if (mesh_ops_.size() > 64) mesh_ops_.erase(mesh_ops_.begin());
+    mark_edited();
+}
+
+uint64_t Scene::mesh_op_seq() const {
+    return mesh_ops_.empty() ? 0 : mesh_ops_.back().seq;
+}
+
+uint32_t Scene::undo_mesh_op(std::string& what) {
+    // A rename of a mesh merged away since has nothing left to rename: skip past it.
+    while (!mesh_ops_.empty() && !mesh_ops_.back().gone && !find_entity(mesh_ops_.back().id))
+        mesh_ops_.pop_back();
+    if (mesh_ops_.empty()) return 0;
+    MeshOp op = std::move(mesh_ops_.back());
+    mesh_ops_.pop_back();
+    mark_edited();
+    char buf[24];
+    if (op.gone) {
+        op.gone->alive = true;
+        op.gone->gpu.dirty = true;
+        MeshEntity* e = op.gone.get();
+        entities_.push_back(std::move(op.gone));
+        set_active(e->id);
+        sync();
+        what = std::string("Brought back ") + display_name(*e, buf, sizeof buf);
+        return e->id;
+    }
+    MeshEntity* e = find_entity(op.id);
+    std::string was = display_name(*e, buf, sizeof buf);
+    e->name = op.old_name;
+    what = "Renamed " + was + " back to " + display_name(*e, buf, sizeof buf);
+    return e->id;
+}
+
+int Scene::age_deleted(std::string& name, bool& freed) {
+    int left = 0;
+    freed = false;
+    for (auto it = mesh_ops_.begin(); it != mesh_ops_.end(); ) {
+        if (!it->gone) { ++it; continue; }
+        const uint64_t spent = UndoStack::global_pushes - it->seq;
+        if (spent >= (uint64_t)DELETE_GRACE) {
+            std::printf("[mesh-undo] freed deleted mesh %u after %d edits\n", it->id, DELETE_GRACE);
+            it = mesh_ops_.erase(it);   // the mesh goes with it
+            freed = true;
+            continue;
+        }
+        char buf[24];
+        name = display_name(*it->gone, buf, sizeof buf);
+        left = DELETE_GRACE - (int)spent;
+        ++it;
+    }
+    return left;
 }
 
 // ---- INSERT preview lifecycle ----

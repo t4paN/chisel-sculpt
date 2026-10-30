@@ -2,6 +2,12 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-30 — Mesh layers: retopo follows its mesh, merges keep retopos, delete can be undone
+
+- Select-mode move, scale and spin carry the mesh's retopo along, its undo history too; undoing the move takes it back.
+- SDF merge joins every merged mesh's retopo into the result, with mirror twins and seams; if more than one had UVs they're dropped and the toast asks for a re-unwrap. Reverting the merge gives each mesh its own back.
+- Ctrl+Z brings back a deleted mesh (sculpt, retopo, history) or an old name, from any mode. A deleted mesh is held for 3 strokes with a countdown toast, then freed.
+
 ## 2026-10-30 — Mesh layers: a Meshes panel, each mesh with its own retopo
 
 - Meshes panel (Sculpt and Select): eye, name, trash per mesh; click = active, Ctrl+click = add to selection, double-click = rename, trash = two clicks.
