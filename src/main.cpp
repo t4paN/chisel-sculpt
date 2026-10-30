@@ -674,8 +674,9 @@ int main(int argc, char* argv[]) {
     // each use so a mid-frame selection change targets the right stack.
     AppState app_state = AppState::IDLE;
     InsertController insert_ctrl(scene, renderer);
-    RetopoState retopo;   // mode 0: sketched strokes + the quads Build made from them
-    uint64_t clean_retopo_rev = 0;   // retopo.rev as of the last save or load
+    // Retopo lives on each mesh (MeshEntity::retopo); this is scene.retopo_rev() as of
+    // the last save or load.
+    uint64_t clean_retopo_rev = 0;
     // Two-finger take-back (see InputState::touch_revert_requested).
     Camera   camera_at_press;
     bool     touch_undo_on_commit   = false;
@@ -747,7 +748,7 @@ int main(int argc, char* argv[]) {
             error_popup_msg, error_popup_trigger, renderer, rescue, rescue_shown,
             max_level, swallow_level_switch, remesh_chained_from_merge, text, fps_display,
             rot_axis, rot_active, rot_last_time, rot_dirty, scale_pivot,
-            retopo, clean_retopo_rev
+            clean_retopo_rev
 #ifdef __EMSCRIPTEN__
             , web_save_name, web_export_name
 #endif
@@ -808,7 +809,7 @@ int main(int argc, char* argv[]) {
             input.close_requested = false;
             const bool busy = app_state != AppState::IDLE || vmerge_job
                 || input.remesh_requested || input.remesh_in_progress;
-            if (scene.edit_mark() == clean_edit_mark && retopo.rev == clean_retopo_rev && !busy) {
+            if (scene.edit_mark() == clean_edit_mark && scene.retopo_rev() == clean_retopo_rev && !busy) {
                 glfwSetWindowShouldClose(window, GLFW_TRUE);
             } else {
                 input.quit_requested = true;
@@ -1272,9 +1273,9 @@ int main(int argc, char* argv[]) {
                 && ph >= 0 && ph < (int)rig.joints.size()) {
                 rig.joints[ph].radius = std::max(1e-4f,
                     rig.joints[ph].radius * std::pow(1.1f, scroll));
-            } else if (std::fabs(scroll) > 0.01f && retopo.grid_open) {
+            } else if (std::fabs(scroll) > 0.01f && scene.active_entity().retopo.grid_open) {
                 // A lasso grid just made: the wheel sets its density (retopo_frame).
-                retopo.grid_wheel += scroll;
+                scene.active_entity().retopo.grid_wheel += scroll;
             } else if (std::fabs(scroll) > 0.01f) {
                 camera.zoom(scroll);
                 screen_buffers_dirty = true;
@@ -1554,9 +1555,9 @@ int main(int argc, char* argv[]) {
                         // Undo entries are per-entity (each carries entity_id and
                         // local indices), so history survives selection switches.
                         screen_buffers_dirty = true;
-                        uint32_t mid = scene.active_mesh_id();
-                        std::snprintf(input.notification, sizeof(input.notification),
-                                      "Selected mesh %u", mid);
+                        char nb[24];
+                        std::snprintf(input.notification, sizeof(input.notification), "Selected %s",
+                                      Scene::display_name(scene.active_entity(), nb, sizeof nb));
                         input.notification_timer = 1.5f;
                     }
                 }
@@ -1586,17 +1587,21 @@ int main(int argc, char* argv[]) {
         }
 
         // ---- Retopo mode (retopo_input.cpp): pen, clicks, its own undo, Build ----
+        // The active mesh's own retopo: its low-poly was made on this sculpt.
+        RetopoState& retopo = scene.active_entity().retopo;
+        char mesh_name[64];
+        Scene::display_name(scene.active_entity(), mesh_name, sizeof mesh_name);
         retopo_frame(retopo, input, scene, *mesh, renderer, camera, tablet, win_w, win_h,
                      screen_buffers_dirty, imgui_wants_mouse);
         if (input.uv_bake_save_requested) {
             input.uv_bake_save_requested = false;
-            retopo_bake_save(retopo, input, current_project_path);
+            retopo_bake_save(retopo, input, current_project_path, mesh_name);
         }
         if (input.retopo_export_requested) {
             input.retopo_export_requested = false;
-            const std::string path = retopo_export(retopo, input, current_project_path);
+            const std::string path = retopo_export(retopo, input, current_project_path, mesh_name);
 #if defined(__EMSCRIPTEN__)
-            if (!path.empty()) web_download_file(path.c_str(), "retopo.obj");
+            if (!path.empty()) web_download_file(path.c_str(), path.c_str() + 1);
 #endif
         }
 

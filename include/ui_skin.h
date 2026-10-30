@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <string>
 #include "imgui.h"
 #include "ui_overlay.h"   // MultiresInfo
 
@@ -96,6 +97,21 @@ void ui_skin_push_dropdown_bg();
 // Drawn with this file's parts so it wears the live skin; call at the top level.
 struct RetopoState;
 void draw_retopo_dock(InputState& input, RetopoState& st, int win_w, int win_h);
+// Sculpt / Select modes' "Meshes" dock: the scene's meshes as layers. The caller fills
+// one row per mesh from the scene; the dock edits name and eye in place (and sets
+// input.mesh_layers_changed), and asks for picks and deletes through input.mesh_layer_*.
+struct MeshLayerRow {
+    uint32_t     id = 0;
+    std::string* name = nullptr;     // the mesh's own; empty = unnamed
+    const char*  shown = nullptr;    // what the row says: the name, or "Mesh <id>"
+    bool*        visible = nullptr;
+    bool         active = false, selected = false;
+    uint32_t     tris = 0;
+    int          level = 0;
+    uint32_t     lo_faces = 0;       // its retopo's built faces: 0 = no low-poly yet
+};
+void draw_mesh_layers_dock(InputState& input, MeshLayerRow* rows, int n, int win_w, int win_h);
+
 // UV mode's panel (key 9): the layout, Unwrap, Export. Drawn instead of the retopo dock.
 void draw_uv_dock(InputState& input, RetopoState& st, int win_w, int win_h);
 // A UV island's colour (the UV panel's, and the model's tint in UV mode).

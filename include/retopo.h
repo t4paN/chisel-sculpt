@@ -584,6 +584,13 @@ const char* retopo_symmetrize(RetopoState& st, const Mesh& m, int keep, int& fac
 // faces. The view toggles (Strokes, Wire) are kept. An empty snapshot clears retopo.
 void retopo_load(RetopoState& st, RetopoSnapshot&& s);
 
+// An OBJ object exported as a retopo (our <mesh>-LO) back into one, to hand retopo_load:
+// faces as written, mirror twins paired by position (x = 0 within a hair = on the seam),
+// and its vt, if every corner has one, as the UV layout, islands and seams read off where
+// the UVs split. Strokes don't survive an OBJ: Build would start the low over. False if
+// the object has no faces.
+bool retopo_from_obj(const ObjPart& p, RetopoSnapshot& out);
+
 // The other way: the session's retopo into a project about to be saved. An open wand
 // menu is settled first (a plain preview goes, a spine's fill stays).
 void retopo_save(RetopoState& st, RetopoSnapshot& out);
@@ -593,6 +600,14 @@ void retopo_save(RetopoState& st, RetopoSnapshot& out);
 // it's current), each corner gets its vt too. Returns false if there's nothing to write
 // or the file can't be opened.
 bool retopo_export_obj(const RetopoMesh& rm, const char* path, const UvLayout* uv = nullptr);
+// The same as one "o" block of an OBJ that may hold several: v / vn indices start after
+// v_base vertices already in the file, vt after vt_base. Adds what it wrote to both.
+void retopo_write_obj(std::FILE* f, const RetopoMesh& rm, const UvLayout* uv, const char* object,
+                      uint32_t& v_base, uint32_t& vt_base);
+// PLY (Z-up like the sculpt's, faces as they are, no colour, no UVs: those are per
+// corner and PLY's are per vertex) and binary STL (faces fanned into triangles).
+bool retopo_export_ply(const RetopoMesh& rm, const char* path);
+bool retopo_export_stl(const RetopoMesh& rm, const char* path);
 // The low's own smooth normal per vertex: its faces' normals, each weighted by the
 // corner's angle (zero for a vertex no face uses). Not RetopoMesh::n, the sculpt's normal
 // under it: a normal map is decoded against the low's shading normals, so the bake and
@@ -658,10 +673,12 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
                   int win_w, int win_h, bool screen_buffers_dirty, bool imgui_wants_mouse);
 // Writes the built quads as an OBJ beside the project (or in home) and toasts how it
 // went. Returns the path written, empty on failure.
-std::string retopo_export(const RetopoState& retopo, InputState& input, const std::string& project_path);
-// The bake's maps as PNGs beside it (<name>-retopo-normal.png / -color.png; downloaded on
+std::string retopo_export(const RetopoState& retopo, InputState& input, const std::string& project_path,
+                          const char* mesh_name);
+// The bake's maps as PNGs beside it (<project>-<mesh>-LO-normal.png / -color.png; downloaded on
 // web), toasting how it went.
-void retopo_bake_save(const RetopoState& retopo, InputState& input, const std::string& project_path);
+void retopo_bake_save(const RetopoState& retopo, InputState& input, const std::string& project_path,
+                      const char* mesh_name);
 // The green ring (red for the eraser, a dot for Cut and the wand).
 void draw_retopo_cursor(Renderer& renderer, const Camera& camera, const InputState& input,
                         float cursor_x, float cursor_y, int win_w, int win_h);

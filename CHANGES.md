@@ -2,6 +2,16 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-30 — Mesh layers: a Meshes panel, each mesh with its own retopo
+
+- Meshes panel (Sculpt and Select): eye, name, trash per mesh; click = active, Ctrl+click = add to selection, double-click = rename, trash = two clicks.
+- Hidden meshes aren't drawn or pickable.
+- Retopo belongs to a mesh: Build, bake and UV act on the active mesh's low. Old files hand theirs to the active mesh.
+- Saves carry each mesh's name, eye and retopo (no format bump; older readers still get the active mesh's retopo).
+- Export (Ctrl+E) lists every mesh's -HI and -LO, the selected meshes pre-ticked. OBJ: one file, one object each; PLY / STL: one file each.
+- OBJ import: each `o` object becomes its own mesh, named after it; the camera frames the whole file.
+- A `<mesh>-LO` next to its `<mesh>-HI` comes back as that mesh's retopo: faces as written, mirror twins re-paired, UVs with their islands and seams. Build strokes don't survive an OBJ.
+
 ## 2026-10-29 — Retopo: capped tube mouths fill, lasso grids stay on one piece
 
 - A piece's longest rim was always its outer edge, so a cylinder wrapped and capped at one end left its mouth unfillable; now it's a hole when the sculpt across its middle faces out through it (Fill, Wand, the wash).

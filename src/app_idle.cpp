@@ -378,10 +378,43 @@ void app_idle_update(App& a, int win_w, int win_h, float dx, float dy) {
 
     // One-shot actions (IDLE only)
 
+    // Mesh layers dock: a row clicked. Ctrl toggles it in the selection (as Ctrl+click on
+    // the model does in Select mode); a plain click makes it the active mesh, the same
+    // switch as a Select-mode click, and F then frames it.
+    if (input.mesh_layer_pick) {
+        const uint32_t id = input.mesh_layer_pick;
+        input.mesh_layer_pick = 0;
+        if (input.mesh_layer_pick_add) {
+            if (scene.toggle_selected(id)) {
+                screen_buffers_dirty = true;
+                std::snprintf(input.notification, sizeof(input.notification),
+                              "Selection: %u meshes", (uint32_t)scene.selected_ids().size());
+                input.notification_timer = 1.5f;
+            }
+        } else if (scene.select(id)) {
+            mesh = &scene.active_mesh();
+            multires = &scene.active_multires();
+            scene.refresh_mirror_map();
+            mesh->compute_bounding_sphere(mesh_center, mesh_radius);
+            brush_stroke.vertex_count = 0;
+            brush_stroke.phase = StrokePhase::NONE;
+            screen_buffers_dirty = true;
+        }
+    }
+    // ...or its trash confirmed: make that one the selected mesh, then the Delete path.
+    if (input.mesh_layer_delete) {
+        const uint32_t id = input.mesh_layer_delete;
+        input.mesh_layer_delete = 0;
+        if (scene.find_entity(id) && (id == scene.active_mesh_id() || scene.select(id)))
+            input.delete_mesh_requested = true;
+    }
+
     // Delete selected mesh (+ mirror pair if linked)
     if (input.delete_mesh_requested) {
         input.delete_mesh_requested = false;
         if (scene.selected()) {
+            char gone[64], buf[24];
+            std::snprintf(gone, sizeof gone, "%s", Scene::display_name(*scene.selected(), buf, sizeof buf));
             auto r = scene.delete_selected();
             if (r.blocked_only_mesh) {
                 std::snprintf(input.notification, sizeof(input.notification),
@@ -397,8 +430,8 @@ void app_idle_update(App& a, int win_w, int win_h, float dx, float dy) {
                 mesh->compute_bounding_sphere(mesh_center, mesh_radius);
                 screen_buffers_dirty = true;
                 std::snprintf(input.notification, sizeof(input.notification),
-                              "Deleted mesh %u, selected mesh %u",
-                              r.deleted_id, r.new_selected_id);
+                              "Deleted %s, now on %s", gone,
+                              Scene::display_name(scene.active_entity(), buf, sizeof buf));
                 input.notification_timer = 2.0f;
             }
         }
@@ -406,8 +439,8 @@ void app_idle_update(App& a, int win_w, int win_h, float dx, float dy) {
 
     // Mode 0: Ctrl+I / Ctrl+A act on the retopo mask; the sculpt's stays as it is.
     if (input.interaction_mode == InputState::InteractionMode::RETOPO) {
-        if (input.mask_invert_requested && !input.uv_mode) retopo_mask_invert(a.retopo);
-        if (input.mask_clear_requested && !input.uv_mode) retopo_mask_clear(a.retopo);
+        if (input.mask_invert_requested && !input.uv_mode) retopo_mask_invert(a.scene.active_entity().retopo);
+        if (input.mask_clear_requested && !input.uv_mode) retopo_mask_clear(a.scene.active_entity().retopo);
         input.mask_invert_requested = input.mask_clear_requested = false;
     }
     // Mask invert (Ctrl+I)

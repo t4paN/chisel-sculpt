@@ -706,6 +706,14 @@ struct InputState {
     int   retopo_rings = 1;
     float retopo_density = 1.0f;
     bool retopo_export_requested = false;
+    // Mesh layers dock (Sculpt / Select): a row clicked (its entity id; Ctrl = add to /
+    // take out of the selection), a trash confirmed, a rename or eye changed (mark the
+    // scene edited), the list folded. app_idle acts on the requests at the next IDLE frame.
+    uint32_t mesh_layer_pick = 0;
+    bool     mesh_layer_pick_add = false;
+    uint32_t mesh_layer_delete = 0;
+    bool     mesh_layers_changed = false;
+    bool     mesh_dock_folded = false;
     // Which mode's shortcuts are live: Paint while painting (EDIT in paint mode), else
     // Sculpt (Insert and Select keep the sculpt keys, as before the split). Retopo has
     // its own, so no brush key reaches into it.

@@ -2140,6 +2140,7 @@ static bool trash_button(const char* id, float size) {
 void draw_paint_layers_panel(InputState& input, Scene& scene, int win_w, int /*win_h*/) {
     if (input.current_brush != BrushType::PAINT || input.paint_target_density) return;
     if (input.interaction_mode == InputState::InteractionMode::RETOPO) return;   // own page
+    if (input.interaction_mode == InputState::InteractionMode::SELECT) return;   // the mesh list's spot
     MeshEntity* ent = scene.find_entity(scene.active_mesh_id());
     if (!ent) return;
     const uint32_t eid = ent->id;

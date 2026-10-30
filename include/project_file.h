@@ -24,8 +24,7 @@ struct ProjectData {
     bool   mirror_x     = true;
     int    subdiv_level = 4;
 
-    // Retopo mode's strokes and low-poly, as they stand (no history). Empty = none.
-    RetopoSnapshot retopo;
+    // Retopo rides per entity now (EntityRecord::retopo): each low-poly with its sculpt.
 };
 
 enum class SaveResult { OK, ERR_OPEN, ERR_WRITE };

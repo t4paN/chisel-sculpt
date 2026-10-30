@@ -1,8 +1,10 @@
 #pragma once
 #include <vector>
+#include <string>
 #include <cstdint>
 #include <cmath>
 #include <cassert>
+#include <cstdio>
 #include "paint_layers.h"
 
 struct Vec3 {
@@ -26,6 +28,8 @@ struct Vec3 {
 };
 
 // SOA triangle mesh
+struct ObjPart;
+
 struct Mesh {
     std::vector<float> pos_x, pos_y, pos_z;   // vertex positions
     std::vector<float> norm_x, norm_y, norm_z; // vertex normals
@@ -115,6 +119,9 @@ struct Mesh {
     void invalidate_mirror_symmetry() { mirror_sym_topo = 0xFFFFFFFFu; }
 
     bool export_obj(const char* filename) const;
+    // One mesh as an "o" block of an OBJ that may hold several: v / vn indices start
+    // after `base` vertices already in the file. Returns the vertices it wrote.
+    uint32_t write_obj(std::FILE* f, const char* object, uint32_t base) const;
     // Binary STL for 3D printing: per-tri facet normal + 3 verts, 80-byte header,
     // uint32 count. `scale` multiplies every coordinate so the print lands at
     // real-world size (e.g. mm). Winding order is preserved from the mesh.
@@ -122,10 +129,23 @@ struct Mesh {
     // ASCII PLY with per-vertex position, normal, and RGB (from packed `color`).
     // PLY is the only export carrying paint; unpainted verts write white.
     bool export_ply(const char* filename) const;
-    static bool import_obj(const char* filename, Mesh& out);
+    // `out` is the whole file. With `parts`, a file holding two or more `o` objects also
+    // comes back one mesh per object (empty otherwise). Only `o` splits: `g` groups are
+    // often polygroups of one sculpt, which must stay one mesh.
+    static bool import_obj(const char* filename, Mesh& out, std::vector<ObjPart>* parts = nullptr);
     // ASCII or binary-little-endian PLY in. Reads position (required), normal
     // (recomputed if absent), and per-vertex RGB into packed `color` if present.
     static bool import_ply(const char* filename, Mesh& out);
+};
+
+struct ObjPart {
+    std::string name;   // the `o` line's, "" for faces before any
+    Mesh        mesh;
+    // The faces as written (n-gons kept, not triangulated), in `mesh`'s vertex numbering:
+    // face f is poly[poly_off[f] .. poly_off[f + 1]). Their `vt` per corner, 2 each, or
+    // empty unless every corner had one. A retopo is rebuilt from these (retopo_from_obj).
+    std::vector<uint32_t> poly, poly_off;
+    std::vector<float>    uv;
 };
 
 // Spatial-hash mirror builder — same logic as Mesh::build_mirror_x_map but

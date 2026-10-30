@@ -26,6 +26,7 @@
 #include "ui_overlay.h"
 #include "ui_skin.h"
 #include "retopo.h"
+#include "uv_unwrap.h"
 #include "imgui.h"
 #include "ImGuiFileDialog.h"
 #include "brush_alpha.h"
@@ -48,6 +49,50 @@ static bool display_file_dialog(IGFD::FileDialog* fd, const char* key) {
 }
 #endif
 
+// A name as part of a file name: anything odd becomes _.
+static std::string file_part(const char* s) {
+    std::string n;
+    for (const char* c = s; c && *c; c++) {
+        const unsigned char u = (unsigned char)*c;
+        n += (std::isalnum(u) || u == '-' || u == '_' || u >= 0x80) ? (char)u : '_';
+    }
+    return n;
+}
+
+// UVs go along with a low only when its layout was made for it as it is now.
+static bool lo_uv_ok(const RetopoState& rt) {
+    return !rt.uv.empty() && rt.uv.fits(rt.result) && rt.uv.key == uv_topology_key(rt.result);
+}
+
+// The export dialog's list: every mesh's sculpt (-HI) and, once built, its retopo (-LO),
+// each with a tick. Refilled each time the dialog opens, the selected meshes ticked (Ctrl+
+// click in Select mode or the Meshes dock picks them; none = the active). File scope because
+// the native dialog's side pane draws it frames after the call that opened it.
+struct ExportPick {
+    uint32_t    id = 0;
+    bool        lo = false;
+    bool        on = true;
+    std::string label;   // the object / file name: <mesh>-HI or <mesh>-LO
+    std::string note;
+};
+static std::vector<ExportPick> g_export_picks;
+
+static void draw_export_picks() {
+    ImGui::TextUnformatted("Export these:");
+    for (size_t i = 0; i < g_export_picks.size(); i++) {
+        ExportPick& p = g_export_picks[i];
+        ImGui::PushID((int)i);
+        ImGui::Checkbox(p.label.c_str(), &p.on);
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", p.note.c_str());
+        ImGui::PopID();
+    }
+    ImGui::Spacing();
+    ImGui::TextWrapped("OBJ: one file, each mesh its own object. "
+                       "PLY / STL hold one mesh: several make one file each, "
+                       "<name>-<mesh>.");
+}
+
 void app_files_frame(App& a) {
     auto& window = a.window;
     auto& input = a.input;
@@ -65,7 +110,6 @@ void app_files_frame(App& a) {
     auto& mesh_radius = a.mesh_radius;
     auto& screen_buffers_dirty = a.screen_buffers_dirty;
     auto& clean_edit_mark = a.clean_edit_mark;
-    auto& retopo = a.retopo;
     auto& clean_retopo_rev = a.clean_retopo_rev;
     auto& cli_open_path = a.cli_open_path;
     auto& default_browse_path = a.default_browse_path;
@@ -78,11 +122,129 @@ void app_files_frame(App& a) {
 #endif
     auto refresh_active_gpu_residency = [&]() { app_refresh_active_gpu_residency(a); };
 
+    // ---- Export: which meshes, what name, and the writing ----
+    auto fill_export_picks = [&]() {
+        g_export_picks.clear();
+        const std::vector<uint32_t>& sel = scene.selected_ids();
+        auto picked = [&](uint32_t id) {
+            return sel.empty() ? id == scene.active_mesh_id()
+                               : std::find(sel.begin(), sel.end(), id) != sel.end();
+        };
+        for (auto& up : scene.entities()) {
+            if (!up || !up->alive || up->preview) continue;
+            char buf[24];
+            std::string base = file_part(Scene::display_name(*up, buf, sizeof buf));
+            // Two meshes with one name would write over each other's files.
+            for (const ExportPick& p : g_export_picks)
+                if (!p.lo && p.label == base + "-HI") { base += "_" + std::to_string(up->id); break; }
+            char note[48];
+            std::snprintf(note, sizeof note, "%u tris", up->mesh.tri_count());
+            g_export_picks.push_back({up->id, false, picked(up->id), base + "-HI", note});
+            const RetopoState& rt = up->retopo;
+            if (rt.built && !rt.result.faces.empty()) {
+                std::snprintf(note, sizeof note, "%u faces%s", rt.result.face_count(),
+                              lo_uv_ok(rt) ? ", UVs" : "");
+                g_export_picks.push_back({up->id, true, picked(up->id), base + "-LO", note});
+            }
+        }
+    };
+    // One thing ticked: its own name. One mesh's HI + LO: the mesh's. Several meshes: the
+    // project's (files inside are per mesh).
+    auto export_default_name = [&]() -> std::string {
+        const ExportPick* first = nullptr;
+        int n_on = 0;
+        bool one_mesh = true;
+        for (const ExportPick& p : g_export_picks) {
+            if (!p.on) continue;
+            if (!first) first = &p;
+            else if (p.id != first->id) one_mesh = false;
+            n_on++;
+        }
+        if (n_on == 1) return first->label;
+        if (n_on > 1 && one_mesh) return first->label.substr(0, first->label.size() - 3);   // drop "-HI"
+        std::string stem = current_project_path.substr(current_project_path.find_last_of("/\\") + 1);
+        const auto dot = stem.find_last_of('.');
+        if (dot != std::string::npos) stem.resize(dot);
+        return stem.empty() ? std::string("chisel") : stem;
+    };
+    // Writes the ticked meshes. OBJ holds them all, one object each; PLY and STL hold
+    // one mesh, so with several ticked each gets <path minus extension>-<label>.<ext>.
+    // Returns the files written; tells the user itself how it went.
+    auto export_picks = [&](const std::string& path) -> std::vector<std::string> {
+        const size_t slash = path.find_last_of("/\\");
+        const size_t dot = path.find_last_of('.');
+        const bool has_ext = dot != std::string::npos && (slash == std::string::npos || dot > slash);
+        std::string ext = has_ext ? path.substr(dot + 1) : "";
+        for (char& ch : ext) ch = (char)std::tolower((unsigned char)ch);
+        if (ext != "stl" && ext != "ply") ext = "obj";
+        const std::string stem = has_ext ? path.substr(0, dot) : path;
+
+        std::vector<const ExportPick*> on;
+        for (const ExportPick& p : g_export_picks)
+            if (p.on && scene.find_entity(p.id)) on.push_back(&p);
+        std::vector<std::string> wrote;
+        if (on.empty()) {
+            std::snprintf(input.notification, sizeof(input.notification), "Nothing ticked to export");
+            input.notification_timer = 3.0f;
+            return wrote;
+        }
+        // GPU-resident sculpting/undo leave mesh.pos stale on the CPU —
+        // pull the live surface back first (save does the same). The others
+        // are already current: switching away from a mesh reads it back.
+        scene.materialize_active_cpu();
+        if (ext == "obj") {
+            if (FILE* f = std::fopen(path.c_str(), "w")) {
+                std::fprintf(f, "# OBJ export from Chisel: %zu object%s\n",
+                             on.size(), on.size() == 1 ? "" : "s");
+                uint32_t vb = 0, vtb = 0;
+                for (const ExportPick* p : on) {
+                    const MeshEntity& e = *scene.find_entity(p->id);
+                    if (p->lo) retopo_write_obj(f, e.retopo.result, lo_uv_ok(e.retopo) ? &e.retopo.uv : nullptr,
+                                                p->label.c_str(), vb, vtb);
+                    else       vb += e.mesh.write_obj(f, p->label.c_str(), vb);
+                }
+                if (std::fclose(f) == 0) wrote.push_back(path);
+            }
+        } else {
+            for (const ExportPick* p : on) {
+                const MeshEntity& e = *scene.find_entity(p->id);
+                const std::string out = on.size() == 1 ? path : stem + "-" + p->label + "." + ext;
+                const bool ok = p->lo ? (ext == "stl" ? retopo_export_stl(e.retopo.result, out.c_str())
+                                                      : retopo_export_ply(e.retopo.result, out.c_str()))
+                                      : (ext == "stl" ? e.mesh.export_stl(out.c_str())
+                                                      : e.mesh.export_ply(out.c_str()));
+                if (ok) wrote.push_back(out);
+            }
+        }
+        const size_t want = ext == "obj" ? 1 : on.size();
+        if (wrote.size() < want) {
+            error_popup_msg = wrote.empty() ? "Export failed: " + path
+                            : "Exported only " + std::to_string(wrote.size()) + " of "
+                              + std::to_string(want) + " files next to " + stem;
+            error_popup_trigger = true;
+        } else if (wrote.size() == 1) {
+            std::snprintf(input.notification, sizeof(input.notification), "Exported%s: %.400s",
+                          on.size() > 1 ? (" " + std::to_string(on.size()) + " meshes").c_str() : "",
+                          wrote[0].c_str());
+            input.notification_timer = 3.0f;
+        } else {
+            std::snprintf(input.notification, sizeof(input.notification), "Exported %zu files: %.400s-*.%s",
+                          wrote.size(), stem.c_str(), ext.c_str());
+            input.notification_timer = 3.0f;
+        }
+        return wrote;
+    };
+
     // ---- Open/import a path (shared by the native dialog and the web picker) ----
     auto do_import_path = [&](const std::string& path) {
         auto dot = path.find_last_of('.');
         std::string ext = (dot != std::string::npos) ? path.substr(dot + 1) : "";
         for (char& ch : ext) ch = (char)std::tolower((unsigned char)ch);
+
+        // An imported mesh's layer name: the file's, without folder or extension.
+        std::string stem = path.substr(path.find_last_of("/\\") + 1);
+        if (stem.find_last_of('.') != std::string::npos) stem.resize(stem.find_last_of('.'));
+        if (stem.size() > 60) stem.resize(60);
 
         if (ext == "chisel") {
             ProjectData proj;
@@ -90,9 +252,6 @@ void app_files_frame(App& a) {
             if (lr == LoadResult::OK && !proj.entities.empty()) {
                 camera = proj.camera;
                 input.mirror_x = proj.mirror_x;
-                // The file's retopo replaces this session's (none in it = none now).
-                retopo_load(retopo, std::move(proj.retopo));
-                clean_retopo_rev = retopo.rev;
                 input.subdiv_level = proj.subdiv_level;
                 input.mesh_locked = true;
                 current_project_path = path;
@@ -102,8 +261,10 @@ void app_files_frame(App& a) {
                 // the saved selection; the active entity's mirror map is
                 // (re)cached by refresh_mirror_map before sync.
                 scene.set_mirror_topology(proj.mirror_use_topology);
+                // Each mesh brings its own retopo (none in the file = none now).
                 scene.load_entities(proj.entities, proj.active_id,
                                     proj.selected_ids, proj.next_id);
+                clean_retopo_rev = scene.retopo_rev();
                 xforms.clear();      // records point at the outgoing scene
                 scene.refresh_mirror_map(input.subdiv_level);
                 scene.sync();
@@ -138,18 +299,96 @@ void app_files_frame(App& a) {
             }
         } else {
             Mesh loaded;
+            std::vector<ObjPart> parts;   // an OBJ of 2+ objects: one mesh each
             bool imported = (ext == "ply") ? Mesh::import_ply(path.c_str(), loaded)
-                                           : Mesh::import_obj(path.c_str(), loaded);
-            if (imported && input.import_append) {
-                // Append: add the mesh as a NEW scene entity at its authored
-                // scale, leaving existing entities, the camera, and their undo
-                // untouched. Same commit path insert uses (add_preview →
-                // commit_preview → multires/mirror init).
-                loaded.mask.clear();
-                uint32_t new_id = scene.add_preview(loaded, 0);
+                                           : Mesh::import_obj(path.c_str(), loaded, &parts);
+            // The whole file frames the camera; the first object then stands in for
+            // "the mesh" below and the others are appended after it.
+            Vec3 file_center; float file_radius = 0.0f;
+            if (imported) loaded.compute_bounding_sphere(file_center, file_radius);
+            // Our own export names objects <mesh>-HI / <mesh>-LO. The HI is a sculpt named
+            // <mesh> again; an LO whose HI is in the file is that sculpt's retopo, not
+            // another sculpt. Any other object is a sculpt under its own name.
+            auto cut_suffix = [](std::string& n, const char* tag) {
+                if (n.size() < 4) return false;
+                const char sep = n[n.size() - 3];
+                if (sep != '-' && sep != '_') return false;
+                for (int k = 0; k < 2; k++)
+                    if (std::toupper((unsigned char)n[n.size() - 2 + k]) != tag[k]) return false;
+                n.resize(n.size() - 3);
+                return true;
+            };
+            std::vector<std::string> names(parts.size());
+            std::vector<size_t> sculpts;                     // parts that become meshes
+            std::vector<int> lo_for(parts.size(), -1);       // per sculpt part: its LO part
+            {
+                std::vector<int> is_hi(parts.size(), 0), is_lo(parts.size(), 0);
+                for (size_t i = 0; i < parts.size(); i++) {
+                    names[i] = parts[i].name;
+                    is_hi[i] = cut_suffix(names[i], "HI");
+                    if (!is_hi[i]) is_lo[i] = cut_suffix(names[i], "LO");
+                }
+                for (size_t i = 0; i < parts.size(); i++) {
+                    if (is_lo[i])
+                        for (size_t j = 0; j < parts.size(); j++)
+                            if (is_hi[j] && lo_for[j] < 0 && names[j] == names[i]) { lo_for[j] = (int)i; break; }
+                }
+                for (size_t i = 0; i < parts.size(); i++) {
+                    bool paired = false;
+                    for (int l : lo_for) paired = paired || l == (int)i;
+                    if (paired) continue;
+                    sculpts.push_back(i);
+                    if (is_lo[i]) names[i] = parts[i].name;   // a lone LO keeps its whole name
+                }
+                for (std::string& n : names) {
+                    if (n.empty()) n = stem;
+                    if (n.size() > 60) n.resize(60);
+                }
+            }
+            // The LO paired with sculpt part i, if any, becomes the active mesh's retopo.
+            int n_retopos = 0;
+            auto attach_lo = [&](size_t i) {
+                RetopoSnapshot snap;
+                if (lo_for[i] >= 0 && retopo_from_obj(parts[lo_for[i]], snap)) n_retopos++;
+                retopo_load(scene.active_entity().retopo, std::move(snap));
+            };
+            // ", 3 meshes, 1 retopo" for the toast; nothing for a plain one-mesh file.
+            auto count_note = [&]() {
+                char b[48] = "";
+                int at = 0;
+                if (sculpts.size() > 1) at = std::snprintf(b, sizeof b, ", %zu meshes", sculpts.size());
+                if (n_retopos > 0)
+                    std::snprintf(b + at, sizeof b - at, ", %d retopo%s", n_retopos, n_retopos == 1 ? "" : "s");
+                return std::string(b);
+            };
+            std::string first_name = stem;
+            if (!sculpts.empty()) {
+                loaded = std::move(parts[sculpts[0]].mesh);
+                first_name = names[sculpts[0]];
+            }
+            // A NEW scene entity at its authored scale, leaving existing entities, the
+            // camera, and their undo untouched. Same commit path insert uses
+            // (add_preview → commit_preview → multires/mirror init). Ends active.
+            auto append_mesh = [&](Mesh& m, const std::string& name) {
+                m.mask.clear();
+                const uint32_t new_id = scene.add_preview(m, 0);
                 scene.commit_preview(new_id);
-                multires_stack_init_from_lock(scene.active_multires(),
-                                              scene.active_mesh(), 0);
+                scene.active_entity().name = name;
+                multires_stack_init_from_lock(scene.active_multires(), scene.active_mesh(), 0);
+                return new_id;
+            };
+            // The rest of the sculpts, then back to the first, which stays the active one.
+            auto append_other_parts = [&](uint32_t first_id) {
+                for (size_t k = 1; k < sculpts.size(); k++) {
+                    append_mesh(parts[sculpts[k]].mesh, names[sculpts[k]]);
+                    attach_lo(sculpts[k]);
+                }
+                if (sculpts.size() > 1) scene.select(first_id);
+            };
+            if (imported && input.import_append) {
+                const uint32_t first_id = append_mesh(loaded, first_name);
+                if (!sculpts.empty()) attach_lo(sculpts[0]);
+                append_other_parts(first_id);
                 scene.set_mirror_topology(false);
                 scene.refresh_mirror_map();
                 scene.sync();
@@ -165,8 +404,8 @@ void app_files_frame(App& a) {
                 screen_buffers_dirty = true;
 
                 std::snprintf(input.notification, sizeof(input.notification),
-                              "Appended: %.400s (%u v, %u t)",
-                              path.c_str(), mesh->vertex_count(), mesh->tri_count());
+                              "Appended: %.400s (%u v, %u t%s)",
+                              path.c_str(), mesh->vertex_count(), mesh->tri_count(), count_note().c_str());
                 input.notification_timer = 3.0f;
             } else if (imported) {
                 *mesh = std::move(loaded);
@@ -186,13 +425,20 @@ void app_files_frame(App& a) {
                 input.mesh_locked = true;
                 multires_stack_init_from_lock(*multires, *mesh, 0);
                 scene.reset_to_single_mesh(0);
+                // A new sculpt: the old one's name and retopo don't belong to it.
+                scene.active_entity().name = first_name;
+                scene.active_entity().visible = true;
+                if (!sculpts.empty()) attach_lo(sculpts[0]);
+                else retopo_load(scene.active_entity().retopo, RetopoSnapshot{});
+                append_other_parts(scene.active_mesh_id());
+                scene.refresh_mirror_map();
                 scene.sync();
                 mesh = &scene.active_mesh();
                 multires = &scene.active_multires();
                 refresh_active_gpu_residency();
                 mesh->compute_bounding_sphere(mesh_center, mesh_radius);
-                camera.set_target(mesh_center);
-                camera.distance = mesh_radius * 2.5f;
+                camera.set_target(file_center);
+                camera.distance = file_radius * 2.5f;
                 current_project_path.clear();
 
                 scene.active_undo().clear(&compute);
@@ -202,10 +448,11 @@ void app_files_frame(App& a) {
                 app_state = AppState::IDLE;
                 screen_buffers_dirty = true;
                 clean_edit_mark = scene.edit_mark();   // the imported file still holds it
+                clean_retopo_rev = scene.retopo_rev();
 
                 std::snprintf(input.notification, sizeof(input.notification),
-                              "Imported: %.400s (%u v, %u t)",
-                              path.c_str(), mesh->vertex_count(), mesh->tri_count());
+                              "Imported: %.400s (%u v, %u t%s)",
+                              path.c_str(), mesh->vertex_count(), mesh->tri_count(), count_note().c_str());
                 input.notification_timer = 3.0f;
             } else {
                 error_popup_msg = "Import failed: " + path;
@@ -418,6 +665,13 @@ void app_files_frame(App& a) {
         IGFD::FileDialogConfig cfg;
         cfg.path = default_browse_path;
         cfg.flags = ImGuiFileDialogFlags_ConfirmOverwrite;
+        fill_export_picks();
+        cfg.fileName = export_default_name() + ".obj";
+        // Nothing to choose with one mesh and no low: no side pane.
+        if (g_export_picks.size() > 1) {
+            cfg.sidePaneWidth = 230.0f;
+            cfg.sidePane = [](const char*, IGFD::UserDatas, bool*) { draw_export_picks(); };
+        }
         fd->OpenDialog("ExportKey", "Export Mesh", ".obj,.stl,.ply", cfg);
     }
     if (input.import_dialog_active && !fd->IsOpened("ImportKey")) {
@@ -436,26 +690,8 @@ void app_files_frame(App& a) {
     }
 
     if (display_file_dialog(fd, "ExportKey")) {
-        if (fd->IsOk()) {
-            std::string path = fd->GetFilePathName();
-            auto dot = path.find_last_of('.');
-            std::string ext = (dot != std::string::npos) ? path.substr(dot + 1) : "";
-            for (char& ch : ext) ch = (char)std::tolower((unsigned char)ch);
-            // GPU-resident sculpting/undo leave mesh.pos stale on the CPU —
-            // pull the live surface back first (save does the same).
-            scene.materialize_active_cpu();
-            bool ok = (ext == "stl") ? mesh->export_stl(path.c_str())
-                    : (ext == "ply") ? mesh->export_ply(path.c_str())
-                                     : mesh->export_obj(path.c_str());
-            if (ok) {
-                std::snprintf(input.notification, sizeof(input.notification),
-                              "Exported: %.400s", path.c_str());
-                input.notification_timer = 3.0f;
-            } else {
-                error_popup_msg = "Export failed: " + path;
-                error_popup_trigger = true;
-            }
-        }
+        if (fd->IsOk())
+            export_picks(fd->GetFilePathName());
         fd->Close();
         input.export_dialog_active = false;
     }
@@ -509,6 +745,9 @@ void app_files_frame(App& a) {
             rec.subdiv_level = up->subdiv_level;
             rec.mesh         = up->mesh;
             rec.multires     = up->multires;
+            rec.name         = up->name;
+            rec.visible      = up->visible;
+            retopo_save(up->retopo, rec.retopo);
             proj.entities.push_back(std::move(rec));
         }
         proj.active_id           = scene.active_mesh_id();
@@ -518,7 +757,6 @@ void app_files_frame(App& a) {
         proj.camera       = camera;
         proj.mirror_x     = input.mirror_x;
         proj.subdiv_level = input.subdiv_level;
-        retopo_save(retopo, proj.retopo);
         SaveResult sr = save_project(path.c_str(), proj);
         if (sr == SaveResult::OK && input.quit_after_save) {
             input.quit_after_save = false;
@@ -528,7 +766,7 @@ void app_files_frame(App& a) {
         if (sr == SaveResult::OK) {
             current_project_path = path;
             clean_edit_mark = scene.edit_mark();
-            clean_retopo_rev = retopo.rev;
+            clean_retopo_rev = scene.retopo_rev();
 #ifdef __EMSCRIPTEN__
             // A MEMFS "save" only counts once the bytes leave as a download
             // (which also unlinks the MEMFS copy; Ctrl+S recreates it).
@@ -651,7 +889,11 @@ void app_files_frame(App& a) {
         if (!input.export_dialog_active)   // ESC cleared the flag
             ImGui::CloseCurrentPopup();
         ImGui::TextUnformatted("Download as:");
-        if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+        if (ImGui::IsWindowAppearing()) {
+            ImGui::SetKeyboardFocusHere();
+            fill_export_picks();
+            std::snprintf(web_export_name, sizeof(web_export_name), "%s", export_default_name().c_str());
+        }
         ImGui::SetNextItemWidth(280);
         ImGui::InputText("##export_name", web_export_name, sizeof(web_export_name));
         auto web_export = [&](const std::string& ext) {
@@ -660,25 +902,19 @@ void app_files_frame(App& a) {
             if (name.size() < ext.size()
                 || name.compare(name.size() - ext.size(), ext.size(), ext) != 0)
                 name += ext;
-            std::string fs_path = "/" + name;
-            // GPU-resident sculpting/undo leave mesh.pos stale on the CPU —
-            // pull the live surface back first (save does the same).
-            scene.materialize_active_cpu();
-            bool ok = (ext == ".stl") ? mesh->export_stl(fs_path.c_str())
-                    : (ext == ".ply") ? mesh->export_ply(fs_path.c_str())
-                                      : mesh->export_obj(fs_path.c_str());
-            if (ok) {
-                web_download_file(fs_path.c_str(), name.c_str());
-                std::snprintf(input.notification, sizeof(input.notification),
-                              "Exported: %.400s", name.c_str());
-                input.notification_timer = 3.0f;
-            } else {
-                error_popup_msg = "Export failed: " + name;
-                error_popup_trigger = true;
-            }
+            // Several files are several downloads (the browser may ask once to allow that).
+            for (const std::string& out : export_picks("/" + name))
+                web_download_file(out.c_str(), out.c_str() + 1);
             input.export_dialog_active = false;
             ImGui::CloseCurrentPopup();
         };
+        if (g_export_picks.size() > 1) {
+            ImGui::Spacing();
+            ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 300.0f);
+            draw_export_picks();
+            ImGui::PopTextWrapPos();
+            ImGui::Spacing();
+        }
         if (ImGui::Button(".obj")) web_export(".obj");
         ImGui::SameLine();
         if (ImGui::Button(".stl")) web_export(".stl");

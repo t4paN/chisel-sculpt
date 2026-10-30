@@ -2,6 +2,8 @@
 #include <cstdint>
 #include "mesh.h"
 #include "multires_stack.h"
+#include "retopo.h"
+#include <string>
 
 // Plain, GPU-free description of one scene entity for serialization and scene
 // reconstruction. Mirrors the *persistent* fields of MeshEntity (id,
@@ -13,6 +15,9 @@ struct EntityRecord {
     uint32_t      subdiv_level = 4;
     Mesh          mesh;
     MultiresStack multires;
+    std::string   name;            // mesh layer name (MLYR chunk), empty = unnamed
+    bool          visible = true;
+    RetopoSnapshot retopo;         // its retopo as saved (RTOW + RTPO/RTSM/RTUV), empty = none
     // Set by the project loader for v<=3 files: multires disp layers are indexed
     // under the saving platform's legacy (hash-order) midpoint numbering and must
     // be migrated to canonical numbering before the stack is usable. Transient —
@@ -22,4 +27,8 @@ struct EntityRecord {
     // of a locked entity and regenerates it from the stack, so this is the only
     // cross-check that the regeneration matched what was saved. Transient.
     uint32_t      stored_vertex_count = 0;
+    // Set by in-session rebuilds (the rescue snapshot): if the entity is still in the
+    // scene, its live retopo (history, tools and all) carries over and `retopo` is only
+    // the fallback for one that has gone (an SDF merge being reverted). Transient.
+    bool          keep_live_retopo = false;
 };

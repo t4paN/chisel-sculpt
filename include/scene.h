@@ -42,6 +42,13 @@ public:
     // "save?" prompt; under-counting closes without one, so mark when in doubt.
     void     mark_edited() { ++edits_; }
     uint64_t edit_mark() const { return edits_ + UndoStack::global_pushes; }
+    // The same for retopo, which keeps its own history per mesh: the sum of every mesh's
+    // RetopoState::rev. Each only grows, and a delete also marks an edit, so any change
+    // moves the sum.
+    uint64_t retopo_rev() const;
+
+    // A mesh layer's name as shown: its own, else "Mesh <id>" written into buf.
+    static const char* display_name(const MeshEntity& e, char* buf, size_t n);
 
     // ---- Mirror map ----
     void set_mirror_topology(bool use_topology) { mirror_use_topology_ = use_topology; }

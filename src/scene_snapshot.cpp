@@ -85,6 +85,16 @@ static EntityRecord lean_record(const MeshEntity& e) {
     rec.id           = e.id;
     rec.subdiv_level = e.subdiv_level;
     rec.multires     = e.multires;
+    rec.name         = e.name;
+    rec.visible      = e.visible;
+    // Its retopo as it stands, for when the entity is gone by the time this restores;
+    // a live one is kept instead (see EntityRecord::keep_live_retopo).
+    rec.keep_live_retopo = true;
+    rec.retopo.strokes = e.retopo.strokes;
+    rec.retopo.result  = e.retopo.result;
+    rec.retopo.built   = e.retopo.built;
+    rec.retopo.next_id = e.retopo.next_id;
+    rec.retopo.uv      = e.retopo.uv;
 
     // Derived caches inside the stack: frames are recomputed on the
     // pre-displacement surface at every cascade, the topo cache is a pure

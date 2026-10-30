@@ -555,6 +555,14 @@ bool Mesh::export_obj(const char* filename) const {
     std::fprintf(f, "# OBJ export from Chisel\n");
     std::fprintf(f, "# vertices: %u\n", vertex_count());
     std::fprintf(f, "# triangles: %u\n", tri_count());
+    write_obj(f, nullptr, 0);
+
+    std::fclose(f);
+    return true;
+}
+
+uint32_t Mesh::write_obj(std::FILE* f, const char* object, uint32_t base) const {
+    if (object) std::fprintf(f, "o %s\n", object);
 
     for (uint32_t i = 0; i < vertex_count(); i++) {
         std::fprintf(f, "v %f %f %f\n", pos_x[i], pos_y[i], pos_z[i]);
@@ -565,17 +573,15 @@ bool Mesh::export_obj(const char* filename) const {
     }
 
     for (uint32_t t = 0; t < tri_count(); t++) {
-        uint32_t i0 = indices[t*3+0];
-        uint32_t i1 = indices[t*3+1];
-        uint32_t i2 = indices[t*3+2];
+        uint32_t i0 = base + indices[t*3+0];
+        uint32_t i1 = base + indices[t*3+1];
+        uint32_t i2 = base + indices[t*3+2];
         std::fprintf(f, "f %u//%u %u//%u %u//%u\n",
                     i0+1, i0+1,
                     i1+1, i1+1,
                     i2+1, i2+1);
     }
-
-    std::fclose(f);
-    return true;
+    return vertex_count();
 }
 
 bool Mesh::export_stl(const char* filename, float scale) const {
@@ -661,7 +667,7 @@ bool Mesh::export_ply(const char* filename) const {
     return true;
 }
 
-bool Mesh::import_obj(const char* filename, Mesh& out) {
+bool Mesh::import_obj(const char* filename, Mesh& out, std::vector<ObjPart>* parts) {
     FILE* f = std::fopen(filename, "r");
     if (!f) return false;
 
@@ -675,14 +681,26 @@ bool Mesh::import_obj(const char* filename, Mesh& out) {
     std::vector<uint32_t> poly_v;       // flat corner list
     std::vector<uint32_t> poly_start;   // offsets into poly_v, size = faces + 1
     poly_start.push_back(0);
+    std::vector<uint32_t> poly_obj;     // per face: index into obj_names
+    std::vector<uint32_t> poly_vt;      // per corner, parallel to poly_v: its vt, ~0u = none
+    std::vector<float> vt;              // 2 per vt line
+    std::vector<std::string> obj_names(1);
 
     char line[512];
     while (std::fgets(line, sizeof(line), f)) {
-        if (line[0] == 'v' && line[1] == ' ') {
+        if (line[0] == 'o' && line[1] == ' ') {
+            std::string n(line + 2);
+            while (!n.empty() && (n.back() == '\n' || n.back() == '\r' || n.back() == ' ')) n.pop_back();
+            obj_names.push_back(n);
+        } else if (line[0] == 'v' && line[1] == ' ') {
             float x, y, z;
             if (std::sscanf(line + 2, "%f %f %f", &x, &y, &z) == 3) {
                 vx.push_back(x); vy.push_back(y); vz.push_back(z);
             }
+        } else if (line[0] == 'v' && line[1] == 't' && line[2] == ' ') {
+            float u = 0.0f, v = 0.0f;
+            std::sscanf(line + 3, "%f %f", &u, &v);
+            vt.push_back(u); vt.push_back(v);
         } else if (line[0] == 'v' && line[1] == 'n' && line[2] == ' ') {
             float x, y, z;
             if (std::sscanf(line + 3, "%f %f %f", &x, &y, &z) == 3) {
@@ -690,17 +708,20 @@ bool Mesh::import_obj(const char* filename, Mesh& out) {
             }
         } else if (line[0] == 'f' && line[1] == ' ') {
             const char* p = line + 2;
-            uint32_t face_verts[16];
+            uint32_t face_verts[16], face_vts[16];
             int count = 0;
             while (*p && *p != '\n' && *p != '\r' && count < 16) {
                 while (*p == ' ') p++;
                 if (!*p || *p == '\n' || *p == '\r') break;
                 int vi = 0;
                 while (*p >= '0' && *p <= '9') { vi = vi * 10 + (*p - '0'); p++; }
+                face_vts[count] = ~0u;
                 face_verts[count++] = (uint32_t)(vi - 1);
                 if (*p == '/') {
                     p++;
-                    while (*p >= '0' && *p <= '9') p++;
+                    int ti = 0;
+                    while (*p >= '0' && *p <= '9') { ti = ti * 10 + (*p - '0'); p++; }
+                    if (ti > 0) face_vts[count - 1] = (uint32_t)(ti - 1);
                     if (*p == '/') {
                         p++;
                         while (*p >= '0' && *p <= '9') p++;
@@ -708,8 +729,9 @@ bool Mesh::import_obj(const char* filename, Mesh& out) {
                 }
             }
             if (count >= 3) {
-                for (int i = 0; i < count; i++) poly_v.push_back(face_verts[i]);
+                for (int i = 0; i < count; i++) { poly_v.push_back(face_verts[i]); poly_vt.push_back(face_vts[i]); }
                 poly_start.push_back((uint32_t)poly_v.size());
+                poly_obj.push_back((uint32_t)obj_names.size() - 1);
             }
         }
     }
@@ -735,6 +757,7 @@ bool Mesh::import_obj(const char* filename, Mesh& out) {
     // the one actually being solved here.
     const uint32_t nv_parsed = (uint32_t)vx.size();
     uint32_t n_quads = 0;
+    std::vector<uint32_t> tri_obj;      // per triangle: its face's object
     for (size_t fi = 0; fi + 1 < poly_start.size(); fi++) {
         const uint32_t b = poly_start[fi], e = poly_start[fi + 1];
         const int count = (int)(e - b);
@@ -773,6 +796,7 @@ bool Mesh::import_obj(const char* filename, Mesh& out) {
                 idxs.push_back(fv[i + 1]);
             }
         }
+        tri_obj.resize(idxs.size() / 3, poly_obj[fi]);
     }
 
     if (vx.empty() || idxs.empty()) return false;
@@ -803,6 +827,68 @@ bool Mesh::import_obj(const char* filename, Mesh& out) {
     std::printf("[import] loaded %u verts, %u tris (%u quads split on the "
                 "mirror-stable diagonal) from %s\n",
                 out.vertex_count(), out.tri_count(), n_quads, filename);
+
+    // One mesh per object, each with only the vertices its triangles use (OBJ indices
+    // are file-wide, so they are renumbered). Objects without faces are skipped.
+    if (parts) {
+        parts->clear();
+        std::vector<uint32_t> tris_in(obj_names.size(), 0);
+        for (uint32_t o : tri_obj) tris_in[o]++;
+        uint32_t n_objs = 0;
+        for (uint32_t c : tris_in) n_objs += c > 0;
+        if (n_objs >= 2) {
+            std::vector<uint32_t> remap(nv, UINT32_MAX);
+            std::vector<uint32_t> used;     // file-wide ids this object took
+            for (uint32_t o = 0; o < (uint32_t)obj_names.size(); o++) {
+                if (!tris_in[o]) continue;
+                parts->push_back({obj_names[o], Mesh{}});
+                Mesh& m = parts->back().mesh;
+                m.indices.reserve(tris_in[o] * 3);
+                for (uint32_t t = 0; t < (uint32_t)tri_obj.size(); t++) {
+                    if (tri_obj[t] != o) continue;
+                    for (int k = 0; k < 3; k++) {
+                        const uint32_t v = out.indices[t * 3 + k];
+                        if (remap[v] == UINT32_MAX) {
+                            remap[v] = (uint32_t)m.pos_x.size();
+                            used.push_back(v);
+                            m.pos_x.push_back(out.pos_x[v]);
+                            m.pos_y.push_back(out.pos_y[v]);
+                            m.pos_z.push_back(out.pos_z[v]);
+                            m.norm_x.push_back(out.norm_x[v]);
+                            m.norm_y.push_back(out.norm_y[v]);
+                            m.norm_z.push_back(out.norm_z[v]);
+                        }
+                        m.indices.push_back(remap[v]);
+                    }
+                }
+                // Its faces as written, renumbered the same way; UVs only if all have them.
+                ObjPart& part = parts->back();
+                bool all_vt = true;
+                part.poly_off.push_back(0);
+                for (size_t fi = 0; fi < poly_obj.size(); fi++) {
+                    if (poly_obj[fi] != o) continue;
+                    bool ok = true;
+                    for (uint32_t c = poly_start[fi]; c < poly_start[fi + 1]; c++)
+                        ok = ok && poly_v[c] < nv && remap[poly_v[c]] != UINT32_MAX;
+                    if (!ok) continue;
+                    for (uint32_t c = poly_start[fi]; c < poly_start[fi + 1]; c++) {
+                        part.poly.push_back(remap[poly_v[c]]);
+                        const uint32_t t = poly_vt[c];
+                        all_vt = all_vt && t != ~0u && t * 2 + 1 < vt.size();
+                        if (all_vt) { part.uv.push_back(vt[t * 2]); part.uv.push_back(vt[t * 2 + 1]); }
+                    }
+                    part.poly_off.push_back((uint32_t)part.poly.size());
+                }
+                if (!all_vt) part.uv.clear();
+                // Reset only what this object touched, for the next one.
+                for (uint32_t v : used) remap[v] = UINT32_MAX;
+                used.clear();
+                m.build_adjacency();
+                std::printf("[import]   object '%s': %u verts, %u tris\n",
+                            obj_names[o].c_str(), m.vertex_count(), m.tri_count());
+            }
+        }
+    }
     return true;
 }
 

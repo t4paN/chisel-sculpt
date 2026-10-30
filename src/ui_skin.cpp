@@ -3829,6 +3829,169 @@ void retopo_sliders(InputState& input, RetopoState& st, float sh, float sgap, fl
 
 }  // namespace
 
+// Sculpt / Select modes' "Meshes" dock, the paint and polygon layer lists' sibling: one
+// row per mesh, newest on top (eye / name / trash), the one being worked on outlined.
+// Click makes a mesh the active one (showing it if it was hidden), Ctrl+click adds it to
+// the selection (the SDF merge takes those), double-click renames. A mesh carrying a
+// retopo says "hi + lo": the low-poly lives with the sculpt it was made on. Deleting a
+// mesh can't be undone, so its trash takes two clicks. The title folds it away.
+void draw_mesh_layers_dock(InputState& input, MeshLayerRow* rows, int n, int win_w, int win_h) {
+    const float bh = 30.0f, gap = 6.0f;
+    const float row_h = 46.0f, kIn = 5.0f;
+    const float w = g_dos ? 300.0f : 250.0f;   // content width; the window hugs it
+    const float top = g_cmd_bottom + 12.0f;
+    const float bottom = (g_status_top > top ? g_status_top : (float)win_h - kEdge) - 12.0f;
+    const ImGuiWindowFlags flags =
+        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
+        ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoCollapse |
+        ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoBringToFrontOnFocus |
+        ImGuiWindowFlags_AlwaysAutoResize;
+    ImGui::SetNextWindowPos(ImVec2((float)win_w - kEdge, top), ImGuiCond_FirstUseEver, ImVec2(1.0f, 0.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f, 10.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(gap, gap));
+    if (!ImGui::Begin("##MeshDock", nullptr, flags)) { end_panel(); return; }
+    window_panel(14.0f);
+    {   // A shrinking app window must not strand it off screen.
+        const ImVec2 p = ImGui::GetWindowPos(), sz = ImGui::GetWindowSize();
+        const ImVec2 c(std::max(0.0f, std::min(p.x, (float)win_w - sz.x)),
+                       std::max(0.0f, std::min(p.y, (float)win_h - sz.y)));
+        if (c.x != p.x || c.y != p.y) ImGui::SetWindowPos(c);
+    }
+    BtnOpts o;
+    o.look = Look::Bar; o.side = TipSide::Left; o.icon_px = 18.0f;
+
+    {   // Title: click folds the list away (it's up in every sculpt session).
+        const ImVec2 p = ImGui::GetCursorScreenPos();
+        ImGui::InvisibleButton("##fold", ImVec2(w, 18.0f));
+        if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) input.mesh_dock_folded = !input.mesh_dock_folded;
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        text_at(dl, UiFont::SansSemibold, 13.0f, p, kText, "Meshes");
+        char cnt[24];
+        std::snprintf(cnt, sizeof cnt, input.mesh_dock_folded ? "%d  +" : "%d  -", n);
+        const ImVec2 cs = text_size(UiFont::Mono, 12.0f, cnt);
+        text_at(dl, UiFont::Mono, 12.0f, ImVec2(p.x + w - cs.x, p.y + 2.0f), kMuted, cnt);
+        if (ImGui::IsItemHovered())
+            tooltip(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), TipSide::Left,
+                    input.mesh_dock_folded ? "Show the mesh list" : "Fold the mesh list away", nullptr);
+    }
+    if (input.mesh_dock_folded) { end_panel(); return; }
+
+    static uint32_t rename_id = 0;
+    static bool rename_focus = false;
+    static char rename_buf[64];
+    static uint32_t arm_id = 0;     // a trash clicked once: the next click on it deletes
+    static double arm_t = 0.0;
+    if (arm_id && ImGui::GetTime() - arm_t > 3.0) arm_id = 0;
+    if (arm_id) input.wake_requested = true;   // frames keep coming so it disarms on time
+
+    // The list scrolls once it would run past the status panel.
+    const float list_h = std::max(row_h, std::min((float)n * (row_h + gap), bottom - ImGui::GetCursorScreenPos().y - 10.0f));
+    ImGui::BeginChild("##meshList", ImVec2(w, list_h), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float row_w = w - (ImGui::GetScrollMaxY() > 0.0f ? ImGui::GetStyle().ScrollbarSize + 2.0f : 0.0f);
+    const float ioff = (row_h - bh) * 0.5f;
+    for (int i = n - 1; i >= 0; i--) {
+        MeshLayerRow& r = rows[i];
+        ImGui::PushID((int)r.id);
+        const ImVec2 r0 = ImGui::GetCursorScreenPos();
+        const ImVec2 r1(r0.x + row_w, r0.y + row_h);
+        const float lx = ImGui::GetCursorPosX(), ly = ImGui::GetCursorPosY();
+        ImGui::BeginGroup();
+        ImGui::SetCursorPos(ImVec2(lx + kIn, ly + ioff));
+        // The eye. The active mesh's is off limits: you'd be sculpting blind.
+        o.on = false;
+        o.enabled = !r.active;
+        o.tip = r.active ? "The mesh you're working on always shows"
+                         : *r.visible ? "Hide it" : "Show it";
+        o.icol = *r.visible ? 0 : kMuted;
+        if (icon_button("vis", *r.visible ? Icon::ViewPaintShow : Icon::ViewPaintHide, bh, o)) {
+            *r.visible = !*r.visible;
+            input.mesh_layers_changed = true;
+        }
+        o.icol = 0; o.enabled = true;
+        ImGui::SameLine(0.0f, 4.0f);
+        ImGui::SetCursorPosY(ly);
+        const float name_w = row_w - 2.0f * bh - 8.0f - 2.0f * kIn;
+        if (rename_id == r.id) {
+            // Enter or clicking away keeps it, Esc drops it, empty keeps the old name.
+            if (rename_focus) { ImGui::SetKeyboardFocusHere(); rename_focus = false; }
+            ImGui::SetNextItemWidth(name_w);
+            ImGui::SetCursorPosY(ly + (row_h - ImGui::GetFrameHeight()) * 0.5f);
+            ImGui::InputText("##rename", rename_buf, sizeof(rename_buf), ImGuiInputTextFlags_AutoSelectAll);
+            if (ImGui::IsItemDeactivated()) {
+                if (!ImGui::IsKeyPressed(ImGuiKey_Escape) && rename_buf[0]) {
+                    *r.name = rename_buf;
+                    input.mesh_layers_changed = true;
+                }
+                rename_id = 0;
+            }
+        } else {
+            const ImVec2 p = ImGui::GetCursorScreenPos();
+            ImGui::InvisibleButton("##name", ImVec2(name_w, row_h));
+            if (ImGui::IsItemHovered())
+                dl->AddRectFilled(ImVec2(p.x, p.y + ioff), ImVec2(p.x + name_w, p.y + ioff + bh),
+                                  IM_COL32(255, 255, 255, 14), rad(6.0f));
+            // Name over a grey footnote (size, level, its low-poly), centred as a block.
+            char foot[64], tris[16];
+            if (r.tris >= 1000000) std::snprintf(tris, sizeof tris, "%.1fM", r.tris / 1e6);
+            else if (r.tris >= 1000) std::snprintf(tris, sizeof tris, "%.1fk", r.tris / 1e3);
+            else std::snprintf(tris, sizeof tris, "%u", r.tris);
+            if (r.lo_faces) std::snprintf(foot, sizeof foot, "%s tris | L%d | lo %u", tris, r.level, r.lo_faces);
+            else            std::snprintf(foot, sizeof foot, "%s tris | L%d", tris, r.level);
+            const UiFont nf = r.active ? UiFont::SansSemibold : UiFont::Sans;
+            const ImVec2 ts = text_size(nf, 13.0f, r.shown);
+            const ImVec2 fs = text_size(UiFont::Mono, 12.0f, foot);
+            const float name_y = p.y + (row_h - ts.y - 5.0f - fs.y) * 0.5f;
+            const char* kind = r.lo_faces ? "hi + lo" : "";
+            const ImVec2 ks = text_size(UiFont::Mono, 11.0f, kind);
+            dl->PushClipRect(p, ImVec2(p.x + name_w - ks.x - 10.0f, p.y + row_h), true);
+            text_at(dl, nf, 13.0f, ImVec2(p.x + 6.0f, name_y), *r.visible ? kText : kMuted, r.shown);
+            dl->PopClipRect();
+            if (kind[0])
+                text_at(dl, UiFont::Mono, 11.0f, ImVec2(p.x + name_w - ks.x - 6.0f, name_y + (ts.y - ks.y) * 0.5f),
+                        kMuted, kind);
+            text_at(dl, UiFont::Mono, 12.0f, ImVec2(p.x + 6.0f, name_y + ts.y + 5.0f), kMuted, foot);
+            if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
+                input.mesh_layer_pick = r.id;
+                input.mesh_layer_pick_add = ImGui::GetIO().KeyCtrl;
+                if (!input.mesh_layer_pick_add && !*r.visible) {   // picking a hidden one shows it
+                    *r.visible = true;
+                    input.mesh_layers_changed = true;
+                }
+            }
+            if (ImGui::IsItemHovered()) {
+                if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                    rename_id = r.id;
+                    rename_focus = true;
+                    std::snprintf(rename_buf, sizeof(rename_buf), "%s", r.shown);
+                }
+                tooltip(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), TipSide::Left,
+                        "Click works on it, Ctrl+click adds it to the selection, double-click renames", nullptr);
+            }
+        }
+        ImGui::SameLine(0.0f, 4.0f);
+        ImGui::SetCursorPosY(ly + ioff);
+        const bool armed = arm_id == r.id;
+        o.enabled = n > 1;
+        o.tip = n <= 1 ? "The only mesh stays" : armed ? "Click again to delete it (no undo)" : "Delete this mesh";
+        o.icol = armed ? kAlert : 0;
+        if (icon_button("del", Icon::UiTrash, bh, o)) {
+            if (armed) { input.mesh_layer_delete = r.id; arm_id = 0; }
+            else       { arm_id = r.id; arm_t = ImGui::GetTime(); }
+        }
+        o.icol = 0; o.enabled = true;
+        ImGui::EndGroup();
+        if (r.active)        dl->AddRect(r0, r1, kAccent, rad(9.0f), 0, 2.0f);
+        else if (r.selected) dl->AddRect(r0, r1, with_alpha(kAccent, 0.45f), rad(9.0f), 0, 1.5f);
+        else if (armed)      dl->AddRect(r0, r1, kAlert, rad(9.0f), 0, 1.5f);
+        ImGui::SetCursorScreenPos(ImVec2(r0.x, r1.y + gap));
+        ImGui::PopID();
+    }
+    ImGui::Dummy(ImVec2(0.0f, 0.0f));
+    ImGui::EndChild();
+    end_panel();
+}
+
 // Retopo mode's "Polygon Layers" dock, like paint mode's layer docker: one row per
 // stroke, newest on top (eye / name / trash). Hovering a row lights that stroke and its
 // quads on the model; click selects, Ctrl+click adds, double-click renames. The

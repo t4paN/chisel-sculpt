@@ -67,8 +67,7 @@ struct App {
     double&           rot_last_time;
     std::vector<uint32_t>& rot_dirty;
     Vec3&             scale_pivot;  // latched on the first frame of an RMB scale drag
-    RetopoState&      retopo;           // mode 0: sketched strokes + the quads Build made
-    uint64_t&         clean_retopo_rev; // retopo.rev as of the last save or load
+    uint64_t&         clean_retopo_rev; // scene.retopo_rev() as of the last save or load
 #ifdef __EMSCRIPTEN__
     char            (&web_save_name)[96];
     char            (&web_export_name)[96];

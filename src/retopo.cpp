@@ -1,4 +1,5 @@
 #include "retopo.h"
+#include "uv_unwrap.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -6179,6 +6180,113 @@ void retopo_load(RetopoState& st, RetopoSnapshot&& s) {
     if (st.built && s.uv.fits(st.result)) st.uv = std::move(s.uv);
 }
 
+bool retopo_from_obj(const ObjPart& p, RetopoSnapshot& out) {
+    const Mesh& m = p.mesh;
+    const uint32_t nv = m.vertex_count();
+    if (p.poly_off.size() < 2 || nv == 0) return false;
+    out = RetopoSnapshot{};
+    RetopoMesh& rm = out.result;
+    rm.v.resize(nv);
+    for (uint32_t i = 0; i < nv; i++) rm.v[i] = Vec3(m.pos_x[i], m.pos_y[i], m.pos_z[i]);
+    // One owner for the lot: there are no strokes left to say which face came from where.
+    const uint32_t owner = 1;
+    for (size_t f = 0; f + 1 < p.poly_off.size(); f++)
+        rm.add_face(&p.poly[p.poly_off[f]], (int)(p.poly_off[f + 1] - p.poly_off[f]), owner);
+    rm.v_owner.assign(nv, owner);
+    // The overlay's back-face test wants the sculpt's normal underneath; the low's own
+    // smooth normal is close enough for that, and the next edit snaps them anyway.
+    retopo_smooth_normals(rm, rm.n);
+
+    // Twins: the vertex at this one's reflection. The file holds 6 decimals, so match
+    // within a hair of the model's size, not exactly. Sorted by x, each looks only near -x.
+    Vec3 lo = rm.v[0], hi = rm.v[0];
+    for (const Vec3& v : rm.v) {
+        lo = Vec3(std::min(lo.x, v.x), std::min(lo.y, v.y), std::min(lo.z, v.z));
+        hi = Vec3(std::max(hi.x, v.x), std::max(hi.y, v.y), std::max(hi.z, v.z));
+    }
+    const float eps = std::max(1e-6f, (hi - lo).length() * 1e-5f);
+    std::vector<uint32_t> by_x(nv);
+    for (uint32_t i = 0; i < nv; i++) by_x[i] = i;
+    std::sort(by_x.begin(), by_x.end(), [&](uint32_t a, uint32_t b) { return rm.v[a].x < rm.v[b].x; });
+    rm.mirror.assign(nv, ~0u);
+    for (uint32_t i = 0; i < nv; i++) {
+        Vec3& a = rm.v[i];
+        if (std::fabs(a.x) <= eps) { a.x = 0.0f; rm.mirror[i] = i; continue; }
+        if (a.x < 0.0f) continue;   // the positive side does the looking
+        auto it = std::lower_bound(by_x.begin(), by_x.end(), -a.x - eps,
+                                   [&](uint32_t j, float x) { return rm.v[j].x < x; });
+        for (; it != by_x.end() && rm.v[*it].x <= -a.x + eps; ++it) {
+            const Vec3& b = rm.v[*it];
+            if (rm.mirror[*it] != ~0u || std::fabs(b.y - a.y) > eps || std::fabs(b.z - a.z) > eps) continue;
+            rm.mirror[i] = *it; rm.mirror[*it] = i;
+            break;
+        }
+    }
+    rebuild_edges(rm);   // seams below are checked against the edges
+    out.built = true;
+    out.next_id = owner + 1;
+
+    if (p.uv.size() != rm.faces.size() * 2) return true;
+    // Islands: faces that share an edge AND agree on its UVs at both ends. An edge where
+    // they disagree is a seam, so a later Unwrap cuts in the same places.
+    UvLayout& L = out.uv;
+    L.uv = p.uv;
+    const uint32_t nf = rm.face_count();
+    std::vector<uint32_t> root(nf);
+    for (uint32_t f = 0; f < nf; f++) root[f] = f;
+    auto find = [&](uint32_t f) { while (root[f] != f) f = root[f] = root[root[f]]; return f; };
+    struct Side { uint32_t f, ca, cb; };   // face, and its corners at the edge's low / high id
+    std::unordered_map<uint64_t, Side> first;
+    auto same = [&](uint32_t c, uint32_t d) {
+        return std::fabs(L.uv[c * 2] - L.uv[d * 2]) < 1e-6f && std::fabs(L.uv[c * 2 + 1] - L.uv[d * 2 + 1]) < 1e-6f;
+    };
+    for (uint32_t f = 0; f < nf; f++) {
+        const uint32_t k = rm.face_size(f), base = rm.face_off[f];
+        for (uint32_t j = 0; j < k; j++) {
+            uint32_t ca = base + j, cb = base + (j + 1) % k;
+            uint32_t a = rm.faces[ca], b = rm.faces[cb];
+            if (a == b) continue;
+            if (a > b) { std::swap(a, b); std::swap(ca, cb); }
+            const uint64_t key = (uint64_t)a << 32 | b;
+            auto ins = first.emplace(key, Side{f, ca, cb});
+            if (ins.second) continue;
+            const Side& o = ins.first->second;
+            if (same(ca, o.ca) && same(cb, o.cb)) root[find(f)] = find(o.f);
+            else { rm.seams.push_back(a); rm.seams.push_back(b); }
+        }
+    }
+    std::vector<uint32_t> pairs;
+    for (size_t i = 0; i + 1 < rm.seams.size(); i += 2) pairs.push_back(i);
+    std::sort(pairs.begin(), pairs.end(), [&](size_t x, size_t y) {
+        return rm.seams[x] != rm.seams[y] ? rm.seams[x] < rm.seams[y] : rm.seams[x + 1] < rm.seams[y + 1];
+    });
+    std::vector<uint32_t> sorted;
+    for (size_t i : pairs) { sorted.push_back(rm.seams[i]); sorted.push_back(rm.seams[i + 1]); }
+    rm.seams = std::move(sorted);
+    std::vector<uint32_t> chart_of(nf, ~0u);
+    L.face_chart.assign(nf, ~0u);
+    for (uint32_t f = 0; f < nf; f++) {
+        const uint32_t r = find(f);
+        if (chart_of[r] == ~0u) chart_of[r] = L.charts++;
+        L.face_chart[f] = chart_of[r];
+    }
+    // How much of the square the islands cover: each face's UV area (shoelace).
+    double used = 0.0;
+    for (uint32_t f = 0; f < nf; f++) {
+        const uint32_t k = rm.face_size(f), base = rm.face_off[f];
+        double a2 = 0.0;
+        for (uint32_t j = 0; j < k; j++) {
+            const uint32_t c = base + j, d = base + (j + 1) % k;
+            a2 += (double)L.uv[c * 2] * L.uv[d * 2 + 1] - (double)L.uv[d * 2] * L.uv[c * 2 + 1];
+        }
+        used += std::fabs(a2) * 0.5;
+    }
+    L.used = (float)std::min(1.0, used);
+    L.key = uv_topology_key(rm);
+    L.seam_key = uv_seam_key(rm);
+    return true;
+}
+
 void retopo_save(RetopoState& st, RetopoSnapshot& out) {
     // A plain wand preview isn't work to save; a spine's fill is.
     retopo_wand_close(st, st.wand_keep_shown ? st.wand_shown : -1);
@@ -6213,15 +6321,31 @@ bool retopo_export_obj(const RetopoMesh& rm, const char* path, const UvLayout* u
     FILE* f = std::fopen(path, "wb");
     if (!f) return false;
     std::fprintf(f, "# Chisel retopo: %u faces%s\n", rm.face_count(), uv ? ", UVs" : "");
-    // Welds leave folded-away vertices behind: write only the ones a quad uses.
-    std::vector<uint32_t> id(rm.v.size(), 0);
+    uint32_t v_base = 0, vt_base = 0;
+    retopo_write_obj(f, rm, uv, nullptr, v_base, vt_base);
+    std::fclose(f);
+    return true;
+}
+
+// Welds leave folded-away vertices behind: every writer keeps only the ones a face uses.
+// id[i] = 1-based new number, 0 = not written. Returns how many are.
+static uint32_t used_vertices(const RetopoMesh& rm, std::vector<uint32_t>& id) {
+    id.assign(rm.v.size(), 0);
     for (uint32_t i : rm.faces) id[i] = 1;
     uint32_t next = 0;
-    for (size_t i = 0; i < rm.v.size(); i++) {
-        if (!id[i]) continue;
-        id[i] = ++next;
-        std::fprintf(f, "v %.6f %.6f %.6f\n", rm.v[i].x, rm.v[i].y, rm.v[i].z);
-    }
+    for (size_t i = 0; i < rm.v.size(); i++)
+        if (id[i]) id[i] = ++next;
+    return next;
+}
+
+void retopo_write_obj(std::FILE* f, const RetopoMesh& rm, const UvLayout* uv, const char* object,
+                      uint32_t& v_base, uint32_t& vt_base) {
+    if (uv && !uv->fits(rm)) uv = nullptr;
+    if (object) std::fprintf(f, "o %s\n", object);
+    std::vector<uint32_t> id;
+    const uint32_t nv = used_vertices(rm, id);
+    for (size_t i = 0; i < rm.v.size(); i++)
+        if (id[i]) std::fprintf(f, "v %.6f %.6f %.6f\n", rm.v[i].x, rm.v[i].y, rm.v[i].z);
     // Normals the bake used, one per written vertex (vn k = v k): left to the importer,
     // each app smooths its own way and a baked normal map shades wrong on top.
     std::vector<Vec3> vn;
@@ -6236,11 +6360,64 @@ bool retopo_export_obj(const RetopoMesh& rm, const char* path, const UvLayout* u
     for (size_t q = 0; q < rm.face_count(); q++) {
         std::fprintf(f, "f");
         for (uint32_t k = rm.face_off[q]; k < rm.face_off[q + 1]; k++) {
-            const uint32_t v = id[rm.faces[k]];
-            if (uv) std::fprintf(f, " %u/%u/%u", v, k + 1, v);
+            const uint32_t v = v_base + id[rm.faces[k]];
+            if (uv) std::fprintf(f, " %u/%u/%u", v, vt_base + k + 1, v);
             else    std::fprintf(f, " %u//%u", v, v);
         }
         std::fprintf(f, "\n");
+    }
+    v_base += nv;
+    if (uv) vt_base += (uint32_t)rm.faces.size();
+}
+
+bool retopo_export_ply(const RetopoMesh& rm, const char* path) {
+    if (rm.faces.empty()) return false;
+    FILE* f = std::fopen(path, "w");
+    if (!f) return false;
+    std::vector<uint32_t> id;
+    const uint32_t nv = used_vertices(rm, id);
+    std::vector<Vec3> vn;
+    retopo_smooth_normals(rm, vn);
+    // Z-up, the same turn as Mesh::export_ply: file (x, y, z) = (x, -z, y).
+    std::fprintf(f, "ply\nformat ascii 1.0\ncomment Chisel PLY export, Z-up\n");
+    std::fprintf(f, "element vertex %u\n", nv);
+    std::fprintf(f, "property float x\nproperty float y\nproperty float z\n");
+    std::fprintf(f, "property float nx\nproperty float ny\nproperty float nz\n");
+    std::fprintf(f, "element face %u\n", rm.face_count());
+    std::fprintf(f, "property list uchar uint vertex_indices\nend_header\n");
+    for (size_t i = 0; i < rm.v.size(); i++)
+        if (id[i]) std::fprintf(f, "%f %f %f %f %f %f\n", rm.v[i].x, -rm.v[i].z, rm.v[i].y,
+                                vn[i].x, -vn[i].z, vn[i].y);
+    for (size_t q = 0; q < rm.face_count(); q++) {
+        std::fprintf(f, "%u", rm.face_size(q));
+        for (uint32_t k = rm.face_off[q]; k < rm.face_off[q + 1]; k++)
+            std::fprintf(f, " %u", id[rm.faces[k]] - 1);
+        std::fprintf(f, "\n");
+    }
+    std::fclose(f);
+    return true;
+}
+
+bool retopo_export_stl(const RetopoMesh& rm, const char* path) {
+    if (rm.faces.empty()) return false;
+    FILE* f = std::fopen(path, "wb");
+    if (!f) return false;
+    char header[80] = {};
+    std::snprintf(header, sizeof(header), "Chisel binary STL (retopo)");
+    std::fwrite(header, 1, sizeof(header), f);
+    uint32_t nt = 0;
+    for (size_t q = 0; q < rm.face_count(); q++) nt += rm.face_size(q) - 2;
+    std::fwrite(&nt, sizeof(uint32_t), 1, f);
+    const uint16_t attr = 0;
+    for (size_t q = 0; q < rm.face_count(); q++) {
+        const uint32_t* c = rm.face(q);
+        for (uint32_t k = 1; k + 1 < rm.face_size(q); k++) {
+            const Vec3 a = rm.v[c[0]], b = rm.v[c[k]], d = rm.v[c[k + 1]];
+            const Vec3 n = (b - a).cross(d - a).normalized();
+            const float rec[12] = {n.x, n.y, n.z, a.x, a.y, a.z, b.x, b.y, b.z, d.x, d.y, d.z};
+            std::fwrite(rec, sizeof(float), 12, f);
+            std::fwrite(&attr, sizeof(uint16_t), 1, f);
+        }
     }
     std::fclose(f);
     return true;

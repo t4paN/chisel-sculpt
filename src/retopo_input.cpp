@@ -13,6 +13,7 @@
 #include "web_bridge.h"
 #endif
 #include <algorithm>
+#include <cctype>
 #include <map>
 #include <chrono>
 #include <cmath>
@@ -1012,12 +1013,19 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
 // The low-poly is a by-product to take elsewhere, not a document: no dialog, next to
 // the project (or home), named after it. Web writes it to MEMFS for main.cpp to hand
 // to the browser.
-// Where retopo's exports go: next to the project as <name>-retopo..., ~/chisel-retopo...
-// before it's saved; the web build writes to its in-memory disk and downloads.
-static std::string export_stem(const std::string& project_path) {
+// Where retopo's exports go: next to the project as <project>-<mesh>-LO..., ~/chisel-<mesh>-LO...
+// before it's saved; the web build writes to its in-memory disk and downloads. The mesh
+// layer's name keeps the pair: the sculpt exports as <mesh>-HI, its low-poly as -LO.
+static std::string export_stem(const std::string& project_path, const char* mesh_name) {
+    std::string mesh;   // a file name part: anything odd becomes _
+    for (const char* c = mesh_name; c && *c; c++) {
+        const unsigned char u = (unsigned char)*c;
+        mesh += (std::isalnum(u) || u == '-' || u == '_' || u >= 0x80) ? (char)u : '_';
+    }
+    if (mesh.empty()) mesh = "mesh";
 #if defined(__EMSCRIPTEN__)
     (void)project_path;
-    return "/retopo";
+    return "/" + mesh + "-LO";
 #else
     std::string stem = project_path;
     if (stem.empty()) {
@@ -1027,12 +1035,13 @@ static std::string export_stem(const std::string& project_path) {
         const auto dot = stem.find_last_of('.');
         if (dot != std::string::npos && stem.find_last_of('/') < dot) stem.resize(dot);
     }
-    return stem + "-retopo";
+    return stem + "-" + mesh + "-LO";
 #endif
 }
 
-std::string retopo_export(const RetopoState& retopo, InputState& input, const std::string& project_path) {
-    const std::string path = export_stem(project_path) + ".obj";
+std::string retopo_export(const RetopoState& retopo, InputState& input, const std::string& project_path,
+                          const char* mesh_name) {
+    const std::string path = export_stem(project_path, mesh_name) + ".obj";
 #if defined(__EMSCRIPTEN__)
     const std::string name = path.substr(1);
 #else
@@ -1052,9 +1061,10 @@ std::string retopo_export(const RetopoState& retopo, InputState& input, const st
     return ok ? path : std::string();
 }
 
-void retopo_bake_save(const RetopoState& retopo, InputState& input, const std::string& project_path) {
+void retopo_bake_save(const RetopoState& retopo, InputState& input, const std::string& project_path,
+                      const char* mesh_name) {
     const BakeResult& r = retopo.bake.result;
-    const std::string stem = export_stem(project_path);
+    const std::string stem = export_stem(project_path, mesh_name);
     int wrote = 0;
     std::string last;
     for (int which = 0; which < 2; which++) {

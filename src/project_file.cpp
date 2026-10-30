@@ -57,6 +57,12 @@ static constexpr uint8_t  RTUV_FORMAT = 3;
 // UV seams, the same way: an optional RTSM chunk after RTPO. They're there whether or not
 // anything has been unwrapped, so they don't ride in RTUV.
 static constexpr uint8_t  RTSM_FORMAT = 1;
+// Mesh layers (2026-10-29), no VERSION bump either. MLYR after an entity's ENTY carries
+// its name and eye. Retopo moved from the project to each mesh: an RTOW chunk (u32
+// entity id) heads each mesh's RTPO / RTSM / RTUV group. A file without RTOW (older)
+// gives its one retopo to the active mesh. The active mesh's group is written last, so
+// a reader that predates RTOW (each RTPO replaces the last) ends up with that one.
+static constexpr uint8_t  MLYR_FORMAT = 1;
 
 struct ChunkHeader {
     char     tag[4];
@@ -382,6 +388,18 @@ static void write_rtsm_chunk(std::ofstream& f, const RetopoSnapshot& r) {
     write_chunk_end(f, sp);
 }
 
+// MLYR: u32 entity id, u8 format, u32 name length + bytes, u8 flags (1 = visible).
+static void write_mlyr_chunk(std::ofstream& f, const EntityRecord& e) {
+    std::streampos sp;
+    write_chunk_begin(f, "MLYR", sp);
+    write_u32(f, e.id);
+    write_u8(f, MLYR_FORMAT);
+    write_u32(f, (uint32_t)e.name.size());
+    if (!e.name.empty()) write_raw(f, e.name.data(), e.name.size());
+    write_u8(f, e.visible ? 1 : 0);
+    write_chunk_end(f, sp);
+}
+
 SaveResult save_project(const char* path, const ProjectData& data) {
     std::ofstream f(path, std::ios::binary);
     if (!f.is_open()) return SaveResult::ERR_OPEN;
@@ -395,13 +413,21 @@ SaveResult save_project(const char* path, const ProjectData& data) {
     for (const EntityRecord& e : data.entities) {
         write_enty_chunk(f, e);
         if (!e.mesh.paint_layers.empty()) write_layr_chunk(f, e);
+        write_mlyr_chunk(f, e);
     }
-    if (!data.retopo.strokes.empty() || data.retopo.result.face_count() > 0)
-        write_rtpo_chunk(f, data.retopo);
-    if (data.retopo.result.face_count() > 0 && !data.retopo.result.seams.empty())
-        write_rtsm_chunk(f, data.retopo);
-    if (!data.retopo.uv.empty() && data.retopo.uv.fits(data.retopo.result))
-        write_rtuv_chunk(f, data.retopo);
+    auto write_retopo = [&](const EntityRecord& e) {
+        const RetopoSnapshot& r = e.retopo;
+        if (r.strokes.empty() && r.result.face_count() == 0) return;
+        std::streampos sp;
+        write_chunk_begin(f, "RTOW", sp);
+        write_u32(f, e.id);
+        write_chunk_end(f, sp);
+        write_rtpo_chunk(f, r);
+        if (r.result.face_count() > 0 && !r.result.seams.empty()) write_rtsm_chunk(f, r);
+        if (!r.uv.empty() && r.uv.fits(r.result)) write_rtuv_chunk(f, r);
+    };
+    for (const EntityRecord& e : data.entities) if (e.id != data.active_id) write_retopo(e);
+    for (const EntityRecord& e : data.entities) if (e.id == data.active_id) write_retopo(e);
 
     if (!f.good()) return SaveResult::ERR_WRITE;
     return SaveResult::OK;
@@ -713,7 +739,7 @@ static bool read_vec3s(ChunkReader& r, std::vector<Vec3>& out, size_t n) {
     for (Vec3& p : out) if (!r.read_raw(&p.x, 4) || !r.read_raw(&p.y, 4) || !r.read_raw(&p.z, 4)) return false;
     return true;
 }
-static bool read_rtpo_chunk(ChunkReader& r, ProjectData& data) {
+static bool read_rtpo_chunk(ChunkReader& r, RetopoSnapshot& out) {
     uint8_t format, built;
     RetopoSnapshot s;
     uint32_t ns;
@@ -758,20 +784,20 @@ static bool read_rtpo_chunk(ChunkReader& r, ProjectData& data) {
         if (!r.read_float_vec(m.mask, nv)) return false;
         for (float& k : m.mask) if (!(k >= 0.0f && k <= 1.0f)) k = 0.0f;   // NaN lands here too
     }
-    data.retopo = std::move(s);
+    out = std::move(s);
     std::printf("[retopo] loaded: %zu stroke(s), %u faces, %u verts\n",
-                data.retopo.strokes.size(), nf, nv);
+                out.strokes.size(), nf, nv);
     return true;
 }
 
 // RTUV (see write_rtuv_chunk). Read after RTPO: it must fit the result just loaded.
-static bool read_rtuv_chunk(ChunkReader& r, ProjectData& data) {
+static bool read_rtuv_chunk(ChunkReader& r, RetopoSnapshot& out) {
     uint8_t format;
     UvLayout L;
     uint32_t nc;
     if (!r.read_u8(format) || format == 0 || format > RTUV_FORMAT) return false;
     if (!r.read_raw(&L.key, 8) || !r.read_u32(L.charts) || !r.read_raw(&L.used, 4) || !r.read_u32(nc)) return false;
-    const RetopoMesh& m = data.retopo.result;
+    const RetopoMesh& m = out.result;
     if (nc != m.faces.size() || nc > r.remaining() / 8) return false;
     if (!r.read_float_vec(L.uv, (size_t)nc * 2) || !r.read_u32_vec(L.face_chart, m.face_count())) return false;
     for (float& t : L.uv) if (!(t >= 0.0f && t <= 1.0f)) t = 0.0f;   // NaN lands here too
@@ -789,19 +815,19 @@ static bool read_rtuv_chunk(ChunkReader& r, ProjectData& data) {
         }
     }
     if (!L.fits(m)) return false;
-    data.retopo.uv = std::move(L);
-    std::printf("[uv] loaded: %u islands over %u faces\n", data.retopo.uv.charts, m.face_count());
+    out.uv = std::move(L);
+    std::printf("[uv] loaded: %u islands over %u faces\n", out.uv.charts, m.face_count());
     return true;
 }
 
 // RTSM (see write_rtsm_chunk). Read after RTPO: every id must be one of its vertices.
-static bool read_rtsm_chunk(ChunkReader& r, ProjectData& data) {
+static bool read_rtsm_chunk(ChunkReader& r, RetopoSnapshot& out) {
     uint8_t format;
     uint32_t n;
     if (!r.read_u8(format) || format == 0 || format > RTSM_FORMAT || !r.read_u32(n) || n > r.remaining() / 8) return false;
     std::vector<uint32_t> ids;
     if (!r.read_u32_vec(ids, (size_t)n * 2)) return false;
-    const size_t nv = data.retopo.result.v.size();
+    const size_t nv = out.result.v.size();
     std::vector<uint64_t> keys;
     for (size_t i = 0; i < ids.size(); i += 2) {
         const uint32_t a = std::min(ids[i], ids[i + 1]), b = std::max(ids[i], ids[i + 1]);
@@ -810,10 +836,26 @@ static bool read_rtsm_chunk(ChunkReader& r, ProjectData& data) {
     }
     std::sort(keys.begin(), keys.end());   // the users binary-search them
     keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
-    std::vector<uint32_t>& out = data.retopo.result.seams;
-    out.clear();
-    for (uint64_t k : keys) { out.push_back((uint32_t)(k >> 32)); out.push_back((uint32_t)k); }
+    std::vector<uint32_t>& seams = out.result.seams;
+    seams.clear();
+    for (uint64_t k : keys) { seams.push_back((uint32_t)(k >> 32)); seams.push_back((uint32_t)k); }
     std::printf("[uv] loaded: %zu seam edge(s)\n", keys.size());
+    return true;
+}
+
+// MLYR (see write_mlyr_chunk). Off = the mesh just keeps no name and stays shown.
+static bool read_mlyr_chunk(ChunkReader& r, ProjectData& data) {
+    uint32_t eid, len;
+    uint8_t format, flags;
+    if (!r.read_u32(eid) || !r.read_u8(format) || format == 0 || format > MLYR_FORMAT) return false;
+    EntityRecord* e = nullptr;
+    for (EntityRecord& c : data.entities) if (c.id == eid) e = &c;
+    if (!e || !r.read_u32(len) || len > 256 || len > r.remaining()) return false;
+    std::string name(len, '\0');
+    if (len && !r.read_raw(&name[0], len)) return false;
+    if (!r.read_u8(flags)) return false;
+    e->name = std::move(name);
+    e->visible = (flags & 1) != 0;
     return true;
 }
 
@@ -827,6 +869,16 @@ static LoadResult load_project_v2(std::ifstream& f, std::streamoff file_size,
                                   bool has_planes, bool has_density,
                                   bool has_derived) {
     bool has_scen = false;
+    // Retopo groups: RTOW names the owner of the RTPO after it; RTSM / RTUV belong to
+    // the last RTPO read. Writers put every RTPO after all the ENTYs and the SCEN, so the
+    // owner (or the active mesh) is already loaded when one arrives.
+    uint32_t rt_owner = 0;
+    RetopoSnapshot* rt_target = nullptr;
+    auto retopo_owner = [&](uint32_t id) -> RetopoSnapshot* {
+        if (!id) id = data.active_id;
+        for (EntityRecord& e : data.entities) if (e.id == id) return &e.retopo;
+        return data.entities.empty() || id != data.active_id ? nullptr : &data.entities.front().retopo;
+    };
 
     while ((std::streamoff)f.tellg() < file_size) {
         ChunkHeader hdr;
@@ -848,24 +900,34 @@ static LoadResult load_project_v2(std::ifstream& f, std::streamoff file_size,
             if (!read_enty_chunk(cr, e, has_color, has_planes, has_density, has_derived))
                 return LoadResult::ERR_CORRUPT;
             data.entities.push_back(std::move(e));
+            rt_target = nullptr;   // the push may have moved every record
         } else if (std::memcmp(hdr.tag, "LAYR", 4) == 0) {
             if (!read_layr_chunk(cr, data))
                 std::printf("[load] a paint layer section didn't read back: that model "
                             "keeps its flattened picture\n");
+        } else if (std::memcmp(hdr.tag, "MLYR", 4) == 0) {
+            if (!read_mlyr_chunk(cr, data))
+                std::printf("[load] a mesh layer's name didn't read back: it loads unnamed\n");
+        } else if (std::memcmp(hdr.tag, "RTOW", 4) == 0) {
+            if (!cr.read_u32(rt_owner)) rt_owner = 0;
         } else if (std::memcmp(hdr.tag, "RTPO", 4) == 0) {
-            if (!read_rtpo_chunk(cr, data)) {
-                data.retopo = RetopoSnapshot{};
+            // Its owner: the RTOW just before it, else (an older file) the active mesh.
+            rt_target = retopo_owner(rt_owner);
+            rt_owner = 0;
+            if (rt_target && !read_rtpo_chunk(cr, *rt_target)) {
+                *rt_target = RetopoSnapshot{};
                 std::printf("[load] the retopo section didn't read back: the project "
                             "loads without it\n");
             }
+            if (!rt_target) std::printf("[load] a retopo section names no mesh: skipped\n");
         } else if (std::memcmp(hdr.tag, "RTSM", 4) == 0) {
-            if (!read_rtsm_chunk(cr, data)) {
-                data.retopo.result.seams.clear();
+            if (rt_target && !read_rtsm_chunk(cr, *rt_target)) {
+                rt_target->result.seams.clear();
                 std::printf("[load] the UV seams didn't read back: the project loads without them\n");
             }
         } else if (std::memcmp(hdr.tag, "RTUV", 4) == 0) {
-            if (!read_rtuv_chunk(cr, data)) {
-                data.retopo.uv.clear();
+            if (rt_target && !read_rtuv_chunk(cr, *rt_target)) {
+                rt_target->uv.clear();
                 std::printf("[load] the UV layout didn't read back: unwrap again in UV mode\n");
             }
         } else if (std::memcmp(hdr.tag, "SCEN", 4) == 0) {

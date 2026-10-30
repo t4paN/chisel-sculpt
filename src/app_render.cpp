@@ -7,7 +7,10 @@
 #include <emscripten.h>
 #endif
 #include "app.h"
+#include <algorithm>
+#include <array>
 #include <cstdio>
+#include <vector>
 #include <string>
 
 #include "mesh.h"
@@ -169,7 +172,7 @@ void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse) {
     // other alive entity from its static display VAO. Depth test composes them.
     // UV mode with a bake to preview: the retopo mesh wearing it stands in for the
     // sculpt it was baked from (the active one, the one retopo works on).
-    const BakeState& bake = a.retopo.bake;
+    const BakeState& bake = scene.active_entity().retopo.bake;
     const bool baked = input.uv_on() && bake.showing();
     if (baked) {
         const BakeResult& r = bake.result;
@@ -184,6 +187,7 @@ void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse) {
         uint32_t active_id = scene.active_mesh_id();
         for (auto& up : scene.entities()) {
             if (!up || !up->alive) continue;
+            if (!up->visible && up->id != active_id) continue;   // its eye is off (mesh layers)
             // An entity is tinted (deselected) unless it's in the selection set.
             // An empty set is a real, reachable state (the user deselected
             // everything) → every entity tinted: a fully-deselected scene.
@@ -413,8 +417,37 @@ void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse) {
     draw_keybind_window(input, win_w, win_h);
     draw_brush_props_window(input, win_w, win_h);
     draw_paint_layers_panel(input, scene, win_w, win_h);
+    // Mesh layers: Select mode, and Sculpt mode unless the paint layers hold that spot.
+    {
+        using IM = InputState::InteractionMode;
+        const bool paint_dock = input.current_brush == BrushType::PAINT && !input.paint_target_density;
+        if (input.interaction_mode == IM::SELECT || (input.interaction_mode == IM::EDIT && !paint_dock)) {
+            static std::vector<MeshLayerRow> rows;      // reused: no allocation once grown
+            static std::vector<std::array<char, 24>> fallback;
+            rows.clear();
+            // Sized before any row points into it: a resize mid-loop would move them.
+            if (fallback.size() < scene.entities().size()) fallback.resize(scene.entities().size());
+            const std::vector<uint32_t>& sel = scene.selected_ids();
+            for (auto& up : scene.entities()) {
+                if (!up || !up->alive || up->preview) continue;
+                MeshLayerRow r;
+                r.id = up->id;
+                r.name = &up->name;
+                r.shown = Scene::display_name(*up, fallback[rows.size()].data(), 24);
+                r.visible = &up->visible;
+                r.active = up->id == scene.active_mesh_id();
+                r.selected = std::find(sel.begin(), sel.end(), up->id) != sel.end();
+                r.tris = up->mesh.tri_count();
+                r.level = up->multires.current_level;
+                r.lo_faces = up->retopo.built ? up->retopo.result.face_count() : 0;
+                rows.push_back(r);
+            }
+            draw_mesh_layers_dock(input, rows.data(), (int)rows.size(), win_w, win_h);
+            if (input.mesh_layers_changed) { input.mesh_layers_changed = false; scene.mark_edited(); }
+        }
+    }
     if (input.interaction_mode == InputState::InteractionMode::RETOPO)
-        draw_retopo_ui(input, a.retopo, renderer, camera, win_w, win_h, screen_buffers_dirty);
+        draw_retopo_ui(input, scene.active_entity().retopo, renderer, camera, win_w, win_h, screen_buffers_dirty);
 
     // ---- Error popup ----
     if (error_popup_trigger) {

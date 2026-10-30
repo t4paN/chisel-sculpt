@@ -579,7 +579,7 @@ void app_ops_levels_and_views(App& a) {
         mesh->compute_bounding_sphere(mesh_center, mesh_radius);
         // Retopo (0) frames the piece being worked on (retopo_focus).
         const bool framed = input.interaction_mode == InputState::InteractionMode::RETOPO
-                         && retopo_focus(a.retopo, camera, mesh_radius);
+                         && retopo_focus(a.scene.active_entity().retopo, camera, mesh_radius);
         if (!framed) {
             camera.set_target(brush_stroke.last_stroke_valid ? brush_stroke.last_stroke_pos : mesh_center);
             camera.distance = std::max(camera.distance * 0.675f, mesh_radius * 0.05f);

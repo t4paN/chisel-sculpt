@@ -5,6 +5,8 @@
 #include "undo.h"
 #include "entity_gpu.h"
 #include "pose.h"
+#include "retopo.h"
+#include <string>
 
 // A self-contained mesh entity: owns its Mesh data and MultiresStack
 // independently of every other entity in the scene.
@@ -17,6 +19,10 @@ struct MeshEntity {
     uint32_t subdiv_level   = 4;
     bool     preview        = false;
     bool     alive          = true;
+    // Mesh layers (the Sculpt / Select dock): its name, empty = "Mesh <id>", and its eye.
+    // Hidden = not drawn and not pickable; the active one is always shown.
+    std::string name;
+    bool     visible        = true;
 
     Mesh          mesh;
     MultiresStack multires;
@@ -34,6 +40,12 @@ struct MeshEntity {
     // Pose brush spheres and bones on this mesh (pose.h). Shown and used only while
     // this is the active entity and the pose brush is in hand.
     PoseRig       pose;
+
+    // Its retopo (mode 0 / UV 9): the strokes, the low-poly Build made on THIS sculpt,
+    // its UVs and its bake. Owned here so the hi/lo pair can't come apart: switching the
+    // active mesh switches the retopo with it, and Build, snap and bake rays only ever
+    // see the sculpt the low was made on.
+    RetopoState   retopo;
 
     // Static display GL buffers, used when this entity is NOT the active one.
     // The active entity is drawn from the renderer's working buffers instead.

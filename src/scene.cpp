@@ -386,6 +386,13 @@ void Scene::sync_color_partial_entity(uint32_t eid,
 // ---- Selection ----
 
 void Scene::set_active(uint32_t entity_id) {
+    // Each mesh has its own retopo, but the copy / paste clipboard is the user's, not
+    // the mesh's: a piece copied on one sculpt pastes onto the next one picked.
+    if (entity_id != 0 && entity_id != active_id_) {
+        MeshEntity* from = find_entity(active_id_);
+        MeshEntity* to   = find_entity(entity_id);
+        if (from && to && from->retopo.has_clip()) to->retopo.clip = from->retopo.clip;
+    }
     active_id_ = entity_id;
     selected_ids_.clear();
     if (entity_id != 0) selected_ids_.push_back(entity_id);
@@ -426,6 +433,18 @@ MeshEntity* Scene::selected() {
 
 const MeshEntity* Scene::selected() const {
     return find_entity(active_id_);
+}
+
+uint64_t Scene::retopo_rev() const {
+    uint64_t r = 0;
+    for (auto& up : entities_) if (up && up->alive) r += up->retopo.rev;
+    return r;
+}
+
+const char* Scene::display_name(const MeshEntity& e, char* buf, size_t n) {
+    if (!e.name.empty()) return e.name.c_str();
+    std::snprintf(buf, n, "Mesh %u", e.id);
+    return buf;
 }
 
 uint32_t Scene::alive_count() const {
@@ -471,6 +490,7 @@ void Scene::render_pick(const Camera& cam, int w, int h) {
     renderer_.pick_begin(cam, w, h);
     for (auto& up : entities_) {
         if (!up || !up->alive) continue;
+        if (!up->visible && up->id != active_id_) continue;   // hidden: out of reach too
         if (up->id == active_id_)
             renderer_.pick_draw(up->id, renderer_.vbo_pos, renderer_.ebo,
                                 (uint32_t)up->mesh.indices.size());
@@ -486,6 +506,16 @@ void Scene::load_entities(std::vector<EntityRecord>& records,
                           uint32_t active_id,
                           const std::vector<uint32_t>& selected,
                           uint32_t next_id) {
+    // In-session rebuilds keep a surviving entity's live retopo (its history too).
+    std::vector<std::pair<uint32_t, RetopoState>> live;
+    for (auto& up : entities_) {
+        if (!up || !up->alive) continue;
+        for (const EntityRecord& rec : records)
+            if (rec.keep_live_retopo && rec.id == up->id) {
+                live.emplace_back(up->id, std::move(up->retopo));
+                break;
+            }
+    }
     // Tear down the current scene, releasing each entity's display VAO.
     for (auto& up : entities_)
         if (up) renderer_.free_display(up->gpu);
@@ -502,6 +532,12 @@ void Scene::load_entities(std::vector<EntityRecord>& records,
         up->preview      = false;
         up->mesh         = std::move(rec.mesh);
         up->multires     = std::move(rec.multires);
+        up->name         = std::move(rec.name);
+        up->visible      = rec.visible;
+        auto kept = std::find_if(live.begin(), live.end(),
+                                 [&](const std::pair<uint32_t, RetopoState>& l) { return l.first == rec.id; });
+        if (kept != live.end()) up->retopo = std::move(kept->second);
+        else                    retopo_load(up->retopo, std::move(rec.retopo));
 
         // A locked stack stores base + displacement layers; the on-disk mesh is
         // only the cached current-level surface. Regenerate it from the stack
