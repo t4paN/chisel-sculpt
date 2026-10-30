@@ -1,12 +1,9 @@
 #include "uv_unwrap.h"
-#include "xatlas/xatlas.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
-#include <cstring>
 #include <map>
-#include <tuple>
 
 uint64_t uv_topology_key(const RetopoMesh& rm) {
     // FNV-1a over the corner lists and the face boundaries: two meshes with the same
@@ -355,6 +352,256 @@ static LscmResult lscm(const std::vector<Vec3>& pos, const std::vector<uint32_t>
     return res;
 }
 
+// ---- Packing. Each island is drawn onto a grid of cells (every cell one of its
+// triangles so much as touches), grown by the padding, and placed biggest first wherever
+// its top ends lowest, trying all four quarter turns: true rotations, since a reflection
+// would hand the island back mirrored. Islands fit by shape, not by box, so a small one
+// can sit in a big one's bay. A search over the scale finds the largest that fits.
+
+struct PackShape {
+    int w = 0, h = 0;              // the grown mask, cells
+    float mnx = 0.0f, mny = 0.0f;  // the turned island's lower corner, mesh units
+    std::vector<uint8_t> raw;      // the cells the island itself covers, w*h
+    std::vector<int32_t> runs;     // the grown mask as runs (y, x0, x1), bottom row first
+    int cx0 = 0, cy0 = 0, cx1 = 0, cy1 = 0;   // a rectangle wholly inside the grown mask
+};
+
+struct PackPlace { int q = 0, x = 0, y = 0; float mnx = 0.0f, mny = 0.0f; };
+
+static void pack_turn(int q, float x, float y, float& ox, float& oy) {
+    switch (q) {
+        case 0:  ox = x;  oy = y;  break;
+        case 1:  ox = -y; oy = x;  break;
+        case 2:  ox = -x; oy = -y; break;
+        default: ox = y;  oy = -x; break;
+    }
+}
+
+// Island `tris` (6 floats per triangle, mesh units) turned q quarter turns, at s cells
+// per mesh unit, grown by pad cells. False when it can't fit an n-cell square at all.
+static bool pack_raster(const std::vector<float>& tris, int q, float s, int pad, int n, PackShape& o) {
+    float mnx = 1e30f, mny = 1e30f, mxx = -1e30f, mxy = -1e30f;
+    for (size_t i = 0; i < tris.size(); i += 2) {
+        float x, y;
+        pack_turn(q, tris[i], tris[i + 1], x, y);
+        mnx = std::min(mnx, x); mxx = std::max(mxx, x);
+        mny = std::min(mny, y); mxy = std::max(mxy, y);
+    }
+    const double fw = (double)(mxx - mnx) * s, fh = (double)(mxy - mny) * s;
+    if (fw + 1 + 2 * pad > n || fh + 1 + 2 * pad > n) return false;
+    o.mnx = mnx; o.mny = mny;
+    o.w = (int)fw + 1 + 2 * pad;
+    o.h = (int)fh + 1 + 2 * pad;
+    const int w = o.w, h = o.h;
+    o.raw.assign((size_t)w * h, 0);
+    for (size_t i = 0; i + 5 < tris.size(); i += 6) {
+        float px[3], py[3];
+        for (int k = 0; k < 3; k++) {
+            pack_turn(q, tris[i + 2 * k], tris[i + 2 * k + 1], px[k], py[k]);
+            px[k] = (px[k] - mnx) * s + pad;
+            py[k] = (py[k] - mny) * s + pad;
+        }
+        if ((px[1] - px[0]) * (py[2] - py[0]) - (px[2] - px[0]) * (py[1] - py[0]) < 0.0f) {
+            std::swap(px[1], px[2]); std::swap(py[1], py[2]);
+        }
+        auto cell = [](float v, int lo, int hi) { return std::min(hi, std::max(lo, (int)std::floor(v))); };
+        const int x0 = cell(std::min({px[0], px[1], px[2]}), pad, w - pad - 1), x1 = cell(std::max({px[0], px[1], px[2]}), pad, w - pad - 1);
+        const int y0 = cell(std::min({py[0], py[1], py[2]}), pad, h - pad - 1), y1 = cell(std::max({py[0], py[1], py[2]}), pad, h - pad - 1);
+        // A cell is in if, for every edge, its corner furthest inside that edge is inside:
+        // with the box test that's exact overlap, and a flat triangle gets the cells its
+        // line crosses rather than none.
+        for (int y = y0; y <= y1; y++)
+            for (int x = x0; x <= x1; x++) {
+                bool in = true;
+                for (int k = 0; k < 3 && in; k++) {
+                    const float ex = px[(k + 1) % 3] - px[k], ey = py[(k + 1) % 3] - py[k];
+                    const float cx = ey < 0.0f ? x + 1.0f : (float)x, cy = ex > 0.0f ? y + 1.0f : (float)y;
+                    in = ex * (cy - py[k]) - ey * (cx - px[k]) >= 0.0f;
+                }
+                if (in) o.raw[(size_t)y * w + x] = 1;
+            }
+    }
+    // Grown by pad cells every way (a square, so two islands' cells end up at least pad+1
+    // apart along some axis: a gap of at least pad cells between the real edges).
+    std::vector<uint8_t> a((size_t)w * h, 0), g((size_t)w * h, 0);
+    for (int y = 0; y < h; y++)
+        for (int x = pad; x < w - pad; x++)
+            if (o.raw[(size_t)y * w + x]) for (int d = -pad; d <= pad; d++) a[(size_t)y * w + x + d] = 1;
+    for (int y = pad; y < h - pad; y++)
+        for (int x = 0; x < w; x++)
+            if (a[(size_t)y * w + x]) for (int d = -pad; d <= pad; d++) g[(size_t)(y + d) * w + x] = 1;
+    o.runs.clear();
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w;) {
+            if (!g[(size_t)y * w + x]) { x++; continue; }
+            int e = x;
+            while (e < w && g[(size_t)y * w + e]) e++;
+            o.runs.push_back(y); o.runs.push_back(x); o.runs.push_back(e);
+            x = e;
+        }
+    // The biggest rectangle inside the grown mask (row by row, as a histogram): one sum
+    // over it rules out most places before the runs are looked at.
+    std::vector<int> ht(w + 1, 0), stk;
+    long best = 0;
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) ht[x] = g[(size_t)y * w + x] ? ht[x] + 1 : 0;
+        stk.clear();
+        for (int x = 0; x <= w; x++) {
+            const int hx = x < w ? ht[x] : 0;
+            while (!stk.empty() && ht[stk.back()] >= hx) {
+                const int top = ht[stk.back()];
+                stk.pop_back();
+                const int left = stk.empty() ? 0 : stk.back() + 1;
+                if ((long)top * (x - left) > best) {
+                    best = (long)top * (x - left);
+                    o.cx0 = left; o.cx1 = x; o.cy0 = y - top + 1; o.cy1 = y + 1;
+                }
+            }
+            stk.push_back(x);
+        }
+    }
+    return best > 0;
+}
+
+// The square being filled: which cells are taken, with sums to ask "anything taken
+// in here?" in one step, and run lengths to hop over a row's taken or too-short stretches.
+struct PackGrid {
+    int n = 0;
+    std::vector<uint8_t>  occ;    // n*n
+    std::vector<int32_t>  row;    // per row, running count: n*(n+1)
+    std::vector<int32_t>  sat;    // summed area: (n+1)*(n+1)
+    std::vector<uint16_t> run;    // per cell: cells to the end of its run (free or taken)
+    std::vector<uint16_t> widest; // per row: its longest free run
+    void reset(int size) {
+        n = size;
+        occ.assign((size_t)n * n, 0);
+        row.assign((size_t)n * (n + 1), 0);
+        sat.assign((size_t)(n + 1) * (n + 1), 0);
+        run.assign((size_t)n * n, 0);
+        widest.assign(n, 0);
+        fix(0, 0, n);
+    }
+    // Rows y0..y1 changed, from column x0 on.
+    void fix(int x0, int y0, int y1) {
+        for (int y = y0; y < y1; y++) {
+            const uint8_t* o = &occ[(size_t)y * n];
+            int32_t* r = &row[(size_t)y * (n + 1)];
+            uint16_t* u = &run[(size_t)y * n];
+            for (int x = x0; x < n; x++) r[x + 1] = r[x] + o[x];
+            int longest = 0;
+            for (int x = n - 1; x >= 0; x--) {
+                u[x] = (uint16_t)(x + 1 < n && o[x + 1] == o[x] ? u[x + 1] + 1 : 1);
+                if (!o[x]) longest = std::max(longest, (int)u[x]);
+            }
+            widest[y] = (uint16_t)longest;
+        }
+        for (int y = y0; y < n; y++)
+            for (int x = x0 + 1; x <= n; x++)
+                sat[(size_t)(y + 1) * (n + 1) + x] = sat[(size_t)y * (n + 1) + x] + row[(size_t)y * (n + 1) + x];
+    }
+    int32_t taken(int x0, int y0, int x1, int y1) const {
+        const size_t m = n + 1;
+        return sat[y1 * m + x1] - sat[y0 * m + x1] - sat[y1 * m + x0] + sat[y0 * m + x0];
+    }
+    // The lowest, then leftmost, spot for sh whose top stays under `below`.
+    bool find(const PackShape& sh, int below, int& bx, int& by) const {
+        const int cw = sh.cx1 - sh.cx0;
+        for (int y = 0; y + sh.h <= n && y + sh.h < below; y++) {
+            const int yb = y + sh.cy0;
+            if (widest[yb] < cw) continue;
+            for (int x = 0; x + sh.w <= n;) {
+                const size_t c = (size_t)yb * n + x + sh.cx0;
+                if (occ[c] || run[c] < cw) { x += run[c]; continue; }
+                // On a clash, hop to the first x that clears the rightmost taken cell
+                // it hit: every x short of that still covers it.
+                const int c0 = x + sh.cx0, c1 = x + sh.cx1, r0 = y + sh.cy0, r1 = y + sh.cy1;
+                if (taken(c0, r0, c1, r1)) {
+                    int lo = c0, hi = c1 - 1;   // the last column with something taken from it on
+                    while (lo < hi) { const int m = (lo + hi + 1) / 2; if (taken(m, r0, c1, r1)) lo = m; else hi = m - 1; }
+                    x = lo - sh.cx0 + 1;
+                    continue;
+                }
+                int next = -1;
+                if (taken(x, y, x + sh.w, y + sh.h)) {
+                    for (size_t i = 0; i < sh.runs.size(); i += 3) {
+                        const int32_t* r = &row[(size_t)(y + sh.runs[i]) * (n + 1)];
+                        const int a = x + sh.runs[i + 1], b = x + sh.runs[i + 2];
+                        if (r[b] == r[a]) continue;
+                        int lo = a, hi = b - 1;
+                        while (lo < hi) { const int m = (lo + hi + 1) / 2; if (r[b] != r[m]) lo = m; else hi = m - 1; }
+                        next = lo - sh.runs[i + 1] + 1;
+                        break;
+                    }
+                }
+                if (next < 0) { bx = x; by = y; return true; }
+                x = next;
+            }
+        }
+        return false;
+    }
+    void stamp(const PackShape& sh, int x, int y) {
+        for (int j = 0; j < sh.h; j++)
+            for (int i = 0; i < sh.w; i++)
+                if (sh.raw[(size_t)j * sh.w + i]) occ[(size_t)(y + j) * n + x + i] = 1;
+        fix(x, y, y + sh.h);
+    }
+};
+
+// Every island placed at s cells per mesh unit, biggest first; false when one won't fit.
+static bool pack_try(const std::vector<std::vector<float>>& isl, const std::vector<uint32_t>& order,
+                     float s, int pad, PackGrid& g, std::vector<PackPlace>& at) {
+    g.reset(g.n);
+    at.assign(isl.size(), PackPlace());
+    PackShape sh[4];
+    for (uint32_t i : order) {
+        int best = g.n + 1, bq = -1, bx = 0, by = 0;
+        for (int q = 0; q < 2; q++) {
+            if (!pack_raster(isl[i], q, s, pad, g.n, sh[q])) continue;
+            int x, y;
+            if (g.find(sh[q], best, x, y)) { best = y + sh[q].h; bq = q; bx = x; by = y; }
+        }
+        if (bq < 0) return false;
+        g.stamp(sh[bq], bx, by);
+        at[i] = PackPlace{bq, bx, by, sh[bq].mnx, sh[bq].mny};
+    }
+    return true;
+}
+
+// Packs the islands (each a list of triangles, 6 floats apiece, mesh units) into an
+// n-cell square with pad cells between them. Writes where each went; returns the scale
+// (cells per mesh unit), 0 when they can't be made to fit.
+static float pack_islands(const std::vector<std::vector<float>>& isl, int n, int pad, std::vector<PackPlace>& out) {
+    double area = 0.0;
+    std::vector<double> isl_area(isl.size(), 0.0);
+    for (size_t i = 0; i < isl.size(); i++) {
+        const std::vector<float>& t = isl[i];
+        for (size_t k = 0; k + 5 < t.size(); k += 6)
+            isl_area[i] += 0.5 * std::fabs((double)(t[k + 2] - t[k]) * (t[k + 5] - t[k + 1]) - (double)(t[k + 4] - t[k]) * (t[k + 3] - t[k + 1]));
+        area += isl_area[i];
+    }
+    if (isl.empty()) return 0.0f;
+    std::vector<uint32_t> order(isl.size());
+    for (uint32_t i = 0; i < order.size(); i++) order[i] = i;
+    std::stable_sort(order.begin(), order.end(), [&](uint32_t a, uint32_t b) { return isl_area[a] > isl_area[b]; });
+    PackGrid g;
+    g.n = n;
+    std::vector<PackPlace> trial;
+    // A first guess from the area, stepped until one scale fits and a bigger one doesn't,
+    // then halved between them.
+    float s = (float)std::sqrt(0.6 * n * n / std::max(area, 1e-12)), lo = 0.0f, hi = 0.0f;
+    for (int i = 0; i < 150 && (lo == 0.0f || hi == 0.0f); i++) {
+        if (pack_try(isl, order, s, pad, g, trial)) { lo = s; out = trial; s *= 1.1f; }
+        else { hi = s; s /= 1.1f; }
+    }
+    if (lo == 0.0f) return 0.0f;
+    for (int i = 0; i < 4 && hi > 0.0f; i++) {
+        const float mid = std::sqrt(lo * hi);
+        if (pack_try(isl, order, mid, pad, g, trial)) { lo = mid; out = trial; }
+        else hi = mid;
+    }
+    return lo;
+}
+
 const char* uv_unwrap(const RetopoMesh& rm, const UvSettings& s, UvLayout& out, double& ms) {
     out.clear();
     ms = 0.0;
@@ -380,8 +627,7 @@ const char* uv_unwrap(const RetopoMesh& rm, const UvSettings& s, UvLayout& out, 
     // Islands are exactly what the painted seams (and the mesh's own borders) fence off:
     // nothing else is cut. Each vertex on a seam is split into one copy per wedge (the
     // faces round it between seams); everything joined through a shared vertex copy is
-    // one island. xatlas segments by its own cost rules and can't be told to stop, so it
-    // only packs (pass 2); the flattening is ours (lscm, above).
+    // one island.
     std::vector<uint32_t> seam_e;
     retopo_seam_edges(rm, seam_e);
     std::vector<uint32_t> wv = tri_idx;    // per triangle corner: its vertex copy
@@ -477,8 +723,8 @@ const char* uv_unwrap(const RetopoMesh& rm, const UvSettings& s, UvLayout& out, 
     }
 
     // Each island turned (a true rotation, never a reflection) so its long axis lies along
-    // u: the principal axis of its corners, about their centre. That's the packing help
-    // xatlas's own turns gave, without the mirroring.
+    // u: the principal axis of its corners, about their centre, so the packer's quarter
+    // turns have a box-shaped island to work with.
     {
         std::vector<double> sx(out.charts, 0.0), sy(out.charts, 0.0), n(out.charts, 0.0),
                             sxx(out.charts, 0.0), syy(out.charts, 0.0), sxy(out.charts, 0.0);
@@ -511,93 +757,60 @@ const char* uv_unwrap(const RetopoMesh& rm, const UvSettings& s, UvLayout& out, 
         }
     }
 
-    // ---- Pass 2: pack the islands into the square, with padding. xatlas finds
-    // the islands by shared UV corners; one vertex per (island, mesh vertex, UV) keeps a
-    // seam vertex's two copies apart, and the island as material keeps islands from
-    // merging where they happen to touch.
-    std::vector<float> pv;
-    std::vector<uint32_t> pidx(tri_idx.size()), pmat(nt);
-    {
-        std::map<std::tuple<uint32_t, uint32_t, uint32_t, uint32_t>, uint32_t> seen;
-        for (uint32_t i = 0; i < tri_idx.size(); i++) {
-            const uint32_t c = tri_corner[i], isl = out.face_chart[tri_face[i / 3]];
-            uint32_t ub, vb;
-            std::memcpy(&ub, &flat[2 * c], 4);
-            std::memcpy(&vb, &flat[2 * c + 1], 4);
-            const auto key = std::make_tuple(isl, tri_idx[i], ub, vb);
-            auto it = seen.find(key);
-            if (it == seen.end()) {
-                it = seen.emplace(key, (uint32_t)(pv.size() / 2)).first;
-                pv.push_back(flat[2 * c]);
-                pv.push_back(flat[2 * c + 1]);
+    // ---- Pass 2: pack the islands into the square, with padding. The grid is at most
+    // 512 cells a side (2 px a cell at 1024), the padding rounded up to whole cells.
+    const int res = std::max(1, s.resolution);
+    const int n = std::min(512, res);
+    const int pad = std::max(1, (int)std::ceil(s.padding * (float)n / res - 1e-4f));
+    std::vector<std::vector<float>> isl_flat(out.charts);
+    for (uint32_t c = 0; c < out.charts; c++)
+        for (uint32_t t : isl_tris[c])
+            for (int k = 0; k < 3; k++) {
+                isl_flat[c].push_back(flat[2 * tri_corner[3 * t + k]]);
+                isl_flat[c].push_back(flat[2 * tri_corner[3 * t + k] + 1]);
             }
-            pidx[i] = it->second;
-        }
-        for (uint32_t t = 0; t < nt; t++) pmat[t] = out.face_chart[tri_face[t]];
-    }
-    xatlas::UvMeshDecl ud;
-    ud.vertexUvData     = pv.data();
-    ud.vertexStride     = 2 * sizeof(float);
-    ud.vertexCount      = (uint32_t)(pv.size() / 2);
-    ud.indexData        = pidx.data();
-    ud.indexFormat      = xatlas::IndexFormat::UInt32;
-    ud.indexCount       = (uint32_t)pidx.size();
-    ud.faceMaterialData = pmat.data();
-    xatlas::Atlas* atlas = xatlas::Create();
-    if (xatlas::AddUvMesh(atlas, ud) != xatlas::AddMeshError::Success) {
-        xatlas::Destroy(atlas);
-        out.clear();
-        return "the packer refused the islands";
-    }
-    xatlas::PackOptions po;
-    po.resolution = (uint32_t)s.resolution;
-    po.padding    = (uint32_t)s.padding;
-    // Never let xatlas's packer turn an island: both its turns are reflections (the
-    // quarter turn swaps u and v; the turn onto the long axis projects onto a frame that
-    // can be left-handed), so they hand islands back mirrored. Ours above is a rotation.
-    po.rotateCharts = po.rotateChartsToAxis = false;
-    xatlas::Generate(atlas, xatlas::ChartOptions(), po);   // on a UV mesh: find its islands, then pack
+    std::vector<PackPlace> at;
+    const float sc = pack_islands(isl_flat, n, pad, at);
 
     const char* why = nullptr;
-    float used = 0.0f;
+    double used = 0.0;
     uint32_t turned = 0, dotted = 0;
-    if (atlas->meshCount != 1 || atlas->width == 0 || atlas->height == 0 || atlas->meshes[0].indexCount != pidx.size()) {
-        why = "the packer produced nothing";
-    } else if (atlas->atlasCount > 1) {
-        // Fixed resolution with an estimated scale should always fit one square; more
-        // than one means the islands didn't, and a second sheet has nowhere to go.
+    if (sc <= 0.0f) {
         why = "the islands didn't fit one texture";
     } else {
-        const xatlas::Mesh& pm = atlas->meshes[0];
-        used = atlas->utilization ? atlas->utilization[0] : 0.0f;
-        const float iw = 1.0f / (float)atlas->width, ih = 1.0f / (float)atlas->height;
         out.uv.assign(rm.faces.size() * 2, 0.0f);
         std::fill(have.begin(), have.end(), 0);
-        for (uint32_t i = 0; i < pidx.size(); i++) {
-            const xatlas::Vertex& v = pm.vertexArray[pm.indexArray[i]];
-            if (v.chartIndex < 0) continue;   // a triangle too thin to pack: its corners come from the others
-            out.uv[2 * tri_corner[i]]     = v.uv[0] * iw;
-            out.uv[2 * tri_corner[i] + 1] = v.uv[1] * ih;
-            have[tri_corner[i]] = 1;
+        for (uint32_t f = 0; f < nf; f++) {
+            const uint32_t c = out.face_chart[f];
+            if (c == ~0u) continue;
+            const PackPlace& P = at[c];
+            for (uint32_t j = rm.face_off[f]; j < rm.face_off[f + 1]; j++) {
+                float x, y;
+                pack_turn(P.q, flat[2 * j], flat[2 * j + 1], x, y);
+                out.uv[2 * j]     = ((x - P.mnx) * sc + pad + P.x) / n;
+                out.uv[2 * j + 1] = ((y - P.mny) * sc + pad + P.y) / n;
+                have[j] = 1;
+            }
         }
-        // Tripwire: with the packer's turns off, no island should come out backwards.
-        // (Mirroring one here would be wrong anyway: islands nest by shape, so flipping
-        // one across its box lands it on its neighbours. That was the 2026-10-26 overlap.)
+        // Tripwire: the packer only rotates, so no island should come out backwards.
+        // How much of the square is used: the islands' own area, face by face.
         {
             std::vector<double> area(out.charts, 0.0);
             for (uint32_t f = 0; f < nf; f++) {
                 const uint32_t c = out.face_chart[f];
                 if (c == ~0u) continue;
                 const uint32_t o = rm.face_off[f], k = rm.face_size(f);
+                double a2 = 0.0;
                 for (uint32_t j = 0; j < k; j++) {
                     const uint32_t a = o + j, b = o + (j + 1) % k;
-                    area[c] += (double)out.uv[2 * a] * out.uv[2 * b + 1] - (double)out.uv[2 * b] * out.uv[2 * a + 1];
+                    a2 += (double)out.uv[2 * a] * out.uv[2 * b + 1] - (double)out.uv[2 * b] * out.uv[2 * a + 1];
                 }
+                area[c] += a2;
+                used += std::fabs(a2) * 0.5;
             }
             for (uint32_t c = 0; c < out.charts; c++) turned += area[c] < 0.0;
         }
-        // Whatever no packed triangle reached (a face in no island, or a corner only a
-        // sliver touched) takes its face's first placed corner: a dot, not a stray line.
+        // A face in no island takes its first placed corner: a dot, not a stray line.
         for (uint32_t f = 0; f < nf; f++) {
             const uint32_t o = rm.face_off[f], k = rm.face_size(f);
             uint32_t src = ~0u;
@@ -608,13 +821,12 @@ const char* uv_unwrap(const RetopoMesh& rm, const UvSettings& s, UvLayout& out, 
         }
         out.key = uv_topology_key(rm);
         out.seam_key = uv_seam_key(rm);
-        out.used = used;
+        out.used = (float)std::min(1.0, used);
     }
-    xatlas::Destroy(atlas);
     ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     if (why) { out.clear(); return why; }
     std::printf("[uv] unwrap: %u faces, %zu painted seam edge(s) -> %u islands, %.0f%% of the square used, %.1f ms"
                 " (not flat-able %u, folded triangles %u, mirrored back %u, BACKWARDS AFTER PACKING %u, faces in no island %u, corners dotted %u)\n",
-                nf, seam_e.size() / 2, out.charts, used * 100.0f, ms, not_flat, folds, mirrored, turned, orphans, dotted);
+                nf, seam_e.size() / 2, out.charts, used * 100.0, ms, not_flat, folds, mirrored, turned, orphans, dotted);
     return nullptr;
 }

@@ -2,6 +2,12 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-30 — UV: our own island packer
+
+- Unwrap packs islands by shape, biggest first, turning them a quarter turn when that fits better (never mirrored); small islands tuck into the gaps.
+- Islands keep their proportions: the old packer's sheet came out rectangular and was squeezed into the square, stretching every island ~15% one way.
+- "% used" is now the islands' real area, so it can read lower than before for the same layout; many-island unwraps fill noticeably more of the square.
+
 ## 2026-10-30 — Mesh layers: retopo follows its mesh, merges keep retopos, delete can be undone
 
 - Select-mode move, scale and spin carry the mesh's retopo along, its undo history too; undoing the move takes it back.

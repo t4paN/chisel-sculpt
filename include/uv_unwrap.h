@@ -5,8 +5,8 @@
 
 // UV mode (key 9): the retopo result laid flat for texturing. The islands are exactly
 // what the painted seams and the mesh's borders fence off; each is flattened by
-// least-squares conformal maps, then xatlas (external/xatlas, MIT) packs them into the
-// unit square. It runs on the low-poly retopo mesh only, never on
+// least-squares conformal maps, then packed into the unit square by shape (biggest
+// first, quarter turns allowed, never a reflection). It runs on the low-poly retopo mesh only, never on
 // the sculpt — a few thousand quads take a fraction of a second, a sculpt would take
 // minutes. The layout it makes (UvLayout) is in retopo.h, beside the mesh it maps.
 
