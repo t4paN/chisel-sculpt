@@ -743,6 +743,196 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
 }
 )WGSL";
 
+// ---- Textured sculpt (an imported glTF wearing its base colour) ----------------------
+// The matcap above, with the texture multiplied into the albedo. Its UVs are per CORNER
+// (a welded sculpt's seams run through shared vertices), which an indexed draw can't
+// feed, so this one is a plain draw of 3 x tris corners that fetches its own vertex:
+// index buffer, then pos/norm/mask/colour by that index, all bound as read-only storage.
+// The very buffers the brushes write, so a stroke shows with no extra copy. Lighting
+// is the matcap's, line for line: change one, change this twin (the facing-threshold
+// band is left out: the knob is gone and the branch was inert).
+static const char* textured_vert_src = R"(
+#version 430 core
+layout(std430, binding=10) readonly buffer TIdx  { uint  t_idx[];  };
+layout(std430, binding=11) readonly buffer TPos  { float t_pos[];  };
+layout(std430, binding=12) readonly buffer TNrm  { float t_nrm[];  };
+layout(std430, binding=13) readonly buffer TMask { float t_mask[]; };
+layout(std430, binding=14) readonly buffer TCol  { uint  t_col[];  };
+layout(std430, binding=15) readonly buffer TUV   { float t_uv[];   };
+
+layout(std140, binding=63) uniform Params {
+    mat4 uView;
+    mat4 uProj;
+    float uFacingThreshold;
+    float uObjMask;
+    float uPaintVisible;
+    float uMatcapContrast;
+    float uFlatShading;
+    float uObjTintR; float uObjTintG; float uObjTintB;
+};
+
+out vec3 vNormView;
+out vec3 vPosView;
+out float vMask;
+out vec4 vColor;
+out vec2 vUV;
+
+void main() {
+    uint cid = uint(gl_VertexID);
+    uint v = t_idx[cid];
+    vec3 aPos = vec3(t_pos[3u * v], t_pos[3u * v + 1u], t_pos[3u * v + 2u]);
+    vec3 aNorm = vec3(t_nrm[3u * v], t_nrm[3u * v + 1u], t_nrm[3u * v + 2u]);
+    mat3 normalMat = mat3(uView);
+    vNormView = normalize(normalMat * aNorm);
+    vMask = t_mask[v];
+    vColor = unpackUnorm4x8(t_col[v]);
+    // Mesh UVs have v up (OBJ); the texture's row 0 is the image's top, at t = 0.
+    vUV = vec2(t_uv[2u * cid], 1.0 - t_uv[2u * cid + 1u]);
+    vec4 posView = uView * vec4(aPos, 1.0);
+    vPosView = posView.xyz;
+    gl_Position = uProj * posView;
+}
+)";
+
+static const char* textured_frag_src = R"(
+#version 430 core
+in vec3 vNormView;
+in vec3 vPosView;
+in float vMask;
+in vec4 vColor;
+in vec2 vUV;
+out vec4 fragColor;
+layout(binding=0) uniform sampler2D uTex;
+
+layout(std140, binding=63) uniform Params {
+    mat4 uView;
+    mat4 uProj;
+    float uFacingThreshold;
+    float uObjMask;
+    float uPaintVisible;
+    float uMatcapContrast;
+    float uFlatShading;
+    float uObjTintR; float uObjTintG; float uObjTintB;
+};
+
+void main() {
+    vec3 ns = normalize(vNormView);
+    vec3 gface = cross(dFdx(vPosView), dFdy(vPosView));
+    float glen = length(gface);
+    vec3 n = ns;
+    if (uFlatShading > 0.5 && glen > 1e-20) {
+        gface /= glen;
+        n = (dot(gface, ns) < 0.0) ? -gface : gface;
+    }
+    float rim = 1.0 - abs(n.z);
+    float rim2 = rim * rim;
+    float top = n.y * 0.5 + 0.5;
+    float val_flat = (0.35 + 0.45 * top + 0.15 * (1.0 - rim2)) * (1.0 - rim2 * 0.3);
+    vec3 L = normalize(vec3(-0.30, 0.62, 0.72));
+    float key = mix(0.35, 1.0, max(dot(n, L), 0.0));
+    key *= key;
+    float fill = n.y * 0.5 + 0.5;
+    float val_key = (0.05 + 0.66 * key + 0.14 * fill) * (1.0 - rim2 * 0.45);
+    float val = mix(val_flat, val_key, uMatcapContrast);
+    float shade = mix(1.0, 0.4, vMask);
+    val *= shade;
+    vec3 H = normalize(L + vec3(0.0, 0.0, 1.0));
+    float spec = pow(max(dot(n, H), 0.0), 90.0) * 0.16 * shade * uMatcapContrast;
+    // Paint tints the texture; hiding paint shows the bare clay, texture and all.
+    vec3 albedo = vColor.rgb * texture(uTex, vUV).rgb;
+    vec3 col = vec3(val) * mix(vec3(1.0), albedo, uPaintVisible) + vec3(spec);
+    if (uObjMask > 0.0) {
+        vec3 tint = vec3(uObjTintR, uObjTintG, uObjTintB);
+        col = mix(col, col * tint, uObjMask);
+    }
+    fragColor = vec4(col, 1.0);
+}
+)";
+
+static const char* textured_wgsl_src = R"WGSL(
+struct Params {
+    view: mat4x4<f32>,
+    proj: mat4x4<f32>,
+    facing_threshold: f32,
+    obj_mask: f32,
+    paint_visible: f32,
+    matcap_contrast: f32,
+    flat_shading: f32,
+    obj_tint_r: f32,
+    obj_tint_g: f32,
+    obj_tint_b: f32,
+};
+@group(0) @binding(63) var<uniform> P: Params;
+@group(0) @binding(0) var tex_color: texture_2d<f32>;
+@group(0) @binding(1) var tex_samp: sampler;
+@group(0) @binding(10) var<storage, read> t_idx: array<u32>;
+@group(0) @binding(11) var<storage, read> t_pos: array<f32>;
+@group(0) @binding(12) var<storage, read> t_nrm: array<f32>;
+@group(0) @binding(13) var<storage, read> t_mask: array<f32>;
+@group(0) @binding(14) var<storage, read> t_col: array<u32>;
+@group(0) @binding(15) var<storage, read> t_uv: array<f32>;
+struct VSOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) nrm: vec3<f32>,
+    @location(1) mask: f32,
+    @location(2) color: vec4<f32>,
+    @location(3) posView: vec3<f32>,
+    @location(4) uv: vec2<f32>,
+};
+@vertex
+fn vs_main(@builtin(vertex_index) cid: u32) -> VSOut {
+    var o: VSOut;
+    let v = t_idx[cid];
+    let aPos = vec3<f32>(t_pos[3u * v], t_pos[3u * v + 1u], t_pos[3u * v + 2u]);
+    let aNorm = vec3<f32>(t_nrm[3u * v], t_nrm[3u * v + 1u], t_nrm[3u * v + 2u]);
+    let nm = mat3x3<f32>(P.view[0].xyz, P.view[1].xyz, P.view[2].xyz);
+    o.nrm = normalize(nm * aNorm);
+    o.mask = t_mask[v];
+    o.color = unpack4x8unorm(t_col[v]);
+    o.uv = vec2<f32>(t_uv[2u * cid], 1.0 - t_uv[2u * cid + 1u]);
+    let posView = P.view * vec4<f32>(aPos, 1.0);
+    o.posView = posView.xyz;
+    o.pos = P.proj * posView;
+    return o;
+}
+@fragment
+fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
+    let ns = normalize(in.nrm);
+    var gface = cross(dpdx(in.posView), dpdy(in.posView));
+    let glen = length(gface);
+    var n = ns;
+    let want_flat = P.flat_shading > 0.5;
+    let usable = glen > 1e-20;
+    if (want_flat && usable) {
+        gface = gface / glen;
+        let facing_viewer = dot(gface, ns) > 0.0;
+        if (!facing_viewer) { gface = -gface; }
+        n = gface;
+    }
+    let rim = 1.0 - abs(n.z);
+    let rim2 = rim * rim;
+    let top = n.y * 0.5 + 0.5;
+    let val_flat = (0.35 + 0.45 * top + 0.15 * (1.0 - rim2)) * (1.0 - rim2 * 0.3);
+    let L = normalize(vec3<f32>(-0.30, 0.62, 0.72));
+    var key = mix(0.35, 1.0, max(dot(n, L), 0.0));
+    key = key * key;
+    let fill = n.y * 0.5 + 0.5;
+    let val_key = (0.05 + 0.66 * key + 0.14 * fill) * (1.0 - rim2 * 0.45);
+    var val = mix(val_flat, val_key, P.matcap_contrast);
+    let shade = mix(1.0, 0.4, in.mask);
+    val = val * shade;
+    let H = normalize(L + vec3<f32>(0.0, 0.0, 1.0));
+    let spec = pow(max(dot(n, H), 0.0), 90.0) * 0.16 * shade * P.matcap_contrast;
+    let albedo = in.color.rgb * textureSample(tex_color, tex_samp, in.uv).rgb;
+    var col = vec3<f32>(val) * mix(vec3<f32>(1.0), albedo, P.paint_visible) + vec3<f32>(spec);
+    if (P.obj_mask > 0.0) {
+        let tint = vec3<f32>(P.obj_tint_r, P.obj_tint_g, P.obj_tint_b);
+        col = mix(col, col * tint, P.obj_mask);
+    }
+    return vec4<f32>(col, 1.0);
+}
+)WGSL";
+
 // ---- Bake preview (UV mode) ----------------------------------------------------------
 // The retopo mesh as a triangle soup wearing the baked maps: the colour map as albedo,
 // the normal map decoded in the MikkTSpace frame it was baked in (n = x T + y B + z N,
@@ -1169,6 +1359,8 @@ Renderer::~Renderer() {
     gpu::release_render_pipeline(matcap_pipeline);
     gpu::release_buffer(matcap_ubo);
     gpu::release_render_pipeline(baked_pipeline);
+    gpu::release_render_pipeline(textured_pipeline);
+    free_textured(active_textured);
     gpu::release_buffer(baked_ubo);
     gpu::release_buffer(baked_pos);
     gpu::release_buffer(baked_nrm);
@@ -1257,6 +1449,27 @@ void Renderer::init() {
         if (!matcap_pipeline.handle) std::fprintf(stderr, "[renderer] matcap pipeline failed\n");
         else std::printf("[renderer] matcap pipeline compiled (gpu:: seam)\n");
         matcap_ubo = gpu::create_buffer(gpu_dev, nullptr, sizeof(MatcapParamsGPU), gpu::Usage::Uniform);
+    }
+
+    // Textured twin: no vertex buffers, everything read by index from storage.
+    {
+        gpu::BindEntry binds[] = {
+            { 63, gpu::Bind::Uniform, sizeof(MatcapParamsGPU) },
+            { 10, gpu::Bind::StorageRead, 0 }, { 11, gpu::Bind::StorageRead, 0 },
+            { 12, gpu::Bind::StorageRead, 0 }, { 13, gpu::Bind::StorageRead, 0 },
+            { 14, gpu::Bind::StorageRead, 0 }, { 15, gpu::Bind::StorageRead, 0 },
+        };
+        gpu::RenderPipelineDesc d;
+        d.shaders.wgsl = textured_wgsl_src;
+        d.shaders.vert_glsl = textured_vert_src;
+        d.shaders.frag_glsl = textured_frag_src;
+        d.binds = binds; d.bind_count = 7;
+        d.topology = gpu::Topology::Triangles;
+        d.depth_test = true; d.depth_write = true;
+        d.sampled_texture = true;
+        textured_pipeline = gpu::create_render_pipeline(gpu_dev, d);
+        if (!textured_pipeline.handle) std::fprintf(stderr, "[renderer] textured pipeline failed\n");
+        else std::printf("[renderer] textured pipeline compiled (gpu:: seam)\n");
     }
 
     // Bake preview (UV mode): pos/norm/tangent/uv soup, both maps sampled.
@@ -1588,6 +1801,7 @@ void Renderer::upload_mesh(const Mesh& mesh) {
         dens_buf[i] = (i < mesh.density.size()) ? mesh.density[i] : 0.5f;
     ensure_buffer(gpu_dev, vbo_density, dens_buf.data(), (uint64_t)dens_buf.size()*sizeof(float),
                   gpu::Usage::Vertex | gpu::Usage::Storage);
+    upload_textured(active_textured, mesh);
 }
 
 void Renderer::update_mask(const Mesh& mesh) {
@@ -1868,6 +2082,9 @@ void Renderer::upload_matcap_params(const Camera& cam, int w, int h, bool select
 
 void Renderer::draw_mesh(const Camera& cam, int w, int h, uint32_t index_count,
                           bool selected) {
+    if (draw_textured(cam, w, h, active_textured, ebo, vbo_pos, vbo_norm, vbo_mask, vbo_color,
+                      index_count, selected))
+        return;
     upload_matcap_params(cam, w, h, selected);
 
     gpu::RenderTarget target; target.width = w; target.height = h;
@@ -1902,12 +2119,15 @@ void Renderer::upload_display(EntityGpu& g, const Mesh& mesh) {
 
     // Display-only buffers: vertex attributes for the matcap + pick draws (pos also
     // bound as a pick vertex buffer). The render pipeline owns the vertex layout.
-    ensure_buffer(gpu_dev, g.vbo_pos, pos.data(), (uint64_t)pos.size()*sizeof(float), gpu::Usage::Vertex);
-    ensure_buffer(gpu_dev, g.vbo_norm, norm.data(), (uint64_t)norm.size()*sizeof(float), gpu::Usage::Vertex);
-    ensure_buffer(gpu_dev, g.vbo_mask, mask_buf.data(), (uint64_t)mask_buf.size()*sizeof(float), gpu::Usage::Vertex);
-    ensure_buffer(gpu_dev, g.vbo_color, col_buf.data(), (uint64_t)col_buf.size()*sizeof(uint32_t), gpu::Usage::Vertex);
+    // Storage too: the textured draw reads all five by index instead of as attributes.
+    const gpu::Usage vs = gpu::Usage::Vertex | gpu::Usage::Storage;
+    ensure_buffer(gpu_dev, g.vbo_pos, pos.data(), (uint64_t)pos.size()*sizeof(float), vs);
+    ensure_buffer(gpu_dev, g.vbo_norm, norm.data(), (uint64_t)norm.size()*sizeof(float), vs);
+    ensure_buffer(gpu_dev, g.vbo_mask, mask_buf.data(), (uint64_t)mask_buf.size()*sizeof(float), vs);
+    ensure_buffer(gpu_dev, g.vbo_color, col_buf.data(), (uint64_t)col_buf.size()*sizeof(uint32_t), vs);
     ensure_buffer(gpu_dev, g.ebo, mesh.indices.data(),
-                  (uint64_t)mesh.indices.size()*sizeof(uint32_t), gpu::Usage::Index);
+                  (uint64_t)mesh.indices.size()*sizeof(uint32_t), gpu::Usage::Index | gpu::Usage::Storage);
+    upload_textured(g.textured, mesh);
 
     g.index_count = (uint32_t)mesh.indices.size();
     g.dirty = false;
@@ -1919,11 +2139,15 @@ void Renderer::free_display(EntityGpu& g) {
     gpu::release_buffer(g.vbo_mask);
     gpu::release_buffer(g.vbo_color);
     gpu::release_buffer(g.ebo);
+    free_textured(g.textured);
     g = EntityGpu();
 }
 
 void Renderer::draw_display(const Camera& cam, EntityGpu& g, int w, int h, bool selected) {
     if (g.index_count == 0) return;
+    if (draw_textured(cam, w, h, g.textured, g.ebo, g.vbo_pos, g.vbo_norm, g.vbo_mask, g.vbo_color,
+                      g.index_count, selected))
+        return;
     upload_matcap_params(cam, w, h, selected);
 
     gpu::RenderTarget target; target.width = w; target.height = h;
@@ -1940,6 +2164,58 @@ void Renderer::draw_display(const Camera& cam, EntityGpu& g, int w, int h, bool 
     gpu::draw_indexed(rp, g.index_count);
     gpu::end_render_pass(rp);
     gpu::release_bind_group(grp);
+}
+
+// ---- Textured sculpt ----
+
+void Renderer::upload_textured(TexturedGpu& t, const Mesh& mesh) {
+    const uint64_t uv_bytes = (uint64_t)mesh.uv.size() * sizeof(float);
+    // Past the device's storage binding limit (a textured import subdivided a few
+    // levels up) it shows untextured rather than not at all.
+    if (!mesh.texture || !mesh.has_uv() || mesh.texture->w <= 0 || !textured_pipeline.handle
+        || uv_bytes > gpu::device_limits().max_storage_binding_size
+        || (uint64_t)mesh.indices.size() * 4 > gpu::device_limits().max_storage_binding_size) {
+        if (t.corners && mesh.texture)
+            std::printf("[renderer] textured draw off: %llu MB of UVs is past the binding limit\n",
+                        (unsigned long long)(uv_bytes >> 20));
+        free_textured(t);
+        return;
+    }
+    ensure_buffer(gpu_dev, t.uv, mesh.uv.data(), uv_bytes, gpu::Usage::Storage);
+    if (t.src != mesh.texture) {
+        gpu::release_texture(t.tex);
+        t.tex = gpu::create_sampled_texture(gpu_dev, mesh.texture->w, mesh.texture->h,
+                                            mesh.texture->rgba.data(), true);
+        t.src = mesh.texture;
+    }
+    t.corners = (uint32_t)mesh.indices.size();
+}
+
+void Renderer::free_textured(TexturedGpu& t) {
+    gpu::release_buffer(t.uv);
+    gpu::release_texture(t.tex);
+    t = TexturedGpu();
+}
+
+bool Renderer::draw_textured(const Camera& cam, int w, int h, TexturedGpu& t, const gpu::Buffer& idx,
+                             const gpu::Buffer& pos, const gpu::Buffer& nrm, const gpu::Buffer& mask,
+                             const gpu::Buffer& col, uint32_t index_count, bool selected) {
+    if (!t.corners || t.corners != index_count || !textured_pipeline.handle) return false;
+    upload_matcap_params(cam, w, h, selected);
+    gpu::RenderTarget target; target.width = w; target.height = h;
+    gpu::RenderPass rp = gpu::begin_render_pass(gpu_dev, target);
+    gpu::set_pipeline(rp, textured_pipeline);
+    gpu::BindBufferEntry be[] = {
+        { 63, &matcap_ubo, sizeof(MatcapParamsGPU) },
+        { 10, &idx, 0 }, { 11, &pos, 0 }, { 12, &nrm, 0 },
+        { 13, &mask, 0 }, { 14, &col, 0 }, { 15, &t.uv, 0 },
+    };
+    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, textured_pipeline, be, 7, &t.tex);
+    gpu::set_bind_group(rp, textured_pipeline, grp);
+    gpu::draw(rp, index_count);
+    gpu::end_render_pass(rp);
+    gpu::release_bind_group(grp);
+    return true;
 }
 
 // ---- Bake preview ----

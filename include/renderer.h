@@ -57,6 +57,9 @@ struct Renderer {
     // baked maps, drawn in place of the sculpt it was baked from. Its own buffers and
     // textures, re-uploaded only when the bake's serial changes.
     gpu::RenderPipeline baked_pipeline;
+    // Textured sculpt: the matcap fetching its vertices by corner (see the shaders).
+    gpu::RenderPipeline textured_pipeline;
+    TexturedGpu active_textured;   // the active mesh's (its buffers are the vbo_* above)
     gpu::Buffer  baked_ubo, baked_pos, baked_nrm, baked_tan, baked_uv;
     gpu::Texture baked_color_tex, baked_normal_tex;
     uint32_t     baked_corners = 0, baked_serial = 0;
@@ -247,6 +250,15 @@ struct Renderer {
     void upload_matcap_params(const Camera& cam, int w, int h, bool selected);
     void draw_mesh(const Camera& cam, int w, int h, uint32_t index_count,
                     bool selected);
+    // Corner UVs + texture for a mesh that has both, else back to untextured. Only on
+    // a full upload: a stroke moves vertices, never UVs.
+    void upload_textured(TexturedGpu& t, const Mesh& mesh);
+    void free_textured(TexturedGpu& t);
+    // The textured twin of the matcap draw, from those buffers. False = not textured
+    // (or not drawable), and the caller draws the plain way.
+    bool draw_textured(const Camera& cam, int w, int h, TexturedGpu& t, const gpu::Buffer& idx,
+                       const gpu::Buffer& pos, const gpu::Buffer& nrm, const gpu::Buffer& mask,
+                       const gpu::Buffer& col, uint32_t index_count, bool selected);
 
     // Per-entity static display buffers (inactive entities).
     void upload_display(EntityGpu& g, const Mesh& mesh);
