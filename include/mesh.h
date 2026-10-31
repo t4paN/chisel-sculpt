@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cassert>
 #include <cstdio>
+#include <memory>
 #include "paint_layers.h"
 
 struct Vec3 {
@@ -25,6 +26,15 @@ struct Vec3 {
         if (l < 1e-8f) return {0,0,0};
         return {x/l, y/l, z/l};
     }
+};
+
+// An image a mesh wears through its corner UVs (an imported glTF base colour). Never
+// edited in place, so every level and copy of the mesh shares one set of pixels: a 2K
+// texture is 16 MB, and the web heap is 32-bit.
+struct MeshTexture {
+    int w = 0, h = 0;
+    std::vector<uint8_t> rgba;   // w * h * 4, row 0 = the image's top
+    std::string name;
 };
 
 // SOA triangle mesh
@@ -92,6 +102,15 @@ struct Mesh {
     // uniform target). Carried by interpolation like color.
     std::vector<float> density;
 
+    // Per-corner UVs, 2 floats per entry of `indices` (OBJ convention: v points up,
+    // origin bottom-left), and the texture they look into. Per corner, not per vertex,
+    // because a sculpt is welded and its UV seams run through shared vertices. Anything
+    // that rebuilds the triangles without carrying these leaves `uv` the wrong size, so
+    // has_uv() is the test, never uv.empty().
+    std::vector<float> uv;
+    std::shared_ptr<const MeshTexture> texture;
+    bool has_uv() const { return !indices.empty() && uv.size() == indices.size() * 2; }
+
     uint32_t vertex_count() const { return (uint32_t)pos_x.size(); }
     uint32_t tri_count() const { return (uint32_t)(indices.size() / 3); }
 
@@ -136,6 +155,13 @@ struct Mesh {
     // ASCII or binary-little-endian PLY in. Reads position (required), normal
     // (recomputed if absent), and per-vertex RGB into packed `color` if present.
     static bool import_ply(const char* filename, Mesh& out);
+    // glTF 2.0 in (.glb, or .gltf with its files beside it), in glb.cpp. Same contract as
+    // import_obj: `out` is the whole file; `parts` one per mesh node when there are two or
+    // more. Vertices are welded by position (other apps split them at UV seams and hard
+    // edges, which a sculpt can't have), UVs kept per corner, the base colour texture
+    // decoded. On failure `err` says why when it's worth telling (compressed meshes).
+    static bool import_glb(const char* filename, Mesh& out, std::vector<ObjPart>* parts,
+                           std::string* err);
 };
 
 struct ObjPart {

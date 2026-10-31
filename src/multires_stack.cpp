@@ -923,6 +923,34 @@ void cascade_to_level(MultiresStack& stack, Mesh& out, int K, ComputeState* comp
     else
         out.density.clear();
 
+    // Corner UVs follow the subdivision. Each pass splits face t into fine faces
+    // 4t..4t+3 with the corner layout loop_subdivide's Pass 4 fixes (a ab ca, b bc ab,
+    // c ca bc, ab bc ca), so a child corner is its parent's corner or the middle of
+    // two of them. Per face, so a UV seam through a shared vertex stays apart. Only
+    // for a textured mesh: at level 3 over a 50k-tri import it is 3.2M faces of UVs.
+    out.texture = stack.base.texture;
+    out.uv.clear();
+    if (stack.base.texture && stack.base.has_uv()) {
+        out.uv = stack.base.uv;
+        std::vector<float> fine;
+        for (int p = 0; p < passes; p++) {
+            const size_t nt = out.uv.size() / 6;
+            fine.resize(nt * 24);
+            for (size_t t = 0; t < nt; t++) {
+                const float* c = &out.uv[6 * t];
+                const float a[2] = {c[0], c[1]}, b[2] = {c[2], c[3]}, cc[2] = {c[4], c[5]};
+                const float ab[2] = {(a[0] + b[0]) * 0.5f, (a[1] + b[1]) * 0.5f};
+                const float bc[2] = {(b[0] + cc[0]) * 0.5f, (b[1] + cc[1]) * 0.5f};
+                const float ca[2] = {(cc[0] + a[0]) * 0.5f, (cc[1] + a[1]) * 0.5f};
+                const float* order[12] = {a, ab, ca, b, bc, ab, cc, ca, bc, ab, bc, ca};
+                float* o = &fine[24 * t];
+                for (int k = 0; k < 12; k++) { o[2 * k] = order[k][0]; o[2 * k + 1] = order[k][1]; }
+            }
+            out.uv.swap(fine);
+        }
+        if (!out.has_uv()) out.uv.clear();   // the chain isn't what the UVs assume
+    }
+
     // [paint-audit] a non-empty plane must be exactly V(L_max) — anything else
     // means the prefix handed to the working mesh is misaligned.
     std::printf("[paint-audit] cascade L%d: V_K %u, color plane %zu/%u, mask %zu/%u\n",

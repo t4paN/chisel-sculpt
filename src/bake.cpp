@@ -42,6 +42,7 @@ struct BakeWork {
     uint32_t high_v = 0, high_t = 0;
     std::vector<float>    hn;       // the sculpt's smooth normals, 3 per vertex (its own CPU ones may be stale)
     std::vector<uint32_t> hcol;     // the sculpt's paint, composited (empty = no colour map)
+    const MeshTexture*    htex = nullptr;   // or its texture, through its corner UVs (wins over paint)
     // The tree.
     std::vector<Node>     nodes;
     std::vector<uint32_t> tri;
@@ -173,7 +174,11 @@ void prep_high(BakeWork& w, const Mesh& m) {
         const float l = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
         if (l > 1e-20f) { n[0] /= l; n[1] /= l; n[2] /= l; }
     }
-    if (w.s.color) {
+    // A textured sculpt (an imported glTF) bakes its texture: that's the detail a
+    // game asset needs, and vertex paint on a mesh that coarse holds almost none of it.
+    // The shared_ptr in `m` keeps the pixels alive; the job stops if `m` changes.
+    if (w.s.color && m.texture && m.has_uv()) w.htex = m.texture.get();
+    else if (w.s.color) {
         w.hcol.resize(nv);
         paint_composite(m.paint_layers, m.color, nv, w.hcol.data());
     }
@@ -325,6 +330,25 @@ uint32_t lerp_rgba(uint32_t a, uint32_t b, uint32_t c, float wa, float wb, float
     return out;
 }
 
+// Bilinear, wrapping (glTF's default sampler), at OBJ-convention (u, v): v = 1 is the
+// image's top row.
+uint32_t sample_tex(const MeshTexture& t, float u, float v) {
+    const float fx = u * t.w - 0.5f, fy = (1.0f - v) * t.h - 0.5f;
+    const float x0f = std::floor(fx), y0f = std::floor(fy);
+    const float ax = fx - x0f, ay = fy - y0f;
+    auto wrap = [](long i, int n) { i %= n; return (int)(i < 0 ? i + n : i); };
+    const int x0 = wrap((long)x0f, t.w), x1 = wrap((long)x0f + 1, t.w);
+    const int y0 = wrap((long)y0f, t.h), y1 = wrap((long)y0f + 1, t.h);
+    const uint8_t* p00 = &t.rgba[((size_t)y0 * t.w + x0) * 4], *p10 = &t.rgba[((size_t)y0 * t.w + x1) * 4];
+    const uint8_t* p01 = &t.rgba[((size_t)y1 * t.w + x0) * 4], *p11 = &t.rgba[((size_t)y1 * t.w + x1) * 4];
+    uint32_t out = 0;
+    for (int c = 0; c < 4; c++) {
+        const float top = p00[c] + (p10[c] - p00[c]) * ax, bot = p01[c] + (p11[c] - p01[c]) * ax;
+        out |= (uint32_t)std::lround(top + (bot - top) * ay) << (8 * c);
+    }
+    return out;
+}
+
 void put(uint8_t* px, uint32_t rgba) {
     px[0] = rgba & 255; px[1] = (rgba >> 8) & 255; px[2] = (rgba >> 16) & 255; px[3] = 255;
 }
@@ -382,8 +406,14 @@ void shade_row(BakeWork& w, const Mesh& m, uint32_t py) {
             o[3] = 255;
         }
         if (r.has_color) {
-            const uint32_t c = w.hcol.empty() ? 0xFFFFFFFFu
-                             : lerp_rgba(w.hcol[ia], w.hcol[ib], w.hcol[ic], ha, h.u, h.v);
+            uint32_t c = 0xFFFFFFFFu;
+            if (w.htex) {
+                const float* hu = &m.uv[6 * (size_t)h.t];
+                c = sample_tex(*w.htex, hu[0] * ha + hu[2] * h.u + hu[4] * h.v,
+                                        hu[1] * ha + hu[3] * h.u + hu[5] * h.v);
+            } else if (!w.hcol.empty()) {
+                c = lerp_rgba(w.hcol[ia], w.hcol[ib], w.hcol[ic], ha, h.u, h.v);
+            }
             put(&r.color_rgba[4 * texel], c);
         }
         w.filled[texel] = 1;

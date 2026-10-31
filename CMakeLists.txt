@@ -236,6 +236,7 @@ endif()
 add_executable(chisel
     src/main.cpp
     src/mesh.cpp
+    src/glb.cpp
     src/scene.cpp
     src/object_xform.cpp
     src/scene_snapshot.cpp

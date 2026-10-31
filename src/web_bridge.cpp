@@ -98,7 +98,7 @@ void web_open_file_picker() {
     EM_ASM({
         var inp = document.createElement('input');
         inp.type = 'file';
-        inp.accept = '.chisel,.obj,.ply';
+        inp.accept = '.chisel,.obj,.ply,.glb';
         inp.onchange = function() {
             var f = inp.files && inp.files[0];
             if (!f) return;

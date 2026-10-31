@@ -300,7 +300,10 @@ void app_files_frame(App& a) {
         } else {
             Mesh loaded;
             std::vector<ObjPart> parts;   // an OBJ of 2+ objects: one mesh each
+            std::string why;              // glTF: why it failed, or what it left out
+            const bool gltf = ext == "glb" || ext == "gltf";
             bool imported = (ext == "ply") ? Mesh::import_ply(path.c_str(), loaded)
+                          : gltf           ? Mesh::import_glb(path.c_str(), loaded, &parts, &why)
                                            : Mesh::import_obj(path.c_str(), loaded, &parts);
             // The whole file frames the camera; the first object then stands in for
             // "the mesh" below and the others are appended after it.
@@ -359,7 +362,13 @@ void app_files_frame(App& a) {
                 if (sculpts.size() > 1) at = std::snprintf(b, sizeof b, ", %zu meshes", sculpts.size());
                 if (n_retopos > 0)
                     std::snprintf(b + at, sizeof b - at, ", %d retopo%s", n_retopos, n_retopos == 1 ? "" : "s");
-                return std::string(b);
+                std::string s = b;
+                if (gltf) {
+                    const Mesh& m = scene.active_mesh();
+                    if (m.texture) s += ", textured " + std::to_string(m.texture->w) + "x" + std::to_string(m.texture->h);
+                    if (!why.empty()) s += ", " + why;
+                }
+                return s;
             };
             std::string first_name = stem;
             if (!sculpts.empty()) {
@@ -456,6 +465,7 @@ void app_files_frame(App& a) {
                 input.notification_timer = 3.0f;
             } else {
                 error_popup_msg = "Import failed: " + path;
+                if (!why.empty()) error_popup_msg += "\n" + why;
                 error_popup_trigger = true;
             }
         }
@@ -686,7 +696,7 @@ void app_files_frame(App& a) {
                                "own scale (OBJ/PLY only). Off: replace the "
                                "scene. .chisel projects always replace.");
         };
-        fd->OpenDialog("ImportKey", "Open File", ".chisel,.obj,.ply", cfg);
+        fd->OpenDialog("ImportKey", "Open File", ".chisel,.obj,.ply,.glb,.gltf", cfg);
     }
 
     if (display_file_dialog(fd, "ExportKey")) {
