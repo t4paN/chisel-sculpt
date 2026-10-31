@@ -404,13 +404,18 @@ struct InputState {
     // the paint brush is active. RMB swatch / toolbar boxes edit both.
     float paint_color[3];
     float paint_color_alt[3];
-    // Colour picker (C while the paint brush is active). While armed, LMB over
-    // the model samples the stored vertex albedo under the cursor into
-    // paint_color — pure colour mix, no shading — then disarms, leaving the
-    // paint brush active. C again / ESC / leaving paint mode cancel it.
-    // color_pick_click is the one-shot "sample now" event the main loop consumes.
-    bool color_pick_active;
-    bool color_pick_click;
+    // Colour picker (C while the paint brush is active). While armed, pressing LMB
+    // on the model starts a pick drag: every frame samples the stored albedo under
+    // the cursor (pure colour mix, no shading) into color_pick_preview, shown in a
+    // swatch by the cursor; the release takes the last sample into paint_color and
+    // disarms, leaving the paint brush active. Ctrl, held at any point of the drag,
+    // samples the paint alone (no texture). C again / ESC / leaving paint mode cancel.
+    // color_pick_click is the one-shot "release: take it" event the main loop consumes.
+    bool  color_pick_active;
+    bool  color_pick_dragging;
+    bool  color_pick_click;
+    bool  color_pick_have;        // the drag has sampled the model at least once
+    float color_pick_preview[3];
     // Paint mode as a mode of its own, not just "the paint brush is current": its
     // dock (Paint, Bucket, Picker | Smooth, Mask) has to stay up while the Mask brush
     // is in hand, since masking is how you fence off the bucket's islands. Set by

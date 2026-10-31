@@ -279,6 +279,8 @@ InputState::InputState()
     paint_visible = true;
     color_pick_active = false;
     color_pick_click = false;
+    color_pick_dragging = false;
+    color_pick_have = false;
     paint_mode = false;
     bucket_active = false;
     bucket_click = false;
@@ -1087,6 +1089,7 @@ static void mouse_button_callback(GLFWwindow* w, int button, int action, int mod
     if (button == GLFW_MOUSE_BUTTON_LEFT && g_input->touch_gesture) {
         g_input->mouse1_down = (action == GLFW_PRESS);
         g_input->bucket_dragging = false;   // a pinch mid-gradient cancels it
+        g_input->color_pick_dragging = false;
         if (action == GLFW_RELEASE && g_input->touch_count == 0)
             g_input->touch_gesture = false;
     } else if (button == GLFW_MOUSE_BUTTON_LEFT) {
@@ -1126,9 +1129,10 @@ static void mouse_button_callback(GLFWwindow* w, int button, int action, int mod
             } else if (g_input->on_model && g_input->color_pick_active
                        && g_input->current_brush == BrushType::PAINT
                        && g_input->interaction_mode == InputState::InteractionMode::EDIT) {
-                // Colour picker consumes this click: sample instead of sculpt
-                // (main loop reads the albedo under the cursor and disarms).
-                g_input->color_pick_click = true;
+                // Colour picker consumes this press: sample instead of sculpt
+                // (main loop previews the albedo under the cursor until release).
+                g_input->color_pick_dragging = true;
+                g_input->color_pick_have = false;
             } else if (g_input->on_model && g_input->bucket_active
                        && g_input->current_brush == BrushType::PAINT
                        && !g_input->is_smooth_active()
@@ -1173,6 +1177,10 @@ static void mouse_button_callback(GLFWwindow* w, int button, int action, int mod
                 g_input->release_y      = (float)g_input->mouse_y;
             }
             g_input->drag_mode = InputState::DragMode::NONE;
+            if (g_input->color_pick_dragging) {
+                g_input->color_pick_dragging = false;
+                g_input->color_pick_click = true;
+            }
             if (g_input->bucket_dragging) {
                 g_input->bucket_dragging = false;
                 g_input->bucket_bx = (float)g_input->mouse_x;
@@ -1383,7 +1391,7 @@ static void run_key_action(GLFWwindow* w, KeyAction a, bool repeat) {
             if (in.current_brush != BrushType::PAINT) pick_brush(BrushType::PAINT);
             in.color_pick_active = !in.color_pick_active;
             in.bucket_active = false;
-            notify(in.color_pick_active ? "Colour picker: click the model (C/ESC cancels)"
+            notify(in.color_pick_active ? "Colour picker: click the model (Ctrl: paint only, C/ESC cancels)"
                                         : "Colour picker off", 1.5f);
             break;
         case KeyAction::BRUSH_PREV:

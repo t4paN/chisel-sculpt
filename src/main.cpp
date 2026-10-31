@@ -1070,6 +1070,7 @@ int main(int argc, char* argv[]) {
             // a gradient dragged from the model may still be released over a panel.
             if (input.mouse1_just_pressed) {
                 input.color_pick_click = false;
+                input.color_pick_dragging = false;
                 input.bucket_click = false;
                 input.bucket_dragging = false;
             }

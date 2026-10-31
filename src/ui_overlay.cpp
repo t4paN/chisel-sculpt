@@ -1617,7 +1617,7 @@ void draw_settings_menu_items(InputState& input, MultiresInfo mres, bool sync_ta
     }
 }
 
-void draw_pick_cursor(float x, float y, bool on_model) {
+void draw_pick_cursor(float x, float y, bool on_model, const float* swatch) {
     ImDrawList* dl = ImGui::GetForegroundDrawList();
     int a = on_model ? 235 : 110;
     ImU32 fill = IM_COL32(255, 255, 255, a);
@@ -1642,6 +1642,15 @@ void draw_pick_cursor(float x, float y, bool on_model) {
     ImVec2 c = at(22.5f, 0);
     dl->AddCircleFilled(c, 4.8f, fill);
     dl->AddCircle(c, 4.8f, line, 0, 1.4f);
+    // Pick drag: the colour under the cursor, right of the glyph and below it, so
+    // neither the hotspot nor the glyph covers it. Always opaque: it's a colour read.
+    if (swatch) {
+        auto b = [](float f) { return (int)(std::min(std::max(f, 0.0f), 1.0f) * 255.0f + 0.5f); };
+        const ImVec2 p0(x + 14.0f, y + 8.0f), p1(x + 36.0f, y + 30.0f);
+        dl->AddRectFilled(ImVec2(p0.x - 2, p0.y - 2), ImVec2(p1.x + 2, p1.y + 2), IM_COL32(25, 25, 25, 255), 4.0f);
+        dl->AddRectFilled(ImVec2(p0.x - 1, p0.y - 1), ImVec2(p1.x + 1, p1.y + 1), IM_COL32(255, 255, 255, 255), 3.0f);
+        dl->AddRectFilled(p0, p1, IM_COL32(b(swatch[0]), b(swatch[1]), b(swatch[2]), 255), 2.0f);
+    }
 }
 
 // The armed fill bucket: a dot at the exact hotspot (the fill seeds from the vertex

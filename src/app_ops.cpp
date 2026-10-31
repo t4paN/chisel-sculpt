@@ -155,14 +155,18 @@ void app_ops_paint_clicks(App& app, int win_w, int win_h) {
     auto& scene = app.scene;
     auto& camera = app.camera;
     auto& renderer = app.renderer;
-    // Colour picker (C in paint mode): sample the stored albedo under the
-    // click — tri + barycentrics from the screen FBO, colours from the CPU
-    // mesh (synced at pen-up), so shading/matcap never leaks into the pick.
-    if (input.color_pick_click) {
-        input.color_pick_click = false;
+    // Colour picker (C in paint mode): sample the stored albedo under the cursor —
+    // tri + barycentrics from the screen FBO, colours from the CPU mesh (synced at
+    // pen-up), so shading/matcap never leaks into the pick. While the press is held
+    // every frame samples into the preview swatch (a 1-px read, like the hover depth
+    // read); the release takes the last sample. Off the model the swatch holds.
+    if (input.color_pick_dragging || input.color_pick_click) {
         int cx = (int)input.mouse_x;
         int cy = (int)input.mouse_y;
-        if (cx >= 0 && cx < win_w && cy >= 0 && cy < win_h) {
+        if (!input.color_pick_active) {
+            input.color_pick_dragging = false;
+            input.color_pick_click = false;
+        } else if (cx >= 0 && cx < win_w && cy >= 0 && cy < win_h) {
             uint32_t tid;
             renderer.read_triid_region(cx, cy, 1, 1, &tid);
             const Mesh& pm = scene.active_mesh();   // screen FBO holds the active entity
@@ -177,10 +181,13 @@ void app_ops_paint_clicks(App& app, int win_w, int win_h) {
                     return paint_composite_vertex(pm.paint_layers, pm.color, v);
                 };
                 uint32_t c0 = vcol(i0), c1 = vcol(i1), c2 = vcol(i2);
-                // A textured mesh shows paint x texture (the textured draw), so that's
-                // the colour under the click: the texture at the click's corner UVs.
+                // A textured mesh shows paint x texture (the textured draw), so a plain
+                // pick takes that: the texture at the cursor's corner UVs. Ctrl picks
+                // the paint alone, since repainting the product over the texture
+                // darkens each round (red over grey concrete comes back dark red).
                 uint32_t tc = 0xFFFFFFFFu;
-                const float tmix = pm.paint_layers.texture_mix();   // the Texture row
+                const float tmix = input.ctrl_held ? 0.0f
+                                 : pm.paint_layers.texture_mix();   // the Texture row
                 if (pm.texture && pm.has_uv() && tmix > 0.0f) {
                     const float* uv = &pm.uv[6 * (size_t)tid];
                     tc = pm.texture->sample(bu * uv[0] + bv * uv[2] + bw * uv[4],
@@ -191,9 +198,19 @@ void app_ops_paint_clicks(App& app, int win_w, int win_h) {
                     float f1 = (float)((c1 >> (ch*8)) & 0xFF);
                     float f2 = (float)((c2 >> (ch*8)) & 0xFF);
                     const float t = 1.0f + ((float)((tc >> (ch*8)) & 0xFF) / 255.0f - 1.0f) * tmix;
-                    input.paint_color[ch] = (bu*f0 + bv*f1 + bw*f2) / 255.0f * t;
+                    input.color_pick_preview[ch] = (bu*f0 + bv*f1 + bw*f2) / 255.0f * t;
                 }
+                input.color_pick_have = true;
+            }
+        }
+        // Released: take the last sample. A drag that never touched the model
+        // leaves the picker armed.
+        if (input.color_pick_click) {
+            input.color_pick_click = false;
+            if (input.color_pick_have) {
+                for (int ch = 0; ch < 3; ch++) input.paint_color[ch] = input.color_pick_preview[ch];
                 input.color_pick_active = false;
+                input.color_pick_have = false;
                 snprintf(input.notification, sizeof(input.notification),
                          "Picked #%02X%02X%02X",
                          (int)(input.paint_color[0]*255.0f + 0.5f),

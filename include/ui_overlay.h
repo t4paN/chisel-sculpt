@@ -68,7 +68,7 @@ void draw_paint_layers_panel(InputState& input, Scene& scene, int win_w, int win
 // Eyedropper cursor while the colour picker is armed (tip at x,y; dimmed when
 // the cursor is off the model). ImGui foreground draw list — identical on all
 // backends, replaces the brush ring for that state.
-void draw_pick_cursor(float x, float y, bool on_model);
+void draw_pick_cursor(float x, float y, bool on_model, const float* swatch = nullptr);
 void draw_bucket_cursor(float x, float y, bool on_model);
 void draw_gradient_drag(float ax, float ay, float bx, float by);
 

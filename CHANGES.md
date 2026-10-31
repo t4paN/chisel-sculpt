@@ -7,7 +7,7 @@ Short, chronological log of notable changes. Newest on top.
 - Open or drop .glb / .gltf (web: .glb): one mesh per object, -HI / -LO pair up as with OBJ, vertices welded so the sculpt doesn't tear at UV seams. Compressed (Draco / meshopt) files are turned away with a message.
 - The base colour texture comes along and shows on the sculpt, lit like the clay; paint tints it, hiding paint hides it. It stays put across subdivision levels. Textures past 4K (2K on web) are halved.
 - Bake: a textured sculpt's colour map is its paint over its texture, sampled where each ray lands.
-- Colour picker (C) picks the texture's colour on a textured mesh.
+- Colour picker (C) picks the texture's colour on a textured mesh; Ctrl picks the paint alone. Hold and drag to preview in a swatch by the cursor, release to take it.
 - Saving keeps the texture and UVs in the .chisel file; older builds open it untextured.
 - Paint mode's Layers panel shows a Texture row under the layers: eye and opacity fade it in the viewport, the bake and the picker, saved with the file.
 

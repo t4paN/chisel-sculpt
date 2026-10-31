@@ -238,7 +238,9 @@ void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse) {
         } else if (input.color_pick_active) {
             // Armed colour picker: eyedropper glyph instead of the brush
             // ring — the ring's size/hardness reading is meaningless here.
-            draw_pick_cursor(cursor_x, cursor_y, input.on_model);
+            draw_pick_cursor(cursor_x, cursor_y, input.on_model,
+                             input.color_pick_dragging && input.color_pick_have
+                                 ? input.color_pick_preview : nullptr);
         } else if (input.pose_brush_on() && !input.is_smooth_active()) {
             draw_pose_cursor(cursor_x, cursor_y,
                              input.on_model || input.pose_hover_joint >= 0);
