@@ -10,6 +10,7 @@ Short, chronological log of notable changes. Newest on top.
 - Colour picker (C) picks the texture's colour on a textured mesh; Ctrl picks the paint alone. Hold and drag to preview in a swatch by the cursor, release to take it.
 - Saving keeps the texture and UVs in the .chisel file; older builds open it untextured.
 - Paint mode's Layers panel shows a Texture row under the layers: eye and opacity fade it in the viewport, the bake and the picker, saved with the file.
+- Remesh and SDF merge keep the texture. Merging several textures (or texture + clay) packs what's still visible into one image up to 4K (2K on web); clay parts stay white under their paint.
 
 ## 2026-10-30 — UV: atlas across meshes, islands moved by hand
 
