@@ -52,6 +52,20 @@ uint32_t snap_mesh_to_soup(Mesh& m, const std::vector<float>& pos,
                            const std::vector<uint8_t>* pinned, float seam_tol,
                            const std::function<bool(Vec3, Vec3)>& accept);
 
+// Textured meshes: give dst (positions final) per-corner UVs from the nearest
+// source surface (src_pos xyz per vertex, src_idx 3 per tri, src_uv 6 per tri).
+// Each dst tri reads all three corners off ONE source UV island, so a tri that
+// straddles a seam never smears across the atlas. `cell` = how far dst may sit
+// from the source (one remesh edge). Replaces dst.uv; leaves dst.texture alone.
+// skip (optional): source tris to avoid while anything else is in reach (the SDF
+// merge's buried halves). tri_island (optional): per dst tri, the source island
+// it read from, named by one of its tris (UINT32_MAX = none in reach).
+void transfer_uv(Mesh& dst, const std::vector<float>& src_pos,
+                 const std::vector<uint32_t>& src_idx,
+                 const std::vector<float>& src_uv, float cell,
+                 const std::vector<uint8_t>* skip = nullptr,
+                 std::vector<uint32_t>* tri_island = nullptr);
+
 // SDF merge paint carry: for each vertex of m (normals current), the soup vertex
 // to take paint from — nearest corner of the closest same-facing soup tri that
 // `accept` puts on the skin. UINT32_MAX where none lies within `cell`.

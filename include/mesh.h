@@ -36,8 +36,10 @@ struct MeshTexture {
     std::vector<uint8_t> rgba;   // w * h * 4, row 0 = the image's top
     std::string name;
     // The image file's own bytes (PNG / JPEG), kept so a save stores them as they came:
-    // a fraction of the pixels' size, and no re-encode. Empty = nothing to save.
-    std::vector<uint8_t> encoded;
+    // a fraction of the pixels' size, and no re-encode. A texture made in the app (an
+    // SDF merge's repack) has none until its first save PNG-encodes it here, once —
+    // hence mutable: the pixels are shared const, the cache rides along.
+    mutable std::vector<uint8_t> encoded;
     // Bilinear, wrapping (glTF's default sampler), at OBJ-convention (u, v): v = 1 is
     // the top row. Packed RGBA8 like Mesh::color. The bake and the colour picker share it.
     uint32_t sample(float u, float v) const;

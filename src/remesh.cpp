@@ -3127,23 +3127,34 @@ struct RefSurface {
         int cx = ci(q.x), cy = ci(q.y), cz = ci(q.z);
         float best = cell * cell;
         bool found = false;
-        for (int z = cz-1; z <= cz+1; z++)
-            for (int y = cy-1; y <= cy+1; y++)
-                for (int x = cx-1; x <= cx+1; x++) {
-                    uint32_t h = hash(x, y, z) & mask;
-                    for (uint32_t j = bucket_off[h]; j < bucket_off[h+1]; j++) {
-                        uint32_t t = bucket_tri[j];
-                        if (skip && (*skip)[t]) continue;
-                        if (check_facing && this->nrm(t).dot(nrm) < 0.3f) continue;
-                        Vec3 c = closest_on_tri(q, v(t,0), v(t,1), v(t,2));
-                        Vec3 d = c - q;
-                        float d2 = d.dot(d);
-                        if (d2 < best) {
-                            best = d2; out = c; found = true;
-                            if (tri_out) *tri_out = t;
-                        }
-                    }
+        // Home cell first, then a neighbour only if its box lies closer than the
+        // best hit so far: a tri nearer than `best` has its nearest point inside
+        // a cell it was registered in, and that cell is that near too. Exact, and
+        // most queries sit right on the surface, so the 26 neighbours mostly drop.
+        // (Distances to the cell box per axis: 0 inside, else the gap.)
+        const float fx = q.x * inv_cell - (float)cx, fy = q.y * inv_cell - (float)cy,
+                    fz = q.z * inv_cell - (float)cz;   // 0..1 within the home cell
+        auto gap = [&](int d, float f) { return d < 0 ? f * cell : d > 0 ? (1.0f - f) * cell : 0.0f; };
+        for (int n = 0; n < 27; n++) {
+            const int dx = n % 3 == 0 ? 0 : (n % 3 == 1 ? -1 : 1);
+            const int dy = (n / 3) % 3 == 0 ? 0 : ((n / 3) % 3 == 1 ? -1 : 1);
+            const int dz = n / 9 == 0 ? 0 : (n / 9 == 1 ? -1 : 1);
+            const float gx = gap(dx, fx), gy = gap(dy, fy), gz = gap(dz, fz);
+            if (gx*gx + gy*gy + gz*gz >= best) continue;
+            const uint32_t h = hash(cx + dx, cy + dy, cz + dz) & mask;
+            for (uint32_t j = bucket_off[h]; j < bucket_off[h+1]; j++) {
+                uint32_t t = bucket_tri[j];
+                if (skip && (*skip)[t]) continue;
+                if (check_facing && this->nrm(t).dot(nrm) < 0.3f) continue;
+                Vec3 c = closest_on_tri(q, v(t,0), v(t,1), v(t,2));
+                Vec3 d = c - q;
+                float d2 = d.dot(d);
+                if (d2 < best) {
+                    best = d2; out = c; found = true;
+                    if (tri_out) *tri_out = t;
                 }
+            }
+        }
         dist = std::sqrt(best);
         return found;
     }
@@ -3403,6 +3414,179 @@ void pick_soup_sources(const Mesh& m, const std::vector<float>& pos,
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
 }
 
+// Barycentric weights of p (projected onto the tri's plane) in a,b,c. Unclamped:
+// a point outside the tri gets negative weights, i.e. the tri's UV map extended.
+static bool tri_bary(Vec3 p, Vec3 a, Vec3 b, Vec3 c, float w[3]) {
+    Vec3 e0 = b - a, e1 = c - a, ep = p - a;
+    float d00 = e0.dot(e0), d01 = e0.dot(e1), d11 = e1.dot(e1);
+    float d20 = ep.dot(e0), d21 = ep.dot(e1);
+    float den = d00 * d11 - d01 * d01;
+    if (!(std::fabs(den) > 1e-30f)) return false;
+    w[1] = (d11 * d20 - d01 * d21) / den;
+    w[2] = (d00 * d21 - d01 * d20) / den;
+    w[0] = 1.0f - w[1] - w[2];
+    return true;
+}
+
+void transfer_uv(Mesh& dst, const std::vector<float>& src_pos,
+                 const std::vector<uint32_t>& src_idx,
+                 const std::vector<float>& src_uv, float cell,
+                 const std::vector<uint8_t>* skip, std::vector<uint32_t>* tri_island) {
+    auto t0 = std::chrono::steady_clock::now();
+    const uint32_t snt = (uint32_t)(src_idx.size() / 3);
+    const uint32_t tc = dst.tri_count(), vc = dst.vertex_count();
+    dst.uv.assign((size_t)tc * 6, 0.0f);
+    if (tri_island) tri_island->assign(tc, UINT32_MAX);
+    if (snt == 0 || src_uv.size() != (size_t)snt * 6 || tc == 0) return;
+
+    // Source UV islands: two tris sharing an edge are one island when both
+    // shared corners carry the same UV on each side (the source is welded, so a
+    // UV seam is an edge whose corners disagree). Edges sorted by key, not hashed:
+    // millions of tris, 32-bit WASM heap.
+    std::vector<uint32_t> island(snt);
+    {
+        for (uint32_t t = 0; t < snt; t++) island[t] = t;
+        auto root = [&](uint32_t x) { while (island[x] != x) x = island[x] = island[island[x]]; return x; };
+        std::vector<std::pair<uint64_t, uint32_t>> edges;   // (edge key, tri*3 + k)
+        edges.reserve((size_t)snt * 3);
+        for (uint32_t t = 0; t < snt; t++)
+            for (uint32_t k = 0; k < 3; k++) {
+                uint64_t a = src_idx[t*3 + k], b = src_idx[t*3 + (k+1)%3];
+                edges.push_back({ a < b ? (a << 32 | b) : (b << 32 | a), t*3 + k });
+            }
+        std::sort(edges.begin(), edges.end());
+        auto corner_uv = [&](uint32_t t, uint32_t v, float& u, float& w) {
+            for (int k = 0; k < 3; k++)
+                if (src_idx[t*3 + k] == v) { u = src_uv[t*6 + 2*k]; w = src_uv[t*6 + 2*k + 1]; return; }
+        };
+        for (size_t i = 0; i + 1 < edges.size(); i++) {
+            if (edges[i].first != edges[i+1].first) continue;
+            uint32_t ta = edges[i].second / 3, tb = edges[i+1].second / 3;
+            uint32_t va = (uint32_t)(edges[i].first >> 32), vb = (uint32_t)edges[i].first;
+            float au, av, bu, bv, au2, av2, bu2, bv2;
+            corner_uv(ta, va, au, av); corner_uv(tb, va, bu, bv);
+            corner_uv(ta, vb, au2, av2); corner_uv(tb, vb, bu2, bv2);
+            const float eps = 1e-6f;
+            if (std::fabs(au - bu) < eps && std::fabs(av - bv) < eps &&
+                std::fabs(au2 - bu2) < eps && std::fabs(av2 - bv2) < eps)
+                island[root(ta)] = root(tb);
+        }
+        for (uint32_t t = 0; t < snt; t++) island[t] = root(t);
+    }
+
+    RefSurface ref;
+    ref.build_borrowed(src_pos.data(), src_idx.data(), snt, cell);
+    auto src_v = [&](uint32_t t, int k) { return ref.v(t, k); };
+    auto map_uv = [&](uint32_t t, Vec3 p, float& u, float& v) {
+        float w[3];
+        if (!tri_bary(p, src_v(t,0), src_v(t,1), src_v(t,2), w)) { w[0] = 1.0f; w[1] = w[2] = 0.0f; }
+        const float* s = &src_uv[(size_t)t * 6];
+        u = w[0]*s[0] + w[1]*s[2] + w[2]*s[4];
+        v = w[0]*s[1] + w[1]*s[3] + w[2]*s[5];
+    };
+    // Nearest same-facing source tri, then any-facing, else none; skipped tris
+    // only when nothing else is in reach.
+    auto nearest = [&](Vec3 q, Vec3 n, Vec3& cp) {
+        float d; uint32_t t = UINT32_MAX;
+        if (ref.closest(q, n, cp, d, skip, &t) || ref.closest(q, Vec3(0, 0, 0), cp, d, skip, &t))
+            return t;
+        if (skip && !ref.closest(q, n, cp, d, nullptr, &t)) ref.closest(q, Vec3(0, 0, 0), cp, d, nullptr, &t);
+        return t;
+    };
+
+    // One lookup per vertex (a vertex is shared by ~6 corners), its own UV off
+    // the closest point — exact wherever the vertex sits on the source.
+    std::vector<uint32_t> vtri(vc, UINT32_MAX);
+    std::vector<float> vuv((size_t)vc * 2, 0.0f);
+    for (uint32_t v = 0; v < vc; v++) {
+        Vec3 n(0, 0, 0);
+        if (v < dst.norm_x.size()) {
+            n = Vec3(dst.norm_x[v], dst.norm_y[v], dst.norm_z[v]);
+            float l = n.length();
+            n = l > 1e-12f ? n * (1.0f / l) : Vec3(0, 0, 0);
+        }
+        Vec3 cp;
+        uint32_t t = nearest(dst.get_pos(v), n, cp);
+        if (t == UINT32_MAX) continue;
+        vtri[v] = t;
+        map_uv(t, cp, vuv[2*v], vuv[2*v + 1]);
+    }
+
+    // Per tri: the island under its centre decides (a seam vertex's own lookup
+    // picks either side at random, the centre doesn't). Corners whose lookup
+    // landed on that island keep it; the rest extend the centre tri's UV map, so
+    // the whole tri stays on one island (a hairline at seams, never a smear).
+    uint32_t misses = 0, extended = 0;
+    std::vector<uint32_t> owner(tc, UINT32_MAX);   // source tri each dst tri read
+    for (uint32_t t = 0; t < tc; t++) {
+        uint32_t vi[3] = { dst.indices[t*3], dst.indices[t*3+1], dst.indices[t*3+2] };
+        Vec3 p[3] = { dst.get_pos(vi[0]), dst.get_pos(vi[1]), dst.get_pos(vi[2]) };
+        Vec3 n = (p[1] - p[0]).cross(p[2] - p[0]);
+        float nl = n.length();
+        n = nl > 1e-20f ? n * (1.0f / nl) : Vec3(0, 0, 0);
+        Vec3 cp;
+        uint32_t ct = nearest((p[0] + p[1] + p[2]) * (1.0f / 3.0f), n, cp);
+        float* out = &dst.uv[(size_t)t * 6];
+        owner[t] = ct;
+        if (ct == UINT32_MAX) {
+            misses++;
+            for (int k = 0; k < 3; k++) { out[2*k] = vuv[2*vi[k]]; out[2*k+1] = vuv[2*vi[k]+1]; }
+            continue;
+        }
+        for (int k = 0; k < 3; k++) {
+            uint32_t kt = vtri[vi[k]];
+            if (kt != UINT32_MAX && island[kt] == island[ct]) {
+                out[2*k] = vuv[2*vi[k]]; out[2*k+1] = vuv[2*vi[k]+1];
+            } else {
+                map_uv(ct, p[k], out[2*k], out[2*k+1]);
+                extended++;
+            }
+        }
+    }
+    // Tris with no source in reach (a hole the SDF merge closed): grow in from
+    // the edge, a ring per pass, each taking its neighbour's UV at the vertex they
+    // share, so a patch shows the colour around its rim rather than a stray texel.
+    uint32_t filled = 0;
+    if (misses > 0 && dst.vert_tri_offset.size() == (size_t)vc + 1) {
+        std::vector<std::pair<uint32_t, uint32_t>> ring;   // (tri, neighbour it copies)
+        std::vector<uint32_t> ring_v;                      // the vertex they share
+        for (int pass = 0; pass < 256; pass++) {
+            ring.clear(); ring_v.clear();
+            for (uint32_t t = 0; t < tc; t++) {
+                if (owner[t] != UINT32_MAX) continue;
+                for (int k = 0; k < 3 && (ring.empty() || ring.back().first != t); k++) {
+                    const uint32_t v = dst.indices[t*3 + k];
+                    for (uint32_t j = dst.vert_tri_offset[v]; j < dst.vert_tri_offset[v+1]; j++) {
+                        const uint32_t nb = dst.vert_tri_list[j];
+                        if (owner[nb] == UINT32_MAX) continue;
+                        ring.push_back({ t, nb }); ring_v.push_back(v);
+                        break;
+                    }
+                }
+            }
+            if (ring.empty()) break;
+            for (size_t i = 0; i < ring.size(); i++) {
+                const uint32_t t = ring[i].first, nb = ring[i].second;
+                int kn = 0;
+                while (kn < 2 && dst.indices[nb*3 + kn] != ring_v[i]) kn++;
+                for (int k = 0; k < 3; k++) {
+                    dst.uv[(size_t)t*6 + 2*k]     = dst.uv[(size_t)nb*6 + 2*kn];
+                    dst.uv[(size_t)t*6 + 2*k + 1] = dst.uv[(size_t)nb*6 + 2*kn + 1];
+                }
+                owner[t] = owner[nb];
+            }
+            filled += (uint32_t)ring.size();
+        }
+    }
+    if (tri_island)
+        for (uint32_t t = 0; t < tc; t++)
+            (*tri_island)[t] = owner[t] == UINT32_MAX ? UINT32_MAX : island[owner[t]];
+    std::printf("[uv] transfer: %u tris from %u source tris, %u corners extended across "
+                "a seam, %u tris with no source in reach, %u of them filled from the rim (%.0f ms)\n",
+                tc, snt, extended, misses, filled,
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+}
+
 // ---------------------------------------------------------------------------
 // Top-level entry point
 // ---------------------------------------------------------------------------
@@ -3437,6 +3621,11 @@ struct RemeshJob {
     uint32_t raw_selected = 0, total_selected = 0;
     RefSurface ref;
     bool carrying = false;            // paint layers are in their dense carry form
+    // Textured mesh: the surface as it came in, for transfer_uv at the end (the
+    // edge ops don't carry per-corner UVs; a lookup after is simpler and exact).
+    std::vector<float>    uv_src_pos, uv_src;
+    std::vector<uint32_t> uv_src_idx;
+    void carry_uv();
 
     int stage = 0;                    // 0 setup, 1 iterating, 2 drift, 3 mirror, 4 done
     int iter = 0, iters_done = 0;
@@ -3506,6 +3695,17 @@ bool RemeshJob::setup() {
     }
 
     t0 = std::chrono::steady_clock::now();
+
+    if (mesh.texture && mesh.has_uv()) {
+        const uint32_t vc = mesh.vertex_count();
+        uv_src_pos.resize((size_t)vc * 3);
+        for (uint32_t v = 0; v < vc; v++) {
+            Vec3 p = mesh.get_pos(v);
+            uv_src_pos[3*v] = p.x; uv_src_pos[3*v+1] = p.y; uv_src_pos[3*v+2] = p.z;
+        }
+        uv_src_idx = mesh.indices;
+        uv_src = mesh.uv;
+    }
 
     // Ensure adjacency is built
     if (mesh.vert_tri_offset.empty()) mesh.build_adjacency();
@@ -3992,6 +4192,7 @@ void RemeshJob::finish_mirror() {
     // here got a repair pass at entry; this one had none.
     repair_flipped_tris(mesh, seam_tol);
     STAGE_DUMP(mesh, "final");
+    carry_uv();
 
     // Replace multires stack (fresh level-0 lock on the new topology). Paint
     // planes restart from the remeshed surface: colour survived the remesh
@@ -4042,6 +4243,12 @@ void RemeshJob::finish_mirror() {
     carrying = false;
 }
 
+void RemeshJob::carry_uv() {
+    if (uv_src_idx.empty()) return;
+    transfer_uv(mesh, uv_src_pos, uv_src_idx, uv_src, target_edge_length);
+    uv_src_pos = {}; uv_src = {}; uv_src_idx = {};
+}
+
 RemeshJob* remesh_begin(Mesh& mesh, MultiresStack& stack,
                         float target_edge_length, int iterations, ComputeState* cs,
                         float density_coarse_mult, float density_fine_mult,
@@ -4062,7 +4269,7 @@ bool remesh_tick(RemeshJob& j, RemeshResult& out) {
         if (j.setup()) { j.stage = 1; return false; }
         // Finished early. "Nothing to do" has still repaired flipped tris on
         // the way in, so a success hands the copy back like a full run does.
-        if (j.r.success) *j.out_mesh = std::move(j.mesh);
+        if (j.r.success) { j.carry_uv(); *j.out_mesh = std::move(j.mesh); }
         j.stage = 4;
         out = j.r;
         return true;

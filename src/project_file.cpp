@@ -5,6 +5,8 @@
 #include <cstring>
 #include <vector>
 #include <algorithm>
+#include <chrono>
+#include "stb/stb_image_write.h"   // the implementation is in bake.cpp
 
 // Current on-disk format. Bump VERSION whenever the v2 layout below changes;
 // older versions are handled by their own decoupled reader modules (see
@@ -402,6 +404,19 @@ static const Mesh& mtex_source(const EntityRecord& e) {
     return e.multires.locked ? e.multires.base : e.mesh;
 }
 
+// A texture with no file bytes of its own (made by a merge): PNG, lossless. Seconds
+// for a 4K image, so it's done on the first save only and kept (see MeshTexture).
+static void encode_png(const MeshTexture& t) {
+    auto t0 = std::chrono::steady_clock::now();
+    stbi_write_png_to_func([](void* ctx, void* data, int size) {
+        auto* out = (std::vector<uint8_t>*)ctx;
+        out->insert(out->end(), (uint8_t*)data, (uint8_t*)data + size);
+    }, &t.encoded, t.w, t.h, 4, t.rgba.data(), t.w * 4);
+    std::printf("[save] texture %dx%d encoded as PNG: %.1f MB (%.0f ms)\n", t.w, t.h,
+                t.encoded.size() / 1e6,
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+}
+
 static void write_mtex_chunk(std::ofstream& f, const EntityRecord& e) {
     const Mesh& m = mtex_source(e);
     const MeshTexture& t = *m.texture;
@@ -447,7 +462,10 @@ SaveResult save_project(const char* path, const ProjectData& data) {
         if (!e.mesh.paint_layers.empty()) write_layr_chunk(f, e);
         write_mlyr_chunk(f, e);
         const Mesh& tm = mtex_source(e);
-        if (tm.texture && !tm.texture->encoded.empty() && tm.has_uv()) write_mtex_chunk(f, e);
+        if (tm.texture && tm.has_uv()) {
+            if (tm.texture->encoded.empty()) encode_png(*tm.texture);
+            if (!tm.texture->encoded.empty()) write_mtex_chunk(f, e);
+        }
     }
     auto write_retopo = [&](const EntityRecord& e) {
         const RetopoSnapshot& r = e.retopo;
