@@ -76,20 +76,9 @@ std::shared_ptr<const MeshTexture> load_image(const cgltf_options& opt, const cg
         }
     }
     if (bytes.empty()) { if (note) *note = "texture not found"; return nullptr; }
-    int w = 0, h = 0, comp = 0;
-    uint8_t* px = stbi_load_from_memory(bytes.data(), (int)bytes.size(), &w, &h, &comp, 4);
-    if (!px) { if (note) *note = "texture format not readable"; return nullptr; }
-    auto t = std::make_shared<MeshTexture>();
-    t->w = w; t->h = h;
-    t->rgba.assign(px, px + (size_t)w * h * 4);
-    stbi_image_free(px);
-    t->name = img->name ? img->name : (img->uri && std::strncmp(img->uri, "data:", 5) ? img->uri : "");
-    while (t->w > kMaxTexSide || t->h > kMaxTexSide) halve(*t);
-    if (t->w != w || t->h != h) {
-        std::printf("[glb] texture %dx%d halved to %dx%d (cap %d)\n", w, h, t->w, t->h, kMaxTexSide);
-        if (note) *note = "texture scaled down";
-    }
-    return t;
+    return decode_mesh_texture(std::move(bytes),
+                               img->name ? img->name : (img->uri && std::strncmp(img->uri, "data:", 5) ? img->uri : ""),
+                               note);
 }
 
 // One part under construction: welded vertices, triangles, corner UVs.
@@ -213,6 +202,26 @@ void add_primitive(Build& b, const cgltf_primitive& prim, const float M[16], int
 }
 
 }  // namespace
+
+std::shared_ptr<const MeshTexture> decode_mesh_texture(std::vector<uint8_t> bytes,
+                                                       const std::string& name, std::string* note) {
+    int w = 0, h = 0, comp = 0;
+    uint8_t* px = bytes.empty() ? nullptr
+                : stbi_load_from_memory(bytes.data(), (int)bytes.size(), &w, &h, &comp, 4);
+    if (!px) { if (note) *note = "texture format not readable"; return nullptr; }
+    auto t = std::make_shared<MeshTexture>();
+    t->w = w; t->h = h;
+    t->rgba.assign(px, px + (size_t)w * h * 4);
+    stbi_image_free(px);
+    t->name = name;
+    t->encoded = std::move(bytes);
+    while (t->w > kMaxTexSide || t->h > kMaxTexSide) halve(*t);
+    if (t->w != w || t->h != h) {
+        std::printf("[glb] texture %dx%d halved to %dx%d (cap %d)\n", w, h, t->w, t->h, kMaxTexSide);
+        if (note) *note = "texture scaled down";
+    }
+    return t;
+}
 
 bool Mesh::import_glb(const char* filename, Mesh& out, std::vector<ObjPart>* parts, std::string* err) {
     cgltf_options opt = {};

@@ -64,6 +64,13 @@ static constexpr uint8_t  RTSM_FORMAT = 1;
 // a reader that predates RTOW (each RTPO replaces the last) ends up with that one.
 static constexpr uint8_t  MLYR_FORMAT = 1;
 
+// Textured meshes (2026-10-31, an imported glTF), no VERSION bump: an optional MTEX after
+// the entity's MLYR. The UVs are the base level's (the stack's base when locked, else the
+// mesh's): every level above is derived from them on the load cascade. The image is its
+// file's own bytes, decoded on load exactly as on import. Readers that predate MTEX load
+// the sculpt untextured.
+static constexpr uint8_t  MTEX_FORMAT = 1;
+
 struct ChunkHeader {
     char     tag[4];
     uint32_t size;
@@ -388,6 +395,28 @@ static void write_rtsm_chunk(std::ofstream& f, const RetopoSnapshot& r) {
     write_chunk_end(f, sp);
 }
 
+// MTEX: u32 entity id, u8 format, u32 name length + bytes, u32 image byte count + bytes,
+// u32 UV float count (2 per index of the base mesh) + floats.
+static const Mesh& mtex_source(const EntityRecord& e) {
+    return e.multires.locked ? e.multires.base : e.mesh;
+}
+
+static void write_mtex_chunk(std::ofstream& f, const EntityRecord& e) {
+    const Mesh& m = mtex_source(e);
+    const MeshTexture& t = *m.texture;
+    std::streampos sp;
+    write_chunk_begin(f, "MTEX", sp);
+    write_u32(f, e.id);
+    write_u8(f, MTEX_FORMAT);
+    write_u32(f, (uint32_t)t.name.size());
+    if (!t.name.empty()) write_raw(f, t.name.data(), t.name.size());
+    write_u32(f, (uint32_t)t.encoded.size());
+    write_raw(f, t.encoded.data(), t.encoded.size());
+    write_u32(f, (uint32_t)m.uv.size());
+    write_raw(f, m.uv.data(), m.uv.size() * sizeof(float));
+    write_chunk_end(f, sp);
+}
+
 // MLYR: u32 entity id, u8 format, u32 name length + bytes, u8 flags (1 = visible).
 static void write_mlyr_chunk(std::ofstream& f, const EntityRecord& e) {
     std::streampos sp;
@@ -414,6 +443,8 @@ SaveResult save_project(const char* path, const ProjectData& data) {
         write_enty_chunk(f, e);
         if (!e.mesh.paint_layers.empty()) write_layr_chunk(f, e);
         write_mlyr_chunk(f, e);
+        const Mesh& tm = mtex_source(e);
+        if (tm.texture && !tm.texture->encoded.empty() && tm.has_uv()) write_mtex_chunk(f, e);
     }
     auto write_retopo = [&](const EntityRecord& e) {
         const RetopoSnapshot& r = e.retopo;
@@ -859,6 +890,30 @@ static bool read_mlyr_chunk(ChunkReader& r, ProjectData& data) {
     return true;
 }
 
+// MTEX (see write_mtex_chunk). Off = the mesh loads untextured; the sculpt is untouched.
+static bool read_mtex_chunk(ChunkReader& r, ProjectData& data) {
+    uint32_t eid, len, nbytes, nuv;
+    uint8_t format;
+    if (!r.read_u32(eid) || !r.read_u8(format) || format == 0 || format > MTEX_FORMAT) return false;
+    EntityRecord* e = nullptr;
+    for (EntityRecord& c : data.entities) if (c.id == eid) e = &c;
+    if (!e || !r.read_u32(len) || len > 4096 || len > r.remaining()) return false;
+    std::string name(len, '\0');
+    if (len && !r.read_raw(&name[0], len)) return false;
+    if (!r.read_u32(nbytes) || nbytes > r.remaining()) return false;
+    std::vector<uint8_t> bytes(nbytes);
+    if (nbytes && !r.read_raw(bytes.data(), nbytes)) return false;
+    Mesh& m = e->multires.locked ? e->multires.base : e->mesh;
+    if (!r.read_u32(nuv) || nuv != m.indices.size() * 2) return false;
+    if (!r.read_float_vec(m.uv, nuv)) { m.uv.clear(); return false; }
+    std::string note;
+    m.texture = decode_mesh_texture(std::move(bytes), name, &note);
+    if (!m.texture) { m.uv.clear(); return false; }
+    std::printf("[load] mesh %u: texture %dx%d%s%s\n", eid, m.texture->w, m.texture->h,
+                note.empty() ? "" : ", ", note.c_str());
+    return true;
+}
+
 // v2+ reader: file already validated (magic + version ok) and `f` positioned
 // just past the 8-byte header. Layout differences are feature-gated: v3+
 // carries per-vertex paint colour in each mesh body (has_color), v5+ carries
@@ -908,6 +963,9 @@ static LoadResult load_project_v2(std::ifstream& f, std::streamoff file_size,
         } else if (std::memcmp(hdr.tag, "MLYR", 4) == 0) {
             if (!read_mlyr_chunk(cr, data))
                 std::printf("[load] a mesh layer's name didn't read back: it loads unnamed\n");
+        } else if (std::memcmp(hdr.tag, "MTEX", 4) == 0) {
+            if (!read_mtex_chunk(cr, data))
+                std::printf("[load] a mesh's texture didn't read back: it loads untextured\n");
         } else if (std::memcmp(hdr.tag, "RTOW", 4) == 0) {
             if (!cr.read_u32(rt_owner)) rt_owner = 0;
         } else if (std::memcmp(hdr.tag, "RTPO", 4) == 0) {

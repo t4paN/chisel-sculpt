@@ -35,10 +35,18 @@ struct MeshTexture {
     int w = 0, h = 0;
     std::vector<uint8_t> rgba;   // w * h * 4, row 0 = the image's top
     std::string name;
+    // The image file's own bytes (PNG / JPEG), kept so a save stores them as they came:
+    // a fraction of the pixels' size, and no re-encode. Empty = nothing to save.
+    std::vector<uint8_t> encoded;
     // Bilinear, wrapping (glTF's default sampler), at OBJ-convention (u, v): v = 1 is
     // the top row. Packed RGBA8 like Mesh::color. The bake and the colour picker share it.
     uint32_t sample(float u, float v) const;
 };
+
+// PNG / JPEG bytes -> a texture, halved past the platform's cap (glb.cpp). Null when the
+// bytes don't decode; `note` then (or when it was scaled down) says so.
+std::shared_ptr<const MeshTexture> decode_mesh_texture(std::vector<uint8_t> bytes,
+                                                       const std::string& name, std::string* note);
 
 // SOA triangle mesh
 struct ObjPart;
