@@ -177,11 +177,20 @@ void app_ops_paint_clicks(App& app, int win_w, int win_h) {
                     return paint_composite_vertex(pm.paint_layers, pm.color, v);
                 };
                 uint32_t c0 = vcol(i0), c1 = vcol(i1), c2 = vcol(i2);
+                // A textured mesh shows paint x texture (the textured draw), so that's
+                // the colour under the click: the texture at the click's corner UVs.
+                uint32_t tc = 0xFFFFFFFFu;
+                if (pm.texture && pm.has_uv()) {
+                    const float* uv = &pm.uv[6 * (size_t)tid];
+                    tc = pm.texture->sample(bu * uv[0] + bv * uv[2] + bw * uv[4],
+                                            bu * uv[1] + bv * uv[3] + bw * uv[5]);
+                }
                 for (int ch = 0; ch < 3; ch++) {
                     float f0 = (float)((c0 >> (ch*8)) & 0xFF);
                     float f1 = (float)((c1 >> (ch*8)) & 0xFF);
                     float f2 = (float)((c2 >> (ch*8)) & 0xFF);
-                    input.paint_color[ch] = (bu*f0 + bv*f1 + bw*f2) / 255.0f;
+                    const float t = (float)((tc >> (ch*8)) & 0xFF) / 255.0f;
+                    input.paint_color[ch] = (bu*f0 + bv*f1 + bw*f2) / 255.0f * t;
                 }
                 input.color_pick_active = false;
                 snprintf(input.notification, sizeof(input.notification),

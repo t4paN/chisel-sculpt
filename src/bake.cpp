@@ -330,25 +330,6 @@ uint32_t lerp_rgba(uint32_t a, uint32_t b, uint32_t c, float wa, float wb, float
     return out;
 }
 
-// Bilinear, wrapping (glTF's default sampler), at OBJ-convention (u, v): v = 1 is the
-// image's top row.
-uint32_t sample_tex(const MeshTexture& t, float u, float v) {
-    const float fx = u * t.w - 0.5f, fy = (1.0f - v) * t.h - 0.5f;
-    const float x0f = std::floor(fx), y0f = std::floor(fy);
-    const float ax = fx - x0f, ay = fy - y0f;
-    auto wrap = [](long i, int n) { i %= n; return (int)(i < 0 ? i + n : i); };
-    const int x0 = wrap((long)x0f, t.w), x1 = wrap((long)x0f + 1, t.w);
-    const int y0 = wrap((long)y0f, t.h), y1 = wrap((long)y0f + 1, t.h);
-    const uint8_t* p00 = &t.rgba[((size_t)y0 * t.w + x0) * 4], *p10 = &t.rgba[((size_t)y0 * t.w + x1) * 4];
-    const uint8_t* p01 = &t.rgba[((size_t)y1 * t.w + x0) * 4], *p11 = &t.rgba[((size_t)y1 * t.w + x1) * 4];
-    uint32_t out = 0;
-    for (int c = 0; c < 4; c++) {
-        const float top = p00[c] + (p10[c] - p00[c]) * ax, bot = p01[c] + (p11[c] - p01[c]) * ax;
-        out |= (uint32_t)std::lround(top + (bot - top) * ay) << (8 * c);
-    }
-    return out;
-}
-
 void put(uint8_t* px, uint32_t rgba) {
     px[0] = rgba & 255; px[1] = (rgba >> 8) & 255; px[2] = (rgba >> 16) & 255; px[3] = 255;
 }
@@ -409,7 +390,7 @@ void shade_row(BakeWork& w, const Mesh& m, uint32_t py) {
             uint32_t c = 0xFFFFFFFFu;
             if (w.htex) {
                 const float* hu = &m.uv[6 * (size_t)h.t];
-                c = sample_tex(*w.htex, hu[0] * ha + hu[2] * h.u + hu[4] * h.v,
+                c = w.htex->sample(hu[0] * ha + hu[2] * h.u + hu[4] * h.v,
                                         hu[1] * ha + hu[3] * h.u + hu[5] * h.v);
             } else if (!w.hcol.empty()) {
                 c = lerp_rgba(w.hcol[ia], w.hcol[ib], w.hcol[ic], ha, h.u, h.v);

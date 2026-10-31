@@ -667,6 +667,24 @@ bool Mesh::export_ply(const char* filename) const {
     return true;
 }
 
+uint32_t MeshTexture::sample(float u, float v) const {
+    const MeshTexture& t = *this;
+    const float fx = u * t.w - 0.5f, fy = (1.0f - v) * t.h - 0.5f;
+    const float x0f = std::floor(fx), y0f = std::floor(fy);
+    const float ax = fx - x0f, ay = fy - y0f;
+    auto wrap = [](long i, int n) { i %= n; return (int)(i < 0 ? i + n : i); };
+    const int x0 = wrap((long)x0f, t.w), x1 = wrap((long)x0f + 1, t.w);
+    const int y0 = wrap((long)y0f, t.h), y1 = wrap((long)y0f + 1, t.h);
+    const uint8_t* p00 = &t.rgba[((size_t)y0 * t.w + x0) * 4], *p10 = &t.rgba[((size_t)y0 * t.w + x1) * 4];
+    const uint8_t* p01 = &t.rgba[((size_t)y1 * t.w + x0) * 4], *p11 = &t.rgba[((size_t)y1 * t.w + x1) * 4];
+    uint32_t out = 0;
+    for (int c = 0; c < 4; c++) {
+        const float top = p00[c] + (p10[c] - p00[c]) * ax, bot = p01[c] + (p11[c] - p01[c]) * ax;
+        out |= (uint32_t)std::lround(top + (bot - top) * ay) << (8 * c);
+    }
+    return out;
+}
+
 bool Mesh::import_obj(const char* filename, Mesh& out, std::vector<ObjPart>* parts) {
     FILE* f = std::fopen(filename, "r");
     if (!f) return false;

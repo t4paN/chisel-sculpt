@@ -35,6 +35,9 @@ struct MeshTexture {
     int w = 0, h = 0;
     std::vector<uint8_t> rgba;   // w * h * 4, row 0 = the image's top
     std::string name;
+    // Bilinear, wrapping (glTF's default sampler), at OBJ-convention (u, v): v = 1 is
+    // the top row. Packed RGBA8 like Mesh::color. The bake and the colour picker share it.
+    uint32_t sample(float u, float v) const;
 };
 
 // SOA triangle mesh
