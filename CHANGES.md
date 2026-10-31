@@ -2,6 +2,13 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-10-31 — Textured GLB import
+
+- Open or drop .glb / .gltf (web: .glb): one mesh per object, -HI / -LO pair up as with OBJ, vertices welded so the sculpt doesn't tear at UV seams. Compressed (Draco / meshopt) files are turned away with a message.
+- The base colour texture comes along and shows on the sculpt, lit like the clay; paint tints it, hiding paint hides it. It stays put across subdivision levels. Textures past 4K (2K on web) are halved.
+- Bake: a textured sculpt's colour map is its texture, sampled where each ray lands.
+- Colour picker (C) picks the texture's colour on a textured mesh.
+
 ## 2026-10-30 — UV: atlas across meshes, islands moved by hand
 
 - The UV panel lists the meshes: click shows one's layout, Ctrl+click adds it to the square; the active mesh's arrow folds out its islands. The list scrolls past four rows and sits above Bake. Islands are no longer renamed.
