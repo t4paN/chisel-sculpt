@@ -73,8 +73,14 @@ struct PaintLayerStack {
     int active = -1;                   // index into layers, -1 = no layers yet
     uint32_t next_id = 1;              // Base is id 0
     bool carrying = false;             // between paint_layers_begin/end_carry
+    // A textured mesh's texture (Mesh::texture) sits under every layer: the panel's
+    // bottom row. Not paintable (yet); its eye and opacity fade it toward white clay,
+    // and the viewport, the bake and the colour picker all read them.
+    bool  tex_visible = true;
+    float tex_opacity = 1.0f;
 
     bool empty() const { return layers.empty(); }
+    float texture_mix() const { return tex_visible ? tex_opacity : 0.0f; }
 };
 
 // THE ACTIVE LAYER'S PIXELS DO NOT LIVE IN THE STACK. They live in the caller's array

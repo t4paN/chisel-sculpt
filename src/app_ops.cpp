@@ -180,7 +180,8 @@ void app_ops_paint_clicks(App& app, int win_w, int win_h) {
                 // A textured mesh shows paint x texture (the textured draw), so that's
                 // the colour under the click: the texture at the click's corner UVs.
                 uint32_t tc = 0xFFFFFFFFu;
-                if (pm.texture && pm.has_uv()) {
+                const float tmix = pm.paint_layers.texture_mix();   // the Texture row
+                if (pm.texture && pm.has_uv() && tmix > 0.0f) {
                     const float* uv = &pm.uv[6 * (size_t)tid];
                     tc = pm.texture->sample(bu * uv[0] + bv * uv[2] + bw * uv[4],
                                             bu * uv[1] + bv * uv[3] + bw * uv[5]);
@@ -189,7 +190,7 @@ void app_ops_paint_clicks(App& app, int win_w, int win_h) {
                     float f0 = (float)((c0 >> (ch*8)) & 0xFF);
                     float f1 = (float)((c1 >> (ch*8)) & 0xFF);
                     float f2 = (float)((c2 >> (ch*8)) & 0xFF);
-                    const float t = (float)((tc >> (ch*8)) & 0xFF) / 255.0f;
+                    const float t = 1.0f + ((float)((tc >> (ch*8)) & 0xFF) / 255.0f - 1.0f) * tmix;
                     input.paint_color[ch] = (bu*f0 + bv*f1 + bw*f2) / 255.0f * t;
                 }
                 input.color_pick_active = false;

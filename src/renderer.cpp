@@ -803,6 +803,7 @@ in vec4 vColor;
 in vec2 vUV;
 out vec4 fragColor;
 layout(binding=0) uniform sampler2D uTex;
+layout(std140, binding=62) uniform TexParams { vec4 uTexMix; };   // x: the Texture row
 
 layout(std140, binding=63) uniform Params {
     mat4 uView;
@@ -838,8 +839,9 @@ void main() {
     val *= shade;
     vec3 H = normalize(L + vec3(0.0, 0.0, 1.0));
     float spec = pow(max(dot(n, H), 0.0), 90.0) * 0.16 * shade * uMatcapContrast;
-    // Paint tints the texture; hiding paint shows the bare clay, texture and all.
-    vec3 albedo = vColor.rgb * texture(uTex, vUV).rgb;
+    // Paint tints the texture, faded toward white by the panel's Texture row; hiding
+    // paint shows the bare clay, texture and all.
+    vec3 albedo = vColor.rgb * mix(vec3(1.0), texture(uTex, vUV).rgb, uTexMix.x);
     vec3 col = vec3(val) * mix(vec3(1.0), albedo, uPaintVisible) + vec3(spec);
     if (uObjMask > 0.0) {
         vec3 tint = vec3(uObjTintR, uObjTintG, uObjTintB);
@@ -863,6 +865,8 @@ struct Params {
     obj_tint_b: f32,
 };
 @group(0) @binding(63) var<uniform> P: Params;
+struct TexParams { mix_x: vec4<f32>, };
+@group(0) @binding(62) var<uniform> TP: TexParams;
 @group(0) @binding(0) var tex_color: texture_2d<f32>;
 @group(0) @binding(1) var tex_samp: sampler;
 @group(0) @binding(10) var<storage, read> t_idx: array<u32>;
@@ -923,7 +927,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     val = val * shade;
     let H = normalize(L + vec3<f32>(0.0, 0.0, 1.0));
     let spec = pow(max(dot(n, H), 0.0), 90.0) * 0.16 * shade * P.matcap_contrast;
-    let albedo = in.color.rgb * textureSample(tex_color, tex_samp, in.uv).rgb;
+    let albedo = in.color.rgb * mix(vec3<f32>(1.0), textureSample(tex_color, tex_samp, in.uv).rgb, TP.mix_x.x);
     var col = vec3<f32>(val) * mix(vec3<f32>(1.0), albedo, P.paint_visible) + vec3<f32>(spec);
     if (P.obj_mask > 0.0) {
         let tint = vec3<f32>(P.obj_tint_r, P.obj_tint_g, P.obj_tint_b);
@@ -1360,6 +1364,7 @@ Renderer::~Renderer() {
     gpu::release_buffer(matcap_ubo);
     gpu::release_render_pipeline(baked_pipeline);
     gpu::release_render_pipeline(textured_pipeline);
+    gpu::release_buffer(textured_ubo);
     free_textured(active_textured);
     gpu::release_buffer(baked_ubo);
     gpu::release_buffer(baked_pos);
@@ -1455,6 +1460,7 @@ void Renderer::init() {
     {
         gpu::BindEntry binds[] = {
             { 63, gpu::Bind::Uniform, sizeof(MatcapParamsGPU) },
+            { 62, gpu::Bind::Uniform, 16 },
             { 10, gpu::Bind::StorageRead, 0 }, { 11, gpu::Bind::StorageRead, 0 },
             { 12, gpu::Bind::StorageRead, 0 }, { 13, gpu::Bind::StorageRead, 0 },
             { 14, gpu::Bind::StorageRead, 0 }, { 15, gpu::Bind::StorageRead, 0 },
@@ -1463,13 +1469,14 @@ void Renderer::init() {
         d.shaders.wgsl = textured_wgsl_src;
         d.shaders.vert_glsl = textured_vert_src;
         d.shaders.frag_glsl = textured_frag_src;
-        d.binds = binds; d.bind_count = 7;
+        d.binds = binds; d.bind_count = 8;
         d.topology = gpu::Topology::Triangles;
         d.depth_test = true; d.depth_write = true;
         d.sampled_texture = true;
         textured_pipeline = gpu::create_render_pipeline(gpu_dev, d);
         if (!textured_pipeline.handle) std::fprintf(stderr, "[renderer] textured pipeline failed\n");
         else std::printf("[renderer] textured pipeline compiled (gpu:: seam)\n");
+        textured_ubo = gpu::create_buffer(gpu_dev, nullptr, 16, gpu::Usage::Uniform);
     }
 
     // Bake preview (UV mode): pos/norm/tangent/uv soup, both maps sampled.
@@ -2081,9 +2088,9 @@ void Renderer::upload_matcap_params(const Camera& cam, int w, int h, bool select
 }
 
 void Renderer::draw_mesh(const Camera& cam, int w, int h, uint32_t index_count,
-                          bool selected) {
+                          bool selected, float tex_mix) {
     if (draw_textured(cam, w, h, active_textured, ebo, vbo_pos, vbo_norm, vbo_mask, vbo_color,
-                      index_count, selected))
+                      index_count, selected, tex_mix))
         return;
     upload_matcap_params(cam, w, h, selected);
 
@@ -2143,10 +2150,11 @@ void Renderer::free_display(EntityGpu& g) {
     g = EntityGpu();
 }
 
-void Renderer::draw_display(const Camera& cam, EntityGpu& g, int w, int h, bool selected) {
+void Renderer::draw_display(const Camera& cam, EntityGpu& g, int w, int h, bool selected,
+                            float tex_mix) {
     if (g.index_count == 0) return;
     if (draw_textured(cam, w, h, g.textured, g.ebo, g.vbo_pos, g.vbo_norm, g.vbo_mask, g.vbo_color,
-                      g.index_count, selected))
+                      g.index_count, selected, tex_mix))
         return;
     upload_matcap_params(cam, w, h, selected);
 
@@ -2199,18 +2207,23 @@ void Renderer::free_textured(TexturedGpu& t) {
 
 bool Renderer::draw_textured(const Camera& cam, int w, int h, TexturedGpu& t, const gpu::Buffer& idx,
                              const gpu::Buffer& pos, const gpu::Buffer& nrm, const gpu::Buffer& mask,
-                             const gpu::Buffer& col, uint32_t index_count, bool selected) {
-    if (!t.corners || t.corners != index_count || !textured_pipeline.handle) return false;
+                             const gpu::Buffer& col, uint32_t index_count, bool selected,
+                             float tex_mix) {
+    // A hidden texture is the plain draw exactly, and that one is cheaper.
+    if (!t.corners || t.corners != index_count || !textured_pipeline.handle || tex_mix <= 0.0f)
+        return false;
     upload_matcap_params(cam, w, h, selected);
+    const float mixv[4] = {tex_mix, 0.0f, 0.0f, 0.0f};
+    gpu::write_buffer(gpu_dev, textured_ubo, 0, mixv, sizeof mixv);
     gpu::RenderTarget target; target.width = w; target.height = h;
     gpu::RenderPass rp = gpu::begin_render_pass(gpu_dev, target);
     gpu::set_pipeline(rp, textured_pipeline);
     gpu::BindBufferEntry be[] = {
-        { 63, &matcap_ubo, sizeof(MatcapParamsGPU) },
+        { 63, &matcap_ubo, sizeof(MatcapParamsGPU) }, { 62, &textured_ubo, 16 },
         { 10, &idx, 0 }, { 11, &pos, 0 }, { 12, &nrm, 0 },
         { 13, &mask, 0 }, { 14, &col, 0 }, { 15, &t.uv, 0 },
     };
-    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, textured_pipeline, be, 7, &t.tex);
+    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, textured_pipeline, be, 8, &t.tex);
     gpu::set_bind_group(rp, textured_pipeline, grp);
     gpu::draw(rp, index_count);
     gpu::end_render_pass(rp);

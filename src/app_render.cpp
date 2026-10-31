@@ -194,12 +194,13 @@ void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse) {
             bool selected = false;
             for (uint32_t id : sel) if (id == up->id) { selected = true; break; }
             if (up->id == active_id && baked) continue;
+            const float tex_mix = up->mesh.paint_layers.texture_mix();
             if (up->id == active_id)
                 renderer.draw_mesh(camera, win_w, win_h,
                                    (uint32_t)scene.active_mesh().indices.size(),
-                                   selected);
+                                   selected, tex_mix);
             else
-                renderer.draw_display(camera, up->gpu, win_w, win_h, selected);
+                renderer.draw_display(camera, up->gpu, win_w, win_h, selected, tex_mix);
         }
     }
 

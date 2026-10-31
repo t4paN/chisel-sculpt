@@ -2241,6 +2241,38 @@ void draw_paint_layers_panel(InputState& input, Scene& scene, int win_w, int /*w
         ImGui::PopID();
     }
 
+    // Under every layer, a textured mesh's texture (an imported glTF): its eye and
+    // opacity, no selecting, since brushes paint the layers above it (texture painting
+    // comes later). Read straight off the stack each frame, so nothing to re-blend.
+    if (ent->mesh.texture && ent->mesh.has_uv()) {
+        ImGui::PushID("texture_row");
+        bool tv = st.tex_visible;
+        if (ImGui::Checkbox("##tvis", &tv)) { st.tex_visible = tv; scene.mark_edited(); }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Show / hide the texture");
+        ImGui::SameLine();
+        char label[48];
+        std::snprintf(label, sizeof(label), "Texture %dx%d", ent->mesh.texture->w, ent->mesh.texture->h);
+        ImGui::BeginDisabled(!st.tex_visible);
+        const float label_x = ImGui::GetCursorPosX();   // where the layer names start
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(label);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("The imported texture, under every paint layer.\n"
+                              "Paint goes on the layers above it.");
+        // The slider sits where the layer rows put their trash can, past the 150 px name.
+        ImGui::SameLine(label_x + 150.0f + ImGui::GetStyle().ItemSpacing.x);
+        float pct = st.tex_opacity * 100.0f;
+        ImGui::SetNextItemWidth(ImGui::GetFrameHeight() * 2.6f);
+        if (ImGui::SliderFloat("##topacity", &pct, 0.0f, 100.0f, "%.0f%%")) {
+            st.tex_opacity = pct / 100.0f;
+            scene.mark_edited();
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("Texture opacity: fades it toward the bare clay");
+        ImGui::EndDisabled();
+        ImGui::PopID();
+    }
+
     ImGui::Separator();
     if (!st.empty() && st.active >= 0) {
         PaintLayer& A = st.layers[st.active];

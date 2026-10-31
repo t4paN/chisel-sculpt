@@ -42,7 +42,8 @@ struct BakeWork {
     uint32_t high_v = 0, high_t = 0;
     std::vector<float>    hn;       // the sculpt's smooth normals, 3 per vertex (its own CPU ones may be stale)
     std::vector<uint32_t> hcol;     // the sculpt's paint, composited (empty = no colour map)
-    const MeshTexture*    htex = nullptr;   // or its texture, through its corner UVs (wins over paint)
+    const MeshTexture*    htex = nullptr;   // its texture, through its corner UVs, under the paint
+    float                 hmix = 1.0f;      // how much of it shows (the Texture row's eye x opacity)
     // The tree.
     std::vector<Node>     nodes;
     std::vector<uint32_t> tri;
@@ -174,13 +175,16 @@ void prep_high(BakeWork& w, const Mesh& m) {
         const float l = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
         if (l > 1e-20f) { n[0] /= l; n[1] /= l; n[2] /= l; }
     }
-    // A textured sculpt (an imported glTF) bakes its texture: that's the detail a
-    // game asset needs, and vertex paint on a mesh that coarse holds almost none of it.
-    // The shared_ptr in `m` keeps the pixels alive; the job stops if `m` changes.
-    if (w.s.color && m.texture && m.has_uv()) w.htex = m.texture.get();
-    else if (w.s.color) {
+    // The colour map is what the viewport shows: the paint layers' composite, times a
+    // textured sculpt's texture (an imported glTF) faded by its row's eye and opacity.
+    // The texture is the detail a game asset needs; vertex paint on a mesh that coarse
+    // holds almost none of it. The shared_ptr in `m` keeps the pixels alive; the job
+    // stops if `m` changes.
+    if (w.s.color) {
         w.hcol.resize(nv);
         paint_composite(m.paint_layers, m.color, nv, w.hcol.data());
+        w.hmix = m.paint_layers.texture_mix();
+        if (m.texture && m.has_uv() && w.hmix > 0.0f) w.htex = m.texture.get();
     }
     w.tri.resize(nt);
     for (uint32_t t = 0; t < nt; t++) w.tri[t] = t;
@@ -387,13 +391,18 @@ void shade_row(BakeWork& w, const Mesh& m, uint32_t py) {
             o[3] = 255;
         }
         if (r.has_color) {
-            uint32_t c = 0xFFFFFFFFu;
+            uint32_t c = w.hcol.empty() ? 0xFFFFFFFFu
+                       : lerp_rgba(w.hcol[ia], w.hcol[ib], w.hcol[ic], ha, h.u, h.v);
             if (w.htex) {
                 const float* hu = &m.uv[6 * (size_t)h.t];
-                c = w.htex->sample(hu[0] * ha + hu[2] * h.u + hu[4] * h.v,
-                                        hu[1] * ha + hu[3] * h.u + hu[5] * h.v);
-            } else if (!w.hcol.empty()) {
-                c = lerp_rgba(w.hcol[ia], w.hcol[ib], w.hcol[ic], ha, h.u, h.v);
+                const uint32_t tc = w.htex->sample(hu[0] * ha + hu[2] * h.u + hu[4] * h.v,
+                                                   hu[1] * ha + hu[3] * h.u + hu[5] * h.v);
+                uint32_t o = 0;
+                for (int s = 0; s < 24; s += 8) {
+                    const float t = 1.0f + (((tc >> s) & 255) / 255.0f - 1.0f) * w.hmix;
+                    o |= (uint32_t)std::lround(((c >> s) & 255) * t) << s;
+                }
+                c = o | (c & 0xFF000000u);
             }
             put(&r.color_rgba[4 * texel], c);
         }

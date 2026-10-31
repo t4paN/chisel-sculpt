@@ -396,7 +396,8 @@ static void write_rtsm_chunk(std::ofstream& f, const RetopoSnapshot& r) {
 }
 
 // MTEX: u32 entity id, u8 format, u32 name length + bytes, u32 image byte count + bytes,
-// u32 UV float count (2 per index of the base mesh) + floats.
+// u32 UV float count (2 per index of the base mesh) + floats, then the panel's Texture
+// row: u8 visible, f32 opacity.
 static const Mesh& mtex_source(const EntityRecord& e) {
     return e.multires.locked ? e.multires.base : e.mesh;
 }
@@ -414,6 +415,8 @@ static void write_mtex_chunk(std::ofstream& f, const EntityRecord& e) {
     write_raw(f, t.encoded.data(), t.encoded.size());
     write_u32(f, (uint32_t)m.uv.size());
     write_raw(f, m.uv.data(), m.uv.size() * sizeof(float));
+    write_u8(f, e.mesh.paint_layers.tex_visible ? 1 : 0);
+    write_raw(f, &e.mesh.paint_layers.tex_opacity, 4);
     write_chunk_end(f, sp);
 }
 
@@ -906,6 +909,12 @@ static bool read_mtex_chunk(ChunkReader& r, ProjectData& data) {
     Mesh& m = e->multires.locked ? e->multires.base : e->mesh;
     if (!r.read_u32(nuv) || nuv != m.indices.size() * 2) return false;
     if (!r.read_float_vec(m.uv, nuv)) { m.uv.clear(); return false; }
+    uint8_t vis = 1;
+    float op = 1.0f;
+    if (r.read_u8(vis) && r.read_raw(&op, 4)) {
+        e->mesh.paint_layers.tex_visible = vis != 0;
+        e->mesh.paint_layers.tex_opacity = std::min(1.0f, std::max(0.0f, op));
+    }
     std::string note;
     m.texture = decode_mesh_texture(std::move(bytes), name, &note);
     if (!m.texture) { m.uv.clear(); return false; }

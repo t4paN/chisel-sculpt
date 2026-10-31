@@ -60,6 +60,7 @@ struct Renderer {
     // Textured sculpt: the matcap fetching its vertices by corner (see the shaders).
     gpu::RenderPipeline textured_pipeline;
     TexturedGpu active_textured;   // the active mesh's (its buffers are the vbo_* above)
+    gpu::Buffer textured_ubo;      // binding 62: the Texture row's mix
     gpu::Buffer  baked_ubo, baked_pos, baked_nrm, baked_tan, baked_uv;
     gpu::Texture baked_color_tex, baked_normal_tex;
     uint32_t     baked_corners = 0, baked_serial = 0;
@@ -248,8 +249,9 @@ struct Renderer {
     // Fill + upload the matcap Params UBO (camera + per-draw flags); shared by
     // draw_mesh and draw_display.
     void upload_matcap_params(const Camera& cam, int w, int h, bool selected);
+    // tex_mix: a textured mesh's Texture row (PaintLayerStack::texture_mix), 0 = hidden.
     void draw_mesh(const Camera& cam, int w, int h, uint32_t index_count,
-                    bool selected);
+                    bool selected, float tex_mix = 1.0f);
     // Corner UVs + texture for a mesh that has both, else back to untextured. Only on
     // a full upload: a stroke moves vertices, never UVs.
     void upload_textured(TexturedGpu& t, const Mesh& mesh);
@@ -258,12 +260,13 @@ struct Renderer {
     // (or not drawable), and the caller draws the plain way.
     bool draw_textured(const Camera& cam, int w, int h, TexturedGpu& t, const gpu::Buffer& idx,
                        const gpu::Buffer& pos, const gpu::Buffer& nrm, const gpu::Buffer& mask,
-                       const gpu::Buffer& col, uint32_t index_count, bool selected);
+                       const gpu::Buffer& col, uint32_t index_count, bool selected, float tex_mix);
 
     // Per-entity static display buffers (inactive entities).
     void upload_display(EntityGpu& g, const Mesh& mesh);
     void free_display(EntityGpu& g);
-    void draw_display(const Camera& cam, EntityGpu& g, int w, int h, bool selected);
+    void draw_display(const Camera& cam, EntityGpu& g, int w, int h, bool selected,
+                      float tex_mix = 1.0f);
 
     // Bake preview: upload_baked is a no-op while `serial` is the one it holds; a null
     // map gets a neutral 1x1 stand-in. draw_baked draws it depth-tested into the scene.
