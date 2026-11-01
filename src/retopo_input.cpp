@@ -309,6 +309,42 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
         }
         retopo.lasso.clear();
     }
+    // Contour line let go: its points on the sculpt (off the plane cache) and the
+    // triangle under each, which the rings are sliced from. A few pixels is a click.
+    if (!retopo_press && !retopo.contour.empty()) {
+        const std::vector<float>& L = retopo.contour;
+        float px_len = 0.0f;
+        for (size_t i = 2; i + 1 < L.size(); i += 2) px_len += std::hypot(L[i] - L[i - 2], L[i + 1] - L[i - 1]);
+        if (retopo_on && px_len > 8.0f && !screen_buffers_dirty) {
+            if (retopo.wand_open) retopo_wand_close(retopo, retopo.wand_keep_shown ? retopo.wand_shown : -1);
+            scene.materialize_active_cpu();   // the rings are sliced off mesh.pos
+            // A quad about kGridPx wide on screen where the line is: the lasso grid's size.
+            constexpr float kGridPx = 28.0f;
+            std::vector<Vec3> cp;
+            std::vector<uint32_t> ct;
+            std::vector<float> cw;
+            for (size_t i = 0; i + 1 < L.size(); i += 2) {
+                Vec3 p, n;
+                float wpp;
+                uint32_t tid;
+                if (renderer.sample_triid((int)L[i], (int)L[i + 1], &tid) && tid < mesh.tri_count()
+                    && retopo_surface_at(L[i], L[i + 1], p, n, wpp)) {
+                    cp.push_back(p);
+                    ct.push_back(tid);
+                    cw.push_back(wpp);
+                }
+            }
+            const char* why = cp.size() < 2 ? "Draw the line along the limb, on the model"
+                            : retopo_contour(retopo, mesh, cp, ct, kGridPx * cw[cw.size() / 2], input.mirror_x);
+            if (why) {
+                std::snprintf(input.notification, sizeof(input.notification), "%s", why);
+                input.notification_timer = 3.0f;
+            } else {
+                input.retopo_contour_panel = true;   // its counts float by the pointer
+            }
+        }
+        retopo.contour.clear();
+    }
     // A line's pen-up that opened a wand menu (spine, notch, edge to vertex): the
     // menu goes up, or the toast says why not; the line is done either way.
     auto line_menu = [&](const char* why) {
@@ -475,6 +511,17 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
         } else if (std::hypot(mx - retopo.lasso[k - 2], my - retopo.lasso[k - 1]) >= 3.0f) {
             retopo.lasso.push_back(mx);
             retopo.lasso.push_back(my);
+        }
+    } else if (retopo_press && !retopo.drawing
+               && input.retopo_tool == InputState::RetopoTool::CONTOUR) {
+        // Contours: a line along a limb, on screen as dragged; the tube goes on at release.
+        const float mx = (float)input.mouse_x, my = (float)input.mouse_y;
+        const size_t k = retopo.contour.size();
+        if (k == 0) {
+            retopo.contour = {retopo_press_x, retopo_press_y};
+        } else if (std::hypot(mx - retopo.contour[k - 2], my - retopo.contour[k - 1]) >= 3.0f) {
+            retopo.contour.push_back(mx);
+            retopo.contour.push_back(my);
         }
     } else if (retopo_press && !screen_buffers_dirty && !retopo_path_press) {
         const float mx = (float)input.mouse_x, my = (float)input.mouse_y;
@@ -650,7 +697,7 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
         retopo_grid_close(retopo);
     // The wheel over an open grid (main.cpp passes it here instead of zooming): each
     // notch about 15% more or fewer sides round the outline, at least one quad's worth.
-    if (retopo.grid_open && std::fabs(retopo.grid_wheel) >= 0.99f) {
+    if (retopo.grid_open && !retopo.grid_contour && std::fabs(retopo.grid_wheel) >= 0.99f) {
         const int notches = std::clamp((int)std::lround(retopo.grid_wheel), -4, 4);
         retopo.grid_wheel = 0.0f;
         int s = retopo.grid_sides;
@@ -664,6 +711,28 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
             std::snprintf(input.notification, sizeof(input.notification), "Grid: %u quads",
                           retopo.result.face_count() - retopo.grid_base.result.face_count());
             input.notification_timer = 2.0f;
+        }
+    }
+    // Contours: the wheel steps the rings (about 10% a notch, at least one, down to two),
+    // Ctrl+wheel the count round (as the grid's sides, down to four). The panel by the
+    // pointer shows both, so no toast.
+    if (retopo.grid_open && retopo.grid_contour
+        && (std::fabs(retopo.grid_wheel) >= 0.99f || std::fabs(retopo.grid_wheel_ctrl) >= 0.99f)) {
+        const int along = std::clamp((int)std::lround(retopo.grid_wheel), -4, 4);
+        const int round = std::clamp((int)std::lround(retopo.grid_wheel_ctrl), -4, 4);
+        retopo.grid_wheel = retopo.grid_wheel_ctrl = 0.0f;
+        int r = retopo.grid_rings, s = retopo.grid_sides;
+        for (int k = 0; k < std::abs(along); k++)
+            r += (along > 0 ? 1 : -1) * std::max(1, (int)std::lround(r * 0.1f));
+        for (int k = 0; k < std::abs(round); k++)
+            s = round > 0 ? std::max(s + 2, 2 * (int)std::lround(s * 1.15f / 2.0f))
+                          : std::min(s - 2, 2 * (int)std::lround(s / 1.15f / 2.0f));
+        r = std::clamp(r, 2, 256);
+        s = std::clamp(s, 4, 128);
+        if (r != retopo.grid_rings || s != retopo.grid_sides) {
+            scene.materialize_active_cpu();   // the rings are sliced off mesh.pos
+            retopo.grid_rings = r;
+            retopo_grid_redo(retopo, mesh, s);
         }
     }
     if (retopo.wand_open
@@ -980,7 +1049,7 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
         input.retopo_paste_request = false;
         if (retopo.wand_open) retopo_wand_close(retopo, retopo.wand_keep_shown ? retopo.wand_shown : -1);
         // A grid on the same lasso goes first: the paste takes its place, not its top.
-        if (retopo.grid_open && retopo.paste_ready) retopo_grid_cancel(retopo);
+        if (retopo.grid_open && !retopo.grid_contour && retopo.paste_ready) retopo_grid_cancel(retopo);
         scene.materialize_active_cpu();   // the paste snaps onto mesh.pos
         if (const char* why = retopo_paste(retopo, mesh, input.mirror_x)) {
             std::snprintf(input.notification, sizeof(input.notification), "%s", why);
@@ -1139,9 +1208,10 @@ void draw_retopo_cursor(Renderer& renderer, const Camera& camera, const InputSta
     // Matrix green (#00FF41): a ring no sculpt brush wears, so the hand
     // knows it's in retopo before the eye finds the dock.
     static const float kRetopoGreen[3] = {0.0f, 1.0f, 0.255f};
-    // Cut draws a bare line and the wand only clicks: a small ring marks the tip.
+    // Cut and Contours draw a bare line and the wand only clicks: a small ring marks the tip.
     const bool cut = (input.retopo_tool == InputState::RetopoTool::CUT
-                      || input.retopo_tool == InputState::RetopoTool::WAND)
+                      || input.retopo_tool == InputState::RetopoTool::WAND
+                      || input.retopo_tool == InputState::RetopoTool::CONTOUR)
                   && !input.is_smooth_active();
     // The eraser's ring is red: it takes things away.
     static const float kEraseRed[3] = {1.0f, 0.25f, 0.2f};

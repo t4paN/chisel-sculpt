@@ -7235,7 +7235,332 @@ const char* grid_apply(RetopoState& st, const Mesh& m) {
                 half ? ", made on one half and mirrored across x = 0" : twin ? ", twin too" : "");
     return nullptr;
 }
+
+// One cross-section of the sculpt for Contours: the plane through `at` square to `axis`,
+// walked from triangle `seed` across shared edges until it comes back round. Walking
+// (not testing every triangle) keeps to the one loop the line is on: the same plane
+// through the other leg or the torso never joins it. False when it doesn't close (it
+// ran off an open edge: a hole, a split seam) or the plane misses round the seed.
+bool contour_slice(const Mesh& m, Vec3 at, Vec3 axis, uint32_t seed,
+                   std::vector<Vec3>& out, std::vector<Vec3>& out_n) {
+    out.clear();
+    out_n.clear();
+    const uint32_t T = m.tri_count();
+    if (seed >= T || m.vert_tri_offset.size() != m.vertex_count() + 1) return false;
+    // A vertex on the plane counts as in front: every crossed triangle then has
+    // exactly two crossed edges, whatever lies exactly on the plane.
+    auto dist = [&](uint32_t v) { return (m.get_pos(v) - at).dot(axis); };
+    auto side = [&](uint32_t v) { return dist(v) >= 0.0f; };
+    auto crossed = [&](uint32_t t) {
+        const uint32_t* c = &m.indices[t * 3];
+        return side(c[0]) != side(c[1]) || side(c[1]) != side(c[2]);
+    };
+    // The line's point comes off the depth buffer, a hair off its triangle: if the
+    // plane misses it, the nearest crossed triangle round it.
+    if (!crossed(seed)) {
+        uint32_t best = ~0u;
+        float bd = 1e30f;
+        for (int j = 0; j < 3; j++) {
+            const uint32_t v = m.indices[seed * 3 + j];
+            for (uint32_t k = m.vert_tri_offset[v]; k < m.vert_tri_offset[v + 1]; k++) {
+                const uint32_t t = m.vert_tri_list[k];
+                if (!crossed(t)) continue;
+                const Vec3 mid = (m.get_pos(m.indices[t * 3]) + m.get_pos(m.indices[t * 3 + 1])
+                                + m.get_pos(m.indices[t * 3 + 2])) * (1.0f / 3.0f);
+                const float d = (mid - at).length();
+                if (d < bd) { bd = d; best = t; }
+            }
+        }
+        if (best == ~0u) return false;
+        seed = best;
+    }
+    // The crossed edge of t that isn't (a, b).
+    auto exit_edge = [&](uint32_t t, uint32_t a, uint32_t b, uint32_t& oa, uint32_t& ob) {
+        const uint32_t* c = &m.indices[t * 3];
+        for (int j = 0; j < 3; j++) {
+            const uint32_t x = c[j], y = c[(j + 1) % 3];
+            if (side(x) == side(y) || (x == a && y == b) || (x == b && y == a)) continue;
+            oa = x;
+            ob = y;
+            return true;
+        }
+        return false;
+    };
+    uint32_t sa = ~0u, sb = ~0u;
+    exit_edge(seed, ~0u, ~0u, sa, sb);
+    uint32_t t = seed, a = sa, b = sb;
+    for (uint32_t step = 0; step < T; step++) {
+        const float da = dist(a), db = dist(b);
+        const float f = da / (da - db);
+        out.push_back(m.get_pos(a) + (m.get_pos(b) - m.get_pos(a)) * f);
+        const Vec3 n = m.get_normal(a) * (1.0f - f) + m.get_normal(b) * f;
+        out_n.push_back(n.length() > 1e-9f ? n.normalized() : n);
+        uint32_t oa, ob;
+        if (!exit_edge(t, a, b, oa, ob)) return false;
+        if ((oa == sa && ob == sb) || (oa == sb && ob == sa)) return out.size() >= 3;
+        uint32_t nt = ~0u;
+        for (uint32_t k = m.vert_tri_offset[oa]; k < m.vert_tri_offset[oa + 1] && nt == ~0u; k++) {
+            const uint32_t u = m.vert_tri_list[k];
+            if (u == t) continue;
+            const uint32_t* c = &m.indices[u * 3];
+            if (c[0] == ob || c[1] == ob || c[2] == ob) nt = u;
+        }
+        if (nt == ~0u) return false;
+        t = nt;
+        a = oa;
+        b = ob;
+    }
+    return false;
+}
+
+// Contours onto `result` (see retopo_contour): rings round the limb square to the line
+// in st.grid_pts, st.grid_sides round each, bridged ring to ring. The first slices go
+// square to the line itself (which runs over the limb's skin), the later ones square to
+// the axis through the rings' centres, so a bent limb's rings follow the bend instead
+// of leaning with the skin.
+const char* contour_apply(RetopoState& st, const Mesh& m) {
+    RetopoMesh& rm = st.result;
+    const std::vector<Vec3>& L = st.grid_pts;
+    const std::vector<uint32_t>& LT = st.grid_tris;
+    const int n = (int)L.size();
+    if (n < 2 || LT.size() != L.size()) return "Draw the line along the limb, on the model";
+    std::vector<float> acc(n, 0.0f);
+    for (int i = 1; i < n; i++) acc[i] = acc[i - 1] + (L[i] - L[i - 1]).length();
+    const float len = acc.back();
+    // The line's way at sample i, over a sixth of its length each side: a hand's wobble
+    // over a few samples tips a plane a long way, and the passes below can't undo that
+    // at the ends.
+    auto line_dir = [&](int i) {
+        int a = i, b = i;
+        while (a > 0 && acc[i] - acc[a] < len / 6.0f) a--;
+        while (b + 1 < n && acc[b] - acc[i] < len / 6.0f) b++;
+        return (L[b] - L[a]).normalized();
+    };
+    auto perimeter = [](const std::vector<Vec3>& Q) {
+        float p = 0.0f;
+        for (size_t i = 0; i < Q.size(); i++) p += (Q[(i + 1) % Q.size()] - Q[i]).length();
+        return p;
+    };
+    auto centre = [](const std::vector<Vec3>& Q) {
+        Vec3 c;
+        float w = 0.0f;
+        for (size_t i = 0; i < Q.size(); i++) {
+            const float s = (Q[(i + 1) % Q.size()] - Q[i]).length();
+            c += (Q[i] + Q[(i + 1) % Q.size()]) * (0.5f * s);
+            w += s;
+        }
+        return w > 1e-12f ? c * (1.0f / w) : Q[0];
+    };
+
+    // The limb's girth, from a slice at the middle of the line (or nearer an end, if the
+    // middle won't close): it sets the count round and the spacing between rings.
+    std::vector<Vec3> Q, Qn;
+    float girth = 0.0f;
+    for (int tryi : {n / 2, n / 3, 2 * n / 3, n / 4, 3 * n / 4})
+        if (contour_slice(m, L[tryi], line_dir(tryi), LT[tryi], Q, Qn)) { girth = perimeter(Q); break; }
+    if (girth <= 0.0f) return "The model doesn't close round under that line (a hole, or not a limb)";
+    if (st.grid_sides <= 0)
+        st.grid_sides = 2 * std::clamp((int)std::lround(girth / std::max(1e-9f, 2.0f * st.grid_edge)), 4, 64);
+    const int N = st.grid_sides;
+    const float spacing = girth / (float)N;   // quads about square
+    if (len < 0.5f * spacing) return "Draw a longer line along the limb";
+    // Rings as far apart as quads are wide, at first; then the wheel's to set.
+    if (st.grid_rings <= 0) st.grid_rings = std::clamp((int)std::lround(len / spacing) + 1, 2, 256);
+    const int R = st.grid_rings;
+
+    // Each slice on the line sample nearest its even spot (samples are a few pixels
+    // apart): it then goes through a point known to be on its seed triangle.
+    auto spots = [&](int count) {
+        std::vector<int> J(count);
+        for (int k = 0, i = 0; k < count; k++) {
+            const float s = len * (float)k / (float)(count - 1);
+            while (i + 1 < n && acc[i + 1] <= s) i++;
+            J[k] = i + 1 < n && acc[i + 1] - s < s - acc[i] ? i + 1 : i;
+        }
+        return J;
+    };
+    // The axis, on its own stations a sixteenth of the girth apart whatever the ring
+    // count (two rings over a bent arm made a chord of it, both planes tipped off the
+    // ends): slice, take each centre, aim each plane down the line through the centres,
+    // slice again. A plane leaning with the skin puts its centre a little off; a few
+    // rounds settle it (each walk touches only the ring's own triangles).
+    const int S = std::clamp((int)std::lround(len / (girth / 16.0f)) + 1, 3, 256);
+    const std::vector<int> JS = spots(S);
+    std::vector<Vec3> C(S), AS(S);
+    for (int k = 0; k < S; k++) AS[k] = line_dir(JS[k]);
+    std::vector<uint8_t> ok(S, 0);
+    for (int round = 0; round < 4; round++) {
+        for (int k = 0; k < S; k++) {
+            ok[k] = contour_slice(m, L[JS[k]], AS[k], LT[JS[k]], Q, Qn);
+            if (ok[k]) C[k] = centre(Q);
+        }
+        for (int k = 0; k < S; k++) {
+            // The axis here: from the nearest closed slice behind to the nearest ahead.
+            int a = ok[k] ? k : -1, b = a;
+            for (int j = k - 1; j >= 0; j--) if (ok[j]) { a = j; break; }
+            for (int j = k + 1; j < S; j++) if (ok[j]) { b = j; break; }
+            if (a < 0 || b < 0 || a == b) continue;
+            Vec3 d = C[b] - C[a];
+            // At an end the plain difference is the way half a step in, bent with the
+            // limb; reaching one more slice on lifts it to the end itself.
+            int b2 = -1;
+            if (a == k) { for (int j = b + 1; j < S; j++) if (ok[j]) { b2 = j; break; }
+                          if (b2 >= 0) d = (C[b] - C[k]) * 4.0f - (C[b2] - C[k]); }
+            else if (b == k) { for (int j = a - 1; j >= 0; j--) if (ok[j]) { b2 = j; break; }
+                               if (b2 >= 0) d = (C[k] - C[a]) * 4.0f - (C[k] - C[b2]); }
+            if (d.length() > 1e-9f) AS[k] = d.normalized();
+        }
+        // Lightly evened out: one centre a little off (a bump on the skin) shouldn't tip
+        // its neighbours' planes. The ends stay as worked out (evening pulls them inward).
+        for (int pass = 0; pass < 2; pass++) {
+            std::vector<Vec3> B = AS;
+            for (int k = 1; k + 1 < S; k++)
+                B[k] = (AS[std::max(0, k - 1)] + AS[k] * 2.0f + AS[std::min(S - 1, k + 1)]).normalized();
+            AS = B;
+        }
+    }
+    // Each ring's plane: the axis where it falls, between the two stations round it.
+    const std::vector<int> J = spots(R);
+    std::vector<Vec3> A(R);
+    for (int k = 0; k < R; k++) {
+        const float s = acc[J[k]];
+        int i = 0;
+        while (i + 2 < S && acc[JS[i + 1]] < s) i++;
+        const float span = acc[JS[i + 1]] - acc[JS[i]];
+        const float f = span > 1e-12f ? std::clamp((s - acc[JS[i]]) / span, 0.0f, 1.0f) : 0.0f;
+        A[k] = (AS[i] * (1.0f - f) + AS[i + 1] * f).normalized();
+    }
+
+    // The rings themselves, each resampled to N round from the point
+    // nearest the line (so the line itself becomes an edge run down the limb), wound
+    // the same way round the axis.
+    std::vector<std::vector<Vec3>> RV(R), RN(R);
+    std::vector<float> per(R, 0.0f);
+    for (int k = 0; k < R; k++) {
+        if (!contour_slice(m, L[J[k]], A[k], LT[J[k]], Q, Qn)) continue;
+        const int q = (int)Q.size();
+        Vec3 area;
+        const Vec3 c = centre(Q);
+        for (int i = 0; i < q; i++) area += (Q[i] - c).cross(Q[(i + 1) % q] - c);
+        if (area.dot(A[k]) < 0.0f) {
+            std::reverse(Q.begin(), Q.end());
+            std::reverse(Qn.begin(), Qn.end());
+        }
+        int s0 = 0;
+        float bd = 1e30f;
+        for (int i = 0; i < q; i++) {
+            const float d = (Q[i] - L[J[k]]).length();
+            if (d < bd) { bd = d; s0 = i; }
+        }
+        std::vector<float> qa(q + 1, 0.0f);
+        for (int i = 0; i < q; i++)
+            qa[i + 1] = qa[i] + (Q[(s0 + i + 1) % q] - Q[(s0 + i) % q]).length();
+        per[k] = qa[q];
+        RV[k].resize(N);
+        RN[k].resize(N);
+        for (int j = 0, seg = 0; j < N; j++) {
+            const float t = qa[q] * (float)j / (float)N;
+            while (seg + 1 < q && qa[seg + 1] < t) seg++;
+            const float sl = qa[seg + 1] - qa[seg];
+            const float f = sl > 1e-12f ? std::min(1.0f, (t - qa[seg]) / sl) : 0.0f;
+            const int i0 = (s0 + seg) % q, i1 = (s0 + seg + 1) % q;
+            RV[k][j] = Q[i0] + (Q[i1] - Q[i0]) * f;
+            const Vec3 nn = Qn[i0] * (1.0f - f) + Qn[i1] * f;
+            RN[k][j] = nn.length() > 1e-9f ? nn.normalized() : A[k];
+        }
+    }
+    // A ring far longer than the rest slipped off the limb (into the torso at the
+    // shoulder, round both legs at the hip): it goes, and so does one that didn't close.
+    // What's kept is the longest unbroken run.
+    std::vector<float> sorted;
+    for (int k = 0; k < R; k++) if (per[k] > 0.0f) sorted.push_back(per[k]);
+    if (sorted.size() < 2) return "The model doesn't close round under that line (a hole, or not a limb)";
+    std::nth_element(sorted.begin(), sorted.begin() + sorted.size() / 2, sorted.end());
+    const float med = sorted[sorted.size() / 2];
+    int best0 = 0, best_n = 0;
+    for (int k = 0; k < R;) {
+        if (per[k] <= 0.0f || per[k] > 2.0f * med) { k++; continue; }
+        int e = k;
+        while (e < R && per[e] > 0.0f && per[e] <= 2.0f * med) e++;
+        if (e - k > best_n) { best_n = e - k; best0 = k; }
+        k = e;
+    }
+    if (best_n < 2) return "The rings wouldn't stay on one limb: draw along it, clear of the joint";
+
+    const uint32_t id = st.grid_id, v0 = (uint32_t)rm.v.size(), f0 = rm.face_count();
+    std::vector<uint32_t> VI((size_t)best_n * N);
+    for (int k = 0; k < best_n; k++)
+        for (int j = 0; j < N; j++) {
+            rm.v.push_back(RV[best0 + k][j]);
+            rm.n.push_back(RN[best0 + k][j]);
+            rm.v_owner.push_back(id);
+            rm.mirror.push_back(~0u);
+            VI[(size_t)k * N + j] = (uint32_t)rm.v.size() - 1;
+        }
+    std::vector<uint32_t> F;
+    for (int k = 0; k + 1 < best_n; k++)
+        for (int j = 0; j < N; j++)
+            F.insert(F.end(), {VI[(size_t)k * N + j], VI[(size_t)k * N + (j + 1) % N],
+                               VI[(size_t)(k + 1) * N + (j + 1) % N], VI[(size_t)(k + 1) * N + j]});
+    float facing = 0.0f;
+    for (size_t q = 0; q < F.size(); q += 4) {
+        const Vec3 a = rm.v[F[q]], b = rm.v[F[q + 1]], c = rm.v[F[q + 2]];
+        facing += (b - a).cross(c - a).dot(rm.n[F[q]]);
+    }
+    for (size_t q = 0; q < F.size(); q += 4) {
+        if (facing < 0.0f) std::swap(F[q + 1], F[q + 3]);
+        rm.add_face(&F[q], 4, id);
+    }
+    rebuild_edges(rm);
+
+    // Mirror: the twin, when the tube sits wholly on one side of x = 0 (an arm, a leg).
+    bool pos = false, neg = false;
+    for (uint32_t i = v0; i < rm.v.size(); i++) { pos |= rm.v[i].x > 1e-6f; neg |= rm.v[i].x < -1e-6f; }
+    const bool twin = st.grid_mirror && pos != neg;
+    if (twin) {
+        std::vector<uint32_t> touched;
+        reflect_new_faces(st, v0, f0, id, touched);
+        rebuild_edges(rm);
+    }
+
+    RetopoStroke stroke;
+    stroke.id = id;
+    stroke.frozen = true;
+    stroke.name = "Contours";
+    for (RetopoStroke& o : st.strokes) o.selected = false;
+    stroke.selected = true;
+    st.strokes.push_back(stroke);
+    st.built = true;
+    st.rev++;
+    std::printf("[retopo] contours: %d rings x %d round (girth %.3f, line %.3f), %d of %d rings dropped%s\n",
+                best_n, N, girth, len, R - best_n, R, twin ? ", twin too" : "");
+    return nullptr;
+}
 }  // namespace
+
+const char* retopo_contour(RetopoState& st, const Mesh& m, const std::vector<Vec3>& pts,
+                           const std::vector<uint32_t>& tris, float edge, bool mirror) {
+    if (pts.size() < 2 || pts.size() != tris.size()) return "Draw the line along the limb, on the model";
+    st.checkpoint();   // one Ctrl+Z takes the contours back, whatever the wheel did
+    st.grid_base = snapshot_of(st);
+    st.grid_id = st.next_id++;
+    st.grid_pts = pts;
+    st.grid_nrm.clear();
+    st.grid_tris = tris;
+    st.grid_edge = edge;
+    st.grid_sides = 0;   // contour_apply picks both counts: round from the girth,
+    st.grid_rings = 0;   // along from the line's length
+    st.grid_wheel_ctrl = 0.0f;
+    st.grid_mirror = mirror;
+    st.grid_wheel = 0.0f;
+    st.grid_contour = true;
+    st.grid_open = true;
+    if (const char* why = contour_apply(st, m)) {
+        retopo_grid_cancel(st);
+        return why;
+    }
+    return nullptr;
+}
 
 const char* retopo_grid(RetopoState& st, const Mesh& m, const std::vector<Vec3>& pts,
                         const std::vector<Vec3>& nrm, int sides, bool mirror) {
@@ -7260,14 +7585,21 @@ void retopo_grid_redo(RetopoState& st, const Mesh& m, int sides) {
     if (!st.grid_open) return;
     st.grid_sides = sides;
     put(st, st.grid_base);
-    if (grid_apply(st, m)) st.rev++;   // refused: the lasso's spot stays bare
+    if (const char* why = st.grid_contour ? contour_apply(st, m) : grid_apply(st, m)) {
+        std::printf("[retopo] %s at %d round refused: %s\n", st.grid_contour ? "contours" : "grid", sides, why);
+        st.rev++;   // the spot stays bare
+    }
 }
 
 void retopo_grid_close(RetopoState& st) {
     st.grid_open = false;
+    st.grid_contour = false;
     st.grid_base = RetopoSnapshot{};
     st.grid_pts.clear();
     st.grid_nrm.clear();
+    st.grid_tris.clear();
+    st.grid_rings = 0;
+    st.grid_wheel_ctrl = 0.0f;
     st.grid_wheel = 0.0f;
 }
 

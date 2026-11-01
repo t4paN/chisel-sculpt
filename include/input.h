@@ -92,6 +92,7 @@ enum class KeyAction : int {
     BRUSH_MOVE, BRUSH_LIMB, BRUSH_POSE, BRUSH_MASK, BRUSH_PREV, BRUSH_NEXT,
     PAINT_BUCKET, PAINT_PICKER,
     RETOPO_BUILD, RETOPO_DRAW, RETOPO_GRAB, RETOPO_CUT, RETOPO_ERASE, RETOPO_FILL, RETOPO_WAND, RETOPO_MASK,
+    RETOPO_CONTOUR,
     HOLD_SIZE, HOLD_STRENGTH, HOLD_HARDNESS, HOLD_SPACING, SIZE_DOWN, SIZE_UP, AUTOSMOOTH,
     LEVEL_UP, LEVEL_DOWN, PROJECT, MIRROR, REMESH, MERGE, DELETE_MESH,
     MASK_INVERT, MASK_CLEAR,
@@ -695,12 +696,13 @@ struct InputState {
     bool retopo_paste_request = false;
     bool retopo_paste_panel = false;   // a paste was just made: its sliders float by the pointer
     bool retopo_paste_redo = false;
+    bool retopo_contour_panel = false; // contours just made: their counts float by the pointer
     // Right button: where it went down, and a one-frame flag on release (retopo's menu
     // is a click, so main.cpp compares the two to tell it from a zoom drag).
     float mouse2_press_x = 0.0f, mouse2_press_y = 0.0f;
     bool mouse2_just_released = false;
     // Mode 0's dock tool. Smooth isn't one of these: it rides Shift, as in sculpt.
-    enum class RetopoTool { DRAW, GRAB, CUT, ERASE, WAND, MASK };
+    enum class RetopoTool { DRAW, GRAB, CUT, ERASE, WAND, MASK, CONTOUR };
     RetopoTool retopo_tool = RetopoTool::DRAW;
     // What the next stroke gets (RetopoStroke has the meaning of each), set in the tool
     // dock or by holding A / W. Its band is the brush Size as drawn, so no width here.
