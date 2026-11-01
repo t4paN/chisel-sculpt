@@ -1477,6 +1477,12 @@ void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
             input.clear_smooth_lock();
             input.retopo_tool = RT::WAND;
         }
+        o.on = !smooth_on && input.retopo_tool == RT::CONTOUR; o.tip = "Contours: drag along a limb";
+        o.key = input.key_label(KeyAction::RETOPO_CONTOUR); o.corner = corner(KeyAction::RETOPO_CONTOUR);
+        if (icon_button("rContour", Icon::RetopoContour, kRailBtn, o)) {
+            input.clear_smooth_lock();
+            input.retopo_tool = RT::CONTOUR;
+        }
         o.on = !smooth_on && input.retopo_tool == RT::MASK; o.tip = "Mask: Ctrl unmasks, Shift softens the edge";
         o.key = input.key_label(KeyAction::RETOPO_MASK); o.corner = corner(KeyAction::RETOPO_MASK);
         if (icon_button("rMask", Icon::BrushMask, kRailBtn, o)) {
@@ -1983,10 +1989,13 @@ float brush_panel(InputState& input, int win_h) {
                 : input.retopo_tool == InputState::RetopoTool::GRAB ? "Grab polygon strips"
                 : input.retopo_tool == InputState::RetopoTool::ERASE ? "Erase edges"
                 : input.retopo_tool == InputState::RetopoTool::WAND ? "Wand"
+                : input.retopo_tool == InputState::RetopoTool::CONTOUR ? "Contours"
                 : cutting ? "Cut" : "Draw polygon strips", nullptr);
         const bool wand = !smoothing && input.retopo_tool == InputState::RetopoTool::WAND;
-        // Cut draws a bare line and the wand only clicks: no width, so no Size either.
+        const bool contour = !smoothing && input.retopo_tool == InputState::RetopoTool::CONTOUR;
+        // Cut and Contours draw a bare line and the wand only clicks: no width, so no Size either.
         if (cutting) hint("Drag a line across islands");
+        else if (contour) { hint("Drag along a limb"); hint("Rings go round it, bridged"); hint("Scroll: more or fewer round"); }
         else if (wand) { hint("Click a hole"); hint("Hover a fill to see it"); hint("Click it to keep it"); }
         else meter_widget("##mS", input, 0, w, k, !can_grow || big);
         if (!smoothing && input.retopo_tool == InputState::RetopoTool::ERASE) {
@@ -4472,6 +4481,44 @@ void draw_retopo_dock(InputState& input, RetopoState& st, int win_w, int win_h) 
                                                  | ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
         if (!over && !ImGui::IsAnyItemActive() && (ImGui::IsMouseClicked(0) || ImGui::IsMouseClicked(1)))
             retopo_paste_close(st);
+        end_panel();
+    }
+
+    // Contours just made: their two counts float by the pointer while the wheel can still
+    // re-make them, with the wheel each answers to. The - / + chips step them as a notch
+    // would (a pen has no wheel). Like the paste panel, not a popup: the next press
+    // anywhere else keeps the tube (retopo_frame closes it) and still does what it does.
+    static ImVec2 contour_at, contour_size(200.0f, 120.0f);
+    if (input.retopo_contour_panel) {
+        input.retopo_contour_panel = false;
+        const ImVec2 mp = ImGui::GetIO().MousePos;
+        contour_at = ImVec2(mp.x + 24.0f, mp.y + 16.0f);
+    }
+    if (st.grid_open && st.grid_contour && input.interaction_mode == InputState::InteractionMode::RETOPO) {
+        ImVec2 p = contour_at;
+        if (p.x + contour_size.x > win_w - 8.0f) p.x = contour_at.x - 48.0f - contour_size.x;
+        if (p.y + contour_size.y > win_h - 8.0f) p.y = std::max(8.0f, (float)win_h - 8.0f - contour_size.y);
+        begin_panel("##retopoContour", p, ImVec2(0, 0), ImVec2(10.0f, 8.0f), 6.0f, 12.0f);
+        label_item(UiFont::SansSemibold, 13.0f, strip_col, "Contours", 0.0f, 20.0f);
+        auto row = [&](const char* id, const char* what, int n, const char* wheel, float& notches) {
+            ImGui::PushID(id);
+            char num[16];
+            std::snprintf(num, sizeof num, "%d", n);
+            label_item(UiFont::Sans, 12.0f, kText, what, 48.0f, bh);
+            ImGui::SameLine(0.0f, 6.0f);
+            if (chip("-", false, bh)) notches -= 1.0f;
+            ImGui::SameLine(0.0f, 4.0f);
+            label_item(UiFont::Mono, 12.0f, kText, num, 28.0f, bh);
+            ImGui::SameLine(0.0f, 4.0f);
+            if (chip("+", false, bh)) notches += 1.0f;
+            ImGui::SameLine(0.0f, 8.0f);
+            label_item(UiFont::Mono, 12.0f, kMuted, wheel, 0.0f, bh);
+            ImGui::PopID();
+        };
+        row("rings", "Rings", st.grid_rings, "wheel", st.grid_wheel);
+        row("round", "Round", st.grid_sides, "Ctrl+wheel", st.grid_wheel_ctrl);
+        label_item(UiFont::Sans, 12.0f, kMuted, "Click on to keep \xC2\xB7 Ctrl+Z takes it back", 0.0f, 18.0f);
+        contour_size = ImGui::GetWindowSize();
         end_panel();
     }
 

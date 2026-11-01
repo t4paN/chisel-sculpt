@@ -252,6 +252,18 @@ struct RetopoState {
     int grid_sides = 0;                     // vertices round the outline (even)
     bool grid_mirror = false;
     float grid_wheel = 0.0f;                // notches waiting: main.cpp adds, retopo_frame takes
+    // Contours (C) ride the same open / wheel / one-undo-step: grid_pts is then the line
+    // drawn along the limb, grid_tris the sculpt triangle under each of its points,
+    // grid_edge the world size of a quad at its first count round.
+    // Contours own both counts: grid_sides round (the lines along the limb, Ctrl+wheel)
+    // and grid_rings along (the loops across it, the wheel); 0 = worked out at the start.
+    bool grid_contour = false;
+    std::vector<uint32_t> grid_tris;
+    float grid_edge = 0.0f;
+    int grid_rings = 0;
+    float grid_wheel_ctrl = 0.0f;           // Ctrl+wheel notches waiting, as grid_wheel
+    // Contour drag: the line so far, screen x, y pairs (empty = none).
+    std::vector<float> contour;
 
     // Pen-up of a line (spine, notch, edge to vertex, extrude, bridge): drop it and
     // everything its press recorded, whichever rule took it.
@@ -667,6 +679,16 @@ void retopo_paste_close(RetopoState& st);
 // takes an open grid back whole, history included (a paste onto the same lasso).
 const char* retopo_grid(RetopoState& st, const Mesh& m, const std::vector<Vec3>& pts,
                         const std::vector<Vec3>& nrm, int sides, bool mirror);
+// Contours: the line `pts` drawn along a limb (on the sculpt, `tris` the triangle under
+// each point) as a new edited island, a tube of rings round the limb square to the
+// line, bridged ring to ring, the line itself one edge run down it. Count round from
+// the limb's girth (quads about `edge` wide), rings as far apart as quads are wide;
+// each ring is the sculpt's own cross-section, so it hugs the limb whatever its shape.
+// With mirror and the tube wholly on one side, its twin too. Opens as a lasso grid does
+// (retopo_grid_redo re-makes it, retopo_grid_close keeps it): the wheel sets
+// st.grid_rings, Ctrl+wheel the count round.
+const char* retopo_contour(RetopoState& st, const Mesh& m, const std::vector<Vec3>& pts,
+                           const std::vector<uint32_t>& tris, float edge, bool mirror);
 void retopo_grid_redo(RetopoState& st, const Mesh& m, int sides);
 void retopo_grid_close(RetopoState& st);
 void retopo_grid_cancel(RetopoState& st);

@@ -2,6 +2,12 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-02 — Retopo: Contours (T)
+
+- New Contours tool (T in mode 0, its own dock button): drag along a limb and rings wrap it square to the line, bridged into a tube; each ring is the sculpt's own cross-section, aimed down the limb's axis so bent limbs stay square.
+- While it's open: wheel = rings (down to 2), Ctrl+wheel = lines round it; a panel by the pointer shows both with - / + chips. One undo step; with mirror an arm gets its twin.
+- Rings that slip off the limb (into the torso at a joint, round a hole) are dropped.
+
 ## 2026-10-31 — Textured GLB import
 
 - Open or drop .glb / .gltf (web: .glb): one mesh per object, -HI / -LO pair up as with OBJ, vertices welded so the sculpt doesn't tear at UV seams. Compressed (Draco / meshopt) files are turned away with a message.

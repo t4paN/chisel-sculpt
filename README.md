@@ -23,7 +23,8 @@ identically in the native build, and vice versa.
 - **Nine brushes** — draw, clay, inflate, crease, pinch, move, limb (snakehook), smooth, mask
 - **Vertex paint mode** with colour picking; paint survives subdivision, remeshing, and merges
 - **Retopology mode** — sketch strips and rings over the sculpt and they become clean quads on
-  its surface; bridge, cut, fill holes, copy a ring from one horn onto the next; mirror-aware,
+  its surface; bridge, cut, fill holes, wrap a limb in contour rings with one line, copy a ring
+  from one horn onto the next; mirror-aware,
   saved in the project, exported as OBJ for baking
 - **Multiple objects** — insert, select, move, scale, delete; per-object undo and subdivision
 - **Multires displacement stack** — step down to edit forms, back up for detail

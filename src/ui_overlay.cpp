@@ -2480,6 +2480,14 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
         dl->AddPolyline(lp.data(), (int)lp.size(), IM_COL32(255, 200, 90, 255), 0, 1.5f);
         dl->AddLine(lp.back(), lp.front(), IM_COL32(255, 200, 90, 110), 1.0f);
     }
+    // The contour line: drawn as dragged, open (it runs along the limb, not round it).
+    if (st.contour.size() >= 4) {
+        static std::vector<ImVec2> cp;
+        cp.clear();
+        for (size_t i = 0; i + 1 < st.contour.size(); i += 2) cp.push_back(ImVec2(st.contour[i], st.contour[i + 1]));
+        dl->AddPolyline(cp.data(), (int)cp.size(), IM_COL32(10, 20, 15, 170), 0, 3.5f);
+        dl->AddPolyline(cp.data(), (int)cp.size(), IM_COL32(120, 210, 255, 255), 0, 1.5f);
+    }
     // A paste target (a lasso let go on bare sculpt with something copied): closed, in
     // the clipboard's cyan, while the view is still the one it was drawn in.
     if (st.paste_ready && st.paste_lasso.size() >= 6

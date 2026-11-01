@@ -20,6 +20,7 @@ enum class Icon {
     RetopoErase,                      // mode 0's eraser
     RetopoWand,                       // mode 0's wand (hole fills)
     ModeUv,                           // UV mode: a checkered square
+    RetopoContour,                    // mode 0's contours (rings round a limb)
     Count
 };
 

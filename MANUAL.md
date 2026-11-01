@@ -286,6 +286,7 @@ things instead of drawing new strips.
 | E | Erase: the edge nearest the ring goes, its two faces become one. Ctrl + E: whole faces |
 | M | Mask: freeze vertices against Grab, Smooth and Erase. Ctrl unmasks, Shift softens; Ctrl+I inverts, Ctrl+A clears |
 | Q | Wand (below) |
+| T | Contours: drag along a limb, rings wrap it and bridge into a tube (below) |
 | H | Fill every hole with an even number of sides (or just the outlines double-clicked) |
 | Space | Build: rebuild every unedited stroke |
 | Del | Dissolve the picked edges |
@@ -308,6 +309,14 @@ Then lasso bare sculpt where the copy should go, right-click, **Paste island**: 
 moved, tilted and scaled to fit what is inside the lasso (lasso looking straight down
 at it: a horn from above), snapped on and smoothed, with **Scale / Twist / Offset** to
 correct it. Pasted across the middle it comes out mirrored.
+
+**Contours (T).** Drag a line along a limb (an arm, a leg, a horn): rings go round it at
+right angles to the line, each one the sculpt's own cross-section there, bridged into a
+tube, the line itself an edge running down it. While it's still open the **wheel** sets
+the rings (down to 2) and **Ctrl + wheel** the lines round it; a panel by the pointer
+shows both, with - / + for a pen. The next click keeps it; one Ctrl+Z takes it all back.
+Rings that slip off the limb (into the body at a joint) are left out, so stop the line
+short of the shoulder or hip.
 
 **Mirror.** With `X` on, everything is built twice, the second half the exact reflection
 of the first. Grab and Smooth never carry a vertex across the middle: it stops on it.

@@ -1300,7 +1300,9 @@ int main(int argc, char* argv[]) {
                     rig.joints[ph].radius * std::pow(1.1f, scroll));
             } else if (std::fabs(scroll) > 0.01f && scene.active_entity().retopo.grid_open) {
                 // A lasso grid just made: the wheel sets its density (retopo_frame).
-                scene.active_entity().retopo.grid_wheel += scroll;
+                // Contours: the wheel sets the rings, Ctrl+wheel the count round.
+                RetopoState& rs = scene.active_entity().retopo;
+                (rs.grid_contour && input.ctrl_held ? rs.grid_wheel_ctrl : rs.grid_wheel) += scroll;
             } else if (std::fabs(scroll) > 0.01f) {
                 camera.zoom(scroll);
                 screen_buffers_dirty = true;
