@@ -1082,7 +1082,8 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
     const bool knife = retopo_on && retopo.built && !input.is_smooth_active()
                     && input.retopo_tool == InputState::RetopoTool::CUT;
     retopo.snap_v = knife ? retopo_snap_vertex(retopo, camera, win_w, win_h,
-                                               (float)input.mouse_x, (float)input.mouse_y)
+                                               (float)input.mouse_x, (float)input.mouse_y,
+                                               0.0f, retopo.snap_v)
                           : ~0u;
     // Draw's snap: before a press, what a line would start on; during a bridge or a
     // spine, what it would end on. Nothing while a band is drawing (it doesn't snap).
@@ -1217,8 +1218,13 @@ void draw_retopo_cursor(Renderer& renderer, const Camera& camera, const InputSta
     static const float kEraseRed[3] = {1.0f, 0.25f, 0.2f};
     const bool erase = input.retopo_tool == InputState::RetopoTool::ERASE
                     && !input.is_smooth_active();
+    // Their dot faces the screen, even all round: tipped with the surface, a 6 px ring's
+    // thick front swung about with every pixel's normal (and a pen's hover jitter), so
+    // it flickered between a dot, a sliver and a blob. It says nothing about the surface.
+    const Vec3 flat = camera.get_view_direction() * -1.0f;
     renderer.draw_cursor(camera, cursor_x, cursor_y, cut ? 6.0f : input.brush_size,
-                         input.cursor_nx, input.cursor_ny, input.cursor_nz,
+                         cut ? flat.x : input.cursor_nx, cut ? flat.y : input.cursor_ny,
+                         cut ? flat.z : input.cursor_nz,
                          1.0f, 0.5f, win_w, win_h, input.on_model,
                          erase ? kEraseRed : kRetopoGreen);
 }

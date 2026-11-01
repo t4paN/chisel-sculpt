@@ -85,8 +85,12 @@ const IconDef kIcons[(int)Icon::Count] = {
                          P("M5.2 15.6l3.2 3.2")}, 3},
     // Drawn here: a bougatsa knife (the user's), tip to the left: one flat line from the
     // tip to the handle's end, the edge a quarter circle back from the tip, the heel
-    // straight up to the handle, which runs on back along the spine's line.
-    /* RetopoCut    */ {{P("M4 7H21v3h-7v7a10 10 0 0 1-10-10z")}, 1},
+    // straight up to the handle, which runs on back along the spine's line. Turned 45
+    // degrees so the tip points at half past seven (user, 2026-11-02): the flat original
+    // M4 7H21v3h-7v7a10 10 0 0 1-10-10z rotated about the centre and grown to fill 19
+    // units. Filled, as its pixel twin is: as a 1.6 px outline its long flat lines
+    // pulsed bright and dim while the hover swell slid them across pixel rows.
+    /* RetopoCut    */ {{F("M3.01 17.78L18.29 2.5L20.99 5.2L14.7 11.49L20.99 17.78A12.71 12.71 0 0 1 3.01 17.78z")}, 1},
     /* UiTrash      */ {{P("M4 7h16M9.5 7V4.5h5V7"), P("M6 7l1 13h10l1-13"), P("M10 11v5.5M14 11v5.5")}, 3},
     // Drawn here: an eraser block tipped over, its rubber end bottom-left, on the line it rubs.
     /* RetopoErase  */ {{P("M4 14L13 5l6 6-9 9z"), P("M8 10l6 6"), P("M10 20h10")}, 3},
@@ -132,15 +136,16 @@ struct Emitter {
 
     void flush(bool closed) {
         if (!open) return;
-        if (kind == Kind::FillPath) {
-            // Concave fill (Pinch's waisted bar). A path whose last curve lands back on
-            // its start repeats that point, which the ear-clipper reads as a zero-area
-            // ear; drop it.
-            ImVector<ImVec2>& pts = dl->_Path;
-            if (pts.Size > 3 && std::fabs(pts.back().x - pts[0].x) < 0.01f
-                             && std::fabs(pts.back().y - pts[0].y) < 0.01f) pts.pop_back();
-            dl->PathFillConcave(col);
-        }
+        // A path whose last curve lands back on its start repeats that point. A fill's
+        // ear-clipper reads it as a zero-area ear; a closed stroke gets a zero-length
+        // side whose direction is rounding noise, and the join there leans the line's
+        // width along it (the knife's top line came out 1 to 2 px thick at the tip,
+        // flickering as the dock's springs moved it by fractions of a pixel). Drop it.
+        ImVector<ImVec2>& pts = dl->_Path;
+        if ((kind == Kind::FillPath || closed) && pts.Size > 3
+            && std::fabs(pts.back().x - pts[0].x) < 0.01f && std::fabs(pts.back().y - pts[0].y) < 0.01f)
+            pts.pop_back();
+        if (kind == Kind::FillPath) dl->PathFillConcave(col);   // concave (Pinch's waisted bar)
         else dl->PathStroke(col, closed ? ImDrawFlags_Closed : ImDrawFlags_None, thick);
         open = false;
     }
@@ -323,7 +328,7 @@ const unsigned short kPixel[(int)Icon::Count][16] = {
     /* paint-picker    */ {0x0000,0x0000,0x0038,0x007C,0x007C,0x01FC,0x01F8,0x01E0,0x03E0,0x0700,0x0E00,0x1C00,0x3800,0x3000,0x0000,0x0000},   // drawn here
     /* mode-retopo     */ {0x0000,0x0000,0x07E0,0x1998,0x6186,0x4182,0x4182,0x4182,0x47E2,0x5998,0x6186,0x4182,0x4182,0x4182,0x0000,0x0000},   // drawn here: bowed quad patch
     /* retopo-pencil   */ {0x0000,0x001C,0x003E,0x007E,0x00FC,0x01F8,0x03F0,0x07E0,0x0FC0,0x1F80,0x3F00,0x3E00,0x7C00,0x6000,0x0000,0x0000},   // drawn here
-    /* retopo-cut      */ {0x0000,0x0000,0x0000,0x0000,0xFFFE,0x7FFE,0x7FFE,0x7FC0,0x3FC0,0x3FC0,0x1FC0,0x0FC0,0x03C0,0x0000,0x0000,0x0000},   // drawn here: bougatsa knife
+    /* retopo-cut      */ {0x0000,0x0000,0x0018,0x003C,0x0078,0x00F0,0x01E0,0x03C0,0x07E0,0x0FF0,0x1FF8,0x3FFC,0x1FF8,0x0FF0,0x0000,0x0000},   // drawn here: bougatsa knife, tip at half past seven
     /* ui-trash        */ {0x0000,0x03C0,0x3FFC,0x3FFC,0x1FF8,0x1998,0x1998,0x1998,0x1998,0x1998,0x1998,0x1998,0x1998,0x1FF8,0x0FF0,0x0000},   // drawn here
     /* retopo-erase    */ {0x0000,0x0000,0x0000,0x0080,0x01C0,0x03E0,0x03F0,0x0DF0,0x1EE0,0x1F40,0x0F80,0x0700,0x0200,0x01FC,0x0000,0x0000},   // drawn here: tipped eraser
     /* retopo-wand     */ {0x0000,0x0020,0x0020,0x00D8,0x0020,0x0020,0x0180,0x0300,0x0600,0x0C00,0x1800,0x3000,0x6000,0x4000,0x0000,0x0000},   // drawn here: wand + spark

@@ -398,9 +398,11 @@ int retopo_cut(RetopoState& st, const Mesh& m, const Camera& cam, int win_w, int
                bool mirror);
 
 // The built vertex within kRetopoDrawSnapPx of screen point (x, y), facing the eye and
-// not hidden, nearest first; ~0u for none. `px` > 0 sets another reach.
+// not hidden, nearest first; ~0u for none. `px` > 0 sets another reach. `keep` (the
+// vertex lit last frame) holds on until another is a few pixels nearer, or it's a few
+// past the reach: a pen's hover jitter between two vertices flipped it every frame.
 uint32_t retopo_snap_vertex(const RetopoState& st, const Camera& cam, int win_w, int win_h,
-                            float x, float y, float px = 0.0f);
+                            float x, float y, float px = 0.0f, uint32_t keep = ~0u);
 
 // The one screen snap reach, every retopo tool (Draw's dots, Cut's vertex ends, edge
 // and loop picks). It was 8 px; hitting a vertex by hand at that took several tries.

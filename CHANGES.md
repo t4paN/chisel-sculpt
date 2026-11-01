@@ -2,6 +2,12 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-02 — Retopo: steadier cursor, snap and knife icon
+
+- Cut, Wand and Contours' cursor dot faces the screen at an even weight instead of tilting with the surface.
+- Cut's snap vertex shows as a diamond (filled where a cut started) and holds on until another is clearly nearer.
+- The Cut dock icon is a solid knife, tip at half past seven; outline icons that close on their start no longer skew at that corner.
+
 ## 2026-11-02 — Retopo: Contours (T)
 
 - New Contours tool (T in mode 0, its own dock button): drag along a limb and rings wrap it square to the line, bridged into a tube; each ring is the sculpt's own cross-section, aimed down the limb's axis so bent limbs stay square.

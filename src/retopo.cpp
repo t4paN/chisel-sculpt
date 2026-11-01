@@ -1997,19 +1997,20 @@ void rebuild_edges(RetopoMesh& rm) {
 }  // namespace
 
 uint32_t retopo_snap_vertex(const RetopoState& st, const Camera& cam, int win_w, int win_h,
-                            float x, float y, float px) {
+                            float x, float y, float px, uint32_t keep) {
     const RetopoMesh& rm = st.result;
     if (!st.built || rm.nb_off.size() != rm.v.size() + 1) return ~0u;
     uint32_t best = ~0u;
     if (px <= 0.0f) px = kSnapPx;
-    float best_d2 = px * px;
+    constexpr float kStickPx = 3.0f;
+    float best_d = px;
     for (uint32_t i = 0; i < (uint32_t)rm.v.size(); i++) {
         if (!alive(rm, i) || st.hidden(rm.v_owner[i])) continue;
         const Vec3 to_eye = cam.perspective ? cam.get_position() - rm.v[i] : cam.get_view_direction() * -1.0f;
         float sx, sy;
         if (rm.n[i].dot(to_eye) <= 0.0f || !cam.world_to_screen(rm.v[i], win_w, win_h, sx, sy)) continue;
-        const float d2 = (sx - x) * (sx - x) + (sy - y) * (sy - y);
-        if (d2 < best_d2) { best_d2 = d2; best = i; }
+        const float d = std::hypot(sx - x, sy - y) - (i == keep ? kStickPx : 0.0f);
+        if (d < best_d) { best_d = d; best = i; }
     }
     return best;
 }

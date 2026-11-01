@@ -2691,16 +2691,24 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
             dl->AddLine(at[a], at[b], IM_COL32(0, 200, 55, 150), 1.0f);
         }
     }
-    // Cut's vertex snap: the vertex under the pointer gets a ring, the one a cut started
-    // on a filled dot, so a vertex cut is never a surprise.
+    // Cut's vertex snap: the vertex under the pointer gets a diamond, the one a cut
+    // started on a filled one, so a vertex cut is never a surprise. Not a ring: that was
+    // the cursor's own dot, so one ring hopping between vertices beside another
+    // following the pointer read as the cursor flickering.
     auto mark = [&](uint32_t i, bool filled) {
         if (i >= rm.v.size()) return;
         float x, y;
         if (!cam.world_to_screen(rm.v[i], win_w, win_h, x, y)) return;
         const ImU32 green = IM_COL32(0, 255, 65, 255), dark = IM_COL32(0, 20, 8, 200);
-        dl->AddCircle(ImVec2(x, y), 6.5f, dark, 16, 4.0f);
-        dl->AddCircle(ImVec2(x, y), 6.5f, green, 16, 2.0f);
-        if (filled) dl->AddCircleFilled(ImVec2(x, y), 3.5f, green, 12);
+        const float r = 7.5f;
+        const ImVec2 a(x, y - r), b(x + r, y), c(x, y + r), d(x - r, y);
+        if (filled) {
+            dl->AddQuadFilled(a, b, c, d, dark);
+            dl->AddQuadFilled(ImVec2(x, y - r + 2), ImVec2(x + r - 2, y), ImVec2(x, y + r - 2), ImVec2(x - r + 2, y), green);
+        } else {
+            dl->AddQuad(a, b, c, d, dark, 4.0f);
+            dl->AddQuad(a, b, c, d, green, 2.0f);
+        }
     };
     // Ctrl + Erase: the face about to go, outlined red.
     if (st.face_hover < rm.face_count()) {
