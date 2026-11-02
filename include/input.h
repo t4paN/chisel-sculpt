@@ -368,6 +368,7 @@ struct InputState {
     float ui_material   = 45.0f;
     bool  ui_motion     = true;
     bool  ui_viewfinder = false;
+    float ui_viewfinder_px = 1.5f;   // UV mode's mesh outline and brackets: line width
     // Web, touch mode only: the whole page drawn at this percent (a CSS scale on the
     // canvas stage), like Chrome's page zoom but owned by the app. 50 = half-size UI
     // with twice the room and twice the pixels. Desktop always draws at 100.

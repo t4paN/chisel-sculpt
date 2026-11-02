@@ -3170,6 +3170,21 @@ void ui_skin_push_dropdown_bg() {
     ImGui::PushStyleColor(ImGuiCol_PopupBg, c);
 }
 
+// Viewfinder corners and, under it, the line width of the marks it puts round each mesh
+// in UV mode (outline + brackets). Shown in the DOS and Modern menus.
+static void viewfinder_menu_rows(InputState& input, float w) {
+    ImGui::Checkbox("Viewfinder corners", &input.ui_viewfinder);
+    if (ImGui::IsItemHovered())
+        ui_skin_menu_tip("Corners round the view, and in UV mode brackets and an\n"
+                         "outline round each mesh, in its islands' colour.");
+    ImGui::BeginDisabled(!input.ui_viewfinder);
+    ImGui::SetNextItemWidth(w);
+    ImGui::SliderFloat("##uiViewfinderPx", &input.ui_viewfinder_px, 0.5f, 6.0f, "line %.1f px");
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ui_skin_menu_tip("How thick the UV mode outline and brackets are drawn.");
+}
+
 void draw_appearance_menu_items(InputState& input) {
     ImFont* semi = ui_skin_font(UiFont::SansSemibold);
     if (semi) ImGui::PushFont(semi, (g_dos || g_y2k) ? 0.0f : 11.0f);
@@ -3217,7 +3232,7 @@ void draw_appearance_menu_items(InputState& input) {
     }
 #endif
     if (input.ui_skin == InputState::UiSkin::DOS)
-        ImGui::Checkbox("Viewfinder corners", &input.ui_viewfinder);
+        viewfinder_menu_rows(input, 268.0f);
     if (input.ui_skin != InputState::UiSkin::MODERN) return;
 
     const float m = input.ui_material;
@@ -3244,7 +3259,7 @@ void draw_appearance_menu_items(InputState& input) {
         text_at(dl, UiFont::Sans, fs, ImVec2(p.x + (w - t.x) * 0.5f, p.y - 4.0f), kMuted, "Tinted");
         text_at(dl, UiFont::Sans, fs, ImVec2(p.x + w - s.x, p.y - 4.0f), kMuted, "Solid");
     }
-    ImGui::Checkbox("Viewfinder corners", &input.ui_viewfinder);
+    viewfinder_menu_rows(input, w);
     ImGui::Checkbox("Springy motion", &input.ui_motion);
 }
 

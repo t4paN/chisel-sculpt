@@ -205,6 +205,7 @@ std::string serialize(const InputState& in) {
     append_kv(s, "ui_material",         in.ui_material);
     append_kv(s, "ui_motion",           in.ui_motion);
     append_kv(s, "ui_viewfinder",       in.ui_viewfinder);
+    append_kv(s, "ui_viewfinder_px",    in.ui_viewfinder_px);
     append_kv(s, "ui_scale_touch",      in.ui_scale_touch);
     append_kv(s, "help_seen",           in.help_seen);
     append_kv(s, "camera_perspective",  in.camera_perspective);
@@ -344,6 +345,7 @@ void apply_global_key(InputState& in, const std::string& key, const std::string&
     else if (key == "ui_material")         in.ui_material         = clampf(std::strtof(val.c_str(), nullptr), 0.0f, 100.0f);
     else if (key == "ui_motion")           in.ui_motion           = parse_bool(val);
     else if (key == "ui_viewfinder")       in.ui_viewfinder       = parse_bool(val);
+    else if (key == "ui_viewfinder_px")    in.ui_viewfinder_px    = clampf(std::strtof(val.c_str(), nullptr), 0.5f, 6.0f);
     else if (key == "ui_scale_touch") {
         int v = (int)std::strtol(val.c_str(), nullptr, 10);
         in.ui_scale_touch = v < 40 ? 40 : (v > 150 ? 150 : v);
@@ -502,6 +504,7 @@ void settings_reset(InputState& input) {
     input.ui_material        = fresh.ui_material;
     input.ui_motion          = fresh.ui_motion;
     input.ui_viewfinder      = fresh.ui_viewfinder;
+    input.ui_viewfinder_px   = fresh.ui_viewfinder_px;
     input.ui_scale_touch     = fresh.ui_scale_touch;
     input.camera_perspective = fresh.camera_perspective;
     input.camera_fov         = fresh.camera_fov;

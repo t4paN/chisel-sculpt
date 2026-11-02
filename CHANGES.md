@@ -2,6 +2,13 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-03 — UV: colour by mesh, marks in the 3D view
+
+- Each mesh has one colour; its islands are lighter and darker shades of it, in the square, the island list and on the model. A strip of it marks each Meshes row.
+- With Viewfinder corners on, every mesh the square shows gets corner brackets and its outline in the 3D view, in its colour.
+- The outline is the low's silhouette and open borders, cut where another shown low or its own front hides it.
+- A line slider under Viewfinder corners sets the marks' width (remembered).
+
 ## 2026-11-02 — Bake: atlas across meshes
 
 - Bake takes every mesh the UV panel shows (active + Ctrl+clicked) into one set of maps, each low's rays reaching only its own sculpt.

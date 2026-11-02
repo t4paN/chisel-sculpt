@@ -2419,34 +2419,101 @@ void retopo_band(ImDrawList* dl, const RetopoStroke& s, const Camera& cam, int w
 
 }  // namespace
 
-void draw_uv_mesh_marks(const UvMeshRow* rows, int n, const Camera& cam, int win_w, int win_h) {
+void draw_uv_mesh_marks(const UvMeshRow* rows, int n, const Camera& cam, int win_w, int win_h, float px) {
     // A low is a few hundred faces, so its outline is found on the CPU every frame: the
     // edges between a face that looks at us and one that looks away, plus open borders.
-    // Drawn over everything, like the brackets: it says where the mesh is, not what hides it.
+    // Open borders and folds can sit behind the low's own front, or behind another low,
+    // so every shown low is drawn into a small depth buffer (a quarter of the window
+    // each way) and each bit of outline is kept only where nothing nearer covers it.
+    // The plane cache can't do this: it holds only the active sculpt.
     ImDrawList* dl = ImGui::GetBackgroundDrawList();
     struct Ed { uint64_t key; uint8_t facing; };
+    struct Shown { const UvMeshRow* r; size_t first; float tol; };
+    static std::vector<Shown> shown;
     static std::vector<Ed> ed;
     static std::vector<ImVec2> at;
+    static std::vector<float> dep;
     static std::vector<uint8_t> ok;
-    const ImU32 under = IM_COL32(10, 12, 18, 160);
+    static std::vector<float> zb;
+    shown.clear(); at.clear(); dep.clear(); ok.clear();
     for (int i = 0; i < n; i++) {
         const UvMeshRow& r = rows[i];
-        if (!(r.active || r.selected) || !r.st->built) continue;
+        if (!(r.active || r.selected) || !r.st->built || r.st->result.face_count() == 0) continue;
         const RetopoMesh& rm = r.st->result;
-        if (rm.face_count() == 0) continue;
-        const ImU32 col = uv_mesh_color(r.id, 1.0f);
-        at.resize(rm.v.size()); ok.resize(rm.v.size());
-        float x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f;
-        for (size_t v = 0; v < rm.v.size(); v++) {
+        float mean = 0.0f;
+        for (size_t e = 0; e + 1 < rm.edges.size(); e += 2) mean += (rm.v[rm.edges[e]] - rm.v[rm.edges[e + 1]]).length();
+        mean /= (float)std::max<size_t>(1, rm.edges.size() / 2);
+        shown.push_back({&r, at.size(), 0.25f * mean});
+        for (const Vec3& p : rm.v) {
             float x, y;
+            const float d = cam.view_depth(p);
             // Past the window's edge still counts (the overlay's rule); behind the eye doesn't.
-            ok[v] = cam.world_to_screen(rm.v[v], win_w, win_h, x, y) || !cam.perspective || cam.view_depth(rm.v[v]) > 1e-4f;
-            at[v] = ImVec2(x, y);
-            if (!ok[v]) continue;
-            x0 = std::min(x0, x); y0 = std::min(y0, y); x1 = std::max(x1, x); y1 = std::max(y1, y);
+            const bool on = cam.world_to_screen(p, win_w, win_h, x, y) || !cam.perspective || d > 1e-4f;
+            at.push_back(ImVec2(x, y));
+            dep.push_back(d);
+            ok.push_back(on);
         }
-        if (x0 > x1) continue;
-        // The outline.
+    }
+    if (shown.empty()) return;
+    // The depth buffer: perspective interpolates 1/depth (straight in screen space), ortho
+    // depth itself. Stored as the depth.
+    const int S = 4, zw = (win_w + S - 1) / S, zh = (win_h + S - 1) / S;
+    zb.assign((size_t)zw * zh, 1e30f);
+    auto raster = [&](uint32_t i0, uint32_t i1, uint32_t i2) {
+        const float x[3] = {at[i0].x / S, at[i1].x / S, at[i2].x / S}, y[3] = {at[i0].y / S, at[i1].y / S, at[i2].y / S};
+        float w[3] = {dep[i0], dep[i1], dep[i2]};
+        if (cam.perspective) for (float& q : w) q = 1.0f / q;
+        const float area = (x[1] - x[0]) * (y[2] - y[0]) - (x[2] - x[0]) * (y[1] - y[0]);
+        if (std::fabs(area) < 1e-6f) return;
+        const int bx0 = std::max(0, (int)std::floor(std::min({x[0], x[1], x[2]})));
+        const int bx1 = std::min(zw - 1, (int)std::ceil(std::max({x[0], x[1], x[2]})));
+        const int by0 = std::max(0, (int)std::floor(std::min({y[0], y[1], y[2]})));
+        const int by1 = std::min(zh - 1, (int)std::ceil(std::max({y[0], y[1], y[2]})));
+        for (int py = by0; py <= by1; py++)
+            for (int qx = bx0; qx <= bx1; qx++) {
+                const float cx = qx + 0.5f, cy = py + 0.5f;
+                const float l0 = ((x[1] - cx) * (y[2] - cy) - (x[2] - cx) * (y[1] - cy)) / area;
+                const float l1 = ((x[2] - cx) * (y[0] - cy) - (x[0] - cx) * (y[2] - cy)) / area;
+                const float l2 = 1.0f - l0 - l1;
+                if (l0 < 0.0f || l1 < 0.0f || l2 < 0.0f) continue;
+                float d = l0 * w[0] + l1 * w[1] + l2 * w[2];
+                if (cam.perspective) d = 1.0f / d;
+                float& z = zb[(size_t)py * zw + qx];
+                z = std::min(z, d);
+            }
+    };
+    for (const Shown& sh : shown) {
+        const RetopoMesh& rm = sh.r->st->result;
+        const uint32_t base = (uint32_t)sh.first;
+        for (uint32_t f = 0; f < rm.face_count(); f++) {
+            const uint32_t o = rm.face_off[f], m = rm.face_size(f);
+            for (uint32_t j = 1; j + 1 < m; j++) {
+                const uint32_t a = base + rm.faces[o], b = base + rm.faces[o + j], c = base + rm.faces[o + j + 1];
+                if (ok[a] && ok[b] && ok[c]) raster(a, b, c);
+            }
+        }
+    }
+    // Seen at a screen point with this depth? The farthest of the 3 x 3 around it decides:
+    // an outline sits at the edge of its own faces, where one coarse pixel can land on the
+    // face beside it (nearer, if it tips toward us), but what really hides a line covers
+    // all nine.
+    auto seen = [&](ImVec2 p, float d, float tol) {
+        const int cx = (int)(p.x / S), cy = (int)(p.y / S);
+        float far = 0.0f;
+        for (int yy = cy - 1; yy <= cy + 1; yy++)
+            for (int xx = cx - 1; xx <= cx + 1; xx++) {
+                if (xx < 0 || yy < 0 || xx >= zw || yy >= zh) return true;
+                far = std::max(far, zb[(size_t)yy * zw + xx]);
+            }
+        return d <= far + tol;
+    };
+    const ImU32 under = IM_COL32(10, 12, 18, 160);
+    const float lw = std::max(0.5f, px);
+    for (const Shown& sh : shown) {
+        const UvMeshRow& r = *sh.r;
+        const RetopoMesh& rm = r.st->result;
+        const uint32_t base = (uint32_t)sh.first;
+        const ImU32 col = uv_mesh_color(r.id, 1.0f);
         ed.clear();
         for (uint32_t f = 0; f < rm.face_count(); f++) {
             const uint32_t o = rm.face_off[f], m = rm.face_size(f);
@@ -2465,17 +2532,36 @@ void draw_uv_mesh_marks(const UvMeshRow* rows, int n, const Camera& cam, int win
             }
         }
         std::sort(ed.begin(), ed.end(), [](const Ed& p, const Ed& q) { return p.key < q.key; });
+        // Each outline edge in pieces of about 6 px, a piece drawn where its middle is seen,
+        // so a line that runs behind something stops where it goes under.
+        float x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f;
         for (int pass = 0; pass < 2; pass++)
             for (size_t e = 0; e < ed.size();) {
                 size_t q = e + 1;
                 bool mixed = false;
                 while (q < ed.size() && ed[q].key == ed[e].key) { mixed |= ed[q].facing != ed[e].facing; q++; }
-                const uint32_t a = (uint32_t)(ed[e].key >> 32), b = (uint32_t)ed[e].key;
-                if ((q - e == 1 || mixed) && ok[a] && ok[b])
-                    dl->AddLine(at[a], at[b], pass ? col : under, pass ? 1.5f : 3.5f);
+                const bool border = q - e == 1;
+                const uint32_t a = base + (uint32_t)(ed[e].key >> 32), b = base + (uint32_t)ed[e].key;
                 e = q;
+                if (!(border || mixed) || !ok[a] || !ok[b]) continue;
+                const ImVec2 pa = at[a], pb = at[b];
+                const float len = std::sqrt((pb.x - pa.x) * (pb.x - pa.x) + (pb.y - pa.y) * (pb.y - pa.y));
+                const int k = std::max(1, std::min(64, (int)(len / 6.0f)));
+                for (int i = 0; i < k; i++) {
+                    const float t0 = (float)i / k, t1 = (float)(i + 1) / k, tm = 0.5f * (t0 + t1);
+                    const ImVec2 m(pa.x + (pb.x - pa.x) * tm, pa.y + (pb.y - pa.y) * tm);
+                    if (!seen(m, dep[a] + (dep[b] - dep[a]) * tm, sh.tol)) continue;
+                    const ImVec2 s0(pa.x + (pb.x - pa.x) * t0, pa.y + (pb.y - pa.y) * t0);
+                    const ImVec2 s1(pa.x + (pb.x - pa.x) * t1, pa.y + (pb.y - pa.y) * t1);
+                    dl->AddLine(s0, s1, pass ? col : under, pass ? lw : lw + 2.0f);
+                }
             }
         // Corner brackets round it on screen, a little off it, kept inside the window.
+        for (size_t v = sh.first; v < sh.first + rm.v.size(); v++) {
+            if (!ok[v]) continue;
+            x0 = std::min(x0, at[v].x); y0 = std::min(y0, at[v].y);
+            x1 = std::max(x1, at[v].x); y1 = std::max(y1, at[v].y);
+        }
         const float pad = 10.0f;
         x0 = std::max(x0 - pad, 4.0f); y0 = std::max(y0 - pad, 4.0f);
         x1 = std::min(x1 + pad, win_w - 4.0f); y1 = std::min(y1 + pad, win_h - 4.0f);
@@ -2485,7 +2571,7 @@ void draw_uv_mesh_marks(const UvMeshRow* rows, int n, const Camera& cam, int win
             {ImVec2(x0, y0 + L), ImVec2(x0, y0), ImVec2(x0 + L, y0)}, {ImVec2(x1 - L, y0), ImVec2(x1, y0), ImVec2(x1, y0 + L)},
             {ImVec2(x1, y1 - L), ImVec2(x1, y1), ImVec2(x1 - L, y1)}, {ImVec2(x0 + L, y1), ImVec2(x0, y1), ImVec2(x0, y1 - L)}};
         for (int pass = 0; pass < 2; pass++)
-            for (const auto& k : cn) dl->AddPolyline(k, 3, pass ? col : under, 0, pass ? 2.0f : 4.5f);
+            for (const auto& c : cn) dl->AddPolyline(c, 3, pass ? col : under, 0, pass ? lw + 0.5f : lw + 3.0f);
     }
 }
 
