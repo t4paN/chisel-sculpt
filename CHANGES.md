@@ -2,6 +2,11 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-03 — Retopo: brackets on the active mesh, wire corners
+
+- With Viewfinder corners on, retopo mode brackets the active mesh's retopo in its colour (no outline: the wire shows it); UV mode still marks every mesh the square shows.
+- The wire judges front and back by its faces, not its corners' averaged normals: a rim or box corner seen from a little above no longer goes faint.
+
 ## 2026-11-03 — Overlay wire on the GPU
 
 - Retopo wire, face fills, seams and edge loops, and the UV mode outline, now draw with the Y wireframe's line shader, each line with its own colour, width and depth pull.

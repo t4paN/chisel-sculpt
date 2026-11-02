@@ -96,7 +96,7 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
                          int win_w, int win_h, bool depth_fresh, bool mirror, bool uv = false, uint32_t mesh = 0);
 // UV mode: every mesh the square shows, marked in the 3D view in its own colour: corner
 // brackets round its low on screen, and the low's outline (GPU, hidden where the scene
-// is in front), px wide. Off unless Viewfinder corners is on.
+// is in front; only with `outline`), px wide. Off unless Viewfinder corners is on.
 struct UvMeshRow;
 void draw_uv_mesh_marks(const UvMeshRow* rows, int n, Renderer& renderer, const Camera& cam,
-                        int win_w, int win_h, float px);
+                        int win_w, int win_h, float px, bool outline);

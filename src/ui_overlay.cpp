@@ -2420,7 +2420,7 @@ void retopo_band(ImDrawList* dl, const RetopoStroke& s, const Camera& cam, int w
 }  // namespace
 
 void draw_uv_mesh_marks(const UvMeshRow* rows, int n, Renderer& renderer, const Camera& cam,
-                        int win_w, int win_h, float px) {
+                        int win_w, int win_h, float px, bool outline) {
     // A low is a few hundred faces, so its outline is found on the CPU every frame: the
     // edges between a face that looks at us and one that looks away, plus open borders.
     // Drawn on the GPU against the scene's own depth, so what hides it is whatever is
@@ -2439,7 +2439,7 @@ void draw_uv_mesh_marks(const UvMeshRow* rows, int n, Renderer& renderer, const 
         for (size_t e = 0; e + 1 < rm.edges.size(); e += 2) pull += (rm.v[rm.edges[e]] - rm.v[rm.edges[e + 1]]).length();
         pull /= (float)std::max<size_t>(1, rm.edges.size() / 2);
         ed.clear();
-        for (uint32_t f = 0; f < rm.face_count(); f++) {
+        for (uint32_t f = 0; f < rm.face_count() && outline; f++) {
             const uint32_t o = rm.face_off[f], m = rm.face_size(f);
             if (m < 3) continue;
             Vec3 nr, c;
@@ -2456,7 +2456,7 @@ void draw_uv_mesh_marks(const UvMeshRow* rows, int n, Renderer& renderer, const 
             }
         }
         std::sort(ed.begin(), ed.end(), [](const Ed& p, const Ed& q) { return p.key < q.key; });
-        for (int pass = 0; pass < 2; pass++)
+        for (int pass = 0; pass < 2 && outline; pass++)
             for (size_t e = 0; e < ed.size();) {
                 size_t q = e + 1;
                 bool mixed = false;
@@ -2580,8 +2580,8 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
     // vis: 0 hidden, 1 behind the sculpt, 2 in view.
     const RetopoMesh& rm = st.result;
     // The wire, fills, seams and loops go to the GPU (renderer.overlay_*), depth-tested
-    // against the scene itself, so they need only fac: 2 facing us, 1 facing away, 0 off
-    // (behind the eye). vis, the plane cache's verdict, still serves what's drawn here in
+    // against the scene itself, so they need only fac != 0 (not behind the eye); which
+    // way they look is the faces' business (face_front below). vis, the plane cache's verdict, still serves what's drawn here in
     // 2D on top: hole washes and the snap marks.
     static std::vector<ImVec2> at;
     static std::vector<uint8_t> vis, fac;
@@ -2652,6 +2652,37 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
     // tested from `reach` nearer, so only those a few quads behind the surface (an ear's
     // inner fold, under a lip) come through: the old "behind, but not the far side" rule.
     const float pull = edge_mean;
+    // Which way each face looks (its own plane, not its corners' averaged normals: a box
+    // corner's normal points off diagonally, so seen from a little above, a bottom rim's
+    // corners read as facing away and the rim and side corners went faint). An edge is
+    // in front when either face beside it looks at us, so the outline always is.
+    static std::vector<uint8_t> face_front;
+    static std::vector<uint64_t> front_keys;   // edges with a face looking at us
+    face_front.assign(rm.face_count(), 0);
+    front_keys.clear();
+    for (uint32_t f = 0; f < rm.face_count(); f++) {
+        const uint32_t o = rm.face_off[f], m = rm.face_size(f);
+        if (m < 3) continue;
+        Vec3 nr, c, cn;
+        for (uint32_t j = 0; j < m; j++) {
+            nr += rm.v[rm.faces[o + j]].cross(rm.v[rm.faces[o + (j + 1) % m]]);
+            c += rm.v[rm.faces[o + j]];
+            cn += rm.n[rm.faces[o + j]];
+        }
+        if (nr.dot(cn) < 0.0f) nr = nr * -1.0f;   // wound the other way: its corners' normals say which side is out
+        c = c * (1.0f / (float)m);
+        const Vec3 to_eye = cam.perspective ? cam.get_position() - c : cam.get_view_direction() * -1.0f;
+        if (nr.dot(to_eye) <= 0.0f) continue;
+        face_front[f] = 1;
+        for (uint32_t j = 0; j < m; j++) {
+            const uint32_t a = rm.faces[o + j], b = rm.faces[o + (j + 1) % m];
+            if (a != b) front_keys.push_back(((uint64_t)std::min(a, b) << 32) | std::max(a, b));
+        }
+    }
+    std::sort(front_keys.begin(), front_keys.end());
+    auto edge_front = [&](uint32_t a, uint32_t b) {
+        return std::binary_search(front_keys.begin(), front_keys.end(), ((uint64_t)std::min(a, b) << 32) | std::max(a, b));
+    };
     if (!baked) {
         static std::vector<uint32_t> tri;
         for (uint32_t f = 0; f < rm.face_count(); f++) {
@@ -2659,8 +2690,8 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
             if (st.hidden(ow) && ow != st.hover_id) continue;
             const uint32_t* q = rm.face(f);
             const uint32_t k = rm.face_size(f);
-            bool ok = k >= 3;
-            for (uint32_t i = 0; i < k && ok; i++) ok = fac[q[i]] == 2;
+            bool ok = k >= 3 && face_front[f];
+            for (uint32_t i = 0; i < k && ok; i++) ok = fac[q[i]] != 0;
             if (!ok) continue;
             const uint32_t isl = tint ? st.uv.face_chart[f] : ~0u;
             const ImU32 col = isl != ~0u ? uv_island_color(mesh, isl, isl == st.uv_hover || isl == st.uv_sel ? 0.45f
@@ -2717,7 +2748,7 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
         for (size_t e = 0; e + 1 < rm.edges.size(); e += 2) {
             const uint32_t a = rm.edges[e], b = rm.edges[e + 1];
             if (!fac[a] || !fac[b]) continue;
-            const bool front = fac[a] == 2 && fac[b] == 2;
+            const bool front = edge_front(a, b);
             if (front != (layer != 1)) continue;
             const uint32_t ow = rm.edge_owner[e / 2];
             if (st.hidden(ow) && ow != st.hover_id) continue;   // its eye is shut (hover still shows it)
@@ -2733,7 +2764,7 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
     // UV seams and double-clicked edge loops, the same way over the wire: bold where seen,
     // thin x-ray where the sculpt is in front, thin from `reach` nearer where facing away.
     auto marked = [&](uint32_t a, uint32_t b, ImU32 under, ImU32 bold, ImU32 thin) {
-        if (fac[a] == 2 && fac[b] == 2) {
+        if (edge_front(a, b)) {
             renderer.overlay_line(rm.v[a], rm.v[b], thin, 1.0f, pull, true);
             renderer.overlay_line(rm.v[a], rm.v[b], under, 5.0f, pull, false);
             renderer.overlay_line(rm.v[a], rm.v[b], bold, 2.5f, pull, false);

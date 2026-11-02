@@ -457,11 +457,12 @@ void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse) {
         }
     }
     if (input.interaction_mode == InputState::InteractionMode::RETOPO) {
-        // UV mode's panel lists every mesh (it picks which ones the square shows).
+        // UV mode's panel lists every mesh (it picks which ones the square shows); retopo
+        // mode reads the active one's row for its colour (the viewfinder brackets).
         static std::vector<UvMeshRow> uv_rows;
         static std::vector<std::array<char, 24>> uv_names;
         uv_rows.clear();
-        if (input.uv_mode) {
+        {
             const std::vector<uint32_t>& sel = scene.selected_ids();
             if (uv_names.size() < scene.entities().size()) uv_names.resize(scene.entities().size());
             for (auto& up : scene.entities()) {
