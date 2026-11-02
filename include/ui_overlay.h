@@ -97,6 +97,11 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
 // UV mode: every mesh the square shows, marked in the 3D view in its own colour: corner
 // brackets round its low on screen, and the low's outline (GPU, hidden where the scene
 // is in front; only with `outline`), px wide. Off unless Viewfinder corners is on.
+// Sculpt and Select modes' viewfinder: brackets round the active mesh (with `selection`,
+// every selected one too) in its colour, only while two or more meshes are on screen (one
+// alone needs no telling apart). No outline.
+class Scene;
+void draw_scene_brackets(const Scene& scene, const Camera& cam, int win_w, int win_h, float px, bool selection);
 struct UvMeshRow;
 void draw_uv_mesh_marks(const UvMeshRow* rows, int n, Renderer& renderer, const Camera& cam,
                         int win_w, int win_h, float px, bool outline);

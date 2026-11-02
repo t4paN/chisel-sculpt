@@ -2419,6 +2419,22 @@ void retopo_band(ImDrawList* dl, const RetopoStroke& s, const Camera& cam, int w
 
 }  // namespace
 
+// Viewfinder brackets round a screen box (a mesh's extent), a little off it and kept
+// inside the window, in the mesh's colour over a dark edge.
+static void mesh_brackets(ImDrawList* dl, float x0, float y0, float x1, float y1, ImU32 col, float lw,
+                          int win_w, int win_h) {
+    const float pad = 10.0f;
+    x0 = std::max(x0 - pad, 4.0f); y0 = std::max(y0 - pad, 4.0f);
+    x1 = std::min(x1 + pad, win_w - 4.0f); y1 = std::min(y1 + pad, win_h - 4.0f);
+    if (x0 >= x1 || y0 >= y1) return;
+    const float L = std::max(8.0f, std::min(24.0f, 0.2f * std::min(x1 - x0, y1 - y0)));
+    const ImVec2 cn[4][3] = {
+        {ImVec2(x0, y0 + L), ImVec2(x0, y0), ImVec2(x0 + L, y0)}, {ImVec2(x1 - L, y0), ImVec2(x1, y0), ImVec2(x1, y0 + L)},
+        {ImVec2(x1, y1 - L), ImVec2(x1, y1), ImVec2(x1 - L, y1)}, {ImVec2(x0 + L, y1), ImVec2(x0, y1), ImVec2(x0, y1 - L)}};
+    for (int pass = 0; pass < 2; pass++)
+        for (const auto& c : cn) dl->AddPolyline(c, 3, pass ? col : IM_COL32(10, 12, 18, 160), 0, pass ? lw + 0.5f : lw + 3.0f);
+}
+
 void draw_uv_mesh_marks(const UvMeshRow* rows, int n, Renderer& renderer, const Camera& cam,
                         int win_w, int win_h, float px, bool outline) {
     // A low is a few hundred faces, so its outline is found on the CPU every frame: the
@@ -2476,17 +2492,44 @@ void draw_uv_mesh_marks(const UvMeshRow* rows, int n, Renderer& renderer, const 
             if (!(cam.world_to_screen(p, win_w, win_h, x, y) || !cam.perspective || cam.view_depth(p) > 1e-4f)) continue;
             x0 = std::min(x0, x); y0 = std::min(y0, y); x1 = std::max(x1, x); y1 = std::max(y1, y);
         }
-        const float pad = 10.0f;
-        x0 = std::max(x0 - pad, 4.0f); y0 = std::max(y0 - pad, 4.0f);
-        x1 = std::min(x1 + pad, win_w - 4.0f); y1 = std::min(y1 + pad, win_h - 4.0f);
-        if (x0 >= x1 || y0 >= y1) continue;
-        const float L = std::max(8.0f, std::min(24.0f, 0.2f * std::min(x1 - x0, y1 - y0)));
-        const ImVec2 cn[4][3] = {
-            {ImVec2(x0, y0 + L), ImVec2(x0, y0), ImVec2(x0 + L, y0)}, {ImVec2(x1 - L, y0), ImVec2(x1, y0), ImVec2(x1, y0 + L)},
-            {ImVec2(x1, y1 - L), ImVec2(x1, y1), ImVec2(x1 - L, y1)}, {ImVec2(x0 + L, y1), ImVec2(x0, y1), ImVec2(x0, y1 - L)}};
-        for (int pass = 0; pass < 2; pass++)
-            for (const auto& c : cn) dl->AddPolyline(c, 3, pass ? col : under, 0, pass ? lw + 0.5f : lw + 3.0f);
+        mesh_brackets(dl, x0, y0, x1, y1, col, lw, win_w, win_h);
     }
+}
+
+void draw_scene_brackets(const Scene& scene, const Camera& cam, int win_w, int win_h, float px, bool selection) {
+    // Each mesh's extent on screen from at most ~4k of its vertices: tight enough for a
+    // bracket, cheap every frame on a 700k-tri sculpt. CPU positions can trail a stroke
+    // in flight by a little, which a bracket doesn't mind.
+    struct Box { uint32_t id; float x0, y0, x1, y1; };
+    static std::vector<Box> marked;
+    marked.clear();
+    int seen = 0;
+    const uint32_t act = scene.active_mesh_id();
+    const std::vector<uint32_t>& sel = scene.selected_ids();
+    for (const auto& up : scene.entities()) {
+        if (!up || !up->alive || up->preview || (!up->visible && up->id != act)) continue;
+        const Mesh& m = up->mesh;
+        const uint32_t n = m.vertex_count();
+        if (n == 0) continue;
+        const uint32_t step = std::max(1u, n / 4096u);
+        float x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f;
+        for (uint32_t v = 0; v < n; v += step) {
+            const Vec3 p(m.pos_x[v], m.pos_y[v], m.pos_z[v]);
+            float x, y;
+            // Past the window's edge still counts (the overlay's rule); behind the eye doesn't.
+            if (!(cam.world_to_screen(p, win_w, win_h, x, y) || !cam.perspective || cam.view_depth(p) > 1e-4f)) continue;
+            x0 = std::min(x0, x); y0 = std::min(y0, y); x1 = std::max(x1, x); y1 = std::max(y1, y);
+        }
+        if (x0 > x1 || x1 < 0.0f || y1 < 0.0f || x0 > win_w || y0 > win_h) continue;
+        seen++;
+        const bool want = up->id == act
+                       || (selection && std::find(sel.begin(), sel.end(), up->id) != sel.end());
+        if (want) marked.push_back({up->id, x0, y0, x1, y1});
+    }
+    if (seen < 2) return;   // one mesh in view: nothing to tell apart
+    for (const Box& k : marked)
+        mesh_brackets(ImGui::GetBackgroundDrawList(), k.x0, k.y0, k.x1, k.y1, uv_mesh_color(k.id, 1.0f),
+                      std::max(0.5f, px), win_w, win_h);
 }
 
 void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera& cam,

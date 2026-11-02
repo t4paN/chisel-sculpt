@@ -3314,7 +3314,9 @@ void draw_modern_ui(InputState& input, int win_w, int win_h, const AlphaLibrary*
     if (g_y2k) {
         draw_y2k_ui(input, win_w, win_h, alpha_lib, mres, stats);
     } else {
-        if (input.ui_viewfinder) viewfinder(win_w, win_h);
+        // Sculpt and Select bracket their meshes instead (draw_scene_brackets).
+        if (input.ui_viewfinder && input.interaction_mode != InputState::InteractionMode::EDIT
+            && input.interaction_mode != InputState::InteractionMode::SELECT) viewfinder(win_w, win_h);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
         file_panel(input, stats);   // first: the rail hangs below it
         rail(input, win_h, alpha_lib);

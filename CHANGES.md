@@ -2,9 +2,10 @@
 
 Short, chronological log of notable changes. Newest on top.
 
-## 2026-11-03 — Retopo: brackets on the active mesh, wire corners
+## 2026-11-03 — Brackets on the meshes you work on, wire corners
 
 - With Viewfinder corners on, retopo mode brackets the active mesh's retopo in its colour (no outline: the wire shows it); UV mode still marks every mesh the square shows.
+- Sculpt mode brackets the active mesh, Select mode every selected one, in their colours, only while two or more meshes are on screen; both drop the fixed window corners.
 - The wire judges front and back by its faces, not its corners' averaged normals: a rim or box corner seen from a little above no longer goes faint.
 
 ## 2026-11-03 — Overlay wire on the GPU

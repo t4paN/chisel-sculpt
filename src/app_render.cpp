@@ -419,6 +419,10 @@ void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse) {
         st.level = multires->current_level;
         st.fps = fps_display;
         st.project_path = current_project_path.c_str();
+        if (input.ui_viewfinder && (input.interaction_mode == InputState::InteractionMode::EDIT
+                                    || input.interaction_mode == InputState::InteractionMode::SELECT))
+            draw_scene_brackets(scene, camera, win_w, win_h, input.ui_viewfinder_px,
+                                input.interaction_mode == InputState::InteractionMode::SELECT);
         draw_modern_ui(input, win_w, win_h, &alpha_lib, mres_info, st);
         draw_skin_dialogs(input, win_w, win_h, dlg);
     }
