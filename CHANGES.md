@@ -10,6 +10,7 @@ Short, chronological log of notable changes. Newest on top.
 - Move, turn and scale keep the padding band inside the square.
 - The packer's grid is 2 px a cell up to 2K (4 px at 4K), so each Padding step packs apart.
 - Unwrap, re-pack and hand moves of islands can be undone, in the big view too.
+- Padding is remembered across restarts; the readout's % used follows a scale or a shrink.
 
 ## 2026-11-02 — Retopo: steadier cursor, snap and knife icon
 

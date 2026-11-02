@@ -210,6 +210,7 @@ std::string serialize(const InputState& in) {
     append_kv(s, "camera_perspective",  in.camera_perspective);
     append_kv(s, "camera_fov",          in.camera_fov);
     append_kv(s, "remesh_detail",       in.remesh_detail);
+    append_kv(s, "uv_padding",          in.uv_padding);
     append_kv(s, "sphere_kind",         (int)in.sphere_kind);
     // mirror_x is deliberately absent — see InputState::mirror_x. Symmetry is session
     // state that starts ON every run, so it must not survive into the next one. As with
@@ -348,6 +349,10 @@ void apply_global_key(InputState& in, const std::string& key, const std::string&
         in.ui_scale_touch = v < 40 ? 40 : (v > 150 ? 150 : v);
     }
     else if (key == "help_seen")           in.help_seen           = parse_bool(val);
+    else if (key == "uv_padding") {   // 2..16 in steps of 2, as the slider sets it
+        const int v = (int)std::strtol(val.c_str(), nullptr, 10);
+        in.uv_padding = std::max(2, std::min(16, (v + 1) / 2 * 2));
+    }
     else if (key == "camera_perspective")  in.camera_perspective  = parse_bool(val);
     else if (key == "mirror_topological")  in.mirror_topological  = parse_bool(val);
     else if (key == "fast_normals")        in.fast_normals        = parse_bool(val);

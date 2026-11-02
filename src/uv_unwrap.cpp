@@ -5,6 +5,21 @@
 #include <cstdio>
 #include <map>
 
+float uv_used(const RetopoMesh& rm, const UvLayout& L) {
+    double used = 0.0;
+    for (uint32_t f = 0; f < rm.face_count(); f++) {
+        if (L.face_chart[f] >= L.charts) continue;
+        const uint32_t o = rm.face_off[f], m = rm.face_size(f);
+        double a2 = 0.0;
+        for (uint32_t j = 0; j < m; j++) {
+            const uint32_t a = o + j, b = o + (j + 1) % m;
+            a2 += (double)L.uv[2 * a] * L.uv[2 * b + 1] - (double)L.uv[2 * b] * L.uv[2 * a + 1];
+        }
+        used += std::fabs(a2) * 0.5;
+    }
+    return (float)std::min(1.0, used);
+}
+
 uint64_t uv_topology_key(const RetopoMesh& rm) {
     // FNV-1a over the corner lists and the face boundaries: two meshes with the same
     // vertex ids in the same faces get the same key, whatever their positions.

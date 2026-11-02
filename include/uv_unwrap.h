@@ -18,6 +18,9 @@ struct UvSettings {
 
 // A hash of rm's faces (corners and counts), to tell when a layout has gone stale.
 uint64_t uv_topology_key(const RetopoMesh& rm);
+// How much of the square the islands cover, 0..1 (UvLayout::used), for a layout
+// changed by hand since its pack.
+float uv_used(const RetopoMesh& rm, const UvLayout& L);
 // A hash of the seams that are still edges: has the user painted since the unwrap?
 uint64_t uv_seam_key(const RetopoMesh& rm);
 

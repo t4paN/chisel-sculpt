@@ -5171,6 +5171,7 @@ void draw_uv_dock(InputState& input, RetopoState& st, UvMeshRow* rows, int nrows
                                 L2.uv[2 * j + 1] = cv + (L2.uv[2 * j + 1] - cv) * k;
                             }
                         }
+                        L2.used = uv_used(rm2, L2);
                         t.rev++;
                     }
                 }
@@ -5603,7 +5604,7 @@ void draw_uv_dock(InputState& input, RetopoState& st, UvMeshRow* rows, int nrows
             input.wake_requested = true;
         }
         if (armed && (!big || !io.MouseDown[ImGuiMouseButton_Right])) {   // let go: done
-            for (RetopoState* t : scaling) t->rev++;
+            for (RetopoState* t : scaling) { t->uv.used = uv_used(t->result, t->uv); t->rev++; }
             scaling.clear();
             from.clear();
             armed = false;
