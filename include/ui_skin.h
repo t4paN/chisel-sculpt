@@ -123,5 +123,7 @@ struct UvMeshRow {
     bool         active = false, selected = false;
 };
 void draw_uv_dock(InputState& input, RetopoState& st, UvMeshRow* rows, int n, int win_w, int win_h);
-// A UV island's colour (the UV panel's, and the model's tint in UV mode).
-ImU32 uv_island_color(uint32_t island, float alpha);
+// UV mode's colours: a mesh's own hue (its row, brackets and outline), and one of its
+// islands' shades of it (the UV panel's, and the model's tint in UV mode).
+ImU32 uv_mesh_color(uint32_t mesh, float alpha);
+ImU32 uv_island_color(uint32_t mesh, uint32_t island, float alpha);

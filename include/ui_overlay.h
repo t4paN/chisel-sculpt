@@ -91,5 +91,10 @@ void draw_pose_cursor(float x, float y, bool on_target);
 // Shared by every skin. (The dock that goes with it is ui_skin.h's draw_retopo_dock.)
 struct RetopoState;
 struct Renderer;
+// uv: UV mode (faces tinted by island, in mesh `mesh`'s colours).
 void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera& cam,
-                         int win_w, int win_h, bool depth_fresh, bool mirror, bool uv = false);
+                         int win_w, int win_h, bool depth_fresh, bool mirror, bool uv = false, uint32_t mesh = 0);
+// UV mode: every mesh the square shows, marked in the 3D view in its own colour: corner
+// brackets round its low on screen, and the low's outline.
+struct UvMeshRow;
+void draw_uv_mesh_marks(const UvMeshRow* rows, int n, const Camera& cam, int win_w, int win_h);

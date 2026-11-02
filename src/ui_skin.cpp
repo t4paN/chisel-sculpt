@@ -4561,14 +4561,33 @@ void draw_retopo_dock(InputState& input, RetopoState& st, int win_w, int win_h) 
     }
 }
 
-// An island's colour, in the UV panel and on the model: a golden-ratio walk round the
-// hue circle, so neighbours in the packing's order never come out alike. DOS cycles its
-// own palette instead.
-ImU32 uv_island_color(uint32_t c, float a) {
-    static const ImU32 kDos[] = {cga::light_cyan, cga::light_green, cga::yellow, cga::light_magenta, cga::light_red};
-    if (g_dos) return with_alpha(kDos[c % 5], a);
+// Colours in UV mode, by mesh: each mesh one hue (its brackets and outline in the 3D view
+// wear it plain), its islands lighter and darker steps of it, so which mesh an island
+// belongs to reads at a glance in the square. Hues walk the circle by the golden ratio
+// from the mesh's id, so a newly added mesh never comes out like its neighbour; the
+// offset starts mesh 1 on coral. Islands step along their own golden walk in brightness
+// (and a hair of hue), so neighbours in the packing's order never come out alike. DOS
+// cycles its own palette, the bright colour and its dark twin.
+namespace {
+const ImU32 kDosMesh[] = {cga::light_cyan, cga::light_green, cga::yellow, cga::light_magenta, cga::light_red};
+const ImU32 kDosDark[] = {IM_COL32(0x00, 0xAA, 0xAA, 255), IM_COL32(0x00, 0xAA, 0x00, 255), IM_COL32(0xAA, 0x55, 0x00, 255),
+                          IM_COL32(0xAA, 0x00, 0xAA, 255), IM_COL32(0xAA, 0x00, 0x00, 255)};
+float uv_mesh_hue(uint32_t mesh) { return std::fmod(mesh * 0.618034f + 0.402f, 1.0f); }
+}  // namespace
+
+ImU32 uv_mesh_color(uint32_t mesh, float a) {
+    if (g_dos) return with_alpha(kDosMesh[mesh % 5], a);
     float r, g, b;
-    ImGui::ColorConvertHSVtoRGB(std::fmod(c * 0.618034f, 1.0f), 0.55f, 0.95f, r, g, b);
+    ImGui::ColorConvertHSVtoRGB(uv_mesh_hue(mesh), 0.62f, 0.97f, r, g, b);
+    return ImGui::GetColorU32(ImVec4(r, g, b, a));
+}
+
+ImU32 uv_island_color(uint32_t mesh, uint32_t c, float a) {
+    if (g_dos) return with_alpha((c & 1 ? kDosDark : kDosMesh)[mesh % 5], a);
+    const float f = std::fmod(c * 0.618034f, 1.0f);   // 0 = the first island: lightest
+    float r, g, b;
+    ImGui::ColorConvertHSVtoRGB(std::fmod(uv_mesh_hue(mesh) + (f - 0.5f) * 0.06f + 1.0f, 1.0f),
+                                0.42f + 0.4f * f, 1.0f - 0.42f * f, r, g, b);
     return ImGui::GetColorU32(ImVec4(r, g, b, a));
 }
 
@@ -4651,7 +4670,7 @@ const std::vector<uint32_t>& uv_outline(const RetopoMesh& rm, const UvLayout& L)
 // returns the island under `mouse` (~0u for none). pad_uv: the padding, in UV units,
 // drawn as a band that wide on each island's outline (half outside, so two islands
 // whose bands just touch sit exactly the padding apart).
-uint32_t draw_uv_islands(ImDrawList* dl, const RetopoMesh& rm, const UvLayout& L, ImVec2 o, float side,
+uint32_t draw_uv_islands(ImDrawList* dl, uint32_t mesh, const RetopoMesh& rm, const UvLayout& L, ImVec2 o, float side,
                          float zoom, ImVec2 c, float k, uint32_t lit_a, uint32_t lit_b, bool pick, ImVec2 mouse,
                          const std::vector<uint8_t>* lit_mask = nullptr, float pad_uv = 0.0f) {
     const float s = side * zoom, mx = o.x + side * 0.5f, my = o.y + side * 0.5f;
@@ -4678,7 +4697,7 @@ uint32_t draw_uv_islands(ImDrawList* dl, const RetopoMesh& rm, const UvLayout& L
             }
             if (ring.size() >= 3) {
                 const bool lit = isl == lit_a || isl == lit_b || (lit_mask && isl < lit_mask->size() && (*lit_mask)[isl]);
-                dl->AddPolyline(ring.data(), (int)ring.size(), uv_island_color(isl, (any_lit && !lit ? 0.18f : 0.45f) * k),
+                dl->AddPolyline(ring.data(), (int)ring.size(), uv_island_color(mesh, isl, (any_lit && !lit ? 0.18f : 0.45f) * k),
                                 ImDrawFlags_Closed, bw);
             }
             ring.clear();
@@ -4691,8 +4710,8 @@ uint32_t draw_uv_islands(ImDrawList* dl, const RetopoMesh& rm, const UvLayout& L
         const uint32_t base = rm.face_off[f], n = std::min<uint32_t>(rm.face_size(f), 64);
         for (uint32_t j = 0; j < n; j++) pts[j] = at(base + j);
         const bool lit = isl == lit_a || isl == lit_b || (lit_mask && isl < lit_mask->size() && (*lit_mask)[isl]);
-        dl->AddConvexPolyFilled(pts, (int)n, uv_island_color(isl, (any_lit ? (lit ? 0.6f : 0.12f) : 0.30f) * k));
-        dl->AddPolyline(pts, (int)n, uv_island_color(isl, (any_lit && !lit ? 0.35f : 0.95f) * k),
+        dl->AddConvexPolyFilled(pts, (int)n, uv_island_color(mesh, isl, (any_lit ? (lit ? 0.6f : 0.12f) : 0.30f) * k));
+        dl->AddPolyline(pts, (int)n, uv_island_color(mesh, isl, (any_lit && !lit ? 0.35f : 0.95f) * k),
                         ImDrawFlags_Closed, lit ? 1.5f : 1.0f);
         if (pick && under == ~0u) {
             bool in = false;
@@ -4908,7 +4927,7 @@ void draw_uv_dock(InputState& input, RetopoState& st, UvMeshRow* rows, int nrows
                 mask.assign(t.uv.charts, 0);
                 for (const Pick& q : picked) if (q.st == &t) { mask[q.isl] = 1; any = true; }
             }
-            const uint32_t u = draw_uv_islands(d, t.result, t.uv, o, side, zoom, c, k, t.uv_sel,
+            const uint32_t u = draw_uv_islands(d, s.r->id, t.result, t.uv, o, side, zoom, c, k, t.uv_sel,
                                                a ? last_hover : ~0u, pick, mouse, any ? &mask : nullptr, pad_uv);
             if (u != ~0u) { under = u; hit = s.r; }
         }
@@ -5108,6 +5127,9 @@ void draw_uv_dock(InputState& input, RetopoState& st, UvMeshRow* rows, int nrows
             text_at(ldl, nf, 13.0f, ImVec2(tx, r0.y + (row_h - ts.y) * 0.5f), t.built ? kText : kMuted, r.shown);
             ldl->PopClipRect();
             text_at(ldl, UiFont::Mono, 11.0f, ImVec2(r1.x - kIn - fs.x, r0.y + (row_h - fs.y) * 0.5f), kMuted, foot);
+            // Its colour: a strip down the row's left edge, the hue its islands and brackets wear.
+            ldl->AddRectFilled(ImVec2(r0.x + 3.0f, r0.y + 7.0f), ImVec2(r0.x + 6.0f, r1.y - 7.0f),
+                               uv_mesh_color(r.id, t.built ? 1.0f : 0.3f), rad(2.0f));
             if (r.active)        ldl->AddRect(r0, r1, kAccent, rad(9.0f), 0, 2.0f);
             else if (r.selected) ldl->AddRect(r0, r1, with_alpha(kAccent, 0.45f), rad(9.0f), 0, 1.5f);
             ImGui::SetCursorScreenPos(ImVec2(r0.x, r1.y + gap));
@@ -5197,7 +5219,7 @@ void draw_uv_dock(InputState& input, RetopoState& st, UvMeshRow* rows, int nrows
                     else                    std::snprintf(nm, sizeof nm, "%s", L.names[i].c_str());
                     const float sw = 12.0f;
                     const ImVec2 sp(i0.x + kIn, i0.y + (sub_h - sw) * 0.5f);
-                    ldl->AddRectFilled(sp, ImVec2(sp.x + sw, sp.y + sw), uv_island_color(i, fresh ? 0.95f : 0.4f), rad(3.0f));
+                    ldl->AddRectFilled(sp, ImVec2(sp.x + sw, sp.y + sw), uv_island_color(r.id, i, fresh ? 0.95f : 0.4f), rad(3.0f));
                     const ImVec2 ns2 = text_size(UiFont::Sans, 13.0f, nm);
                     text_at(ldl, UiFont::Sans, 13.0f, ImVec2(sp.x + sw + 8.0f, i0.y + (sub_h - ns2.y) * 0.5f), kText, nm);
                     // Folded over itself (the unwrap's flag): said in place of the face count.
@@ -5220,7 +5242,7 @@ void draw_uv_dock(InputState& input, RetopoState& st, UvMeshRow* rows, int nrows
                         text_at(ldl, UiFont::Mono, 12.0f, ImVec2(sp.x + sw + 8.0f, i0.y + sub_h + 14.0f), kMuted, l2);
                         ldl->AddRect(i0, i1, kAccent, rad(8.0f), 0, 2.0f);
                     }
-                    if (ih || i == last_hover) ldl->AddRect(i0, i1, uv_island_color(i, 1.0f), rad(8.0f), 0, 1.5f);
+                    if (ih || i == last_hover) ldl->AddRect(i0, i1, uv_island_color(r.id, i, 1.0f), rad(8.0f), 0, 1.5f);
                     ImGui::SetCursorScreenPos(ImVec2(s0r.x, i1.y + gap));
                     ImGui::PopID();
                 }

@@ -2419,8 +2419,78 @@ void retopo_band(ImDrawList* dl, const RetopoStroke& s, const Camera& cam, int w
 
 }  // namespace
 
+void draw_uv_mesh_marks(const UvMeshRow* rows, int n, const Camera& cam, int win_w, int win_h) {
+    // A low is a few hundred faces, so its outline is found on the CPU every frame: the
+    // edges between a face that looks at us and one that looks away, plus open borders.
+    // Drawn over everything, like the brackets: it says where the mesh is, not what hides it.
+    ImDrawList* dl = ImGui::GetBackgroundDrawList();
+    struct Ed { uint64_t key; uint8_t facing; };
+    static std::vector<Ed> ed;
+    static std::vector<ImVec2> at;
+    static std::vector<uint8_t> ok;
+    const ImU32 under = IM_COL32(10, 12, 18, 160);
+    for (int i = 0; i < n; i++) {
+        const UvMeshRow& r = rows[i];
+        if (!(r.active || r.selected) || !r.st->built) continue;
+        const RetopoMesh& rm = r.st->result;
+        if (rm.face_count() == 0) continue;
+        const ImU32 col = uv_mesh_color(r.id, 1.0f);
+        at.resize(rm.v.size()); ok.resize(rm.v.size());
+        float x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f;
+        for (size_t v = 0; v < rm.v.size(); v++) {
+            float x, y;
+            // Past the window's edge still counts (the overlay's rule); behind the eye doesn't.
+            ok[v] = cam.world_to_screen(rm.v[v], win_w, win_h, x, y) || !cam.perspective || cam.view_depth(rm.v[v]) > 1e-4f;
+            at[v] = ImVec2(x, y);
+            if (!ok[v]) continue;
+            x0 = std::min(x0, x); y0 = std::min(y0, y); x1 = std::max(x1, x); y1 = std::max(y1, y);
+        }
+        if (x0 > x1) continue;
+        // The outline.
+        ed.clear();
+        for (uint32_t f = 0; f < rm.face_count(); f++) {
+            const uint32_t o = rm.face_off[f], m = rm.face_size(f);
+            if (m < 3) continue;
+            Vec3 nr, c;
+            for (uint32_t j = 0; j < m; j++) {
+                nr += rm.v[rm.faces[o + j]].cross(rm.v[rm.faces[o + (j + 1) % m]]);
+                c += rm.v[rm.faces[o + j]];
+            }
+            c = c * (1.0f / (float)m);
+            const Vec3 to_eye = cam.perspective ? cam.get_position() - c : cam.get_view_direction() * -1.0f;
+            const uint8_t facing = nr.dot(to_eye) > 0.0f;
+            for (uint32_t j = 0; j < m; j++) {
+                const uint32_t a = rm.faces[o + j], b = rm.faces[o + (j + 1) % m];
+                if (a != b) ed.push_back({((uint64_t)std::min(a, b) << 32) | std::max(a, b), facing});   // welds leave repeats
+            }
+        }
+        std::sort(ed.begin(), ed.end(), [](const Ed& p, const Ed& q) { return p.key < q.key; });
+        for (int pass = 0; pass < 2; pass++)
+            for (size_t e = 0; e < ed.size();) {
+                size_t q = e + 1;
+                bool mixed = false;
+                while (q < ed.size() && ed[q].key == ed[e].key) { mixed |= ed[q].facing != ed[e].facing; q++; }
+                const uint32_t a = (uint32_t)(ed[e].key >> 32), b = (uint32_t)ed[e].key;
+                if ((q - e == 1 || mixed) && ok[a] && ok[b])
+                    dl->AddLine(at[a], at[b], pass ? col : under, pass ? 1.5f : 3.5f);
+                e = q;
+            }
+        // Corner brackets round it on screen, a little off it, kept inside the window.
+        const float pad = 10.0f;
+        x0 = std::max(x0 - pad, 4.0f); y0 = std::max(y0 - pad, 4.0f);
+        x1 = std::min(x1 + pad, win_w - 4.0f); y1 = std::min(y1 + pad, win_h - 4.0f);
+        if (x0 >= x1 || y0 >= y1) continue;
+        const float L = std::max(8.0f, std::min(24.0f, 0.2f * std::min(x1 - x0, y1 - y0)));
+        const ImVec2 cn[4][3] = {
+            {ImVec2(x0, y0 + L), ImVec2(x0, y0), ImVec2(x0 + L, y0)}, {ImVec2(x1 - L, y0), ImVec2(x1, y0), ImVec2(x1, y0 + L)},
+            {ImVec2(x1, y1 - L), ImVec2(x1, y1), ImVec2(x1 - L, y1)}, {ImVec2(x0 + L, y1), ImVec2(x0, y1), ImVec2(x0, y1 - L)}};
+        for (int pass = 0; pass < 2; pass++)
+            for (const auto& k : cn) dl->AddPolyline(k, 3, pass ? col : under, 0, pass ? 2.0f : 4.5f);
+    }
+}
+
 void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera& cam,
-                         int win_w, int win_h, bool depth_fresh, bool mirror, bool uv) {
+                         int win_w, int win_h, bool depth_fresh, bool mirror, bool uv, uint32_t mesh) {
     ImDrawList* dl = ImGui::GetBackgroundDrawList();
     if (st.show_strokes) {
         auto band = [&](const RetopoStroke& s, int alpha) {
@@ -2589,7 +2659,7 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
             }
             if (!ok || poly.size() < 3) continue;
             const uint32_t isl = tint ? st.uv.face_chart[f] : ~0u;
-            const ImU32 col = isl != ~0u ? uv_island_color(isl, isl == st.uv_hover || isl == st.uv_sel ? 0.45f
+            const ImU32 col = isl != ~0u ? uv_island_color(mesh, isl, isl == st.uv_hover || isl == st.uv_sel ? 0.45f
                                                                 : island_lit ? 0.08f : 0.24f)
                             : ow == st.hover_id ? IM_COL32(255, 240, 160, 48)
                             : is_sel(ow)        ? IM_COL32(255, 190, 120, 40)

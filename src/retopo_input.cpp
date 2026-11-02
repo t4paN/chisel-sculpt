@@ -1283,6 +1283,9 @@ void draw_retopo_ui(InputState& input, RetopoState& retopo, UvMeshRow* uv_rows, 
     if (input.uv_mode) draw_uv_dock(input, retopo, uv_rows, uv_n, win_w, win_h);
     else               draw_retopo_dock(input, retopo, win_w, win_h);
     if (retopo.rev != audited_rev) { audited_rev = retopo.rev; retopo_audit(retopo); }
+    uint32_t act_id = 0;
+    for (int i = 0; i < uv_n; i++) if (uv_rows[i].active) act_id = uv_rows[i].id;
     draw_retopo_overlay(retopo, renderer, camera, win_w, win_h,
-                        !cam_moving && !screen_buffers_dirty, input.mirror_x, input.uv_on());
+                        !cam_moving && !screen_buffers_dirty, input.mirror_x, input.uv_on(), act_id);
+    if (input.uv_mode) draw_uv_mesh_marks(uv_rows, uv_n, camera, win_w, win_h);
 }
