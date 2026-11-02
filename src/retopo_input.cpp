@@ -865,6 +865,10 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
         uint32_t skipped = 0, islands = 0, folded = 0;
         double ms = 0.0;
         std::vector<UvPackPart> parts;
+        // The Padding, in pixels of the active mesh's bake size (an atlas is one texture).
+        UvSettings us;
+        us.padding = input.uv_padding;
+        us.resolution = on.empty() ? 1024 : on[0]->retopo.bake.settings.resolution;
         if (!why && repack) {
             // Re-pack: the layouts as they are (hand-moved islands included), packed again.
             for (MeshEntity* e : on) {
@@ -874,12 +878,12 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
                 parts.push_back(UvPackPart{&e->retopo.result, &e->retopo.uv});
             }
             if (parts.empty()) why = "Unwrap first: nothing to re-pack";
-            else why = uv_pack(parts, UvSettings(), ms);
+            else why = uv_pack(parts, us, ms);
         } else if (!why) {
-            UvSettings us;
             us.pack = on.size() == 1;   // several: each flattened, then all packed as one
             for (MeshEntity* e : on) {
                 RetopoState& rt = e->retopo;
+                rt.checkpoint();   // Ctrl+Z brings the old layout back
                 double one = 0.0;
                 UvLayout old = std::move(rt.uv);
                 const char* w = uv_unwrap(rt.result, us, rt.uv, one);
@@ -917,7 +921,7 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
             }
             if (!why && parts.size() > 1) {
                 double pm = 0.0;
-                why = uv_pack(parts, UvSettings(), pm);
+                why = uv_pack(parts, us, pm);
                 ms += pm;
             }
             // A failed atlas leaves flat, unpacked islands behind: no layout beats that.

@@ -2,6 +2,15 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-02 — UV: scale islands, Padding, undo for layouts
+
+- Big view: right-drag scales the picked islands round their middle, as Select mode scales meshes.
+- Big view: zooming grows the view to the window's height first, then zooms the layout inside it.
+- Padding slider (2–16 px, at the bake size) in the active mesh's fold-out; each island's outline shows it as a band; letting go re-packs, or shrinks hand-arranged islands where they are.
+- Move, turn and scale keep the padding band inside the square.
+- The packer's grid is 2 px a cell up to 2K (4 px at 4K), so each Padding step packs apart.
+- Unwrap, re-pack and hand moves of islands can be undone, in the big view too.
+
 ## 2026-11-02 — Retopo: steadier cursor, snap and knife icon
 
 - Cut, Wand and Contours' cursor dot faces the screen at an even weight instead of tilting with the surface.

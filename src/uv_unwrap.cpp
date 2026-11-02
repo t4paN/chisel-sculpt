@@ -817,10 +817,11 @@ const char* uv_pack(const std::vector<UvPackPart>& parts, const UvSettings& s, d
         }
     }
     if (isl.empty()) return "no islands to pack: Unwrap first";
-    // The grid is at most 512 cells a side (2 px a cell at 1024), the padding rounded up
-    // to whole cells.
+    // The grid is at most 1024 cells a side, the padding rounded up to whole cells: 2 px a
+    // cell up to 2K, so every 2 px step of the Padding packs apart (at 512 cells, 2 to 8 px
+    // all came out as one cell at 4K); 4 px a cell at 4K, where 2 px is a hair anyway.
     const int res = std::max(1, s.resolution);
-    const int n = std::min(512, res);
+    const int n = std::min(std::min(1024, res), std::max(512, res / 2));
     const int pad = std::max(1, (int)std::ceil(s.padding * (float)n / res - 1e-4f));
     std::vector<PackPlace> at;
     const float sc = pack_islands(isl, n, pad, at);
@@ -857,6 +858,7 @@ const char* uv_pack(const std::vector<UvPackPart>& parts, const UvSettings& s, d
         }
         for (uint32_t c = 0; c < L.charts; c++) turned += area[c] < 0.0;
         L.used = (float)std::min(1.0, used);
+        L.hand_placed = false;
         all += used;
     }
     ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();

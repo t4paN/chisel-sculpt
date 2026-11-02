@@ -4574,19 +4574,116 @@ ImU32 uv_island_color(uint32_t c, float a) {
 
 namespace {
 
+// Each island's outline as closed loops of corners (an edge two of its faces share,
+// with the same UVs both sides, is inside it). Corner numbers stay good while islands
+// are moved, turned or scaled, so this is only redone when the islands themselves
+// change. `loops` holds each loop's corners, then ~0u.
+struct UvOutline { const UvLayout* L = nullptr; uint64_t key = 0; std::vector<uint32_t> loops; };
+
+const std::vector<uint32_t>& uv_outline(const RetopoMesh& rm, const UvLayout& L) {
+    static UvOutline cache[8];
+    static int next = 0;
+    uint64_t key = L.key * 1099511628211ull + L.charts;
+    for (uint32_t c : L.face_chart) key = key * 31 + c;
+    key = key * 31 + rm.faces.size();
+    for (UvOutline& o : cache) if (o.L == &L && o.key == key) return o.loops;
+    UvOutline& o = cache[next];
+    next = (next + 1) % 8;
+    o.L = &L; o.key = key; o.loops.clear();
+    // Every edge of every island face, by its two vertices (low first) and island.
+    struct Ed { uint32_t isl, lo, hi, j0, j1; };
+    static std::vector<Ed> ed;
+    ed.clear();
+    for (uint32_t f = 0; f < rm.face_count(); f++) {
+        const uint32_t isl = L.face_chart[f];
+        if (isl >= L.charts) continue;
+        const uint32_t a0 = rm.face_off[f], a1 = rm.face_off[f + 1];
+        for (uint32_t j = a0; j < a1; j++) {
+            const uint32_t jn = j + 1 < a1 ? j + 1 : a0;
+            const uint32_t a = rm.faces[j], b = rm.faces[jn];
+            ed.push_back({isl, std::min(a, b), std::max(a, b), j, jn});
+        }
+    }
+    std::sort(ed.begin(), ed.end(), [](const Ed& x, const Ed& y) {
+        return x.isl != y.isl ? x.isl < y.isl : x.lo != y.lo ? x.lo < y.lo : x.hi < y.hi; });
+    auto same_uv = [&](uint32_t p, uint32_t q) { return L.uv[2 * p] == L.uv[2 * q] && L.uv[2 * p + 1] == L.uv[2 * q + 1]; };
+    // The outline's edges, each one way round (as its face winds), keyed by where it starts.
+    static std::vector<Ed> out;
+    out.clear();
+    for (size_t i = 0; i < ed.size();) {
+        size_t e = i + 1;
+        while (e < ed.size() && ed[e].isl == ed[i].isl && ed[e].lo == ed[i].lo && ed[e].hi == ed[i].hi) e++;
+        const bool inside = e - i == 2 && same_uv(ed[i].j0, ed[i + 1].j1) && same_uv(ed[i].j1, ed[i + 1].j0);
+        if (!inside) for (size_t q = i; q < e; q++) out.push_back({ed[q].isl, rm.faces[ed[q].j0], 0, ed[q].j0, ed[q].j1});
+        i = e;
+    }
+    std::sort(out.begin(), out.end(), [](const Ed& x, const Ed& y) { return x.isl != y.isl ? x.isl < y.isl : x.lo < y.lo; });
+    // Walk them into loops: from an edge's end, the unused edge of the same island that
+    // starts at that vertex with the same UV.
+    static std::vector<uint8_t> used;
+    used.assign(out.size(), 0);
+    for (size_t s = 0; s < out.size(); s++) {
+        if (used[s]) continue;
+        size_t cur = s;
+        while (!used[cur]) {
+            used[cur] = 1;
+            o.loops.push_back(out[cur].j0);
+            const uint32_t isl = out[cur].isl, v = rm.faces[out[cur].j1], jend = out[cur].j1;
+            size_t lo = 0, hi = out.size();
+            while (lo < hi) {   // first edge of (isl, v)
+                const size_t mid = (lo + hi) / 2;
+                if (out[mid].isl < isl || (out[mid].isl == isl && out[mid].lo < v)) lo = mid + 1; else hi = mid;
+            }
+            size_t nx = SIZE_MAX;
+            for (size_t q = lo; q < out.size() && out[q].isl == isl && out[q].lo == v; q++)
+                if (!used[q] && same_uv(out[q].j0, jend)) { nx = q; break; }
+            if (nx == SIZE_MAX) break;
+            cur = nx;
+        }
+        o.loops.push_back(~0u);
+    }
+    return o.loops;
+}
+
 // The layout drawn into a square on screen (top-left o, size side), magnified `zoom`
 // times round UV point c; k dims it (a stale layout). Islands lit_a / lit_b (and any
 // marked in lit_mask, one byte per island) stand out and the rest fade. With pick,
-// returns the island under `mouse` (~0u for none).
+// returns the island under `mouse` (~0u for none). pad_uv: the padding, in UV units,
+// drawn as a band that wide on each island's outline (half outside, so two islands
+// whose bands just touch sit exactly the padding apart).
 uint32_t draw_uv_islands(ImDrawList* dl, const RetopoMesh& rm, const UvLayout& L, ImVec2 o, float side,
                          float zoom, ImVec2 c, float k, uint32_t lit_a, uint32_t lit_b, bool pick, ImVec2 mouse,
-                         const std::vector<uint8_t>* lit_mask = nullptr) {
+                         const std::vector<uint8_t>* lit_mask = nullptr, float pad_uv = 0.0f) {
     const float s = side * zoom, mx = o.x + side * 0.5f, my = o.y + side * 0.5f;
     auto at = [&](uint32_t corner) {   // v up in UV, y down on screen
         return ImVec2(mx + (L.uv[2 * corner] - c.x) * s, my - (L.uv[2 * corner + 1] - c.y) * s);
     };
     const bool any_lit = lit_a < L.charts || lit_b < L.charts || lit_mask;
     uint32_t under = ~0u;
+    if (pad_uv > 0.0f && !L.face_chart.empty()) {
+        // The padding band under the faces: true to size, but never thinner than a hair.
+        const float bw = std::max(1.5f, pad_uv * s);
+        const std::vector<uint32_t>& loops = uv_outline(rm, L);
+        static std::vector<ImVec2> ring;
+        ring.clear();
+        uint32_t isl = ~0u;
+        for (uint32_t j : loops) {
+            if (j != ~0u) {
+                if (ring.empty()) {   // the island of the loop's first corner's face
+                    const uint32_t f = (uint32_t)(std::upper_bound(rm.face_off.begin(), rm.face_off.end(), j) - rm.face_off.begin()) - 1;
+                    isl = L.face_chart[f];
+                }
+                ring.push_back(at(j));
+                continue;
+            }
+            if (ring.size() >= 3) {
+                const bool lit = isl == lit_a || isl == lit_b || (lit_mask && isl < lit_mask->size() && (*lit_mask)[isl]);
+                dl->AddPolyline(ring.data(), (int)ring.size(), uv_island_color(isl, (any_lit && !lit ? 0.18f : 0.45f) * k),
+                                ImDrawFlags_Closed, bw);
+            }
+            ring.clear();
+        }
+    }
     ImVec2 pts[64];
     for (uint32_t f = 0; f < rm.face_count(); f++) {
         const uint32_t isl = L.face_chart[f];
@@ -4793,6 +4890,10 @@ void draw_uv_dock(InputState& input, RetopoState& st, UvMeshRow* rows, int nrows
     };
     // Every shown layout into a square on screen; returns the island under `mouse` and
     // (hit) whose it is. The active mesh's draw bright, the others faded behind it.
+    // The padding in UV units: its pixels at the active mesh's bake size (an atlas is
+    // one texture, so the same for every mesh shown).
+    const float pad_uv = (float)input.uv_padding / (float)std::max(1, st.bake.settings.resolution);
+    const float edge_m = pad_uv * 0.5f;   // hand-moved islands keep their band inside the square
     auto draw_all = [&](ImDrawList* d, ImVec2 o, float side, float zoom, ImVec2 c, bool pick, ImVec2 mouse,
                         UvMeshRow*& hit, bool with_picks) -> uint32_t {
         uint32_t under = ~0u;
@@ -4808,7 +4909,7 @@ void draw_uv_dock(InputState& input, RetopoState& st, UvMeshRow* rows, int nrows
                 for (const Pick& q : picked) if (q.st == &t) { mask[q.isl] = 1; any = true; }
             }
             const uint32_t u = draw_uv_islands(d, t.result, t.uv, o, side, zoom, c, k, t.uv_sel,
-                                               a ? last_hover : ~0u, pick, mouse, any ? &mask : nullptr);
+                                               a ? last_hover : ~0u, pick, mouse, any ? &mask : nullptr, pad_uv);
             if (u != ~0u) { under = u; hit = s.r; }
         }
         return under;
@@ -4821,7 +4922,7 @@ void draw_uv_dock(InputState& input, RetopoState& st, UvMeshRow* rows, int nrows
     const float detail_h = 2.0f * 16.0f + 6.0f;
     float list_full = 0.0f;
     for (int i = 0; i < nrows; i++) list_full += row_h + gap;
-    if (islands_out) list_full += (float)L.charts * (sub_h + gap) + (st.uv_sel < L.charts ? detail_h : 0.0f);
+    if (islands_out) list_full += ImGui::GetFrameHeight() + gap + (float)L.charts * (sub_h + gap) + (st.uv_sel < L.charts ? detail_h : 0.0f);
     list_full = std::max(0.0f, list_full - gap);
     const float list_h = std::min(list_full, 4.0f * (row_h + gap) - gap);   // past four rows it scrolls
     // Unwrap, Re-pack, Clear seams and Export share a row when it's wide enough.
@@ -5014,6 +5115,66 @@ void draw_uv_dock(InputState& input, RetopoState& st, UvMeshRow* rows, int nrows
             // Its islands, folded out: indented under it.
             if (r.active && islands_out) {
                 const float ind = 18.0f;
+            {   // Padding: the room kept between islands, in the bake's pixels, 2 to 16 in steps
+                // of 2, at the top of the active mesh's islands (it spaces all of them). The band round each island shows it while the slider moves; let go and the
+                // islands take it: a re-pack, or, on a layout arranged by hand, each island shrunk
+                // round its own middle by the change, so the arrangement survives. One undo step
+                // either way.
+                static int pad_from = 4;
+                int v = input.uv_padding;
+                const ImVec2 pad0 = ImGui::GetCursorScreenPos();
+                ImGui::SetCursorScreenPos(ImVec2(pad0.x + ind, pad0.y));
+                ImGui::SetNextItemWidth(row_w - ind);
+                ImGui::BeginDisabled(baking);
+                if (ImGui::SliderInt("##uvPadding", &v, 2, 16, "padding %d px")) input.uv_padding = std::max(2, std::min(16, (v + 1) / 2 * 2));
+                if (ImGui::IsItemActivated()) pad_from = input.uv_padding;
+                const bool let_go = ImGui::IsItemDeactivated() && input.uv_padding != pad_from && any_fresh;
+                ImGui::EndDisabled();
+                tip("Space kept between islands so a bake doesn't bleed, in pixels of the bake size. Let go and the "
+                    "islands make room: re-packed, or shrunk where they are if you've arranged them by hand");
+                ImGui::SetCursorScreenPos(ImVec2(pad0.x, pad0.y + ImGui::GetFrameHeight() + gap));
+                bool by_hand = false;   // any shown layout arranged by hand
+                for (const Shown& sh : shown) by_hand |= sh.fresh && sh.r->st->uv.hand_placed;
+                if (let_go && !by_hand) input.uv_repack_requested = true;
+                if (let_go && by_hand && input.uv_padding > pad_from) {
+                    // Each island shrinks by the padding's change across its longer side, round
+                    // its own middle, so the gaps between them grow by about that much. A smaller
+                    // padding leaves a hand arrangement alone: growing could run islands together.
+                    const float d = (float)(input.uv_padding - pad_from) / (float)std::max(1, st.bake.settings.resolution);
+                    for (const Shown& sh : shown) {
+                        if (!sh.fresh) continue;
+                        RetopoState& t = *sh.r->st;
+                        const RetopoMesh& rm2 = t.result;
+                        UvLayout& L2 = t.uv;
+                        static std::vector<float> box;   // per island: lo u, lo v, hi u, hi v
+                        box.assign((size_t)L2.charts * 4, 0.0f);
+                        for (uint32_t c = 0; c < L2.charts; c++) { box[4 * c] = box[4 * c + 1] = 1e30f; box[4 * c + 2] = box[4 * c + 3] = -1e30f; }
+                        for (uint32_t f = 0; f < rm2.face_count(); f++) {
+                            const uint32_t c = L2.face_chart[f];
+                            if (c >= L2.charts) continue;
+                            for (uint32_t j = rm2.face_off[f]; j < rm2.face_off[f + 1]; j++) {
+                                float* b = &box[4 * c];
+                                b[0] = std::min(b[0], L2.uv[2 * j]); b[1] = std::min(b[1], L2.uv[2 * j + 1]);
+                                b[2] = std::max(b[2], L2.uv[2 * j]); b[3] = std::max(b[3], L2.uv[2 * j + 1]);
+                            }
+                        }
+                        t.checkpoint();
+                        for (uint32_t f = 0; f < rm2.face_count(); f++) {
+                            const uint32_t c = L2.face_chart[f];
+                            if (c >= L2.charts) continue;
+                            const float* b = &box[4 * c];
+                            const float ext = std::max(1e-6f, std::max(b[2] - b[0], b[3] - b[1]));
+                            const float k = std::max(0.05f, (ext - d) / ext);
+                            const float cu = (b[0] + b[2]) * 0.5f, cv = (b[1] + b[3]) * 0.5f;
+                            for (uint32_t j = rm2.face_off[f]; j < rm2.face_off[f + 1]; j++) {
+                                L2.uv[2 * j]     = cu + (L2.uv[2 * j] - cu) * k;
+                                L2.uv[2 * j + 1] = cv + (L2.uv[2 * j + 1] - cv) * k;
+                            }
+                        }
+                        t.rev++;
+                    }
+                }
+            }
                 for (uint32_t i = 0; i < L.charts; i++) {
                     ImGui::PushID((int)i);
                     const ImVec2 s0r = ImGui::GetCursorScreenPos();
@@ -5179,9 +5340,15 @@ void draw_uv_dock(InputState& input, RetopoState& st, UvMeshRow* rows, int nrows
     input.uv_preview_frame = ImGui::GetFrameCount();
     const float e = big_a * big_a * (3.0f - 2.0f * big_a);
     const float foot_h = bh + 14.0f;
+    // Zooming in grows the view first, round the middle of the window, until it meets the
+    // window's top and bottom (or sides); past that the layout zooms inside it. big_zoom is
+    // the whole magnification over the view's opening size, bz the part inside the view.
     const float side_t = std::floor(std::min((float)win_w, (float)win_h - 60.0f - foot_h) * 0.8f);
-    const ImVec2 p_t(std::floor(((float)win_w - side_t) * 0.5f), std::floor(((float)win_h - side_t - foot_h) * 0.5f));
-    const float bs = dock_side + (side_t - dock_side) * e;
+    const float side_cap = std::floor(std::max(side_t, std::min((float)win_w - 20.0f, (float)win_h - foot_h - 20.0f)));
+    const float side_z = std::floor(std::min(side_cap, side_t * big_zoom));
+    const float bz = side_t * big_zoom / side_z;
+    const ImVec2 p_t(std::floor(((float)win_w - side_z) * 0.5f), std::floor(((float)win_h - side_z - foot_h) * 0.5f));
+    const float bs = dock_side + (side_z - dock_side) * e;
     const ImVec2 p(dock_o.x + (p_t.x - dock_o.x) * e, dock_o.y + (p_t.y - dock_o.y) * e);
     ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
     ImGui::SetNextWindowSize(ImVec2((float)win_w, (float)win_h));
@@ -5206,20 +5373,22 @@ void draw_uv_dock(InputState& input, RetopoState& st, UvMeshRow* rows, int nrows
         const float mx = p.x + bs * 0.5f, my = p.y + bs * 0.5f;
         if (inside && io.MouseWheel != 0.0f) {
             // Zoom round the pointer: the UV point under it stays under it.
-            const float s0 = bs * big_zoom;
+            // While the view is still growing the whole square stays in it, centred.
+            const float s0 = bs * bz;
             const ImVec2 u(big_c.x + (m.x - mx) / s0, big_c.y - (m.y - my) / s0);
-            big_zoom = std::max(1.0f, std::min(50.0f, big_zoom * std::pow(1.2f, io.MouseWheel)));
-            const float s1 = bs * big_zoom;
-            big_c = ImVec2(u.x - (m.x - mx) / s1, u.y + (m.y - my) / s1);
+            big_zoom = std::max(1.0f, std::min(50.0f * side_cap / side_t, big_zoom * std::pow(1.2f, io.MouseWheel)));
+            const float s1 = side_t * big_zoom;
+            if (s1 <= side_cap) big_c = ImVec2(0.5f, 0.5f);
+            else big_c = ImVec2(u.x - (m.x - mx) / s1, u.y + (m.y - my) / s1);
         }
         if (ImGui::IsMouseDown(ImGuiMouseButton_Middle)) {
-            big_c.x -= io.MouseDelta.x / (bs * big_zoom);
-            big_c.y += io.MouseDelta.y / (bs * big_zoom);
+            big_c.x -= io.MouseDelta.x / (bs * bz);
+            big_c.y += io.MouseDelta.y / (bs * bz);
         }
     }
     bdl->PushClipRect(p, ImVec2(p.x + bs, p.y + bs), true);
     {   // The texture's square, with a faint eighths grid, wherever the view has gone.
-        const float s = bs * big_zoom;
+        const float s = bs * bz;
         const ImVec2 a(p.x + bs * 0.5f + (0.0f - big_c.x) * s, p.y + bs * 0.5f - (1.0f - big_c.y) * s);
         for (int i = 1; i < 8; i++) {
             const float t = s * (float)i / 8.0f;
@@ -5229,7 +5398,7 @@ void draw_uv_dock(InputState& input, RetopoState& st, UvMeshRow* rows, int nrows
         bdl->AddRect(a, ImVec2(a.x + s, a.y + s), kDivider);
     }
     UvMeshRow* hit = nullptr;
-    const uint32_t under = draw_all(bdl, p, bs, big_zoom, big_c, big && inside && !drag_on, m, hit, true);
+    const uint32_t under = draw_all(bdl, p, bs, bz, big_c, big && inside && !drag_on, m, hit, true);
     bdl->PopClipRect();
     bdl->AddRect(p, ImVec2(p.x + bs, p.y + bs), kDivider, g_dos ? 0.0f : rad(4.0f));
     if (big && ImGui::GetFrameCount() != big_frame) {
@@ -5264,13 +5433,13 @@ void draw_uv_dock(InputState& input, RetopoState& st, UvMeshRow* rows, int nrows
         }
     }
     // Moving the picked islands: the press armed it; past a few pixels they move together,
-    // one undo step a drag (per mesh they're on). The set stays inside the square
+    // one undo step a drag (per mesh they're on). The set, padding band and all, stays inside the square
     // (anything past the edge would bake to nothing).
     if (drag_armed && big && !picked.empty()) {
         if (!drag_on && std::hypot(m.x - drag_from.x, m.y - drag_from.y) > 3.0f) {
             std::vector<RetopoState*> done;
             for (const Pick& q : picked)
-                if (std::find(done.begin(), done.end(), q.st) == done.end()) { q.st->checkpoint(); done.push_back(q.st); }
+                if (std::find(done.begin(), done.end(), q.st) == done.end()) { q.st->checkpoint(); q.st->uv.hand_placed = true; done.push_back(q.st); }
             drag_on = true;
         }
         if (drag_on && (io.MouseDelta.x != 0.0f || io.MouseDelta.y != 0.0f)) {
@@ -5286,9 +5455,13 @@ void draw_uv_dock(InputState& input, RetopoState& st, UvMeshRow* rows, int nrows
                     }
                 }
             }
-            const float s = bs * big_zoom;
-            const float du = std::max(-lo_u, std::min(1.0f - hi_u, io.MouseDelta.x / s));
-            const float dv = std::max(-lo_v, std::min(1.0f - hi_v, -io.MouseDelta.y / s));
+            // The padding band stays in the square too (its outer edge, half the padding
+            // past the islands), unless the set is too big for that.
+            const float s = bs * bz;
+            const float mu = std::min(edge_m, std::max(0.0f, (1.0f - (hi_u - lo_u)) * 0.5f));
+            const float mv = std::min(edge_m, std::max(0.0f, (1.0f - (hi_v - lo_v)) * 0.5f));
+            const float du = std::max(mu - lo_u, std::min(1.0f - mu - hi_u, io.MouseDelta.x / s));
+            const float dv = std::max(mv - lo_v, std::min(1.0f - mv - hi_v, -io.MouseDelta.y / s));
             for (const Pick& q : picked) {
                 const RetopoMesh& dm = q.st->result;
                 UvLayout& dL = q.st->uv;
@@ -5312,7 +5485,7 @@ void draw_uv_dock(InputState& input, RetopoState& st, UvMeshRow* rows, int nrows
         static ImVec2 pivot;
         const bool qd = ImGui::IsKeyDown(ImGuiKey_Q), ed = ImGui::IsKeyDown(ImGuiKey_E);
         float step = 0.0f;
-        if (big && !picked.empty() && !drag_on) {
+        if (big && !picked.empty() && !drag_on && !io.MouseDown[ImGuiMouseButton_Right]) {
             if (io.KeyShift) {
                 if (ImGui::IsKeyPressed(ImGuiKey_Q, false)) step = 1.5707963f;
                 if (ImGui::IsKeyPressed(ImGuiKey_E, false)) step = -1.5707963f;
@@ -5325,7 +5498,7 @@ void draw_uv_dock(InputState& input, RetopoState& st, UvMeshRow* rows, int nrows
             from.clear();
             float lo_u = 1e30f, lo_v = 1e30f, hi_u = -1e30f, hi_v = -1e30f;
             for (const Pick& q : picked) {
-                if (std::find(turning.begin(), turning.end(), q.st) == turning.end()) { q.st->checkpoint(); turning.push_back(q.st); }
+                if (std::find(turning.begin(), turning.end(), q.st) == turning.end()) { q.st->checkpoint(); q.st->uv.hand_placed = true; turning.push_back(q.st); }
                 const RetopoMesh& dm = q.st->result;
                 UvLayout& dL = q.st->uv;
                 for (uint32_t f = 0; f < dm.face_count(); f++) {
@@ -5354,8 +5527,10 @@ void draw_uv_dock(InputState& input, RetopoState& st, UvMeshRow* rows, int nrows
                 lo_u = std::min(lo_u, u); hi_u = std::max(hi_u, u);
                 lo_v = std::min(lo_v, v); hi_v = std::max(hi_v, v);
             }
-            const float su = hi_u - lo_u > 1.0f ? 0.0f : lo_u < 0.0f ? -lo_u : hi_u > 1.0f ? 1.0f - hi_u : 0.0f;
-            const float sv = hi_v - lo_v > 1.0f ? 0.0f : lo_v < 0.0f ? -lo_v : hi_v > 1.0f ? 1.0f - hi_v : 0.0f;
+            const float mu = std::min(edge_m, std::max(0.0f, (1.0f - (hi_u - lo_u)) * 0.5f));
+            const float mv = std::min(edge_m, std::max(0.0f, (1.0f - (hi_v - lo_v)) * 0.5f));
+            const float su = hi_u - lo_u > 1.0f ? 0.0f : lo_u < mu ? mu - lo_u : hi_u > 1.0f - mu ? 1.0f - mu - hi_u : 0.0f;
+            const float sv = hi_v - lo_v > 1.0f ? 0.0f : lo_v < mv ? mv - lo_v : hi_v > 1.0f - mv ? 1.0f - mv - hi_v : 0.0f;
             if (su != 0.0f || sv != 0.0f)
                 for (const Corner& c : from) { c.L->uv[2 * c.j] += su; c.L->uv[2 * c.j + 1] += sv; }
             input.wake_requested = true;
@@ -5364,6 +5539,74 @@ void draw_uv_dock(InputState& input, RetopoState& st, UvMeshRow* rows, int nrows
             for (RetopoState* t : turning) t->rev++;
             turning.clear();
             from.clear();
+        }
+    }
+    // Right-drag scales the picked islands round the middle of the set, as Select mode
+    // scales meshes: right grows, left shrinks (exponential, so it feels the same at any
+    // size). Pressing on an island that isn't picked picks just it; on nothing, the set
+    // as it is. One undo step a drag (per mesh), and the set (with its band) never outgrows the square.
+    {
+        struct Corner { UvLayout* L; uint32_t j; float u, v; };
+        static std::vector<Corner> from;
+        static std::vector<RetopoState*> scaling;
+        static bool armed = false;
+        static ImVec2 at, pivot;
+        static float fit = 1.0f;   // the largest factor that still fits the square
+        if (big && inside && !drag_armed && !ImGui::IsKeyDown(ImGuiKey_Q) && !ImGui::IsKeyDown(ImGuiKey_E)
+            && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+            if (hit && under != ~0u && (hit->active || !baking) && !is_picked(hit->st, under)) {
+                picked.assign(1, Pick{hit->st, under});
+                pick_island(hit, under);
+            }
+            armed = !picked.empty();
+            at = m;
+        }
+        if (armed && big && io.MouseDown[ImGuiMouseButton_Right]) {
+            const float dx = m.x - at.x;
+            if (scaling.empty() && std::fabs(dx) > 3.0f) {
+                // The drag's start: the corners as they are, one undo step per mesh.
+                from.clear();
+                float lo_u = 1e30f, lo_v = 1e30f, hi_u = -1e30f, hi_v = -1e30f;
+                for (const Pick& q : picked) {
+                    if (std::find(scaling.begin(), scaling.end(), q.st) == scaling.end()) { q.st->checkpoint(); q.st->uv.hand_placed = true; scaling.push_back(q.st); }
+                    const RetopoMesh& dm = q.st->result;
+                    UvLayout& dL = q.st->uv;
+                    for (uint32_t f = 0; f < dm.face_count(); f++) {
+                        if (dL.face_chart[f] != q.isl) continue;
+                        for (uint32_t j = dm.face_off[f]; j < dm.face_off[f + 1]; j++) {
+                            from.push_back({&dL, j, dL.uv[2 * j], dL.uv[2 * j + 1]});
+                            lo_u = std::min(lo_u, dL.uv[2 * j]); hi_u = std::max(hi_u, dL.uv[2 * j]);
+                            lo_v = std::min(lo_v, dL.uv[2 * j + 1]); hi_v = std::max(hi_v, dL.uv[2 * j + 1]);
+                        }
+                    }
+                }
+                pivot = ImVec2((lo_u + hi_u) * 0.5f, (lo_v + hi_v) * 0.5f);
+                fit = (1.0f - 2.0f * edge_m) / std::max(1e-6f, std::max(hi_u - lo_u, hi_v - lo_v));
+            }
+            if (!scaling.empty() && io.MouseDelta.x != 0.0f) {
+                // From the start's corners each time, so a long drag doesn't drift; then
+                // slid back inside the square if it now pokes out.
+                const float k = std::min(fit, std::exp(dx * 0.005f));
+                float lo_u = 1e30f, lo_v = 1e30f, hi_u = -1e30f, hi_v = -1e30f;
+                for (const Corner& c : from) {
+                    const float u = pivot.x + (c.u - pivot.x) * k, v = pivot.y + (c.v - pivot.y) * k;
+                    c.L->uv[2 * c.j] = u;
+                    c.L->uv[2 * c.j + 1] = v;
+                    lo_u = std::min(lo_u, u); hi_u = std::max(hi_u, u);
+                    lo_v = std::min(lo_v, v); hi_v = std::max(hi_v, v);
+                }
+                const float su = lo_u < edge_m ? edge_m - lo_u : hi_u > 1.0f - edge_m ? 1.0f - edge_m - hi_u : 0.0f;
+                const float sv = lo_v < edge_m ? edge_m - lo_v : hi_v > 1.0f - edge_m ? 1.0f - edge_m - hi_v : 0.0f;
+                if (su != 0.0f || sv != 0.0f)
+                    for (const Corner& c : from) { c.L->uv[2 * c.j] += su; c.L->uv[2 * c.j + 1] += sv; }
+            }
+            input.wake_requested = true;
+        }
+        if (armed && (!big || !io.MouseDown[ImGuiMouseButton_Right])) {   // let go: done
+            for (RetopoState* t : scaling) t->rev++;
+            scaling.clear();
+            from.clear();
+            armed = false;
         }
     }
     if (e > 0.6f) {
@@ -5382,7 +5625,7 @@ void draw_uv_dock(InputState& input, RetopoState& st, UvMeshRow* rows, int nrows
             else      std::snprintf(left, sizeof left, "%s", isl);
         } else if (picked.size() > 1) std::snprintf(left, sizeof left, "%zu islands picked", picked.size());
         else std::snprintf(left, sizeof left, "%.0f%%", big_zoom * 100.0f);
-        const char* keys = "Drag moves \xC2\xB7 Ctrl+click adds \xC2\xB7 Q/E turn \xC2\xB7 Scroll zoom \xC2\xB7 Middle-drag pan \xC2\xB7 Double-click fit \xC2\xB7 Esc back";
+        const char* keys = "Drag moves \xC2\xB7 Right-drag scales \xC2\xB7 Ctrl+click adds \xC2\xB7 Q/E turn \xC2\xB7 Scroll zoom \xC2\xB7 Middle-drag pan \xC2\xB7 Double-click fit \xC2\xB7 Esc back";
         const float ty = p.y + bs + 8.0f + (bh - 14.0f) * 0.5f;
         text_at(bdl, UiFont::SansSemibold, 12.0f, ImVec2(bx, ty), kText, left);
         const ImVec2 ks = text_size(UiFont::Sans, 12.0f, keys);

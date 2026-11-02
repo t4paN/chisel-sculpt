@@ -112,8 +112,11 @@ struct UvLayout {
     // Per island, from the unwrap (not saved): 1 = it came out folded over itself (or is
     // closed, with no border at all); a seam across it would open it.
     std::vector<uint8_t> needs_cut;
+    // Islands moved, turned or scaled by hand since the last pack (not saved): a Padding
+    // change then shrinks them in place rather than re-packing the arrangement away.
+    bool hand_placed = false;
     bool empty() const { return uv.empty(); }
-    void clear() { uv.clear(); face_chart.clear(); names.clear(); needs_cut.clear(); charts = 0; used = 0.0f; key = 0; seam_key = 0; }
+    void clear() { uv.clear(); face_chart.clear(); names.clear(); needs_cut.clear(); charts = 0; used = 0.0f; key = 0; seam_key = 0; hand_placed = false; }
     // Sized for rm (a cheap guard for a file or a bug; the key is the real test).
     bool fits(const RetopoMesh& rm) const {
         return uv.size() == rm.faces.size() * 2 && face_chart.size() == rm.face_count();
@@ -128,8 +131,8 @@ struct RetopoSnapshot {
     RetopoMesh result;
     bool built = false;
     uint32_t next_id = 1;
-    // Only for saving and loading (retopo_save / retopo_load): history steps leave it
-    // empty. A layout isn't an edit; undo makes it stale or fresh again by its key.
+    // History steps carry it too: islands moved, turned, scaled or re-packed by hand are
+    // edits, and an undo of a mesh edit brings back the layout that went with that mesh.
     UvLayout uv;
     size_t bytes() const;
 };

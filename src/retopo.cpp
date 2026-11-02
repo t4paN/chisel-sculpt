@@ -60,6 +60,7 @@ size_t RetopoSnapshot::bytes() const {
              + (result.faces.size() + result.face_off.size()) * sizeof(uint32_t) * 2
              + result.edges.size() * sizeof(uint32_t) * 3 + result.seams.size() * sizeof(uint32_t);
     for (const RetopoStroke& k : strokes) b += k.pts.size() * (2 * sizeof(Vec3) + sizeof(float)) + 128;
+    b += uv.uv.size() * sizeof(float) + uv.face_chart.size() * sizeof(uint32_t);
     return b;
 }
 
@@ -112,6 +113,7 @@ RetopoSnapshot snapshot_of(const RetopoState& st) {
     s.result = st.result;
     s.built = st.built;
     s.next_id = st.next_id;
+    s.uv = st.uv;
     return s;
 }
 
@@ -134,6 +136,7 @@ void restore(RetopoState& st, RetopoSnapshot&& s) {
     st.result = std::move(s.result);
     st.built = s.built;
     st.next_id = std::max(st.next_id, s.next_id);   // ids are never reused
+    st.uv = std::move(s.uv);
 }
 }  // namespace
 

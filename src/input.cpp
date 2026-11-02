@@ -1700,6 +1700,17 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
     }
     if (ImGui::GetFrameCount() - g_input->uv_preview_frame <= 1) {
         if (action == GLFW_PRESS && key == GLFW_KEY_ESCAPE) g_input->uv_preview_esc = true;
+        // Undo / redo reach the layout from in here too, but not mid-gesture: a move, turn
+        // or scale holds the corners it started from, and an undo could swap the layout
+        // (even its corner count) out from under it.
+        const bool busy = glfwGetMouseButton(w, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS
+                       || glfwGetMouseButton(w, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS
+                       || glfwGetKey(w, GLFW_KEY_Q) == GLFW_PRESS || glfwGetKey(w, GLFW_KEY_E) == GLFW_PRESS;
+        if (action != GLFW_RELEASE && !busy) {
+            const int a = find_key_action(key, mods);
+            if (a == (int)KeyAction::UNDO) g_input->undo_requested = true;
+            if (a == (int)KeyAction::REDO) g_input->redo_requested = true;
+        }
         return;
     }
 
