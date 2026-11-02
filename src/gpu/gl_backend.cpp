@@ -597,7 +597,10 @@ RenderPass begin_offscreen_pass(Device& dev, OffscreenTarget& t, const Offscreen
         if (d.color[i].is_uint) glClearBufferuiv(GL_COLOR, (GLint)i, d.color[i].u);
         else                    glClearBufferfv (GL_COLOR, (GLint)i, d.color[i].f);
     }
-    if (d.clear_depth) glClear(GL_DEPTH_BUFFER_BIT);
+    // glClear(DEPTH) is gated by the depth write-mask, which is whatever the last pipeline
+    // left (an overlay that doesn't write depth): force it, or the clear silently does
+    // nothing and last pass's depth hides this one (the plane cache went stale on orbit).
+    if (d.clear_depth) { glDepthMask(GL_TRUE); glClear(GL_DEPTH_BUFFER_BIT); }
     return rp;
 }
 

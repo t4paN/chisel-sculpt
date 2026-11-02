@@ -1287,5 +1287,5 @@ void draw_retopo_ui(InputState& input, RetopoState& retopo, UvMeshRow* uv_rows, 
     for (int i = 0; i < uv_n; i++) if (uv_rows[i].active) act_id = uv_rows[i].id;
     draw_retopo_overlay(retopo, renderer, camera, win_w, win_h,
                         !cam_moving && !screen_buffers_dirty, input.mirror_x, input.uv_on(), act_id);
-    if (input.uv_mode && input.ui_viewfinder) draw_uv_mesh_marks(uv_rows, uv_n, camera, win_w, win_h, input.ui_viewfinder_px);
+    if (input.uv_mode && input.ui_viewfinder) draw_uv_mesh_marks(uv_rows, uv_n, renderer, camera, win_w, win_h, input.ui_viewfinder_px);
 }

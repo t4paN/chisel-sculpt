@@ -637,6 +637,87 @@ void main() {
 }
 )";
 
+// Overlay wire: the debug ribbon, but each segment pulled from a per-frame buffer of
+// 10 floats (a xyz, b xyz, rgba bits, width px, pull, spare). The pull moves only the
+// depth: the point is drawn where it is and depth-tested as if `pull` world units
+// nearer the eye (never past a tenth of its own depth, so it can't cross the eye).
+static const char* ov_line_vert_src =
+"#version 430 core\n"
+"layout(std430, binding = 0) readonly buffer SegIn { float seg[]; };\n"
+DEBUG_PARAMS_BLOCK
+R"(
+out vec4 vCol;
+out float vLat;
+out float vHw;
+void main() {
+    uint vid = uint(gl_VertexID);
+    uint e = vid / 6u;
+    uint c = vid % 6u;
+    uint s = e * 10u;
+    vec4 va = uView * vec4(seg[s], seg[s+1u], seg[s+2u], 1.0);
+    vec4 vb = uView * vec4(seg[s+3u], seg[s+4u], seg[s+5u], 1.0);
+    float pull = seg[s+8u];
+    float hw = seg[s+7u] * 0.5 + 0.5;
+    vec4 ca = uProj * va, cb = uProj * vb;
+    vec4 pa = uProj * vec4(va.xy, min(va.z + pull, va.z * 0.1), 1.0);
+    vec4 pb = uProj * vec4(vb.xy, min(vb.z + pull, vb.z * 0.1), 1.0);
+    vec2 sa = (ca.xy / ca.w * 0.5 + 0.5) * uViewport;
+    vec2 sb = (cb.xy / cb.w * 0.5 + 0.5) * uViewport;
+    vec2 d  = sb - sa;
+    vec2 n  = vec2(-d.y, d.x) / max(length(d), 1e-4);
+    uint corner = (c == 0u) ? 0u : (c == 1u || c == 4u) ? 1u : (c == 5u) ? 3u : 2u;
+    bool  atB  = corner >= 2u;
+    float side = (corner == 1u || corner == 3u) ? -1.0 : 1.0;
+    vec4 clip = atB ? cb : ca;
+    vec4 pc   = atB ? pb : pa;
+    vec2 sp   = (atB ? sb : sa) + n * (side * hw);
+    vec2 ndc  = sp / uViewport * 2.0 - 1.0;
+    gl_Position = vec4(ndc * clip.w, max(pc.z / pc.w, -0.9999) * clip.w, clip.w);
+    vCol = unpackUnorm4x8(floatBitsToUint(seg[s+6u]));
+    vLat = side;
+    vHw = hw;
+}
+)";
+
+static const char* ov_line_frag_src =
+"#version 430 core\n"
+R"(
+in vec4 vCol;
+in float vLat;
+in float vHw;
+out vec4 fragColor;
+void main() {
+    float aa = clamp((1.0 - abs(vLat)) * vHw, 0.0, 1.0);   // ~1px edge feather
+    fragColor = vec4(vCol.rgb, vCol.a * aa);
+}
+)";
+
+// Overlay fills: plain triangles, 5 floats a corner (xyz, rgba bits, pull), the pull
+// as for the lines.
+static const char* ov_tri_vert_src =
+"#version 430 core\n"
+"layout(std430, binding = 0) readonly buffer TriIn { float tv[]; };\n"
+DEBUG_PARAMS_BLOCK
+R"(
+out vec4 vCol;
+void main() {
+    uint s = uint(gl_VertexID) * 5u;
+    vec4 v = uView * vec4(tv[s], tv[s+1u], tv[s+2u], 1.0);
+    vec4 c = uProj * v;
+    vec4 p = uProj * vec4(v.xy, min(v.z + tv[s+4u], v.z * 0.1), 1.0);
+    gl_Position = vec4(c.xy, max(p.z / p.w, -0.9999) * c.w, c.w);
+    vCol = unpackUnorm4x8(floatBitsToUint(tv[s+3u]));
+}
+)";
+
+static const char* ov_tri_frag_src =
+"#version 430 core\n"
+R"(
+in vec4 vCol;
+out vec4 fragColor;
+void main() { fragColor = vCol; }
+)";
+
 // ---- WGSL render shaders (WebGPU backend) ----
 // One module per program, vs_main + fs_main (the names the seam hardcodes). The
 // std140 Params blocks mirror the *ParamsGPU structs above byte-for-byte — WGSL's
@@ -1340,6 +1421,86 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
 }
 )WGSL";
 
+static const char* ov_line_wgsl_src = R"WGSL(
+struct Params {
+    view: mat4x4<f32>, proj: mat4x4<f32>,
+    viewport: vec2<f32>, half_w: f32, bias: f32,
+};
+@group(0) @binding(63) var<uniform> P: Params;
+@group(0) @binding(0) var<storage, read> seg: array<f32>;
+struct VSOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) col: vec4<f32>,
+    @location(1) lat: f32,
+    @location(2) hw: f32,
+};
+@vertex
+fn vs_main(@builtin(vertex_index) vid: u32) -> VSOut {
+    let e = vid / 6u;
+    let c = vid % 6u;
+    let s = e * 10u;
+    let va = P.view * vec4<f32>(seg[s], seg[s+1u], seg[s+2u], 1.0);
+    let vb = P.view * vec4<f32>(seg[s+3u], seg[s+4u], seg[s+5u], 1.0);
+    let pull = seg[s+8u];
+    let hw = seg[s+7u] * 0.5 + 0.5;
+    let ca = P.proj * va;
+    let cb = P.proj * vb;
+    let pa = P.proj * vec4<f32>(va.xy, min(va.z + pull, va.z * 0.1), 1.0);
+    let pb = P.proj * vec4<f32>(vb.xy, min(vb.z + pull, vb.z * 0.1), 1.0);
+    let sa = (ca.xy / ca.w * 0.5 + vec2<f32>(0.5)) * P.viewport;
+    let sb = (cb.xy / cb.w * 0.5 + vec2<f32>(0.5)) * P.viewport;
+    let d  = sb - sa;
+    let n  = vec2<f32>(-d.y, d.x) / max(length(d), 1e-4);
+    var corner = 2u;
+    if (c == 0u) { corner = 0u; }
+    else if (c == 1u || c == 4u) { corner = 1u; }
+    else if (c == 5u) { corner = 3u; }
+    let atB = corner >= 2u;
+    var side = 1.0;
+    if (corner == 1u || corner == 3u) { side = -1.0; }
+    var clip = ca; var pc = pa; var sp = sa;
+    if (atB) { clip = cb; pc = pb; sp = sb; }
+    sp = sp + n * (side * hw);
+    let ndc = sp / P.viewport * 2.0 - vec2<f32>(1.0);
+    var o: VSOut;
+    o.pos = vec4<f32>(ndc * clip.w, max(pc.z / pc.w, 0.0001) * clip.w, clip.w);
+    o.col = unpack4x8unorm(bitcast<u32>(seg[s+6u]));
+    o.lat = side;
+    o.hw = hw;
+    return o;
+}
+@fragment
+fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
+    let aa = clamp((1.0 - abs(in.lat)) * in.hw, 0.0, 1.0);
+    return vec4<f32>(in.col.rgb, in.col.a * aa);
+}
+)WGSL";
+
+static const char* ov_tri_wgsl_src = R"WGSL(
+struct Params {
+    view: mat4x4<f32>, proj: mat4x4<f32>,
+    viewport: vec2<f32>, half_w: f32, bias: f32,
+};
+@group(0) @binding(63) var<uniform> P: Params;
+@group(0) @binding(0) var<storage, read> tv: array<f32>;
+struct VSOut { @builtin(position) pos: vec4<f32>, @location(0) col: vec4<f32> };
+@vertex
+fn vs_main(@builtin(vertex_index) vid: u32) -> VSOut {
+    let s = vid * 5u;
+    let v = P.view * vec4<f32>(tv[s], tv[s+1u], tv[s+2u], 1.0);
+    let c = P.proj * v;
+    let p = P.proj * vec4<f32>(v.xy, min(v.z + tv[s+4u], v.z * 0.1), 1.0);
+    var o: VSOut;
+    o.pos = vec4<f32>(c.xy, max(p.z / p.w, 0.0001) * c.w, c.w);
+    o.col = unpack4x8unorm(bitcast<u32>(tv[s+3u]));
+    return o;
+}
+@fragment
+fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
+    return in.col;
+}
+)WGSL";
+
 // ---- Renderer ----
 
 Renderer::Renderer()
@@ -1385,6 +1546,12 @@ Renderer::~Renderer() {
     gpu::release_render_pipeline(debug_edge_pipeline);
     gpu::release_buffer(debug_edge_ubo);
     gpu::release_buffer(debug_edge_vbo);
+    gpu::release_render_pipeline(ov_line_depth);
+    gpu::release_render_pipeline(ov_line_xray);
+    gpu::release_render_pipeline(ov_tri_pipeline);
+    gpu::release_buffer(ov_ubo);
+    gpu::release_buffer(ov_seg_buf);
+    gpu::release_buffer(ov_tri_buf);
     gpu::release_render_pipeline(pick_pipeline);
     for (auto& bg : pick_bgs) gpu::release_bind_group(bg);
     for (auto& ubo : pick_ubos) gpu::release_buffer(ubo);
@@ -1715,6 +1882,34 @@ void Renderer::init() {
         debug_edge_ubo = gpu::create_buffer(gpu_dev, nullptr, sizeof(DebugParamsGPU), gpu::Usage::Uniform);
     }
     // debug_edge_vbo (edge index buffer) is created lazily in draw_debug_mesh.
+    // Overlay wire + fills (flush_overlay): the same ribbon, per-segment colour and width.
+    // Lines: one pipeline depth-tested, one not (the "behind the sculpt" x-ray); fills
+    // depth-tested. None writes depth: overlays never hide each other.
+    {
+        gpu::BindEntry binds[] = {
+            { 0,  gpu::Bind::StorageRead, 0 },
+            { 63, gpu::Bind::Uniform, sizeof(DebugParamsGPU) },
+        };
+        gpu::RenderPipelineDesc d;
+        d.shaders.wgsl = ov_line_wgsl_src;
+        d.shaders.vert_glsl = ov_line_vert_src;
+        d.shaders.frag_glsl = ov_line_frag_src;
+        d.binds = binds; d.bind_count = 2;
+        d.topology = gpu::Topology::Triangles;
+        d.depth_test = true; d.depth_write = false; d.blend = true;
+        ov_line_depth = gpu::create_render_pipeline(gpu_dev, d);
+        d.depth_test = false;
+        ov_line_xray = gpu::create_render_pipeline(gpu_dev, d);
+        d.shaders.wgsl = ov_tri_wgsl_src;
+        d.shaders.vert_glsl = ov_tri_vert_src;
+        d.shaders.frag_glsl = ov_tri_frag_src;
+        d.depth_test = true;
+        ov_tri_pipeline = gpu::create_render_pipeline(gpu_dev, d);
+        if (!ov_line_depth.handle || !ov_line_xray.handle || !ov_tri_pipeline.handle)
+            std::fprintf(stderr, "[renderer] overlay pipelines failed\n");
+        else std::printf("[renderer] overlay pipelines compiled (gpu:: seam)\n");
+        ov_ubo = gpu::create_buffer(gpu_dev, nullptr, sizeof(DebugParamsGPU), gpu::Usage::Uniform);
+    }
 
     initialized = true;
 }
@@ -2878,4 +3073,74 @@ void Renderer::draw_debug_mesh(const Camera& cam, const Mesh& mesh, int w, int h
     gpu::draw(rp, (debug_edge_count / 2u) * 6u);
     gpu::end_render_pass(rp);
     gpu::release_bind_group(grp);
+}
+
+void Renderer::overlay_line(const Vec3& a, const Vec3& b, uint32_t rgba, float width_px, float pull, bool xray) {
+    std::vector<float>& q = xray ? ov_xray : ov_depth;
+    float bits;
+    std::memcpy(&bits, &rgba, sizeof bits);
+    q.insert(q.end(), {a.x, a.y, a.z, b.x, b.y, b.z, bits, width_px, pull, 0.0f});
+}
+
+void Renderer::overlay_tri(const Vec3& a, const Vec3& b, const Vec3& c, uint32_t rgba, float pull) {
+    float bits;
+    std::memcpy(&bits, &rgba, sizeof bits);
+    ov_tris.insert(ov_tris.end(), {a.x, a.y, a.z, bits, pull, b.x, b.y, b.z, bits, pull, c.x, c.y, c.z, bits, pull});
+}
+
+// Grows only (to a power of two): the overlay's size changes every frame.
+static void ensure_capacity(gpu::Device& dev, gpu::Buffer& b, const void* data, uint64_t bytes) {
+    if (!b.handle || b.size < bytes) {
+        uint64_t cap = 4096;
+        while (cap < bytes) cap *= 2;
+        gpu::release_buffer(b);
+        b = gpu::create_buffer(dev, nullptr, cap, gpu::Usage::Storage);
+    }
+    gpu::write_buffer(dev, b, 0, data, bytes);
+}
+
+void Renderer::flush_overlay(const Camera& cam, int w, int h) {
+    const uint32_t nx = (uint32_t)(ov_xray.size() / 10), nd = (uint32_t)(ov_depth.size() / 10);
+    const uint32_t nt = (uint32_t)(ov_tris.size() / 5);
+    if (nx + nd + nt == 0 || w <= 0 || h <= 0) { ov_xray.clear(); ov_depth.clear(); ov_tris.clear(); return; }
+    DebugParamsGPU p{};
+    cam.get_view_matrix(p.view);
+    cam.get_projection_matrix(p.proj, (float)w / (float)h);
+    p.viewport[0] = (float)w;
+    p.viewport[1] = (float)h;
+    gpu::write_buffer(gpu_dev, ov_ubo, 0, &p, sizeof p);
+    // One buffer for both kinds of line, x-ray first: the draws take their ranges.
+    ov_xray.insert(ov_xray.end(), ov_depth.begin(), ov_depth.end());
+    if (nx + nd) ensure_capacity(gpu_dev, ov_seg_buf, ov_xray.data(), ov_xray.size() * sizeof(float));
+    if (nt) ensure_capacity(gpu_dev, ov_tri_buf, ov_tris.data(), ov_tris.size() * sizeof(float));
+
+    gpu::RenderTarget target;          // fbo 0 (default framebuffer), no clear: the scene's depth stays
+    target.width = w; target.height = h;
+    gpu::RenderPass rp = gpu::begin_render_pass(gpu_dev, target);
+    gpu::BindGroup gt{}, gx{}, gd{};
+    if (nt) {
+        gpu::BindBufferEntry be[] = {{ 0, &ov_tri_buf, ov_tri_buf.size }, { 63, &ov_ubo, sizeof(DebugParamsGPU) }};
+        gt = gpu::create_bind_group(gpu_dev, ov_tri_pipeline, be, 2);
+        gpu::set_pipeline(rp, ov_tri_pipeline);
+        gpu::set_bind_group(rp, ov_tri_pipeline, gt);
+        gpu::draw(rp, nt);
+    }
+    gpu::BindBufferEntry bl[] = {{ 0, &ov_seg_buf, ov_seg_buf.size }, { 63, &ov_ubo, sizeof(DebugParamsGPU) }};
+    if (nx) {
+        gx = gpu::create_bind_group(gpu_dev, ov_line_xray, bl, 2);
+        gpu::set_pipeline(rp, ov_line_xray);
+        gpu::set_bind_group(rp, ov_line_xray, gx);
+        gpu::draw(rp, nx * 6u);
+    }
+    if (nd) {
+        gd = gpu::create_bind_group(gpu_dev, ov_line_depth, bl, 2);
+        gpu::set_pipeline(rp, ov_line_depth);
+        gpu::set_bind_group(rp, ov_line_depth, gd);
+        gpu::draw(rp, nd * 6u, nx * 6u);
+    }
+    gpu::end_render_pass(rp);
+    if (nt) gpu::release_bind_group(gt);
+    if (nx) gpu::release_bind_group(gx);
+    if (nd) gpu::release_bind_group(gd);
+    ov_xray.clear(); ov_depth.clear(); ov_tris.clear();
 }

@@ -2419,101 +2419,25 @@ void retopo_band(ImDrawList* dl, const RetopoStroke& s, const Camera& cam, int w
 
 }  // namespace
 
-void draw_uv_mesh_marks(const UvMeshRow* rows, int n, const Camera& cam, int win_w, int win_h, float px) {
+void draw_uv_mesh_marks(const UvMeshRow* rows, int n, Renderer& renderer, const Camera& cam,
+                        int win_w, int win_h, float px) {
     // A low is a few hundred faces, so its outline is found on the CPU every frame: the
     // edges between a face that looks at us and one that looks away, plus open borders.
-    // Open borders and folds can sit behind the low's own front, or behind another low,
-    // so every shown low is drawn into a small depth buffer (a quarter of the window
-    // each way) and each bit of outline is kept only where nothing nearer covers it.
-    // The plane cache can't do this: it holds only the active sculpt.
+    // Drawn on the GPU against the scene's own depth, so what hides it is whatever is
+    // really in front: its own front (an open sheet's far rim), another mesh, a sculpt.
     ImDrawList* dl = ImGui::GetBackgroundDrawList();
     struct Ed { uint64_t key; uint8_t facing; };
-    struct Shown { const UvMeshRow* r; size_t first; float tol; };
-    static std::vector<Shown> shown;
     static std::vector<Ed> ed;
-    static std::vector<ImVec2> at;
-    static std::vector<float> dep;
-    static std::vector<uint8_t> ok;
-    static std::vector<float> zb;
-    shown.clear(); at.clear(); dep.clear(); ok.clear();
+    const ImU32 under = IM_COL32(10, 12, 18, 160);
+    const float lw = std::max(0.5f, px);
     for (int i = 0; i < n; i++) {
         const UvMeshRow& r = rows[i];
         if (!(r.active || r.selected) || !r.st->built || r.st->result.face_count() == 0) continue;
         const RetopoMesh& rm = r.st->result;
-        float mean = 0.0f;
-        for (size_t e = 0; e + 1 < rm.edges.size(); e += 2) mean += (rm.v[rm.edges[e]] - rm.v[rm.edges[e + 1]]).length();
-        mean /= (float)std::max<size_t>(1, rm.edges.size() / 2);
-        shown.push_back({&r, at.size(), 0.25f * mean});
-        for (const Vec3& p : rm.v) {
-            float x, y;
-            const float d = cam.view_depth(p);
-            // Past the window's edge still counts (the overlay's rule); behind the eye doesn't.
-            const bool on = cam.world_to_screen(p, win_w, win_h, x, y) || !cam.perspective || d > 1e-4f;
-            at.push_back(ImVec2(x, y));
-            dep.push_back(d);
-            ok.push_back(on);
-        }
-    }
-    if (shown.empty()) return;
-    // The depth buffer: perspective interpolates 1/depth (straight in screen space), ortho
-    // depth itself. Stored as the depth.
-    const int S = 4, zw = (win_w + S - 1) / S, zh = (win_h + S - 1) / S;
-    zb.assign((size_t)zw * zh, 1e30f);
-    auto raster = [&](uint32_t i0, uint32_t i1, uint32_t i2) {
-        const float x[3] = {at[i0].x / S, at[i1].x / S, at[i2].x / S}, y[3] = {at[i0].y / S, at[i1].y / S, at[i2].y / S};
-        float w[3] = {dep[i0], dep[i1], dep[i2]};
-        if (cam.perspective) for (float& q : w) q = 1.0f / q;
-        const float area = (x[1] - x[0]) * (y[2] - y[0]) - (x[2] - x[0]) * (y[1] - y[0]);
-        if (std::fabs(area) < 1e-6f) return;
-        const int bx0 = std::max(0, (int)std::floor(std::min({x[0], x[1], x[2]})));
-        const int bx1 = std::min(zw - 1, (int)std::ceil(std::max({x[0], x[1], x[2]})));
-        const int by0 = std::max(0, (int)std::floor(std::min({y[0], y[1], y[2]})));
-        const int by1 = std::min(zh - 1, (int)std::ceil(std::max({y[0], y[1], y[2]})));
-        for (int py = by0; py <= by1; py++)
-            for (int qx = bx0; qx <= bx1; qx++) {
-                const float cx = qx + 0.5f, cy = py + 0.5f;
-                const float l0 = ((x[1] - cx) * (y[2] - cy) - (x[2] - cx) * (y[1] - cy)) / area;
-                const float l1 = ((x[2] - cx) * (y[0] - cy) - (x[0] - cx) * (y[2] - cy)) / area;
-                const float l2 = 1.0f - l0 - l1;
-                if (l0 < 0.0f || l1 < 0.0f || l2 < 0.0f) continue;
-                float d = l0 * w[0] + l1 * w[1] + l2 * w[2];
-                if (cam.perspective) d = 1.0f / d;
-                float& z = zb[(size_t)py * zw + qx];
-                z = std::min(z, d);
-            }
-    };
-    for (const Shown& sh : shown) {
-        const RetopoMesh& rm = sh.r->st->result;
-        const uint32_t base = (uint32_t)sh.first;
-        for (uint32_t f = 0; f < rm.face_count(); f++) {
-            const uint32_t o = rm.face_off[f], m = rm.face_size(f);
-            for (uint32_t j = 1; j + 1 < m; j++) {
-                const uint32_t a = base + rm.faces[o], b = base + rm.faces[o + j], c = base + rm.faces[o + j + 1];
-                if (ok[a] && ok[b] && ok[c]) raster(a, b, c);
-            }
-        }
-    }
-    // Seen at a screen point with this depth? The farthest of the 3 x 3 around it decides:
-    // an outline sits at the edge of its own faces, where one coarse pixel can land on the
-    // face beside it (nearer, if it tips toward us), but what really hides a line covers
-    // all nine.
-    auto seen = [&](ImVec2 p, float d, float tol) {
-        const int cx = (int)(p.x / S), cy = (int)(p.y / S);
-        float far = 0.0f;
-        for (int yy = cy - 1; yy <= cy + 1; yy++)
-            for (int xx = cx - 1; xx <= cx + 1; xx++) {
-                if (xx < 0 || yy < 0 || xx >= zw || yy >= zh) return true;
-                far = std::max(far, zb[(size_t)yy * zw + xx]);
-            }
-        return d <= far + tol;
-    };
-    const ImU32 under = IM_COL32(10, 12, 18, 160);
-    const float lw = std::max(0.5f, px);
-    for (const Shown& sh : shown) {
-        const UvMeshRow& r = *sh.r;
-        const RetopoMesh& rm = r.st->result;
-        const uint32_t base = (uint32_t)sh.first;
         const ImU32 col = uv_mesh_color(r.id, 1.0f);
+        float pull = 0.0f;   // a mean edge: the low's chords dip under the sculpt it lies on
+        for (size_t e = 0; e + 1 < rm.edges.size(); e += 2) pull += (rm.v[rm.edges[e]] - rm.v[rm.edges[e + 1]]).length();
+        pull /= (float)std::max<size_t>(1, rm.edges.size() / 2);
         ed.clear();
         for (uint32_t f = 0; f < rm.face_count(); f++) {
             const uint32_t o = rm.face_off[f], m = rm.face_size(f);
@@ -2532,35 +2456,25 @@ void draw_uv_mesh_marks(const UvMeshRow* rows, int n, const Camera& cam, int win
             }
         }
         std::sort(ed.begin(), ed.end(), [](const Ed& p, const Ed& q) { return p.key < q.key; });
-        // Each outline edge in pieces of about 6 px, a piece drawn where its middle is seen,
-        // so a line that runs behind something stops where it goes under.
-        float x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f;
         for (int pass = 0; pass < 2; pass++)
             for (size_t e = 0; e < ed.size();) {
                 size_t q = e + 1;
                 bool mixed = false;
                 while (q < ed.size() && ed[q].key == ed[e].key) { mixed |= ed[q].facing != ed[e].facing; q++; }
                 const bool border = q - e == 1;
-                const uint32_t a = base + (uint32_t)(ed[e].key >> 32), b = base + (uint32_t)ed[e].key;
+                const uint32_t a = (uint32_t)(ed[e].key >> 32), b = (uint32_t)ed[e].key;
                 e = q;
-                if (!(border || mixed) || !ok[a] || !ok[b]) continue;
-                const ImVec2 pa = at[a], pb = at[b];
-                const float len = std::sqrt((pb.x - pa.x) * (pb.x - pa.x) + (pb.y - pa.y) * (pb.y - pa.y));
-                const int k = std::max(1, std::min(64, (int)(len / 6.0f)));
-                for (int i = 0; i < k; i++) {
-                    const float t0 = (float)i / k, t1 = (float)(i + 1) / k, tm = 0.5f * (t0 + t1);
-                    const ImVec2 m(pa.x + (pb.x - pa.x) * tm, pa.y + (pb.y - pa.y) * tm);
-                    if (!seen(m, dep[a] + (dep[b] - dep[a]) * tm, sh.tol)) continue;
-                    const ImVec2 s0(pa.x + (pb.x - pa.x) * t0, pa.y + (pb.y - pa.y) * t0);
-                    const ImVec2 s1(pa.x + (pb.x - pa.x) * t1, pa.y + (pb.y - pa.y) * t1);
-                    dl->AddLine(s0, s1, pass ? col : under, pass ? lw : lw + 2.0f);
-                }
+                if (!(border || mixed)) continue;
+                if (cam.perspective && (cam.view_depth(rm.v[a]) <= 1e-4f || cam.view_depth(rm.v[b]) <= 1e-4f)) continue;
+                renderer.overlay_line(rm.v[a], rm.v[b], pass ? col : under, pass ? lw : lw + 2.0f, pull, false);
             }
         // Corner brackets round it on screen, a little off it, kept inside the window.
-        for (size_t v = sh.first; v < sh.first + rm.v.size(); v++) {
-            if (!ok[v]) continue;
-            x0 = std::min(x0, at[v].x); y0 = std::min(y0, at[v].y);
-            x1 = std::max(x1, at[v].x); y1 = std::max(y1, at[v].y);
+        float x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f;
+        for (const Vec3& p : rm.v) {
+            float x, y;
+            // Past the window's edge still counts (the overlay's rule); behind the eye doesn't.
+            if (!(cam.world_to_screen(p, win_w, win_h, x, y) || !cam.perspective || cam.view_depth(p) > 1e-4f)) continue;
+            x0 = std::min(x0, x); y0 = std::min(y0, y); x1 = std::max(x1, x); y1 = std::max(y1, y);
         }
         const float pad = 10.0f;
         x0 = std::max(x0 - pad, 4.0f); y0 = std::max(y0 - pad, 4.0f);
@@ -2665,9 +2579,13 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
     // under a lip); deeper than that it's the far side of the model and stays hidden.
     // vis: 0 hidden, 1 behind the sculpt, 2 in view.
     const RetopoMesh& rm = st.result;
+    // The wire, fills, seams and loops go to the GPU (renderer.overlay_*), depth-tested
+    // against the scene itself, so they need only fac: 2 facing us, 1 facing away, 0 off
+    // (behind the eye). vis, the plane cache's verdict, still serves what's drawn here in
+    // 2D on top: hole washes and the snap marks.
     static std::vector<ImVec2> at;
-    static std::vector<uint8_t> vis;
-    at.resize(rm.v.size()); vis.resize(rm.v.size());
+    static std::vector<uint8_t> vis, fac;
+    at.resize(rm.v.size()); vis.resize(rm.v.size()); fac.resize(rm.v.size());
     float reach = 0.0f;   // "a few quads": 4x the mean edge
     for (size_t e = 0; e + 1 < rm.edges.size(); e += 2)
         reach += (rm.v[rm.edges[e]] - rm.v[rm.edges[e + 1]]).length();
@@ -2706,6 +2624,7 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
         }
         at[i] = ImVec2(x, y);
         vis[i] = v;
+        fac[i] = on_screen ? (facing ? 2 : 1) : 0;
     }
     const ImU32 dark = IM_COL32(15, 25, 35, 150), lite = IM_COL32(170, 240, 255, 235);
     const ImU32 hot = IM_COL32(255, 235, 120, 255), dim = IM_COL32(170, 240, 255, 110);
@@ -2728,22 +2647,21 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
     // only the brush's ring, so what's judged is the baked maps. Seams come back while a
     // seam stroke is under the pen: painting them blind would be guesswork.
     const bool baked = uv && st.bake.showing();
+    // How far toward the eye the GPU depth test takes the low's front: a quad's chord dips
+    // under the curved sculpt it lies on, by well under an edge. Edges facing away are
+    // tested from `reach` nearer, so only those a few quads behind the surface (an ear's
+    // inner fold, under a lip) come through: the old "behind, but not the far side" rule.
+    const float pull = edge_mean;
     if (!baked) {
-        const ImDrawListFlags keep_flags = dl->Flags;
-        dl->Flags &= ~ImDrawListFlags_AntiAliasedFill;
-        static std::vector<ImVec2> poly;
+        static std::vector<uint32_t> tri;
         for (uint32_t f = 0; f < rm.face_count(); f++) {
             const uint32_t ow = rm.face_owner[f];
             if (st.hidden(ow) && ow != st.hover_id) continue;
             const uint32_t* q = rm.face(f);
             const uint32_t k = rm.face_size(f);
-            poly.clear();
-            bool ok = true;
-            for (uint32_t i = 0; i < k && ok; i++) {
-                ok = vis[q[i]] == 2;
-                if (i == 0 || q[i] != q[i - 1]) poly.push_back(at[q[i]]);   // welds leave repeats
-            }
-            if (!ok || poly.size() < 3) continue;
+            bool ok = k >= 3;
+            for (uint32_t i = 0; i < k && ok; i++) ok = fac[q[i]] == 2;
+            if (!ok) continue;
             const uint32_t isl = tint ? st.uv.face_chart[f] : ~0u;
             const ImU32 col = isl != ~0u ? uv_island_color(mesh, isl, isl == st.uv_hover || isl == st.uv_sel ? 0.45f
                                                                 : island_lit ? 0.08f : 0.24f)
@@ -2751,19 +2669,21 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
                             : is_sel(ow)        ? IM_COL32(255, 190, 120, 40)
                             : st.hover_id       ? IM_COL32(205, 245, 255, 16)
                                                 : IM_COL32(205, 245, 255, 36);
-            if (poly.size() <= 4) dl->AddConvexPolyFilled(poly.data(), (int)poly.size(), col);
-            else                  dl->AddConcavePolyFilled(poly.data(), (int)poly.size(), col);
+            // Quads and triangles fan; Erase's merged n-gons (maybe concave) ear-clip.
+            tri.clear();
+            if (k <= 4) for (uint32_t j = 1; j + 1 < k; j++) tri.insert(tri.end(), {0u, j, j + 1});
+            else        retopo_face_triangles(rm, f, tri);
             // Masked: darkened by its corners' mean mask, as a masked sculpt is.
             float mk = 0.0f;
             for (uint32_t i = 0; i < k; i++) mk += rm.mask_at(q[i]);
             mk /= (float)k;
-            if (mk > 0.01f) {
-                const ImU32 shade = IM_COL32(8, 12, 22, (int)(170.0f * std::min(1.0f, mk)));
-                if (poly.size() <= 4) dl->AddConvexPolyFilled(poly.data(), (int)poly.size(), shade);
-                else                  dl->AddConcavePolyFilled(poly.data(), (int)poly.size(), shade);
+            const ImU32 shade = IM_COL32(8, 12, 22, (int)(170.0f * std::min(1.0f, mk)));
+            for (size_t t = 0; t + 2 < tri.size(); t += 3) {
+                const Vec3 &p0 = rm.v[q[tri[t]]], &p1 = rm.v[q[tri[t + 1]]], &p2 = rm.v[q[tri[t + 2]]];
+                renderer.overlay_tri(p0, p1, p2, col, pull);
+                if (mk > 0.01f) renderer.overlay_tri(p0, p1, p2, shade, pull);
             }
         }
-        dl->Flags = keep_flags;
     }
     // Holes (outlines that aren't a piece's outer edge): a wash over the gap, green when
     // its count of sides is even (Fill makes it quads), amber when odd, rim drawn the same.
@@ -2790,62 +2710,55 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
         }
         dl->Flags = keep_flags;
     }
-    // Behind the sculpt (either end): one dim pass under the rest, no dark outline.
-    for (size_t e = 0; e + 1 < rm.edges.size() && !baked; e += 2) {
-        const uint32_t a = rm.edges[e], b = rm.edges[e + 1];
-        if (!vis[a] || !vis[b] || (vis[a] == 2 && vis[b] == 2)) continue;
-        const uint32_t ow = rm.edge_owner[e / 2];
-        if (st.hidden(ow) && ow != st.hover_id) continue;
-        const bool lit = ow == st.hover_id, on = is_sel(ow);
-        dl->AddLine(at[a], at[b], lit ? IM_COL32(150, 135, 70, 190) : on ? IM_COL32(150, 90, 40, 170)
-                                  : IM_COL32(70, 110, 130, st.hover_id ? 70 : 150), 1.0f);
-    }
-    for (size_t e = 0; e + 1 < rm.edges.size() && !baked; e += 2) {
-        const uint32_t a = rm.edges[e], b = rm.edges[e + 1];
-        if (vis[a] != 2 || vis[b] != 2) continue;
-        const uint32_t ow = rm.edge_owner[e / 2];
-        if (st.hidden(ow) && ow != st.hover_id) continue;   // its eye is shut (hover still shows it)
-        dl->AddLine(at[a], at[b], dark, ow == st.hover_id || is_sel(ow) ? 4.0f : 3.0f);
-    }
-    for (size_t e = 0; e + 1 < rm.edges.size() && !baked; e += 2) {
-        const uint32_t a = rm.edges[e], b = rm.edges[e + 1];
-        if (vis[a] != 2 || vis[b] != 2) continue;
-        const uint32_t ow = rm.edge_owner[e / 2];
-        if (st.hidden(ow) && ow != st.hover_id) continue;
-        const bool lit = ow == st.hover_id, on = is_sel(ow);
-        dl->AddLine(at[a], at[b], lit ? hot : on ? sel_col : st.hover_id ? dim : lite,
-                    lit || on ? 2.0f : 1.5f);
-    }
-    // UV seams: red over the wire, thin where the sculpt is in front.
+    // The wire on the GPU, in three layers: every edge facing us dim and x-ray (what stays
+    // of it is the part behind the sculpt), then depth-tested: edges facing away dim (from
+    // `reach` nearer), the dark outline, and the bright line over it.
+    for (int layer = 0; layer < 4 && !baked; layer++)
+        for (size_t e = 0; e + 1 < rm.edges.size(); e += 2) {
+            const uint32_t a = rm.edges[e], b = rm.edges[e + 1];
+            if (!fac[a] || !fac[b]) continue;
+            const bool front = fac[a] == 2 && fac[b] == 2;
+            if (front != (layer != 1)) continue;
+            const uint32_t ow = rm.edge_owner[e / 2];
+            if (st.hidden(ow) && ow != st.hover_id) continue;   // its eye is shut (hover still shows it)
+            const bool lit = ow == st.hover_id, on = is_sel(ow);
+            const ImU32 behind = lit ? IM_COL32(150, 135, 70, 190) : on ? IM_COL32(150, 90, 40, 170)
+                                     : IM_COL32(70, 110, 130, st.hover_id ? 70 : 150);
+            const Vec3 &pa = rm.v[a], &pb = rm.v[b];
+            if (layer == 0)      renderer.overlay_line(pa, pb, behind, 1.0f, pull, true);
+            else if (layer == 1) renderer.overlay_line(pa, pb, behind, 1.0f, reach, false);
+            else if (layer == 2) renderer.overlay_line(pa, pb, dark, lit || on ? 4.0f : 3.0f, pull, false);
+            else renderer.overlay_line(pa, pb, lit ? hot : on ? sel_col : st.hover_id ? dim : lite, lit || on ? 2.0f : 1.5f, pull, false);
+        }
+    // UV seams and double-clicked edge loops, the same way over the wire: bold where seen,
+    // thin x-ray where the sculpt is in front, thin from `reach` nearer where facing away.
+    auto marked = [&](uint32_t a, uint32_t b, ImU32 under, ImU32 bold, ImU32 thin) {
+        if (fac[a] == 2 && fac[b] == 2) {
+            renderer.overlay_line(rm.v[a], rm.v[b], thin, 1.0f, pull, true);
+            renderer.overlay_line(rm.v[a], rm.v[b], under, 5.0f, pull, false);
+            renderer.overlay_line(rm.v[a], rm.v[b], bold, 2.5f, pull, false);
+        } else {
+            renderer.overlay_line(rm.v[a], rm.v[b], thin, 1.0f, reach, false);
+        }
+    };
     if (!baked || st.seam_painting) {
         static std::vector<uint32_t> seams;
         retopo_seam_edges(rm, seams);
         for (size_t e = 0; e + 1 < seams.size(); e += 2) {
             const uint32_t a = seams[e], b = seams[e + 1];
-            if (!vis[a] || !vis[b] || st.hidden(rm.v_owner[a])) continue;
-            if (vis[a] == 2 && vis[b] == 2) {
-                dl->AddLine(at[a], at[b], IM_COL32(30, 0, 0, 220), 5.0f);
-                dl->AddLine(at[a], at[b], IM_COL32(255, 50, 40, 255), 2.5f);
-            } else {
-                dl->AddLine(at[a], at[b], IM_COL32(220, 40, 30, 150), 1.0f);
-            }
+            if (!fac[a] || !fac[b] || st.hidden(rm.v_owner[a])) continue;
+            marked(a, b, IM_COL32(30, 0, 0, 220), IM_COL32(255, 50, 40, 255), IM_COL32(220, 40, 30, 150));
         }
     }
-    // Double-clicked edge loops: green over the wire, thin where the sculpt is in front.
     // A picked edge a weld or the eraser took away isn't an edge any more: skipped.
     for (size_t e = 0; e + 1 < st.loop_edges.size() && !baked; e += 2) {
         const uint32_t a = st.loop_edges[e], b = st.loop_edges[e + 1];
-        if (a >= rm.v.size() || b >= rm.v.size() || !vis[a] || !vis[b]) continue;
+        if (a >= rm.v.size() || b >= rm.v.size() || !fac[a] || !fac[b]) continue;
         if (st.hidden(rm.v_owner[a]) || rm.nb_off.size() != rm.v.size() + 1) continue;
         bool edge = false;
         for (uint32_t k = rm.nb_off[a]; k < rm.nb_off[a + 1] && !edge; k++) edge = rm.nb[k] == b;
         if (!edge) continue;
-        if (vis[a] == 2 && vis[b] == 2) {
-            dl->AddLine(at[a], at[b], IM_COL32(0, 20, 8, 220), 5.0f);
-            dl->AddLine(at[a], at[b], IM_COL32(0, 255, 65, 255), 2.5f);
-        } else {
-            dl->AddLine(at[a], at[b], IM_COL32(0, 200, 55, 150), 1.0f);
-        }
+        marked(a, b, IM_COL32(0, 20, 8, 220), IM_COL32(0, 255, 65, 255), IM_COL32(0, 200, 55, 150));
     }
     // Cut's vertex snap: the vertex under the pointer gets a diamond, the one a cut
     // started on a filled one, so a vertex cut is never a surprise. Not a ring: that was

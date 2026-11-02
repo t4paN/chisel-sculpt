@@ -491,6 +491,9 @@ void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse) {
         ImGui::EndPopup();
     }
 
+    // Overlay wire queued while the UI was built (retopo, UV marks): on the GPU, against
+    // the scene's depth, under the UI.
+    renderer.flush_overlay(camera, win_w, win_h);
     ImGui::Render();
 #ifdef CHISEL_BACKEND_WEBGPU
     // UI pass: load the scene already drawn into the swapchain view, draw ImGui on

@@ -617,6 +617,8 @@ static float pack_islands(const std::vector<std::vector<float>>& isl, int n, int
     return lo;
 }
 
+void retopo_face_triangles(const RetopoMesh& rm, uint32_t f, std::vector<uint32_t>& out) { triangulate(rm, f, out); }
+
 const char* uv_unwrap(const RetopoMesh& rm, const UvSettings& s, UvLayout& out, double& ms) {
     out.clear();
     ms = 0.0;

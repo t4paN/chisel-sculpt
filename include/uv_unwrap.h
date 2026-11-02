@@ -34,4 +34,7 @@ const char* uv_unwrap(const RetopoMesh& rm, const UvSettings& s, UvLayout& out, 
 // its size on its mesh, so texel density matches across them all. Rewrites each layout's
 // uv and used. nullptr on success, else why not (the layouts are left as they were).
 struct UvPackPart { const RetopoMesh* rm; UvLayout* L; };
+// Face f ear-clipped into triangles, as corner positions within the face (0..k-1),
+// appended to out: concave n-gons (the eraser's merges) come out right where a fan folds.
+void retopo_face_triangles(const RetopoMesh& rm, uint32_t f, std::vector<uint32_t>& out);
 const char* uv_pack(const std::vector<UvPackPart>& parts, const UvSettings& s, double& ms);

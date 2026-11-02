@@ -110,6 +110,15 @@ struct Renderer {
     uint32_t debug_edge_src_tris;  // tri count it was built from (stale-cache check)
     float    debug_mesh_radius;    // bounding radius at build (zoom-adaptive width)
 
+    // Overlay wire (retopo, seams, UV mode outline): the Y wireframe's ribbon shader fed
+    // per segment instead of from the sculpt's edges, so each line carries its own colour,
+    // width and pull (world units toward the eye, for the depth test only: a low's chord
+    // dips under the curved sculpt it lies on). Queued while the UI is built, drawn by
+    // flush_overlay() against the scene's depth, just before the UI pass.
+    gpu::RenderPipeline ov_line_depth, ov_line_xray, ov_tri_pipeline;
+    gpu::Buffer ov_ubo, ov_seg_buf, ov_tri_buf;
+    std::vector<float> ov_xray, ov_depth, ov_tris;   // 10 floats a segment, 5 a fill corner
+
     // Screen-buffer MRT for the brush pipeline — on the gpu:: seam. A 4-attachment
     // offscreen target (R32F depth / RGB16F normal / R32UI triid / RG16F bary) +
     // depth RBO, shared with the pick pass. The MRT render pipeline writes all four;
@@ -293,6 +302,13 @@ struct Renderer {
     // mirrored anchor (main.cpp), since only it knows the mirror plane.
     void draw_mirror_cursor(float cx, float cy, float hardness, float alpha,
                             int w, int h);
+
+    // Overlay wire and fills, queued for flush_overlay (see ov_line_depth). rgba is an
+    // ImU32 (IM_COL32 order). xray: drawn over everything, under the depth-tested lines.
+    // Fills are depth tested, under all lines. Drawn in the order queued within a kind.
+    void overlay_line(const Vec3& a, const Vec3& b, uint32_t rgba, float width_px, float pull, bool xray);
+    void overlay_tri(const Vec3& a, const Vec3& b, const Vec3& c, uint32_t rgba, float pull);
+    void flush_overlay(const Camera& cam, int w, int h);
 
     // Debug visualization
     void draw_debug_mesh(const Camera& cam, const Mesh& mesh, int w, int h);

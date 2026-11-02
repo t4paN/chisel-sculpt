@@ -2,6 +2,13 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-03 — Overlay wire on the GPU
+
+- Retopo wire, face fills, seams and edge loops, and the UV mode outline, now draw with the Y wireframe's line shader, each line with its own colour, width and depth pull.
+- They are hidden by the scene's real depth (every mesh, not just the active sculpt's snapshot), and stay correct while the camera moves.
+- The UV outline drops its own CPU depth buffer.
+- Fix (GL): clearing an offscreen target's depth now forces depth writes on; with the overlay drawn last, the pick buffer kept stale depth after an orbit and presses on a retopo mesh orbited instead of grabbing.
+
 ## 2026-11-03 — UV: colour by mesh, marks in the 3D view
 
 - Each mesh has one colour; its islands are lighter and darker shades of it, in the square, the island list and on the model. A strip of it marks each Meshes row.
