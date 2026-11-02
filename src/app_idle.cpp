@@ -273,7 +273,6 @@ void app_idle_update(App& a, int win_w, int win_h, float dx, float dy) {
                         || input.voxel_merge_confirm_pending
                         || input.drop_level_confirm_pending
                         || input.reset_confirm_pending
-                        || input.pose_clear_confirm_pending
                         || input.drop_confirm_pending
                         || input.export_dialog_active || input.import_dialog_active
                         || input.save_dialog_active

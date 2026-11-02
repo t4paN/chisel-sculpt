@@ -20,7 +20,7 @@ identically in the native build, and vice versa.
 
 ## Features
 
-- **Nine brushes** — draw, clay, inflate, crease, pinch, move, limb (snakehook), smooth, mask
+- **Ten brushes** — draw, clay, inflate, crease, pinch, move, limb (snakehook), pose (bend a limb at a joint), smooth, mask
 - **Vertex paint mode** with colour picking; paint survives subdivision, remeshing, and merges
 - **Retopology mode** — sketch strips and rings over the sculpt and they become clean quads on
   its surface; bridge, cut, fill holes, wrap a limb in contour rings with one line, copy a ring

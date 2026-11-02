@@ -1393,7 +1393,7 @@ void BrushStroke::begin(Renderer& renderer, const Camera& cam,
     if (brush_type == BrushType::MOVE || brush_type == BrushType::LIMB
         || brush_type == BrushType::POSE) {
         move.reset(vert_count);
-        pose.joint = -1;   // set again by the first pose dab
+        pose.on = false;   // set again by the first pose dab
     }
 }
 
@@ -2025,76 +2025,47 @@ void BrushStroke::apply_limb_gpu(DabContext& ctx, float cursor_dx, float cursor_
     gpu_positions_deferred = true;
 }
 
-// Rotation taking unit vector u onto unit vector v, as three columns. The shortest
-// one: the twist about the bone stays where it was, which is what an unconstrained
-// joint should do.
-static void pose_rotation(Vec3 u, Vec3 v, float c0[3], float c1[3], float c2[3]) {
-    float m[3][3];
-    Vec3 k = u.cross(v);
-    float c = u.dot(v);
-    if (c < -0.9999f) {
-        // Folded straight back: any axis across the bone will do.
-        Vec3 a = std::fabs(u.x) < 0.9f ? Vec3(1, 0, 0) : Vec3(0, 1, 0);
-        a = a.cross(u).normalized();
-        const float av[3] = {a.x, a.y, a.z};
-        for (int i = 0; i < 3; i++)
-            for (int j = 0; j < 3; j++) m[i][j] = 2.0f * av[i] * av[j] - (i == j ? 1.0f : 0.0f);
-    } else {
-        // Rodrigues with an unnormalised axis: R = I + K + K^2 / (1 + c).
-        const float kx = k.x, ky = k.y, kz = k.z;
-        const float K[3][3] = {{0, -kz, ky}, {kz, 0, -kx}, {-ky, kx, 0}};
-        const float kv[3] = {kx, ky, kz};
-        const float kk = k.dot(k), inv = 1.0f / (1.0f + c);
-        for (int i = 0; i < 3; i++)
-            for (int j = 0; j < 3; j++)
-                m[i][j] = (i == j ? 1.0f : 0.0f) + K[i][j]
-                        + (kv[i] * kv[j] - (i == j ? kk : 0.0f)) * inv;
-    }
-    for (int i = 0; i < 3; i++) { c0[i] = m[i][0]; c1[i] = m[i][1]; c2[i] = m[i][2]; }
+// Rotation by `angle` about unit `n`, as three columns (Rodrigues).
+static void pose_rotation(Vec3 n, float angle, float c0[3], float c1[3], float c2[3]) {
+    const float c = std::cos(angle), s = std::sin(angle), t = 1.0f - c;
+    const float x = n.x, y = n.y, z = n.z;
+    c0[0] = t * x * x + c;     c0[1] = t * x * y + s * z; c0[2] = t * x * z - s * y;
+    c1[0] = t * x * y - s * z; c1[1] = t * y * y + c;     c1[2] = t * y * z + s * x;
+    c2[0] = t * x * z + s * y; c2[1] = t * y * z - s * x; c2[2] = t * z * z + c;
 }
 
 void BrushStroke::apply_pose_gpu(DabContext& ctx, float cursor_dx, float cursor_dy,
-                                 float hardness, PoseRig& rig, int joint) {
+                                 float hardness, PoseHinge& hinge) {
     dirty_verts.clear();
 
-    if (!is_active() || !ctx.compute.has_pose()) return;
-    if (joint < 0 || joint >= (int)rig.joints.size()) return;
+    if (!is_active() || !ctx.compute.has_pose() || !hinge.set) return;
 
     PoseParamsGPU& P = pose.params;
     if (!move.captured) {
         ctx.compute.ensure_accum_buffer(ctx.vertex_count);
         ctx.compute.ensure_move_buffers(ctx.vertex_count);
 
-        pose.joint = joint;
-        pose.start = rig.joints[joint].pos;
+        pose.on = true;
+        pose.start = hinge.lever;
 
-        // The bones touching the grabbed sphere move: each swings about its other end.
-        // One weight lane each on the GPU, so at most four; a fifth just holds still.
+        // Four lanes, all swinging about the anchor: the same swing at 1/4, 2/4, 3/4
+        // and all of its angle (pose_bind spreads each vertex across two of them).
+        // No stretch: the limb keeps its length.
         P = PoseParamsGPU{};
-        int moving[kPoseGpuBones];
-        int nm = 0;
-        for (int bi = 0; bi < (int)rig.bones.size() && nm < kPoseGpuBones; bi++) {
-            const PoseBone& b = rig.bones[bi];
-            if (b.a != joint && b.b != joint) continue;
-            const Vec3 fixed = rig.joints[b.a == joint ? b.b : b.a].pos;
-            const Vec3 axis = pose.start - fixed;
-            const float len = axis.length();
-            if (len < 1e-6f) continue;   // a zero-length bone has no swing
-            const Vec3 u = axis * (1.0f / len);
-            PoseBoneGPU& g = P.bones[nm];
-            g.f[0] = fixed.x; g.f[1] = fixed.y; g.f[2] = fixed.z;
-            g.u[0] = u.x; g.u[1] = u.y; g.u[2] = u.z;
-            g.r0[0] = 1.0f; g.r1[1] = 1.0f; g.r2[2] = 1.0f;   // identity, no stretch
-            g.r0[3] = len;
+        for (int k = 0; k < kPoseGpuBones; k++) {
+            PoseBoneGPU& g = P.bones[k];
+            g.f[0] = hinge.anchor.x; g.f[1] = hinge.anchor.y; g.f[2] = hinge.anchor.z;
+            g.u[0] = 1.0f;
+            g.r0[0] = 1.0f; g.r1[1] = 1.0f; g.r2[2] = 1.0f;   // identity until the first swing
+            g.r0[3] = 1.0f;
             g.r1[3] = 1.0f;
-            moving[nm++] = bi;
         }
-        P.bone_count = (uint32_t)nm;
+        P.bone_count = (uint32_t)kPoseGpuBones;
 
-        // Who moves and how much: the skin envelope + connectivity binding, on the CPU
-        // (main.cpp materialised mesh.pos for it at pen-down). It goes up once; the
-        // CPU already holds the affected list, so there is no capture readback.
-        pose_bind(ctx.mesh, rig, joint, moving, nm, hardness, ctx.mirror_x, pose.bind);
+        // Who moves and how much, on the CPU (main.cpp materialised mesh.pos for it at
+        // pen-down). It goes up once; the CPU already holds the affected list, so
+        // there is no capture readback.
+        pose_bind(ctx.mesh, hinge, hardness, ctx.mirror_x, pose.bind);
         P.affected_count = (uint32_t)pose.bind.ids.size();
         ctx.compute.upload_pose_binding(pose.bind.ids.data(), pose.bind.init.data(),
                                         pose.bind.w.data(), P.affected_count);
@@ -2104,14 +2075,14 @@ void BrushStroke::apply_pose_gpu(DabContext& ctx, float cursor_dx, float cursor_
         move.total_dx = move.total_dy = move.total_dz = 0.0f;
         move.captured = true;
         // The mirror sink's pivot and the F-focus point.
-        anchor_pos = pose.start;
+        anchor_pos = hinge.anchor;
         anchor_valid = true;
     }
     const bool capture_pending = false;
 
-    // The sphere tracks the cursor 1:1 in the plane through it, scaled at its own
-    // depth (foreshortening: under perspective a far sphere needs more world travel
-    // per pixel). Strength isn't read: a joint that lags the hand isn't a joint.
+    // The lever's target tracks the cursor 1:1 in the plane through it, scaled at its
+    // own depth (foreshortening: under perspective a far lever needs more world travel
+    // per pixel). Strength isn't read: a lever that lags the hand isn't a lever.
     float scale = 2.0f * ctx.cam.half_height_at(ctx.cam.view_depth(pose.start))
                 / (float)ctx.win_h;
     Vec3 fwd = ctx.cam.get_view_direction();
@@ -2121,23 +2092,35 @@ void BrushStroke::apply_pose_gpu(DabContext& ctx, float cursor_dx, float cursor_
     move.total_dx += right.x * wdx + up.x * wdy;
     move.total_dy += right.y * wdx + up.y * wdy;
     move.total_dz += right.z * wdx + up.z * wdy;
-    const Vec3 m = pose.start + Vec3(move.total_dx, move.total_dy, move.total_dz);
-    rig.joints[joint].pos = m;   // before the empty-binding bail: the sphere moves regardless
+
+    // The swing: the shortest turn about the anchor taking the lever toward the
+    // target. Dragged onto the anchor, or folded straight back, it has no direction,
+    // so the last swing stays.
+    const Vec3 v0 = pose.start - hinge.anchor;
+    const Vec3 v1 = pose.start + Vec3(move.total_dx, move.total_dy, move.total_dz) - hinge.anchor;
+    const Vec3 cr = v0.cross(v1);
+    const float sn = cr.length(), cs = v0.dot(v1);
+    if (sn > 1e-9f * v0.length() * v1.length()) {
+        const Vec3 n = cr * (1.0f / sn);
+        const float angle = std::atan2(sn, cs);
+        for (int k = 0; k < kPoseGpuBones; k++) {
+            PoseBoneGPU& g = P.bones[k];
+            float c0[3], c1[3], c2[3];
+            pose_rotation(n, angle * (float)(k + 1) / (float)kPoseGpuBones, c0, c1, c2);
+            for (int i = 0; i < 3; i++) { g.r0[i] = c0[i]; g.r1[i] = c1[i]; g.r2[i] = c2[i]; }
+        }
+        // The lever rides the swing at its own distance (before the empty-binding
+        // bail: the handle moves regardless).
+        const float* r0 = P.bones[kPoseGpuBones - 1].r0;
+        const float* r1 = P.bones[kPoseGpuBones - 1].r1;
+        const float* r2 = P.bones[kPoseGpuBones - 1].r2;
+        hinge.lever = hinge.anchor + Vec3(r0[0] * v0.x + r1[0] * v0.y + r2[0] * v0.z,
+                                          r0[1] * v0.x + r1[1] * v0.y + r2[1] * v0.z,
+                                          r0[2] * v0.x + r1[2] * v0.y + r2[2] * v0.z);
+    }
 
     if (move.affected_list.empty()) return;
 
-    for (uint32_t i = 0; i < P.bone_count; i++) {
-        PoseBoneGPU& g = P.bones[i];
-        const Vec3 fixed(g.f[0], g.f[1], g.f[2]);
-        const Vec3 u(g.u[0], g.u[1], g.u[2]);
-        const Vec3 to = m - fixed;
-        const float len = to.length();
-        if (len < 1e-6f) continue;   // dragged onto its anchor: keep the last swing
-        float c0[3], c1[3], c2[3];
-        pose_rotation(u, to * (1.0f / len), c0, c1, c2);
-        for (int k = 0; k < 3; k++) { g.r0[k] = c0[k]; g.r1[k] = c1[k]; g.r2[k] = c2[k]; }
-        g.r1[3] = len / g.r0[3];
-    }
     ctx.compute.dispatch_pose_apply(P, ctx.renderer.vbo_pos, ctx.mesh.vertex_count());
 
     // From here it is apply_move_gpu's tail: mirror sink, normals, touched list.

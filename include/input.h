@@ -9,9 +9,9 @@ enum class BrushType {
     PINCH,
     MOVE,
     LIMB,
-    // Spheres placed inside the volume, linked by bones; dragging one bends the mesh
-    // around the spheres it is linked to (pose.h). Not a stroke you paint: a press
-    // either builds the rig or grabs a sphere.
+    // A hinge drawn along a limb: anchor where the line starts, lever where it ends;
+    // dragging the lever swings what lies past the anchor (pose.h). Not a stroke you
+    // paint: a press either draws a new line or grabs a handle.
     POSE,
     SMOOTH,
     MASK,
@@ -279,16 +279,12 @@ struct InputState {
     bool    brush_props_request  = false;
     bool    brush_props_esc      = false;
 
-    // Pose brush. main.cpp writes the hovered sphere each frame (-1 = none); the press
-    // latch reads it to pick between grabbing a sphere and laying a new one. The size
-    // keys over a sphere resize it instead of the brush (steps, consumed by main).
-    // Delete in the pose brush asks to clear the rig instead of deleting the mesh.
-    int     pose_hover_joint     = -1;
-    int     pose_resize_steps    = 0;
-    int     pose_remove_joint    = -1;    // right-clicked sphere, consumed by main
+    // Pose brush. main.cpp writes the handle under the cursor each frame (kPoseAnchor,
+    // kPoseLever, -1 none); the press latch reads it to pick between swinging, moving
+    // the anchor and drawing a new line. Delete in the pose brush clears the hinge
+    // instead of deleting the mesh.
+    int     pose_hover           = -1;
     bool    pose_delete_key      = false;
-    bool    pose_clear_confirm_pending = false;
-    bool    pose_clear_requested = false;
     bool pose_brush_on() const {
         return current_brush == BrushType::POSE && interaction_mode == InteractionMode::EDIT;
     }
@@ -473,9 +469,8 @@ struct InputState {
     bool on_model;          // cursor is over geometry
 
     // Interaction latch: locks mode on mouse-down until release
-    // POSE_EDIT: the pose brush is laying a new sphere (main.cpp pose block), not
-    // stroking — the press either started a new pair or grew one off a sphere.
-    // POSE_MOVE: Shift+drag on a sphere, relocating it alone (the mesh stays put).
+    // POSE_EDIT: the pose brush is drawing a new hinge line (main.cpp pose block), not
+    // stroking. POSE_MOVE: dragging the anchor alone (the mesh stays put).
     enum class DragMode { NONE, ORBIT, SCULPT, PAN, ZOOM, MOVE_OBJECT, SCALE_OBJECT,
                           POSE_EDIT, POSE_MOVE, RETOPO };
     DragMode drag_mode;

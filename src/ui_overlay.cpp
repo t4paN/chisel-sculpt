@@ -417,20 +417,6 @@ void draw_reset_confirm(TextOverlay& text, int win_w, int win_h) {
                   1.5f, win_w, win_h, CGA(light_gray), 1.0f);
 }
 
-void draw_pose_clear_confirm(TextOverlay& text, int win_w, int win_h) {
-    text.draw_panel(0, 0, (float)win_w, (float)win_h,
-                   win_w, win_h, 0.0f, 0.0f, 0.0f, 0.5f);
-    const char* msg = "Delete all pose spheres? (Y/N)";
-    float msg_scale = 3.0f;
-    float cx = (float)win_w * 0.5f;
-    float msg_y = (float)win_h * 0.5f - 40.0f;
-    text.draw_text(msg, cx - std::strlen(msg) * 8.0f * msg_scale * 0.5f, msg_y,
-                  msg_scale, win_w, win_h, CGA(yellow), 1.0f);
-    const char* sub = "Every sphere and bone on this mesh goes. The sculpt stays as it is.";
-    text.draw_text(sub, cx - std::strlen(sub) * 8.0f * 1.5f * 0.5f, msg_y + 40.0f,
-                  1.5f, win_w, win_h, CGA(light_gray), 1.0f);
-}
-
 void draw_notification(TextOverlay& text, InputState& input, int win_w, int win_h) {
     if (input.notification_timer > 0.0f) {
         input.notification_timer -= 1.0f / 60.0f;
@@ -864,8 +850,9 @@ void draw_help_popup(InputState& input, int win_w, int win_h) {
         std::snprintf(k, sizeof(k), "%s %s %s", L(KeyAction::BRUSH_CREASE),
                       L(KeyAction::BRUSH_PINCH), L(KeyAction::BRUSH_MOVE));
         help_row(k, "Crease  Pinch  Move");
-        std::snprintf(k, sizeof(k), "%s %s", L(KeyAction::BRUSH_LIMB), L(KeyAction::BRUSH_MASK));
-        help_row(k, "Limb  Mask");
+        std::snprintf(k, sizeof(k), "%s %s %s", L(KeyAction::BRUSH_LIMB),
+                      L(KeyAction::BRUSH_POSE), L(KeyAction::BRUSH_MASK));
+        help_row(k, "Limb  Pose  Mask");
         std::snprintf(k, sizeof(k), "%s %s", L(KeyAction::BRUSH_PREV), L(KeyAction::BRUSH_NEXT));
         help_row(k, "Cycle alpha (Draw, Mask)");
         std::snprintf(k, sizeof(k), "%s %s", L(KeyAction::PAINT_BUCKET), L(KeyAction::PAINT_PICKER));
@@ -1171,7 +1158,7 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
     y += mode_h + row_gap;
 
     // === Island 3 — Brush column: single vertical column ===
-    // Order: Draw, Clay, Inflate, Crease, Pinch, Move, Limb, Smooth, Mask. Smooth is a lock
+    // Order: Draw, Clay, Inflate, Crease, Pinch, Move, Limb, Pose, Smooth, Mask. Smooth is a lock
     // toggle (not a switch_brush), handled specially in-place. Paint lives in the
     // mode row above, not here.
     ImGui::SetNextWindowPos(ImVec2(margin, y), ImGuiCond_Always);
@@ -1193,7 +1180,7 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
         {"Pinch",   "Pinch",   btip(4, KeyAction::BRUSH_PINCH),   BrushType::PINCH},
         {"Move",    "Move",    btip(5, KeyAction::BRUSH_MOVE),    BrushType::MOVE},
         {"Limb",    "Limb",    btip(6, KeyAction::BRUSH_LIMB),    BrushType::LIMB},
-        // Pose (K) hidden 2026-10-22: parked, not ready for users. Code stays wired.
+        {"Pose",    "Pose",    btip(7, KeyAction::BRUSH_POSE),    BrushType::POSE},
         {"Smooth",  "Smooth",  "Shortcut: double-press Shift",    BrushType::SMOOTH},
         {"Mask",    "Mask",    btip(9, KeyAction::BRUSH_MASK),    BrushType::MASK},
     };
@@ -1680,59 +1667,42 @@ void draw_gradient_drag(float ax, float ay, float bx, float by) {
     dl->AddCircle(ImVec2(bx, by), 6.0f, fill, 0, 1.6f);
 }
 
-void draw_pose_rig(const PoseRig& rig, const Camera& cam, int win_w, int win_h,
-                   int hover, float soft, bool grow) {
-    if (rig.empty()) return;
+void draw_pose_hinge(const PoseHinge& hinge, const Camera& cam, int win_w, int win_h,
+                     int hover, bool mirror) {
+    if (!hinge.set) return;
     ImDrawList* dl = ImGui::GetBackgroundDrawList();
-    static std::vector<uint8_t> lit;
-    static std::vector<ImVec2>  at;
-    static std::vector<float>   rad;
-    static std::vector<uint8_t> shown;
-    rig.connected(hover, lit);   // all zero when nothing is hovered
-    const size_t n = rig.joints.size();
-    at.resize(n); rad.resize(n); shown.resize(n);
-    for (size_t j = 0; j < n; j++) {
-        const PoseJoint& jt = rig.joints[j];
-        float x, y;
-        cam.world_to_screen(jt.pos, win_w, win_h, x, y);
-        shown[j] = !(cam.perspective && cam.view_depth(jt.pos) <= 1e-4f);
-        at[j] = ImVec2(x, y);
-        rad[j] = std::max(3.0f, jt.radius * pose_px_per_world(cam, jt.pos, win_h));
-    }
     const ImU32 dark = IM_COL32(20, 20, 20, 170);
-    for (const PoseBone& b : rig.bones) {
-        if (!shown[b.a] || !shown[b.b]) continue;
-        const ImU32 col = lit[b.a] ? IM_COL32(255, 190, 90, 235) : IM_COL32(235, 235, 235, 170);
-        dl->AddLine(at[b.a], at[b.b], dark, 5.0f);
-        dl->AddLine(at[b.a], at[b.b], col, 2.5f);
-    }
-    for (size_t j = 0; j < n; j++) {
-        if (!shown[j]) continue;
-        const bool is_hover = (int)j == hover;
-        const ImU32 fill = is_hover ? IM_COL32(255, 190, 90, 90)
-                         : lit[j]   ? IM_COL32(255, 190, 90, 50)
-                                    : IM_COL32(255, 255, 255, 36);
-        const ImU32 line = is_hover ? IM_COL32(255, 222, 160, 255)
-                         : lit[j]   ? IM_COL32(255, 190, 90, 230)
-                                    : IM_COL32(235, 235, 235, 170);
-        dl->AddCircleFilled(at[j], rad[j], fill, 48);
-        dl->AddCircle(at[j], rad[j], dark, 48, 3.5f);
-        dl->AddCircle(at[j], rad[j], line, 48, is_hover ? 2.0f : 1.5f);
-        if (!is_hover) continue;
-        dl->AddCircle(at[j], rad[j] * (1.0f + soft), IM_COL32(255, 190, 90, 80), 64, 1.0f);
-        if (grow) {
-            const float s = std::min(8.0f, rad[j] * 0.6f);
-            const ImVec2 c = at[j];
-            dl->AddLine(ImVec2(c.x - s, c.y), ImVec2(c.x + s, c.y), dark, 4.0f);
-            dl->AddLine(ImVec2(c.x, c.y - s), ImVec2(c.x, c.y + s), dark, 4.0f);
-            dl->AddLine(ImVec2(c.x - s, c.y), ImVec2(c.x + s, c.y), line, 2.0f);
-            dl->AddLine(ImVec2(c.x, c.y - s), ImVec2(c.x, c.y + s), line, 2.0f);
-        }
-    }
+    const ImU32 hot  = IM_COL32(255, 190, 90, 235);
+    const ImU32 cold = IM_COL32(235, 235, 235, 200);
+    auto one = [&](Vec3 a, Vec3 l, bool twin) {
+        if (cam.perspective && (cam.view_depth(a) <= 1e-4f || cam.view_depth(l) <= 1e-4f))
+            return;
+        float ax, ay, lx, ly;
+        cam.world_to_screen(a, win_w, win_h, ax, ay);
+        cam.world_to_screen(l, win_w, win_h, lx, ly);
+        const ImVec2 pa(ax, ay), pl(lx, ly);
+        const int al = twin ? 90 : 255;   // the mirrored twin is a ghost: it can't be grabbed
+        auto fade = [&](ImU32 c) { return (c & 0x00FFFFFFu) | ((ImU32)(((c >> 24) * al) / 255) << 24); };
+        // The limb's girth at the anchor, faint: the bend straddles this ring.
+        const float rg = std::max(4.0f, hinge.radius * pose_px_per_world(cam, a, win_h));
+        dl->AddCircle(pa, rg, fade(IM_COL32(255, 255, 255, 60)), 48, 1.0f);
+        dl->AddLine(pa, pl, fade(dark), 5.0f);
+        dl->AddLine(pa, pl, fade(cold), 2.0f);
+        // Anchor: a ring (it holds still). Lever: a filled dot (it swings).
+        const bool ha = !twin && hover == kPoseAnchor, hl = !twin && hover == kPoseLever;
+        dl->AddCircle(pa, 7.0f, fade(dark), 24, 4.5f);
+        dl->AddCircle(pa, 7.0f, fade(ha ? hot : cold), 24, 2.2f);
+        dl->AddCircleFilled(pl, 7.5f, fade(dark), 24);
+        dl->AddCircleFilled(pl, 5.5f, fade(hl ? hot : cold), 24);
+    };
+    if (mirror && pose_mirror_twin(hinge))
+        one(Vec3(-hinge.anchor.x, hinge.anchor.y, hinge.anchor.z),
+            Vec3(-hinge.lever.x, hinge.lever.y, hinge.lever.z), true);
+    one(hinge.anchor, hinge.lever, false);
 }
 
 // The pose brush has no footprint to show: a dot at the hotspot, bright over the
-// model or a sphere (a press does something there), dim elsewhere (it orbits).
+// model or a handle (a press does something there), dim elsewhere (it orbits).
 void draw_pose_cursor(float x, float y, bool on_target) {
     ImDrawList* dl = ImGui::GetForegroundDrawList();
     const int a = on_target ? 235 : 110;
@@ -1869,7 +1839,6 @@ void draw_keybind_window(InputState& input, int win_w, int win_h) {
         float unit_h[kMaxUnits];
         int   units = 0;
         for (int i = 0; i < (int)KeyAction::COUNT; i++) {
-            if (i == (int)KeyAction::BRUSH_POSE) continue;   // hidden while the pose brush is parked
             if (i == 0 || std::strcmp(key_action_info((KeyAction)i).group,
                                       key_action_info((KeyAction)(i - 1)).group) != 0) {
                 unit_first[units] = i;
@@ -1932,7 +1901,6 @@ void draw_keybind_window(InputState& input, int win_w, int win_h) {
                 ImGui::Dummy(ImVec2(0.0f, 4.0f));
                 ImGui::TextColored(accent, "%s", key_action_info((KeyAction)unit_first[u]).group);
                 for (int i = unit_first[u]; i < unit_first[u + 1]; i++) {
-                    if (i == (int)KeyAction::BRUSH_POSE) continue;
                     const KeyActionInfo& info = key_action_info((KeyAction)i);
                     ImGui::PushID(i);
                     ImGui::AlignTextToFramePadding();

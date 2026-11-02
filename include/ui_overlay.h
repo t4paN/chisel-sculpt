@@ -28,7 +28,6 @@ void draw_slider(TextOverlay& text, const InputState& input, int win_w, int win_
 // Confirm for the burger menu's "delete highest subdiv" — destructive, wipes undo.
 void draw_drop_level_confirm(TextOverlay& text, int level, int win_w, int win_h);
 void draw_reset_confirm(TextOverlay& text, int win_w, int win_h);
-void draw_pose_clear_confirm(TextOverlay& text, int win_w, int win_h);
 void draw_notification(TextOverlay& text, InputState& input, int win_w, int win_h);
 // Red flash for the one case where Chisel overrides a setting the user chose: the mesh
 // cannot supply mirror pairs, so Topological was switched back to World Space. Sits at
@@ -72,15 +71,15 @@ void draw_pick_cursor(float x, float y, bool on_model, const float* swatch = nul
 void draw_bucket_cursor(float x, float y, bool on_model);
 void draw_gradient_drag(float ax, float ay, float bx, float by);
 
-// Pose brush rig, drawn through the mesh (the spheres sit inside it): every sphere
-// as a disc at its projected size, bones as lines between them. The set under the
-// cursor (hover = its sphere, -1 none) is lit; the hovered sphere also shows how far
-// its bones may reach (soft radii past its skin) and, with grow set (Ctrl), a "+".
-// Background draw list, so the docks stay on top. And the pose cursor: a dot.
-struct PoseRig;
+// Pose brush hinge, drawn through the mesh (the handles sit inside it): the line,
+// the anchor as a ring with the limb's girth round it, the lever as a dot. The
+// handle under the cursor (hover: kPoseAnchor / kPoseLever, -1 none) is lit. With
+// mirror, the twin the swing will also move shows as a ghost. Background draw list,
+// so the docks stay on top. And the pose cursor: a dot.
+struct PoseHinge;
 struct Camera;
-void draw_pose_rig(const PoseRig& rig, const Camera& cam, int win_w, int win_h,
-                   int hover, float soft, bool grow);
+void draw_pose_hinge(const PoseHinge& hinge, const Camera& cam, int win_w, int win_h,
+                     int hover, bool mirror);
 void draw_pose_cursor(float x, float y, bool on_target);
 
 // Retopo mode (key 0). The overlay draws every stroke as a translucent band at its

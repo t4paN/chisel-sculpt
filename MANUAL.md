@@ -29,7 +29,7 @@ mesh to sculpt; left-drag off the mesh to orbit. That's 90% of the app right the
 
 - **Top toolbar** — Subdiv −/+, Undo, Redo, Export, Save, **+** (incremental save), Load, Merge.
 - **Mode row** — Edit, Insert, Select, Paint, plus the `[ ]` paint-visibility toggle.
-- **Brush column** (Edit mode) — Draw, Clay, Inflate, Crease, Pinch, Move, Limb, Smooth, Mask.
+- **Brush column** (Edit mode) — Draw, Clay, Inflate, Crease, Pinch, Move, Limb, Pose, Smooth, Mask.
 - **HUD panel** (bottom left) — active brush and its size / strength / hardness /
   spacing, triangle and vertex counts, subdivision level, mirror axis, normals mode,
   autosmooth state.
@@ -73,8 +73,30 @@ the camera, so you never have to switch tools just to look around.
 | V | **Pinch** | Pulls vertices toward the stroke centre — tightens edges and detail. |
 | G | **Move** | Grab-and-drag: picks up the surface under the cursor and moves it with you. |
 | H | **Limb** | Snakehook: pulls a tube out of the surface, redistributing and densifying geometry at the tip. Grow arms, tails, horns from nothing. |
+| K | **Pose** | Bend a limb at a joint: draw along it, drag the far end. See Posing below. |
 | Shift | **Smooth** | Hold Shift with any brush to smooth instead. In Paint mode it blends colours instead of geometry. |
 | M | **Mask** | Paints a protection mask (see Masking below). |
+
+### Posing
+
+The Pose brush (K) bends a limb at one joint, no rig to build.
+
+- **Draw along the limb, from the joint to the tip** (shoulder to hand, elbow to
+  wrist). The line leaves two handles in the middle of the limb: the **anchor**
+  (ring) where you started, the **lever** (dot) where you let go. The faint circle
+  round the anchor is the limb's thickness there.
+- **Drag the lever**: everything past the anchor swings round it, like a hinge, and
+  keeps its length. The bend follows the joint even when the limb is already bent.
+- **Hardness** sets how soft the bend is across the anchor: high is a crisp hinge,
+  low spreads it out over about two limb-thicknesses each side.
+- **Drag the anchor**: moves it alone, the mesh stays put.
+- **Draw a new line** to pose another joint; it replaces the old handles.
+- **Mirror**: the other side bends to match (its handles show faintly).
+- **Shift** still smooths, handy for tidying a crease after a bend.
+  **Delete** clears the handles (never the mesh).
+
+The handles show only while Pose is in hand, and aren't saved with the project.
+Ctrl+Z on a bend puts the lever back too.
 
 ### Clay's own controls
 

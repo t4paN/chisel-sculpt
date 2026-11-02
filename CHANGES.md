@@ -2,6 +2,14 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-03 — Pose brush is back, as a hinge (K)
+
+- Draw along a limb, joint to tip: an anchor (ring) and a lever (dot) sit in the middle of it. Drag the lever and everything past the anchor swings round it, keeping its length.
+- Hardness sets how soft the bend is across the anchor; the cut leans to the joint's own angle on an already bent limb.
+- Only the limb connected through the anchor moves: an arm lying along the body keeps to its own tube, and UV-seam splits on imported models count as joined.
+- Drag the anchor to move it alone; a new line replaces the hinge; Delete clears it; Shift smooths; Ctrl+Z puts the lever back with the bend; Mirror bends the twin.
+- Back in both docks, the help card, shortcuts and the manual. The old sphere rig is gone.
+
 ## 2026-11-03 — Brackets on the meshes you work on, wire corners
 
 - With Viewfinder corners on, retopo mode brackets the active mesh's retopo in its colour (no outline: the wire shows it); UV mode still marks every mesh the square shows.

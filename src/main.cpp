@@ -1291,14 +1291,7 @@ int main(int argc, char* argv[]) {
         // Consume scroll for camera zoom
         {
             float scroll = input_consume_scroll();
-            // Over a pose sphere the wheel sizes the sphere instead of zooming.
-            PoseRig& rig = scene.active_entity().pose;
-            const int ph = input.pose_hover_joint;
-            if (std::fabs(scroll) > 0.01f && input.pose_brush_on()
-                && ph >= 0 && ph < (int)rig.joints.size()) {
-                rig.joints[ph].radius = std::max(1e-4f,
-                    rig.joints[ph].radius * std::pow(1.1f, scroll));
-            } else if (std::fabs(scroll) > 0.01f && scene.active_entity().retopo.grid_open) {
+            if (std::fabs(scroll) > 0.01f && scene.active_entity().retopo.grid_open) {
                 // A lasso grid just made: the wheel sets its density (retopo_frame).
                 // Contours: the wheel sets the rings, Ctrl+wheel the count round.
                 RetopoState& rs = scene.active_entity().retopo;
@@ -1652,170 +1645,117 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // ---- Pose brush: hover, laying spheres, sizing them, clearing the rig ----
-        // A sculpt stroke only starts when the press grabbed a sphere (input.cpp); this
+        // ---- Pose brush: hover, drawing the hinge, moving its anchor ----
+        // A sculpt stroke only starts when the press grabbed the lever (input.cpp); this
         // block owns everything else the brush does. All of it is user-paced, so the
         // CPU ray casts here are fine (they never run inside a stroke).
         {
-            PoseRig& rig = scene.active_entity().pose;
-            struct PoseBuild {
-                bool on = false, new_a = false;
-                int a = -1, b = -1;
-                float px = 0, py = 0, lx = -1, ly = -1;
-            };
-            static PoseBuild build;
-            // Shift+drag relocation: which sphere, and where the cursor sat on it, so
-            // the sphere keeps its offset under the hand instead of jumping to it.
-            struct PoseRelocate { bool on = false; int j = -1; float ox = 0, oy = 0, lx = 0, ly = 0; };
-            static PoseRelocate reloc;
+            PoseHinge& hinge = scene.active_entity().pose;
+            // Drawing a line: the hinge it replaces, back if the press never dragged.
+            struct PoseLine { bool on = false; float px = 0, py = 0, lx = -1, ly = -1; PoseHinge prev; };
+            static PoseLine line;
+            // Dragging the anchor: where the cursor sat on it, so the handle keeps its
+            // offset under the hand instead of jumping to it.
+            struct PoseAnchorDrag { bool on = false; float ox = 0, oy = 0, lx = 0, ly = 0; };
+            static PoseAnchorDrag adrag;
             const float mx = (float)input.mouse_x, my = (float)input.mouse_y;
             const bool pose_on = input.pose_brush_on();
-            const bool laying = input.drag_mode == InputState::DragMode::POSE_EDIT
-                             || input.drag_mode == InputState::DragMode::POSE_MOVE;
+            const bool editing = input.drag_mode == InputState::DragMode::POSE_EDIT
+                              || input.drag_mode == InputState::DragMode::POSE_MOVE;
 
             if (!pose_on) {
-                input.pose_hover_joint = -1;
-                input.pose_remove_joint = -1;
-            } else if (app_state == AppState::IDLE && !build.on && !reloc.on && !laying
+                input.pose_hover = -1;
+            } else if (app_state == AppState::IDLE && !line.on && !adrag.on && !editing
                        && input.drag_mode != InputState::DragMode::SCULPT) {
-                // Held through a grab: the stroke drives the sphere the press landed on.
-                input.pose_hover_joint = pose_pick(rig, camera, mx, my, win_w, win_h);
+                // Held through a swing: the stroke drives the lever the press landed on.
+                input.pose_hover = pose_pick(hinge, camera, mx, my, win_w, win_h);
             }
 
-            // Press: a new pair (A at the press, B dragged out), or with Ctrl on a
-            // sphere, a new sphere B grown off it.
-            if (pose_on && app_state == AppState::IDLE && !build.on
+            // Press on the model: a new line. The anchor sits in the volume under the
+            // press, sized to it; an open mesh has no far wall, so the ring stands in.
+            if (pose_on && app_state == AppState::IDLE && !line.on
                 && input.drag_mode == InputState::DragMode::POSE_EDIT) {
                 scene.materialize_active_cpu();   // the ray cast reads mesh.pos
-                const int h = input.pose_hover_joint;
-                build.new_a = h < 0;
-                int a = h;
-                if (a < 0) {
-                    Vec3 c;
-                    float r;
-                    if (pose_volume_center(*mesh, camera, mx, my, win_w, win_h, c, r)) {
-                        // An open mesh has no far wall to measure: fall back to the ring.
-                        if (r <= 0.0f) r = input.brush_size / pose_px_per_world(camera, c, win_h);
-                        a = rig.add_joint(c, r);
-                    }
-                }
-                if (a >= 0) {
-                    const PoseJoint ja = rig.joints[a];   // a copy: add_joint may reallocate
-                    const int b = rig.add_joint(ja.pos, ja.radius);
-                    if (rig.add_bone(a, b)) {
-                        build.on = true;
-                        build.a = a;
-                        build.b = b;
-                        build.px = mx; build.py = my;
-                        build.lx = build.ly = -1.0f;
-                    } else {
-                        rig.pop_joint();
-                        if (build.new_a) rig.pop_joint();
-                        std::snprintf(input.notification, sizeof(input.notification),
-                                      "A pose set holds at most %d bones", kPoseMaxBones);
-                        input.notification_timer = 2.0f;
-                    }
-                }
-                if (!build.on) input.drag_mode = InputState::DragMode::NONE;
-            }
-
-            // Dragging B out: it sits in the middle of whatever volume is under the
-            // cursor, sized to it; off the model it rides the plane through A.
-            if (build.on && input.drag_mode == InputState::DragMode::POSE_EDIT
-                && (mx != build.lx || my != build.ly)) {
-                build.lx = mx; build.ly = my;
-                const PoseJoint ja = rig.joints[build.a];
-                PoseJoint& jb = rig.joints[build.b];
                 Vec3 c;
                 float r;
                 if (pose_volume_center(*mesh, camera, mx, my, win_w, win_h, c, r)) {
-                    jb.pos = c;
-                    jb.radius = r > 0.0f ? r : ja.radius;
-                } else {
-                    Vec3 o, d;
-                    pose_screen_ray(camera, mx, my, win_w, win_h, o, d);
-                    jb.pos = o + d * camera.view_depth(ja.pos);
-                    jb.radius = ja.radius;
-                }
-            }
-
-            // Release: a click that never dragged makes nothing.
-            if (build.on && input.drag_mode != InputState::DragMode::POSE_EDIT) {
-                if (std::hypot(mx - build.px, my - build.py) < 4.0f) {
-                    rig.pop_joint();
-                    if (build.new_a) rig.pop_joint();
-                }
-                build.on = false;
-                input.pose_hover_joint = -1;   // indices may have shifted; re-picked next frame
-            }
-
-            // Shift+drag: the sphere alone, re-centred in the volume under the cursor (its
-            // size kept, it may have been tuned); off the model it rides its own depth.
-            if (pose_on && app_state == AppState::IDLE && !reloc.on
-                && input.drag_mode == InputState::DragMode::POSE_MOVE) {
-                const int h = input.pose_hover_joint;
-                if (h >= 0 && h < (int)rig.joints.size()) {
-                    scene.materialize_active_cpu();   // the ray cast reads mesh.pos
-                    float sx = mx, sy = my;
-                    camera.world_to_screen(rig.joints[h].pos, win_w, win_h, sx, sy);
-                    reloc = PoseRelocate{true, h, mx - sx, my - sy, mx, my};
-                    rig.forget_moves(h);
+                    if (r <= 0.0f) r = input.brush_size / pose_px_per_world(camera, c, win_h);
+                    line.prev = hinge;
+                    hinge.clear();
+                    hinge.set = true;
+                    hinge.anchor = hinge.lever = c;
+                    hinge.radius = r;
+                    line.on = true;
+                    line.px = mx; line.py = my;
+                    line.lx = line.ly = -1.0f;
                 } else {
                     input.drag_mode = InputState::DragMode::NONE;
                 }
             }
-            if (reloc.on && input.drag_mode == InputState::DragMode::POSE_MOVE
-                && (mx != reloc.lx || my != reloc.ly)) {
-                reloc.lx = mx; reloc.ly = my;
-                PoseJoint& jt = rig.joints[reloc.j];
-                const float tx = mx - reloc.ox, ty = my - reloc.oy;
+
+            // Dragging the lever out: it sits in the middle of whatever volume is under
+            // the cursor; off the model it rides the plane through the anchor.
+            if (line.on && input.drag_mode == InputState::DragMode::POSE_EDIT
+                && (mx != line.lx || my != line.ly)) {
+                line.lx = mx; line.ly = my;
+                Vec3 c;
+                float r;
+                if (pose_volume_center(*mesh, camera, mx, my, win_w, win_h, c, r)) {
+                    hinge.lever = c;
+                } else {
+                    Vec3 o, d;
+                    pose_screen_ray(camera, mx, my, win_w, win_h, o, d);
+                    hinge.lever = o + d * camera.view_depth(hinge.anchor);
+                }
+            }
+
+            // Release: a click that never dragged keeps the hinge that was there.
+            if (line.on && input.drag_mode != InputState::DragMode::POSE_EDIT) {
+                if (std::hypot(mx - line.px, my - line.py) < 4.0f) hinge = line.prev;
+                line.on = false;
+                line.prev.clear();
+                input.pose_hover = -1;
+            }
+
+            // Dragging the anchor: re-centred in the volume under the cursor (its girth
+            // re-measured there); off the model it rides its own depth. The lever stays.
+            if (pose_on && app_state == AppState::IDLE && !adrag.on
+                && input.drag_mode == InputState::DragMode::POSE_MOVE) {
+                if (hinge.set) {
+                    scene.materialize_active_cpu();   // the ray cast reads mesh.pos
+                    float sx = mx, sy = my;
+                    camera.world_to_screen(hinge.anchor, win_w, win_h, sx, sy);
+                    adrag = PoseAnchorDrag{true, mx - sx, my - sy, mx, my};
+                } else {
+                    input.drag_mode = InputState::DragMode::NONE;
+                }
+            }
+            if (adrag.on && input.drag_mode == InputState::DragMode::POSE_MOVE
+                && (mx != adrag.lx || my != adrag.ly)) {
+                adrag.lx = mx; adrag.ly = my;
+                const float tx = mx - adrag.ox, ty = my - adrag.oy;
                 Vec3 c;
                 float r;
                 if (pose_volume_center(*mesh, camera, tx, ty, win_w, win_h, c, r)) {
-                    jt.pos = c;
+                    hinge.anchor = c;
+                    if (r > 0.0f) hinge.radius = r;
                 } else {
                     Vec3 o, d;
                     pose_screen_ray(camera, tx, ty, win_w, win_h, o, d);
-                    jt.pos = o + d * camera.view_depth(jt.pos);
+                    hinge.anchor = o + d * camera.view_depth(hinge.anchor);
                 }
             }
-            if (reloc.on && input.drag_mode != InputState::DragMode::POSE_MOVE)
-                reloc.on = false;
+            if (adrag.on && input.drag_mode != InputState::DragMode::POSE_MOVE)
+                adrag.on = false;
 
-            // Right-click on a sphere.
-            if (input.pose_remove_joint >= 0 && app_state == AppState::IDLE
-                && !build.on && !reloc.on) {
-                rig.remove_joint(input.pose_remove_joint);
-                input.pose_remove_joint = -1;
-                input.pose_hover_joint = -1;   // indices shifted; re-picked next frame
-            }
-
-            // [ and ] over a sphere (input.cpp routes them here instead of brush size).
-            if (input.pose_resize_steps != 0) {
-                const int h = input.pose_hover_joint;
-                if (pose_on && h >= 0 && h < (int)rig.joints.size())
-                    rig.joints[h].radius = std::max(1e-4f,
-                        rig.joints[h].radius * std::pow(1.1f, (float)input.pose_resize_steps));
-                input.pose_resize_steps = 0;
-            }
-
-            if (app_state == AppState::IDLE && !build.on && input.pose_delete_key) {
+            // Delete in the pose brush clears the hinge, never the mesh.
+            if (app_state == AppState::IDLE && !line.on && input.pose_delete_key) {
                 input.pose_delete_key = false;
-                if (rig.empty()) {
-                    std::snprintf(input.notification, sizeof(input.notification),
-                                  "No pose spheres to delete");
-                    input.notification_timer = 1.5f;
-                } else {
-                    input.pose_clear_confirm_pending = true;
-                }
-            }
-            if (app_state == AppState::IDLE && input.pose_clear_requested) {
-                input.pose_clear_requested = false;
-                rig.clear();
-                input.pose_hover_joint = -1;
                 std::snprintf(input.notification, sizeof(input.notification),
-                              "Pose spheres deleted");
+                              hinge.set ? "Pose hinge cleared" : "No pose hinge to clear");
                 input.notification_timer = 1.5f;
+                hinge.clear();
+                input.pose_hover = -1;
             }
         }
 
@@ -1876,17 +1816,14 @@ int main(int argc, char* argv[]) {
                 g_path_stats.report();
                 // Only if this stroke pushed an entry: a stub that never laid a dab
                 // commits nothing, and a blind undo would eat the stroke BEFORE it.
-                // A pose stroke ties its sphere's move to the entry it just pushed, so
-                // Ctrl+Z takes the sphere back with the mesh (PoseRig::on_undo).
-                if (brush_stroke.pose.joint >= 0) {
-                    PoseRig& rig = scene.active_entity().pose;
-                    const int j = brush_stroke.pose.joint;
-                    brush_stroke.pose.joint = -1;
+                // A swing ties the lever's move to the entry it just pushed, so Ctrl+Z
+                // takes the lever back with the mesh (PoseHinge::on_undo).
+                if (brush_stroke.pose.on) {
+                    brush_stroke.pose.on = false;
+                    PoseHinge& hinge = scene.active_entity().pose;
                     const UndoEntry* top = scene.active_undo().peek_undo();
-                    if (top && j < (int)rig.joints.size()
-                        && UndoStack::global_pushes > pushes_at_stroke_start)
-                        rig.moves.push_back({top->seq, (uint16_t)j,
-                                             brush_stroke.pose.start, rig.joints[j].pos});
+                    if (top && hinge.set && UndoStack::global_pushes > pushes_at_stroke_start)
+                        hinge.moves.push_back({top->seq, brush_stroke.pose.start, hinge.lever});
                 }
                 if (touch_undo_on_commit) {
                     touch_undo_on_commit = false;
@@ -2264,8 +2201,7 @@ int main(int argc, char* argv[]) {
                         brush_stroke.apply_limb_gpu(ctx, dx, dy, eff_strength, eff_hardness);
                     } else if (is_pose) {
                         brush_stroke.apply_pose_gpu(ctx, dx, dy, eff_hardness,
-                                                    scene.active_entity().pose,
-                                                    input.pose_hover_joint);
+                                                    scene.active_entity().pose);
                     } else if (input.current_brush == BrushType::CREASE) {
                         brush_stroke.apply_crease(ctx, dab_x, dab_y, eff_strength, eff_hardness,
                                                   input.is_subtract_active());

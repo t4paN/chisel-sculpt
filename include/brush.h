@@ -271,12 +271,12 @@ struct BrushStroke {
     ColorState color;
     MaskState density;   // density-field stroke state — same scalar shape as mask
 
-    // Pose brush: the grabbed sphere at pen-down, the bones touching it (params; each
-    // dab only rewrites their rotation and stretch) and the binding pose_bind made.
+    // Pose brush: the lever at pen-down (each dab swings it from there), the binding
+    // pose_bind made and the params (each dab only rewrites the four lanes' rotation).
     // Everything is filled at pen-down, so no dab allocates.
     struct PoseGrab {
-        int  joint = -1;
-        Vec3 start;                         // the grabbed sphere at pen-down
+        bool on = false;                    // a swing is running (set by its first dab)
+        Vec3 start;                         // the lever at pen-down
         PoseBinding bind;
         PoseParamsGPU params = {};
     } pose;
@@ -369,13 +369,12 @@ struct BrushStroke {
     void apply_limb_gpu(DabContext& ctx, float cursor_dx, float cursor_dy,
                         float strength, float hardness);
 
-    // Pose: the grabbed sphere follows the cursor 1:1 (rig.joints[joint] is moved
-    // live, so it draws where the hand is) and the bones linked to it swing about
-    // their other sphere, carrying what they reach. Move's capture-once spine: the
-    // affected set is fixed at pen-down. hardness = how far past a sphere's skin
-    // the hold fades out.
+    // Pose: the lever follows the cursor 1:1 in the plane through it and everything
+    // past the anchor swings with it (hinge.lever moves live, so it draws where the
+    // hand is). Move's capture-once spine: the affected set is fixed at pen-down.
+    // hardness = how soft the bend is across the anchor.
     void apply_pose_gpu(DabContext& ctx, float cursor_dx, float cursor_dy,
-                        float hardness, PoseRig& rig, int joint);
+                        float hardness, PoseHinge& hinge);
 
     // Post-dispatch methods
     void post_dab(DabContext& ctx);

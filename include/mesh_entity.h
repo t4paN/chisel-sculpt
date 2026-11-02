@@ -37,9 +37,9 @@ struct MeshEntity {
     // targets the active entity, so no cross-entity routing is needed.
     UndoStack     undo;
 
-    // Pose brush spheres and bones on this mesh (pose.h). Shown and used only while
-    // this is the active entity and the pose brush is in hand.
-    PoseRig       pose;
+    // The pose brush's hinge on this mesh (pose.h). Shown and used only while this is
+    // the active entity and the pose brush is in hand.
+    PoseHinge     pose;
 
     // Its retopo (mode 0 / UV 9): the strokes, the low-poly Build made on THIS sculpt,
     // its UVs and its bake. Owned here so the hi/lo pair can't come apart: switching the

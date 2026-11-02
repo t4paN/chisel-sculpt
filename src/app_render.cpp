@@ -68,7 +68,7 @@ void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse) {
     bool non_edit_mode = input.interaction_mode != InputState::InteractionMode::EDIT
                       && !retopo_mode;
     // Hide the OS cursor while sculpting (we draw our own brush cursor).
-    bool show_os_cursor = input.quit_requested || input.export_dialog_active || input.import_dialog_active || input.save_dialog_active || input.remesh_confirm_pending || input.voxel_merge_confirm_pending || input.drop_confirm_pending || input.reset_confirm_pending || input.pose_clear_confirm_pending || input.help_popup_open || input.keybind_menu_open || input.brush_props_open || imgui_wants_mouse || non_edit_mode;
+    bool show_os_cursor = input.quit_requested || input.export_dialog_active || input.import_dialog_active || input.save_dialog_active || input.remesh_confirm_pending || input.voxel_merge_confirm_pending || input.drop_confirm_pending || input.reset_confirm_pending || input.help_popup_open || input.keybind_menu_open || input.brush_props_open || imgui_wants_mouse || non_edit_mode;
 #ifndef __EMSCRIPTEN__
     // A slider drag owns the cursor mode while it runs: it holds GLFW_CURSOR_DISABLED
     // to capture the pointer. This line ran unconditionally every frame and put the
@@ -222,16 +222,15 @@ void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse) {
         renderer.draw_debug_mesh(camera, *mesh, win_w, win_h);
     }
 
-    // Pose rig: shown only while the pose brush is in hand. The reach ring is the
-    // farthest a bone's skin envelope may extend from it: two sphere radii (pose_bind).
+    // Pose hinge: shown only while the pose brush is in hand, with its mirrored twin
+    // when Mirror will move one.
     if (input.pose_brush_on() && !non_edit_mode) {
-        draw_pose_rig(scene.active_entity().pose, camera, win_w, win_h,
-                      input.pose_hover_joint, 1.0f,
-                      input.ctrl_held && app_state == AppState::IDLE);
+        draw_pose_hinge(scene.active_entity().pose, camera, win_w, win_h,
+                        input.pose_hover, input.mirror_x);
     }
 
     // Brush cursor — draw at locked position during slider, normal position otherwise
-    if (!input.quit_requested && !input.export_dialog_active && !input.import_dialog_active && !input.save_dialog_active && !input.remesh_confirm_pending && !input.voxel_merge_confirm_pending && !input.drop_confirm_pending && !input.reset_confirm_pending && !input.pose_clear_confirm_pending && !input.help_popup_open && !input.keybind_menu_open && !input.brush_props_open && !imgui_wants_mouse && !non_edit_mode) {
+    if (!input.quit_requested && !input.export_dialog_active && !input.import_dialog_active && !input.save_dialog_active && !input.remesh_confirm_pending && !input.voxel_merge_confirm_pending && !input.drop_confirm_pending && !input.reset_confirm_pending && !input.help_popup_open && !input.keybind_menu_open && !input.brush_props_open && !imgui_wants_mouse && !non_edit_mode) {
         float cursor_x, cursor_y;
         if (input.slider_mode != InputState::SliderMode::NONE) {
             cursor_x = (float)input.slider_start_x;
@@ -250,7 +249,7 @@ void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse) {
                                  ? input.color_pick_preview : nullptr);
         } else if (input.pose_brush_on() && !input.is_smooth_active()) {
             draw_pose_cursor(cursor_x, cursor_y,
-                             input.on_model || input.pose_hover_joint >= 0);
+                             input.on_model || input.pose_hover >= 0);
         } else if (input.bucket_active && input.current_brush == BrushType::PAINT
                    && !input.is_smooth_active()) {
             if (input.bucket_dragging) {
@@ -360,8 +359,6 @@ void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse) {
                                 win_w, win_h);
     if (bitmap_dialogs && input.reset_confirm_pending)
         draw_reset_confirm(text, win_w, win_h);
-    if (bitmap_dialogs && input.pose_clear_confirm_pending)
-        draw_pose_clear_confirm(text, win_w, win_h);
     if (bitmap_dialogs && input.voxel_merge_confirm_pending)
         draw_voxel_merge_confirm(text, input.voxel_merge_resolution,
                                  dlg.n_selected, dlg.n_unselected,
