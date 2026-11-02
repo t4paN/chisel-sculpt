@@ -171,11 +171,18 @@ void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse) {
     // Mesh: N draws. The active entity is drawn from the working VAO; every
     // other alive entity from its static display VAO. Depth test composes them.
     // UV mode with a bake to preview: the retopo mesh wearing it stands in for the
-    // sculpt it was baked from (the active one, the one retopo works on).
+    // sculpt it was baked from (the active one, the one retopo works on). An atlas: every
+    // member's low stands in for its sculpt, as long as none of them has gone stale.
     const BakeState& bake = scene.active_entity().retopo.bake;
-    const bool baked = input.uv_on() && bake.showing();
+    bool baked = input.uv_on() && bake.showing();
+    if (baked)
+        for (const BakeResult::Part& p : bake.result->parts) {
+            const MeshEntity* e = scene.find_entity(p.id);
+            if (e && e->alive && !e->retopo.bake.fresh) baked = false;
+        }
+    auto in_bake = [&](uint32_t id) { return baked && bake.result->part(id) != nullptr; };
     if (baked) {
-        const BakeResult& r = bake.result;
+        const BakeResult& r = *bake.result;
         renderer.upload_baked(r.serial, r.pos.data(), r.nrm.data(), r.tan.data(), r.uv.data(), r.corners(),
                               r.res, r.has_color ? r.color_rgba.data() : nullptr,
                               r.has_normal ? r.normal_rgba.data() : nullptr);
@@ -193,7 +200,7 @@ void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse) {
             // everything) → every entity tinted: a fully-deselected scene.
             bool selected = false;
             for (uint32_t id : sel) if (id == up->id) { selected = true; break; }
-            if (up->id == active_id && baked) continue;
+            if (in_bake(up->id)) continue;
             const float tex_mix = up->mesh.paint_layers.texture_mix();
             if (up->id == active_id)
                 renderer.draw_mesh(camera, win_w, win_h,

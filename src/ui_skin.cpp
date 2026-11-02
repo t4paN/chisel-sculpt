@@ -5266,10 +5266,11 @@ void draw_uv_dock(InputState& input, RetopoState& st, UvMeshRow* rows, int nrows
             const float x1 = ImGui::GetCursorPosX();
             if (idle) {
                 const bool can = fresh && (bs.normal || bs.color);
-                if (chip(bk.result.empty() ? "Bake" : "Bake again", false, bh, can)) input.uv_bake_requested = true;
+                if (chip(bk.res().empty() ? "Bake" : "Bake again", false, bh, can)) input.uv_bake_requested = true;
                 tip(!st.built ? "Build a retopo mesh in mode 0 first"
                     : !fresh  ? "Unwrap first: the bake goes onto the UV layout"
                     : !(bs.normal || bs.color) ? "Pick a map to bake"
+                    : many    ? "Bake every mesh shown into one set of maps (an atlas), each from its own sculpt"
                               : "Bake the active mesh's sculpt under its retopo mesh into these maps");
             } else {
                 // A bar in the button's place: how far, and what it's doing.
@@ -5289,25 +5290,28 @@ void draw_uv_dock(InputState& input, RetopoState& st, UvMeshRow* rows, int nrows
             }
             if (idle) {
                 ImGui::SameLine();
-                if (chip("Preview", bk.preview, bh, !bk.result.empty())) bk.preview = !bk.preview;
-                tip(bk.result.empty() ? "Bake first" : "Show the retopo mesh wearing the bake, in place of the sculpt");
+                if (chip("Preview", bk.preview, bh, !bk.res().empty())) bk.preview = !bk.preview;
+                tip(bk.res().empty() ? "Bake first" : "Show the retopo mesh wearing the bake, in place of the sculpt (every mesh of an atlas)");
                 ImGui::SameLine();
                 ImGui::SetCursorPosX(x1 + w - bh);
                 BtnOpts so;
                 so.look = Look::Bar; so.side = TipSide::Left; so.icon_px = 18.0f;
-                so.tip = "Save the maps as PNG"; so.enabled = !bk.result.empty();
+                so.tip = "Save the maps as PNG"; so.enabled = !bk.res().empty();
                 if (icon_button("uvBakeSave", Icon::CmdSave, bh, so)) input.uv_bake_save_requested = true;
             }
             // Readout: what the last bake was, and whether it still fits the mesh.
             char ro2[96];
-            const BakeResult& r = bk.result;
+            const BakeResult& r = bk.res();
             if (!idle) std::snprintf(ro2, sizeof ro2, "baking at %dpx: orbit away, it keeps going", bs.resolution);
             else if (r.empty()) std::snprintf(ro2, sizeof ro2, "not baked yet");
             else if (!bk.fresh) std::snprintf(ro2, sizeof ro2, "out of date: the mesh changed, bake again");
+            else if (r.overlap > 0.005f) std::snprintf(ro2, sizeof ro2, "%zu meshes overlap in it: Re-pack, bake again", r.parts.size());
+            else if (r.parts.size() > 1) std::snprintf(ro2, sizeof ro2, "%zu-mesh atlas \xC2\xB7 %dpx \xC2\xB7 %.1f s%s", r.parts.size(), r.res,
+                                                       r.ms / 1000.0, r.missed > 0.0005f ? " \xC2\xB7 some found no sculpt" : "");
             else if (r.missed > 0.0005f) std::snprintf(ro2, sizeof ro2, "%dpx \xC2\xB7 %.1f s \xC2\xB7 %.1f%% found no sculpt", r.res, r.ms / 1000.0, r.missed * 100.0f);
             else std::snprintf(ro2, sizeof ro2, "%dpx \xC2\xB7 %.1f s \xC2\xB7 %s%s", r.res, r.ms / 1000.0,
                                r.has_normal ? "normal" : "", r.has_color ? (r.has_normal ? " + colour" : "colour") : "");
-            label_item(UiFont::Mono, 12.0f, idle && !r.empty() && (!bk.fresh || r.missed > 0.02f) ? kText : kMuted, ro2, 0.0f, 16.0f);
+            label_item(UiFont::Mono, 12.0f, idle && !r.empty() && (!bk.fresh || r.missed > 0.02f || r.overlap > 0.005f) ? kText : kMuted, ro2, 0.0f, 16.0f);
         }
     }
     end_panel();

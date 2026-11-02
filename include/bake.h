@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -18,6 +19,11 @@
 // so a map baked here reads the same there. That only holds if they get the same
 // normals: OBJ export writes them (retopo_smooth_normals), and faces are fanned from
 // their first corner, as OBJ importers triangulate them.
+//
+// An atlas: several meshes whose layouts share one square bake into ONE texture, each
+// low's rays reaching only its own sculpt. The meshes go one at a time (each sculpt's
+// tree is built, used and dropped before the next: the web heap holds one), then one
+// dilation runs over the lot. The result is kept once and shared by every member.
 
 struct Mesh;
 struct RetopoMesh;
@@ -37,13 +43,21 @@ struct BakeResult {
     bool has_normal = false, has_color = false, flip_green = false;
     std::vector<uint8_t> normal_rgba, color_rgba;   // res * res * 4; row 0 = v 1 (the top, as a PNG)
     std::vector<float> pos, nrm, tan, uv;           // 3, 3, 4, 2 floats per corner, 3 corners per triangle
-    uint64_t key = 0;        // bake_key of the low it was baked for
+    // The meshes in it, by entity id: each one's triangles in the soup [tri0, tri1) and
+    // the bake_key of its low as it was baked (one part for a single-mesh bake).
+    struct Part { uint32_t id; uint32_t tri0, tri1; uint64_t key; };
+    std::vector<Part> parts;
+    float    overlap = 0.0f; // share of island texels two meshes' islands both claimed
     uint32_t serial = 0;     // unique per bake in a run: the renderer re-uploads when it changes
     float    missed = 0.0f;  // share of the islands' texels whose ray found no sculpt
     double   ms = 0.0;
     uint32_t high_tris = 0;
     bool empty() const { return res == 0; }
     uint32_t corners() const { return (uint32_t)(pos.size() / 3); }
+    const Part* part(uint32_t id) const {
+        for (const Part& p : parts) if (p.id == id) return &p;
+        return nullptr;
+    }
 };
 
 struct BakeWork;   // a bake in progress (bake.cpp)
@@ -52,29 +66,38 @@ struct BakeWork;   // a bake in progress (bake.cpp)
 // baked from. Not saved: the PNGs are the keepers.
 struct BakeState {
     BakeSettings settings;
-    BakeResult   result;
+    // Shared by every mesh of an atlas (the maps are kept once, not per mesh). Use res().
+    std::shared_ptr<const BakeResult> result;
     std::shared_ptr<BakeWork> job;   // set while a bake runs
     bool preview = true;             // UV mode shows the low wearing the maps
     // Is `result` still the low as it is? Checked by bake_refresh once per retopo change.
     bool fresh = false;
     uint64_t checked_rev = ~0ull;
     bool running() const { return (bool)job; }
-    bool showing() const { return preview && fresh && !result.empty(); }
+    bool showing() const { return preview && fresh && result && !result->empty(); }
+    const BakeResult& res() const {
+        static const BakeResult none;
+        return result ? *result : none;
+    }
 };
 
 // A hash of what a bake depends on in the low: faces, positions and UVs. Different now =
 // the bake is out of date (the preview stops drawing it).
 uint64_t bake_key(const RetopoMesh& rm, const UvLayout& L);
 
-// Once a frame: re-hash the low only when `rev` (RetopoState::rev) moved since the last look.
-void bake_refresh(BakeState& b, const RetopoMesh& rm, const UvLayout& L, uint64_t rev);
+// Once a frame: re-hash the low only when `rev` (RetopoState::rev) moved since the last
+// look. `id` = the mesh it belongs to (its part of the result is the one compared).
+void bake_refresh(BakeState& b, uint32_t id, const RetopoMesh& rm, const UvLayout& L, uint64_t rev);
 
-// Start a bake of `high` onto rm's layout L (both copied, the sculpt is read in place).
+// One mesh of a bake: its low (rm, L: copied at the start) and its sculpt (read in place).
+struct BakeInput { uint32_t id; const RetopoMesh* rm; const UvLayout* L; const Mesh* high; };
+// Start a bake of these meshes into one texture, with b's settings; b holds the job.
 // nullptr = started, else why not.
-const char* bake_start(BakeState& b, const RetopoMesh& rm, const UvLayout& L, const Mesh& high);
+const char* bake_start(BakeState& b, const std::vector<BakeInput>& in);
 // Work for about budget_ms. 0 = still going, 1 = done (b.result filled), -1 = stopped
-// (why says why). `high` must be the sculpt it started on; anything else stops it.
-int  bake_step(BakeState& b, const Mesh& high, double budget_ms, const char** why);
+// (why says why). `find` gives a member's sculpt by id now (nullptr = gone); one that
+// isn't the sculpt it started on, or has changed, stops the job.
+int  bake_step(BakeState& b, const std::function<const Mesh*(uint32_t)>& find, double budget_ms, const char** why);
 void bake_cancel(BakeState& b);
 float bake_progress(const BakeState& b);   // 0..1
 const char* bake_phase(const BakeState& b);

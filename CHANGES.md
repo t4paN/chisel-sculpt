@@ -2,6 +2,14 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-02 — Bake: atlas across meshes
+
+- Bake takes every mesh the UV panel shows (active + Ctrl+clicked) into one set of maps, each low's rays reaching only its own sculpt.
+- One sculpt at a time (tree built, used, freed), one edge dilation over the lot; the bar counts the meshes.
+- The maps are kept once and shared by every member: preview and Save reach them from any of them.
+- Preview swaps every member's sculpt for its low wearing the atlas; Save names the PNGs `<mesh>-atlas-*`.
+- Islands of two meshes overlapping in the texture are reported: Re-pack them together and bake again.
+
 ## 2026-11-02 — UV: scale islands, Padding, undo for layouts
 
 - Big view: right-drag scales the picked islands round their middle, as Select mode scales meshes.

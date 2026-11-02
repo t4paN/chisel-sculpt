@@ -29,17 +29,29 @@ constexpr uint32_t kLeaf = 8;
 
 struct BuildTask { uint32_t node, begin, end; };
 
-enum class Phase { Prep, Tree, Raster, Shade, Dilate, Done };
+// Raster lays every member's texels out at once; then Prep, Tree and Shade run once per
+// member (its own sculpt, its own texels); Dilate once over the lot.
+enum class Phase { Raster, Prep, Tree, Shade, Dilate, Done };
+
+// One mesh of the job: its sculpt (to notice it changing under the job) and its stretch
+// of the soup.
+struct WorkPart {
+    uint32_t id;
+    const Mesh* high;
+    uint32_t high_v, high_t;
+    uint32_t tri0, tri1;   // its soup triangles
+    float reach;           // world units: its own low's mean edge x the Reach setting
+    uint64_t key;
+};
 
 }  // namespace
 
 struct BakeWork {
     BakeSettings s;
-    Phase phase = Phase::Prep;
+    Phase phase = Phase::Raster;
     Clock::time_point t0;
-    // The sculpt it started on, to notice it changing under the job.
-    const Mesh* high = nullptr;
-    uint32_t high_v = 0, high_t = 0;
+    std::vector<WorkPart> parts;
+    size_t cur = 0;                 // the member Prep / Tree / Shade are on
     std::vector<float>    hn;       // the sculpt's smooth normals, 3 per vertex (its own CPU ones may be stale)
     std::vector<uint32_t> hcol;     // the sculpt's paint, composited (empty = no colour map)
     const MeshTexture*    htex = nullptr;   // its texture, through its corner UVs, under the paint
@@ -50,12 +62,14 @@ struct BakeWork {
     std::vector<float>    cen;      // triangle centres, 3 per triangle: build only
     std::vector<BuildTask> todo;
     uint32_t tree_done = 0;         // triangles placed in leaves (progress)
-    // The low, as the soup the result carries (filled in Prep).
+    // The lows, as the soup the result carries (filled at the start).
     BakeResult out;
-    float reach = 0.0f;             // world units
+    float reach = 0.0f;             // the current member's, world units
     // Raster: per texel, the soup triangle covering its centre + 1 (0 = none).
     std::vector<uint32_t> owner;
     uint32_t raster_tri = 0;
+    size_t raster_part = 0;         // the member raster_tri is in
+    uint64_t overlap = 0;           // texels claimed by one member's island and then another's
     // Shade, row by row; filled = has a value (an island texel whose ray hit).
     std::vector<uint8_t> filled;
     uint32_t shade_row = 0;
@@ -105,7 +119,7 @@ void mk_set(const SMikkTSpaceContext* c, const float t[], float sign, int f, int
 
 // The soup: every face with an island, fanned from its first corner (as OBJ readers
 // triangulate), each corner carrying position, smooth normal, tangent and UV.
-void build_low(BakeWork& w, const RetopoMesh& rm, const UvLayout& L) {
+float build_low(BakeWork& w, const RetopoMesh& rm, const UvLayout& L) {
     std::vector<Vec3> vn;
     retopo_smooth_normals(rm, vn);
     std::vector<float> tan(rm.faces.size() * 4, 0.0f);
@@ -145,7 +159,7 @@ void build_low(BakeWork& w, const RetopoMesh& rm, const UvLayout& L) {
         }
         for (uint32_t j = 1; j + 1 < k; j++) { corner(o); corner(o + j); corner(o + j + 1); }
     }
-    w.reach = (float)(edge / std::max(1u, edges)) * w.s.reach;
+    return (float)(edge / std::max(1u, edges)) * w.s.reach;
 }
 
 // ---- The sculpt: normals, paint, tree --------------------------------------------------
@@ -160,6 +174,9 @@ void tri_box(const Mesh& m, uint32_t t, float lo[3], float hi[3]) {
 
 void prep_high(BakeWork& w, const Mesh& m) {
     const uint32_t nv = m.vertex_count(), nt = m.tri_count();
+    // The last member's leftovers go first.
+    w.nodes.clear(); w.todo.clear(); w.tree_done = 0;
+    w.hcol.clear(); w.htex = nullptr; w.hmix = 1.0f;
     w.hn.assign((size_t)nv * 3, 0.0f);
     w.cen.resize((size_t)nt * 3);
     for (uint32_t t = 0; t < nt; t++) {
@@ -322,6 +339,7 @@ void raster_tri(BakeWork& w, uint32_t t) {
             if (b[0] < eps || b[1] < eps || b[2] < eps) continue;
             uint32_t& o = w.owner[(size_t)py * R + px];
             if (!o) o = t + 1;
+            else if (o - 1 < w.parts[w.raster_part].tri0) w.overlap++;   // an earlier member's island
         }
 }
 
@@ -346,7 +364,7 @@ void shade_row(BakeWork& w, const Mesh& m, uint32_t py) {
     for (int px = 0; px < R; px++) {
         const size_t texel = (size_t)py * R + px;
         const uint32_t own = w.owner[texel];
-        if (!own) continue;
+        if (!own || own - 1 < w.parts[w.cur].tri0 || own - 1 >= w.parts[w.cur].tri1) continue;   // not this member's
         w.covered++;
         const uint32_t t = own - 1;
         const float* uv = &r.uv[6 * (size_t)t];
@@ -509,33 +527,44 @@ uint64_t bake_key(const RetopoMesh& rm, const UvLayout& L) {
     return h;
 }
 
-void bake_refresh(BakeState& b, const RetopoMesh& rm, const UvLayout& L, uint64_t rev) {
+void bake_refresh(BakeState& b, uint32_t id, const RetopoMesh& rm, const UvLayout& L, uint64_t rev) {
     if (rev == b.checked_rev) return;
     b.checked_rev = rev;
-    b.fresh = !b.result.empty() && bake_key(rm, L) == b.result.key;
+    const BakeResult::Part* p = b.result ? b.result->part(id) : nullptr;
+    b.fresh = p && bake_key(rm, L) == p->key;
 }
 
-const char* bake_start(BakeState& b, const RetopoMesh& rm, const UvLayout& L, const Mesh& high) {
+const char* bake_start(BakeState& b, const std::vector<BakeInput>& in) {
     if (b.job) return "Already baking";
-    if (rm.faces.empty()) return "Build a retopo mesh in mode 0 first";
-    if (L.empty() || !L.fits(rm) || L.key != uv_topology_key(rm)) return "Unwrap first: the bake needs UVs";
-    if (high.tri_count() == 0) return "No sculpt to bake from";
+    if (in.empty()) return "Build a retopo mesh in mode 0 first";
+    for (const BakeInput& x : in) {
+        if (x.rm->faces.empty()) return "Build a retopo mesh in mode 0 first";
+        if (x.L->empty() || !x.L->fits(*x.rm) || x.L->key != uv_topology_key(*x.rm)) return "Unwrap first: the bake needs UVs";
+        if (x.high->tri_count() == 0) return "No sculpt to bake from";
+    }
     const BakeSettings& s = b.settings;
     if (!s.normal && !s.color) return "Pick a map to bake";
     auto w = std::make_shared<BakeWork>();
     w->s = s;
     w->t0 = Clock::now();
-    w->high = &high;
-    w->high_v = high.vertex_count();
-    w->high_t = high.tri_count();
     BakeResult& r = w->out;
     r.res = std::max(64, std::min(4096, s.resolution));
     r.has_normal = s.normal;
     r.has_color = s.color;
     r.flip_green = s.flip_green;
-    r.key = bake_key(rm, L);
-    r.high_tris = high.tri_count();
-    build_low(*w, rm, L);
+    for (const BakeInput& x : in) {
+        WorkPart p;
+        p.id = x.id;
+        p.high = x.high;
+        p.high_v = x.high->vertex_count();
+        p.high_t = x.high->tri_count();
+        p.tri0 = (uint32_t)(r.pos.size() / 9);
+        p.reach = build_low(*w, *x.rm, *x.L);
+        p.tri1 = (uint32_t)(r.pos.size() / 9);
+        p.key = bake_key(*x.rm, *x.L);
+        r.high_tris += p.high_t;
+        if (p.tri1 > p.tri0) w->parts.push_back(p);
+    }
     if (r.pos.empty()) return "No faces in an island: Unwrap again";
     b.job = std::move(w);
     return nullptr;
@@ -543,49 +572,67 @@ const char* bake_start(BakeState& b, const RetopoMesh& rm, const UvLayout& L, co
 
 void bake_cancel(BakeState& b) { b.job.reset(); }
 
-int bake_step(BakeState& b, const Mesh& m, double budget_ms, const char** why) {
+int bake_step(BakeState& b, const std::function<const Mesh*(uint32_t)>& find, double budget_ms, const char** why) {
     if (why) *why = nullptr;
     if (!b.job) return -1;
     BakeWork& w = *b.job;
-    if (&m != w.high || m.vertex_count() != w.high_v || m.tri_count() != w.high_t) {
-        if (why) *why = "Bake stopped: the sculpt changed";
-        b.job.reset();
-        return -1;
+    // The member being read must still be the sculpt it started on, as it was.
+    const Mesh* mp = nullptr;
+    if (w.phase == Phase::Prep || w.phase == Phase::Tree || w.phase == Phase::Shade) {
+        const WorkPart& P = w.parts[w.cur];
+        mp = find(P.id);
+        if (!mp || mp != P.high || mp->vertex_count() != P.high_v || mp->tri_count() != P.high_t) {
+            if (why) *why = "Bake stopped: the sculpt changed";
+            b.job.reset();
+            return -1;
+        }
     }
     const Clock::time_point t0 = Clock::now();
     const int R = w.out.res;
     while (ms_since(t0) < budget_ms) {
         switch (w.phase) {
-        case Phase::Prep:
-            prep_high(w, m);
-            w.phase = Phase::Tree;
-            break;
-        case Phase::Tree:
-            for (int i = 0; i < 256 && !w.todo.empty(); i++) build_one(w, m);
-            if (w.todo.empty()) {
-                std::vector<float>().swap(w.cen);
-                w.owner.assign((size_t)R * R, 0);
-                w.phase = Phase::Raster;
-            }
-            break;
         case Phase::Raster: {
+            // Every member's texels at once, so a later one sees where an earlier one's
+            // islands already are (an overlap: the readout says Re-pack).
+            if (w.owner.empty()) w.owner.assign((size_t)R * R, 0);
             const uint32_t n = (uint32_t)(w.out.pos.size() / 9);
-            for (int i = 0; i < 64 && w.raster_tri < n; i++) raster_tri(w, w.raster_tri++);
+            for (int i = 0; i < 64 && w.raster_tri < n; i++) {
+                while (w.raster_part + 1 < w.parts.size() && w.raster_tri >= w.parts[w.raster_part].tri1) w.raster_part++;
+                raster_tri(w, w.raster_tri++);
+            }
             if (w.raster_tri >= n) {
                 if (w.out.has_normal) w.out.normal_rgba.assign((size_t)R * R * 4, 0);
                 if (w.out.has_color)  w.out.color_rgba.assign((size_t)R * R * 4, 0);
                 w.filled.assign((size_t)R * R, 0);
-                w.phase = Phase::Shade;
+                w.cur = 0;
+                w.phase = Phase::Prep;
+                return 0;   // the next member's sculpt is checked before it's read
             }
             break;
         }
+        case Phase::Prep:
+            prep_high(w, *mp);
+            w.reach = w.parts[w.cur].reach;
+            w.phase = Phase::Tree;
+            break;
+        case Phase::Tree:
+            for (int i = 0; i < 256 && !w.todo.empty(); i++) build_one(w, *mp);
+            if (w.todo.empty()) {
+                std::vector<float>().swap(w.cen);
+                w.shade_row = 0;
+                w.phase = Phase::Shade;
+            }
+            break;
         case Phase::Shade:
-            shade_row(w, m, w.shade_row++);
+            shade_row(w, *mp, w.shade_row++);
             if (w.shade_row >= (uint32_t)R) {
-                std::vector<uint32_t>().swap(w.owner);
-                // The tree's done its job: hand its memory back before the next one.
+                // This member's tree has done its job: hand its memory back before the next.
                 std::vector<Node>().swap(w.nodes);
                 std::vector<uint32_t>().swap(w.tri);
+                std::vector<float>().swap(w.hn);
+                std::vector<uint32_t>().swap(w.hcol);
+                if (++w.cur < w.parts.size()) { w.phase = Phase::Prep; return 0; }
+                std::vector<uint32_t>().swap(w.owner);
                 // Rings to grow: enough to cover a mip chain's reach a few levels down.
                 w.dilate_passes = std::max(8, std::min(64, R / 64));
                 dilate_start(w);
@@ -602,10 +649,14 @@ int bake_step(BakeState& b, const Mesh& m, double budget_ms, const char** why) {
             static uint32_t serial = 0;
             w.out.ms = ms_since(w.t0);
             w.out.serial = ++serial;
-            b.result = std::move(w.out);
+            for (const WorkPart& p : w.parts) w.out.parts.push_back({p.id, p.tri0, p.tri1, p.key});
+            w.out.overlap = w.covered ? (float)((double)w.overlap / (double)(w.covered + w.overlap)) : 0.0f;
+            auto done = std::make_shared<BakeResult>(std::move(w.out));
+            b.result = done;
             b.checked_rev = ~0ull;
-            std::printf("[bake] %dx%d from %u sculpt tris: %.1f%% of texels missed, %.0f ms\n",
-                        b.result.res, b.result.res, b.result.high_tris, b.result.missed * 100.0f, b.result.ms);
+            std::printf("[bake] %dx%d, %zu mesh%s from %u sculpt tris: %.1f%% of texels missed, %.1f%% overlapped, %.0f ms\n",
+                        done->res, done->res, done->parts.size(), done->parts.size() == 1 ? "" : "es", done->high_tris,
+                        done->missed * 100.0f, done->overlap * 100.0f, done->ms);
             b.job.reset();
             return 1;
         }
@@ -618,11 +669,13 @@ float bake_progress(const BakeState& b) {
     if (!b.job) return 0.0f;
     const BakeWork& w = *b.job;
     const float R = (float)w.out.res;
+    const float np = (float)std::max<size_t>(1, w.parts.size());
+    auto member = [&](float f) { return 0.05f + 0.90f * ((float)w.cur + f) / np; };
     switch (w.phase) {
-    case Phase::Prep:   return 0.0f;
-    case Phase::Tree:   return 0.02f + 0.18f * (float)w.tree_done / (float)std::max(1u, w.high_t);
-    case Phase::Raster: return 0.20f + 0.05f * (float)w.raster_tri / std::max(1.0f, (float)w.out.pos.size() / 9.0f);
-    case Phase::Shade:  return 0.25f + 0.70f * (float)w.shade_row / R;
+    case Phase::Raster: return 0.05f * (float)w.raster_tri / std::max(1.0f, (float)w.out.pos.size() / 9.0f);
+    case Phase::Prep:   return member(0.0f);
+    case Phase::Tree:   return member(0.2f * (float)w.tree_done / (float)std::max(1u, w.parts[w.cur].high_t));
+    case Phase::Shade:  return member(0.2f + 0.8f * (float)w.shade_row / R);
     case Phase::Dilate: return 0.95f + 0.05f * (float)w.dilate_pass / (float)std::max(1, w.dilate_passes);
     case Phase::Done:   return 1.0f;
     }
@@ -631,15 +684,20 @@ float bake_progress(const BakeState& b) {
 
 const char* bake_phase(const BakeState& b) {
     if (!b.job) return "";
-    switch (b.job->phase) {
-    case Phase::Prep:   return "Reading the sculpt";
-    case Phase::Tree:   return "Sorting the sculpt";
+    const BakeWork& w = *b.job;
+    const char* what = "";
+    switch (w.phase) {
     case Phase::Raster: return "Laying out texels";
-    case Phase::Shade:  return "Casting rays";
+    case Phase::Prep:   what = "Reading the sculpt"; break;
+    case Phase::Tree:   what = "Sorting the sculpt"; break;
+    case Phase::Shade:  what = "Casting rays"; break;
     case Phase::Dilate: return "Padding the edges";
     case Phase::Done:   return "Done";
     }
-    return "";
+    if (w.parts.size() < 2) return what;
+    static char buf[64];
+    std::snprintf(buf, sizeof buf, "%s %zu/%zu", what, w.cur + 1, w.parts.size());
+    return buf;
 }
 
 bool bake_write_png(const BakeResult& r, int which, const char* path) {

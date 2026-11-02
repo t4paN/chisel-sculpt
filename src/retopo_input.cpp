@@ -947,11 +947,35 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
     // Bake (bake.h): started from the UV panel, run a slice a frame while UV mode is up.
     // Leaving UV mode stops it: mode 0 or sculpting could change the low or the sculpt
     // under a job that read them at the start.
-    bake_refresh(retopo.bake, retopo.result, retopo.uv, retopo.rev);
+    // An atlas's maps are shared by its meshes, and any of them can go out of date while
+    // another is active: each checks its own part (a cheap rev compare, mostly).
+    const uint32_t active_id = scene.active_mesh_id();
+    for (const auto& up : scene.entities())
+        if (up && up->alive && up->retopo.bake.result)
+            bake_refresh(up->retopo.bake, up->id, up->retopo.result, up->retopo.uv, up->retopo.rev);
+    // A member's sculpt by id, as it is now: the active one is `mesh`.
+    auto sculpt_of = [&](uint32_t id) -> const Mesh* {
+        if (id == active_id) return &mesh;
+        const MeshEntity* e = scene.find_entity(id);
+        return e && e->alive ? &e->mesh : nullptr;
+    };
     if (input.uv_bake_requested) {
         input.uv_bake_requested = false;
         scene.materialize_active_cpu();   // the rays read mesh.pos
-        const char* why = bake_start(retopo.bake, retopo.result, retopo.uv, mesh);
+        // Every mesh the UV panel shows (the active one and the rest of the selection,
+        // each with an up-to-date layout) into one texture: an atlas when it's several.
+        std::vector<BakeInput> in;
+        auto take = [&](uint32_t id) {
+            MeshEntity* e = scene.find_entity(id);
+            if (!e || !e->alive || e->preview || !e->retopo.built) return;
+            for (const BakeInput& x : in) if (x.id == id) return;
+            const RetopoState& t = id == active_id ? retopo : e->retopo;
+            if (id != active_id && (t.uv.empty() || !t.uv.fits(t.result) || t.uv.key != uv_topology_key(t.result))) return;
+            in.push_back({id, &t.result, &t.uv, sculpt_of(id)});
+        };
+        take(active_id);
+        for (uint32_t id : scene.selected_ids()) take(id);
+        const char* why = bake_start(retopo.bake, in);
         if (why) {
             std::snprintf(input.notification, sizeof(input.notification), "%s", why);
             input.notification_timer = 2.5f;
@@ -966,13 +990,26 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
     if (retopo.bake.running()) {
         // ~12 ms a frame: the window keeps answering (orbit to look round mid-bake).
         const char* why = nullptr;
-        const int r = bake_step(retopo.bake, mesh, 12.0, &why);
+        const int r = bake_step(retopo.bake, sculpt_of, 12.0, &why);
         if (r == 1) {
-            const BakeResult& b = retopo.bake.result;
-            if (b.missed > 0.02f)
+            // Every member shares the maps; each one's preview and Save reach them.
+            const BakeResult& b = *retopo.bake.result;
+            for (const BakeResult::Part& p : b.parts) {
+                MeshEntity* e = scene.find_entity(p.id);
+                if (!e || p.id == active_id) continue;
+                e->retopo.bake.result = retopo.bake.result;
+                e->retopo.bake.checked_rev = ~0ull;
+            }
+            if (b.overlap > 0.005f)
+                std::snprintf(input.notification, sizeof(input.notification),
+                              "Baked %zu meshes - their islands overlap: Re-pack them together and bake again", b.parts.size());
+            else if (b.missed > 0.02f)
                 std::snprintf(input.notification, sizeof(input.notification),
                               "Baked %dpx in %.1f s - %.0f%% of it found no sculpt: raise Reach",
                               b.res, b.ms / 1000.0, b.missed * 100.0f);
+            else if (b.parts.size() > 1)
+                std::snprintf(input.notification, sizeof(input.notification), "Baked %zu meshes into one %dpx atlas in %.1f s",
+                              b.parts.size(), b.res, b.ms / 1000.0);
             else
                 std::snprintf(input.notification, sizeof(input.notification), "Baked %dpx in %.1f s", b.res, b.ms / 1000.0);
             input.notification_timer = 3.0f;
@@ -1187,8 +1224,9 @@ std::string retopo_export(const RetopoState& retopo, InputState& input, const st
 
 void retopo_bake_save(const RetopoState& retopo, InputState& input, const std::string& project_path,
                       const char* mesh_name) {
-    const BakeResult& r = retopo.bake.result;
-    const std::string stem = export_stem(project_path, mesh_name);
+    const BakeResult& r = retopo.bake.res();
+    // An atlas's maps belong to all its meshes: named after the active one, marked so.
+    const std::string stem = export_stem(project_path, mesh_name) + (r.parts.size() > 1 ? "-atlas" : "");
     int wrote = 0;
     std::string last;
     for (int which = 0; which < 2; which++) {
