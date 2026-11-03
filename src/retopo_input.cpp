@@ -1019,6 +1019,32 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
         }
         input.wake_requested = true;   // next slice next frame, even with the pen still
     }
+    if (input.uv_seams_cut_requested) {
+        input.uv_seams_cut_requested = false;
+        const int n = retopo.built ? retopo_seams_cut(retopo) : -1;
+        if (n > 0) {
+            input.uv_unwrap_requested = true;   // the point of cutting: the new islands
+            input.wake_requested = true;
+            std::snprintf(input.notification, sizeof(input.notification), "Cut %d seam edge%s - unwrapping", n, n == 1 ? "" : "s");
+        } else {
+            std::snprintf(input.notification, sizeof(input.notification), n == 0 ? "Those were all seams already"
+                                                                                 : "Nothing marked: mark seams first, then C cuts");
+        }
+        input.notification_timer = 2.0f;
+    }
+    if (input.uv_seams_weld_requested) {
+        input.uv_seams_weld_requested = false;
+        const int n = retopo.built ? retopo_seams_weld(retopo) : -1;
+        if (n > 0) {
+            input.uv_unwrap_requested = true;   // islands joined back: lay them out again
+            input.wake_requested = true;
+            std::snprintf(input.notification, sizeof(input.notification), "Welded %d seam edge%s - unwrapping", n, n == 1 ? "" : "s");
+        } else {
+            std::snprintf(input.notification, sizeof(input.notification), n == 0 ? "No seams among the marked edges"
+                                                                                 : "Nothing marked: mark the seams to weld, then W");
+        }
+        input.notification_timer = 2.0f;
+    }
     if (input.uv_seams_clear_requested) {
         input.uv_seams_clear_requested = false;
         if (retopo_seams_clear(retopo)) {
@@ -1144,28 +1170,126 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
                                                      (float)input.mouse_y, input.brush_size)
                                     : ~0u;
 
-    // UV mode's one tool, the seam brush: the pen hops vertex to vertex (the nearest
-    // one in reach), and each hop marks the edges between (Ctrl: unmarks). One stroke
-    // is one undo step.
+    // UV mode's seam brush marks edges (chalk, a selection); Cut (C) makes them seams,
+    // Weld (W) plain edges again. The pen hops vertex to vertex (the nearest one in
+    // reach), and each hop marks the edges between, seams or not; Ctrl unmarks. A
+    // double-click marks the edge loop there (Ctrl: unmarks it), Shift+Ctrl+click the
+    // shortest way from where the last stroke ended, a click off the model drops the
+    // marks. One stroke (or click) is one undo step.
     {
+        // A click off the model (a press that orbits, let go without moving): the marks go.
+        static bool off_press = false;
+        static float off_x = 0.0f, off_y = 0.0f;
+        if (input.mouse1_just_pressed && input.uv_on() && !input.alt_held
+            && input.drag_mode == InputState::DragMode::ORBIT) {
+            off_press = true;
+            off_x = (float)input.mouse_x;
+            off_y = (float)input.mouse_y;
+        }
+        if (off_press && std::hypot((float)input.mouse_x - off_x, (float)input.mouse_y - off_y) > 4.0f) off_press = false;
+        if (off_press && input.mouse1_just_released) {
+            off_press = false;
+            if (input.uv_on() && retopo_marks_clear(retopo)) {
+                std::snprintf(input.notification, sizeof(input.notification), "Marks dropped - Ctrl+Z brings them back");
+                input.notification_timer = 1.5f;
+            }
+        }
         static bool seam_stroke = false;
         static uint32_t seam_last = ~0u;
+        // A double-click is two CLICKS (pressed and let go in place), not two quick strokes
+        // started near each other: those picked whole loops across the one being painted.
+        static double last_click_t = -1.0, press_t = 0.0;
+        static float last_click_x = 0.0f, last_click_y = 0.0f, press_x = 0.0f, press_y = 0.0f;
+        static bool press_moved = false, press_was_dbl = false;
         const bool uv = input.uv_on() && retopo.built;
         const bool press = uv && input.drag_mode == InputState::DragMode::RETOPO;
+        const bool path_keys = input.ctrl_held && input.shift_held;
+        const float mx = (float)input.mouse_x, my = (float)input.mouse_y;
+        retopo.seam_path_ready = uv && path_keys && retopo.seam_anchor < retopo.result.v.size();
+        retopo.seam_v = uv && !input.alt_held ? retopo_snap_vertex(retopo, camera, win_w, win_h, mx, my) : ~0u;
         if (press && !seam_stroke) {
             retopo.begin_edit();
-            retopo.seam_erase = input.ctrl_held;   // decided at the press, like the eraser
+            retopo.seam_erase = input.ctrl_held && !path_keys;   // decided at the press, like the eraser
             seam_last = ~0u;
+            const double now = std::chrono::duration<double>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            const bool dbl = !path_keys && now - last_click_t < 0.4
+                          && std::hypot(mx - last_click_x, my - last_click_y) <= 6.0f;
+            press_t = now; press_x = mx; press_y = my;
+            press_moved = false;
+            press_was_dbl = dbl;
+            if (dbl) {
+                // The loop picker writes the retopo pick list: borrow it, then put it back.
+                std::vector<uint32_t> keep = retopo.loop_edges;
+                const uint32_t pa = retopo.path_a, pb = retopo.path_b;
+                int n = retopo_select_loop(retopo, camera, win_w, win_h, mx, my, false, input.mirror_x);
+                const std::vector<uint32_t> loop = retopo.loop_edges;
+                retopo.loop_edges.swap(keep);
+                retopo.path_a = pa; retopo.path_b = pb;
+                n = n > 0 ? retopo_seam_mark_edges(retopo, loop, retopo.seam_erase) : 0;
+                std::snprintf(input.notification, sizeof(input.notification),
+                              n ? (retopo.seam_erase ? "Loop unmarked: %d edges" : "Loop marked: %d edges - C cuts, W welds")
+                                : "No loop there%.0d", n);
+                input.notification_timer = 1.5f;
+                seam_last = retopo.seam_v;   // so holding on doesn't hop off it
+            } else if (path_keys && retopo.seam_v != ~0u && retopo.seam_anchor < retopo.result.v.size()) {
+                const int n = retopo_seam_path(retopo, retopo.seam_anchor, retopo.seam_v, false, input.mirror_x);
+                std::snprintf(input.notification, sizeof(input.notification),
+                              n ? "Path marked: %d edges - C cuts, W welds" : "No edges join those two%.0d", n);
+                input.notification_timer = 1.5f;
+                seam_last = retopo.seam_v;
+            }
         }
-        if (!press) retopo.seam_erase = input.ctrl_held;
-        retopo.seam_v = uv && !input.alt_held ? retopo_snap_vertex(retopo, camera, win_w, win_h,
-                                                                   (float)input.mouse_x, (float)input.mouse_y)
-                                              : ~0u;
-        if (press && retopo.seam_v != ~0u && retopo.seam_v != seam_last) {
-            if (seam_last != ~0u) retopo_seam_path(retopo, seam_last, retopo.seam_v, retopo.seam_erase, input.mirror_x);
+        if (press && std::hypot(mx - press_x, my - press_y) > 4.0f) press_moved = true;
+        // The brush: every edge whose middle the ring (brush size, in pixels) passes over is
+        // marked, or unmarked with Ctrl. Each frame tests the whole sweep from where the
+        // last one left off, so a fast drag doesn't skip edges. It starts once the pointer
+        // moves, so a click (half a double-click, a path's end) marks nothing by itself.
+        static float dab_x = 0.0f, dab_y = 0.0f;
+        static std::vector<float> vsx, vsy;
+        static std::vector<uint8_t> vok;
+        static std::vector<uint32_t> hit;
+        if (press && !press_moved) { dab_x = press_x; dab_y = press_y; }
+        if (press && press_moved && !press_was_dbl && !(path_keys && seam_last != ~0u)) {
+            const RetopoMesh& rm = retopo.result;
+            const uint32_t nv = (uint32_t)rm.v.size();
+            vsx.resize(nv); vsy.resize(nv); vok.assign(nv, 0);
+            for (uint32_t i = 0; i < nv; i++) {
+                if (retopo.hidden(rm.v_owner[i])) continue;
+                const Vec3 to_eye = camera.perspective ? camera.get_position() - rm.v[i] : camera.get_view_direction() * -1.0f;
+                vok[i] = rm.n[i].dot(to_eye) > 0.0f && camera.world_to_screen(rm.v[i], win_w, win_h, vsx[i], vsy[i]);
+            }
+            const float r = std::max(2.0f, input.brush_size);
+            const float dx = mx - dab_x, dy = my - dab_y, l2 = dx * dx + dy * dy;
+            hit.clear();
+            for (size_t e = 0; e + 1 < rm.edges.size(); e += 2) {
+                const uint32_t ea = rm.edges[e], eb = rm.edges[e + 1];
+                if (ea >= nv || eb >= nv || !vok[ea] || !vok[eb]) continue;
+                // The sweep's nearest point to the edge's middle.
+                const float cx = (vsx[ea] + vsx[eb]) * 0.5f, cy = (vsy[ea] + vsy[eb]) * 0.5f;
+                const float t = l2 > 0.0f ? std::max(0.0f, std::min(1.0f, ((cx - dab_x) * dx + (cy - dab_y) * dy) / l2)) : 0.0f;
+                if (std::hypot(cx - (dab_x + dx * t), cy - (dab_y + dy * t)) > r) continue;
+                hit.push_back(ea); hit.push_back(eb);
+                if (input.mirror_x && ea < rm.mirror.size() && eb < rm.mirror.size()) {
+                    const uint32_t ta = rm.mirror[ea], tb = rm.mirror[eb];
+                    if (ta < nv && tb < nv && ta != tb && (ta != ea || tb != eb)) { hit.push_back(ta); hit.push_back(tb); }
+                }
+            }
+            if (!hit.empty()) retopo_seam_mark_edges(retopo, hit, retopo.seam_erase);
+            dab_x = mx; dab_y = my;
             seam_last = retopo.seam_v;
         }
-        if (!press && seam_stroke) retopo.end_edit();
+        if (!press && seam_stroke) {
+            retopo.end_edit();
+            // Where a Shift+Ctrl+click path starts next: the vertex nearest where this ended.
+            if (retopo.seam_v != ~0u) retopo.seam_anchor = retopo.seam_v;
+            else if (seam_last != ~0u) retopo.seam_anchor = seam_last;
+            // A click (let go in place) can be the first half of a double-click; a stroke,
+            // or the click that just made one, can't.
+            if (!press_moved && !press_was_dbl) { last_click_t = press_t; last_click_x = press_x; last_click_y = press_y; }
+            else last_click_t = -1.0;
+        }
+        if (!press) retopo.seam_erase = input.ctrl_held && !path_keys;
         seam_stroke = press;
         retopo.seam_painting = press;
     }
@@ -1236,6 +1360,15 @@ void draw_retopo_cursor(Renderer& renderer, const Camera& camera, const InputSta
     static const float kEraseRed[3] = {1.0f, 0.25f, 0.2f};
     const bool erase = input.retopo_tool == InputState::RetopoTool::ERASE
                     && !input.is_smooth_active();
+    // UV mode's seam brush: its own ring at brush size, chalk yellow, white while Ctrl
+    // unmarks (whatever tool mode 0 was left on).
+    if (input.uv_on()) {
+        static const float kChalk[3] = {1.0f, 0.93f, 0.59f}, kWhite[3] = {1.0f, 1.0f, 1.0f};
+        const bool unmark = input.ctrl_held && !input.shift_held;
+        renderer.draw_cursor(camera, cursor_x, cursor_y, input.brush_size, input.cursor_nx, input.cursor_ny,
+                             input.cursor_nz, 1.0f, 0.5f, win_w, win_h, input.on_model, unmark ? kWhite : kChalk);
+        return;
+    }
     // Their dot faces the screen, even all round: tipped with the surface, a 6 px ring's
     // thick front swung about with every pixel's normal (and a pen's hover jitter), so
     // it flickered between a dot, a sliver and a blob. It says nothing about the surface.

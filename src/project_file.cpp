@@ -59,6 +59,8 @@ static constexpr uint8_t  RTUV_FORMAT = 3;
 // UV seams, the same way: an optional RTSM chunk after RTPO. They're there whether or not
 // anything has been unwrapped, so they don't ride in RTUV.
 static constexpr uint8_t  RTSM_FORMAT = 1;
+// The seams marked but not cut yet (2026-11-03) ride in an RTMK chunk of the same layout,
+// so an older build, which skips it, keeps the cut seams and just loses the chalk.
 // Mesh layers (2026-10-29), no VERSION bump either. MLYR after an entity's ENTY carries
 // its name and eye. Retopo moved from the project to each mesh: an RTOW chunk (u32
 // entity id) heads each mesh's RTPO / RTSM / RTUV group. A file without RTOW (older)
@@ -388,12 +390,13 @@ static void write_rtuv_chunk(std::ofstream& f, const RetopoSnapshot& r) {
 }
 
 // RTSM: u8 format, u32 seam count, then 2 u32 vertex ids per seam (RTPO's numbering).
-static void write_rtsm_chunk(std::ofstream& f, const RetopoSnapshot& r) {
+// RTMK: the same, for the marks.
+static void write_rtsm_chunk(std::ofstream& f, const char* tag, const std::vector<uint32_t>& ids) {
     std::streampos sp;
-    write_chunk_begin(f, "RTSM", sp);
+    write_chunk_begin(f, tag, sp);
     write_u8(f, RTSM_FORMAT);
-    write_u32(f, (uint32_t)(r.result.seams.size() / 2));
-    write_u32s(f, r.result.seams);
+    write_u32(f, (uint32_t)(ids.size() / 2));
+    write_u32s(f, ids);
     write_chunk_end(f, sp);
 }
 
@@ -475,7 +478,8 @@ SaveResult save_project(const char* path, const ProjectData& data) {
         write_u32(f, e.id);
         write_chunk_end(f, sp);
         write_rtpo_chunk(f, r);
-        if (r.result.face_count() > 0 && !r.result.seams.empty()) write_rtsm_chunk(f, r);
+        if (r.result.face_count() > 0 && !r.result.seams.empty()) write_rtsm_chunk(f, "RTSM", r.result.seams);
+        if (r.result.face_count() > 0 && !r.result.marks.empty()) write_rtsm_chunk(f, "RTMK", r.result.marks);
         if (!r.uv.empty() && r.uv.fits(r.result)) write_rtuv_chunk(f, r);
     };
     for (const EntityRecord& e : data.entities) if (e.id != data.active_id) write_retopo(e);
@@ -873,7 +877,7 @@ static bool read_rtuv_chunk(ChunkReader& r, RetopoSnapshot& out) {
 }
 
 // RTSM (see write_rtsm_chunk). Read after RTPO: every id must be one of its vertices.
-static bool read_rtsm_chunk(ChunkReader& r, RetopoSnapshot& out) {
+static bool read_rtsm_chunk(ChunkReader& r, RetopoSnapshot& out, bool marks) {
     uint8_t format;
     uint32_t n;
     if (!r.read_u8(format) || format == 0 || format > RTSM_FORMAT || !r.read_u32(n) || n > r.remaining() / 8) return false;
@@ -888,10 +892,10 @@ static bool read_rtsm_chunk(ChunkReader& r, RetopoSnapshot& out) {
     }
     std::sort(keys.begin(), keys.end());   // the users binary-search them
     keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
-    std::vector<uint32_t>& seams = out.result.seams;
+    std::vector<uint32_t>& seams = marks ? out.result.marks : out.result.seams;
     seams.clear();
     for (uint64_t k : keys) { seams.push_back((uint32_t)(k >> 32)); seams.push_back((uint32_t)k); }
-    std::printf("[uv] loaded: %zu seam edge(s)\n", keys.size());
+    std::printf("[uv] loaded: %zu %s edge(s)\n", keys.size(), marks ? "marked seam" : "seam");
     return true;
 }
 
@@ -1006,9 +1010,14 @@ static LoadResult load_project_v2(std::ifstream& f, std::streamoff file_size,
             }
             if (!rt_target) std::printf("[load] a retopo section names no mesh: skipped\n");
         } else if (std::memcmp(hdr.tag, "RTSM", 4) == 0) {
-            if (rt_target && !read_rtsm_chunk(cr, *rt_target)) {
+            if (rt_target && !read_rtsm_chunk(cr, *rt_target, false)) {
                 rt_target->result.seams.clear();
                 std::printf("[load] the UV seams didn't read back: the project loads without them\n");
+            }
+        } else if (std::memcmp(hdr.tag, "RTMK", 4) == 0) {
+            if (rt_target && !read_rtsm_chunk(cr, *rt_target, true)) {
+                rt_target->result.marks.clear();
+                std::printf("[load] the marked UV seams didn't read back: the project loads without them\n");
             }
         } else if (std::memcmp(hdr.tag, "RTUV", 4) == 0) {
             if (rt_target && !read_rtuv_chunk(cr, *rt_target)) {

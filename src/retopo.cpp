@@ -1,6 +1,7 @@
 #include "retopo.h"
 #include "uv_unwrap.h"
 #include <algorithm>
+#include <iterator>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -58,7 +59,7 @@ bool RetopoState::finish_live(int rings, float density) {
 size_t RetopoSnapshot::bytes() const {
     size_t b = result.v.size() * (2 * sizeof(Vec3) + 3 * sizeof(uint32_t) + 3)
              + (result.faces.size() + result.face_off.size()) * sizeof(uint32_t) * 2
-             + result.edges.size() * sizeof(uint32_t) * 3 + result.seams.size() * sizeof(uint32_t);
+             + result.edges.size() * sizeof(uint32_t) * 3 + (result.seams.size() + result.marks.size()) * sizeof(uint32_t);
     for (const RetopoStroke& k : strokes) b += k.pts.size() * (2 * sizeof(Vec3) + sizeof(float)) + 128;
     b += uv.uv.size() * sizeof(float) + uv.face_chart.size() * sizeof(uint32_t);
     return b;
@@ -159,7 +160,7 @@ void RetopoState::end_edit() {
     has_pending = false;
     const RetopoMesh& a = pending.result;
     const bool same = a.faces == result.faces && a.face_off == result.face_off && a.v.size() == result.v.size()
-                   && a.mask == result.mask && a.seams == result.seams
+                   && a.mask == result.mask && a.seams == result.seams && a.marks == result.marks
                    && std::equal(a.v.begin(), a.v.end(), result.v.begin(),
                                  [](const Vec3& l, const Vec3& r) { return l.x == r.x && l.y == r.y && l.z == r.z; });
     if (!same) {
@@ -1263,15 +1264,20 @@ void extract(const RetopoMesh& src, RetopoMesh& dst, Keep keep) {
         dst.face_owner.push_back(src.face_owner[f]);
     }
     for (uint32_t& m : dst.mirror) m = m == ~0u ? ~0u : remap[m];
-    // Seams follow their vertices' new numbers (re-sorted: the order was by the old ones).
-    std::vector<uint64_t> sk;
-    for (size_t i = 0; i + 1 < src.seams.size(); i += 2) {
-        const uint32_t a = remap[src.seams[i]], b = remap[src.seams[i + 1]];
-        if (a != ~0u && b != ~0u && a != b) sk.push_back(((uint64_t)std::min(a, b) << 32) | std::max(a, b));
+    // Seams and marks follow their vertices' new numbers (re-sorted: the order was by the
+    // old ones).
+    for (int which = 0; which < 2; which++) {
+        const std::vector<uint32_t>& from = which ? src.marks : src.seams;
+        std::vector<uint32_t>& to = which ? dst.marks : dst.seams;
+        std::vector<uint64_t> sk;
+        for (size_t i = 0; i + 1 < from.size(); i += 2) {
+            const uint32_t a = remap[from[i]], b = remap[from[i + 1]];
+            if (a != ~0u && b != ~0u && a != b) sk.push_back(((uint64_t)std::min(a, b) << 32) | std::max(a, b));
+        }
+        std::sort(sk.begin(), sk.end());
+        sk.erase(std::unique(sk.begin(), sk.end()), sk.end());
+        for (uint64_t k : sk) { to.push_back((uint32_t)(k >> 32)); to.push_back((uint32_t)k); }
     }
-    std::sort(sk.begin(), sk.end());
-    sk.erase(std::unique(sk.begin(), sk.end()), sk.end());
-    for (uint64_t k : sk) { dst.seams.push_back((uint32_t)(k >> 32)); dst.seams.push_back((uint32_t)k); }
     for (size_t e = 0; e < src.edge_owner.size(); e++) {
         const uint32_t a = remap[src.edges[e * 2]], b = remap[src.edges[e * 2 + 1]];
         if (a == ~0u || b == ~0u || !keep(src.edge_owner[e])) continue;
@@ -6376,6 +6382,7 @@ bool retopo_absorb(RetopoState& into, RetopoState& from) {
             a.add_face(c.data(), (int)c.size(), id(b.face_owner[f]));
         }
         for (uint32_t v : b.seams) a.seams.push_back(v + v_off);   // still sorted after a's
+        for (uint32_t v : b.marks) a.marks.push_back(v + v_off);
         rebuild_edges(a);
         into.built = true;
         // Only one side ever had faces: its layout still fits, renumbered (ids moved
@@ -6532,17 +6539,46 @@ bool retopo_export_stl(const RetopoMesh& rm, const char* path) {
 
 // ---- UV seams ----------------------------------------------------------------------
 
-void retopo_seam_edges(const RetopoMesh& rm, std::vector<uint32_t>& out) {
+static void live_edges(const RetopoMesh& rm, const std::vector<uint32_t>& list, std::vector<uint32_t>& out) {
     out.clear();
     const uint32_t nv = (uint32_t)rm.v.size();
     if (rm.nb_off.size() != nv + 1) return;
-    for (size_t i = 0; i + 1 < rm.seams.size(); i += 2) {
-        const uint32_t a = rm.seams[i], b = rm.seams[i + 1];
+    for (size_t i = 0; i + 1 < list.size(); i += 2) {
+        const uint32_t a = list[i], b = list[i + 1];
         if (a >= nv || b >= nv) continue;
         bool edge = false;
         for (uint32_t k = rm.nb_off[a]; k < rm.nb_off[a + 1] && !edge; k++) edge = rm.nb[k] == b;
         if (edge) { out.push_back(a); out.push_back(b); }
     }
+}
+void retopo_seam_edges(const RetopoMesh& rm, std::vector<uint32_t>& out) { live_edges(rm, rm.seams, out); }
+void retopo_mark_edges(const RetopoMesh& rm, std::vector<uint32_t>& out) { live_edges(rm, rm.marks, out); }
+
+static std::vector<uint64_t> edge_keys(const std::vector<uint32_t>& list) {
+    std::vector<uint64_t> k;
+    for (size_t i = 0; i + 1 < list.size(); i += 2) k.push_back(edge_key(list[i], list[i + 1]));
+    return k;   // the lists are kept sorted, so these are too
+}
+static void store_keys(std::vector<uint32_t>& list, const std::vector<uint64_t>& keys) {
+    list.clear();
+    for (uint64_t k : keys) { list.push_back((uint32_t)(k >> 32)); list.push_back((uint32_t)k); }
+}
+
+// Marks `keys` (erase: unmarks them). touched = the owners of their ends.
+static int apply_seam_keys(RetopoState& st, std::vector<uint64_t>& keys, std::vector<uint32_t>& touched, bool erase) {
+    RetopoMesh& rm = st.result;
+    std::vector<uint64_t> mk = edge_keys(rm.marks);
+    int changed = 0;
+    for (uint64_t k : keys) {
+        const auto it = std::lower_bound(mk.begin(), mk.end(), k);
+        const bool there = it != mk.end() && *it == k;
+        if (erase && there)        { mk.erase(it); changed++; }
+        else if (!erase && !there) { mk.insert(it, k); changed++; }
+    }
+    if (!changed) return 0;
+    store_keys(rm.marks, mk);
+    freeze_touched(st, touched);
+    return changed;
 }
 
 int retopo_seam_path(RetopoState& st, uint32_t from, uint32_t to, bool erase, bool mirror) {
@@ -6570,8 +6606,6 @@ int retopo_seam_path(RetopoState& st, uint32_t from, uint32_t to, bool erase, bo
         }
     }
     if (prev[to] == ~0u) return 0;
-    std::vector<uint64_t> have;
-    for (size_t i = 0; i + 1 < rm.seams.size(); i += 2) have.push_back(edge_key(rm.seams[i], rm.seams[i + 1]));
     std::vector<uint64_t> path;
     std::vector<uint32_t> touched;
     for (uint32_t u = to; prev[u] != ~0u; u = prev[u]) {
@@ -6584,24 +6618,58 @@ int retopo_seam_path(RetopoState& st, uint32_t from, uint32_t to, bool erase, bo
         const uint32_t tb = mirror && prev[u] < rm.mirror.size() ? rm.mirror[prev[u]] : ~0u;
         if (ta < nv && tb < nv && ta != tb) { path.push_back(edge_key(ta, tb)); touched.push_back(rm.v_owner[ta]); }
     }
-    int changed = 0;
-    for (uint64_t k : path) {
-        const auto it = std::lower_bound(have.begin(), have.end(), k);
-        const bool there = it != have.end() && *it == k;
-        if (erase && there)        { have.erase(it); changed++; }
-        else if (!erase && !there) { have.insert(it, k); changed++; }
+    return apply_seam_keys(st, path, touched, erase);
+}
+
+int retopo_seam_mark_edges(RetopoState& st, const std::vector<uint32_t>& edges, bool erase) {
+    RetopoMesh& rm = st.result;
+    const uint32_t nv = (uint32_t)rm.v.size();
+    std::vector<uint64_t> keys;
+    std::vector<uint32_t> touched;
+    for (size_t i = 0; i + 1 < edges.size(); i += 2) {
+        if (edges[i] >= nv || edges[i + 1] >= nv) continue;
+        keys.push_back(edge_key(edges[i], edges[i + 1]));
+        touched.push_back(rm.v_owner[edges[i]]);
     }
-    if (!changed) return 0;
-    rm.seams.clear();
-    for (uint64_t k : have) { rm.seams.push_back((uint32_t)(k >> 32)); rm.seams.push_back((uint32_t)k); }
-    freeze_touched(st, touched);
-    return changed;
+    return st.built ? apply_seam_keys(st, keys, touched, erase) : 0;
+}
+
+int retopo_seams_cut(RetopoState& st) {
+    RetopoMesh& rm = st.result;
+    if (rm.marks.empty()) return -1;
+    st.checkpoint();
+    std::vector<uint64_t> cut = edge_keys(rm.seams), mk = edge_keys(rm.marks);
+    std::vector<uint64_t> all;
+    std::set_union(cut.begin(), cut.end(), mk.begin(), mk.end(), std::back_inserter(all));
+    store_keys(rm.seams, all);
+    rm.marks.clear();
+    return (int)(all.size() - cut.size());
+}
+
+int retopo_seams_weld(RetopoState& st) {
+    RetopoMesh& rm = st.result;
+    if (rm.marks.empty()) return -1;
+    st.checkpoint();
+    std::vector<uint64_t> cut = edge_keys(rm.seams), mk = edge_keys(rm.marks);
+    std::vector<uint64_t> left;
+    std::set_difference(cut.begin(), cut.end(), mk.begin(), mk.end(), std::back_inserter(left));
+    store_keys(rm.seams, left);
+    rm.marks.clear();
+    return (int)(cut.size() - left.size());
+}
+
+bool retopo_marks_clear(RetopoState& st) {
+    if (st.result.marks.empty()) return false;
+    st.checkpoint();
+    st.result.marks.clear();
+    return true;
 }
 
 bool retopo_seams_clear(RetopoState& st) {
-    if (st.result.seams.empty()) return false;
+    if (st.result.seams.empty() && st.result.marks.empty()) return false;
     st.checkpoint();
     st.result.seams.clear();
+    st.result.marks.clear();
     return true;
 }
 

@@ -92,7 +92,7 @@ enum class KeyAction : int {
     BRUSH_MOVE, BRUSH_LIMB, BRUSH_POSE, BRUSH_MASK, BRUSH_PREV, BRUSH_NEXT,
     PAINT_BUCKET, PAINT_PICKER,
     RETOPO_BUILD, RETOPO_DRAW, RETOPO_GRAB, RETOPO_CUT, RETOPO_ERASE, RETOPO_FILL, RETOPO_WAND, RETOPO_MASK,
-    RETOPO_CONTOUR,
+    RETOPO_CONTOUR, UV_SEAM_CUT, UV_SEAM_WELD,
     HOLD_SIZE, HOLD_STRENGTH, HOLD_HARDNESS, HOLD_SPACING, SIZE_DOWN, SIZE_UP, AUTOSMOOTH,
     LEVEL_UP, LEVEL_DOWN, PROJECT, MIRROR, REMESH, MERGE, DELETE_MESH,
     MASK_INVERT, MASK_CLEAR,
@@ -692,6 +692,8 @@ struct InputState {
     bool uv_repack_requested = false;  // its Re-pack: the shown layouts packed again, as they are
     uint32_t uv_focus = 0;             // this mesh becomes the active one, the selection kept
     bool uv_seams_clear_requested = false;  // its Clear seams
+    bool uv_seams_cut_requested = false;    // C / the rail's scissors: marked edges become seams
+    bool uv_seams_weld_requested = false;   // W / the rail's stitches: marked seams become plain edges
     bool uv_bake_requested = false;         // its Bake (settings in RetopoState::bake)
     bool uv_bake_cancel_requested = false;  // ...Stop, while one runs
     // The panel's big layout view: the frame it was last drawn on (it's out while that's

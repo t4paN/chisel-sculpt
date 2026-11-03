@@ -25,7 +25,7 @@ identically in the native build, and vice versa.
 - **Retopology mode** — sketch strips and rings over the sculpt and they become clean quads on
   its surface; bridge, cut, fill holes, wrap a limb in contour rings with one line, copy a ring
   from one horn onto the next, lasso a patch into a quad grid; mirror-aware, saved in the project
-- **UV unwrap and bake** — paint seams, unwrap and pack the low-poly, then bake the sculpt into
+- **UV unwrap and bake** — brush seams on and cut them, unwrap and pack the low-poly, then bake the sculpt into
   normal, colour and Color ID maps; several meshes can share one texture (an atlas); export the
   low-poly with its maps as GLB, OBJ or STL, and the UV layout as a PNG to paint over
 - **Multiple objects** — a Meshes panel (show, hide, rename, delete with undo); insert, select,

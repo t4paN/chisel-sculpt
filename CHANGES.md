@@ -2,6 +2,15 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-03 — UV seams: mark with a brush, cut with C, weld with W
+
+- Seams come in two steps: the brush marks edges (yellow), **C** cuts the marked into seams and unwraps; the rail gets the brush, Cut and Weld buttons.
+- The brush is a ring (S sizes it): every edge whose middle passes under it is marked, Ctrl+drag unmarks; a fast drag skips nothing.
+- Double-click marks a loop, Shift+Ctrl+click the shortest path from the last point; mirror marks the twin.
+- Existing seams can be marked too (yellow, red rim) and **W** welds them back into plain edges.
+- A click off the model drops the marks, one Ctrl+Z away; marks are saved in the project.
+- Fixed: two quick strokes no longer count as a double-click (the stray loops across a stroke).
+
 ## 2026-11-03 — Meshes dock: fold triangle, title bar moves it
 
 - Like the paint layers window: the triangle on the left folds the list, the rest of the title bar drags the dock (it used to fold on any click and move only from its margins).

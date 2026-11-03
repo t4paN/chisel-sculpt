@@ -373,9 +373,16 @@ The last step of the low-poly workflow: lay the retopo mesh flat into a square (
 layout), then bake the sculpt's detail and paint into textures for it. Build a retopo
 in mode 0 first; UV mode works on it and never changes the sculpt.
 
-**Seams.** Drag on the model to paint seams, vertex to vertex, where the mesh may be cut
-open (Ctrl erases; with mirror on, the twin is painted too). **Clear seams** in the panel
-removes them all.
+**Seams.** Seams are made in two steps: mark the edges, then cut them.
+- **Marking.** Drag on the model to brush edges yellow: every edge whose middle passes
+  under the ring is marked (hold **S** and drag to size the ring). **Ctrl+drag** unmarks.
+  **Double-click** an edge to mark its whole loop; **Shift+Ctrl+click** marks the shortest
+  path from the last point to the one clicked. With mirror on, the twin is marked too.
+- **Cutting.** **C** (or the scissors on the rail) turns the marked edges into seams (red)
+  and unwraps along them. Existing seams can be marked like any edge (they show yellow with
+  a red rim): **W** (or the weld button) joins them back into plain edges and unwraps again.
+- A click off the model drops the marks (Ctrl+Z brings them back). **Clear seams** in the
+  panel removes every seam and mark.
 
 **Unwrap** cuts along the seams and the mesh's own open borders, nowhere else, flattens
 each piece (an *island*) with as little stretch as it can, and packs the islands into the
@@ -415,7 +422,7 @@ with a progress bar and **Stop**.
   A GLB carries the colour and normal maps inside, in one file ready for an engine; an
   OBJ gets an `.mtl` that points at the PNGs beside it; STL is shape only.
 
-In the browser both download straight away. The seams and the layout are saved in the
+In the browser both download straight away. The seams, marks and layout are saved in the
 `.chisel` project; the baked maps are not, so bake again after reopening.
 
 ## Camera

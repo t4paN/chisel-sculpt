@@ -101,6 +101,12 @@ const IconDef kIcons[(int)Icon::Count] = {
     // Drawn here: a tube lying on its side, its open end a full ring, two more rings round it.
     /* RetopoContour*/ {{P("M5 7h15M5 17h15"), P("M5 7c-2.4 0-2.4 10 0 10c2.4 0 2.4-10 0-10z"),
                          P("M11 7c2.4 0 2.4 10 0 10M17 7c2.4 0 2.4 10 0 10")}, 3},
+    // Drawn here: a seam chalked on, dashed along a curve, the chalk's round tip at its end.
+    /* UvSeamMark   */ {{D("M3.5 20.5C6 13 10 9 17.5 6.5"), C(19.5, 5, 2)}, 2},
+    // Drawn here: scissors, rings on the left, blades crossing to the right.
+    /* UvSeamCut    */ {{C(6.5, 6.5, 3), C(6.5, 17.5, 3), P("M8.7 8.7L20.5 20.5M8.7 15.3L20.5 3.5")}, 3},
+    // Drawn here: a seam sewn shut, three stitches across the line.
+    /* UvSeamWeld   */ {{P("M3 12h18"), P("M5.5 7l3 10M10.5 7l3 10M15.5 7l3 10")}, 2},
 };
 
 // ---- Minimal SVG path interpreter -------------------------------------------
@@ -334,6 +340,9 @@ const unsigned short kPixel[(int)Icon::Count][16] = {
     /* retopo-wand     */ {0x0000,0x0020,0x0020,0x00D8,0x0020,0x0020,0x0180,0x0300,0x0600,0x0C00,0x1800,0x3000,0x6000,0x4000,0x0000,0x0000},   // drawn here: wand + spark
     /* mode-uv         */ {0x0000,0x0000,0x3FFC,0x3F04,0x3F04,0x3F04,0x3F04,0x3F04,0x20FC,0x20FC,0x20FC,0x20FC,0x20FC,0x3FFC,0x0000,0x0000},   // drawn here: checkered square
     /* retopo-contour  */ {0x0000,0x0000,0x0000,0x0000,0x3FFC,0x5224,0x5112,0x5112,0x5112,0x5112,0x5224,0x3FFC,0x0000,0x0000,0x0000,0x0000},   // drawn here: ringed tube
+    /* uv-seam-mark    */ {0x0000,0x000E,0x001C,0x0060,0x01C0,0x0180,0x0600,0x0600,0x0C00,0x0800,0x0000,0x3000,0x6000,0x6000,0x4000,0x0000},   // drawn here: dashed chalk line
+    /* uv-seam-cut     */ {0x0000,0x1C02,0x3E04,0x6208,0x6210,0x6620,0x3E40,0x0180,0x0180,0x3E40,0x6620,0x6210,0x6208,0x3E04,0x1C02,0x0000},   // drawn here: scissors
+    /* uv-seam-weld    */ {0x0000,0x0000,0x0000,0x0200,0x6230,0x2310,0x3118,0x7FFE,0x7FFE,0x188C,0x08C4,0x0C46,0x0040,0x0000,0x0000,0x0000},   // drawn here: stitches across a seam
 };
 } // namespace
 

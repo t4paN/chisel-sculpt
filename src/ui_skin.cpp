@@ -1422,11 +1422,30 @@ void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
         (modes_dock.rest.y > 0.0f ? modes_dock.rest.y : ImGui::GetWindowSize().y);
     end_panel();
 
-    // UV mode has no tools, so no rail.
+    // UV mode's rail: the seam brush (chalk: mark), Cut (scissors), which turns the marks
+    // into seams and unwraps, and Weld, which joins marked seams back. Cut and Weld are
+    // actions, not tools to switch to.
     if (input.uv_on()) {
-        g_rail_bottom = modes_bottom;
-        g_rail_right = kEdge;
+        if (!begin_panel("##mRail", ImVec2(kEdge, modes_bottom + 12.0f), ImVec2(0, 0),
+                         ImVec2(5, 5), 2.0f, 14.0f)) {
+            end_panel();
+            return;
+        }
+        o.side = TipSide::Right;
+        o.on = true; o.tip = "Mark edges: brush over them, double-click a loop, Shift+Ctrl+click a path. Ctrl unmarks, a click off the model drops them";
+        o.key = nullptr; o.corner = nullptr;
+        icon_button("uvMark", Icon::UvSeamMark, kRailBtn, o);
+        o.on = false; o.tip = "Cut the marked seams and unwrap";
+        o.key = input.key_label(KeyAction::UV_SEAM_CUT); o.corner = corner(KeyAction::UV_SEAM_CUT);
+        if (icon_button("uvCut", Icon::UvSeamCut, kRailBtn, o)) input.uv_seams_cut_requested = true;
+        o.tip = "Weld the marked seams back into plain edges and unwrap";
+        o.key = input.key_label(KeyAction::UV_SEAM_WELD); o.corner = corner(KeyAction::UV_SEAM_WELD);
+        if (icon_button("uvWeld", Icon::UvSeamWeld, kRailBtn, o)) input.uv_seams_weld_requested = true;
+        o.key = nullptr; o.corner = nullptr;
+        g_rail_bottom = ImGui::GetWindowPos().y + ImGui::GetWindowSize().y;
+        g_rail_right = ImGui::GetWindowPos().x + ImGui::GetWindowSize().x;
         g_strip_open = false;
+        end_panel();
         return;
     }
 
@@ -1974,9 +1993,13 @@ float brush_panel(InputState& input, int win_h) {
         hint("to place");
     } else if (input.uv_on()) {
         heading("Seams", nullptr);
-        hint("Drag along the mesh: paint seams");
-        hint("Ctrl+drag: erase seams");
-        hint("Unwrap cuts along them");
+        hint("Drag: mark the edges under the brush");
+        hint("Hold S and drag: brush size");
+        hint("Double-click: mark a loop");
+        hint("Shift+Ctrl+click: mark a path");
+        hint("Ctrl+drag: unmark");
+        hint("C: cut the marked, W: weld them");
+        hint("Click off the model: drop the marks");
     } else if (mode == InputState::InteractionMode::RETOPO) {
         // Size for every tool: the band as drawn, or the reach of Grab / Smooth. Drawing
         // also plans the next stroke: Rings (A) and Density (W).
@@ -5006,6 +5029,9 @@ void draw_uv_dock(InputState& input, RetopoState& st, UvMeshRow* rows, int nrows
     static std::vector<uint32_t> seams;
     retopo_seam_edges(rm, seams);
     const size_t ns = seams.size() / 2;
+    static std::vector<uint32_t> marks;   // marked, not cut yet
+    retopo_mark_edges(rm, marks);
+    const size_t nm = marks.size() / 2;
     const bool seams_moved = fresh && L.seam_key != uv_seam_key(rm);
     // Several meshes in the square: do they share it, or lie on top of each other?
     // Checked again only when one of them changed.
@@ -5024,7 +5050,7 @@ void draw_uv_dock(InputState& input, RetopoState& st, UvMeshRow* rows, int nrows
         }
     }
     char ro[96];
-    bool loud = seams_moved;
+    bool loud = seams_moved || nm > 0;
     if (many) {
         uint32_t isl = 0;
         float used = 0.0f;
@@ -5032,6 +5058,8 @@ void draw_uv_dock(InputState& input, RetopoState& st, UvMeshRow* rows, int nrows
         if (ov) { std::snprintf(ro, sizeof ro, "%zu meshes overlap: Re-pack them", shown.size()); loud = true; }
         else std::snprintf(ro, sizeof ro, "%zu meshes \xC2\xB7 %u islands \xC2\xB7 %.0f%%", shown.size(), isl, used * 100.0f);
     }
+    else if (nm) std::snprintf(ro, sizeof ro, "%zu edge%s marked: %s cuts, %s welds", nm, nm == 1 ? "" : "s",
+                               input.key_label(KeyAction::UV_SEAM_CUT), input.key_label(KeyAction::UV_SEAM_WELD));
     else if (seams_moved) std::snprintf(ro, sizeof ro, "seams changed: Unwrap again");
     else if (fresh) std::snprintf(ro, sizeof ro, "%u islands \xC2\xB7 %.0f%% \xC2\xB7 %zu seam edge%s", L.charts,
                                   L.used * 100.0f, ns, ns == 1 ? "" : "s");
@@ -5060,7 +5088,7 @@ void draw_uv_dock(InputState& input, RetopoState& st, UvMeshRow* rows, int nrows
     const float x0 = ImGui::GetCursorPosX();
     unwrap_buttons();
     if (one_row) ImGui::SameLine();
-    if (chip("Clear seams", false, bh, ns > 0)) input.uv_seams_clear_requested = true;
+    if (chip("Clear seams", false, bh, ns + nm > 0)) input.uv_seams_clear_requested = true;
     tip("Remove every painted seam (Ctrl+Z takes it back)");
     ImGui::SameLine();
     ImGui::SetCursorPosX(x0 + w - bh);

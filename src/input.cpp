@@ -55,6 +55,8 @@ const KeyActionInfo kKeyActions[(int)KeyAction::COUNT] = {
     {"retopo_wand",   "Retopo mode", "Wand",             "Click a hole: hover the ways to fill it, click one to keep it", {GLFW_KEY_Q, 0}, KeyScope::Retopo},
     {"retopo_mask",   "Retopo mode", "Mask",             "Freeze vertices against Grab, Smooth and Erase. Ctrl unmasks, Shift softens the edge", {GLFW_KEY_M, 0}, KeyScope::Retopo},
     {"retopo_contour", "Retopo mode", "Contours",        "Drag along a limb: rings round it, bridged into a tube. Wheel: more or fewer rings, Ctrl+wheel: more or fewer round", {GLFW_KEY_T, 0}, KeyScope::Retopo},
+    {"uv_seam_cut",   "UV mode", "Cut seams",        "The marked edges become seams, and the mesh unwraps along them", {GLFW_KEY_C, 0}, KeyScope::Uv},
+    {"uv_seam_weld",  "UV mode", "Weld seams",       "The marked seams join back into plain edges, and the mesh unwraps again", {GLFW_KEY_W, 0}, KeyScope::Uv},
     {"hold_size",     "Brush feel", "Size",             "Hold and drag", {GLFW_KEY_S, 0}},
     {"hold_strength", "Brush feel", "Strength",         "Hold and drag. In Retopo mode: the next stroke's Density", {GLFW_KEY_W, 0}},
     {"hold_hardness", "Brush feel", "Hardness",         "Hold and drag. In Retopo mode: the next stroke's Rings", {GLFW_KEY_A, 0}},
@@ -1122,7 +1124,7 @@ static void mouse_button_callback(GLFWwindow* w, int button, int action, int mod
                 g_input->drag_mode = InputState::DragMode::SCULPT;
             } else if (g_input->interaction_mode == InputState::InteractionMode::RETOPO) {
                 // Retopo: a press on the model starts a stroke (main.cpp captures it),
-                // anywhere else orbits, as in Edit. In UV mode the stroke paints seams.
+                // anywhere else orbits, as in Edit. In UV mode the stroke marks seam edges.
                 g_input->drag_mode = g_input->on_model ? InputState::DragMode::RETOPO
                                                        : InputState::DragMode::ORBIT;
             } else if (g_input->on_model && g_input->color_pick_active
@@ -1320,13 +1322,19 @@ static void run_key_action(GLFWwindow* w, KeyAction a, bool repeat) {
             break;
         case KeyAction::MODE_UV:
             in.enter_uv_mode();
-            notify("UV: paint seams on the model, then Unwrap", 2.0f);
+            notify("UV: brush edges to mark them, C cuts them into seams", 2.0f);
             break;
         case KeyAction::RETOPO_BUILD:
             if (!repeat) in.retopo_build_requested = true;
             break;
         case KeyAction::RETOPO_FILL:
             if (!repeat) in.retopo_fill_requested = true;
+            break;
+        case KeyAction::UV_SEAM_CUT:
+            if (!repeat) in.uv_seams_cut_requested = true;
+            break;
+        case KeyAction::UV_SEAM_WELD:
+            if (!repeat) in.uv_seams_weld_requested = true;
             break;
         case KeyAction::RETOPO_DRAW:
         case KeyAction::RETOPO_GRAB:

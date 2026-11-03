@@ -2791,6 +2791,22 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
             if (!fac[a] || !fac[b] || st.hidden(rm.v_owner[a])) continue;
             marked(a, b, IM_COL32(30, 0, 0, 220), IM_COL32(255, 50, 40, 255), IM_COL32(220, 40, 30, 150));
         }
+        // Marked: chalk, pale yellow over the seams. A marked seam keeps a red rim, so a
+        // selection about to be welded reads apart from one about to be cut.
+        static std::vector<uint32_t> marks;
+        static std::vector<uint64_t> cut;
+        retopo_mark_edges(rm, marks);
+        cut.clear();
+        for (size_t e = 0; e + 1 < seams.size(); e += 2)
+            cut.push_back(((uint64_t)std::min(seams[e], seams[e + 1]) << 32) | std::max(seams[e], seams[e + 1]));
+        std::sort(cut.begin(), cut.end());
+        for (size_t e = 0; e + 1 < marks.size(); e += 2) {
+            const uint32_t a = marks[e], b = marks[e + 1];
+            if (!fac[a] || !fac[b] || st.hidden(rm.v_owner[a])) continue;
+            const bool seam = std::binary_search(cut.begin(), cut.end(), ((uint64_t)std::min(a, b) << 32) | std::max(a, b));
+            marked(a, b, seam ? IM_COL32(200, 30, 20, 255) : IM_COL32(40, 32, 0, 220), IM_COL32(255, 238, 150, 255),
+                   IM_COL32(230, 210, 120, 150));
+        }
     }
     // A picked edge a weld or the eraser took away isn't an edge any more: skipped.
     for (size_t e = 0; e + 1 < st.loop_edges.size() && !baked; e += 2) {
@@ -2837,11 +2853,19 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
             dl->AddPolyline(poly.data(), (int)poly.size(), IM_COL32(255, 60, 50, 255), ImDrawFlags_Closed, 2.5f);
         }
     }
-    // The seam brush's vertex: a red ring, white when Ctrl would erase.
+    // The seam brush's vertex: a chalk ring, white when Ctrl would erase. With Shift+Ctrl
+    // held, the vertex the last stroke ended on gets a dot: the path starts there.
     if (st.seam_v < rm.v.size() && vis[st.seam_v] == 2) {
         const ImVec2 p = at[st.seam_v];
-        dl->AddCircle(p, 7.0f, IM_COL32(20, 0, 0, 200), 16, 4.0f);
-        dl->AddCircle(p, 7.0f, st.seam_erase ? IM_COL32(255, 255, 255, 255) : IM_COL32(255, 50, 40, 255), 16, 2.0f);
+        dl->AddCircle(p, 7.0f, IM_COL32(20, 16, 0, 200), 16, 4.0f);
+        dl->AddCircle(p, 7.0f, st.seam_erase ? IM_COL32(255, 255, 255, 255) : IM_COL32(255, 238, 150, 255), 16, 2.0f);
+    }
+    if (st.seam_path_ready && st.seam_anchor < rm.v.size() && vis[st.seam_anchor] == 2) {
+        const ImVec2 p = at[st.seam_anchor];
+        dl->AddCircleFilled(p, 6.0f, IM_COL32(20, 16, 0, 220), 16);
+        dl->AddCircleFilled(p, 4.0f, IM_COL32(255, 238, 150, 255), 16);
+        if (st.seam_v < rm.v.size() && vis[st.seam_v] == 2 && st.seam_v != st.seam_anchor)
+            dl->AddLine(p, at[st.seam_v], IM_COL32(255, 238, 150, 110), 1.5f);
     }
     if (st.cutting) mark(st.cut_from_v, true);
     if (st.snap_v != st.cut_from_v || !st.cutting) mark(st.snap_v, false);

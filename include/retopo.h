@@ -64,6 +64,11 @@ struct RetopoMesh {
     // a pair that has stopped being an edge (a Cut split it, a weld retired an end) is
     // skipped by its users: see retopo_seam_edges.
     std::vector<uint32_t> seams;
+    // UV mode's selection of edges (chalk: painted, double-clicked loops, Shift+Ctrl+click
+    // paths), the same layout. Unwrap ignores it; Cut (C) makes its edges seams, Weld (W)
+    // makes them plain edges again. It may hold edges that are already seams (picked to
+    // weld); a click off the model drops it.
+    std::vector<uint32_t> marks;
     // For Smooth: edge neighbours (CSR), and for a border vertex its two border
     // neighbours (pinned = a corner, or not a simple border: it never moves).
     std::vector<uint32_t> nb_off, nb;
@@ -77,7 +82,7 @@ struct RetopoMesh {
     uint32_t rim_count() const { return (uint32_t)rim_hole.size(); }
     void clear() {
         v.clear(); n.clear(); faces.clear(); face_off.assign(1, 0); edges.clear(); edge_owner.clear();
-        v_owner.clear(); face_owner.clear(); mirror.clear(); mask.clear(); seams.clear();
+        v_owner.clear(); face_owner.clear(); mirror.clear(); mask.clear(); seams.clear(); marks.clear();
         nb_off.clear(); nb.clear(); border_nb.clear(); pinned.clear();
         rim_off.assign(1, 0); rim.clear(); rim_hole.clear();
     }
@@ -157,6 +162,10 @@ struct RetopoState {
     // UV mode: the vertex the seam brush is on (a ring in the overlay), and whether it erases.
     uint32_t seam_v = ~0u;
     bool seam_erase = false;
+    // The vertex the last seam stroke ended on: a Shift+Ctrl+click marks the shortest way
+    // from it (drawn while Shift+Ctrl is held, seam_path_ready). ~0u = none yet.
+    uint32_t seam_anchor = ~0u;
+    bool seam_path_ready = false;
     bool seam_painting = false;   // a seam stroke is under the pen (the bake preview shows seams then)
     // UV mode: the island the pointer is on in the panel (list or preview) and the one
     // picked there; ~0u = none. The overlay lights them on the model.
@@ -645,14 +654,27 @@ bool retopo_export_stl(const RetopoMesh& rm, const char* path);
 // the exported vn must both be these.
 void retopo_smooth_normals(const RetopoMesh& rm, std::vector<Vec3>& out);
 
-// UV seams (UV mode's brush). Painting hops vertex to vertex: retopo_seam_path marks
-// (erase: unmarks) the shortest run of edges from a to b, and with mirror their twins.
-// Like any edit it freezes the islands it touches, so Build keeps their vertices, and the
+// UV seams, in two steps as a tailor works: mark (chalk), then cut, or weld back. Painting
+// hops vertex to vertex: retopo_seam_path marks the shortest run of edges from a to b
+// (erase: unmarks them), and with mirror their twins; seams or not, they're marked. Like
+// any edit it freezes the islands it touches, so Build keeps their vertices, and the
 // seams with them. Returns how many edges changed.
 int retopo_seam_path(RetopoState& st, uint32_t a, uint32_t b, bool erase, bool mirror);
-// The seams that are still edges of rm, 2 ids each: what Unwrap cuts and the overlay draws.
+// The same for a list of edges (2 ids each; a double-clicked loop), mirror twins included
+// by the caller. Returns how many changed.
+int retopo_seam_mark_edges(RetopoState& st, const std::vector<uint32_t>& edges, bool erase);
+// The seams (cut) that are still edges of rm, 2 ids each: what Unwrap cuts and the
+// overlay draws. retopo_mark_edges: the same for the marks.
 void retopo_seam_edges(const RetopoMesh& rm, std::vector<uint32_t>& out);
-// Every seam gone (one undo step). False if there were none.
+void retopo_mark_edges(const RetopoMesh& rm, std::vector<uint32_t>& out);
+// Cut (C): every marked edge becomes a seam; Weld (W): every marked seam a plain edge
+// again. The marks go either way (one undo step). Return how many edges changed, -1 = no
+// marks.
+int retopo_seams_cut(RetopoState& st);
+int retopo_seams_weld(RetopoState& st);
+// A click off the model: the marks go (one undo step). False if there were none.
+bool retopo_marks_clear(RetopoState& st);
+// Every seam and mark gone (one undo step). False if there were none.
 bool retopo_seams_clear(RetopoState& st);
 
 // Copy / paste an island (Wand right-click), fitted onto another part of the sculpt.

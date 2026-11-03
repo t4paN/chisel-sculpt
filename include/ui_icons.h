@@ -21,6 +21,7 @@ enum class Icon {
     RetopoWand,                       // mode 0's wand (hole fills)
     ModeUv,                           // UV mode: a checkered square
     RetopoContour,                    // mode 0's contours (rings round a limb)
+    UvSeamMark, UvSeamCut, UvSeamWeld, // UV mode: mark seams (a chalk line), cut them (scissors), weld them (stitches)
     Count
 };
 
