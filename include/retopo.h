@@ -716,10 +716,6 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
 // went. Returns the path written, empty on failure.
 std::string retopo_export(const RetopoState& retopo, InputState& input, const std::string& project_path,
                           const char* mesh_name);
-// The bake's maps as PNGs beside it (<project>-<mesh>-LO-normal.png / -color.png; downloaded on
-// web), toasting how it went.
-void retopo_bake_save(const RetopoState& retopo, InputState& input, const std::string& project_path,
-                      const char* mesh_name);
 // The green ring (red for the eraser, a dot for Cut and the wand).
 void draw_retopo_cursor(Renderer& renderer, const Camera& camera, const InputState& input,
                         float cursor_x, float cursor_y, int win_w, int win_h);

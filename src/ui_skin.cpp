@@ -4943,9 +4943,15 @@ void draw_uv_dock(InputState& input, RetopoState& st, UvMeshRow* rows, int nrows
     label_item(UiFont::SansSemibold, 13.0f, kText, "UV Layout", w, 18.0f);
     // What sits under the square: readout, buttons, the list's header and (open) its rows,
     // the bake's header and (open) its rows. The square takes the rest, up to the full width.
-    const float bake_h = 20.0f + gap + (bake_open ? bh * 3.0f + ImGui::GetFrameHeight() + 16.0f + gap * 5.0f : 0.0f);
+    // The bake's second row: Green down and the sizes, when they fit side by side.
+    auto chip_w = [](const char* t) { return text_size(UiFont::Sans, 13.0f, t).x + 24.0f; };
+    const bool gd_wrap = chip_w("Green down") + chip_w("512") + chip_w("1K") + chip_w("2K") + chip_w("4K")
+                       + 4.0f * gap > w;
+    const float bake_h = 20.0f + gap + (bake_open ? bh * (gd_wrap ? 4.0f : 3.0f) + ImGui::GetFrameHeight() + 16.0f
+                                                    + gap * (gd_wrap ? 6.0f : 5.0f) : 0.0f);
+    const float big_btn = 44.0f;   // Export model and textures, at the dock's bottom right
     const float below = 18.0f + bh + (one_row ? 0.0f : bh + gap) + 20.0f + (list_open ? list_h + gap : 0.0f)
-                      + bake_h + gap * 4.0f;
+                      + bake_h + big_btn + gap * 5.0f;
     const float side = std::max(80.0f, std::min(w, ImGui::GetContentRegionAvail().y - below));
     const ImVec2 o0 = ImGui::GetCursorScreenPos();
     const ImVec2 sq0(o0.x + std::floor((w - side) * 0.5f), o0.y), sq1(sq0.x + side, sq0.y + side);
@@ -5048,8 +5054,12 @@ void draw_uv_dock(InputState& input, RetopoState& st, UvMeshRow* rows, int nrows
     ImGui::SetCursorPosX(x0 + w - bh);
     BtnOpts o;
     o.look = Look::Bar; o.side = TipSide::Left; o.icon_px = 18.0f;
-    o.tip = fresh ? "Export OBJ with UVs" : "Export OBJ (unwrap first for UVs)"; o.enabled = st.built;
-    if (icon_button("uvExport", Icon::CmdExport, bh, o)) input.retopo_export_requested = true;
+    o.tip = any_fresh ? "Export the UV map: a PNG of the layout, to paint over" : "Unwrap first: the UV map is the layout";
+    o.enabled = any_fresh;
+    if (icon_button("uvExport", Icon::CmdExport, bh, o)) {
+        input.export_kind = InputState::ExportKind::UV_MAP;
+        input.export_dialog_active = true;
+    }
 
     // A section header: click folds it away (the square grows into the room).
     auto section = [&](const char* id, const char* label, bool& open) {
@@ -5258,13 +5268,20 @@ void draw_uv_dock(InputState& input, RetopoState& st, UvMeshRow* rows, int nrows
             if (chip("Colour", bs.color, bh, idle)) bs.color = !bs.color;
             tip("Colour map: the paint, every visible layer merged");
             ImGui::SameLine();
+            // Color ID: only a sculpt with a paint layer named ColorID has one to bake.
+            bool any_id = false;
+            for (const Shown& s : shown) any_id = any_id || s.r->has_color_id;
+            if (!many && act_row) any_id = act_row->has_color_id;
+            if (chip("Color ID", bs.color_id && any_id, bh, idle && any_id)) bs.color_id = !bs.color_id;
+            tip(any_id ? "Color ID map: the paint layer named ColorID alone, flat colours, no blending"
+                       : "Name a paint layer ColorID (Paint mode) to bake a Color ID map from it");
             if (chip("Green down", bs.flip_green, bh, idle && bs.normal)) bs.flip_green = !bs.flip_green;
             tip("Normal map green flipped (DirectX style), for engines that read it that way. Off: green up");
             // Size.
             static const int sizes[4] = {512, 1024, 2048, 4096};
             static const char* size_lab[4] = {"512", "1K", "2K", "4K"};
             for (int i = 0; i < 4; i++) {
-                if (i) ImGui::SameLine();
+                if (i || !gd_wrap) ImGui::SameLine();
                 if (chip(size_lab[i], bs.resolution == sizes[i], bh, idle)) bs.resolution = sizes[i];
                 tip(i == 3 ? "4096 x 4096 (slow on big sculpts)" : "Texture size, in pixels a side");
             }
@@ -5278,11 +5295,11 @@ void draw_uv_dock(InputState& input, RetopoState& st, UvMeshRow* rows, int nrows
             // Go / progress, then the result's switches.
             const float x1 = ImGui::GetCursorPosX();
             if (idle) {
-                const bool can = fresh && (bs.normal || bs.color);
+                const bool can = fresh && (bs.normal || bs.color || (bs.color_id && any_id));
                 if (chip(bk.res().empty() ? "Bake" : "Bake again", false, bh, can)) input.uv_bake_requested = true;
                 tip(!st.built ? "Build a retopo mesh in mode 0 first"
                     : !fresh  ? "Unwrap first: the bake goes onto the UV layout"
-                    : !(bs.normal || bs.color) ? "Pick a map to bake"
+                    : !(bs.normal || bs.color || (bs.color_id && any_id)) ? "Pick a map to bake"
                     : many    ? "Bake every mesh shown into one set of maps (an atlas), each from its own sculpt"
                               : "Bake the active mesh's sculpt under its retopo mesh into these maps");
             } else {
@@ -5305,13 +5322,8 @@ void draw_uv_dock(InputState& input, RetopoState& st, UvMeshRow* rows, int nrows
                 ImGui::SameLine();
                 if (chip("Preview", bk.preview, bh, !bk.res().empty())) bk.preview = !bk.preview;
                 tip(bk.res().empty() ? "Bake first" : "Show the retopo mesh wearing the bake, in place of the sculpt (every mesh of an atlas)");
-                ImGui::SameLine();
-                ImGui::SetCursorPosX(x1 + w - bh);
-                BtnOpts so;
-                so.look = Look::Bar; so.side = TipSide::Left; so.icon_px = 18.0f;
-                so.tip = "Save the maps as PNG"; so.enabled = !bk.res().empty();
-                if (icon_button("uvBakeSave", Icon::CmdSave, bh, so)) input.uv_bake_save_requested = true;
             }
+            (void)x1;
             // Readout: what the last bake was, and whether it still fits the mesh.
             char ro2[96];
             const BakeResult& r = bk.res();
@@ -5322,9 +5334,28 @@ void draw_uv_dock(InputState& input, RetopoState& st, UvMeshRow* rows, int nrows
             else if (r.parts.size() > 1) std::snprintf(ro2, sizeof ro2, "%zu-mesh atlas \xC2\xB7 %dpx \xC2\xB7 %.1f s%s", r.parts.size(), r.res,
                                                        r.ms / 1000.0, r.missed > 0.0005f ? " \xC2\xB7 some found no sculpt" : "");
             else if (r.missed > 0.0005f) std::snprintf(ro2, sizeof ro2, "%dpx \xC2\xB7 %.1f s \xC2\xB7 %.1f%% found no sculpt", r.res, r.ms / 1000.0, r.missed * 100.0f);
-            else std::snprintf(ro2, sizeof ro2, "%dpx \xC2\xB7 %.1f s \xC2\xB7 %s%s", r.res, r.ms / 1000.0,
-                               r.has_normal ? "normal" : "", r.has_color ? (r.has_normal ? " + colour" : "colour") : "");
+            else std::snprintf(ro2, sizeof ro2, "%dpx \xC2\xB7 %.1f s \xC2\xB7 %s%s%s", r.res, r.ms / 1000.0,
+                               r.has_normal ? "normal" : "", r.has_color ? (r.has_normal ? " + colour" : "colour") : "",
+                               r.has_id ? (r.has_normal || r.has_color ? " + ID" : "ID") : "");
             label_item(UiFont::Mono, 12.0f, idle && !r.empty() && (!bk.fresh || r.missed > 0.02f || r.overlap > 0.005f) ? kText : kMuted, ro2, 0.0f, 16.0f);
+        }
+    }
+
+    // Export model and textures: big, at the bottom right, the end of the workflow.
+    {
+        const float bs = big_btn;
+        const float y_end = ImGui::GetWindowHeight() - ImGui::GetStyle().WindowPadding.y - bs * g_k;
+        if (ImGui::GetCursorPosY() < y_end) ImGui::SetCursorPosY(y_end);
+        ImGui::SetCursorPosX(ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x - bs * g_k);
+        BtnOpts eo;
+        eo.look = Look::Bar; eo.side = TipSide::Left; eo.icon_px = 28.0f;
+        eo.icol = IM_COL32(245, 247, 252, 255);   // lighter than the skin's: it's the way out
+        eo.enabled = any_built;
+        eo.tip = any_built ? "Export model and textures: the retopo meshes shown (OBJ, STL or GLB) and their maps"
+                           : "Build a retopo mesh in mode 0 first";
+        if (icon_button("uvExportAll", Icon::CmdExport, bs, eo)) {
+            input.export_kind = InputState::ExportKind::UV_ASSETS;
+            input.export_dialog_active = true;
         }
     }
     end_panel();

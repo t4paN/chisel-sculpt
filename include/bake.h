@@ -33,15 +33,24 @@ struct BakeSettings {
     int   resolution = 1024;
     float reach = 1.0f;         // how far either side of the low a ray looks, in mean low edges
     bool  normal = true, color = true;
+    // The Color ID map: the sculpt's "ColorID" paint layer alone, each texel the colour of
+    // the nearest painted vertex (no blending: an ID map must keep its flat colours). Only
+    // bakes when that layer exists (bake_color_id_layer).
+    bool  color_id = true;
     bool  flip_green = false;   // green down (DirectX-style engines); default is green up
 };
+
+struct PaintLayerStack;
+// The paint layer a Color ID map comes from: the one named "ColorID" (any case; "Color
+// ID", "color_id", "Colour ID" count too). -1 = none.
+int bake_color_id_layer(const PaintLayerStack& s);
 
 // A finished bake: the maps, plus the low mesh as the triangle soup they were baked
 // against (corner tangent frames included), which is exactly what the preview draws.
 struct BakeResult {
     int  res = 0;
-    bool has_normal = false, has_color = false, flip_green = false;
-    std::vector<uint8_t> normal_rgba, color_rgba;   // res * res * 4; row 0 = v 1 (the top, as a PNG)
+    bool has_normal = false, has_color = false, has_id = false, flip_green = false;
+    std::vector<uint8_t> normal_rgba, color_rgba, id_rgba;   // res * res * 4; row 0 = v 1 (the top, as a PNG)
     std::vector<float> pos, nrm, tan, uv;           // 3, 3, 4, 2 floats per corner, 3 corners per triangle
     // The meshes in it, by entity id: each one's triangles in the soup [tri0, tri1) and
     // the bake_key of its low as it was baked (one part for a single-mesh bake).
@@ -102,5 +111,10 @@ void bake_cancel(BakeState& b);
 float bake_progress(const BakeState& b);   // 0..1
 const char* bake_phase(const BakeState& b);
 
-// One map as an RGB PNG: which 0 = normal, 1 = colour. False = no such map or not written.
-bool bake_write_png(const BakeResult& r, int which, const char* path);
+// One map as an RGB PNG: which 0 = normal, 1 = colour, 2 = Color ID. size = the PNG's side
+// (0 = the bake's; another resamples, nearest, so an ID map keeps its flat colours).
+// False = no such map or not written.
+bool bake_write_png(const BakeResult& r, int which, const char* path, int size = 0);
+// The same PNG as bytes (for a .glb to carry). Empty = no such map.
+std::vector<uint8_t> bake_png_bytes(const BakeResult& r, int which, int size = 0);
+const std::vector<uint8_t>& bake_map(const BakeResult& r, int which);

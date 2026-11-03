@@ -1222,30 +1222,6 @@ std::string retopo_export(const RetopoState& retopo, InputState& input, const st
     return ok ? path : std::string();
 }
 
-void retopo_bake_save(const RetopoState& retopo, InputState& input, const std::string& project_path,
-                      const char* mesh_name) {
-    const BakeResult& r = retopo.bake.res();
-    // An atlas's maps belong to all its meshes: named after the active one, marked so.
-    const std::string stem = export_stem(project_path, mesh_name) + (r.parts.size() > 1 ? "-atlas" : "");
-    int wrote = 0;
-    std::string last;
-    for (int which = 0; which < 2; which++) {
-        if (!(which == 0 ? r.has_normal : r.has_color)) continue;
-        const std::string path = stem + (which == 0 ? "-normal.png" : "-color.png");
-        if (!bake_write_png(r, which, path.c_str())) continue;
-        wrote++;
-        last = path;
-#if defined(__EMSCRIPTEN__)
-        web_download_file(path.c_str(), path.c_str() + 1);
-#endif
-    }
-    if (r.empty())  std::snprintf(input.notification, sizeof(input.notification), "Bake first");
-    else if (!wrote) std::snprintf(input.notification, sizeof(input.notification), "Couldn't write the maps next to %.400s", stem.c_str());
-    else std::snprintf(input.notification, sizeof(input.notification), "Saved %d map%s: %.400s", wrote,
-                       wrote == 1 ? "" : "s", wrote == 1 ? last.c_str() : (stem + "-*.png").c_str());
-    input.notification_timer = 3.0f;
-}
-
 void draw_retopo_cursor(Renderer& renderer, const Camera& camera, const InputState& input,
                         float cursor_x, float cursor_y, int win_w, int win_h) {
     // Matrix green (#00FF41): a ring no sculpt brush wears, so the hand

@@ -270,6 +270,7 @@ add_executable(chisel
     src/retopo_input.cpp
     src/uv_unwrap.cpp
     src/bake.cpp
+    src/uv_export.cpp
     src/compute_mask.cpp
     src/compute_density.cpp
     src/compute_color.cpp

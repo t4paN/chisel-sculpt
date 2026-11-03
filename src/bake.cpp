@@ -9,6 +9,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <cctype>
+#include <string>
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb/stb_image_write.h"
@@ -54,6 +56,7 @@ struct BakeWork {
     size_t cur = 0;                 // the member Prep / Tree / Shade are on
     std::vector<float>    hn;       // the sculpt's smooth normals, 3 per vertex (its own CPU ones may be stale)
     std::vector<uint32_t> hcol;     // the sculpt's paint, composited (empty = no colour map)
+    std::vector<uint32_t> hid;      // its ColorID layer, un-premultiplied (empty = this sculpt has none)
     const MeshTexture*    htex = nullptr;   // its texture, through its corner UVs, under the paint
     float                 hmix = 1.0f;      // how much of it shows (the Texture row's eye x opacity)
     // The tree.
@@ -176,7 +179,7 @@ void prep_high(BakeWork& w, const Mesh& m) {
     const uint32_t nv = m.vertex_count(), nt = m.tri_count();
     // The last member's leftovers go first.
     w.nodes.clear(); w.todo.clear(); w.tree_done = 0;
-    w.hcol.clear(); w.htex = nullptr; w.hmix = 1.0f;
+    w.hcol.clear(); w.hid.clear(); w.htex = nullptr; w.hmix = 1.0f;
     w.hn.assign((size_t)nv * 3, 0.0f);
     w.cen.resize((size_t)nt * 3);
     for (uint32_t t = 0; t < nt; t++) {
@@ -202,6 +205,19 @@ void prep_high(BakeWork& w, const Mesh& m) {
         paint_composite(m.paint_layers, m.color, nv, w.hcol.data());
         w.hmix = m.paint_layers.texture_mix();
         if (m.texture && m.has_uv() && w.hmix > 0.0f) w.htex = m.texture.get();
+    }
+    // Color ID: the one layer, straight (premultiplied values divided back out; an
+    // unpainted vertex is black, the usual "no ID").
+    const int idl = w.s.color_id ? bake_color_id_layer(m.paint_layers) : -1;
+    if (idl >= 0) {
+        w.hid.resize(nv);
+        for (uint32_t v = 0; v < nv; v++) {
+            const uint32_t c = paint_layers_value(m.paint_layers, m.color, idl, v);
+            const uint32_t a = c >> 24;
+            uint32_t o = 0xFF000000u;
+            if (a) for (int s = 0; s < 24; s += 8) o |= std::min(255u, (((c >> s) & 255) * 255 + a / 2) / a) << s;
+            w.hid[v] = o;
+        }
     }
     w.tri.resize(nt);
     for (uint32_t t = 0; t < nt; t++) w.tri[t] = t;
@@ -424,6 +440,11 @@ void shade_row(BakeWork& w, const Mesh& m, uint32_t py) {
             }
             put(&r.color_rgba[4 * texel], c);
         }
+        if (r.has_id) {
+            // The corner the hit is nearest: one vertex's colour, never a blend of two IDs.
+            const uint32_t iv = ha >= h.u && ha >= h.v ? ia : h.u >= h.v ? ib : ic;
+            put(&r.id_rgba[4 * texel], w.hid.empty() ? 0xFF000000u : w.hid[iv]);
+        }
         w.filled[texel] = 1;
     }
 }
@@ -455,6 +476,7 @@ void dilate_pass(BakeWork& w) {
     for (uint32_t i : w.front) {
         const int x = (int)(i % R), y = (int)(i / R);
         int nsum[4] = {0, 0, 0, 0}, csum[4] = {0, 0, 0, 0}, cnt = 0;
+        size_t id_from = SIZE_MAX;   // an ID texel copies one neighbour, it doesn't average
         for (int dy = -1; dy <= 1; dy++)
             for (int dx = -1; dx <= 1; dx++) {
                 const int nx = x + dx, ny = y + dy;
@@ -466,12 +488,14 @@ void dilate_pass(BakeWork& w) {
                     if (r.has_normal) nsum[c] += r.normal_rgba[4 * j + c];
                     if (r.has_color)  csum[c] += r.color_rgba[4 * j + c];
                 }
+                if (id_from == SIZE_MAX) id_from = j;
                 cnt++;
             }
         if (!cnt) continue;
         for (int c = 0; c < 4; c++) {
             if (r.has_normal) r.normal_rgba[4 * (size_t)i + c] = (uint8_t)((nsum[c] + cnt / 2) / cnt);
             if (r.has_color)  r.color_rgba[4 * (size_t)i + c]  = (uint8_t)((csum[c] + cnt / 2) / cnt);
+            if (r.has_id)     r.id_rgba[4 * (size_t)i + c]     = r.id_rgba[4 * id_from + c];
         }
         w.filled[i] = gen;
     }
@@ -506,6 +530,7 @@ void finish(BakeWork& w) {
         if (w.filled[i]) continue;
         if (r.has_normal) put(&r.normal_rgba[4 * i], 0xFFFF8080u);   // (128, 128, 255)
         if (r.has_color)  put(&r.color_rgba[4 * i], mean);
+        if (r.has_id)     put(&r.id_rgba[4 * i], 0xFF000000u);
     }
     r.missed = w.covered ? (float)((double)w.misses / (double)w.covered) : 0.0f;
 }
@@ -543,7 +568,9 @@ const char* bake_start(BakeState& b, const std::vector<BakeInput>& in) {
         if (x.high->tri_count() == 0) return "No sculpt to bake from";
     }
     const BakeSettings& s = b.settings;
-    if (!s.normal && !s.color) return "Pick a map to bake";
+    bool any_id = false;
+    for (const BakeInput& x : in) any_id = any_id || bake_color_id_layer(x.high->paint_layers) >= 0;
+    if (!s.normal && !s.color && !(s.color_id && any_id)) return "Pick a map to bake";
     auto w = std::make_shared<BakeWork>();
     w->s = s;
     w->t0 = Clock::now();
@@ -551,6 +578,7 @@ const char* bake_start(BakeState& b, const std::vector<BakeInput>& in) {
     r.res = std::max(64, std::min(4096, s.resolution));
     r.has_normal = s.normal;
     r.has_color = s.color;
+    r.has_id = s.color_id && any_id;
     r.flip_green = s.flip_green;
     for (const BakeInput& x : in) {
         WorkPart p;
@@ -603,6 +631,7 @@ int bake_step(BakeState& b, const std::function<const Mesh*(uint32_t)>& find, do
             if (w.raster_tri >= n) {
                 if (w.out.has_normal) w.out.normal_rgba.assign((size_t)R * R * 4, 0);
                 if (w.out.has_color)  w.out.color_rgba.assign((size_t)R * R * 4, 0);
+                if (w.out.has_id)     w.out.id_rgba.assign((size_t)R * R * 4, 0);
                 w.filled.assign((size_t)R * R, 0);
                 w.cur = 0;
                 w.phase = Phase::Prep;
@@ -631,6 +660,7 @@ int bake_step(BakeState& b, const std::function<const Mesh*(uint32_t)>& find, do
                 std::vector<uint32_t>().swap(w.tri);
                 std::vector<float>().swap(w.hn);
                 std::vector<uint32_t>().swap(w.hcol);
+                std::vector<uint32_t>().swap(w.hid);
                 if (++w.cur < w.parts.size()) { w.phase = Phase::Prep; return 0; }
                 std::vector<uint32_t>().swap(w.owner);
                 // Rings to grow: enough to cover a mip chain's reach a few levels down.
@@ -700,11 +730,52 @@ const char* bake_phase(const BakeState& b) {
     return buf;
 }
 
-bool bake_write_png(const BakeResult& r, int which, const char* path) {
-    const std::vector<uint8_t>& src = which == 0 ? r.normal_rgba : r.color_rgba;
-    if (r.empty() || src.size() != (size_t)r.res * r.res * 4) return false;
-    std::vector<uint8_t> rgb((size_t)r.res * r.res * 3);
-    for (size_t i = 0, n = (size_t)r.res * r.res; i < n; i++)
-        for (int c = 0; c < 3; c++) rgb[3 * i + c] = src[4 * i + c];
-    return stbi_write_png(path, r.res, r.res, 3, rgb.data(), r.res * 3) != 0;
+int bake_color_id_layer(const PaintLayerStack& s) {
+    for (int i = 0; i < (int)s.layers.size(); i++) {
+        std::string n;
+        for (char c : s.layers[i].name)
+            if (std::isalnum((unsigned char)c)) n += (char)std::tolower((unsigned char)c);
+        if (n == "colorid" || n == "colourid") return i;
+    }
+    return -1;
+}
+
+const std::vector<uint8_t>& bake_map(const BakeResult& r, int which) {
+    return which == 0 ? r.normal_rgba : which == 1 ? r.color_rgba : r.id_rgba;
+}
+
+// RGB at `size` a side, nearest from the bake's own pixels. Empty = no such map.
+static std::vector<uint8_t> map_rgb(const BakeResult& r, int which, int& size) {
+    const std::vector<uint8_t>& src = bake_map(r, which);
+    std::vector<uint8_t> rgb;
+    if (r.empty() || src.size() != (size_t)r.res * r.res * 4) return rgb;
+    if (size <= 0) size = r.res;
+    rgb.resize((size_t)size * size * 3);
+    for (int y = 0; y < size; y++) {
+        const int sy = (int)(((int64_t)y * r.res) / size);
+        for (int x = 0; x < size; x++) {
+            const int sx = (int)(((int64_t)x * r.res) / size);
+            const uint8_t* p = &src[4 * ((size_t)sy * r.res + sx)];
+            uint8_t* o = &rgb[3 * ((size_t)y * size + x)];
+            o[0] = p[0]; o[1] = p[1]; o[2] = p[2];
+        }
+    }
+    return rgb;
+}
+
+bool bake_write_png(const BakeResult& r, int which, const char* path, int size) {
+    const std::vector<uint8_t> rgb = map_rgb(r, which, size);
+    if (rgb.empty()) return false;
+    return stbi_write_png(path, size, size, 3, rgb.data(), size * 3) != 0;
+}
+
+std::vector<uint8_t> bake_png_bytes(const BakeResult& r, int which, int size) {
+    std::vector<uint8_t> out;
+    const std::vector<uint8_t> rgb = map_rgb(r, which, size);
+    if (rgb.empty()) return out;
+    stbi_write_png_to_func([](void* ctx, void* data, int n) {
+        auto* o = (std::vector<uint8_t>*)ctx;
+        o->insert(o->end(), (uint8_t*)data, (uint8_t*)data + n);
+    }, &out, size, size, 3, rgb.data(), size * 3);
+    return out;
 }

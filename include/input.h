@@ -488,6 +488,25 @@ struct InputState {
 
     // File dialogs (Ctrl+E export, Ctrl+O import, Ctrl+S save, Ctrl+Shift+S save-as)
     bool export_dialog_active;
+    // Which export that dialog is for. One "up" flag for all of them keeps every modal
+    // gate (keys, cursor, sculpt input) working; the kind picks the window (app_files.cpp)
+    // and goes back to MESH when it closes.
+    //   MESH:      the meshes (toolbar, E)
+    //   UV_MAP:    UV mode's layout picture (the dock's export button)
+    //   UV_ASSETS: UV mode's model + textures (the big button at the dock's bottom right)
+    enum class ExportKind { MESH, UV_MAP, UV_ASSETS };
+    ExportKind export_kind = ExportKind::MESH;
+    // The UV map picture: size a side, wire width in pixels, islands filled (or just the
+    // wire), and the Color ID map written next to it when the bake has one.
+    int   uvmap_size = 1024;
+    float uvmap_wire = 2.0f;
+    bool  uvmap_fill = true;
+    bool  uvmap_color_id = true;
+    // Model + textures: the lows as OBJ / STL / GLB (0 / 1 / 2), and which maps go along.
+    bool uvx_model = true;
+    int  uvx_format = 2;
+    bool uvx_textures = true;
+    bool uvx_tex_color = true, uvx_tex_normal = true, uvx_tex_id = true, uvx_tex_uvmap = false;
     bool import_dialog_active;
     bool import_append;           // import dialog checkbox: add as new entity vs replace scene
     bool save_requested;
@@ -675,7 +694,6 @@ struct InputState {
     bool uv_seams_clear_requested = false;  // its Clear seams
     bool uv_bake_requested = false;         // its Bake (settings in RetopoState::bake)
     bool uv_bake_cancel_requested = false;  // ...Stop, while one runs
-    bool uv_bake_save_requested = false;    // ...Save maps (PNG next to the project; downloads on web)
     // The panel's big layout view: the frame it was last drawn on (it's out while that's
     // this frame or the last), and Esc for it. While it's out key_callback runs no
     // shortcuts. A frame stamp, not a flag, so a view that stops being drawn can't

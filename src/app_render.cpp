@@ -474,6 +474,7 @@ void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse) {
                 r.st = &up->retopo;
                 r.active = up->id == scene.active_mesh_id();
                 r.selected = std::find(sel.begin(), sel.end(), up->id) != sel.end();
+                r.has_color_id = bake_color_id_layer(up->mesh.paint_layers) >= 0;
                 uv_rows.push_back(r);
             }
         }

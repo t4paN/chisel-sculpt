@@ -2,6 +2,14 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-03 — UV exports: UV map picture, model + textures, GLB
+
+- The UV dock's export button writes the UV map as a PNG (`<mesh>-UVmap_1024.png`): size, wire thickness, islands filled or just the outline.
+- New **Color ID** bake map, from the sculpt's paint layer named `ColorID` (flat colours, no blending); it can ride along with the UV map as `<mesh>-ColorID_<size>.png`.
+- **Export model and textures** (big button, dock's bottom right) replaces the bake's Save maps: GLB, OBJ (+ MTL) or STL, with each baked map ticked on or off.
+- GLB export: the retopo meshes with UVs, smooth normals, and the colour and normal maps embedded in one material; every selected mesh goes out together (atlas).
+- On web both windows download straight away, the UV map named for you.
+
 ## 2026-11-03 — Pose brush is back, as a hinge (K)
 
 - Draw along a limb, joint to tip: an anchor (ring) and a lever (dot) sit in the middle of it. Drag the lever and everything past the anchor swings round it, keeping its length.

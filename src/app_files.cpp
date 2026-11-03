@@ -27,6 +27,8 @@
 #include "ui_skin.h"
 #include "retopo.h"
 #include "uv_unwrap.h"
+#include "uv_export.h"
+#include "bake.h"
 #include "imgui.h"
 #include "ImGuiFileDialog.h"
 #include "brush_alpha.h"
@@ -91,6 +93,89 @@ static void draw_export_picks() {
     ImGui::TextWrapped("OBJ: one file, each mesh its own object. "
                        "PLY / STL hold one mesh: several make one file each, "
                        "<name>-<mesh>.");
+}
+
+
+// ---- UV mode's exports (UV dock): the layout picture, and model + textures ----------
+// What the two windows can offer, worked out as one opens (file scope: the native
+// dialog's side pane draws it frames later).
+struct UvExportAvail {
+    int  parts = 0, with_uv = 0;      // meshes shown, and how many have a current layout
+    bool normal = false, color = false, id = false;   // maps in the bake
+    bool fresh = true;                // the bake still fits the meshes
+    int  res = 0;                     // the bake's size
+};
+static UvExportAvail g_uvx;
+
+// Size chips shared by the windows: 512 / 1K / 2K / 4K.
+static void size_chips(const char* id, int& v) {
+    static const int sizes[4] = {512, 1024, 2048, 4096};
+    static const char* lab[4] = {"512", "1K", "2K", "4K"};
+    ImGui::PushID(id);
+    for (int i = 0; i < 4; i++) {
+        if (i) ImGui::SameLine();
+        if (ImGui::RadioButton(lab[i], v == sizes[i])) v = sizes[i];
+    }
+    ImGui::PopID();
+}
+
+static void draw_uvmap_options(InputState& in) {
+    ImGui::TextUnformatted("Size");
+    size_chips("uvmSize", in.uvmap_size);
+    ImGui::SetNextItemWidth(200.0f);
+    ImGui::SliderFloat("##uvmWire", &in.uvmap_wire, 0.5f, 8.0f, "wire %.1f px");
+    ImGui::Checkbox("Fill the islands", &in.uvmap_fill);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("On: each island in its colour under the wire. Off: just the wire");
+    ImGui::BeginDisabled(!g_uvx.id);
+    bool cid = in.uvmap_color_id && g_uvx.id;
+    if (ImGui::Checkbox("Color ID map too", &cid)) in.uvmap_color_id = cid;
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("%s", g_uvx.id ? "<mesh>-ColorID_<size>.png beside it: the baked ColorID paint layer"
+                                         : "Bake with Color ID on first (needs a paint layer named ColorID)");
+    if (g_uvx.parts > 1) ImGui::TextDisabled("%d meshes in one square", g_uvx.with_uv);
+}
+
+static void draw_uvx_options(InputState& in) {
+    ImGui::Checkbox("Model", &in.uvx_model);
+    ImGui::BeginDisabled(!in.uvx_model);
+    ImGui::Indent();
+    ImGui::RadioButton("GLB", &in.uvx_format, 2);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("One file: the meshes with their colour and normal maps inside");
+    ImGui::SameLine();
+    ImGui::RadioButton("OBJ", &in.uvx_format, 0);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("With an .mtl that points at the maps");
+    ImGui::SameLine();
+    ImGui::RadioButton("STL", &in.uvx_format, 1);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Shape only: no UVs, no textures");
+    ImGui::Unindent();
+    ImGui::EndDisabled();
+    if (g_uvx.parts > 1) ImGui::TextDisabled("%d meshes", g_uvx.parts);
+
+    ImGui::Spacing();
+    ImGui::Checkbox("Textures", &in.uvx_textures);
+    ImGui::BeginDisabled(!in.uvx_textures);
+    ImGui::Indent();
+    auto tex = [&](const char* label, bool& v, bool have, const char* why) {
+        ImGui::BeginDisabled(!have);
+        bool on = v && have;
+        if (ImGui::Checkbox(label, &on)) v = on;
+        ImGui::EndDisabled();
+        if (!have && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("%s", why);
+    };
+    tex("Colour", in.uvx_tex_color, g_uvx.color, "Bake with Colour on first");
+    tex("Normal", in.uvx_tex_normal, g_uvx.normal, "Bake with Normal on first");
+    tex("Color ID", in.uvx_tex_id, g_uvx.id, "Bake with Color ID on first (needs a paint layer named ColorID)");
+    tex("UV map", in.uvx_tex_uvmap, g_uvx.with_uv > 0, "Unwrap first");
+    ImGui::Unindent();
+    ImGui::EndDisabled();
+    if (g_uvx.res && !g_uvx.fresh) ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.4f, 1.0f), "The bake is out of date");
+    ImGui::Spacing();
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 220.0f);
+    ImGui::TextDisabled("%s", in.uvx_model && in.uvx_format == 2
+        ? "GLB carries Colour and Normal inside; Color ID and the UV map go beside it as PNGs."
+        : "Maps go beside the model as PNGs: <name>-Color_1024.png and so on.");
+    ImGui::PopTextWrapPos();
 }
 
 void app_files_frame(App& a) {
@@ -234,6 +319,191 @@ void app_files_frame(App& a) {
         }
         return wrote;
     };
+
+
+    // ---- UV mode's exports: the meshes the UV panel shows (the active one, then the rest
+    // of the selection), as Bake takes them. Each low goes with its layout when the layout
+    // is current for it.
+    auto uv_parts = [&]() {
+        std::vector<UvExportPart> out;
+        auto take = [&](uint32_t id) {
+            MeshEntity* e = scene.find_entity(id);
+            if (!e || !e->alive || e->preview || !e->retopo.built || e->retopo.result.faces.empty()) return;
+            for (const UvExportPart& p : out) if (p.id == id) return;
+            char buf[24];
+            out.push_back({id, file_part(Scene::display_name(*e, buf, sizeof buf)), &e->retopo.result,
+                           lo_uv_ok(e->retopo) ? &e->retopo.uv : nullptr});
+        };
+        take(scene.active_mesh_id());
+        for (uint32_t id : scene.selected_ids()) take(id);
+        return out;
+    };
+    auto fill_uvx_avail = [&]() {
+        const std::vector<UvExportPart> parts = uv_parts();
+        g_uvx = UvExportAvail{};
+        g_uvx.parts = (int)parts.size();
+        for (const UvExportPart& p : parts) g_uvx.with_uv += p.uv ? 1 : 0;
+        const BakeState& bk = scene.active_entity().retopo.bake;
+        const BakeResult& r = bk.res();
+        g_uvx.res = r.res;
+        g_uvx.normal = r.has_normal;
+        g_uvx.color = r.has_color;
+        g_uvx.id = r.has_id;
+        g_uvx.fresh = bk.fresh;
+    };
+    auto active_part_name = [&]() {
+        char buf[24];
+        return file_part(Scene::display_name(scene.active_entity(), buf, sizeof buf));
+    };
+    // "<dir>/<name>" without the extension; and the "-UVmap_<n>" a name may carry set to
+    // the size actually written (the native dialog's name was made before the size moved).
+    auto strip_ext = [](const std::string& path) {
+        const size_t slash = path.find_last_of("/\\"), dot = path.find_last_of('.');
+        return dot != std::string::npos && (slash == std::string::npos || dot > slash) ? path.substr(0, dot) : path;
+    };
+    auto retag = [](std::string stem, const char* tag, int size, const char* to_tag) {
+        const size_t at = stem.rfind(tag);
+        const std::string want = std::string(to_tag) + std::to_string(size);
+        if (at != std::string::npos) {
+            size_t e = at + std::strlen(tag);
+            while (e < stem.size() && std::isdigit((unsigned char)stem[e])) e++;
+            if (e == stem.size()) return stem.substr(0, at) + want;
+        }
+        return stem + want;
+    };
+    auto toast_written = [&](const std::vector<std::string>& wrote, size_t want, const std::string& where) {
+        if (wrote.size() < want) {
+            error_popup_msg = wrote.empty() ? "Export failed: " + where
+                            : "Exported only " + std::to_string(wrote.size()) + " of " + std::to_string(want)
+                              + " files next to " + where;
+            error_popup_trigger = true;
+        } else {
+            if (wrote.size() == 1)
+                std::snprintf(input.notification, sizeof(input.notification), "Exported: %.400s", wrote[0].c_str());
+            else
+                std::snprintf(input.notification, sizeof(input.notification), "Exported %zu files: %.400s*",
+                              wrote.size(), where.c_str());
+            input.notification_timer = 3.0f;
+        }
+    };
+    // The layout picture (and the Color ID map beside it). Returns the files written.
+    auto export_uv_map = [&](const std::string& path) {
+        std::vector<std::string> wrote;
+        std::vector<UvExportPart> parts = uv_parts();
+        parts.erase(std::remove_if(parts.begin(), parts.end(), [](const UvExportPart& p) { return !p.uv; }), parts.end());
+        if (parts.empty()) {
+            std::snprintf(input.notification, sizeof(input.notification), "Unwrap first: the UV map is the layout");
+            input.notification_timer = 3.0f;
+            return wrote;
+        }
+        const int size = input.uvmap_size;
+        const std::string stem = retag(strip_ext(path), "-UVmap_", size, "-UVmap_");
+        size_t want = 1;
+        if (uv_map_write_png(parts, size, input.uvmap_wire, input.uvmap_fill, (stem + ".png").c_str()))
+            wrote.push_back(stem + ".png");
+        const BakeResult& r = scene.active_entity().retopo.bake.res();
+        if (input.uvmap_color_id && r.has_id) {
+            want++;
+            const std::string id = retag(stem, "-UVmap_", size, "-ColorID_") + ".png";
+            if (bake_write_png(r, 2, id.c_str(), size)) wrote.push_back(id);
+        }
+        toast_written(wrote, want, stem);
+        return wrote;
+    };
+    // Model and textures: the lows as OBJ (+ MTL) / STL / GLB, and the ticked maps beside
+    // them (a GLB carries Colour and Normal inside instead).
+    auto export_uv_assets = [&](const std::string& path) {
+        std::vector<std::string> wrote;
+        const std::vector<UvExportPart> parts = uv_parts();
+        if (parts.empty()) {
+            std::snprintf(input.notification, sizeof(input.notification), "Build a retopo mesh in mode 0 first");
+            input.notification_timer = 3.0f;
+            return wrote;
+        }
+        const std::string stem = strip_ext(path);
+        const BakeResult& r = scene.active_entity().retopo.bake.res();
+        const bool tex = input.uvx_textures;
+        const bool t_col = tex && input.uvx_tex_color && r.has_color;
+        const bool t_nrm = tex && input.uvx_tex_normal && r.has_normal;
+        const bool t_id  = tex && input.uvx_tex_id && r.has_id;
+        const bool t_uv = tex && input.uvx_tex_uvmap;
+        const bool model = input.uvx_model;
+        const int fmt = input.uvx_format;
+        const bool glb_carries = model && fmt == 2;
+        const std::string res = "_" + std::to_string(r.res);
+        const std::string col_png = stem + "-Color" + res + ".png", nrm_png = stem + "-Normal" + res + ".png";
+        auto base = [](const std::string& p) { return p.substr(p.find_last_of("/\\") + 1); };
+        size_t want = 0;
+        if (model) {
+            if (fmt == 2) {
+                want++;
+                std::vector<uint8_t> cp, np;
+                if (t_col) cp = bake_png_bytes(r, 1);
+                if (t_nrm) np = bake_png_bytes(r, 0);
+                if (glb_write_lows((stem + ".glb").c_str(), parts, t_col ? &cp : nullptr, t_nrm ? &np : nullptr))
+                    wrote.push_back(stem + ".glb");
+            } else if (fmt == 0) {
+                want++;
+                const bool mtl = t_col || t_nrm;
+                if (mtl) {
+                    want++;
+                    if (FILE* m = std::fopen((stem + ".mtl").c_str(), "w")) {
+                        std::fprintf(m, "# Chisel bake\nnewmtl baked\nKd 1 1 1\nKs 0 0 0\n");
+                        if (t_col) std::fprintf(m, "map_Kd %s\n", base(col_png).c_str());
+                        if (t_nrm) std::fprintf(m, "map_Bump %s\n", base(nrm_png).c_str());
+                        if (std::fclose(m) == 0) wrote.push_back(stem + ".mtl");
+                    }
+                }
+                if (FILE* f = std::fopen((stem + ".obj").c_str(), "w")) {
+                    std::fprintf(f, "# OBJ export from Chisel: %zu retopo mesh%s\n", parts.size(), parts.size() == 1 ? "" : "es");
+                    if (mtl) std::fprintf(f, "mtllib %s\n", base(stem + ".mtl").c_str());
+                    uint32_t vb = 0, vtb = 0;
+                    for (const UvExportPart& p : parts) {
+                        std::fprintf(f, "o %s-LO\n", p.name.c_str());
+                        if (mtl) std::fprintf(f, "usemtl baked\n");
+                        retopo_write_obj(f, *p.rm, p.uv, nullptr, vb, vtb);
+                    }
+                    if (std::fclose(f) == 0) wrote.push_back(stem + ".obj");
+                }
+            } else {
+                for (const UvExportPart& p : parts) {
+                    want++;
+                    const std::string out = parts.size() == 1 ? stem + ".stl" : stem + "-" + p.name + "-LO.stl";
+                    if (retopo_export_stl(*p.rm, out.c_str())) wrote.push_back(out);
+                }
+            }
+        }
+        if (t_col && !glb_carries) { want++; if (bake_write_png(r, 1, col_png.c_str())) wrote.push_back(col_png); }
+        if (t_nrm && !glb_carries) { want++; if (bake_write_png(r, 0, nrm_png.c_str())) wrote.push_back(nrm_png); }
+        if (t_id) {
+            want++;
+            const std::string id = stem + "-ColorID" + res + ".png";
+            if (bake_write_png(r, 2, id.c_str())) wrote.push_back(id);
+        }
+        if (t_uv) {
+            std::vector<UvExportPart> lp = parts;
+            lp.erase(std::remove_if(lp.begin(), lp.end(), [](const UvExportPart& p) { return !p.uv; }), lp.end());
+            if (!lp.empty()) {
+                want++;
+                const std::string uvp = stem + "-UVmap_" + std::to_string(input.uvmap_size) + ".png";
+                if (uv_map_write_png(lp, input.uvmap_size, input.uvmap_wire, input.uvmap_fill, uvp.c_str()))
+                    wrote.push_back(uvp);
+            }
+        }
+        if (!want) {
+            std::snprintf(input.notification, sizeof(input.notification), "Nothing ticked to export");
+            input.notification_timer = 3.0f;
+            return wrote;
+        }
+        toast_written(wrote, want, stem);
+        return wrote;
+    };
+    auto uvx_ext = [&]() { return input.uvx_model ? (input.uvx_format == 2 ? ".glb" : input.uvx_format == 1 ? ".stl" : ".obj") : ""; };
+    // A closed export window always leaves the kind at MESH for the toolbar's next one.
+    if (!input.export_dialog_active) input.export_kind = InputState::ExportKind::MESH;
+    const bool exp_mesh = input.export_dialog_active && input.export_kind == InputState::ExportKind::MESH;
+    const bool exp_uvmap = input.export_dialog_active && input.export_kind == InputState::ExportKind::UV_MAP;
+    const bool exp_uvx = input.export_dialog_active && input.export_kind == InputState::ExportKind::UV_ASSETS;
 
     // ---- Open/import a path (shared by the native dialog and the web picker) ----
     auto do_import_path = [&](const std::string& path) {
@@ -671,7 +941,7 @@ void app_files_frame(App& a) {
     // ---- ImGui file dialogs (native: browse the real filesystem) ----
     auto* fd = IGFD::FileDialog::Instance();
 
-    if (input.export_dialog_active && !fd->IsOpened("ExportKey")) {
+    if (exp_mesh && !fd->IsOpened("ExportKey")) {
         IGFD::FileDialogConfig cfg;
         cfg.path = default_browse_path;
         cfg.flags = ImGuiFileDialogFlags_ConfirmOverwrite;
@@ -705,7 +975,46 @@ void app_files_frame(App& a) {
         fd->Close();
         input.export_dialog_active = false;
     }
-    if (!input.export_dialog_active && fd->IsOpened("ExportKey"))
+    if (!exp_mesh && fd->IsOpened("ExportKey"))
+        fd->Close();
+
+    // UV mode's two: the layout picture, and model + textures. Their options sit in the
+    // side pane; the name is a starting point (the size and format chosen there win).
+    InputState* inp = &input;
+    if (exp_uvmap && !fd->IsOpened("UvMapKey")) {
+        fill_uvx_avail();
+        IGFD::FileDialogConfig cfg;
+        cfg.path = default_browse_path;
+        cfg.flags = ImGuiFileDialogFlags_ConfirmOverwrite;
+        cfg.fileName = active_part_name() + "-UVmap_" + std::to_string(input.uvmap_size) + ".png";
+        cfg.sidePaneWidth = 240.0f;
+        cfg.sidePane = [inp](const char*, IGFD::UserDatas, bool*) { draw_uvmap_options(*inp); };
+        fd->OpenDialog("UvMapKey", "Export UV Map", ".png", cfg);
+    }
+    if (display_file_dialog(fd, "UvMapKey")) {
+        if (fd->IsOk()) export_uv_map(fd->GetFilePathName());
+        fd->Close();
+        input.export_dialog_active = false;
+    }
+    if (!exp_uvmap && fd->IsOpened("UvMapKey"))
+        fd->Close();
+
+    if (exp_uvx && !fd->IsOpened("UvAssetsKey")) {
+        fill_uvx_avail();
+        IGFD::FileDialogConfig cfg;
+        cfg.path = default_browse_path;
+        cfg.flags = ImGuiFileDialogFlags_ConfirmOverwrite;
+        cfg.fileName = active_part_name() + uvx_ext();
+        cfg.sidePaneWidth = 250.0f;
+        cfg.sidePane = [inp](const char*, IGFD::UserDatas, bool*) { draw_uvx_options(*inp); };
+        fd->OpenDialog("UvAssetsKey", "Export Model and Textures", ".glb,.obj,.stl,.png", cfg);
+    }
+    if (display_file_dialog(fd, "UvAssetsKey")) {
+        if (fd->IsOk()) export_uv_assets(fd->GetFilePathName());
+        fd->Close();
+        input.export_dialog_active = false;
+    }
+    if (!exp_uvx && fd->IsOpened("UvAssetsKey"))
         fd->Close();
 
     if (display_file_dialog(fd, "ImportKey")) {
@@ -893,7 +1202,7 @@ void app_files_frame(App& a) {
 
     // Export: pick a name, a format button writes via the normal exporter
     // into MEMFS, web_download_file hands the bytes to the browser.
-    if (input.export_dialog_active && !ImGui::IsPopupOpen("Export Mesh"))
+    if (exp_mesh && !ImGui::IsPopupOpen("Export Mesh"))
         ImGui::OpenPopup("Export Mesh");
     if (ImGui::BeginPopupModal("Export Mesh", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         if (!input.export_dialog_active)   // ESC cleared the flag
@@ -935,6 +1244,53 @@ void app_files_frame(App& a) {
             input.export_dialog_active = false;
             ImGui::CloseCurrentPopup();
         }
+        ImGui::EndPopup();
+    }
+
+    // UV mode's two. The UV map's name is made for the user: <mesh>-UVmap_<size>.png.
+    auto web_get = [&](const std::vector<std::string>& files) {
+        for (const std::string& out : files) web_download_file(out.c_str(), out.c_str() + 1);
+        input.export_dialog_active = false;
+        ImGui::CloseCurrentPopup();
+    };
+    if (exp_uvmap && !ImGui::IsPopupOpen("Export UV Map"))
+        ImGui::OpenPopup("Export UV Map");
+    if (ImGui::BeginPopupModal("Export UV Map", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        if (!input.export_dialog_active) ImGui::CloseCurrentPopup();
+        if (ImGui::IsWindowAppearing()) fill_uvx_avail();
+        draw_uvmap_options(input);
+        const std::string name = active_part_name() + "-UVmap_" + std::to_string(input.uvmap_size) + ".png";
+        ImGui::Spacing();
+        ImGui::TextDisabled("%s", name.c_str());
+        if (ImGui::Button("Download")) web_get(export_uv_map("/" + name));
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) { input.export_dialog_active = false; ImGui::CloseCurrentPopup(); }
+        ImGui::EndPopup();
+    }
+    static char web_uvx_name[128] = "";
+    if (exp_uvx && !ImGui::IsPopupOpen("Export Model and Textures"))
+        ImGui::OpenPopup("Export Model and Textures");
+    if (ImGui::BeginPopupModal("Export Model and Textures", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        if (!input.export_dialog_active) ImGui::CloseCurrentPopup();
+        if (ImGui::IsWindowAppearing()) {
+            fill_uvx_avail();
+            std::snprintf(web_uvx_name, sizeof web_uvx_name, "%s", active_part_name().c_str());
+            ImGui::SetKeyboardFocusHere();
+        }
+        ImGui::TextUnformatted("Download as:");
+        ImGui::SetNextItemWidth(260);
+        ImGui::InputText("##uvx_name", web_uvx_name, sizeof web_uvx_name);
+        ImGui::Spacing();
+        draw_uvx_options(input);
+        ImGui::Spacing();
+        if (ImGui::Button("Download")) {
+            std::string n = web_uvx_name[0] ? web_uvx_name : "model";
+            for (const char* e : {".glb", ".obj", ".stl"})
+                if (n.size() > 4 && n.compare(n.size() - 4, 4, e) == 0) n.resize(n.size() - 4);
+            web_get(export_uv_assets("/" + n + uvx_ext()));
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) { input.export_dialog_active = false; ImGui::CloseCurrentPopup(); }
         ImGui::EndPopup();
     }
 

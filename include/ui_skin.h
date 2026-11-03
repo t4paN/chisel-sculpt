@@ -121,6 +121,7 @@ struct UvMeshRow {
     const char*  shown = nullptr;    // the mesh's name, or "Mesh <id>"
     RetopoState* st = nullptr;       // its retopo (its layout lives there)
     bool         active = false, selected = false;
+    bool         has_color_id = false;   // its sculpt has a "ColorID" paint layer (bake_color_id_layer)
 };
 void draw_uv_dock(InputState& input, RetopoState& st, UvMeshRow* rows, int n, int win_w, int win_h);
 // UV mode's colours: a mesh's own hue (its row, brackets and outline), and one of its
