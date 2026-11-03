@@ -2,6 +2,10 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-03 — Meshes dock: fold triangle, title bar moves it
+
+- Like the paint layers window: the triangle on the left folds the list, the rest of the title bar drags the dock (it used to fold on any click and move only from its margins).
+
 ## 2026-11-03 — Docs for v0.3.8
 
 - MANUAL: new UV mode (9) section (seams, unwrap, atlas, bake maps, exports); Meshes panel; retopo per mesh, lasso grid, -HI/-LO export names; GLB in the import/export table.

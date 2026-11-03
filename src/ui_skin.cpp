@@ -3860,19 +3860,31 @@ void draw_mesh_layers_dock(InputState& input, MeshLayerRow* rows, int n, int win
     BtnOpts o;
     o.look = Look::Bar; o.side = TipSide::Left; o.icon_px = 18.0f;
 
-    {   // Title: click folds the list away (it's up in every sculpt session).
+    {   // Title, as the paint layers window's: the triangle folds the list away, the rest
+        // of the bar is no widget at all, so a drag on it moves the dock (ImGui's own
+        // window move, the same as grabbing its edge).
         const ImVec2 p = ImGui::GetCursorScreenPos();
-        ImGui::InvisibleButton("##fold", ImVec2(w, 18.0f));
+        const float th = 18.0f, tw = 18.0f;
+        ImGui::InvisibleButton("##fold", ImVec2(tw, th));
+        const bool fold_hover = ImGui::IsItemHovered();
         if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) input.mesh_dock_folded = !input.mesh_dock_folded;
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-        text_at(dl, UiFont::SansSemibold, 13.0f, p, kText, "Meshes");
-        char cnt[24];
-        std::snprintf(cnt, sizeof cnt, input.mesh_dock_folded ? "%d  +" : "%d  -", n);
-        const ImVec2 cs = text_size(UiFont::Mono, 12.0f, cnt);
-        text_at(dl, UiFont::Mono, 12.0f, ImVec2(p.x + w - cs.x, p.y + 2.0f), kMuted, cnt);
-        if (ImGui::IsItemHovered())
+        if (fold_hover)
             tooltip(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), TipSide::Left,
                     input.mesh_dock_folded ? "Show the mesh list" : "Fold the mesh list away", nullptr);
+        ImGui::SameLine(0.0f, 0.0f);
+        ImGui::Dummy(ImVec2(w - tw, th));
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const ImU32 tc = fold_hover ? kText : kMuted;
+        const ImVec2 c(p.x + tw * 0.5f - 2.0f, p.y + th * 0.5f);
+        if (input.mesh_dock_folded)   // pointing right: folded
+            dl->AddTriangleFilled(ImVec2(c.x - 3.0f, c.y - 5.0f), ImVec2(c.x + 4.0f, c.y), ImVec2(c.x - 3.0f, c.y + 5.0f), tc);
+        else                          // pointing down: open
+            dl->AddTriangleFilled(ImVec2(c.x - 5.0f, c.y - 3.0f), ImVec2(c.x + 5.0f, c.y - 3.0f), ImVec2(c.x, c.y + 4.0f), tc);
+        text_at(dl, UiFont::SansSemibold, 13.0f, ImVec2(p.x + tw, p.y), kText, "Meshes");
+        char cnt[24];
+        std::snprintf(cnt, sizeof cnt, "%d", n);
+        const ImVec2 cs = text_size(UiFont::Mono, 12.0f, cnt);
+        text_at(dl, UiFont::Mono, 12.0f, ImVec2(p.x + w - cs.x, p.y + 2.0f), kMuted, cnt);
     }
     if (input.mesh_dock_folded) { end_panel(); return; }
 
