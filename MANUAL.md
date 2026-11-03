@@ -56,6 +56,7 @@ mesh to sculpt; left-drag off the mesh to orbit. That's 90% of the app right the
 | 3 | **Select** | Picking, moving, scaling, deleting whole objects |
 | 4 | **Paint** | Vertex-colour painting |
 | 0 | **Retopo** | Drawing a clean low-poly over the sculpt (see [Retopology](#retopology-retopo-mode-0)) |
+| 9 | **UV** | Unwrapping the low-poly and baking the sculpt into texture maps (see [UV mode](#uv-mode-9-unwrap-and-bake)) |
 
 ## Sculpting (Edit mode)
 
@@ -196,6 +197,18 @@ the usual suspects.
 
 ## Multiple objects
 
+### The Meshes panel
+
+Sculpt and Select modes list every mesh in the scene: an eye, a name and a trash can per
+row. Click a row to make that mesh the active one, Ctrl+click to add it to the selection,
+double-click to rename it; the trash takes two clicks. A hidden mesh isn't drawn and
+can't be picked. **Ctrl+Z** brings back a deleted mesh, with its sculpt, retopo and
+history, from any mode.
+
+Each mesh keeps its **own retopo** (and UV layout and bake): retopo and UV mode work on
+the active mesh's. Moving, scaling or spinning a mesh in Select mode carries its retopo
+along; a voxel merge joins the merged meshes' retopos into the result.
+
 ### Insert mode (2)
 
 Click to place a sphere, drag to scale it, release to commit. If the placement
@@ -285,8 +298,8 @@ back.
 
 A low-poly cage drawn by hand over the sculpt, for baking and game use. It lives beside
 the sculpt and never changes it: the sculpt can keep changing underneath, and the cage
-snaps back onto whatever is there. It works on the **active object**, so select the one
-you mean before pressing `0`.
+snaps back onto whatever is there. Every mesh has its own; retopo works on the **active
+mesh's**, so pick the one you mean (Meshes panel, or Select mode) before pressing `0`.
 
 **Strokes become quads.** Draw a fat stroke and it is built the moment the pen lifts:
 closed (back near its start) it is a **donut** (rings round an eye or a mouth), open it
@@ -326,7 +339,10 @@ closes with a quad. Starting on a picked loop **extrudes** it as far as the line
 
 **Wand (Q).** Click a hole: every way to fill it is listed, hovering one shows it on the
 model, a click keeps it. Drag a lasso: cleanup inside it (near-miss vertices weld,
-slivers and second copies go, tiny holes close). Right-click an island: **Copy island**.
+slivers and second copies go, tiny holes close). A lasso round **bare sculpt** (no retopo
+inside) fills it with a new island of quads, a ring along the outline and a grid inside;
+the **wheel** makes it denser or sparser until the next click. With mirror on, the twin
+comes along, and a lasso across the middle makes one symmetric grid. Right-click an island: **Copy island**.
 Then lasso bare sculpt where the copy should go, right-click, **Paste island**: it is
 moved, tilted and scaled to fit what is inside the lasso (lasso looking straight down
 at it: a horn from above), snapped on and smoothed, with **Scale / Twist / Offset** to
@@ -345,8 +361,62 @@ of the first. Grab and Smooth never carry a vertex across the middle: it stops o
 The dock's **Symmetrize** keeps one half and rebuilds the other from it.
 
 The cage is saved in the `.chisel` project. **Export** (the dock) writes it as an OBJ
-next to the project (in the browser it downloads as `retopo.obj`): quads as quads, ready
-to bake the sculpt onto in another app.
+next to the project, named `<project>-<mesh>-LO.obj` (in the browser it downloads as
+`<mesh>-LO.obj`): quads as quads, with UVs once it's unwrapped. The toolbar's Export
+(Ctrl+E) lists every mesh's sculpt (`-HI`) and retopo (`-LO`) side by side; opening an OBJ
+or GLB with a `<mesh>-LO` beside its `<mesh>-HI` brings it back as that mesh's retopo,
+UVs and seams included. To bake in Chisel itself, go on to [UV mode](#uv-mode-9-unwrap-and-bake).
+
+## UV mode (9): unwrap and bake
+
+The last step of the low-poly workflow: lay the retopo mesh flat into a square (its UV
+layout), then bake the sculpt's detail and paint into textures for it. Build a retopo
+in mode 0 first; UV mode works on it and never changes the sculpt.
+
+**Seams.** Drag on the model to paint seams, vertex to vertex, where the mesh may be cut
+open (Ctrl erases; with mirror on, the twin is painted too). **Clear seams** in the panel
+removes them all.
+
+**Unwrap** cuts along the seams and the mesh's own open borders, nowhere else, flattens
+each piece (an *island*) with as little stretch as it can, and packs the islands into the
+square. **Re-pack** packs them again as they are. The **Padding** slider sets the gap
+between islands, in pixels at the bake size.
+
+**The panel.** The layout shows in a square; double-click it for a big centred view
+(scroll zooms, middle-drag pans, Esc or a click outside flies it back). In the big view,
+drag moves islands, Ctrl+click picks several, **Q / E** turn them (Shift: exact quarter
+turns) and right-drag scales them; each move is one Ctrl+Z. Below the square the meshes
+are listed: click one to show its layout, the arrow folds out its islands (hover one
+to light it on the model, click for its share of the square and texel density).
+
+**Several meshes, one texture (atlas).** Ctrl+click more meshes in the panel's list: the
+square shows them all, and Unwrap, Re-pack and Bake take them together into one texture,
+each island at its real size so detail is even across them. Each mesh has its own colour
+in the square and on the model; with Viewfinder corners on, each also gets brackets.
+
+**Bake.** Pick the maps and a size (512 to 4K), then **Bake**; it runs a slice per frame
+with a progress bar and **Stop**.
+
+| Map | What it holds |
+|---|---|
+| Normal | The sculpt's detail as seen from the low-poly (green up; **Green down** flips it for engines that want that) |
+| Colour | The paint, every visible layer merged, over an imported model's texture |
+| Color ID | The paint layer named `ColorID` alone, flat colours: for picking materials by colour in other apps |
+
+**Reach** sets how far either side of the low-poly the bake looks for the sculpt.
+**Preview** shows the low-poly wearing the maps in place of the sculpt.
+
+**Exporting.**
+- The **export button** beside Unwrap writes the **UV map**: a PNG of the layout to paint
+  over (`<mesh>-UVmap_1024.png`), with a size, the wire's thickness, islands filled or
+  just outlined, and optionally the Color ID map beside it (`<mesh>-ColorID_1024.png`).
+- **Export model and textures** (the big button at the panel's bottom right) writes the
+  low-poly meshes shown as **GLB**, **OBJ** or **STL**, with any of the baked maps ticked.
+  A GLB carries the colour and normal maps inside, in one file ready for an engine; an
+  OBJ gets an `.mtl` that points at the PNGs beside it; STL is shape only.
+
+In the browser both download straight away. The seams and the layout are saved in the
+`.chisel` project; the baked maps are not, so bake again after reopening.
 
 ## Camera
 
@@ -428,8 +498,9 @@ re-save it on its origin platform first if you want the levels.
 
 | Direction | Formats | Notes |
 |---|---|---|
-| Import (Ctrl+O) | OBJ, PLY, .chisel | One picker for all three |
-| Export (Ctrl+E / toolbar) | OBJ, STL, PLY | PLY carries vertex paint; STL is print-ready — pair it with voxel merge |
+| Import (Ctrl+O, or drop a file) | OBJ, PLY, GLB / glTF, .chisel | One picker for all of them; each OBJ / GLB object becomes its own mesh. A GLB's colour texture comes along and shows on the sculpt (paint tints it); compressed GLBs (Draco / meshopt) aren't read |
+| Export (Ctrl+E / toolbar) | OBJ, STL, PLY | Every mesh's sculpt (`-HI`) and retopo (`-LO`); PLY carries vertex paint; STL is print-ready — pair it with voxel merge |
+| Export from UV mode | PNG, GLB, OBJ + MTL, STL | The UV map, and the low-poly with its baked maps (see [UV mode](#uv-mode-9-unwrap-and-bake)) |
 
 ### On the web
 
@@ -456,7 +527,8 @@ you want to choose folders on itch.
 
 ## Known limitations
 
-- No texture painting — paint is per-vertex.
+- No texture painting — paint is per-vertex. Imported textures show and bake, and paint
+  tints them, but brushes don't paint into them.
 - Brush feel is still being tuned (falloff curves, stroke interpolation).
 - Voxel-merging heavily damaged, non-watertight input can need a resolution bump.
 - After a *full* undo of many overlapping carve strokes, normals can look slightly

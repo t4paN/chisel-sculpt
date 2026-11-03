@@ -2,6 +2,11 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-03 — Docs for v0.3.8
+
+- MANUAL: new UV mode (9) section (seams, unwrap, atlas, bake maps, exports); Meshes panel; retopo per mesh, lasso grid, -HI/-LO export names; GLB in the import/export table.
+- README: UV unwrap and bake, Meshes panel, GLB in and out.
+
 ## 2026-11-03 — UV exports: UV map picture, model + textures, GLB
 
 - The UV dock's export button writes the UV map as a PNG (`<mesh>-UVmap_1024.png`): size, wire thickness, islands filled or just the outline.

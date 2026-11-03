@@ -24,22 +24,26 @@ identically in the native build, and vice versa.
 - **Vertex paint mode** with colour picking; paint survives subdivision, remeshing, and merges
 - **Retopology mode** — sketch strips and rings over the sculpt and they become clean quads on
   its surface; bridge, cut, fill holes, wrap a limb in contour rings with one line, copy a ring
-  from one horn onto the next; mirror-aware,
-  saved in the project, exported as OBJ for baking
-- **Multiple objects** — insert, select, move, scale, delete; per-object undo and subdivision
+  from one horn onto the next, lasso a patch into a quad grid; mirror-aware, saved in the project
+- **UV unwrap and bake** — paint seams, unwrap and pack the low-poly, then bake the sculpt into
+  normal, colour and Color ID maps; several meshes can share one texture (an atlas); export the
+  low-poly with its maps as GLB, OBJ or STL, and the UV layout as a PNG to paint over
+- **Multiple objects** — a Meshes panel (show, hide, rename, delete with undo); insert, select,
+  move, scale; per-object undo, subdivision and retopo
 - **Multires displacement stack** — step down to edit forms, back up for detail
 - **X-axis mirror** — real-time symmetric sculpting, masking, and painting
 - **Voxel merge** — weld a selection into one watertight manifold, ready for 3D
   printing; mirror-symmetric or boolean-subtract variants, Marching Cubes or Surface Nets
 - **Isotropic remesh** — respects masks and mirror symmetry
 - **Delta-based undo/redo** — per-stroke, per-object, GPU-resident
-- **OBJ / PLY in; OBJ / STL / PLY out** (PLY carries vertex paint)
+- **OBJ / PLY / GLB in; OBJ / STL / PLY / GLB out** (PLY carries vertex paint; textured GLBs
+  come in with their texture, retopo lows go out as GLB with their baked maps)
 - **Pen pressure** — XInput2 / WinTab / browser Pointer Events; mouse-first design, tablet optional
 - **Matcap shading** — one draw call per object
 
 **Full controls and workflow: [MANUAL.md](MANUAL.md).** Quickstart: left-drag on the
 mesh sculpts, off the mesh orbits; `1–4` switch modes; hold `S`/`W`/`A` + drag to tune
-the brush; `X` mirrors; `Ctrl+Z` undoes; `0` is retopology.
+the brush; `X` mirrors; `Ctrl+Z` undoes; `0` is retopology, `9` unwraps and bakes it.
 
 ## How it works
 
