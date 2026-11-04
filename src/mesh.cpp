@@ -51,6 +51,37 @@ static inline Vec3 guard_normal(const Vec3& max_sum, const Vec3& area_sum) {
 // path's flag arrays: grows once, then no heap churn per stroke.
 static std::vector<float> g_area_sum;
 
+void Mesh::map_normals_now(std::vector<float>& out) const {
+    const uint32_t nv = vertex_count(), nt = tri_count();
+    out.assign((size_t)nv * 3, 0.0f);
+    for (uint32_t t = 0; t < nt; t++) {
+        const uint32_t a = indices[3 * t], b = indices[3 * t + 1], c = indices[3 * t + 2];
+        const Vec3 pa = get_pos(a);
+        const Vec3 n = (get_pos(b) - pa).cross(get_pos(c) - pa);   // area-weighted, as the sculpt shades
+        for (uint32_t v : {a, b, c}) { out[3 * v] += n.x; out[3 * v + 1] += n.y; out[3 * v + 2] += n.z; }
+    }
+    for (uint32_t v = 0; v < nv; v++) {
+        float* n = &out[3 * v];
+        const float l = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+        if (l > 1e-20f) { n[0] /= l; n[1] /= l; n[2] /= l; }
+    }
+    if (map_pos.size() != (size_t)nv * 3 || map_norm.size() != (size_t)nv * 3) return;
+    for (uint32_t v = 0; v < nv; v++) {
+        if (pos_x[v] != map_pos[3 * v] || pos_y[v] != map_pos[3 * v + 1] || pos_z[v] != map_pos[3 * v + 2]) continue;
+        for (int c = 0; c < 3; c++) out[3 * v + c] = map_norm[3 * v + c];
+    }
+}
+
+void Mesh::set_map_normals(std::vector<float>&& n) {
+    const uint32_t nv = vertex_count();
+    map_norm = std::move(n);
+    map_pos.resize((size_t)nv * 3);
+    for (uint32_t v = 0; v < nv; v++) {
+        map_pos[3 * v] = pos_x[v]; map_pos[3 * v + 1] = pos_y[v]; map_pos[3 * v + 2] = pos_z[v];
+    }
+    recompute_normals();
+}
+
 void Mesh::recompute_normals() {
     uint32_t vc = vertex_count();
     uint32_t tc = tri_count();

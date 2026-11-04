@@ -60,11 +60,16 @@ uint32_t snap_mesh_to_soup(Mesh& m, const std::vector<float>& pos,
 // skip (optional): source tris to avoid while anything else is in reach (the SDF
 // merge's buried halves). tri_island (optional): per dst tri, the source island
 // it read from, named by one of its tris (UINT32_MAX = none in reach).
+// src_nrm + dst_nrm (optional, 3 per vertex): dst_nrm gets the source's smooth normal at
+// each vertex's closest point, as a normal map needs on a surface it wasn't baked on. A
+// vertex with none in reach, or on a source whose normals are zero, keeps its own.
 void transfer_uv(Mesh& dst, const std::vector<float>& src_pos,
                  const std::vector<uint32_t>& src_idx,
                  const std::vector<float>& src_uv, float cell,
                  const std::vector<uint8_t>* skip = nullptr,
-                 std::vector<uint32_t>* tri_island = nullptr);
+                 std::vector<uint32_t>* tri_island = nullptr,
+                 const std::vector<float>* src_nrm = nullptr,
+                 std::vector<float>* dst_nrm = nullptr);
 
 // SDF merge paint carry: for each vertex of m (normals current), the soup vertex
 // to take paint from — nearest corner of the closest same-facing soup tri that

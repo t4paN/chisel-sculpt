@@ -182,29 +182,13 @@ void prep_high(BakeWork& w, const Mesh& m) {
     // The last member's leftovers go first.
     w.nodes.clear(); w.todo.clear(); w.tree_done = 0;
     w.hcol.clear(); w.hid.clear(); w.htex = nullptr; w.hmix = 1.0f; w.hnmap = nullptr; w.hnmix = 1.0f;
-    w.hn.assign((size_t)nv * 3, 0.0f);
+    m.map_normals_now(w.hn);
     w.cen.resize((size_t)nt * 3);
     for (uint32_t t = 0; t < nt; t++) {
-        const uint32_t a = m.indices[3 * t], b = m.indices[3 * t + 1], c = m.indices[3 * t + 2];
-        const Vec3 pa = m.get_pos(a), pb = m.get_pos(b), pc = m.get_pos(c);
-        const Vec3 n = (pb - pa).cross(pc - pa);   // area-weighted, as the sculpt shades
-        for (uint32_t v : {a, b, c}) { w.hn[3 * v] += n.x; w.hn[3 * v + 1] += n.y; w.hn[3 * v + 2] += n.z; }
-        const Vec3 ce = (pa + pb + pc) * (1.0f / 3.0f);
+        const Vec3 ce = (m.get_pos(m.indices[3 * t]) + m.get_pos(m.indices[3 * t + 1]) + m.get_pos(m.indices[3 * t + 2])) * (1.0f / 3.0f);
         w.cen[3 * t] = ce.x; w.cen[3 * t + 1] = ce.y; w.cen[3 * t + 2] = ce.z;
     }
-    for (uint32_t v = 0; v < nv; v++) {
-        float* n = &w.hn[3 * v];
-        const float l = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
-        if (l > 1e-20f) { n[0] /= l; n[1] /= l; n[2] /= l; }
-    }
-    // A normal map only reads right on the normals it was baked against (Mesh::map_norm).
     if (m.normal_map && m.has_uv()) {
-        if (m.map_pos.size() == (size_t)nv * 3 && m.map_norm.size() == (size_t)nv * 3) {
-            for (uint32_t v = 0; v < nv; v++) {
-                if (m.pos_x[v] != m.map_pos[3 * v] || m.pos_y[v] != m.map_pos[3 * v + 1] || m.pos_z[v] != m.map_pos[3 * v + 2]) continue;
-                for (int c = 0; c < 3; c++) w.hn[3 * v + c] = m.map_norm[3 * v + c];
-            }
-        }
         w.hnmix = m.paint_layers.texture_mix();
         if (w.hnmix > 0.0f) w.hnmap = m.normal_map.get();
     }

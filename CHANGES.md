@@ -2,6 +2,11 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-04 — SDF merge and remesh keep the normal map
+
+- SDF merge used to drop the normal map every time. One image now stays with its map; a merge that repacks textures builds a normal atlas with the same layout as the colour one, flat where a part has no map.
+- New vertices take the source's smooth normals at their closest point, as a map only reads right on the normals it was baked against. Remesh does the same.
+
 ## 2026-11-04 — Normal bake reads an imported normal map
 
 - Baking from an imported model now includes its normal map and file normals, as the viewport shows them, so a low-poly export bakes with its detail instead of nearly flat.
@@ -11,7 +16,7 @@ Short, chronological log of notable changes. Newest on top.
 
 - A GLB's normal map now comes in with its colour map and shows in the viewport on both backends; the Texture row fades it too and reads "+ normal".
 - The file's normals stay while a vertex hasn't moved, as the map only reads right on them; a moved vertex gets fresh ones and the map keeps following the surface.
-- Saves keep the map in a new optional chunk, which older builds skip. SDF merge with a texture atlas drops it and keeps the colour.
+- Saves keep the map in a new optional chunk, which older builds skip.
 
 ## 2026-11-04 — Unwrap: holes keep their shape, unevenness spreads out
 

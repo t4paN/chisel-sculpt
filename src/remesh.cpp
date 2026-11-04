@@ -3431,12 +3431,19 @@ static bool tri_bary(Vec3 p, Vec3 a, Vec3 b, Vec3 c, float w[3]) {
 void transfer_uv(Mesh& dst, const std::vector<float>& src_pos,
                  const std::vector<uint32_t>& src_idx,
                  const std::vector<float>& src_uv, float cell,
-                 const std::vector<uint8_t>* skip, std::vector<uint32_t>* tri_island) {
+                 const std::vector<uint8_t>* skip, std::vector<uint32_t>* tri_island,
+                 const std::vector<float>* src_nrm, std::vector<float>* dst_nrm) {
     auto t0 = std::chrono::steady_clock::now();
     const uint32_t snt = (uint32_t)(src_idx.size() / 3);
     const uint32_t tc = dst.tri_count(), vc = dst.vertex_count();
     dst.uv.assign((size_t)tc * 6, 0.0f);
     if (tri_island) tri_island->assign(tc, UINT32_MAX);
+    if (dst_nrm) {
+        dst_nrm->resize((size_t)vc * 3);
+        for (uint32_t v = 0; v < vc; v++) {
+            (*dst_nrm)[3*v] = dst.norm_x[v]; (*dst_nrm)[3*v+1] = dst.norm_y[v]; (*dst_nrm)[3*v+2] = dst.norm_z[v];
+        }
+    }
     if (snt == 0 || src_uv.size() != (size_t)snt * 6 || tc == 0) return;
 
     // Source UV islands: two tris sharing an edge are one island when both
@@ -3510,6 +3517,19 @@ void transfer_uv(Mesh& dst, const std::vector<float>& src_pos,
         if (t == UINT32_MAX) continue;
         vtri[v] = t;
         map_uv(t, cp, vuv[2*v], vuv[2*v + 1]);
+        if (src_nrm && dst_nrm) {
+            float w[3];
+            if (!tri_bary(cp, src_v(t,0), src_v(t,1), src_v(t,2), w)) { w[0] = 1.0f; w[1] = w[2] = 0.0f; }
+            Vec3 sn(0, 0, 0);
+            for (int k = 0; k < 3; k++) {
+                const float* c = &(*src_nrm)[3 * (size_t)src_idx[t*3 + k]];
+                sn += Vec3(c[0], c[1], c[2]) * w[k];
+            }
+            const float sl = sn.length();
+            if (sl > 1e-6f) {
+                (*dst_nrm)[3*v] = sn.x / sl; (*dst_nrm)[3*v+1] = sn.y / sl; (*dst_nrm)[3*v+2] = sn.z / sl;
+            }
+        }
     }
 
     // Per tri: the island under its centre decides (a seam vertex's own lookup
@@ -3623,7 +3643,7 @@ struct RemeshJob {
     bool carrying = false;            // paint layers are in their dense carry form
     // Textured mesh: the surface as it came in, for transfer_uv at the end (the
     // edge ops don't carry per-corner UVs; a lookup after is simpler and exact).
-    std::vector<float>    uv_src_pos, uv_src;
+    std::vector<float>    uv_src_pos, uv_src, uv_src_nrm;   // nrm: only with a normal map
     std::vector<uint32_t> uv_src_idx;
     void carry_uv();
 
@@ -3705,6 +3725,7 @@ bool RemeshJob::setup() {
         }
         uv_src_idx = mesh.indices;
         uv_src = mesh.uv;
+        if (mesh.normal_map) mesh.map_normals_now(uv_src_nrm);
     }
 
     // Ensure adjacency is built
@@ -4245,8 +4266,12 @@ void RemeshJob::finish_mirror() {
 
 void RemeshJob::carry_uv() {
     if (uv_src_idx.empty()) return;
-    transfer_uv(mesh, uv_src_pos, uv_src_idx, uv_src, target_edge_length);
-    uv_src_pos = {}; uv_src = {}; uv_src_idx = {};
+    std::vector<float> vn;
+    const bool with_n = !uv_src_nrm.empty();
+    transfer_uv(mesh, uv_src_pos, uv_src_idx, uv_src, target_edge_length, nullptr, nullptr,
+                with_n ? &uv_src_nrm : nullptr, with_n ? &vn : nullptr);
+    if (with_n) mesh.set_map_normals(std::move(vn));
+    uv_src_pos = {}; uv_src = {}; uv_src_idx = {}; uv_src_nrm = {};
 }
 
 RemeshJob* remesh_begin(Mesh& mesh, MultiresStack& stack,

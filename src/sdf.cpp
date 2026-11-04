@@ -71,7 +71,9 @@ uint32_t gather_soup(const Scene& scene,
                      size_t&                additive_floats,
                      std::vector<float>&    soup_uv,   // 6 per tri (zeros when untextured)
                      std::vector<uint32_t>& soup_tex,  // per tri: slot in texs, UINT32_MAX = none
-                     std::vector<std::shared_ptr<const MeshTexture>>& texs)
+                     std::vector<std::shared_ptr<const MeshTexture>>& texs,
+                     std::vector<std::shared_ptr<const MeshTexture>>& ntexs,  // parallel: normal maps, or null
+                     std::vector<float>&    soup_nrm)  // 3 per vertex; empty = no normal maps, zero = this one has none
 {
     n_additive  = 0;
     n_cutter    = 0;
@@ -108,8 +110,15 @@ uint32_t gather_soup(const Scene& scene,
         // textures (if any) stay behind.
         uint32_t slot = UINT32_MAX;
         if (!cutter && m.texture && m.has_uv()) {
-            slot = (uint32_t)(std::find(texs.begin(), texs.end(), m.texture) - texs.begin());
-            if (slot == texs.size()) texs.push_back(m.texture);
+            for (slot = 0; slot < texs.size(); slot++)
+                if (texs[slot] == m.texture && ntexs[slot] == m.normal_map) break;
+            if (slot == texs.size()) { texs.push_back(m.texture); ntexs.push_back(m.normal_map); }
+            if (m.normal_map) {
+                std::vector<float> own;
+                m.map_normals_now(own);
+                soup_nrm.resize((size_t)base * 3, 0.0f);
+                soup_nrm.insert(soup_nrm.end(), own.begin(), own.end());
+            }
         }
         soup_tex.insert(soup_tex.end(), m.tri_count(), slot);
         if (slot != UINT32_MAX) soup_uv.insert(soup_uv.end(), m.uv.begin(), m.uv.end());
@@ -143,6 +152,7 @@ uint32_t gather_soup(const Scene& scene,
             if (add_entity(up.get(), /*cutter=*/true)) n_cutter++;
         }
     }
+    if (!soup_nrm.empty()) soup_nrm.resize(pos.size(), 0.0f);
     return n_additive + n_cutter;
 }
 
@@ -1384,7 +1394,8 @@ struct VoxelMergeJob {
     // Textured inputs: per-soup-tri UVs and texture slot (see gather_soup).
     std::vector<float>    soup_uv;
     std::vector<uint32_t> soup_tex;
-    std::vector<std::shared_ptr<const MeshTexture>> texs;
+    std::vector<std::shared_ptr<const MeshTexture>> texs, ntexs;
+    std::vector<float>    soup_nrm;
 
     std::vector<float> field_cpu;  // post-flood signed field (read once, reused by relax)
     std::vector<float> soup;       // MC output triangle soup (read once in Mesh)
@@ -1454,7 +1465,10 @@ static void symmetrise_field_x(std::vector<float>& field, const SdfGrid& grid) {
 // out of its image and packed into a new one of at most kMaxSide square, all
 // shrunk by the same factor until they fit; bare-clay parts point at a white
 // patch so they show their paint. Swallowed islands and empty image space drop
-// out, so the shrink is usually mild.
+// out, so the shrink is usually mild. Normal maps take the same road, a second image
+// with the same layout (a part without one stays flat), and the result keeps the
+// source's smooth normals under them: the map only reads right on those, and a coarse
+// source's merged surface otherwise shows its facets.
 #ifdef __EMSCRIPTEN__
 static constexpr int kMaxSide = 2048;   // glb.cpp's import cap: the 32-bit WASM heap
 #else
@@ -1463,7 +1477,9 @@ static constexpr int kMaxSide = 4096;
 
 void carry_textures(Mesh& m, const std::vector<float>& pos, const std::vector<uint32_t>& idx,
                            const std::vector<float>& soup_uv, const std::vector<uint32_t>& soup_tex,
-                           const std::vector<std::shared_ptr<const MeshTexture>>& texs, float voxel,
+                           const std::vector<std::shared_ptr<const MeshTexture>>& texs,
+                           const std::vector<std::shared_ptr<const MeshTexture>>& ntexs,
+                           const std::vector<float>& soup_nrm, float voxel,
                            const std::function<bool(Vec3, Vec3)>& on_skin) {
     auto t0 = std::chrono::steady_clock::now();
     const uint32_t snt = (uint32_t)(idx.size() / 3), tc = m.tri_count();
@@ -1476,7 +1492,9 @@ void carry_textures(Mesh& m, const std::vector<float>& pos, const std::vector<ui
         buried[t] = !(l > 1e-20f) || !on_skin((A + B + C) * (1.0f / 3.0f), n * (1.0f / l));
     }
     std::vector<uint32_t> isl;
-    transfer_uv(m, pos, idx, soup_uv, voxel, &buried, &isl);
+    std::vector<float> map_n;
+    const bool with_n = !soup_nrm.empty();
+    transfer_uv(m, pos, idx, soup_uv, voxel, &buried, &isl, with_n ? &soup_nrm : nullptr, with_n ? &map_n : nullptr);
 
     // Which images the surface actually shows (a merged-away part's doesn't count).
     std::vector<uint8_t> used(texs.size() + 1, 0);   // last = bare clay
@@ -1489,7 +1507,9 @@ void carry_textures(Mesh& m, const std::vector<float>& pos, const std::vector<ui
     if (n_used == 0) { m.uv.clear(); return; }
     if (n_used == 1 && !used[texs.size()]) {
         m.texture = texs[only];
-        std::printf("[sdf] texture kept (%dx%d)\n", m.texture->w, m.texture->h);
+        m.normal_map = ntexs[only];
+        if (m.normal_map) m.set_map_normals(std::move(map_n));
+        std::printf("[sdf] texture kept (%dx%d)%s\n", m.texture->w, m.texture->h, m.normal_map ? " with its normal map" : "");
         return;
     }
 
@@ -1580,12 +1600,25 @@ void carry_textures(Mesh& m, const std::vector<float>& pos, const std::vector<ui
     atlas->w = AW; atlas->h = AH; atlas->name = "merged";
     atlas->rgba.assign((size_t)AW * AH * 4, 255);
     const int taps = std::min(4, (int)std::ceil(1.0f / k - 1e-3f));
+    bool any_n = false;
+    for (const Chart& c : charts) any_n = any_n || (c.slot != UINT32_MAX && ntexs[c.slot]);
+    std::shared_ptr<MeshTexture> natlas;
+    if (any_n) {
+        natlas = std::make_shared<MeshTexture>();
+        natlas->w = AW; natlas->h = AH; natlas->name = "merged-normal";
+        natlas->rgba.resize((size_t)AW * AH * 4);
+        for (size_t i = 0; i < (size_t)AW * AH; i++) {   // flat
+            uint8_t* o = &natlas->rgba[4 * i];
+            o[0] = 128; o[1] = 128; o[2] = 255; o[3] = 255;
+        }
+    }
     for (const Chart& c : charts) {
         if (c.slot == UINT32_MAX) continue;   // stays white
         const MeshTexture& tex = *texs[c.slot];
+        const MeshTexture* ntex = ntexs[c.slot].get();
         for (int py = c.Y; py < c.Y + c.h && py < AH; py++)
             for (int px = c.X; px < c.X + c.w; px++) {
-                uint32_t sum[4] = { 0, 0, 0, 0 };
+                uint32_t sum[4] = { 0, 0, 0, 0 }, nsum[4] = { 0, 0, 0, 0 };
                 for (int ty = 0; ty < taps; ty++)
                     for (int tx = 0; tx < taps; tx++) {
                         const float ax = (float)px + (tx + 0.5f) / taps, ay = (float)py + (ty + 0.5f) / taps;
@@ -1593,9 +1626,15 @@ void carry_textures(Mesh& m, const std::vector<float>& pos, const std::vector<ui
                         const float sy = c.y0 + (ay - (float)(c.Y + pad)) / k;
                         const uint32_t p = tex.sample(sx / tex.w, 1.0f - sy / tex.h);
                         for (int ch = 0; ch < 4; ch++) sum[ch] += (p >> (8 * ch)) & 0xFF;
+                        if (!ntex) continue;
+                        const uint32_t q = ntex->sample(sx / tex.w, 1.0f - sy / tex.h);
+                        for (int ch = 0; ch < 4; ch++) nsum[ch] += (q >> (8 * ch)) & 0xFF;
                     }
                 uint8_t* o = &atlas->rgba[((size_t)py * AW + px) * 4];
                 for (int ch = 0; ch < 4; ch++) o[ch] = (uint8_t)(sum[ch] / (taps * taps));
+                if (!ntex) continue;
+                uint8_t* no = &natlas->rgba[((size_t)py * AW + px) * 4];
+                for (int ch = 0; ch < 4; ch++) no[ch] = (uint8_t)(nsum[ch] / (taps * taps));
             }
     }
 
@@ -1617,8 +1656,10 @@ void carry_textures(Mesh& m, const std::vector<float>& pos, const std::vector<ui
         }
     }
     m.texture = atlas;
-    std::printf("[sdf] textures repacked: %d image(s)%s, %zu islands -> %dx%d at %.0f%% scale (%.0f ms)\n",
-                n_used, used[texs.size()] ? " + bare clay" : "", charts.size(), AW, AH, 100.0f * k,
+    m.normal_map = natlas;
+    if (natlas) m.set_map_normals(std::move(map_n));
+    std::printf("[sdf] textures repacked: %d image(s)%s%s, %zu islands -> %dx%d at %.0f%% scale (%.0f ms)\n",
+                n_used, used[texs.size()] ? " + bare clay" : "", natlas ? " + normal maps" : "", charts.size(), AW, AH, 100.0f * k,
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
 }
 
@@ -1645,7 +1686,7 @@ VoxelMergeJob* voxel_merge_begin(Scene& scene, ComputeState& cs,
     job->res.in_entities = gather_soup(scene, job->pos, idx, job->vcol, job->any_paint,
                                        job->vdens, job->any_density,
                                        subtract, n_additive, n_cutter, additive_floats,
-                                       job->soup_uv, job->soup_tex, job->texs);
+                                       job->soup_uv, job->soup_tex, job->texs, job->ntexs, job->soup_nrm);
     job->res.in_tris     = (uint32_t)(idx.size() / 3);
     if (idx.empty()) return fail("selection has no triangles");
     if (n_additive == 1 && n_cutter == 0 && scene.selected_ids().size() == 1) {
@@ -2203,7 +2244,7 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
 
         if (!j.texs.empty()) {
             const float hv = 0.5f * grid.voxel;
-            carry_textures(welded, j.pos, j.idx, j.soup_uv, j.soup_tex, j.texs, grid.voxel,
+            carry_textures(welded, j.pos, j.idx, j.soup_uv, j.soup_tex, j.texs, j.ntexs, j.soup_nrm, grid.voxel,
                            [&](Vec3 c, Vec3 n) {
                                return sample_field(j.field_cpu, grid, c + n * hv) > 0.0f &&
                                       sample_field(j.field_cpu, grid, c - n * hv) < 0.0f;

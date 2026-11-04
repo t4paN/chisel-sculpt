@@ -140,6 +140,11 @@ struct Mesh {
     void set_normal(uint32_t i, Vec3 n) { norm_x[i]=n.x; norm_y[i]=n.y; norm_z[i]=n.z; }
 
     void recompute_normals();
+    // Fresh smooth normals into `out` (3 per vertex; the CPU ones may be stale), map_norm where
+    // a vertex is still at its map_pos: what a normal map reads on, for a bake or a transfer.
+    void map_normals_now(std::vector<float>& out) const;
+    // These normals (3 per vertex) become the ones the normal map reads on, at today's positions.
+    void set_map_normals(std::vector<float>&& n);
     void recompute_normals_partial(const std::vector<uint32_t>& dirty_verts,
                                    std::vector<uint32_t>* affected_verts_out = nullptr);
     void expand_dirty_to_affected(const std::vector<uint32_t>& dirty_verts,
