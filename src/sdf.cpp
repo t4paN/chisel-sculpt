@@ -1392,7 +1392,7 @@ struct SdfCountParamsGPU {
 struct SdfExpandParamsGPU {
     float ox, oy, oz;     float voxel;
     int32_t R;            uint32_t triCount;
-    uint32_t workCount;   uint32_t _pad0;
+    uint32_t workCount;   uint32_t workOffset;
 };
 struct SdfSignParamsGPU {
     float ox, oy, oz;     float voxel;
@@ -1405,11 +1405,12 @@ struct SdfMeshParamsGPU {                    // shared by mc + nets (same unifor
     float ox, oy, oz;     float voxel;
     int32_t R;            uint32_t cellCount;
     int32_t count_only;   uint32_t cap;
+    uint32_t cellOffset;  uint32_t _pad0, _pad1, _pad2;
 };
 static_assert(sizeof(SdfCountParamsGPU)  == 32, "");
 static_assert(sizeof(SdfExpandParamsGPU) == 32, "");
 static_assert(sizeof(SdfSignParamsGPU)   == 48, "");
-static_assert(sizeof(SdfMeshParamsGPU)   == 32, "");
+static_assert(sizeof(SdfMeshParamsGPU)   == 48, "");
 
 // Drain + report GL errors after a stage. In CHISEL_DEBUG, glFinish() first so a
 // GPU hang/TDR is attributed to THIS dispatch (the last "stage OK" before a crash
@@ -1440,7 +1441,7 @@ static void sdf_gl_check(const char* stage) {
 // + uniforms before dispatching. Phases advance one step per tick (Sign — the
 // dominant pass — is budgeted across several ticks).
 struct VoxelMergeJob {
-    enum class Phase { Splat, Sign, Mesh, Finish, Done, Failed };
+    enum class Phase { Splat, Expand, Sign, Mesh, MeshCount, MeshWrite, Finish, Done, Failed };
     Phase phase = Phase::Splat;
 
     bool     mirror = false;
@@ -1457,6 +1458,8 @@ struct VoxelMergeJob {
     uint32_t work_count   = 0;
     uint32_t out_tris     = 0;
     uint32_t sign_off     = 0;     // resumable winding-sign cursor (corner index)
+    uint32_t expand_off   = 0;     // same for the distance splat (work item)
+    uint32_t cell_off     = 0;     // same for the extractor's two passes (cell)
 
     std::vector<float>    pos;     // source soup, kept for relax + paint transfer
     std::vector<uint32_t> idx;     // its tris (cutters already wound backwards), kept for the snap
@@ -1742,7 +1745,7 @@ void carry_textures(Mesh& m, const std::vector<float>& pos, const std::vector<ui
 }
 
 // Each step past 256 is a smaller jump: that's where a merge starts to cost real time.
-static const int kMergeSteps[] = { 64, 90, 128, 180, 256, 320, 384 };
+static const int kMergeSteps[] = { 64, 90, 128, 180, 256, 320, 384, 512 };
 static double g_merge_ms_per_corner = 0.0;   // this session's last merge, for the prompt's estimate
 
 VoxelMergeJob* voxel_merge_begin(Scene& scene, ComputeState& cs,
@@ -1890,10 +1893,10 @@ VoxelMergeJob* voxel_merge_begin(Scene& scene, ComputeState& cs,
     job->splat_box = gpu::create_buffer(cs.gpu_dev, nullptr, (uint64_t)tri_count*6*sizeof(uint32_t), Usage::Storage | Usage::CopySrc);
     job->splat_off = gpu::create_buffer(cs.gpu_dev, nullptr, (uint64_t)tri_count*sizeof(uint32_t),   Usage::Storage);
 
-    // Packed-distance accumulator: atomicMin target in expand, read by sign (GPU only,
-    // never read back). Cleared to BAND_FAR's bit pattern via the seam clear primitive
+    // Packed-distance accumulator: atomicMin target in expand, read by sign; wrap mode
+    // reads it back instead of running sign (CopySrc). Cleared to BAND_FAR's bit pattern via the seam clear primitive
     // (non-zero fill word: CPU-upload on WebGPU, ClearBuffer-with-pattern on GL).
-    job->dist = gpu::create_buffer(cs.gpu_dev, nullptr, (uint64_t)job->corner_count*sizeof(uint32_t), Usage::Storage);
+    job->dist = gpu::create_buffer(cs.gpu_dev, nullptr, (uint64_t)job->corner_count*sizeof(uint32_t), Usage::Storage | Usage::CopySrc);
     uint32_t far_bits;
     { float bf = BAND_FAR; std::memcpy(&far_bits, &bf, sizeof(float)); }
     gpu::clear_buffer(cs.gpu_dev, job->dist, far_bits);
@@ -1996,13 +1999,29 @@ VoxelMergeJob* voxel_merge_begin(Scene& scene, ComputeState& cs,
     return job;
 }
 
+// A copy is one GPU job the driver can't interrupt. If it holds the engine past the
+// preempt limit while the desktop waits to draw (0.64 s on Linux xe), the engine is reset
+// and our context dies. A 0.5 GB grid at R=512 is enough, so big copies go in pieces.
+static const uint64_t GPU_COPY_PIECE = 64ull << 20;
+static void read_in_pieces(ComputeState& cs, const gpu::Buffer& b, uint64_t bytes, void* out) {
+    for (uint64_t off = 0; off < bytes; off += GPU_COPY_PIECE)
+        gpu::read_buffer(cs.gpu_dev, b, off, std::min(GPU_COPY_PIECE, bytes - off), (char*)out + off);
+}
+static void write_in_pieces(ComputeState& cs, gpu::Buffer& b, uint64_t bytes, const void* data) {
+    for (uint64_t off = 0; off < bytes; off += GPU_COPY_PIECE) {
+        gpu::write_buffer(cs.gpu_dev, b, off, (const char*)data + off, std::min(GPU_COPY_PIECE, bytes - off));
+#ifndef CHISEL_BACKEND_WEBGPU
+        glFlush();
+#endif
+    }
+}
+
 VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
                                   VoxelMergeJob& j, VoxelMergeResult& out) {
     // Pipelines were compiled in begin; tick dispatches them through cs.gpu_dev.
     using Phase = VoxelMergeJob::Phase;
     const SdfGrid& grid = j.grid;
     const uint32_t zero = 0u;
-
     auto done = [&](VoxelMergeStatus s) { out = j.res; return s; };
     auto fail = [&](const std::string& msg) {
         j.res.error = msg;
@@ -2089,34 +2108,52 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
         gpu::write_buffer(cs.gpu_dev, j.splat_off, 0, off_cpu.data(),
                           (uint64_t)j.tri_count*sizeof(uint32_t));
 
-        // ---- Pass C (expand + splat): one thread per work item ----
-        if (j.work_count > 0u) {
-            SdfExpandParamsGPU eu = {};
-            eu.ox = grid.origin.x; eu.oy = grid.origin.y; eu.oz = grid.origin.z;
-            eu.voxel = grid.voxel; eu.R = (int)grid.R;
-            eu.triCount = j.tri_count; eu.workCount = j.work_count;
-            gpu::write_buffer(cs.gpu_dev, j.expand_ubo, 0, &eu, sizeof(eu));
-
-            const gpu::BindBufferEntry ebg[] = {
-                { BIND_SDF_SOUP_POS,     &j.soup_pos,  j.soup_pos.size },
-                { BIND_SDF_SOUP_IDX,     &j.soup_idx,  j.soup_idx.size },
-                { BIND_SDF_DIST,         &j.dist,      j.dist.size },
-                { BIND_SDF_SPLAT_BOX,    &j.splat_box, j.splat_box.size },
-                { BIND_SDF_SPLAT_OFFSET, &j.splat_off, j.splat_off.size },
-                { BIND_PARAMS,           &j.expand_ubo, sizeof(SdfExpandParamsGPU) },
-            };
-            gpu::BindGroup egrp = gpu::create_bind_group(cs.gpu_dev, j.expand_pipe, ebg, 6);
-            {
-                gpu::ComputeBatch b = gpu::begin_compute(cs.gpu_dev);
-                sdf_dispatch_seam(b, j.expand_pipe, egrp, j.work_count);
-                gpu::submit(b);
-            }
-            gpu::release_bind_group(egrp);
-            sdf_gl_check("expand dispatch");
-        }
-
+        j.expand_off = 0;
         j.sign_off = 0;
-        j.phase = Phase::Sign;
+        j.phase = j.work_count > 0u ? Phase::Expand : (j.wrap ? Phase::Mesh : Phase::Sign);
+        return done(VoxelMergeStatus::Working);
+    }
+
+    case Phase::Expand: {
+        // ---- Pass C (expand + splat): one thread per work item, in slices ----
+        // The driver kills any one GPU job that runs too long (5 s on Linux xe), and
+        // reads then come back as zeros. A slice is its own submission with its own
+        // clock, and a whole number of 64-thread groups so none spills into the next.
+        const uint32_t EXPAND_SLICE = 4000000u, SLICES_PER_TICK = 4u;
+        SdfExpandParamsGPU eu = {};
+        eu.ox = grid.origin.x; eu.oy = grid.origin.y; eu.oz = grid.origin.z;
+        eu.voxel = grid.voxel; eu.R = (int)grid.R;
+        eu.triCount = j.tri_count; eu.workCount = j.work_count;
+
+        const gpu::BindBufferEntry ebg[] = {
+            { BIND_SDF_SOUP_POS,     &j.soup_pos,  j.soup_pos.size },
+            { BIND_SDF_SOUP_IDX,     &j.soup_idx,  j.soup_idx.size },
+            { BIND_SDF_DIST,         &j.dist,      j.dist.size },
+            { BIND_SDF_SPLAT_BOX,    &j.splat_box, j.splat_box.size },
+            { BIND_SDF_SPLAT_OFFSET, &j.splat_off, j.splat_off.size },
+            { BIND_PARAMS,           &j.expand_ubo, sizeof(SdfExpandParamsGPU) },
+        };
+        gpu::BindGroup egrp = gpu::create_bind_group(cs.gpu_dev, j.expand_pipe, ebg, 6);
+        for (uint32_t s = 0; s < SLICES_PER_TICK && j.expand_off < j.work_count; s++) {
+            const uint32_t n = std::min(EXPAND_SLICE, j.work_count - j.expand_off);
+            eu.workOffset = j.expand_off;
+            gpu::write_buffer(cs.gpu_dev, j.expand_ubo, 0, &eu, sizeof(eu));
+            gpu::ComputeBatch b = gpu::begin_compute(cs.gpu_dev);
+            sdf_dispatch_seam(b, j.expand_pipe, egrp, n);
+            gpu::submit(b);
+#ifndef CHISEL_BACKEND_WEBGPU
+            glFlush();
+#endif
+            j.expand_off += n;
+        }
+        gpu::release_bind_group(egrp);
+        if (j.expand_off >= j.work_count) {
+            sdf_gl_check("expand dispatch");
+            // Wrap mode decides inside by flooding air and reads distance only, so the sign
+            // pass would be wasted work: most of a merge's time, and its worst slices can
+            // outlast the GPU watchdog (a film has no far field for the tree to skip).
+            j.phase = j.wrap ? Phase::Mesh : Phase::Sign;
+        }
         return done(VoxelMergeStatus::Working);
     }
 
@@ -2172,8 +2209,10 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
         //      CPU copy for the relax in Finish (field SSBO isn't written after this,
         //      so one readback serves both). ----
         j.field_cpu.assign(j.corner_count, 0.0f);
-        gpu::read_buffer(cs.gpu_dev, j.field, 0,
-                         (uint64_t)j.corner_count*sizeof(float), j.field_cpu.data());
+        // dist holds the float bits of the magnitude the sign pass would have copied over,
+        // BAND_FAR off-band included.
+        read_in_pieces(cs, j.wrap ? j.dist : j.field,
+                       (uint64_t)j.corner_count*sizeof(float), j.field_cpu.data());
         if (j.wrap) wrap_thin_skin(j.field_cpu, grid.R, j.wrap_t, BAND_FAR);
         else        flood_fill_sign(j.field_cpu, grid.R, BAND_FAR);
         // Anti-pimple: flatten the lattice-frequency scallop of the trilinear
@@ -2185,31 +2224,38 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
         // close). MC's mirror path leaves the field as-is and seams at extraction.
         if (j.mirror && j.use_nets)
             symmetrise_field_x(j.field_cpu, grid);
-        gpu::write_buffer(cs.gpu_dev, j.field, 0, j.field_cpu.data(),
-                          (uint64_t)j.corner_count*sizeof(float));
+        write_in_pieces(cs, j.field, (uint64_t)j.corner_count*sizeof(float), j.field_cpu.data());
 
-        // ---- Extractor bind group (one, reused across both passes; mc_out is realloc'd
-        //      in place between them so its GL id — what the GL backend records — stays
-        //      valid). Surface Nets omits the tri-table binding. ----
+        j.cell_off = 0;
+        j.phase = Phase::MeshCount;
+        return done(VoxelMergeStatus::Working);
+    }
+
+    case Phase::MeshCount:
+    case Phase::MeshWrite: {
+        // ---- Extractor, tally then emit, in slices across frames (see Phase::Expand).
+        //      Each slice's cells mostly hold nothing, so they're cheap: at grid 512 a
+        //      single job over all 134M of them is what the watchdog killed. ----
+        const bool counting = j.phase == Phase::MeshCount;
+        const uint32_t MESH_SLICE = 4000000u, SLICES_PER_TICK = 2u;
         SdfMeshParamsGPU mu = {};
         mu.ox = grid.origin.x; mu.oy = grid.origin.y; mu.oz = grid.origin.z;
         mu.voxel = grid.voxel; mu.R = (int)grid.R; mu.cellCount = j.cell_count;
+        mu.count_only = counting ? 1 : 0;
+        mu.cap = counting ? 0u : j.out_tris;
 
-        // One bind group per extractor pass. mc_out is resized between the count and
-        // write passes via the seam resize_buffer: on GL the handle is preserved, but
-        // on WebGPU a resize RECREATES the buffer (new handle), so the bind group that
-        // references mc_out must be rebuilt after the resize. Factor creation into a
-        // lambda used for both builds. Surface Nets omits the tri-table binding.
-        auto build_mgrp = [&]() -> gpu::BindGroup {
-            if (j.use_nets) {
-                const gpu::BindBufferEntry mbg[] = {
-                    { BIND_SDF_FIELD,    &j.field,  j.field.size },
-                    { BIND_SDF_MC_OUT,   &j.mc_out, j.mc_out.size },
-                    { BIND_SDF_MC_COUNT, &j.mc_cnt, j.mc_cnt.size },
-                    { BIND_PARAMS,       &j.mc_ubo, sizeof(SdfMeshParamsGPU) },
-                };
-                return gpu::create_bind_group(cs.gpu_dev, j.mc_pipe, mbg, 4);
-            }
+        // Built fresh each tick: resizing mc_out between the passes recreates it on
+        // WebGPU (new handle). Surface Nets omits the tri-table binding.
+        gpu::BindGroup mgrp;
+        if (j.use_nets) {
+            const gpu::BindBufferEntry mbg[] = {
+                { BIND_SDF_FIELD,    &j.field,  j.field.size },
+                { BIND_SDF_MC_OUT,   &j.mc_out, j.mc_out.size },
+                { BIND_SDF_MC_COUNT, &j.mc_cnt, j.mc_cnt.size },
+                { BIND_PARAMS,       &j.mc_ubo, sizeof(SdfMeshParamsGPU) },
+            };
+            mgrp = gpu::create_bind_group(cs.gpu_dev, j.mc_pipe, mbg, 4);
+        } else {
             const gpu::BindBufferEntry mbg[] = {
                 { BIND_SDF_FIELD,    &j.field,  j.field.size },
                 { BIND_SDF_MC_OUT,   &j.mc_out, j.mc_out.size },
@@ -2217,49 +2263,41 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
                 { BIND_SDF_TRITABLE, &j.tritab, j.tritab.size },
                 { BIND_PARAMS,       &j.mc_ubo, sizeof(SdfMeshParamsGPU) },
             };
-            return gpu::create_bind_group(cs.gpu_dev, j.mc_pipe, mbg, 5);
-        };
-        gpu::BindGroup mgrp = build_mgrp();
-
-        // ---- Dispatch 3a: extractor count pass ----
-        mu.count_only = 1; mu.cap = 0u;
-        gpu::write_buffer(cs.gpu_dev, j.mc_ubo, 0, &mu, sizeof(mu));
-        {
-            gpu::ComputeBatch b = gpu::begin_compute(cs.gpu_dev);
-            sdf_dispatch_seam(b, j.mc_pipe, mgrp, j.cell_count);
-            gpu::submit(b);
+            mgrp = gpu::create_bind_group(cs.gpu_dev, j.mc_pipe, mbg, 5);
         }
-        sdf_gl_check("mc-count dispatch");
-
-        uint32_t out_tris = 0;
-        gpu::read_buffer(cs.gpu_dev, j.mc_cnt, 0, sizeof(uint32_t), &out_tris);
-        if (out_tris == 0) { gpu::release_bind_group(mgrp); return fail("merge produced no geometry (raise resolution?)"); }
-        j.out_tris = out_tris;
-
-        // ---- Size MC_OUT exactly via the seam resize, then rebuild mgrp (the write
-        //      pass binds the possibly-recreated mc_out — see the bind-group note above)
-        //      and reset the counter via the seam. ----
-        gpu::resize_buffer(cs.gpu_dev, j.mc_out, (uint64_t)out_tris * 18 * sizeof(float),
-                           gpu::Usage::Storage | gpu::Usage::CopySrc);
-        gpu::release_bind_group(mgrp);
-        mgrp = build_mgrp();
-        gpu::write_buffer(cs.gpu_dev, j.mc_cnt, 0, &zero, sizeof(uint32_t));
-
-        // ---- Dispatch 3b: extractor write pass ----
-        mu.count_only = 0; mu.cap = out_tris;
-        gpu::write_buffer(cs.gpu_dev, j.mc_ubo, 0, &mu, sizeof(mu));
-        {
+        for (uint32_t s = 0; s < SLICES_PER_TICK && j.cell_off < j.cell_count; s++) {
+            const uint32_t n = std::min(MESH_SLICE, j.cell_count - j.cell_off);
+            mu.cellOffset = j.cell_off;
+            gpu::write_buffer(cs.gpu_dev, j.mc_ubo, 0, &mu, sizeof(mu));
             gpu::ComputeBatch b = gpu::begin_compute(cs.gpu_dev);
-            sdf_dispatch_seam(b, j.mc_pipe, mgrp, j.cell_count);
+            sdf_dispatch_seam(b, j.mc_pipe, mgrp, n);
             gpu::submit(b);
+#ifndef CHISEL_BACKEND_WEBGPU
+            glFlush();
+#endif
+            j.cell_off += n;
         }
         gpu::release_bind_group(mgrp);
-        sdf_gl_check("mc-write dispatch");
+        if (j.cell_off < j.cell_count) return done(VoxelMergeStatus::Working);
+        sdf_gl_check(counting ? "mc-count dispatch" : "mc-write dispatch");
+
+        if (counting) {
+            uint32_t out_tris = 0;
+            gpu::read_buffer(cs.gpu_dev, j.mc_cnt, 0, sizeof(uint32_t), &out_tris);
+            if (out_tris == 0) return fail("merge produced no geometry (raise resolution?)");
+            j.out_tris = out_tris;
+            // Size MC_OUT exactly, reset the counter, then emit.
+            gpu::resize_buffer(cs.gpu_dev, j.mc_out, (uint64_t)out_tris * 18 * sizeof(float),
+                               gpu::Usage::Storage | gpu::Usage::CopySrc);
+            gpu::write_buffer(cs.gpu_dev, j.mc_cnt, 0, &zero, sizeof(uint32_t));
+            j.cell_off = 0;
+            j.phase = Phase::MeshWrite;
+            return done(VoxelMergeStatus::Working);
+        }
 
         // ---- Readback the MC soup (the only large readback). On WebGPU -> mapAsync. ----
-        j.soup.assign((size_t)out_tris * 18, 0.0f);
-        gpu::read_buffer(cs.gpu_dev, j.mc_out, 0,
-                         (uint64_t)j.soup.size()*sizeof(float), j.soup.data());
+        j.soup.assign((size_t)j.out_tris * 18, 0.0f);
+        read_in_pieces(cs, j.mc_out, (uint64_t)j.soup.size()*sizeof(float), j.soup.data());
 
         j.phase = Phase::Finish;
         return done(VoxelMergeStatus::Working);
@@ -2448,7 +2486,7 @@ int voxel_merge_max_resolution() {
 #ifdef __EMSCRIPTEN__
     const int ceiling = 320;      // 32-bit heap: the CPU side holds about 3 grids at once
 #else
-    const int ceiling = 384;
+    const int ceiling = 512;
 #endif
     const gpu::DeviceLimits dl = gpu::device_limits();
     const uint64_t budget = std::min(dl.max_buffer_size, dl.max_storage_binding_size);
@@ -2506,11 +2544,19 @@ float voxel_merge_estimate_seconds(int resolution) {
 
 float voxel_merge_progress(const VoxelMergeJob& j) {
     switch (j.phase) {
-        case VoxelMergeJob::Phase::Splat:  return 0.05f;
+        case VoxelMergeJob::Phase::Splat:  return 0.02f;
+        case VoxelMergeJob::Phase::Expand: return j.work_count
+                                               ? 0.02f + 0.08f * ((float)j.expand_off / (float)j.work_count)
+                                               : 0.10f;
         case VoxelMergeJob::Phase::Sign:   return j.corner_count
                                                ? 0.10f + 0.70f * ((float)j.sign_off / (float)j.corner_count)
                                                : 0.10f;
-        case VoxelMergeJob::Phase::Mesh:   return 0.85f;
+        case VoxelMergeJob::Phase::Mesh:   return 0.80f;
+        case VoxelMergeJob::Phase::MeshCount:
+        case VoxelMergeJob::Phase::MeshWrite: {
+            const float f = j.cell_count ? (float)j.cell_off / (float)j.cell_count : 1.0f;
+            return j.phase == VoxelMergeJob::Phase::MeshCount ? 0.80f + 0.05f * f : 0.85f + 0.10f * f;
+        }
         case VoxelMergeJob::Phase::Finish: return 0.95f;
         case VoxelMergeJob::Phase::Done:   return 1.0f;
         case VoxelMergeJob::Phase::Failed: return 1.0f;

@@ -13,6 +13,10 @@ struct Params {
     u_cellCount  : u32,        // 20
     u_count_only : i32,        // 24
     u_cap        : u32,        // 28
+    u_cellOffset : u32,        // 32  this slice's first cell
+    _pad0        : u32,        // 36
+    _pad1        : u32,        // 40
+    _pad2        : u32,        // 44
 };
 
 @group(0) @binding(24) var<storage, read>       f   : array<f32>;
@@ -42,7 +46,7 @@ fn grad(c : vec3<i32>, R1 : i32) -> vec3<f32> {
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid : vec3<u32>,
         @builtin(num_workgroups)        nwg : vec3<u32>) {
-    let cell = gid.x + gid.y * nwg.x * 64u;
+    let cell = gid.x + gid.y * nwg.x * 64u + P.u_cellOffset;
     if (cell >= P.u_cellCount) { return; }
     let R1 = P.u_R + 1;
     let cx =  i32(cell) % P.u_R;

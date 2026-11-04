@@ -257,7 +257,7 @@ printing.
 | M | Mirror-symmetric union — the result stays editable under X-mirror |
 | − | **Subtract**: union the selection, then carve away every *unselected* (tinted) mesh — booleans with your bystander objects as cutters |
 | S | Toggle the extractor: Marching Cubes ↔ Surface Nets (Surface Nets gives a smoother, more even result) |
-| [ / ] | Less / more **Detail**: the prompt shows the triangles to expect, and how long once you've run one merge |
+| [ / ] | Less / more **Detail**: the prompt shows the triangles to expect, and how long once you've run one merge. A skull marks the top step (desktop only): a very heavy mesh and a long wait |
 | N / Esc | Cancel |
 
 The merge runs across frames — the app stays responsive during big grids. Output is

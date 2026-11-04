@@ -794,7 +794,7 @@ void app_files_frame(App& a) {
                 input.remesh_detail = std::min(4.0f, std::max(0.25f, (float)std::atof(env)));
             // SDF remesh knobs for CHISEL_AUTO_MERGE runs.
             if (const char* env = std::getenv("CHISEL_MERGE_RES"))
-                input.voxel_merge_resolution = std::min(384, std::max(64, std::atoi(env)));
+                input.voxel_merge_resolution = std::min(512, std::max(64, std::atoi(env)));
             if (const char* env = std::getenv("CHISEL_MERGE_MIRROR"))
                 input.voxel_merge_mirror = std::atoi(env) != 0;
         }

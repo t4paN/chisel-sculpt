@@ -2,6 +2,12 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-04 — SDF merge: grid 512, and big grids no longer kill the GPU
+
+- Detail gains a top step at 512 on native, with a skull in the prompt's brackets. Large solid models can still hit the clean "lower merge resolution" refusal there.
+- Big grid copies go in 64 MB pieces and the distance and extraction passes spread across frames: one long GPU job could get the engine reset, which ended the merge with no geometry or a hang.
+- Wrapped merges skip the sign pass, which they never used. The same mesh comes out about twice as fast.
+
 ## 2026-11-04 — SDF merge: Detail control, grid up to 384
 
 - The prompt's Resolution number is now Detail: the triangles to expect, with the source's count, the grid size and, after one merge, a time estimate.

@@ -20,7 +20,7 @@ layout(std140, binding = 63) uniform Params {
     int   u_R;         // 16
     uint  u_triCount;  // 20
     uint  u_workCount; // 24
-    uint  _pad0;       // 28
+    uint  u_workOffset; // 28  this slice's first work item
 };
 
 uint linear_gid() {
@@ -71,7 +71,7 @@ float pt_tri_dist(vec3 pt, vec3 a, vec3 b, vec3 c) {
 }
 
 void main() {
-    uint gid = linear_gid();
+    uint gid = linear_gid() + u_workOffset;
     if (gid >= u_workCount) return;
     // Owner = upper_bound(off, gid) - 1 over [0, u_triCount): first i with off[i] > gid.
     uint lo = 0u, hi = u_triCount;

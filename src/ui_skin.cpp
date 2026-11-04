@@ -3719,7 +3719,37 @@ void draw_skin_dialogs(InputState& input, int win_w, int win_h, const DialogInfo
         ImGui::SameLine();
         if (dlg_button("##resUp", "+", nullptr, false)) press_dialog_key(GLFW_KEY_RIGHT_BRACKET);
         dlg_tip("More triangles: more shape, slower");
-        key_hint("[ ]");
+        if (input.voxel_merge_resolution >= 512) {
+            // The top step gets a skull in its brackets. Pixels, not a glyph: the UI fonts
+            // may not have one, and undrawn holes work on every skin's background.
+            static const char* const kSkull[7] = {
+                ".#####.",
+                "#######",
+                "#..#..#",
+                "#..#..#",
+                "#######",
+                ".##.##.",
+                ".#.#.#.",
+            };
+            const float px = 2.0f, skull = 7.0f * px, gap = 3.0f;
+            ImGui::SameLine(0.0f, 14.0f);
+            const ImVec2 p = ImGui::GetCursorScreenPos();
+            const ImVec2 bs = text_size(UiFont::Mono, 12.0f, "[");
+            ImGui::Dummy(ImVec2(bs.x * 2.0f + gap * 2.0f + skull, row_h));
+            dlg_tip("Top step: a long merge and a very heavy mesh");
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            const float by = p.y + (row_h - bs.y) * 0.5f;
+            text_at(dl, UiFont::Mono, 12.0f, ImVec2(p.x, by), hint, "[");
+            text_at(dl, UiFont::Mono, 12.0f, ImVec2(p.x + bs.x + gap * 2.0f + skull, by), hint, "]");
+            const float sx = std::floor(p.x + bs.x + gap), sy = std::floor(p.y + (row_h - skull) * 0.5f);
+            for (int r = 0; r < 7; r++)
+                for (int c = 0; c < 7; c++)
+                    if (kSkull[r][c] == '#')
+                        dl->AddRectFilled(ImVec2(sx + c * px, sy + r * px),
+                                          ImVec2(sx + (c + 1) * px, sy + (r + 1) * px), kAlert);
+        } else {
+            key_hint("[ ]");
+        }
         {
             char src[16], note[96];
             tri_text(src, sizeof src, info.merge_tris);

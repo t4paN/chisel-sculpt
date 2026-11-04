@@ -11,7 +11,7 @@ struct Params {
     u_R         : i32,        // 16
     u_triCount  : u32,        // 20
     u_workCount : u32,        // 24
-    _pad0       : u32,        // 28
+    u_workOffset : u32,       // 28  this slice's first work item
 };
 
 @group(0) @binding(21) var<storage, read>       p   : array<f32>;
@@ -60,7 +60,7 @@ fn pt_tri_dist(pt : vec3<f32>, a : vec3<f32>, b : vec3<f32>, c : vec3<f32>) -> f
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid : vec3<u32>,
         @builtin(num_workgroups)        nwg : vec3<u32>) {
-    let g = gid.x + gid.y * nwg.x * 64u;
+    let g = gid.x + gid.y * nwg.x * 64u + P.u_workOffset;
     if (g >= P.u_workCount) { return; }
     // Owner = upper_bound(off, g) - 1 over [0, u_triCount): first i with off[i] > g.
     var lo = 0u; var hi = P.u_triCount;

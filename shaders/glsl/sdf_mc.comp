@@ -19,6 +19,7 @@ layout(std140, binding = 63) uniform Params {
     uint  u_cellCount;  // 20
     int   u_count_only; // 24
     uint  u_cap;        // 28
+    uint  u_cellOffset; // 32  this slice's first cell
 };
 
 uint linear_gid() {
@@ -45,7 +46,7 @@ vec3 grad(ivec3 c, int R1) {
 }
 
 void main() {
-    uint cell = linear_gid();
+    uint cell = linear_gid() + u_cellOffset;
     if (cell >= u_cellCount) return;
     int R1 = u_R + 1;
     int cx =  int(cell) % u_R;
