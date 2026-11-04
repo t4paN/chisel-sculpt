@@ -2,6 +2,7 @@
 #include "pose.h"           // kPoseAnchor / kPoseLever
 #include "brush_alpha.h"   // kFillGradient
 #include "debug_console.h"
+#include "sdf.h"
 #include "tablet.h"
 #include "imgui.h"           // key_callback yields to a focused text field
 #include <cmath>
@@ -1593,10 +1594,10 @@ static void handle_modal_key(GLFWwindow* w, int key) {
             break;
         case GLFW_KEY_D: if (merge) in.voxel_merge_adaptive = !in.voxel_merge_adaptive; break;
         case GLFW_KEY_LEFT_BRACKET:
-            if (merge && in.voxel_merge_resolution > 64) in.voxel_merge_resolution -= 32;
+            if (merge) in.voxel_merge_resolution = voxel_merge_step_resolution(in.voxel_merge_resolution, -1);
             break;
         case GLFW_KEY_RIGHT_BRACKET:
-            if (merge && in.voxel_merge_resolution < 256) in.voxel_merge_resolution += 32;
+            if (merge) in.voxel_merge_resolution = voxel_merge_step_resolution(in.voxel_merge_resolution, +1);
             break;
         default: break;
     }

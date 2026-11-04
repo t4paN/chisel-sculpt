@@ -93,4 +93,15 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
 // Progress in [0,1] for the HUD.
 float voxel_merge_progress(const VoxelMergeJob& job);
 
+// The resolution steps behind the merge prompt's Detail control. The cap is lower on
+// the web (32-bit heap) and on any device whose buffers can't hold one grid.
+int voxel_merge_max_resolution();
+int voxel_merge_step_resolution(int resolution, int dir);   // dir: +1 finer, -1 coarser
+
+// What the prompt shows before anything runs. Measure once when it opens: it walks every
+// selected triangle. The estimate is rough: rough surfaces and overlaps lose area.
+void voxel_merge_measure_selection(const Scene& scene, double& area, float& extent, uint64_t& tris);
+uint64_t voxel_merge_estimate_tris(double area, float extent, int resolution);
+float voxel_merge_estimate_seconds(int resolution);          // from this session's last merge; 0 = none yet
+
 void voxel_merge_destroy(VoxelMergeJob* job);

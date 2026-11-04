@@ -1741,6 +1741,10 @@ void carry_textures(Mesh& m, const std::vector<float>& pos, const std::vector<ui
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
 }
 
+// Each step past 256 is a smaller jump: that's where a merge starts to cost real time.
+static const int kMergeSteps[] = { 64, 90, 128, 180, 256, 320, 384 };
+static double g_merge_ms_per_corner = 0.0;   // this session's last merge, for the prompt's estimate
+
 VoxelMergeJob* voxel_merge_begin(Scene& scene, ComputeState& cs,
                                  int resolution, bool mirror, bool surface_nets,
                                  bool subtract, bool keep_detail) {
@@ -1811,7 +1815,7 @@ VoxelMergeJob* voxel_merge_begin(Scene& scene, ComputeState& cs,
         lo.x = -X; hi.x = X;
     }
 
-    int R = std::max(16, std::min(resolution, 256));
+    int R = std::max(16, std::min(resolution, voxel_merge_max_resolution()));
     float ext = std::max(hi.x - lo.x, std::max(hi.y - lo.y, hi.z - lo.z));
     if (!(ext > 0.0f)) return fail("degenerate selection bounds");
 
@@ -1843,6 +1847,9 @@ VoxelMergeJob* voxel_merge_begin(Scene& scene, ComputeState& cs,
         if (job->wrap) {
             job->wrap_t = 1.25f * grid.voxel;
             job->wrap_keep = 0.5f * grid.voxel;
+            // The wide band only guards the sign flood, which a wrap doesn't run. Every
+            // triangle pays for the band cubed, so this is most of a big wrap's GPU time.
+            job->band = std::min(job->band, 3);
         }
         job->res.wrapped = job->wrap;
         std::printf("[sdf] thin skin check: %.0f%% of the surface has a back within 0.5%% of the size, "
@@ -2425,6 +2432,7 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
 
         auto t1 = std::chrono::high_resolution_clock::now();
         j.res.elapsed_ms = std::chrono::duration<double, std::milli>(t1 - j.t0).count();
+        g_merge_ms_per_corner = j.res.elapsed_ms / (double)j.corner_count;
         j.res.success = true;
         j.phase = Phase::Done;
         return done(VoxelMergeStatus::Done);
@@ -2434,6 +2442,66 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
     case Phase::Failed: return done(VoxelMergeStatus::Failed);
     }
     return done(VoxelMergeStatus::Working);  // unreachable
+}
+
+int voxel_merge_max_resolution() {
+#ifdef __EMSCRIPTEN__
+    const int ceiling = 320;      // 32-bit heap: the CPU side holds about 3 grids at once
+#else
+    const int ceiling = 384;
+#endif
+    const gpu::DeviceLimits dl = gpu::device_limits();
+    const uint64_t budget = std::min(dl.max_buffer_size, dl.max_storage_binding_size);
+    int best = 64;
+    for (int r : kMergeSteps) {
+        const uint64_t corners = (uint64_t)(r + 1) * (r + 1) * (r + 1);
+        if (r <= ceiling && corners * sizeof(float) <= budget) best = r;
+    }
+    return best;
+}
+
+int voxel_merge_step_resolution(int resolution, int dir) {
+    const int cap = voxel_merge_max_resolution();
+    if (dir > 0) {
+        for (int r : kMergeSteps) if (r > resolution && r <= cap) return r;
+        return std::min(resolution, cap);
+    }
+    int best = resolution;
+    for (int r : kMergeSteps) if (r < resolution) best = r;
+    return best;
+}
+
+void voxel_merge_measure_selection(const Scene& scene, double& area, float& extent, uint64_t& tris) {
+    area = 0.0; extent = 0.0f; tris = 0;
+    Vec3 lo(1e30f, 1e30f, 1e30f), hi(-1e30f, -1e30f, -1e30f);
+    for (uint32_t id : scene.selected_ids()) {
+        const MeshEntity* e = scene.find_entity(id);
+        if (!e || !e->alive) continue;
+        const Mesh& m = e->mesh;
+        const uint32_t nt = m.tri_count();
+        tris += nt;
+        for (uint32_t t = 0; t < nt; t++) {
+            const Vec3 a = m.get_pos(m.indices[t*3]), b = m.get_pos(m.indices[t*3+1]), c = m.get_pos(m.indices[t*3+2]);
+            area += 0.5 * (b - a).cross(c - a).length();
+        }
+        for (uint32_t v = 0; v < m.vertex_count(); v++) {
+            lo.x = std::min(lo.x, m.pos_x[v]); hi.x = std::max(hi.x, m.pos_x[v]);
+            lo.y = std::min(lo.y, m.pos_y[v]); hi.y = std::max(hi.y, m.pos_y[v]);
+            lo.z = std::min(lo.z, m.pos_z[v]); hi.z = std::max(hi.z, m.pos_z[v]);
+        }
+    }
+    if (tris) extent = std::max(hi.x - lo.x, std::max(hi.y - lo.y, hi.z - lo.z));
+}
+
+uint64_t voxel_merge_estimate_tris(double area, float extent, int resolution) {
+    if (!(extent > 0.0f)) return 0;
+    const double voxel = extent / (double)(resolution - 2 * GRID_PAD);
+    return (uint64_t)(2.8 * area / (voxel * voxel));   // measured 2.5-3.05 tris per voxel face on real models
+}
+
+float voxel_merge_estimate_seconds(int resolution) {
+    const uint64_t corners = (uint64_t)(resolution + 1) * (resolution + 1) * (resolution + 1);
+    return (float)(g_merge_ms_per_corner * (double)corners / 1000.0);
 }
 
 float voxel_merge_progress(const VoxelMergeJob& j) {

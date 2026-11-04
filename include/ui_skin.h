@@ -68,6 +68,9 @@ struct DialogInfo {
     int   n_unselected   = 0;    // red meshes a subtract merge would carve away
     bool  has_density    = false;
     float merge_progress = 0.0f; // 0..1 while a merge runs
+    double   merge_area   = 0.0;    // the selection, measured when the prompt opens
+    float    merge_extent = 0.0f;
+    uint64_t merge_tris   = 0;
 };
 
 // The remesh and SDF-merge prompts and progress panels, drawn as real dialogs in the

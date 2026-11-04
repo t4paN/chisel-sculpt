@@ -330,7 +330,17 @@ void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse) {
     DialogInfo dlg;
     if (input.remesh_confirm_pending || input.voxel_merge_confirm_pending)
         dlg.levels_to_bake = snapshot_levels_to_bake(scene);
+    // Walks every selected triangle, so once per opening. The selection can't change
+    // behind a modal prompt.
+    static bool     s_merge_was_open = false;
+    static double   s_merge_area = 0.0;
+    static float    s_merge_extent = 0.0f;
+    static uint64_t s_merge_tris = 0;
+    if (input.voxel_merge_confirm_pending && !s_merge_was_open)
+        voxel_merge_measure_selection(scene, s_merge_area, s_merge_extent, s_merge_tris);
+    s_merge_was_open = input.voxel_merge_confirm_pending;
     if (input.voxel_merge_confirm_pending) {
+        dlg.merge_area = s_merge_area; dlg.merge_extent = s_merge_extent; dlg.merge_tris = s_merge_tris;
         dlg.n_selected = (int)scene.selected_ids().size();
         // Count unselected (red) committed entities — candidate cutters for subtract.
         for (const auto& up : scene.entities()) {

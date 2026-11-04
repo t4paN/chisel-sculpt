@@ -2,6 +2,12 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-04 — SDF merge: Detail control, grid up to 384
+
+- The prompt's Resolution number is now Detail: the triangles to expect, with the source's count, the grid size and, after one merge, a time estimate.
+- [ and ] step through 64, 90, 128, 180, 256, 320 and 384. The web stops at 320, or lower if the browser's buffers can't hold the grid.
+- A wrapped merge uses a narrower distance band at high resolution, which cuts most of its GPU work.
+
 ## 2026-11-04 — SDF merge wraps thin-film models
 
 - Some AI-generated GLBs are closed films about 0.1% of the model's size thick, far under a voxel, so the grid saw no inside and they vanished. They now come out as one sealed shell, texture and normal map included.

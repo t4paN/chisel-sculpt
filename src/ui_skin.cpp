@@ -1,4 +1,5 @@
 #include "ui_skin.h"
+#include "sdf.h"
 #include "ui_icons.h"
 #include "ui_backdrop.h"
 #include "input.h"
@@ -3677,7 +3678,7 @@ void draw_skin_dialogs(InputState& input, int win_w, int win_h, const DialogInfo
         ImGui::Dummy(ImVec2(0.0f, 2.0f));
 
         const float row_h = dlg_row_h();
-        float label_w = std::max(text_size(UiFont::Sans, 13.0f, title_case("Resolution")).x,
+        float label_w = std::max(text_size(UiFont::Sans, 13.0f, title_case("Detail")).x,
                                  text_size(UiFont::Sans, 13.0f, title_case("Extractor")).x);
         if (info.has_density)
             label_w = std::max(label_w, text_size(UiFont::Sans, 13.0f, title_case("Remesh after")).x);
@@ -3692,17 +3693,23 @@ void draw_skin_dialogs(InputState& input, int win_w, int win_h, const DialogInfo
                     ImVec2(p.x, p.y + (row_h - ks.y) * 0.5f), hint, k);
         };
 
-        // Resolution: - 128 +, the same 32-step nudge as [ / ].
-        dlg_label("Resolution", label_w, row_h);
+        // Detail: what the merge will make, not the size of its grid. Same steps as [ / ].
+        auto tri_text = [](char* out, size_t cap, uint64_t n) {
+            if (n >= 1000000) std::snprintf(out, cap, "%.1fM", (double)n / 1e6);
+            else              std::snprintf(out, cap, "%dk", (int)std::lround((double)n / 1e3));
+        };
+        dlg_label("Detail", label_w, row_h);
         ImGui::SameLine(0.0f, 0.0f);
         if (dlg_button("##resDn", "-", nullptr, false)) press_dialog_key(GLFW_KEY_LEFT_BRACKET);
-        dlg_tip("Coarser grid: faster, less detail");
+        dlg_tip("Fewer triangles: faster, closes more small gaps");
         ImGui::SameLine();
         {
-            char v[16];
-            std::snprintf(v, sizeof v, "%d", input.voxel_merge_resolution);
+            char n[16], v[32];
+            tri_text(n, sizeof n, voxel_merge_estimate_tris(info.merge_area, info.merge_extent,
+                                                            input.voxel_merge_resolution));
+            std::snprintf(v, sizeof v, "~%s tris", n);
             ImVec2 p = ImGui::GetCursorScreenPos();
-            ImVec2 vs = text_size(UiFont::MonoMedium, 15.0f, "000");
+            ImVec2 vs = text_size(UiFont::MonoMedium, 15.0f, "~000k tris");
             ImVec2 ts = text_size(UiFont::MonoMedium, 15.0f, v);
             ImGui::Dummy(ImVec2(vs.x + 8.0f, row_h));
             text_at(ImGui::GetWindowDrawList(), UiFont::MonoMedium, 15.0f,
@@ -3711,8 +3718,22 @@ void draw_skin_dialogs(InputState& input, int win_w, int win_h, const DialogInfo
         }
         ImGui::SameLine();
         if (dlg_button("##resUp", "+", nullptr, false)) press_dialog_key(GLFW_KEY_RIGHT_BRACKET);
-        dlg_tip("Finer grid: more detail, slower");
+        dlg_tip("More triangles: more shape, slower");
         key_hint("[ ]");
+        {
+            char src[16], note[96];
+            tri_text(src, sizeof src, info.merge_tris);
+            const float secs = voxel_merge_estimate_seconds(input.voxel_merge_resolution);
+            int at = std::snprintf(note, sizeof note, "source %s, grid %d", src, input.voxel_merge_resolution);
+            if (secs >= 1.0f) std::snprintf(note + at, sizeof note - at, ", about %d s", (int)std::lround(secs));
+            dlg_label("", label_w, row_h);
+            ImGui::SameLine(0.0f, 0.0f);
+            ImVec2 p = ImGui::GetCursorScreenPos();
+            ImVec2 ns = text_size(UiFont::Mono, 12.0f, note);
+            ImGui::Dummy(ImVec2(ns.x, row_h));
+            text_at(ImGui::GetWindowDrawList(), UiFont::Mono, 12.0f,
+                    ImVec2(p.x, p.y + (row_h - ns.y) * 0.5f), hint, note);
+        }
 
         // Extractor: both options visible, the live one lit; S flips it.
         dlg_label("Extractor", label_w, row_h);
