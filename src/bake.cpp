@@ -59,6 +59,8 @@ struct BakeWork {
     std::vector<uint32_t> hid;      // its ColorID layer, un-premultiplied (empty = this sculpt has none)
     const MeshTexture*    htex = nullptr;   // its texture, through its corner UVs, under the paint
     float                 hmix = 1.0f;      // how much of it shows (the Texture row's eye x opacity)
+    const MeshTexture*    hnmap = nullptr;  // its normal map (a coarse import's detail lives there)
+    float                 hnmix = 1.0f;     // how much of that shows (the same row)
     // The tree.
     std::vector<Node>     nodes;
     std::vector<uint32_t> tri;
@@ -179,7 +181,7 @@ void prep_high(BakeWork& w, const Mesh& m) {
     const uint32_t nv = m.vertex_count(), nt = m.tri_count();
     // The last member's leftovers go first.
     w.nodes.clear(); w.todo.clear(); w.tree_done = 0;
-    w.hcol.clear(); w.hid.clear(); w.htex = nullptr; w.hmix = 1.0f;
+    w.hcol.clear(); w.hid.clear(); w.htex = nullptr; w.hmix = 1.0f; w.hnmap = nullptr; w.hnmix = 1.0f;
     w.hn.assign((size_t)nv * 3, 0.0f);
     w.cen.resize((size_t)nt * 3);
     for (uint32_t t = 0; t < nt; t++) {
@@ -194,6 +196,17 @@ void prep_high(BakeWork& w, const Mesh& m) {
         float* n = &w.hn[3 * v];
         const float l = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
         if (l > 1e-20f) { n[0] /= l; n[1] /= l; n[2] /= l; }
+    }
+    // A normal map only reads right on the normals it was baked against (Mesh::map_norm).
+    if (m.normal_map && m.has_uv()) {
+        if (m.map_pos.size() == (size_t)nv * 3 && m.map_norm.size() == (size_t)nv * 3) {
+            for (uint32_t v = 0; v < nv; v++) {
+                if (m.pos_x[v] != m.map_pos[3 * v] || m.pos_y[v] != m.map_pos[3 * v + 1] || m.pos_z[v] != m.map_pos[3 * v + 2]) continue;
+                for (int c = 0; c < 3; c++) w.hn[3 * v + c] = m.map_norm[3 * v + c];
+            }
+        }
+        w.hnmix = m.paint_layers.texture_mix();
+        if (w.hnmix > 0.0f) w.hnmap = m.normal_map.get();
     }
     // The colour map is what the viewport shows: the paint layers' composite, times a
     // textured sculpt's texture (an imported glTF) faded by its row's eye and opacity.
@@ -372,6 +385,30 @@ void put(uint8_t* px, uint32_t rgba) {
     px[0] = rgba & 255; px[1] = (rgba >> 8) & 255; px[2] = (rgba >> 16) & 255; px[3] = 255;
 }
 
+// The sculpt's own normal map bent into its normal at a hit, as the textured shader does:
+// tangents from how the hit triangle's position runs along its UVs, v up, as the map's green.
+Vec3 apply_high_map(const BakeWork& w, const Mesh& m, uint32_t t, const Vec3& Nh, float ha, float hb, float hc) {
+    const float* uv = &m.uv[6 * (size_t)t];
+    const uint32_t c = w.hnmap->sample(uv[0] * ha + uv[2] * hb + uv[4] * hc, uv[1] * ha + uv[3] * hb + uv[5] * hc);
+    const Vec3 tn = Vec3((c & 255) / 255.0f, ((c >> 8) & 255) / 255.0f, ((c >> 16) & 255) / 255.0f) * 2.0f - Vec3(1.0f, 1.0f, 1.0f);
+    const Vec3 pa = m.get_pos(m.indices[3 * t]);
+    const Vec3 e1 = m.get_pos(m.indices[3 * t + 1]) - pa, e2 = m.get_pos(m.indices[3 * t + 2]) - pa;
+    const float du1 = uv[2] - uv[0], dv1 = uv[3] - uv[1], du2 = uv[4] - uv[0], dv2 = uv[5] - uv[1];
+    const float det = du1 * dv2 - du2 * dv1;
+    if (std::fabs(det) < 1e-20f) return Nh;
+    const float id = 1.0f / det;
+    Vec3 T = (e1 * dv2 - e2 * dv1) * id;
+    const Vec3 Bu = (e2 * du1 - e1 * du2) * id;
+    T = T - Nh * Nh.dot(T);
+    const float tl = T.length();
+    if (tl < 1e-20f) return Nh;
+    T = T * (1.0f / tl);
+    Vec3 B = Nh.cross(T);
+    if (B.dot(Bu) < 0.0f) B = B * -1.0f;
+    const Vec3 bent = (T * tn.x + B * tn.y + Nh * tn.z).normalized();
+    return (Nh + (bent - Nh) * w.hnmix).normalized();
+}
+
 // One row of texels: ray, then the sculpt's normal in the low's tangent frame and its
 // paint where the ray landed.
 void shade_row(BakeWork& w, const Mesh& m, uint32_t py) {
@@ -407,9 +444,10 @@ void shade_row(BakeWork& w, const Mesh& m, uint32_t py) {
         const float ha = 1.0f - h.u - h.v;
         if (r.has_normal) {
             const float* na = &w.hn[3 * ia], *nb = &w.hn[3 * ib], *nc = &w.hn[3 * ic];
-            const Vec3 Nh = Vec3(na[0] * ha + nb[0] * h.u + nc[0] * h.v,
-                                 na[1] * ha + nb[1] * h.u + nc[1] * h.v,
-                                 na[2] * ha + nb[2] * h.u + nc[2] * h.v).normalized();
+            Vec3 Nh = Vec3(na[0] * ha + nb[0] * h.u + nc[0] * h.v,
+                           na[1] * ha + nb[1] * h.u + nc[1] * h.v,
+                           na[2] * ha + nb[2] * h.u + nc[2] * h.v).normalized();
+            if (w.hnmap) Nh = apply_high_map(w, m, h.t, Nh, ha, h.u, h.v);
             // The exact inverse of the shader's n = normalize(x T + y B + z N), with
             // B = sign * cross(N, T) and T, N as interpolated (mikktspace.h's sampler).
             const Vec3 B = N.cross(T) * sign;

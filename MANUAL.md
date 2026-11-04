@@ -409,7 +409,7 @@ with a progress bar and **Stop**.
 
 | Map | What it holds |
 |---|---|
-| Normal | The sculpt's detail as seen from the low-poly (green up; **Green down** flips it for engines that want that) |
+| Normal | The sculpt's detail as seen from the low-poly, an imported model's normal map included (green up; **Green down** flips it for engines that want that) |
 | Colour | The paint, every visible layer merged, over an imported model's texture |
 | Color ID | The paint layer named `ColorID` alone, flat colours: for picking materials by colour in other apps |
 

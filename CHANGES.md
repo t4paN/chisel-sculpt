@@ -2,6 +2,11 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-04 — Normal bake reads an imported normal map
+
+- Baking from an imported model now includes its normal map and file normals, as the viewport shows them, so a low-poly export bakes with its detail instead of nearly flat.
+- Hiding or fading the Texture row does the same to the map in the bake.
+
 ## 2026-11-04 — GLB import reads the normal map
 
 - A GLB's normal map now comes in with its colour map and shows in the viewport on both backends; the Texture row fades it too and reads "+ normal".
