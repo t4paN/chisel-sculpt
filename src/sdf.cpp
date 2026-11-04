@@ -488,6 +488,29 @@ void wrap_thin_skin(std::vector<float>& field, uint32_t R, float t, float band_f
     }
 }
 
+// The shell above is a ball round every point of the source, so every bump has swelled
+// and every crease filled. Taking the same distance back along the normals undoes that:
+// the shell's convex curves all have a radius of at least t, so a drop shorter than t
+// can't fold them, and its creases only open. Everything moves at once, as one vert
+// moving alone by a few triangle sizes would fold its fan. A crease narrower than 2t
+// stays bridged: the flood sealed it, and this only moves the skin.
+// Pinned verts keep their x (the mirror seam); the rest stay at x >= seam_tol if that's > 0.
+void settle_wrap(Mesh& m, float drop, const std::vector<uint8_t>* pinned, float seam_tol) {
+    m.build_adjacency();
+    m.recompute_normals();
+    const uint32_t vc = m.vertex_count();
+    for (uint32_t v = 0; v < vc; v++) {
+        Vec3 n(m.norm_x[v], m.norm_y[v], m.norm_z[v]);
+        const float l = n.length();
+        if (l <= 1e-12f) continue;
+        const Vec3 q = m.get_pos(v);
+        Vec3 c = q - n * (drop / l);
+        if (pinned && v < (uint32_t)pinned->size() && (*pinned)[v]) c.x = q.x;
+        else if (seam_tol > 0.0f) c.x = std::max(seam_tol, c.x);
+        m.pos_x[v] = c.x; m.pos_y[v] = c.y; m.pos_z[v] = c.z;
+    }
+}
+
 // ---- Band-limited field smoothing (anti-pimple) -----------------------------
 // The distance field is exact AT grid corners but trilinear between them, so the
 // zero level set carries a lattice-frequency scallop — the "pimples" visible on
@@ -1424,7 +1447,8 @@ struct VoxelMergeJob {
     bool     use_nets = false;     // Surface Nets extractor chosen (vs Marching Cubes)
     bool     keep_detail = true;   // snap the extracted surface back onto the source soup
     bool     wrap = false;         // thin skin: shell round the source (see wrap_thin_skin)
-    float    wrap_t = 0.0f;        // how far outside the source that shell sits; 0 = on it
+    float    wrap_t = 0.0f;        // how far out the flood puts that shell
+    float    wrap_keep = 0.0f;     // how far off the source it finally settles; 0 = on it
     SdfGrid  grid;
     int      band = 0;
     uint32_t tri_count    = 0;
@@ -1813,8 +1837,13 @@ VoxelMergeJob* voxel_merge_begin(Scene& scene, ComputeState& cs,
         float open_ratio = 0.0f;
         const float thin = thin_skin_share(pos, idx, 0.005f * ext, open_ratio);
         job->wrap = thin >= 0.25f || open_ratio >= 2.0f;
-        // 1.25 voxels at R=128 and below, the same width in world units above it.
-        if (job->wrap) job->wrap_t = 0.625f * (float)job->band * grid.voxel;
+        // Just over the one voxel the flood needs to seal. Tied to the voxel and not to a
+        // world width, as anything narrower than 2t stays bridged: more resolution has
+        // to mean more shape.
+        if (job->wrap) {
+            job->wrap_t = 1.25f * grid.voxel;
+            job->wrap_keep = 0.5f * grid.voxel;
+        }
         job->res.wrapped = job->wrap;
         std::printf("[sdf] thin skin check: %.0f%% of the surface has a back within 0.5%% of the size, "
                     "open edges %.2f -> %s\n", 100.0f * thin, open_ratio,
@@ -2264,20 +2293,24 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
         // sides) and a cutter's sheet in open air (outside on both sides).
         // Reach is one voxel: the snap restores sub-voxel detail, it doesn't
         // reshape. Runs with snap=false too, so both paths print a DRIFT line.
-        // Wrapped: the shell can't land on the source without collapsing to nothing,
-        // so it lands one wrap_t outside it, which brings the sub-voxel valleys back.
-        // The skin test is off there: a valley sits under the shell by design, and
-        // the move is capped well short of the far wall.
+        // Wrapped: the flood's shell settles most of the way back first, as it has no
+        // business being a bigger model. It can't land ON the source: both walls would
+        // meet in a film thinner than a triangle and poke through each other. The skin
+        // test is off there, because every source point lies inside the shell by design.
         auto snap_to_source = [&](Mesh& m, const std::vector<uint8_t>* pinned, float seam_tol) {
             const float hv = 0.5f * grid.voxel;
-            snap_mesh_to_soup(m, j.pos, j.idx, grid.voxel, grid.voxel + j.wrap_t, j.keep_detail,
+            if (j.wrap) settle_wrap(m, j.wrap_t - j.wrap_keep, pinned, seam_tol);
+            snap_mesh_to_soup(m, j.pos, j.idx, grid.voxel, grid.voxel + j.wrap_keep, j.keep_detail,
                               pinned, seam_tol,
                               [&](Vec3 c, Vec3 n) {
                                   return j.wrap ||
                                          (sample_field(j.field_cpu, grid, c + n * hv) > 0.0f &&
                                           sample_field(j.field_cpu, grid, c - n * hv) < 0.0f);
-                              }, j.wrap_t);
+                              }, j.wrap_keep);
         };
+        // The Surface Nets mirror never snaps (it would break the pairing), so its shell
+        // stays where the flood put it.
+        const float wrap_off = (j.mirror && j.use_nets) ? j.wrap_t : j.wrap_keep;
         // Is this source tri on the result's skin? Wrapped: every source tri sits inside
         // the shell, so ask instead whether open air lies past the shell in front of it.
         auto src_on_skin = [&](Vec3 c, Vec3 n) {
@@ -2329,7 +2362,7 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
 
         if (!j.texs.empty())
             carry_textures(welded, j.pos, j.idx, j.soup_uv, j.soup_tex, j.texs, j.ntexs, j.soup_nrm, grid.voxel,
-                           src_on_skin, j.wrap_t);
+                           src_on_skin, wrap_off);
 
         // Reproject vertex paint + remesh density from the source meshes
         // (skipped entirely if no source carries either attribute).
@@ -2339,7 +2372,7 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
         // surface near a join to a dense neighbour's vertices (see pick_soup_sources).
         std::vector<uint32_t> skin_pick;
         if (j.any_paint || j.any_density) {
-            pick_soup_sources(welded, j.pos, j.idx, grid.voxel, src_on_skin, skin_pick, j.wrap_t);
+            pick_soup_sources(welded, j.pos, j.idx, grid.voxel, src_on_skin, skin_pick, wrap_off);
             transfer_attrs_world(welded, j.pos, j.vcol, j.any_paint,
                                  j.vdens, j.any_density,
                                  grid.origin, grid.voxel, grid.R,

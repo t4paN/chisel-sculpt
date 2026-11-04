@@ -6,7 +6,7 @@ Short, chronological log of notable changes. Newest on top.
 
 - Some AI-generated GLBs are closed films about 0.1% of the model's size thick, far under a voxel, so the grid saw no inside and they vanished. They now come out as one sealed shell, texture and normal map included.
 - The merge checks the source first: a quarter or more of the surface with a back layer right behind it, or a truly open sheet, gets wrapped. The notification says "thin skin: wrapped". Solid models take the old path unchanged.
-- A wrapped result sits about 1% of the model's size outside the source on each side, and holes narrower than about 2% close. Subtract doesn't wrap, and the choice is per merge, not per mesh.
+- The sealed shell then settles back to half a voxel off the source, so bumps don't swell and shapes don't go blobby. Holes and creases narrower than about 2.5 voxels stay closed, so more resolution keeps more shape. Subtract doesn't wrap, and the choice is per merge, not per mesh.
 
 ## 2026-11-04 — SDF merge and remesh keep the normal map
 

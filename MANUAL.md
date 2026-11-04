@@ -265,8 +265,8 @@ tangentially relaxed onto the iso-surface so it comes out even rather than stair
 
 Some imported models, AI-generated ones especially, are paper-thin films the grid can't see
 inside. The merge spots these and wraps them in a shell instead (the notification says
-"thin skin: wrapped"). The result is about 1% of the model's size bigger on each side, and
-holes narrower than about 2% close up.
+"thin skin: wrapped"). The result sits half a voxel outside the original, and holes and
+creases narrower than about 2.5 voxels close up, so raise the resolution to keep more shape.
 
 ## Masking
 
