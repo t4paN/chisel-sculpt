@@ -74,6 +74,10 @@ static constexpr uint8_t  MLYR_FORMAT = 1;
 // file's own bytes, decoded on load exactly as on import. Readers that predate MTEX load
 // the sculpt untextured.
 static constexpr uint8_t  MTEX_FORMAT = 1;
+// A normal map, optional after the MTEX it shares its UVs with (2026-11-04): MNRM, u32 entity
+// id, u8 format, u32 name length + bytes, u32 image byte count + bytes, u32 float count +
+// map_pos, u32 float count + map_norm. A reader that predates it just skips the chunk.
+static constexpr uint8_t  MNRM_FORMAT = 1;
 
 struct ChunkHeader {
     char     tag[4];
@@ -438,6 +442,24 @@ static void write_mtex_chunk(std::ofstream& f, const EntityRecord& e) {
     write_chunk_end(f, sp);
 }
 
+static void write_mnrm_chunk(std::ofstream& f, const EntityRecord& e) {
+    const Mesh& m = mtex_source(e);
+    const MeshTexture& t = *m.normal_map;
+    std::streampos sp;
+    write_chunk_begin(f, "MNRM", sp);
+    write_u32(f, e.id);
+    write_u8(f, MNRM_FORMAT);
+    write_u32(f, (uint32_t)t.name.size());
+    if (!t.name.empty()) write_raw(f, t.name.data(), t.name.size());
+    write_u32(f, (uint32_t)t.encoded.size());
+    write_raw(f, t.encoded.data(), t.encoded.size());
+    write_u32(f, (uint32_t)m.map_pos.size());
+    write_raw(f, m.map_pos.data(), m.map_pos.size() * sizeof(float));
+    write_u32(f, (uint32_t)m.map_norm.size());
+    write_raw(f, m.map_norm.data(), m.map_norm.size() * sizeof(float));
+    write_chunk_end(f, sp);
+}
+
 // MLYR: u32 entity id, u8 format, u32 name length + bytes, u8 flags (1 = visible).
 static void write_mlyr_chunk(std::ofstream& f, const EntityRecord& e) {
     std::streampos sp;
@@ -468,6 +490,8 @@ SaveResult save_project(const char* path, const ProjectData& data) {
         if (tm.texture && tm.has_uv()) {
             if (tm.texture->encoded.empty()) encode_png(*tm.texture);
             if (!tm.texture->encoded.empty()) write_mtex_chunk(f, e);
+            if (tm.normal_map && tm.normal_map->encoded.empty()) encode_png(*tm.normal_map);
+            if (tm.normal_map && !tm.normal_map->encoded.empty()) write_mnrm_chunk(f, e);
         }
     }
     auto write_retopo = [&](const EntityRecord& e) {
@@ -945,6 +969,30 @@ static bool read_mtex_chunk(ChunkReader& r, ProjectData& data) {
     return true;
 }
 
+// MNRM (see write_mnrm_chunk). Off = the mesh keeps its colour and loses only the map.
+static bool read_mnrm_chunk(ChunkReader& r, ProjectData& data) {
+    uint32_t eid, len, nbytes, npos, nnorm;
+    uint8_t format;
+    if (!r.read_u32(eid) || !r.read_u8(format) || format == 0 || format > MNRM_FORMAT) return false;
+    EntityRecord* e = nullptr;
+    for (EntityRecord& c : data.entities) if (c.id == eid) e = &c;
+    if (!e || !r.read_u32(len) || len > 4096 || len > r.remaining()) return false;
+    std::string name(len, '\0');
+    if (len && !r.read_raw(&name[0], len)) return false;
+    if (!r.read_u32(nbytes) || nbytes > r.remaining()) return false;
+    std::vector<uint8_t> bytes(nbytes);
+    if (nbytes && !r.read_raw(bytes.data(), nbytes)) return false;
+    Mesh& m = e->multires.locked ? e->multires.base : e->mesh;
+    if (!r.read_u32(npos) || !r.read_float_vec(m.map_pos, npos)) { m.map_pos.clear(); return false; }
+    if (!r.read_u32(nnorm) || !r.read_float_vec(m.map_norm, nnorm)) { m.map_pos.clear(); m.map_norm.clear(); return false; }
+    std::string note;
+    m.normal_map = decode_mesh_texture(std::move(bytes), name, &note);
+    if (!m.normal_map) { m.map_pos.clear(); m.map_norm.clear(); return false; }
+    std::printf("[load] mesh %u: normal map %dx%d%s%s\n", eid, m.normal_map->w, m.normal_map->h,
+                note.empty() ? "" : ", ", note.c_str());
+    return true;
+}
+
 // v2+ reader: file already validated (magic + version ok) and `f` positioned
 // just past the 8-byte header. Layout differences are feature-gated: v3+
 // carries per-vertex paint colour in each mesh body (has_color), v5+ carries
@@ -997,6 +1045,9 @@ static LoadResult load_project_v2(std::ifstream& f, std::streamoff file_size,
         } else if (std::memcmp(hdr.tag, "MTEX", 4) == 0) {
             if (!read_mtex_chunk(cr, data))
                 std::printf("[load] a mesh's texture didn't read back: it loads untextured\n");
+        } else if (std::memcmp(hdr.tag, "MNRM", 4) == 0) {
+            if (!read_mnrm_chunk(cr, data))
+                std::printf("[load] a mesh's normal map didn't read back: it loads without it\n");
         } else if (std::memcmp(hdr.tag, "RTOW", 4) == 0) {
             if (!cr.read_u32(rt_owner)) rt_owner = 0;
         } else if (std::memcmp(hdr.tag, "RTPO", 4) == 0) {

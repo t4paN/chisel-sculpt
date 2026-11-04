@@ -122,6 +122,12 @@ struct Mesh {
     // has_uv() is the test, never uv.empty().
     std::vector<float> uv;
     std::shared_ptr<const MeshTexture> texture;
+    // A tangent-space normal map on the same UVs (glTF: green up). Never without `texture`.
+    // It only reads right on the normals it was baked against, which aren't the ones
+    // recompute_normals makes: map_pos / map_norm (3 per vertex, or empty) are the import's
+    // positions and normals, and a vertex still at its map_pos gets its map_norm back.
+    std::shared_ptr<const MeshTexture> normal_map;
+    std::vector<float> map_pos, map_norm;
     bool has_uv() const { return !indices.empty() && uv.size() == indices.size() * 2; }
 
     uint32_t vertex_count() const { return (uint32_t)pos_x.size(); }

@@ -2228,7 +2228,8 @@ void draw_paint_layers_panel(InputState& input, Scene& scene, int win_w, int /*w
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Show / hide the texture");
         ImGui::SameLine();
         char label[48];
-        std::snprintf(label, sizeof(label), "Texture %dx%d", ent->mesh.texture->w, ent->mesh.texture->h);
+        std::snprintf(label, sizeof(label), "Texture %dx%d%s", ent->mesh.texture->w, ent->mesh.texture->h,
+                      ent->mesh.normal_map ? " + normal" : "");
         ImGui::BeginDisabled(!st.tex_visible);
         const float label_x = ImGui::GetCursorPosX();   // where the layer names start
         ImGui::AlignTextToFramePadding();

@@ -2,6 +2,12 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-04 — GLB import reads the normal map
+
+- A GLB's normal map now comes in with its colour map and shows in the viewport on both backends; the Texture row fades it too and reads "+ normal".
+- The file's normals stay while a vertex hasn't moved, as the map only reads right on them; a moved vertex gets fresh ones and the map keeps following the surface.
+- Saves keep the map in a new optional chunk, which older builds skip. SDF merge with a texture atlas drops it and keeps the colour.
+
 ## 2026-11-04 — Unwrap: holes keep their shape, unevenness spreads out
 
 - Holes inside an island (eye sockets, nostrils) keep their true outline: each is filled with a hidden fan for the solve, then dropped. Plain slits stay free to open.

@@ -877,6 +877,9 @@ void Scene::splice_active(const Mesh& replacement) {
     e->mesh.density = replacement.density;
     e->mesh.uv      = replacement.uv;
     e->mesh.texture = replacement.texture;
+    e->mesh.normal_map = replacement.normal_map;
+    e->mesh.map_pos = replacement.map_pos;
+    e->mesh.map_norm = replacement.map_norm;
     // The cascade output already carries the level's CSR (copied from the topo
     // cache) and its normals (computed by the replay) — rebuilding both here was
     // a full O(V+T) CPU pass each, and recompute_normals threw the replay's

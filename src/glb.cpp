@@ -86,6 +86,9 @@ struct Build {
     std::string name;
     const cgltf_node*  node  = nullptr;
     const cgltf_image* image = nullptr;   // the base colour image its triangles look into
+    const cgltf_image* normal = nullptr;  // the normal map, if the material has one
+    std::vector<float> nrm;               // with a normal map: NORMAL per welded vertex (3 each)
+    bool nrm_ok = true;                   // false: one was missing, or hard edges split one
     std::vector<float> x, y, z;
     std::vector<uint32_t> color;          // COLOR_0 per welded vertex, kept sized once on
     bool has_color = false;
@@ -122,18 +125,21 @@ uint32_t pack_rgba(const float* c, int n) {
 
 // One primitive into its part, through the node's world matrix.
 void add_primitive(Build& b, const cgltf_primitive& prim, const float M[16], int* skipped) {
-    const cgltf_accessor *pos = nullptr, *col = nullptr;
+    const cgltf_accessor *pos = nullptr, *col = nullptr, *nor = nullptr;
     const cgltf_accessor* tex[4] = {};
     for (cgltf_size i = 0; i < prim.attributes_count; i++) {
         const cgltf_attribute& a = prim.attributes[i];
         if (a.type == cgltf_attribute_type_position) pos = a.data;
         else if (a.type == cgltf_attribute_type_color && a.index == 0) col = a.data;
+        else if (a.type == cgltf_attribute_type_normal) nor = a.data;
         else if (a.type == cgltf_attribute_type_texcoord && a.index >= 0 && a.index < 4) tex[a.index] = a.data;
     }
     if (!pos || pos->count == 0) { (*skipped)++; return; }
     int set = 0;
-    if (prim.material && prim.material->has_pbr_metallic_roughness)
+    if (prim.material && prim.material->has_pbr_metallic_roughness && prim.material->pbr_metallic_roughness.base_color_texture.texture)
         set = prim.material->pbr_metallic_roughness.base_color_texture.texcoord;
+    else if (prim.material && prim.material->normal_texture.texture)
+        set = prim.material->normal_texture.texcoord;
     const cgltf_accessor* uva = (set >= 0 && set < 4) ? tex[set] : nullptr;
 
     const size_t n = pos->count;
@@ -151,6 +157,21 @@ void add_primitive(Build& b, const cgltf_primitive& prim, const float M[16], int
         if (!b.has_color) { b.color.assign(b.x.size(), 0xFFFFFFFFu); b.has_color = true; }
     }
 
+    std::vector<float> fn;
+    if (b.normal && nor && nor->count == n) {
+        fn.resize(n * 3);
+        cgltf_accessor_unpack_floats(nor, fn.data(), n * 3);
+    } else if (b.normal) {
+        b.nrm_ok = false;
+    }
+    const float det = M[0] * (M[5] * M[10] - M[9] * M[6]) - M[4] * (M[1] * M[10] - M[9] * M[2])
+                    + M[8] * (M[1] * M[6] - M[5] * M[2]);
+    // Normals go through the matrix's cofactors (the inverse transpose, up to scale).
+    const float ns = det < 0.0f ? -1.0f : 1.0f;
+    const float C[9] = {(M[5] * M[10] - M[9] * M[6]) * ns, (M[8] * M[6] - M[4] * M[10]) * ns, (M[4] * M[9] - M[8] * M[5]) * ns,
+                        (M[9] * M[2] - M[1] * M[10]) * ns, (M[0] * M[10] - M[8] * M[2]) * ns, (M[8] * M[1] - M[0] * M[9]) * ns,
+                        (M[1] * M[6] - M[5] * M[2]) * ns,  (M[4] * M[2] - M[0] * M[6]) * ns,  (M[0] * M[5] - M[4] * M[1]) * ns};
+
     // Weld through the world matrix (column-major). A mirroring matrix turns the
     // triangles inside out, so it flips their winding back.
     std::vector<uint32_t> remap(n);
@@ -161,9 +182,21 @@ void add_primitive(Build& b, const cgltf_primitive& prim, const float M[16], int
         const float wz = M[2] * q[0] + M[6] * q[1] + M[10] * q[2] + M[14];
         remap[i] = weld_vertex(b, wx, wy, wz);
         if (ncol) b.color[remap[i]] = pack_rgba(&c[ncol * i], ncol);
+        if (!fn.empty()) {
+            const float* k = &fn[3 * i];
+            float wn[3] = {C[0] * k[0] + C[1] * k[1] + C[2] * k[2], C[3] * k[0] + C[4] * k[1] + C[5] * k[2],
+                           C[6] * k[0] + C[7] * k[1] + C[8] * k[2]};
+            const float l = std::sqrt(wn[0] * wn[0] + wn[1] * wn[1] + wn[2] * wn[2]);
+            if (l > 1e-12f) { wn[0] /= l; wn[1] /= l; wn[2] /= l; }
+            const size_t at = 3 * (size_t)remap[i];
+            if (at == b.nrm.size()) {
+                b.nrm.insert(b.nrm.end(), wn, wn + 3);
+            } else if (at > b.nrm.size()
+                       || b.nrm[at] * wn[0] + b.nrm[at + 1] * wn[1] + b.nrm[at + 2] * wn[2] < 0.9998f) {
+                b.nrm_ok = false;   // about 1 degree apart: a hard edge one normal can't hold
+            }
+        }
     }
-    const float det = M[0] * (M[5] * M[10] - M[9] * M[6]) - M[4] * (M[1] * M[10] - M[9] * M[2])
-                    + M[8] * (M[1] * M[6] - M[5] * M[2]);
     const bool flip = det < 0.0f;
 
     auto index = [&](size_t k) -> size_t {
@@ -262,19 +295,27 @@ bool Mesh::import_glb(const char* filename, Mesh& out, std::vector<ObjPart>* par
             for (cgltf_size i = 0; i < node->mesh->primitives_count; i++) {
                 const cgltf_primitive& prim = node->mesh->primitives[i];
                 const cgltf_image* img = nullptr;
+                const cgltf_image* nimg = nullptr;
                 if (prim.material && prim.material->has_pbr_metallic_roughness) {
                     const cgltf_texture* tx = prim.material->pbr_metallic_roughness.base_color_texture.texture;
                     if (tx) img = tx->image;
                 }
+                if (prim.material && prim.material->normal_texture.texture) {
+                    // One set of UVs per sculpt: a map on a different set than the colour stays behind.
+                    const bool same_set = !img || prim.material->normal_texture.texcoord
+                                                  == prim.material->pbr_metallic_roughness.base_color_texture.texcoord;
+                    if (same_set) nimg = prim.material->normal_texture.texture->image;
+                }
                 Build* b = nullptr;
                 int of_node = 0;
                 for (Build& c : builds)
-                    if (c.node == node) { of_node++; if (c.image == img) b = &c; }
+                    if (c.node == node) { of_node++; if (c.image == img && c.normal == nimg) b = &c; }
                 if (!b) {
                     builds.push_back(Build{});
                     b = &builds.back();
                     b->node = node;
                     b->image = img;
+                    b->normal = nimg;
                     b->name = of_node ? std::string(nm) + "_" + std::to_string(of_node + 1) : nm;
                 }
                 add_primitive(*b, prim, M, &skipped);
@@ -294,6 +335,14 @@ bool Mesh::import_glb(const char* filename, Mesh& out, std::vector<ObjPart>* par
     std::string note;
     std::vector<std::pair<const cgltf_image*, std::shared_ptr<const MeshTexture>>> images;
     std::vector<ObjPart> made;
+    auto image_of = [&](const cgltf_image* img) {
+        auto it = std::find_if(images.begin(), images.end(), [&](auto& e) { return e.first == img; });
+        if (it == images.end()) {
+            images.push_back({img, load_image(opt, img, dir, &note)});
+            it = images.end() - 1;
+        }
+        return it->second;
+    };
     for (Build& b : builds) {
         if (b.idx.empty()) continue;
         ObjPart part;
@@ -304,17 +353,26 @@ bool Mesh::import_glb(const char* filename, Mesh& out, std::vector<ObjPart>* par
         m.color = std::move(b.color);
         if (b.all_uv) {
             m.uv = std::move(b.uv);
-            if (b.image) {
-                auto it = std::find_if(images.begin(), images.end(), [&](auto& e) { return e.first == b.image; });
-                if (it == images.end()) {
-                    images.push_back({b.image, load_image(opt, b.image, dir, &note)});
-                    it = images.end() - 1;
-                }
-                m.texture = it->second;
+            if (b.image) m.texture = image_of(b.image);
+            if (b.normal) m.normal_map = image_of(b.normal);
+            // A normal map with no colour (a normals-only bake): plain white under it.
+            if (m.normal_map && !m.texture) {
+                auto white = std::make_shared<MeshTexture>();
+                white->w = white->h = 1;
+                white->rgba = {255, 255, 255, 255};
+                white->name = "white";
+                m.texture = white;
             }
         }
         const uint32_t nv = m.vertex_count();
         m.norm_x.assign(nv, 0.0f); m.norm_y.assign(nv, 0.0f); m.norm_z.assign(nv, 1.0f);
+        if (m.normal_map && b.nrm_ok && b.nrm.size() == (size_t)nv * 3) {
+            m.map_norm = std::move(b.nrm);
+            m.map_pos.resize((size_t)nv * 3);
+            for (uint32_t v = 0; v < nv; v++) {
+                m.map_pos[3 * v] = m.pos_x[v]; m.map_pos[3 * v + 1] = m.pos_y[v]; m.map_pos[3 * v + 2] = m.pos_z[v];
+            }
+        }
         m.recompute_normals();   // welded: the split, hard-edged normals don't apply
         m.build_adjacency();
         // A retopo is rebuilt from faces + per-corner UVs (retopo_from_obj): here they're
@@ -323,9 +381,11 @@ bool Mesh::import_glb(const char* filename, Mesh& out, std::vector<ObjPart>* par
         part.poly_off.resize(m.tri_count() + 1);
         for (uint32_t f = 0; f <= m.tri_count(); f++) part.poly_off[f] = 3 * f;
         if (m.has_uv()) part.uv = m.uv;
-        std::printf("[glb]   '%s': %u verts, %u tris, %s, texture %s\n", part.name.c_str(),
+        std::printf("[glb]   '%s': %u verts, %u tris, %s, texture %s, normal map %s%s\n", part.name.c_str(),
                     nv, m.tri_count(), m.has_uv() ? "UVs" : "no UVs",
-                    m.texture ? (std::to_string(m.texture->w) + "x" + std::to_string(m.texture->h)).c_str() : "none");
+                    m.texture ? (std::to_string(m.texture->w) + "x" + std::to_string(m.texture->h)).c_str() : "none",
+                    m.normal_map ? (std::to_string(m.normal_map->w) + "x" + std::to_string(m.normal_map->h)).c_str() : "none",
+                    m.normal_map ? (m.map_norm.empty() ? " on recomputed normals" : " on the file's normals") : "");
         made.push_back(std::move(part));
     }
     if (made.empty()) {

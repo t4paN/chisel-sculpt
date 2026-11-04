@@ -825,7 +825,9 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
 )WGSL";
 
 // ---- Textured sculpt (an imported glTF wearing its base colour) ----------------------
-// The matcap above, with the texture multiplied into the albedo. Its UVs are per CORNER
+// The matcap above, with the texture multiplied into the albedo and any normal map
+// bent into the normal. Its tangents come from the screen derivatives of position and
+// UV, not from a buffer, so they follow the surface as it's sculpted. Its UVs are per CORNER
 // (a welded sculpt's seams run through shared vertices), which an indexed draw can't
 // feed, so this one is a plain draw of 3 x tris corners that fetches its own vertex:
 // index buffer, then pos/norm/mask/colour by that index, all bound as read-only storage.
@@ -884,7 +886,8 @@ in vec4 vColor;
 in vec2 vUV;
 out vec4 fragColor;
 layout(binding=0) uniform sampler2D uTex;
-layout(std140, binding=62) uniform TexParams { vec4 uTexMix; };   // x: the Texture row
+layout(binding=2) uniform sampler2D uNormalMap;
+layout(std140, binding=62) uniform TexParams { vec4 uTexMix; };   // x: the Texture row, y: 1 = has a normal map
 
 layout(std140, binding=63) uniform Params {
     mat4 uView;
@@ -905,6 +908,24 @@ void main() {
     if (uFlatShading > 0.5 && glen > 1e-20) {
         gface /= glen;
         n = (dot(gface, ns) < 0.0) ? -gface : gface;
+    }
+    // Normal map, in the frame it was baked in: n = x T + y B + z N, B = sign * cross(N, T).
+    // dP/du and dP/dv from how position and UV change per pixel. uv has v up, as the map's
+    // green does. Solved out with det, so the screen's y direction doesn't matter.
+    vec3 tn = texture(uNormalMap, vUV).rgb * 2.0 - 1.0;
+    vec2 uv = vec2(vUV.x, 1.0 - vUV.y);
+    vec3 dpx = dFdx(vPosView), dpy = dFdy(vPosView);
+    vec2 dux = dFdx(uv), duy = dFdy(uv);
+    float det = dux.x * duy.y - duy.x * dux.y;
+    vec3 T = (dpx * duy.y - dpy * dux.y) * sign(det);
+    vec3 Bu = (dpy * dux.x - dpx * duy.x) * sign(det);
+    T -= n * dot(n, T);
+    float tlen = length(T);
+    if (uTexMix.y > 0.5 && tlen > 1e-20) {
+        T /= tlen;
+        vec3 B = cross(n, T);
+        if (dot(B, Bu) < 0.0) B = -B;
+        n = normalize(mix(n, normalize(tn.x * T + tn.y * B + tn.z * n), uTexMix.x));
     }
     float rim = 1.0 - abs(n.z);
     float rim2 = rim * rim;
@@ -950,6 +971,8 @@ struct TexParams { mix_x: vec4<f32>, };
 @group(0) @binding(62) var<uniform> TP: TexParams;
 @group(0) @binding(0) var tex_color: texture_2d<f32>;
 @group(0) @binding(1) var tex_samp: sampler;
+@group(0) @binding(2) var normal_tex: texture_2d<f32>;
+@group(0) @binding(3) var normal_samp: sampler;
 @group(0) @binding(10) var<storage, read> t_idx: array<u32>;
 @group(0) @binding(11) var<storage, read> t_pos: array<f32>;
 @group(0) @binding(12) var<storage, read> t_nrm: array<f32>;
@@ -993,6 +1016,27 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         let facing_viewer = dot(gface, ns) > 0.0;
         if (!facing_viewer) { gface = -gface; }
         n = gface;
+    }
+    // See the GLSL twin.
+    let tn = textureSample(normal_tex, normal_samp, in.uv).rgb * 2.0 - 1.0;
+    let uv_up = vec2<f32>(in.uv.x, 1.0 - in.uv.y);
+    let dpx = dpdx(in.posView);
+    let dpy = dpdy(in.posView);
+    let dux = dpdx(uv_up);
+    let duy = dpdy(uv_up);
+    let det = dux.x * duy.y - duy.x * dux.y;
+    var tng = (dpx * duy.y - dpy * dux.y) * sign(det);
+    let bu = (dpy * dux.x - dpx * duy.x) * sign(det);
+    tng = tng - n * dot(n, tng);
+    let tlen = length(tng);
+    let has_map = TP.mix_x.y > 0.5;
+    let tng_ok = tlen > 1e-20;
+    if (has_map && tng_ok) {
+        tng = tng / tlen;
+        var btn = cross(n, tng);
+        let btn_back = dot(btn, bu) < 0.0;
+        if (btn_back) { btn = -btn; }
+        n = normalize(mix(n, normalize(tn.x * tng + tn.y * btn + tn.z * n), TP.mix_x.x));
     }
     let rim = 1.0 - abs(n.z);
     let rim2 = rim * rim;
@@ -1639,7 +1683,7 @@ void Renderer::init() {
         d.binds = binds; d.bind_count = 8;
         d.topology = gpu::Topology::Triangles;
         d.depth_test = true; d.depth_write = true;
-        d.sampled_texture = true;
+        d.sampled_texture = true; d.sampled_texture2 = true;
         textured_pipeline = gpu::create_render_pipeline(gpu_dev, d);
         if (!textured_pipeline.handle) std::fprintf(stderr, "[renderer] textured pipeline failed\n");
         else std::printf("[renderer] textured pipeline compiled (gpu:: seam)\n");
@@ -2391,12 +2435,22 @@ void Renderer::upload_textured(TexturedGpu& t, const Mesh& mesh) {
                                             mesh.texture->rgba.data(), true);
         t.src = mesh.texture;
     }
+    if (!t.normal_made || t.normal_src != mesh.normal_map) {
+        static const uint8_t flat[4] = {128, 128, 255, 255};
+        gpu::release_texture(t.normal);
+        t.normal = mesh.normal_map
+            ? gpu::create_sampled_texture(gpu_dev, mesh.normal_map->w, mesh.normal_map->h, mesh.normal_map->rgba.data(), true)
+            : gpu::create_sampled_texture(gpu_dev, 1, 1, flat, true);
+        t.normal_src = mesh.normal_map;
+        t.normal_made = true;
+    }
     t.corners = (uint32_t)mesh.indices.size();
 }
 
 void Renderer::free_textured(TexturedGpu& t) {
     gpu::release_buffer(t.uv);
     gpu::release_texture(t.tex);
+    gpu::release_texture(t.normal);
     t = TexturedGpu();
 }
 
@@ -2408,7 +2462,7 @@ bool Renderer::draw_textured(const Camera& cam, int w, int h, TexturedGpu& t, co
     if (!t.corners || t.corners != index_count || !textured_pipeline.handle || tex_mix <= 0.0f)
         return false;
     upload_matcap_params(cam, w, h, selected);
-    const float mixv[4] = {tex_mix, 0.0f, 0.0f, 0.0f};
+    const float mixv[4] = {tex_mix, t.normal_src ? 1.0f : 0.0f, 0.0f, 0.0f};
     gpu::write_buffer(gpu_dev, textured_ubo, 0, mixv, sizeof mixv);
     gpu::RenderTarget target; target.width = w; target.height = h;
     gpu::RenderPass rp = gpu::begin_render_pass(gpu_dev, target);
@@ -2418,7 +2472,7 @@ bool Renderer::draw_textured(const Camera& cam, int w, int h, TexturedGpu& t, co
         { 10, &idx, 0 }, { 11, &pos, 0 }, { 12, &nrm, 0 },
         { 13, &mask, 0 }, { 14, &col, 0 }, { 15, &t.uv, 0 },
     };
-    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, textured_pipeline, be, 8, &t.tex);
+    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, textured_pipeline, be, 8, &t.tex, &t.normal);
     gpu::set_bind_group(rp, textured_pipeline, grp);
     gpu::draw(rp, index_count);
     gpu::end_render_pass(rp);

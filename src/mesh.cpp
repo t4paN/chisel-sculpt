@@ -100,6 +100,13 @@ void Mesh::recompute_normals() {
         norm_y[i] = n.y;
         norm_z[i] = n.z;
     }
+
+    if (map_pos.size() == (size_t)vc * 3 && map_norm.size() == (size_t)vc * 3) {
+        for (uint32_t i = 0; i < vc; i++) {
+            if (pos_x[i] != map_pos[i*3] || pos_y[i] != map_pos[i*3+1] || pos_z[i] != map_pos[i*3+2]) continue;
+            norm_x[i] = map_norm[i*3]; norm_y[i] = map_norm[i*3+1]; norm_z[i] = map_norm[i*3+2];
+        }
+    }
 }
 
 void Mesh::compute_bounding_sphere(Vec3& center, float& radius) const {

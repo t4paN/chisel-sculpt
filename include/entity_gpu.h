@@ -12,6 +12,9 @@ struct TexturedGpu {
     gpu::Buffer  uv;            // 2 floats per corner, read-only storage
     gpu::Texture tex;
     std::shared_ptr<const MeshTexture> src;
+    gpu::Texture normal;        // the normal map, or one flat texel (WebGPU wants every binding)
+    std::shared_ptr<const MeshTexture> normal_src;
+    bool normal_made = false;
     uint32_t     corners = 0;
 };
 

@@ -929,6 +929,9 @@ void cascade_to_level(MultiresStack& stack, Mesh& out, int K, ComputeState* comp
     // two of them. Per face, so a UV seam through a shared vertex stays apart. Only
     // for a textured mesh: at level 3 over a 50k-tri import it is 3.2M faces of UVs.
     out.texture = stack.base.texture;
+    out.normal_map = stack.base.normal_map;
+    out.map_pos = stack.base.map_pos;
+    out.map_norm = stack.base.map_norm;
     out.uv.clear();
     if (stack.base.texture && stack.base.has_uv()) {
         out.uv = stack.base.uv;
