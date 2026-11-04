@@ -84,9 +84,11 @@ static void triangulate(const RetopoMesh& rm, uint32_t f, std::vector<uint32_t>&
 }
 
 // One island laid flat by least-squares conformal maps: every triangle keeps its angles
-// as well as it can, and the island's own border goes wherever that puts it. Two
-// vertices are pinned (the pair farthest apart, on the border if there is one), the
-// rest solved by conjugate gradients from a flat projection as the first guess.
+// as well as it can, and the island's outer border goes wherever that puts it; holes
+// hold their outline (below), then rounds that weigh the worst triangles more spread
+// the strain over all the edges. Two vertices are pinned (the pair farthest apart, on
+// the border if there is one), the rest solved by conjugate gradients from a flat
+// projection as the first guess.
 // `tris` are triangle numbers into wv (3 vertex copies each); positions are pos[orig[copy]].
 // Writes uv (2 per copy) for the island's copies, in mesh units.
 struct LscmResult { bool closed = false; bool mirrored = false; uint32_t folds = 0; };
@@ -111,7 +113,7 @@ static LscmResult lscm(const std::vector<Vec3>& pos, const std::vector<uint32_t>
     auto P = [&](uint32_t i) { return i < n_real ? pos[orig[copy[i]]] : hole_mid[i - n_real]; };
 
     // Its border: edges only one triangle uses. A piece with none (closed) can't lie flat;
-    // a ring or a tube can (as a flat ring, squeezed on the inside).
+    // a ring or a tube can (as a flat ring, its inner loop held open like any hole).
     std::map<uint64_t, int> edge_use;
     for (uint32_t t : tris)
         for (int j = 0; j < 3; j++) {

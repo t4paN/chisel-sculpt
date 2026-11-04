@@ -159,7 +159,8 @@ struct RetopoState {
     // Cut's vertex snap: the built vertex under the pointer (lit while hovering), and the
     // ones the line started and ended on (~0u = it started / ended on no vertex).
     uint32_t snap_v = ~0u, cut_from_v = ~0u, cut_to_v = ~0u;
-    // UV mode: the vertex the seam brush is on (a ring in the overlay), and whether it erases.
+    // UV mode: the vertex nearest the pointer (a marker in the overlay only while a Shift+Ctrl
+    // path is ready, as the brush has its own ring), and whether the brush erases.
     uint32_t seam_v = ~0u;
     bool seam_erase = false;
     // The vertex the last seam stroke ended on: a Shift+Ctrl+click marks the shortest way
