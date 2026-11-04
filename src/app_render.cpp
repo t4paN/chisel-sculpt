@@ -63,8 +63,10 @@ void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse) {
 #endif
     // ---- Cursor visibility ----
     // Retopo counts as an edit mode here: it shows the brush ring (the band width).
-    // UV has no tools, so it keeps the OS pointer.
-    const bool retopo_mode = input.retopo_tools_on();
+    // So does UV once there's a retopo to mark (the seam brush); before that it has no
+    // tools and keeps the OS pointer.
+    const bool retopo_mode = input.retopo_tools_on()
+                          || (input.uv_on() && scene.active_entity().retopo.built);
     bool non_edit_mode = input.interaction_mode != InputState::InteractionMode::EDIT
                       && !retopo_mode;
     // Hide the OS cursor while sculpting (we draw our own brush cursor).
@@ -240,7 +242,7 @@ void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse) {
             cursor_y = (float)input.mouse_y;
         }
         if (retopo_mode) {
-            draw_retopo_cursor(renderer, camera, input, cursor_x, cursor_y, win_w, win_h);
+            draw_retopo_cursor(renderer, camera, input, scene.active_entity().retopo, cursor_x, cursor_y, win_w, win_h);
         } else if (input.color_pick_active) {
             // Armed colour picker: eyedropper glyph instead of the brush
             // ring — the ring's size/hardness reading is meaningless here.

@@ -1241,34 +1241,106 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
             }
         }
         if (press && std::hypot(mx - press_x, my - press_y) > 4.0f) press_moved = true;
-        // The brush: every edge whose middle the ring (brush size, in pixels) passes over is
-        // marked, or unmarked with Ctrl. Each frame tests the whole sweep from where the
-        // last one left off, so a fast drag doesn't skip edges. It starts once the pointer
-        // moves, so a click (half a double-click, a path's end) marks nothing by itself.
+        // The brush: an edge is marked, or unmarked with Ctrl, once the ring (brush size, in
+        // pixels) has passed over 60% of it. A ring smaller than the edge never holds that
+        // much at once, so what each frame covers adds up over the stroke in `covered`: one
+        // bit per point along the edge. Past the window's edge doesn't count against it, or
+        // zooming in would put long edges out of reach.
+        // Only what can be seen is in reach: the edge needs a face looking at us, as the
+        // bright wire does, and a point with the sculpt well in front of it (the overlay's
+        // own slack) doesn't count.
+        // Each frame tests the whole sweep from where the last one left off, so a fast drag
+        // doesn't skip edges, and a frame with no fresh depth just leaves it to the next. It
+        // starts once the pointer moves, so a click (half a double-click, a path's end)
+        // marks nothing by itself.
+        constexpr int kEdgePoints = 20;
+        constexpr uint32_t kEdgeDone = 1u << 31;
         static float dab_x = 0.0f, dab_y = 0.0f;
         static std::vector<float> vsx, vsy;
         static std::vector<uint8_t> vok;
-        static std::vector<uint32_t> hit;
-        if (press && !press_moved) { dab_x = press_x; dab_y = press_y; }
-        if (press && press_moved && !press_was_dbl && !(path_keys && seam_last != ~0u)) {
+        static std::vector<uint32_t> hit, covered;
+        static std::vector<uint64_t> front_keys;
+        if (press && !press_moved) {
+            dab_x = press_x; dab_y = press_y;
+            covered.assign(retopo.result.edges.size() / 2, 0u);
+        }
+        if (press && press_moved && !press_was_dbl && !(path_keys && seam_last != ~0u) && !screen_buffers_dirty) {
             const RetopoMesh& rm = retopo.result;
             const uint32_t nv = (uint32_t)rm.v.size();
             vsx.resize(nv); vsy.resize(nv); vok.assign(nv, 0);
+            covered.resize(rm.edges.size() / 2, 0u);
             for (uint32_t i = 0; i < nv; i++) {
                 if (retopo.hidden(rm.v_owner[i])) continue;
-                const Vec3 to_eye = camera.perspective ? camera.get_position() - rm.v[i] : camera.get_view_direction() * -1.0f;
-                vok[i] = rm.n[i].dot(to_eye) > 0.0f && camera.world_to_screen(rm.v[i], win_w, win_h, vsx[i], vsy[i]);
+                // Off the window still projects; only behind the eye has no screen position.
+                vok[i] = camera.world_to_screen(rm.v[i], win_w, win_h, vsx[i], vsy[i])
+                      || !camera.perspective || camera.view_depth(rm.v[i]) > 1e-4f;
             }
+            // Edges with a face looking at us, judged as the wire is (draw_retopo_overlay).
+            front_keys.clear();
+            for (uint32_t f = 0; f < rm.face_count(); f++) {
+                const uint32_t o = rm.face_off[f], m = rm.face_size(f);
+                if (m < 3) continue;
+                Vec3 nr, c, cn;
+                for (uint32_t j = 0; j < m; j++) {
+                    nr += rm.v[rm.faces[o + j]].cross(rm.v[rm.faces[o + (j + 1) % m]]);
+                    c += rm.v[rm.faces[o + j]];
+                    cn += rm.n[rm.faces[o + j]];
+                }
+                if (nr.dot(cn) < 0.0f) nr = nr * -1.0f;   // wound the other way: its corners' normals say which side is out
+                c = c * (1.0f / (float)m);
+                const Vec3 to_eye = camera.perspective ? camera.get_position() - c : camera.get_view_direction() * -1.0f;
+                if (nr.dot(to_eye) <= 0.0f) continue;
+                for (uint32_t j = 0; j < m; j++) {
+                    const uint32_t a = rm.faces[o + j], b = rm.faces[o + (j + 1) % m];
+                    if (a != b) front_keys.push_back(((uint64_t)std::min(a, b) << 32) | std::max(a, b));
+                }
+            }
+            std::sort(front_keys.begin(), front_keys.end());
+            float edge_mean = 0.0f;
+            for (size_t e = 0; e + 1 < rm.edges.size(); e += 2)
+                edge_mean += (rm.v[rm.edges[e]] - rm.v[rm.edges[e + 1]]).length();
+            edge_mean /= (float)std::max<size_t>(1, rm.edges.size() / 2);
             const float r = std::max(2.0f, input.brush_size);
             const float dx = mx - dab_x, dy = my - dab_y, l2 = dx * dx + dy * dy;
+            const float lox = std::min(dab_x, mx) - r, hix = std::max(dab_x, mx) + r;
+            const float loy = std::min(dab_y, my) - r, hiy = std::max(dab_y, my) + r;
             hit.clear();
             for (size_t e = 0; e + 1 < rm.edges.size(); e += 2) {
                 const uint32_t ea = rm.edges[e], eb = rm.edges[e + 1];
                 if (ea >= nv || eb >= nv || !vok[ea] || !vok[eb]) continue;
-                // The sweep's nearest point to the edge's middle.
-                const float cx = (vsx[ea] + vsx[eb]) * 0.5f, cy = (vsy[ea] + vsy[eb]) * 0.5f;
-                const float t = l2 > 0.0f ? std::max(0.0f, std::min(1.0f, ((cx - dab_x) * dx + (cy - dab_y) * dy) / l2)) : 0.0f;
-                if (std::hypot(cx - (dab_x + dx * t), cy - (dab_y + dy * t)) > r) continue;
+                uint32_t& bits = covered[e / 2];
+                if (bits & kEdgeDone) continue;
+                if (std::max(vsx[ea], vsx[eb]) < lox || std::min(vsx[ea], vsx[eb]) > hix
+                    || std::max(vsy[ea], vsy[eb]) < loy || std::min(vsy[ea], vsy[eb]) > hiy) continue;
+                if (!std::binary_search(front_keys.begin(), front_keys.end(),
+                                        ((uint64_t)std::min(ea, eb) << 32) | std::max(ea, eb))) continue;
+                int in_window = 0, under = 0;
+                for (int i = 0; i < kEdgePoints; i++) {
+                    const float u = ((float)i + 0.5f) / (float)kEdgePoints;
+                    const Vec3 p = rm.v[ea] * (1.0f - u) + rm.v[eb] * u;
+                    float x, y;
+                    if (!camera.world_to_screen(p, win_w, win_h, x, y)) continue;
+                    in_window++;
+                    if (bits & (1u << i)) { under++; continue; }
+                    // The sweep's nearest point to this one.
+                    const float t = l2 > 0.0f ? std::max(0.0f, std::min(1.0f, ((x - dab_x) * dx + (y - dab_y) * dy) / l2)) : 0.0f;
+                    if (std::hypot(x - (dab_x + dx * t), y - (dab_y + dy * t)) > r) continue;
+                    float front = 0.0f;
+                    if (renderer.sample_depth((int)x, (int)y, &front) && front < 500.0f) {
+                        const float depth = camera.view_depth(p);
+                        const Vec3 n = rm.n[ea] * (1.0f - u) + rm.n[eb] * u;
+                        const Vec3 to_eye = camera.perspective ? camera.get_position() - p : camera.get_view_direction() * -1.0f;
+                        const float te = to_eye.length(), nl = n.length();
+                        const float cosv = te > 1e-6f && nl > 1e-6f ? n.dot(to_eye) / (te * nl) : 1.0f;
+                        const float tol = std::max(edge_mean, 2.0f * camera.half_height_at(depth) / (float)win_h
+                                                              * 6.0f / std::max(std::fabs(cosv), 0.15f));
+                        if (depth > front + tol) continue;
+                    }
+                    bits |= 1u << i;
+                    under++;
+                }
+                if (in_window == 0 || under * 5 < in_window * 3) continue;
+                bits |= kEdgeDone;
                 hit.push_back(ea); hit.push_back(eb);
                 if (input.mirror_x && ea < rm.mirror.size() && eb < rm.mirror.size()) {
                     const uint32_t ta = rm.mirror[ea], tb = rm.mirror[eb];
@@ -1347,7 +1419,7 @@ std::string retopo_export(const RetopoState& retopo, InputState& input, const st
 }
 
 void draw_retopo_cursor(Renderer& renderer, const Camera& camera, const InputState& input,
-                        float cursor_x, float cursor_y, int win_w, int win_h) {
+                        const RetopoState& retopo, float cursor_x, float cursor_y, int win_w, int win_h) {
     // Matrix green (#00FF41): a ring no sculpt brush wears, so the hand
     // knows it's in retopo before the eye finds the dock.
     static const float kRetopoGreen[3] = {0.0f, 1.0f, 0.255f};
@@ -1360,13 +1432,20 @@ void draw_retopo_cursor(Renderer& renderer, const Camera& camera, const InputSta
     static const float kEraseRed[3] = {1.0f, 0.25f, 0.2f};
     const bool erase = input.retopo_tool == InputState::RetopoTool::ERASE
                     && !input.is_smooth_active();
-    // UV mode's seam brush: its own ring at brush size, chalk yellow, white while Ctrl
-    // unmarks (whatever tool mode 0 was left on).
+    // UV mode's seam brush: the ring every brush wears, at brush size, red as the seams,
+    // white while it unmarks (whatever tool mode 0 was left on). seam_erase, not Ctrl: Ctrl
+    // pressed mid-stroke doesn't turn a stroke into an erase, so the ring mustn't say so.
+    // A small circle stands where the crosshair would.
     if (input.uv_on()) {
-        static const float kChalk[3] = {1.0f, 0.93f, 0.59f}, kWhite[3] = {1.0f, 1.0f, 1.0f};
-        const bool unmark = input.ctrl_held && !input.shift_held;
+        static const float kSeamRed[3] = {1.0f, 0.196f, 0.157f}, kWhite[3] = {1.0f, 1.0f, 1.0f};
+        const bool unmark = retopo.seam_erase;
         renderer.draw_cursor(camera, cursor_x, cursor_y, input.brush_size, input.cursor_nx, input.cursor_ny,
-                             input.cursor_nz, 1.0f, 0.5f, win_w, win_h, input.on_model, unmark ? kWhite : kChalk);
+                             input.cursor_nz, 1.0f, 0.5f, win_w, win_h, false, unmark ? kWhite : kSeamRed);
+        if (input.on_model) {
+            ImDrawList* dl = ImGui::GetForegroundDrawList();
+            dl->AddCircle(ImVec2(cursor_x, cursor_y), 7.0f, IM_COL32(30, 0, 0, 200), 16, 4.0f);
+            dl->AddCircle(ImVec2(cursor_x, cursor_y), 7.0f, unmark ? IM_COL32(255, 255, 255, 255) : IM_COL32(255, 50, 40, 255), 16, 2.0f);
+        }
         return;
     }
     // Their dot faces the screen, even all round: tipped with the surface, a 6 px ring's

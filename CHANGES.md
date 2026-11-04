@@ -2,6 +2,14 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-04 — Seam brush: real ring, Size slider, only what's in view
+
+- The ring now draws in UV mode, like the other brushes: seam red (white while unmarking), sized by S, a small circle in place of the crosshair.
+- The Seams panel gets a Size slider, and the bottom Size track works in UV in the 2000s skin.
+- The brush no longer reaches through the model: an edge needs a face looking at us, and parts with the sculpt in front don't count.
+- An edge is marked or unmarked once 60% of it has been under the ring, added up over the stroke; off-window parts don't count against it.
+- Edges running off the window can now be brushed; the chalk ring on the snapped vertex shows only for a Shift+Ctrl path.
+
 ## 2026-11-03 — UV seams: mark with a brush, cut with C, weld with W
 
 - Seams come in two steps: the brush marks edges (yellow), **C** cuts the marked into seams and unwraps; the rail gets the brush, Cut and Weld buttons.

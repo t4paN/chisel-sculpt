@@ -738,9 +738,9 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
 // went. Returns the path written, empty on failure.
 std::string retopo_export(const RetopoState& retopo, InputState& input, const std::string& project_path,
                           const char* mesh_name);
-// The green ring (red for the eraser, a dot for Cut and the wand).
+// The green ring (red for the eraser, a dot for Cut and the wand; UV's seam brush is red too).
 void draw_retopo_cursor(Renderer& renderer, const Camera& camera, const InputState& input,
-                        float cursor_x, float cursor_y, int win_w, int win_h);
+                        const RetopoState& retopo, float cursor_x, float cursor_y, int win_w, int win_h);
 // The dock and the overlay, mode 0 and UV mode (whose panel lists the meshes: uv_rows).
 struct UvMeshRow;
 void draw_retopo_ui(InputState& input, RetopoState& retopo, UvMeshRow* uv_rows, int uv_n, Renderer& renderer,

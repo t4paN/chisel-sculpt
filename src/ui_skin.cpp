@@ -1868,7 +1868,9 @@ void meter_widget(const char* id, InputState& in, int which, float w, float k = 
                       IM_COL32(255, 255, 255, lit ? 56 : 26), 2.0f * k);
     // Size wears the ring's own colour, so it moves with Hardness like the cursor does.
     ImU32 col = kText;
-    if (which == 0 && in.interaction_mode == InputState::InteractionMode::RETOPO) {
+    if (which == 0 && in.uv_on()) {
+        col = IM_COL32(255, 50, 40, 255);        // the seam brush's ring, red as the seams
+    } else if (which == 0 && in.interaction_mode == InputState::InteractionMode::RETOPO) {
         col = IM_COL32(0x00, 0xFF, 0x41, 255);   // retopo's ring is matrix green (main.cpp)
     } else if (which == 0) {
         float rgb[3];
@@ -1993,8 +1995,8 @@ float brush_panel(InputState& input, int win_h) {
         hint("to place");
     } else if (input.uv_on()) {
         heading("Seams", nullptr);
+        meter_widget("##mS", input, 0, w, k, !can_grow || big);
         hint("Drag: mark the edges under the brush");
-        hint("Hold S and drag: brush size");
         hint("Double-click: mark a loop");
         hint("Shift+Ctrl+click: mark a path");
         hint("Ctrl+drag: unmark");
@@ -2571,8 +2573,8 @@ void y2k_top(InputState& in, int W, const SkinStats& st) {
         ytext(dl, true, 11.0f, ImVec2(x + sw - ysize(true, 11.0f, sl[i].val).x, cy - 17), y2k::value, sl[i].val);
         char id[16]; std::snprintf(id, sizeof id, "##ys%d", i);
         float t = y2k_track(id, dl, ImVec2(x, cy + 1), sw, 14.0f, sl[i].pct, nullptr);
-        // Retopo draws with the brush ring, so Size (only) stays live there.
-        const bool retopo_size = i == 0 && in.retopo_tools_on();
+        // Retopo and the seam brush draw with the brush ring, so Size (only) stays live there.
+        const bool retopo_size = i == 0 && in.interaction_mode == InputState::InteractionMode::RETOPO;
         if (t >= 0.0f && (editing || retopo_size)) set_feel(in, i, t);
         x += sw + 14.0f;
     }

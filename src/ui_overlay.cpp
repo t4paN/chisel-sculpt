@@ -2853,12 +2853,13 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
             dl->AddPolyline(poly.data(), (int)poly.size(), IM_COL32(255, 60, 50, 255), ImDrawFlags_Closed, 2.5f);
         }
     }
-    // The seam brush's vertex: a chalk ring, white when Ctrl would erase. With Shift+Ctrl
-    // held, the vertex the last stroke ended on gets a dot: the path starts there.
-    if (st.seam_v < rm.v.size() && vis[st.seam_v] == 2) {
+    // With Shift+Ctrl held, the vertex the last stroke ended on gets a dot, the path starts
+    // there, and a chalk ring on the one it would end on. Only then: beside the brush's own
+    // ring, one hopping between vertices reads as the cursor flickering.
+    if (st.seam_path_ready && st.seam_v < rm.v.size() && vis[st.seam_v] == 2) {
         const ImVec2 p = at[st.seam_v];
         dl->AddCircle(p, 7.0f, IM_COL32(20, 16, 0, 200), 16, 4.0f);
-        dl->AddCircle(p, 7.0f, st.seam_erase ? IM_COL32(255, 255, 255, 255) : IM_COL32(255, 238, 150, 255), 16, 2.0f);
+        dl->AddCircle(p, 7.0f, IM_COL32(255, 238, 150, 255), 16, 2.0f);
     }
     if (st.seam_path_ready && st.seam_anchor < rm.v.size() && vis[st.seam_anchor] == 2) {
         const ImVec2 p = at[st.seam_anchor];

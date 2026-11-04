@@ -374,9 +374,10 @@ layout), then bake the sculpt's detail and paint into textures for it. Build a r
 in mode 0 first; UV mode works on it and never changes the sculpt.
 
 **Seams.** Seams are made in two steps: mark the edges, then cut them.
-- **Marking.** Drag on the model to brush edges yellow: every edge whose middle passes
-  under the ring is marked (hold **S** and drag to size the ring). **Ctrl+drag** unmarks.
-  **Double-click** an edge to mark its whole loop; **Shift+Ctrl+click** marks the shortest
+- **Marking.** Drag on the model to brush edges yellow: an edge is marked once 60% of it
+  has passed under the ring, and only what you can see counts, so the brush never reaches
+  round the far side (hold **S** and drag, or use the Size slider, to size the ring).
+  **Ctrl+drag** unmarks. **Double-click** an edge to mark its whole loop; **Shift+Ctrl+click** marks the shortest
   path from the last point to the one clicked. With mirror on, the twin is marked too.
 - **Cutting.** **C** (or the scissors on the rail) turns the marked edges into seams (red)
   and unwraps along them. Existing seams can be marked like any edge (they show yellow with
