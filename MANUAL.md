@@ -387,7 +387,9 @@ in mode 0 first; UV mode works on it and never changes the sculpt.
 
 **Unwrap** cuts along the seams and the mesh's own open borders, nowhere else, flattens
 each piece (an *island*) with as little stretch as it can, and packs the islands into the
-square. **Re-pack** packs them again as they are. The **Padding** slider sets the gap
+square. Holes inside an island keep their shape, with the unevenness spread over all its
+edges rather than crunched round the rim; a plain cut that doesn't enclose anything is free
+to open. **Re-pack** packs them again as they are. The **Padding** slider sets the gap
 between islands, in pixels at the bake size.
 
 **The panel.** The layout shows in a square; double-click it for a big centred view

@@ -2,6 +2,12 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-04 — Unwrap: holes keep their shape, unevenness spreads out
+
+- Holes inside an island (eye sockets, nostrils) keep their true outline: each is filled with a hidden fan for the solve, then dropped. Plain slits stay free to open.
+- Triangles far from their true shape weigh more each round, so the strain spreads over all the edges instead of crunching one loop.
+- On a saved head with two holes: holes from 25% and 44% of true area to 106% each, worst squash 0.22 to 0.52, the folded triangle gone; an unwrap takes about twice as long.
+
 ## 2026-11-04 — Seam brush: real ring, Size slider, only what's in view
 
 - The ring now draws in UV mode, like the other brushes: seam red (white while unmarking), sized by S, a small circle in place of the crosshair.

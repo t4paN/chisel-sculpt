@@ -90,6 +90,10 @@ static void triangulate(const RetopoMesh& rm, uint32_t f, std::vector<uint32_t>&
 // `tris` are triangle numbers into wv (3 vertex copies each); positions are pos[orig[copy]].
 // Writes uv (2 per copy) for the island's copies, in mesh units.
 struct LscmResult { bool closed = false; bool mirrored = false; uint32_t folds = 0; };
+constexpr double kHoleMinRound = 0.05;   // 1 = a circle; under this a border loop is a slit, not a hole
+constexpr double kHoleWeight   = 0.5;    // a fan triangle's edges, in cotangent terms: a neat 45 degree corner's
+constexpr int    kArapRounds   = 30, kEvenFrom = 6;
+constexpr double kEvenPow      = 4.0, kEvenMax = 100.0;
 
 static LscmResult lscm(const std::vector<Vec3>& pos, const std::vector<uint32_t>& orig,
                        const std::vector<uint32_t>& wv, const std::vector<uint32_t>& tris, std::vector<float>& uv) {
@@ -101,8 +105,10 @@ static LscmResult lscm(const std::vector<Vec3>& pos, const std::vector<uint32_t>
     for (uint32_t t : tris)
         for (int j = 0; j < 3; j++)
             if (local.emplace(wv[3 * t + j], (uint32_t)copy.size()).second) copy.push_back(wv[3 * t + j]);
-    const uint32_t n = (uint32_t)copy.size();
-    auto P = [&](uint32_t i) { return pos[orig[copy[i]]]; };
+    uint32_t n = (uint32_t)copy.size();
+    const uint32_t n_real = n;
+    std::vector<Vec3> hole_mid;   // past the real copies: one made-up vertex per filled hole
+    auto P = [&](uint32_t i) { return i < n_real ? pos[orig[copy[i]]] : hole_mid[i - n_real]; };
 
     // Its border: edges only one triangle uses. A piece with none (closed) can't lie flat;
     // a ring or a tube can (as a flat ring, squeezed on the inside).
@@ -115,6 +121,57 @@ static LscmResult lscm(const std::vector<Vec3>& pos, const std::vector<uint32_t>
     std::vector<uint8_t> border(n, 0);
     for (const auto& e : edge_use)
         if (e.second == 1) border[(uint32_t)(e.first >> 32)] = border[(uint32_t)e.first] = 1;
+
+    // Holes (an eye socket, a nostril) are just more free border to the solve, and nothing
+    // resists a free border closing up: the rim would crunch into the hole and fold. So
+    // each one is filled for the solve, with a fan from a made-up vertex at its middle,
+    // which holds its true outline like any other surface and is dropped afterwards. The
+    // loop with the most area is the outside and stays free. A slit has no area (both
+    // sides of the cut lie together) and is there to open, so it's left alone too.
+    std::vector<uint32_t> border_next(n, ~0u);
+    for (uint32_t t : tris)
+        for (int j = 0; j < 3; j++) {
+            const uint32_t a = local[wv[3 * t + j]], b = local[wv[3 * t + (j + 1) % 3]];
+            if (edge_use[((uint64_t)std::min(a, b) << 32) | std::max(a, b)] == 1) border_next[a] = b;
+        }
+    struct Fan { uint32_t mid, a, b; };
+    std::vector<Fan> fans;
+    {
+        struct Loop { std::vector<uint32_t> v; double perim = 0.0, area = 0.0; };
+        std::vector<Loop> loops;
+        std::vector<uint8_t> walked(n, 0);
+        for (uint32_t s = 0; s < n; s++) {
+            if (border_next[s] == ~0u || walked[s]) continue;
+            Loop L;
+            Vec3 vec;
+            uint32_t i = s;
+            while (i != ~0u && !walked[i]) {
+                walked[i] = 1;
+                L.v.push_back(i);
+                const uint32_t nx = border_next[i];
+                if (nx == ~0u) break;
+                L.perim += (P(nx) - P(i)).length();
+                vec += (P(i) - P(s)).cross(P(nx) - P(s));
+                i = nx;
+            }
+            if (i != s || L.v.size() < 3) continue;   // didn't close (two loops touching at a vertex)
+            L.area = 0.5 * vec.length();
+            loops.push_back(std::move(L));
+        }
+        size_t outer = 0;
+        for (size_t i = 1; i < loops.size(); i++) if (loops[i].area > loops[outer].area) outer = i;
+        for (size_t i = 0; i < loops.size(); i++) {
+            const Loop& L = loops[i];
+            if (i == outer || 12.566370614 * L.area / std::max(1e-20, L.perim * L.perim) < kHoleMinRound) continue;
+            Vec3 c;
+            for (uint32_t v : L.v) c += P(v);
+            hole_mid.push_back(c * (1.0f / (float)L.v.size()));
+            const uint32_t mid = n++;
+            for (size_t j = 0; j < L.v.size(); j++)
+                fans.push_back({mid, L.v[j], L.v[(j + 1) % L.v.size()]});
+        }
+        border.resize(n, 0);
+    }
 
     // First guess: projected onto the island's mean plane, seen from the side its faces
     // face (so it isn't mirrored).
@@ -154,15 +211,17 @@ static LscmResult lscm(const std::vector<Vec3>& pos, const std::vector<uint32_t>
     // counts by its size. Two real rows per triangle.
     struct Row { uint32_t c[3]; double a[3], b[3], qx[3], qy[3], w[3]; };
     std::vector<Row> rows;
-    rows.reserve(tris.size());
-    for (uint32_t t : tris) {
+    rows.reserve(tris.size() + fans.size());
+    // A hole's fan runs against the rim's direction: the rim goes round the island's side.
+    auto add_row = [&](uint32_t c0, uint32_t c1, uint32_t c2, bool fill) {
         Row r;
+        r.c[0] = c0; r.c[1] = c1; r.c[2] = c2;
         Vec3 Q[3];
-        for (int j = 0; j < 3; j++) { r.c[j] = local[wv[3 * t + j]]; Q[j] = P(r.c[j]); }
+        for (int j = 0; j < 3; j++) Q[j] = P(r.c[j]);
         const Vec3 e1 = Q[1] - Q[0], e2 = Q[2] - Q[0];
         const double l1 = e1.length();
         const Vec3 nn = e1.cross(e2);
-        if (l1 < 1e-12 || nn.length() < 1e-14f) continue;   // degenerate: no say
+        if (l1 < 1e-12 || nn.length() < 1e-14f) return;   // degenerate: no say
         const Vec3 xa = e1 * (float)(1.0 / l1), ya = nn.normalized().cross(xa);
         const double qx[3] = {0.0, l1, e2.dot(xa)}, qy[3] = {0.0, 0.0, e2.dot(ya)};
         const double s = 1.0 / std::sqrt(l1 * qy[2]);
@@ -175,9 +234,14 @@ static LscmResult lscm(const std::vector<Vec3>& pos, const std::vector<uint32_t>
             // The cotangent of the angle at corner j: the weight of the edge facing it.
             const double ux = qx[a] - qx[j], uy = qy[a] - qy[j], vx = qx[b] - qx[j], vy = qy[b] - qy[j];
             r.w[j] = 0.5 * (ux * vx + uy * vy) / std::max(1e-300, ux * vy - uy * vx);
+            // A fan's triangles are slivers more often than not, and a sliver's cotangent
+            // is huge: a plain even weight, so no one spoke runs the show.
+            if (fill) r.w[j] = kHoleWeight;
         }
         rows.push_back(r);
-    }
+    };
+    for (uint32_t t : tris) add_row(local[wv[3 * t]], local[wv[3 * t + 1]], local[wv[3 * t + 2]], false);
+    for (const Fan& f : fans) add_row(f.b, f.a, f.mid, true);
     // M = AᵀA applied to y, as rows of A: re = sum a u - b v, im = sum b u + a v.
     auto apply = [&](const std::vector<double>& y, std::vector<double>& out) {
         std::fill(out.begin(), out.end(), 0.0);
@@ -248,6 +312,7 @@ static LscmResult lscm(const std::vector<Vec3>& pos, const std::vector<uint32_t>
     // Started from the conformal map, a few rounds settle it.
     if (!rows.empty()) {
         // L (cotangent weights) as a sparse matrix over the vertices, built once.
+        // Each triangle's share is scaled by how badly it's doing (row_k, below).
         std::vector<std::map<uint32_t, double>> Lm(n);
         for (const Row& r : rows)
             for (int j = 0; j < 3; j++) {
@@ -314,11 +379,45 @@ static LscmResult lscm(const std::vector<Vec3>& pos, const std::vector<uint32_t>
         if (au > 1e-30) {   // a mirrored conformal map (shouldn't happen) is left as it is
             const double k = std::sqrt(a3 / au);
             for (double& t : x) t *= k;
-            std::vector<double> bu(n), bv(n);
-            for (int round = 0; round < 12; round++) {
+            std::vector<double> bu(n), bv(n), row_k(rows.size(), 1.0);
+            // ARAP alone is happy to crunch: a triangle squashed flat costs it a limited
+            // amount, so it pays that on one loop rather than a little on every edge. From
+            // round kEvenFrom on, a triangle far from its true shape counts for more (by
+            // its worst stretch or squash, to the power kEvenPow, up to kEvenMax), which
+            // leans towards the worst one being as mild as it can be: the unevenness
+            // spreads out over all the edges. Re-solved each round, so L is rebuilt too.
+            auto slot = [&](uint32_t i, uint32_t j) {
+                return (size_t)(std::lower_bound(col.begin() + off[i], col.begin() + off[i + 1], j) - col.begin());
+            };
+            for (int round = 0; round < kArapRounds; round++) {
                 std::fill(bu.begin(), bu.end(), 0.0);
                 std::fill(bv.begin(), bv.end(), 0.0);
-                for (const Row& r : rows) {
+                if (round >= kEvenFrom) {
+                    std::fill(val.begin(), val.end(), 0.0);
+                    for (size_t ri = 0; ri < rows.size(); ri++) {
+                        const Row& r = rows[ri];
+                        const double ux = x[r.c[1]] - x[r.c[0]], uy = x[n + r.c[1]] - x[n + r.c[0]];
+                        const double vx = x[r.c[2]] - x[r.c[0]], vy = x[n + r.c[2]] - x[n + r.c[0]];
+                        const double j00 = ux / r.qx[1], j10 = uy / r.qx[1];
+                        const double j01 = (vx - r.qx[2] * j00) / r.qy[2], j11 = (vy - r.qx[2] * j10) / r.qy[2];
+                        const double q = std::hypot((j00 + j11) * 0.5, (j10 - j01) * 0.5);
+                        const double f = std::hypot((j00 - j11) * 0.5, (j10 + j01) * 0.5);
+                        const bool flipped = j00 * j11 - j01 * j10 <= 0.0;
+                        const double hi = q + f, lo = std::fabs(q - f);
+                        const double bad = std::max(hi, 1.0 / std::max(lo, 1e-3));
+                        const double want = flipped ? kEvenMax : std::min(kEvenMax, std::pow(bad, kEvenPow));
+                        row_k[ri] = 0.5 * (row_k[ri] + want);   // half way: a jump each round rings
+                        for (int j = 0; j < 3; j++) {
+                            const uint32_t a = r.c[(j + 1) % 3], b = r.c[(j + 2) % 3];
+                            const double w = row_k[ri] * r.w[j];
+                            val[slot(a, b)] -= w; val[slot(b, a)] -= w;
+                            val[slot(a, a)] += w; val[slot(b, b)] += w;
+                        }
+                    }
+                    for (uint32_t i = 0; i < n; i++) ldiag[i] = val[slot(i, i)];
+                }
+                for (size_t ri = 0; ri < rows.size(); ri++) {
+                    const Row& r = rows[ri];
                     // Local: the turn that best fits the triangle's current UV shape.
                     double s00 = 0.0, s01 = 0.0, s10 = 0.0, s11 = 0.0;
                     for (int j = 0; j < 3; j++) {
@@ -334,8 +433,9 @@ static LscmResult lscm(const std::vector<Vec3>& pos, const std::vector<uint32_t>
                         const int a = (j + 1) % 3, b = (j + 2) % 3;
                         const double dx = r.qx[a] - r.qx[b], dy = r.qy[a] - r.qy[b];
                         const double ru = cs * dx - sn * dy, rv = sn * dx + cs * dy;
-                        bu[r.c[a]] += r.w[j] * ru; bv[r.c[a]] += r.w[j] * rv;
-                        bu[r.c[b]] -= r.w[j] * ru; bv[r.c[b]] -= r.w[j] * rv;
+                        const double wk = row_k[ri] * r.w[j];
+                        bu[r.c[a]] += wk * ru; bv[r.c[a]] += wk * rv;
+                        bu[r.c[b]] -= wk * ru; bv[r.c[b]] -= wk * rv;
                     }
                 }
                 solve(x.data(), bu);
@@ -354,7 +454,7 @@ static LscmResult lscm(const std::vector<Vec3>& pos, const std::vector<uint32_t>
     }
     res.mirrored = a_uv < 0.0;
     const double sc = std::fabs(a_uv) > 1e-30 ? std::sqrt(a_3d / std::fabs(a_uv)) : 1.0;
-    for (uint32_t i = 0; i < n; i++) {
+    for (uint32_t i = 0; i < n_real; i++) {
         uv[2 * copy[i]]     = (float)((res.mirrored ? -x[i] : x[i]) * sc);
         uv[2 * copy[i] + 1] = (float)(x[n + i] * sc);
     }
