@@ -3277,7 +3277,7 @@ uint32_t snap_mesh_to_soup(Mesh& m, const std::vector<float>& pos,
                            const std::vector<uint32_t>& idx,
                            float cell, float max_step, bool snap,
                            const std::vector<uint8_t>* pinned, float seam_tol,
-                           const std::function<bool(Vec3, Vec3)>& accept) {
+                           const std::function<bool(Vec3, Vec3)>& accept, float offset) {
     auto t0 = std::chrono::steady_clock::now();
     RefSurface ref;
     ref.build_borrowed(pos.data(), idx.data(), (uint32_t)(idx.size() / 3), cell);
@@ -3299,6 +3299,8 @@ uint32_t snap_mesh_to_soup(Mesh& m, const std::vector<float>& pos,
             nrm = nrm * (1.0f / nl);
             float h;
             if (!raycast_ref(ref, q, nrm, max_step, h)) continue;
+            h += offset;                                   // aim for source + offset, not the source
+            if (std::fabs(h) > max_step - offset) continue;
             if (std::fabs(h) < 1e-7f) continue;
             Vec3 c = q + nrm * h;
             if (!accept(c, nrm)) { refused++; continue; }
@@ -3340,7 +3342,8 @@ uint32_t snap_mesh_to_soup(Mesh& m, const std::vector<float>& pos,
             float nl = n.length();
             if (nl < 1e-20f) continue;
             Vec3 cp; float d;
-            if (ref.closest((a + b + c) * (1.0f / 3.0f), n * (1.0f / nl), cp, d)) dists.push_back(d);
+            n = n * (1.0f / nl);
+            if (ref.closest((a + b + c) * (1.0f / 3.0f) - n * offset, n, cp, d)) dists.push_back(d);
         }
         if (!dists.empty()) {
             std::sort(dists.begin(), dists.end());
@@ -3362,6 +3365,56 @@ uint32_t snap_mesh_to_soup(Mesh& m, const std::vector<float>& pos,
     return moved;
 }
 
+float thin_skin_share(const std::vector<float>& pos, const std::vector<uint32_t>& idx,
+                      float reach, float& open_ratio) {
+    open_ratio = 0.0f;
+    const uint32_t nt = (uint32_t)(idx.size() / 3);
+    if (nt == 0 || !(reach > 0.0f)) return 0.0f;
+    RefSurface ref;
+    ref.build_borrowed(pos.data(), idx.data(), nt, reach);
+
+    // Area-weighted over a sample of faces: the share settles long before 20k rays.
+    // The ray filter wants faces looking the same way as the ray, so casting along
+    // -n ignores the face itself and finds the layer that backs it. h <= 0 is a
+    // wall across open air, which isn't thinness.
+    const uint32_t stride = std::max(1u, nt / 20000u);
+    double area = 0.0, sampled = 0.0, thin = 0.0;
+    for (uint32_t t = 0; t < nt; t++) {
+        const Vec3 a = ref.v(t,0), b = ref.v(t,1), c = ref.v(t,2);
+        const Vec3 n = (b - a).cross(c - a);
+        const float l = n.length();
+        area += 0.5 * l;
+        if (t % stride != 0 || !(l > 1e-20f)) continue;
+        sampled += 0.5 * l;
+        float h;
+        if (raycast_ref(ref, (a + b + c) * (1.0f / 3.0f), n * (-1.0f / l), reach, h) && h > 0.0f)
+            thin += 0.5 * l;
+    }
+
+    // Open edges: used by one tri only. Sorted keys, not hashed (32-bit WASM heap).
+    std::vector<uint64_t> edges;
+    edges.reserve((size_t)nt * 3);
+    for (uint32_t t = 0; t < nt; t++)
+        for (uint32_t k = 0; k < 3; k++) {
+            const uint64_t a = idx[t*3 + k], b = idx[t*3 + (k+1)%3];
+            edges.push_back(a < b ? (a << 32 | b) : (b << 32 | a));
+        }
+    std::sort(edges.begin(), edges.end());
+    double open_len = 0.0;
+    for (size_t i = 0; i < edges.size(); ) {
+        size_t j = i + 1;
+        while (j < edges.size() && edges[j] == edges[i]) j++;
+        if (j - i == 1) {
+            const float* a = &pos[3 * (size_t)(edges[i] >> 32)];
+            const float* b = &pos[3 * (size_t)(uint32_t)edges[i]];
+            open_len += (Vec3(a[0], a[1], a[2]) - Vec3(b[0], b[1], b[2])).length();
+        }
+        i = j;
+    }
+    if (area > 0.0) open_ratio = (float)(open_len / std::sqrt(area));
+    return sampled > 0.0 ? (float)(thin / sampled) : 0.0f;
+}
+
 // Which soup vertex each vertex of m should take its paint from. Nearest VERTEX
 // alone gets joins wrong: a coarse input's vertices sit far apart, so a point on
 // its surface near the crease is often closer to a dense neighbour's vertex across
@@ -3373,7 +3426,7 @@ uint32_t snap_mesh_to_soup(Mesh& m, const std::vector<float>& pos,
 void pick_soup_sources(const Mesh& m, const std::vector<float>& pos,
                        const std::vector<uint32_t>& idx, float cell,
                        const std::function<bool(Vec3, Vec3)>& accept,
-                       std::vector<uint32_t>& pick) {
+                       std::vector<uint32_t>& pick, float inset) {
     auto t0 = std::chrono::steady_clock::now();
     const uint32_t vc = m.vertex_count();
     pick.assign(vc, UINT32_MAX);
@@ -3398,7 +3451,8 @@ void pick_soup_sources(const Mesh& m, const std::vector<float>& pos,
         float nl = nrm.length();
         if (nl <= 1e-12f) continue;
         Vec3 cp; float d; uint32_t t = UINT32_MAX;
-        if (!ref.closest(q, nrm * (1.0f / nl), cp, d, &buried, &t)) continue;
+        nrm = nrm * (1.0f / nl);
+        if (!ref.closest(q - nrm * inset, nrm, cp, d, &buried, &t)) continue;
         uint32_t bestk = 0; float bd = std::numeric_limits<float>::max();
         for (int k = 0; k < 3; k++) {
             Vec3 e = ref.v(t,k) - cp;
@@ -3432,7 +3486,7 @@ void transfer_uv(Mesh& dst, const std::vector<float>& src_pos,
                  const std::vector<uint32_t>& src_idx,
                  const std::vector<float>& src_uv, float cell,
                  const std::vector<uint8_t>* skip, std::vector<uint32_t>* tri_island,
-                 const std::vector<float>* src_nrm, std::vector<float>* dst_nrm) {
+                 const std::vector<float>* src_nrm, std::vector<float>* dst_nrm, float inset) {
     auto t0 = std::chrono::steady_clock::now();
     const uint32_t snt = (uint32_t)(src_idx.size() / 3);
     const uint32_t tc = dst.tri_count(), vc = dst.vertex_count();
@@ -3495,6 +3549,7 @@ void transfer_uv(Mesh& dst, const std::vector<float>& src_pos,
     // only when nothing else is in reach.
     auto nearest = [&](Vec3 q, Vec3 n, Vec3& cp) {
         float d; uint32_t t = UINT32_MAX;
+        q = q - n * inset;
         if (ref.closest(q, n, cp, d, skip, &t) || ref.closest(q, Vec3(0, 0, 0), cp, d, skip, &t))
             return t;
         if (skip && !ref.closest(q, n, cp, d, nullptr, &t)) ref.closest(q, Vec3(0, 0, 0), cp, d, nullptr, &t);

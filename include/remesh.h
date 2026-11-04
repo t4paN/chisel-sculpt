@@ -46,11 +46,22 @@ uint64_t predict_adaptive_tris(const Mesh& mesh, float target_edge_length,
 // vetoes hits that aren't on the result's real skin (buried halves at a join).
 // seam_tol > 0 = mirror +x half: verts under it are left alone, none move below
 // it. snap=false only measures. Prints the [sdf] DRIFT line either way.
+// offset > 0 = the surface is meant to sit that far OUTSIDE the source (a wrapped
+// thin skin): verts land at source + offset, and max_step still counts the offset.
 uint32_t snap_mesh_to_soup(Mesh& m, const std::vector<float>& pos,
                            const std::vector<uint32_t>& idx,
                            float cell, float max_step, bool snap,
                            const std::vector<uint8_t>* pinned, float seam_tol,
-                           const std::function<bool(Vec3, Vec3)>& accept);
+                           const std::function<bool(Vec3, Vec3)>& accept,
+                           float offset = 0.0f);
+
+// SDF merge: how much of a soup a voxel grid can't see the inside of. Returns the
+// share of surface area (0..1) with another layer facing away from it no more than
+// `reach` behind it: a closed film squeezed flat, thinner than any voxel.
+// open_ratio = total length of open edges / sqrt(area): about 4 for a flat open
+// sheet, under 1 for a solid with an open neck or a few holes.
+float thin_skin_share(const std::vector<float>& pos, const std::vector<uint32_t>& idx,
+                      float reach, float& open_ratio);
 
 // Textured meshes: give dst (positions final) per-corner UVs from the nearest
 // source surface (src_pos xyz per vertex, src_idx 3 per tri, src_uv 6 per tri).
@@ -63,13 +74,16 @@ uint32_t snap_mesh_to_soup(Mesh& m, const std::vector<float>& pos,
 // src_nrm + dst_nrm (optional, 3 per vertex): dst_nrm gets the source's smooth normal at
 // each vertex's closest point, as a normal map needs on a surface it wasn't baked on. A
 // vertex with none in reach, or on a source whose normals are zero, keeps its own.
+// inset: look for the source this far in along dst's normal (a wrapped skin sits
+// outside its source by a fixed amount, which would otherwise eat the whole reach).
 void transfer_uv(Mesh& dst, const std::vector<float>& src_pos,
                  const std::vector<uint32_t>& src_idx,
                  const std::vector<float>& src_uv, float cell,
                  const std::vector<uint8_t>* skip = nullptr,
                  std::vector<uint32_t>* tri_island = nullptr,
                  const std::vector<float>* src_nrm = nullptr,
-                 std::vector<float>* dst_nrm = nullptr);
+                 std::vector<float>* dst_nrm = nullptr,
+                 float inset = 0.0f);
 
 // SDF merge paint carry: for each vertex of m (normals current), the soup vertex
 // to take paint from — nearest corner of the closest same-facing soup tri that
@@ -77,4 +91,4 @@ void transfer_uv(Mesh& dst, const std::vector<float>& src_pos,
 void pick_soup_sources(const Mesh& m, const std::vector<float>& pos,
                        const std::vector<uint32_t>& idx, float cell,
                        const std::function<bool(Vec3, Vec3)>& accept,
-                       std::vector<uint32_t>& pick);
+                       std::vector<uint32_t>& pick, float inset = 0.0f);

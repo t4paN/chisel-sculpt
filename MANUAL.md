@@ -263,6 +263,11 @@ printing.
 The merge runs across frames — the app stays responsive during big grids. Output is
 tangentially relaxed onto the iso-surface so it comes out even rather than stair-stepped.
 
+Some imported models, AI-generated ones especially, are paper-thin films the grid can't see
+inside. The merge spots these and wraps them in a shell instead (the notification says
+"thin skin: wrapped"). The result is about 1% of the model's size bigger on each side, and
+holes narrower than about 2% close up.
+
 ## Masking
 
 The Mask brush (M) paints protection: masked vertices ignore sculpting *and* paint.
