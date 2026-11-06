@@ -298,6 +298,10 @@ struct InputState {
     // readme during — has no way to guess that 1-4 are the modes, and no reason to
     // press a 28 px (i) disc. So the card opens itself exactly once, ever.
     bool             help_seen;
+    // A debug instance (CHISEL_DEBUG build, or CHISEL_DEBUG=1 in the environment, which
+    // chisel-debug.sh sets): no first-run card, no quit dialog. It leaves help_seen
+    // alone, because debug runs share settings.cfg with normal ones.
+    bool             debug_instance = false;
 
     // Brush-alpha (stamp) selection. Index into the AlphaLibrary pool; 0 = Round
     // (no stamp). One shared selection, but it only affects Draw, Mask and Paint —

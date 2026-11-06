@@ -1754,7 +1754,7 @@ void command_panel(InputState& input, int win_w, int win_h, MultiresInfo mres, c
 
     // No Shortcuts button here any more: Menu > Key bindings lists every key and can
     // change them. The card still opens once on the very first launch, as a primer.
-    if (!input.help_seen) {
+    if (!input.help_seen && !input.debug_instance) {
         input.help_seen = true;
         ImGui::OpenPopup("##helppopup");
     }
@@ -2894,7 +2894,7 @@ void y2k_right(InputState& in, int W, int H, MultiresInfo mres) {
         y += bh + 4.0f;
     }
     (void)mres;
-    if (!in.help_seen) { in.help_seen = true; ImGui::OpenPopup("##helppopup"); }
+    if (!in.help_seen && !in.debug_instance) { in.help_seen = true; ImGui::OpenPopup("##helppopup"); }
 
     static bool prev_menu_open = false;
     bool menu_open = ImGui::IsPopupOpen("##burgermenu");

@@ -478,6 +478,12 @@ int main(int argc, char* argv[]) {
     // Before anything reads the brush fields. Missing/corrupt storage is a no-op that
     // leaves the constructor defaults standing, so there is nothing to check here.
     settings_load(input);
+#ifdef CHISEL_DEBUG
+    input.debug_instance = true;
+#else
+    const char* debug_env = std::getenv("CHISEL_DEBUG");
+    input.debug_instance = debug_env && debug_env[0] == '1';
+#endif
     // Dev: the phone layout on desktop, for layout work (touch mode is otherwise web-only).
     if (std::getenv("CHISEL_TOUCH_UI")) input.touch_mode = true;
 #ifdef __EMSCRIPTEN__
@@ -811,7 +817,8 @@ int main(int argc, char* argv[]) {
             input.close_requested = false;
             const bool busy = app_state != AppState::IDLE || vmerge_job
                 || input.remesh_requested || input.remesh_in_progress;
-            if (scene.edit_mark() == clean_edit_mark && scene.retopo_rev() == clean_retopo_rev && !busy) {
+            if (input.debug_instance
+                || (scene.edit_mark() == clean_edit_mark && scene.retopo_rev() == clean_retopo_rev && !busy)) {
                 glfwSetWindowShouldClose(window, GLFW_TRUE);
             } else {
                 input.quit_requested = true;
@@ -1598,6 +1605,15 @@ int main(int argc, char* argv[]) {
                          mesh_center, mesh_radius, dx,
                          app_state == AppState::IDLE,
                          win_w, win_h, window, screen_buffers_dirty);
+
+#ifndef __EMSCRIPTEN__
+        // Debug instance: Esc closes without the dialog. Checked after the tick above,
+        // which claims Esc first to back out of insert mode.
+        if (input.debug_instance && input.quit_requested) {
+            input.quit_requested = false;
+            glfwSetWindowShouldClose(window, GLFW_TRUE);
+        }
+#endif
 
         // Block sculpt drag in INSERT/SELECT modes (prevent falling through to SCULPTING)
         if (app_state == AppState::IDLE

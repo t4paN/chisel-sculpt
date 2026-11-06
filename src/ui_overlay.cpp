@@ -1250,7 +1250,7 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
         // First launch ever: open the card unprompted, once. Opened from here rather
         // than at startup because the popup belongs to this window's stack — the same
         // reason draw_help_popup is called from inside this Begin/End pair.
-        if (!input.help_seen) {
+        if (!input.help_seen && !input.debug_instance) {
             input.help_seen = true;   // persists via the settings blob
             ImGui::OpenPopup("##helppopup");
         }
