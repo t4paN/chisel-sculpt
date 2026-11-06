@@ -365,7 +365,7 @@ void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse) {
     if (input.drop_confirm_pending)
         draw_drop_confirm(text, input.drop_path, win_w, win_h);
     if (bitmap_dialogs && input.remesh_confirm_pending)
-        draw_remesh_confirm(text, dlg.levels_to_bake, win_w, win_h);
+        draw_remesh_confirm(text, dlg.levels_to_bake, input.mirror_x, win_w, win_h);
     if (input.drop_level_confirm_pending)
         draw_drop_level_confirm(text, multires->base_level + (int)multires->disp.size(),
                                 win_w, win_h);

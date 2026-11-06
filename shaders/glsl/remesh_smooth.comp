@@ -84,7 +84,9 @@ void main() {
     // seam_tol is 1% of the target edge, so 150x = 1.5 edges.
     vec3 vn = vec3(normals[v*3u+0u], normals[v*3u+1u], normals[v*3u+2u]);
     float vn_len = length(vn);
-    bool ring_flat = abs(in_pos[v*3u]) > 150.0 * P.seam_tol && vn_len > 1e-12;
+    // seam_tol 0 = no mirror, so no seam anywhere (a vert at exactly x=0 too).
+    bool no_seam = P.seam_tol <= 0.0;
+    bool ring_flat = (no_seam || abs(in_pos[v*3u]) > 150.0 * P.seam_tol) && vn_len > 1e-12;
     vec3 area_acc = vec3(0.0);
     float area_sum = 0.0;
     for (uint j = t_start; j < t_end && ring_flat; j++) {
@@ -120,7 +122,7 @@ void main() {
     float new_x = pos.x + td.x * (P.lambda * w);
     // Non-pinned verts are outside the seam band by construction. Keep them there:
     // don't allow smoothing to drift |x| into the band or flip sides.
-    new_x = sign(pos.x) * max(P.seam_tol, abs(new_x));
+    if (!no_seam) new_x = sign(pos.x) * max(P.seam_tol, abs(new_x));
 
     out_pos[v*3u+0u] = new_x;
     out_pos[v*3u+1u] = pos.y + td.y * (P.lambda * w);

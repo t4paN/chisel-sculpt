@@ -723,7 +723,11 @@ void app_ops_remesh_and_merge(App& a) {
                                       input.density_coarse_mult,
                                       input.density_fine_mult,
                                       input.remesh_keep_detail,
-                                      input.remesh_detail);
+                                      input.remesh_detail,
+                                      // A chained remesh finishes the merge, so it
+                                      // keeps the side the merge dialog picked.
+                                      remesh_chained_from_merge ? input.voxel_merge_mirror
+                                                                : input.mirror_x);
         else {
             remesh_chained_from_merge = false;
             input.remesh_in_progress = false;
@@ -782,7 +786,7 @@ void app_ops_remesh_and_merge(App& a) {
             app_state = AppState::IDLE;
             if (result.selected_tris > 0) { scene.active_undo().clear(&compute); xforms.clear(); }
             std::snprintf(input.notification, sizeof(input.notification),
-                          "Remesh: %u sel, %u/%u -> %u/%u v/t (spatial mirror)",
+                          "Remesh: %u sel, %u/%u -> %u/%u v/t",
                           result.selected_tris,
                           result.old_verts, result.old_tris,
                           result.new_verts, result.new_tris);

@@ -1212,6 +1212,37 @@ static uint32_t collapse_short_edges(Mesh& m, EdgeTable& et,
             // would later cut into a duplicate seam tooth.
             if (!pinned[v_keep] && std::fabs(new_pos.x) < seam_tol) continue;
 
+            // A midpoint on a thin film's rim sits inward of the rim, so the rim
+            // retreats half an edge per collapse and tiny tunnels open into big
+            // holes, all still closed surface (AI GLBs, film under half an edge
+            // thick; measured on rubble: this pass alone lost the film). So the new
+            // point may leave the plane of any face around the edge by only 10% of
+            // the target edge. If the midpoint can't, an end of the edge can stay
+            // put, as a rim vert would; if neither can, the edge stays.
+            if (!pinned[v_keep]) {
+                const float max_off_plane = 0.1f * lo_local / 0.8f;
+                auto off_plane = [&](const Vec3& q) {
+                    float worst = 0.0f;
+                    const uint32_t ends[2] = { va, vb };
+                    for (uint32_t u : ends)
+                        for (uint32_t j = m.vert_tri_offset[u]; j < m.vert_tri_offset[u+1]; j++) {
+                            const uint32_t t = m.vert_tri_list[j];
+                            const Vec3 a = m.get_pos(m.indices[t*3]);
+                            const Vec3 fn = (m.get_pos(m.indices[t*3+1]) - a)
+                                                .cross(m.get_pos(m.indices[t*3+2]) - a);
+                            const float l = fn.length();
+                            if (l > 1e-20f) worst = std::max(worst, std::fabs(fn.dot(q - a)) / l);
+                        }
+                    return worst;
+                };
+                if (off_plane(new_pos) > max_off_plane) {
+                    const Vec3 pa = m.get_pos(va), pb = m.get_pos(vb);
+                    const float ea = off_plane(pa), eb = off_plane(pb);
+                    if (std::min(ea, eb) > max_off_plane) continue;
+                    new_pos = ea <= eb ? pa : pb;
+                }
+            }
+
             if (collapse_would_invert(m, et, v_keep, v_remove, new_pos)) continue;
 
             // Block collapse that would create seam-straddling triangles: if
@@ -1221,7 +1252,7 @@ static uint32_t collapse_short_edges(Mesh& m, EdgeTable& et,
             {
                 bool straddle = false;
                 float nx_sign = (new_pos.x > 0.0f) ? 1.0f : (new_pos.x < 0.0f ? -1.0f : 0.0f);
-                if (nx_sign != 0.0f && m.vert_tri_offset.size() > v_remove + 1) {
+                if (seam_tol > 0.0f && nx_sign != 0.0f && m.vert_tri_offset.size() > v_remove + 1) {
                     uint32_t vs = m.vert_tri_offset[v_remove];
                     uint32_t ve = m.vert_tri_offset[v_remove + 1];
                     for (uint32_t j = vs; j < ve && !straddle; j++) {
@@ -1394,6 +1425,7 @@ static uint32_t collapse_short_edges(Mesh& m, EdgeTable& et,
 static uint32_t flip_edges(Mesh& m, EdgeTable& et,
                            const std::vector<uint32_t>& tri_selected,
                            const std::vector<uint32_t>& pinned,
+                           float seam_tol,
                            float min_normal_cos = -2.0f) {
     // Botsch-Kobbelt: loop until valence stops improving. Single-pass unordered
     // iteration leaves wins on the table — an edge that becomes flippable only
@@ -1450,7 +1482,7 @@ static uint32_t flip_edges(Mesh& m, EdgeTable& et,
             // Block flips that would create a seam-straddling edge: if vc and vd
             // sit on opposite sides of x=0, the new edge crosses the mirror plane.
             float xc = m.pos_x[vc], xd = m.pos_x[vd];
-            if ((xc > 0.0f && xd < 0.0f) || (xc < 0.0f && xd > 0.0f)) continue;
+            if (seam_tol > 0.0f && ((xc > 0.0f && xd < 0.0f) || (xc < 0.0f && xd > 0.0f))) continue;
 
             // Check: would the flipped edge already exist?
             if (et.find_edge(vc, vd) != INVALID) continue;
@@ -3241,7 +3273,7 @@ static uint32_t project_to_ref(Mesh& m, const RefSurface& ref,
         float h;
         if (!raycast_ref(ref, q, nrm, max_step, h)) continue;
         Vec3 c = q + nrm * h;
-        if (std::fabs(q.x) >= seam_tol)   // keep non-seam verts out of the seam band
+        if (seam_tol > 0.0f && std::fabs(q.x) >= seam_tol)   // keep non-seam verts out of the seam band
             c.x = (q.x < 0.0f ? -1.0f : 1.0f) * std::max(seam_tol, std::fabs(c.x));
         // Fan check: every incident tri must keep its facing and at least a
         // quarter of its projected area — rejects flips and near-flat slivers.
@@ -3683,6 +3715,7 @@ struct RemeshJob {
     float density_coarse_mult = 2.0f, density_fine_mult = 0.5f;
     int   iterations = 10;
     bool  keep_detail = true;
+    bool  mirror = true;
 
     RemeshResult r;
     std::chrono::steady_clock::time_point t0;
@@ -3802,7 +3835,9 @@ bool RemeshJob::setup() {
 
     high = 1.4f * target_edge_length;
     low  = 0.8f * target_edge_length;   // canonical 4/3:4/5 band (was 0.6 — too wide, left fine tris)
-    seam_tol = std::max(1e-5f, target_edge_length * 0.01f);
+    // No mirror = no seam: at 0 every "is this vert on the seam" test is false, and
+    // the tests of which side of x=0 a vert is on check for 0 themselves.
+    seam_tol = mirror ? std::max(1e-5f, target_edge_length * 0.01f) : 0.0f;
 
     // Repair brush-induced flipped tris before the edge ops can amplify them.
     repair_flipped_tris(mesh, seam_tol);
@@ -3925,7 +3960,7 @@ bool RemeshJob::setup() {
     }
 
     // Mirror the selection for symmetry (skip if no mirror map).
-    if (!mesh.mirror_x_map.empty())
+    if (mirror && !mesh.mirror_x_map.empty())
         cs->dispatch_mirror_selection(mesh.vertex_count(), mesh.tri_count());
 
     // Final readback after grow + mirror — CPU now has the authoritative selection.
@@ -4146,7 +4181,7 @@ bool RemeshJob::step() {
 
     ts = tick();
     // cos 15°: a flip may turn a face by at most that much in keep-detail mode.
-    uint32_t n_flip = flip_edges(mesh, et, tri_selected, pinned,
+    uint32_t n_flip = flip_edges(mesh, et, tri_selected, pinned, seam_tol,
                                  keep_detail ? 0.966f : -2.0f);
     t_flip += since(ts);
     if (n_flip > 0) rebuild_after_flip();
@@ -4252,15 +4287,25 @@ void RemeshJob::finish_mirror() {
     // Final compaction and rebuild
     compact_mesh(mesh);
 
-    audit_open_edges(mesh, seam_tol, "pre-mirror", target_edge_length);
-    STAGE_DUMP(mesh, "pre-mirror");
+    if (mirror) {
+        audit_open_edges(mesh, seam_tol, "pre-mirror", target_edge_length);
+        STAGE_DUMP(mesh, "pre-mirror");
 
-    mirror_positive_half(mesh, seam_tol, target_edge_length, cs);
+        mirror_positive_half(mesh, seam_tol, target_edge_length, cs);
 
-    mesh.build_adjacency();
-    mesh.recompute_normals();
+        mesh.build_adjacency();
+        mesh.recompute_normals();
 
-    audit_open_edges(mesh, seam_tol, "post-mirror", target_edge_length);
+        audit_open_edges(mesh, seam_tol, "post-mirror", target_edge_length);
+    } else {
+        // The pairs describe the old topology, and a run with no edge ops never
+        // cleared them. The app builds fresh ones from the new positions.
+        mesh.mirror_x_map.clear();
+        mesh.build_adjacency();
+        mesh.recompute_normals();
+
+        audit_open_edges(mesh, seam_tol, "final", target_edge_length);
+    }
 
     // The mirror step is the last thing that can leave inverted geometry: the
     // reflected half is emitted with reversed winding, and the component cull
@@ -4332,8 +4377,9 @@ void RemeshJob::carry_uv() {
 RemeshJob* remesh_begin(Mesh& mesh, MultiresStack& stack,
                         float target_edge_length, int iterations, ComputeState* cs,
                         float density_coarse_mult, float density_fine_mult,
-                        bool keep_detail, float detail) {
+                        bool keep_detail, float detail, bool mirror) {
     RemeshJob* j = new RemeshJob(mesh, stack, cs);
+    j->mirror              = mirror;
     j->target_edge_length  = target_edge_length;
     j->iterations          = iterations;
     j->density_coarse_mult = density_coarse_mult;

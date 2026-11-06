@@ -29,7 +29,9 @@ RemeshJob* remesh_begin(Mesh& mesh, MultiresStack& stack,
                         float density_coarse_mult = 2.0f,
                         float density_fine_mult = 0.5f,
                         bool keep_detail = true,   // snap to the original surface + guard flips
-                        float detail = 1.0f);      // tri-count multiplier on the auto target
+                        float detail = 1.0f,       // tri-count multiplier on the auto target
+                        bool mirror = true);       // true: -x becomes a reflection of +x
+                                                   // false: the whole surface, nothing deleted
 bool  remesh_tick(RemeshJob& job, RemeshResult& out);
 float remesh_progress(const RemeshJob& job);       // 0..1
 void  remesh_destroy(RemeshJob* job);

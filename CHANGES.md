@@ -2,6 +2,11 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-06 — Remesh follows Mirror X, and thin films keep their rims
+
+- With Mirror off the remesher works on the whole surface and replaces nothing, so lopsided models survive it. With Mirror on it still makes -X a copy of +X. The dialog says which one you're about to get.
+- Merging edges no longer pulls the rims of paper-thin films inward, which grew tiny tunnels into big holes. Film models come out with more triangles because of it (rubble: 564k, was 309k); sculpts barely change.
+
 ## 2026-11-06 — Debug instances skip the first-run card and the quit prompt
 
 - With `CHISEL_DEBUG=1` or a `CHISEL_DEBUG` build, the shortcut card stays closed, and Esc or the title-bar X quit at once, even with unsaved changes.

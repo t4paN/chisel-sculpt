@@ -96,7 +96,9 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     // seam_tol is 1% of the target edge, so 150x = 1.5 edges.
     let vn = vec3<f32>(normals[v*3u+0u], normals[v*3u+1u], normals[v*3u+2u]);
     let vn_len = length(vn);
-    let off_seam = abs(in_pos[v*3u]) > 150.0 * P.seam_tol;
+    // seam_tol 0 = no mirror, so no seam anywhere (a vert at exactly x=0 too).
+    let no_seam = P.seam_tol <= 0.0;
+    let off_seam = no_seam || abs(in_pos[v*3u]) > 150.0 * P.seam_tol;
     let vn_ok = vn_len > 1e-12;
     var ring_flat = off_seam && vn_ok;
     var area_acc = vec3<f32>(0.0);
@@ -137,7 +139,9 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     var new_x = pos.x + td.x * (P.lambda * w);
     // Non-pinned verts are outside the seam band by construction. Keep them there:
     // don't allow smoothing to drift |x| into the band or flip sides.
-    new_x = sign(pos.x) * max(P.seam_tol, abs(new_x));
+    if (!no_seam) {
+        new_x = sign(pos.x) * max(P.seam_tol, abs(new_x));
+    }
 
     out_pos[v*3u+0u] = new_x;
     out_pos[v*3u+1u] = pos.y + td.y * (P.lambda * w);

@@ -191,9 +191,12 @@ adjusted forms. Each object in the scene has its own independent level and stack
 
 **/** starts an isotropic remesh of the active mesh (confirm with **Y**). It
 rebuilds triangles toward uniform edge length, respects the mask (masked areas keep
-their topology) and mirror symmetry, and carries vertex paint across. Use it when
-sculpting has stretched triangles thin — the Limb brush and heavy Move strokes are
-the usual suspects.
+their topology), and carries vertex paint across. Use it when sculpting has stretched
+triangles thin — the Limb brush and heavy Move strokes are the usual suspects.
+
+It follows **Mirror X**. With Mirror on, the result is symmetric: the -X side is replaced
+by a copy of the +X side. With Mirror off, the whole surface is remeshed and nothing is
+replaced, so turn it off for lopsided models. The dialog says which one you're about to get.
 
 ## Multiple objects
 

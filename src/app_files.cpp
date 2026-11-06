@@ -790,6 +790,8 @@ void app_files_frame(App& a) {
             keep_detail_env_done = true;
             if (const char* env = std::getenv("CHISEL_REMESH_KEEP_DETAIL"))
                 input.remesh_keep_detail = std::atoi(env) != 0;
+            if (const char* env = std::getenv("CHISEL_REMESH_MIRROR"))
+                input.mirror_x = std::atoi(env) != 0;
             if (const char* env = std::getenv("CHISEL_REMESH_DETAIL"))
                 input.remesh_detail = std::min(4.0f, std::max(0.25f, (float)std::atof(env)));
             // SDF remesh knobs for CHISEL_AUTO_MERGE runs.

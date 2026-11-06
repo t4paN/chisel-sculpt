@@ -3649,6 +3649,9 @@ void draw_skin_dialogs(InputState& input, int win_w, int win_h, const DialogInfo
     if (begin_dialog("##dlgRemesh", input.remesh_confirm_pending, win_w, win_h)) {
         dlg_title("Remesh stretched regions?");
         dlg_text(UiFont::Sans, 13.0f, kMuted, "Evens out stretched triangles. Wipes the subdivision stack.");
+        dlg_text(UiFont::Sans, 13.0f, kMuted, input.mirror_x
+                 ? "Mirror is on: the -X side becomes a copy of the +X side."
+                 : "Mirror is off: both sides stay as they are.");
         dlg_rescue_line(info.levels_to_bake);
         ImGui::Dummy(ImVec2(0.0f, 2.0f));
         if (dlg_button("##rmY", "Remesh", "Y", true)) press_dialog_key(GLFW_KEY_Y);

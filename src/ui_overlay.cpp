@@ -107,7 +107,7 @@ void draw_drop_confirm(TextOverlay& text, const char* path, int win_w, int win_h
                   cx - 360.0f, cy + 20.0f, scale, win_w, win_h, CGA(yellow), 1.0f);
 }
 
-void draw_remesh_confirm(TextOverlay& text, int levels_to_bake, int win_w, int win_h) {
+void draw_remesh_confirm(TextOverlay& text, int levels_to_bake, bool mirror, int win_w, int win_h) {
     text.draw_panel(0, 0, (float)win_w, (float)win_h,
                    win_w, win_h, 0.0f, 0.0f, 0.0f, 0.5f);
 
@@ -116,7 +116,10 @@ void draw_remesh_confirm(TextOverlay& text, int levels_to_bake, int win_w, int w
     float msg_y = (float)win_h * 0.5f - 20.0f;
     text.draw_text("Remesh stretched regions? Wipes stack. (Y/N)", msg_x, msg_y, msg_scale,
                   win_w, win_h, CGA(yellow), 1.0f);
-    draw_rescue_line(text, levels_to_bake, msg_x, msg_y + 34.0f, msg_scale, win_w, win_h);
+    text.draw_text(mirror ? "Mirror on: the -X side becomes a copy of the +X side."
+                          : "Mirror off: both sides stay as they are.",
+                   msg_x, msg_y + 34.0f, msg_scale, win_w, win_h, CGA(light_cyan), 1.0f);
+    draw_rescue_line(text, levels_to_bake, msg_x, msg_y + 68.0f, msg_scale, win_w, win_h);
 }
 
 void draw_remesh_progress(TextOverlay& text, int win_w, int win_h, float progress) {
@@ -159,7 +162,7 @@ void draw_voxel_merge_confirm(TextOverlay& text, int resolution, int n_selected,
                   scale, win_w, win_h, CGA(yellow), 1.0f);
 
     // Subtract option: carve the unselected meshes out of the selected union.
-    float oy = 100.0f;
+    float oy = 130.0f;
     if (n_unselected > 0) {
         std::snprintf(line, sizeof(line), "- subtract %d unselected mesh%s (carve)",
                       n_unselected, n_unselected == 1 ? "" : "es");
