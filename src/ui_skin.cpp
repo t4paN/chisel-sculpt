@@ -3780,6 +3780,24 @@ void draw_skin_dialogs(InputState& input, int win_w, int win_h, const DialogInfo
         dlg_tip("The robust default");
         key_hint("S");
 
+        // How wide a hole the merge seals on a film model (an AI GLB). H steps through.
+        dlg_label("Close holes", label_w, row_h);
+        ImGui::SameLine(0.0f, 0.0f);
+        {
+            static const char* const kNames[3] = { "Normal", "More", "Most" };
+            static const char* const kTips[3] = {
+                "Film models: seal holes under about 2.5 grid cells. Solid sculpts ignore this",
+                "Film models: seal holes under about 4 grid cells, a little softer in tight creases",
+                "Film models: seal holes under about 5 grid cells, softer in tight creases, a little slower",
+            };
+            for (int i = 0; i < 3; i++) {
+                if (i) ImGui::SameLine();
+                if (dlg_toggle(kNames[i], input.voxel_merge_close_holes == i)) input.voxel_merge_close_holes = i;
+                dlg_tip(kTips[i]);
+            }
+        }
+        key_hint("H");
+
         // Density paint on the selection: offer the chained adaptive remesh.
         if (info.has_density) {
             dlg_label("Remesh after", label_w, row_h);

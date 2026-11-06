@@ -2,6 +2,14 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-06 — SDF merge: Close holes, closed holes take their colour from the rim
+
+- Close holes in the merge prompt (H): Normal, More or Most sets how wide a gap a paper-thin model's wrap seals. Solid models ignore it.
+- A closed hole's patch fades in from the colours around its rim, using small cells of free texture space, instead of showing flat copies. Patches covering over a tenth of the mesh are left alone: that's a mirror merge's missing side, not a hole.
+- A few stray specks with no colour source no longer send the whole texture through the repack, which shrank it to as little as 79%.
+- Triangles across a texture seam stay inside the source triangle they read, so they stop reaching into empty texture.
+- `CHISEL_AUTO_QUIT` now ends a scripted merge, as it does a scripted remesh.
+
 ## 2026-11-06 — Remesh follows Mirror X, and thin films keep their rims
 
 - With Mirror off the remesher works on the whole surface and replaces nothing, so lopsided models survive it. With Mirror on it still makes -X a copy of +X. The dialog says which one you're about to get.

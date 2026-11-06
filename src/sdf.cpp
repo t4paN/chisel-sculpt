@@ -1556,6 +1556,222 @@ static constexpr int kMaxSide = 2048;   // glb.cpp's import cap: the 32-bit WASM
 static constexpr int kMaxSide = 4096;
 #endif
 
+// ---- Colour for closed holes -------------------------------------------------
+// A tri with no source in reach sits on a patch the flood made over a hole. Its UV can
+// only be a copy from the rim, which shows as flat, stepped colour. So each patch takes
+// its colour from its rim instead: rim verts read the texture, the colour walks inward a
+// ring at a time, then smooths, so it fades across the hole. Those colours need pixels
+// of their own, so every patch tri gets a tiny cell in empty texture space. A cell per
+// tri, not a flattened patch, as patches can curve and fold. A cell holds its tri's
+// linear colour run out past the tri, which bilinear sampling gives back exactly, so
+// even a tiny cell is seamless. No free space left = that tri keeps its rim copy.
+// The image is copied, not edited: other meshes and undo share the original.
+static void blend_closed_holes(Mesh& m, const std::vector<uint8_t>& filled) {
+    if (!m.texture || !m.has_uv() || filled.size() != m.tri_count()) return;
+    auto t0 = std::chrono::steady_clock::now();
+    const uint32_t tc = m.tri_count(), vc = m.vertex_count();
+
+    std::vector<uint8_t> state(vc, 0);   // 0 = not on a patch, 1 = waiting, 2 = rim, 3 = walked to, 4 = next ring
+    uint32_t n_filled = 0;
+    for (uint32_t t = 0; t < tc; t++)
+        if (filled[t]) {
+            n_filled++;
+            for (int k = 0; k < 3; k++) state[m.indices[t*3 + k]] = 1;
+        }
+    if (n_filled == 0) return;
+    // That's no hole: a mirror merge of a lopsided model has no source on a whole side.
+    // Blending it would fill the image with blur (rubble at grid 512: 40% of the image).
+    if (n_filled > tc / 10) {
+        std::printf("[sdf] hole colour: skipped, %u of %u tris have no source\n", n_filled, tc);
+        return;
+    }
+
+    // Rim verts: the average of what the real surface around them shows.
+    std::vector<float> col((size_t)vc * 3, 0.0f);
+    std::vector<uint16_t> taps(vc, 0);
+    for (uint32_t t = 0; t < tc; t++) {
+        if (filled[t]) continue;
+        for (int k = 0; k < 3; k++) {
+            const uint32_t v = m.indices[t*3 + k];
+            if (!state[v]) continue;
+            const uint32_t p = m.texture->sample(m.uv[t*6 + 2*k], m.uv[t*6 + 2*k + 1]);
+            for (int c = 0; c < 3; c++) col[3*v + c] += (float)((p >> (8 * c)) & 0xFF);
+            taps[v]++;
+        }
+    }
+    std::vector<uint32_t> ring, next, inner;
+    for (uint32_t v = 0; v < vc; v++)
+        if (taps[v]) {
+            for (int c = 0; c < 3; c++) col[3*v + c] /= (float)taps[v];
+            state[v] = 2;
+            ring.push_back(v);
+        }
+    // Mean of v's neighbours across patch tris, among those already coloured.
+    auto mean_known = [&](uint32_t v, float out[3]) {
+        float sum[3] = { 0.0f, 0.0f, 0.0f };
+        int n = 0;
+        for (uint32_t j = m.vert_tri_offset[v]; j < m.vert_tri_offset[v+1]; j++) {
+            const uint32_t t = m.vert_tri_list[j];
+            if (!filled[t]) continue;
+            for (int k = 0; k < 3; k++) {
+                const uint32_t u = m.indices[t*3 + k];
+                if (u == v || (state[u] != 2 && state[u] != 3)) continue;
+                for (int c = 0; c < 3; c++) sum[c] += col[3*u + c];
+                n++;
+            }
+        }
+        if (n) for (int c = 0; c < 3; c++) out[c] = sum[c] / (float)n;
+        return n > 0;
+    };
+    // Inward, a ring per pass. A ring sees only the rings before it.
+    std::vector<float> ring_col;
+    while (!ring.empty()) {
+        next.clear();
+        for (uint32_t v : ring)
+            for (uint32_t j = m.vert_tri_offset[v]; j < m.vert_tri_offset[v+1]; j++) {
+                const uint32_t t = m.vert_tri_list[j];
+                if (!filled[t]) continue;
+                for (int k = 0; k < 3; k++) {
+                    const uint32_t u = m.indices[t*3 + k];
+                    if (state[u] == 1) { state[u] = 4; next.push_back(u); }
+                }
+            }
+        ring_col.resize(next.size() * 3);
+        for (size_t i = 0; i < next.size(); i++) mean_known(next[i], &ring_col[3*i]);
+        for (size_t i = 0; i < next.size(); i++) {
+            for (int c = 0; c < 3; c++) col[3*next[i] + c] = ring_col[3*i + c];
+            state[next[i]] = 3;
+            inner.push_back(next[i]);
+        }
+        ring.swap(next);
+    }
+    // Walking leaves rings; a few sweeps turn them into a fade. The rim stays put.
+    for (int pass = 0; pass < 48; pass++)
+        for (uint32_t v : inner) {
+            float c3[3];
+            if (mean_known(v, c3)) for (int c = 0; c < 3; c++) col[3*v + c] = c3[c];
+        }
+
+    uint32_t need = 0;
+    for (uint32_t t = 0; t < tc; t++)
+        if (filled[t] && state[m.indices[t*3]] >= 2 && state[m.indices[t*3+1]] >= 2 && state[m.indices[t*3+2]] >= 2)
+            need++;
+    if (need == 0) return;
+
+    // Free cells: everything the rest of the surface reads is taken, plus a cell of
+    // margin. Judged on this mesh's own UVs: what a merge swallowed is free to reuse.
+    const int W = m.texture->w, H = m.texture->h;
+    int s = 4, GW = 0, GH = 0;
+    std::vector<uint8_t> taken;
+    uint32_t free_cells = 0;
+    for (;; s--) {
+        GW = W / s; GH = H / s;
+        taken.assign((size_t)GW * GH, 0);
+        for (uint32_t t = 0; t < tc; t++) {
+            if (filled[t]) continue;
+            float x[3], y[3];
+            for (int k = 0; k < 3; k++) {
+                x[k] = m.uv[t*6 + 2*k] * (float)W / (float)s;
+                y[k] = (1.0f - m.uv[t*6 + 2*k + 1]) * (float)H / (float)s;
+            }
+            const int x0 = std::max(0, (int)std::floor(std::min({x[0], x[1], x[2]})));
+            const int x1 = std::min(GW - 1, (int)std::floor(std::max({x[0], x[1], x[2]})));
+            const int y0 = std::max(0, (int)std::floor(std::min({y[0], y[1], y[2]})));
+            const int y1 = std::min(GH - 1, (int)std::floor(std::max({y[0], y[1], y[2]})));
+            const float area = (x[1] - x[0]) * (y[2] - y[0]) - (x[2] - x[0]) * (y[1] - y[0]);
+            const float sign = area < 0.0f ? -1.0f : 1.0f;
+            for (int gy = y0; gy <= y1; gy++)
+                for (int gx = x0; gx <= x1; gx++) {
+                    // Past 2 x 2 cells a bounding box overstates a slanted tri: skip a
+                    // cell lying wholly outside one of its edges.
+                    bool outside = false;
+                    if ((x1 - x0 > 1 || y1 - y0 > 1) && area != 0.0f)
+                        for (int e = 0; e < 3 && !outside; e++) {
+                            const int f = (e + 1) % 3;
+                            float best = -1e30f;
+                            for (int cx = 0; cx < 2; cx++)
+                                for (int cy = 0; cy < 2; cy++)
+                                    best = std::max(best, sign * ((x[f] - x[e]) * ((float)(gy + cy) - y[e]) -
+                                                                  (y[f] - y[e]) * ((float)(gx + cx) - x[e])));
+                            outside = best < 0.0f;
+                        }
+                    if (!outside) taken[(size_t)gy * GW + gx] = 1;
+                }
+        }
+        std::vector<uint8_t> grown = taken;
+        for (int gy = 0; gy < GH; gy++)
+            for (int gx = 0; gx < GW; gx++) {
+                if (!taken[(size_t)gy * GW + gx]) continue;
+                for (int ny = std::max(0, gy - 1); ny <= std::min(GH - 1, gy + 1); ny++)
+                    for (int nx = std::max(0, gx - 1); nx <= std::min(GW - 1, gx + 1); nx++)
+                        grown[(size_t)ny * GW + nx] = 1;
+            }
+        taken.swap(grown);
+        free_cells = 0;
+        for (uint8_t c : taken) free_cells += c ? 0u : 1u;
+        if (free_cells >= need || s == 3) break;
+    }
+    if (free_cells == 0) {
+        std::printf("[sdf] hole colour: no free texture space, %u tris keep their rim copy\n", need);
+        return;
+    }
+
+    auto out = std::make_shared<MeshTexture>();
+    out->w = W; out->h = H; out->name = m.texture->name; out->rgba = m.texture->rgba;
+    std::shared_ptr<MeshTexture> nout;
+    if (m.normal_map) {
+        nout = std::make_shared<MeshTexture>();
+        nout->w = m.normal_map->w; nout->h = m.normal_map->h;
+        nout->name = m.normal_map->name; nout->rgba = m.normal_map->rgba;
+    }
+    const float leg = (float)(s - 2);
+    size_t cursor = 0;
+    uint32_t placed = 0;
+    for (uint32_t t = 0; t < tc && placed < free_cells; t++) {
+        if (!filled[t]) continue;
+        const uint32_t vi[3] = { m.indices[t*3], m.indices[t*3+1], m.indices[t*3+2] };
+        if (state[vi[0]] < 2 || state[vi[1]] < 2 || state[vi[2]] < 2) continue;
+        while (taken[cursor]) cursor++;
+        const int X = (int)(cursor % GW) * s, Y = (int)(cursor / GW) * s;
+        cursor++;
+        for (int j = 0; j < s; j++)
+            for (int i = 0; i < s; i++) {
+                const float b1 = ((float)i + 0.5f - 1.0f) / leg, b2 = ((float)j + 0.5f - 1.0f) / leg;
+                const float b0 = 1.0f - b1 - b2;
+                uint8_t* o = &out->rgba[((size_t)(Y + j) * W + (X + i)) * 4];
+                for (int c = 0; c < 3; c++) {
+                    const float val = b0 * col[3*vi[0] + c] + b1 * col[3*vi[1] + c] + b2 * col[3*vi[2] + c];
+                    o[c] = (uint8_t)std::lround(std::min(255.0f, std::max(0.0f, val)));
+                }
+                o[3] = 255;
+            }
+        // The normal map shares the UVs, and what's in its empty space is anyone's guess:
+        // the cell's patch of it goes flat. It can be a different size to the colour map.
+        if (nout) {
+            const int NW = nout->w, NH = nout->h;
+            const int nx0 = X * NW / W, nx1 = std::min(NW, ((X + s) * NW + W - 1) / W);
+            const int ny0 = Y * NH / H, ny1 = std::min(NH, ((Y + s) * NH + H - 1) / H);
+            for (int ny = ny0; ny < ny1; ny++)
+                for (int nx = nx0; nx < nx1; nx++) {
+                    uint8_t* o = &nout->rgba[((size_t)ny * NW + nx) * 4];
+                    o[0] = 128; o[1] = 128; o[2] = 255; o[3] = 255;
+                }
+        }
+        const float cx[3] = { (float)X + 1.0f, (float)X + 1.0f + leg, (float)X + 1.0f };
+        const float cy[3] = { (float)Y + 1.0f, (float)Y + 1.0f, (float)Y + 1.0f + leg };
+        for (int k = 0; k < 3; k++) {
+            m.uv[t*6 + 2*k]     = cx[k] / (float)W;
+            m.uv[t*6 + 2*k + 1] = 1.0f - cy[k] / (float)H;
+        }
+        placed++;
+    }
+    m.texture = out;
+    if (nout) m.normal_map = nout;
+    std::printf("[sdf] hole colour: %u of %u patch tris blended from the rim, %d px cells, %.1f%% of the image (%.0f ms)\n",
+                placed, n_filled, s, 100.0 * placed * s * s / ((double)W * H),
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+}
+
 void carry_textures(Mesh& m, const std::vector<float>& pos, const std::vector<uint32_t>& idx,
                            const std::vector<float>& soup_uv, const std::vector<uint32_t>& soup_tex,
                            const std::vector<std::shared_ptr<const MeshTexture>>& texs,
@@ -1575,12 +1791,16 @@ void carry_textures(Mesh& m, const std::vector<float>& pos, const std::vector<ui
     std::vector<uint32_t> isl;
     std::vector<float> map_n;
     const bool with_n = !soup_nrm.empty();
-    transfer_uv(m, pos, idx, soup_uv, voxel, &buried, &isl, with_n ? &soup_nrm : nullptr, with_n ? &map_n : nullptr, inset);
+    std::vector<uint8_t> filled;
+    transfer_uv(m, pos, idx, soup_uv, voxel, &buried, &isl, with_n ? &soup_nrm : nullptr, with_n ? &map_n : nullptr, inset, &filled);
 
     // Which images the surface actually shows (a merged-away part's doesn't count).
     std::vector<uint8_t> used(texs.size() + 1, 0);   // last = bare clay
     for (uint32_t t = 0; t < tc; t++) {
-        const uint32_t s = isl[t] == UINT32_MAX ? UINT32_MAX : soup_tex[isl[t]];
+        // A speck with no source and no rim to copy from isn't bare clay: a handful of
+        // those (8 of 1.6M tris) used to send the whole image through the shrinking repack.
+        if (isl[t] == UINT32_MAX) continue;
+        const uint32_t s = soup_tex[isl[t]];
         used[s == UINT32_MAX ? texs.size() : s] = 1;
     }
     int n_used = 0, only = -1;
@@ -1591,6 +1811,7 @@ void carry_textures(Mesh& m, const std::vector<float>& pos, const std::vector<ui
         m.normal_map = ntexs[only];
         if (m.normal_map) m.set_map_normals(std::move(map_n));
         std::printf("[sdf] texture kept (%dx%d)%s\n", m.texture->w, m.texture->h, m.normal_map ? " with its normal map" : "");
+        blend_closed_holes(m, filled);
         return;
     }
 
@@ -1742,6 +1963,7 @@ void carry_textures(Mesh& m, const std::vector<float>& pos, const std::vector<ui
     std::printf("[sdf] textures repacked: %d image(s)%s%s, %zu islands -> %dx%d at %.0f%% scale (%.0f ms)\n",
                 n_used, used[texs.size()] ? " + bare clay" : "", natlas ? " + normal maps" : "", charts.size(), AW, AH, 100.0f * k,
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+    blend_closed_holes(m, filled);
 }
 
 // Each step past 256 is a smaller jump: that's where a merge starts to cost real time.
@@ -1750,7 +1972,7 @@ static double g_merge_ms_per_corner = 0.0;   // this session's last merge, for t
 
 VoxelMergeJob* voxel_merge_begin(Scene& scene, ComputeState& cs,
                                  int resolution, bool mirror, bool surface_nets,
-                                 bool subtract, bool keep_detail) {
+                                 bool subtract, bool keep_detail, int close_holes) {
     VoxelMergeJob* job = new VoxelMergeJob();
     job->mirror = mirror;
     job->keep_detail = keep_detail;
@@ -1846,13 +2068,18 @@ VoxelMergeJob* voxel_merge_begin(Scene& scene, ComputeState& cs,
         job->wrap = thin >= 0.25f || open_ratio >= 2.0f;
         // Just over the one voxel the flood needs to seal. Tied to the voxel and not to a
         // world width, as anything narrower than 2t stays bridged: more resolution has
-        // to mean more shape.
+        // to mean more shape. Close holes widens it for a model full of them, and stops
+        // at 2.5: on rubble, 5 tore the shell open, with GRID_PAD at 4.
         if (job->wrap) {
-            job->wrap_t = 1.25f * grid.voxel;
+            static const float kFloodVoxels[3] = { 1.25f, 1.875f, 2.5f };
+            const float flood = kFloodVoxels[std::min(2, std::max(0, close_holes))];
+            job->wrap_t = flood * grid.voxel;
             job->wrap_keep = 0.5f * grid.voxel;
             // The wide band only guards the sign flood, which a wrap doesn't run. Every
             // triangle pays for the band cubed, so this is most of a big wrap's GPU time.
             job->band = std::min(job->band, 3);
+            // A wider flood still needs real distances out to its own width.
+            if (close_holes > 0) job->band = std::max(job->band, (int)std::ceil(flood) + 1);
         }
         job->res.wrapped = job->wrap;
         std::printf("[sdf] thin skin check: %.0f%% of the surface has a back within 0.5%% of the size, "

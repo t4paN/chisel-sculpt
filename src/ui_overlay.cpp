@@ -132,7 +132,7 @@ void draw_remesh_progress(TextOverlay& text, int win_w, int win_h, float progres
                   win_w, win_h, CGA(light_green), 1.0f);
 }
 
-void draw_voxel_merge_confirm(TextOverlay& text, int resolution, int n_selected,
+void draw_voxel_merge_confirm(TextOverlay& text, int resolution, int close_holes, int n_selected,
                              int n_unselected, bool surface_nets,
                              bool has_density, bool adaptive, int levels_to_bake,
                              int win_w, int win_h) {
@@ -158,7 +158,11 @@ void draw_voxel_merge_confirm(TextOverlay& text, int resolution, int n_selected,
                   surface_nets ? "Surface Nets" : "Marching Cubes");
     text.draw_text(line, cx - 360.0f, cy + 34.0f, scale, win_w, win_h, CGA(light_cyan), 1.0f);
 
-    text.draw_text("Y remesh   M mirror-remesh   N / ESC cancel", cx - 360.0f, cy + 70.0f,
+    static const char* const kCloseHoles[3] = { "Normal", "More", "Most" };
+    std::snprintf(line, sizeof(line), "Close holes: %s   ( H steps )", kCloseHoles[close_holes]);
+    text.draw_text(line, cx - 360.0f, cy + 64.0f, scale, win_w, win_h, CGA(light_cyan), 1.0f);
+
+    text.draw_text("Y remesh   M mirror-remesh   N / ESC cancel", cx - 360.0f, cy + 100.0f,
                   scale, win_w, win_h, CGA(yellow), 1.0f);
 
     // Subtract option: carve the unselected meshes out of the selected union.

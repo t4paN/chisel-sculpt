@@ -3518,12 +3518,14 @@ void transfer_uv(Mesh& dst, const std::vector<float>& src_pos,
                  const std::vector<uint32_t>& src_idx,
                  const std::vector<float>& src_uv, float cell,
                  const std::vector<uint8_t>* skip, std::vector<uint32_t>* tri_island,
-                 const std::vector<float>* src_nrm, std::vector<float>* dst_nrm, float inset) {
+                 const std::vector<float>* src_nrm, std::vector<float>* dst_nrm, float inset,
+                 std::vector<uint8_t>* tri_filled) {
     auto t0 = std::chrono::steady_clock::now();
     const uint32_t snt = (uint32_t)(src_idx.size() / 3);
     const uint32_t tc = dst.tri_count(), vc = dst.vertex_count();
     dst.uv.assign((size_t)tc * 6, 0.0f);
     if (tri_island) tri_island->assign(tc, UINT32_MAX);
+    if (tri_filled) tri_filled->assign(tc, 0);
     if (dst_nrm) {
         dst_nrm->resize((size_t)vc * 3);
         for (uint32_t v = 0; v < vc; v++) {
@@ -3621,8 +3623,8 @@ void transfer_uv(Mesh& dst, const std::vector<float>& src_pos,
 
     // Per tri: the island under its centre decides (a seam vertex's own lookup
     // picks either side at random, the centre doesn't). Corners whose lookup
-    // landed on that island keep it; the rest extend the centre tri's UV map, so
-    // the whole tri stays on one island (a hairline at seams, never a smear).
+    // landed on that island keep it; the rest read the centre tri at their nearest
+    // point, so the whole tri stays on one island (a hairline at seams, never a smear).
     uint32_t misses = 0, extended = 0;
     std::vector<uint32_t> owner(tc, UINT32_MAX);   // source tri each dst tri read
     for (uint32_t t = 0; t < tc; t++) {
@@ -3637,6 +3639,7 @@ void transfer_uv(Mesh& dst, const std::vector<float>& src_pos,
         owner[t] = ct;
         if (ct == UINT32_MAX) {
             misses++;
+            if (tri_filled) (*tri_filled)[t] = 1;
             for (int k = 0; k < 3; k++) { out[2*k] = vuv[2*vi[k]]; out[2*k+1] = vuv[2*vi[k]+1]; }
             continue;
         }
@@ -3645,7 +3648,16 @@ void transfer_uv(Mesh& dst, const std::vector<float>& src_pos,
             if (kt != UINT32_MAX && island[kt] == island[ct]) {
                 out[2*k] = vuv[2*vi[k]]; out[2*k+1] = vuv[2*vi[k]+1];
             } else {
-                map_uv(ct, p[k], out[2*k], out[2*k+1]);
+                // Clamped to the tri it read: running its map on past its edges can land
+                // in empty texture, which showed as black specks along seams.
+                float w[3];
+                if (!tri_bary(p[k], src_v(ct,0), src_v(ct,1), src_v(ct,2), w)) { w[0] = 1.0f; w[1] = w[2] = 0.0f; }
+                float sum = 0.0f;
+                for (int q = 0; q < 3; q++) { w[q] = std::max(0.0f, w[q]); sum += w[q]; }
+                for (int q = 0; q < 3; q++) w[q] = sum > 0.0f ? w[q] / sum : 1.0f / 3.0f;
+                const float* st = &src_uv[(size_t)ct * 6];
+                out[2*k]   = w[0]*st[0] + w[1]*st[2] + w[2]*st[4];
+                out[2*k+1] = w[0]*st[1] + w[1]*st[3] + w[2]*st[5];
                 extended++;
             }
         }

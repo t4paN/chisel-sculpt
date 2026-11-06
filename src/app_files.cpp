@@ -799,6 +799,8 @@ void app_files_frame(App& a) {
                 input.voxel_merge_resolution = std::min(512, std::max(64, std::atoi(env)));
             if (const char* env = std::getenv("CHISEL_MERGE_MIRROR"))
                 input.voxel_merge_mirror = std::atoi(env) != 0;
+            if (const char* env = std::getenv("CHISEL_MERGE_CLOSE_HOLES"))
+                input.voxel_merge_close_holes = std::min(2, std::max(0, std::atoi(env)));
         }
     }
 

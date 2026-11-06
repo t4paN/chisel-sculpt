@@ -261,6 +261,7 @@ printing.
 | − | **Subtract**: union the selection, then carve away every *unselected* (tinted) mesh — booleans with your bystander objects as cutters |
 | S | Toggle the extractor: Marching Cubes ↔ Surface Nets (Surface Nets gives a smoother, more even result) |
 | [ / ] | Less / more **Detail**: the prompt shows the triangles to expect, and how long once you've run one merge. A skull marks the top step (desktop only): a very heavy mesh and a long wait |
+| H | **Close holes**: Normal, More or Most, for paper-thin models only (see below) |
 | N / Esc | Cancel |
 
 The merge runs across frames — the app stays responsive during big grids. Output is
@@ -270,6 +271,11 @@ Some imported models, AI-generated ones especially, are paper-thin films the gri
 inside. The merge spots these and wraps them in a shell instead (the notification says
 "thin skin: wrapped"). The result sits half a voxel outside the original, and holes and
 creases narrower than about 2.5 voxels close up, so raise the resolution to keep more shape.
+
+**Close holes** widens that to about 4 voxels (More) or 5 (Most), so a fine grid can seal more
+holes, though tight creases get softer too. A closed hole takes its colour from its rim, fading
+in toward the middle. Saving rewrites the texture as a PNG, so the file can grow. Solid models
+ignore this setting.
 
 ## Masking
 

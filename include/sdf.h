@@ -80,7 +80,8 @@ enum class VoxelMergeStatus { Working, Done, Failed };
 VoxelMergeJob* voxel_merge_begin(Scene& scene, ComputeState& cs,
                                  int resolution, bool mirror, bool surface_nets,
                                  bool subtract = false,
-                                 bool keep_detail = true);  // snap the result back onto the source meshes
+                                 bool keep_detail = true,   // snap the result back onto the source meshes
+                                 int close_holes = 0);      // thin skin: how wide a gap the flood bridges, 0..2
 
 // Advance one budgeted step. Returns Working until the job completes; on the final
 // step it runs the CPU tail (weld → relax → mirror seam → manifold gate → scene

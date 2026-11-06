@@ -639,6 +639,7 @@ struct InputState {
     bool voxel_merge_mirror;       // M (vs Y): symmetrise the result about x=0
     bool voxel_merge_surface_nets; // S toggles: Surface Nets vs Marching Cubes extractor
     int  voxel_merge_resolution;   // target cells along longest axis (see voxel_merge_step_resolution)
+    int  voxel_merge_close_holes = 0;   // H in merge dialog: 0 Normal, 1 More, 2 Most (film models only)
     bool voxel_merge_subtract;     // '-' in merge dialog: carve unselected (red) meshes from the selected union
     bool voxel_merge_adaptive;     // D in merge dialog: chain the adaptive remesh after the merge (density field only)
 

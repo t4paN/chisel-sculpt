@@ -827,7 +827,8 @@ void app_ops_remesh_and_merge(App& a) {
                                            input.voxel_merge_mirror,
                                            input.voxel_merge_surface_nets,
                                            input.voxel_merge_subtract,
-                                           input.remesh_keep_detail);
+                                           input.remesh_keep_detail,
+                                           input.voxel_merge_close_holes);
             input.voxel_merge_in_progress = true;
         }
     }
@@ -898,6 +899,12 @@ void app_ops_remesh_and_merge(App& a) {
                 std::snprintf(input.notification, sizeof(input.notification),
                               "SDF remesh failed: %.200s", vm.error.c_str());
                 input.notification_timer = 4.0f;
+            }
+            // CHISEL_AUTO_QUIT: a scripted merge ends on its own, like a scripted remesh.
+            if (std::getenv("CHISEL_AUTO_QUIT")) {
+                std::fflush(stdout);
+                debug_console::pump();   // stdout is piped through the ~ console
+                std::_Exit(vm.success ? 0 : 3);
             }
         }
     }

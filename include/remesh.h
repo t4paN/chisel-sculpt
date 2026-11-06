@@ -78,6 +78,8 @@ float thin_skin_share(const std::vector<float>& pos, const std::vector<uint32_t>
 // vertex with none in reach, or on a source whose normals are zero, keeps its own.
 // inset: look for the source this far in along dst's normal (a wrapped skin sits
 // outside its source by a fixed amount, which would otherwise eat the whole reach).
+// tri_filled: 1 for each tri with no source in reach (a closed hole), whose UV is only a
+// copy from its rim.
 void transfer_uv(Mesh& dst, const std::vector<float>& src_pos,
                  const std::vector<uint32_t>& src_idx,
                  const std::vector<float>& src_uv, float cell,
@@ -85,7 +87,8 @@ void transfer_uv(Mesh& dst, const std::vector<float>& src_pos,
                  std::vector<uint32_t>* tri_island = nullptr,
                  const std::vector<float>* src_nrm = nullptr,
                  std::vector<float>* dst_nrm = nullptr,
-                 float inset = 0.0f);
+                 float inset = 0.0f,
+                 std::vector<uint8_t>* tri_filled = nullptr);
 
 // SDF merge paint carry: for each vertex of m (normals current), the soup vertex
 // to take paint from — nearest corner of the closest same-facing soup tri that
