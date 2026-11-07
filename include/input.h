@@ -671,7 +671,7 @@ struct InputState {
     // the user asked to avoid. Changing it re-aims insert immediately; the startup
     // mesh follows on the next launch (the current scene is not thrown away).
     // ICO is default: the icosphere has no pole pinch and is what brush feel was
-    // tuned against. UV is 32x16 = Blender's stock sphere, for edge-loop workflows.
+    // tuned against. UV is the common stock 32x16 sphere, for edge-loop workflows.
     enum class SphereKind { ICO, UV };
     SphereKind sphere_kind;
     bool delete_mesh_requested;   // Delete key

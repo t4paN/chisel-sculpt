@@ -211,7 +211,7 @@ fn deposit(v : u32, anchor : vec3<f32>, view : vec3<f32>, anchor_n : vec3<f32>,
         // whole module for it (naga/glslang don't, so GL builds stay silent).
         let target_h = P.disp_amount;
         let h = dot(vp - anchor, dir);
-        // Standard-clay approach (Blender-style): each dab moves verts a FRACTION of
+        // Standard-clay approach: each dab moves verts a FRACTION of
         // the remaining gap to the plane instead of teleporting them onto it. The
         // overlapping dabs of a stroke still converge onto a flat layer behind the
         // leading edge, but each individual dab lays a soft increment — a spinning
@@ -220,7 +220,7 @@ fn deposit(v : u32, anchor : vec3<f32>, view : vec3<f32>, anchor_n : vec3<f32>,
         // "Wrong side" = past the plane (proud on a build, sunk on a carve). Standard
         // clay pulls BOTH sides toward the plane — that's what makes it flatten as it
         // builds and even out crossings. clay_melt scales the wrong-side pull:
-        // 1 = fully two-sided (Blender's clay), 0 = freeze proud detail (preserve
+        // 1 = fully two-sided (standard clay), 0 = freeze proud detail (preserve
         // mode, the old phase-1 behavior). Direction test uses clay_sign, not raw's
         // sign: the area-plane bias can put the plane below the anchor (target_h < 0)
         // mid-build.
@@ -234,7 +234,7 @@ fn deposit(v : u32, anchor : vec3<f32>, view : vec3<f32>, anchor_n : vec3<f32>,
         let build = P.clay_sign >= 0;
         let wrong = select(proud, sunk, build);
         var delta = select(raw, raw * P.clay_melt, wrong);
-        // Plane trim (Blender's plane_trim): cap the per-dab move so a footprint
+        // Plane trim: cap the per-dab move so a footprint
         // hanging over a deep hollow or a tall old stroke can't yank verts in one
         // violent step.
         let trim = 0.5 * P.world_radius;

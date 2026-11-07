@@ -1385,8 +1385,8 @@ void draw_settings_menu_items(InputState& input, MultiresInfo mres, bool sync_ta
             // mid-sculpt to compare, which is the whole reason it is a button up here
             // instead of a tickbox at the bottom.
             //
-            // World Space is the default, and is what ZBrush and Blender do by default
-            // too; both also keep a topology-mirror option alongside it, which is what
+            // World Space is the default, and is what other sculpting apps do by default
+            // too; they also keep a topology-mirror option alongside it, which is what
             // Topological is here.
             {
                 const bool topo = input.mirror_topological;

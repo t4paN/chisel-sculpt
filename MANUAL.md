@@ -305,7 +305,7 @@ spacing, and pressure all apply.
 
 Paint lives on the base cage of the multires stack, so it survives level switches,
 subdivision, remeshing, and voxel merges. PLY export carries it out of the app,
-standing upright (Z-up, as PLY is usually read); re-importing a Chisel PLY turns it
+standing upright (Z-up); re-importing a Chisel PLY turns it
 back.
 
 ## Retopology (Retopo mode, 0)

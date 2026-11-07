@@ -668,7 +668,7 @@ bool Mesh::export_ply(const char* filename) const {
 
     std::fprintf(f, "ply\n");
     std::fprintf(f, "format ascii 1.0\n");
-    // Z-up: PLY has no agreed up axis, and Blender (the usual next stop) reads it Z-up,
+    // Z-up: PLY has no agreed up axis, and the usual next app along reads it Z-up,
     // so a Y-up file landed lying on its back. Written turned +90 degrees about X:
     // file (x, y, z) = (x, -z, y), a proper rotation (winding and mirror-x untouched).
     // The comment marks it so import_ply turns our own files back; other PLYs and our
@@ -804,7 +804,7 @@ bool Mesh::import_obj(const char* filename, Mesh& out, std::vector<ObjPart>* par
     // This is not cosmetic. An asymmetric diagonal is an edge whose mirror image
     // does not exist, so the subdivision midpoint sitting on it has no mirror
     // either — and build_fine_mirror used to answer that by self-mapping it,
-    // which mirror_project reads as "seam" and snaps to x = 0. A Blender UV
+    // which mirror_project reads as "seam" and snaps to x = 0. A stock UV
     // sphere (448 quads) lost 448 vertices to the mirror plane on the first
     // mirrored stroke after a subdivide. See CHANGES.md 2026-08-23.
     //

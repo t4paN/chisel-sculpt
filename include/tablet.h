@@ -5,7 +5,7 @@ struct GLFWwindow;
 // Pen/tablet pressure input.
 //
 // Linux/X11: reads the stylus "Abs Pressure" valuator straight off XInput2 — the
-// same layer other drawing apps and Blender read (they go through Qt/GTK; we talk to libXi
+// same layer other drawing and 3D apps read (they go through Qt/GTK; we talk to libXi
 // directly because GLFW has no tablet support). libXi is dlopen'd at runtime, so
 // there is NO build- or run-time hard dependency on libxi-dev; libXi.so.6 ships on
 // every X11 desktop. xf86-input-wacom's pressure curve is applied driver-side, so

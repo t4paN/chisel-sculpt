@@ -286,7 +286,7 @@ static void finalize_primitive(Mesh& m) {
     m.recompute_normals();
 }
 
-// Latitude/longitude sphere with the poles on Y. (32, 16) reproduces Blender's
+// Latitude/longitude sphere with the poles on Y. (32, 16) reproduces the common
 // stock UV sphere vertex-for-vertex: the same cos/sin of the same angles, seam
 // column at -Z, unit radius.
 //

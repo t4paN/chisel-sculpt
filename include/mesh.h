@@ -238,7 +238,7 @@ Mesh icosphere(int subdivisions);
 //   cylinder: axis along Y, `radial` segments around, `height_seg` along the axis,
 //             triangle-fan caps sharing the rim ring.
 //   uv sphere: latitude/longitude sphere, poles on Y. (32, 16) reproduces
-//             Blender's stock UV sphere vertex-for-vertex.
+//             the common stock UV sphere vertex-for-vertex.
 Mesh box_primitive(int seg);
 Mesh cylinder_primitive(int radial, int height_seg);
 Mesh uv_sphere(int segments, int rings);
