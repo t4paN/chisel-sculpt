@@ -107,6 +107,8 @@ const IconDef kIcons[(int)Icon::Count] = {
     /* UvSeamCut    */ {{C(6.5, 6.5, 3), C(6.5, 17.5, 3), P("M8.7 8.7L20.5 20.5M8.7 15.3L20.5 3.5")}, 3},
     // Drawn here: a seam sewn shut, three stitches across the line.
     /* UvSeamWeld   */ {{P("M3 12h18"), P("M5.5 7l3 10M10.5 7l3 10M15.5 7l3 10")}, 2},
+    // Drawn here: a scatter of dots of a few sizes, what one Stipple dab with Scatter leaves.
+    /* BrushStipple */ {{C(7, 7.5f, 2.6f), C(15.5f, 15, 3.4f), C(17, 5.5f, 1.4f), C(6, 17.5f, 1.4f)}, 4},
 };
 
 // ---- Minimal SVG path interpreter -------------------------------------------
@@ -343,6 +345,7 @@ const unsigned short kPixel[(int)Icon::Count][16] = {
     /* uv-seam-mark    */ {0x0000,0x000E,0x001C,0x0060,0x01C0,0x0180,0x0600,0x0600,0x0C00,0x0800,0x0000,0x3000,0x6000,0x6000,0x4000,0x0000},   // drawn here: dashed chalk line
     /* uv-seam-cut     */ {0x0000,0x1C02,0x3E04,0x6208,0x6210,0x6620,0x3E40,0x0180,0x0180,0x3E40,0x6620,0x6210,0x6208,0x3E04,0x1C02,0x0000},   // drawn here: scissors
     /* uv-seam-weld    */ {0x0000,0x0000,0x0000,0x0200,0x6230,0x2310,0x3118,0x7FFE,0x7FFE,0x188C,0x08C4,0x0C46,0x0040,0x0000,0x0000,0x0000},   // drawn here: stitches across a seam
+    /* brush-stipple   */ {0x0000,0x0000,0x0018,0x3818,0x3800,0x3800,0x0000,0x0000,0x0060,0x00F0,0x00F0,0x1860,0x1800,0x0006,0x0006,0x0000},   // drawn here: scattered dots
 };
 } // namespace
 

@@ -40,6 +40,8 @@ const KeyActionInfo kKeyActions[(int)KeyAction::COUNT] = {
     {"brush_limb",    "Sculpt brushes", "Limb",      nullptr, {GLFW_KEY_H, 0}, KeyScope::Sculpt},
     {"brush_pose",    "Sculpt brushes", "Pose",
         "Draw along a limb, joint to tip: anchor + lever. Drag the lever: swing. Drag the anchor: move it. Hardness: how soft the bend. Delete: clear", {GLFW_KEY_K, 0}, KeyScope::Sculpt},
+    {"brush_stipple", "Sculpt brushes", "Stipple",
+        "Fine detail stamps: lands on press, random spin and size. Right-click: jitter and Scatter (one dot becomes many)", {GLFW_KEY_R, 0}, KeyScope::Sculpt},
     {"brush_mask",    "Brushes", "Mask",                nullptr, {GLFW_KEY_M, 0}},
     {"brush_prev",    "Brushes", "Previous alpha",
         "Draw and Mask. In Paint mode: swap colours. In Select mode: hold to spin the selection.", {GLFW_KEY_Q, 0}},
@@ -277,6 +279,12 @@ InputState::InputState()
     // default 0.25 the between-dab angle steps are big enough that dabs read as
     // separate stamps; 0.10 stamps the in-between angles.
     per_brush[(int)BrushType::CLAY].spacing = 0.10f;
+    // Stipple lays separate stamps, not a bead: spaced a radius apart so a drag
+    // speckles instead of ploughing a trench. Strength is per stamp (the dab loop
+    // doesn't density-compensate it), so a little under Draw's default.
+    per_brush[(int)BrushType::STIPPLE].spacing  = 1.0f;
+    per_brush[(int)BrushType::STIPPLE].strength = 0.4f;
+    per_brush[(int)BrushType::STIPPLE].hardness = 0.5f;
 
     drop_path[0] = '\0';
     paint_color[0] = 0.85f; paint_color[1] = 0.25f; paint_color[2] = 0.30f;      // warm red
@@ -497,6 +505,7 @@ const char* InputState::brush_name() const {
         case BrushType::MOVE:   return "Move";
         case BrushType::LIMB:   return "Limb";
         case BrushType::POSE:   return "Pose";
+        case BrushType::STIPPLE:return is_subtract_active() ? "Stipple (-)": "Stipple";
         case BrushType::SMOOTH: return "Smooth";
         case BrushType::MASK:   return "Mask";
         case BrushType::PAINT:  return bucket_active ? (is_subtract_active() ? "Fill (erase)" : "Fill")
@@ -1384,6 +1393,7 @@ static void run_key_action(GLFWwindow* w, KeyAction a, bool repeat) {
         // Limb (snakehook): pull + tangential redistribute
         case KeyAction::BRUSH_LIMB:    pick_brush(BrushType::LIMB);    break;
         case KeyAction::BRUSH_POSE:    pick_brush(BrushType::POSE);    break;
+        case KeyAction::BRUSH_STIPPLE: pick_brush(BrushType::STIPPLE); break;
         case KeyAction::BRUSH_MASK:    pick_brush(BrushType::MASK);    break;
         case KeyAction::BRUSH_CREASE:  pick_brush(BrushType::CREASE);  break;
         case KeyAction::PAINT_PICKER:
@@ -1409,7 +1419,8 @@ static void run_key_action(GLFWwindow* w, KeyAction a, bool repeat) {
             }
             // Draw and Mask step through the alphas; the main loop owns the library,
             // so it applies the step and wraps it. Brushes with no alpha: nothing.
-            if (in.current_brush == BrushType::DRAW || in.current_brush == BrushType::MASK)
+            if (in.current_brush == BrushType::DRAW || in.current_brush == BrushType::MASK
+                || in.current_brush == BrushType::STIPPLE)
                 in.alpha_step += (a == KeyAction::BRUSH_NEXT ? 1 : -1);
             break;
         }

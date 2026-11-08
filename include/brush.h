@@ -162,6 +162,14 @@ struct BrushStroke {
     bool  stamp_prev_valid;
     float stamp_rake_angle;
     bool  stamp_rake_valid;
+    // Extra in-plane spin for the next dab's stamp, radians (Stipple's random rotation).
+    // The dab loop sets it before each Stipple dab and zeroes it after; every other
+    // brush leaves it at 0, so set_alpha_dab adds nothing for them.
+    float stamp_spin = 0.0f;
+    // Stipple's jitter source (xorshift32). Reseeded every pen-down so two taps in the
+    // same spot don't print the same pattern; never 0.
+    uint32_t stipple_rng = 0x9E3779B9u;
+    float stipple_rand();   // uniform [0, 1)
     float cyl_axis_x, cyl_axis_y, cyl_axis_z;
     // The real area normal: normals averaged over a disc around the cursor, not the
     // single texel under it. cyl_axis snaps to whichever facet the cursor pixel lands
@@ -359,6 +367,16 @@ struct BrushStroke {
     void apply_draw(DabContext& ctx, float dab_x, float dab_y,
                     float strength, float hardness, bool subtract,
                     bool inflate = false, bool clay = false);
+
+    // Stipple: one dab of the stroke, laid as Draw stamps with the alpha allowed. Each
+    // stamp gets its own random spin, size and depth (StippleSettings' jitters); with
+    // scatter on the dab becomes `copies` smaller stamps dart-thrown over the brush
+    // disc instead of one at the cursor. Every stamp is a full apply_draw dab, so the
+    // mirror lobe, masking, undo and the dirty-list path are Draw's, unchanged. Runs
+    // post_dab per stamp itself — the caller must not post_dab it again.
+    void apply_stipple(DabContext& ctx, float dab_x, float dab_y,
+                       float strength, float hardness, bool subtract,
+                       const StippleSettings& st);
 
     void apply_move_gpu(DabContext& ctx, float cursor_dx, float cursor_dy,
                         float strength, float hardness);

@@ -126,6 +126,8 @@ static StrokeSpeed g_hover_speed;
 // full-vertex-array dispatch.
 static constexpr float DAB_SPACING_MIN_COS = 0.30f;
 static constexpr int   DAB_COUNT_MAX       = 64;
+// Stipple Scatter: most stamps one frame may lay (dabs x copies). See the dab loop.
+static constexpr int   STIPPLE_STAMPS_MAX  = 256;
 
 // The spacing the strength defaults were tuned at, and the fixed reference the dab-
 // density compensation normalises against. Must track BrushSettings::spacing's
@@ -1919,7 +1921,13 @@ int main(int argc, char* argv[]) {
                 // the same result, so they keep the full 1.0 ceiling.
                 BrushType bt = input.live_brush_slot();
                 bool additive_brush = (bt == BrushType::DRAW  || bt == BrushType::INFLATE ||
-                                       bt == BrushType::CREASE || bt == BrushType::PINCH);
+                                       bt == BrushType::CREASE || bt == BrushType::PINCH ||
+                                       bt == BrushType::STIPPLE);
+                // Stipple lays discrete stamps, not a bead: a stamp's depth is its
+                // strength, whatever the spacing or the hand speed, so it opts out of
+                // the density compensation and the speed falloff below (it still takes
+                // the max-effect ceiling and pen pressure like the other additives).
+                const bool is_stipple = bt == BrushType::STIPPLE;
                 float ceiling = additive_brush ? input.max_effect : 1.0f;
                 eff_strength *= PRESSURE_STR_FLOOR +
                                 (ceiling - PRESSURE_STR_FLOOR) * p_shaped;
@@ -1947,7 +1955,7 @@ int main(int argc, char* argv[]) {
                     // thinner, the way a quick pen stroke does. Size never drops below 80%
                     // (SPEED_SIZE_FLOOR), and spacing and the density compensation below
                     // already follow eff_brush_size, as for a pen.
-                    if (pressure_is_synthetic && !is_grab && input.speed_gain > 0.0f) {
+                    if (pressure_is_synthetic && !is_grab && !is_stipple && input.speed_gain > 0.0f) {
                         const float k = input.speed_gain * g_stroke_speed.px_s / SPEED_REF;
                         eff_strength   *= std::max(SPEED_FLOOR, 1.0f / (1.0f + k));
                         const float hf  = std::max(SPEED_FLOOR, 1.0f / (1.0f + 0.5f * k));
@@ -2062,6 +2070,17 @@ int main(int argc, char* argv[]) {
                     dab_count = DAB_COUNT_MAX;
                     spacing = dab_dist / (float)DAB_COUNT_MAX;
                 }
+                // Stipple's Scatter makes every dab `copies` stamps, each a full Draw
+                // dab, so the budget is in stamps: stretch the step the same way rather
+                // than let a flick with 64 copies queue 4096 dabs in one frame.
+                if (is_stipple && input.stipple.scatter && !first_dab) {
+                    const int per = std::max(1, input.stipple.copies);
+                    const int cap = std::max(1, STIPPLE_STAMPS_MAX / per);
+                    if (dab_count > cap) {
+                        dab_count = cap;
+                        spacing = dab_dist / (float)cap;
+                    }
+                }
 
                 // Crease Build: while the brush rests (no dab due from movement), keep
                 // dabbing where the last one landed, up to 20 a second at 100%. A pause
@@ -2126,7 +2145,7 @@ int main(int argc, char* argv[]) {
                 // s == SPACING_REF the window is [0.20, 1.0], i.e. exactly what it was.
                 {
                     float ref_spacing = input.brush_size * SPACING_REF;
-                    if (additive_brush && ref_spacing > 1e-6f) {
+                    if (additive_brush && !is_stipple && ref_spacing > 1e-6f) {
                         float window = eff.spacing / SPACING_REF;
                         float comp   = spacing / ref_spacing;
                         float lo = 0.20f * window, hi = window;
@@ -2257,13 +2276,17 @@ int main(int argc, char* argv[]) {
                     } else if (input.current_brush == BrushType::INFLATE) {
                         brush_stroke.apply_draw(ctx, dab_x, dab_y, eff_strength, eff_hardness,
                                                 input.is_subtract_active(), true);
+                    } else if (input.current_brush == BrushType::STIPPLE) {
+                        brush_stroke.apply_stipple(ctx, dab_x, dab_y, eff_strength, eff_hardness,
+                                                   input.is_subtract_active(), input.stipple);
                     }
 
                     // Mask and paint write straight to their own VBO and never move
                     // geometry, so they skip the position/normal post-dab sync.
+                    // Stipple post_dabs each of its stamps itself.
                     bool is_nongeo = input.current_brush == BrushType::MASK
                                   || input.current_brush == BrushType::PAINT;
-                    if (!is_nongeo) {
+                    if (!is_nongeo && !is_stipple) {
                         brush_stroke.post_dab(ctx);
                     }
                 }

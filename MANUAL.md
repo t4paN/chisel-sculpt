@@ -29,7 +29,7 @@ mesh to sculpt; left-drag off the mesh to orbit. That's 90% of the app right the
 
 - **Top toolbar** — Subdiv −/+, Undo, Redo, Export, Save, **+** (incremental save), Load, Merge.
 - **Mode row** — Edit, Insert, Select, Paint, plus the `[ ]` paint-visibility toggle.
-- **Brush column** (Edit mode) — Draw, Clay, Inflate, Crease, Pinch, Move, Limb, Pose, Smooth, Mask.
+- **Brush column** (Edit mode) — Draw, Clay, Inflate, Crease, Pinch, Move, Limb, Pose, Stipple, Smooth, Mask.
 - **HUD panel** (bottom left) — active brush and its size / strength / hardness /
   spacing, triangle and vertex counts, subdivision level, mirror axis, normals mode,
   autosmooth state.
@@ -75,8 +75,25 @@ the camera, so you never have to switch tools just to look around.
 | G | **Move** | Grab-and-drag: picks up the surface under the cursor and moves it with you. |
 | H | **Limb** | Snakehook: pulls a tube out of the surface, redistributing and densifying geometry at the tip. Grow arms, tails, horns from nothing. |
 | K | **Pose** | Bend a limb at a joint: draw along it, drag the far end. See Posing below. |
+| R | **Stipple** | Fine detail stamps with the current alpha: pores, speckle, scratches. Lands the moment you press, every stamp with a random turn, size and depth. Ctrl stamps inward. See Stipple below. |
 | Shift | **Smooth** | Hold Shift with any brush to smooth instead. In Paint mode it blends colours instead of geometry. |
 | M | **Mask** | Paints a protection mask (see Masking below). |
+
+### Stipple
+
+Stipple (R) is for the small stuff. Every dab is a stamp of the current alpha (Q / E
+step through them), and it lands the moment you press: tap for one, drag for a trail
+spaced by Spacing.
+
+Right-click on the canvas, or use the tool options beside the brush panel:
+
+- **Spin**, **Size**, **Depth** — how far each stamp's rotation, size and strength
+  wander. Spin needs an alpha: the Round dot looks the same at any angle.
+- **Scatter** — one dab becomes **Copies** smaller stamps (**Dot size** of the brush)
+  spread over the brush ring, kept from piling on each other. With the plain Round dot
+  and Ctrl held, one tap is a patch of pores; no many-dot alpha needed.
+
+Strength is per stamp: Spacing and hand speed don't change how deep a stamp goes.
 
 ### Posing
 

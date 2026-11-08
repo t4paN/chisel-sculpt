@@ -2,6 +2,13 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-08 — Stipple brush (R)
+
+- New sculpt brush for fine detail: each dab is a Draw stamp of the current alpha, landed on pen-down, with random spin, size and depth per stamp.
+- Scatter turns one dab into several smaller copies spread over the brush ring, so the Round dot alone makes a pore field.
+- Options on right-click (every skin) and in the tool options dock (Modern, DOS). Saved with the settings.
+- Strength is per stamp: Stipple skips the spacing compensation and the speed falloff. A frame lays at most 256 scattered stamps.
+
 ## 2026-11-08 — Retopo's Export opens the export window
 
 - Export on the Polygon Layers dock no longer saves an OBJ beside the project without asking. It opens the same Model and Textures window as UV mode: GLB, OBJ or STL, with any baked maps.
