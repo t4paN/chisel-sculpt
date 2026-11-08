@@ -636,13 +636,10 @@ bool retopo_absorb(RetopoState& into, RetopoState& from);
 // menu is settled first (a plain preview goes, a spine's fill stays).
 void retopo_save(RetopoState& st, RetopoSnapshot& out);
 
-// Write state.result as an OBJ, every face as it is (quads, triangles, bigger ones),
-// with retopo_smooth_normals as its vn. With uv (a layout made for rm: the caller checks
-// it's current), each corner gets its vt too. Returns false if there's nothing to write
-// or the file can't be opened.
-bool retopo_export_obj(const RetopoMesh& rm, const char* path, const UvLayout* uv = nullptr);
-// The same as one "o" block of an OBJ that may hold several: v / vn indices start after
-// v_base vertices already in the file, vt after vt_base. Adds what it wrote to both.
+// Write rm as one "o" block of an OBJ that may hold several, every face as it is (quads,
+// triangles, bigger ones), with retopo_smooth_normals as its vn. With uv (a layout made for
+// rm: the caller checks it's current), each corner gets its vt too. v / vn indices start
+// after v_base vertices already in the file, vt after vt_base. Adds what it wrote to both.
 void retopo_write_obj(std::FILE* f, const RetopoMesh& rm, const UvLayout* uv, const char* object,
                       uint32_t& v_base, uint32_t& vt_base);
 // PLY (Z-up like the sculpt's, faces as they are, no colour, no UVs: those are per
@@ -735,10 +732,6 @@ bool retopo_focus(const RetopoState& retopo, Camera& camera, float mesh_radius);
 void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& mesh,
                   Renderer& renderer, const Camera& camera, const Tablet& tablet,
                   int win_w, int win_h, bool screen_buffers_dirty, bool imgui_wants_mouse);
-// Writes the built quads as an OBJ beside the project (or in home) and toasts how it
-// went. Returns the path written, empty on failure.
-std::string retopo_export(const RetopoState& retopo, InputState& input, const std::string& project_path,
-                          const char* mesh_name);
 // The green ring (red for the eraser, a dot for Cut and the wand; UV's seam brush is red too).
 void draw_retopo_cursor(Renderer& renderer, const Camera& camera, const InputState& input,
                         const RetopoState& retopo, float cursor_x, float cursor_y, int win_w, int win_h);

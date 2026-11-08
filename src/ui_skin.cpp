@@ -4101,6 +4101,9 @@ void draw_mesh_layers_dock(InputState& input, MeshLayerRow* rows, int n, int win
     end_panel();
 }
 
+// The export button of retopo's and UV mode's docks: the one way out, one size.
+static const float kExportBtn = 40.0f, kExportIcon = 25.0f;
+
 // Retopo mode's "Polygon Layers" dock, like paint mode's layer docker: one row per
 // stroke, newest on top (eye / name / trash). Hovering a row lights that stroke and its
 // quads on the model; click selects, Ctrl+click adds, double-click renames. The
@@ -4383,14 +4386,10 @@ void draw_retopo_dock(InputState& input, RetopoState& st, int win_w, int win_h) 
     if (icon_button("rUndo", Icon::CmdUndo, bh, o)) st.undo();
     o.key = nullptr; o.enabled = true;
 
+    const float export_y = ImGui::GetCursorPosY();   // the Export button's top, drawn below
     if (chip("Strokes", st.show_strokes, bh)) st.show_strokes = !st.show_strokes;
     ImGui::SameLine(0.0f, 4.0f);
     if (chip("Wire", st.show_result, bh)) st.show_result = !st.show_result;
-    ImGui::SameLine();
-    ImGui::SetCursorPosX(x0 + w - bh);
-    o.tip = "Export OBJ"; o.enabled = st.built;
-    if (icon_button("rExport", Icon::CmdExport, bh, o)) input.retopo_export_requested = true;
-    o.enabled = true;
 
     // Symmetrize asks which half is the base first: the button can't know which one the
     // user got right.
@@ -4426,6 +4425,20 @@ void draw_retopo_dock(InputState& input, RetopoState& st, int win_w, int win_h) 
     else          std::snprintf(ro, sizeof ro, "%s", input.mirror_x ? "not built \xC2\xB7 mirror X" : "not built");
     label_item(UiFont::Mono, 12.0f, kMuted, ro, 0.0f, 18.0f);
     foot_h = ImGui::GetCursorPosY() - fy0;
+    // Export, UV mode's big button again: taller than its row, so it's placed by hand
+    // beside Strokes and Symmetrize instead of pushing them apart.
+    {
+        const float after_y = ImGui::GetCursorPosY();
+        ImGui::SetCursorPos(ImVec2(x0 + w - kExportBtn * g_k, export_y));
+        BtnOpts eo;
+        eo.look = Look::Bar; eo.side = TipSide::Left; eo.icon_px = kExportIcon;
+        eo.icol = IM_COL32(245, 247, 252, 255);
+        eo.enabled = st.built;
+        eo.tip = st.built ? "Export model and textures: the low-poly as GLB, OBJ or STL, and its maps" : "Build first";
+        if (icon_button("rExport", Icon::CmdExport, kExportBtn, eo)) input.retopo_export_requested = true;
+        ImGui::SetCursorPosY(after_y);
+        ImGui::Dummy(ImVec2(0.0f, 0.0f));   // ImGui wants an item after a cursor move, or it complains
+    }
 
     // Right-click menu on an island (main.cpp asks): the same three sliders, for the
     // selection, where the pointer is. A click anywhere else closes it.
@@ -5058,7 +5071,7 @@ void draw_uv_dock(InputState& input, RetopoState& st, UvMeshRow* rows, int nrows
                        + 4.0f * gap > w;
     const float bake_h = 20.0f + gap + (bake_open ? bh * (gd_wrap ? 4.0f : 3.0f) + ImGui::GetFrameHeight() + 16.0f
                                                     + gap * (gd_wrap ? 6.0f : 5.0f) : 0.0f);
-    const float big_btn = 44.0f;   // Export model and textures, at the dock's bottom right
+    const float big_btn = kExportBtn;   // Export model and textures, at the dock's bottom right
     const float below = 18.0f + bh + (one_row ? 0.0f : bh + gap) + 20.0f + (list_open ? list_h + gap : 0.0f)
                       + bake_h + big_btn + gap * 5.0f;
     const float side = std::max(80.0f, std::min(w, ImGui::GetContentRegionAvail().y - below));
@@ -5462,7 +5475,7 @@ void draw_uv_dock(InputState& input, RetopoState& st, UvMeshRow* rows, int nrows
         if (ImGui::GetCursorPosY() < y_end) ImGui::SetCursorPosY(y_end);
         ImGui::SetCursorPosX(ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x - bs * g_k);
         BtnOpts eo;
-        eo.look = Look::Bar; eo.side = TipSide::Left; eo.icon_px = 28.0f;
+        eo.look = Look::Bar; eo.side = TipSide::Left; eo.icon_px = kExportIcon;
         eo.icol = IM_COL32(245, 247, 252, 255);   // lighter than the skin's: it's the way out
         eo.enabled = any_built;
         eo.tip = any_built ? "Export model and textures: the retopo meshes shown (OBJ, STL or GLB) and their maps"

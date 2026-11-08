@@ -1367,57 +1367,6 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
     }
 }
 
-// The low-poly is a by-product to take elsewhere, not a document: no dialog, next to
-// the project (or home), named after it. Web writes it to MEMFS for main.cpp to hand
-// to the browser.
-// Where retopo's exports go: next to the project as <project>-<mesh>-LO..., ~/chisel-<mesh>-LO...
-// before it's saved; the web build writes to its in-memory disk and downloads. The mesh
-// layer's name keeps the pair: the sculpt exports as <mesh>-HI, its low-poly as -LO.
-static std::string export_stem(const std::string& project_path, const char* mesh_name) {
-    std::string mesh;   // a file name part: anything odd becomes _
-    for (const char* c = mesh_name; c && *c; c++) {
-        const unsigned char u = (unsigned char)*c;
-        mesh += (std::isalnum(u) || u == '-' || u == '_' || u >= 0x80) ? (char)u : '_';
-    }
-    if (mesh.empty()) mesh = "mesh";
-#if defined(__EMSCRIPTEN__)
-    (void)project_path;
-    return "/" + mesh + "-LO";
-#else
-    std::string stem = project_path;
-    if (stem.empty()) {
-        const char* home = std::getenv("HOME");
-        stem = std::string(home ? home : ".") + "/chisel";
-    } else {
-        const auto dot = stem.find_last_of('.');
-        if (dot != std::string::npos && stem.find_last_of('/') < dot) stem.resize(dot);
-    }
-    return stem + "-" + mesh + "-LO";
-#endif
-}
-
-std::string retopo_export(const RetopoState& retopo, InputState& input, const std::string& project_path,
-                          const char* mesh_name) {
-    const std::string path = export_stem(project_path, mesh_name) + ".obj";
-#if defined(__EMSCRIPTEN__)
-    const std::string name = path.substr(1);
-#else
-    const std::string name = path;
-#endif
-    // UVs go along when there's a layout made for the mesh as it is now.
-    const bool uv_ok = !retopo.uv.empty() && retopo.uv.fits(retopo.result)
-                    && retopo.uv.key == uv_topology_key(retopo.result);
-    const bool ok = retopo_export_obj(retopo.result, path.c_str(), uv_ok ? &retopo.uv : nullptr);
-    if (ok)
-        std::snprintf(input.notification, sizeof(input.notification), "Exported%s: %.400s",
-                      uv_ok ? " with UVs" : "", name.c_str());
-    else
-        std::snprintf(input.notification, sizeof(input.notification),
-                      retopo.built ? "Export failed: %.400s" : "Build first%.0s", name.c_str());
-    input.notification_timer = 3.0f;
-    return ok ? path : std::string();
-}
-
 void draw_retopo_cursor(Renderer& renderer, const Camera& camera, const InputState& input,
                         const RetopoState& retopo, float cursor_x, float cursor_y, int win_w, int win_h) {
     // Matrix green (#00FF41): a ring no sculpt brush wears, so the hand

@@ -6429,18 +6429,6 @@ void retopo_smooth_normals(const RetopoMesh& rm, std::vector<Vec3>& out) {
     for (Vec3& n : out) n = n.normalized();
 }
 
-bool retopo_export_obj(const RetopoMesh& rm, const char* path, const UvLayout* uv) {
-    if (rm.faces.empty()) return false;
-    if (uv && !uv->fits(rm)) uv = nullptr;
-    FILE* f = std::fopen(path, "wb");
-    if (!f) return false;
-    std::fprintf(f, "# Chisel retopo: %u faces%s\n", rm.face_count(), uv ? ", UVs" : "");
-    uint32_t v_base = 0, vt_base = 0;
-    retopo_write_obj(f, rm, uv, nullptr, v_base, vt_base);
-    std::fclose(f);
-    return true;
-}
-
 // Welds leave folded-away vertices behind: every writer keeps only the ones a face uses.
 // id[i] = 1-based new number, 0 = not written. Returns how many are.
 static uint32_t used_vertices(const RetopoMesh& rm, std::vector<uint32_t>& id) {

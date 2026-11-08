@@ -2,6 +2,11 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-08 — Retopo's Export opens the export window
+
+- Export on the Polygon Layers dock no longer saves an OBJ beside the project without asking. It opens the same Model and Textures window as UV mode: GLB, OBJ or STL, with any baked maps.
+- The two docks' export buttons now share one size and the same lighter icon: UV mode's is 10% smaller, retopo's grew to match.
+
 ## 2026-11-06 — SDF merge: Close holes, closed holes take their colour from the rim
 
 - Close holes in the merge prompt (H): Normal, More or Most sets how wide a gap a paper-thin model's wrap seals. Solid models ignore it.

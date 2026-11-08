@@ -1625,16 +1625,12 @@ int main(int argc, char* argv[]) {
         // ---- Retopo mode (retopo_input.cpp): pen, clicks, its own undo, Build ----
         // The active mesh's own retopo: its low-poly was made on this sculpt.
         RetopoState& retopo = scene.active_entity().retopo;
-        char mesh_name[64];
-        Scene::display_name(scene.active_entity(), mesh_name, sizeof mesh_name);
         retopo_frame(retopo, input, scene, *mesh, renderer, camera, tablet, win_w, win_h,
                      screen_buffers_dirty, imgui_wants_mouse);
         if (input.retopo_export_requested) {
             input.retopo_export_requested = false;
-            const std::string path = retopo_export(retopo, input, current_project_path, mesh_name);
-#if defined(__EMSCRIPTEN__)
-            if (!path.empty()) web_download_file(path.c_str(), path.c_str() + 1);
-#endif
+            input.export_kind = InputState::ExportKind::UV_ASSETS;
+            input.export_dialog_active = true;
         }
 
         // Hover speed, for the stroke's running start (g_hover_speed). Orbit, pan and

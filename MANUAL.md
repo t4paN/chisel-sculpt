@@ -374,9 +374,9 @@ short of the shoulder or hip.
 of the first. Grab and Smooth never carry a vertex across the middle: it stops on it.
 The dock's **Symmetrize** keeps one half and rebuilds the other from it.
 
-The cage is saved in the `.chisel` project. **Export** (the dock) writes it as an OBJ
-next to the project, named `<project>-<mesh>-LO.obj` (in the browser it downloads as
-`<mesh>-LO.obj`): quads as quads, with UVs once it's unwrapped. The toolbar's Export
+The cage is saved in the `.chisel` project. **Export** (the dock) opens the same window as
+UV mode's big export button: **GLB**, **OBJ** or **STL**, quads as quads in an OBJ, with UVs
+once it's unwrapped and any baked maps ticked. The toolbar's Export
 (Ctrl+E) lists every mesh's sculpt (`-HI`) and retopo (`-LO`) side by side; opening an OBJ
 or GLB with a `<mesh>-LO` beside its `<mesh>-HI` brings it back as that mesh's retopo,
 UVs and seams included. To bake in Chisel itself, go on to [UV mode](#uv-mode-9-unwrap-and-bake).

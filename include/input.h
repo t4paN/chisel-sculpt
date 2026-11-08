@@ -497,7 +497,7 @@ struct InputState {
     // and goes back to MESH when it closes.
     //   MESH:      the meshes (toolbar, E)
     //   UV_MAP:    UV mode's layout picture (the dock's export button)
-    //   UV_ASSETS: UV mode's model + textures (the big button at the dock's bottom right)
+    //   UV_ASSETS: model + textures (the export button on retopo's and UV mode's docks)
     enum class ExportKind { MESH, UV_MAP, UV_ASSETS };
     ExportKind export_kind = ExportKind::MESH;
     // The UV map picture: size a side, wire width in pixels, islands filled (or just the

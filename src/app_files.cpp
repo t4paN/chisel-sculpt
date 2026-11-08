@@ -321,7 +321,7 @@ void app_files_frame(App& a) {
     };
 
 
-    // ---- UV mode's exports: the meshes the UV panel shows (the active one, then the rest
+    // ---- The UV map and model + textures windows: the meshes the UV panel shows (the active one, then the rest
     // of the selection), as Bake takes them. Each low goes with its layout when the layout
     // is current for it.
     auto uv_parts = [&]() {
