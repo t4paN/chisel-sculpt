@@ -1300,6 +1300,7 @@ void BrushStroke::begin(Renderer& renderer, const Camera& cam,
         uint32_t seed = (uint32_t)(t ^ (t >> 32)) ^ (++strokes * 0x9E3779B9u);
         stipple_rng = seed ? seed : 0x9E3779B9u;
     }
+    stipple_stamp_n = stipple_rng & 1u;
 
     // GPU touched list: the stroke's touched set is built on the GPU and its undo
     // capture never leaves it. Needs everything the pen-up GPU path uses — the diff
@@ -1712,7 +1713,7 @@ float BrushStroke::stipple_rand() {
 
 void BrushStroke::apply_stipple(DabContext& ctx, float dab_x, float dab_y,
                                 float strength, float hardness, bool subtract,
-                                const StippleSettings& st) {
+                                const StippleSettings& st, StippleInk ink) {
     // Screen-space placement, like every other dab: the brush disc is ctx.eff_brush_size
     // px in radius, and set_anchor turns each stamp's px radius into its world radius
     // at the depth it lands on. Off-model stamps just fail their anchor and skip.
@@ -1761,8 +1762,19 @@ void BrushStroke::apply_stipple(DabContext& ctx, float dab_x, float dab_y,
         sub.eff_brush_size = cr[i];
         stamp_spin = (2.0f * stipple_rand() - 1.0f) * kPi * st.rot_jitter;
         const float s = strength * (1.0f - st.depth_jitter * stipple_rand());
-        apply_draw(sub, cx[i], cy[i], s, hardness, subtract);
-        post_dab(sub);
+        // The colour kernel samples the alpha through set_alpha_dab, so stamp_spin turns
+        // it the same as Draw's; "depth" jitter there is opacity.
+        if (ink == StippleInk::Colour) {
+            const float* rgb = nullptr;
+            if (st.two_colours && st.scatter)
+                rgb = (stipple_stamp_n++ & 1u) ? ctx.input.paint_color_alt : ctx.input.paint_color;
+            apply_color_gpu(sub, cx[i], cy[i], s, hardness, subtract, rgb);
+        } else if (ink == StippleInk::Density) {
+            apply_density_gpu(sub, cx[i], cy[i], s, hardness, subtract);
+        } else {
+            apply_draw(sub, cx[i], cy[i], s, hardness, subtract);
+            post_dab(sub);
+        }
     }
     stamp_spin = 0.0f;
 }
@@ -2422,7 +2434,8 @@ void BrushStroke::composite_after_color_dab(DabContext& ctx, uint32_t vc) {
 }
 
 void BrushStroke::apply_color_gpu(DabContext& ctx, float dab_x, float dab_y,
-                                  float strength, float hardness, bool erase) {
+                                  float strength, float hardness, bool erase,
+                                  const float* rgb) {
 
     // Reserve this dab's dirty-list region before any kernel can append to it.
     begin_dab(ctx, DAB_COLOR);
@@ -2450,9 +2463,10 @@ void BrushStroke::apply_color_gpu(DabContext& ctx, float dab_x, float dab_y,
         p.paint_r = p.paint_g = p.paint_b = 0.0f;
         p.paint_a = 0.0f;
     } else {
-        p.paint_r = ctx.input.paint_color[0];
-        p.paint_g = ctx.input.paint_color[1];
-        p.paint_b = ctx.input.paint_color[2];
+        const float* c = rgb ? rgb : ctx.input.paint_color;
+        p.paint_r = c[0];
+        p.paint_g = c[1];
+        p.paint_b = c[2];
     }
     p.vertex_count = ctx.mesh.vertex_count();
 
@@ -2468,34 +2482,55 @@ void BrushStroke::apply_color_gpu(DabContext& ctx, float dab_x, float dab_y,
 }
 
 void BrushStroke::apply_color_smooth_gpu(DabContext& ctx, float dab_x, float dab_y,
-                                         float strength, float hardness) {
+                                         float strength, float hardness,
+                                         float flow_sx, float flow_sy) {
+    // Blend's direction: the screen step between dabs turned into the camera plane,
+    // the same right/up frame Move drags in. A tilted surface still reads the right
+    // way: the shader only compares it against edge directions.
+    const bool blend = flow_sx != 0.0f || flow_sy != 0.0f;
+    Vec3 flow = {0, 0, 0};
+    if (blend) {
+        Vec3 pos = ctx.cam.get_position();
+        Vec3 fwd = (ctx.cam.target - pos).normalized();
+        Vec3 right = fwd.cross(Vec3{0, 1, 0}).normalized();
+        Vec3 up = right.cross(fwd).normalized();
+        flow = (right * flow_sx + up * (-flow_sy)).normalized();
+    }
+    // Each pass is a full dab (its own dirty-list region and readback), as Stipple's
+    // stamps are. Spreading further means more passes: one ring per pass.
+    const int passes = blend ? 3 : 2;
+    for (int pass = 0; pass < passes; pass++) {
+        // Reserve this dab's dirty-list region before any kernel can append to it.
+        begin_dab(ctx, DAB_COLOR);
+        if (!is_active()) return;
+        if (!ctx.compute.supported || !ctx.compute.has_color_smooth()) return;
 
-    // Reserve this dab's dirty-list region before any kernel can append to it.
-    begin_dab(ctx, DAB_COLOR);
-    if (!is_active()) return;
-    if (!ctx.compute.supported || !ctx.compute.has_color_smooth()) return;
+        set_anchor(ctx.mesh, ctx.cam, dab_x, dab_y, ctx.eff_brush_size, ctx.win_h, ctx.renderer);
+        if (!anchor_valid) return;
 
-    set_anchor(ctx.mesh, ctx.cam, dab_x, dab_y, ctx.eff_brush_size, ctx.win_h, ctx.renderer);
-    if (!anchor_valid) return;
+        ColorPaintParams p{};
+        p.anchor_a_x = anchor_pos.x;
+        p.anchor_a_y = anchor_pos.y;
+        p.anchor_a_z = anchor_pos.z;
+        p.anchor_b_x = -anchor_pos.x;
+        p.anchor_b_y =  anchor_pos.y;
+        p.anchor_b_z =  anchor_pos.z;
+        p.use_b = ctx.mirror_x ? 1 : 0;
+        p.world_radius = anchor_world_radius;
+        p.hardness = hardness;
+        p.paint_strength = strength;        // blend amount toward neighbour average
+        p.vertex_count = ctx.mesh.vertex_count();
+        if (blend) {
+            p.flow_x = flow.x; p.flow_y = flow.y; p.flow_z = flow.z;
+            p.flow_amt = 1.0f;
+        }
 
-    ColorPaintParams p{};
-    p.anchor_a_x = anchor_pos.x;
-    p.anchor_a_y = anchor_pos.y;
-    p.anchor_a_z = anchor_pos.z;
-    p.anchor_b_x = -anchor_pos.x;
-    p.anchor_b_y =  anchor_pos.y;
-    p.anchor_b_z =  anchor_pos.z;
-    p.use_b = ctx.mirror_x ? 1 : 0;
-    p.world_radius = anchor_world_radius;
-    p.hardness = hardness;
-    p.paint_strength = strength;        // blend amount toward neighbour average
-    p.vertex_count = ctx.mesh.vertex_count();
+        ctx.compute.dispatch_color_smooth(p, ctx.renderer.vbo_pos, ctx.renderer.ebo);
+        composite_after_color_dab(ctx, p.vertex_count);
 
-    ctx.compute.dispatch_color_smooth(p, ctx.renderer.vbo_pos, ctx.renderer.ebo);
-    composite_after_color_dab(ctx, p.vertex_count);
-
-    // Dirty list lands async → color first-touch snapshots in drain_dab_readbacks.
-    kick_dab_readback(ctx, DAB_COLOR);
+        // Dirty list lands async → color first-touch snapshots in drain_dab_readbacks.
+        kick_dab_readback(ctx, DAB_COLOR);
+    }
 
     gpu_color_deferred = true;
     needs_mesh_update = true;

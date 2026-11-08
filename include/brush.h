@@ -169,6 +169,10 @@ struct BrushStroke {
     // Stipple's jitter source (xorshift32). Reseeded every pen-down so two taps in the
     // same spot don't print the same pattern; never 0.
     uint32_t stipple_rng = 0x9E3779B9u;
+    // Two colours: stamps alternate main / second off this counter, so a stroke splits
+    // exactly 50-50 (the copies land at random spots, so it still reads as a mix).
+    // Starts on a random side each pen-down.
+    uint32_t stipple_stamp_n = 0;
     float stipple_rand();   // uniform [0, 1)
     float cyl_axis_x, cyl_axis_y, cyl_axis_z;
     // The real area normal: normals averaged over a disc around the cursor, not the
@@ -374,9 +378,12 @@ struct BrushStroke {
     // disc instead of one at the cursor. Every stamp is a full apply_draw dab, so the
     // mirror lobe, masking, undo and the dirty-list path are Draw's, unchanged. Runs
     // post_dab per stamp itself — the caller must not post_dab it again.
+    // `ink` picks what each stamp lays: Draw (sculpt), or paint mode's colour or
+    // density kernel. The paint inks write their own VBO and get no post_dab, like Paint.
+    enum class StippleInk { Sculpt, Colour, Density };
     void apply_stipple(DabContext& ctx, float dab_x, float dab_y,
                        float strength, float hardness, bool subtract,
-                       const StippleSettings& st);
+                       const StippleSettings& st, StippleInk ink = StippleInk::Sculpt);
 
     void apply_move_gpu(DabContext& ctx, float cursor_dx, float cursor_dy,
                         float strength, float hardness);
@@ -417,8 +424,10 @@ struct BrushStroke {
 
     // GPU paint brush: compute shader lerps vertex albedo in the color VBO.
     // erase = paint toward white instead of the brush color.
+    // `rgb` overrides the main paint colour for this dab (Stipple's Two colours).
     void apply_color_gpu(DabContext& ctx, float dab_x, float dab_y,
-                         float strength, float hardness, bool erase);
+                         float strength, float hardness, bool erase,
+                         const float* rgb = nullptr);
 
     // GPU paint-smooth: the smooth gesture (shift / double-shift) while a paint
     // brush is active — blends vertex colours toward their neighbour average
@@ -429,8 +438,12 @@ struct BrushStroke {
     void apply_density_smooth_gpu(DabContext& ctx, float dab_x, float dab_y,
                                   float strength, float hardness);
 
+    // Paint smooth: two neighbour-average passes per dab (one blended too little).
+    // With a stroke direction (flow_sx/sy, screen px, non-zero) it is Blend instead:
+    // three passes that take colour only from upstream neighbours, a directional blur.
     void apply_color_smooth_gpu(DabContext& ctx, float dab_x, float dab_y,
-                                float strength, float hardness);
+                                float strength, float hardness,
+                                float flow_sx = 0.0f, float flow_sy = 0.0f);
 
     // Pen-up reconcile — tick once per frame from main once the stroke ends, until
     // it returns true (the commit completed this call; had_update = geometry was

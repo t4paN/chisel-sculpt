@@ -6,6 +6,11 @@
 // neighbour reads are Gauss-Seidel-racy across invocations — harmless for a colour
 // blur (a u32 read is never torn). See CONVENTIONS.md.
 //
+// Blend (paint mode's directional blur) is the same pass with flow_amt > 0: each
+// neighbour is weighted by how far upstream of the vertex it sits along `flow` (the
+// stroke direction, world space), so colour is carried forward along the stroke
+// instead of spreading evenly. flow_amt = 0 is the plain smooth, unchanged.
+//
 // Bindings mirror the ComputeBinding enum in include/compute.h:
 //   0 positions (read)   2 indices (read)   4 adj_offset (read)   5 adj_list (read)
 //   6 dirty (read_write) 12 mask (read)     28 color (read_write) 63 params UBO
@@ -19,6 +24,8 @@ struct Params {
     use_b        : u32,
     vertex_count : u32,
     _pad0        : u32,
+    flow         : vec3<f32>,   // stroke direction, unit (lobe B mirrors x)
+    flow_amt     : f32,         // 0 = plain smooth, 1 = upstream neighbours only
 };
 
 struct DirtyRegion {
@@ -61,6 +68,21 @@ fn anchor_weight(anchor : vec3<f32>, vp : vec3<f32>) -> f32 {
     return brush_falloff(dist, P.world_radius);
 }
 
+// How much neighbour n counts toward v's blend. Plain smooth: all equally.
+fn nb_weight(n : u32, vp : vec3<f32>, flow : vec3<f32>) -> f32 {
+    if (P.flow_amt <= 0.0) {
+        return 1.0;
+    }
+    let np = vec3<f32>(positions[n*3u], positions[n*3u+1u], positions[n*3u+2u]);
+    let e = np - vp;
+    let len = length(e);
+    if (len <= 1e-12) {
+        return 0.0;
+    }
+    let up = max(dot(e / len, -flow), 0.0);   // > 0: n sits behind v along the stroke
+    return mix(1.0, up, P.flow_amt);
+}
+
 @compute @workgroup_size(64)
 fn main(@builtin(workgroup_id) wg : vec3<u32>,
         @builtin(local_invocation_id) lid : vec3<u32>) {
@@ -75,9 +97,17 @@ fn main(@builtin(workgroup_id) wg : vec3<u32>,
     }
 
     let vp = vec3<f32>(positions[v*3u], positions[v*3u+1u], positions[v*3u+2u]);
-    var w = anchor_weight(P.anchor_a, vp);
+    let wa = anchor_weight(P.anchor_a, vp);
+    var wb = 0.0;
     if (P.use_b != 0u) {
-        w = max(w, anchor_weight(P.anchor_b, vp));
+        wb = anchor_weight(P.anchor_b, vp);
+    }
+    var w = max(wa, wb);
+    // The mirror lobe drags the reflected way.
+    var flow = P.flow;
+    let on_b = wb > wa;
+    if (on_b) {
+        flow.x = -flow.x;
     }
     if (w <= 0.0) {
         return;
@@ -102,11 +132,13 @@ fn main(@builtin(workgroup_id) wg : vec3<u32>,
         if      (v == i0) { n0 = i1; n1 = i2; }
         else if (v == i1) { n0 = i0; n1 = i2; }
         else              { n0 = i0; n1 = i1; }
-        sum = sum + unpack4x8unorm(color_buf[n0]);
-        sum = sum + unpack4x8unorm(color_buf[n1]);
-        count = count + 2.0;
+        let w0 = nb_weight(n0, vp, flow);
+        let w1 = nb_weight(n1, vp, flow);
+        sum = sum + unpack4x8unorm(color_buf[n0]) * w0;
+        sum = sum + unpack4x8unorm(color_buf[n1]) * w1;
+        count = count + w0 + w1;
     }
-    if (count <= 0.0) {
+    if (count <= 1e-6) {
         return;
     }
 

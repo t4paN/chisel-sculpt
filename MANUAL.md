@@ -318,6 +318,9 @@ spacing, and pressure all apply.
 | C | Colour picker: click the model to grab the colour under the cursor (pure paint, shading excluded); ESC or C cancels |
 | Q / E | Swap active / alternate colour |
 | B | Fill bucket: click to fill the unmasked area you clicked, Ctrl+click erases it. The mask is the wall. Hardness is the fill's edge against the mask: high cuts hard along it, low melts across the mask line, a little way into the masked area (up to one brush radius in all) |
+| D | Back to the plain paint brush from the bucket, picker, Stipple or Blend |
+| R | Stipple: colour stamps with random spin, size and opacity. RMB shows its knobs under the colour wheel. Scatter turns each dab into small copies; with Scatter on, Two colours alternates the copies between main and second colour, half each. Ctrl erases in specks. R again: back to the brush |
+| G | Blend: a directional blur. Colour is taken only from behind the stroke, so it drags the way you move. How far it reaches depends on mesh density (it moves colour one vertex ring per pass). G again: back to the brush |
 | `[ ]` toggle (toolbar) | Hide vertex colour while sculpting (Paint mode always shows it) |
 
 Paint lives on the base cage of the multires stack, so it survives level switches,

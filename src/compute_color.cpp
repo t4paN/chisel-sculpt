@@ -25,13 +25,14 @@ struct ColorPaintParamsGPU {
 };
 static_assert(sizeof(ColorPaintParamsGPU) == 64, "color paint Params UBO must be 64 bytes");
 
-// 48-byte std140 block, byte-identical to color_smooth.{comp,wgsl}'s Params.
+// 64-byte std140 block, byte-identical to color_smooth.{comp,wgsl}'s Params.
 struct ColorSmoothParamsGPU {
     float    anchor_a[3]; float world_radius;        // 16
     float    anchor_b[3]; float hardness;            // 16
     float    strength; uint32_t use_b; uint32_t vertex_count; uint32_t _pad0; // 16
+    float    flow[3];     float flow_amt;            // 16  Blend's direction; 0 = smooth
 };
-static_assert(sizeof(ColorSmoothParamsGPU) == 48, "color smooth Params UBO must be 48 bytes");
+static_assert(sizeof(ColorSmoothParamsGPU) == 64, "color smooth Params UBO must be 64 bytes");
 
 // 336-byte std140 block, byte-identical to color_composite.{comp,wgsl}'s Params.
 struct ColorCompositeParamsGPU {
@@ -171,6 +172,8 @@ void ComputeState::dispatch_color_smooth(const ColorPaintParams& p, const gpu::B
     u.strength = p.paint_strength;   // smooth reuses paint_strength as the blend amount
     u.use_b = (uint32_t)p.use_b;
     u.vertex_count = vc;
+    u.flow[0] = p.flow_x; u.flow[1] = p.flow_y; u.flow[2] = p.flow_z;
+    u.flow_amt = p.flow_amt;
     gpu::write_buffer(gpu_dev, color_smooth_ubo, 0, &u, sizeof(u));
     select_dab_blocks(u.anchor_a, u.anchor_b, u.world_radius, u.use_b != 0, vc);
 

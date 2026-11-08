@@ -857,13 +857,16 @@ void draw_help_popup(InputState& input, int win_w, int win_h) {
         std::snprintf(k, sizeof(k), "%s %s %s", L(KeyAction::BRUSH_CREASE),
                       L(KeyAction::BRUSH_PINCH), L(KeyAction::BRUSH_MOVE));
         help_row(k, "Crease  Pinch  Move");
-        std::snprintf(k, sizeof(k), "%s %s %s", L(KeyAction::BRUSH_LIMB),
-                      L(KeyAction::BRUSH_POSE), L(KeyAction::BRUSH_MASK));
-        help_row(k, "Limb  Pose  Mask");
+        std::snprintf(k, sizeof(k), "%s %s %s %s", L(KeyAction::BRUSH_LIMB),
+                      L(KeyAction::BRUSH_POSE), L(KeyAction::BRUSH_STIPPLE), L(KeyAction::BRUSH_MASK));
+        help_row(k, "Limb  Pose  Stipple  Mask");
         std::snprintf(k, sizeof(k), "%s %s", L(KeyAction::BRUSH_PREV), L(KeyAction::BRUSH_NEXT));
         help_row(k, "Cycle alpha (Draw, Mask)");
         std::snprintf(k, sizeof(k), "%s %s", L(KeyAction::PAINT_BUCKET), L(KeyAction::PAINT_PICKER));
         help_row(k, "Fill bucket  Colour picker (Paint)");
+        std::snprintf(k, sizeof(k), "%s %s %s", L(KeyAction::PAINT_BRUSH), L(KeyAction::PAINT_STIPPLE),
+                      L(KeyAction::PAINT_BLEND));
+        help_row(k, "Paint brush  Stipple  Blend (Paint)");
         help_head("SIZE + FEEL");
         std::snprintf(k, sizeof(k), "%s %s", L(KeyAction::SIZE_DOWN), L(KeyAction::SIZE_UP));
         help_row(k, "Brush size");
@@ -1098,7 +1101,9 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
             ImGui::SameLine();
             ImGui::TextUnformatted(input.color_pick_active ? "Picking..."
                                    : input.bucket_active   ? "Click to fill, Ctrl erases"
-                                                          : "Q/E swap - C pick - B fill");
+                                   : input.paint_stipple_active ? "Stipple - right-click for knobs - D brush"
+                                   : input.paint_blend_active ? "Blend - drag to smear - D brush"
+                                                          : "Q/E swap - C pick - B fill - R stipple - G blend");
             if (input.bucket_active) {
                 const AlphaLibrary& pl = fill_patterns();
                 const int pi = std::max(0, std::min(input.fill_pattern, pl.count() - 1));
@@ -1235,6 +1240,10 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
                             ImGuiColorEditFlags_NoSidePreview |
                             ImGuiColorEditFlags_NoInputs |
                             ImGuiColorEditFlags_NoLabel);
+        if (input.paint_stipple_active) {
+            ImGui::Separator();
+            draw_stipple_options(input.paint_stipple, false, true);
+        }
         ImGui::EndPopup();
     }
     // Stipple: right-click pops its jitter / scatter knobs at the cursor.
@@ -1244,7 +1253,7 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
         ImGui::OpenPopup("##stipplepop");
     }
     if (ImGui::BeginPopup("##stipplepop")) {
-        draw_stipple_options(input, false);
+        draw_stipple_options(input.stipple, false);
         ImGui::EndPopup();
     }
 
@@ -2010,8 +2019,7 @@ void draw_keybind_window(InputState& input, int win_w, int win_h) {
 // Same frame, padding and background as the key bindings window. Changes apply as you
 // drag (and save on the settings debounce), so there is no Save/Cancel, just Close.
 // The same window doubles as the unselected-colour picker (input.props_page).
-bool draw_stipple_options(InputState& input, bool row) {
-    StippleSettings& st = input.stipple;
+bool draw_stipple_options(StippleSettings& st, bool row, bool paint) {
     bool changed = false;
     const float w = row ? 110.0f : 170.0f;
     // A 0-100% slider; in a row the label rides inside the slider to save width.
@@ -2025,13 +2033,14 @@ bool draw_stipple_options(InputState& input, bool row) {
         if (ImGui::SliderFloat(id, &p, 0.0f, 100.0f, fmt)) { *v = p * 0.01f; changed = true; }
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
     };
-    if (!row) ImGui::TextDisabled("Stipple");
+    if (!row) ImGui::TextDisabled(paint ? "Stipple (paint)" : "Stipple");
     else { ImGui::AlignTextToFramePadding(); ImGui::TextUnformatted("Jitter"); }
     pct("Spin",  "##stRot",   &st.rot_jitter,   "Random turn per stamp. 100%: any angle (shows with an alpha; the Round dot has no turn)");
     if (!row) ImGui::Spacing();
     pct("Size",  "##stSize",  &st.size_jitter,  "Each stamp shrinks by up to this much");
     if (!row) ImGui::Spacing();
-    pct("Depth", "##stDepth", &st.depth_jitter, "Each stamp lands up to this much lighter");
+    if (paint) pct("Opacity", "##stDepth", &st.depth_jitter, "Each stamp lands up to this much fainter");
+    else       pct("Depth", "##stDepth", &st.depth_jitter, "Each stamp lands up to this much lighter");
     if (row) ImGui::SameLine(0.0f, 16.0f);
     else { ImGui::Spacing(); ImGui::Separator(); }
     if (ImGui::Checkbox("Scatter", &st.scatter)) changed = true;
@@ -2053,6 +2062,13 @@ bool draw_stipple_options(InputState& input, bool row) {
             changed = true;
         }
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("A copy's size, as a share of the brush");
+        if (paint) {
+            // Paint + Scatter only: every other copy takes the second colour (Q/E swatch).
+            if (row) ImGui::SameLine(0.0f, 16.0f);
+            if (ImGui::Checkbox("Two colours", &st.two_colours)) changed = true;
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Copies alternate main and second colour, half each");
+        }
     }
     return changed;
 }

@@ -1108,7 +1108,7 @@ bool swatch_picker_popup(InputState& input, const AlphaLibrary* alpha_lib, int& 
 
 // Paint mode's tools are all the paint brush underneath (its colour, size and layer);
 // the tool says what a click does with it.
-enum class RailTool { Brush, Bucket, Picker };
+enum class RailTool { Brush, Bucket, Picker, Stipple, Blend };
 bool alpha_picker_popup(InputState& input, const AlphaLibrary* alpha_lib, ImVec2 at, bool strip = false) {
     return swatch_picker_popup(input, alpha_lib, input.active_alpha, "##alphapick", "BRUSH ALPHA",
                                true, at, strip);
@@ -1140,7 +1140,9 @@ constexpr int kRailBrushCount = (int)(sizeof kRailBrushes / sizeof kRailBrushes[
 // Paint mode's own dock. Mask is here because masking is how you fence off what the
 // bucket fills; Smooth smooths whichever of the two is underneath, as in sculpt.
 const RailBrush kPaintBrushes[] = {
-    {"pPaint",  "Paint",         KeyAction::MODE_PAINT,   Icon::ModePaint,   BrushType::PAINT},
+    {"pPaint",  "Paint",         KeyAction::PAINT_BRUSH,  Icon::ModePaint,   BrushType::PAINT},
+    {"pStipple","Stipple",       KeyAction::PAINT_STIPPLE, Icon::BrushStipple, BrushType::PAINT, RailTool::Stipple},
+    {"pBlend",  "Blend",         KeyAction::PAINT_BLEND,  Icon::PaintBlend,  BrushType::PAINT, RailTool::Blend},
     {"pBucket", "Fill Bucket",   KeyAction::PAINT_BUCKET, Icon::PaintBucket, BrushType::PAINT, RailTool::Bucket},
     {"pPicker", "Colour Picker", KeyAction::PAINT_PICKER, Icon::PaintPicker, BrushType::PAINT, RailTool::Picker},
     {"pSmooth", "Smooth",        KeyAction::COUNT,        Icon::BrushSmooth, BrushType::SMOOTH},
@@ -1163,7 +1165,10 @@ bool rail_brush_on(const InputState& in, const RailBrush& b, bool smooth_on) {
     switch (b.tool) {
         case RailTool::Bucket: return in.bucket_active;
         case RailTool::Picker: return in.color_pick_active;
-        default:               return !in.bucket_active && !in.color_pick_active;
+        case RailTool::Stipple: return in.paint_stipple_active;
+        case RailTool::Blend:   return in.paint_blend_active;
+        default:               return !in.bucket_active && !in.color_pick_active
+                                      && !in.paint_stipple_active && !in.paint_blend_active;
     }
 }
 
@@ -1175,8 +1180,11 @@ void rail_pick(InputState& in, const RailBrush& b) {
     in.subtract_locked = false;
     in.interaction_mode = InputState::InteractionMode::EDIT;
     if (b.type != BrushType::PAINT) return;
-    if (b.tool != RailTool::Brush) in.paint_target_density = false;   // colour-only tools
+    if (b.tool == RailTool::Bucket || b.tool == RailTool::Picker)
+        in.paint_target_density = false;   // colour-only tools (Stipple paints density too)
     in.bucket_active = b.tool == RailTool::Bucket;
+    in.paint_stipple_active = b.tool == RailTool::Stipple;
+    in.paint_blend_active = b.tool == RailTool::Blend;
     in.color_pick_active = b.tool == RailTool::Picker && !in.color_pick_active;
 }
 
@@ -2087,7 +2095,11 @@ void options_panel(InputState& input, int win_h) {
     if (!begin_panel("##mOpts", ImVec2(g_brush_right + 12.0f, (float)win_h - kEdge), ImVec2(0, 1),
                      ImVec2(12, 8), 8.0f, 12.0f)) { end_panel(); return; }
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8, 7));
-    if (stipple_on) draw_stipple_options(input, true);
+    if (stipple_on) draw_stipple_options(input.stipple, true);
+    if (paint_on && input.paint_stipple_active) {
+        draw_stipple_options(input.paint_stipple, true, true);
+        ImGui::SameLine(0.0f, 16.0f);
+    }
     if (paint_on) {
         Grow g = grow_begin();
         const bool to_colour = chip("Colour", !input.paint_target_density);
@@ -3375,6 +3387,10 @@ void draw_modern_ui(InputState& input, int win_w, int win_h, const AlphaLibrary*
             ImGui::ColorPicker3("##paintpick", input.paint_color,
                                 ImGuiColorEditFlags_NoSidePreview | ImGuiColorEditFlags_NoInputs |
                                 ImGuiColorEditFlags_NoLabel);
+            if (input.paint_stipple_active) {
+                ImGui::Separator();
+                draw_stipple_options(input.paint_stipple, false, true);
+            }
             end_skin_popup();
         }
         // Stipple: its jitter / scatter knobs at the cursor, same trigger.
@@ -3385,7 +3401,7 @@ void draw_modern_ui(InputState& input, int win_w, int win_h, const AlphaLibrary*
             ImGui::OpenPopup("##stipplepop");
         }
         if (begin_skin_popup("##stipplepop", ImVec2(14, 12), false)) {
-            draw_stipple_options(input, false);
+            draw_stipple_options(input.stipple, false);
             end_skin_popup();
         }
     }

@@ -23,6 +23,7 @@ enum class Icon {
     RetopoContour,                    // mode 0's contours (rings round a limb)
     UvSeamMark, UvSeamCut, UvSeamWeld, // UV mode: mark seams (a chalk line), cut them (scissors), weld them (stitches)
     BrushStipple,                     // Stipple brush: a scatter of dots
+    PaintBlend,                       // paint Blend: a yin-yang
     Count
 };
 

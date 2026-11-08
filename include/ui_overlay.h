@@ -3,6 +3,7 @@
 
 struct TextOverlay;
 struct InputState;
+struct StippleSettings;
 struct AlphaLibrary;
 class Scene;
 
@@ -65,7 +66,8 @@ void draw_brush_props_window(InputState& input, int win_w, int win_h);
 // plain ImGui widgets, shared by every skin's right-click popup and the modern tool
 // options dock. `row` lays them out on one line (the dock); otherwise stacked (popup).
 // Returns true if anything changed.
-bool draw_stipple_options(InputState& input, bool row);
+// `paint` is paint mode's Stipple: its depth jitter is opacity, so the label says so.
+bool draw_stipple_options(StippleSettings& st, bool row, bool paint = false);
 // Paint layers docker (paint mode, colour target). Shared by every skin.
 void draw_paint_layers_panel(InputState& input, Scene& scene, int win_w, int win_h);
 

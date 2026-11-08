@@ -1927,7 +1927,9 @@ int main(int argc, char* argv[]) {
                 // strength, whatever the spacing or the hand speed, so it opts out of
                 // the density compensation and the speed falloff below (it still takes
                 // the max-effect ceiling and pen pressure like the other additives).
-                const bool is_stipple = bt == BrushType::STIPPLE;
+                const bool is_stipple = bt == BrushType::STIPPLE || bt == BrushType::PAINT_STIPPLE;
+                const StippleSettings& stipple_st =
+                    bt == BrushType::PAINT_STIPPLE ? input.paint_stipple : input.stipple;
                 float ceiling = additive_brush ? input.max_effect : 1.0f;
                 eff_strength *= PRESSURE_STR_FLOOR +
                                 (ceiling - PRESSURE_STR_FLOOR) * p_shaped;
@@ -2073,8 +2075,8 @@ int main(int argc, char* argv[]) {
                 // Stipple's Scatter makes every dab `copies` stamps, each a full Draw
                 // dab, so the budget is in stamps: stretch the step the same way rather
                 // than let a flick with 64 copies queue 4096 dabs in one frame.
-                if (is_stipple && input.stipple.scatter && !first_dab) {
-                    const int per = std::max(1, input.stipple.copies);
+                if (is_stipple && stipple_st.scatter && !first_dab) {
+                    const int per = std::max(1, stipple_st.copies);
                     const int cap = std::max(1, STIPPLE_STAMPS_MAX / per);
                     if (dab_count > cap) {
                         dab_count = cap;
@@ -2255,6 +2257,33 @@ int main(int argc, char* argv[]) {
                                 renderer.update_mask_partial(*mesh, mask_dirty);
                             }
                         }
+                    } else if (input.current_brush == BrushType::PAINT && input.paint_blend_active) {
+                        // Blend: drag colour along the stroke. Needs a direction, so the
+                        // stroke's first dab and a resting brush lay nothing.
+                        const float px = dab_i > 0 ? dab_px[dab_i - 1] : brush_stroke.last_dab_x;
+                        const float py = dab_i > 0 ? dab_py[dab_i - 1] : brush_stroke.last_dab_y;
+                        const float sx = dab_x - px, sy = dab_y - py;
+                        const bool moved = !(first_dab && dab_i == 0) && sx * sx + sy * sy > 1e-4f;
+                        if (!moved) {
+                            // nothing to drag yet
+                        } else if (input.paint_target_density) {
+                            // Density has no directional pass: a plain smooth there.
+                            if (compute.supported && compute.has_density_smooth())
+                                brush_stroke.apply_density_smooth_gpu(ctx, dab_x, dab_y, eff_strength, eff_hardness);
+                        } else if (compute.supported && compute.has_color_smooth()) {
+                            brush_stroke.apply_color_smooth_gpu(ctx, dab_x, dab_y, eff_strength,
+                                                                eff_hardness, sx, sy);
+                        }
+                    } else if (input.current_brush == BrushType::PAINT && is_stipple) {
+                        // Paint mode's Stipple: same stamps, colour or density ink.
+                        const bool dens = input.paint_target_density;
+                        if (dens ? (compute.supported && compute.has_density_kernels())
+                                 : (compute.supported && compute.has_color())) {
+                            brush_stroke.apply_stipple(ctx, dab_x, dab_y, eff_strength, eff_hardness,
+                                                       input.is_subtract_active(), stipple_st,
+                                                       dens ? BrushStroke::StippleInk::Density
+                                                            : BrushStroke::StippleInk::Colour);
+                        }
                     } else if (input.current_brush == BrushType::PAINT) {
                         if (input.paint_target_density) {
                             if (compute.supported && compute.has_density_kernels()) {
@@ -2278,7 +2307,7 @@ int main(int argc, char* argv[]) {
                                                 input.is_subtract_active(), true);
                     } else if (input.current_brush == BrushType::STIPPLE) {
                         brush_stroke.apply_stipple(ctx, dab_x, dab_y, eff_strength, eff_hardness,
-                                                   input.is_subtract_active(), input.stipple);
+                                                   input.is_subtract_active(), stipple_st);
                     }
 
                     // Mask and paint write straight to their own VBO and never move

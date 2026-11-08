@@ -49,6 +49,12 @@ const KeyActionInfo kKeyActions[(int)KeyAction::COUNT] = {
         "Draw and Mask. In Paint mode: swap colours. In Select mode: hold to spin the selection.", {GLFW_KEY_E, 0}},
     {"paint_bucket",  "Paint mode", "Fill bucket",      "Click an unmasked area to fill it. Ctrl: erase it", {GLFW_KEY_B, 0}, KeyScope::Paint},
     {"paint_picker",  "Paint mode", "Colour picker",    "Click the model to pick its colour", {GLFW_KEY_C, 0}, KeyScope::Paint},
+    {"paint_brush",   "Paint mode", "Paint brush",
+        "Back to the plain brush from the bucket, picker or Stipple", {GLFW_KEY_D, 0}, KeyScope::Paint},
+    {"paint_stipple", "Paint mode", "Stipple",
+        "Colour stamps: random spin, size and opacity. Right-click: colour, jitter and Scatter", {GLFW_KEY_R, 0}, KeyScope::Paint},
+    {"paint_blend",   "Paint mode", "Blend",
+        "Drags colour along the stroke, like a directional blur", {GLFW_KEY_G, 0}, KeyScope::Paint},
     {"retopo_build",  "Retopo mode", "Build",            "Turn the strokes into quads (the bar's Build)", {GLFW_KEY_SPACE, 0}, KeyScope::Retopo},
     {"retopo_draw",   "Retopo mode", "Draw polygon strips", nullptr, {GLFW_KEY_D, 0}, KeyScope::Retopo},
     {"retopo_grab",   "Retopo mode", "Grab polygon strips", "Drag the built quads around", {GLFW_KEY_G, 0}, KeyScope::Retopo},
@@ -285,6 +291,14 @@ InputState::InputState()
     per_brush[(int)BrushType::STIPPLE].spacing  = 1.0f;
     per_brush[(int)BrushType::STIPPLE].strength = 0.4f;
     per_brush[(int)BrushType::STIPPLE].hardness = 0.5f;
+    // Paint Stipple: same spacing reasoning; full opacity so a freckle reads at a tap.
+    per_brush[(int)BrushType::PAINT_STIPPLE].spacing  = 1.0f;
+    per_brush[(int)BrushType::PAINT_STIPPLE].strength = 1.0f;
+    per_brush[(int)BrushType::PAINT_STIPPLE].hardness = 0.5f;
+    // Blend: tight spacing so the smear is one continuous drag, not a row of blots.
+    per_brush[(int)BrushType::PAINT_BLEND].spacing  = 0.10f;
+    per_brush[(int)BrushType::PAINT_BLEND].strength = 0.6f;
+    per_brush[(int)BrushType::PAINT_BLEND].hardness = 0.3f;
 
     drop_path[0] = '\0';
     paint_color[0] = 0.85f; paint_color[1] = 0.25f; paint_color[2] = 0.30f;      // warm red
@@ -296,6 +310,8 @@ InputState::InputState()
     color_pick_have = false;
     paint_mode = false;
     bucket_active = false;
+    paint_stipple_active = false;
+    paint_blend_active = false;
     bucket_click = false;
     bucket_erase = false;
     fill_pattern = kFillSolid;
@@ -328,7 +344,7 @@ void InputState::seed_brush_sizes() {
 }
 
 void InputState::switch_brush(BrushType to) {
-    if (to != BrushType::PAINT) { color_pick_active = false; bucket_active = false; }
+    if (to != BrushType::PAINT) { color_pick_active = false; bucket_active = false; paint_stipple_active = false; paint_blend_active = false; }
     if (to == BrushType::PAINT) paint_mode = true;
     else if (to != BrushType::MASK) paint_mode = false;
     if (to == current_brush) return;
@@ -356,6 +372,8 @@ void InputState::switch_brush(BrushType to) {
 BrushType InputState::live_brush_slot() const {
     if (is_smooth_active() || current_brush == BrushType::SMOOTH) return BrushType::SMOOTH;
     if (current_brush == BrushType::PAINT && bucket_active) return BrushType::BUCKET;
+    if (current_brush == BrushType::PAINT && paint_stipple_active) return BrushType::PAINT_STIPPLE;
+    if (current_brush == BrushType::PAINT && paint_blend_active) return BrushType::PAINT_BLEND;
     return current_brush;
 }
 
@@ -408,6 +426,8 @@ void InputState::enter_paint_mode() {
     switch_brush(BrushType::PAINT);
     paint_mode = true;
     bucket_active = false;
+    paint_stipple_active = false;
+    paint_blend_active = false;
     color_pick_active = false;
     subtract_locked = false;
 }
@@ -417,6 +437,8 @@ void InputState::enter_retopo_mode() {
     uv_mode = false;
     clear_smooth_lock();
     bucket_active = false;
+    paint_stipple_active = false;
+    paint_blend_active = false;
     color_pick_active = false;
 }
 
@@ -509,6 +531,8 @@ const char* InputState::brush_name() const {
         case BrushType::SMOOTH: return "Smooth";
         case BrushType::MASK:   return "Mask";
         case BrushType::PAINT:  return bucket_active ? (is_subtract_active() ? "Fill (erase)" : "Fill")
+                                     : paint_stipple_active ? (is_subtract_active() ? "Stipple (erase)" : "Stipple")
+                                     : paint_blend_active ? "Blend"
                                                      : "Paint";
         default: return "Unknown";
     }
@@ -1381,8 +1405,50 @@ static void run_key_action(GLFWwindow* w, KeyAction a, bool repeat) {
             pick_brush(BrushType::PAINT);
             in.paint_target_density = false;   // the bucket fills colour only
             in.color_pick_active = false;
+            in.paint_stipple_active = false;
+            in.paint_blend_active = false;
             in.bucket_active = true;
             notify("Fill bucket: click an unmasked area (Ctrl erases)", 1.5f);
+            break;
+
+        case KeyAction::PAINT_BRUSH:
+            // Paint mode's D: the plain brush, whatever was armed. (Pressing 4 again
+            // still does the same, through enter_paint_mode.)
+            in.enter_paint_mode();
+            notify("Paint brush", 1.0f);
+            break;
+        case KeyAction::PAINT_STIPPLE:
+            // Paint mode's R: arm Stipple. Again: back to the brush, like the bucket.
+            in.interaction_mode = InputState::InteractionMode::EDIT;
+            if (in.paint_mode && in.current_brush == BrushType::PAINT && in.paint_stipple_active
+                && !in.is_smooth_active()) {
+                in.paint_stipple_active = false;
+                notify("Paint brush", 1.0f);
+                break;
+            }
+            pick_brush(BrushType::PAINT);
+            in.bucket_active = false;
+            in.color_pick_active = false;
+            in.paint_blend_active = false;
+            in.paint_stipple_active = true;
+            notify("Stipple: right-click for colour, jitter and Scatter", 1.5f);
+            break;
+
+        case KeyAction::PAINT_BLEND:
+            // Paint mode's G: arm Blend. Again: back to the brush.
+            in.interaction_mode = InputState::InteractionMode::EDIT;
+            if (in.paint_mode && in.current_brush == BrushType::PAINT && in.paint_blend_active
+                && !in.is_smooth_active()) {
+                in.paint_blend_active = false;
+                notify("Paint brush", 1.0f);
+                break;
+            }
+            pick_brush(BrushType::PAINT);
+            in.bucket_active = false;
+            in.color_pick_active = false;
+            in.paint_stipple_active = false;
+            in.paint_blend_active = true;
+            notify("Blend: drag colour along the stroke", 1.5f);
             break;
 
         case KeyAction::BRUSH_DRAW:    pick_brush(BrushType::DRAW);    break;
@@ -1402,6 +1468,8 @@ static void run_key_action(GLFWwindow* w, KeyAction a, bool repeat) {
             if (in.current_brush != BrushType::PAINT) pick_brush(BrushType::PAINT);
             in.color_pick_active = !in.color_pick_active;
             in.bucket_active = false;
+            in.paint_stipple_active = false;
+            in.paint_blend_active = false;
             notify(in.color_pick_active ? "Colour picker: click the model (Ctrl: paint only, C/ESC cancels)"
                                         : "Colour picker off", 1.5f);
             break;

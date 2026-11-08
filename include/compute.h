@@ -200,6 +200,9 @@ struct ColorPaintParams {
     float paint_r, paint_g, paint_b;  // brush albedo, linear [0,1]
     float paint_a = 1.0f;             // target coverage: 1 = paint, 0 = erase to transparent
     uint32_t vertex_count;
+    // Colour smooth only: Blend's stroke direction (world, unit) and how strictly the
+    // pass follows it. flow_amt 0 = the plain smooth.
+    float flow_x = 0.0f, flow_y = 0.0f, flow_z = 0.0f, flow_amt = 0.0f;
 };
 
 struct MoveCaptureParams {

@@ -2,6 +2,15 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-09 — Paint mode: Stipple (R), Blend (G), D for the brush
+
+- Stipple in Paint mode: colour stamps with random spin, size and opacity, and Scatter. Its own knobs, under the colour wheel on right-click and in the tool dock.
+- Two colours (with Scatter on): copies alternate main and second colour, half each.
+- Blend: a directional blur. Colour is taken only from behind the stroke, so it drags the way you move. Mirror smears both sides outward. On Density it smooths.
+- Smooth mixes colours further: two passes per dab instead of one.
+- D in Paint mode goes back to the plain brush from the bucket, picker, Stipple or Blend.
+- Sculpt Stipple added to the shortcut card.
+
 ## 2026-11-08 — Stipple brush (R)
 
 - New sculpt brush for fine detail: each dab is a Draw stamp of the current alpha, landed on pen-down, with random spin, size and depth per stamp.

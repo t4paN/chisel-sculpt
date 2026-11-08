@@ -26,9 +26,9 @@ constexpr float kDebounceSec   = 1.0f;   // quiet time after the last edit befor
 // keying off it would silently orphan every saved brush the day a label changes.
 const char* kBrushKey[(int)BrushType::COUNT] = {
     "draw", "clay", "inflate", "crease", "pinch",
-    "move", "limb", "pose", "smooth", "mask", "paint", "bucket", "stipple"
+    "move", "limb", "pose", "smooth", "mask", "paint", "bucket", "stipple", "paint_stipple", "paint_blend"
 };
-static_assert((int)BrushType::COUNT == 13, "kBrushKey is out of sync with BrushType");
+static_assert((int)BrushType::COUNT == 15, "kBrushKey is out of sync with BrushType");
 
 const char* kProfileKey[(int)InputProfile::COUNT] = { "mouse", "tablet" };
 
@@ -231,6 +231,13 @@ std::string serialize(const InputState& in) {
     append_kv(s, "stipple_scatter",     in.stipple.scatter);
     append_kv(s, "stipple_copies",      in.stipple.copies);
     append_kv(s, "stipple_copy_size",   in.stipple.copy_size);
+    append_kv(s, "paint_stipple_rot_jitter",   in.paint_stipple.rot_jitter);
+    append_kv(s, "paint_stipple_size_jitter",  in.paint_stipple.size_jitter);
+    append_kv(s, "paint_stipple_depth_jitter", in.paint_stipple.depth_jitter);
+    append_kv(s, "paint_stipple_scatter",      in.paint_stipple.scatter);
+    append_kv(s, "paint_stipple_copies",       in.paint_stipple.copies);
+    append_kv(s, "paint_stipple_copy_size",    in.paint_stipple.copy_size);
+    append_kv(s, "paint_stipple_two_colours",  in.paint_stipple.two_colours);
     append_kv(s, "density_coarse_mult", in.density_coarse_mult);
     append_kv(s, "density_fine_mult",   in.density_fine_mult);
     // Shortcuts: only the ones that differ from the factory binding, as key.<id>=<glfw
@@ -322,6 +329,13 @@ void apply_global_key(InputState& in, const std::string& key, const std::string&
     else if (key == "stipple_scatter")     in.stipple.scatter     = parse_bool(val);
     else if (key == "stipple_copies")      in.stipple.copies      = (int)clampf(std::strtof(val.c_str(), nullptr), 1.0f, 64.0f);
     else if (key == "stipple_copy_size")   in.stipple.copy_size   = clampf(std::strtof(val.c_str(), nullptr), 0.05f, 1.0f);
+    else if (key == "paint_stipple_rot_jitter")   in.paint_stipple.rot_jitter   = clampf(std::strtof(val.c_str(), nullptr), 0.0f, 1.0f);
+    else if (key == "paint_stipple_size_jitter")  in.paint_stipple.size_jitter  = clampf(std::strtof(val.c_str(), nullptr), 0.0f, 1.0f);
+    else if (key == "paint_stipple_depth_jitter") in.paint_stipple.depth_jitter = clampf(std::strtof(val.c_str(), nullptr), 0.0f, 1.0f);
+    else if (key == "paint_stipple_scatter")      in.paint_stipple.scatter      = parse_bool(val);
+    else if (key == "paint_stipple_copies")       in.paint_stipple.copies       = (int)clampf(std::strtof(val.c_str(), nullptr), 1.0f, 64.0f);
+    else if (key == "paint_stipple_copy_size")    in.paint_stipple.copy_size    = clampf(std::strtof(val.c_str(), nullptr), 0.05f, 1.0f);
+    else if (key == "paint_stipple_two_colours")  in.paint_stipple.two_colours  = parse_bool(val);
     else if (key == "density_coarse_mult") in.density_coarse_mult = clampf(std::strtof(val.c_str(), nullptr), 1.0f, 4.0f);
     else if (key == "density_fine_mult")   in.density_fine_mult   = clampf(std::strtof(val.c_str(), nullptr), 0.2f, 1.0f);
     else if (key == "per_brush_sizes")     in.per_brush_sizes     = parse_bool(val);
@@ -530,6 +544,7 @@ void settings_reset(InputState& input) {
     input.crease_dot         = fresh.crease_dot;
     input.crease_build       = fresh.crease_build;
     input.stipple            = fresh.stipple;
+    input.paint_stipple      = fresh.paint_stipple;
     input.density_coarse_mult = fresh.density_coarse_mult;
     input.density_fine_mult   = fresh.density_fine_mult;
     input.active_alpha       = fresh.active_alpha;

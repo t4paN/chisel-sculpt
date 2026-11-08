@@ -27,6 +27,14 @@ enum class BrushType {
     // — the plain Round dot makes a pore field without a many-dot alpha. Settings in
     // InputState::stipple. Appended after BUCKET so no existing index moves.
     STIPPLE,
+    // Paint mode's Stipple: colour (or density) stamps with the same jitter and Scatter.
+    // A settings slot only, like BUCKET: current_brush stays PAINT and
+    // paint_stipple_active arms it; live_brush_slot() aims here while it is armed, so
+    // its size, opacity and spacing don't move the paint brush's.
+    PAINT_STIPPLE,
+    // Paint mode's Blend: directional blur, colour dragged along the stroke. A settings
+    // slot only, armed by paint_blend_active, same pattern as PAINT_STIPPLE.
+    PAINT_BLEND,
     COUNT
 };
 
@@ -46,6 +54,7 @@ struct StippleSettings {
     bool  scatter      = false;  // one dab -> `copies` stamps spread over the brush disc
     int   copies       = 12;     // 1..64 stamps per dab while scatter is on
     float copy_size    = 0.18f;  // 0.05..1: a copy's size as a fraction of the brush
+    bool  two_colours  = false;  // paint + scatter only: copies alternate main / second colour, 50-50
 };
 
 struct BrushSettings {
@@ -114,7 +123,7 @@ enum class KeyAction : int {
     MODE_SCULPT, MODE_INSERT, MODE_SELECT, MODE_PAINT, MODE_RETOPO, MODE_UV,
     BRUSH_DRAW, BRUSH_CLAY, BRUSH_INFLATE, BRUSH_CREASE, BRUSH_PINCH,
     BRUSH_MOVE, BRUSH_LIMB, BRUSH_POSE, BRUSH_STIPPLE, BRUSH_MASK, BRUSH_PREV, BRUSH_NEXT,
-    PAINT_BUCKET, PAINT_PICKER,
+    PAINT_BUCKET, PAINT_PICKER, PAINT_BRUSH, PAINT_STIPPLE, PAINT_BLEND,
     RETOPO_BUILD, RETOPO_DRAW, RETOPO_GRAB, RETOPO_CUT, RETOPO_ERASE, RETOPO_FILL, RETOPO_WAND, RETOPO_MASK,
     RETOPO_CONTOUR, UV_SEAM_CUT, UV_SEAM_WELD,
     HOLD_SIZE, HOLD_STRENGTH, HOLD_HARDNESS, HOLD_SPACING, SIZE_DOWN, SIZE_UP, AUTOSMOOTH,
@@ -355,6 +364,8 @@ struct InputState {
 
     // Stipple brush options (see StippleSettings). Saved with the settings.
     StippleSettings stipple;
+    // Paint mode's Stipple has its own: freckles and pores want different knobs.
+    StippleSettings paint_stipple;
 
     // Colour deselected objects are multiplied by (default: a neutral light grey, #A5A5A5;
     // was a dark bordeaux until 2026-10-21). Set in the Unselected colour window (burger
@@ -456,6 +467,12 @@ struct InputState {
     // bucket_click is the one-shot event the main loop consumes; bucket_erase
     // latches Ctrl at the click, since it may be up again by the time that runs.
     bool bucket_active;
+    // Paint mode's Stipple is armed (R): the paint brush lays jittered stamps. Exclusive
+    // with the bucket and the picker; cleared on any brush switch off PAINT.
+    bool paint_stipple_active;
+    // Paint mode's Blend is armed (G): strokes drag colour along their direction.
+    // Exclusive with the bucket, picker and Stipple; cleared like them.
+    bool paint_blend_active;
     bool bucket_click;
     bool bucket_erase;
     // What the bucket lays down: a fill_patterns() index (brush_alpha.h). Solid and the

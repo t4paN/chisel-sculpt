@@ -109,6 +109,10 @@ const IconDef kIcons[(int)Icon::Count] = {
     /* UvSeamWeld   */ {{P("M3 12h18"), P("M5.5 7l3 10M10.5 7l3 10M15.5 7l3 10")}, 2},
     // Drawn here: a scatter of dots of a few sizes, what one Stipple dab with Scatter leaves.
     /* BrushStipple */ {{C(7, 7.5f, 2.6f), C(15.5f, 15, 3.4f), C(17, 5.5f, 1.4f), C(6, 17.5f, 1.4f)}, 4},
+    // Drawn here: a yin-yang, two colours folding into each other. The fill is the dark
+    // lobe (concave, along the S); the dot sits in the light one.
+    /* PaintBlend   */ {{C(12, 12, 9), F("M12 3a9 9 0 0 1 0 18a4.5 4.5 0 0 1 0-9a4.5 4.5 0 0 0 0-9z"),
+                         F("M12 6.2a1.3 1.3 0 1 0 0 2.6a1.3 1.3 0 1 0 0-2.6z")}, 3},
 };
 
 // ---- Minimal SVG path interpreter -------------------------------------------
@@ -346,6 +350,7 @@ const unsigned short kPixel[(int)Icon::Count][16] = {
     /* uv-seam-cut     */ {0x0000,0x1C02,0x3E04,0x6208,0x6210,0x6620,0x3E40,0x0180,0x0180,0x3E40,0x6620,0x6210,0x6208,0x3E04,0x1C02,0x0000},   // drawn here: scissors
     /* uv-seam-weld    */ {0x0000,0x0000,0x0000,0x0200,0x6230,0x2310,0x3118,0x7FFE,0x7FFE,0x188C,0x08C4,0x0C46,0x0040,0x0000,0x0000,0x0000},   // drawn here: stitches across a seam
     /* brush-stipple   */ {0x0000,0x0000,0x0018,0x3818,0x3800,0x3800,0x0000,0x0000,0x0060,0x00F0,0x00F0,0x1860,0x1800,0x0006,0x0006,0x0000},   // drawn here: scattered dots
+    /* paint-blend     */ {0x0000,0x0FF0,0x1818,0x218C,0x618E,0x400E,0x401E,0x403E,0x43FE,0x47FE,0x4E7E,0x6E7E,0x2E7C,0x1FF8,0x0FF0,0x0000},   // drawn here: yin-yang
 };
 } // namespace
 
