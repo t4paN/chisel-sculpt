@@ -2,6 +2,14 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-08 — Stipple brush (P)
+
+- New sculpt brush for fine detail: each dab is a Draw stamp of the current alpha, landed on pen-down, with random spin, size and depth per stamp.
+- Scatter turns one dab into several smaller copies spread over the brush ring, so the Round dot alone makes a pore field.
+- Options on right-click (every skin) and in the tool options dock (Modern, DOS). Saved with the settings.
+- Strength is per stamp: Stipple skips the spacing compensation and the speed falloff. A frame lays at most 256 scattered stamps.
+- Project detail down moves from P to Shift+P.
+
 ## 2026-11-06 — SDF merge: Close holes, closed holes take their colour from the rim
 
 - Close holes in the merge prompt (H): Normal, More or Most sets how wide a gap a paper-thin model's wrap seals. Solid models ignore it.

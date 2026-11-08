@@ -1141,8 +1141,7 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
     // every other brush (their dabs force the stamp off; see set_alpha_dab). Clay
     // always stamps the Square builtin and offers no choice, so no picker there.
     // Selection drives input.active_alpha; the main loop uploads on change.
-    bool alpha_brush = current == BrushType::DRAW || current == BrushType::MASK ||
-                       current == BrushType::PAINT;
+    bool alpha_brush = brush_uses_alpha(current);
     if (mode == InputState::InteractionMode::EDIT && alpha_brush
         && alpha_lib && alpha_lib->count() > 0) {
         const float sw = btn_h;
@@ -1173,7 +1172,7 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
 
     float brush_w = calc_btn_w("Inflate");
 
-    static char btips[10][48];
+    static char btips[11][48];
     auto btip = [&](int i, KeyAction a) {
         std::snprintf(btips[i], sizeof(btips[i]), "Shortcut: %s", input.key_label(a));
         return btips[i];
@@ -1188,6 +1187,7 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
         {"Move",    "Move",    btip(5, KeyAction::BRUSH_MOVE),    BrushType::MOVE},
         {"Limb",    "Limb",    btip(6, KeyAction::BRUSH_LIMB),    BrushType::LIMB},
         {"Pose",    "Pose",    btip(7, KeyAction::BRUSH_POSE),    BrushType::POSE},
+        {"Stipple", "Stipple", btip(10, KeyAction::BRUSH_STIPPLE), BrushType::STIPPLE},
         {"Smooth",  "Smooth",  "Shortcut: double-press Shift",    BrushType::SMOOTH},
         {"Mask",    "Mask",    btip(9, KeyAction::BRUSH_MASK),    BrushType::MASK},
     };
@@ -1235,6 +1235,16 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
                             ImGuiColorEditFlags_NoSidePreview |
                             ImGuiColorEditFlags_NoInputs |
                             ImGuiColorEditFlags_NoLabel);
+        ImGui::EndPopup();
+    }
+    // Stipple: right-click pops its jitter / scatter knobs at the cursor.
+    if (current == BrushType::STIPPLE && !smooth_on && rmb_edge && !input.zoom_modifier_held() &&
+        input.interaction_mode == InputState::InteractionMode::EDIT) {
+        ImGui::SetNextWindowPos(ImVec2((float)input.mouse_x, (float)input.mouse_y));
+        ImGui::OpenPopup("##stipplepop");
+    }
+    if (ImGui::BeginPopup("##stipplepop")) {
+        draw_stipple_options(input, false);
         ImGui::EndPopup();
     }
 
@@ -2000,6 +2010,53 @@ void draw_keybind_window(InputState& input, int win_w, int win_h) {
 // Same frame, padding and background as the key bindings window. Changes apply as you
 // drag (and save on the settings debounce), so there is no Save/Cancel, just Close.
 // The same window doubles as the unselected-colour picker (input.props_page).
+bool draw_stipple_options(InputState& input, bool row) {
+    StippleSettings& st = input.stipple;
+    bool changed = false;
+    const float w = row ? 110.0f : 170.0f;
+    // A 0-100% slider; in a row the label rides inside the slider to save width.
+    auto pct = [&](const char* label, const char* id, float* v, const char* tip) {
+        if (row) ImGui::SameLine(0.0f, 10.0f);
+        else { ImGui::AlignTextToFramePadding(); ImGui::TextUnformatted(label); ImGui::SameLine(86.0f); }
+        ImGui::SetNextItemWidth(w);
+        char fmt[32];
+        std::snprintf(fmt, sizeof(fmt), row ? "%s %%.0f%%%%" : "%%.0f%%%%", label);
+        float p = *v * 100.0f;
+        if (ImGui::SliderFloat(id, &p, 0.0f, 100.0f, fmt)) { *v = p * 0.01f; changed = true; }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
+    };
+    if (!row) ImGui::TextDisabled("Stipple");
+    else { ImGui::AlignTextToFramePadding(); ImGui::TextUnformatted("Jitter"); }
+    pct("Spin",  "##stRot",   &st.rot_jitter,   "Random turn per stamp. 100%: any angle (shows with an alpha; the Round dot has no turn)");
+    if (!row) ImGui::Spacing();
+    pct("Size",  "##stSize",  &st.size_jitter,  "Each stamp shrinks by up to this much");
+    if (!row) ImGui::Spacing();
+    pct("Depth", "##stDepth", &st.depth_jitter, "Each stamp lands up to this much lighter");
+    if (row) ImGui::SameLine(0.0f, 16.0f);
+    else { ImGui::Spacing(); ImGui::Separator(); }
+    if (ImGui::Checkbox("Scatter", &st.scatter)) changed = true;
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("One dab becomes many smaller stamps spread over the brush ring: a single dot alpha makes a pore field");
+    if (st.scatter) {
+        if (row) ImGui::SameLine(0.0f, 10.0f);
+        else { ImGui::AlignTextToFramePadding(); ImGui::TextUnformatted("Copies"); ImGui::SameLine(86.0f); }
+        ImGui::SetNextItemWidth(w);
+        if (ImGui::SliderInt("##stCopies", &st.copies, 1, 64, row ? "Copies %d" : "%d")) changed = true;
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Stamps per dab");
+        st.copies = st.copies < 1 ? 1 : (st.copies > 64 ? 64 : st.copies);
+        if (row) ImGui::SameLine(0.0f, 10.0f);
+        else { ImGui::AlignTextToFramePadding(); ImGui::TextUnformatted("Dot size"); ImGui::SameLine(86.0f); }
+        ImGui::SetNextItemWidth(w);
+        float p = st.copy_size * 100.0f;
+        if (ImGui::SliderFloat("##stCopySize", &p, 5.0f, 100.0f, row ? "Dot %.0f%%" : "%.0f%%")) {
+            st.copy_size = p * 0.01f;
+            changed = true;
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("A copy's size, as a share of the brush");
+    }
+    return changed;
+}
+
 void draw_brush_props_window(InputState& input, int win_w, int win_h) {
     if (input.brush_props_request) {
         input.brush_props_request = false;

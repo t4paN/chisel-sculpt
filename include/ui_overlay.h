@@ -61,6 +61,11 @@ void draw_help_popup(InputState& input, int win_w, int win_h);
 void draw_keybind_window(InputState& input, int win_w, int win_h);
 // Brush properties (burger menu): same frame as the key bindings window.
 void draw_brush_props_window(InputState& input, int win_w, int win_h);
+// Stipple's knobs (rotation / size / depth jitter, Scatter + copies + copy size) as
+// plain ImGui widgets, shared by every skin's right-click popup and the modern tool
+// options dock. `row` lays them out on one line (the dock); otherwise stacked (popup).
+// Returns true if anything changed.
+bool draw_stipple_options(InputState& input, bool row);
 // Paint layers docker (paint mode, colour target). Shared by every skin.
 void draw_paint_layers_panel(InputState& input, Scene& scene, int win_w, int win_h);
 

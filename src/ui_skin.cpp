@@ -1131,6 +1131,7 @@ const RailBrush kRailBrushes[] = {
     {"bMove",    "Move",    KeyAction::BRUSH_MOVE,    Icon::BrushMove,    BrushType::MOVE},
     {"bLimb",    "Limb",    KeyAction::BRUSH_LIMB,    Icon::BrushLimb,    BrushType::LIMB},
     {"bPose",    "Pose",    KeyAction::BRUSH_POSE,    Icon::BrushPose,    BrushType::POSE},
+    {"bStipple", "Stipple", KeyAction::BRUSH_STIPPLE, Icon::BrushStipple, BrushType::STIPPLE},
     {"bSmooth",  "Smooth",  KeyAction::COUNT,         Icon::BrushSmooth,  BrushType::SMOOTH},
     {"bMask",    "Mask",    KeyAction::BRUSH_MASK,    Icon::BrushMask,    BrushType::MASK},
 };
@@ -1577,9 +1578,9 @@ void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
     // the alpha names show in the strip.
     // The bucket's sidecard is the same swatch, showing its fill pattern instead.
     // The picker has neither.
-    const bool alpha_brush = current == BrushType::DRAW || current == BrushType::MASK ||
-                             (current == BrushType::PAINT && !input.bucket_active &&
-                              !input.color_pick_active);
+    const bool alpha_brush = brush_uses_alpha(current) &&
+                             !(current == BrushType::PAINT &&
+                               (input.bucket_active || input.color_pick_active));
     const bool bucket = current == BrushType::PAINT && input.bucket_active;
     const AlphaLibrary* lib = bucket ? &fill_patterns() : alpha_lib;
     if (editing && !smooth_on && (alpha_brush || bucket) && lib && lib->count() > 0
@@ -2080,11 +2081,13 @@ void options_panel(InputState& input, int win_h) {
     const bool smooth_on = input.is_smooth_active();
     const bool editing = input.interaction_mode == InputState::InteractionMode::EDIT;
     const bool paint_on = editing && current == BrushType::PAINT && !smooth_on;
-    if (!paint_on) return;   // Clay's Melt moved to the Brush properties window
+    const bool stipple_on = editing && current == BrushType::STIPPLE && !smooth_on;
+    if (!paint_on && !stipple_on) return;   // Clay's Melt moved to the Brush properties window
 
     if (!begin_panel("##mOpts", ImVec2(g_brush_right + 12.0f, (float)win_h - kEdge), ImVec2(0, 1),
                      ImVec2(12, 8), 8.0f, 12.0f)) { end_panel(); return; }
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8, 7));
+    if (stipple_on) draw_stipple_options(input, true);
     if (paint_on) {
         Grow g = grow_begin();
         const bool to_colour = chip("Colour", !input.paint_target_density);
@@ -2669,9 +2672,9 @@ void y2k_left(InputState& in, int H, const AlphaLibrary* lib) {
     y += ((count + 1) / 2) * (th + 4.0f) + 6.0f;
 
     // Alpha. The bucket and the picker have no stamp.
-    const bool alpha_brush = current == BrushType::DRAW || current == BrushType::MASK ||
-                             (current == BrushType::PAINT && !in.bucket_active &&
-                              !in.color_pick_active);
+    const bool alpha_brush = brush_uses_alpha(current) &&
+                             !(current == BrushType::PAINT &&
+                               (in.bucket_active || in.color_pick_active));
     if (editing && !smooth_on && alpha_brush && lib && lib->count() > 0) {
         ytext(dl, true, 11.0f, ImVec2(x0 + 2, y), y2k::label, "Alpha");
         y += 18;
@@ -3372,6 +3375,17 @@ void draw_modern_ui(InputState& input, int win_w, int win_h, const AlphaLibrary*
             ImGui::ColorPicker3("##paintpick", input.paint_color,
                                 ImGuiColorEditFlags_NoSidePreview | ImGuiColorEditFlags_NoInputs |
                                 ImGuiColorEditFlags_NoLabel);
+            end_skin_popup();
+        }
+        // Stipple: its jitter / scatter knobs at the cursor, same trigger.
+        if (input.current_brush == BrushType::STIPPLE && !smooth_on && rmb_edge &&
+            input.interaction_mode == InputState::InteractionMode::EDIT &&
+            !input.zoom_modifier_held()) {
+            ImGui::SetNextWindowPos(ImVec2((float)input.mouse_x, (float)input.mouse_y));
+            ImGui::OpenPopup("##stipplepop");
+        }
+        if (begin_skin_popup("##stipplepop", ImVec2(14, 12), false)) {
+            draw_stipple_options(input, false);
             end_skin_popup();
         }
     }

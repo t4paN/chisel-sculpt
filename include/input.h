@@ -21,7 +21,31 @@ enum class BrushType {
     // lands) and Hardness (edge between the two colours) don't move the paint brush's.
     // live_brush_slot() aims here while the bucket is armed; current_brush stays PAINT.
     BUCKET,
+    // Stipple: Draw's dab as a stamp for fine detail (pores, speckle, scratches).
+    // Lands on pen-down, every dab gets a random spin and size, and with Scatter on
+    // one dab becomes several smaller copies of the alpha spread over the brush disc
+    // — the plain Round dot makes a pore field without a many-dot alpha. Settings in
+    // InputState::stipple. Appended after BUCKET so no existing index moves.
+    STIPPLE,
     COUNT
+};
+
+// The brushes that sample the shared alpha (stamp) selection. Clay is not in here:
+// it ignores the picker and always stamps Square.
+inline bool brush_uses_alpha(BrushType b) {
+    return b == BrushType::DRAW || b == BrushType::MASK || b == BrushType::PAINT
+        || b == BrushType::STIPPLE;
+}
+
+// Stipple's knobs (right-click on the canvas, or the tool options dock). Global like
+// clay_melt / crease_dot, not per input profile: none of them depends on the device.
+struct StippleSettings {
+    float rot_jitter   = 1.0f;   // 0..1: random spin per stamp, up to +-180 deg at 1
+    float size_jitter  = 0.35f;  // 0..1: each stamp shrinks by up to this fraction
+    float depth_jitter = 0.25f;  // 0..1: each stamp's strength drops by up to this fraction
+    bool  scatter      = false;  // one dab -> `copies` stamps spread over the brush disc
+    int   copies       = 12;     // 1..64 stamps per dab while scatter is on
+    float copy_size    = 0.18f;  // 0.05..1: a copy's size as a fraction of the brush
 };
 
 struct BrushSettings {
@@ -89,7 +113,7 @@ struct ProfileSettings {
 enum class KeyAction : int {
     MODE_SCULPT, MODE_INSERT, MODE_SELECT, MODE_PAINT, MODE_RETOPO, MODE_UV,
     BRUSH_DRAW, BRUSH_CLAY, BRUSH_INFLATE, BRUSH_CREASE, BRUSH_PINCH,
-    BRUSH_MOVE, BRUSH_LIMB, BRUSH_POSE, BRUSH_MASK, BRUSH_PREV, BRUSH_NEXT,
+    BRUSH_MOVE, BRUSH_LIMB, BRUSH_POSE, BRUSH_STIPPLE, BRUSH_MASK, BRUSH_PREV, BRUSH_NEXT,
     PAINT_BUCKET, PAINT_PICKER,
     RETOPO_BUILD, RETOPO_DRAW, RETOPO_GRAB, RETOPO_CUT, RETOPO_ERASE, RETOPO_FILL, RETOPO_WAND, RETOPO_MASK,
     RETOPO_CONTOUR, UV_SEAM_CUT, UV_SEAM_WELD,
@@ -328,6 +352,9 @@ struct InputState {
     // Brush properties window (burger menu), not the options dock.
     float crease_dot   = 0.6f;
     float crease_build = 0.1f;
+
+    // Stipple brush options (see StippleSettings). Saved with the settings.
+    StippleSettings stipple;
 
     // Colour deselected objects are multiplied by (default: a neutral light grey, #A5A5A5;
     // was a dark bordeaux until 2026-10-21). Set in the Unselected colour window (burger

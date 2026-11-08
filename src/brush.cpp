@@ -1167,7 +1167,7 @@ float BrushStroke::falloff(float dist, float radius, float hardness) const {
 }
 
 void BrushStroke::set_alpha_dab(DabContext& ctx, bool allow) {
-    // Round brush unless the calling brush supports alphas (draw/clay/mask/paint)
+    // Round brush unless the calling brush supports alphas (draw/clay/stipple/mask/paint)
     // AND a stamp is selected AND uploaded (tex_w > 1 means the 1x1 dummy has been
     // replaced). Clay ignores the picker — it always stamps Square (the main loop
     // keeps that uploaded while Clay is current), so active_alpha doesn't gate it.
@@ -1223,7 +1223,7 @@ void BrushStroke::set_alpha_dab(DabContext& ctx, bool allow) {
     // Stamp spin: rotate the frame about n by the rake angle. The kernel's mirror-X
     // pass flips tang.x/bitan.x after this, so mirrored dabs get the reflected
     // rotation for free.
-    float total = (is_clay && stamp_rake_valid ? stamp_rake_angle : 0.0f);
+    float total = (is_clay && stamp_rake_valid ? stamp_rake_angle : 0.0f) + stamp_spin;
     if (total != 0.0f) {
         float cs = std::cos(total), sn = std::sin(total);
         Vec3 tr = t * cs + b * sn;
@@ -1293,6 +1293,13 @@ void BrushStroke::begin(Renderer& renderer, const Camera& cam,
     stamp_prev_valid = false;
     stamp_rake_valid = false;
     stamp_rake_angle = 0.0f;
+    stamp_spin = 0.0f;
+    {
+        static uint32_t strokes = 0;
+        uint64_t t = (uint64_t)std::chrono::steady_clock::now().time_since_epoch().count();
+        uint32_t seed = (uint32_t)(t ^ (t >> 32)) ^ (++strokes * 0x9E3779B9u);
+        stipple_rng = seed ? seed : 0x9E3779B9u;
+    }
 
     // GPU touched list: the stroke's touched set is built on the GPU and its undo
     // capture never leaves it. Needs everything the pen-up GPU path uses — the diff
@@ -1342,7 +1349,8 @@ void BrushStroke::begin(Renderer& renderer, const Camera& cam,
             || brush_type == BrushType::CLAY
             || brush_type == BrushType::INFLATE
             || brush_type == BrushType::CREASE
-            || brush_type == BrushType::PINCH)) {
+            || brush_type == BrushType::PINCH
+            || brush_type == BrushType::STIPPLE)) {
         compute->snapshot_stroke_normals(renderer.vbo_norm, vert_count);
     }
 
@@ -1693,6 +1701,70 @@ void BrushStroke::apply_pinch(DabContext& ctx, float dab_x, float dab_y,
     kick_dab_readback(ctx, DAB_GEO);   // dirty list lands async → snap + normals
 
     gpu_positions_deferred = true;
+}
+
+float BrushStroke::stipple_rand() {
+    uint32_t x = stipple_rng;
+    x ^= x << 13; x ^= x >> 17; x ^= x << 5;
+    stipple_rng = x;
+    return (x >> 8) * (1.0f / 16777216.0f);
+}
+
+void BrushStroke::apply_stipple(DabContext& ctx, float dab_x, float dab_y,
+                                float strength, float hardness, bool subtract,
+                                const StippleSettings& st) {
+    // Screen-space placement, like every other dab: the brush disc is ctx.eff_brush_size
+    // px in radius, and set_anchor turns each stamp's px radius into its world radius
+    // at the depth it lands on. Off-model stamps just fail their anchor and skip.
+    constexpr int   kMaxCopies = 64;
+    constexpr int   kTries     = 12;     // dart-throwing attempts per copy
+    constexpr float kMinPx     = 1.0f;   // never a sub-pixel stamp
+    constexpr float kPi        = 3.14159265f;
+    const float R = ctx.eff_brush_size;
+
+    const int n = st.scatter ? std::max(1, std::min(st.copies, kMaxCopies)) : 1;
+    float cx[kMaxCopies], cy[kMaxCopies], cr[kMaxCopies];
+    int placed = 0;
+    for (int i = 0; i < n; i++) {
+        // Size first: placement needs it to keep the copy inside the disc and apart
+        // from the others.
+        float r = (st.scatter ? R * st.copy_size : R)
+                * (1.0f - st.size_jitter * stipple_rand());
+        r = std::max(r, kMinPx);
+        float x = dab_x, y = dab_y;
+        if (st.scatter && n > 1) {
+            // Uniform over the disc the copy's centre may use (so its own footprint
+            // stays inside the brush ring), rejecting spots that would bury an earlier
+            // copy. A crowded disc runs out of tries and takes the last candidate —
+            // more copies than fit just overlap, which is what the user asked for.
+            const float reach = std::max(R - r, 0.0f);
+            for (int t = 0; t < kTries; t++) {
+                const float a = 2.0f * kPi * stipple_rand();
+                const float d = reach * std::sqrt(stipple_rand());
+                x = dab_x + d * std::cos(a);
+                y = dab_y + d * std::sin(a);
+                bool clear = true;
+                for (int j = 0; j < placed && clear; j++) {
+                    const float ex = x - cx[j], ey = y - cy[j];
+                    const float min_d = 0.9f * (r + cr[j]);
+                    clear = ex * ex + ey * ey >= min_d * min_d;
+                }
+                if (clear) break;
+            }
+        }
+        cx[placed] = x; cy[placed] = y; cr[placed] = r;
+        placed++;
+    }
+
+    DabContext sub = ctx;
+    for (int i = 0; i < placed; i++) {
+        sub.eff_brush_size = cr[i];
+        stamp_spin = (2.0f * stipple_rand() - 1.0f) * kPi * st.rot_jitter;
+        const float s = strength * (1.0f - st.depth_jitter * stipple_rand());
+        apply_draw(sub, cx[i], cy[i], s, hardness, subtract);
+        post_dab(sub);
+    }
+    stamp_spin = 0.0f;
 }
 
 void BrushStroke::apply_draw(DabContext& ctx, float dab_x, float dab_y,
