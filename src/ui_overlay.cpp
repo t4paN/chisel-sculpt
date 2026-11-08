@@ -1146,7 +1146,9 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
     // every other brush (their dabs force the stamp off; see set_alpha_dab). Clay
     // always stamps the Square builtin and offers no choice, so no picker there.
     // Selection drives input.active_alpha; the main loop uploads on change.
-    bool alpha_brush = brush_uses_alpha(current);
+    // Blend smears colour along the stroke; it has no stamp to pick.
+    bool alpha_brush = brush_uses_alpha(current)
+                    && !(current == BrushType::PAINT && input.paint_blend_active);
     if (mode == InputState::InteractionMode::EDIT && alpha_brush
         && alpha_lib && alpha_lib->count() > 0) {
         const float sw = btn_h;

@@ -1588,7 +1588,8 @@ void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
     // The picker has neither.
     const bool alpha_brush = brush_uses_alpha(current) &&
                              !(current == BrushType::PAINT &&
-                               (input.bucket_active || input.color_pick_active));
+                               (input.bucket_active || input.color_pick_active ||
+                                input.paint_blend_active));   // Blend smears, no stamp
     const bool bucket = current == BrushType::PAINT && input.bucket_active;
     const AlphaLibrary* lib = bucket ? &fill_patterns() : alpha_lib;
     if (editing && !smooth_on && (alpha_brush || bucket) && lib && lib->count() > 0
@@ -2686,7 +2687,8 @@ void y2k_left(InputState& in, int H, const AlphaLibrary* lib) {
     // Alpha. The bucket and the picker have no stamp.
     const bool alpha_brush = brush_uses_alpha(current) &&
                              !(current == BrushType::PAINT &&
-                               (in.bucket_active || in.color_pick_active));
+                               (in.bucket_active || in.color_pick_active ||
+                                in.paint_blend_active));   // Blend smears, no stamp
     if (editing && !smooth_on && alpha_brush && lib && lib->count() > 0) {
         ytext(dl, true, 11.0f, ImVec2(x0 + 2, y), y2k::label, "Alpha");
         y += 18;
