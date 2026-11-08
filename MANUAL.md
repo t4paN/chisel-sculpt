@@ -75,13 +75,13 @@ the camera, so you never have to switch tools just to look around.
 | G | **Move** | Grab-and-drag: picks up the surface under the cursor and moves it with you. |
 | H | **Limb** | Snakehook: pulls a tube out of the surface, redistributing and densifying geometry at the tip. Grow arms, tails, horns from nothing. |
 | K | **Pose** | Bend a limb at a joint: draw along it, drag the far end. See Posing below. |
-| P | **Stipple** | Fine detail stamps with the current alpha: pores, speckle, scratches. Lands the moment you press, every stamp with a random turn, size and depth. Ctrl stamps inward. See Stipple below. |
+| R | **Stipple** | Fine detail stamps with the current alpha: pores, speckle, scratches. Lands the moment you press, every stamp with a random turn, size and depth. Ctrl stamps inward. See Stipple below. |
 | Shift | **Smooth** | Hold Shift with any brush to smooth instead. In Paint mode it blends colours instead of geometry. |
 | M | **Mask** | Paints a protection mask (see Masking below). |
 
 ### Stipple
 
-Stipple (P) is for the small stuff. Every dab is a stamp of the current alpha (Q / E
+Stipple (R) is for the small stuff. Every dab is a stamp of the current alpha (Q / E
 step through them), and it lands the moment you press: tap for one, drag for a trail
 spaced by Spacing.
 
@@ -199,7 +199,7 @@ Chisel keeps a displacement stack: a base cage plus per-level detail layers.
 |---|---|
 | Ctrl + D | Subdivision level up (adds detail resolution) |
 | Shift + D | Subdivision level down (edit broad forms; detail is preserved) |
-| Shift+P | Project displacement (bake current-level changes down the stack) |
+| P | Project displacement (bake current-level changes down the stack) |
 
 Step down to move big shapes, step back up and your fine detail rides along on the
 adjusted forms. Each object in the scene has its own independent level and stack.
