@@ -113,6 +113,11 @@ const IconDef kIcons[(int)Icon::Count] = {
     // lobe (concave, along the S); the dot sits in the light one.
     /* PaintBlend   */ {{C(12, 12, 9), F("M12 3a9 9 0 0 1 0 18a4.5 4.5 0 0 1 0-9a4.5 4.5 0 0 0 0-9z"),
                          F("M12 6.2a1.3 1.3 0 1 0 0 2.6a1.3 1.3 0 1 0 0-2.6z")}, 3},
+    // Drawn here: three corners clicked and joined, the quad's last two sides dashed
+    // toward the fourth, still to come.
+    /* RetopoPoints */ {{P("M7.4 5H16.6M19 7.4V16.6"), D("M16.6 19H5V7.4"),
+                         C(5, 5, 2.4f), P("M16.6 5a2.4 2.4 0 1 0 4.8 0a2.4 2.4 0 1 0-4.8 0"
+                                          "M16.6 19a2.4 2.4 0 1 0 4.8 0a2.4 2.4 0 1 0-4.8 0")}, 4},
 };
 
 // ---- Minimal SVG path interpreter -------------------------------------------
@@ -351,6 +356,7 @@ const unsigned short kPixel[(int)Icon::Count][16] = {
     /* uv-seam-weld    */ {0x0000,0x0000,0x0000,0x0200,0x6230,0x2310,0x3118,0x7FFE,0x7FFE,0x188C,0x08C4,0x0C46,0x0040,0x0000,0x0000,0x0000},   // drawn here: stitches across a seam
     /* brush-stipple   */ {0x0000,0x0000,0x0018,0x3818,0x3800,0x3800,0x0000,0x0000,0x0060,0x00F0,0x00F0,0x1860,0x1800,0x0006,0x0006,0x0000},   // drawn here: scattered dots
     /* paint-blend     */ {0x0000,0x0FF0,0x1818,0x218C,0x618E,0x400E,0x401E,0x403E,0x43FE,0x47FE,0x4E7E,0x6E7E,0x2E7C,0x1FF8,0x0FF0,0x0000},   // drawn here: yin-yang
+    /* retopo-points   */ {0x0000,0x700E,0x7FFE,0x700E,0x2004,0x0004,0x2004,0x0004,0x2004,0x0004,0x2004,0x0004,0x200E,0x2AAE,0x000E,0x0000},   // drawn here: three clicked corners, two sides dashed
 };
 } // namespace
 

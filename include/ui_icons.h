@@ -24,6 +24,7 @@ enum class Icon {
     UvSeamMark, UvSeamCut, UvSeamWeld, // UV mode: mark seams (a chalk line), cut them (scissors), weld them (stitches)
     BrushStipple,                     // Stipple brush: a scatter of dots
     PaintBlend,                       // paint Blend: a yin-yang
+    RetopoPoints,                     // mode 0's points (click four, a quad)
     Count
 };
 

@@ -64,6 +64,7 @@ const KeyActionInfo kKeyActions[(int)KeyAction::COUNT] = {
     {"retopo_wand",   "Retopo mode", "Wand",             "Click a hole: hover the ways to fill it, click one to keep it", {GLFW_KEY_Q, 0}, KeyScope::Retopo},
     {"retopo_mask",   "Retopo mode", "Mask",             "Freeze vertices against Grab, Smooth and Erase. Ctrl unmasks, Shift softens the edge", {GLFW_KEY_M, 0}, KeyScope::Retopo},
     {"retopo_contour", "Retopo mode", "Contours",        "Drag along a limb: rings round it, bridged into a tube. Wheel: more or fewer rings, Ctrl+wheel: more or fewer round", {GLFW_KEY_T, 0}, KeyScope::Retopo},
+    {"retopo_points", "Retopo mode", "Points",           "Click four points on the model: they make a quad. A built vertex under the pointer is taken instead of a new one. Click a point again to drop it", {GLFW_KEY_V, 0}, KeyScope::Retopo},
     {"uv_seam_cut",   "UV mode", "Cut seams",        "The marked edges become seams, and the mesh unwraps along them", {GLFW_KEY_C, 0}, KeyScope::Uv},
     {"uv_seam_weld",  "UV mode", "Weld seams",       "The marked seams join back into plain edges, and the mesh unwraps again", {GLFW_KEY_W, 0}, KeyScope::Uv},
     {"hold_size",     "Brush feel", "Size",             "Hold and drag", {GLFW_KEY_S, 0}},
@@ -1377,6 +1378,7 @@ static void run_key_action(GLFWwindow* w, KeyAction a, bool repeat) {
         case KeyAction::RETOPO_WAND:
         case KeyAction::RETOPO_MASK:
         case KeyAction::RETOPO_CONTOUR:
+        case KeyAction::RETOPO_POINTS:
             if (repeat) break;
             in.clear_smooth_lock();
             in.retopo_tool = a == KeyAction::RETOPO_GRAB  ? InputState::RetopoTool::GRAB
@@ -1385,12 +1387,14 @@ static void run_key_action(GLFWwindow* w, KeyAction a, bool repeat) {
                            : a == KeyAction::RETOPO_WAND  ? InputState::RetopoTool::WAND
                            : a == KeyAction::RETOPO_MASK  ? InputState::RetopoTool::MASK
                            : a == KeyAction::RETOPO_CONTOUR ? InputState::RetopoTool::CONTOUR
+                           : a == KeyAction::RETOPO_POINTS ? InputState::RetopoTool::POINTS
                                                           : InputState::RetopoTool::DRAW;
             notify(a == KeyAction::RETOPO_GRAB ? "Grab polygon strips"
                    : a == KeyAction::RETOPO_CUT ? "Cut"
                    : a == KeyAction::RETOPO_ERASE ? "Erase"
                    : a == KeyAction::RETOPO_WAND ? "Wand: click a hole"
                    : a == KeyAction::RETOPO_CONTOUR ? "Contours: drag along a limb"
+                   : a == KeyAction::RETOPO_POINTS ? "Points: click four, get a quad"
                    : a == KeyAction::RETOPO_MASK ? "Mask: Ctrl unmasks, Shift softens the edge" : "Draw polygon strips", 1.0f);
             break;
         case KeyAction::PAINT_BUCKET:

@@ -1513,6 +1513,12 @@ void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
             input.clear_smooth_lock();
             input.retopo_tool = RT::CONTOUR;
         }
+        o.on = !smooth_on && input.retopo_tool == RT::POINTS; o.tip = "Points: click four, get a quad";
+        o.key = input.key_label(KeyAction::RETOPO_POINTS); o.corner = corner(KeyAction::RETOPO_POINTS);
+        if (icon_button("rPoints", Icon::RetopoPoints, kRailBtn, o)) {
+            input.clear_smooth_lock();
+            input.retopo_tool = RT::POINTS;
+        }
         o.on = !smooth_on && input.retopo_tool == RT::MASK; o.tip = "Mask: Ctrl unmasks, Shift softens the edge";
         o.key = input.key_label(KeyAction::RETOPO_MASK); o.corner = corner(KeyAction::RETOPO_MASK);
         if (icon_button("rMask", Icon::BrushMask, kRailBtn, o)) {
@@ -2116,12 +2122,15 @@ float brush_panel(InputState& input, int win_h) {
                 : input.retopo_tool == InputState::RetopoTool::ERASE ? "Erase edges"
                 : input.retopo_tool == InputState::RetopoTool::WAND ? "Wand"
                 : input.retopo_tool == InputState::RetopoTool::CONTOUR ? "Contours"
+                : input.retopo_tool == InputState::RetopoTool::POINTS ? "Points"
                 : cutting ? "Cut" : "Draw polygon strips", nullptr);
         const bool wand = !smoothing && input.retopo_tool == InputState::RetopoTool::WAND;
         const bool contour = !smoothing && input.retopo_tool == InputState::RetopoTool::CONTOUR;
+        const bool points = !smoothing && input.retopo_tool == InputState::RetopoTool::POINTS;
         // Cut and Contours draw a bare line and the wand only clicks: no width, so no Size either.
         if (cutting) hint("Drag a line across islands");
         else if (contour) { hint("Drag along a limb"); hint("Rings go round it, bridged"); hint("Scroll: more or fewer round"); }
+        else if (points) { hint("Click four points: a quad"); hint("On a vertex: it's shared"); hint("Click a point again: gone"); }
         else if (wand) { hint("Click a hole"); hint("Hover a fill to see it"); hint("Click it to keep it"); }
         else meter_widget("##mS", input, 0, w, k, !can_grow || big);
         if (!smoothing && input.retopo_tool == InputState::RetopoTool::ERASE) {

@@ -2,6 +2,14 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-10 — Retopo: Points (V)
+
+- Points tool in retopo mode (V, rail button after Contours): click four points on the model and they become a quad.
+- A built vertex under the pointer (orange dot) is used instead of a new one, so quads join onto islands; islands a quad touches merge.
+- Any click order works: a crossed order is put back in order, and the quad faces outward. Each quad is one undo step.
+- Mirror: a twin quad on the other side; points dropped within a few pixels of the middle snap onto it and are shared.
+- Click a placed point again to drop it; Ctrl+Z drops the last one first. A quad that would lie over another is refused, and only the 4th point is dropped.
+
 ## 2026-11-09 — Autosave, File menu, recovery after a crash
 
 - Autosave (desktop): after a minute with hands off, or after 5 minutes of unsaved work at the next pause. The main thread only copies the scene; a background thread writes it.

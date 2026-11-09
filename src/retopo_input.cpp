@@ -132,6 +132,7 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
     static bool retopo_erasing_faces = false;   // Ctrl was held at the press
     static bool retopo_masking = false;
     static bool retopo_mask_smooth = false;     // Shift was held at the press: soften the edge
+    static bool retopo_pointing = false;        // Points: this press has placed (or dropped) its point
     const bool retopo_press = retopo_on && input.drag_mode == InputState::DragMode::RETOPO;
     // Mouths (a capped tube's open end) are holes too, but telling one takes the sculpt:
     // marked once an edit settles, so the wash shows on them. Every rebuild unmarks them.
@@ -170,6 +171,11 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
         }
         was_press = retopo_press;
     }
+    // Points: picks made toward a quad last only while nothing else changes the retopo
+    // (a renumber would leave their vertex ids pointing anywhere) and the tool stays out.
+    if (!retopo.points.empty()
+        && (!retopo_on || input.retopo_tool != InputState::RetopoTool::POINTS || retopo.rev != retopo.points_rev))
+        retopo.points.clear();
     // Wand lasso let go: clean up what it holds. A few pixels is a click (the menu).
     if (!retopo_press && !retopo.lasso.empty()) {
         float x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f;
@@ -523,6 +529,61 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
             retopo.contour.push_back(mx);
             retopo.contour.push_back(my);
         }
+    } else if (retopo_press && !retopo.drawing
+               && input.retopo_tool == InputState::RetopoTool::POINTS) {
+        // Points: each click puts one down where it pressed (a built vertex there is
+        // taken instead), a click on one already down takes it back; the fourth makes
+        // the quad. One point per press, judged once the plane cache is fresh.
+        if (!retopo_pointing && !screen_buffers_dirty) {
+            retopo_pointing = true;
+            const float px = retopo_press_x, py = retopo_press_y;
+            int hit = -1;
+            for (size_t i = 0; i < retopo.points.size() && hit < 0; i++) {
+                const RetopoState::PointPick& k = retopo.points[i];
+                const Vec3 at = k.v != ~0u ? retopo.result.v[k.v] : k.p;
+                float sx, sy;
+                if (camera.world_to_screen(at, win_w, win_h, sx, sy) && std::hypot(sx - px, sy - py) < 8.0f)
+                    hit = (int)i;
+            }
+            RetopoState::PointPick pk;
+            const uint32_t sv = retopo_snap_vertex(retopo, camera, win_w, win_h, px, py, 0.0f, ~0u);
+            Vec3 p, n;
+            float wpp;
+            bool ok = true;
+            if (hit >= 0) {
+                retopo.points.erase(retopo.points.begin() + hit);
+            } else if (sv != ~0u) {
+                pk.v = sv;
+            } else if (retopo_surface_at(px, py, p, n, wpp)) {
+                // Mirror on and a few pixels off the middle: onto it, so the twin quad
+                // shares the corner instead of leaving a sliver between the halves.
+                if (input.mirror_x && std::fabs(p.x) < 6.0f * wpp) {
+                    p.x = 0.0f;
+                    n.x = 0.0f;
+                    n = n.length() > 1e-6f ? n.normalized() : Vec3(0, 0, 1);
+                }
+                pk.p = p;
+                pk.n = n;
+            } else {
+                ok = false;
+            }
+            if (hit < 0 && ok) {
+                if (retopo.wand_open) retopo_wand_close(retopo, retopo.wand_keep_shown ? retopo.wand_shown : -1);
+                retopo.points.push_back(pk);
+                retopo.points_rev = retopo.rev;
+            }
+            if (retopo.points.size() == 4) {
+                const char* why = retopo_point_quad(retopo, input.mirror_x);
+                if (why) {
+                    retopo.points.pop_back();   // the fourth goes: click it somewhere else
+                    std::snprintf(input.notification, sizeof(input.notification), "%s", why);
+                    input.notification_timer = 2.5f;
+                } else {
+                    retopo.points.clear();
+                }
+                retopo.points_rev = retopo.rev;
+            }
+        }
     } else if (retopo_press && !screen_buffers_dirty && !retopo_path_press) {
         const float mx = (float)input.mouse_x, my = (float)input.mouse_y;
         if (!retopo.drawing) {
@@ -676,6 +737,7 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
         if (retopo_smoothing || retopo_grabbing || retopo_erasing || retopo_masking) retopo.end_edit();
         retopo_smoothing = retopo_grabbing = retopo_erasing = retopo_erasing_faces = false;
         retopo_masking = retopo_mask_smooth = false;
+        retopo_pointing = false;
     }
     // A slider drag is one undo step; letting go ends it.
     if (!input.mouse1_down) retopo.last_tag = 0;
@@ -836,6 +898,11 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
     // history: retopo doesn't touch the sculpt.
     // UV mode too: it shows the retopo, so its Ctrl+Z is retopo's (an undo can bring the
     // mesh an older layout was made for back, and the layout with it: see UvLayout::key).
+    // With Points picks down, Ctrl+Z takes the last one back first (they aren't history).
+    if (retopo_on && input.undo_requested && !retopo.points.empty()) {
+        retopo.points.pop_back();
+        input.undo_requested = false;
+    }
     if (input.interaction_mode == InputState::InteractionMode::RETOPO
         && (input.undo_requested || input.redo_requested)) {
         const bool ok = input.undo_requested ? retopo.undo() : retopo.redo();
@@ -1152,6 +1219,12 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
                                                (float)input.mouse_x, (float)input.mouse_y,
                                                0.0f, retopo.snap_v)
                           : ~0u;
+    // Points' snap: the built vertex a click would take.
+    retopo.point_v = retopo_on && retopo.built && !input.is_smooth_active()
+                     && input.retopo_tool == InputState::RetopoTool::POINTS
+                   ? retopo_snap_vertex(retopo, camera, win_w, win_h, (float)input.mouse_x,
+                                        (float)input.mouse_y, 0.0f, retopo.point_v)
+                   : ~0u;
     // Draw's snap: before a press, what a line would start on; during a bridge or a
     // spine, what it would end on. Nothing while a band is drawing (it doesn't snap).
     const bool line_live = retopo.drawing && !retopo.extruding
@@ -1375,7 +1448,8 @@ void draw_retopo_cursor(Renderer& renderer, const Camera& camera, const InputSta
     // Cut and Contours draw a bare line and the wand only clicks: a small ring marks the tip.
     const bool cut = (input.retopo_tool == InputState::RetopoTool::CUT
                       || input.retopo_tool == InputState::RetopoTool::WAND
-                      || input.retopo_tool == InputState::RetopoTool::CONTOUR)
+                      || input.retopo_tool == InputState::RetopoTool::CONTOUR
+                      || input.retopo_tool == InputState::RetopoTool::POINTS)
                   && !input.is_smooth_active();
     // The eraser's ring is red: it takes things away.
     static const float kEraseRed[3] = {1.0f, 0.25f, 0.2f};

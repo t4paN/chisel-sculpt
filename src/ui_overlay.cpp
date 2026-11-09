@@ -2652,6 +2652,38 @@ void draw_retopo_overlay(const RetopoState& st, Renderer& renderer, const Camera
         dl->AddPolyline(cp.data(), (int)cp.size(), IM_COL32(10, 20, 15, 170), 0, 3.5f);
         dl->AddPolyline(cp.data(), (int)cp.size(), IM_COL32(120, 210, 255, 255), 0, 1.5f);
     }
+    // Points (V): the picks so far, joined in order, the side that would close the quad
+    // dimmer; the built vertex a click would take, an orange dot (Draw's snap colour).
+    if (!st.points.empty() || st.point_v < st.result.v.size()) {
+        static std::vector<ImVec2> pp;
+        static std::vector<uint8_t> ok;
+        pp.clear();
+        ok.clear();
+        for (const RetopoState::PointPick& k : st.points) {
+            const bool built = k.v != ~0u && k.v < st.result.v.size();
+            const Vec3 p = built ? st.result.v[k.v] : k.p;
+            float x = 0.0f, y = 0.0f;
+            ok.push_back(cam.world_to_screen(p, win_w, win_h, x, y) ? 1 : 0);
+            pp.push_back(ImVec2(x, y));
+        }
+        const ImU32 dark = IM_COL32(10, 20, 15, 190), lit = IM_COL32(0, 255, 65, 255);
+        for (size_t i = 0; i + 1 < pp.size(); i++)
+            if (ok[i] && ok[i + 1]) {
+                dl->AddLine(pp[i], pp[i + 1], dark, 3.5f);
+                dl->AddLine(pp[i], pp[i + 1], lit, 1.5f);
+            }
+        if (pp.size() == 3 && ok[0] && ok[2]) dl->AddLine(pp[2], pp[0], IM_COL32(0, 255, 65, 90), 1.0f);
+        for (size_t i = 0; i < pp.size(); i++) {
+            if (!ok[i]) continue;
+            dl->AddCircleFilled(pp[i], 6.0f, dark, 16);
+            dl->AddCircleFilled(pp[i], 4.0f, lit, 16);
+        }
+        float x, y;
+        if (st.point_v < st.result.v.size() && cam.world_to_screen(st.result.v[st.point_v], win_w, win_h, x, y)) {
+            dl->AddCircleFilled(ImVec2(x, y), 6.5f, IM_COL32(30, 12, 0, 220), 16);
+            dl->AddCircleFilled(ImVec2(x, y), 4.5f, IM_COL32(255, 150, 30, 255), 16);
+        }
+    }
     // A paste target (a lasso let go on bare sculpt with something copied): closed, in
     // the clipboard's cyan, while the view is still the one it was drawn in.
     if (st.paste_ready && st.paste_lasso.size() >= 6

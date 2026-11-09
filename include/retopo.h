@@ -277,6 +277,15 @@ struct RetopoState {
     float grid_wheel_ctrl = 0.0f;           // Ctrl+wheel notches waiting, as grid_wheel
     // Contour drag: the line so far, screen x, y pairs (empty = none).
     std::vector<float> contour;
+    // Points (V): the clicks so far toward the next quad, each a built vertex (v) or a
+    // new spot on the sculpt (v = ~0u: p, n). The fourth makes the quad. Not history:
+    // any change to the retopo that isn't a point's own (an undo, an edit, a Build:
+    // points_rev no longer matches rev) drops them, since a renumber could leave v
+    // pointing anywhere.
+    struct PointPick { uint32_t v = ~0u; Vec3 p, n; };
+    std::vector<PointPick> points;
+    uint64_t points_rev = 0;
+    uint32_t point_v = ~0u;           // the built vertex a click would take (lit)
 
     // Pen-up of a line (spine, notch, edge to vertex, extrude, bridge): drop it and
     // everything its press recorded, whichever rule took it.
@@ -714,6 +723,12 @@ const char* retopo_grid(RetopoState& st, const Mesh& m, const std::vector<Vec3>&
 // st.grid_rings, Ctrl+wheel the count round.
 const char* retopo_contour(RetopoState& st, const Mesh& m, const std::vector<Vec3>& pts,
                            const std::vector<uint32_t>& tris, float edge, bool mirror);
+// Points (V): st.points holds four picks; they become one quad, in whichever order
+// they went round (a bowtie is untangled), facing out of the sculpt. Built vertices
+// among them are shared, so a quad clicked onto an island's edge joins it (islands it
+// touches merge). Mirror: a twin too, when it sits on one side (corners on x = 0 are
+// shared with it). nullptr = made (one undo step), else why not (nothing changed).
+const char* retopo_point_quad(RetopoState& st, bool mirror);
 void retopo_grid_redo(RetopoState& st, const Mesh& m, int sides);
 void retopo_grid_close(RetopoState& st);
 void retopo_grid_cancel(RetopoState& st);

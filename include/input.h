@@ -125,7 +125,7 @@ enum class KeyAction : int {
     BRUSH_MOVE, BRUSH_LIMB, BRUSH_POSE, BRUSH_STIPPLE, BRUSH_MASK, BRUSH_PREV, BRUSH_NEXT,
     PAINT_BUCKET, PAINT_PICKER, PAINT_BRUSH, PAINT_STIPPLE, PAINT_BLEND,
     RETOPO_BUILD, RETOPO_DRAW, RETOPO_GRAB, RETOPO_CUT, RETOPO_ERASE, RETOPO_FILL, RETOPO_WAND, RETOPO_MASK,
-    RETOPO_CONTOUR, UV_SEAM_CUT, UV_SEAM_WELD,
+    RETOPO_CONTOUR, RETOPO_POINTS, UV_SEAM_CUT, UV_SEAM_WELD,
     HOLD_SIZE, HOLD_STRENGTH, HOLD_HARDNESS, HOLD_SPACING, SIZE_DOWN, SIZE_UP, AUTOSMOOTH,
     LEVEL_UP, LEVEL_DOWN, PROJECT, MIRROR, REMESH, MERGE, DELETE_MESH,
     MASK_INVERT, MASK_CLEAR,
@@ -784,7 +784,7 @@ struct InputState {
     float mouse2_press_x = 0.0f, mouse2_press_y = 0.0f;
     bool mouse2_just_released = false;
     // Mode 0's dock tool. Smooth isn't one of these: it rides Shift, as in sculpt.
-    enum class RetopoTool { DRAW, GRAB, CUT, ERASE, WAND, MASK, CONTOUR };
+    enum class RetopoTool { DRAW, GRAB, CUT, ERASE, WAND, MASK, CONTOUR, POINTS };
     RetopoTool retopo_tool = RetopoTool::DRAW;
     // What the next stroke gets (RetopoStroke has the meaning of each), set in the tool
     // dock or by holding A / W. Its band is the brush Size as drawn, so no width here.
