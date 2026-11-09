@@ -53,6 +53,7 @@ struct SkinStats {
     int         level = 0;            // live multires level
     float       fps = 0.0f;
     const char* project_path = nullptr;
+    bool        dirty = false;        // edits since the last save/load (File > New asks first)
 };
 
 // The whole modern UI, including its own notification toast and hold-key slider

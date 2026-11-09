@@ -1,4 +1,5 @@
 #include "ui_skin.h"
+#include "session_files.h"
 #include "sdf.h"
 #include "ui_icons.h"
 #include "ui_backdrop.h"
@@ -1625,6 +1626,80 @@ void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
     }
 }
 
+// File menu, dropped from the name in the top-left panel (modern skin). Opening it
+// reads the recent list and the autosave folder once; nothing is scanned per frame.
+// New / Recents / Recover ask first only when there is unsaved work (st.dirty), and
+// reuse the Quit dialog (quit_to_new) and the drop prompt (drop_recover) to do it.
+void file_menu(InputState& input, const SkinStats& st, ImVec2 at) {
+    static std::vector<std::string> recents;
+    static std::vector<AutosaveFile> leftovers;
+    static bool was_open = false;
+    const bool open = ImGui::IsPopupOpen("##filemenu");
+    if (open && !was_open) {
+        recents = recents_list();
+        leftovers = autosave_leftovers();
+    }
+    was_open = open;
+    auto open_path = [&](const std::string& path, bool recover) {
+        std::snprintf(input.drop_path, sizeof(input.drop_path), "%s", path.c_str());
+        input.drop_recover = recover;
+        if (st.dirty) input.drop_confirm_pending = true;
+        else          input.drop_open_requested = true;
+        input.wake_requested = true;
+    };
+    auto base_name = [](const std::string& p) {
+        const size_t s = p.find_last_of("/\\");
+        return s == std::string::npos ? p : p.substr(s + 1);
+    };
+    ImGui::SetNextWindowPos(at, ImGuiCond_Always, ImVec2(0, 0));
+    ImGui::SetNextWindowSizeConstraints(ImVec2(220, 0), ImVec2(FLT_MAX, FLT_MAX));
+    if (!begin_skin_popup("##filemenu", ImVec2(10, 10))) return;
+    if (ImGui::MenuItem("New")) {
+        if (st.dirty) { input.quit_requested = true; input.quit_to_new = true; }
+        else          input.new_project_requested = true;
+    }
+#ifndef __EMSCRIPTEN__
+    // Submenus are their own popup windows: give them the solid dropdown backing,
+    // or they'd draw see-through (begin_skin_popup clears PopupBg for its glass).
+    ui_skin_push_dropdown_bg();
+    const bool rec_open = ImGui::BeginMenu("Recents");
+    ImGui::PopStyleColor();
+    if (rec_open) {
+        if (recents.empty()) ImGui::TextDisabled("No recent projects");
+        for (size_t i = 0; i < recents.size(); i++) {
+            ImGui::PushID((int)i);
+            if (ImGui::MenuItem(base_name(recents[i]).c_str())) open_path(recents[i], false);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", recents[i].c_str());
+            ImGui::PopID();
+        }
+        ImGui::EndMenu();
+    }
+    ui_skin_push_dropdown_bg();
+    const bool rcv_open = ImGui::BeginMenu("Recover");
+    ImGui::PopStyleColor();
+    if (rcv_open) {
+        if (leftovers.empty()) ImGui::TextDisabled("Nothing to recover");
+        else ImGui::TextDisabled("Autosaves of sessions that ended unsaved");
+        for (size_t i = 0; i < leftovers.size(); i++) {
+            ImGui::PushID((int)(100 + i));
+            if (ImGui::MenuItem(leftovers[i].label)) open_path(leftovers[i].path, true);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", leftovers[i].path.c_str());
+            ImGui::PopID();
+        }
+        ImGui::EndMenu();
+    }
+#endif
+    ImGui::Separator();
+    if (ImGui::MenuItem("Save", input.key_label(KeyAction::SAVE))) input.save_requested = true;
+    if (ImGui::MenuItem("About")) input.about_open = true;
+#ifndef __EMSCRIPTEN__
+    ImGui::Separator();
+    // Same as the window's X: closes at once when everything is saved, else asks.
+    if (ImGui::MenuItem("Exit")) input.close_requested = true;
+#endif
+    end_skin_popup();
+}
+
 void file_panel(InputState& input, const SkinStats& st) {
     static DockGrow dock;
     dock_pre(dock, input.touch_mode);
@@ -1651,17 +1726,31 @@ void file_panel(InputState& input, const SkinStats& st) {
             text_at(dl, UiFont::Sans, 16.0f, ImVec2(p.x + 10.0f + bs.x + 18.0f + ns.x + 6.0f, ty),
                     cga::light_red, "*");
     } else {
+    // The name is the File menu's button: a hover tint and a small chevron say so.
     ImVec2 ns = text_size(UiFont::SansSemibold, 14.0f * k, name);
     ImVec2 us = text_size(UiFont::Sans, 11.0f * k, "unsaved");
-    float w = (10.0f + 8.0f) * k + ns.x + (unsaved ? (6.0f + 10.0f) * k + us.x : 0.0f);
+    const float chev_w = 14.0f * k;
+    float w = (10.0f + 8.0f) * k + ns.x + (unsaved ? (6.0f + 10.0f) * k + us.x : 0.0f) + chev_w;
     ImVec2 p = ImGui::GetCursorScreenPos();
-    ImGui::Dummy(ImVec2(w, bb));
+    const bool clicked = ImGui::InvisibleButton("##fileName", ImVec2(w, bb));
+    const bool hov = ImGui::IsItemHovered();
+    const bool menu_open = ImGui::IsPopupOpen("##filemenu");
+    if (hov || menu_open)
+        dl->AddRectFilled(p, ImVec2(p.x + w, p.y + bb), IM_COL32(255, 255, 255, menu_open ? 30 : 18),
+                          rad(8.0f * k));
     text_at(dl, UiFont::SansSemibold, 14.0f * k, ImVec2(p.x + 10.0f * k, p.y + (bb - ns.y) * 0.5f), kText, name);
     if (unsaved) {
         float x = p.x + 10.0f * k + ns.x + 6.0f * k;
         dl->AddCircleFilled(ImVec2(x + 3.0f * k, p.y + bb * 0.5f), 3.0f * k, kUnsaved, 12);
         text_at(dl, UiFont::Sans, 11.0f * k, ImVec2(x + 10.0f * k, p.y + (bb - us.y) * 0.5f), kUnsaved, "unsaved");
     }
+    {
+        const float cx = p.x + w - 12.0f * k, cy = p.y + bb * 0.5f;
+        dl->AddTriangleFilled(ImVec2(cx - 3.5f * k, cy - 1.5f * k), ImVec2(cx + 3.5f * k, cy - 1.5f * k),
+                              ImVec2(cx, cy + 2.5f * k), hov || menu_open ? kText : kMuted);
+    }
+    if (hov && !menu_open) tooltip(p, ImVec2(p.x + w, p.y + bb), TipSide::Below, "File", nullptr);
+    if (clicked) ImGui::OpenPopup("##filemenu");
     }
     vdivider();
 
@@ -1680,6 +1769,7 @@ void file_panel(InputState& input, const SkinStats& st) {
     dock_post(dock);
     // The rest height, so a grown file bar doesn't push the modes dock down.
     g_file_bottom = ImGui::GetWindowPos().y + (dock.rest.y > 0.0f ? dock.rest.y : ImGui::GetWindowSize().y);
+    if (!g_dos) file_menu(input, st, ImVec2(ImGui::GetWindowPos().x, g_file_bottom + 8.0f));
     end_panel();
 }
 
@@ -2203,10 +2293,13 @@ void status_panel(const InputState& input, int win_w, int win_h, const SkinStats
     const ImU32 val_col = g_dos ? cga::light_green : kText;
     char buf[48];
 
-    // Title row: name, save state, fps at the right edge.
+    // Title row: the app and its version (modern) or the file name and save state
+    // (DOS, not caught up yet), fps at the right edge. The file name lives top left,
+    // on the File menu's button.
     {
         char name[64];
-        project_name(name, sizeof name, st.project_path);
+        if (g_dos) project_name(name, sizeof name, st.project_path);
+        else       std::snprintf(name, sizeof name, "Chisel");
         const bool unsaved = !st.project_path || !*st.project_path;
         const float tpx = g_dos ? 16.0f : 13.0f, th = g_dos ? 22.0f : 24.0f;
         ImVec2 p = ImGui::GetCursorScreenPos();
@@ -2214,15 +2307,19 @@ void status_panel(const InputState& input, int win_w, int win_h, const SkinStats
         float cy = p.y + th * 0.5f;
         ImVec2 ns = text_size(UiFont::SansSemibold, tpx, name);
         text_at(dl, UiFont::SansSemibold, tpx, ImVec2(p.x, cy - ns.y * 0.5f), g_dos ? cga::white : kText, name);
-        if (unsaved) {
+        if (g_dos) {
+            if (unsaved)
+                text_at(dl, UiFont::Sans, 16.0f, ImVec2(p.x + ns.x + 4.0f, cy - 8.0f), cga::light_red, "*");
+        } else {
+            // Just the release, x.y.z: "v0.3.8-24-gdc1baf1" reads as "v0.3.8".
+            // The full build string stays in File > About for bug reports.
+            char ver[24];
+            std::snprintf(ver, sizeof ver, "%s", st.version ? st.version : "dev");
+            if (char* dash = std::strchr(ver, '-')) *dash = '\0';
             float x = p.x + ns.x + 8.0f;
-            if (g_dos) {
-                text_at(dl, UiFont::Sans, 16.0f, ImVec2(x - 4.0f, cy - 8.0f), cga::light_red, "*");
-            } else {
-                ImVec2 us = text_size(UiFont::Sans, 11.0f, "unsaved");
-                dl->AddCircleFilled(ImVec2(x + 3.0f, cy), 3.0f, kUnsaved, 12);
-                text_at(dl, UiFont::Sans, 11.0f, ImVec2(x + 10.0f, cy - us.y * 0.5f), kUnsaved, "unsaved");
-            }
+            ImVec2 vs = text_size(UiFont::Mono, 11.0f, ver);
+            dl->AddCircleFilled(ImVec2(x + 3.0f, cy), 3.0f, kUnsaved, 12);
+            text_at(dl, UiFont::Mono, 11.0f, ImVec2(x + 10.0f, cy - vs.y * 0.5f), kMuted, ver);
         }
         if (input.show_fps) {
             std::snprintf(buf, sizeof buf, g_dos ? "%.0ffps" : "%.0f fps", st.fps);
@@ -3657,23 +3754,83 @@ void draw_skin_dialogs(InputState& input, int win_w, int win_h, const DialogInfo
         auto centre = [&](float w) {
             ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.0f, (avail - w) * 0.5f));
         };
-        const char* title = "Quit Chisel?";
+        // quit_to_new: the same three answers, but the app stays and starts over
+        // (File > New with unsaved work, and Esc in the browser).
+        const bool to_new = input.quit_to_new;
+        const char* title = to_new ? "Start a new project?" : "Quit Chisel?";
         const char* note = "Anything not saved is lost.";
+        const char* save_l = to_new ? "Save & New" : "Save & Quit";
+        const char* go_l   = to_new ? "Discard" : "Quit";
         centre(text_size(UiFont::SansSemibold, 16.0f, title_case(title)).x);
         dlg_title(title);
         centre(text_size(UiFont::Sans, 13.0f, note).x);
         dlg_text(UiFont::Sans, 13.0f, kMuted, note);
         ImGui::Dummy(ImVec2(0.0f, 2.0f));
         const float sp = ImGui::GetStyle().ItemSpacing.x;
-        centre(dlg_button_w("Save & Quit", "S") + dlg_button_w("Quit", "Y") + dlg_button_w("Cancel", "N") + sp * 2.0f);
-        if (dlg_button("##qS", "Save & Quit", "S", true)) press_dialog_key(GLFW_KEY_S);
-        dlg_tip("Save, then close (asks for a name if the work has no file yet)");
+        centre(dlg_button_w(save_l, "S") + dlg_button_w(go_l, "Y") + dlg_button_w("Cancel", "N") + sp * 2.0f);
+        if (dlg_button("##qS", save_l, "S", true)) press_dialog_key(GLFW_KEY_S);
+        dlg_tip(to_new ? "Save, then start fresh (asks for a name if the work has no file yet)"
+                       : "Save, then close (asks for a name if the work has no file yet)");
         ImGui::SameLine();
-        if (dlg_button("##qY", "Quit", "Y", false, true)) press_dialog_key(GLFW_KEY_Y);
-        dlg_tip("Close without saving");
+        if (dlg_button("##qY", go_l, "Y", false, true)) press_dialog_key(GLFW_KEY_Y);
+        dlg_tip(to_new ? "Throw this work away and start with a fresh sphere" : "Close without saving");
         ImGui::SameLine();
         if (dlg_button("##qN", "Cancel", "N", false)) press_dialog_key(GLFW_KEY_N);
         dlg_tip("Back to sculpting (Esc works too)");
+        end_dialog();
+    }
+
+    // ---- Recover: the startup offer of an autosave an ended session left ----
+    if (begin_dialog("##dlgRecover", input.recover_prompt_pending, win_w, win_h)) {
+        const float avail = ImGui::GetContentRegionAvail().x;
+        auto centre = [&](float w) {
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.0f, (avail - w) * 0.5f));
+        };
+        const char* title = "Recover unsaved work?";
+        char l1[96];
+        std::snprintf(l1, sizeof l1, "A session ended without saving. Last autosave: %s.", input.recover_label);
+        const char* l2 = "Not now keeps it under File > Recover (click the file name, top left).";
+        centre(text_size(UiFont::SansSemibold, 16.0f, title_case(title)).x);
+        dlg_title(title);
+        centre(text_size(UiFont::Sans, 13.0f, l1).x);
+        dlg_text(UiFont::Sans, 13.0f, kMuted, l1);
+        centre(text_size(UiFont::Sans, 13.0f, l2).x);
+        dlg_text(UiFont::Sans, 13.0f, kMuted, l2);
+        ImGui::Dummy(ImVec2(0.0f, 2.0f));
+        const float sp = ImGui::GetStyle().ItemSpacing.x;
+        centre(dlg_button_w("Recover", "Y") + dlg_button_w("Not now", "N") + sp);
+        if (dlg_button("##rcY", "Recover", "Y", true)) press_dialog_key(GLFW_KEY_Y);
+        dlg_tip("Open it as an unsaved project (Ctrl+S asks where to keep it)");
+        ImGui::SameLine();
+        if (dlg_button("##rcN", "Not now", "N", false)) press_dialog_key(GLFW_KEY_N);
+        dlg_tip("Start with the sphere (Esc works too)");
+        end_dialog();
+    }
+
+    // ---- About (File menu) ----
+    if (begin_dialog("##dlgAbout", input.about_open, win_w, win_h)) {
+        const float avail = ImGui::GetContentRegionAvail().x;
+        auto centre = [&](float w) {
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.0f, (avail - w) * 0.5f));
+        };
+#ifdef CHISEL_VERSION
+        const char* ver = CHISEL_VERSION;
+#else
+        const char* ver = "dev";
+#endif
+        const char* l1 = "A fast, spartan sculpting app.";
+        const char* l2 = "github.com/t4paN/chisel-sculpt";
+        centre(text_size(UiFont::SansSemibold, 16.0f, title_case("Chisel")).x);
+        dlg_title("Chisel");
+        centre(text_size(UiFont::Mono, 13.0f, ver).x);
+        dlg_text(UiFont::Mono, 13.0f, kUnsaved, ver);
+        centre(text_size(UiFont::Sans, 13.0f, l1).x);
+        dlg_text(UiFont::Sans, 13.0f, kMuted, l1);
+        centre(text_size(UiFont::Sans, 13.0f, l2).x);
+        dlg_text(UiFont::Sans, 13.0f, kMuted, l2);
+        ImGui::Dummy(ImVec2(0.0f, 2.0f));
+        centre(dlg_button_w("Close", "N"));
+        if (dlg_button("##abN", "Close", "N", true)) press_dialog_key(GLFW_KEY_N);
         end_dialog();
     }
 

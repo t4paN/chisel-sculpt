@@ -509,7 +509,12 @@ SaveResult save_project(const char* path, const ProjectData& data) {
     for (const EntityRecord& e : data.entities) if (e.id != data.active_id) write_retopo(e);
     for (const EntityRecord& e : data.entities) if (e.id == data.active_id) write_retopo(e);
 
+    // Flush and close before judging: the last buffered block only hits the disk here,
+    // and a full disk shows up then, not at the last write call.
+    f.flush();
     if (!f.good()) return SaveResult::ERR_WRITE;
+    f.close();
+    if (f.fail()) return SaveResult::ERR_WRITE;
     return SaveResult::OK;
 }
 

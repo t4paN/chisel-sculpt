@@ -55,6 +55,7 @@
 #include "renderer.h"
 #include "input.h"
 #include "settings.h"
+#include "session_files.h"
 #include "text_overlay.h"
 #include "brush.h"
 #include "tablet.h"
@@ -766,6 +767,20 @@ int main(int argc, char* argv[]) {
             , fbw, fbh
 #endif
     };
+    // Work an earlier session left unsaved (crash, kill, closed without saving): offer
+    // the newest once, on one key. Not when a file was asked for on the command line,
+    // and not in the classic skin, whose bitmap dialogs have no such prompt yet.
+    if (cli_open_path.empty() && !input.ui_classic()) {
+        AutosaveFile left;
+        int others = 0;
+        if (autosave_take_unseen(left, others)) {
+            std::snprintf(input.drop_path, sizeof(input.drop_path), "%s", left.path.c_str());
+            std::snprintf(input.recover_label, sizeof(input.recover_label), "%s", left.label);
+            input.recover_prompt_pending = true;
+            std::printf("[autosave] offering %s (%d more in File > Recover)\n", left.path.c_str(), others);
+        }
+    }
+
     auto frame = [&]() {
         input.begin_frame();
 
@@ -824,6 +839,7 @@ int main(int argc, char* argv[]) {
                 glfwSetWindowShouldClose(window, GLFW_TRUE);
             } else {
                 input.quit_requested = true;
+                input.quit_to_new = false;   // a real close, even over an open "New?" ask
                 if (glfwGetWindowAttrib(window, GLFW_ICONIFIED)) glfwRestoreWindow(window);
                 glfwFocusWindow(window);
                 glfwRequestWindowAttention(window);
@@ -831,6 +847,10 @@ int main(int argc, char* argv[]) {
         }
 #endif
         if (win_w == 0 || win_h == 0) {
+#ifndef __EMSCRIPTEN__
+            // A minimised window is the classic coffee break: it still autosaves.
+            app_autosave_tick(app, glfwGetTime() - last_active_time);
+#endif
             glfwPollEvents();      // keep the browser event loop breathing on a hidden frame
             input.end_frame();
             return;   // skip this frame (lambda body; == `continue` in the native loop)
@@ -1001,6 +1021,9 @@ int main(int argc, char* argv[]) {
                 // Settings still save on their debounce while nothing is drawn.
                 settings_tick(input, (float)(now - settings_last_time));
                 settings_last_time = now;
+#ifndef __EMSCRIPTEN__
+                app_autosave_tick(app, now - last_active_time);
+#endif
                 idle_last_frame = true;
                 input.end_frame();
                 return;   // == `continue` in the native loop, like the hidden-frame skip
@@ -1611,7 +1634,7 @@ int main(int argc, char* argv[]) {
 #ifndef __EMSCRIPTEN__
         // Debug instance: Esc closes without the dialog. Checked after the tick above,
         // which claims Esc first to back out of insert mode.
-        if (input.debug_instance && input.quit_requested) {
+        if (input.debug_instance && input.quit_requested && !input.quit_to_new) {
             input.quit_requested = false;
             glfwSetWindowShouldClose(window, GLFW_TRUE);
         }
@@ -2375,6 +2398,12 @@ int main(int argc, char* argv[]) {
 #else
     while (!glfwWindowShouldClose(window)) frame();
 #endif
+
+    // Closing with everything saved: this session's autosave has nothing left to
+    // rescue. Closing unsaved keeps it for the next launch to offer.
+    if (scene.edit_mark() == clean_edit_mark && scene.retopo_rev() == clean_retopo_rev)
+        autosave_drop_session();
+    autosave_shutdown();
 
     ui_backdrop::shutdown();
 #ifdef CHISEL_BACKEND_WEBGPU

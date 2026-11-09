@@ -94,6 +94,11 @@ void app_ops_remesh_and_merge(App& a);   // remesh run, SDF merge kick-off + per
 // app_files.cpp: open/import, the dev auto-import hooks, save, save-as, incremental
 // save, export, and their dialogs (native file browser, web name prompts + picker).
 void app_files_frame(App& a);
+struct ProjectData;
+// The scene as a .chisel holds it, copied out (Save and the autosave share it).
+void app_build_project(App& a, ProjectData& proj);
+// Native autosave: call while the app idles, with the seconds since the last input.
+void app_autosave_tick(App& a, double idle_secs);
 
 // app_render.cpp: cursor visibility, the scene pass, overlays and dialogs, then (after
 // app_files_frame) the button islands, panels, error popup, ImGui render and present.

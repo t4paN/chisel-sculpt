@@ -37,6 +37,7 @@ void InsertController::tick(InputState& input, Camera& camera,
     // ESC: cancel active preview, or exit insert mode entirely.
     if (input.quit_requested) {
         input.quit_requested = false;
+        input.quit_to_new = false;
         if (state_.phase != Phase::IDLE) {
             if (state_.preview_mesh_id != 0) {
                 scene_.remove_preview(state_.preview_mesh_id);

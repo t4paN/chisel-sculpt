@@ -529,6 +529,16 @@ struct InputState {
     // has no file yet that save goes through the Save window, and cancelling it
     // drops this (main.cpp) — you are back in the app, nothing lost.
     bool quit_after_save = false;
+    // The same dialog, asking to start a new project instead of closing: File > New
+    // with unsaved work, and Esc in the browser (where closing does nothing). Y then
+    // means discard + new, S means save first (quit_after_save, then new), N cancels.
+    // Riding on quit_requested keeps every modal gate working without a new flag.
+    bool quit_to_new = false;
+    bool new_project_requested = false;   // File > New, answered: start the fresh sphere
+    // File > About, and the startup offer to recover an autosave (Y / N). Both modal.
+    bool about_open = false;
+    bool recover_prompt_pending = false;
+    char recover_label[48] = "";          // "Nov 9, 14:32", for the prompt's line
     // A close asked from outside the app's own keys (title-bar X, the desktop's
     // "close window", which KDE sends at logout). main.cpp closes at once when
     // nothing is unsaved, else raises the window and asks.
@@ -567,6 +577,9 @@ struct InputState {
     bool drop_confirm_pending;
     bool drop_open_requested;       // Y: open, discarding current changes
     char drop_path[1024];
+    // File > Recents and File > Recover reuse this prompt. drop_recover: the path is
+    // an autosave, so it opens as Unsaved Project and never becomes the save target.
+    bool drop_recover = false;
 
     // Notification (brief on-screen message)
     char notification[512];

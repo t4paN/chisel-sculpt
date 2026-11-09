@@ -2,6 +2,17 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-09 — Autosave, File menu, recovery after a crash
+
+- Autosave (desktop): after a minute with hands off, or after 5 minutes of unsaved work at the next pause. The main thread only copies the scene; a background thread writes it.
+- One file per session in the settings folder's autosave/, replaced in one step each time, so a crash mid-write keeps the last copy. The newest 3 ended sessions are kept; a real save deletes the session's file.
+- After a crash or an unsaved close, the next launch offers the work once (Recover / Not now). After that it waits under File > Recover. Recovered work opens untitled.
+- File menu on the project name, top left: New, Recents, Recover, Save, About, Exit. The browser gets New, Save and About.
+- New asks Save & New / Discard / Cancel when there's unsaved work. Esc in the browser now asks the same, instead of a Quit that did nothing.
+- The status dock's title row reads "Chisel" and the release (v0.3.8); the file name lives on the File button. About keeps the full build string.
+- Modern skin only for the menu and title row; the other skins are listed as owed.
+- Saving now checks the final flush, so a full disk reports a failed save.
+
 ## 2026-11-09 — Paint mode: Stipple (R), Blend (G), D for the brush
 
 - Stipple in Paint mode: colour stamps with random spin, size and opacity, and Scatter. Its own knobs, under the colour wheel on right-click and in the tool dock.

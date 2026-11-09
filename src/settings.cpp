@@ -570,3 +570,16 @@ void settings_reset(InputState& input) {
 }
 
 bool settings_storage_available() { return g_storage_ok; }
+
+// The folder settings.cfg lives in (made if missing), for the other files that sit
+// beside it: the recent-files list and the autosave folder. Empty on web, or when
+// there is no home dir to put it in.
+std::string settings_dir() {
+#ifdef __EMSCRIPTEN__
+    return std::string();
+#else
+    std::string p = config_path(true);
+    if (p.empty()) return p;
+    return p.substr(0, p.find_last_of("/\\"));
+#endif
+}

@@ -428,6 +428,7 @@ void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse) {
         st.level = multires->current_level;
         st.fps = fps_display;
         st.project_path = current_project_path.c_str();
+        st.dirty = scene.edit_mark() != a.clean_edit_mark || scene.retopo_rev() != a.clean_retopo_rev;
         if (input.ui_viewfinder && (input.interaction_mode == InputState::InteractionMode::EDIT
                                     || input.interaction_mode == InputState::InteractionMode::SELECT))
             draw_scene_brackets(scene, camera, win_w, win_h, input.ui_viewfinder_px,

@@ -33,6 +33,7 @@
 #include "ImGuiFileDialog.h"
 #include "brush_alpha.h"
 #include "project_file.h"
+#include "session_files.h"
 #include "scene_snapshot.h"
 #include "object_xform.h"
 #include <filesystem>
@@ -176,6 +177,34 @@ static void draw_uvx_options(InputState& in) {
         ? "GLB carries Colour and Normal inside; Color ID and the UV map go beside it as PNGs."
         : "Maps go beside the model as PNGs: <name>-Color_1024.png and so on.");
     ImGui::PopTextWrapPos();
+}
+
+// Every alive, committed entity (not INSERT previews) with its own mesh + multires,
+// plus the scene-wide state: what a .chisel holds. Copies the meshes, so the result
+// stands alone (the autosave writer hands it to another thread). Main thread only:
+// materialize_active_cpu may read back from the GPU, which no stroke may be doing.
+void app_build_project(App& a, ProjectData& proj) {
+    Scene& scene = a.scene;
+    scene.materialize_active_cpu();  // 2b: copies the active entity's mesh + multires to disk
+    for (auto& up : scene.entities()) {
+        if (!up || !up->alive || up->preview) continue;
+        EntityRecord rec;
+        rec.id           = up->id;
+        rec.subdiv_level = up->subdiv_level;
+        rec.mesh         = up->mesh;
+        rec.multires     = up->multires;
+        rec.name         = up->name;
+        rec.visible      = up->visible;
+        retopo_save(up->retopo, rec.retopo);
+        proj.entities.push_back(std::move(rec));
+    }
+    proj.active_id           = scene.active_mesh_id();
+    proj.selected_ids        = scene.selected_ids();
+    proj.next_id             = scene.next_id();
+    proj.mirror_use_topology = scene.mirror_topology();
+    proj.camera       = a.camera;
+    proj.mirror_x     = a.input.mirror_x;
+    proj.subdiv_level = a.input.subdiv_level;
 }
 
 void app_files_frame(App& a) {
@@ -505,6 +534,105 @@ void app_files_frame(App& a) {
     const bool exp_uvmap = input.export_dialog_active && input.export_kind == InputState::ExportKind::UV_MAP;
     const bool exp_uvx = input.export_dialog_active && input.export_kind == InputState::ExportKind::UV_ASSETS;
 
+    // ---- Put a whole project into the scene: Open (.chisel), File > New, Recover ----
+    // `path` becomes the save target (empty = Unsaved Project). Clean as loaded.
+    auto apply_project = [&](ProjectData& proj, const std::string& path) {
+        camera = proj.camera;
+        input.mirror_x = proj.mirror_x;
+        input.subdiv_level = proj.subdiv_level;
+        input.mesh_locked = true;
+        current_project_path = path;
+
+        // Rebuild the whole multimesh scene. load_entities does
+        // per-entity cascade/adjacency/normals/mirror and restores
+        // the saved selection; the active entity's mirror map is
+        // (re)cached by refresh_mirror_map before sync.
+        scene.set_mirror_topology(proj.mirror_use_topology);
+        // Each mesh brings its own retopo (none in the file = none now).
+        scene.load_entities(proj.entities, proj.active_id,
+                            proj.selected_ids, proj.next_id);
+        clean_retopo_rev = scene.retopo_rev();
+        xforms.clear();      // records point at the outgoing scene
+        scene.refresh_mirror_map(input.subdiv_level);
+        scene.sync();
+        clean_edit_mark = scene.edit_mark();
+
+        mesh = &scene.active_mesh();
+        multires = &scene.active_multires();
+        refresh_active_gpu_residency();
+        mesh->compute_bounding_sphere(mesh_center, mesh_radius);
+        brush_stroke.vertex_count = 0;
+        brush_stroke.phase = StrokePhase::NONE;
+        app_state = AppState::IDLE;
+        screen_buffers_dirty = true;
+
+        if (scene.load_flattened() > 0) {
+            std::snprintf(input.notification, sizeof(input.notification),
+                          "Loaded with %d mesh(es) flattened: file is from "
+                          "another platform — re-save there to migrate",
+                          scene.load_flattened());
+            input.notification_timer = 6.0f;
+        } else {
+            std::snprintf(input.notification, sizeof(input.notification),
+                          "Loaded: %.400s (%zu mesh%s, active %u v, %u t)",
+                          path.c_str(), proj.entities.size(),
+                          proj.entities.size() == 1 ? "" : "es",
+                          mesh->vertex_count(), mesh->tri_count());
+            input.notification_timer = 3.0f;
+        }
+    };
+
+    // ---- Recover an autosave: its work, but not its file ----
+    // Opens as Unsaved Project, so Ctrl+S asks where and never writes into the autosave
+    // folder, and dirty, so closing still asks. The autosave itself is deleted once this
+    // session holds its own copy (session_files.h).
+    auto do_recover = [&](const std::string& path) {
+        ProjectData proj;
+        LoadResult lr = load_project(path.c_str(), proj);
+        if (lr != LoadResult::OK || proj.entities.empty()) {
+            error_popup_msg = std::string("Recover failed: ") + result_string(lr) + "\n" + path;
+            error_popup_trigger = true;
+            return;
+        }
+        apply_project(proj, std::string());
+        clean_edit_mark = ~0ull;   // matches no real edit mark: unsaved until a save
+        autosave_mark_recovered(path);
+        std::snprintf(input.notification, sizeof(input.notification),
+                      "Recovered unsaved work (%zu mesh%s). Ctrl+S to keep it",
+                      proj.entities.size(), proj.entities.size() == 1 ? "" : "es");
+        input.notification_timer = 4.0f;
+    };
+
+    // ---- File > New: the opening ball again, as a fresh launch builds it ----
+    // Goes through the load path, so nothing of the old scene (meshes, retopo, layers,
+    // undo) carries over. Mirror and every setting stay as they are.
+    auto do_new_project = [&]() {
+        static const int kStartLevel = InputState().subdiv_level;
+        const bool uv = input.sphere_kind == InputState::SphereKind::UV;
+        const int level = uv ? 0 : kStartLevel;
+        ProjectData proj;
+        EntityRecord rec;
+        rec.id = 1;
+        rec.subdiv_level = (uint32_t)level;
+        rec.mesh = uv ? uv_sphere(32, 16) : icosphere(level);
+        rec.mesh.recompute_normals();
+        rec.mesh.build_adjacency();
+        multires_stack_init_from_lock(rec.multires, rec.mesh, level);
+        proj.entities.push_back(std::move(rec));
+        proj.active_id = 1;
+        proj.selected_ids = {1};
+        proj.next_id = 2;
+        proj.mirror_use_topology = scene.mirror_topology();
+        proj.mirror_x = input.mirror_x;
+        proj.subdiv_level = level;
+        apply_project(proj, std::string());
+        camera = Camera();
+        camera.set_target(mesh_center);
+        camera.distance = mesh_radius * 2.5f;
+        std::snprintf(input.notification, sizeof(input.notification), "New project");
+        input.notification_timer = 2.0f;
+    };
+
     // ---- Open/import a path (shared by the native dialog and the web picker) ----
     auto do_import_path = [&](const std::string& path) {
         auto dot = path.find_last_of('.');
@@ -520,49 +648,8 @@ void app_files_frame(App& a) {
             ProjectData proj;
             LoadResult lr = load_project(path.c_str(), proj);
             if (lr == LoadResult::OK && !proj.entities.empty()) {
-                camera = proj.camera;
-                input.mirror_x = proj.mirror_x;
-                input.subdiv_level = proj.subdiv_level;
-                input.mesh_locked = true;
-                current_project_path = path;
-
-                // Rebuild the whole multimesh scene. load_entities does
-                // per-entity cascade/adjacency/normals/mirror and restores
-                // the saved selection; the active entity's mirror map is
-                // (re)cached by refresh_mirror_map before sync.
-                scene.set_mirror_topology(proj.mirror_use_topology);
-                // Each mesh brings its own retopo (none in the file = none now).
-                scene.load_entities(proj.entities, proj.active_id,
-                                    proj.selected_ids, proj.next_id);
-                clean_retopo_rev = scene.retopo_rev();
-                xforms.clear();      // records point at the outgoing scene
-                scene.refresh_mirror_map(input.subdiv_level);
-                scene.sync();
-                clean_edit_mark = scene.edit_mark();
-
-                mesh = &scene.active_mesh();
-                multires = &scene.active_multires();
-                refresh_active_gpu_residency();
-                mesh->compute_bounding_sphere(mesh_center, mesh_radius);
-                brush_stroke.vertex_count = 0;
-                brush_stroke.phase = StrokePhase::NONE;
-                app_state = AppState::IDLE;
-                screen_buffers_dirty = true;
-
-                if (scene.load_flattened() > 0) {
-                    std::snprintf(input.notification, sizeof(input.notification),
-                                  "Loaded with %d mesh(es) flattened: file is from "
-                                  "another platform — re-save there to migrate",
-                                  scene.load_flattened());
-                    input.notification_timer = 6.0f;
-                } else {
-                    std::snprintf(input.notification, sizeof(input.notification),
-                                  "Loaded: %.400s (%zu mesh%s, active %u v, %u t)",
-                                  path.c_str(), proj.entities.size(),
-                                  proj.entities.size() == 1 ? "" : "es",
-                                  mesh->vertex_count(), mesh->tri_count());
-                    input.notification_timer = 3.0f;
-                }
+                apply_project(proj, path);
+                recents_add(path);
             } else {
                 error_popup_msg = std::string("Load failed: ") + result_string(lr) + "\n" + path;
                 error_popup_trigger = true;
@@ -1057,39 +1144,22 @@ void app_files_frame(App& a) {
 
     // ---- Save project (.chisel) ----
     auto do_save_project = [&](const std::string& path) {
-        scene.materialize_active_cpu();  // 2b: copies the active entity's mesh + multires to disk
         ProjectData proj;
-        // Persist the whole multimesh scene: every alive, committed entity
-        // (skip transient INSERT previews) with its own mesh + multires.
-        for (auto& up : scene.entities()) {
-            if (!up || !up->alive || up->preview) continue;
-            EntityRecord rec;
-            rec.id           = up->id;
-            rec.subdiv_level = up->subdiv_level;
-            rec.mesh         = up->mesh;
-            rec.multires     = up->multires;
-            rec.name         = up->name;
-            rec.visible      = up->visible;
-            retopo_save(up->retopo, rec.retopo);
-            proj.entities.push_back(std::move(rec));
-        }
-        proj.active_id           = scene.active_mesh_id();
-        proj.selected_ids        = scene.selected_ids();
-        proj.next_id             = scene.next_id();
-        proj.mirror_use_topology = scene.mirror_topology();
-        proj.camera       = camera;
-        proj.mirror_x     = input.mirror_x;
-        proj.subdiv_level = input.subdiv_level;
+        app_build_project(a, proj);
         SaveResult sr = save_project(path.c_str(), proj);
         if (sr == SaveResult::OK && input.quit_after_save) {
             input.quit_after_save = false;
-            glfwSetWindowShouldClose(window, GLFW_TRUE);
+            // Save & New: the fresh sphere comes after this save, not a close.
+            if (input.quit_to_new) { input.quit_to_new = false; input.new_project_requested = true; }
+            else glfwSetWindowShouldClose(window, GLFW_TRUE);
         }
-        if (sr != SaveResult::OK) input.quit_after_save = false;   // stay; the error popup says why
+        if (sr != SaveResult::OK) { input.quit_after_save = false; input.quit_to_new = false; }
         if (sr == SaveResult::OK) {
             current_project_path = path;
             clean_edit_mark = scene.edit_mark();
             clean_retopo_rev = scene.retopo_rev();
+            recents_add(path);
+            autosave_drop_session();   // the real file holds this work now
 #ifdef __EMSCRIPTEN__
             // A MEMFS "save" only counts once the bytes leave as a download
             // (which also unlinks the MEMFS copy; Ctrl+S recreates it).
@@ -1108,7 +1178,9 @@ void app_files_frame(App& a) {
     // ---- Drag-and-drop open (prompt was answered in the key callback) ----
     if (input.drop_open_requested) {
         input.drop_open_requested = false;
-        do_import_path(input.drop_path);
+        if (input.drop_recover) do_recover(input.drop_path);
+        else                    do_import_path(input.drop_path);
+        input.drop_recover = false;
     }
 
     if (input.save_requested) {
@@ -1371,4 +1443,64 @@ void app_files_frame(App& a) {
     // save already closed the window inside do_save_project.
     if (input.quit_after_save && !input.save_dialog_active && !input.save_requested)
         input.quit_after_save = false;
+    if (!input.quit_requested && !input.quit_after_save) input.quit_to_new = false;
+
+    // File > New (or the "New?" dialog's Discard / Save first, once the save landed).
+    if (input.new_project_requested) {
+        input.new_project_requested = false;
+        do_new_project();
+    }
+}
+
+// ---- Autosave (native) ----
+// Called from main.cpp's idle-frame skip (and its hidden-window path) with how long
+// nothing has happened. Two triggers, both only with work changed since the last
+// autosave AND not saved for real:
+//   idle: a full minute without input, the "went for coffee" case;
+//   timer: 5 minutes of unsaved work, taken at the next 1-second pause, so a session
+//          that never stops for a minute still gets a copy.
+// The main thread only copies the scene (app_build_project); the writing happens on
+// session_files' thread. The marks move on at the snapshot, so a failed write waits
+// for the next edit instead of retrying every frame. Console lines only: a toast
+// would wake the drawing loop, and nobody asked for this save.
+void app_autosave_tick(App& a, double idle_secs) {
+    if (!autosave_enabled()) return;
+    static uint64_t saved_edit = ~0ull, saved_rev = ~0ull;
+    static double dirty_since = -1.0;
+
+    bool ok; double secs; unsigned long long bytes; std::string path;
+    if (autosave_poll(ok, secs, bytes, path)) {
+        if (ok) std::printf("[autosave] wrote %.1f MB in %.2f s: %s\n", bytes / 1048576.0, secs, path.c_str());
+        else    std::printf("[autosave] FAILED after %.2f s: %s\n", secs, path.c_str());
+        std::fflush(stdout);
+    }
+
+    Scene& scene = a.scene;
+    const uint64_t edit = scene.edit_mark(), rev = scene.retopo_rev();
+    const bool clean = edit == a.clean_edit_mark && rev == a.clean_retopo_rev;
+    const bool changed = edit != saved_edit || rev != saved_rev;
+    if (clean || !changed) { dirty_since = -1.0; return; }
+    const double now = glfwGetTime();
+    if (dirty_since < 0.0) dirty_since = now;
+
+    const bool idle_rule  = idle_secs >= 60.0;
+    const bool timer_rule = now - dirty_since >= 300.0 && idle_secs >= 1.0;
+    if (!idle_rule && !timer_rule) return;
+    const InputState& in = a.input;
+    if (autosave_busy() || a.app_state != AppState::IDLE || a.vmerge_job
+        || a.brush_stroke.is_active() || in.remesh_requested || in.remesh_in_progress
+        || in.voxel_merge_requested || in.voxel_merge_in_progress) return;
+
+    const double t0 = glfwGetTime();
+    ProjectData* proj = new ProjectData;
+    app_build_project(a, *proj);
+    saved_edit = scene.edit_mark();
+    saved_rev = scene.retopo_rev();
+    dirty_since = -1.0;
+    const double copy_ms = (glfwGetTime() - t0) * 1000.0;
+    std::printf("[autosave] %s: snapshot of %zu mesh%s took %.0f ms (main thread), writing in the background\n",
+                idle_rule ? "idle 60 s" : "5 min unsaved", proj->entities.size(),
+                proj->entities.size() == 1 ? "" : "es", copy_ms);
+    std::fflush(stdout);
+    autosave_start(proj);
 }

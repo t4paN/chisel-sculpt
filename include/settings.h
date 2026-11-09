@@ -47,3 +47,7 @@ void settings_reset(InputState& input);
 // Chrome and Firefox partition third-party storage (it works, keyed to the itch.io
 // top-level site); Safari may refuse it outright. Hence the check rather than an assume.
 bool settings_storage_available();
+
+#include <string>
+// The folder settings.cfg lives in, created if missing. Empty on web or with no home dir.
+std::string settings_dir();

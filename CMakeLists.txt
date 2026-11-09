@@ -245,6 +245,7 @@ add_executable(chisel
     src/camera.cpp
     src/input.cpp
     src/settings.cpp
+    src/session_files.cpp
     src/sphere.cpp
     src/text_overlay.cpp
     src/brush.cpp
@@ -385,6 +386,12 @@ if(MSVC)
 endif()
 if(NOT WIN32 AND NOT EMSCRIPTEN)
     target_link_libraries(chisel PRIVATE m dl)
+endif()
+# The autosave writer (session_files.cpp) runs on a std::thread. Native only: the web
+# build skips autosave entirely and links no thread runtime.
+if(NOT EMSCRIPTEN)
+    find_package(Threads REQUIRED)
+    target_link_libraries(chisel PRIVATE Threads::Threads)
 endif()
 
 # Pen tablet (src/tablet.cpp): direct Xlib calls need libX11. XInput2 (libXi) is

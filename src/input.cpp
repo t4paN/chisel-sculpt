@@ -1599,7 +1599,7 @@ static void handle_modal_key(GLFWwindow* w, int key) {
     const bool merge = in.voxel_merge_confirm_pending;
     switch (key) {
         case GLFW_KEY_ESCAPE:
-            if      (in.drop_confirm_pending)       in.drop_confirm_pending = false;
+            if      (in.drop_confirm_pending)       { in.drop_confirm_pending = false; in.drop_recover = false; }
             else if (in.voxel_merge_confirm_pending) in.voxel_merge_confirm_pending = false;
             else if (in.drop_level_confirm_pending) in.drop_level_confirm_pending = false;
             else if (in.reset_confirm_pending)      in.reset_confirm_pending = false;
@@ -1607,7 +1607,9 @@ static void handle_modal_key(GLFWwindow* w, int key) {
             else if (in.export_dialog_active)       in.export_dialog_active = false;
             else if (in.import_dialog_active)       in.import_dialog_active = false;
             else if (in.save_dialog_active)         in.save_dialog_active = false;
-            else if (in.quit_requested)             in.quit_requested = false;
+            else if (in.quit_requested)             { in.quit_requested = false; in.quit_to_new = false; }
+            else if (in.about_open)                 in.about_open = false;
+            else if (in.recover_prompt_pending)     in.recover_prompt_pending = false;
             break;
         // `~` debug console. Native only — on web the shell.html overlay owns this key
         // and already mirrors console.log.
@@ -1633,17 +1635,28 @@ static void handle_modal_key(GLFWwindow* w, int key) {
             } else if (in.remesh_confirm_pending) {
                 in.remesh_confirm_pending = false;
                 in.remesh_requested = true;
+            } else if (in.quit_requested && in.quit_to_new) {   // Discard, start new
+                in.quit_requested = false;
+                in.quit_to_new = false;
+                in.new_project_requested = true;
             } else if (in.quit_requested) {
                 glfwSetWindowShouldClose(w, GLFW_TRUE);
+            } else if (in.recover_prompt_pending) {
+                // drop_path already holds the autosave; it opens as Unsaved Project.
+                in.recover_prompt_pending = false;
+                in.drop_recover = true;
+                in.drop_open_requested = true;
             }
             break;
         case GLFW_KEY_N:
-            if      (in.drop_confirm_pending)       in.drop_confirm_pending = false;
+            if      (in.drop_confirm_pending)       { in.drop_confirm_pending = false; in.drop_recover = false; }
             else if (merge)                         in.voxel_merge_confirm_pending = false;
             else if (in.drop_level_confirm_pending) in.drop_level_confirm_pending = false;
             else if (in.reset_confirm_pending)      in.reset_confirm_pending = false;
             else if (in.remesh_confirm_pending)     in.remesh_confirm_pending = false;
-            else if (in.quit_requested)             in.quit_requested = false;
+            else if (in.quit_requested)             { in.quit_requested = false; in.quit_to_new = false; }
+            else if (in.about_open)                 in.about_open = false;
+            else if (in.recover_prompt_pending)     in.recover_prompt_pending = false;
             break;
         // The merge dialog's own keys: M = mirror-symmetric merge, '-' = subtract (union
         // the selection, then carve away every unselected red mesh), S flips the
@@ -1665,7 +1678,7 @@ static void handle_modal_key(GLFWwindow* w, int key) {
             break;
         case GLFW_KEY_S:
             if (merge) in.voxel_merge_surface_nets = !in.voxel_merge_surface_nets;
-            else if (in.quit_requested) {   // Save & Quit
+            else if (in.quit_requested) {   // Save & Quit (or Save & New: quit_to_new stays)
                 in.quit_requested = false;
                 in.quit_after_save = true;
                 in.save_requested = true;
@@ -1750,7 +1763,9 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
                      || g_input->voxel_merge_confirm_pending
                      || g_input->drop_level_confirm_pending
                      || g_input->reset_confirm_pending
-                     || g_input->drop_confirm_pending;
+                     || g_input->drop_confirm_pending
+                     || g_input->about_open
+                     || g_input->recover_prompt_pending;
     if (modal_active) {
         if (action == GLFW_PRESS) handle_modal_key(w, key);
         return;
@@ -1811,7 +1826,15 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
 
             case GLFW_KEY_ESCAPE:
                 if (g_input->color_pick_active) g_input->color_pick_active = false;
-                else                            g_input->quit_requested = true;
+                else {
+                    g_input->quit_requested = true;
+#ifdef __EMSCRIPTEN__
+                    // A browser tab can't be closed from inside, so Esc there offers
+                    // a fresh start instead. The classic skin keeps its bitmap Quit
+                    // prompt, which can't say this (owedstuff: skins catch-up).
+                    g_input->quit_to_new = !g_input->ui_classic();
+#endif
+                }
                 break;
 
             case GLFW_KEY_ENTER:
@@ -1883,6 +1906,7 @@ static void drop_callback(GLFWwindow* w, int count, const char** paths) {
         return;
     }
     snprintf(g_input->drop_path, sizeof(g_input->drop_path), "%s", path);
+    g_input->drop_recover = false;   // a dropped file is a real file, never an autosave
     g_input->drop_confirm_pending = true;
     g_input->wake_requested = true;
 }
