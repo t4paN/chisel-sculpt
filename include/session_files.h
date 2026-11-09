@@ -9,9 +9,8 @@
 // only pause the user can feel is the copy of the scene the main thread hands over.
 // One file per session, autosave-<date>-<time>-<pid>.chisel, overwritten each time
 // via <name>.tmp + rename, so a crash mid-write never eats the previous copy. A session
-// that ends unsaved leaves its file behind; the next launch offers it once (the file
-// is renamed seen-autosave-... then), File > Recover lists them all, and only the
-// newest 3 are kept.
+// that ends unsaved leaves its file behind. Nothing asks about it at startup: the app
+// opens as usual and File > Recover lists them. Only the newest 3 are kept.
 #include <string>
 #include <vector>
 
@@ -29,14 +28,10 @@ struct AutosaveFile {
     std::string path;
     long long   mtime = 0;      // seconds since the epoch, for sorting
     char        label[32] = ""; // "Nov 09, 14:32", local time of the last write
-    bool        seen = false;   // already offered at a startup
 };
 // Autosaves left by sessions that have ended, newest first. Live sessions' files
 // (this one's, or another open window's) are never listed.
 std::vector<AutosaveFile> autosave_leftovers();
-// Marks every unseen leftover as offered and returns the newest, so the startup prompt
-// asks about each file once. False when there was nothing new.
-bool autosave_take_unseen(AutosaveFile& newest, int& others);
 
 // Background writer. start() takes ownership of `proj` and deletes it once written;
 // one write at a time (a call while busy just drops the snapshot).

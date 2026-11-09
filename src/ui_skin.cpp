@@ -3780,33 +3780,6 @@ void draw_skin_dialogs(InputState& input, int win_w, int win_h, const DialogInfo
         end_dialog();
     }
 
-    // ---- Recover: the startup offer of an autosave an ended session left ----
-    if (begin_dialog("##dlgRecover", input.recover_prompt_pending, win_w, win_h)) {
-        const float avail = ImGui::GetContentRegionAvail().x;
-        auto centre = [&](float w) {
-            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.0f, (avail - w) * 0.5f));
-        };
-        const char* title = "Recover unsaved work?";
-        char l1[96];
-        std::snprintf(l1, sizeof l1, "A session ended without saving. Last autosave: %s.", input.recover_label);
-        const char* l2 = "Not now keeps it under File > Recover (click the file name, top left).";
-        centre(text_size(UiFont::SansSemibold, 16.0f, title_case(title)).x);
-        dlg_title(title);
-        centre(text_size(UiFont::Sans, 13.0f, l1).x);
-        dlg_text(UiFont::Sans, 13.0f, kMuted, l1);
-        centre(text_size(UiFont::Sans, 13.0f, l2).x);
-        dlg_text(UiFont::Sans, 13.0f, kMuted, l2);
-        ImGui::Dummy(ImVec2(0.0f, 2.0f));
-        const float sp = ImGui::GetStyle().ItemSpacing.x;
-        centre(dlg_button_w("Recover", "Y") + dlg_button_w("Not now", "N") + sp);
-        if (dlg_button("##rcY", "Recover", "Y", true)) press_dialog_key(GLFW_KEY_Y);
-        dlg_tip("Open it as an unsaved project (Ctrl+S asks where to keep it)");
-        ImGui::SameLine();
-        if (dlg_button("##rcN", "Not now", "N", false)) press_dialog_key(GLFW_KEY_N);
-        dlg_tip("Start with the sphere (Esc works too)");
-        end_dialog();
-    }
-
     // ---- About (File menu) ----
     if (begin_dialog("##dlgAbout", input.about_open, win_w, win_h)) {
         const float avail = ImGui::GetContentRegionAvail().x;

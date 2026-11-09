@@ -1609,7 +1609,6 @@ static void handle_modal_key(GLFWwindow* w, int key) {
             else if (in.save_dialog_active)         in.save_dialog_active = false;
             else if (in.quit_requested)             { in.quit_requested = false; in.quit_to_new = false; }
             else if (in.about_open)                 in.about_open = false;
-            else if (in.recover_prompt_pending)     in.recover_prompt_pending = false;
             break;
         // `~` debug console. Native only — on web the shell.html overlay owns this key
         // and already mirrors console.log.
@@ -1641,11 +1640,6 @@ static void handle_modal_key(GLFWwindow* w, int key) {
                 in.new_project_requested = true;
             } else if (in.quit_requested) {
                 glfwSetWindowShouldClose(w, GLFW_TRUE);
-            } else if (in.recover_prompt_pending) {
-                // drop_path already holds the autosave; it opens as Unsaved Project.
-                in.recover_prompt_pending = false;
-                in.drop_recover = true;
-                in.drop_open_requested = true;
             }
             break;
         case GLFW_KEY_N:
@@ -1656,7 +1650,6 @@ static void handle_modal_key(GLFWwindow* w, int key) {
             else if (in.remesh_confirm_pending)     in.remesh_confirm_pending = false;
             else if (in.quit_requested)             { in.quit_requested = false; in.quit_to_new = false; }
             else if (in.about_open)                 in.about_open = false;
-            else if (in.recover_prompt_pending)     in.recover_prompt_pending = false;
             break;
         // The merge dialog's own keys: M = mirror-symmetric merge, '-' = subtract (union
         // the selection, then carve away every unselected red mesh), S flips the
@@ -1764,8 +1757,7 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
                      || g_input->drop_level_confirm_pending
                      || g_input->reset_confirm_pending
                      || g_input->drop_confirm_pending
-                     || g_input->about_open
-                     || g_input->recover_prompt_pending;
+                     || g_input->about_open;
     if (modal_active) {
         if (action == GLFW_PRESS) handle_modal_key(w, key);
         return;

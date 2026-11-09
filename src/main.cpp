@@ -767,20 +767,6 @@ int main(int argc, char* argv[]) {
             , fbw, fbh
 #endif
     };
-    // Work an earlier session left unsaved (crash, kill, closed without saving): offer
-    // the newest once, on one key. Not when a file was asked for on the command line,
-    // and not in the classic skin, whose bitmap dialogs have no such prompt yet.
-    if (cli_open_path.empty() && !input.ui_classic()) {
-        AutosaveFile left;
-        int others = 0;
-        if (autosave_take_unseen(left, others)) {
-            std::snprintf(input.drop_path, sizeof(input.drop_path), "%s", left.path.c_str());
-            std::snprintf(input.recover_label, sizeof(input.recover_label), "%s", left.label);
-            input.recover_prompt_pending = true;
-            std::printf("[autosave] offering %s (%d more in File > Recover)\n", left.path.c_str(), others);
-        }
-    }
-
     auto frame = [&]() {
         input.begin_frame();
 

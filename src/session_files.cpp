@@ -8,7 +8,6 @@ void recents_add(const std::string&) {}
 std::vector<std::string> recents_list() { return {}; }
 bool autosave_enabled() { return false; }
 std::vector<AutosaveFile> autosave_leftovers() { return {}; }
-bool autosave_take_unseen(AutosaveFile&, int&) { return false; }
 bool autosave_busy() { return false; }
 void autosave_start(ProjectData* proj) { delete proj; }
 bool autosave_poll(bool&, double&, unsigned long long&, std::string&) { return false; }
@@ -91,7 +90,8 @@ const std::string& session_path() {
     return p;
 }
 
-// autosave-...-<pid>.chisel or seen-autosave-...-<pid>.chisel → pid (0 = not ours).
+// autosave-...-<pid>.chisel → pid (0 = not ours). seen-autosave-... is what the old
+// startup offer renamed files to; still read, so those stay listed and rotated.
 unsigned long pid_of(const std::string& name) {
     const std::string ext = ".chisel";
     if (name.size() <= ext.size() || name.compare(name.size() - ext.size(), ext.size(), ext) != 0)
@@ -129,7 +129,6 @@ std::vector<AutosaveFile> list_all(bool include_live) {
         AutosaveFile f;
         f.path = e.path().string();
         f.mtime = mtime_of(e.path());
-        f.seen = name.rfind("seen-", 0) == 0;
         std::time_t t = (std::time_t)f.mtime;
         std::strftime(f.label, sizeof f.label, "%b %d, %H:%M", std::localtime(&t));
         out.push_back(f);
@@ -238,24 +237,6 @@ bool autosave_enabled() {
 std::vector<AutosaveFile> autosave_leftovers() {
     if (!autosave_enabled()) return {};
     return list_all(false);
-}
-
-bool autosave_take_unseen(AutosaveFile& newest, int& others) {
-    others = 0;
-    bool found = false;
-    for (AutosaveFile& f : autosave_leftovers()) {
-        if (f.seen) continue;
-        fs::path p(f.path);
-        fs::path seen = p.parent_path() / ("seen-" + p.filename().string());
-        std::error_code ec;
-        fs::rename(p, seen, ec);
-        if (ec) continue;
-        f.path = seen.string();
-        f.seen = true;
-        if (!found) { newest = f; found = true; }
-        else others++;
-    }
-    return found;
 }
 
 bool autosave_busy() { return g_job != nullptr; }

@@ -535,10 +535,8 @@ struct InputState {
     // Riding on quit_requested keeps every modal gate working without a new flag.
     bool quit_to_new = false;
     bool new_project_requested = false;   // File > New, answered: start the fresh sphere
-    // File > About, and the startup offer to recover an autosave (Y / N). Both modal.
+    // File > About. Modal.
     bool about_open = false;
-    bool recover_prompt_pending = false;
-    char recover_label[48] = "";          // "Nov 9, 14:32", for the prompt's line
     // A close asked from outside the app's own keys (title-bar X, the desktop's
     // "close window", which KDE sends at logout). main.cpp closes at once when
     // nothing is unsaved, else raises the window and asks.
