@@ -1787,6 +1787,7 @@ int main(int argc, char* argv[]) {
 
             // Active entity lives in the working buffers at offset 0; the brush
             // dispatches over its full [0, vertex_count) range.
+            bench::pd_arm(renderer.gpu_dev);
             brush_stroke.begin(renderer, camera,
                                (float)input.mouse_x, (float)input.mouse_y,
                                input.brush_size,
@@ -1794,6 +1795,7 @@ int main(int argc, char* argv[]) {
                                input.current_brush, scene.active_mesh_id(),
                                scene.active_entity().multires_gpu,
                                !screen_buffers_dirty);
+            bench::pd_mark("begin: rest");
             brush_stroke.walk_x = (float)input.mouse_x;
             brush_stroke.walk_y = (float)input.mouse_y;
             brush_stroke.walk_carry = 0.0f;
@@ -2357,7 +2359,12 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        bench::pd_mark("dabs + everything before render");
+        bench::copy_test(renderer.gpu_dev, renderer.vbo_pos,
+                         (uint64_t)mesh->vertex_count() * 3 * sizeof(float), multires->current_level);
         app_render_frame(app, win_w, win_h, imgui_wants_mouse);   // app_render.cpp: draw, UI, present
+        bench::pd_mark("render + present");
+        bench::pd_frame();
         if (bench::active()) {
             const int lvl = multires->current_level;
             bench::Phase ph = bench::Phase::IDLE;

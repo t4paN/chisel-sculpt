@@ -2,6 +2,18 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-10 — Pen-down hitch at 16M tris gone (native, both backends)
+
+*Measured on the native wgpu build, Arc B570, Mesa anv: frame log over real strokes, plus a self-running copy benchmark.*
+
+- Every stroke at L7 (7 864 322 verts, 15.7M tris) opened with a ~110 ms frame; at L6 (4M tris) there was none, and mid-stroke L7 held 13.3 ms. A new pen-down probe put all of it in two whole-mesh buffer copies: the stroke's normals snapshot and the undo positions snapshot, 54 ms of CPU each, with the GPU done in about 1 ms.
+- The cost follows the copy's exact byte count, not the amount of data. 90 MiB: 0.02 ms. 90 MiB + 24 bytes (this mesh's array): 52 ms. 45 MiB + 12 bytes: 52 ms. 80 MiB + 24: 0.03 ms. Same on a blank buffer in an empty scene, so it is not memory pressure or mesh state. The driver's rule is unknown; the time is spent recording or submitting the command.
+- Fix: the WebGPU backend's one copy routine (`encode_copy`, both `copy_buffer` overloads) sends a body that is a whole number of 64 KiB and a tail under 64 KiB. Benchmark: 52 ms -> 0.02 ms. Real strokes at L7: first frame 110 ms -> 13.5 ms, 13 strokes in a row.
+- GL had the same hitch (first frames of 107-181 ms at L7 in a frame log), so `gl_backend.cpp` splits its copies the same way (`copy_split`). After the fix GL was judged by feel only, over 44 strokes at L7: better, no frame log taken.
+- **Still there:** the first stroke after arriving at a level opens with a one-off ~200 ms frame (was ~325). The probe puts it in the first dab, before render; not split further.
+- **Not checked:** other vertex counts (only this one size was known bad), the web build (Chrome on the same driver would likely have hit it; not rebuilt or run), other GPUs. The copy benchmark never ran on GL.
+- Dev hooks, inert unless set: `CHISEL_PENDOWN=1` times the first three frames of each stroke step by step, draining the GPU after each, so it slows strokes and is not for feel tests. `CHISEL_COPY_TEST=<level>` (with `CHISEL_COPY_TEST_MB` / `_EXTRA` for a blank buffer) times copies at a range of sizes and exits. `CHISEL_AUTO_SUBD` drops requests that land while a level is still building, so reaching L7 by script needed a manual Ctrl+D.
+
 ## 2026-11-10 — Smooth brush keeps poles even
 
 *Checked by hand on the native GL build: smoothing over poles after an SDF remesh, wireframe on.*

@@ -207,11 +207,31 @@ void end_compute_pass(ComputeBatch& b) {
     }
 }
 
+// Every buffer copy goes through here. A copy is split into a body that is a whole
+// number of 64 KiB and a tail under 64 KiB, because on Intel Arc (Mesa anv, measured
+// 2026-11-10 on a B570) the CPU cost of *recording* a copy depends on its exact byte
+// count, not on how much it moves: 90 MiB costs 0.02 ms, 90 MiB + 24 bytes costs
+// 52 ms, and so does a 45 MiB + 12 copy with the same element count. A whole-mesh
+// array is vertex_count * 12 bytes and at L7 (7 864 322 verts) lands on exactly such a
+// size, twice per pen-down. Round bodies and sub-row tails were fast in every case
+// tried (bench::copy_test). Both parts stay multiples of 4, as WebGPU requires.
+static void encode_copy(WGPUCommandEncoder enc, WGPUBuffer src, uint64_t src_off,
+                        WGPUBuffer dst, uint64_t dst_off, uint64_t size) {
+    const uint64_t body = size & ~0xFFFFull;
+    if (body == 0 || body == size) {
+        wgpuCommandEncoderCopyBufferToBuffer(enc, src, src_off, dst, dst_off, size);
+        return;
+    }
+    wgpuCommandEncoderCopyBufferToBuffer(enc, src, src_off, dst, dst_off, body);
+    wgpuCommandEncoderCopyBufferToBuffer(enc, src, src_off + body, dst, dst_off + body,
+                                         size - body);
+}
+
 void copy_buffer(ComputeBatch& b, const Buffer& src, uint64_t src_off,
                  const Buffer& dst, uint64_t dst_off, uint64_t size) {
     // copies are encoder-level commands — the compute pass must be ended first.
     if (b.pass) end_compute_pass(b);
-    wgpuCommandEncoderCopyBufferToBuffer(b.enc, src.handle, src_off, dst.handle, dst_off, size);
+    encode_copy(b.enc, src.handle, src_off, dst.handle, dst_off, size);
 }
 
 void submit(ComputeBatch& b) {
@@ -324,7 +344,7 @@ void clear_buffer(Device& dev, Buffer& b, uint32_t fill_word) {
 void copy_buffer(Device& dev, const Buffer& src, uint64_t src_off,
                  const Buffer& dst, uint64_t dst_off, uint64_t size) {
     WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(dev.device, nullptr);
-    wgpuCommandEncoderCopyBufferToBuffer(enc, src.handle, src_off, dst.handle, dst_off, size);
+    encode_copy(enc, src.handle, src_off, dst.handle, dst_off, size);
     WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(enc, nullptr);
     wgpuQueueSubmit(dev.queue, 1, &cmd);
     wgpuCommandBufferRelease(cmd);

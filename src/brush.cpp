@@ -1,6 +1,7 @@
 #include "brush.h"
 #include "mesh_entity.h"
 #include "scene.h"
+#include "bench.h"
 #include <cmath>
 #include <cstring>
 #include <algorithm>
@@ -609,7 +610,9 @@ void BrushStroke::begin_dab(DabContext& ctx, uint8_t kind) {
 
     const uint32_t vc = ctx.mesh.vertex_count();
     if (vc == 0) return;
+    bench::pd_mark("dab: before begin_dab");
     cs.ensure_smooth_dirty_buffer(vc);
+    bench::pd_mark("dab: smooth dirty buffer");
 
     // Once per frame, before that frame's first dab: rebuild every block's AABB from
     // the GPU's own positions and drop the previous frame's selection.
@@ -617,6 +620,7 @@ void BrushStroke::begin_dab(DabContext& ctx, uint8_t kind) {
         cs.dispatch_block_boxes(ctx.renderer.vbo_pos, vc);
         cs.begin_block_frame();
         blocks_need_rebuild = false;
+        bench::pd_mark("dab: block boxes rebuild");
     }
 
     // GPU touched list: nothing reads this region back, so it costs nothing to make it
@@ -1328,6 +1332,7 @@ void BrushStroke::begin(Renderer& renderer, const Camera& cam,
         snap_y.assign(vert_count, 0.0f);
         snap_z.assign(vert_count, 0.0f);
     }
+    bench::pd_mark(gpu_touched ? "begin: touched list (gpu)" : "begin: cpu snapshots (NOT gpu)");
 
     mask.reset();
     color.reset();
@@ -1339,6 +1344,7 @@ void BrushStroke::begin(Renderer& renderer, const Camera& cam,
     // its first dab then anchors when the re-kicked plane cache lands.
     if (!screen_buffers_fresh)
         renderer.render_screen_buffers(cam, screen_w, screen_h);
+    bench::pd_mark(screen_buffers_fresh ? "begin: screen buffers (reused)" : "begin: screen buffers RE-RENDER");
 
     // Freeze per-vertex normals for the entire stroke. Draw_accum reads
     // displacement direction from this snapshot — without it, each dab would
@@ -1354,6 +1360,7 @@ void BrushStroke::begin(Renderer& renderer, const Camera& cam,
             || brush_type == BrushType::STIPPLE)) {
         compute->snapshot_stroke_normals(renderer.vbo_norm, vert_count);
     }
+    bench::pd_mark("begin: normals snapshot");
 
     // Phase 2a (GPU-resident undo): snapshot the pen-down VBO positions so the
     // pen-up diff shader can reproject world deltas into disp/base on the GPU.
@@ -1364,6 +1371,7 @@ void BrushStroke::begin(Renderer& renderer, const Camera& cam,
         && brush_type != BrushType::PAINT) {
         mgpu.snapshot_positions(renderer.vbo_pos, vert_count);
     }
+    bench::pd_mark("begin: positions snapshot");
 
     // Only the CPU mask fallback (apply_mask → walk_brush_region) ever reads these
     // full-screen buffers. MOVE gets its anchor from set_anchor's per-dab 1x1 reads,

@@ -231,14 +231,34 @@ void dispatch_indirect(ComputeBatch&, ComputePipeline& pipe, BindGroup& group,
 
 void end_compute_pass(ComputeBatch&) { /* no GL pass object */ }
 
-void copy_buffer(ComputeBatch&, const Buffer& src, uint64_t src_off,
-                 const Buffer& dst, uint64_t dst_off, uint64_t size) {
+// Every buffer copy goes through here, split into a body that is a whole number of
+// 64 KiB and a tail under 64 KiB. Same reason as encode_copy in webgpu_backend.cpp:
+// on Intel Arc under Mesa the CPU cost of a copy follows its exact byte count (90 MiB
+// is free, 90 MiB + 24 bytes costs ~52 ms), and a whole-mesh array at L7 lands on such
+// a size twice per pen-down. Measured on the wgpu build; the GL build showed the same
+// ~110 ms first frame at L7 before this (2026-11-10).
+static void copy_split(const Buffer& src, uint64_t src_off,
+                       const Buffer& dst, uint64_t dst_off, uint64_t size) {
     glBindBuffer(GL_COPY_READ_BUFFER,  src.handle);
     glBindBuffer(GL_COPY_WRITE_BUFFER, dst.handle);
-    glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER,
-                        (GLintptr)src_off, (GLintptr)dst_off, (GLsizeiptr)size);
+    const uint64_t body = size & ~0xFFFFull;
+    if (body == 0 || body == size) {
+        glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER,
+                            (GLintptr)src_off, (GLintptr)dst_off, (GLsizeiptr)size);
+    } else {
+        glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER,
+                            (GLintptr)src_off, (GLintptr)dst_off, (GLsizeiptr)body);
+        glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER,
+                            (GLintptr)(src_off + body), (GLintptr)(dst_off + body),
+                            (GLsizeiptr)(size - body));
+    }
     glBindBuffer(GL_COPY_READ_BUFFER,  0);
     glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
+}
+
+void copy_buffer(ComputeBatch&, const Buffer& src, uint64_t src_off,
+                 const Buffer& dst, uint64_t dst_off, uint64_t size) {
+    copy_split(src, src_off, dst, dst_off, size);
 }
 
 void submit(ComputeBatch&) {
@@ -271,12 +291,7 @@ void clear_buffer(Device&, Buffer& b, uint32_t fill_word) {
 
 void copy_buffer(Device&, const Buffer& src, uint64_t src_off,
                  const Buffer& dst, uint64_t dst_off, uint64_t size) {
-    glBindBuffer(GL_COPY_READ_BUFFER,  src.handle);
-    glBindBuffer(GL_COPY_WRITE_BUFFER, dst.handle);
-    glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER,
-                        (GLintptr)src_off, (GLintptr)dst_off, (GLsizeiptr)size);
-    glBindBuffer(GL_COPY_READ_BUFFER,  0);
-    glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
+    copy_split(src, src_off, dst, dst_off, size);
 }
 
 void resize_buffer(Device&, Buffer& b, uint64_t new_size, Usage /*usage*/) {
