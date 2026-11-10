@@ -745,6 +745,11 @@ void smooth_cross_field(const Mesh& m, CrossField& cf, int iters) {
     }
 }
 
+static float env_float(const char* name, float def) {
+    const char* e = std::getenv(name);
+    return e ? (float)std::atof(e) : def;
+}
+
 // Even out the marching-cubes triangulation WITHOUT losing shape. Each pass
 // moves a vertex toward its 1-ring centroid but only in the tangent plane (the
 // normal component, taken from the SDF gradient, is stripped), then snaps the
@@ -755,6 +760,7 @@ void smooth_cross_field(const Mesh& m, CrossField& cf, int iters) {
 // field we already built; no perform_remesh (which would mirror-symmetrise).
 // `pinned` (optional): verts flagged 1 are held fixed across every pass. Used by
 // the mirror path to lock the x=0 seam loop so the two halves stay weldable.
+// `even_area`: weight neighbours by owned surface so tris at poles match the rest.
 // `flow` (optional): smoothed cross field; adds a confidence-weighted tangential
 // force snapping each 1-ring edge onto its nearest cross axis, so the edge flow
 // follows curvature (the quad-remesher look) while the reprojection keeps every
@@ -762,7 +768,8 @@ void smooth_cross_field(const Mesh& m, CrossField& cf, int iters) {
 void relax_to_field(Mesh& m, const std::vector<float>& field,
                     const SdfGrid& grid, int iters, float lambda,
                     const std::vector<uint8_t>* pinned = nullptr,
-                    const CrossField* flow = nullptr) {
+                    const CrossField* flow = nullptr,
+                    bool even_area = false) {
     uint32_t nv = m.vertex_count();
     if (nv == 0 || m.indices.empty() || iters <= 0) return;
 
@@ -781,8 +788,21 @@ void relax_to_field(Mesh& m, const std::vector<float>& field,
 
     float h = 0.5f * grid.voxel;              // central-difference step for the gradient
     std::vector<float> nx(nv), ny(nv), nz(nv);
+    std::vector<float> aw;                    // even_area: surface each vert owns (sum of its tris)
+    if (even_area) aw.resize(nv);
 
     for (int it = 0; it < iters; it++) {
+        if (even_area) {
+            std::fill(aw.begin(), aw.end(), 0.0f);
+            for (size_t t = 0; t + 2 < m.indices.size(); t += 3) {
+                uint32_t i0 = m.indices[t], i1 = m.indices[t+1], i2 = m.indices[t+2];
+                Vec3 p0(m.pos_x[i0], m.pos_y[i0], m.pos_z[i0]);
+                Vec3 p1(m.pos_x[i1], m.pos_y[i1], m.pos_z[i1]);
+                Vec3 p2(m.pos_x[i2], m.pos_y[i2], m.pos_z[i2]);
+                float a = (p1-p0).cross(p2-p0).length();        // 2x area; only ratios matter
+                aw[i0] += a; aw[i1] += a; aw[i2] += a;
+            }
+        }
         for (uint32_t v = 0; v < nv; v++) {
             const std::vector<uint32_t>& N = nbr[v];
             Vec3 p(m.pos_x[v], m.pos_y[v], m.pos_z[v]);
@@ -808,9 +828,25 @@ void relax_to_field(Mesh& m, const std::vector<float>& field,
                 continue;
             }
 
+            // Plain neighbour average packs the tris at a 5-edge vert tight and
+            // spreads those at a 7-edge vert wide (they owned 0.56x / 1.42x the average
+            // surface; equal tris would give 0.83x / 1.17x). So weight each neighbour
+            // by the surface it owns, squared: a vert is drawn toward neighbours that
+            // have too much and lets go of those with too little. Squared because the
+            // plain weight settled only halfway there. Moving tris toward the mean
+            // area directly was tried too; it blew up under the Jacobi update.
             Vec3 c(0,0,0);
-            for (uint32_t u : N) c += Vec3(m.pos_x[u], m.pos_y[u], m.pos_z[u]);
-            c = c * (1.0f / (float)N.size());
+            if (even_area) {
+                float ws = 0.0f;
+                for (uint32_t u : N) {
+                    float wu = aw[u] * aw[u];
+                    c += Vec3(m.pos_x[u], m.pos_y[u], m.pos_z[u]) * wu; ws += wu;
+                }
+                c = (ws > 1e-30f) ? c * (1.0f / ws) : p;
+            } else {
+                for (uint32_t u : N) c += Vec3(m.pos_x[u], m.pos_y[u], m.pos_z[u]);
+                c = c * (1.0f / (float)N.size());
+            }
             Vec3 d = c - p;                    // umbrella (uniform-Laplacian) vector
 
             // Surface normal from the SDF gradient (central differences).
@@ -986,11 +1022,6 @@ uint32_t flip_valence(Mesh& m, const std::vector<uint8_t>* seam, int sweeps = 3)
 // onto the field before the next, so the guards always see settled geometry.
 // Vertex count never changes. Seam verts (mirror path) stay put and no flip may
 // lay an edge along the mirror plane, as the reflection would double it.
-static float env_float(const char* name, float def) {
-    const char* e = std::getenv(name);
-    return e ? (float)std::atof(e) : def;
-}
-
 struct PoleStats { uint32_t before = 0, after = 0, flips = 0; int rounds = 0; };
 
 PoleStats reduce_poles(Mesh& m, const std::vector<float>& field, const SdfGrid& grid,
@@ -2794,6 +2825,8 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
 
         // Dev hook: CHISEL_POLE_ROUNDS=0 turns the pole walk off, for A/B runs.
         static const int pole_rounds = (int)env_float("CHISEL_POLE_ROUNDS", 30.0f);
+        // Dev hook: CHISEL_EVEN_ITERS=0 puts the last relax back on plain neighbour averaging.
+        static const int even_iters = (int)env_float("CHISEL_EVEN_ITERS", 8.0f);
         const auto pole_t0 = std::chrono::steady_clock::now();
         if (j.mirror && !j.use_nets) {
             // MC keep-+x-and-reflect: relax that half alone (seam pinned), then
@@ -2807,7 +2840,7 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
             relax_to_field(welded, j.field_cpu, grid, /*iters=*/4, /*lambda=*/0.5f, &seam, &flow);  // A: 1D seam relax
             uint32_t flips = flip_valence(welded, &seam);
             PoleStats ps = reduce_poles(welded, j.field_cpu, grid, &seam, pole_rounds);
-            relax_to_field(welded, j.field_cpu, grid, /*iters=*/4, /*lambda=*/0.5f, &seam, &flow);
+            relax_to_field(welded, j.field_cpu, grid, even_iters > 0 ? even_iters : 4, /*lambda=*/0.5f, &seam, &flow, even_iters > 0);
             std::printf("[sdf-flow] cross-field relax: %u valence flips (+x half)\n", flips);
             std::printf("[sdf-flow] poles %u -> %u of %u verts (%u flips, %d rounds, +x half)\n",
                         ps.before, ps.after, welded.vertex_count(), ps.flips, ps.rounds);
@@ -2833,7 +2866,8 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
             PoleStats ps;
             const bool walk = !(j.mirror && j.use_nets);
             if (walk) ps = reduce_poles(welded, j.field_cpu, grid, nullptr, pole_rounds);
-            relax_to_field(welded, j.field_cpu, grid, /*iters=*/4, /*lambda=*/0.5f, nullptr, &flow);
+            relax_to_field(welded, j.field_cpu, grid, (walk && even_iters > 0) ? even_iters : 4, /*lambda=*/0.5f, nullptr, &flow,
+                           walk && even_iters > 0);
             std::printf("[sdf-flow] cross-field relax: %u valence flips\n", flips);
             if (walk)
                 std::printf("[sdf-flow] poles %u -> %u of %u verts (%u flips, %d rounds)\n",

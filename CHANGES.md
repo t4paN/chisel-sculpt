@@ -2,6 +2,19 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-10 — SDF remesh: triangles at poles match the rest in size
+
+*Checked by hand on the native GL build: wireframe, then brushes on the remeshed result.*
+
+- The relax averaged a vert's neighbours evenly, which packed the tris at 5-edge verts tight and spread those at 7-edge verts wide: they owned 0.56x and 1.42x the average surface, where equal-area tris would give 0.83x and 1.17x.
+- The last relax (`relax_to_field`, `even_area`) now weighs each neighbour by the surface it owns, squared, for 8 passes. A vert is drawn toward neighbours with too much surface and lets go of those with too little.
+- Headless, grid 128, eight models plain and mirrored (predator shown): 5-edge verts 0.56x -> 0.76x, 7-edge verts 1.42x -> 1.16x; tri area spread (CV) at poles 0.34 -> 0.12, elsewhere 0.16 -> 0.10.
+- Trade-off: worst-1% triangle angle 39 -> 34 degrees (it was 31 before the pole walk). Watertightness and drift from source are the same on and off. Cost: a few tens of ms.
+- No brush code changed. A dab now catches a similar number of verts at a pole as elsewhere, but a 5-edge vert still averages five neighbours, not six, so the smooth brush can still differ there.
+- Not on the Surface Nets mirror path, as with the pole walk.
+- **Tried and dropped:** plain (unsquared) surface weights and the area-weighted centre of a vert's own tris both stopped about halfway; pushing each tri straight toward the mean area blew up under the Jacobi update.
+- Dev hook: `CHISEL_EVEN_ITERS` (0 = old neighbour average). The headless A/B runs used `xvfb-run` with `WAYLAND_DISPLAY` unset: no window, software GL, about 7 s a run.
+
 ## 2026-11-10 — SDF remesh: fewer poles
 
 *Wireframe checked by hand on the native GL build.*
