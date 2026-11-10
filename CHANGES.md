@@ -2,6 +2,20 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-10 — SDF remesh: fewer poles
+
+*Wireframe checked by hand on the native GL build.*
+
+- A pole is a vert without exactly six edges. The SDF remesh left about a quarter of all verts as poles, nearly all of them needless 5-edge/7-edge pairs side by side.
+- New pass after the valence flips (`reduce_poles`, `sdf.cpp`): a pair can be moved one step by a flip that costs nothing, and two pairs that meet cancel. Pairs walk on a coin toss for up to 30 rounds; a vert takes one flip per round and its neighbourhood is re-relaxed onto the field before the next. Vertex count never changes.
+- Headless, grid 128, pass off vs on: predator 23.5% -> 10.4% poles, trollface 25.2% -> 10.9%, tilted uv48 25.1% -> 8.3%, wedge 22.5% -> 7.7%, tilted plate 9.4% -> 5.2%. Worst-1% triangle angle rises from about 30 to about 38 degrees. Mirror merges gain the same.
+- Watertightness is the same on and off over eight models, plain and mirrored. Three runs fail either way: `cube-insert` and `ico5-lumpy` unmirrored (92 and 4 non-manifold edges), `blade-thin` mirrored (merge refused).
+- Cost: the finishing step takes about half as long again (predator: whole merge 1.1 s -> 1.35 s), and it grows with vert count.
+- Not on the Surface Nets mirror path, whose left/right pairing is by position.
+- **Tried and dropped:** steering the walk toward flat ground (Hessian curvature) and toward opposite poles (a screened potential). Both ended with more poles than the coin toss, so leftover poles are fewer but not better placed.
+- **Why it stops near 8%:** marching cubes lays the surface out in patches whose triangle rows run different ways, and the remaining poles are the borders between patches. Removing those means re-laying the verts along one direction field (the Instant Meshes approach). Not started.
+- Dev hooks: `CHISEL_POLE_ROUNDS` (0 = off), `CHISEL_POLE_P` (coin, 0.5), `CHISEL_POLE_Q` (stretch cap, 2.5). Console: `[sdf-flow] poles N -> M of V verts`.
+
 ## 2026-11-10 — Retopo: Points (V)
 
 - Points tool in retopo mode (V, rail button after Contours): click four points on the model and they become a quad.

@@ -970,6 +970,206 @@ uint32_t flip_valence(Mesh& m, const std::vector<uint8_t>* seam, int sweeps = 3)
     return flips_total;
 }
 
+// ---- Pole reduction: drift, meet, cancel -----------------------------------
+// flip_valence stops at the first local minimum, which on MC output leaves about
+// a quarter of the verts irregular. Nearly all of them are 5-7 pairs: a pair has
+// no net charge, so nothing about the shape asks for it, yet no single flip that
+// lowers the valence energy can remove it. One flip can MOVE a pair a step at no
+// cost though, and two pairs that meet cancel (or fuse into one). So: let pairs
+// walk on a coin toss until they meet. Steering the walk was tried and dropped:
+// toward flat ground (Hessian curvature) and toward opposite charge (a screened
+// potential) both ended with MORE poles than the plain coin toss.
+// The floor is about 8%: MC lays the surface out in patches whose triangle rows
+// run different ways, and the poles left over are the borders between patches.
+// No walk removes those; that takes re-laying the verts along one direction field.
+// A vert takes part in one flip per round and its neighbourhood is re-relaxed
+// onto the field before the next, so the guards always see settled geometry.
+// Vertex count never changes. Seam verts (mirror path) stay put and no flip may
+// lay an edge along the mirror plane, as the reflection would double it.
+static float env_float(const char* name, float def) {
+    const char* e = std::getenv(name);
+    return e ? (float)std::atof(e) : def;
+}
+
+struct PoleStats { uint32_t before = 0, after = 0, flips = 0; int rounds = 0; };
+
+PoleStats reduce_poles(Mesh& m, const std::vector<float>& field, const SdfGrid& grid,
+                       const std::vector<uint8_t>* seam, int max_rounds) {
+    PoleStats st;
+    const uint32_t nv = m.vertex_count();
+    const uint32_t nt = (uint32_t)(m.indices.size() / 3);
+    if (nv == 0 || nt == 0) return st;
+
+    static const float WALK_P  = env_float("CHISEL_POLE_P", 0.5f);   // coin toss for a level step
+    static const float STRETCH = env_float("CHISEL_POLE_Q", 2.5f);   // new edge^2 / old edge^2 cap
+
+    auto ekey = [](uint32_t a, uint32_t b) -> uint64_t {
+        if (a > b) std::swap(a, b);
+        return ((uint64_t)a << 32) | (uint64_t)b;
+    };
+    auto is_seam = [&](uint32_t v) { return seam && (*seam)[v] != 0; };
+    auto target  = [&](uint32_t v) -> int { return is_seam(v) ? 4 : 6; };
+
+    // Edge -> its two tris, and each vert's neighbours. Both kept exact through
+    // every flip (flip_valence lets them go stale and skips; here a stale entry
+    // would stall a walking pair).
+    std::unordered_map<uint64_t, std::pair<int32_t,int32_t>> etab;
+    etab.reserve((size_t)nt * 2);
+    std::vector<std::vector<uint32_t>> nb(nv);
+    for (uint32_t t = 0; t < nt; t++) {
+        for (int i = 0; i < 3; i++) {
+            uint32_t a = m.indices[t*3+i], b = m.indices[t*3+(i+1)%3];
+            auto ins = etab.emplace(ekey(a,b), std::make_pair((int32_t)t, -1));
+            if (ins.second) { nb[a].push_back(b); nb[b].push_back(a); }
+            else if (ins.first->second.second < 0) ins.first->second.second = (int32_t)t;
+        }
+    }
+    std::vector<int> val(nv);
+    for (uint32_t v = 0; v < nv; v++) {
+        val[v] = (int)nb[v].size();
+        if (val[v] != target(v)) st.before++;
+    }
+
+    auto P = [&](uint32_t v) { return Vec3(m.pos_x[v], m.pos_y[v], m.pos_z[v]); };
+    auto other = [&](uint32_t t, uint32_t a, uint32_t b) -> uint32_t {
+        for (int i = 0; i < 3; i++) {
+            uint32_t x = m.indices[t*3+i];
+            if (x != a && x != b) return x;
+        }
+        return 0xFFFFFFFFu;
+    };
+    auto coin = [](uint64_t k, uint32_t round) -> float {       // deterministic per edge+round
+        uint64_t x = k * 0x9E3779B97F4A7C15ull + (uint64_t)round * 0xBF58476D1CE4E5B9ull;
+        x ^= x >> 31; x *= 0x94D049BB133111EBull; x ^= x >> 29;
+        return (float)(x & 0xFFFFFFu) * (1.0f / 16777216.0f);
+    };
+
+    std::vector<uint32_t> stamp(nv, 0), rstamp(nv, 0);
+    std::vector<uint32_t> moved, ring;
+    const float h = 0.5f * grid.voxel;
+
+    for (uint32_t round = 1; round <= (uint32_t)max_rounds; round++) {
+        uint32_t flips = 0;
+        moved.clear();
+
+        for (uint32_t v = 0; v < nv; v++) {
+            if (val[v] == target(v) || stamp[v] == round) continue;
+
+            // Best flip around v: the edges at v (lower it) and the edges facing it
+            // (raise it). Score = valence energy first, curvature-weighted energy second.
+            bool   have = false;
+            float  best_score = 0.0f;
+            uint32_t ba = 0, bb = 0, bc = 0, bd = 0, bt0 = 0, bt1 = 0;
+            auto consider = [&](uint32_t a, uint32_t b) {
+                auto it = etab.find(ekey(a, b));
+                if (it == etab.end() || it->second.second < 0) return;      // seam/boundary edge
+                uint32_t t0 = (uint32_t)it->second.first, t1 = (uint32_t)it->second.second;
+                uint32_t c = other(t0, a, b), d = other(t1, a, b);
+                if (c == d || c == 0xFFFFFFFFu || d == 0xFFFFFFFFu) return;
+                if (stamp[a] == round || stamp[b] == round ||
+                    stamp[c] == round || stamp[d] == round) return;
+                // Never make a valence-3 vert (a vert inside a tri; 2 on the seam half).
+                if (val[a] - 1 < (is_seam(a) ? 3 : 4) || val[b] - 1 < (is_seam(b) ? 3 : 4)) return;
+                if (is_seam(c) && is_seam(d)) return;                       // edge in the mirror plane
+                int ea = val[a]-target(a), eb = val[b]-target(b);
+                int ec = val[c]-target(c), ed = val[d]-target(d);
+                int   dE = (1 - 2*ea) + (1 - 2*eb) + (1 + 2*ec) + (1 + 2*ed);
+                if (dE > 0) return;
+                float toss = coin(ekey(a, b), round);
+                if (dE == 0 && toss >= WALK_P) return;
+                float score = (float)dE + toss;         // dE is even: a real gain always wins
+                if (have && score >= best_score) return;
+                if (etab.count(ekey(c, d))) return;                         // would fuse two sheets
+                Vec3 pa = P(a), pb = P(b), pc = P(c), pd = P(d);
+                // A level step must not stretch: it only shuffles the pair along.
+                if (dE == 0 && (pd-pc).dot(pd-pc) > STRETCH * (pb-pa).dot(pb-pa)) return;
+                bool fwd = false;                                            // does t0 wind a->b?
+                for (int i = 0; i < 3; i++)
+                    if (m.indices[t0*3+i] == a && m.indices[t0*3+(i+1)%3] == b) fwd = true;
+                uint32_t A = fwd ? a : b, B = fwd ? b : a;
+                Vec3 pA = fwd ? pa : pb, pB = fwd ? pb : pa;
+                Vec3 n_old = (pB-pA).cross(pc-pA) + (pA-pB).cross(pd-pB);
+                Vec3 n0 = (pA-pc).cross(pd-pc);                              // new tri (c,A,d)
+                Vec3 n1 = (pB-pd).cross(pc-pd);                              // new tri (d,B,c)
+                float area_eps = 1e-12f * n_old.dot(n_old) + 1e-30f;
+                if (n0.dot(n_old) <= 0.0f || n1.dot(n_old) <= 0.0f) return;
+                if (n0.dot(n0) < area_eps || n1.dot(n1) < area_eps) return;
+                have = true; best_score = score;
+                ba = A; bb = B; bc = c; bd = d; bt0 = t0; bt1 = t1;
+            };
+            for (uint32_t u : nb[v]) {
+                consider(v, u);
+                auto it = etab.find(ekey(v, u));
+                if (it == etab.end()) continue;
+                consider(u, other((uint32_t)it->second.first, v, u));
+                if (it->second.second >= 0)
+                    consider(u, other((uint32_t)it->second.second, v, u));
+            }
+            if (!have) continue;
+
+            // Flip A-B to c-d. Old t0=(A,B,c), t1=(B,A,d); new t0=(c,A,d), t1=(d,B,c).
+            // B-c moves from t0 to t1 and A-d from t1 to t0; the other two stay.
+            m.indices[bt0*3+0]=bc; m.indices[bt0*3+1]=ba; m.indices[bt0*3+2]=bd;
+            m.indices[bt1*3+0]=bd; m.indices[bt1*3+1]=bb; m.indices[bt1*3+2]=bc;
+            etab.erase(ekey(ba, bb));
+            etab.emplace(ekey(bc, bd), std::make_pair((int32_t)bt0, (int32_t)bt1));
+            auto retri = [&](uint32_t x, uint32_t y, uint32_t from, uint32_t to) {
+                auto& e = etab[ekey(x, y)];
+                if (e.first == (int32_t)from) e.first = (int32_t)to;
+                else if (e.second == (int32_t)from) e.second = (int32_t)to;
+            };
+            retri(bb, bc, bt0, bt1);
+            retri(ba, bd, bt1, bt0);
+            auto drop = [&](uint32_t x, uint32_t y) {
+                auto& L = nb[x];
+                for (size_t i = 0; i < L.size(); i++)
+                    if (L[i] == y) { L[i] = L.back(); L.pop_back(); break; }
+            };
+            drop(ba, bb); drop(bb, ba);
+            nb[bc].push_back(bd); nb[bd].push_back(bc);
+            val[ba]--; val[bb]--; val[bc]++; val[bd]++;
+            stamp[ba] = stamp[bb] = stamp[bc] = stamp[bd] = round;
+            moved.push_back(ba); moved.push_back(bb); moved.push_back(bc); moved.push_back(bd);
+            flips++;
+        }
+
+        st.rounds = (int)round;
+        if (flips == 0) break;
+        st.flips += flips;
+
+        // Settle the flipped verts and their neighbours back onto the field
+        // (tangential umbrella + reprojection, same move as relax_to_field).
+        ring.clear();
+        for (uint32_t x : moved) {
+            if (rstamp[x] != round) { rstamp[x] = round; ring.push_back(x); }
+            for (uint32_t u : nb[x])
+                if (rstamp[u] != round) { rstamp[u] = round; ring.push_back(u); }
+        }
+        for (int it = 0; it < 2; it++) {
+            for (uint32_t x : ring) {
+                if (is_seam(x) || nb[x].empty()) continue;
+                Vec3 p = P(x), c(0,0,0);
+                for (uint32_t u : nb[x]) c += P(u);
+                Vec3 dlt = c * (1.0f / (float)nb[x].size()) - p;
+                Vec3 g(
+                    sample_field(field,grid,Vec3(p.x+h,p.y,p.z)) - sample_field(field,grid,Vec3(p.x-h,p.y,p.z)),
+                    sample_field(field,grid,Vec3(p.x,p.y+h,p.z)) - sample_field(field,grid,Vec3(p.x,p.y-h,p.z)),
+                    sample_field(field,grid,Vec3(p.x,p.y,p.z+h)) - sample_field(field,grid,Vec3(p.x,p.y,p.z-h)));
+                float gl = g.length();
+                if (gl < 1e-12f) continue;
+                Vec3 n = g * (1.0f / gl);
+                Vec3 pn = p + (dlt - n * dlt.dot(n)) * 0.5f;
+                pn = pn - n * sample_field(field, grid, pn);
+                m.pos_x[x] = pn.x; m.pos_y[x] = pn.y; m.pos_z[x] = pn.z;
+            }
+        }
+    }
+
+    for (uint32_t v = 0; v < nv; v++)
+        if (val[v] != target(v)) st.after++;
+    return st;
+}
+
 // ---- Mirror-symmetric extraction -------------------------------------------
 // The MC case table bakes a fixed grid-space diagonal per ambiguous face, so a
 // +x feature and its -x twin tessellate the SAME world direction — geometry can
@@ -2592,6 +2792,9 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
                    sample_field(j.field_cpu, grid, c - n * hv) < 0.0f;
         };
 
+        // Dev hook: CHISEL_POLE_ROUNDS=0 turns the pole walk off, for A/B runs.
+        static const int pole_rounds = (int)env_float("CHISEL_POLE_ROUNDS", 30.0f);
+        const auto pole_t0 = std::chrono::steady_clock::now();
         if (j.mirror && !j.use_nets) {
             // MC keep-+x-and-reflect: relax that half alone (seam pinned), then
             // mirror it -> both sides identical, exact partner map, no seam fight.
@@ -2603,8 +2806,11 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
             smooth_cross_field(welded, flow, /*iters=*/24);
             relax_to_field(welded, j.field_cpu, grid, /*iters=*/4, /*lambda=*/0.5f, &seam, &flow);  // A: 1D seam relax
             uint32_t flips = flip_valence(welded, &seam);
+            PoleStats ps = reduce_poles(welded, j.field_cpu, grid, &seam, pole_rounds);
             relax_to_field(welded, j.field_cpu, grid, /*iters=*/4, /*lambda=*/0.5f, &seam, &flow);
             std::printf("[sdf-flow] cross-field relax: %u valence flips (+x half)\n", flips);
+            std::printf("[sdf-flow] poles %u -> %u of %u verts (%u flips, %d rounds, +x half)\n",
+                        ps.before, ps.after, welded.vertex_count(), ps.flips, ps.rounds);
             validate_seam_loop(welded, grid.voxel, seam);  // H-B: close seam escapees before reflecting
             // Snap the +x half before it is reflected, seam column pinned and every
             // other vert kept clear of the plane, so the reflect sees the same seam.
@@ -2622,12 +2828,23 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
             smooth_cross_field(welded, flow, /*iters=*/24);
             relax_to_field(welded, j.field_cpu, grid, /*iters=*/4, /*lambda=*/0.5f, nullptr, &flow);
             uint32_t flips = flip_valence(welded, nullptr);
+            // Not on the Surface-Nets mirror: its pairing is by position, and the
+            // walk re-relaxes verts one side at a time.
+            PoleStats ps;
+            const bool walk = !(j.mirror && j.use_nets);
+            if (walk) ps = reduce_poles(welded, j.field_cpu, grid, nullptr, pole_rounds);
             relax_to_field(welded, j.field_cpu, grid, /*iters=*/4, /*lambda=*/0.5f, nullptr, &flow);
             std::printf("[sdf-flow] cross-field relax: %u valence flips\n", flips);
+            if (walk)
+                std::printf("[sdf-flow] poles %u -> %u of %u verts (%u flips, %d rounds)\n",
+                            ps.before, ps.after, welded.vertex_count(), ps.flips, ps.rounds);
             // Surface-Nets mirror is made symmetric by the FIELD; the source soup
             // needn't be, so a snap here would break the pairing. Faithful only.
             if (!j.mirror) snap_to_source(welded, nullptr, 0.0f);
         }
+
+        std::printf("[sdf-flow] relax + poles: %.0f ms\n",
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - pole_t0).count());
 
         welded.build_adjacency();
         welded.recompute_normals();   // clean per-vertex normals (GPU normals were orientation-only)
