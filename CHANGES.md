@@ -2,6 +2,14 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-11 — Slider release returns the cursor on the native WebGPU build (Wayland)
+
+- After a size/strength/hardness drag the cursor reappeared at the **previous** drag's start, to the pixel, on the native WebGPU build only; GL was fine.
+- Cause: the compositor (KWin) keeps every pointer-warp target as the window's lock hint and applies it when the next lock ends. Vulkan frames queue in the compositor, so the unlock lands a frame late and the release-time warp arrives while the pointer is still locked: it moves nothing and becomes the next release's target. GL frames don't queue.
+- Fix: the drag start is requested right after the capture (`slider_hint_start`, `src/input.cpp`), so the hint held at release is the right one.
+- Same mechanism as the 2026-10-27 jump after an orbit edge wrap: the wrap's warp left its target behind.
+- Scripted check (virtual mouse and keyboard, protocol trace): before, WebGPU 1 of 6 drags returned, GL 6 of 6; after, 12 of 12 on both, across normal drags, key taps, 20 ms drags and drags straight after an orbit wrap.
+
 ## 2026-11-10 — File dialogs remember their sort, hide dot-files
 
 - Sort order now survives restarts: the file list's table id was hashed from a memory address that moves every launch, so `imgui.ini` never matched it (and gained an orphan `[Table]` entry per run). Fixed id in the vendored dialog; all dialogs share one remembered sort.

@@ -696,6 +696,10 @@ static void slider_capture(GLFWwindow* w, bool grab) {
 #endif
 }
 
+#if !defined(__EMSCRIPTEN__)
+static void slider_hint_start();   // see Edge wrap
+#endif
+
 static void begin_slider_drag(GLFWwindow* w, InputState::SliderMode mode, float start_value) {
     g_input->slider_mode        = mode;
     g_input->slider_start_x     = g_input->mouse_x;
@@ -721,6 +725,7 @@ static void begin_slider_drag(GLFWwindow* w, InputState::SliderMode mode, float 
         g_slider_begin_vx = cx;
         g_slider_begin_vy = cy;
     }
+    slider_hint_start();
 #endif
 }
 
@@ -882,6 +887,23 @@ static bool   g_return_pending = false;
 static double g_return_x = 0.0, g_return_y = 0.0;
 static double g_return_time = 0.0;
 static constexpr double kReturnRadius = 24.0;
+
+// Where the pointer goes when a slider's capture ends is the compositor's call, and
+// KWin's answer is "the last spot this window asked a warp to": it keeps every warp's
+// target as the surface's lock hint, applied on the next unlock, and never clears it. A
+// warp sent after the release is too late on the WebGPU build: its frames queue in the
+// compositor (FIFO present), the unlock queues behind them, and a warp that arrives
+// while the pointer is still locked moves nothing. So each release jumped to the
+// PREVIOUS drag's start, or to the far edge an orbit wrap had left (2026-10-27). GL
+// frames don't queue, which is why only one build showed it (2026-11-11, traced).
+// So the drag start is asked for up front, right after the capture: the pointer is
+// already there, and the frames drawn during the drag carry it in as the hint.
+static void slider_hint_start() {
+    if (!on_wayland() || !wl_pointer_warp_available()) return;
+    // A pen isn't the pointer: warping to the pen's spot would move the idle mouse.
+    if (g_input->active_profile == InputProfile::TABLET) return;
+    wl_pointer_warp(g_input->slider_start_x, g_input->slider_start_y);
+}
 
 static void slider_return_warp(double x, double y, bool mouse_dragged) {
     if (!on_wayland() || !wl_pointer_warp_available()) return;
