@@ -1035,7 +1035,7 @@ void app_files_frame(App& a) {
     if (exp_mesh && !fd->IsOpened("ExportKey")) {
         IGFD::FileDialogConfig cfg;
         cfg.path = default_browse_path;
-        cfg.flags = ImGuiFileDialogFlags_ConfirmOverwrite;
+        cfg.flags = ImGuiFileDialogFlags_ConfirmOverwrite | ImGuiFileDialogFlags_DontShowHiddenFiles;
         fill_export_picks();
         cfg.fileName = export_default_name() + ".obj";
         // Nothing to choose with one mesh and no low: no side pane.
@@ -1048,7 +1048,7 @@ void app_files_frame(App& a) {
     if (input.import_dialog_active && !fd->IsOpened("ImportKey")) {
         IGFD::FileDialogConfig cfg;
         cfg.path = default_browse_path;
-        cfg.flags = ImGuiFileDialogFlags_None;
+        cfg.flags = ImGuiFileDialogFlags_DontShowHiddenFiles;
         cfg.sidePaneWidth = 190.0f;
         cfg.sidePane = [&](const char*, IGFD::UserDatas, bool*) {
             ImGui::Checkbox("Append to scene", &input.import_append);
@@ -1076,7 +1076,7 @@ void app_files_frame(App& a) {
         fill_uvx_avail();
         IGFD::FileDialogConfig cfg;
         cfg.path = default_browse_path;
-        cfg.flags = ImGuiFileDialogFlags_ConfirmOverwrite;
+        cfg.flags = ImGuiFileDialogFlags_ConfirmOverwrite | ImGuiFileDialogFlags_DontShowHiddenFiles;
         cfg.fileName = active_part_name() + "-UVmap_" + std::to_string(input.uvmap_size) + ".png";
         cfg.sidePaneWidth = 240.0f;
         cfg.sidePane = [inp](const char*, IGFD::UserDatas, bool*) { draw_uvmap_options(*inp); };
@@ -1094,7 +1094,7 @@ void app_files_frame(App& a) {
         fill_uvx_avail();
         IGFD::FileDialogConfig cfg;
         cfg.path = default_browse_path;
-        cfg.flags = ImGuiFileDialogFlags_ConfirmOverwrite;
+        cfg.flags = ImGuiFileDialogFlags_ConfirmOverwrite | ImGuiFileDialogFlags_DontShowHiddenFiles;
         cfg.fileName = active_part_name() + uvx_ext();
         cfg.sidePaneWidth = 250.0f;
         cfg.sidePane = [inp](const char*, IGFD::UserDatas, bool*) { draw_uvx_options(*inp); };
@@ -1122,7 +1122,7 @@ void app_files_frame(App& a) {
     if (input.load_alpha_dialog_active && !fd->IsOpened("AlphaKey")) {
         IGFD::FileDialogConfig cfg;
         cfg.path = default_browse_path;
-        cfg.flags = ImGuiFileDialogFlags_None;
+        cfg.flags = ImGuiFileDialogFlags_DontShowHiddenFiles;
         fd->OpenDialog("AlphaKey", "Load Brush Alpha", ".png,.jpg,.jpeg,.tga,.bmp", cfg);
     }
     if (display_file_dialog(fd, "AlphaKey")) {
@@ -1258,7 +1258,7 @@ void app_files_frame(App& a) {
     if (input.save_dialog_active && !fd->IsOpened("SaveKey")) {
         IGFD::FileDialogConfig cfg;
         cfg.path = default_browse_path;
-        cfg.flags = ImGuiFileDialogFlags_ConfirmOverwrite;
+        cfg.flags = ImGuiFileDialogFlags_ConfirmOverwrite | ImGuiFileDialogFlags_DontShowHiddenFiles;
         fd->OpenDialog("SaveKey", "Save Project", ".chisel", cfg);
     }
 

@@ -2,6 +2,12 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-10 — File dialogs remember their sort, hide dot-files
+
+- Sort order now survives restarts: the file list's table id was hashed from a memory address that moves every launch, so `imgui.ini` never matched it (and gained an orphan `[Table]` entry per run). Fixed id in the vendored dialog; all dialogs share one remembered sort.
+- First run starts on Date, newest first; one click on Date gives newest first (was two).
+- Every dialog (Open, Save, Export, UV exports, Brush Alpha) hides dot-files and dot-folders.
+
 ## 2026-11-10 — Pen-down hitch at 16M tris gone (native, both backends)
 
 *Measured on the native wgpu build, Arc B570, Mesa anv: frame log over real strokes, plus a self-running copy benchmark.*

@@ -1,5 +1,10 @@
 #pragma once
 
+// Chisel: dialogs start sorted newest first (Date, descending); the user's own pick is then
+// remembered in imgui.ini (see the fixed table id in m_DrawFileListView).
+#define defaultSortField FIELD_DATE
+#define defaultSortOrderDate false
+
 // uncomment and modify defines under for customize ImGuiFileDialog
 
 /////////////////////////////////

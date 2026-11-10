@@ -4324,7 +4324,10 @@ void IGFD::FileDialog::m_DrawFileListView(ImVec2 vSize) {
                                    | ImGuiTableFlags_Sortable
 #endif  // USE_CUSTOM_SORTING_ICON
         ;
-    const auto listViewID = ImGui::GetID("FileTable");
+    // Chisel: a fixed id, not one hashed from this window + the singleton's address. The
+    // address moves every launch (ASLR), so imgui.ini never matched the saved sort order
+    // and gained an orphan [Table] entry per run; fixed, every dialog shares one remembered sort.
+    const auto listViewID = ImHashStr("ChiselFileTable");
     if (ImGui::BeginTableEx("FileTable", listViewID, 4, flags, vSize, 0.0f)) {
         ImGui::TableSetupScrollFreeze(0, 1);  // Make header always visible
         ImGui::TableSetupColumn(fdi.headerFileName.c_str(), ImGuiTableColumnFlags_WidthStretch | (defaultSortOrderFilename ? ImGuiTableColumnFlags_PreferSortAscending : ImGuiTableColumnFlags_PreferSortDescending), -1, 0);
@@ -4337,7 +4340,8 @@ void IGFD::FileDialog::m_DrawFileListView(ImVec2 vSize) {
                                     ((m_FileDialogInternal.getDialogConfig().flags & ImGuiFileDialogFlags_HideColumnSize) ? ImGuiTableColumnFlags_DefaultHide : 0),
                                 -1, 2);
         ImGui::TableSetupColumn(fdi.headerFileDate.c_str(),
-                                ImGuiTableColumnFlags_WidthFixed | (defaultSortOrderDate ? ImGuiTableColumnFlags_PreferSortAscending : ImGuiTableColumnFlags_PreferSortDescending) |
+                                ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_DefaultSort |  // Chisel: newest first until the user picks
+                                     (defaultSortOrderDate ? ImGuiTableColumnFlags_PreferSortAscending : ImGuiTableColumnFlags_PreferSortDescending) |
                                     ((m_FileDialogInternal.getDialogConfig().flags & ImGuiFileDialogFlags_HideColumnDate) ? ImGuiTableColumnFlags_DefaultHide : 0),
                                 -1, 3);
 

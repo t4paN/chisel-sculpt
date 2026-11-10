@@ -579,7 +579,7 @@ public:
     bool sortingDirection[4] = {  // true => Ascending, false => Descending
         defaultSortOrderFilename, defaultSortOrderType, defaultSortOrderSize, defaultSortOrderDate};
 #endif
-    SortingFieldEnum sortingField = SortingFieldEnum::FIELD_FILENAME;  // detail view sorting column
+    SortingFieldEnum sortingField = SortingFieldEnum::defaultSortField;  // Chisel: was hard-wired to FIELD_FILENAME  // detail view sorting column
     bool showDevices              = false;                             // devices are shown (only on os windows)
 
     std::string dLGpath;                  // base path set by user when OpenDialog was called
