@@ -2,6 +2,19 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-10 — Smooth brush keeps poles even
+
+*Checked by hand on the native GL build: smoothing over poles after an SDF remesh, wireframe on.*
+
+- Smoothing after an SDF remesh made the poles show again. The brush moved each vert toward the plain average of its neighbours, the same rule the SDF relax dropped today: it packs the tris at 5-edge verts tight and spreads those at 7-edge verts.
+- `smooth_apply` (both twins) now weighs each neighbour by the surface it owns, squared, as `relax_to_field` does. On an even mesh the weights are equal and it is the plain average, so the brush is unchanged there.
+- Rule simulated over a whole remeshed model (tilted plate, mirrored), as a stroke can't be driven headless. Share of surface owned by 5-edge verts, as remeshed 0.69: old rule 0.50 after 9 passes and 0.46 after 30; new rule 0.68 and 0.67. Tri area spread at poles, as remeshed 0.14: old 0.33 and 0.40; new 0.16 and 0.19.
+- It holds an even layout; easing an already pinched mesh back out was not measured.
+- Cost not measured: a smoothed vert now reads its neighbours' tris as well, about a dozen times the reads per vert per pass. If big brushes on dense meshes or the web build feel it, the fix is a per-vert area buffer.
+- GL compiles; `tools/check-wgsl.py` 74/74 clean under Tint. Web build not rebuilt or run in a browser yet.
+- **Not changed:** the pen-up autosmooth (`stroke_smooth_apply`) still uses the plain average, one gentle pass, so it still tightens poles slightly. Retopo Smooth's odd verts use the plain average too (the likely cause of islands tightening toward their centre); not touched yet.
+- **Tried and dropped:** weights from a vert's own tris only (no neighbour rings, much cheaper). Area squared got about two thirds of the way; higher powers went unstable.
+
 ## 2026-11-10 — SDF remesh: triangles at poles match the rest in size
 
 *Checked by hand on the native GL build: wireframe, then brushes on the remeshed result.*

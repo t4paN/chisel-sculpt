@@ -1,9 +1,10 @@
 // smooth_apply.wgsl
 // Port of src/compute_smooth.cpp (smooth_apply). Pass 2 of the smooth brush, run once
-// per iteration: a uniform Laplacian over each touched vertex's 1-ring. The mirror
-// seam crease is handled by re-imposing the X reflection after every iteration in
-// dispatch_smooth (not by a normal projection in here — that variant pinched ridges/
-// bumps under prolonged smoothing). Tail UBO slots are padding kept for shape parity.
+// per iteration: a Laplacian over each touched vertex's 1-ring, each neighbour weighted
+// by the surface it owns, squared (see owned()). The mirror seam crease is handled by
+// re-imposing the X reflection after every iteration in dispatch_smooth (not by a
+// normal projection in here — that variant pinched ridges/bumps under prolonged
+// smoothing). Tail UBO slots are padding kept for shape parity.
 // See CONVENTIONS.md.
 //
 // Bindings mirror the ComputeBinding enum in include/compute.h:
@@ -35,6 +36,31 @@ struct DirtyRegion {
 @group(0) @binding(61) var<uniform>             DR         : DirtyRegion;
 @group(0) @binding(63) var<uniform>             P          : Params;
 
+fn pos3(i : u32) -> vec3<f32> {
+    return vec3<f32>(positions[i * 3u], positions[i * 3u + 1u], positions[i * 3u + 2u]);
+}
+
+// Surface a vertex owns: the summed (doubled) area of its triangles.
+// A plain neighbour average packs the tris round a 5-edge vertex tight and spreads
+// those round a 7-edge vertex wide, so every stroke used to pinch the poles the SDF
+// remesh had just evened out. Weighting each neighbour by owned()^2 is that remesh's
+// own rule (relax_to_field, even_area): a vertex is drawn toward neighbours holding
+// too much surface and lets go of those holding too little. Where the tris are
+// already even the weights are equal and this IS the plain average.
+fn owned(u : u32) -> f32 {
+    var s = 0.0;
+    let b = adj_offset[u];
+    let e = adj_offset[u + 1u];
+    for (var j = b; j < e; j = j + 1u) {
+        let t = adj_list[j];
+        let p0 = pos3(indices[t * 3u]);
+        let p1 = pos3(indices[t * 3u + 1u]);
+        let p2 = pos3(indices[t * 3u + 2u]);
+        s = s + length(cross(p1 - p0, p2 - p0));
+    }
+    return s;
+}
+
 @compute @workgroup_size(64)
 fn main(@builtin(workgroup_id) wg : vec3<u32>,
         @builtin(local_invocation_id) lid : vec3<u32>) {
@@ -59,14 +85,18 @@ fn main(@builtin(workgroup_id) wg : vec3<u32>,
         return;
     }
 
-    let cur_x = positions[v * 3u];
-    let cur_y = positions[v * 3u + 1u];
-    let cur_z = positions[v * 3u + 2u];
+    let cur = pos3(v);
 
-    var sum_x = 0.0;
-    var sum_y = 0.0;
-    var sum_z = 0.0;
-    var count = 0.0;
+    // Own surface, only to bring the neighbours' into the range of 1 before squaring:
+    // on a dense mesh a raw area squared is small enough to lose bits.
+    let own = owned(v);
+    if (own <= 0.0) {
+        return;
+    }
+    let inv_own = 1.0 / own;
+
+    var sum = vec3<f32>(0.0, 0.0, 0.0);
+    var wsum = 0.0;
 
     let start = adj_offset[v];
     let end = adj_offset[v + 1u];
@@ -76,29 +106,32 @@ fn main(@builtin(workgroup_id) wg : vec3<u32>,
         let i1 = indices[t * 3u + 1u];
         let i2 = indices[t * 3u + 2u];
 
+        // The two corners that aren't v. Each neighbour turns up in two tris, so it
+        // is counted twice, the same for all of them.
+        var na = i0;
+        var nb = i1;
         if (v == i0) {
-            sum_x = sum_x + positions[i1*3u]      + positions[i2*3u];
-            sum_y = sum_y + positions[i1*3u + 1u] + positions[i2*3u + 1u];
-            sum_z = sum_z + positions[i1*3u + 2u] + positions[i2*3u + 2u];
+            na = i1;
+            nb = i2;
         } else if (v == i1) {
-            sum_x = sum_x + positions[i0*3u]      + positions[i2*3u];
-            sum_y = sum_y + positions[i0*3u + 1u] + positions[i2*3u + 1u];
-            sum_z = sum_z + positions[i0*3u + 2u] + positions[i2*3u + 2u];
-        } else {
-            sum_x = sum_x + positions[i0*3u]      + positions[i1*3u];
-            sum_y = sum_y + positions[i0*3u + 1u] + positions[i1*3u + 1u];
-            sum_z = sum_z + positions[i0*3u + 2u] + positions[i1*3u + 2u];
+            nb = i2;
         }
-        count = count + 2.0;
+
+        let ra = owned(na) * inv_own;
+        let rb = owned(nb) * inv_own;
+        let wa = ra * ra;
+        let wb = rb * rb;
+        sum = sum + pos3(na) * wa + pos3(nb) * wb;
+        wsum = wsum + wa + wb;
     }
 
-    if (count <= 0.0) {
+    if (wsum <= 0.0) {
         return;
     }
 
-    let inv_c = 1.0 / count;
     let blend = w * P.strength * mscale;
-    positions[v*3u]      = positions[v*3u]      + (sum_x * inv_c - cur_x) * blend;
-    positions[v*3u + 1u] = positions[v*3u + 1u] + (sum_y * inv_c - cur_y) * blend;
-    positions[v*3u + 2u] = positions[v*3u + 2u] + (sum_z * inv_c - cur_z) * blend;
+    let moved = cur + (sum / wsum - cur) * blend;
+    positions[v * 3u]      = moved.x;
+    positions[v * 3u + 1u] = moved.y;
+    positions[v * 3u + 2u] = moved.z;
 }

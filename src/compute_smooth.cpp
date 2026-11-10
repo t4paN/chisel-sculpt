@@ -318,7 +318,7 @@ void ComputeState::dispatch_smooth(const SmoothAccumParams& p,
         gpu::release_bind_group(grp);
     }
 
-    // ---- Pass 2: apply (uniform Laplacian), looped ----
+    // ---- Pass 2: apply (Laplacian, neighbours weighted by owned surface), looped ----
     SmoothApplyParamsGPU up = {};
     up.vertex_count = vc;
     up.strength = p.strength;

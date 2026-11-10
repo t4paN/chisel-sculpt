@@ -1,6 +1,7 @@
 // smooth_apply.comp — GLSL 430 sibling of shaders/wgsl/smooth_apply.wgsl.
-// Pass 2 of the smooth brush, run once per iteration: a uniform Laplacian over each
-// touched vertex's 1-ring. The mirror seam crease is handled by re-imposing the X
+// Pass 2 of the smooth brush, run once per iteration: a Laplacian over each touched
+// vertex's 1-ring, each neighbour weighted by the surface it owns, squared (see
+// owned()). The mirror seam crease is handled by re-imposing the X
 // reflection after every iteration in dispatch_smooth (not by a normal projection in
 // here — that variant pinched ridges/bumps under prolonged smoothing). 16-byte std140
 // Params UBO at binding 63; tail slots are padding kept for shape parity.
@@ -30,6 +31,31 @@ layout(std140, binding = 63) uniform Params {
     uint  _pad1;          // 12  (struct rounds to 16)
 } P;
 
+vec3 pos3(uint i) {
+    return vec3(positions[i * 3u], positions[i * 3u + 1u], positions[i * 3u + 2u]);
+}
+
+// Surface a vertex owns: the summed (doubled) area of its triangles.
+// A plain neighbour average packs the tris round a 5-edge vertex tight and spreads
+// those round a 7-edge vertex wide, so every stroke used to pinch the poles the SDF
+// remesh had just evened out. Weighting each neighbour by owned()^2 is that remesh's
+// own rule (relax_to_field, even_area): a vertex is drawn toward neighbours holding
+// too much surface and lets go of those holding too little. Where the tris are
+// already even the weights are equal and this IS the plain average.
+float owned(uint u) {
+    float s = 0.0;
+    uint b = adj_offset[u];
+    uint e = adj_offset[u + 1u];
+    for (uint j = b; j < e; j++) {
+        uint t = adj_list[j];
+        vec3 p0 = pos3(indices[t * 3u]);
+        vec3 p1 = pos3(indices[t * 3u + 1u]);
+        vec3 p2 = pos3(indices[t * 3u + 2u]);
+        s += length(cross(p1 - p0, p2 - p0));
+    }
+    return s;
+}
+
 void main() {
     // Dispatch culling: one workgroup per ACTIVE block; entry 0 is the count, hence +1.
     uint v = (DR.block_mode == 1u)
@@ -43,12 +69,16 @@ void main() {
     float mscale = 1.0 - mask[v];
     if (mscale <= 0.0) return;
 
-    float cur_x = positions[v * 3u];
-    float cur_y = positions[v * 3u + 1u];
-    float cur_z = positions[v * 3u + 2u];
+    vec3 cur = pos3(v);
 
-    float sum_x = 0.0, sum_y = 0.0, sum_z = 0.0;
-    float count = 0.0;
+    // Own surface, only to bring the neighbours' into the range of 1 before squaring:
+    // on a dense mesh a raw area squared is small enough to lose bits.
+    float own = owned(v);
+    if (own <= 0.0) return;
+    float inv_own = 1.0 / own;
+
+    vec3 sum = vec3(0.0);
+    float wsum = 0.0;
 
     uint start = adj_offset[v];
     uint end = adj_offset[v + 1u];
@@ -58,27 +88,30 @@ void main() {
         uint i1 = indices[t * 3u + 1u];
         uint i2 = indices[t * 3u + 2u];
 
+        // The two corners that aren't v. Each neighbour turns up in two tris, so it
+        // is counted twice, the same for all of them.
+        uint na = i0;
+        uint nb = i1;
         if (v == i0) {
-            sum_x += positions[i1*3u] + positions[i2*3u];
-            sum_y += positions[i1*3u+1u] + positions[i2*3u+1u];
-            sum_z += positions[i1*3u+2u] + positions[i2*3u+2u];
+            na = i1;
+            nb = i2;
         } else if (v == i1) {
-            sum_x += positions[i0*3u] + positions[i2*3u];
-            sum_y += positions[i0*3u+1u] + positions[i2*3u+1u];
-            sum_z += positions[i0*3u+2u] + positions[i2*3u+2u];
-        } else {
-            sum_x += positions[i0*3u] + positions[i1*3u];
-            sum_y += positions[i0*3u+1u] + positions[i1*3u+1u];
-            sum_z += positions[i0*3u+2u] + positions[i1*3u+2u];
+            nb = i2;
         }
-        count += 2.0;
+
+        float ra = owned(na) * inv_own;
+        float rb = owned(nb) * inv_own;
+        float wa = ra * ra;
+        float wb = rb * rb;
+        sum += pos3(na) * wa + pos3(nb) * wb;
+        wsum += wa + wb;
     }
 
-    if (count <= 0.0) return;
+    if (wsum <= 0.0) return;
 
-    float inv_c = 1.0 / count;
     float blend = w * P.strength * mscale;
-    positions[v * 3u]     += (sum_x * inv_c - cur_x) * blend;
-    positions[v * 3u + 1u] += (sum_y * inv_c - cur_y) * blend;
-    positions[v * 3u + 2u] += (sum_z * inv_c - cur_z) * blend;
+    vec3 moved = cur + (sum / wsum - cur) * blend;
+    positions[v * 3u]      = moved.x;
+    positions[v * 3u + 1u] = moved.y;
+    positions[v * 3u + 2u] = moved.z;
 }
