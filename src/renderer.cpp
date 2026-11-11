@@ -2344,7 +2344,7 @@ void Renderer::draw_mesh(const Camera& cam, int w, int h, uint32_t index_count,
     gpu::set_vertex_buffer(rp, 2, vbo_mask);
     gpu::set_vertex_buffer(rp, 3, vbo_color);
     gpu::set_index_buffer(rp, ebo);
-    gpu::draw_indexed(rp, index_count);
+    gpu::draw_indexed_sliced(rp, index_count);
     gpu::end_render_pass(rp);
     gpu::release_bind_group(grp);
 }
@@ -2408,7 +2408,7 @@ void Renderer::draw_display(const Camera& cam, EntityGpu& g, int w, int h, bool 
     gpu::set_vertex_buffer(rp, 2, g.vbo_mask);
     gpu::set_vertex_buffer(rp, 3, g.vbo_color);
     gpu::set_index_buffer(rp, g.ebo);
-    gpu::draw_indexed(rp, g.index_count);
+    gpu::draw_indexed_sliced(rp, g.index_count);
     gpu::end_render_pass(rp);
     gpu::release_bind_group(grp);
 }
@@ -2474,7 +2474,7 @@ bool Renderer::draw_textured(const Camera& cam, int w, int h, TexturedGpu& t, co
     };
     gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, textured_pipeline, be, 8, &t.tex, &t.normal);
     gpu::set_bind_group(rp, textured_pipeline, grp);
-    gpu::draw(rp, index_count);
+    gpu::draw_sliced(rp, index_count);
     gpu::end_render_pass(rp);
     gpu::release_bind_group(grp);
     return true;
@@ -2571,7 +2571,7 @@ void Renderer::pick_draw(uint32_t entity_id, const gpu::Buffer& pos_vbo, const g
     gpu::set_bind_group(pick_pass, pick_pipeline, pick_bgs[pick_slot]);
     gpu::set_vertex_buffer(pick_pass, 0, pos_vbo);
     gpu::set_index_buffer(pick_pass, ebo_);
-    gpu::draw_indexed(pick_pass, index_count);
+    gpu::draw_indexed_sliced(pick_pass, index_count);
     pick_slot++;
 }
 
@@ -2876,7 +2876,7 @@ void Renderer::render_screen_buffers(const Camera& cam, int w, int h) {
     gpu::set_vertex_buffer(rp, 1, screen_vbo_norm);
     gpu::set_vertex_buffer(rp, 2, screen_vbo_triid);
     gpu::set_vertex_buffer(rp, 3, screen_vbo_bary);
-    gpu::draw(rp, screen_tri_count * 3);
+    gpu::draw_sliced(rp, screen_tri_count * 3);
     gpu::end_render_pass(rp);   // rebinds the default framebuffer
     gpu::release_bind_group(grp);
 

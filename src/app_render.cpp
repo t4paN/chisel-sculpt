@@ -3,6 +3,7 @@
 // the UI tail (button islands, panels, error popup) and the ImGui pass + present.
 #include "scene.h"          // first: pulls in glad, which must precede any GL header
 #include <GLFW/glfw3.h>
+#include "bench.h"
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
 #endif
@@ -70,7 +71,7 @@ void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse) {
     bool non_edit_mode = input.interaction_mode != InputState::InteractionMode::EDIT
                       && !retopo_mode;
     // Hide the OS cursor while sculpting (we draw our own brush cursor).
-    bool show_os_cursor = input.quit_requested || input.export_dialog_active || input.import_dialog_active || input.save_dialog_active || input.remesh_confirm_pending || input.voxel_merge_confirm_pending || input.drop_confirm_pending || input.reset_confirm_pending || input.help_popup_open || input.keybind_menu_open || input.brush_props_open || imgui_wants_mouse || non_edit_mode;
+    bool show_os_cursor = input.quit_requested || input.export_dialog_active || input.import_dialog_active || input.save_dialog_active || input.remesh_confirm_pending || input.voxel_merge_confirm_pending || input.drop_confirm_pending || input.reset_confirm_pending || input.subdiv_confirm_pending || input.help_popup_open || input.keybind_menu_open || input.brush_props_open || imgui_wants_mouse || non_edit_mode;
 #ifndef __EMSCRIPTEN__
     // A slider drag owns the cursor mode while it runs: it holds GLFW_CURSOR_DISABLED
     // to capture the pointer. This line ran unconditionally every frame and put the
@@ -212,6 +213,7 @@ void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse) {
                 renderer.draw_display(camera, up->gpu, win_w, win_h, selected, tex_mix);
         }
     }
+    bench::pd_mark("render: meshes");
 
     // Debug mesh overlay (Y key toggle). Invalidate cached edge buffer on
     // every transition so the next "on" rebuilds against current topology.
@@ -232,7 +234,7 @@ void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse) {
     }
 
     // Brush cursor — draw at locked position during slider, normal position otherwise
-    if (!input.quit_requested && !input.export_dialog_active && !input.import_dialog_active && !input.save_dialog_active && !input.remesh_confirm_pending && !input.voxel_merge_confirm_pending && !input.drop_confirm_pending && !input.reset_confirm_pending && !input.help_popup_open && !input.keybind_menu_open && !input.brush_props_open && !imgui_wants_mouse && !non_edit_mode) {
+    if (!input.quit_requested && !input.export_dialog_active && !input.import_dialog_active && !input.save_dialog_active && !input.remesh_confirm_pending && !input.voxel_merge_confirm_pending && !input.drop_confirm_pending && !input.reset_confirm_pending && !input.subdiv_confirm_pending && !input.help_popup_open && !input.keybind_menu_open && !input.brush_props_open && !imgui_wants_mouse && !non_edit_mode) {
         float cursor_x, cursor_y;
         if (input.slider_mode != InputState::SliderMode::NONE) {
             cursor_x = (float)input.slider_start_x;
@@ -371,6 +373,8 @@ void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse) {
                                 win_w, win_h);
     if (bitmap_dialogs && input.reset_confirm_pending)
         draw_reset_confirm(text, win_w, win_h);
+    if (bitmap_dialogs && input.subdiv_confirm_pending)
+        draw_subdiv_confirm(text, input.subdiv_confirm_tris, glfwGetTime(), win_w, win_h);
     if (bitmap_dialogs && input.voxel_merge_confirm_pending)
         draw_voxel_merge_confirm(text, input.voxel_merge_resolution, input.voxel_merge_close_holes,
                                  dlg.n_selected, dlg.n_unselected,

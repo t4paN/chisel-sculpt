@@ -988,6 +988,7 @@ int main(int argc, char* argv[]) {
                 || input.touch_gesture
                 || input.slider_mode != InputState::SliderMode::NONE
                 || input.notification_timer > 0.0f || input.mirror_unavailable_timer > 0.0f
+                || input.subdiv_confirm_pending   // its skull flashes
                 // Same condition the refresh below runs under, so it can't keep us awake
                 // while the menu defers it.
                 || (screen_buffers_dirty && !input.settings_menu_open)

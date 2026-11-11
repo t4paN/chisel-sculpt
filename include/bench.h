@@ -32,6 +32,7 @@ void shutdown();      // print the summary, close the CSV
 // mark and the GPU wait after it. That serialises the frame, so the parts are honest
 // but their sum overstates the frame; never leave it on for a feel test.
 void pd_arm(gpu::Device& dev);     // at pen-down; marks are no-ops until then
+void pd_arm_level(gpu::Device& dev);   // CHISEL_LEVELTRACE=1: at a level switch, six frames
 void pd_mark(const char* label);
 void pd_frame();                   // after present; disarms three frames into the stroke
 

@@ -424,6 +424,31 @@ void draw_reset_confirm(TextOverlay& text, int win_w, int win_h) {
                   1.5f, win_w, win_h, CGA(light_gray), 1.0f);
 }
 
+void draw_subdiv_confirm(TextOverlay& text, uint64_t tris, double now, int win_w, int win_h) {
+    text.draw_panel(0, 0, (float)win_w, (float)win_h,
+                   win_w, win_h, 0.0f, 0.0f, 0.0f, 0.5f);
+    static const char* const kSkull[7] = {
+        ".#####.", "#######", "#..#..#", "#..#..#", "#######", ".##.##.", ".#.#.#.",
+    };
+    const float cx = (float)win_w * 0.5f, cy = (float)win_h * 0.5f;
+    if (std::fmod(now, 0.8) < 0.5) {
+        const float px = 8.0f, x0 = cx - 3.5f * px, y0 = cy - 130.0f;
+        for (int r = 0; r < 7; r++)
+            for (int c = 0; c < 7; c++)
+                if (kSkull[r][c] == '#')
+                    text.draw_panel(x0 + c * px, y0 + r * px, px, px, win_w, win_h,
+                                    1.0f, 0.33f, 0.33f, 1.0f);
+    }
+    const char* msg = "Subdivision Levels Critical, Proceed?";
+    const float msg_scale = 3.0f, msg_y = cy - 40.0f;
+    text.draw_text(msg, cx - std::strlen(msg) * 8.0f * msg_scale * 0.5f, msg_y,
+                  msg_scale, win_w, win_h, CGA(yellow), 1.0f);
+    char sub[96];
+    std::snprintf(sub, sizeof sub, "%.1fM triangles    Y (Yolo)    N (Nope)", (double)tris / 1e6);
+    text.draw_text(sub, cx - std::strlen(sub) * 8.0f * 1.5f * 0.5f, msg_y + 40.0f,
+                  1.5f, win_w, win_h, CGA(light_gray), 1.0f);
+}
+
 void draw_notification(TextOverlay& text, InputState& input, int win_w, int win_h) {
     if (input.notification_timer > 0.0f) {
         input.notification_timer -= 1.0f / 60.0f;

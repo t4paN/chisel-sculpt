@@ -118,6 +118,7 @@ struct PenDown {
     int frame = 0;
     gpu::Device* dev = nullptr;
     gpu::Buffer sync;            // 16 bytes; reading it back drains the queue
+    int frames_left = 0;
     Clock::time_point t_mark, t_frame;
 };
 PenDown P;
@@ -136,8 +137,21 @@ void pd_arm(gpu::Device& dev) {
     gpu::read_buffer(dev, P.sync, 0, sizeof(junk), junk);   // start from an empty queue
     P.armed = true;
     P.frame = 0;
+    P.frames_left = 3;
     P.t_mark = P.t_frame = Clock::now();
     std::printf("[pendown] ---- pen down ----\n");
+}
+
+// CHISEL_LEVELTRACE=1: the same probe, armed when a subdivision level switch starts and
+// kept on for the six frames after it (2026-11-11, the 63M-tri engine reset).
+void pd_arm_level(gpu::Device& dev) {
+    static int on = -1;
+    if (on < 0) { const char* e = std::getenv("CHISEL_LEVELTRACE"); on = (e && *e && *e != '0') ? 1 : 0; }
+    if (!on) return;
+    P.on = 1;
+    pd_arm(dev);
+    P.frames_left = 6;
+    std::printf("[pendown] ---- (level switch, not a pen-down) ----\n");
 }
 
 void pd_mark(const char* label) {
@@ -156,7 +170,8 @@ void pd_frame() {
     std::printf("[pendown] f%d frame total %.1f ms\n", P.frame, ms_since(P.t_frame));
     std::fflush(stdout);
     P.t_mark = P.t_frame = Clock::now();
-    if (++P.frame >= 3) P.armed = false;
+    ++P.frame;
+    if (--P.frames_left <= 0) P.armed = false;
 }
 
 

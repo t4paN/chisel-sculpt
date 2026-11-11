@@ -1628,6 +1628,7 @@ static void handle_modal_key(GLFWwindow* w, int key) {
             if      (in.drop_confirm_pending)       { in.drop_confirm_pending = false; in.drop_recover = false; }
             else if (in.voxel_merge_confirm_pending) in.voxel_merge_confirm_pending = false;
             else if (in.drop_level_confirm_pending) in.drop_level_confirm_pending = false;
+            else if (in.subdiv_confirm_pending)     in.subdiv_confirm_pending = false;
             else if (in.reset_confirm_pending)      in.reset_confirm_pending = false;
             else if (in.remesh_confirm_pending)     in.remesh_confirm_pending = false;
             // A file dialog's text field (address bar, search, file name) is being typed
@@ -1659,6 +1660,11 @@ static void handle_modal_key(GLFWwindow* w, int key) {
             } else if (in.drop_level_confirm_pending) {
                 in.drop_level_confirm_pending = false;
                 in.drop_level_requested = true;
+            } else if (in.subdiv_confirm_pending) {
+                // Yolo: the same level-up again, this time waved through.
+                in.subdiv_confirm_pending = false;
+                in.subdiv_confirmed = true;
+                in.level_switch_delta = +1;
             } else if (in.reset_confirm_pending) {
                 in.reset_confirm_pending = false;
                 in.reset_settings_requested = true;
@@ -1677,6 +1683,7 @@ static void handle_modal_key(GLFWwindow* w, int key) {
             if      (in.drop_confirm_pending)       { in.drop_confirm_pending = false; in.drop_recover = false; }
             else if (merge)                         in.voxel_merge_confirm_pending = false;
             else if (in.drop_level_confirm_pending) in.drop_level_confirm_pending = false;
+            else if (in.subdiv_confirm_pending)     in.subdiv_confirm_pending = false;
             else if (in.reset_confirm_pending)      in.reset_confirm_pending = false;
             else if (in.remesh_confirm_pending)     in.remesh_confirm_pending = false;
             else if (in.quit_requested)             { in.quit_requested = false; in.quit_to_new = false; }
@@ -1787,6 +1794,7 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
                      || g_input->voxel_merge_confirm_pending
                      || g_input->drop_level_confirm_pending
                      || g_input->reset_confirm_pending
+                     || g_input->subdiv_confirm_pending
                      || g_input->drop_confirm_pending
                      || g_input->about_open;
     if (modal_active) {
@@ -1907,7 +1915,7 @@ static void drop_callback(GLFWwindow* w, int count, const char** paths) {
         g_input->import_dialog_active || g_input->save_dialog_active ||
         g_input->remesh_confirm_pending || g_input->voxel_merge_confirm_pending ||
         g_input->drop_level_confirm_pending || g_input->drop_confirm_pending ||
-        g_input->reset_confirm_pending)
+        g_input->reset_confirm_pending || g_input->subdiv_confirm_pending)
         return;
     // Only project/model files; anything else gets a notification, not a prompt.
     const char* path = paths[0];

@@ -493,6 +493,45 @@ void draw_indexed(RenderPass& rp, uint32_t index_count) {
     glBindVertexArray(0);
 }
 
+// Run length for the sliced draws, in vertices (a multiple of 3). 0 = never cut.
+static uint32_t draw_slice_verts() {
+    static uint32_t n = ~0u;
+    if (n == ~0u) {
+        n = kDrawSliceVerts;
+        if (const char* e = std::getenv("CHISEL_DRAW_SLICE_MTRIS"))
+            n = (uint32_t)std::strtoul(e, nullptr, 10) * 3000000u;
+    }
+    return n;
+}
+
+void draw_sliced(RenderPass& rp, uint32_t vertex_count) {
+    const uint32_t run = draw_slice_verts();
+    if (run == 0 || vertex_count <= run) { draw(rp, vertex_count, 0); return; }
+    gl_setup_vao(rp);
+    const GLenum topo = gl_topology(rp.pipe->topology);
+    for (uint32_t first = 0; first < vertex_count; first += run) {
+        const uint32_t n = vertex_count - first < run ? vertex_count - first : run;
+        glDrawArrays(topo, (GLint)first, (GLsizei)n);
+        glFlush();   // this run goes to the GPU as its own job
+    }
+    glBindVertexArray(0);
+}
+
+void draw_indexed_sliced(RenderPass& rp, uint32_t index_count) {
+    const uint32_t run = draw_slice_verts();
+    if (run == 0 || index_count <= run) { draw_indexed(rp, index_count); return; }
+    gl_setup_vao(rp);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, rp.ibuf);
+    const GLenum topo = gl_topology(rp.pipe->topology);
+    for (uint32_t first = 0; first < index_count; first += run) {
+        const uint32_t n = index_count - first < run ? index_count - first : run;
+        glDrawElements(topo, (GLsizei)n, GL_UNSIGNED_INT,
+                       (const void*)((size_t)first * sizeof(uint32_t)));
+        glFlush();   // this run goes to the GPU as its own job
+    }
+    glBindVertexArray(0);
+}
+
 void end_render_pass(RenderPass& rp) {
     // Default-target passes leave their FBO bound for the frame; an offscreen pass
     // rebinds the default framebuffer so the next default pass / readback is correct.

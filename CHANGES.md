@@ -2,6 +2,15 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-11 — 63M triangles: skull prompt, sliced draws, WebGPU guard
+
+- Ctrl+D from 15.7M to 62.9M tris could reset the graphics driver (Intel xe, 640 ms per GPU job). Measured: the level switch is innocent; the per-frame mesh draw was one job of 500 to 670 ms.
+- Why it is that slow: the level needs about 14 GB of graphics memory on a 10 GB card (8.6 GB on the card, 5.4 GB spilled to system RAM). About 6.8 GB of it is the flat copy of the mesh the pick buffers draw from. Not fixed here.
+- Going up a level past 30M tris now asks first: "Subdivision Levels Critical", Proceed? Y (Yolo) / N (Nope), with a flashing skull, in every skin.
+- GL: whole-mesh draws (`gpu::draw_sliced`, `gpu::draw_indexed_sliced`) go out in runs of 4M tris with a flush between, so no single job nears the limit. Same frame time (about 650 ms at 62.9M), no reset. WebGPU draws in one go: a render pass is one submission.
+- WebGPU: the subdivide and remesh size guards count the biggest real buffer (36 B/tri, the flat pick copy) instead of 12 B/tri, so 62.9M is refused with the usual toast instead of aborting on a 2.26 GB buffer.
+- Dev: `CHISEL_LEVELTRACE=1` prints CPU time and GPU wait for each step of a level switch and the six frames after it; `CHISEL_DRAW_SLICE_MTRIS=<n>` sets the run length (0 = one draw).
+
 ## 2026-11-11 — New file browser for every native dialog
 
 - One dialog (`src/file_browser.cpp`, an ImGuiFileDialog subclass) for Open, Save, Export, UV exports, Brush Alpha and the folder pick.

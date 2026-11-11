@@ -631,6 +631,10 @@ void draw_indexed(RenderPass& rp, uint32_t index_count) {
     wgpuRenderPassEncoderDrawIndexed(rp.pass, index_count, 1, 0, 0, 0);
 }
 
+// One draw each: see gpu.h.
+void draw_sliced(RenderPass& rp, uint32_t vertex_count) { draw(rp, vertex_count, 0); }
+void draw_indexed_sliced(RenderPass& rp, uint32_t index_count) { draw_indexed(rp, index_count); }
+
 void end_render_pass(RenderPass& rp) {
     if (rp.pass) { wgpuRenderPassEncoderEnd(rp.pass); wgpuRenderPassEncoderRelease(rp.pass); rp.pass = nullptr; }
     if (rp.enc) {

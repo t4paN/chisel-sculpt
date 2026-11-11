@@ -397,6 +397,16 @@ void set_vertex_buffer(RenderPass&, uint32_t slot, const Buffer&);
 void set_index_buffer(RenderPass&, const Buffer&);                       // 32-bit indices
 void draw(RenderPass&, uint32_t vertex_count, uint32_t first_vertex = 0);
 void draw_indexed(RenderPass&, uint32_t index_count);
+// The same draws for whole meshes, which can be tens of millions of triangles. GL cuts
+// them into runs of kDrawSliceVerts and flushes between runs, so each run is its own
+// job for the driver: a driver gives one GPU job a fixed time (640 ms on Intel xe)
+// and resets the engine past it, and one 62.9M-tri draw sat on that line (2026-11-11).
+// Triangle lists only. WebGPU draws in one go: a render pass is one submission however
+// it is cut, and its buffer limit refuses meshes that size first.
+// CHISEL_DRAW_SLICE_MTRIS=<n> overrides the run length (0 = never cut), for measuring.
+constexpr uint32_t kDrawSliceVerts = 4u * 1000u * 1000u * 3u;   // 4M triangles
+void draw_sliced(RenderPass&, uint32_t vertex_count);
+void draw_indexed_sliced(RenderPass&, uint32_t index_count);
 void end_render_pass(RenderPass&);
 
 // ---- Offscreen MRT render target + readback ----------------------------------

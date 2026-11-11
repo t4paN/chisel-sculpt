@@ -1,4 +1,5 @@
 // The frame's one-shot operations and shared helpers, moved out of main.cpp as is.
+#include "bench.h"
 #include "debug_console.h"
 #include "scene.h"          // first: pulls in glad, which must precede any GL header
 #include <GLFW/glfw3.h>
@@ -417,6 +418,23 @@ void app_ops_paint_clicks(App& app, int win_w, int win_h) {
     }
 }
 
+// The size guards (subdivide, remesh) predict the biggest single GPU buffer a triangle
+// count needs and hold it against the device's limit.
+// WebGPU: the flat pick soup, 3 corners x vec3 per triangle (renderer.cpp
+// upload_screen_mesh). The limit is enforced there: 62.9M tris asked for 2.26 GB against
+// 2 GiB and wgpu aborted the app (2026-11-11), while the old 12 B/tri figure let it by.
+// GL: the limit it reports is the SSBO block size, which the driver does not hold whole
+// buffers to (that same 2.26 GB soup allocates), so only the index / CSR lists at 12 B/tri
+// are checked, as before.
+#ifdef CHISEL_BACKEND_WEBGPU
+static const uint64_t kBiggestBufferBytesPerTri = 36ull;
+#else
+static const uint64_t kBiggestBufferBytesPerTri = 12ull;
+#endif
+// Past this a level-up asks first. 15.7M tris (a sphere's L7) draws in 8 ms on an Arc
+// B570; the next step, 62.9M, sat on the driver's job time limit (2026-11-11).
+static const uint64_t kCriticalTris = 30000000ull;
+
 // Level switch, delete-top-level, focus and snap views: camera and multires ops that run
 // between the pen-down sampling and the stroke.
 void app_ops_levels_and_views(App& a) {
@@ -454,6 +472,8 @@ void app_ops_levels_and_views(App& a) {
         // reference the old buffers) — crash. Level switch is idle-only.
         input.level_switch_delta = 0;
     }
+    // A Yolo whose level-up was dropped above must not wave a later one through.
+    if (input.level_switch_delta == 0) input.subdiv_confirmed = false;
     if (input.level_switch_delta != 0) {
         int delta = input.level_switch_delta;
         input.level_switch_delta = 0;
@@ -461,13 +481,12 @@ void app_ops_levels_and_views(App& a) {
         const int target = from + delta;
         // Subdivision guard: before going up a level, predict the largest
         // resulting GPU buffer against the limits the device actually granted.
-        // Subdividing quadruples tris; the index SSBO and CSR adjacency both
-        // weigh tris x 12 bytes and are the biggest allocations. Refusing here
-        // beats attempting the build and losing the device (WebGPU treats an
-        // over-limit buffer as a validation error -> device loss).
+        // Subdividing quadruples tris. Refusing here beats attempting the build
+        // and losing the device (WebGPU treats an over-limit buffer as a
+        // validation error -> device loss).
         if (delta > 0) {
             const uint64_t tris_next  = (uint64_t)mesh->tri_count() * 4ull;
-            const uint64_t bytes_next = tris_next * 12ull;
+            const uint64_t bytes_next = tris_next * kBiggestBufferBytesPerTri;
             const gpu::DeviceLimits dl = gpu::device_limits();
             const uint64_t budget = dl.max_buffer_size < dl.max_storage_binding_size
                                   ? dl.max_buffer_size : dl.max_storage_binding_size;
@@ -481,8 +500,19 @@ void app_ops_levels_and_views(App& a) {
                             (unsigned long long)(bytes_next >> 20),
                             (unsigned long long)(budget >> 20));
                 delta = 0;
+            } else if (tris_next > kCriticalTris && !input.subdiv_confirmed) {
+                // It fits the device's limits, but it is heavy enough that the machine
+                // may crawl or the driver may give up. The user's call, not ours: ask
+                // (flashing skull). Y comes back here as the same level-up with
+                // subdiv_confirmed set.
+                input.subdiv_confirm_tris = tris_next;
+                input.subdiv_confirm_pending = true;
+                std::printf("[multires] L%d -> L%d is %.1fM tris: asking first\n",
+                            from, target, (double)tris_next / 1e6);
+                delta = 0;
             }
         }
+        input.subdiv_confirmed = false;   // good for the one switch it was given for
         const double switch_t0 = glfwGetTime();
         if (delta != 0 && target >= multires->base_level && target <= max_level) {
             scene.materialize_active_cpu();  // 2b: projection/cascade read disp/base
@@ -502,14 +532,20 @@ void app_ops_levels_and_views(App& a) {
             }
             scene.active_undo().push(std::move(lvl_e));
             multires->current_level = target;
+            bench::pd_arm_level(compute.gpu_dev);
             multires_sync_paint(*multires, *mesh);
+            bench::pd_mark("level: sync paint");
             if (scene.alive_count() <= 1) {
                 // Paint/mask ride the cascade (finest-level planes) — no
                 // save/restore needed across the rebuild.
                 cascade_to_level(*multires, *mesh, target, &compute);
+                bench::pd_mark("level: cascade");
                 arm_geometry_handoff(*mesh);
+                bench::pd_mark("level: geometry handoff");
                 scene.refresh_mirror_map();
+                bench::pd_mark("level: mirror map");
                 scene.sync();  // rebinds active: rebuilds adjacency from new topology
+                bench::pd_mark("level: scene sync (adjacency)");
             } else {
                 Mesh solo;
                 cascade_to_level(*multires, solo, target, &compute);
@@ -518,6 +554,7 @@ void app_ops_levels_and_views(App& a) {
                 scene.refresh_mirror_map();
             }
             refresh_active_gpu_residency();
+            bench::pd_mark("level: gpu residency");
             mesh->compute_bounding_sphere(mesh_center, mesh_radius);
             screen_buffers_dirty = true;
             std::printf("[multires] switched to level %d (%u verts, %u tris) in %.1f ms\n",
@@ -689,7 +726,7 @@ void app_ops_remesh_and_merge(App& a) {
                 : predict_adaptive_tris(*mesh, 0.0f, input.density_coarse_mult,
                                         input.density_fine_mult);
             const uint64_t tris_pred = (uint64_t)((double)base_pred * std::max(1.0f, detail));
-            const uint64_t bytes_pred = tris_pred * 12ull;  // index/CSR SSBOs
+            const uint64_t bytes_pred = tris_pred * kBiggestBufferBytesPerTri;
             const gpu::DeviceLimits dl = gpu::device_limits();
             const uint64_t budget = dl.max_buffer_size < dl.max_storage_binding_size
                                   ? dl.max_buffer_size : dl.max_storage_binding_size;

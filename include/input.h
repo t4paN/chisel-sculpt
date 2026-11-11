@@ -1,5 +1,6 @@
 #pragma once
 #include <GLFW/glfw3.h>
+#include <cstdint>
 #include <string>
 
 enum class BrushType {
@@ -443,6 +444,12 @@ struct InputState {
     bool drop_level_confirm_pending = false;
     // Menu > Reset settings: Y/N confirm first, then main applies settings_reset.
     bool reset_confirm_pending = false;
+    // Going up a level past a triangle count that may be more than the machine can take
+    // asks first (flashing skull, Y/N). Y sets subdiv_confirmed, which lets exactly one
+    // level-up through; app_ops consumes it.
+    bool     subdiv_confirm_pending = false;
+    bool     subdiv_confirmed = false;
+    uint64_t subdiv_confirm_tris = 0;     // what the level would make, for the prompt
     bool reset_settings_requested = false;
     bool drop_level_requested = false;
 

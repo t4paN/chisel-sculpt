@@ -29,6 +29,8 @@ void draw_slider(TextOverlay& text, const InputState& input, int win_w, int win_
 // Confirm for the burger menu's "delete highest subdiv" — destructive, wipes undo.
 void draw_drop_level_confirm(TextOverlay& text, int level, int win_w, int win_h);
 void draw_reset_confirm(TextOverlay& text, int win_w, int win_h);
+// Confirm before a subdivision level that may be too heavy; `now` drives the flash.
+void draw_subdiv_confirm(TextOverlay& text, uint64_t tris, double now, int win_w, int win_h);
 void draw_notification(TextOverlay& text, InputState& input, int win_w, int win_h);
 // Red flash for the one case where Chisel overrides a setting the user chose: the mesh
 // cannot supply mirror pairs, so Topological was switched back to World Space. Sits at

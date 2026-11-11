@@ -3756,6 +3756,53 @@ void draw_skin_dialogs(InputState& input, int win_w, int win_h, const DialogInfo
         end_dialog();
     }
 
+    // ---- Subdivision past the heavy line: confirm ---- Centred, Nope is the default.
+    if (begin_dialog("##dlgSubdiv", input.subdiv_confirm_pending, win_w, win_h)) {
+        const float avail = ImGui::GetContentRegionAvail().x;
+        auto centre = [&](float w) {
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.0f, (avail - w) * 0.5f));
+        };
+        // The merge prompt's skull, bigger and flashing. Pixels, not a glyph (see there).
+        static const char* const kSkull[7] = {
+            ".#####.", "#######", "#..#..#", "#..#..#", "#######", ".##.##.", ".#.#.#.",
+        };
+        const float px = 6.0f, skull = 7.0f * px;
+        centre(skull);
+        {
+            const ImVec2 p = ImGui::GetCursorScreenPos();
+            ImGui::Dummy(ImVec2(skull, skull));
+            if (std::fmod(ImGui::GetTime(), 0.8) < 0.5) {
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                const float sx = std::floor(p.x), sy = std::floor(p.y);
+                for (int r = 0; r < 7; r++)
+                    for (int c = 0; c < 7; c++)
+                        if (kSkull[r][c] == '#')
+                            dl->AddRectFilled(ImVec2(sx + c * px, sy + r * px),
+                                              ImVec2(sx + (c + 1) * px, sy + (r + 1) * px), kAlert);
+            }
+        }
+        const char* title = "Subdivision Levels Critical";
+        char l1[96];
+        std::snprintf(l1, sizeof l1, "The next level is %.1fM triangles. It may crawl, or not fit at all.",
+                      (double)input.subdiv_confirm_tris / 1e6);
+        const char* l2 = "Proceed?";
+        centre(text_size(UiFont::SansSemibold, 16.0f, title_case(title)).x);
+        dlg_title(title);
+        centre(text_size(UiFont::Sans, 13.0f, l1).x);
+        dlg_text(UiFont::Sans, 13.0f, kMuted, l1);
+        centre(text_size(UiFont::Sans, 13.0f, l2).x);
+        dlg_text(UiFont::Sans, 13.0f, kMuted, l2);
+        ImGui::Dummy(ImVec2(0.0f, 2.0f));
+        const float sp = ImGui::GetStyle().ItemSpacing.x;
+        centre(dlg_button_w("Yolo", "Y") + dlg_button_w("Nope", "N") + sp);
+        if (dlg_button("##sdY", "Yolo", "Y", false, true)) press_dialog_key(GLFW_KEY_Y);
+        dlg_tip("Subdivide anyway. Save first if the sculpt matters");
+        ImGui::SameLine();
+        if (dlg_button("##sdN", "Nope", "N", true)) press_dialog_key(GLFW_KEY_N);
+        dlg_tip("Stay at this level (Esc works too)");
+        end_dialog();
+    }
+
     // ---- Quit ---- Everything centred. Save & Quit saves first: a project with no
     // file yet gets the Save window, and the app closes once that save lands.
     if (begin_dialog("##dlgQuit", input.quit_requested, win_w, win_h)) {
