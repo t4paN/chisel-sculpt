@@ -2,6 +2,7 @@
 // WebGPU (wgpu-native v29) implementation of the gpu:: compute seam (gpu/gpu.h).
 // Seam Step 1 — compute path only. The render seam is added with the Stage 3 port.
 #include "gpu/gpu.h"
+#include "gpu/gpu_memtrace.h"
 
 #include <webgpu/webgpu.h>
 #ifdef __EMSCRIPTEN__
@@ -86,13 +87,15 @@ DeviceLimits device_limits() { return g_device_limits; }
 static WGPUInstance g_instance = nullptr;
 void webgpu_set_instance(WGPUInstance i) { g_instance = i; }
 
-Buffer create_buffer(Device& dev, const void* data, uint64_t size, Usage usage) {
+Buffer create_buffer(Device& dev, const void* data, uint64_t size, Usage usage,
+                     const char* file, int line) {
     Buffer b;
     b.size = size;
     WGPUBufferDescriptor bd = {};
     bd.usage = to_wgpu_usage(usage);
     bd.size  = size;
     b.handle = wgpuDeviceCreateBuffer(dev.device, &bd);
+    memtrace::add((uintptr_t)b.handle, size, file, line);
     if (b.handle && data) wgpuQueueWriteBuffer(dev.queue, b.handle, 0, data, size);
     return b;
 }
@@ -101,7 +104,10 @@ void write_buffer(Device& dev, Buffer& b, uint64_t offset, const void* data, uin
     wgpuQueueWriteBuffer(dev.queue, b.handle, offset, data, size);
 }
 
+void dump_live_buffers(const char* tag, uint64_t min_bytes) { memtrace::dump(tag, min_bytes); }
+
 void release_buffer(Buffer& b) {
+    memtrace::remove((uintptr_t)b.handle);
     if (b.handle) { wgpuBufferRelease(b.handle); b.handle = nullptr; }
     b.size = 0;
 }

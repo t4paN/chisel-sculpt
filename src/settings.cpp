@@ -1,3 +1,4 @@
+#include "gpu/gpu.h"
 #include "settings.h"
 #include "input.h"
 #include "brush_alpha.h"   // fill_patterns()
@@ -214,6 +215,7 @@ std::string serialize(const InputState& in) {
     append_kv(s, "remesh_detail",       in.remesh_detail);
     append_kv(s, "uv_padding",          in.uv_padding);
     append_kv(s, "sphere_kind",         (int)in.sphere_kind);
+    append_kv(s, "gpu_memory_gb",       in.gpu_memory_gb);
     // mirror_x is deliberately absent — see InputState::mirror_x. Symmetry is session
     // state that starts ON every run, so it must not survive into the next one. As with
     // brush_size, leaving it out of the "serialize and compare" blob also means pressing
@@ -390,6 +392,11 @@ void apply_global_key(InputState& in, const std::string& key, const std::string&
     else if (key == "paint_color")         parse_rgb(val, in.paint_color);
     else if (key == "paint_color_alt")     parse_rgb(val, in.paint_color_alt);
     else if (key == "unselected_tint")     parse_rgb(val, in.unselected_tint);
+    else if (key == "gpu_memory_gb") {
+        // Only a size the table has a row for; anything else keeps the default.
+        const int gb = std::atoi(val.c_str());
+        for (const gpu::MemoryRow& r : gpu::kMemoryRows) if (r.gb == gb) in.gpu_memory_gb = gb;
+    }
     else if (key == "sphere_kind") {
         // Range-checked like every other value on the way in: the blob is
         // user-editable, and an out-of-range enum would come back every launch.
@@ -539,6 +546,7 @@ void settings_reset(InputState& input) {
     input.camera_fov         = fresh.camera_fov;
     input.remesh_detail      = fresh.remesh_detail;
     input.sphere_kind        = fresh.sphere_kind;
+    input.gpu_memory_gb      = fresh.gpu_memory_gb;
     input.mirror_x           = fresh.mirror_x;
     input.mirror_topological = fresh.mirror_topological;
     input.fast_normals       = fresh.fast_normals;

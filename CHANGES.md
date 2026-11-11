@@ -2,6 +2,15 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-11 — Graphics memory setting; live GPU buffer ledger
+
+- Crash: up to 62.9M tris, down a level, up again aborted on native WebGPU ("Not enough memory left"). Revisiting a stored level is rebuilt on the card (the GPU cascade), which keeps its own tables and scratch: about 1.6 GB extra at 15.7M tris, about 6 GB at 62.9M.
+- Settings > Graphics memory: 2 / 4 / 6 / 8 / 10 / 12 / 16 GB, default 4. No API reports it (WebGPU hides it, GL is per vendor), so the user says. Table `kMemoryRows` in `include/gpu/gpu.h`; only the 10 GB row is measured, the rest are extrapolated from it.
+- The GPU cascade runs only up to the table's size for that card (37M tris at 10 GB); past it the CPU replay does the same job (13 s at 62.9M, against 30 s for a first build).
+- The skull prompt's line comes from the same table (93M tris at 10 GB, 32M at the default 4) instead of a fixed 30M, and names the setting.
+- Dev: `CHISEL_GPU_MEM=1` prints every live GPU buffer summed per creating source line after each level switch (`include/gpu/gpu_memtrace.h`; `create_buffer` records its call site).
+- Still open: the second trip up to 62.9M runs out of memory even on the CPU replay. Grow-only working buffers stay sized for the biggest level visited (4.8 GB held at 15.7M after a visit, 1.3 GB fresh).
+
 ## 2026-11-11 — 63M triangles fit: the pick pass lost its flat copy of the mesh
 
 - The pick buffers (depth, normal, triangle id, barycentrics, drawn at pen-down) used a flat, de-indexed copy of the whole mesh: 48 B/tri, refilled by a compute pass over every triangle at each pen-down and stroke commit. At 62.9M tris that was 6.8 GB.

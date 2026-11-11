@@ -447,6 +447,9 @@ struct InputState {
     // Going up a level past a triangle count that may be more than the machine can take
     // asks first (flashing skull, Y/N). Y sets subdiv_confirmed, which lets exactly one
     // level-up through; app_ops consumes it.
+    // Settings > Graphics memory: what the user says their card has (2..16 GB, one of
+    // gpu::kMemoryRows). Sizes the fast level rebuild and the skull prompt.
+    int      gpu_memory_gb = 4;
     bool     subdiv_confirm_pending = false;
     bool     subdiv_confirmed = false;
     uint64_t subdiv_confirm_tris = 0;     // what the level would make, for the prompt

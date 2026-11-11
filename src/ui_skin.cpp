@@ -3785,7 +3785,9 @@ void draw_skin_dialogs(InputState& input, int win_w, int win_h, const DialogInfo
         char l1[96];
         std::snprintf(l1, sizeof l1, "The next level is %.1fM triangles. It may crawl, or not fit at all.",
                       (double)input.subdiv_confirm_tris / 1e6);
-        const char* l2 = "Proceed?";
+        char l2[96];
+        std::snprintf(l2, sizeof l2, "Settings has this card at %d GB of graphics memory. Proceed?",
+                      input.gpu_memory_gb);
         centre(text_size(UiFont::SansSemibold, 16.0f, title_case(title)).x);
         dlg_title(title);
         centre(text_size(UiFont::Sans, 13.0f, l1).x);

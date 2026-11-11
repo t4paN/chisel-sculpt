@@ -91,6 +91,31 @@ struct DeviceLimits {
 void set_device_limits(const DeviceLimits&);
 DeviceLimits device_limits();
 
+// How much memory the graphics card has. No API says: WebGPU hides it on purpose and
+// GL has only per-vendor extensions, so this is what the user picked in Settings
+// (InputState::gpu_memory_gb, copied here every frame), 4 GB until they do.
+// The rows are what fits in 80% of that, from two measured points on a 10 GB card
+// (2026-11-11, native WebGPU, plain sphere; the 10 GB row matches what was seen):
+//   holding a level:          0.71 GiB + 0.156 GiB per million verts
+//   the GPU cascade's switch: 0.71 GiB + 0.39  GiB per million verts (old level,
+//                             the cascade's own tables and scratch, new level)
+// fast_mtris = biggest level the GPU cascade may rebuild (past it, the CPU replay;
+// an allocation that fails on WebGPU aborts the app). max_mtris = biggest level
+// that fits at all (past it, a level-up asks first).
+struct MemoryRow { int gb; uint32_t fast_mtris; uint32_t max_mtris; };
+constexpr MemoryRow kMemoryRows[] = {
+    { 2, 4, 11 }, { 4, 12, 32 }, { 6, 21, 52 }, { 8, 29, 73 },
+    { 10, 37, 93 }, { 12, 46, 114 }, { 16, 62, 155 },
+};
+constexpr int kMemoryRowCount = (int)(sizeof(kMemoryRows) / sizeof(kMemoryRows[0]));
+inline int user_memory_gb = 4;
+inline const MemoryRow& memory_row() {
+    for (const MemoryRow& r : kMemoryRows) if (r.gb == user_memory_gb) return r;
+    return kMemoryRows[1];
+}
+inline uint64_t fast_rebuild_max_tris() { return (uint64_t)memory_row().fast_mtris * 1000000ull; }
+inline uint64_t fits_max_tris()         { return (uint64_t)memory_row().max_mtris  * 1000000ull; }
+
 struct Buffer {
     uint64_t size = 0;
 #if defined(CHISEL_BACKEND_WEBGPU)
@@ -102,7 +127,12 @@ struct Buffer {
 
 // Create a buffer of `size` bytes with `usage` (+ CopyDst). If `data` is non-null it
 // is uploaded immediately. release_buffer frees the backend handle.
-Buffer create_buffer(Device&, const void* data, uint64_t size, Usage usage);
+// (file/line are filled in by the compiler at the call site, for the CHISEL_GPU_MEM
+// ledger; never pass them.)
+Buffer create_buffer(Device&, const void* data, uint64_t size, Usage usage,
+                     const char* file = __builtin_FILE(), int line = __builtin_LINE());
+// CHISEL_GPU_MEM=1: print the live buffers, summed per creating line. No-op otherwise.
+void   dump_live_buffers(const char* tag, uint64_t min_bytes = 32ull << 20);
 void   write_buffer(Device&, Buffer&, uint64_t offset, const void* data, uint64_t size);
 void   release_buffer(Buffer&);
 

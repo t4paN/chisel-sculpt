@@ -3,6 +3,7 @@
 // native sibling of webgpu_backend.cpp: same interface, immediate-mode underneath.
 // A current GL context must already exist (the windowing/app code owns it).
 #include "gpu/gpu.h"
+#include "gpu/gpu_memtrace.h"
 
 #include <glad/glad.h>
 #include <cstdio>
@@ -42,7 +43,8 @@ void set_device_limits(const DeviceLimits& l) {
 }
 DeviceLimits device_limits() { return g_device_limits; }
 
-Buffer create_buffer(Device&, const void* data, uint64_t size, Usage /*usage*/) {
+Buffer create_buffer(Device&, const void* data, uint64_t size, Usage /*usage*/,
+                     const char* file, int line) {
     // GL buffers carry no fixed usage role; the bind point (SSBO vs UBO) is decided
     // at bind time from the pipeline layout, so the Usage flags are advisory here.
     Buffer b; b.size = size;
@@ -52,8 +54,11 @@ Buffer create_buffer(Device&, const void* data, uint64_t size, Usage /*usage*/) 
     glBufferData(GL_SHADER_STORAGE_BUFFER, (GLsizeiptr)size, data, GL_DYNAMIC_DRAW);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
     b.handle = h;
+    memtrace::add((uintptr_t)h, size, file, line);
     return b;
 }
+
+void dump_live_buffers(const char* tag, uint64_t min_bytes) { memtrace::dump(tag, min_bytes); }
 
 void write_buffer(Device&, Buffer& b, uint64_t offset, const void* data, uint64_t size) {
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, b.handle);
@@ -62,6 +67,7 @@ void write_buffer(Device&, Buffer& b, uint64_t offset, const void* data, uint64_
 }
 
 void release_buffer(Buffer& b) {
+    memtrace::remove((uintptr_t)b.handle);
     if (b.handle) { GLuint h = b.handle; glDeleteBuffers(1, &h); b.handle = 0; }
     b.size = 0;
 }

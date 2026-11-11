@@ -844,7 +844,16 @@ void cascade_to_level(MultiresStack& stack, Mesh& out, int K, ComputeState* comp
     const char* mode = "slow";
     if (fast) {
         bool gpu_done = false;
-        if (compute && compute->supported)
+        // The GPU replay keeps its own tables and scratch beside the working mesh:
+        // about 6 GB extra at 62.9M tris, which a 10 GB card refused, and on WebGPU a
+        // refused buffer aborts the app (2026-11-11). Past the size the Graphics
+        // memory setting allows, the CPU replay below does the same job.
+        const uint64_t tris_K = (uint64_t)stack.topo_cache[passes - 1].indices.size() / 3ull;
+        const bool gpu_fits = tris_K <= gpu::fast_rebuild_max_tris();
+        if (!gpu_fits)
+            std::printf("[cascade] L%d: %.1fM tris is past the GPU rebuild size for %d GB, CPU replay\n",
+                        K, (double)tris_K / 1e6, gpu::user_memory_gb);
+        if (compute && compute->supported && gpu_fits)
             gpu_done = cascade_replay_gpu(stack, *compute, out, passes);
         if (gpu_done) {
             mode = "gpu";

@@ -423,10 +423,6 @@ void app_ops_paint_clicks(App& app, int win_w, int win_h) {
 // adjacency list, 12 B/tri each. (Until 2026-11-11 the pick pass kept a flat copy of
 // the mesh at 36 B/tri, which this figure missed; that copy is gone.)
 static const uint64_t kBiggestBufferBytesPerTri = 12ull;
-// Past this a level-up asks first. 15.7M tris (a sphere's L7) draws in 8 ms on an Arc
-// B570; the next step, 62.9M, sat on the driver's job time limit (2026-11-11).
-static const uint64_t kCriticalTris = 30000000ull;
-
 // Level switch, delete-top-level, focus and snap views: camera and multires ops that run
 // between the pen-down sampling and the stroke.
 void app_ops_levels_and_views(App& a) {
@@ -447,6 +443,7 @@ void app_ops_levels_and_views(App& a) {
     auto print_undo_top = [&](const char* tag) { app_print_undo_top(a, tag); };
     auto refresh_active_gpu_residency = [&]() { app_refresh_active_gpu_residency(a); };
     auto arm_geometry_handoff = [&](const Mesh& m) { app_arm_geometry_handoff(a, m); };
+    gpu::user_memory_gb = input.gpu_memory_gb;   // Settings -> the seam, where the size rules live
     // A remesh job owns the mesh until its last step: no level switch under it.
     if (input.remesh_in_progress) input.level_switch_delta = 0;
     // Multires level switch (D / Shift-D post-lock). Recorded on the undo
@@ -492,9 +489,10 @@ void app_ops_levels_and_views(App& a) {
                             (unsigned long long)(bytes_next >> 20),
                             (unsigned long long)(budget >> 20));
                 delta = 0;
-            } else if (tris_next > kCriticalTris && !input.subdiv_confirmed) {
-                // It fits the device's limits, but it is heavy enough that the machine
-                // may crawl or the driver may give up. The user's call, not ours: ask
+            } else if (tris_next > gpu::fits_max_tris() && !input.subdiv_confirmed) {
+                // It fits the device's limits, but by the Graphics memory setting it is
+                // more than the card holds: the machine may crawl (62.9M tris on 10 GB
+                // spilled into system RAM, 650 ms a frame) or the driver may give up. The user's call, not ours: ask
                 // (flashing skull). Y comes back here as the same level-up with
                 // subdiv_confirmed set.
                 input.subdiv_confirm_tris = tris_next;
@@ -553,6 +551,11 @@ void app_ops_levels_and_views(App& a) {
                         target, mesh->vertex_count(), mesh->tri_count(),
                         (glfwGetTime() - switch_t0) * 1000.0);
             print_undo_top("level-switch");
+            {
+                char tag[48];
+                std::snprintf(tag, sizeof tag, "after switch L%d -> L%d", from, target);
+                gpu::dump_live_buffers(tag);
+            }
             // A switch slow enough to freeze the frame has stale input queued
             // behind it (GLFW delivers it all in the next poll) — swallow it.
             if (glfwGetTime() - switch_t0 > 0.15)

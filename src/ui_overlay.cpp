@@ -1539,6 +1539,34 @@ void draw_settings_menu_items(InputState& input, MultiresInfo mres, bool sync_ta
 
             ImGui::Checkbox("Show FPS", &input.show_fps);
 
+            // The app cannot ask the card how much memory it has, so the user says.
+            {
+                int row = 1;
+                for (int i = 0; i < gpu::kMemoryRowCount; i++)
+                    if (gpu::kMemoryRows[i].gb == input.gpu_memory_gb) row = i;
+                ImGui::SetNextItemWidth(mw);
+                ui_skin_push_dropdown_bg();
+                if (ImGui::Combo("##gpuMemory", &row,
+                                 "Graphics memory: 2 GB\0Graphics memory: 4 GB\0Graphics memory: 6 GB\0"
+                                 "Graphics memory: 8 GB\0Graphics memory: 10 GB\0Graphics memory: 12 GB\0"
+                                 "Graphics memory: 16 GB\0"))
+                    input.gpu_memory_gb = gpu::kMemoryRows[row].gb;
+                ImGui::PopStyleColor();
+                if (ImGui::IsItemHovered()) {
+                    char tip[320];
+                    const gpu::MemoryRow& r = gpu::kMemoryRows[row];
+                    std::snprintf(tip, sizeof tip,
+                                  "How much memory your graphics card has. The app\n"
+                                  "cannot ask the card, so it goes by this.\n\n"
+                                  "At %d GB: revisiting a subdivision level is rebuilt on\n"
+                                  "the card up to %uM triangles (slower past that), and\n"
+                                  "going past %uM asks first.\n\n"
+                                  "Too high a setting can crash the app on big meshes.",
+                                  r.gb, r.fast_mtris, r.max_mtris);
+                    ui_skin_menu_tip(tip);
+                }
+            }
+
             ImGui::Checkbox("Remesh keeps detail", &input.remesh_keep_detail);
             if (ImGui::IsItemHovered())
                 ui_skin_menu_tip("On: the remesher keeps its new points on your sculpt\n"
