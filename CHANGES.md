@@ -2,6 +2,14 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-11 — 63M triangles fit: the pick pass lost its flat copy of the mesh
+
+- The pick buffers (depth, normal, triangle id, barycentrics, drawn at pen-down) used a flat, de-indexed copy of the whole mesh: 48 B/tri, refilled by a compute pass over every triangle at each pen-down and stroke commit. At 62.9M tris that was 6.8 GB.
+- Now the pass has no vertex buffers. Its vertex stage reads the working index list, positions and normals by corner number (same pattern as the textured draw); triangle id and barycentrics come from the corner number. The copy, its four buffers and the expand kernel (GLSL + WGSL) are deleted.
+- Measured on an Arc B570 (10 GB), fresh sphere at 62.9M tris: graphics memory 14 GB -> 6 GB, nothing spilled to system RAM; mesh draw 650 ms -> 17 ms a frame; strokes land. At 15.7M tris: 3.5 GB -> 1.8 GB.
+- Native WebGPU reaches 62.9M too (it aborted on that copy's 2.26 GB buffer), so its size guards go back to 12 B/tri, which is now the real biggest buffer.
+- Triangle ids are whole numbers end to end; they used to pass through a float, exact only up to 16.7M.
+
 ## 2026-11-11 — 63M triangles: skull prompt, sliced draws, WebGPU guard
 
 - Ctrl+D from 15.7M to 62.9M tris could reset the graphics driver (Intel xe, 640 ms per GPU job). Measured: the level switch is innocent; the per-frame mesh draw was one job of 500 to 670 ms.

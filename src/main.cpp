@@ -1852,8 +1852,6 @@ int main(int argc, char* argv[]) {
                     if (UndoStack::global_pushes > pushes_at_stroke_start)
                         input.undo_requested = true;
                 }
-                if (had_update)
-                    renderer.update_screen_positions(*mesh);
                 screen_buffers_dirty = true;
                 app_state = AppState::IDLE;
             }

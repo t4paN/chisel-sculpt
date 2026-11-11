@@ -127,22 +127,9 @@ struct Renderer {
     gpu::RenderPipeline  screen_pipeline;
     gpu::Buffer          screen_ubo;
 
-    // Flat triangle-soup vertex buffers for the screen pass (no index sharing).
-    // pos/norm are filled by the GPU-side expand compute (so they carry
-    // Vertex|Storage); triid/bary are static per topology (Vertex). Seam-owned.
-    gpu::Buffer screen_vbo_pos;
-    gpu::Buffer screen_vbo_norm;
-    gpu::Buffer screen_vbo_triid;
-    gpu::Buffer screen_vbo_bary;
+    // Triangles the screen pass draws. It reads the working mesh buffers by index
+    // (no vertex buffers of its own).
     uint32_t screen_tri_count;
-    // Tris the triid/bary attribute buffers are filled for. Their content is a
-    // pure function of tri index (t,t,t / fixed bary pattern), so the buffers are
-    // grow-only: a level revisit re-uploads nothing, growth fills only the tail.
-    uint32_t screen_static_tris = 0;
-
-    // GPU-side indexed→flat expansion — on the gpu:: compute seam.
-    gpu::ComputePipeline screen_expand_pipeline;
-    gpu::Buffer          screen_expand_ubo;
 
     bool initialized;
 
@@ -192,10 +179,6 @@ struct Renderer {
     void create_screen_buffers(int w, int h);
     void resize_screen_buffers(int w, int h);
     void upload_screen_mesh(const Mesh& mesh);
-    void update_screen_positions(const Mesh& mesh);
-
-    // GPU-side screen mesh position/normal update (no CPU mesh read)
-    void update_screen_mesh_gpu();
 
     // Render to screen buffers (call once on pen-down or per frame during stroke)
     void render_screen_buffers(const Camera& cam, int w, int h);

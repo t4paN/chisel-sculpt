@@ -447,7 +447,7 @@ struct BrushStroke {
 
     // Pen-up reconcile — tick once per frame from main once the stroke ends, until
     // it returns true (the commit completed this call; had_update = geometry was
-    // modified, caller should update_screen_positions). Stage 1 drains in-flight
+    // modified). Stage 1 drains in-flight
     // dab readbacks, runs autosmooth + the GPU undo-ring diff, and kicks the pen-up
     // buffer reads; stage 2 lands them, syncs mesh/multires, and commits the undo
     // entry. Multi-frame only when async readbacks are in flight (webgpu); on GL it

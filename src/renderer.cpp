@@ -86,13 +86,6 @@ struct ScreenParamsGPU {
 };
 static_assert(sizeof(ScreenParamsGPU) == 128, "screen Params UBO must be 128 bytes (std140)");
 
-// Indexed→flat expand compute Params UBO — triangle count (std140 at binding 63).
-struct ScreenExpandParamsGPU {
-    uint32_t tri_count;
-    uint32_t _pad[3];
-};
-static_assert(sizeof(ScreenExpandParamsGPU) == 16, "expand Params UBO must be 16 bytes (std140)");
-
 // Unit-ring segment count (shared by ring + footprint disc geometry, built once).
 static const int CURSOR_SEGS = 64;
 
@@ -495,12 +488,17 @@ void main() {
     "    mat4 uProj;\n" \
     "};\n"
 
+// No vertex buffers: each corner is read by index straight from the working mesh
+// (index list, positions, normals), like the textured pipeline. The triangle id and
+// barycentrics the pass writes are per corner, which shared indexed vertices cannot
+// carry; this used to be solved with a flat, de-indexed copy of the whole mesh
+// (36 B/tri pos + norm, 12 B/tri id + bary: 6.8 GB at 62.9M tris, and over WebGPU's
+// 2 GiB buffer limit). The corner number gives both for free.
 static const char* screen_buf_vert_src =
 "#version 430 core\n"
-"layout(location=0) in vec3 aPos;\n"
-"layout(location=1) in vec3 aNorm;\n"
-"layout(location=2) in float aTriID;\n"
-"layout(location=3) in vec2 aBary;\n"
+"layout(std430, binding=10) readonly buffer SIdx { uint  s_idx[]; };\n"
+"layout(std430, binding=11) readonly buffer SPos { float s_pos[]; };\n"
+"layout(std430, binding=12) readonly buffer SNrm { float s_nrm[]; };\n"
 SCREEN_PARAMS_BLOCK
 R"(
 out vec3 vNormWorld;
@@ -509,6 +507,10 @@ flat out uint vTriID;
 out vec2 vBary;
 
 void main() {
+    uint cid = uint(gl_VertexID);
+    uint v = s_idx[cid];
+    vec3 aPos = vec3(s_pos[3u * v], s_pos[3u * v + 1u], s_pos[3u * v + 2u]);
+    vec3 aNorm = vec3(s_nrm[3u * v], s_nrm[3u * v + 1u], s_nrm[3u * v + 2u]);
     vec4 viewPos = uView * vec4(aPos, 1.0);
     // World-space normal written to the normal attachment — brush back-projection
     // (apply_draw in brush.cpp) treats this as a world-space direction to displace
@@ -517,8 +519,10 @@ void main() {
     // "cannon" extrusions along world +z regardless of camera angle.
     vNormWorld = normalize(aNorm);
     vDepth = -viewPos.z;  // linear depth (positive into screen)
-    vTriID = uint(aTriID);
-    vBary = aBary;
+    vTriID = cid / 3u;
+    // Corner 0 = (1,0), 1 = (0,1), 2 = (0,0).
+    uint corner = cid % 3u;
+    vBary = vec2(corner == 0u ? 1.0 : 0.0, corner == 1u ? 1.0 : 0.0);
     gl_Position = uProj * viewPos;
 }
 )";
@@ -540,40 +544,6 @@ void main() {
     outNormal = vec4(normalize(vNormWorld), 1.0);
     outTriID = vTriID;
     outBary = vBary;
-}
-)";
-
-static const char* screen_expand_src = R"(
-#version 430
-layout(local_size_x = 64) in;
-
-layout(std430, binding = 0) readonly buffer PosIn   { float in_pos[]; };
-layout(std430, binding = 1) readonly buffer NormIn  { float in_norm[]; };
-layout(std430, binding = 2) readonly buffer IdxIn   { uint  in_idx[]; };
-layout(std430, binding = 3) writeonly buffer PosOut  { float out_pos[]; };
-layout(std430, binding = 4) writeonly buffer NormOut { float out_norm[]; };
-
-layout(std140, binding = 63) uniform Params { uint tri_count; };
-
-void main() {
-    // 2D group grid: 1D would exceed the 65535 per-dim dispatch limit past
-    // ~4.2M tris (multires L9). Same recovery as the SDF kernels.
-    uint t = gl_GlobalInvocationID.x
-           + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * 64u;
-    if (t >= tri_count) return;
-
-    uint i0 = in_idx[t*3+0];
-    uint i1 = in_idx[t*3+1];
-    uint i2 = in_idx[t*3+2];
-    uint base = t * 9;
-
-    out_pos[base+0] = in_pos[i0*3+0]; out_pos[base+1] = in_pos[i0*3+1]; out_pos[base+2] = in_pos[i0*3+2];
-    out_pos[base+3] = in_pos[i1*3+0]; out_pos[base+4] = in_pos[i1*3+1]; out_pos[base+5] = in_pos[i1*3+2];
-    out_pos[base+6] = in_pos[i2*3+0]; out_pos[base+7] = in_pos[i2*3+1]; out_pos[base+8] = in_pos[i2*3+2];
-
-    out_norm[base+0] = in_norm[i0*3+0]; out_norm[base+1] = in_norm[i0*3+1]; out_norm[base+2] = in_norm[i0*3+2];
-    out_norm[base+3] = in_norm[i1*3+0]; out_norm[base+4] = in_norm[i1*3+1]; out_norm[base+5] = in_norm[i1*3+2];
-    out_norm[base+6] = in_norm[i2*3+0]; out_norm[base+7] = in_norm[i2*3+1]; out_norm[base+8] = in_norm[i2*3+2];
 }
 )";
 
@@ -1357,6 +1327,9 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
 static const char* screen_buf_wgsl_src = R"WGSL(
 struct Params { view: mat4x4<f32>, proj: mat4x4<f32> };
 @group(0) @binding(63) var<uniform> P: Params;
+@group(0) @binding(10) var<storage, read> s_idx: array<u32>;
+@group(0) @binding(11) var<storage, read> s_pos: array<f32>;
+@group(0) @binding(12) var<storage, read> s_nrm: array<f32>;
 struct VSOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) nrmWorld: vec3<f32>,
@@ -1365,14 +1338,20 @@ struct VSOut {
     @location(3) bary: vec2<f32>,
 };
 @vertex
-fn vs_main(@location(0) aPos: vec3<f32>, @location(1) aNorm: vec3<f32>,
-           @location(2) aTriID: f32, @location(3) aBary: vec2<f32>) -> VSOut {
+fn vs_main(@builtin(vertex_index) cid: u32) -> VSOut {
     var o: VSOut;
+    let v = s_idx[cid];
+    let aPos = vec3<f32>(s_pos[3u * v], s_pos[3u * v + 1u], s_pos[3u * v + 2u]);
+    let aNorm = vec3<f32>(s_nrm[3u * v], s_nrm[3u * v + 1u], s_nrm[3u * v + 2u]);
     let viewPos = P.view * vec4<f32>(aPos, 1.0);
     o.nrmWorld = normalize(aNorm);
     o.depth = -viewPos.z;
-    o.triID = u32(aTriID);
-    o.bary = aBary;
+    o.triID = cid / 3u;
+    // Corner 0 = (1,0), 1 = (0,1), 2 = (0,0).
+    let corner = cid % 3u;
+    let is0 = corner == 0u;
+    let is1 = corner == 1u;
+    o.bary = vec2<f32>(select(0.0, 1.0, is0), select(0.0, 1.0, is1));
     o.pos = P.proj * viewPos;
     return o;
 }
@@ -1390,34 +1369,6 @@ fn fs_main(in: VSOut) -> FSOut {
     o.triID = in.triID;
     o.bary = in.bary;
     return o;
-}
-)WGSL";
-
-// Indexed->flat expand (compute). writeonly GLSL maps to read_write storage in WGSL.
-static const char* screen_expand_wgsl_src = R"WGSL(
-@group(0) @binding(0) var<storage, read>       in_pos:  array<f32>;
-@group(0) @binding(1) var<storage, read>       in_norm: array<f32>;
-@group(0) @binding(2) var<storage, read>       in_idx:  array<u32>;
-@group(0) @binding(3) var<storage, read_write> out_pos:  array<f32>;
-@group(0) @binding(4) var<storage, read_write> out_norm: array<f32>;
-struct Params { tri_count: u32 };
-@group(0) @binding(63) var<uniform> P: Params;
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>,
-        @builtin(num_workgroups)        nwg: vec3<u32>) {
-    // 2D group grid past the 65535 per-dim dispatch limit (multires L9).
-    let t = gid.x + gid.y * nwg.x * 64u;
-    if (t >= P.tri_count) { return; }
-    let i0 = in_idx[t*3u+0u];
-    let i1 = in_idx[t*3u+1u];
-    let i2 = in_idx[t*3u+2u];
-    let base = t * 9u;
-    out_pos[base+0u] = in_pos[i0*3u+0u]; out_pos[base+1u] = in_pos[i0*3u+1u]; out_pos[base+2u] = in_pos[i0*3u+2u];
-    out_pos[base+3u] = in_pos[i1*3u+0u]; out_pos[base+4u] = in_pos[i1*3u+1u]; out_pos[base+5u] = in_pos[i1*3u+2u];
-    out_pos[base+6u] = in_pos[i2*3u+0u]; out_pos[base+7u] = in_pos[i2*3u+1u]; out_pos[base+8u] = in_pos[i2*3u+2u];
-    out_norm[base+0u] = in_norm[i0*3u+0u]; out_norm[base+1u] = in_norm[i0*3u+1u]; out_norm[base+2u] = in_norm[i0*3u+2u];
-    out_norm[base+3u] = in_norm[i1*3u+0u]; out_norm[base+4u] = in_norm[i1*3u+1u]; out_norm[base+5u] = in_norm[i1*3u+2u];
-    out_norm[base+6u] = in_norm[i2*3u+0u]; out_norm[base+7u] = in_norm[i2*3u+1u]; out_norm[base+8u] = in_norm[i2*3u+2u];
 }
 )WGSL";
 
@@ -1602,12 +1553,6 @@ Renderer::~Renderer() {
     gpu::release_offscreen_target(screen_target);
     gpu::release_render_pipeline(screen_pipeline);
     gpu::release_buffer(screen_ubo);
-    gpu::release_buffer(screen_vbo_pos);
-    gpu::release_buffer(screen_vbo_norm);
-    gpu::release_buffer(screen_vbo_triid);
-    gpu::release_buffer(screen_vbo_bary);
-    gpu::release_compute_pipeline(screen_expand_pipeline);
-    gpu::release_buffer(screen_expand_ubo);
 }
 
 void Renderer::init() {
@@ -1845,28 +1790,21 @@ void Renderer::init() {
         crosshair_ubo = gpu::create_buffer(gpu_dev, nullptr, sizeof(CrosshairParamsGPU), gpu::Usage::Uniform);
     }
 
-    // Screen-buffer MRT pipeline — on the gpu:: seam. Four tightly-packed vertex
-    // buffers (pos/norm/triid/bary at slots 0-3) + a view/proj UBO; writes all four
-    // MRT attachments. The offscreen target itself is created lazily (window size).
+    // Screen-buffer MRT pipeline — on the gpu:: seam. No vertex buffers: the vertex
+    // stage reads the working mesh's index list, positions and normals from storage
+    // (bindings 10-12) + a view/proj UBO; writes all four MRT attachments. The
+    // offscreen target itself is created lazily (window size).
     {
-        gpu::VertexAttr attrs[] = {
-            { 0, gpu::VertexFormat::F32x3, 0, 0 },  // aPos
-            { 1, gpu::VertexFormat::F32x3, 1, 0 },  // aNorm
-            { 2, gpu::VertexFormat::F32,   2, 0 },  // aTriID
-            { 3, gpu::VertexFormat::F32x2, 3, 0 },  // aBary
+        gpu::BindEntry binds[] = {
+            { 63, gpu::Bind::Uniform, sizeof(ScreenParamsGPU) },
+            { 10, gpu::Bind::StorageRead, 0 }, { 11, gpu::Bind::StorageRead, 0 },
+            { 12, gpu::Bind::StorageRead, 0 },
         };
-        gpu::VertexSlot slots[] = {
-            { 3 * sizeof(float) }, { 3 * sizeof(float) },
-            { 1 * sizeof(float) }, { 2 * sizeof(float) },
-        };
-        gpu::BindEntry binds[] = {{ 63, gpu::Bind::Uniform, sizeof(ScreenParamsGPU) }};
         gpu::RenderPipelineDesc d;
         d.shaders.wgsl = screen_buf_wgsl_src;
         d.shaders.vert_glsl = screen_buf_vert_src;
         d.shaders.frag_glsl = screen_buf_frag_src;
-        d.attrs = attrs; d.attr_count = 4;
-        d.slots = slots; d.slot_count = 4;
-        d.binds = binds; d.bind_count = 1;
+        d.binds = binds; d.bind_count = 4;
         d.topology = gpu::Topology::Triangles;
         d.depth_test = true; d.depth_write = true; d.blend = false;
         // Offscreen MRT signature: writes all four attachments of the screen target.
@@ -1878,27 +1816,6 @@ void Renderer::init() {
         if (!screen_pipeline.handle) std::fprintf(stderr, "[renderer] screen pipeline failed\n");
         else std::printf("[renderer] screen pipeline compiled (gpu:: seam)\n");
         screen_ubo = gpu::create_buffer(gpu_dev, nullptr, sizeof(ScreenParamsGPU), gpu::Usage::Uniform);
-    }
-
-    // Flat triangle-soup vertex buffers (seam-owned; pos/norm also SSBO targets for
-    // the expand kernel). Allocated/filled lazily in upload_screen_mesh.
-
-    // Indexed→flat expansion — on the gpu:: compute seam. 5 storage bindings
-    // (0-4) + a tri_count Params UBO at binding 63.
-    {
-        gpu::BindEntry binds[] = {
-            { 0, gpu::Bind::StorageRead,      0 },  // in_pos
-            { 1, gpu::Bind::StorageRead,      0 },  // in_norm
-            { 2, gpu::Bind::StorageRead,      0 },  // in_idx
-            { 3, gpu::Bind::StorageReadWrite, 0 },  // out_pos
-            { 4, gpu::Bind::StorageReadWrite, 0 },  // out_norm
-            { 63, gpu::Bind::Uniform, sizeof(ScreenExpandParamsGPU) },
-        };
-        gpu::ShaderSources src; src.wgsl = screen_expand_wgsl_src; src.glsl = screen_expand_src;
-        screen_expand_pipeline = gpu::create_compute_pipeline(gpu_dev, src, binds, 6);
-        if (!screen_expand_pipeline.handle) std::fprintf(stderr, "[renderer] screen_expand pipeline failed\n");
-        else std::printf("[compute] screen_expand pipeline compiled (gpu:: seam)\n");
-        screen_expand_ubo = gpu::create_buffer(gpu_dev, nullptr, sizeof(ScreenExpandParamsGPU), gpu::Usage::Uniform);
     }
 
     // Debug wireframe overlay — on the gpu:: seam. Screen-space fat lines: a
@@ -2752,108 +2669,12 @@ void Renderer::resize_screen_buffers(int w, int h) {
 }
 
 void Renderer::upload_screen_mesh(const Mesh& mesh) {
-    uint32_t tc = mesh.tri_count();
-    screen_tri_count = tc;
-    uint32_t flat_vc = tc * 3;
-
-    // pos/norm are filled by the expand compute (Vertex|Storage); allocate them
-    // empty, grow-only (contents aren't preserved — the expand kernel rewrites the
-    // live tc*3 verts every call, and draws read exactly screen_tri_count*3 verts,
-    // so an oversized buffer is harmless on both backends).
-    uint64_t pn_bytes = (uint64_t)flat_vc * 3 * sizeof(float);
-    if (screen_vbo_pos.size < pn_bytes) {
-        gpu::release_buffer(screen_vbo_pos);
-        screen_vbo_pos = gpu::create_buffer(gpu_dev, nullptr, pn_bytes, gpu::Usage::Vertex | gpu::Usage::Storage);
-    }
-    if (screen_vbo_norm.size < pn_bytes) {
-        gpu::release_buffer(screen_vbo_norm);
-        screen_vbo_norm = gpu::create_buffer(gpu_dev, nullptr, pn_bytes, gpu::Usage::Vertex | gpu::Usage::Storage);
-    }
-
-    // Triid and bary are a pure function of the triangle index (t,t,t / fixed
-    // bary pattern) — no mesh data involved. Grow-only with tail fill: revisiting
-    // a level the buffers already cover uploads nothing (at multires L8 the pair
-    // is ~47 MB, previously re-sent on every level switch), and growth uploads
-    // only the [screen_static_tris, tc) range.
-    if (tc > screen_static_tris || !screen_vbo_triid.handle || !screen_vbo_bary.handle) {
-        const uint32_t old_tc = (screen_vbo_triid.handle && screen_vbo_bary.handle)
-                              ? screen_static_tris : 0u;
-        const uint64_t triid_bytes = (uint64_t)flat_vc * sizeof(float);
-        const uint64_t bary_bytes  = (uint64_t)flat_vc * 2 * sizeof(float);
-        // A grow reallocates (no in-place resize on WebGPU) and refills from 0;
-        // otherwise only the tail is new.
-        const uint32_t fill_from = (screen_vbo_triid.size < triid_bytes ||
-                                    screen_vbo_bary.size < bary_bytes) ? 0u : old_tc;
-        if (screen_vbo_triid.size < triid_bytes) {
-            gpu::release_buffer(screen_vbo_triid);
-            screen_vbo_triid = gpu::create_buffer(gpu_dev, nullptr, triid_bytes, gpu::Usage::Vertex);
-        }
-        if (screen_vbo_bary.size < bary_bytes) {
-            gpu::release_buffer(screen_vbo_bary);
-            screen_vbo_bary = gpu::create_buffer(gpu_dev, nullptr, bary_bytes, gpu::Usage::Vertex);
-        }
-        const uint32_t fill_tc = tc - fill_from;
-        std::vector<float> triid((size_t)fill_tc * 3);
-        std::vector<float> bary((size_t)fill_tc * 6);
-        for (uint32_t i = 0; i < fill_tc; i++) {
-            const float t = (float)(fill_from + i);
-            uint32_t base = i * 3;
-            triid[base+0] = t; triid[base+1] = t; triid[base+2] = t;
-            bary[(base+0)*2+0] = 1.0f; bary[(base+0)*2+1] = 0.0f;
-            bary[(base+1)*2+0] = 0.0f; bary[(base+1)*2+1] = 1.0f;
-            bary[(base+2)*2+0] = 0.0f; bary[(base+2)*2+1] = 0.0f;
-        }
-        gpu::write_buffer(gpu_dev, screen_vbo_triid, (uint64_t)fill_from * 3 * sizeof(float),
-                          triid.data(), (uint64_t)triid.size() * sizeof(float));
-        gpu::write_buffer(gpu_dev, screen_vbo_bary, (uint64_t)fill_from * 6 * sizeof(float),
-                          bary.data(), (uint64_t)bary.size() * sizeof(float));
-        screen_static_tris = tc;
-    }
-
-    // Fill positions/normals via GPU expansion.
-    update_screen_mesh_gpu();
-}
-
-void Renderer::update_screen_positions(const Mesh& mesh) {
-    (void)mesh;
-    update_screen_mesh_gpu();
-}
-
-void Renderer::update_screen_mesh_gpu() {
-    if (!screen_expand_pipeline.handle || screen_tri_count == 0) return;
-
-    ScreenExpandParamsGPU p{}; p.tri_count = screen_tri_count;
-    gpu::write_buffer(gpu_dev, screen_expand_ubo, 0, &p, sizeof p);
-
-    // Seam-owned buffers bound directly. 0-2 read (mesh pos/norm/idx), 3-4 written
-    // (flat soup pos/norm), 63 = tri_count UBO.
-    gpu::BindBufferEntry be[] = {
-        { 0, &vbo_pos, 0 }, { 1, &vbo_norm, 0 }, { 2, &ebo, 0 },
-        { 3, &screen_vbo_pos, 0 }, { 4, &screen_vbo_norm, 0 },
-        { 63, &screen_expand_ubo, sizeof(ScreenExpandParamsGPU) },
-    };
-    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, screen_expand_pipeline, be, 6);
-
-    gpu::ComputeBatch batch = gpu::begin_compute(gpu_dev);
-    // 2D grid past 65535 groups (5.2M tris at multires L9 -> 81920): WebGPU
-    // hard-caps each dispatch dimension; the kernel recovers the linear index.
-    uint32_t groups = (screen_tri_count + 63) / 64;
-    uint32_t gx = groups, gy = 1u;
-    const uint32_t MAXG = 65535u;
-    if (groups > MAXG) { gx = MAXG; gy = (groups + MAXG - 1u) / MAXG; }
-    gpu::dispatch(batch, screen_expand_pipeline, grp, gx, gy);
-    gpu::submit(batch);   // issues the vertex-attrib + buffer-update barriers
-    gpu::release_bind_group(grp);
+    // The screen pass reads the working buffers directly; all it needs is the count.
+    screen_tri_count = mesh.tri_count();
 }
 
 void Renderer::render_screen_buffers(const Camera& cam, int w, int h) {
     create_screen_buffers(w, h);
-
-    // Re-expand the flat soup from the live working VBO first. GPU-side writes
-    // (in-place GPU undo/redo, compute kernels) update vbo_pos/vbo_norm without
-    // going through update_screen_positions — rendering the stale soup here left
-    // the brush picking against ghost (pre-undo) geometry.
-    update_screen_mesh_gpu();
 
     // Clear: depth→max, normal→0, triid→0xFFFFFFFF (no triangle), bary→0.
     gpu::OffscreenPassDesc d;
@@ -2869,13 +2690,14 @@ void Renderer::render_screen_buffers(const Camera& cam, int w, int h) {
     cam.get_view_matrix(p.view);
     cam.get_projection_matrix(p.proj, (float)w / (float)h);
     gpu::write_buffer(gpu_dev, screen_ubo, 0, &p, sizeof p);
-    gpu::BindBufferEntry be[] = {{ 63, &screen_ubo, sizeof(ScreenParamsGPU) }};
-    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, screen_pipeline, be, 1);
+    // The live working buffers, so GPU-side writes (in-place undo/redo, compute
+    // kernels) are picked against as they are now, with nothing to refresh.
+    gpu::BindBufferEntry be[] = {
+        { 63, &screen_ubo, sizeof(ScreenParamsGPU) },
+        { 10, &ebo, 0 }, { 11, &vbo_pos, 0 }, { 12, &vbo_norm, 0 },
+    };
+    gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, screen_pipeline, be, 4);
     gpu::set_bind_group(rp, screen_pipeline, grp);
-    gpu::set_vertex_buffer(rp, 0, screen_vbo_pos);
-    gpu::set_vertex_buffer(rp, 1, screen_vbo_norm);
-    gpu::set_vertex_buffer(rp, 2, screen_vbo_triid);
-    gpu::set_vertex_buffer(rp, 3, screen_vbo_bary);
     gpu::draw_sliced(rp, screen_tri_count * 3);
     gpu::end_render_pass(rp);   // rebinds the default framebuffer
     gpu::release_bind_group(grp);

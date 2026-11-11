@@ -275,9 +275,8 @@ void Scene::sync_partial_entity(uint32_t eid,
 
     if (eid == active_id_) {
         // Active entity lives in the working buffer at offset 0 — patch it
-        // directly; the screen mesh re-expands from the working VBO on the GPU.
+        // directly; the screen pass reads the working VBO as it is.
         renderer_.update_mesh_verts(e->mesh, local_dirty);
-        renderer_.update_screen_positions(e->mesh);
     } else {
         // Inactive entity (object-move drag): re-upload its static display VAO.
         { fit_paint_layers(*e); renderer_.upload_display(e->gpu, e->mesh); }

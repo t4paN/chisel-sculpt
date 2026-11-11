@@ -419,18 +419,10 @@ void app_ops_paint_clicks(App& app, int win_w, int win_h) {
 }
 
 // The size guards (subdivide, remesh) predict the biggest single GPU buffer a triangle
-// count needs and hold it against the device's limit.
-// WebGPU: the flat pick soup, 3 corners x vec3 per triangle (renderer.cpp
-// upload_screen_mesh). The limit is enforced there: 62.9M tris asked for 2.26 GB against
-// 2 GiB and wgpu aborted the app (2026-11-11), while the old 12 B/tri figure let it by.
-// GL: the limit it reports is the SSBO block size, which the driver does not hold whole
-// buffers to (that same 2.26 GB soup allocates), so only the index / CSR lists at 12 B/tri
-// are checked, as before.
-#ifdef CHISEL_BACKEND_WEBGPU
-static const uint64_t kBiggestBufferBytesPerTri = 36ull;
-#else
+// count needs and hold it against the device's limit: the index list and the CSR
+// adjacency list, 12 B/tri each. (Until 2026-11-11 the pick pass kept a flat copy of
+// the mesh at 36 B/tri, which this figure missed; that copy is gone.)
 static const uint64_t kBiggestBufferBytesPerTri = 12ull;
-#endif
 // Past this a level-up asks first. 15.7M tris (a sphere's L7) draws in 8 ms on an Arc
 // B570; the next step, 62.9M, sat on the driver's job time limit (2026-11-11).
 static const uint64_t kCriticalTris = 30000000ull;
