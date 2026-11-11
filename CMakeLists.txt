@@ -264,6 +264,7 @@ add_executable(chisel
     src/pose.cpp
     src/web_bridge.cpp
     src/app_files.cpp
+    src/file_browser.cpp
     src/app_ops.cpp
     src/app_render.cpp
     src/app_idle.cpp

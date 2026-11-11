@@ -1938,7 +1938,7 @@ void IGFD::FileManager::m_SortFields(const FileDialogInternal& vFileDialogIntern
             std::sort(vFileInfosList.begin(), vFileInfosList.end(),  //
                       [&vFileDialogInternal](const std::shared_ptr<FileInfos>& a, const std::shared_ptr<FileInfos>& b) -> bool {
                           if (!a.use_count() || !b.use_count()) return false;
-                          if (a->fileType != b->fileType) return (a->fileType > b->fileType);                     // directories last
+                          if (a->fileType != b->fileType) return (a->fileType < b->fileType);  // Chisel: folders on top in both directions                     // directories last
                           return M_SortStrings(vFileDialogInternal, true, true, a->fileNameExt, b->fileNameExt);  // sort in insensitive case
                       });
         }
@@ -1958,7 +1958,7 @@ void IGFD::FileManager::m_SortFields(const FileDialogInternal& vFileDialogIntern
 #endif  // USE_CUSTOM_SORTING_ICON
             std::sort(vFileInfosList.begin(), vFileInfosList.end(), [&vFileDialogInternal](const std::shared_ptr<FileInfos>& a, const std::shared_ptr<FileInfos>& b) -> bool {
                 if (!a.use_count() || !b.use_count()) return false;
-                if (a->fileType != b->fileType) return (a->fileType > b->fileType);                               // directory in last
+                if (a->fileType != b->fileType) return (a->fileType < b->fileType);  // Chisel: folders on top in both directions                               // directory in last
                 return M_SortStrings(vFileDialogInternal, true, true, a->fileExtLevels[0], b->fileExtLevels[0]);  // sort in sensitive case
             });
         }
@@ -1978,7 +1978,7 @@ void IGFD::FileManager::m_SortFields(const FileDialogInternal& vFileDialogIntern
 #endif  // USE_CUSTOM_SORTING_ICON
             std::sort(vFileInfosList.begin(), vFileInfosList.end(), [](const std::shared_ptr<FileInfos>& a, const std::shared_ptr<FileInfos>& b) -> bool {
                 if (!a.use_count() || !b.use_count()) return false;
-                if (a->fileType != b->fileType) return (a->fileType > b->fileType);  // directory in last
+                if (a->fileType != b->fileType) return (a->fileType < b->fileType);  // Chisel: folders on top in both directions  // directory in last
                 return (a->fileSize > b->fileSize);                                  // else
             });
         }
@@ -1998,7 +1998,7 @@ void IGFD::FileManager::m_SortFields(const FileDialogInternal& vFileDialogIntern
 #endif  // USE_CUSTOM_SORTING_ICON
             std::sort(vFileInfosList.begin(), vFileInfosList.end(), [](const std::shared_ptr<FileInfos>& a, const std::shared_ptr<FileInfos>& b) -> bool {
                 if (!a.use_count() || !b.use_count()) return false;
-                if (a->fileType != b->fileType) return (a->fileType > b->fileType);  // directory in last
+                if (a->fileType != b->fileType) return (a->fileType < b->fileType);  // Chisel: folders on top in both directions  // directory in last
                 return (a->fileModifDate > b->fileModifDate);                        // else
             });
         }
@@ -2034,6 +2034,10 @@ void IGFD::FileManager::m_SortFields(const FileDialogInternal& vFileDialogIntern
         }
     }
 #endif  // USE_THUMBNAILS
+
+    // Chisel: ".." (up one folder) is always the top row, whatever the sort field and direction.
+    std::stable_partition(vFileInfosList.begin(), vFileInfosList.end(),
+                          [](const std::shared_ptr<FileInfos>& f) { return f.use_count() && f->fileNameExt == ".."; });
 
     m_ApplyFilteringOnFileList(vFileDialogInternal, vFileInfosList, vFileInfosFilteredList);
 }

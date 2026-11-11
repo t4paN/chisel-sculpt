@@ -31,6 +31,7 @@
 #include "bake.h"
 #include "imgui.h"
 #include "ImGuiFileDialog.h"
+#include "file_browser.h"
 #include "brush_alpha.h"
 #include "project_file.h"
 #include "session_files.h"
@@ -43,12 +44,15 @@
 // screen rather than wherever ImGui last left them (often under the button that
 // opened them). Appearing only, so the user can still drag one aside. The position
 // is set only when this key's dialog is up: otherwise it would land on whatever
-// window begins next.
+// window begins next. The minimum size leaves room for the Places pane, the file
+// list and an options pane side by side.
 static bool display_file_dialog(IGFD::FileDialog* fd, const char* key) {
-    if (fd->IsOpened(key))
+    if (fd->IsOpened(key)) {
         ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing,
                                 ImVec2(0.5f, 0.5f));
-    return fd->Display(key, ImGuiWindowFlags_NoCollapse, ImVec2(600, 400));
+        ImGui::SetNextWindowSize(ImVec2(900, 560), ImGuiCond_FirstUseEver);
+    }
+    return fd->Display(key, ImGuiWindowFlags_NoCollapse, ImVec2(760, 440));
 }
 #endif
 
@@ -1030,11 +1034,27 @@ void app_files_frame(App& a) {
 
 #ifndef __EMSCRIPTEN__
     // ---- ImGui file dialogs (native: browse the real filesystem) ----
-    auto* fd = IGFD::FileDialog::Instance();
+    auto* fd = file_browser();
+    // Dev hook for screenshots (no input injection on Wayland): CHISEL_SHOT_DIALOG=open,
+    // save or folder opens that dialog once at startup. Inert unless set.
+    {
+        static bool shot_done = false;
+        if (!shot_done) {
+            shot_done = true;
+            if (const char* e = std::getenv("CHISEL_SHOT_DIALOG")) {
+                const std::string w = e;
+                if (w == "open") input.import_dialog_active = true;
+                else if (w == "save") input.save_dialog_active = true;
+                else if (w == "folder") input.browse_default_request = true;
+            }
+        }
+    }
+    // Every dialog starts where the last file went to or came from (file_browser.cpp).
+    auto start_dir = [&]() { return file_browser_start_dir(input.browse_default_dir, default_browse_path); };
 
     if (exp_mesh && !fd->IsOpened("ExportKey")) {
         IGFD::FileDialogConfig cfg;
-        cfg.path = default_browse_path;
+        cfg.path = start_dir();
         cfg.flags = ImGuiFileDialogFlags_ConfirmOverwrite | ImGuiFileDialogFlags_DontShowHiddenFiles;
         fill_export_picks();
         cfg.fileName = export_default_name() + ".obj";
@@ -1047,7 +1067,7 @@ void app_files_frame(App& a) {
     }
     if (input.import_dialog_active && !fd->IsOpened("ImportKey")) {
         IGFD::FileDialogConfig cfg;
-        cfg.path = default_browse_path;
+        cfg.path = start_dir();
         cfg.flags = ImGuiFileDialogFlags_DontShowHiddenFiles;
         cfg.sidePaneWidth = 190.0f;
         cfg.sidePane = [&](const char*, IGFD::UserDatas, bool*) {
@@ -1061,8 +1081,10 @@ void app_files_frame(App& a) {
     }
 
     if (display_file_dialog(fd, "ExportKey")) {
-        if (fd->IsOk())
+        if (fd->IsOk()) {
+            file_browser_note(fd->GetFilePathName());
             export_picks(fd->GetFilePathName());
+        }
         fd->Close();
         input.export_dialog_active = false;
     }
@@ -1075,7 +1097,7 @@ void app_files_frame(App& a) {
     if (exp_uvmap && !fd->IsOpened("UvMapKey")) {
         fill_uvx_avail();
         IGFD::FileDialogConfig cfg;
-        cfg.path = default_browse_path;
+        cfg.path = start_dir();
         cfg.flags = ImGuiFileDialogFlags_ConfirmOverwrite | ImGuiFileDialogFlags_DontShowHiddenFiles;
         cfg.fileName = active_part_name() + "-UVmap_" + std::to_string(input.uvmap_size) + ".png";
         cfg.sidePaneWidth = 240.0f;
@@ -1083,7 +1105,10 @@ void app_files_frame(App& a) {
         fd->OpenDialog("UvMapKey", "Export UV Map", ".png", cfg);
     }
     if (display_file_dialog(fd, "UvMapKey")) {
-        if (fd->IsOk()) export_uv_map(fd->GetFilePathName());
+        if (fd->IsOk()) {
+            file_browser_note(fd->GetFilePathName());
+            export_uv_map(fd->GetFilePathName());
+        }
         fd->Close();
         input.export_dialog_active = false;
     }
@@ -1093,7 +1118,7 @@ void app_files_frame(App& a) {
     if (exp_uvx && !fd->IsOpened("UvAssetsKey")) {
         fill_uvx_avail();
         IGFD::FileDialogConfig cfg;
-        cfg.path = default_browse_path;
+        cfg.path = start_dir();
         cfg.flags = ImGuiFileDialogFlags_ConfirmOverwrite | ImGuiFileDialogFlags_DontShowHiddenFiles;
         cfg.fileName = active_part_name() + uvx_ext();
         cfg.sidePaneWidth = 250.0f;
@@ -1101,7 +1126,10 @@ void app_files_frame(App& a) {
         fd->OpenDialog("UvAssetsKey", "Export Model and Textures", ".glb,.obj,.stl,.png", cfg);
     }
     if (display_file_dialog(fd, "UvAssetsKey")) {
-        if (fd->IsOk()) export_uv_assets(fd->GetFilePathName());
+        if (fd->IsOk()) {
+            file_browser_note(fd->GetFilePathName());
+            export_uv_assets(fd->GetFilePathName());
+        }
         fd->Close();
         input.export_dialog_active = false;
     }
@@ -1109,8 +1137,10 @@ void app_files_frame(App& a) {
         fd->Close();
 
     if (display_file_dialog(fd, "ImportKey")) {
-        if (fd->IsOk())
+        if (fd->IsOk()) {
+            file_browser_note(fd->GetFilePathName());
             do_import_path(fd->GetFilePathName());
+        }
         fd->Close();
         input.import_dialog_active = false;
     }
@@ -1121,12 +1151,13 @@ void app_files_frame(App& a) {
     // bitmap as a new pool entry and selects it.
     if (input.load_alpha_dialog_active && !fd->IsOpened("AlphaKey")) {
         IGFD::FileDialogConfig cfg;
-        cfg.path = default_browse_path;
+        cfg.path = start_dir();
         cfg.flags = ImGuiFileDialogFlags_DontShowHiddenFiles;
         fd->OpenDialog("AlphaKey", "Load Brush Alpha", ".png,.jpg,.jpeg,.tga,.bmp", cfg);
     }
     if (display_file_dialog(fd, "AlphaKey")) {
         if (fd->IsOk()) {
+            file_browser_note(fd->GetFilePathName());
             int idx = alpha_lib.load_custom(fd->GetFilePathName().c_str());
             if (idx > 0) {
                 input.active_alpha = idx;   // upload-on-change picks it up next frame
@@ -1139,6 +1170,57 @@ void app_files_frame(App& a) {
         input.load_alpha_dialog_active = false;
     }
     if (!input.load_alpha_dialog_active && fd->IsOpened("AlphaKey"))
+        fd->Close();
+
+    // Burger menu > Default folder: a folder pick (no filters = folders only). Picking
+    // one also makes it the folder the next dialog opens in.
+    if (input.browse_default_request && !fd->IsOpened("FolderKey")) {
+        IGFD::FileDialogConfig cfg;
+        std::error_code ec;
+        start_dir();   // tells the Places pane which folder is the default
+        cfg.path = std::filesystem::is_directory(input.browse_default_dir, ec) ? input.browse_default_dir
+                                                                               : default_browse_path;
+        cfg.flags = ImGuiFileDialogFlags_DontShowHiddenFiles;
+        cfg.sidePaneWidth = 220.0f;
+        const std::string builtin = default_browse_path;
+        cfg.sidePane = [inp, builtin](const char*, IGFD::UserDatas, bool*) {
+            ImGui::TextWrapped("Open, Save and Export start in the folder you last used. "
+                               "This one is where they start before that, and it is "
+                               "always in Places.");
+            ImGui::Spacing();
+            ImGui::TextWrapped("Go into a folder (or click one) and press OK.");
+            if (!inp->browse_default_dir.empty()) {
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::Spacing();
+                if (ImGui::Button("Use the built-in folder")) {
+                    inp->browse_default_dir.clear();
+                    file_browser_note(builtin, false);
+                    inp->browse_default_request = false;
+                }
+                ImGui::TextDisabled("%s", builtin.c_str());
+            }
+        };
+        fd->OpenDialog("FolderKey", "Default Folder", nullptr, cfg);
+    }
+    if (display_file_dialog(fd, "FolderKey")) {
+        if (fd->IsOk()) {
+            std::error_code ec;
+            std::string d = fd->GetFilePathName();
+            if (!std::filesystem::is_directory(d, ec)) d = fd->GetCurrentPath();
+            if (std::filesystem::is_directory(d, ec)) {
+                d = std::filesystem::path(d).lexically_normal().string();
+                while (d.size() > 1 && (d.back() == '/' || d.back() == '\\')) d.pop_back();
+                input.browse_default_dir = d;
+                file_browser_note(d, false);
+                std::snprintf(input.notification, sizeof(input.notification), "Default folder: %s",
+                              d.c_str());
+            }
+        }
+        fd->Close();
+        input.browse_default_request = false;
+    }
+    if (!input.browse_default_request && fd->IsOpened("FolderKey"))
         fd->Close();
 #endif // !__EMSCRIPTEN__
 
@@ -1197,73 +1279,36 @@ void app_files_frame(App& a) {
     }
 
     // ---- Incremental save ("+"): sculpt.chisel -> sculpt_001.chisel -> _002 ----
-    // A trailing _NNN is treated as the counter rather than part of the stem, so
-    // repeated presses walk the series instead of nesting suffixes. Existing files
-    // are skipped, so an incremental save can never overwrite a previous version
-    // (on web nothing persists in MEMFS, so it just counts up from the last name).
-    auto next_incremental_path = [&](const std::string& path) -> std::string {
-        const std::string ext = ".chisel";
-        std::string stem = path;
-        if (stem.size() >= ext.size()
-            && stem.compare(stem.size() - ext.size(), ext.size(), ext) == 0)
-            stem.resize(stem.size() - ext.size());
-        // A browser renames a colliding download to "bust_001 (1).chisel", and
-        // opening that file makes it the current project. Strip the marker before
-        // reading the counter below, or "bust_001 (1)" parses as an un-numbered
-        // stem and the next save compounds into "bust_001 (1)_001".
-        if (!stem.empty() && stem.back() == ')') {
-            size_t op = stem.find_last_of('(');
-            if (op != std::string::npos && op + 1 < stem.size() - 1) {
-                bool all_digits = true;
-                for (size_t i = op + 1; i + 1 < stem.size(); i++)
-                    if (!std::isdigit((unsigned char)stem[i])) { all_digits = false; break; }
-                if (all_digits) {
-                    while (op > 0 && stem[op - 1] == ' ') op--;   // Chrome " (1)", Firefox "(1)"
-                    stem.resize(op);
-                }
-            }
-        }
-        int n = 0;
-        size_t us = stem.find_last_of('_');
-        if (us != std::string::npos && us + 1 < stem.size()) {
-            bool all_digits = true;
-            for (size_t i = us + 1; i < stem.size(); i++)
-                if (!std::isdigit((unsigned char)stem[i])) { all_digits = false; break; }
-            if (all_digits) {
-                n = std::atoi(stem.c_str() + us + 1);
-                stem.resize(us);
-            }
-        }
-        char suffix[16];
-        for (int i = n + 1; i <= 9999; i++) {
-            std::snprintf(suffix, sizeof(suffix), "_%03d", i);
-            std::string cand = stem + suffix + ext;
-            std::error_code ec;
-            if (!std::filesystem::exists(cand, ec)) return cand;
-        }
-        return stem + "_9999" + ext;   // series exhausted: overwrite the last one
-    };
-
+    // Numbering rules live in next_incremental_path (file_browser.cpp), shared with the
+    // dialogs' "+" button so both walk the same series.
     if (input.save_incremental_requested) {
         input.save_incremental_requested = false;
         if (current_project_path.empty()) {
             // Nothing to number off yet — ask for a name first, like plain save.
             input.save_dialog_active = true;
         } else {
-            do_save_project(next_incremental_path(current_project_path));
+            do_save_project(next_incremental_path(current_project_path, ".chisel"));
         }
     }
 
 #ifndef __EMSCRIPTEN__
     if (input.save_dialog_active && !fd->IsOpened("SaveKey")) {
         IGFD::FileDialogConfig cfg;
-        cfg.path = default_browse_path;
+        // A project that has a file starts in its folder, under its name.
+        std::error_code ec;
+        const std::filesystem::path cur(current_project_path);
+        cfg.path = file_browser_start_dir(input.browse_default_dir, default_browse_path);
+        if (!current_project_path.empty() && std::filesystem::is_directory(cur.parent_path(), ec)) {
+            cfg.path = cur.parent_path().string();
+            cfg.fileName = cur.filename().string();
+        }
         cfg.flags = ImGuiFileDialogFlags_ConfirmOverwrite | ImGuiFileDialogFlags_DontShowHiddenFiles;
         fd->OpenDialog("SaveKey", "Save Project", ".chisel", cfg);
     }
 
     if (display_file_dialog(fd, "SaveKey")) {
         if (fd->IsOk()) {
+            file_browser_note(fd->GetFilePathName());
             do_save_project(fd->GetFilePathName());
         }
         fd->Close();

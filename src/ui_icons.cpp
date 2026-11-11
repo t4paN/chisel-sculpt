@@ -118,6 +118,22 @@ const IconDef kIcons[(int)Icon::Count] = {
     /* RetopoPoints */ {{P("M7.4 5H16.6M19 7.4V16.6"), D("M16.6 19H5V7.4"),
                          C(5, 5, 2.4f), P("M16.6 5a2.4 2.4 0 1 0 4.8 0a2.4 2.4 0 1 0-4.8 0"
                                           "M16.6 19a2.4 2.4 0 1 0 4.8 0a2.4 2.4 0 1 0-4.8 0")}, 4},
+    // Drawn here, for the file dialogs: back / forward / up, a folder with a plus.
+    /* NavBack      */ {{P("M15 5l-7 7 7 7")}, 1},
+    /* NavForward   */ {{P("M9 5l7 7-7 7")}, 1},
+    /* NavUp        */ {{P("M12 19V5M6 11l6-6 6 6")}, 1},
+    /* NewFolder    */ {{P("M3 6.5A1.5 1.5 0 0 1 4.5 5H9l2 2.5h8.5A1.5 1.5 0 0 1 21 9v9.5"
+                           "a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18.5z"), P("M12 11v6M9 14h6")}, 2},
+    // The Places pane: a house, a monitor, a page, a tray with an arrow in, a framed
+    // landscape, a drive, a bookmark ribbon, a clock.
+    /* PlaceHome    */ {{P("M3 11l9-7.5 9 7.5"), P("M5.5 9.5V20h13V9.5"), P("M10 20v-5h4v5")}, 3},
+    /* PlaceDesktop */ {{R(3, 4, 18, 12, 1.5f), P("M12 16v4M8 20h8")}, 2},
+    /* PlaceDocuments*/{{P("M6 3h8l4 4v14H6z"), P("M14 3v4h4"), P("M9 12h6M9 16h6")}, 3},
+    /* PlaceDownloads*/{{P("M12 3v11M7 9.5l5 5 5-5"), P("M4 16v4h16v-4")}, 2},
+    /* PlacePictures*/ {{R(3, 5, 18, 14, 1.5f), P("M4 17l5-5 4 4 2.5-2.5L20 18"), C(16, 9.5f, 1.5f)}, 3},
+    /* PlaceDrive   */ {{R(3, 7, 18, 10, 2), P("M6.5 12h6"), C(17, 12, 1.2f)}, 3},
+    /* PlaceBookmark*/ {{P("M7 3h10v18l-5-4-5 4z")}, 1},
+    /* PlaceRecent  */ {{C(12, 12, 9), P("M12 7v5l3.5 2")}, 2},
 };
 
 // ---- Minimal SVG path interpreter -------------------------------------------

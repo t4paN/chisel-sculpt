@@ -5,6 +5,16 @@
 #define defaultSortField FIELD_DATE
 #define defaultSortOrderDate false
 
+// Chisel: no [Dir] / [File] tags. The blank prefix keeps room at the start of each
+// name for the icon file_browser.cpp draws there. Sizes in plain English units.
+#define dirEntryString "    "
+#define linkEntryString "    "
+#define fileEntryString "    "
+#define fileSizeBytes "B"
+#define fileSizeKiloBytes "KB"
+#define fileSizeMegaBytes "MB"
+#define fileSizeGigaBytes "GB"
+
 // uncomment and modify defines under for customize ImGuiFileDialog
 
 /////////////////////////////////

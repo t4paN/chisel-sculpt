@@ -1,5 +1,6 @@
 #pragma once
 #include <GLFW/glfw3.h>
+#include <string>
 
 enum class BrushType {
     DRAW,
@@ -389,6 +390,12 @@ struct InputState {
 
     // FPS readout visibility (burger menu toggle). Display only.
     bool show_fps = true;
+
+    // The file dialogs' default folder (burger menu > Default folder). Empty = the
+    // built-in ~/Desktop/chisel-sculpts. The dialogs open where the last file went to or
+    // came from (file_browser.cpp keeps that), and fall back to this when it is gone.
+    std::string browse_default_dir;
+    bool browse_default_request = false;   // burger menu asks for the folder picker
 
     // Appearance (burger menu). The modern skin is the default; Classic brings back
     // the original button islands and the bitmap-font HUD; DOS is the modern layout

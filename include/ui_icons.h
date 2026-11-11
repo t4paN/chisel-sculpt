@@ -25,6 +25,11 @@ enum class Icon {
     BrushStipple,                     // Stipple brush: a scatter of dots
     PaintBlend,                       // paint Blend: a yin-yang
     RetopoPoints,                     // mode 0's points (click four, a quad)
+    // The file dialogs' toolbar and Places pane (vector only: no pixel versions, the
+    // dialogs draw these on every skin).
+    NavBack, NavForward, NavUp, NewFolder,
+    PlaceHome, PlaceDesktop, PlaceDocuments, PlaceDownloads, PlacePictures,
+    PlaceDrive, PlaceBookmark, PlaceRecent,
     Count
 };
 

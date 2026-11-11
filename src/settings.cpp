@@ -208,6 +208,7 @@ std::string serialize(const InputState& in) {
     append_kv(s, "ui_viewfinder_px",    in.ui_viewfinder_px);
     append_kv(s, "ui_scale_touch",      in.ui_scale_touch);
     append_kv(s, "help_seen",           in.help_seen);
+    if (!in.browse_default_dir.empty()) s += "browse_default=" + in.browse_default_dir + "\n";
     append_kv(s, "camera_perspective",  in.camera_perspective);
     append_kv(s, "camera_fov",          in.camera_fov);
     append_kv(s, "remesh_detail",       in.remesh_detail);
@@ -377,6 +378,7 @@ void apply_global_key(InputState& in, const std::string& key, const std::string&
         in.ui_scale_touch = v < 40 ? 40 : (v > 150 ? 150 : v);
     }
     else if (key == "help_seen")           in.help_seen           = parse_bool(val);
+    else if (key == "browse_default")      in.browse_default_dir  = val;
     else if (key == "uv_padding") {   // 2..16 in steps of 2, as the slider sets it
         const int v = (int)std::strtol(val.c_str(), nullptr, 10);
         in.uv_padding = std::max(2, std::min(16, (v + 1) / 2 * 2));
@@ -526,6 +528,7 @@ void settings_reset(InputState& input) {
     input.matcap_contrast    = fresh.matcap_contrast;
     input.flat_shading       = fresh.flat_shading;
     input.show_fps           = fresh.show_fps;
+    input.browse_default_dir = fresh.browse_default_dir;
     input.ui_skin            = fresh.ui_skin;
     input.ui_material        = fresh.ui_material;
     input.ui_motion          = fresh.ui_motion;

@@ -1579,6 +1579,20 @@ void draw_settings_menu_items(InputState& input, MultiresInfo mres, bool sync_ta
             if (ImGui::IsItemHovered())
                 ui_skin_menu_tip("The tint on objects that aren't selected.");
 
+#ifndef __EMSCRIPTEN__
+            // Where Open / Save / Export start before you have used a folder (and the
+            // one pinned in their Places). The browser build uses the browser's pickers.
+            if (ImGui::Selectable("Default folder...")) {
+                input.browse_default_request = true;
+                ImGui::CloseCurrentPopup();
+            }
+            if (ImGui::IsItemHovered())
+                ui_skin_menu_tip("Where file dialogs start before you have used a\n"
+                                 "folder. Now: %s",
+                                 input.browse_default_dir.empty() ? "Desktop/chisel-sculpts (built in)"
+                                                                  : input.browse_default_dir.c_str());
+#endif
+
             if (ImGui::Selectable("Key bindings...")) {
                 input.keybind_menu_request = true;
                 ImGui::CloseCurrentPopup();

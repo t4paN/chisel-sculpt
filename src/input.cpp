@@ -1630,6 +1630,11 @@ static void handle_modal_key(GLFWwindow* w, int key) {
             else if (in.drop_level_confirm_pending) in.drop_level_confirm_pending = false;
             else if (in.reset_confirm_pending)      in.reset_confirm_pending = false;
             else if (in.remesh_confirm_pending)     in.remesh_confirm_pending = false;
+            // A file dialog's text field (address bar, search, file name) is being typed
+            // in: Esc belongs to the field, so the dialog stays (the dialog closes on Esc
+            // by itself otherwise).
+            else if ((in.export_dialog_active || in.import_dialog_active || in.save_dialog_active) &&
+                     ImGui::GetCurrentContext() && ImGui::GetIO().WantTextInput) {}
             else if (in.export_dialog_active)       in.export_dialog_active = false;
             else if (in.import_dialog_active)       in.import_dialog_active = false;
             else if (in.save_dialog_active)         in.save_dialog_active = false;

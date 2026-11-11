@@ -2,6 +2,16 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-11 — New file browser for every native dialog
+
+- One dialog (`src/file_browser.cpp`, an ImGuiFileDialog subclass) for Open, Save, Export, UV exports, Brush Alpha and the folder pick.
+- Places pane: Home, Desktop, Documents, Downloads, Pictures (by their real names on Linux), drives, bookmarks (+ adds the folder you're in), recent folders. Right-click removes a row; Reset brings removed Places/Drives back. Kept in `places.txt` beside the settings.
+- Back / forward / up (Alt+arrows), an address bar of clickable folders (click its empty end or Ctrl+L to type a path), new folder, search; icons per file type, no `[Dir]`/`[File]` tags.
+- Dialogs open in the folder last used. Burger menu > Default folder sets the fallback (built-in: Desktop/chisel-sculpts); only a picked one gets a Places row.
+- The name field has the keyboard as the dialog opens. Typing lights the first file that starts with those letters; the rest of its name shows in grey and Tab fills it in (the name only, not the extension). Open: Enter opens the lit file. Save: Enter saves exactly what was typed.
+- `+` next to OK in save/export dialogs: saves the next numbered copy (`_001`, `_002`), same numbering as Save +, now one shared function (`next_incremental_path`).
+- Folders sort on top and `..` stays the first row under every sort. Esc closes the dialog even while typing a name.
+
 ## 2026-11-11 — Slider release returns the cursor on the native WebGPU build (Wayland)
 
 - After a size/strength/hardness drag the cursor reappeared at the **previous** drag's start, to the pixel, on the native WebGPU build only; GL was fine.
