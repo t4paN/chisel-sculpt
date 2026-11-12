@@ -2722,8 +2722,32 @@ void Renderer::render_screen_buffers(const Camera& cam, int w, int h) {
 void Renderer::poll_plane_reads() {
     if (!plane_pending) return;
     for (int i = 0; i < 3; ++i)
-        if (!gpu::ticket_ready(gpu_dev, plane_tk[i])) return;
+        if (plane_tk[i] && !gpu::ticket_ready(gpu_dev, plane_tk[i])) return;
     size_t px = (size_t)plane_kick_w * plane_kick_h;
+#if defined(_WIN32) && !defined(CHISEL_BACKEND_WEBGPU)
+    // One plane per call (= per frame) on Windows GL. Copying all three out at once is
+    // ~39 MB at 1920x1017 and pushed the frame three after every pen-up 2-3 ms past the
+    // 13.3 ms vsync budget (CHISEL_PERF, 2026-11-12): a dropped frame, so a moving ring
+    // stalled and then jumped. The cursor keeps its last normal until all three land.
+    for (int i = 0; i < 3; ++i) {
+        if (!plane_tk[i]) continue;
+        bool ok = px > 0;
+        if (i == 0) { plane_depth.resize(px);
+                      ok &= gpu::ticket_take(gpu_dev, plane_tk[0], plane_depth.data(), px * sizeof(float)); }
+        if (i == 1) { plane_norm.resize(px * 3);
+                      ok &= gpu::ticket_take(gpu_dev, plane_tk[1], plane_norm.data(), px * 3 * sizeof(float)); }
+        if (i == 2) { plane_triid.resize(px);
+                      ok &= gpu::ticket_take(gpu_dev, plane_tk[2], plane_triid.data(), px * sizeof(uint32_t)); }
+        plane_tk[i] = 0;
+        plane_split_ok = (i == 0 ? ok : (plane_split_ok && ok));
+        if (plane_tk[0] || plane_tk[1] || plane_tk[2]) return;   // the rest next frame
+        break;
+    }
+    plane_pending = false;
+    plane_w = plane_kick_w; plane_h = plane_kick_h;
+    plane_valid = plane_split_ok;
+    return;
+#endif
     plane_depth.resize(px);
     plane_norm.resize(px * 3);
     plane_triid.resize(px);

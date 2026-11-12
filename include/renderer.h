@@ -235,6 +235,7 @@ struct Renderer {
     int  plane_kick_w = 0, plane_kick_h = 0;          // dims of the in-flight kick
     gpu::ReadTicket plane_tk[3] = {0, 0, 0};
     bool plane_pending = false;
+    bool plane_split_ok = false;   // Windows GL lands the planes one per frame; all three ok
     bool plane_valid   = false;
 
     void draw_background(int w, int h);
