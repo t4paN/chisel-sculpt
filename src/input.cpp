@@ -627,10 +627,17 @@ static void apply_slider_delta(float dx) {
     // Write through to the latched slot — per_brush[] is the truth, the live fields are
     // only the thing being dragged. slider_slot, not a fresh live_brush_slot(): see the
     // field's comment for why letting go of Shift mid-drag must not change the target.
+    // Only the field being dragged. A brush key pressed mid-drag re-aims the live
+    // mirror at the new brush, so writing all three would stamp its strength,
+    // hardness and spacing onto the brush the drag started on.
     const int save_brush = (int)g_input->slider_slot;
-    g_input->per_brush[save_brush].strength = g_input->brush_strength;
-    g_input->per_brush[save_brush].hardness = g_input->brush_hardness;
-    g_input->per_brush[save_brush].spacing  = g_input->brush_spacing;
+    switch (g_input->slider_mode) {
+        case InputState::SliderMode::STRENGTH: g_input->per_brush[save_brush].strength = g_input->brush_strength; break;
+        case InputState::SliderMode::HARDNESS: g_input->per_brush[save_brush].hardness = g_input->brush_hardness; break;
+        case InputState::SliderMode::SPACING:  g_input->per_brush[save_brush].spacing  = g_input->brush_spacing;  break;
+        default: break;
+    }
+    if (g_input->slider_mode != InputState::SliderMode::SIZE) return;
     // Size lives outside BrushSettings but stashes the same way, and the SIZE drag used
     // to update only the live value — so with per-brush sizes on, every resize was
     // reverted by the next brush switch. Smooth folds onto Draw here for the same
