@@ -697,6 +697,19 @@ static void slider_capture(GLFWwindow* w, bool grab) {
     web_pointer_lock(grab);
 #else
     if (!w) return;
+#if defined(_WIN32)
+    // A pen in the driver's Pen (absolute) mode can't be captured: GLFW parks the cursor
+    // at the window centre and reads each move as an offset from there, but the pen puts
+    // it straight back under the tip, so every move read as a leap and the size went to
+    // 0 or 100 with nothing between (2026-11-12). With the pen driving, the cursor is only
+    // hidden and the drag reads plain position changes, as the web build does. It is
+    // bounded by the screen edge, and Mouse mode reads the same way. The mouse keeps the
+    // capture.
+    if (grab && g_input && g_input->active_device == InputDevice::TABLET) {
+        glfwSetInputMode(w, GLFW_CURSOR, GLFW_CURSOR_HIDDEN);
+        return;
+    }
+#endif
     glfwSetInputMode(w, GLFW_CURSOR, grab ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
 #endif
 }
