@@ -529,6 +529,9 @@ static bool g_slider_check_return = false;
 struct tagPOINT { long x; long y; };
 typedef tagPOINT POINT;
 extern "C" __declspec(dllimport) int __stdcall GetCursorPos(POINT*);
+// TEMPORARY (pen side buttons): the extra info of the mouse message being handled. Pen
+// and touch emulated clicks carry a signature in the top 24 bits (0xFF515700).
+extern "C" __declspec(dllimport) long long __stdcall GetMessageExtraInfo(void);
 static double g_slider_probe_t0 = 0.0;
 static bool   g_slider_probe_watch = false;   // release .. first report after rest
 static long   g_slider_probe_osx = 0, g_slider_probe_osy = 0;
@@ -1254,6 +1257,20 @@ void input_web_feed_imgui_wheel() {
 
 static void mouse_button_callback(GLFWwindow* w, int button, int action, int mods) {
     if (!g_input) return;
+#if defined(_WIN32)
+    // The pen's side buttons come from WinTab once their mapping is known; the driver's
+    // emulated copies (which drop some presses) are dropped here. See tablet.h.
+    if (button == GLFW_MOUSE_BUTTON_MIDDLE || button == GLFW_MOUSE_BUTTON_RIGHT) {
+        const long long extra = GetMessageExtraInfo();
+        if (tablet_drop_driver_button(button, action, extra)) {
+            std::printf("[click] t=%.3f %s %s from the driver dropped (WinTab has it)\n",
+                        glfwGetTime(), button == GLFW_MOUSE_BUTTON_RIGHT ? "RMB" : "MMB",
+                        action == GLFW_PRESS ? "down" : "up");
+            std::fflush(stdout);
+            return;
+        }
+    }
+#endif
 
     // Update modifiers from mouse event too
     // The on-screen buttons hold their modifier regardless: the emulated touch click
@@ -1404,6 +1421,11 @@ static void mouse_button_callback(GLFWwindow* w, int button, int action, int mod
                 action == GLFW_PRESS ? "down" : "up", g_input->mouse_x, g_input->mouse_y,
                 g_input->active_device == InputDevice::TABLET ? "tablet" : "mouse",
                 (int)g_input->drag_mode, (int)g_input->slider_mode, (int)g_input->on_model);
+#if defined(_WIN32)
+    // TEMPORARY (pen side buttons): who sent it. GLFW calls this from its WndProc, so
+    // the message being handled is still the current one.
+    std::printf("[click]   extra 0x%llX\n", (unsigned long long)GetMessageExtraInfo());
+#endif
     std::fflush(stdout);
 }
 

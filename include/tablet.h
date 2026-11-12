@@ -61,6 +61,17 @@ private:
     Impl* impl = nullptr;      // nullptr on unsupported platforms / failed init
 };
 
+// Windows (WinTab) only. With the driver in Mouse mode the pen's side buttons reach the
+// window as emulated mouse clicks, and the driver drops some presses (never releases),
+// most often right after the pen comes back into range (2026-11-12: 6 of 42 in log19).
+// WinTab's own button state never misses one. So once a side button's click is known
+// (learned from the first emulated click that lines up with a WinTab edge), the press
+// and release come from WinTab and the driver's copies of that click are dropped.
+// Called from the mouse-button callback for every middle/right click; `extra` is the
+// message's GetMessageExtraInfo (the driver tags its clicks, a real mouse sends 0).
+// Returns true when the event is the driver's copy of a click WinTab now delivers.
+bool tablet_drop_driver_button(int glfw_button, int action, long long extra);
+
 // Native Wayland only: moving the pointer for edge-wrapped drags, through the
 // compositor's wp_pointer_warp_v1 (GLFW's glfwSetCursorPos does nothing there). init once
 // after the window exists; available() is false elsewhere and on compositors without the

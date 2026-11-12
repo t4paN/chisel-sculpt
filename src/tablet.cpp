@@ -1058,11 +1058,13 @@ void Tablet::shutdown() {
 #include <windows.h>
 #include "wintab.h"
 
-// PACKET = pen cursor id + normalized pressure, in ascending PK-bit order.
-#define PACKETDATA (PK_CURSOR | PK_NORMAL_PRESSURE)
+// PACKET = pen cursor id + button state + normalized pressure, in ascending PK-bit order.
+// PACKETMODE 0 (absolute) makes pkButtons the bitmask of buttons held now.
+#define PACKETDATA (PK_CURSOR | PK_BUTTONS | PK_NORMAL_PRESSURE)
 #define PACKETMODE 0
 #include "pktdef.h"
 #include <cstdio>
+#include <GLFW/glfw3.h>   // glfwGetTime, for traces that line up with input.cpp's
 
 namespace {
 typedef UINT (*PFN_WTInfoA)(UINT, UINT, LPVOID);
@@ -1093,12 +1095,23 @@ struct Tablet::Impl {
     UINT   msg_proximity = WT_DEFBASE + WT_PROXIMITY_OFS;
     int    proximity     = -1;   // -1 never reported, 0 out, 1 in (hardware proximity)
     unsigned long proximity_changes = 0;
+    DWORD  buttons       = 0;    // pkButtons of the last packet (bit 0 tip, 1/2 the side buttons)
+
+    // Side buttons (see tablet_drop_driver_button). Bits 1 and 2 of pkButtons.
+    GLFWwindow* win = nullptr;
+    int    side_glfw[2]  = { -1, -1 };   // learned GLFW button per side bit, -1 unknown
+    bool   side_held[2]  = { false, false };   // a press WinTab delivered, not yet released
+    // The last driver click and the last unmatched WinTab edge, for lining the two up
+    // (either can land first: the click in glfwPollEvents, the packet in poll()).
+    int    drv_button = -1, drv_action = -1;  double drv_t = -1.0;
+    int    edge_bit   = -1; bool edge_down = false; double edge_t = -1.0;
 };
 
 namespace {
 // One tablet per process, and the message window is ours alone, so a file-scope
 // pointer is all the window procedure needs to find its Impl.
 Tablet::Impl* g_wt_impl = nullptr;
+void wt_release_side(Tablet::Impl* m);
 
 LRESULT CALLBACK tablet_msg_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     Tablet::Impl* m = g_wt_impl;
@@ -1111,18 +1124,105 @@ LRESULT CALLBACK tablet_msg_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         std::printf("[tablet] proximity %s (ctx %s)\n", in ? "in" : "out",
                     LOWORD(lp) ? "enter" : "leave");
         std::fflush(stdout);
+        // A pen whisked away with a side button held sends no release packet.
+        if (!in) { wt_release_side(m); m->buttons &= ~(DWORD)6; }
         return 0;
     }
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
+
+// A click through the window's own callback chain (ImGui's, then the app's), the way
+// the Wayland pen path feeds its buttons. Modifiers come from the keyboard.
+// Set while wt_emit_button runs: outside a WndProc, GetMessageExtraInfo still holds the
+// last message's tag, which may be the driver's, and our own click must not be dropped.
+bool g_wt_emitting = false;
+
+void wt_emit_button(GLFWwindow* w, int button, int action) {
+    if (!w) return;
+    struct Flag { Flag() { g_wt_emitting = true; } ~Flag() { g_wt_emitting = false; } } flag;
+    int mods = 0;
+    auto down = [w](int k) { return glfwGetKey(w, k) == GLFW_PRESS; };
+    if (down(GLFW_KEY_LEFT_SHIFT)   || down(GLFW_KEY_RIGHT_SHIFT))   mods |= GLFW_MOD_SHIFT;
+    if (down(GLFW_KEY_LEFT_CONTROL) || down(GLFW_KEY_RIGHT_CONTROL)) mods |= GLFW_MOD_CONTROL;
+    if (down(GLFW_KEY_LEFT_ALT)     || down(GLFW_KEY_RIGHT_ALT))     mods |= GLFW_MOD_ALT;
+    if (down(GLFW_KEY_LEFT_SUPER)   || down(GLFW_KEY_RIGHT_SUPER))   mods |= GLFW_MOD_SUPER;
+    GLFWmousebuttonfun cb = glfwSetMouseButtonCallback(w, nullptr);
+    glfwSetMouseButtonCallback(w, cb);
+    if (cb) cb(w, button, action, mods);
+}
+
+constexpr double kMatchSec = 0.06;   // a driver click and its WinTab edge (log19: <= 14 ms)
+
+void wt_learn(Tablet::Impl* m, int bit, int glfw_button) {
+    if (m->side_glfw[bit] == glfw_button) return;
+    m->side_glfw[bit] = glfw_button;
+    std::printf("[tablet] side button %d is %s (learned from the driver's click)\n", bit + 1,
+                glfw_button == GLFW_MOUSE_BUTTON_MIDDLE ? "middle" : "right");
+    std::fflush(stdout);
+}
+
+// A WinTab edge on side bit `bit` (0 lower, 1 upper).
+void wt_side_edge(Tablet::Impl* m, int bit, bool down, double now) {
+    const int act = down ? GLFW_PRESS : GLFW_RELEASE;
+    // The driver's click for this edge already came (and was let through): learn from it
+    // and do not send the edge again.
+    if (m->drv_button >= 0 && m->drv_action == act && now - m->drv_t < kMatchSec
+        && m->side_glfw[bit] < 0) {
+        wt_learn(m, bit, m->drv_button);
+        m->drv_button = -1;
+        m->side_held[bit] = down;
+        return;
+    }
+    const int b = m->side_glfw[bit];
+    if (b < 0) {   // not learned yet: the driver's click, if it comes, is the one
+        m->edge_bit = bit; m->edge_down = down; m->edge_t = now;
+        return;
+    }
+    if (down == m->side_held[bit]) return;
+    m->side_held[bit] = down;
+    std::printf("[tablet] t=%.3f side button %d %s -> %s\n", now, bit + 1,
+                down ? "down" : "up", b == GLFW_MOUSE_BUTTON_MIDDLE ? "MMB" : "RMB");
+    std::fflush(stdout);
+    wt_emit_button(m->win, b, act);
+}
+
+void wt_release_side(Tablet::Impl* m) {
+    for (int bit = 0; bit < 2; bit++)
+        if (m->side_held[bit] && m->side_glfw[bit] >= 0) {
+            m->side_held[bit] = false;
+            wt_emit_button(m->win, m->side_glfw[bit], GLFW_RELEASE);
+        }
+}
+}
+
+bool tablet_drop_driver_button(int glfw_button, int action, long long extra) {
+    Tablet::Impl* m = g_wt_impl;
+    if (!m || !m->ctx || extra == 0 || g_wt_emitting) return false;   // a real mouse, no WinTab, or ours
+    if (glfw_button != GLFW_MOUSE_BUTTON_MIDDLE && glfw_button != GLFW_MOUSE_BUTTON_RIGHT)
+        return false;
+    for (int bit = 0; bit < 2; bit++)
+        if (m->side_glfw[bit] == glfw_button) return true;   // WinTab delivers this one
+    // Not learned yet. If WinTab already reported the matching edge, learn now; either
+    // way this click goes through, it is the only copy so far.
+    const double now = glfwGetTime();
+    if (m->edge_bit >= 0 && now - m->edge_t < kMatchSec
+        && m->edge_down == (action == GLFW_PRESS)) {
+        wt_learn(m, m->edge_bit, glfw_button);
+        m->side_held[m->edge_bit] = m->edge_down;
+        m->edge_bit = -1;
+        return false;
+    }
+    m->drv_button = glfw_button; m->drv_action = action; m->drv_t = now;
+    return false;
 }
 
 Tablet::Tablet() {}
 Tablet::~Tablet() { shutdown(); }
 
-bool Tablet::init(GLFWwindow* /*window*/) {
+bool Tablet::init(GLFWwindow* window) {
     shutdown();
     Impl* m = new Impl();
+    m->win = window;
 
     m->wintab = LoadLibraryA("Wintab32.dll");
     if (!m->wintab) { delete m; return false; }
@@ -1200,6 +1300,22 @@ void Tablet::poll(bool /*stroke_active*/) {
     PACKET pkts[32];
     int n = m->WTPacketsGet(m->ctx, 32, pkts);
     if (n > 0) {
+        // Button edges, in packet order. The tip (bit 0) is left to the driver's click,
+        // which has never been dropped; the side buttons (bits 1, 2) come from here.
+        const double now = glfwGetTime();
+        for (int i = 0; i < n; i++) {
+            const DWORD was = m->buttons, is = pkts[i].pkButtons;
+            if (is == was) continue;
+            // TEMPORARY trace, to line up with the [click] lines.
+            std::printf("[tablet] t=%.3f buttons 0x%lX -> 0x%lX\n", now,
+                        (unsigned long)was, (unsigned long)is);
+            std::fflush(stdout);
+            m->buttons = is;
+            for (int bit = 0; bit < 2; bit++) {
+                const DWORD mask = (DWORD)2 << bit;
+                if ((was ^ is) & mask) wt_side_edge(m, bit, (is & mask) != 0, now);
+            }
+        }
         m->samples += (unsigned long)n;
         double norm = ((double)pkts[n - 1].pkNormalPressure - m->press_min)
                     / (m->press_max - m->press_min);
@@ -1246,6 +1362,10 @@ unsigned long Tablet::sample_count() const { return 0; }
 int Tablet::proximity() const { return -1; }
 unsigned long Tablet::proximity_changes() const { return 0; }
 
+#endif
+
+#if !(defined(_WIN32) && !defined(CHISEL_NO_TABLET) && !defined(__EMSCRIPTEN__))
+bool tablet_drop_driver_button(int, int, long long) { return false; }
 #endif
 
 #if !defined(CHISEL_WL_TABLET)
