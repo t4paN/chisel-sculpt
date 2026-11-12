@@ -82,34 +82,23 @@ inline float max_spacing_for(BrushType b) {
     return b == BrushType::CLAY ? 0.15f : 1.0f;
 }
 
-// Which input device the brush-feel settings are tuned for. Switched by hand from
-// the burger menu, NOT auto-detected: a pen and a mouse can both be live at once
-// (and on web every pen is also a mouse), so any auto-switch has to guess, and
-// guessing wrong mid-stroke changes the brush under your hand. See switch_profile.
-enum class InputProfile {
+// Which device is driving input right now (main.cpp's arbiter: pen packets or the pen
+// entering proximity -> TABLET, cursor motion with the pen out of range -> MOUSE).
+// It decides ONLY where a stroke's pressure comes from (and the few pen-vs-pointer
+// details like cursor warps); it carries no settings. Until 2026-11-12 each device had
+// its own brush-feel profile (strength/hardness/spacing/max effect) swapped on every
+// change with a toast, which made a mouse<->pen hand-off feel like the app changing
+// under you. Brush size left the profiles on 2026-08-07 for the same reason.
+enum class InputDevice {
     MOUSE,
     TABLET,
-    COUNT
 };
 
-// The stash for one profile. Holds only the settings whose *right value depends on
-// what you are holding* — a pen needs lighter strength and a lower ceiling than a
-// mouse because pressure already modulates both. Everything else (brush size,
-// autosmooth, matcap, colours, mirror, density mults) is a sculpting or look
-// preference that has nothing to do with the input device, so it stays
-// single-valued on InputState and is saved once.
-//
-// Brush size used to live here and was moved out on 2026-08-07: reaching for the
-// mouse to orbit and finding a different-sized brush reads as the app losing your
-// place, not as a thoughtful per-device default.
-//
-// These duplicate live InputState fields; the live copy is the truth for the ACTIVE
-// profile and the stash is written back on switch — the same save/restore shape
-// per_brush[] already uses for brush_strength (see switch_brush).
-struct ProfileSettings {
-    float max_effect;
-    BrushSettings per_brush[(int)BrushType::COUNT];
-};
+// A mouse dab is always at full input, a pen only when pressed to the stop, so the
+// mouse lands at this fraction of the max-effect ceiling (the old mouse profile's 0.6
+// default, the old MOUSE_STRENGTH_SCALE before that). With max effect at 100% both
+// devices feel as they did with the separate profiles' defaults.
+constexpr float MOUSE_EFFECT_HOLDBACK = 0.6f;
 
 // Rebindable keyboard shortcuts (burger menu -> Key bindings). One entry per thing a
 // key can do outside a dialog; key_callback looks the pressed key up here instead of
@@ -242,25 +231,17 @@ struct InputState {
     // stretch defaulting on): one shared size.
     //
     // The TOGGLE persists but the sizes it stashes do not, for the same reason
-    // brush_size itself does not. Deliberately NOT folded into BrushSettings: that
-    // struct is what ProfileSettings stashes per input device, and size is not a device
-    // trait (see the 2026-08-07 note above).
+    // brush_size itself does not, which is why it is not folded into BrushSettings
+    // (those are saved).
     bool  per_brush_sizes = false;
     float brush_size_of[(int)BrushType::COUNT];
     // Point every slot at the live brush_size. Called when the toggle flips and on
     // settings reset, so neither can make the brush under the cursor jump.
     void seed_brush_sizes();
 
-    // Mouse/tablet brush-feel profiles. The live fields above are the active
-    // profile's working copy; profiles[] holds the other one's parked values.
-    // profiles[active_profile] is stale by design between switches — never read it
-    // for the active profile, call flush_profile() first (settings save does).
-    InputProfile     active_profile;
-    ProfileSettings  profiles[(int)InputProfile::COUNT];
-    // Set by the burger menu while its popup is up. Suspends the device auto-switch:
-    // you tune the tablet profile with the mouse in your hand, and without this the
-    // very act of reaching for a slider would swap you back to the mouse profile and
-    // send the edit to the wrong one.
+    // The device driving input (see InputDevice). Not saved: it is whatever you touch.
+    InputDevice      active_device;
+    // Set by the burger menu while its popup is up.
     bool             settings_menu_open;
 
     // Set by the (i) shortcut card while it is up. The card is a plain ImGui popup,
@@ -675,9 +656,8 @@ struct InputState {
     float speed_gain;
 
     // Max brush effect: the strength multiplier at FULL input — a mouse dab, or a pen
-    // pressed to the stop. It is the ceiling of the pressure ramp, not a separate scale,
-    // so one number means the same thing on both profiles (a per-profile copy that only
-    // bit when pressure was off would be a dead knob on the Tablet tab).
+    // pressed to the stop. It is the ceiling of the pressure ramp, not a separate scale.
+    // One value for both devices; the mouse lands at MOUSE_EFFECT_HOLDBACK of it.
     //
     // Applies to the additive-displacement brushes only (Draw/Inflate/Crease/Pinch) —
     // those accumulate without bound, so a ceiling is what stops full-strength dabs from
@@ -685,9 +665,7 @@ struct InputState {
     // Smooth/Mask/Paint converge on a target, so capping those would just make them take
     // longer to reach the same place.
     //
-    // Defaults differ by profile on purpose, and that is NOT a guessed preset: 0.6 mouse
-    // / 1.0 tablet are exactly the constants this replaced (the old MOUSE_STRENGTH_SCALE
-    // and the implicit 1.0 top of the pressure ramp), so the shipped feel is unchanged.
+    // Default 1.0: with the hold-back that is the old profiles' 0.6 mouse / 1.0 tablet.
     float max_effect;
 
     // Fast draw mode: skip per-pixel normal interpolation, use vertex normals directly
@@ -845,8 +823,6 @@ struct InputState {
                                                                       : KeyScope::Sculpt;
     }
     void clear_smooth_lock();  // drop the sticky smooth lock, re-aim the mirror
-    void switch_profile(InputProfile to);  // park the live brush feel, load the other profile's
-    void flush_profile();      // per_brush[] -> profiles[active_profile] (call before saving)
     // Re-point brush_strength/hardness/spacing (and the size, when per-brush sizes are
     // on) at per_brush[live_brush_slot()]. Idempotent; call it after anything that can
     // change which slot is live.

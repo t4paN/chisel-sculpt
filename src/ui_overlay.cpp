@@ -1319,16 +1319,11 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
         if (hamburger_button(burger, ImGui::IsPopupOpen("##burgermenu")))
             ImGui::OpenPopup("##burgermenu");
 
-        // Read AFTER OpenPopup so the opening frame is the one that syncs. The profile
-        // tab bar below stores its selection by ID and defaults to the first tab, so
-        // without a one-shot nudge it would report "Mouse" to a Tablet user the moment
-        // the menu opens — and that read is what drives switch_profile.
+        // Read AFTER OpenPopup so the opening frame is the one that flags it.
         static bool prev_menu_open = false;
         bool menu_open = ImGui::IsPopupOpen("##burgermenu");
         bool sync_tabs = menu_open && !prev_menu_open;
         prev_menu_open = menu_open;
-        // Freezes the device auto-switch for as long as the menu is up, so reaching for
-        // a slider with the mouse doesn't yank you off the profile you came here to edit.
         input.settings_menu_open = menu_open;
 
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10, 10));
@@ -1354,43 +1349,11 @@ void draw_settings_menu_items(InputState& input, MultiresInfo mres, bool sync_ta
     const float mw = ui_skin_menu_item_width(150.0f);
     {
         {
-            // Brush-feel profile. Both stay loaded and the active one follows whichever
-            // device you are actually using (main.cpp arbitrates); these tabs are how you
-            // *edit* the one that isn't in your hand — while this menu is open the
-            // auto-switch is frozen, so picking a tab holds until you close it.
-            if (ImGui::BeginTabBar("##profiles")) {
-                const char* names[(int)InputProfile::COUNT] = { "Mouse", "Tablet" };
-                for (int i = 0; i < (int)InputProfile::COUNT; i++) {
-                    // SetSelected only on the opening frame (see sync_tabs above);
-                    // forcing it every frame would override the user's own clicks.
-                    ImGuiTabItemFlags f = (sync_tabs && input.active_profile == (InputProfile)i)
-                                        ? ImGuiTabItemFlags_SetSelected : 0;
-                    if (ImGui::BeginTabItem(names[i], nullptr, f)) {
-                        if (input.active_profile != (InputProfile)i)
-                            input.switch_profile((InputProfile)i);
-                        ImGui::EndTabItem();
-                    }
-                }
-                ImGui::EndTabBar();
-            }
-            ImGui::TextDisabled("(?) follows the device you're using");
-            if (ImGui::IsItemHovered()) {
-                ui_skin_menu_tip("Both profiles stay loaded. Touch the pen and the tablet\n"
-                                 "profile takes over; move the mouse and the mouse profile\n"
-                                 "does. Never mid-stroke.\n\n"
-                                 "Per profile: strength, hardness, spacing, max effect.\n"
-                                 "Shared: brush size (per brush if you turn that on\n"
-                                 "below), autosmooth, speed falloff, lighting,\n"
-                                 "colours, mirror, density.\n\n"
-                                 "Pick a tab here to edit the other profile — switching\n"
-                                 "is paused while this menu is open.");
-            }
+            // (The Mouse/Tablet profile tabs lived here until 2026-11-12; one brush feel
+            // now serves both devices, see InputDevice.)
+            (void)sync_tabs;
 
-            // Max brush effect: the ceiling of the strength ramp for the profile whose
-            // tab is selected. Lives above the Separator because everything below it is
-            // shared, and this is the one slider that belongs to the tab you just picked.
-            // Edited through the LIVE field (not profiles[]) like every other per-profile
-            // control — flush_profile parks it in the right slot on the next switch/save.
+            // Max brush effect: the ceiling of the strength ramp, for both devices.
             //
             // Shown as a percentage because that is how it reads to the user ("60%"),
             // while the stored value stays 0..1 like the rest of the settings. Floor is
@@ -1406,12 +1369,12 @@ void draw_settings_menu_items(InputState& input, MultiresInfo mres, bool sync_ta
                                  "Those brushes pile up without bound, so the cap is what\n"
                                  "stops a stroke overshooting. Move, Smooth, Mask and\n"
                                  "Paint aim at a target instead and ignore it.\n\n"
-                                 "Defaults: 60%% mouse, 100%% tablet.");
+                                 "A mouse dab lands at 60%% of this (it is always\n"
+                                 "full input); the pen gets all of it pressed hard.\n"
+                                 "Default 100%%.");
 
             // Speed falloff (InputState::speed_gain). Sits with max effect because the
-            // two are tuned together, but it is ONE shared value, not per profile: the
-            // pen has real pressure and never uses it, so a per-profile copy would be a
-            // slider that does nothing on one of its two tabs.
+            // two are tuned together. The pen has real pressure and never uses it.
             float speed_pct = input.speed_gain * 100.0f;
             ImGui::SetNextItemWidth(mw);
             if (ImGui::SliderFloat("##speedGain", &speed_pct, 0.0f, 100.0f, "speed falloff %.0f%%"))

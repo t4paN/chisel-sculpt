@@ -648,7 +648,7 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
             // Same pen test as the brush: plugged in isn't enough, the pen has
             // to be what's driving (a resting pen reads ~0 forever).
             const bool pen = tablet.available()
-                          && input.active_profile == InputProfile::TABLET;
+                          && input.active_device == InputDevice::TABLET;
             const float pr = pen ? std::max(0.2f, tablet.pressure()) : 1.0f;
             retopo.live.pts.push_back(p);
             retopo.live.nrm.push_back(n);

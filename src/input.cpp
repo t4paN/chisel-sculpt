@@ -199,8 +199,7 @@ InputState::InputState()
     // than a one-time first-run value — worth it being a comfortable working size.
     , brush_size(70.0f), brush_strength(0.5f), brush_hardness(0.5f), brush_spacing(0.25f)
     , per_brush{}
-    , active_profile(InputProfile::MOUSE)
-    , profiles{}
+    , active_device(InputDevice::MOUSE)
     , settings_menu_open(false)
     , help_popup_open(false)
     , help_seen(false)
@@ -234,7 +233,7 @@ InputState::InputState()
     , mirror_topological(false)
     , autosmooth(false)
     , speed_gain(0.0f)
-    , max_effect(0.6f)          // mouse default; the tablet profile is raised to 1.0 below
+    , max_effect(1.0f)          // the mouse lands at MOUSE_EFFECT_HOLDBACK of it
     , fast_normals(false)
     , current_lod(0)
     , subdiv_level(4)
@@ -321,22 +320,6 @@ InputState::InputState()
     bucket_dragging = false;
     bucket_ax = bucket_ay = bucket_bx = bucket_by = 0.0f;
 
-    // Seed BOTH profiles from the same defaults rather than shipping invented pen
-    // numbers — the whole point of the split is that the user tunes each to their
-    // own hand, and a guessed tablet preset would just be a wrong starting point
-    // that looks deliberate. flush_profile fills the active one; copy it across.
-    flush_profile();
-    for (int i = 0; i < (int)InputProfile::COUNT; i++)
-        profiles[i] = profiles[(int)active_profile];
-
-    // The one deliberate exception to that. max_effect is the ceiling of the strength
-    // ramp, and the two devices genuinely arrive at it differently: a mouse dab is always
-    // at full input (hence the 0.6 hold-back that keeps additive brushes from piling up),
-    // while a pen only reaches the ceiling when you press it to the stop and spends most
-    // of a stroke well below. 1.0 here is not a guess about tablets — it is the number
-    // the pressure ramp already used implicitly, so pen feel is bit-for-bit unchanged.
-    profiles[(int)InputProfile::TABLET].max_effect = 1.0f;
-
     for (int i = 0; i < (int)KeyAction::COUNT; i++) keybinds[i] = kKeyActions[i].def;
 }
 
@@ -398,30 +381,6 @@ void InputState::sync_live_settings() {
         brush_size = brush_size_of[(int)size_slot()];
         size_writer = "per-brush mirror";
     }
-}
-
-void InputState::flush_profile() {
-    // No fold from the mirror: per_brush[] is written at the point of edit and is
-    // already the truth. Folding a mirror that may be aimed at Smooth was the other
-    // half of the slot-confusion bug — it ran four times a second from settings_tick.
-    ProfileSettings& p = profiles[(int)active_profile];
-    p.max_effect = max_effect;
-    for (int i = 0; i < (int)BrushType::COUNT; i++) p.per_brush[i] = per_brush[i];
-}
-
-void InputState::switch_profile(InputProfile to) {
-    if (to == active_profile || to == InputProfile::COUNT) return;
-    // Deliberately does NOT clear the smooth lock. This runs on every device swap, and
-    // silently dropping a sticky lock the user set by double-tapping Shift would read as
-    // the app losing state. flush/restore route through live_brush_slot() instead, so the
-    // lock rides across the switch untouched.
-    flush_profile();
-
-    active_profile = to;
-    const ProfileSettings& p = profiles[(int)to];
-    max_effect = p.max_effect;
-    for (int i = 0; i < (int)BrushType::COUNT; i++) per_brush[i] = p.per_brush[i];
-    sync_live_settings();
 }
 
 void InputState::enter_paint_mode() {
@@ -971,7 +930,7 @@ bool wrap_cursor(GLFWwindow* window, InputState& input, int win_w, int win_h) {
 #else
     // A pen maps the tablet onto the screen: it can't travel past the edge and nothing
     // can warp it, so the next sample would just put it back.
-    if (input.active_profile == InputProfile::TABLET) return false;
+    if (input.active_device == InputDevice::TABLET) return false;
     if (g_warp_off || g_warp_pending) return false;
     const bool wayland = on_wayland();
     if (wayland && !wl_pointer_warp_available()) return false;
@@ -1034,7 +993,7 @@ static constexpr double kReturnRadius = 24.0;
 static void slider_hint_start() {
     if (!on_wayland() || !wl_pointer_warp_available()) return;
     // A pen isn't the pointer: warping to the pen's spot would move the idle mouse.
-    if (g_input->active_profile == InputProfile::TABLET) return;
+    if (g_input->active_device == InputDevice::TABLET) return;
     wl_pointer_warp(g_input->slider_start_x, g_input->slider_start_y);
 }
 
@@ -1443,7 +1402,7 @@ static void mouse_button_callback(GLFWwindow* w, int button, int action, int mod
                 button == GLFW_MOUSE_BUTTON_LEFT ? "LMB" : button == GLFW_MOUSE_BUTTON_RIGHT ? "RMB"
                     : button == GLFW_MOUSE_BUTTON_MIDDLE ? "MMB" : "other",
                 action == GLFW_PRESS ? "down" : "up", g_input->mouse_x, g_input->mouse_y,
-                g_input->active_profile == InputProfile::TABLET ? "tablet" : "mouse",
+                g_input->active_device == InputDevice::TABLET ? "tablet" : "mouse",
                 (int)g_input->drag_mode, (int)g_input->slider_mode, (int)g_input->on_model);
     std::fflush(stdout);
 }

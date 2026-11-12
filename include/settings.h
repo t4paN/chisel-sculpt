@@ -7,7 +7,7 @@
 // under a kilobyte of scalars); on native it goes to a config file under XDG_CONFIG_HOME
 // / %APPDATA%. Only the sink is #ifdef'd, the format is identical on both.
 //
-// What is saved: brush feel (per profile — see ProfileSettings), plus the single-valued
+// What is saved: brush feel (one set for mouse and pen, see InputDevice), plus the single-valued
 // look/scene preferences (matcap, paint colours, mirror, density mults). What is NOT
 // saved: anything scene- or frame-scoped — subdiv_level, interaction_mode, mesh_locked,
 // the dialog and *_requested flags. Persisting those would restore the app into a mode
@@ -24,8 +24,7 @@ struct InputState;
 // after InputState is constructed and before anything reads its fields.
 void settings_load(InputState& input);
 
-// Serialize `input` and write it to the sink. Flushes the active profile first, so the
-// caller does not have to. Failures are silent by design: a browser that refuses
+// Serialize `input` and write it to the sink. Failures are silent by design: a browser that refuses
 // localStorage (see below) must not break sculpting.
 void settings_save(InputState& input);
 

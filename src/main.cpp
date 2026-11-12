@@ -118,8 +118,8 @@ static StrokeSpeed g_stroke_speed;
 static constexpr float SPEED_TELEPORT = 15000.0f;
 static StrokeSpeed g_hover_speed;
 
-// The old MOUSE_STRENGTH_SCALE (0.6) lived here. It is now the per-profile "max brush
-// effect" slider (InputState::max_effect) — same number, same defaults, but reachable.
+// The old MOUSE_STRENGTH_SCALE (0.6) lived here. It is now MOUSE_EFFECT_HOLDBACK
+// (input.h) under the one "max brush effect" slider (InputState::max_effect).
 // Dab spacing is stepped in SCREEN pixels but every dab deposits into a WORLD-space
 // sphere, so the step has to be foreshortening-corrected — see the block in the dab
 // loop. MIN_COS floors the correction (at most 1/0.30 ≈ 3.3x the dab count near a
@@ -957,7 +957,7 @@ int main(int argc, char* argv[]) {
                             s_size_seen, input.brush_size,
                             input.size_writer ? input.size_writer : "UNKNOWN WRITER",
                             input.brush_name(), (int)input.interaction_mode,
-                            input.active_profile == InputProfile::TABLET ? "tablet" : "mouse",
+                            input.active_device == InputDevice::TABLET ? "tablet" : "mouse",
                             input.mouse_x, input.mouse_y, imp.x, imp.y,
                             (int)ImGui::GetIO().WantCaptureMouse,
                             (int)ImGui::IsMouseDown(ImGuiMouseButton_Left));
@@ -967,8 +967,9 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // Device-driven profile switch. Both profiles stay loaded; whichever device is
-        // actually producing input owns the live brush settings.
+        // Which device is driving (InputDevice). It only picks the pressure source and
+        // a few pen-vs-pointer details; no settings change with it, so a switch is
+        // silent and can never cost a click.
         //
         // The pen wins on evidence (its sample counter moved), the mouse only on evidence
         // PLUS a quiet window, because on X11 the stylus also drives the core pointer —
@@ -977,14 +978,11 @@ int main(int argc, char* argv[]) {
         // movement. The web pen path has the same shape (chisel_set_pointer fires for pen
         // events too), so one rule covers both.
         //
-        // Latching on the *other* device rather than on pen idleness is deliberate:
-        // a timeout-to-mouse would re-tune strength/hardness/spacing every time you
-        // lifted the pen to think, which reads as the app glitching. (Brush size used
-        // to be the loudest symptom of that; it went global on 2026-08-07, but the
-        // brush-feel fields it still swaps make the same argument.)
-        if (!input.sculpting && !input.settings_menu_open &&
-            input.drag_mode == InputState::DragMode::NONE &&
-            input.slider_mode == InputState::SliderMode::NONE) {
+        // Never mid-stroke (the stroke's pressure source holds to the end). The switch to
+        // the pen is allowed on the press frame itself, before the stroke starts below,
+        // so a pen that taps down from out of range still gets real pressure on its first
+        // stroke. The switch back to the mouse waits for no drag and no slider.
+        if (!input.sculpting) {
             const double kPenHoldSec = 0.25;
             double now = glfwGetTime();
             unsigned long samples = tablet.sample_count();
@@ -1002,29 +1000,27 @@ int main(int argc, char* argv[]) {
             const int prox = tablet.proximity();
             const bool prox_edge = tablet.proximity_changes() != prev_prox_changes;
             prev_prox_changes = tablet.proximity_changes();
-            InputProfile want = input.active_profile;
+            const bool idle = input.drag_mode == InputState::DragMode::NONE &&
+                              input.slider_mode == InputState::SliderMode::NONE;
+            InputDevice want = input.active_device;
             const char* why = "";
             if (pen_reported) {
-                want = InputProfile::TABLET; why = "pen packets";
+                want = InputDevice::TABLET; why = "pen packets";
             } else if (prox_edge && prox == 1) {
-                want = InputProfile::TABLET; why = "pen entered proximity";
-            } else if (cursor_moved && prox == 0) {
-                want = InputProfile::MOUSE; why = "cursor moved, pen out of proximity";
-            } else if (cursor_moved && now - last_pen_input_time > kPenHoldSec) {
-                want = InputProfile::MOUSE; why = "cursor moved, no pen packets for 0.25 s";
+                want = InputDevice::TABLET; why = "pen entered proximity";
+            } else if (idle && cursor_moved && prox == 0) {
+                want = InputDevice::MOUSE; why = "cursor moved, pen out of proximity";
+            } else if (idle && cursor_moved && now - last_pen_input_time > kPenHoldSec) {
+                want = InputDevice::MOUSE; why = "cursor moved, no pen packets for 0.25 s";
             }
 
-            if (want != input.active_profile) {
-                std::printf("[profile] %s -> %s (%s; %.3f s since pen packet, proximity %d)\n",
-                            input.active_profile == InputProfile::TABLET ? "tablet" : "mouse",
-                            want == InputProfile::TABLET ? "tablet" : "mouse", why,
+            if (want != input.active_device) {
+                std::printf("[device] %s -> %s (%s; %.3f s since pen packet, proximity %d)\n",
+                            input.active_device == InputDevice::TABLET ? "tablet" : "mouse",
+                            want == InputDevice::TABLET ? "tablet" : "mouse", why,
                             now - last_pen_input_time, prox);
                 std::fflush(stdout);
-                input.switch_profile(want);
-                std::snprintf(input.notification, sizeof(input.notification),
-                              want == InputProfile::TABLET ? "Tablet settings"
-                                                           : "Mouse settings");
-                input.notification_timer = 1.2f;
+                input.active_device = want;
             }
         }
 
@@ -1161,9 +1157,18 @@ int main(int argc, char* argv[]) {
         if ((imgui_wants_mouse || dialog_open) && app_state != AppState::SCULPTING) {
             // TEMPORARY (first-click hunt): a press the UI swallowed, and why.
             if (input.mouse1_just_pressed || input.drag_mode != InputState::DragMode::NONE) {
+                // Where ImGui thinks the pointer is and what it thinks is under it: the
+                // eaten presses so far (log16/17) were mid-canvas with no panel there.
+                const ImGuiIO& gio = ImGui::GetIO();
+                const ImGuiContext& gctx = *ImGui::GetCurrentContext();
                 std::printf("[click] t=%.3f press/drag eaten by the UI gate (imgui-wants-mouse %d, "
-                            "dialog %d, drag_mode was %d)\n", glfwGetTime(),
-                            (int)imgui_wants_mouse, (int)dialog_open, (int)input.drag_mode);
+                            "dialog %d, drag_mode was %d) app %.0f,%.0f imgui %.0f,%.0f "
+                            "hovered '%s' active '%s' popup %d owned %d\n", glfwGetTime(),
+                            (int)imgui_wants_mouse, (int)dialog_open, (int)input.drag_mode,
+                            input.mouse_x, input.mouse_y, gio.MousePos.x, gio.MousePos.y,
+                            gctx.HoveredWindow ? gctx.HoveredWindow->Name : "-",
+                            gctx.ActiveIdWindow ? gctx.ActiveIdWindow->Name : "-",
+                            gctx.OpenPopupStack.Size, (int)gio.MouseDownOwned[0]);
                 std::fflush(stdout);
             }
             // A press on a panel over the model is the panel's, not a pick or a fill
@@ -2056,16 +2061,16 @@ int main(int argc, char* argv[]) {
                 // (0.05x strength, all brushes). The K toggle used to be the escape hatch
                 // for exactly that; removing K on 2026-08-07 exposed it.
                 //
-                // active_profile is the signal that was already correct: the arbiter
-                // switches to TABLET on stylus samples and back to MOUSE on cursor motion
-                // after a 250 ms quiet window, and it is frozen mid-stroke, so this cannot
-                // flip under a stroke in progress.
+                // active_device is the signal that was already correct: the arbiter
+                // switches to TABLET on stylus samples or proximity and back to MOUSE on
+                // cursor motion with the pen out of range, and it is frozen mid-stroke,
+                // so this cannot flip under a stroke in progress.
                 bool pressure_is_synthetic = !(tablet.available() &&
-                                               input.active_profile == InputProfile::TABLET);
+                                               input.active_device == InputDevice::TABLET);
                 float pressure = pressure_is_synthetic ? 1.0f : tablet.pressure();
                 float p_shaped = std::pow(pressure, PRESSURE_GAMMA);
 
-                // Max brush effect (per-profile slider) is the CEILING of this ramp, not
+                // Max brush effect (burger menu slider) is the CEILING of this ramp, not
                 // a scale applied after it: at full input the dab lands on exactly
                 // max_effect × nominal strength, and the floor stays where it is so a
                 // feather-light pen touch still fades to near-nothing.
@@ -2088,7 +2093,11 @@ int main(int argc, char* argv[]) {
                 const bool is_stipple = bt == BrushType::STIPPLE || bt == BrushType::PAINT_STIPPLE;
                 const StippleSettings& stipple_st =
                     bt == BrushType::PAINT_STIPPLE ? input.paint_stipple : input.stipple;
-                float ceiling = additive_brush ? input.max_effect : 1.0f;
+                // One max effect for both devices; a mouse dab (always full input) lands
+                // at MOUSE_EFFECT_HOLDBACK of it, where a pen has to press to the stop.
+                float ceiling = additive_brush
+                    ? input.max_effect * (pressure_is_synthetic ? MOUSE_EFFECT_HOLDBACK : 1.0f)
+                    : 1.0f;
                 eff_strength *= PRESSURE_STR_FLOOR +
                                 (ceiling - PRESSURE_STR_FLOOR) * p_shaped;
 

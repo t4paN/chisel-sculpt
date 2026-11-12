@@ -31,7 +31,14 @@ const char* kBrushKey[(int)BrushType::COUNT] = {
 };
 static_assert((int)BrushType::COUNT == 15, "kBrushKey is out of sync with BrushType");
 
-const char* kProfileKey[(int)InputProfile::COUNT] = { "mouse", "tablet" };
+// Section names of the per-device brush-feel profiles written until 2026-11-12. Read
+// once to migrate a stored blob into the single [brush] section, never written.
+const char* kLegacyProfileKey[2] = { "mouse", "tablet" };
+
+struct BrushFeel {
+    float max_effect;
+    BrushSettings per_brush[(int)BrushType::COUNT];
+};
 
 // Index 0..4 are the procedural builtins (see AlphaLibrary::init_builtins). A custom
 // image lives only in this session's MEMFS/pool, so its index means nothing next run —
@@ -167,30 +174,24 @@ void append_kv(std::string& s, const char* key, bool v) {
     append_kv(s, key, v ? 1 : 0);
 }
 
-void append_profile(std::string& s, const ProfileSettings& p, const char* name) {
-    s += "\n[";
-    s += name;
-    s += "]\n";
-    append_kv(s, "max_effect", p.max_effect);
+void append_brush_feel(std::string& s, const InputState& in) {
+    s += "\n[brush]\n";
+    append_kv(s, "max_effect", in.max_effect);
     for (int i = 0; i < (int)BrushType::COUNT; i++) {
         char buf[128];
         std::snprintf(buf, sizeof(buf), "brush.%s=%.6g %.6g %.6g\n", kBrushKey[i],
-                      (double)p.per_brush[i].strength,
-                      (double)p.per_brush[i].hardness,
-                      (double)p.per_brush[i].spacing);
+                      (double)in.per_brush[i].strength,
+                      (double)in.per_brush[i].hardness,
+                      (double)in.per_brush[i].spacing);
         s += buf;
     }
 }
 
-// Caller must have flushed the active profile first.
 std::string serialize(const InputState& in) {
     std::string s;
     s.reserve(2048);
     s += "# Chisel settings. Regenerated on change; unknown keys are ignored.\n";
     append_kv(s, "version", kFormatVersion);
-    s += "active_profile=";
-    s += kProfileKey[(int)in.active_profile];
-    s += "\n";
 
     s += "\n[global]\n";
     // brush_size is deliberately absent — see InputState::brush_size. Because the
@@ -275,8 +276,7 @@ std::string serialize(const InputState& in) {
                   (double)in.unselected_tint[2]);
     s += buf;
 
-    for (int i = 0; i < (int)InputProfile::COUNT; i++)
-        append_profile(s, in.profiles[i], kProfileKey[i]);
+    append_brush_feel(s, in);
     return s;
 }
 
@@ -305,7 +305,7 @@ void apply_brush(const std::string& v, BrushSettings& b, BrushType which) {
     b.spacing  = clampf(sp, 0.05f, max_spacing_for(which));
 }
 
-void apply_profile_key(ProfileSettings& p, const std::string& key, const std::string& val) {
+void apply_feel_key(BrushFeel& p, const std::string& key, const std::string& val) {
     // Low end is the slider's 0.10, NOT 0: max_effect is the ceiling of a ramp whose
     // floor is PRESSURE_STR_FLOOR (0.05), and a ceiling below the floor would invert it.
     if      (key == "max_effect") p.max_effect = clampf(std::strtof(val.c_str(), nullptr), 0.10f, 1.0f);
@@ -424,11 +424,23 @@ std::string trim(const std::string& s) {
 }
 
 // Applies over whatever `in` already holds, so anything the blob omits keeps its
-// constructor default. Section-scoped: -1 = header area, -2 = [global], >=0 = a profile.
+// constructor default. Section-scoped: -1 = header area, -2 = [global], -3 = [brush],
+// 0/1 = a legacy [mouse]/[tablet] profile.
 void deserialize(const std::string& blob, InputState& in) {
     int section = -1;
     size_t pos = 0;
-    std::string pending_profile;   // active_profile arrives before the sections do
+    std::string pending_profile;   // legacy: active_profile arrives before the sections do
+
+    BrushFeel feel;
+    feel.max_effect = in.max_effect;
+    for (int i = 0; i < (int)BrushType::COUNT; i++) feel.per_brush[i] = in.per_brush[i];
+    bool have_feel = false;
+    // Legacy profiles start from the same defaults with their old max-effect defaults
+    // (0.6 mouse, 1.0 tablet), so a section that never wrote the key migrates right.
+    BrushFeel legacy[2] = { feel, feel };
+    legacy[0].max_effect = MOUSE_EFFECT_HOLDBACK;
+    legacy[1].max_effect = 1.0f;
+    bool have_legacy = false;
 
     while (pos <= blob.size()) {
         size_t eol = blob.find('\n', pos);
@@ -441,8 +453,9 @@ void deserialize(const std::string& blob, InputState& in) {
             std::string name = line.substr(1, line.size() - 2);
             section = -1;
             if (name == "global") section = -2;
-            else for (int i = 0; i < (int)InputProfile::COUNT; i++)
-                if (name == kProfileKey[i]) { section = i; break; }
+            else if (name == "brush") { section = -3; have_feel = true; }
+            else for (int i = 0; i < 2; i++)
+                if (name == kLegacyProfileKey[i]) { section = i; have_legacy = true; break; }
             continue;
         }
 
@@ -452,23 +465,26 @@ void deserialize(const std::string& blob, InputState& in) {
         std::string val = trim(line.substr(eq + 1));
 
         if (section == -2)      apply_global_key(in, key, val);
-        else if (section >= 0)  apply_profile_key(in.profiles[section], key, val);
+        else if (section == -3) apply_feel_key(feel, key, val);
+        else if (section >= 0)  apply_feel_key(legacy[section], key, val);
         else if (key == "active_profile") pending_profile = val;
         // `version` is read but unused at v1 — it exists so a future format break has a
         // discriminator to branch on instead of guessing from which keys are present.
     }
 
-    // Load the requested profile into the live fields LAST, after every [section] has
-    // populated profiles[]. Assigning active_profile directly (not via switch_profile)
-    // because the live fields are still constructor defaults, not the other profile's —
-    // a switch here would flush those defaults over a profile we just parsed.
-    in.active_profile = InputProfile::MOUSE;
-    for (int i = 0; i < (int)InputProfile::COUNT; i++)
-        if (pending_profile == kProfileKey[i]) in.active_profile = (InputProfile)i;
-
-    const ProfileSettings& p = in.profiles[(int)in.active_profile];
-    in.max_effect = p.max_effect;
-    for (int i = 0; i < (int)BrushType::COUNT; i++) in.per_brush[i] = p.per_brush[i];
+    // A blob from before 2026-11-12 has per-device profiles and no [brush]. Keep the
+    // one that was active (the one the user was tuning; mouse if unsaid). Its max effect
+    // maps onto the shared slider: the mouse now lands at MOUSE_EFFECT_HOLDBACK of the
+    // ceiling, so the old mouse value is divided by it (0.6 -> 100%), and the pen's
+    // carries over as is. The next save writes [brush] and drops the old sections.
+    if (!have_feel && have_legacy) {
+        const int a = pending_profile == kLegacyProfileKey[1] ? 1 : 0;
+        feel = legacy[a];
+        if (a == 0)
+            feel.max_effect = clampf(feel.max_effect / MOUSE_EFFECT_HOLDBACK, 0.10f, 1.0f);
+    }
+    in.max_effect = feel.max_effect;
+    for (int i = 0; i < (int)BrushType::COUNT; i++) in.per_brush[i] = feel.per_brush[i];
     in.sync_live_settings();
 }
 
@@ -481,17 +497,14 @@ void settings_load(InputState& input) {
     if (blob.empty()) {
         // Nothing stored yet is the normal first-run path, not a failure. Seed the
         // comparison baseline so the first tick does not write an identical blob back.
-        input.flush_profile();
         g_last_blob = serialize(input);
         return;
     }
     deserialize(blob, input);
-    input.flush_profile();
     g_last_blob = serialize(input);
 }
 
 void settings_save(InputState& input) {
-    input.flush_profile();
     std::string blob = serialize(input);
     if (!storage_write(blob)) { g_storage_ok = false; return; }
     g_last_blob = blob;
@@ -515,7 +528,6 @@ void settings_tick(InputState& input, float dt) {
     if (g_since_poll < 0.25f) return;
     g_since_poll = 0.0f;
 
-    input.flush_profile();
     if (serialize(input) != g_last_blob) {
         g_dirty = true;
         g_since_edit = 0.0f;
@@ -524,8 +536,6 @@ void settings_tick(InputState& input, float dt) {
 
 void settings_reset(InputState& input) {
     InputState fresh;   // the single source of defaults — no second copy to drift
-    for (int i = 0; i < (int)InputProfile::COUNT; i++) input.profiles[i] = fresh.profiles[i];
-    input.active_profile     = fresh.active_profile;
     // brush_size is session state now, so Reset leaves it where the user put it —
     // same as it leaves the current brush and the smooth lock alone.
     input.per_brush_sizes    = fresh.per_brush_sizes;
@@ -568,9 +578,9 @@ void settings_reset(InputState& input) {
         input.paint_color_alt[i] = fresh.paint_color_alt[i];
         input.unselected_tint[i] = fresh.unselected_tint[i];
     }
-    // Live brush fields come back from the restored active profile. sync_live_settings,
+    // Brush feel back to defaults. sync_live_settings,
     // not current_brush: reset can fire while a smooth lock is held (or Shift is down).
-    const ProfileSettings& p = input.profiles[(int)input.active_profile];
+    const InputState& p = fresh;
     input.max_effect = p.max_effect;
     for (int i = 0; i < (int)BrushType::COUNT; i++) input.per_brush[i] = p.per_brush[i];
     input.sync_live_settings();
