@@ -398,7 +398,11 @@ void Scene::set_active(uint32_t entity_id) {
     if (preview_id_ != 0) selected_ids_.push_back(preview_id_);
     // Swap the working set to the new active entity. id 0 (single-mesh
     // refresh_for_edit_mode) is a no-op: the working buffer keeps its content.
-    if (entity_id != 0) bind_active_(entity_id);
+    // So is the entity already bound: its working set is current (edits to it go
+    // through sync() / the partial syncs, which still rebind). Re-binding it re-sent
+    // the whole mesh, adjacency and mirror map on every return to Edit mode, and
+    // twice per insert (Windows 2026-11-12: a 655k-vert sculpt, uploads doubled).
+    if (entity_id != 0 && entity_id != bound_active_id_) bind_active_(entity_id);
 }
 
 void Scene::collapse_selection_to_active() {
