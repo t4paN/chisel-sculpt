@@ -1416,11 +1416,16 @@ ProjectionStats project_down_to_level(MultiresStack& stack, int target_level) {
         }
     }
 
-    // Rebuild base mirror and clear per-level mirror caches. Mirror maps are
-    // topology-only, but the base positions changed (even for target > base_level
-    // we re-run spatial hash defensively). Per-level maps rebuild lazily on cascade.
-    build_mirror_spatial(stack.base, stack.base_mirror);
-    stack.mirror.clear();
+    // Mirror pairs are topology-only and projection changes no topology, so the base
+    // map built at lock still holds. Re-pairing it here from the PROJECTED (sculpted)
+    // base positions was what the persistent-map rule forbids: an asymmetric sculpt's
+    // drifted verts lose their twins for good, and clearing the per-level maps made
+    // every level re-derive from that worse base. Only a map that no longer fits the
+    // cage is rebuilt.
+    if (stack.base_mirror.size() != stack.base.vertex_count()) {
+        build_mirror_spatial(stack.base, stack.base_mirror);
+        stack.mirror.clear();
+    }
 
     // Reconstruction check: cascade to L_max and compare to the truth this function
     // already built in mesh_at[passes], so the only added cost is one cascade. That

@@ -893,6 +893,17 @@ void Scene::splice_active(const Mesh& replacement) {
     }
     if (replacement.norm_x.size() != (size_t)vc)
         e->mesh.recompute_normals();
+    // The mirror map has to follow the topology too. An undo across a level change
+    // kept the old level's map (4.5M entries at a 17.9M-vert L4, Windows 2026-11-11):
+    // sync uploaded it at the wrong size, then refresh_mirror_map re-paired the
+    // sculpted surface by position and lost 95% of the pairs. The cascade hands over
+    // the level's topological map; take it, and never keep one sized for other verts.
+    if (replacement.mirror_x_map.size() == (size_t)vc) {
+        e->mesh.mirror_x_map = replacement.mirror_x_map;
+        e->mesh.mirror_topo_version = e->mesh.topo_version;
+    } else if (e->mesh.mirror_x_map.size() != (size_t)vc) {
+        e->mesh.mirror_x_map.clear();
+    }
     // sync() → bind_active_ re-uploads the working buffers + adjacency/mirror
     // SSBOs from the new topology, and refreshes inactive display VAOs.
     sync();
