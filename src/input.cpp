@@ -594,13 +594,7 @@ static GLFWwindow* g_window = nullptr;
 // Slider drag: accumulate a horizontal delta into the active slider, clamped so
 // the accumulator doesn't overshoot the value range. Fed from the GLFW cursor
 // callback natively, from the DOM pointermove listener (movementX) on web.
-#if defined(_WIN32)
-static bool slider_settle_absorb(float dx);   // see end_slider_drag
-#endif
 static void apply_slider_delta(float dx) {
-#if defined(_WIN32)
-    if (slider_settle_absorb(dx)) return;
-#endif
     g_input->slider_accum += dx;
 
     switch (g_input->slider_mode) {
@@ -745,13 +739,7 @@ static void slider_capture(GLFWwindow* w, bool grab) {
 static void slider_hint_start();   // see Edge wrap
 #endif
 
-#if defined(_WIN32)
-static void slider_settle_finish(const char* why);
-#endif
 static void begin_slider_drag(GLFWwindow* w, InputState::SliderMode mode, float start_value) {
-#if defined(_WIN32)
-    slider_settle_finish("next slider key");   // a new hold ends the last one's settle
-#endif
     g_input->slider_mode        = mode;
     g_input->slider_start_x     = g_input->mouse_x;
     g_input->slider_start_y     = g_input->mouse_y;
@@ -802,72 +790,7 @@ static void slider_return_warp(double x, double y, bool mouse_dragged);   // see
 
 // warp_back = false is the abandon path (focus loss): hand the cursor back where it
 // actually is rather than teleporting it into a window the user has already left.
-static void finish_slider_drag(GLFWwindow* w, bool warp_back);
-
-#if defined(_WIN32)
-// Release settle. Letting go of S usually happens while the hand is still sliding: the
-// last few px of the drag (log7: 7, 4, 3, 1 px over 40 ms, in the drag's direction)
-// used to land on the cursor the instant the capture ended, so the ring "jumped" the
-// way the drag was going. So the capture is held a moment past the key-up: motion is
-// discarded until a frame with none (the hand has stopped), at most kSettleMax, and
-// only then is the cursor handed back at the drag start. A deliberate move starts
-// after the hand has stopped, so it doesn't feel the hold.
-static bool        g_slider_settling = false;
-static GLFWwindow* g_slider_settle_w = nullptr;
-static double      g_slider_settle_t0 = 0.0;
-static bool        g_slider_settle_moved = false;
-static double      g_slider_settle_px = 0.0;
-static constexpr double kSettleMax = 0.08;   // log7/8: the hand tail is 40-53 ms; 150 ms swallowed deliberate moves
-
-static bool slider_settle_absorb(float dx) {
-    if (!g_slider_settling) return false;
-    g_slider_settle_moved = true;
-    g_slider_settle_px += std::fabs(dx);
-    return true;
-}
-
-static void slider_settle_finish(const char* why) {
-    if (!g_slider_settling) return;
-    g_slider_settling = false;
-    if (g_slider_settle_px > 0.0) {
-        std::printf("[slider] settle: absorbed %.0f px over %.0f ms (%s)\n", g_slider_settle_px,
-                    (glfwGetTime() - g_slider_settle_t0) * 1000.0, why);
-        std::fflush(stdout);
-    }
-    finish_slider_drag(g_slider_settle_w, true);
-}
-#endif
-
-// Once a frame from main, after the events: ends a release settle once a whole frame
-// passed with no motion, or at kSettleMax. No-op elsewhere.
-void input_slider_settle_tick() {
-#if defined(_WIN32)
-    if (!g_slider_settling) return;
-    const double dt = glfwGetTime() - g_slider_settle_t0;
-    if (dt >= kSettleMax)                          slider_settle_finish("timeout");
-    else if (!g_slider_settle_moved && dt > 0.02)  slider_settle_finish("hand stopped");
-    else                                           g_slider_settle_moved = false;
-#endif
-}
-
 static void end_slider_drag(GLFWwindow* w, bool warp_back) {
-    if (!g_input || g_input->slider_mode == InputState::SliderMode::NONE) return;
-#if defined(_WIN32)
-    if (warp_back && w) {
-        if (g_slider_settling) return;   // already settling
-        g_slider_settling = true;
-        g_slider_settle_w = w;
-        g_slider_settle_t0 = glfwGetTime();
-        g_slider_settle_moved = false;
-        g_slider_settle_px = 0.0;
-        return;
-    }
-    g_slider_settling = false;   // abandon path (focus loss): no settle
-#endif
-    finish_slider_drag(w, warp_back);
-}
-
-static void finish_slider_drag(GLFWwindow* w, bool warp_back) {
     if (!g_input || g_input->slider_mode == InputState::SliderMode::NONE) return;
     bool mouse_dragged = true;
 #if !defined(__EMSCRIPTEN__)
@@ -1320,11 +1243,6 @@ void input_web_feed_imgui_wheel() {
 
 static void mouse_button_callback(GLFWwindow* w, int button, int action, int mods) {
     if (!g_input) return;
-#if defined(_WIN32)
-    // A press inside a slider's release settle must not land on a still-active slider
-    // (that would eat the click): end the settle first and let the press through.
-    if (action == GLFW_PRESS) slider_settle_finish("click");
-#endif
 
     // Update modifiers from mouse event too
     // The on-screen buttons hold their modifier regardless: the emulated touch click
