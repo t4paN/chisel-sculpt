@@ -1425,6 +1425,26 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        // Between a stroke's end and the refreshed screen buffers landing there is no
+        // sample under a cursor that hasn't moved. Falling back to the view direction
+        // there flipped the ring flat for a frame and back to the surface tilt once the
+        // planes landed: a visible swing after every stroke, ~3 frames on Windows where
+        // the plane read is asynchronous (2026-11-12, screen capture of frames 302-307).
+        // So a still cursor over the model keeps the last real normal until the fresh
+        // one arrives. Orbiting and the cursor leaving the model still face the camera.
+        static bool  s_have_last_n = false;
+        static float s_last_n[3] = {0, 0, 1};
+        static double s_last_n_mx = -1, s_last_n_my = -1;
+        if (have_sample) {
+            s_have_last_n = true;
+            s_last_n[0] = target_nx; s_last_n[1] = target_ny; s_last_n[2] = target_nz;
+            s_last_n_mx = input.mouse_x; s_last_n_my = input.mouse_y;
+        } else if (s_have_last_n && !camera_moving && input.on_model
+                   && std::fabs(input.mouse_x - s_last_n_mx) < 24.0
+                   && std::fabs(input.mouse_y - s_last_n_my) < 24.0) {
+            target_nx = s_last_n[0]; target_ny = s_last_n[1]; target_nz = s_last_n[2];
+            have_sample = true;
+        }
         if (!have_sample) {
             Vec3 vd = camera.get_view_direction();
             target_nx = -vd.x; target_ny = -vd.y; target_nz = -vd.z;

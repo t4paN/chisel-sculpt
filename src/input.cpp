@@ -817,7 +817,7 @@ static GLFWwindow* g_slider_settle_w = nullptr;
 static double      g_slider_settle_t0 = 0.0;
 static bool        g_slider_settle_moved = false;
 static double      g_slider_settle_px = 0.0;
-static constexpr double kSettleMax = 0.15;
+static constexpr double kSettleMax = 0.08;   // log7/8: the hand tail is 40-53 ms; 150 ms swallowed deliberate moves
 
 static bool slider_settle_absorb(float dx) {
     if (!g_slider_settling) return false;
