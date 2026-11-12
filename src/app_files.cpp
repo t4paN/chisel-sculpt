@@ -529,6 +529,21 @@ void app_files_frame(App& a) {
             return wrote;
         }
         toast_written(wrote, want, stem);
+        // Maps ticked with no bake to put in them: say so, or the file looks broken
+        // (Windows 2026-11-12: a bare GLB exported before the bake, read as a bug).
+        const bool asked_maps = tex && (input.uvx_tex_color || input.uvx_tex_normal);
+        const bool no_maps = asked_maps && !r.has_color && !r.has_normal;
+        if (model && no_maps && wrote.size() == want) {
+            std::snprintf(input.notification, sizeof(input.notification),
+                          "Exported geometry only: no bake yet (UV mode, Bake) for the maps");
+            input.notification_timer = 4.0f;
+        }
+        std::printf("[export] %s: %zu of %zu written, %zu mesh%s; colour %s, normal %s%s\n",
+                    stem.c_str(), wrote.size(), want, parts.size(), parts.size() == 1 ? "" : "es",
+                    t_col ? (glb_carries ? "inside" : "png") : "no",
+                    t_nrm ? (glb_carries ? "inside" : "png") : "no",
+                    no_maps ? " (maps ticked, nothing baked)" : "");
+        std::fflush(stdout);
         return wrote;
     };
     auto uvx_ext = [&]() { return input.uvx_model ? (input.uvx_format == 2 ? ".glb" : input.uvx_format == 1 ? ".stl" : ".obj") : ""; };
