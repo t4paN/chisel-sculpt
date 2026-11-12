@@ -139,6 +139,7 @@ static constexpr float SPACING_REF = 0.25f;
 // From input.cpp
 extern float input_consume_scroll();
 extern void input_slider_probe_tick();   // TEMPORARY Windows slider-return probe
+extern void input_slider_capture_tick(GLFWwindow* w);   // Win32 deferred slider capture
 void setup_char_callback(GLFWwindow* window);
 
 // From window_icon.cpp — sets the GLFW window icon from the embedded PNG.
@@ -887,6 +888,7 @@ int main(int argc, char* argv[]) {
         else
 #endif
         glfwPollEvents();
+        input_slider_capture_tick(window);
 #if defined(_WIN32) && !defined(__EMSCRIPTEN__)
         g_mouse_history.pull(window, input);
 #endif

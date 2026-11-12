@@ -557,6 +557,10 @@ static double g_slider_last_raw_x = 0;
 // (tablet.cpp) without ever moving it, so an unchanged value at release means the pen,
 // not the mouse, did the drag.
 static double g_slider_begin_vx = 0, g_slider_begin_vy = 0;
+#if defined(_WIN32)
+// A slider key went down this poll; the capture waits for input_slider_capture_tick.
+static bool g_slider_capture_pending = false;
+#endif
 #if !defined(__EMSCRIPTEN__)
 // Set at a slider release: the next pointer report is checked against the drag start.
 static bool g_slider_check_return = false;
@@ -766,7 +770,14 @@ static void begin_slider_drag(GLFWwindow* w, InputState::SliderMode mode, float 
     EM_ASM({ if (Module.chiselSliderBegin) Module.chiselSliderBegin($0, $1); },
            g_input->mouse_x, g_input->mouse_y);
 #endif
+#if defined(_WIN32)
+    // Not from inside the key callback: see input_slider_capture_tick. Until it runs the
+    // cursor is still free and reports window coordinates, which the baseline seeded
+    // below (also window coordinates) turns into honest deltas.
+    if (w) g_slider_capture_pending = true;
+#else
     slider_capture(w, true);
+#endif
     // Seed the delta baseline AFTER capturing. Disabling the cursor switches GLFW to an
     // unbounded virtual position that need not start at the window coordinate, so
     // seeding from mouse_x would make the first motion event a jump of whatever the two
@@ -784,6 +795,39 @@ static void begin_slider_drag(GLFWwindow* w, InputState::SliderMode mode, float 
 #endif
 }
 
+// Win32: the capture a slider key asked for, taken once glfwPollEvents has returned.
+//
+// GLFW's disabled cursor on Windows parks the pointer at the window centre and reads
+// every later WM_MOUSEMOVE as an offset from there. The slider key arrives in the middle
+// of a message drain, and if the hand is moving, moves from BEFORE the capture are still
+// queued behind it. They carry the old position, so the first one read as "the pointer
+// jumped from the centre to where the drag began": the slider leapt by that distance on
+// its first event, 100 px for a drag begun 100 px off centre, and never gave it back
+// (2026-11-12; scripted, 12 drags of 12 with the mouse moving at key-down, none with it
+// still). With the queue drained first there is nothing stale left to misread.
+void input_slider_capture_tick(GLFWwindow* w) {
+#if defined(_WIN32)
+    if (!g_slider_capture_pending) return;
+    g_slider_capture_pending = false;
+    if (!w || !g_input || g_input->slider_mode == InputState::SliderMode::NONE) return;
+    // The hand moved on a little since the key: this is where GLFW will put the pointer
+    // back on release, so this is where the drag (and the ring) sits.
+    double cx = 0.0, cy = 0.0;
+    glfwGetCursorPos(w, &cx, &cy);
+    g_input->slider_start_x = cx;
+    g_input->slider_start_y = cy;
+    g_input->mouse_x = g_input->prev_mouse_x = cx;
+    g_input->mouse_y = g_input->prev_mouse_y = cy;
+    slider_capture(w, true);
+    glfwGetCursorPos(w, &cx, &cy);   // now the virtual position
+    g_slider_last_raw_x = cx;
+    g_slider_begin_vx = cx;
+    g_slider_begin_vy = cy;
+#else
+    (void)w;
+#endif
+}
+
 #if !defined(__EMSCRIPTEN__)
 static void slider_return_warp(double x, double y, bool mouse_dragged);   // see Edge wrap
 #endif
@@ -792,6 +836,9 @@ static void slider_return_warp(double x, double y, bool mouse_dragged);   // see
 // actually is rather than teleporting it into a window the user has already left.
 static void end_slider_drag(GLFWwindow* w, bool warp_back) {
     if (!g_input || g_input->slider_mode == InputState::SliderMode::NONE) return;
+#if defined(_WIN32)
+    g_slider_capture_pending = false;   // a tap: released before the capture was taken
+#endif
     bool mouse_dragged = true;
 #if !defined(__EMSCRIPTEN__)
     if (w) {
@@ -1036,6 +1083,11 @@ static void cursor_pos_callback(GLFWwindow* w, double x, double y) {
         float dx = (float)(x - g_slider_last_raw_x);
         g_slider_last_raw_x = x;
         apply_slider_delta(dx);
+        static const bool s_trace = std::getenv("CHISEL_SLIDER_TRACE") != nullptr;
+        if (s_trace) {
+            std::printf("[slider-trace] t=%.4f x=%.1f y=%.1f dx=%.1f size=%.2f\n",
+                        glfwGetTime(), x, y, dx, g_input->brush_size);
+        }
         return;
     }
 #if defined(_WIN32)
