@@ -1998,6 +1998,7 @@ int main(int argc, char* argv[]) {
                         input.undo_requested = true;
                 }
                 screen_buffers_dirty = true;
+                renderer.keep_planes_next_kick = true;   // only the mesh changed
                 app_state = AppState::IDLE;
             }
         }

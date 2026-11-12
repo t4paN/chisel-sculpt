@@ -2707,7 +2707,21 @@ void Renderer::render_screen_buffers(const Camera& cam, int w, int h) {
     // poll_plane_reads() lands them; until then sample_* report not-ready.
     for (int i = 0; i < 3; ++i)
         if (plane_tk[i]) { gpu::ticket_drop(gpu_dev, plane_tk[i]); plane_tk[i] = 0; }
-    plane_valid = false;
+    // After a stroke the camera hasn't moved, so the planes already here are still right
+    // everywhere but the strip just sculpted, the same data the stroke itself sampled.
+    // Where the read is asynchronous (Windows GL, WebGPU) they stay readable until the new
+    // ones land: invalidating them left 3-5 frames with nothing under the cursor, and a
+    // ring moving off a fresh stroke snapped shape when the data came back (2026-11-12).
+    // Anything that moved the camera or resized still invalidates, as before.
+    const float cam_key[10] = { cam.target.x, cam.target.y, cam.target.z, cam.distance,
+                                cam.yaw, cam.pitch, cam.fov, cam.perspective ? 1.0f : 0.0f,
+                                (float)w, (float)h };
+    const bool same_view = std::memcmp(cam_key, plane_cam_key, sizeof cam_key) == 0;
+    std::memcpy(plane_cam_key, cam_key, sizeof cam_key);
+    const bool keep = keep_planes_next_kick && same_view && plane_valid
+                   && plane_w == w && plane_h == h;
+    keep_planes_next_kick = false;
+    if (!keep) plane_valid = false;
     plane_tk[0] = gpu::read_target_region_async(gpu_dev, screen_target, 0, 0, 0, w, h);
     plane_tk[1] = gpu::read_target_region_async(gpu_dev, screen_target, 1, 0, 0, w, h);
     plane_tk[2] = gpu::read_target_region_async(gpu_dev, screen_target, 2, 0, 0, w, h);

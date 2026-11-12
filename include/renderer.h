@@ -236,6 +236,11 @@ struct Renderer {
     gpu::ReadTicket plane_tk[3] = {0, 0, 0};
     bool plane_pending = false;
     bool plane_split_ok = false;   // Windows GL lands the planes one per frame; all three ok
+    float plane_cam_key[10] = {};  // camera + size of the last plane kick
+    // Set by the caller right before a refresh that only the mesh changed (a stroke
+    // commit): the current planes stay readable until the new ones land, if the camera
+    // and size are unchanged. One-shot. See render_screen_buffers.
+    bool keep_planes_next_kick = false;
     bool plane_valid   = false;
 
     void draw_background(int w, int h);
