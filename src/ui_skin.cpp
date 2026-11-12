@@ -2130,7 +2130,7 @@ float brush_panel(InputState& input, int win_h) {
         // Cut and Contours draw a bare line and the wand only clicks: no width, so no Size either.
         if (cutting) hint("Drag a line across islands");
         else if (contour) { hint("Drag along a limb"); hint("Rings go round it, bridged"); hint("Scroll: more or fewer round"); }
-        else if (points) { hint("Click four points: a quad"); hint("On a vertex: it's shared"); hint("Click a point again: gone"); }
+        else if (points) { hint("Click four points: a quad"); hint("Three, then the first again: a triangle"); hint("On a vertex: it's shared"); hint("Click a point again: gone"); }
         else if (wand) { hint("Click a hole"); hint("Hover a fill to see it"); hint("Click it to keep it"); }
         else meter_widget("##mS", input, 0, w, k, !can_grow || big);
         if (!smoothing && input.retopo_tool == InputState::RetopoTool::ERASE) {

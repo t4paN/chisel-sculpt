@@ -550,7 +550,19 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
             Vec3 p, n;
             float wpp;
             bool ok = true;
-            if (hit >= 0) {
+            // Three down and the first clicked again: close them as a triangle (the
+            // way a loop closes) instead of taking that point back.
+            const bool close_tri = hit == 0 && retopo.points.size() == 3;
+            if (close_tri) {
+                const char* why = retopo_point_quad(retopo, input.mirror_x);
+                if (why) {
+                    std::snprintf(input.notification, sizeof(input.notification), "%s", why);
+                    input.notification_timer = 2.5f;
+                } else {
+                    retopo.points.clear();
+                }
+                retopo.points_rev = retopo.rev;
+            } else if (hit >= 0) {
                 retopo.points.erase(retopo.points.begin() + hit);
             } else if (sv != ~0u) {
                 pk.v = sv;

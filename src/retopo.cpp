@@ -5521,25 +5521,28 @@ bool edge_vertex_fill(RetopoState& st, const EdgeVertex& ev, bool wedge, bool mi
 
 const char* retopo_point_quad(RetopoState& st, bool mirror) {
     RetopoMesh& rm = st.result;
-    if (st.points.size() != 4) return "Four points make a quad";
+    // Four points make a quad; three make a triangle (closed by clicking the first again).
+    const int n = (int)st.points.size();
+    if (n != 3 && n != 4) return "Four points make a quad";
+    const char* what = n == 3 ? "triangle" : "quad";
     if (rm.mirror.size() != rm.v.size()) rm.mirror.resize(rm.v.size(), ~0u);
     Vec3 P[4], N[4];
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < n; i++) {
         const RetopoState::PointPick& k = st.points[i];
         if (k.v != ~0u && k.v >= rm.v.size()) return "A point's vertex went away: click it again";
         P[i] = k.v != ~0u ? rm.v[k.v] : k.p;
         N[i] = k.v != ~0u ? rm.n[k.v] : k.n;
     }
     float span = 0.0f;
-    for (int i = 0; i < 4; i++)
-        for (int j = i + 1; j < 4; j++) span = std::max(span, (P[i] - P[j]).length());
-    for (int i = 0; i < 4; i++)
-        for (int j = i + 1; j < 4; j++) {
+    for (int i = 0; i < n; i++)
+        for (int j = i + 1; j < n; j++) span = std::max(span, (P[i] - P[j]).length());
+    for (int i = 0; i < n; i++)
+        for (int j = i + 1; j < n; j++) {
             const bool same_v = st.points[i].v != ~0u && st.points[i].v == st.points[j].v;
             if (same_v || (P[i] - P[j]).length() <= 1e-4f * span) return "Two of those points are the same spot";
         }
     // Which way is out: the sculpt's normals under the corners.
-    Vec3 nf = N[0] + N[1] + N[2] + N[3];
+    Vec3 nf = N[0] + N[1] + N[2] + (n == 4 ? N[3] : Vec3(0, 0, 0));
     if (nf.length() < 1e-6f) return "Those points face every way: click them on one side of the form";
     nf = nf.normalized();
     // Round the quad, whatever order they were clicked in: looking down nf, a click order
@@ -5547,18 +5550,18 @@ const char* retopo_point_quad(RetopoState& st, bool mirror) {
     const Vec3 ax = std::fabs(nf.x) < 0.9f ? Vec3(1, 0, 0) : Vec3(0, 1, 0);
     const Vec3 tu = nf.cross(ax).normalized(), tv = nf.cross(tu);
     float X[4], Y[4];
-    for (int i = 0; i < 4; i++) { X[i] = P[i].dot(tu); Y[i] = P[i].dot(tv); }
+    for (int i = 0; i < n; i++) { X[i] = P[i].dot(tu); Y[i] = P[i].dot(tv); }
     auto side = [&](int p, int q, int r) { return (X[q] - X[p]) * (Y[r] - Y[p]) - (Y[q] - Y[p]) * (X[r] - X[p]); };
     auto crosses = [&](int a, int b, int c, int d) {
         return side(a, b, c) * side(a, b, d) < 0.0f && side(c, d, a) * side(c, d, b) < 0.0f;
     };
     int o[4] = {0, 1, 2, 3};
-    if (crosses(0, 1, 2, 3))      { o[1] = 2; o[2] = 1; }
-    else if (crosses(1, 2, 3, 0)) { o[2] = 3; o[3] = 2; }
+    if (n == 4 && crosses(0, 1, 2, 3))      { o[1] = 2; o[2] = 1; }
+    else if (n == 4 && crosses(1, 2, 3, 0)) { o[2] = 3; o[3] = 2; }   // a triangle can't cross
     Vec3 nw(0, 0, 0);   // Newell: twice the area, along the quad's own normal
-    for (int k = 0; k < 4; k++) nw = nw + P[o[k]].cross(P[o[(k + 1) % 4]]);
+    for (int k = 0; k < n; k++) nw = nw + P[o[k]].cross(P[o[(k + 1) % n]]);
     if (nw.length() < 1e-4f * span * span) return "Those points are in a line: spread them out";
-    if (nw.dot(nf) < 0.0f) std::swap(o[1], o[3]);   // wound to face out of the sculpt
+    if (nw.dot(nf) < 0.0f) std::swap(o[1], o[n - 1]);   // wound to face out of the sculpt
 
     RetopoSnapshot before = snapshot_of(st);
     // A built vertex among them: the quad joins that island. All new: an island of its own.
@@ -5575,7 +5578,7 @@ const char* retopo_point_quad(RetopoState& st, bool mirror) {
     touched.push_back(owner);
     const uint32_t v0 = (uint32_t)rm.v.size(), f0 = rm.face_count();
     uint32_t q[4];
-    for (int k = 0; k < 4; k++) {
+    for (int k = 0; k < n; k++) {
         const RetopoState::PointPick& pk = st.points[o[k]];
         if (pk.v != ~0u) { q[k] = pk.v; continue; }
         q[k] = (uint32_t)rm.v.size();
@@ -5585,13 +5588,13 @@ const char* retopo_point_quad(RetopoState& st, bool mirror) {
         // Snapped onto x = 0 at the click (mirror on): its own twin, shared with the twin quad.
         rm.mirror.push_back(mirror && pk.p.x == 0.0f ? q[k] : ~0u);
     }
-    rm.add_face(q, 4, owner);
+    rm.add_face(q, n, owner);
     // Mirror: the twin, when the quad sits on one side of x = 0 (corners on it are shared)
     // and every built vertex it takes has a twin of its own to take there.
     bool twin = false, across = false, unpaired = false;
     if (mirror) {
         bool pos = false, neg = false;
-        for (int k = 0; k < 4; k++) {
+        for (int k = 0; k < n; k++) {
             pos |= P[k].x > 1e-6f;
             neg |= P[k].x < -1e-6f;
             if (st.points[k].v != ~0u) unpaired |= rm.mirror[st.points[k].v] >= v0;
@@ -5604,8 +5607,10 @@ const char* retopo_point_quad(RetopoState& st, bool mirror) {
     }
     if (new_faces_double(rm, f0)) {
         put(st, before);
-        return twin ? "That quad, or its twin, would lie over one already there"
-                    : "That quad would lie over one already there";
+        return twin ? (n == 3 ? "That triangle, or its twin, would lie over a face already there"
+                              : "That quad, or its twin, would lie over one already there")
+                    : (n == 3 ? "That triangle would lie over a face already there"
+                              : "That quad would lie over one already there");
     }
     if (fresh) {
         RetopoStroke s;
@@ -5624,7 +5629,7 @@ const char* retopo_point_quad(RetopoState& st, bool mirror) {
     st.rev++;
     push_capped(st.undo_stack, std::move(before));
     st.redo_stack.clear();
-    std::printf("[retopo] points: quad%s%s%s\n", twin ? " + twin" : "",
+    std::printf("[retopo] points: %s%s%s%s\n", what, twin ? " + twin" : "",
                 across ? " (across x = 0: no twin)" : "",
                 unpaired ? " (a built corner has no twin: no twin)" : "");
     return nullptr;
