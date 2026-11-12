@@ -2,6 +2,18 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-12 — Second trip to 62.9M fits; level undo keeps mirror pairs; Windows round-trip fixes
+
+- Crash fixed: up to 62.9M tris, down a level, up again ran out of graphics memory. Stroke, snapshot and cascade scratch past twice the biggest mesh is freed after a level switch, and a level too big for the GPU rebuild drops the cascade's tables first. 10 GB card: 2.35 GB held at 15.7M after the visit (was 4.8), the second 62.9M holds what the first did; both backends.
+- Ctrl+Z on a level change kept the old level's mirror map: it went to the GPU at the wrong size and the sculpt was re-paired by position (on Windows 937k of 17.9M verts kept a twin). The rebuilt level's own map is used now; stepping down no longer re-pairs the base cage from projected positions either.
+- A brush key pressed mid S/W/E/R drag no longer stamps the new brush's strength, hardness and spacing onto the old one.
+- Back to Edit mode no longer re-sends the active mesh (adjacency, mirror map, buffers); an insert did it twice.
+- Retopo Points: three points, then the first again, close a triangle.
+- Drag and drop: the prompt offers Add (A) beside Replace for meshes, as a glass dialog in the modern skins.
+- Export with maps ticked but nothing baked says it wrote geometry only.
+- Log lines: `[export]` (what was written), `[insert]` preview/commit ms, `[window]` size, scale and fullscreen changes.
+- Dev: `gpu-wedge-test.py` (root) takes `LEVEL_UNDO=1` for the Windows sequence.
+
 ## 2026-11-11 — Graphics memory setting; live GPU buffer ledger
 
 - Crash: up to 62.9M tris, down a level, up again aborted on native WebGPU ("Not enough memory left"). Revisiting a stored level is rebuilt on the card (the GPU cascade), which keeps its own tables and scratch: about 1.6 GB extra at 15.7M tris, about 6 GB at 62.9M.
