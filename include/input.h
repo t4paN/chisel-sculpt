@@ -1,4 +1,6 @@
 #pragma once
+#include <cctype>
+#include <cstring>
 #include <GLFW/glfw3.h>
 #include <cstdint>
 #include <string>
@@ -595,6 +597,17 @@ struct InputState {
     // File > Recents and File > Recover reuse this prompt. drop_recover: the path is
     // an autosave, so it opens as Unsaved Project and never becomes the save target.
     bool drop_recover = false;
+    // A: add the file to the scene instead of replacing it (what Open's "Append to
+    // scene" does). Not for a .chisel project or an autosave, which are whole scenes.
+    bool drop_append = false;
+    bool drop_appendable() const {
+        if (drop_recover) return false;
+        const char* dot = std::strrchr(drop_path, '.');
+        if (!dot) return true;
+        char ext[8] = {};
+        for (int i = 0; i < 7 && dot[1 + i]; i++) ext[i] = (char)std::tolower((unsigned char)dot[1 + i]);
+        return std::strcmp(ext, "chisel") != 0;
+    }
 
     // Notification (brief on-screen message)
     char notification[512];

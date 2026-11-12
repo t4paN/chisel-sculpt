@@ -3805,6 +3805,44 @@ void draw_skin_dialogs(InputState& input, int win_w, int win_h, const DialogInfo
         end_dialog();
     }
 
+    // ---- Drag and drop: open the dropped file ---- (Recents and Recover reuse it.)
+    if (begin_dialog("##dlgDrop", input.drop_confirm_pending, win_w, win_h)) {
+        const float avail = ImGui::GetContentRegionAvail().x;
+        auto centre = [&](float w) {
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.0f, (avail - w) * 0.5f));
+        };
+        const char* path = input.drop_path;
+        const char* base = std::strrchr(path, '/');
+        const char* bs = std::strrchr(path, '\\');
+        if (bs && (!base || bs > base)) base = bs;
+        base = base ? base + 1 : path;
+        const bool add = input.drop_appendable();
+        char title[160];
+        // Capped well short of title_case's 64-char buffer (the DOS skin upper-cases).
+        std::snprintf(title, sizeof title, "Open %.48s?", base);
+        const char* note = add ? "Replace the scene with it, or add it beside what's there."
+                               : "It replaces the scene; anything not saved is lost.";
+        centre(text_size(UiFont::SansSemibold, 16.0f, title_case(title)).x);
+        dlg_title(title);
+        centre(text_size(UiFont::Sans, 13.0f, note).x);
+        dlg_text(UiFont::Sans, 13.0f, kMuted, note);
+        ImGui::Dummy(ImVec2(0.0f, 2.0f));
+        const float sp = ImGui::GetStyle().ItemSpacing.x;
+        centre((add ? dlg_button_w("Add", "A") + sp : 0.0f)
+               + dlg_button_w("Replace", "Y") + dlg_button_w("Cancel", "N") + sp);
+        if (add) {
+            if (dlg_button("##drA", "Add", "A", true)) press_dialog_key(GLFW_KEY_A);
+            dlg_tip("Add it to the scene as a new mesh; nothing here changes");
+            ImGui::SameLine();
+        }
+        if (dlg_button("##drY", "Replace", "Y", !add, true)) press_dialog_key(GLFW_KEY_Y);
+        dlg_tip("Open it in place of the scene, without saving this one");
+        ImGui::SameLine();
+        if (dlg_button("##drN", "Cancel", "N", false)) press_dialog_key(GLFW_KEY_N);
+        dlg_tip("Keep the scene as it is (Esc works too)");
+        end_dialog();
+    }
+
     // ---- Quit ---- Everything centred. Save & Quit saves first: a project with no
     // file yet gets the Save window, and the app closes once that save lands.
     if (begin_dialog("##dlgQuit", input.quit_requested, win_w, win_h)) {

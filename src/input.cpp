@@ -1658,6 +1658,7 @@ static void handle_modal_key(GLFWwindow* w, int key) {
             if (in.drop_confirm_pending) {
                 // In the drop dialog, Y = open without saving.
                 in.drop_confirm_pending = false;
+                in.drop_append = false;
                 in.drop_open_requested = true;
             } else if (merge) {
                 in.voxel_merge_confirm_pending = false;
@@ -1684,6 +1685,14 @@ static void handle_modal_key(GLFWwindow* w, int key) {
                 in.new_project_requested = true;
             } else if (in.quit_requested) {
                 glfwSetWindowShouldClose(w, GLFW_TRUE);
+            }
+            break;
+        case GLFW_KEY_A:
+            // Drop dialog only: add the file to the scene, keep what's there.
+            if (in.drop_confirm_pending && in.drop_appendable()) {
+                in.drop_confirm_pending = false;
+                in.drop_append = true;
+                in.drop_open_requested = true;
             }
             break;
         case GLFW_KEY_N:

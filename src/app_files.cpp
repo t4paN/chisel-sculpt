@@ -1276,8 +1276,15 @@ void app_files_frame(App& a) {
     if (input.drop_open_requested) {
         input.drop_open_requested = false;
         if (input.drop_recover) do_recover(input.drop_path);
-        else                    do_import_path(input.drop_path);
+        else if (input.drop_append) {
+            // The Open dialog's tick, for this one file; the user's own choice stays.
+            const bool keep = input.import_append;
+            input.import_append = true;
+            do_import_path(input.drop_path);
+            input.import_append = keep;
+        } else                  do_import_path(input.drop_path);
         input.drop_recover = false;
+        input.drop_append = false;
     }
 
     if (input.save_requested) {

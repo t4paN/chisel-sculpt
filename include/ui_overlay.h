@@ -8,7 +8,7 @@ struct AlphaLibrary;
 class Scene;
 
 void draw_quit_dialog(TextOverlay& text, int win_w, int win_h);
-void draw_drop_confirm(TextOverlay& text, const char* path, int win_w, int win_h);
+void draw_drop_confirm(TextOverlay& text, const char* path, bool appendable, int win_w, int win_h);
 // levels_to_bake: subdivision levels the rescue snapshot will bake down first to
 // get the scene under its triangle cap (0 = none, -1 = cannot fit, no rescue).
 // Shown in the prompt because baking is destructive and the Y is the consent.
