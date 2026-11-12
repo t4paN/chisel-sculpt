@@ -394,7 +394,10 @@ void InputState::sync_live_settings() {
     // Size is only mirrored when the per-brush toggle is on; off, one shared size is
     // the whole point. The stash is still kept current at the point of edit either way,
     // so flipping the toggle mid-session starts from the sizes you were actually using.
-    if (per_brush_sizes) brush_size = brush_size_of[(int)size_slot()];
+    if (per_brush_sizes && brush_size != brush_size_of[(int)size_slot()]) {
+        brush_size = brush_size_of[(int)size_slot()];
+        size_writer = "per-brush mirror";
+    }
 }
 
 void InputState::flush_profile() {
@@ -574,6 +577,7 @@ static void apply_slider_delta(float dx) {
                 scaled = std::max(min_val, std::min(max_val, scaled));
                 g_input->slider_accum = scaled / 0.4f;
                 g_input->brush_size = g_input->slider_start_value + scaled;
+                g_input->size_writer = "S drag";
                 break;
             }
             case InputState::SliderMode::STRENGTH: {
@@ -711,6 +715,22 @@ static void begin_slider_drag(GLFWwindow* w, InputState::SliderMode mode, float 
     g_input->slider_mode        = mode;
     g_input->slider_start_x     = g_input->mouse_x;
     g_input->slider_start_y     = g_input->mouse_y;
+#if defined(_WIN32)
+    // Win32 GLFW remembers the OS cursor position at the moment of capture and puts the
+    // cursor back there on release; a glfwSetCursorPos while disabled only moves its
+    // virtual cursor. mouse_x can trail the OS cursor by a few px (coalesced moves still
+    // queued), so a start taken from it was a spot the pointer never returned to: the
+    // ring jumped 2-9 px on the first move after release (2026-11-11, Entry 1a). Start
+    // from the position GLFW will restore instead.
+    if (w) {
+        double cx = 0.0, cy = 0.0;
+        glfwGetCursorPos(w, &cx, &cy);
+        g_input->slider_start_x = cx;
+        g_input->slider_start_y = cy;
+        g_input->mouse_x = g_input->prev_mouse_x = cx;
+        g_input->mouse_y = g_input->prev_mouse_y = cy;
+    }
+#endif
     g_input->slider_start_value = start_value;
     g_input->slider_slot        = g_input->live_brush_slot();
     g_input->slider_accum       = 0;
@@ -773,6 +793,22 @@ static void end_slider_drag(GLFWwindow* w, bool warp_back) {
     EM_ASM({ if (Module.chiselSliderEnd) Module.chiselSliderEnd($0); }, warp_back ? 1 : 0);
 #endif
     slider_capture(w, false);
+#if defined(_WIN32)
+    // Adopt where the pointer really is now that the capture is released (see
+    // begin_slider_drag), so the ring and the cursor can't disagree on the next move.
+    if (w) {
+        double rx = 0.0, ry = 0.0;
+        glfwGetCursorPos(w, &rx, &ry);
+        const double off = std::hypot(rx - g_input->slider_start_x, ry - g_input->slider_start_y);
+        if (warp_back && off > 1.0) {
+            std::printf("[slider] release: pointer at (%.0f, %.0f), %.1f px from the drag "
+                        "start; adopted\n", rx, ry, off);
+            std::fflush(stdout);
+        }
+        g_input->mouse_x = g_input->prev_mouse_x = rx;
+        g_input->mouse_y = g_input->prev_mouse_y = ry;
+    }
+#endif
 #if !defined(__EMSCRIPTEN__)
     if (w && warp_back) {
         slider_return_warp(g_input->slider_start_x, g_input->slider_start_y, mouse_dragged);
@@ -1282,6 +1318,16 @@ static void mouse_button_callback(GLFWwindow* w, int button, int action, int mod
                 g_input->drag_mode = InputState::DragMode::NONE;
         }
     }
+    // TEMPORARY (Windows first-click-after-pen<->mouse hunt): every button edge, with the
+    // profile it landed in and what it latched. Pair with the [profile] lines by time.
+    std::printf("[click] t=%.3f %s %s at %.0f,%.0f profile %s -> drag_mode %d slider %d "
+                "on_model %d\n", glfwGetTime(),
+                button == GLFW_MOUSE_BUTTON_LEFT ? "LMB" : button == GLFW_MOUSE_BUTTON_RIGHT ? "RMB"
+                    : button == GLFW_MOUSE_BUTTON_MIDDLE ? "MMB" : "other",
+                action == GLFW_PRESS ? "down" : "up", g_input->mouse_x, g_input->mouse_y,
+                g_input->active_profile == InputProfile::TABLET ? "tablet" : "mouse",
+                (int)g_input->drag_mode, (int)g_input->slider_mode, (int)g_input->on_model);
+    std::fflush(stdout);
 }
 
 static void scroll_callback(GLFWwindow* w, double xoff, double yoff) {
@@ -1557,6 +1603,7 @@ static void run_key_action(GLFWwindow* w, KeyAction a, bool repeat) {
             float step = std::max(1.0f, in.brush_size * 0.08f);
             in.brush_size = std::max(5.0f, std::min(500.0f,
                 in.brush_size + (a == KeyAction::SIZE_UP ? step : -step)));
+            in.size_writer = a == KeyAction::SIZE_UP ? "size key up" : "size key down";
             // Stash it too, or with per-brush sizes on the next switch_brush undoes this.
             in.brush_size_of[(int)in.size_slot()] = in.brush_size;
             snprintf(in.notification, sizeof(in.notification), "Size: %.0f", in.brush_size);

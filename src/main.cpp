@@ -929,6 +929,40 @@ int main(int argc, char* argv[]) {
             camera.fov = eff_fov;
         }
 
+        // TEMPORARY (Windows 1b: size jumps on Crease -> Draw with individual sizes off).
+        // Catches every brush_size change, tagged or not, with enough context to tell a
+        // stray dock-bar click from a writer nobody knew about. S drags would print a line
+        // per motion event, so a drag is folded into one line on release.
+        {
+            static float s_size_seen = input.brush_size;
+            static float s_drag_from = -1.0f;
+            const bool in_size_drag = input.slider_mode == InputState::SliderMode::SIZE;
+            if (in_size_drag && s_drag_from < 0.0f) s_drag_from = s_size_seen;
+            if (!in_size_drag && s_drag_from >= 0.0f) {
+                std::printf("[size] %.1f -> %.1f by S drag (brush %s)\n", s_drag_from,
+                            input.brush_size, input.brush_name());
+                std::fflush(stdout);
+                s_drag_from = -1.0f;
+                s_size_seen = input.brush_size;
+                input.size_writer = nullptr;
+            }
+            if (!in_size_drag && input.brush_size != s_size_seen) {
+                const ImVec2 imp = ImGui::GetIO().MousePos;
+                std::printf("[size] %.1f -> %.1f by %s (brush %s, mode %d, profile %s, "
+                            "mouse %.0f,%.0f imgui %.0f,%.0f, imgui-wants-mouse %d, LMB %d)\n",
+                            s_size_seen, input.brush_size,
+                            input.size_writer ? input.size_writer : "UNKNOWN WRITER",
+                            input.brush_name(), (int)input.interaction_mode,
+                            input.active_profile == InputProfile::TABLET ? "tablet" : "mouse",
+                            input.mouse_x, input.mouse_y, imp.x, imp.y,
+                            (int)ImGui::GetIO().WantCaptureMouse,
+                            (int)ImGui::IsMouseDown(ImGuiMouseButton_Left));
+                std::fflush(stdout);
+                s_size_seen = input.brush_size;
+                input.size_writer = nullptr;
+            }
+        }
+
         // Device-driven profile switch. Both profiles stay loaded; whichever device is
         // actually producing input owns the live brush settings.
         //
@@ -955,13 +989,33 @@ int main(int argc, char* argv[]) {
 
             bool cursor_moved = (input.mouse_x != input.prev_mouse_x ||
                                  input.mouse_y != input.prev_mouse_y);
+            // Where the platform reports pen proximity (WinTab's WT_PROXIMITY), use it:
+            // the pen entering range switches while it is still hovering, so the profile
+            // is already right when the tip or a barrel button goes down, and the pen
+            // leaving range hands over to the mouse on the next motion with no guessed
+            // quiet window. -1 = no proximity source, the packet + timeout rule alone.
+            static unsigned long prev_prox_changes = tablet.proximity_changes();
+            const int prox = tablet.proximity();
+            const bool prox_edge = tablet.proximity_changes() != prev_prox_changes;
+            prev_prox_changes = tablet.proximity_changes();
             InputProfile want = input.active_profile;
-            if (pen_reported)
-                want = InputProfile::TABLET;
-            else if (cursor_moved && now - last_pen_input_time > kPenHoldSec)
-                want = InputProfile::MOUSE;
+            const char* why = "";
+            if (pen_reported) {
+                want = InputProfile::TABLET; why = "pen packets";
+            } else if (prox_edge && prox == 1) {
+                want = InputProfile::TABLET; why = "pen entered proximity";
+            } else if (cursor_moved && prox == 0) {
+                want = InputProfile::MOUSE; why = "cursor moved, pen out of proximity";
+            } else if (cursor_moved && now - last_pen_input_time > kPenHoldSec) {
+                want = InputProfile::MOUSE; why = "cursor moved, no pen packets for 0.25 s";
+            }
 
             if (want != input.active_profile) {
+                std::printf("[profile] %s -> %s (%s; %.3f s since pen packet, proximity %d)\n",
+                            input.active_profile == InputProfile::TABLET ? "tablet" : "mouse",
+                            want == InputProfile::TABLET ? "tablet" : "mouse", why,
+                            now - last_pen_input_time, prox);
+                std::fflush(stdout);
                 input.switch_profile(want);
                 std::snprintf(input.notification, sizeof(input.notification),
                               want == InputProfile::TABLET ? "Tablet settings"
@@ -1101,6 +1155,13 @@ int main(int argc, char* argv[]) {
         bool imgui_wants_mouse = ImGui::GetIO().WantCaptureMouse;
         bool dialog_open = input.export_dialog_active || input.import_dialog_active || input.save_dialog_active || input.voxel_merge_confirm_pending || input.drop_confirm_pending || input.remesh_in_progress || input.help_popup_open || input.keybind_menu_open || input.brush_props_open;
         if ((imgui_wants_mouse || dialog_open) && app_state != AppState::SCULPTING) {
+            // TEMPORARY (first-click hunt): a press the UI swallowed, and why.
+            if (input.mouse1_just_pressed || input.drag_mode != InputState::DragMode::NONE) {
+                std::printf("[click] t=%.3f press/drag eaten by the UI gate (imgui-wants-mouse %d, "
+                            "dialog %d, drag_mode was %d)\n", glfwGetTime(),
+                            (int)imgui_wants_mouse, (int)dialog_open, (int)input.drag_mode);
+                std::fflush(stdout);
+            }
             // A press on a panel over the model is the panel's, not a pick or a fill
             // (the bucket's Scale slider sits right over it). Only this frame's press:
             // a gradient dragged from the model may still be released over a panel.
@@ -1192,6 +1253,50 @@ int main(int argc, char* argv[]) {
 #if GLFW_VERSION_MAJOR > 3 || GLFW_VERSION_MINOR >= 4
             wayland = glfwGetPlatform() == GLFW_PLATFORM_WAYLAND;
 #endif
+#if defined(_WIN32)
+            // Windows: borderless, not exclusive. glfwSetWindowMonitor with a monitor takes
+            // exclusive fullscreen, which on this box flashed the screen on every toggle
+            // and on every focus change (2026-11-12, Entry 5c). An undecorated window that
+            // covers the monitor exactly is what Windows itself treats as fullscreen (the
+            // taskbar steps aside while it is foreground), with no mode change at all.
+            static bool windowed_was_max = false;
+            (void)wayland;
+            if (!input.is_fullscreen) {
+                windowed_was_max = glfwGetWindowAttrib(window, GLFW_MAXIMIZED) != 0;
+                if (windowed_was_max) glfwRestoreWindow(window);
+                glfwGetWindowPos(window, &windowed_x, &windowed_y);
+                glfwGetWindowSize(window, &windowed_w, &windowed_h);
+                // The monitor the window is mostly on, not always the primary.
+                GLFWmonitor* mon = glfwGetPrimaryMonitor();
+                int mcount = 0;
+                GLFWmonitor** mons = glfwGetMonitors(&mcount);
+                int best = -1;
+                for (int i = 0; i < mcount; i++) {
+                    int mx, my;
+                    glfwGetMonitorPos(mons[i], &mx, &my);
+                    const GLFWvidmode* m = glfwGetVideoMode(mons[i]);
+                    if (!m) continue;
+                    int ox = std::max(0, std::min(windowed_x + windowed_w, mx + m->width) - std::max(windowed_x, mx));
+                    int oy = std::max(0, std::min(windowed_y + windowed_h, my + m->height) - std::max(windowed_y, my));
+                    if (ox * oy > best) { best = ox * oy; mon = mons[i]; }
+                }
+                const GLFWvidmode* vm = mon ? glfwGetVideoMode(mon) : nullptr;
+                if (vm) {
+                    int mx = 0, my = 0;
+                    glfwGetMonitorPos(mon, &mx, &my);
+                    glfwSetWindowAttrib(window, GLFW_DECORATED, GLFW_FALSE);
+                    glfwSetWindowPos(window, mx, my);
+                    glfwSetWindowSize(window, vm->width, vm->height);
+                    input.is_fullscreen = true;
+                }
+            } else {
+                glfwSetWindowAttrib(window, GLFW_DECORATED, GLFW_TRUE);
+                glfwSetWindowPos(window, windowed_x, windowed_y);
+                glfwSetWindowSize(window, windowed_w, windowed_h);
+                if (windowed_was_max) glfwMaximizeWindow(window);
+                input.is_fullscreen = false;
+            }
+#else
             if (!input.is_fullscreen) {
                 if (!wayland) glfwGetWindowPos(window, &windowed_x, &windowed_y);
                 glfwGetWindowSize(window, &windowed_w, &windowed_h);
@@ -1207,6 +1312,7 @@ int main(int argc, char* argv[]) {
                                      windowed_w, windowed_h, GLFW_DONT_CARE);
                 input.is_fullscreen = false;
             }
+#endif  // _WIN32
 #else
             // Browser fullscreen of the whole page (the canvas is position:fixed at
             // 100vw/100vh, so it follows; win_w/h re-read the size next frame).

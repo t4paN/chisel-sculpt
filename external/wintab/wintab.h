@@ -75,6 +75,11 @@ typedef struct tagLOGCONTEXTA {
 #define CXO_PEN      0x0002
 #define CXO_MESSAGES 0x0004
 
+// --- messages, as offsets from LOGCONTEXT.lcMsgBase (WT_DEFBASE unless changed) ---
+#define WT_DEFBASE      0x7FF0
+#define WT_PACKET_OFS    0
+#define WT_PROXIMITY_OFS 5   // lParam: LOWORD = entering context, HIWORD = entering hardware proximity
+
 // --- packet-field (PK_*) bits, ascending order = packet field order ---
 #define PK_CONTEXT          0x0001
 #define PK_STATUS           0x0002

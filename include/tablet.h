@@ -46,13 +46,18 @@ struct Tablet {
     // for change between frames. Needed because on X11 the pen also drives the core
     // pointer, so cursor motion alone cannot tell pen from mouse.
     unsigned long sample_count() const;
+    // Hardware proximity of the pen, where the platform reports it (Windows WinTab's
+    // WT_PROXIMITY): 1 hovering or touching, 0 away, -1 not known (never reported, or no
+    // source). proximity_changes() counts edges, for callers that poll once a frame.
+    int   proximity() const;
+    unsigned long proximity_changes() const;
     void  shutdown();
 
     Tablet(const Tablet&) = delete;
     Tablet& operator=(const Tablet&) = delete;
 
+    struct Impl;               // public only so the Win32 message proc can reach it
 private:
-    struct Impl;
     Impl* impl = nullptr;      // nullptr on unsupported platforms / failed init
 };
 

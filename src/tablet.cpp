@@ -45,6 +45,8 @@ float Tablet::pressure() const  { return g_web_pen_seen ? g_web_pressure : 1.0f;
 bool  Tablet::available() const { return g_web_pen_seen; }
 void  Tablet::shutdown()        {}
 unsigned long Tablet::sample_count() const { return g_web_pen_count; }
+int Tablet::proximity() const { return -1; }
+unsigned long Tablet::proximity_changes() const { return 0; }
 
 #elif defined(__linux__) && !defined(CHISEL_NO_TABLET)
 
@@ -1024,6 +1026,10 @@ unsigned long Tablet::sample_count() const {
     return impl->samples;
 }
 
+// No proximity source wired on Linux yet (XI2 proximity events would be it).
+int Tablet::proximity() const { return -1; }
+unsigned long Tablet::proximity_changes() const { return 0; }
+
 void Tablet::shutdown() {
     if (!impl) return;
 #if defined(CHISEL_WL_TABLET)
@@ -1056,6 +1062,7 @@ void Tablet::shutdown() {
 #define PACKETDATA (PK_CURSOR | PK_NORMAL_PRESSURE)
 #define PACKETMODE 0
 #include "pktdef.h"
+#include <cstdio>
 
 namespace {
 typedef UINT (*PFN_WTInfoA)(UINT, UINT, LPVOID);
@@ -1083,7 +1090,32 @@ struct Tablet::Impl {
     float  last_pressure = 0.0f;
     unsigned long samples = 0;   // WinTab only queues packets for the pen, so any
                                  // packet at all means the stylus is what is moving
+    UINT   msg_proximity = WT_DEFBASE + WT_PROXIMITY_OFS;
+    int    proximity     = -1;   // -1 never reported, 0 out, 1 in (hardware proximity)
+    unsigned long proximity_changes = 0;
 };
+
+namespace {
+// One tablet per process, and the message window is ours alone, so a file-scope
+// pointer is all the window procedure needs to find its Impl.
+Tablet::Impl* g_wt_impl = nullptr;
+
+LRESULT CALLBACK tablet_msg_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    Tablet::Impl* m = g_wt_impl;
+    if (m && msg == m->msg_proximity) {
+        // HIWORD: the cursor entering/leaving the tablet's hardware proximity. LOWORD
+        // (entering the context) also fires on context overlap changes, which says
+        // nothing about where the pen is, so it is only logged.
+        const int in = HIWORD(lp) != 0 ? 1 : 0;
+        if (in != m->proximity) { m->proximity = in; m->proximity_changes++; }
+        std::printf("[tablet] proximity %s (ctx %s)\n", in ? "in" : "out",
+                    LOWORD(lp) ? "enter" : "leave");
+        std::fflush(stdout);
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+}
 
 Tablet::Tablet() {}
 Tablet::~Tablet() { shutdown(); }
@@ -1118,7 +1150,7 @@ bool Tablet::init(GLFWwindow* /*window*/) {
     // Message-only window to own the context (no UI, isolated from GLFW's window).
     WNDCLASSEXW wc = {};
     wc.cbSize        = sizeof(wc);
-    wc.lpfnWndProc   = DefWindowProcW;
+    wc.lpfnWndProc   = tablet_msg_proc;
     wc.hInstance     = GetModuleHandleW(nullptr);
     wc.lpszClassName = kMsgWinClass;
     RegisterClassExW(&wc);   // benign if already registered
@@ -1136,7 +1168,16 @@ bool Tablet::init(GLFWwindow* /*window*/) {
     lc.lcPktMode  = PACKETMODE;
     lc.lcMoveMask = PACKETDATA;
     lc.lcBtnUpMask = lc.lcBtnDnMask;
+    m->msg_proximity = lc.lcMsgBase + WT_PROXIMITY_OFS;
+    g_wt_impl = m;            // before WTOpen: the driver may report proximity right away
     m->ctx = m->WTOpen(m->msg_win, &lc, TRUE);
+    // lcSysMode: non-zero = the system cursor is in relative (Mouse) mode. Logged for the
+    // Krita relative-mode side project, which needs to know whether drivers set it.
+    std::printf("[tablet] WinTab context %s: pressure %ld..%ld, msg base 0x%X, sysmode %d "
+                "(sys org %d,%d ext %d,%d)\n", m->ctx ? "open" : "FAILED",
+                (long)press.axMin, (long)press.axMax, lc.lcMsgBase, (int)lc.lcSysMode,
+                lc.lcSysOrgX, lc.lcSysOrgY, lc.lcSysExtX, lc.lcSysExtY);
+    std::fflush(stdout);
 
     m->has_device = (m->ctx != nullptr);
     impl = m;                 // keep the lib loaded even with no context (cheap)
@@ -1179,8 +1220,12 @@ unsigned long Tablet::sample_count() const {
     return impl ? impl->samples : 0;
 }
 
+int Tablet::proximity() const { return impl ? impl->proximity : -1; }
+unsigned long Tablet::proximity_changes() const { return impl ? impl->proximity_changes : 0; }
+
 void Tablet::shutdown() {
     if (!impl) return;
+    if (g_wt_impl == impl) g_wt_impl = nullptr;
     if (impl->ctx)     impl->WTCloseFn(impl->ctx);
     if (impl->msg_win) DestroyWindow(impl->msg_win);
     if (impl->wintab)  FreeLibrary(impl->wintab);
@@ -1198,6 +1243,8 @@ float Tablet::pressure() const  { return 1.0f; }
 bool  Tablet::available() const { return false; }
 void  Tablet::shutdown()        {}
 unsigned long Tablet::sample_count() const { return 0; }
+int Tablet::proximity() const { return -1; }
+unsigned long Tablet::proximity_changes() const { return 0; }
 
 #endif
 

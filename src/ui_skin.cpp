@@ -2574,6 +2574,7 @@ void set_feel(InputState& in, int which, float t) {
     const BrushType slot = in.live_brush_slot();
     switch (which) {
         case 0: in.brush_size = std::max(5.0f, t * 500.0f);
+                in.size_writer = "dock/track Size bar";
                 in.brush_size_of[(int)in.size_slot()] = in.brush_size; break;
         case 1: in.brush_strength = std::max(0.01f, t); in.per_brush[(int)slot].strength = in.brush_strength; break;
         case 2: in.brush_hardness = std::max(0.01f, t); in.per_brush[(int)slot].hardness = in.brush_hardness; break;

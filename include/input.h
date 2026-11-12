@@ -222,6 +222,10 @@ struct InputState {
     // property of what you are sculpting right now, so restoring last session's number
     // hands you a brush scaled for a model you are no longer looking at.
     float brush_size;
+    // TEMPORARY (Windows 1b size-jump hunt): every brush_size writer tags itself here;
+    // main.cpp's [size] trace prints the tag on the frame the value changes. A change
+    // with no tag is a writer nobody knew about, which is the point of the trace.
+    const char* size_writer = nullptr;
     // These three are a READ-ONLY MIRROR of per_brush[live_brush_slot()], re-pointed
     // once a frame by sync_live_settings(). per_brush[] is the truth; the mirror exists
     // so the HUD and the sliders have a single scalar to read and drag. Anything that
