@@ -560,6 +560,14 @@ static double g_slider_begin_vx = 0, g_slider_begin_vy = 0;
 #if !defined(__EMSCRIPTEN__)
 // Set at a slider release: the next pointer report is checked against the drag start.
 static bool g_slider_check_return = false;
+#if defined(_WIN32)
+// TEMPORARY slider-return probe (see end_slider_drag). Just GetCursorPos, declared by
+// hand: <windows.h> here would drag its macros (DELETE, near, ...) over the key tables.
+struct tagPOINT { long x; long y; };
+typedef tagPOINT POINT;
+extern "C" __declspec(dllimport) int __stdcall GetCursorPos(POINT*);
+static double g_slider_probe_t0 = 0.0;
+#endif
 #endif
 static GLFWwindow* g_window = nullptr;
 
@@ -800,6 +808,18 @@ static void end_slider_drag(GLFWwindow* w, bool warp_back) {
         double rx = 0.0, ry = 0.0;
         glfwGetCursorPos(w, &rx, &ry);
         const double off = std::hypot(rx - g_input->slider_start_x, ry - g_input->slider_start_y);
+        // TEMPORARY probe: the first move after release lands 4-14 px off the start,
+        // mostly left/up, though the pointer IS at the start right here. Log every report
+        // for 300 ms after release with the OS cursor beside GLFW's.
+        g_slider_probe_t0 = glfwGetTime();
+        {
+            POINT os = {};
+            GetCursorPos(&os);
+            std::printf("[slider-probe] release t=%.3f glfw %.1f,%.1f os(screen) %ld,%ld start %.1f,%.1f\n",
+                        g_slider_probe_t0, rx, ry, os.x, os.y,
+                        g_input->slider_start_x, g_input->slider_start_y);
+            std::fflush(stdout);
+        }
         if (warp_back && off > 1.0) {
             std::printf("[slider] release: pointer at (%.0f, %.0f), %.1f px from the drag "
                         "start; adopted\n", rx, ry, off);
@@ -995,6 +1015,19 @@ static void cursor_pos_callback(GLFWwindow* w, double x, double y) {
         apply_slider_delta(dx);
         return;
     }
+#if defined(_WIN32)
+    if (g_slider_probe_t0 > 0.0) {
+        const double dt = glfwGetTime() - g_slider_probe_t0;
+        if (dt > 0.3) g_slider_probe_t0 = 0.0;
+        else {
+            POINT os = {};
+            GetCursorPos(&os);
+            std::printf("[slider-probe] +%.1f ms cb %.1f,%.1f os(screen) %ld,%ld\n",
+                        dt * 1000.0, x, y, os.x, os.y);
+            std::fflush(stdout);
+        }
+    }
+#endif
     // TEMPORARY (2026-10-27, slider-after-wrap jump): where the pointer first shows up
     // after a slider release. Logged before the wrap filter below, so a stale report it
     // drops is still seen.

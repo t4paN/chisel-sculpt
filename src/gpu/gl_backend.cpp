@@ -281,6 +281,51 @@ void map_read(Device&, const Buffer& staging, uint64_t size, void* out) {
 // ---- One-shot buffer ops -----------------------------------------------------
 
 void read_buffer(Device&, const Buffer& src, uint64_t offset, uint64_t size, void* out) {
+#if defined(_WIN32)
+    // Intel's Windows GL driver serves glGetBufferSubData at ~15 MB/s straight out of
+    // device memory, while a GPU copy into a STREAM_READ buffer that is then mapped
+    // reads at ~3 GB/s (tools/glbench --readback, Arc B570). Every whole-mesh read went
+    // through here: materialize ran at 0.15-0.36 M verts/s against 1-4.5 M on Linux
+    // with the same card, so insert, autosave and level-down stalled for seconds
+    // (2026-11-12, log5: 837k verts in 5.5 s, a 2.6M-vert cascade readback 4.4 s).
+    // Small reads (counters, one-word results) stay on the direct path: for them the
+    // copy and map would cost more than they save.
+    constexpr uint64_t kDirectMax = 64ull << 10;
+    constexpr uint64_t kChunk     = 64ull << 20;   // bounds the staging buffer
+    if (size > kDirectMax && src.handle) {
+        static GLuint   staging     = 0;
+        static uint64_t staging_cap = 0;
+        const uint64_t want = size < kChunk ? size : kChunk;
+        if (staging_cap < want) {
+            if (!staging) glGenBuffers(1, &staging);
+            glBindBuffer(GL_COPY_WRITE_BUFFER, staging);
+            glBufferData(GL_COPY_WRITE_BUFFER, (GLsizeiptr)want, nullptr, GL_STREAM_READ);
+            glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
+            staging_cap = want;
+        }
+        uint8_t* dst = (uint8_t*)out;
+        for (uint64_t done = 0; done < size; ) {
+            const uint64_t n = (size - done) < kChunk ? (size - done) : kChunk;
+            glBindBuffer(GL_COPY_READ_BUFFER,  src.handle);
+            glBindBuffer(GL_COPY_WRITE_BUFFER, staging);
+            glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER,
+                                (GLintptr)(offset + done), 0, (GLsizeiptr)n);
+            glBindBuffer(GL_COPY_READ_BUFFER, 0);
+            // A read map waits for the copy itself (no MAP_UNSYNCHRONIZED).
+            const void* p = glMapBufferRange(GL_COPY_WRITE_BUFFER, 0, (GLsizeiptr)n, GL_MAP_READ_BIT);
+            if (!p) {
+                glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
+                break;   // fall through to the direct read for the rest
+            }
+            std::memcpy(dst + done, p, (size_t)n);
+            glUnmapBuffer(GL_COPY_WRITE_BUFFER);
+            glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
+            done += n;
+            if (done == size) return;
+        }
+        // Mapping failed part-way: the direct path still gives the right bytes, slowly.
+    }
+#endif
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, src.handle);
     glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, (GLintptr)offset, (GLsizeiptr)size, out);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
