@@ -799,6 +799,23 @@ int main(int argc, char* argv[]) {
         win_h = EM_ASM_INT({ return (Module.canvas.clientHeight || window.innerHeight) | 0; });
 #else
         glfwGetFramebufferSize(window, &win_w, &win_h);
+        {
+            // One line per size or mode change. Fullscreen on Windows flashed and then
+            // "felt slower", and the log had nothing to say about it.
+            static int log_w = -1, log_h = -1;
+            static bool log_fs = false;
+            if (win_w != log_w || win_h != log_h || input.is_fullscreen != log_fs) {
+                int ww = 0, wh = 0;
+                float sx = 1.0f, sy = 1.0f;
+                glfwGetWindowSize(window, &ww, &wh);
+                glfwGetWindowContentScale(window, &sx, &sy);
+                std::printf("[window] %.1f s: framebuffer %dx%d, window %dx%d, scale %.2f, %s\n",
+                            glfwGetTime(), win_w, win_h, ww, wh, sx,
+                            input.is_fullscreen ? "fullscreen" : "windowed");
+                std::fflush(stdout);
+                log_w = win_w; log_h = win_h; log_fs = input.is_fullscreen;
+            }
+        }
 #endif
 #if !defined(__EMSCRIPTEN__) && !defined(_WIN32)
         // SIGTERM / SIGHUP (logout, shutdown, `kill`) asks like the title-bar X.

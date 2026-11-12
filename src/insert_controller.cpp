@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cmath>
 #include <algorithm>
+#include <chrono>
 
 InsertController::InsertController(Scene& scene, Renderer& renderer)
     : scene_(scene), renderer_(renderer) {}
@@ -56,7 +57,14 @@ void InsertController::tick(InputState& input, Camera& camera,
 
     // Helper: commit the active entity after preview is finalised.
     // Called from PLACING release and MIRROR_PROMPT answer.
+    // Whole-step timers: a Windows insert greyed the window out ("Not Responding")
+    // and only its 1.6 s materialize was ever measured.
+    using Clock = std::chrono::steady_clock;
+    auto ms_since = [](Clock::time_point t) {
+        return std::chrono::duration<double, std::milli>(Clock::now() - t).count();
+    };
     auto finish_commit = [&](uint32_t preview_id, uint32_t vert_count, bool symmetric) {
+        const auto t_commit = Clock::now();
         scene_.commit_preview(preview_id);
 
         // Init multires on the newly-active entity.
@@ -73,6 +81,8 @@ void InsertController::tick(InputState& input, Camera& camera,
 
         scene_.active_mesh().compute_bounding_sphere(mesh_center, mesh_radius);
         scene_.sync();
+        std::printf("[insert] commit: %u verts, %.1f ms\n", vert_count, ms_since(t_commit));
+        std::fflush(stdout);
 
         if (symmetric) {
             std::snprintf(input.notification, sizeof(input.notification),
@@ -297,7 +307,11 @@ void InsertController::tick(InputState& input, Camera& camera,
                     prim.set_pos(i, spawn + p * state_.current_radius);
                 }
 
+                const auto t_add = Clock::now();
                 state_.preview_mesh_id = scene_.add_preview(prim, state_.subdiv_level);
+                std::printf("[insert] preview: %u verts, %.1f ms\n",
+                            svc, ms_since(t_add));
+                std::fflush(stdout);
                 screen_buffers_dirty = true;
                 state_.phase = Phase::PLACING;
                 std::snprintf(input.notification, sizeof(input.notification),
