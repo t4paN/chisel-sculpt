@@ -121,4 +121,7 @@ struct MultiresGPU {
     void materialize_cpu(MultiresStack& stack, Mesh& mesh, const gpu::Buffer& vbo_pos);
 
     void cleanup();
+    // The same for this mesh's snapshot and stale-list buffers (see
+    // ComputeState::trim_scratch). Disp/frames shrink in ensure() instead.
+    void trim_scratch(uint32_t vertex_count);
 };

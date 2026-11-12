@@ -853,6 +853,9 @@ void cascade_to_level(MultiresStack& stack, Mesh& out, int K, ComputeState* comp
         if (!gpu_fits)
             std::printf("[cascade] L%d: %.1fM tris is past the GPU rebuild size for %d GB, CPU replay\n",
                         K, (double)tris_K / 1e6, gpu::user_memory_gb);
+        // The tables of an earlier, smaller GPU rebuild are still resident; this level
+        // needs that room (second trip up to L8 ran out with ~2 GB of them held).
+        if (compute && !gpu_fits) compute->release_cascade_buffers();
         if (compute && compute->supported && gpu_fits)
             gpu_done = cascade_replay_gpu(stack, *compute, out, passes);
         if (gpu_done) {

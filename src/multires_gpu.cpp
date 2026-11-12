@@ -47,7 +47,10 @@ void MultiresGPU::ensure(uint32_t vertex_count, uint32_t base_vertex_count) {
 
     // Grow-only seam buffers (release + create on grow; WebGPU has no in-place
     // resize). Usage::Storage — these are read/written by the diff/apply kernels.
-    if (capacity < vertex_count || !disp_ssbo.handle || !frames_ssbo.handle) {
+    // Also shrinks past twice the need: a trip down from L8 otherwise kept 1.4 GB of
+    // L8-sized layers. Only upload_level calls this, and it refills both right after.
+    if (capacity < vertex_count || (uint64_t)capacity > (uint64_t)vertex_count * 2u
+        || !disp_ssbo.handle || !frames_ssbo.handle) {
         gpu::release_buffer(disp_ssbo);
         gpu::release_buffer(frames_ssbo);
         disp_ssbo   = gpu::create_buffer(*dev, nullptr,
@@ -349,6 +352,20 @@ void MultiresGPU::materialize_cpu(MultiresStack& stack, Mesh& mesh, const gpu::B
                         std::chrono::steady_clock::now() - t0).count();
         std::printf("[mgpu] materialize: %zu verts in %zu runs, %.1f ms\n",
                     n_dirty, runs.size(), ms);
+    }
+}
+
+void MultiresGPU::trim_scratch(uint32_t vc) {
+    const uint64_t keep = (uint64_t)std::max(vc, 1u) * 2u;
+    if (snap_pos_capacity > keep) {
+        gpu::release_buffer(snap_pos_ssbo);
+        snap_pos_capacity = 0;
+    }
+    // A pending list holds ids still to be materialized; never drop those.
+    if (stale_capacity > keep && !stale_pending) {
+        gpu::release_buffer(stale_mark_ssbo);
+        gpu::release_buffer(stale_list_ssbo);
+        stale_capacity = 0;
     }
 }
 

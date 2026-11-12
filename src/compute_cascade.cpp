@@ -155,6 +155,11 @@ void ComputeState::cleanup_cascade() {
     gpu::release_buffer(cascade_disp_ubo);
     gpu::release_buffer(cascade_normals_ubo);
     gpu::release_buffer(cascade_frames_ubo);
+    release_cascade_buffers();
+}
+
+// Tables and scratch only; the pipelines stay. Both rebuild on the next GPU replay.
+void ComputeState::release_cascade_buffers() {
     for (auto& lv : cascade_levels) release_level(lv);
     cascade_levels.clear();
     cascade_stamp = 0;

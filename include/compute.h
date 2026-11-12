@@ -735,6 +735,15 @@ struct ComputeState {
 
     // Allocate/resize the accumulation buffer for the given vertex count.
     void ensure_accum_buffer(uint32_t vertex_count);
+    // Free the per-vertex stroke and cascade scratch that is more than twice what
+    // `vertex_count` (the largest mesh in the scene, at its current level) needs. They
+    // only ever grow, so after a trip up to a big level they stayed that size, and the
+    // second trip up ran out of graphics memory. Each is recreated at its next use.
+    void trim_scratch(uint32_t vertex_count);
+    // Drop the GPU cascade's per-level tables and scratch (about 2 GB after a fast
+    // rebuild of L7). Called when a switch is too big for the GPU rebuild, so the CPU
+    // replay of that level isn't sharing the card with tables nobody will use.
+    void release_cascade_buffers();
 
     // Clear the accumulation buffer to zero. Call before each dab.
     void clear_accum_buffer();

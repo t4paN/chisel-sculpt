@@ -55,6 +55,46 @@ void ComputeState::ensure_accum_buffer(uint32_t vertex_count) {
     accum_vertex_count = vertex_count;
 }
 
+// Twice, not exactly: the same mesh at the same level never churns, and one level
+// down (a quarter the verts) always frees. Every site below rebuilds on
+// `capacity < n || !handle`, so a zeroed capacity is all the next use needs.
+void ComputeState::trim_scratch(uint32_t vc) {
+    const uint64_t keep = (uint64_t)std::max(vc, 1u) * 2u;
+    auto over = [&](uint32_t cap) { return cap > keep; };
+    if (over(accum_vertex_count)) {
+        gpu::release_buffer(accum_ssbo);
+        gpu::release_buffer(accum_sym_ssbo);
+        accum_vertex_count = 0;
+    }
+    if (over(stroke_norm_capacity)) {
+        gpu::release_buffer(stroke_norm_ssbo);
+        stroke_norm_capacity = 0;
+    }
+    if (over(norm_capacity)) {
+        gpu::release_buffer(norm_mark_ssbo);
+        gpu::release_buffer(norm_list_ssbo);
+        norm_capacity = 0;
+    }
+    if (over(touched_capacity)) {
+        gpu::release_buffer(touched_mark_ssbo);
+        gpu::release_buffer(touched_list_ssbo);
+        touched_capacity = 0;
+    }
+    // The cascade's hand-off to residency (cascade_out_valid) is consumed before this
+    // runs, so its disp/frames scratch holds nothing anyone will read.
+    if (over(cascade_pos_capacity)) {
+        gpu::release_buffer(cascade_pos_a);
+        gpu::release_buffer(cascade_pos_b);
+        gpu::release_buffer(cascade_norm_ssbo);
+        cascade_pos_capacity = 0;
+    }
+    if (over(cascade_layer_capacity) && !cascade_out_valid) {
+        gpu::release_buffer(cascade_disp_ssbo);
+        gpu::release_buffer(cascade_frames_ssbo);
+        cascade_layer_capacity = 0;
+    }
+}
+
 void ComputeState::clear_accum_buffer() {
     if (!accum_ssbo.handle || accum_vertex_count == 0) return;
     gpu::clear_buffer(gpu_dev, accum_ssbo, 0);

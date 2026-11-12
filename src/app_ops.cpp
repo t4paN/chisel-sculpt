@@ -73,6 +73,14 @@ void app_refresh_active_gpu_residency(App& a) {
     }
     ent.multires_gpu.upload_level(ent.multires, ent.multires.current_level, dsrc, fsrc);
     compute.cascade_out_valid = false;
+    // Grow-only scratch follows the mesh back down (subd-memory-second-trip-handoff).
+    // The shared buffers keep room for the biggest mesh in the scene, so switching
+    // between a big sculpt and a small one never frees and regrows them.
+    uint32_t biggest = 0;
+    for (const auto& e : scene.entities())
+        if (e && e->alive) biggest = std::max(biggest, e->mesh.vertex_count());
+    compute.trim_scratch(biggest);
+    ent.multires_gpu.trim_scratch(ent.mesh.vertex_count());
 }
 
 // Debug helper: print undo stack top after key operations
