@@ -138,6 +138,7 @@ static constexpr float SPACING_REF = 0.25f;
 
 // From input.cpp
 extern float input_consume_scroll();
+extern void input_slider_probe_tick();   // TEMPORARY Windows slider-return probe
 void setup_char_callback(GLFWwindow* window);
 
 // From window_icon.cpp — sets the GLFW window icon from the embedded PNG.
@@ -889,6 +890,7 @@ int main(int argc, char* argv[]) {
 #if defined(_WIN32) && !defined(__EMSCRIPTEN__)
         g_mouse_history.pull(window, input);
 #endif
+        input_slider_probe_tick();
         wl_pointer_warp_dispatch();   // the pointer-enter serial a Wayland edge wrap needs
         tablet.poll(brush_stroke.is_active());
         if (tablet.available() && !prev_tablet_avail) {

@@ -567,7 +567,27 @@ struct tagPOINT { long x; long y; };
 typedef tagPOINT POINT;
 extern "C" __declspec(dllimport) int __stdcall GetCursorPos(POINT*);
 static double g_slider_probe_t0 = 0.0;
+static bool   g_slider_probe_watch = false;   // release .. first report after rest
+static long   g_slider_probe_osx = 0, g_slider_probe_osy = 0;
 #endif
+
+// TEMPORARY, once a frame from main: while the pointer is quiet after a slider release,
+// log the OS cursor if it moves WITHOUT a GLFW report (the 8 px "let go, wait, move" jump).
+void input_slider_probe_tick() {
+#if defined(_WIN32)
+    if (!g_slider_probe_watch) return;
+    POINT os = {};
+    GetCursorPos(&os);
+    if (os.x != g_slider_probe_osx || os.y != g_slider_probe_osy) {
+        std::printf("[slider-probe] frame +%.0f ms: os(screen) %ld,%ld (was %ld,%ld)\n",
+                    (glfwGetTime() - g_slider_probe_t0) * 1000.0, os.x, os.y,
+                    g_slider_probe_osx, g_slider_probe_osy);
+        std::fflush(stdout);
+        g_slider_probe_osx = os.x;
+        g_slider_probe_osy = os.y;
+    }
+#endif
+}
 #endif
 static GLFWwindow* g_window = nullptr;
 
@@ -815,6 +835,9 @@ static void end_slider_drag(GLFWwindow* w, bool warp_back) {
         {
             POINT os = {};
             GetCursorPos(&os);
+            g_slider_probe_watch = true;
+            g_slider_probe_osx = os.x;
+            g_slider_probe_osy = os.y;
             std::printf("[slider-probe] release t=%.3f glfw %.1f,%.1f os(screen) %ld,%ld start %.1f,%.1f\n",
                         g_slider_probe_t0, rx, ry, os.x, os.y,
                         g_input->slider_start_x, g_input->slider_start_y);
@@ -1018,8 +1041,18 @@ static void cursor_pos_callback(GLFWwindow* w, double x, double y) {
 #if defined(_WIN32)
     if (g_slider_probe_t0 > 0.0) {
         const double dt = glfwGetTime() - g_slider_probe_t0;
-        if (dt > 0.3) g_slider_probe_t0 = 0.0;
-        else {
+        if (dt > 0.3) {
+            // Past the window, but this is the first report since the pointer went
+            // quiet: the "let go, wait, then move" case (log6, 8 px after 20 s).
+            POINT os = {};
+            GetCursorPos(&os);
+            std::printf("[slider-probe] first report after rest, +%.0f ms: cb %.1f,%.1f "
+                        "os(screen) %ld,%ld start %.1f,%.1f\n", dt * 1000.0, x, y, os.x, os.y,
+                        g_input->slider_start_x, g_input->slider_start_y);
+            std::fflush(stdout);
+            g_slider_probe_t0 = 0.0;
+            g_slider_probe_watch = false;
+        } else {
             POINT os = {};
             GetCursorPos(&os);
             std::printf("[slider-probe] +%.1f ms cb %.1f,%.1f os(screen) %ld,%ld\n",
