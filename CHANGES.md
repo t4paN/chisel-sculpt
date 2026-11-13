@@ -2,6 +2,14 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-13 — Relative pen (web)
+
+- Burger menu > Relative pen (off by default): the pen moves Chisel's own cursor like a mouse, so the tablet driver can stay in Pen (absolute) mode and the browser still gets pressure. Lift the pen out of range and put it down elsewhere: the cursor carries on from where it was.
+- Pen sensitivity (0.25x to 4x) scales its steps. Sliders hold the cursor at the grab point with no pointer lock; Chisel draws the arrow, the OS pointer stays hidden under the tip.
+- A click only reaches Chisel while the tip is over its window (said in the tooltip): fullscreen, or map the tablet to the browser window.
+- Chromium on Wayland draws its own pointer for the pen and ignores the page hiding it; Firefox hides it.
+- Dev: `[relpen]` console lines (pointer type changes, re-anchors), temporary.
+
 ## 2026-11-13 — Windows round-trip fixes merged; one brush feel for mouse and pen
 
 - Mouse and tablet profiles removed: one brush feel, one Max effect (a mouse dab is 0.6 of it). The device only picks the pressure source, and switching is silent (no toast). Settings move to `[brush]`, migrated from the old profile.

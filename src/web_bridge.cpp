@@ -283,12 +283,15 @@ void web_install_dom_listeners() {
         var relSeen = false;
         var relLive = false;
         var RELGAP = 100;
+        var relLastType = '';
         var relStep = function(cx, cy, t, r, k, gain) {
             var x = (cx - r.left) * k;
             var y = (cy - r.top) * k;
             var fresh = relFresh || t - relT > RELGAP;
             relT = t;
             if (fresh) {
+                console.log('[relpen] re-anchor: tip ' + x.toFixed(0) + ',' + y.toFixed(0)
+                            + ' cursor stays ' + lastX.toFixed(0) + ',' + lastY.toFixed(0));
                 relFresh = false;
                 relPX = x;
                 relPY = y;
@@ -348,6 +351,12 @@ void web_install_dom_listeners() {
             var locked = document.pointerLockElement === c;
             var gain = e.pointerType === 'pen' ? Module._chisel_relpen_gain() : 0;
             var live = gain > 0;
+            // TEMPORARY relative-pen diagnostics: what the browser calls this pointer.
+            if (e.pointerType !== relLastType) {
+                relLastType = e.pointerType;
+                console.log('[relpen] pointerType=' + e.pointerType + ' pressure=' + e.pressure
+                            + ' gain=' + gain + ' setting=' + Module._chisel_relpen_gain());
+            }
             if (live !== relLive) {
                 relLive = live;
                 if (live) relFresh = true;
