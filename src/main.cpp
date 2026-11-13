@@ -894,6 +894,11 @@ int main(int argc, char* argv[]) {
 #endif
         input_slider_probe_tick();
         wl_pointer_warp_dispatch();   // the pointer-enter serial a Wayland edge wrap needs
+#if !defined(__EMSCRIPTEN__)
+        tablet_set_relative(input.relative_pen ? input.pen_sensitivity : 0.0f,
+                            input.active_device == InputDevice::MOUSE,
+                            input.mouse_x, input.mouse_y);
+#endif
         tablet.poll(brush_stroke.is_active());
         if (tablet.available() && !prev_tablet_avail) {
             std::snprintf(input.notification, sizeof(input.notification),
@@ -1023,6 +1028,12 @@ int main(int argc, char* argv[]) {
                 input.active_device = want;
             }
         }
+#if !defined(__EMSCRIPTEN__)
+        // Natively the relative pen is live while the pen is the device (the web shell
+        // reports its own through chisel_relpen_live).
+        input.relpen_live = input.relative_pen && tablet_relative_supported()
+                         && input.active_device == InputDevice::TABLET;
+#endif
 
         // ---- Idle frame skip ----
         // Nothing on screen changes unless something happened, so a model you're only

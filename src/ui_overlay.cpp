@@ -3,6 +3,7 @@
 #include "ui_skin.h"
 #include "text_overlay.h"
 #include "input.h"
+#include "tablet.h"
 #include "settings.h"
 #include "brush_alpha.h"
 #include "ui_icons.h"
@@ -1386,10 +1387,27 @@ void draw_settings_menu_items(InputState& input, MultiresInfo mres, bool sync_ta
                                  "and size.\n\n"
                                  "0%% = off. A pen uses its real pressure instead.");
 
-#if defined(__EMSCRIPTEN__)
+#if defined(__EMSCRIPTEN__) || defined(__linux__)
             // Relative pen: Chisel moves its own cursor by the pen's steps (web_bridge.cpp
-            // feed), so the driver can stay in Pen mode and the browser still gets pressure.
-            ImGui::Checkbox("Relative pen", &input.relative_pen);
+            // feed; natively tablet.cpp, Wayland only so far), so the driver can stay in
+            // Pen mode and the browser still gets pressure.
+#if defined(__EMSCRIPTEN__)
+            const bool relpen_here = true;
+#else
+            const bool relpen_here = tablet_relative_supported();
+#endif
+            if (relpen_here) ImGui::Checkbox("Relative pen", &input.relative_pen);
+#if !defined(__EMSCRIPTEN__)
+            if (relpen_here && ImGui::IsItemHovered())
+                ui_skin_menu_tip("The pen moves the cursor like a mouse: lift it,\n"
+                                 "put it down anywhere, and the cursor carries on\n"
+                                 "from where it was.\n\n"
+                                 "Set your tablet driver to its absolute (pen)\n"
+                                 "mode, not its relative one.\n\n"
+                                 "The real pen tip must stay over Chisel's\n"
+                                 "window: go fullscreen, or map the tablet\n"
+                                 "to this window in the driver.");
+#else
             if (ImGui::IsItemHovered())
                 ui_skin_menu_tip("The pen moves the cursor like a mouse: lift it,\n"
                                  "put it down anywhere, and the cursor carries on\n"
@@ -1400,7 +1418,8 @@ void draw_settings_menu_items(InputState& input, MultiresInfo mres, bool sync_ta
                                  "hidden. A click only reaches Chisel while the tip\n"
                                  "is over its window: go fullscreen, or map the\n"
                                  "tablet to the browser window in the driver.");
-            if (input.relative_pen) {
+#endif
+            if (relpen_here && input.relative_pen) {
                 ImGui::SetNextItemWidth(mw);
                 ImGui::SliderFloat("##penSensitivity", &input.pen_sensitivity, 0.25f, 4.0f,
                                    "pen sensitivity %.2fx", ImGuiSliderFlags_Logarithmic);

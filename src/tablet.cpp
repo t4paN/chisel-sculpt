@@ -197,7 +197,24 @@ struct WlPen {
     bool          seen     = false;      // a pen has been over our window
     float         pressure = 0.0f;
     unsigned long samples  = 0;
+
+    // Relative pen, Chisel's own (the native twin of web_bridge.cpp's feed): the driver
+    // stays in absolute mode, so the tip's position arrives here, and each motion steps
+    // Chisel's cursor by the tip's travel x gain instead. Lifts need no clock: the
+    // compositor says when the tool leaves and re-enters proximity, and the first motion
+    // after that only anchors. Set every frame by tablet_set_relative (main loop).
+    float  rel_gain   = 0.0f;            // 0 = off
+    bool   rel_mouse  = false;           // the mouse drove the cursor last (arbiter)
+    double rel_ax = 0, rel_ay = 0;       // the app's cursor as of last frame
+    // Motions left that only anchor. A returning pen's FIRST motion still carries the spot
+    // where it left (the proximity-in frame; Chrome on this desktop shows the same stale
+    // sample), so after proximity-in two motions anchor: one report (~7 ms) of hover lost.
+    int    rel_fresh  = 1;
+    bool   rel_seen   = false;           // a relative step has happened (else: start at tip)
+    double rel_px = 0, rel_py = 0;       // last tip position folded in
+    double rel_vx = 0, rel_vy = 0;       // Chisel's cursor
 };
+WlPen* g_wl = nullptr;                   // for tablet_set_relative / _supported
 
 // GLFW has no getter for a callback. Setting one returns the previous, so swap and
 // restore. Whatever is installed is called: ImGui chains in front of the app's own, so
@@ -323,21 +340,61 @@ void wl_end_drag(WlPen* p) {
     }
 }
 
+// One relative step: fold the tip's travel since the last motion into Chisel's cursor.
+// After a lift (or a slider drag, or the mouse) the first motion only anchors, and the
+// cursor carries on from where it is: the mouse's spot if the mouse drove last, else
+// where the pen left it. The very first pen motion starts under the tip.
+void wl_rel_step(WlPen* p) {
+    if (p->rel_fresh > 0) {
+        p->rel_fresh--;
+        p->rel_px = p->x;
+        p->rel_py = p->y;
+        if (!p->rel_seen)      { p->rel_vx = p->x;      p->rel_vy = p->y;      p->rel_seen = true; }
+        else if (p->rel_mouse) { p->rel_vx = p->rel_ax; p->rel_vy = p->rel_ay; }
+        std::printf("[relpen] re-anchor: tip %.0f,%.0f cursor stays %.0f,%.0f%s\n",
+                    p->x, p->y, p->rel_vx, p->rel_vy, p->rel_mouse ? " (from mouse)" : "");
+        std::fflush(stdout);
+        return;
+    }
+    int w = 0, h = 0;
+    glfwGetWindowSize(p->win, &w, &h);   // surface-local units, same as p->x/y
+    // TEMPORARY: a big step with no lift seen is the jump this anchoring exists to stop.
+    if (std::fabs(p->x - p->rel_px) > 60.0 || std::fabs(p->y - p->rel_py) > 60.0) {
+        std::printf("[relpen] hop %.0f,%.0f with no lift seen (tip %.0f,%.0f)\n",
+                    p->x - p->rel_px, p->y - p->rel_py, p->x, p->y);
+        std::fflush(stdout);
+    }
+    p->rel_vx = std::clamp(p->rel_vx + (p->x - p->rel_px) * p->rel_gain, 0.0, (double)std::max(w - 1, 0));
+    p->rel_vy = std::clamp(p->rel_vy + (p->y - p->rel_py) * p->rel_gain, 0.0, (double)std::max(h - 1, 0));
+    p->rel_px = p->x;
+    p->rel_py = p->y;
+}
+
 void wl_move(WlPen* p) {
+    const bool rel = p->rel_gain > 0.0f;
     if (glfwGetInputMode(p->win, GLFW_CURSOR) == GLFW_CURSOR_DISABLED) {
         if (!p->drag) wl_begin_drag(p);
         // Wayland motion still counts until the lock lands (and after it lapses); while
-        // it's held the cursor is frozen, so this adds nothing.
-        p->drag_sx += p->x - p->drag_lx;
-        p->drag_sy += p->y - p->drag_ly;
+        // it's held the cursor is frozen, so this adds nothing. A relative pen drags at
+        // its own speed, and its cursor holds on the grab point: the pen re-anchors after
+        // the drag and carries on from there.
+        const double g = rel ? p->rel_gain : 1.0;
+        p->drag_sx += (p->x - p->drag_lx) * g;
+        p->drag_sy += (p->y - p->drag_ly) * g;
         p->drag_lx = p->x;
         p->drag_ly = p->y;
+        if (rel) p->rel_fresh = 1;
         drag_emit(p);
         return;
     }
     if (p->drag) wl_end_drag(p);
     p->ex = p->x;
     p->ey = p->y;
+    if (rel) {
+        wl_rel_step(p);
+        wl_emit_pos(p->win, p->rel_vx, p->rel_vy);
+        return;
+    }
     wl_emit_pos(p->win, p->x, p->y);
 }
 
@@ -360,7 +417,10 @@ void wl_apply_cursor(WlPen* p) {
         near_edge = p->x < kPenEdgeMargin || p->y < kPenEdgeMargin ||
                     p->x > w - kPenEdgeMargin || p->y > h - kPenEdgeMargin;
     }
-    int want = (mode == GLFW_CURSOR_NORMAL || near_edge) && p->arrow ? 1 : 0;
+    // A relative pen's tip is not where Chisel's cursor is, so its arrow stays hidden
+    // (ImGui draws one at the cursor over UI) — except near the edge, for the reason above.
+    const bool rel = p->rel_gain > 0.0f;
+    int want = ((mode == GLFW_CURSOR_NORMAL && !rel) || near_edge) && p->arrow ? 1 : 0;
     if (want == p->cursor_applied) return;
     p->cursor_applied = want;
     zwp_tablet_tool_v2_set_cursor(p->active, p->prox_serial, want ? p->arrow : nullptr,
@@ -388,11 +448,18 @@ void tool_prox_in(void* d, zwp_tablet_tool_v2* t, uint32_t serial, zwp_tablet_v2
     p->f_in = true;
     p->f_tool = t;
     p->prox_serial = serial;
+    p->rel_fresh = 2;                    // relative pen: a lift ends here (see rel_fresh)
+    if (p->rel_gain > 0.0f) { std::printf("[relpen] proximity in\n"); std::fflush(stdout); }
 }
 void tool_prox_out(void* d, zwp_tablet_tool_v2* t) {
     WlPen* p = (WlPen*)d;
     p->f_out = true;
     p->f_tool = t;
+    p->rel_fresh = 2;
+    if (p->rel_gain > 0.0f) {
+        std::printf("[relpen] proximity out at tip %.0f,%.0f\n", p->x, p->y);
+        std::fflush(stdout);
+    }
 }
 void tool_down(void* d, zwp_tablet_tool_v2*, uint32_t) { ((WlPen*)d)->f_down = true; }
 void tool_up(void* d, zwp_tablet_tool_v2*)             { ((WlPen*)d)->f_up = true; }
@@ -511,6 +578,7 @@ void reg_global_remove(void*, wl_registry*, uint32_t) {}
 const wl_registry_listener kRegListener = { reg_global, reg_global_remove };
 
 void wl_destroy(WlPen* p) {
+    if (g_wl == p) g_wl = nullptr;
     lock_close(p);                       // closing releases a held lock at once
     for (zwp_tablet_tool_v2* t : p->tools)   zwp_tablet_tool_v2_destroy(t);
     for (zwp_tablet_v2* t : p->tablets)      zwp_tablet_v2_destroy(t);
@@ -576,9 +644,20 @@ WlPen* wl_create(GLFWwindow* win) {
     std::printf("[tablet] Wayland tablet protocol bound (%zu tablet(s), %zu tool(s))\n",
                 p->tablets.size(), p->tools.size());
     std::fflush(stdout);
+    g_wl = p;
     return p;
 }
 }  // namespace
+
+bool tablet_relative_supported() { return g_wl != nullptr; }
+void tablet_set_relative(float gain, bool mouse_drove, double cx, double cy) {
+    if (!g_wl) return;
+    if (gain > 0.0f && g_wl->rel_gain <= 0.0f) g_wl->rel_fresh = 1;      // switched on
+    g_wl->rel_gain  = gain;
+    g_wl->rel_mouse = mouse_drove;
+    g_wl->rel_ax = cx;
+    g_wl->rel_ay = cy;
+}
 
 // ---- Native Wayland: pointer warp, for edge-wrapped drags ----
 //
@@ -1369,6 +1448,10 @@ bool tablet_drop_driver_button(int, int, long long) { return false; }
 #endif
 
 #if !defined(CHISEL_WL_TABLET)
+// Chisel's own relative pen natively: Wayland only so far (the browser has its own in
+// web_bridge.cpp; X11 and Windows to come).
+bool tablet_relative_supported() { return false; }
+void tablet_set_relative(float, bool, double, double) {}
 // No native Wayland here: X11 and Windows wrap with glfwSetCursorPos; the browser doesn't wrap.
 void wl_pointer_warp_init(GLFWwindow*) {}
 bool wl_pointer_warp_available() { return false; }

@@ -79,8 +79,13 @@ void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse) {
     // lock ~50us after the drag created it. Two owners of one piece of state, and
     // this one won sixty times a second — so the capture never actually held, the
     // pointer really did travel, and glfwSetCursorPos was refused for want of a lock.
+    // Relative pen: the pen's tip is not at Chisel's cursor, and the mouse pointer is
+    // wherever the mouse was left, so both stay hidden and ImGui draws the arrow at the
+    // cursor over UI (the pen's own tool cursor: tablet.cpp wl_apply_cursor).
+    const bool relpen = input.relpen_live && input.relative_pen;
+    ImGui::GetIO().MouseDrawCursor = relpen && show_os_cursor;
     if (input.slider_mode == InputState::SliderMode::NONE)
-        glfwSetInputMode(window, GLFW_CURSOR, show_os_cursor ? GLFW_CURSOR_NORMAL : GLFW_CURSOR_HIDDEN);
+        glfwSetInputMode(window, GLFW_CURSOR, show_os_cursor && !relpen ? GLFW_CURSOR_NORMAL : GLFW_CURSOR_HIDDEN);
 #else
     // Emscripten's GLFW has no GLFW_CURSOR_HIDDEN (warns every frame) —
     // drive the canvas CSS cursor instead, only on state change.

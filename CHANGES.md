@@ -2,6 +2,14 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-13 — Relative pen on native Linux (Wayland)
+
+- Burger menu > Relative pen now also on native Linux under Wayland (shown only where the compositor's tablet protocol is bound): driver in absolute mode, Chisel steps its own cursor, sensitivity as on the web.
+- Lifts come from the compositor's proximity events, no clock. The first report after a return repeats the spot the pen left, so the first two only anchor.
+- Sliders drag at the pen's sensitivity and hold the cursor at the grab point; a pen returning after the mouse carries on from the mouse's spot; pointer and pen cursor hidden, ImGui draws the arrow over UI.
+- Not in the AppImage (X11 build) or on X11 sessions yet. Windowed: a tip that leaves through the window edge can still jump on return; fullscreen is clean.
+- Dev: `[relpen]` proximity / re-anchor / hop lines, temporary.
+
 ## 2026-11-13 — Relative pen (web)
 
 - Burger menu > Relative pen (off by default): the pen moves Chisel's own cursor like a mouse, so the tablet driver can stay in Pen (absolute) mode and the browser still gets pressure. Lift the pen out of range and put it down elsewhere: the cursor carries on from where it was.
