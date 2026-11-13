@@ -284,6 +284,12 @@ void web_install_dom_listeners() {
         var relLive = false;
         var RELGAP = 100;
         var relLastType = '';
+        // TEMPORARY: the last few pen events, printed at every pen-down.
+        var relRing = [];
+        var relNote = function(what) {
+            relRing.push(what);
+            if (relRing.length > 10) relRing.shift();
+        };
         var relStep = function(cx, cy, t, r, k, gain) {
             var x = (cx - r.left) * k;
             var y = (cy - r.top) * k;
@@ -332,9 +338,20 @@ void web_install_dom_listeners() {
             lastX = outX;
             lastY = outY;
             sx0 = e.clientX;
+            relNote(e.type + '@' + (e.timeStamp | 0) + ' tip ' + (((e.clientX - r.left) * k) | 0) + ','
+                    + (((e.clientY - r.top) * k) | 0) + ' out ' + (outX | 0) + ',' + (outY | 0)
+                    + ' n=' + (e.getCoalescedEvents ? e.getCoalescedEvents().length : 1));
+            if (e.type === 'pointerdown') {
+                console.log('[relpen] down; last events: ' + relRing.join(' | '));
+                relRing = [];
+            }
             Module._chisel_set_pointer(outX, outY, sdx);
         };
-        var relGone = function(e) { if (e.pointerType === 'pen') relFresh = true; };
+        var relGone = function(e) {
+            if (e.pointerType !== 'pen') return;
+            relFresh = true;
+            relNote(e.type + '@' + (e.timeStamp | 0));
+        };
         c.addEventListener('pointerleave', relGone);
         c.addEventListener('pointerenter', relGone);
         c.addEventListener('pointercancel', relGone);
@@ -363,6 +380,7 @@ void web_install_dom_listeners() {
                 Module._chisel_relpen_live(live ? 1 : 0);
             }
             if (live && !locked) { relFeed(e, r, k, gain); return; }
+            if (relSeen) relNote(e.type + '/' + e.pointerType + '@' + (e.timeStamp | 0));
             // Browsers deliver one pointermove per frame; the positions merged into it
             // are the stroke's real path (see InputState::path_x). The last coalesced
             // event is `e` itself, so it goes through the normal call below.
