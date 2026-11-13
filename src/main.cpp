@@ -140,6 +140,10 @@ static constexpr float SPACING_REF = 0.25f;
 extern float input_consume_scroll();
 extern void input_slider_probe_tick();   // TEMPORARY Windows slider-return probe
 extern void input_slider_capture_tick(GLFWwindow* w);   // Win32 deferred slider capture
+extern void input_relpen_frame(GLFWwindow* w);          // native relative pen (input.cpp)
+#if defined(_WIN32) && !defined(__EMSCRIPTEN__)
+extern bool input_relpen_on();
+#endif
 void setup_char_callback(GLFWwindow* window);
 
 // From window_icon.cpp — sets the GLFW window icon from the embedded PNG.
@@ -209,6 +213,9 @@ struct MouseHistory {
         last = buf[0];
         have_last = true;
         if (fresh <= 1) return;   // nothing GLFW didn't already deliver
+        // A relative pen: the history is where the OS pointer (the tip) went, not where
+        // Chisel's cursor went. Its path comes from PenPath below.
+        if (input_relpen_on()) return;
 
         HWND hwnd = glfwGetWin32Window(window);
         input.path_n = 0;
@@ -222,6 +229,102 @@ struct MouseHistory {
     }
 };
 static MouseHistory g_mouse_history;
+
+// The pen's path, from the tablet's own reports.
+//
+// With the driver in Pen mode the pointer history above holds next to nothing for the
+// pen: 1.7 positions a frame against 13 for the mouse (2026-11-13), so a fast pen stroke
+// was laid through one point per frame and came out in chunks. WinTab queues every
+// report the pen makes (tablet_packets), and the frame's path is rebuilt from those.
+//
+// The reports are in the driver's units, and which way up they run is the driver's
+// business, so nothing is assumed: the scale from report units to pixels is learned,
+// per axis and with its sign, from how far the OS pointer moved while the reports moved
+// (a running least-squares fit). Until the fit is tight the path is left as it was. A
+// driver in Mouse mode never fits (pointer acceleration), and keeps the old path.
+//
+// Only steps are used, never positions: the path is hung back from the cursor, its last
+// point ON the cursor, each earlier point one report's step behind. For a relative pen
+// the cursor is Chisel's own and the steps take its sensitivity.
+struct PenPath {
+    bool have_prev = false;
+    long prev_px = 0, prev_py = 0;     // the last report of the previous frame
+    POINT prev_cur = {};               // the OS pointer then
+    unsigned long prox_seen = 0;
+    // Fit sums per axis: report step squared, report step x pointer step, pointer step squared.
+    double xx[2] = {0, 0}, xc[2] = {0, 0}, cc[2] = {0, 0};
+    // The learned scale, px per report unit. Taken when the fit is tight (r2 >= 0.95),
+    // kept while it is merely noisy (a frame's reports and its pointer step never line
+    // up exactly), dropped when it clearly no longer holds (r2 < 0.6).
+    double k[2] = {0, 0};
+    bool have_k = false;
+
+    // 1 tight, 0 can't say (too little motion, or in between), -1 clearly not linear.
+    // moved[]: how many frames (decayed like the sums) had motion on the axis. A fit on
+    // two or three frames is an accident: the first version took one 0.3 s after launch
+    // (x 3.77, y -5.00) and dropped it again 140 ms later.
+    double moved[2] = {0, 0};
+    int fit(int axis, double& out) const {
+        if (moved[axis] < 25.0 || xx[axis] < 1.0 || cc[axis] < 400.0) return 0;
+        const double r2 = (xc[axis] * xc[axis]) / (xx[axis] * cc[axis]);
+        if (r2 < 0.6) return -1;
+        if (r2 < 0.95) return 0;
+        out = xc[axis] / xx[axis];
+        return 1;
+    }
+
+    void apply(InputState& input, Tablet& tablet) {
+        const long* xs = nullptr;
+        const long* ys = nullptr;
+        const int n = tablet_packets(&xs, &ys);
+        const unsigned long prox = tablet.proximity_changes();
+        const bool prox_changed = prox != prox_seen;
+        prox_seen = prox;
+        if (n <= 0) return;
+        POINT cur;
+        if (!GetCursorPos(&cur)) return;
+
+        // Learn the scale from this frame's step of both. Not across a lift.
+        if (have_prev && !prox_changed) {
+            const double dp[2] = { (double)(xs[n - 1] - prev_px), (double)(ys[n - 1] - prev_py) };
+            const double dc[2] = { (double)(cur.x - prev_cur.x), (double)(cur.y - prev_cur.y) };
+            for (int a = 0; a < 2; a++) {
+                xx[a] = xx[a] * 0.995 + dp[a] * dp[a];
+                xc[a] = xc[a] * 0.995 + dp[a] * dc[a];
+                cc[a] = cc[a] * 0.995 + dc[a] * dc[a];
+                moved[a] = moved[a] * 0.995 + ((dp[a] != 0.0 && dc[a] != 0.0) ? 1.0 : 0.0);
+            }
+        }
+        have_prev = true;
+        prev_px = xs[n - 1];
+        prev_py = ys[n - 1];
+        prev_cur = cur;
+
+        double kx = 0.0, ky = 0.0;
+        const int fx = fit(0, kx), fy = fit(1, ky);
+        const bool had_k = have_k;
+        if (fx == 1 && fy == 1) { k[0] = kx; k[1] = ky; have_k = true; }
+        else if (fx == -1 || fy == -1) have_k = false;
+        if (have_k != had_k) {
+            // TEMPORARY diagnostics.
+            std::printf("[penpath] t=%.3f tablet-report scale %s: x %.5f, y %.5f px per unit\n",
+                        glfwGetTime(), have_k ? "learned" : "lost", k[0], k[1]);
+            std::fflush(stdout);
+        }
+        if (!have_k || prox_changed || n < 2) return;
+        if (input.active_device != InputDevice::TABLET) return;
+        if (input.slider_mode != InputState::SliderMode::NONE || input.release_tail) return;
+
+        const double gain = input_relpen_on() ? (double)input.pen_sensitivity : 1.0;
+        const double ex = input.mouse_x, ey = input.mouse_y;
+        input.path_n = 0;
+        for (int i = 0; i < n; i++) {
+            input.push_path(ex + (double)(xs[i] - xs[n - 1]) * k[0] * gain,
+                            ey + (double)(ys[i] - ys[n - 1]) * k[1] * gain);
+        }
+    }
+};
+static PenPath g_pen_path;
 #endif
 
 // Sample depth at a pixel to decide if the cursor is on the model. Returns false
@@ -901,6 +1004,9 @@ int main(int argc, char* argv[]) {
                             input.mouse_x, input.mouse_y);
 #endif
         tablet.poll(brush_stroke.is_active());
+#if defined(_WIN32) && !defined(__EMSCRIPTEN__)
+        g_pen_path.apply(input, tablet);   // the pen's path from the tablet's own reports
+#endif
         if (tablet.available() && !prev_tablet_avail) {
             std::snprintf(input.notification, sizeof(input.notification),
                           "Pen pressure: tablet connected");
@@ -1029,8 +1135,11 @@ int main(int argc, char* argv[]) {
                 input.active_device = want;
             }
         }
-#if !defined(__EMSCRIPTEN__)
-        // Natively the relative pen is live while the pen is the device (the web shell
+#if defined(_WIN32) && !defined(__EMSCRIPTEN__)
+        // Windows: input.cpp steps the cursor off the OS pointer and owns relpen_live.
+        input_relpen_frame(window);
+#elif !defined(__EMSCRIPTEN__)
+        // Wayland: the relative pen is live while the pen is the device (the web shell
         // reports its own through chisel_relpen_live).
         input.relpen_live = input.relative_pen && tablet_relative_supported()
                          && input.active_device == InputDevice::TABLET;

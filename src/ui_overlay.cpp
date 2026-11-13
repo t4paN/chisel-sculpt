@@ -1387,17 +1387,17 @@ void draw_settings_menu_items(InputState& input, MultiresInfo mres, bool sync_ta
                                  "and size.\n\n"
                                  "0%% = off. A pen uses its real pressure instead.");
 
-#if defined(__EMSCRIPTEN__) || defined(__linux__)
+#if defined(__EMSCRIPTEN__) || defined(__linux__) || defined(_WIN32)
             // Relative pen: Chisel moves its own cursor by the pen's steps (web_bridge.cpp
-            // feed; natively tablet.cpp, Wayland only so far), so the driver can stay in
-            // Pen mode and the browser still gets pressure.
-#if defined(__EMSCRIPTEN__)
+            // feed; natively tablet.cpp on Wayland, input.cpp relpen_step on Windows), so
+            // the driver can stay in Pen mode and the browser still gets pressure.
+#if defined(__EMSCRIPTEN__) || defined(_WIN32)
             const bool relpen_here = true;
 #else
             const bool relpen_here = tablet_relative_supported();
 #endif
             if (relpen_here) ImGui::Checkbox("Relative pen", &input.relative_pen);
-#if !defined(__EMSCRIPTEN__)
+#if defined(__linux__) && !defined(__EMSCRIPTEN__)
             if (relpen_here && ImGui::IsItemHovered())
                 ui_skin_menu_tip("The pen moves the cursor like a mouse: lift it,\n"
                                  "put it down anywhere, and the cursor carries on\n"
@@ -1409,6 +1409,7 @@ void draw_settings_menu_items(InputState& input, MultiresInfo mres, bool sync_ta
                                  "to this window in the driver.");
 #else
             if (ImGui::IsItemHovered())
+#if defined(__EMSCRIPTEN__)
                 ui_skin_menu_tip("The pen moves the cursor like a mouse: lift it,\n"
                                  "put it down anywhere, and the cursor carries on\n"
                                  "from where it was.\n\n"
@@ -1418,6 +1419,16 @@ void draw_settings_menu_items(InputState& input, MultiresInfo mres, bool sync_ta
                                  "hidden. A click only reaches Chisel while the tip\n"
                                  "is over its window: go fullscreen, or map the\n"
                                  "tablet to the browser window in the driver.");
+#else
+                ui_skin_menu_tip("The pen moves the cursor like a mouse: lift it,\n"
+                                 "put it down anywhere, and the cursor carries on\n"
+                                 "from where it was.\n\n"
+                                 "For a tablet driver left in Pen (absolute) mode.\n\n"
+                                 "The real pointer still sits under the pen tip,\n"
+                                 "hidden. A click only reaches Chisel while the tip\n"
+                                 "is over its window: maximize Chisel, or map the\n"
+                                 "tablet to its window in the driver.");
+#endif
 #endif
             if (relpen_here && input.relative_pen) {
                 ImGui::SetNextItemWidth(mw);

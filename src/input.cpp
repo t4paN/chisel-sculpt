@@ -538,6 +538,88 @@ static long   g_slider_probe_osx = 0, g_slider_probe_osy = 0;
 #endif
 #endif
 
+// ---- Relative pen, native Windows ----
+//
+// The web build's relative pen (web_bridge.cpp) in the desktop exe. The driver stays in
+// Pen (absolute) mode, the OS pointer sits under the tip, hidden, and each of its moves
+// becomes a step of Chisel's own cursor (g_rel_vx/vy), which is what mouse_x/y, the path
+// and ImGui then see. The cursor stays put and only the baseline moves (a re-anchor) on
+// the first report after WinTab says the pen entered or left range. Leaving counts too,
+// so the return re-anchors even if its own proximity message lands after the move.
+//
+// Nothing here goes by the clock. The first version re-anchored after 100 ms of silence
+// plus a 40 px hop, and for 40 ms after every re-anchor, both timed when the report was
+// handled. On a heavy mesh a frame is longer than that, so every fast frame of a stroke
+// read as a lift: the cursor dropped that motion (a spiral came out in straight chords)
+// and the path rebuilt from the pointer history threw dabs off the line (2026-11-13).
+// On while the setting is on and the pen is driving or in range. When that ends (the
+// mouse takes over with the pen away) the OS pointer is put on Chisel's cursor, so the
+// mouse carries on from where the user was looking.
+#if defined(_WIN32) && !defined(__EMSCRIPTEN__)
+static double g_rel_vx = 0.0, g_rel_vy = 0.0;   // Chisel's cursor
+static double g_rel_px = 0.0, g_rel_py = 0.0;   // the last OS pointer report
+static bool   g_rel_fresh = true;
+static bool   g_rel_on = false;                 // the relative pen owns the cursor
+static unsigned long g_rel_prox_seen = 0;
+
+static bool relpen_wanted() {
+    if (!g_input || !g_input->relative_pen) return false;
+    return g_input->active_device == InputDevice::TABLET || tablet_live_proximity() == 1;
+}
+
+// One OS pointer report. Returns false when the relative pen isn't driving (x, y are
+// used as they are); otherwise x, y come back as Chisel's cursor.
+static bool relpen_step(GLFWwindow* w, double& x, double& y, bool hold) {
+    if (!relpen_wanted()) return false;
+    if (!g_rel_on) { g_rel_on = true; g_rel_fresh = true; }
+    const unsigned long prox = tablet_live_proximity_changes();
+    if (prox != g_rel_prox_seen) { g_rel_prox_seen = prox; g_rel_fresh = true; }
+    if (g_rel_fresh) {
+        // Carry on from wherever the cursor is (the mouse's spot, if it was last).
+        g_rel_fresh = false;
+        g_rel_vx = g_input->mouse_x;
+        g_rel_vy = g_input->mouse_y;
+        // TEMPORARY relative-pen diagnostics.
+        std::printf("[relpen] t=%.3f re-anchor: tip %.0f,%.0f (was %.0f,%.0f) cursor stays "
+                    "%.0f,%.0f, proximity %d\n", glfwGetTime(), x, y, g_rel_px, g_rel_py,
+                    g_rel_vx, g_rel_vy, tablet_live_proximity());
+        std::fflush(stdout);
+    } else if (!hold) {
+        int ww = 0, wh = 0;
+        if (w) glfwGetWindowSize(w, &ww, &wh);
+        const double gain = (double)g_input->pen_sensitivity;
+        g_rel_vx += (x - g_rel_px) * gain;
+        g_rel_vy += (y - g_rel_py) * gain;
+        if (ww > 0) g_rel_vx = std::max(0.0, std::min((double)ww - 1.0, g_rel_vx));
+        if (wh > 0) g_rel_vy = std::max(0.0, std::min((double)wh - 1.0, g_rel_vy));
+    }
+    g_rel_px = x;
+    g_rel_py = y;
+    x = g_rel_vx;
+    y = g_rel_vy;
+    return true;
+}
+
+// Once a frame from main, after the device arbiter. Hands the cursor back to the mouse
+// when the relative pen stops driving, and says whether it is driving (relpen_live).
+void input_relpen_frame(GLFWwindow* w) {
+    if (!g_input) return;
+    const bool want = relpen_wanted();
+    if (g_rel_on && !want) {
+        g_rel_on = false;
+        if (w && g_input->slider_mode == InputState::SliderMode::NONE)
+            glfwSetCursorPos(w, g_input->mouse_x, g_input->mouse_y);
+    }
+    g_input->relpen_live = want && g_rel_on;
+}
+
+// The relative pen owns the cursor: mouse_x/y is Chisel's cursor, not the OS pointer.
+// main.cpp's path builders ask (MouseHistory must stay out, PenPath applies the gain).
+bool input_relpen_on() { return g_rel_on; }
+#else
+void input_relpen_frame(GLFWwindow*) {}
+#endif
+
 // TEMPORARY, once a frame from main: while the pointer is quiet after a slider release,
 // log the OS cursor if it moves WITHOUT a GLFW report (the 8 px "let go, wait, move" jump).
 void input_slider_probe_tick() {
@@ -731,8 +813,9 @@ static void begin_slider_drag(GLFWwindow* w, InputState::SliderMode mode, float 
     // virtual cursor. mouse_x can trail the OS cursor by a few px (coalesced moves still
     // queued), so a start taken from it was a spot the pointer never returned to: the
     // ring jumped 2-9 px on the first move after release (2026-11-11, Entry 1a). Start
-    // from the position GLFW will restore instead.
-    if (w) {
+    // from the position GLFW will restore instead. (Not for a relative pen: its cursor is
+    // Chisel's own, the OS pointer is somewhere else, under the tip.)
+    if (w && !g_rel_on) {
         double cx = 0.0, cy = 0.0;
         glfwGetCursorPos(w, &cx, &cy);
         g_input->slider_start_x = cx;
@@ -791,11 +874,13 @@ void input_slider_capture_tick(GLFWwindow* w) {
     // The hand moved on a little since the key: this is where GLFW will put the pointer
     // back on release, so this is where the drag (and the ring) sits.
     double cx = 0.0, cy = 0.0;
-    glfwGetCursorPos(w, &cx, &cy);
-    g_input->slider_start_x = cx;
-    g_input->slider_start_y = cy;
-    g_input->mouse_x = g_input->prev_mouse_x = cx;
-    g_input->mouse_y = g_input->prev_mouse_y = cy;
+    if (!g_rel_on) {   // a relative pen's drag sits on Chisel's cursor, where it began
+        glfwGetCursorPos(w, &cx, &cy);
+        g_input->slider_start_x = cx;
+        g_input->slider_start_y = cy;
+        g_input->mouse_x = g_input->prev_mouse_x = cx;
+        g_input->mouse_y = g_input->prev_mouse_y = cy;
+    }
     slider_capture(w, true);
     glfwGetCursorPos(w, &cx, &cy);   // now the virtual position
     g_slider_last_raw_x = cx;
@@ -833,7 +918,13 @@ static void end_slider_drag(GLFWwindow* w, bool warp_back) {
         // cursor-position hint on the locked pointer. Releasing the capture below is
         // what actually moves the pointer there. (On web the pointer-lock exit restores
         // the OS cursor to where it was grabbed, which is the same place.)
-        if (w) glfwSetCursorPos(w, g_input->slider_start_x, g_input->slider_start_y);
+#if defined(_WIN32)
+        // A relative pen's OS pointer stays under the tip; moving it would read as a step.
+        const bool move_os = !g_rel_on;
+#else
+        const bool move_os = true;
+#endif
+        if (w && move_os) glfwSetCursorPos(w, g_input->slider_start_x, g_input->slider_start_y);
         g_input->mouse_x      = g_input->slider_start_x;
         g_input->mouse_y      = g_input->slider_start_y;
         g_input->prev_mouse_x = g_input->slider_start_x;
@@ -849,7 +940,8 @@ static void end_slider_drag(GLFWwindow* w, bool warp_back) {
 #if defined(_WIN32)
     // Adopt where the pointer really is now that the capture is released (see
     // begin_slider_drag), so the ring and the cursor can't disagree on the next move.
-    if (w) {
+    // A relative pen keeps Chisel's cursor, which is still on the drag start.
+    if (w && !g_rel_on) {
         double rx = 0.0, ry = 0.0;
         glfwGetCursorPos(w, &rx, &ry);
         const double off = std::hypot(rx - g_input->slider_start_x, ry - g_input->slider_start_y);
@@ -1058,6 +1150,11 @@ static void cursor_pos_callback(GLFWwindow* w, double x, double y) {
 #else
     // Slider drag: accumulate delta, don't update mouse position.
     if (g_input->slider_mode != InputState::SliderMode::NONE) {
+#if defined(_WIN32)
+        // A relative pen: its cursor holds still, only the baseline follows the tip, so
+        // the cursor carries on from the grab point after the drag.
+        { double hx = x, hy = y; relpen_step(w, hx, hy, true); }
+#endif
         float dx = (float)(x - g_slider_last_raw_x);
         g_slider_last_raw_x = x;
         apply_slider_delta(dx);
@@ -1141,6 +1238,12 @@ static void cursor_pos_callback(GLFWwindow* w, double x, double y) {
             return;
         }
     }
+#if defined(_WIN32)
+    // Relative pen: from here on the position is Chisel's own cursor. ImGui's callback
+    // ran before this one with the OS position; the event queued here supersedes it.
+    if (relpen_step(w, x, y, false) && ImGui::GetCurrentContext())
+        ImGui::GetIO().AddMousePosEvent((float)x, (float)y);
+#endif
     g_input->mouse_x = x;
     g_input->mouse_y = y;
     g_input->push_path(x, y);

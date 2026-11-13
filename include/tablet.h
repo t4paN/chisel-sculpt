@@ -84,6 +84,17 @@ bool tablet_relative_supported();
 bool tablet_lift_supported();
 float tablet_pen_height();   // the hovering pen's height now (0..1), -1 out of range / unknown
 void tablet_set_relative(float gain, float lift, bool mouse_drove, double cx, double cy);
+
+// Windows (WinTab) only: Tablet::proximity() / proximity_changes(), current even inside
+// glfwPollEvents. -1 / 0 where there is no proximity source.
+int tablet_live_proximity();
+unsigned long tablet_live_proximity_changes();
+
+// Windows (WinTab) only: the position of every pen report drained by the last
+// Tablet::poll(), oldest first, in the driver's own units (not pixels; main.cpp's PenPath
+// learns the scale). The arrays stay valid until the next poll. Returns the count.
+int tablet_packets(const long** xs, const long** ys);
+
 // Native Wayland only: moving the pointer for edge-wrapped drags, through the
 // compositor's wp_pointer_warp_v1 (GLFW's glfwSetCursorPos does nothing there). init once
 // after the window exists; available() is false elsewhere and on compositors without the
