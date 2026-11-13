@@ -213,6 +213,18 @@ struct WlPen {
     bool   rel_seen   = false;           // a relative step has happened (else: start at tip)
     double rel_px = 0, rel_py = 0;       // last tip position folded in
     double rel_vx = 0, rel_vy = 0;       // Chisel's cursor
+
+    // Lift height: the hover height above which Chisel treats the pen as gone, like
+    // the driver setting stock KDE lacks. Height is the protocol's distance, 0 (touching)
+    // to 1 (edge of hover range), sent only by tools with the distance capability. Above
+    // it the pen's motion is ignored (the cursor holds; a relative pen re-anchors on the
+    // way back down). 1 = off. A small band below the line stops flicker at it.
+    bool   has_distance = false;
+    float  distance     = 0.0f;
+    float  lift         = 1.0f;          // set by tablet_set_relative
+    bool   lifted       = false;
+    bool   tip          = false;         // tip down: never lifted mid-stroke
+    float  hover_max    = 0.0f;          // TEMPORARY calibration log: highest this hover
 };
 WlPen* g_wl = nullptr;                   // for tablet_set_relative / _supported
 
@@ -370,6 +382,27 @@ void wl_rel_step(WlPen* p) {
     p->rel_py = p->y;
 }
 
+// Above the lift height the pen counts as gone. Returns true while it is.
+bool wl_lifted(WlPen* p) {
+    if (!p->has_distance || p->lift >= 1.0f || p->tip) {
+        if (p->lifted && p->rel_fresh < 1) p->rel_fresh = 1;   // touched down from "lifted"
+        p->lifted = false;
+        return false;
+    }
+    const float band = 0.03f;            // land this far below the line: no flicker on it
+    if (!p->lifted && p->distance > p->lift) {
+        p->lifted = true;
+        std::printf("[lift] lifted at height %.2f (line %.2f)\n", p->distance, p->lift);
+        std::fflush(stdout);
+    } else if (p->lifted && p->distance < p->lift - band) {
+        p->lifted = false;
+        if (p->rel_fresh < 1) p->rel_fresh = 1;   // a relative pen re-anchors here
+        std::printf("[lift] landed at height %.2f (highest %.2f)\n", p->distance, p->hover_max);
+        std::fflush(stdout);
+    }
+    return p->lifted;
+}
+
 void wl_move(WlPen* p) {
     const bool rel = p->rel_gain > 0.0f;
     if (glfwGetInputMode(p->win, GLFW_CURSOR) == GLFW_CURSOR_DISABLED) {
@@ -432,7 +465,9 @@ void wl_apply_cursor(WlPen* p) {
 void tool_type(void*, zwp_tablet_tool_v2*, uint32_t) {}
 void tool_hw_serial(void*, zwp_tablet_tool_v2*, uint32_t, uint32_t) {}
 void tool_hw_id(void*, zwp_tablet_tool_v2*, uint32_t, uint32_t) {}
-void tool_capability(void*, zwp_tablet_tool_v2*, uint32_t) {}
+void tool_capability(void* d, zwp_tablet_tool_v2*, uint32_t cap) {
+    if (cap == ZWP_TABLET_TOOL_V2_CAPABILITY_DISTANCE) ((WlPen*)d)->has_distance = true;
+}
 void tool_done(void*, zwp_tablet_tool_v2*) {}
 void tool_removed(void* d, zwp_tablet_tool_v2* t) {
     WlPen* p = (WlPen*)d;
@@ -449,6 +484,7 @@ void tool_prox_in(void* d, zwp_tablet_tool_v2* t, uint32_t serial, zwp_tablet_v2
     p->f_tool = t;
     p->prox_serial = serial;
     p->rel_fresh = 2;                    // relative pen: a lift ends here (see rel_fresh)
+    p->hover_max = p->distance;
     if (p->rel_gain > 0.0f) { std::printf("[relpen] proximity in\n"); std::fflush(stdout); }
 }
 void tool_prox_out(void* d, zwp_tablet_tool_v2* t) {
@@ -456,10 +492,12 @@ void tool_prox_out(void* d, zwp_tablet_tool_v2* t) {
     p->f_out = true;
     p->f_tool = t;
     p->rel_fresh = 2;
-    if (p->rel_gain > 0.0f) {
-        std::printf("[relpen] proximity out at tip %.0f,%.0f\n", p->x, p->y);
+    if (p->rel_gain > 0.0f || p->lift < 1.0f) {
+        std::printf("[relpen] proximity out at tip %.0f,%.0f (height %.2f, highest this hover %.2f)\n",
+                    p->x, p->y, p->distance, p->hover_max);
         std::fflush(stdout);
     }
+    p->lifted = false;
 }
 void tool_down(void* d, zwp_tablet_tool_v2*, uint32_t) { ((WlPen*)d)->f_down = true; }
 void tool_up(void* d, zwp_tablet_tool_v2*)             { ((WlPen*)d)->f_up = true; }
@@ -472,7 +510,11 @@ void tool_motion(void* d, zwp_tablet_tool_v2*, wl_fixed_t x, wl_fixed_t y) {
 void tool_pressure(void* d, zwp_tablet_tool_v2*, uint32_t v) {
     ((WlPen*)d)->pressure = (float)v / 65535.0f;   // protocol range is 0..65535
 }
-void tool_distance(void*, zwp_tablet_tool_v2*, uint32_t) {}
+void tool_distance(void* d, zwp_tablet_tool_v2*, uint32_t v) {
+    WlPen* p = (WlPen*)d;
+    p->distance = (float)v / 65535.0f;   // protocol range is 0..65535
+    if (p->distance > p->hover_max) p->hover_max = p->distance;
+}
 void tool_tilt(void*, zwp_tablet_tool_v2*, wl_fixed_t, wl_fixed_t) {}
 void tool_rotation(void*, zwp_tablet_tool_v2*, wl_fixed_t) {}
 void tool_slider(void*, zwp_tablet_tool_v2*, int32_t) {}
@@ -498,7 +540,13 @@ void tool_frame(void* d, zwp_tablet_tool_v2* t, uint32_t) {
     if (p->active == t) {
         // Re-check the cursor on every motion, not just per app frame: a fast exit would
         // otherwise cross the edge before the arrow is up (see wl_apply_cursor).
-        if (p->f_motion) { wl_move(p); wl_apply_cursor(p); p->samples++; }
+        if (p->f_down) p->tip = true;
+        // A lifted pen moves nothing and counts as no pen activity, so the mouse can take
+        // over as it would after the pen left range. Slider drags are never cut short.
+        const bool lift_gate = glfwGetInputMode(p->win, GLFW_CURSOR) != GLFW_CURSOR_DISABLED
+                            && wl_lifted(p);
+        // Still counted as pen activity: it keeps the frame (and the height readout) live.
+        if (p->f_motion) { if (!lift_gate) { wl_move(p); wl_apply_cursor(p); } p->samples++; }
         if (p->f_down) wl_emit_button(p->win, GLFW_MOUSE_BUTTON_LEFT, GLFW_PRESS);
         for (int i = 0; i < p->f_nbtn; i++) {
             const WlPen::Btn& bt = p->f_btn[i];
@@ -507,7 +555,7 @@ void tool_frame(void* d, zwp_tablet_tool_v2* t, uint32_t) {
             held = bt.pressed;
             wl_emit_button(p->win, bt.button, bt.pressed ? GLFW_PRESS : GLFW_RELEASE);
         }
-        if (p->f_up) wl_emit_button(p->win, GLFW_MOUSE_BUTTON_LEFT, GLFW_RELEASE);
+        if (p->f_up) { p->tip = false; wl_emit_button(p->win, GLFW_MOUSE_BUTTON_LEFT, GLFW_RELEASE); }
         if (p->f_out) {
             // Leaving proximity with a button held (pen whisked off mid-drag) never sends
             // the matching up, so release whatever is still down.
@@ -650,8 +698,11 @@ WlPen* wl_create(GLFWwindow* win) {
 }  // namespace
 
 bool tablet_relative_supported() { return g_wl != nullptr; }
-void tablet_set_relative(float gain, bool mouse_drove, double cx, double cy) {
+bool tablet_lift_supported() { return g_wl && g_wl->has_distance; }
+float tablet_pen_height() { return g_wl && g_wl->active && g_wl->has_distance ? g_wl->distance : -1.0f; }
+void tablet_set_relative(float gain, float lift, bool mouse_drove, double cx, double cy) {
     if (!g_wl) return;
+    g_wl->lift = lift;
     if (gain > 0.0f && g_wl->rel_gain <= 0.0f) g_wl->rel_fresh = 1;      // switched on
     g_wl->rel_gain  = gain;
     g_wl->rel_mouse = mouse_drove;
@@ -1451,7 +1502,9 @@ bool tablet_drop_driver_button(int, int, long long) { return false; }
 // Chisel's own relative pen natively: Wayland only so far (the browser has its own in
 // web_bridge.cpp; X11 and Windows to come).
 bool tablet_relative_supported() { return false; }
-void tablet_set_relative(float, bool, double, double) {}
+bool tablet_lift_supported() { return false; }
+float tablet_pen_height() { return -1.0f; }
+void tablet_set_relative(float, float, bool, double, double) {}
 // No native Wayland here: X11 and Windows wrap with glfwSetCursorPos; the browser doesn't wrap.
 void wl_pointer_warp_init(GLFWwindow*) {}
 bool wl_pointer_warp_available() { return false; }

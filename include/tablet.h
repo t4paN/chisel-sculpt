@@ -77,9 +77,13 @@ bool tablet_drop_driver_button(int glfw_button, int action, long long extra);
 // false and set_relative does nothing; the browser has its own (web_bridge.cpp).
 // set_relative runs once a frame BEFORE Tablet::poll: gain 0 = off; mouse_drove = the
 // arbiter's device is the mouse (a returning pen then carries on from the mouse's spot);
-// cx/cy = the app's cursor (input.mouse_x/y).
+// cx/cy = the app's cursor (input.mouse_x/y). lift = the hover height (0 touching .. 1
+// edge of range) above which the pen counts as gone, absolute or relative; 1 = off.
+// lift_supported(): the pen reports its height (distance capability).
 bool tablet_relative_supported();
-void tablet_set_relative(float gain, bool mouse_drove, double cx, double cy);
+bool tablet_lift_supported();
+float tablet_pen_height();   // the hovering pen's height now (0..1), -1 out of range / unknown
+void tablet_set_relative(float gain, float lift, bool mouse_drove, double cx, double cy);
 // Native Wayland only: moving the pointer for edge-wrapped drags, through the
 // compositor's wp_pointer_warp_v1 (GLFW's glfwSetCursorPos does nothing there). init once
 // after the window exists; available() is false elsewhere and on compositors without the

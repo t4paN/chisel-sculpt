@@ -9,6 +9,8 @@ Short, chronological log of notable changes. Newest on top.
 - Sliders drag at the pen's sensitivity and hold the cursor at the grab point; a pen returning after the mouse carries on from the mouse's spot; pointer and pen cursor hidden, ImGui draws the arrow over UI.
 - Not in the AppImage (X11 build) or on X11 sessions yet. Windowed: a tip that leaves through the window edge can still jump on return; fullscreen is clean.
 - Dev: `[relpen]` proximity / re-anchor / hop lines, temporary.
+- Pen lift height (native Wayland, pens that report hover height): above the line the pen counts as gone and the cursor holds, absolute or relative; a relative pen carries on from there when it comes back down. Slider in the burger menu with a live height readout (the tablet reports steps, not mm: hold the pen at your height and read it). Off by default. Stock KDE has no such setting.
+- Dev: `[lift]` lifted / landed lines with heights, temporary.
 
 ## 2026-11-13 — Relative pen (web)
 

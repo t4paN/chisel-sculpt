@@ -1430,6 +1430,36 @@ void draw_settings_menu_items(InputState& input, MultiresInfo mres, bool sync_ta
                                      "Pen mode. Default 1.00x.");
             }
 #endif
+#if !defined(__EMSCRIPTEN__)
+            // Lift height: shown for any pen that reports its hover height, relative or not.
+            if (tablet_lift_supported()) {
+                float lift_pct = input.pen_lift_height * 100.0f;
+                // The tablet reports height in its own steps, not mm, so the readout is how
+                // a user finds their number: hold the pen at it (a ruler) and read.
+                const float now = tablet_pen_height();
+                char fmt[64];
+                if (lift_pct >= 99.5f) std::snprintf(fmt, sizeof(fmt), "lift height: off");
+                else                   std::snprintf(fmt, sizeof(fmt), "lift height %%.0f%%%%");
+                if (now >= 0.0f) {
+                    size_t n = std::strlen(fmt);
+                    std::snprintf(fmt + n, sizeof(fmt) - n, "  (pen %.0f%%%%)", now * 100.0f);
+                }
+                ImGui::SetNextItemWidth(mw);
+                if (ImGui::SliderFloat("##penLift", &lift_pct, 5.0f, 100.0f, fmt))
+                    input.pen_lift_height = lift_pct * 0.01f;
+                if (ImGui::IsItemHovered())
+                    ui_skin_menu_tip("How high the pen can hover before Chisel\n"
+                                     "lets go of it: above this the cursor stays\n"
+                                     "put, as if the pen had left the tablet.\n\n"
+                                     "With Relative pen on, lift above it to\n"
+                                     "reposition the pen.\n\n"
+                                     "Percent of the pen's hover range: the\n"
+                                     "tablet reports steps, not millimetres.\n"
+                                     "To find yours, hold the pen at your height\n"
+                                     "(a ruler works) and read the (pen %%) value.\n\n"
+                                     "100%% = off (only leaving range counts).");
+            }
+#endif
 
             ImGui::Separator();
 
