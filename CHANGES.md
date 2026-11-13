@@ -2,6 +2,17 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-13 — Relative pen: Chrome on Windows; native Windows (unfinished)
+
+- Web, Chrome and Edge on Windows: the cursor no longer snaps to the pen tip after every stroke. Chrome sends one mouse-type move at the tip after each pen-up, which read as the mouse taking over; a mouse event within 100 ms of a pen event is dropped while the relative pen drives.
+- Web, same browsers: slow moves are no longer eaten. A pen held still sends nothing there, so 100 ms of silence is no lift: after a pause only a hop of more than 40 px re-anchors, with no settle window.
+- Web, Windows, any browser: a pen side button set to Erase in the tablet driver pans, as the middle button. Chrome never hears the driver's Middle Click, and a hovering eraser carries no button bit in Chrome or Firefox; the pen swapping to the eraser tool and back (leave and re-enter within 5 to 14 ms) is the signal. A guess from timing: a pen that leaves range with the button held comes back as the plain pen.
+- All three are behind a user-agent check; other browsers and systems are unchanged. Not built yet (written on the Windows box, tested as a patch to the v0.3.10 `chisel.js`).
+- Native Windows, unfinished: Relative pen and pen sensitivity in the burger menu. The OS pointer stays under the tip, hidden, and its moves step Chisel's own cursor; it re-anchors when WinTab reports the pen entering or leaving range, never by the clock (clock rules read every long frame as a lift and cut a stroke into chords). Sliders hold the cursor on the grab point; the mouse taking over carries on from Chisel's cursor.
+- Native Windows: WinTab packets carry position, and the pen's stroke path is rebuilt from them (`PenPath`, scale learned from the OS pointer). No denser than before for a plain pen: the pen reports about 130 times a second, 1.7 a frame at 75 fps.
+- Measured: no stall inside strokes (1481 sculpt frames, worst 14.4 ms); the slow frames are level switches. Fast pen strokes come out in straight pieces at the pen's report rate; left as is.
+- Dev: `[relpen] re-anchor` and `[penpath]` log lines, temporary.
+
 ## 2026-11-13 — Relative pen on native Linux (Wayland)
 
 - Burger menu > Relative pen now also on native Linux under Wayland (shown only where the compositor's tablet protocol is bound): driver in absolute mode, Chisel steps its own cursor, sensitivity as on the web.
