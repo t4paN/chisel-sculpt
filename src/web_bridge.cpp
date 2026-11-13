@@ -283,6 +283,11 @@ void web_install_dom_listeners() {
         var relSeen = false;
         var relLive = false;
         var RELGAP = 100;
+        // After a re-anchor, every report for this long only re-anchors too: Chromium
+        // follows the pen's return with a whole stale pointermove (the spot it left)
+        // before the real one ~14 ms later. 40 ms of hover lost is unnoticeable.
+        var RELSETTLE = 40;
+        var relSettle = -1e9;
         var relLastType = '';
         // TEMPORARY: the last few pen events, printed at every pen-down.
         var relRing = [];
@@ -295,8 +300,10 @@ void web_install_dom_listeners() {
             var y = (cy - r.top) * k;
             var fresh = relFresh || t - relT > RELGAP;
             relT = t;
-            if (fresh) {
-                console.log('[relpen] re-anchor: tip ' + x.toFixed(0) + ',' + y.toFixed(0)
+            if (fresh) relSettle = t + RELSETTLE;
+            if (fresh || t < relSettle) {
+                console.log('[relpen] re-anchor' + (fresh ? '' : ' (settling)') + ': tip '
+                            + x.toFixed(0) + ',' + y.toFixed(0)
                             + ' cursor stays ' + lastX.toFixed(0) + ',' + lastY.toFixed(0));
                 relFresh = false;
                 relPX = x;
@@ -317,9 +324,19 @@ void web_install_dom_listeners() {
             }
             return dx;
         };
+        var relId = -1;
         var relFeed = function(e, r, k, gain) {
             var sdx = 0;
-            if (e.type === 'pointermove' && e.getCoalescedEvents) {
+            // Chromium gives the pen a new pointerId each time it comes back into range:
+            // a lift signal of its own, for browsers that skip pointerleave.
+            if (e.pointerId !== relId) { relId = e.pointerId; relFresh = true; }
+            // Chromium also re-enters with a STALE sample: the pointerover and the first
+            // move's coalesced list carry the spot where the pen left, then the real one.
+            // Anchoring on that stale sample turned the whole hop into one cursor step,
+            // so the cursor stayed glued to the tip (traced 2026-11-13 with a pointer-event probe). A
+            // fresh pen therefore anchors on the event's own, final position only.
+            var fresh = relFresh || e.timeStamp - relT > RELGAP || e.timeStamp < relSettle;
+            if (!fresh && e.type === 'pointermove' && e.getCoalescedEvents) {
                 var list = e.getCoalescedEvents();
                 for (var i = 0; i + 1 < list.length; i++) {
                     sdx += relStep(list[i].clientX, list[i].clientY, list[i].timeStamp, r, k, gain);

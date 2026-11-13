@@ -8,6 +8,7 @@ Short, chronological log of notable changes. Newest on top.
 - Pen sensitivity (0.25x to 4x) scales its steps. Sliders hold the cursor at the grab point with no pointer lock; Chisel draws the arrow, the OS pointer stays hidden under the tip.
 - A click only reaches Chisel while the tip is over its window (said in the tooltip): fullscreen, or map the tablet to the browser window.
 - Chromium on Wayland draws its own pointer for the pen and ignores the page hiding it; Firefox hides it.
+- Lifts in Chrome: it re-enters with a stale sample at the spot the pen left, which glued the cursor to the tip. A new pointerId now counts as a lift, and the first 40 ms back only re-anchor.
 - Dev: `[relpen]` console lines (pointer type changes, re-anchors), temporary.
 
 ## 2026-11-13 — Windows round-trip fixes merged; one brush feel for mouse and pen
