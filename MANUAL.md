@@ -173,6 +173,16 @@ in the burger menu. Mouse and pen share one brush feel: the pen gets its strengt
 pressure, a mouse dab hits at 0.6 of the max effect. Switching between them is silent.
 Chisel is designed to work fine with a mouse — a tablet is nice, never necessary.
 
+### Relative pen (browser)
+
+Burger menu > **Relative pen** (off by default) makes the pen move Chisel's cursor the way
+a mouse does: lift it, put it down elsewhere, and the cursor carries on from where it
+was. Keep the tablet driver in its normal pen (absolute) mode so the browser still gets
+pressure. **pen sensitivity** (0.25x to 4x) sets how fast the pen moves the cursor. The
+real pointer stays under the tip, so clicks only reach Chisel while the tip is over its
+window: play fullscreen, or map the tablet to the browser window. On Linux, Chrome and
+Chromium under Wayland still show the pen's own arrow; Firefox hides it.
+
 ## Symmetry
 
 **X** toggles X-axis mirror. Strokes, masks, and paint apply symmetrically in real
