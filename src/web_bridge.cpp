@@ -393,17 +393,18 @@ void web_install_dom_listeners() {
         c.addEventListener('pointerenter', relGone);
         c.addEventListener('pointercancel', relGone);
 
-        // Chromium on Windows: a pen side button set to "Erase" in the tablet driver pans,
-        // as the middle button. The driver's own "Middle Click" never reaches the page
-        // there (no press, no release; Firefox gets both), and a hovering eraser carries no
-        // button bit either. What does arrive: pressing or releasing Erase swaps the pen
-        // for the eraser tool, seen as the pen leaving and coming back 6-14 ms later with a
-        // new pointerId (a real lift took 136 ms or more; probe logs of 2026-11-13). So a
+        // Windows, any browser: a pen side button set to "Erase" in the tablet driver pans,
+        // as the middle button. The driver's own "Middle Click" never reaches the page in
+        // Chromium (no press, no release; Firefox gets both), and a hovering eraser carries
+        // no button bit in either. What does arrive, the same in Chrome and Firefox:
+        // pressing or releasing Erase swaps the pen for the eraser tool, seen as the pen
+        // leaving and coming back 5-14 ms later with a new pointerId (a real lift took
+        // 136 ms or more; probe logs of 2026-11-13). So a
         // return within ERASESWAP ms flips pen <-> eraser and any slower return is the
         // plain pen again. Contact settles it for sure: bit 32 is the eraser, bit 1 the
         // tip. It is a guess from timing: a pen that leaves range with the button held is
         // read as the plain pen when it comes back. Any pen mode, relative or not.
-        if (winChromium) {
+        if (relUA.indexOf('Windows') >= 0) {
             var ERASESWAP = 40;
             var eraser = false;
             var eraserHeld = false;
