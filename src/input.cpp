@@ -536,6 +536,7 @@ static double g_slider_probe_t0 = 0.0;
 static bool   g_slider_probe_watch = false;   // release .. first report after rest
 static long   g_slider_probe_osx = 0, g_slider_probe_osy = 0;
 #endif
+#endif
 
 // TEMPORARY, once a frame from main: while the pointer is quiet after a slider release,
 // log the OS cursor if it moves WITHOUT a GLFW report (the 8 px "let go, wait, move" jump).
@@ -554,7 +555,6 @@ void input_slider_probe_tick() {
     }
 #endif
 }
-#endif
 static GLFWwindow* g_window = nullptr;
 
 // Slider drag: accumulate a horizontal delta into the active slider, clamped so
