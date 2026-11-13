@@ -267,6 +267,75 @@ void web_install_dom_listeners() {
         c.addEventListener('pointerup', tUp);
         c.addEventListener('pointercancel', tUp);
 
+        // Relative pen (Settings > Relative pen). The driver stays in Pen (absolute) mode,
+        // so the browser gets pressure; here each pen move becomes a step of Chisel's own
+        // cursor (relVX/Y), like a mouse. Lift the pen and put it down elsewhere and the
+        // cursor carries on from where it was: the first report after the pen comes back
+        // (leave/enter, or 100 ms of silence) only re-anchors. The OS pointer stays under
+        // the tip, hidden (app_render.cpp), so a click lands only while the tip is over
+        // the canvas.
+        var relVX = 0;
+        var relVY = 0;
+        var relPX = 0;
+        var relPY = 0;
+        var relT = -1e9;
+        var relFresh = true;
+        var relSeen = false;
+        var relLive = false;
+        var RELGAP = 100;
+        var relStep = function(cx, cy, t, r, k, gain) {
+            var x = (cx - r.left) * k;
+            var y = (cy - r.top) * k;
+            var fresh = relFresh || t - relT > RELGAP;
+            relT = t;
+            if (fresh) {
+                relFresh = false;
+                relPX = x;
+                relPY = y;
+                // Carry on from wherever the cursor was (the mouse's spot, if it was last);
+                // the very first pen report starts under the tip.
+                if (relSeen) { relVX = lastX; relVY = lastY; }
+                else { relVX = x; relVY = y; relSeen = true; }
+                return 0;
+            }
+            var dx = (x - relPX) * gain;
+            var dy = (y - relPY) * gain;
+            relPX = x;
+            relPY = y;
+            if (!sliding) {
+                relVX = Math.max(0, Math.min(c.clientWidth - 1, relVX + dx));
+                relVY = Math.max(0, Math.min(c.clientHeight - 1, relVY + dy));
+            }
+            return dx;
+        };
+        var relFeed = function(e, r, k, gain) {
+            var sdx = 0;
+            if (e.type === 'pointermove' && e.getCoalescedEvents) {
+                var list = e.getCoalescedEvents();
+                for (var i = 0; i + 1 < list.length; i++) {
+                    sdx += relStep(list[i].clientX, list[i].clientY, list[i].timeStamp, r, k, gain);
+                    if (!sliding) Module._chisel_path_sample(relVX, relVY);
+                }
+            }
+            sdx += relStep(e.clientX, e.clientY, e.timeStamp, r, k, gain);
+            // The mouse's lockless-slider offset belongs to the mouse.
+            offX = 0;
+            offY = 0;
+            reanchor = false;
+            // A slider holds the cursor on its grab point; relVX/Y never moved during
+            // it, so the pen carries on from there afterwards.
+            var outX = sliding ? anchorX : relVX;
+            var outY = sliding ? anchorY : relVY;
+            lastX = outX;
+            lastY = outY;
+            sx0 = e.clientX;
+            Module._chisel_set_pointer(outX, outY, sdx);
+        };
+        var relGone = function(e) { if (e.pointerType === 'pen') relFresh = true; };
+        c.addEventListener('pointerleave', relGone);
+        c.addEventListener('pointerenter', relGone);
+        c.addEventListener('pointercancel', relGone);
+
         var feed = function(e) {
             // During a gesture no finger drives the cursor, and outside one only the
             // first canvas finger does (it is the one GLFW clicks with).
@@ -277,6 +346,14 @@ void web_install_dom_listeners() {
             // works in its layout size.
             var k = r.width > 0 ? c.clientWidth / r.width : 1;
             var locked = document.pointerLockElement === c;
+            var gain = e.pointerType === 'pen' ? Module._chisel_relpen_gain() : 0;
+            var live = gain > 0;
+            if (live !== relLive) {
+                relLive = live;
+                if (live) relFresh = true;
+                Module._chisel_relpen_live(live ? 1 : 0);
+            }
+            if (live && !locked) { relFeed(e, r, k, gain); return; }
             // Browsers deliver one pointermove per frame; the positions merged into it
             // are the stroke's real path (see InputState::path_x). The last coalesced
             // event is `e` itself, so it goes through the normal call below.
@@ -350,9 +427,12 @@ void web_install_dom_listeners() {
         c.addEventListener('pointerdown', feed);
         // Keep a mouse drag's moves coming once it leaves the canvas (or itch's
         // iframe), so an orbit or a stroke carries on past it. Released by the browser
-        // on pointerup. Pens are left alone.
+        // on pointerup. Pens only in relative mode (below).
         c.addEventListener('pointerdown', function(e) {
-            if (e.pointerType === 'mouse' && c.setPointerCapture) {
+            // A relative pen too: its stroke shouldn't stop where the tip leaves the canvas.
+            var cap = e.pointerType === 'mouse'
+                   || (e.pointerType === 'pen' && Module._chisel_relpen_gain() > 0);
+            if (cap && c.setPointerCapture) {
                 try { c.setPointerCapture(e.pointerId); } catch (err) {}
             }
         });

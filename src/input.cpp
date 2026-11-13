@@ -653,6 +653,9 @@ static void apply_slider_delta(float dx) {
 // the DOM movementX feed still works, only the visible cursor wanders.
 #if defined(__EMSCRIPTEN__)
 static void web_pointer_lock(bool grab) {
+    // A relative pen needs no lock: the shell owns its cursor, which simply stays put for
+    // the drag. A pen under a browser lock sends jumpy deltas anyway.
+    if (grab && g_input && g_input->relpen_live && g_input->relative_pen) return;
     // Not in Firefox on desktop Linux. Its lock doesn't hold the pointer there (it is
     // somewhere else on release), and its movementX under the lock alternates the real
     // step with the pointer's distance from the grab point (-1, +153, -1, +152, ...),
@@ -1172,6 +1175,17 @@ extern "C" EMSCRIPTEN_KEEPALIVE void chisel_set_pointer(double x, double y, doub
 // The browser batches pointer moves to one event per frame; getCoalescedEvents()
 // hands back the positions it merged. The shell feeds all but the last through here —
 // path only, no ImGui, no slider delta — and the last through chisel_set_pointer.
+// Relative pen, asked by the shell on every pen event: the step gain, 0 when it's off.
+extern "C" EMSCRIPTEN_KEEPALIVE double chisel_relpen_gain() {
+    return (g_input && g_input->relative_pen) ? (double)g_input->pen_sensitivity : 0.0;
+}
+// The shell, when the device behind the pointer changes (relative pen vs anything else).
+extern "C" EMSCRIPTEN_KEEPALIVE void chisel_relpen_live(int on) {
+    if (!g_input) return;
+    g_input->relpen_live = on != 0;
+    g_input->wake_requested = true;
+}
+
 extern "C" EMSCRIPTEN_KEEPALIVE void chisel_path_sample(double x, double y) {
     if (!g_input || g_input->slider_mode != InputState::SliderMode::NONE) return;
     g_input->push_path(x, y);

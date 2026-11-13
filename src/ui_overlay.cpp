@@ -1386,6 +1386,32 @@ void draw_settings_menu_items(InputState& input, MultiresInfo mres, bool sync_ta
                                  "and size.\n\n"
                                  "0%% = off. A pen uses its real pressure instead.");
 
+#if defined(__EMSCRIPTEN__)
+            // Relative pen: Chisel moves its own cursor by the pen's steps (web_bridge.cpp
+            // feed), so the driver can stay in Pen mode and the browser still gets pressure.
+            ImGui::Checkbox("Relative pen", &input.relative_pen);
+            if (ImGui::IsItemHovered())
+                ui_skin_menu_tip("The pen moves the cursor like a mouse: lift it,\n"
+                                 "put it down anywhere, and the cursor carries on\n"
+                                 "from where it was.\n\n"
+                                 "Set your tablet driver to Pen (absolute) mode, so\n"
+                                 "the browser gets pressure.\n\n"
+                                 "The real pointer still sits under the pen tip,\n"
+                                 "hidden. A click only reaches Chisel while the tip\n"
+                                 "is over its window: go fullscreen, or map the\n"
+                                 "tablet to the browser window in the driver.");
+            if (input.relative_pen) {
+                ImGui::SetNextItemWidth(mw);
+                ImGui::SliderFloat("##penSensitivity", &input.pen_sensitivity, 0.25f, 4.0f,
+                                   "pen sensitivity %.2fx", ImGuiSliderFlags_Logarithmic);
+                if (ImGui::IsItemHovered())
+                    ui_skin_menu_tip("How fast the pen moves the cursor in\n"
+                                     "relative mode.\n\n"
+                                     "1.00x = as far as the pen would take it in\n"
+                                     "Pen mode. Default 1.00x.");
+            }
+#endif
+
             ImGui::Separator();
 
             // Which mirror. A button rather than a checkbox because this is a two-state

@@ -84,9 +84,14 @@ void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse) {
 #else
     // Emscripten's GLFW has no GLFW_CURSOR_HIDDEN (warns every frame) —
     // drive the canvas CSS cursor instead, only on state change.
+    // Relative pen: the OS pointer sits under the pen tip, not at Chisel's cursor, so it
+    // stays hidden everywhere and ImGui draws the arrow where the UI wants one.
+    const bool relpen = input.relpen_live && input.relative_pen;
+    ImGui::GetIO().MouseDrawCursor = relpen && show_os_cursor;
     static bool css_cursor_hidden = false;
-    if (css_cursor_hidden == show_os_cursor) {
-        css_cursor_hidden = !show_os_cursor;
+    const bool want_hidden = !show_os_cursor || relpen;
+    if (css_cursor_hidden != want_hidden) {
+        css_cursor_hidden = want_hidden;
         EM_ASM({ Module['canvas'].style.cursor = $0 ? 'none' : 'auto'; }, css_cursor_hidden);
     }
 #endif

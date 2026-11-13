@@ -217,6 +217,8 @@ std::string serialize(const InputState& in) {
     append_kv(s, "uv_padding",          in.uv_padding);
     append_kv(s, "sphere_kind",         (int)in.sphere_kind);
     append_kv(s, "gpu_memory_gb",       in.gpu_memory_gb);
+    append_kv(s, "relative_pen",        in.relative_pen);
+    append_kv(s, "pen_sensitivity",     in.pen_sensitivity);
     // mirror_x is deliberately absent — see InputState::mirror_x. Symmetry is session
     // state that starts ON every run, so it must not survive into the next one. As with
     // brush_size, leaving it out of the "serialize and compare" blob also means pressing
@@ -345,6 +347,8 @@ void apply_global_key(InputState& in, const std::string& key, const std::string&
     else if (key == "autosmooth")          in.autosmooth          = parse_bool(val);
     else if (key == "speed_gain")          in.speed_gain          = clampf(std::strtof(val.c_str(), nullptr), 0.0f, 1.0f);
     else if (key == "camera_fov")          in.camera_fov          = clampf(std::strtof(val.c_str(), nullptr), 15.0f, 80.0f);
+    else if (key == "relative_pen")        in.relative_pen        = parse_bool(val);
+    else if (key == "pen_sensitivity")     in.pen_sensitivity     = clampf(std::strtof(val.c_str(), nullptr), 0.25f, 4.0f);
     else if (key == "remesh_detail")       in.remesh_detail       = clampf(std::strtof(val.c_str(), nullptr), 0.25f, 4.0f);
     else if (key == "flat_shading")        in.flat_shading        = parse_bool(val);
     else if (key == "show_fps")            in.show_fps            = parse_bool(val);
@@ -557,6 +561,8 @@ void settings_reset(InputState& input) {
     input.remesh_detail      = fresh.remesh_detail;
     input.sphere_kind        = fresh.sphere_kind;
     input.gpu_memory_gb      = fresh.gpu_memory_gb;
+    input.relative_pen       = fresh.relative_pen;
+    input.pen_sensitivity    = fresh.pen_sensitivity;
     input.mirror_x           = fresh.mirror_x;
     input.mirror_topological = fresh.mirror_topological;
     input.fast_normals       = fresh.fast_normals;

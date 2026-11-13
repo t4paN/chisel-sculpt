@@ -437,6 +437,14 @@ struct InputState {
     // Settings > Graphics memory: what the user says their card has (2..16 GB, one of
     // gpu::kMemoryRows). Sizes the fast level rebuild and the skull prompt.
     int      gpu_memory_gb = 4;
+    // Settings > Relative pen (web for now): the driver stays in Pen (absolute) mode so the
+    // browser gets pressure, and the shell turns the pen's moves into steps of Chisel's own
+    // cursor, like a mouse. pen_sensitivity scales those steps (1 = what Pen mode moves).
+    // relpen_live: the last pointer event came from the pen with this on, so the OS cursor
+    // is hidden everywhere and ImGui draws the arrow at Chisel's cursor instead.
+    bool     relative_pen = false;
+    float    pen_sensitivity = 1.0f;
+    bool     relpen_live = false;
     bool     subdiv_confirm_pending = false;
     bool     subdiv_confirmed = false;
     uint64_t subdiv_confirm_tris = 0;     // what the level would make, for the prompt
