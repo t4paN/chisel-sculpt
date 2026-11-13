@@ -169,8 +169,9 @@ Plug in a tablet and pressure drives both strength and size automatically — no
 switch to flip, it's on whenever a tablet is present. Sources: XInput2 on Linux
 (same as other Linux drawing apps), WinTab on Windows, the Pointer Events pressure channel in the
 browser. How hard a full-pressure press actually hits is the **max effect** slider
-in the burger menu. Chisel is designed to work fine with a mouse — a tablet is nice,
-never necessary.
+in the burger menu. Mouse and pen share one brush feel: the pen gets its strength from
+pressure, a mouse dab hits at 0.6 of the max effect. Switching between them is silent.
+Chisel is designed to work fine with a mouse — a tablet is nice, never necessary.
 
 ## Symmetry
 
@@ -203,6 +204,12 @@ Chisel keeps a displacement stack: a base cage plus per-level detail layers.
 
 Step down to move big shapes, step back up and your fine detail rides along on the
 adjusted forms. Each object in the scene has its own independent level and stack.
+
+**Graphics memory** (burger menu: 2 to 16 GB, default 4) tells Chisel how much memory your
+graphics card has, since no graphics API reports it. It decides how many triangles a level
+can hold before the skull prompt warns you, and how big a level is still rebuilt on the
+card when you step back up (past that the CPU does it, slower). Set it to your card's real
+size to get the most out of it.
 
 ## Remeshing
 
@@ -356,6 +363,7 @@ things instead of drawing new strips.
 | M | Mask: freeze vertices against Grab, Smooth and Erase. Ctrl unmasks, Shift softens; Ctrl+I inverts, Ctrl+A clears |
 | Q | Wand (below) |
 | T | Contours: drag along a limb, rings wrap it and bridge into a tube (below) |
+| V | Points: click four points on the model and they become a quad (below) |
 | H | Fill every hole with an even number of sides (or just the outlines double-clicked) |
 | Space | Build: rebuild every unedited stroke |
 | Del | Dissolve the picked edges |
@@ -389,6 +397,12 @@ the rings (down to 2) and **Ctrl + wheel** the lines round it; a panel by the po
 shows both, with - / + for a pen. The next click keeps it; one Ctrl+Z takes it all back.
 Rings that slip off the limb (into the body at a joint) are left out, so stop the line
 short of the shoulder or hip.
+
+**Points (V).** Click four points on the model and they become a quad, in any order (a
+crossed order is put right, and the quad faces outward). Clicking on a built vertex
+(orange dot) uses it instead of a new one, so quads join onto islands. Click a placed point
+again to drop it; Ctrl+Z drops the last one first, then whole quads. With mirror on, each
+quad gets a twin, and points dropped near the middle snap onto it.
 
 **Mirror.** With `X` on, everything is built twice, the second half the exact reflection
 of the first. Grab and Smooth never carry a vertex across the middle: it stops on it.
@@ -537,6 +551,26 @@ by pre-v4 builds migrate automatically when opened on the platform that saved th
 (just re-save to upgrade them to v4). Opened on the *other* platform, a pre-v4 file
 loads with correct geometry but its level stack flattened — you'll get a notification;
 re-save it on its origin platform first if you want the levels.
+
+### The File menu, autosave and recovery
+
+The project name at the top left is the **File** menu: New, Recents, Recover, Save, About,
+Exit (the browser build has New, Save and About). New asks first if there is unsaved work.
+
+On the desktop builds Chisel **autosaves** in the background: after a minute with your
+hands off, or after 5 minutes of unsaved work at the next pause. It never interrupts a
+stroke. After a crash or an unsaved close the app starts normally and the work waits under
+**File > Recover** (it opens untitled; save it under a name). The newest three ended
+sessions are kept; a real save clears its session's autosave.
+
+### The file browser (desktop)
+
+Open, Save and Export all use one file browser: Places (Home, Desktop, Documents,
+Downloads, Pictures, drives, bookmarks, recent folders), back / forward / up (Alt + arrows),
+a clickable path bar (Ctrl+L to type one), search and new folder. Dialogs open in the folder
+you used last; burger menu > **Default folder** sets the fallback. Typing a name lights
+the first file that starts with it, **Tab** completes the name and **Enter** opens it. The
+**+** next to OK saves the next numbered copy, like Save +.
 
 ### Import / export
 

@@ -23,7 +23,7 @@ identically in the native build, and vice versa.
 - **Ten brushes** — draw, clay, inflate, crease, pinch, move, limb (snakehook), pose (bend a limb at a joint), smooth, mask
 - **Vertex paint mode** with colour picking; paint survives subdivision, remeshing, and merges
 - **Retopology mode** — sketch strips and rings over the sculpt and they become clean quads on
-  its surface; bridge, cut, fill holes, wrap a limb in contour rings with one line, copy a ring
+  its surface; bridge, cut, fill holes, place quads point by point, wrap a limb in contour rings with one line, copy a ring
   from one horn onto the next, lasso a patch into a quad grid; mirror-aware, saved in the project
 - **UV unwrap and bake** — brush seams on and cut them, unwrap and pack the low-poly, then bake the sculpt into
   normal, colour and Color ID maps; several meshes can share one texture (an atlas); export the
@@ -39,6 +39,7 @@ identically in the native build, and vice versa.
 - **OBJ / PLY / GLB in; OBJ / STL / PLY / GLB out** (PLY carries vertex paint; textured GLBs
   come in with their texture, retopo lows go out as GLB with their baked maps)
 - **Pen pressure** — XInput2 / WinTab / browser Pointer Events; mouse-first design, tablet optional
+- **Autosave + crash recovery** on the desktop builds, and a file browser with places and type-ahead
 - **Matcap shading** — one draw call per object
 
 **Full controls and workflow: [MANUAL.md](MANUAL.md).** Quickstart: left-drag on the
