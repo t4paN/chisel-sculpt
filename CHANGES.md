@@ -2,6 +2,16 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-13 — Windows round-trip fixes merged; one brush feel for mouse and pen
+
+- Mouse and tablet profiles removed: one brush feel, one Max effect (a mouse dab is 0.6 of it). The device only picks the pressure source, and switching is silent (no toast). Settings move to `[brush]`, migrated from the old profile.
+- Windows: pen side buttons come from WinTab instead of the driver's clicks (the driver dropped 7–14% of presses in Mouse mode).
+- Windows sliders: the capture is taken after the poll, so stale queued moves no longer read as a size jump; the release settle is gone; with the pen driving (driver in Pen mode) the slider hides the cursor and reads deltas instead of capturing it, so it no longer snaps to 0 or 100.
+- Ring cursor no longer swings or snaps after a stroke: the screen planes stay readable across the stroke-commit refresh (Windows GL lands them one per frame).
+- Windows GL: screen-buffer readback through a staging buffer (about 3.2M verts/s, Linux range).
+- Windows: borderless fullscreen; the pen is detected on proximity (WT_PROXIMITY), not on the first click.
+- Web build linked again (a Windows-only probe sat inside a native-only block).
+
 ## 2026-11-12 — Second trip to 62.9M fits; level undo keeps mirror pairs; Windows round-trip fixes
 
 - Crash fixed: up to 62.9M tris, down a level, up again ran out of graphics memory. Stroke, snapshot and cascade scratch past twice the biggest mesh is freed after a level switch, and a level too big for the GPU rebuild drops the cascade's tables first. 10 GB card: 2.35 GB held at 15.7M after the visit (was 4.8), the second 62.9M holds what the first did; both backends.
