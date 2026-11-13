@@ -288,6 +288,22 @@ void web_install_dom_listeners() {
         // before the real one ~14 ms later. 40 ms of hover lost is unnoticeable.
         var RELSETTLE = 40;
         var relSettle = -1e9;
+        // Chromium on Windows (Chrome, Edge), traced 2026-11-13 with a pointer-event probe.
+        // Everything behind winChromium is off everywhere else, which stays as it was.
+        //  - After every pen-up it sends one mouse-type pointermove at the tip, in the same
+        //    millisecond as the pen's own events. Taken as "the mouse took over", it snapped
+        //    the cursor to the tip after each stroke. A mouse event within RELECHO ms of a
+        //    pen event is that echo and is dropped; the real mouse gets through once the
+        //    pen has been quiet that long.
+        //  - A pen held still sends nothing, so RELGAP of silence is no lift there: it
+        //    re-anchored (and settled for 40 ms) at the start of every slow move, eating
+        //    it. Lifts are always announced (leave/enter, new pointerId), so after a pause
+        //    only a hop of more than RELHOP px re-anchors, with no settle window.
+        var relUA = navigator.userAgent;
+        var winChromium = relUA.indexOf('Windows') >= 0 && relUA.indexOf('Chrome/') >= 0;
+        var RELECHO = 100;
+        var RELHOP = 40;
+        var relPenT = -1e9;
         var relLastType = '';
         // TEMPORARY: the last few pen events, printed at every pen-down.
         var relRing = [];
@@ -298,10 +314,13 @@ void web_install_dom_listeners() {
         var relStep = function(cx, cy, t, r, k, gain) {
             var x = (cx - r.left) * k;
             var y = (cy - r.top) * k;
-            var fresh = relFresh || t - relT > RELGAP;
+            var gap = t - relT > RELGAP;
+            var fresh = relFresh || (gap && !winChromium);
+            var hop = winChromium && !fresh && gap
+                   && Math.abs(x - relPX) + Math.abs(y - relPY) > RELHOP;
             relT = t;
             if (fresh) relSettle = t + RELSETTLE;
-            if (fresh || t < relSettle) {
+            if (fresh || hop || t < relSettle) {
                 console.log('[relpen] re-anchor' + (fresh ? '' : ' (settling)') + ': tip '
                             + x.toFixed(0) + ',' + y.toFixed(0)
                             + ' cursor stays ' + lastX.toFixed(0) + ',' + lastY.toFixed(0));
@@ -335,7 +354,8 @@ void web_install_dom_listeners() {
             // Anchoring on that stale sample turned the whole hop into one cursor step,
             // so the cursor stayed glued to the tip (traced 2026-11-13 with a pointer-event probe). A
             // fresh pen therefore anchors on the event's own, final position only.
-            var fresh = relFresh || e.timeStamp - relT > RELGAP || e.timeStamp < relSettle;
+            var fresh = relFresh || (!winChromium && e.timeStamp - relT > RELGAP)
+                     || e.timeStamp < relSettle;
             if (!fresh && e.type === 'pointermove' && e.getCoalescedEvents) {
                 var list = e.getCoalescedEvents();
                 for (var i = 0; i + 1 < list.length; i++) {
@@ -373,6 +393,56 @@ void web_install_dom_listeners() {
         c.addEventListener('pointerenter', relGone);
         c.addEventListener('pointercancel', relGone);
 
+        // Chromium on Windows: a pen side button set to "Erase" in the tablet driver pans,
+        // as the middle button. The driver's own "Middle Click" never reaches the page
+        // there (no press, no release; Firefox gets both), and a hovering eraser carries no
+        // button bit either. What does arrive: pressing or releasing Erase swaps the pen
+        // for the eraser tool, seen as the pen leaving and coming back 6-14 ms later with a
+        // new pointerId (a real lift took 136 ms or more; probe logs of 2026-11-13). So a
+        // return within ERASESWAP ms flips pen <-> eraser and any slower return is the
+        // plain pen again. Contact settles it for sure: bit 32 is the eraser, bit 1 the
+        // tip. It is a guess from timing: a pen that leaves range with the button held is
+        // read as the plain pen when it comes back. Any pen mode, relative or not.
+        if (winChromium) {
+            var ERASESWAP = 40;
+            var eraser = false;
+            var eraserHeld = false;
+            var eraserLeftT = -1e9;
+            var eraserIn = false;
+            var eraserPan = function(on, e) {
+                if (on === eraserHeld) return;
+                eraserHeld = on;
+                // An ordinary middle press for Emscripten's GLFW; the position is already
+                // Chisel's own (chisel_set_pointer).
+                c.dispatchEvent(new MouseEvent(on ? 'mousedown' : 'mouseup', { bubbles: true,
+                    cancelable: true, view: window, button: 1, buttons: on ? 4 : 0,
+                    clientX: e.clientX, clientY: e.clientY }));
+            };
+            c.addEventListener('pointerleave', function(e) {
+                if (e.pointerType !== 'pen') return;
+                eraserLeftT = e.timeStamp;
+                eraserIn = false;
+                // Gone for longer than a swap: let the button go.
+                setTimeout(function() {
+                    if (!eraserIn && eraserHeld) { eraser = false; eraserPan(false, e); }
+                }, 300);
+            });
+            c.addEventListener('pointerenter', function(e) {
+                if (e.pointerType !== 'pen') return;
+                eraserIn = true;
+                eraser = e.timeStamp - eraserLeftT < ERASESWAP ? !eraser : false;
+                eraserPan(eraser, e);
+            });
+            var eraserSync = function(e) {
+                if (e.pointerType !== 'pen') return;
+                if (e.buttons & 32) eraser = true;
+                else if (e.buttons & 1) eraser = false;
+                eraserPan(eraser, e);
+            };
+            c.addEventListener('pointermove', eraserSync);
+            c.addEventListener('pointerdown', eraserSync);
+        }
+
         var feed = function(e) {
             // During a gesture no finger drives the cursor, and outside one only the
             // first canvas finger does (it is the one GLFW clicks with).
@@ -383,6 +453,10 @@ void web_install_dom_listeners() {
             // works in its layout size.
             var k = r.width > 0 ? c.clientWidth / r.width : 1;
             var locked = document.pointerLockElement === c;
+            // Chromium on Windows: the mouse-type echo of a relative pen (see winChromium).
+            if (e.pointerType === 'pen') relPenT = e.timeStamp;
+            else if (winChromium && e.pointerType === 'mouse' && relLive
+                     && e.timeStamp - relPenT < RELECHO) return;
             var gain = e.pointerType === 'pen' ? Module._chisel_relpen_gain() : 0;
             var live = gain > 0;
             // TEMPORARY relative-pen diagnostics: what the browser calls this pointer.
