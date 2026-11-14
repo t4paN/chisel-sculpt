@@ -16,4 +16,10 @@ void web_open_file_picker();
 void web_open_alpha_picker();
 // Pointer, pen pressure, pagehide and key listeners. Once, before the main loop.
 void web_install_dom_listeners();
+// Pen pressure read off the tablet itself (WebHID), for a pen the browser is shown as a
+// mouse (Windows Ink off). State: 0 = not offered in this browser, 1 = offered and no
+// tablet open, 2 = a tablet is open. Connect opens the browser's device prompt and
+// must be called from a click.
+int  web_tablet_state();
+void web_tablet_connect();
 #endif

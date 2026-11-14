@@ -12,6 +12,7 @@
 #include "renderer.h"
 #include "retopo.h"
 #include "uv_unwrap.h"
+#include "web_bridge.h"
 #include "imgui.h"
 #include <functional>
 #include <cstdio>
@@ -1439,6 +1440,27 @@ void draw_settings_menu_items(InputState& input, MultiresInfo mres, bool sync_ta
                                      "relative mode.\n\n"
                                      "1.00x = as far as the pen would take it in\n"
                                      "Pen mode. Default 1.00x.");
+            }
+#endif
+#if defined(__EMSCRIPTEN__)
+            // Pen pressure without Windows Ink: the page reads the tablet itself
+            // (web_bridge.cpp, WebHID). Shown only where the browser offers it.
+            {
+                const int ts = web_tablet_state();
+                if (ts == 1) {
+                    if (ImGui::Button("Pen pressure without Windows Ink", ImVec2(mw, 0.0f)))
+                        web_tablet_connect();
+                } else if (ts == 2) {
+                    ImGui::TextDisabled("Pen pressure: read from the tablet");
+                }
+                if (ts != 0 && ImGui::IsItemHovered())
+                    ui_skin_menu_tip("Reads the pen's pressure straight from the\n"
+                                     "tablet, for a pen the browser sees as a mouse:\n"
+                                     "Windows Ink off, or the driver in Mouse mode.\n\n"
+                                     "Pick your tablet in the browser's prompt. It\n"
+                                     "is remembered for next time.\n\n"
+                                     "Chrome and Edge only. Works with One by Wacom;\n"
+                                     "other tablets are not supported yet.");
             }
 #endif
 #if !defined(__EMSCRIPTEN__)

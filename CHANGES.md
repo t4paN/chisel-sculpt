@@ -2,6 +2,13 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-15 — Web: pen pressure without Windows Ink (Chrome and Edge)
+
+- With Windows Ink off, or the tablet driver in Mouse mode, the browser is handed a plain mouse and no event carries pressure. Chisel can now read the pressure from the tablet's own USB reports (WebHID), next to the Wacom driver. Position and buttons stay the mouse's.
+- Menu, under Relative pen: **Pen pressure without Windows Ink**. One click, pick the tablet in the browser's prompt; the browser remembers it, so later visits connect by themselves. Shown only in Chrome and Edge on Windows.
+- Only the One by Wacom report layout is decoded (measured on 056A:037B: pressure 0..2047, wrapped in report id 220 next to the Wacom driver). Other tablets' reports are ignored.
+- Not available in Firefox (no WebHID). Inside itch's frame it needs the frame to allow HID: unchecked.
+
 ## 2026-11-15 — Web on Windows: sticky stroke start, pen slider drags, keyboard focus
 
 - Relative pen, Firefox on Windows: the cursor stuck at the start of a stroke. Windows holds back the pen's moves for a moment after every pen-down (mean 30 ms, up to 130 ms in the 2026-11-13 probe logs, Chrome and Firefox alike); a hold of over 100 ms read as a lift, so the stroke's first moves were dropped and 40 ms more went to settling. The rule Chrome already had (silence alone is no lift, only a hop of over 40 px after a pause re-anchors) now covers every browser on Windows. The hold itself is Windows' and is there with a plain pen too.

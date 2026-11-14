@@ -133,6 +133,14 @@ void web_open_alpha_picker() {
     });
 }
 
+int web_tablet_state() {
+    return EM_ASM_INT({ return Module.chiselTabletState ? Module.chiselTabletState() : 0; });
+}
+
+void web_tablet_connect() {
+    EM_ASM({ if (Module.chiselTabletConnect) Module.chiselTabletConnect(); });
+}
+
 void web_install_dom_listeners() {
     // Feed pointer position straight from the DOM in CSS-pixel space (canvas-relative),
     // bypassing GLFW's backing-store coords which desync from render/pick space across a
@@ -592,6 +600,73 @@ void web_install_dom_listeners() {
         };
         window.addEventListener('pointermove', feedPen, true);
         window.addEventListener('pointerdown', feedPen, true);
+
+        // Pen pressure without Windows Ink (Chrome and Edge on Windows; WebHID). With Ink
+        // off, or the driver in Mouse mode, the browser is handed a plain mouse and no DOM
+        // event carries pressure. The tablet's own USB reports still do, and its vendor
+        // collection opens next to the Wacom driver, so the page reads them itself.
+        // Position and buttons stay the mouse's; only the pressure comes from here, into
+        // the same chisel_set_pen as above, on every report while the pen is in range
+        // (the device arbiter in main.cpp then calls it a tablet, as with a real pen).
+        // The user grants the tablet once, from the menu (ui_overlay.cpp); the browser
+        // remembers it, so later visits open it with no prompt.
+        //
+        // Report layout: Wacom's "Bamboo pen" report, measured on a One by Wacom M
+        // (056A:037B, 2026-11-15) and the same as Linux wacom_wac.c wacom_bpt_pen:
+        //   [0] bit 0 tip, bits 1-2 side buttons, bit 5 ready, bit 6 prox, bit 7 range
+        //   [1..2] x   [3..4] y   [5..6] pressure, little-endian, 0..2047   [7] distance
+        // The tablet sends it as report id 2. Next to the Wacom driver on Windows it
+        // arrives as report id 220 with that 2 as the first byte. Other tablets need
+        // their own layout: their reports match neither shape and are ignored.
+        var hidOpen = 0;
+        var hidInk = false;
+        // A real pen event (Ink on) brings its own pressure: the tablet's is not used.
+        var hidNote = function(e) { hidInk = e.pointerType === 'pen'; };
+        window.addEventListener('pointermove', hidNote, true);
+        window.addEventListener('pointerdown', hidNote, true);
+        var hidReport = function(e) {
+            var d = e.data;
+            var o = -1;
+            if (e.reportId === 2 && d.byteLength >= 7) o = 0;
+            else if (e.reportId === 220 && d.byteLength >= 8 && d.getUint8(0) === 2) o = 1;
+            if (o < 0 || hidInk) return;
+            if (!(d.getUint8(o) & 0x20)) return;
+            Module._chisel_set_pen(1, Math.min(1, d.getUint16(o + 5, true) / 2047));
+        };
+        var hidAttach = function(dev) {
+            if (dev.vendorId !== 0x056a || dev.chiselOn) return;
+            (dev.opened ? Promise.resolve() : dev.open()).then(function() {
+                if (dev.chiselOn) return;
+                dev.chiselOn = true;
+                dev.addEventListener('inputreport', hidReport);
+                hidOpen++;
+                console.log('[tablet] reading pressure from ' + dev.productName);
+            }).catch(function(err) {
+                console.warn('[tablet] could not open ' + dev.productName + ': ' + err.message);
+            });
+        };
+        var hidHere = !!navigator.hid && navigator.userAgent.indexOf('Windows') >= 0;
+        // 0 = not offered here, 1 = offered and no tablet open, 2 = a tablet is open.
+        Module.chiselTabletState = function() { return !hidHere ? 0 : (hidOpen > 0 ? 2 : 1); };
+        // Needs a user gesture: called from a menu click.
+        Module.chiselTabletConnect = function() {
+            if (!hidHere) return;
+            navigator.hid.requestDevice({ filters: [{ vendorId: 0x056a }] }).then(function(list) {
+                list.forEach(hidAttach);
+            }).catch(function(err) {
+                console.warn('[tablet] request failed: ' + err.message);
+            });
+        };
+        if (hidHere) {
+            navigator.hid.getDevices().then(function(list) { list.forEach(hidAttach); });
+            navigator.hid.addEventListener('connect', function(e) { hidAttach(e.device); });
+            navigator.hid.addEventListener('disconnect', function(e) {
+                if (!e.device.chiselOn) return;
+                e.device.chiselOn = false;
+                e.device.removeEventListener('inputreport', hidReport);
+                hidOpen = Math.max(0, hidOpen - 1);
+            });
+        }
 
         // Last-chance settings write. visibilitychange->hidden is the reliable one on
         // mobile (a backgrounded tab may never get pagehide before it is discarded);
