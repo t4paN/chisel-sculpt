@@ -2,6 +2,14 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-14 — Pen lift height: switch, always shown, settling after a return
+
+- Burger menu > Pen lift height is now a checkbox (off by default) above the slider. Off, the pen is never let go by height, so the line can be set, or a too-low one undone, without the pen dropping out on the way to the slider.
+- Checkbox and slider show wherever the Wayland tablet protocol is bound, before any pen has been near the tablet, so the mouse can set them. A pen that reports no height leaves them without effect (the tooltip says how to tell). The slider's "100% = off" position is gone.
+- Stock kernel tablet driver: the cursor jumped after the pen came back into range or landed from above the line (36 jumps in one session, every one straight after a return, none mid-hover). With lift height on, for 8 reports after the anchoring a step over 40 px only anchors; counted in reports, no clock. The report that brings the tip down is judged too (quick taps out of a lift landed 100-250 px off), then the stroke owns every step.
+- Slider drags (S/W/A/E) that begin right after a return honour the owed anchoring and the same settling: the pen's leftover travel had gone into the slider (brush size 35.7 -> 107.8 in one drag).
+- Dev: `[relpen] settling` and `[relpen] slider drag` log lines, temporary.
+
 ## 2026-11-13 — Relative pen: Chrome on Windows; native Windows (unfinished)
 
 - Web, Chrome and Edge on Windows: the cursor no longer snaps to the pen tip after every stroke. Chrome sends one mouse-type move at the tip after each pen-up, which read as the mouse taking over; a mouse event within 100 ms of a pen event is dropped while the relative pen drives.

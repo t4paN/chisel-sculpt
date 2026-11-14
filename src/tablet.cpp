@@ -210,6 +210,16 @@ struct WlPen {
     // where it left (the proximity-in frame; Chrome on this desktop shows the same stale
     // sample), so after proximity-in two motions anchor: one report (~7 ms) of hover lost.
     int    rel_fresh  = 1;
+    // Reports left, after the anchoring, in which a big step still only anchors. The
+    // stock kernel driver's pen keeps travelling for a few reports after a return or a
+    // landing (runs of equal 60-160 px steps, every one straight after an anchor, none
+    // mid-hover; the hand is still crossing, or the position is still catching up), and
+    // that travel belongs to the lift, not to the cursor. Counted in reports, not by the
+    // clock. Ends with the report that brings the tip down. Only while lift height is
+    // switched on: a driver that handles lifts itself returns clean, and there the guard
+    // would only cost a fast flick its first reports.
+    int    rel_settle = 0;
+    int    drag_fresh = 0, drag_settle = 0;   // the same two, owed inside a slider drag
     bool   rel_seen   = false;           // a relative step has happened (else: start at tip)
     double rel_px = 0, rel_py = 0;       // last tip position folded in
     double rel_vx = 0, rel_vy = 0;       // Chisel's cursor
@@ -331,6 +341,10 @@ void lock_poll(WlPen* p) {
     }
 }
 
+// Settling after a return or a landing (see WlPen::rel_settle).
+constexpr int    kRelSettleReports = 8;      // ~60 ms at the pen's ~130 reports a second
+constexpr double kRelSettleStep    = 40.0;   // px in one report: faster than a hover aims
+
 // A slider drag began (GLFW's cursor went DISABLED) with the pen over the window. Mouse
 // drags never get here: the pen has to be in proximity, and nobody holds both.
 void wl_begin_drag(WlPen* p) {
@@ -341,6 +355,13 @@ void wl_begin_drag(WlPen* p) {
     p->drag_lx = p->ex;
     p->drag_ly = p->ey;
     p->drag_sx = p->drag_sy = 0.0;
+    // A relative pen that is still owed its anchoring (it has just returned or landed)
+    // owes it here too: that travel went into the slider instead, and a size tripled
+    // between two strokes (35.7 -> 107.8, straight after a return). Same rule as
+    // wl_rel_step: the owed motions only anchor, then big steps for a few reports.
+    p->drag_fresh  = p->rel_gain > 0.0f ? p->rel_fresh : 0;
+    p->drag_settle = p->rel_gain > 0.0f && p->lift < 1.0f
+                   ? (p->drag_fresh > 0 ? kRelSettleReports : p->rel_settle) : 0;
     if (p->lock == WlPen::Lock::NONE && lock_connect(p) && lock_send(p, "lock"))
         p->lock = WlPen::Lock::REQUESTED;
 }
@@ -366,7 +387,25 @@ void wl_rel_step(WlPen* p) {
         std::printf("[relpen] re-anchor: tip %.0f,%.0f cursor stays %.0f,%.0f%s\n",
                     p->x, p->y, p->rel_vx, p->rel_vy, p->rel_mouse ? " (from mouse)" : "");
         std::fflush(stdout);
+        p->rel_settle = p->lift < 1.0f ? kRelSettleReports : 0;   // only with lift height on
         return;
+    }
+    if (p->rel_settle > 0) {
+        p->rel_settle--;
+        // The touch itself can carry the last of that travel (a quick tap straight out of
+        // a lift: the dab landed 100-250 px off the cursor), so the report that brings
+        // the tip down is still judged. After it the stroke owns every step.
+        const bool judge = !p->tip || p->f_down;
+        if (p->tip) p->rel_settle = 0;
+        if (judge && (std::fabs(p->x - p->rel_px) > kRelSettleStep || std::fabs(p->y - p->rel_py) > kRelSettleStep)) {
+            // TEMPORARY log.
+            std::printf("[relpen] settling: step %.0f,%.0f dropped (tip %.0f,%.0f)\n",
+                        p->x - p->rel_px, p->y - p->rel_py, p->x, p->y);
+            std::fflush(stdout);
+            p->rel_px = p->x;
+            p->rel_py = p->y;
+            return;
+        }
     }
     int w = 0, h = 0;
     glfwGetWindowSize(p->win, &w, &h);   // surface-local units, same as p->x/y
@@ -412,8 +451,21 @@ void wl_move(WlPen* p) {
         // its own speed, and its cursor holds on the grab point: the pen re-anchors after
         // the drag and carries on from there.
         const double g = rel ? p->rel_gain : 1.0;
-        p->drag_sx += (p->x - p->drag_lx) * g;
-        p->drag_sy += (p->y - p->drag_ly) * g;
+        bool anchor_only = false;
+        if (p->drag_fresh > 0) { p->drag_fresh--; anchor_only = true; }
+        else if (p->drag_settle > 0) {
+            p->drag_settle--;
+            anchor_only = std::fabs(p->x - p->drag_lx) > kRelSettleStep || std::fabs(p->y - p->drag_ly) > kRelSettleStep;
+        }
+        if (anchor_only) {
+            // TEMPORARY log.
+            std::printf("[relpen] slider drag: step %.0f,%.0f dropped (pen just back)\n",
+                        p->x - p->drag_lx, p->y - p->drag_ly);
+            std::fflush(stdout);
+        } else {
+            p->drag_sx += (p->x - p->drag_lx) * g;
+            p->drag_sy += (p->y - p->drag_ly) * g;
+        }
         p->drag_lx = p->x;
         p->drag_ly = p->y;
         if (rel) p->rel_fresh = 1;
@@ -698,7 +750,11 @@ WlPen* wl_create(GLFWwindow* win) {
 }  // namespace
 
 bool tablet_relative_supported() { return g_wl != nullptr; }
-bool tablet_lift_supported() { return g_wl && g_wl->has_distance; }
+// Wherever the tablet protocol is bound, not only once a pen has shown a height: the
+// compositor announces a pen only after it has been near the tablet, and the setting has
+// to be there for the mouse before that. A pen that reports no height (some drivers pass
+// none) leaves it without effect; the user keeps the switch off there.
+bool tablet_lift_supported() { return g_wl != nullptr; }
 float tablet_pen_height() { return g_wl && g_wl->active && g_wl->has_distance ? g_wl->distance : -1.0f; }
 void tablet_set_relative(float gain, float lift, bool mouse_drove, double cx, double cy) {
     if (!g_wl) return;

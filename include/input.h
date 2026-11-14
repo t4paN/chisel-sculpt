@@ -447,6 +447,10 @@ struct InputState {
     // Native Wayland: hover height (0 touching .. 1 edge of range) above which the pen
     // counts as gone, absolute or relative (tablet.cpp wl_lifted). 1 = off.
     float    pen_lift_height = 1.0f;
+    // The switch beside it. Off = the pen is never let go by height, whatever the slider
+    // says: the line can be set (or a too-low one undone) without the pen dropping out
+    // on the way to the slider.
+    bool     pen_lift_on = false;
     bool     relpen_live = false;
     bool     subdiv_confirm_pending = false;
     bool     subdiv_confirmed = false;

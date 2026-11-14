@@ -1442,15 +1442,27 @@ void draw_settings_menu_items(InputState& input, MultiresInfo mres, bool sync_ta
             }
 #endif
 #if !defined(__EMSCRIPTEN__)
-            // Lift height: shown for any pen that reports its hover height, relative or not.
+            // Lift height: shown wherever the tablet protocol is bound, relative pen or not.
+            // A switch and a slider: with only the slider, a line dragged too low dropped
+            // the pen on its way back to the slider. Off, the slider and its readout still
+            // work, so the height is found first and switched on after.
             if (tablet_lift_supported()) {
+                ImGui::Checkbox("Pen lift height", &input.pen_lift_on);
+                if (ImGui::IsItemHovered())
+                    ui_skin_menu_tip("Let go of the pen above the height set\n"
+                                     "below. Off: only leaving the tablet's\n"
+                                     "range counts as a lift.\n\n"
+                                     "Set the height with this off, then\n"
+                                     "switch it on.\n\n"
+                                     "Needs a pen that reports its height: if\n"
+                                     "no (pen %%) value shows on the slider\n"
+                                     "while you hover, yours does not.");
                 float lift_pct = input.pen_lift_height * 100.0f;
                 // The tablet reports height in its own steps, not mm, so the readout is how
                 // a user finds their number: hold the pen at it (a ruler) and read.
                 const float now = tablet_pen_height();
                 char fmt[64];
-                if (lift_pct >= 99.5f) std::snprintf(fmt, sizeof(fmt), "lift height: off");
-                else                   std::snprintf(fmt, sizeof(fmt), "lift height %%.0f%%%%");
+                std::snprintf(fmt, sizeof(fmt), "lift height %%.0f%%%%");
                 if (now >= 0.0f) {
                     size_t n = std::strlen(fmt);
                     std::snprintf(fmt + n, sizeof(fmt) - n, "  (pen %.0f%%%%)", now * 100.0f);
@@ -1467,8 +1479,7 @@ void draw_settings_menu_items(InputState& input, MultiresInfo mres, bool sync_ta
                                      "Percent of the pen's hover range: the\n"
                                      "tablet reports steps, not millimetres.\n"
                                      "To find yours, hold the pen at your height\n"
-                                     "(a ruler works) and read the (pen %%) value.\n\n"
-                                     "100%% = off (only leaving range counts).");
+                                     "(a ruler works) and read the (pen %%) value.");
             }
 #endif
 

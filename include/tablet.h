@@ -79,7 +79,8 @@ bool tablet_drop_driver_button(int glfw_button, int action, long long extra);
 // arbiter's device is the mouse (a returning pen then carries on from the mouse's spot);
 // cx/cy = the app's cursor (input.mouse_x/y). lift = the hover height (0 touching .. 1
 // edge of range) above which the pen counts as gone, absolute or relative; 1 = off.
-// lift_supported(): the pen reports its height (distance capability).
+// lift_supported(): the lift height setting exists here (same as relative_supported; a
+// pen that reports no height leaves it without effect).
 bool tablet_relative_supported();
 bool tablet_lift_supported();
 float tablet_pen_height();   // the hovering pen's height now (0..1), -1 out of range / unknown

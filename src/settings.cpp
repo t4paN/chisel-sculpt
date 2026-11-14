@@ -220,6 +220,7 @@ std::string serialize(const InputState& in) {
     append_kv(s, "relative_pen",        in.relative_pen);
     append_kv(s, "pen_sensitivity",     in.pen_sensitivity);
     append_kv(s, "pen_lift_height",     in.pen_lift_height);
+    append_kv(s, "pen_lift_on",         in.pen_lift_on);
     // mirror_x is deliberately absent — see InputState::mirror_x. Symmetry is session
     // state that starts ON every run, so it must not survive into the next one. As with
     // brush_size, leaving it out of the "serialize and compare" blob also means pressing
@@ -350,6 +351,7 @@ void apply_global_key(InputState& in, const std::string& key, const std::string&
     else if (key == "camera_fov")          in.camera_fov          = clampf(std::strtof(val.c_str(), nullptr), 15.0f, 80.0f);
     else if (key == "relative_pen")        in.relative_pen        = parse_bool(val);
     else if (key == "pen_sensitivity")     in.pen_sensitivity     = clampf(std::strtof(val.c_str(), nullptr), 0.25f, 4.0f);
+    else if (key == "pen_lift_on")         in.pen_lift_on         = parse_bool(val);
     else if (key == "pen_lift_height")     in.pen_lift_height     = clampf(std::strtof(val.c_str(), nullptr), 0.05f, 1.0f);
     else if (key == "remesh_detail")       in.remesh_detail       = clampf(std::strtof(val.c_str(), nullptr), 0.25f, 4.0f);
     else if (key == "flat_shading")        in.flat_shading        = parse_bool(val);
@@ -566,6 +568,7 @@ void settings_reset(InputState& input) {
     input.relative_pen       = fresh.relative_pen;
     input.pen_sensitivity    = fresh.pen_sensitivity;
     input.pen_lift_height    = fresh.pen_lift_height;
+    input.pen_lift_on        = fresh.pen_lift_on;
     input.mirror_x           = fresh.mirror_x;
     input.mirror_topological = fresh.mirror_topological;
     input.fast_normals       = fresh.fast_normals;

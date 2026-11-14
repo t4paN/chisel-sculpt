@@ -999,7 +999,7 @@ int main(int argc, char* argv[]) {
         wl_pointer_warp_dispatch();   // the pointer-enter serial a Wayland edge wrap needs
 #if !defined(__EMSCRIPTEN__)
         tablet_set_relative(input.relative_pen ? input.pen_sensitivity : 0.0f,
-                            input.pen_lift_height,
+                            input.pen_lift_on ? input.pen_lift_height : 1.0f,
                             input.active_device == InputDevice::MOUSE,
                             input.mouse_x, input.mouse_y);
 #endif
