@@ -95,6 +95,9 @@ unsigned long tablet_live_proximity_changes();
 // Tablet::poll(), oldest first, in the driver's own units (not pixels; main.cpp's PenPath
 // learns the scale). The arrays stay valid until the next poll. Returns the count.
 int tablet_packets(const long** xs, const long** ys);
+// Pixels per unit of those reports (magnitudes), from the WinTab context's extents.
+// False where the driver gave none; PenPath then learns the whole scale itself.
+bool tablet_unit_px(double* kx, double* ky);
 
 // Native Wayland only: moving the pointer for edge-wrapped drags, through the
 // compositor's wp_pointer_warp_v1 (GLFW's glfwSetCursorPos does nothing there). init once

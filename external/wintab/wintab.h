@@ -69,6 +69,8 @@ typedef struct tagLOGCONTEXTA {
 #define WTI_DEFSYSCTX 4
 #define WTI_DEVICES   100
 #define DVC_NPRESSURE 15
+#define WTI_CURSORS   200
+#define CSR_NAME      1
 
 // --- lcOptions bits ---
 #define CXO_SYSTEM   0x0001

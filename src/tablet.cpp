@@ -1251,6 +1251,7 @@ void Tablet::shutdown() {
 #define PACKETDATA (PK_CURSOR | PK_BUTTONS | PK_X | PK_Y | PK_NORMAL_PRESSURE)
 #define PACKETMODE 0
 #include "pktdef.h"
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <GLFW/glfw3.h>   // glfwGetTime, for traces that line up with input.cpp's
@@ -1292,6 +1293,16 @@ struct Tablet::Impl {
     static constexpr int kPosMax = 256;
     long   pos_x[kPosMax], pos_y[kPosMax];
     int    pos_n = 0;
+    // Pixels per context unit, per axis, from the context's own extents (0 = not known).
+    double unit_px[2] = { 0.0, 0.0 };
+
+    // The cursor (tool) of the last packet. WinTab numbers them in threes per tablet:
+    // puck, pen tip, eraser. A side button set to "Erase" in the driver's panel swaps
+    // the pen for the eraser while held (proximity out, then in as cursor 2) and sends
+    // no button at all, so the eraser in range is what Chisel pans on: the middle
+    // button is held for as long as it is there (the web build does the same).
+    UINT   cursor = 0xFFFFFFFFu;
+    bool   erase_pan = false;
 
     // Side buttons (see tablet_drop_driver_button). Bits 1 and 2 of pkButtons.
     GLFWwindow* win = nullptr;
@@ -1308,6 +1319,7 @@ namespace {
 // pointer is all the window procedure needs to find its Impl.
 Tablet::Impl* g_wt_impl = nullptr;
 void wt_release_side(Tablet::Impl* m);
+void wt_erase_pan(Tablet::Impl* m, bool on);
 
 LRESULT CALLBACK tablet_msg_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     Tablet::Impl* m = g_wt_impl;
@@ -1321,7 +1333,7 @@ LRESULT CALLBACK tablet_msg_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     LOWORD(lp) ? "enter" : "leave");
         std::fflush(stdout);
         // A pen whisked away with a side button held sends no release packet.
-        if (!in) { wt_release_side(m); m->buttons &= ~(DWORD)6; }
+        if (!in) { wt_release_side(m); m->buttons &= ~(DWORD)6; wt_erase_pan(m, false); }
         return 0;
     }
     return DefWindowProcW(hwnd, msg, wp, lp);
@@ -1388,6 +1400,17 @@ void wt_release_side(Tablet::Impl* m) {
             m->side_held[bit] = false;
             wt_emit_button(m->win, m->side_glfw[bit], GLFW_RELEASE);
         }
+}
+
+// The eraser came into range (on) or the pen tip came back / everything left (off).
+void wt_erase_pan(Tablet::Impl* m, bool on) {
+    if (on == m->erase_pan) return;
+    m->erase_pan = on;
+    // TEMPORARY trace.
+    std::printf("[tablet] t=%.3f eraser %s -> MMB %s\n", glfwGetTime(),
+                on ? "in range" : "gone", on ? "down" : "up");
+    std::fflush(stdout);
+    wt_emit_button(m->win, GLFW_MOUSE_BUTTON_MIDDLE, on ? GLFW_PRESS : GLFW_RELEASE);
 }
 }
 
@@ -1474,6 +1497,13 @@ bool Tablet::init(GLFWwindow* window) {
                 (long)press.axMin, (long)press.axMax, lc.lcMsgBase, (int)lc.lcSysMode,
                 lc.lcSysOrgX, lc.lcSysOrgY, lc.lcSysExtX, lc.lcSysExtY);
     std::fflush(stdout);
+    // The context's units against the screen area it is mapped to. For the default
+    // system context that is 1 px per unit (Y running up), but it is the driver's to say.
+    if (lc.lcOutExtX != 0) m->unit_px[0] = std::fabs((double)lc.lcSysExtX / (double)lc.lcOutExtX);
+    if (lc.lcOutExtY != 0) m->unit_px[1] = std::fabs((double)lc.lcSysExtY / (double)lc.lcOutExtY);
+    std::printf("[tablet] WinTab units: out ext %ld,%ld -> %.4f, %.4f px per unit\n",
+                (long)lc.lcOutExtX, (long)lc.lcOutExtY, m->unit_px[0], m->unit_px[1]);
+    std::fflush(stdout);
 
     // Room for a long frame's worth of reports (the default queue is a few dozen).
     if (m->ctx) {
@@ -1520,6 +1550,15 @@ void Tablet::poll(bool /*stroke_active*/) {
         // which has never been dropped; the side buttons (bits 1, 2) come from here.
         const double now = glfwGetTime();
         for (int i = 0; i < n; i++) {
+            if (pkts[i].pkCursor != m->cursor) {
+                m->cursor = pkts[i].pkCursor;
+                // TEMPORARY trace: which tool the driver says this is.
+                char name[64] = {};
+                m->WTInfo(WTI_CURSORS + m->cursor, CSR_NAME, name);
+                name[sizeof(name) - 1] = 0;
+                std::printf("[tablet] t=%.3f cursor %u \"%s\"\n", now, (unsigned)m->cursor, name);
+                std::fflush(stdout);
+            }
             const DWORD was = m->buttons, is = pkts[i].pkButtons;
             if (is == was) continue;
             // TEMPORARY trace, to line up with the [click] lines.
@@ -1540,6 +1579,10 @@ void Tablet::poll(bool /*stroke_active*/) {
     }
     if (n < 32) break;
     }
+    // Once per poll, from where things stand now: the proximity messages above were
+    // handled before the packets, so packets from before a lift must not press again.
+    if (m->proximity == 0) wt_erase_pan(m, false);
+    else if (m->pos_n > 0) wt_erase_pan(m, m->cursor % 3 == 2);
 }
 
 float Tablet::pressure() const {
@@ -1559,6 +1602,13 @@ int tablet_packets(const long** xs, const long** ys) {
     *xs = g_wt_impl->pos_x;
     *ys = g_wt_impl->pos_y;
     return g_wt_impl->pos_n;
+}
+
+bool tablet_unit_px(double* kx, double* ky) {
+    if (!g_wt_impl || g_wt_impl->unit_px[0] <= 0.0 || g_wt_impl->unit_px[1] <= 0.0) return false;
+    *kx = g_wt_impl->unit_px[0];
+    *ky = g_wt_impl->unit_px[1];
+    return true;
 }
 
 int Tablet::proximity() const { return impl ? impl->proximity : -1; }
@@ -1601,6 +1651,7 @@ bool tablet_drop_driver_button(int, int, long long) { return false; }
 int tablet_live_proximity() { return -1; }
 unsigned long tablet_live_proximity_changes() { return 0; }
 int tablet_packets(const long**, const long**) { return 0; }
+bool tablet_unit_px(double*, double*) { return false; }
 #endif
 
 #if !defined(CHISEL_WL_TABLET)

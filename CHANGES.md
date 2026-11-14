@@ -2,6 +2,13 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-14 — Native Windows relative pen: Erase button pans, menu hover, pen path scale
+
+- A pen side button set to Erase in the tablet driver pans, as the middle button. WinTab names the tool on every report (cursor 2 of each three is the eraser), so the eraser in range holds the middle button and the pen tip coming back, or everything leaving range, lets it go. No timing guess, unlike the web. A pen with a real eraser end pans the same way while that end hovers.
+- Menus hovered at the pen tip, not at Chisel's cursor, whenever the tip was outside the window or had just come back in (ImGui's backend falls back to the OS pointer there). Chisel's cursor is now handed to ImGui every frame while the relative pen drives.
+- `PenPath` takes the size of its scale from the WinTab context (1 px per unit here) and learns only the direction, from four frames of motion. The full fit took 7 s to lock in one run and 808 s in another. The fit still overrules a stated size it disagrees with and still drops the scale when the pointer stops following the reports.
+- Dev: `[tablet] cursor`, `[tablet] eraser`, `[tablet] WinTab units` log lines, temporary.
+
 ## 2026-11-14 — Pen lift height: switch, always shown, settling after a return
 
 - Burger menu > Pen lift height is now a checkbox (off by default) above the slider. Off, the pen is never let go by height, so the line can be set, or a too-low one undone, without the pen dropping out on the way to the slider.

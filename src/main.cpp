@@ -264,12 +264,26 @@ struct PenPath {
     // two or three frames is an accident: the first version took one 0.3 s after launch
     // (x 3.77, y -5.00) and dropped it again 140 ms later.
     double moved[2] = {0, 0};
+    // unit[]: px per report unit as the WinTab context states it (0 = not stated). With
+    // it only the direction is left to learn, which a few frames of motion settle; the
+    // full fit took 7 s to lock in one run and 808 s in another (2026-11-13). The fit
+    // still overrules a stated size it clearly disagrees with, and still drops the scale
+    // when the pointer stops following the reports (a driver in Mouse mode).
+    double unit[2] = {0, 0};
     int fit(int axis, double& out) const {
-        if (moved[axis] < 25.0 || xx[axis] < 1.0 || cc[axis] < 400.0) return 0;
+        const bool stated = unit[axis] > 0.0;
+        if (moved[axis] < (stated ? 4.0 : 25.0) || xx[axis] < 1.0 || cc[axis] < 400.0) return 0;
         const double r2 = (xc[axis] * xc[axis]) / (xx[axis] * cc[axis]);
-        if (r2 < 0.6) return -1;
+        if (r2 < 0.6) return moved[axis] < 25.0 ? 0 : -1;
+        const double slope = xc[axis] / xx[axis];
+        if (stated) {
+            const double ratio = std::fabs(slope) / unit[axis];
+            if (r2 >= 0.95 && (ratio < 0.8 || ratio > 1.25)) { out = slope; return 1; }
+            out = slope < 0.0 ? -unit[axis] : unit[axis];
+            return 1;
+        }
         if (r2 < 0.95) return 0;
-        out = xc[axis] / xx[axis];
+        out = slope;
         return 1;
     }
 
@@ -300,6 +314,7 @@ struct PenPath {
         prev_py = ys[n - 1];
         prev_cur = cur;
 
+        if (!tablet_unit_px(&unit[0], &unit[1])) unit[0] = unit[1] = 0.0;
         double kx = 0.0, ky = 0.0;
         const int fx = fit(0, kx), fy = fit(1, ky);
         const bool had_k = have_k;
@@ -1225,6 +1240,13 @@ int main(int argc, char* argv[]) {
         ImGui_ImplOpenGL3_NewFrame();
 #endif
         ImGui_ImplGlfw_NewFrame();
+#if defined(_WIN32) && !defined(__EMSCRIPTEN__)
+        // A relative pen: ImGui's backend falls back to the OS pointer (the tip) whenever
+        // the pointer is outside the window or has just come back in, so menus hovered
+        // somewhere other than Chisel's cursor. The last word each frame is Chisel's.
+        if (input_relpen_on())
+            ImGui::GetIO().AddMousePosEvent((float)input.mouse_x, (float)input.mouse_y);
+#endif
         // ImGui measures DeltaTime from the last drawn frame, so the wake frame after an
         // idle stretch would see the whole gap: a toast raised by the waking keypress
         // would be counted down by minutes and vanish before it was ever drawn.
