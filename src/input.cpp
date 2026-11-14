@@ -512,6 +512,7 @@ static int g_shift_tap_count = 0;
 static int g_ctrl_tap_count = 0;
 
 static double g_slider_last_raw_x = 0;
+static unsigned long g_slider_prox_seen = 0;   // Win32: WinTab proximity edges seen by the drag
 // GLFW's virtual position when the drag began. A pen drives a slider through a replay
 // (tablet.cpp) without ever moving it, so an unchanged value at release means the pen,
 // not the mouse, did the drag.
@@ -852,6 +853,7 @@ static void begin_slider_drag(GLFWwindow* w, InputState::SliderMode mode, float 
         g_slider_begin_vx = cx;
         g_slider_begin_vy = cy;
     }
+    g_slider_prox_seen = tablet_live_proximity_changes();
     slider_hint_start();
 #endif
 }
@@ -980,6 +982,9 @@ static void end_slider_drag(GLFWwindow* w, bool warp_back) {
     // warp being refused outright.
     // A pen can't be warped on Wayland, and it isn't the pointer this checks anyway —
     // after a pen-driven drag the "got" position is just the idle mouse.
+#if defined(_WIN32)
+    if (g_rel_on) mouse_dragged = false;   // a relative pen's OS pointer is never sent back
+#endif
     if (w && warp_back && mouse_dragged) {
         double ax = 0.0, ay = 0.0;
         glfwGetCursorPos(w, &ax, &ay);
@@ -1153,10 +1158,26 @@ static void cursor_pos_callback(GLFWwindow* w, double x, double y) {
 #if defined(_WIN32)
         // A relative pen: its cursor holds still, only the baseline follows the tip, so
         // the cursor carries on from the grab point after the drag.
-        { double hx = x, hy = y; relpen_step(w, hx, hy, true); }
+        bool rel = false;
+        { double hx = x, hy = y; rel = relpen_step(w, hx, hy, true); }
 #endif
         float dx = (float)(x - g_slider_last_raw_x);
         g_slider_last_raw_x = x;
+#if defined(_WIN32)
+        // A pen lifted and put down elsewhere mid-drag (to reach further): the first
+        // report after WinTab says it left or came back carries that whole hop, which
+        // is not a drag. It only moves the baseline, relative pen or not. Leaving
+        // counts as well as returning, as for the relative pen's re-anchor.
+        const unsigned long prox = tablet_live_proximity_changes();
+        if (prox != g_slider_prox_seen) {
+            g_slider_prox_seen = prox;
+            // TEMPORARY log.
+            std::printf("[slider] pen lift mid-drag: step %.0f dropped\n", dx);
+            std::fflush(stdout);
+            dx = 0.0f;
+        }
+        if (rel) dx *= g_input->pen_sensitivity;   // as on the web and on Linux
+#endif
         apply_slider_delta(dx);
         static const bool s_trace = std::getenv("CHISEL_SLIDER_TRACE") != nullptr;
         if (s_trace) {

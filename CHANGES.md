@@ -2,6 +2,14 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-15 — Slider drags: a pen lifted mid-drag no longer jumps the slider
+
+- Slider drags (S/W/A/E) with the pen lifted and put down elsewhere mid-drag, to reach further: the hop to the new spot went into the slider. The slider now moves only while the pen moves.
+- Windows: the first report after WinTab says the pen left or came back only moves the drag's baseline, relative pen or not.
+- Linux (Wayland): the drag only honoured an anchoring owed when it began; it now also owes one for a lift during it.
+- Windows: a relative pen's slider drags go at the pen sensitivity, as on the web and on Linux. The false `POINTER DID NOT RETURN` line after each of them is gone.
+- Dev: `[slider] pen lift mid-drag` log line, temporary.
+
 ## 2026-11-14 — Native Windows relative pen: Erase button pans, menu hover, pen path scale
 
 - A pen side button set to Erase in the tablet driver pans, as the middle button. WinTab names the tool on every report (cursor 2 of each three is the eraser), so the eraser in range holds the middle button and the pen tip coming back, or everything leaving range, lets it go. No timing guess, unlike the web. A pen with a real eraser end pans the same way while that end hovers.

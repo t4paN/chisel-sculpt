@@ -452,6 +452,11 @@ void wl_move(WlPen* p) {
         // the drag and carries on from there.
         const double g = rel ? p->rel_gain : 1.0;
         bool anchor_only = false;
+        // The pen left range and came back mid-drag (lifted to reach further): proximity
+        // set rel_fresh to 2, but the drag only read what was owed when it began, so the
+        // hop to the new spot went into the slider. Owe the anchoring to the drag here.
+        // (Each drag motion below leaves rel_fresh at 1, so 2 means a lift since.)
+        if (p->rel_fresh > 1) { p->drag_fresh = p->rel_fresh; p->rel_fresh = 1; }
         if (p->drag_fresh > 0) { p->drag_fresh--; anchor_only = true; }
         else if (p->drag_settle > 0) {
             p->drag_settle--;
