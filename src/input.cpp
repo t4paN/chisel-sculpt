@@ -745,7 +745,11 @@ static void web_pointer_lock(bool grab) {
     // which slammed every slider to its ends. Unlocked, the shell feeds the clientX
     // step instead, which is exact. Chromium on the same desktop locks properly.
     // Newer browsers answer with a promise; a refusal is otherwise silent.
+    // Nor does a plain (absolute) pen: the same jumpy deltas made the S/W/A/E drags
+    // unusable with a pen in the browser (user report 2026-11-15, Windows). Unlocked, the
+    // shell feeds the pen's clientX steps. The pen's own pointer wanders during the drag.
     if (grab) EM_ASM({
+        if (Module.chiselPenDrives) return;
         var ua = navigator.userAgent;
         if (ua.indexOf('Firefox') >= 0 && ua.indexOf('Linux') >= 0 && ua.indexOf('Android') < 0) return;
         if (!Module.canvas.requestPointerLock) return;

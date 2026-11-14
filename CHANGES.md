@@ -2,6 +2,13 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-15 — Web on Windows: sticky stroke start, pen slider drags, keyboard focus
+
+- Relative pen, Firefox on Windows: the cursor stuck at the start of a stroke. Windows holds back the pen's moves for a moment after every pen-down (mean 30 ms, up to 130 ms in the 2026-11-13 probe logs, Chrome and Firefox alike); a hold of over 100 ms read as a lift, so the stroke's first moves were dropped and 40 ms more went to settling. The rule Chrome already had (silence alone is no lift, only a hop of over 40 px after a pause re-anchors) now covers every browser on Windows. The hold itself is Windows' and is there with a plain pen too.
+- Slider drags (S/W/A/E) with a plain pen: no pointer lock for a pen. A pen under a browser lock sends jumpy deltas; unlocked, the shell feeds its position steps, as it already did for the relative pen. The pen's own pointer wanders during the drag.
+- Slider drags with a plain pen lifted and put down elsewhere mid-drag: the hop no longer goes into the slider (the web side of the entry below).
+- Shell: the page takes keyboard focus on any press. On itch (v0.3.10, Chrome on Windows) Ctrl+D bookmarked and Alt-drag did not orbit; every key listener sits on the frame's window, which hears nothing without focus. Unverified as the cause.
+
 ## 2026-11-15 — Slider drags: a pen lifted mid-drag no longer jumps the slider
 
 - Slider drags (S/W/A/E) with the pen lifted and put down elsewhere mid-drag, to reach further: the hop to the new spot went into the slider. The slider now moves only while the pen moves.

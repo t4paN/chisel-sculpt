@@ -188,6 +188,14 @@
     window.addEventListener('mousedown', function(e) {
       if (e.button === 1) e.preventDefault();
     }, true);
+    // Every key listener here sits on this window, so inside itch's iframe the app is
+    // deaf until the frame holds keyboard focus: Ctrl+D bookmarked, Alt-drag did not
+    // orbit (reported 2026-11-15, Chrome on Windows, v0.3.10 on itch). A press normally
+    // focuses the frame, but not when its default is cancelled along the way. Take the
+    // focus on any press. UNVERIFIED as the cause: written on the Windows box, not built.
+    window.addEventListener('pointerdown', function() {
+      if (!document.hasFocus()) window.focus();
+    }, true);
     window.addEventListener('wheel', function(e) {
       e.preventDefault();
     }, { capture: true, passive: false });

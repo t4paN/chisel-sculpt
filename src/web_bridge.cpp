@@ -301,6 +301,17 @@ void web_install_dom_listeners() {
         //    only a hop of more than RELHOP px re-anchors, with no settle window.
         var relUA = navigator.userAgent;
         var winChromium = relUA.indexOf('Windows') >= 0 && relUA.indexOf('Chrome/') >= 0;
+        // Windows, any browser: the silence rule above is off in Firefox too. Windows holds
+        // back the pen's moves for a moment after every pen-down (mean 30 ms, up to 130 ms
+        // in the 2026-11-13 probe logs, Chrome and Firefox alike); in Firefox a hold of over
+        // RELGAP read as a lift, so the stroke's first moves were dropped and 40 ms more
+        // went to settling: the cursor stuck at the start of a stroke. Firefox announces
+        // lifts there as Chrome does (leave/enter).
+        var winQuiet = relUA.indexOf('Windows') >= 0;
+        // A pen that left and came back (or changed id) since its last report: the next
+        // step is the hop to where it landed, which a slider drag must not take.
+        var penHop = false;
+        var penId = -1;
         var RELECHO = 100;
         var RELHOP = 40;
         var relPenT = -1e9;
@@ -315,8 +326,8 @@ void web_install_dom_listeners() {
             var x = (cx - r.left) * k;
             var y = (cy - r.top) * k;
             var gap = t - relT > RELGAP;
-            var fresh = relFresh || (gap && !winChromium);
-            var hop = winChromium && !fresh && gap
+            var fresh = relFresh || (gap && !winQuiet);
+            var hop = winQuiet && !fresh && gap
                    && Math.abs(x - relPX) + Math.abs(y - relPY) > RELHOP;
             relT = t;
             if (fresh) relSettle = t + RELSETTLE;
@@ -354,7 +365,7 @@ void web_install_dom_listeners() {
             // Anchoring on that stale sample turned the whole hop into one cursor step,
             // so the cursor stayed glued to the tip (traced 2026-11-13 with a pointer-event probe). A
             // fresh pen therefore anchors on the event's own, final position only.
-            var fresh = relFresh || (!winChromium && e.timeStamp - relT > RELGAP)
+            var fresh = relFresh || (!winQuiet && e.timeStamp - relT > RELGAP)
                      || e.timeStamp < relSettle;
             if (!fresh && e.type === 'pointermove' && e.getCoalescedEvents) {
                 var list = e.getCoalescedEvents();
@@ -387,6 +398,7 @@ void web_install_dom_listeners() {
         var relGone = function(e) {
             if (e.pointerType !== 'pen') return;
             relFresh = true;
+            penHop = true;
             relNote(e.type + '@' + (e.timeStamp | 0));
         };
         c.addEventListener('pointerleave', relGone);
@@ -454,6 +466,9 @@ void web_install_dom_listeners() {
             // works in its layout size.
             var k = r.width > 0 ? c.clientWidth / r.width : 1;
             var locked = document.pointerLockElement === c;
+            // For the slider's pointer lock (input.cpp web_pointer_lock): a pen gets none.
+            Module.chiselPenDrives = e.pointerType === 'pen';
+            if (e.pointerType === 'pen' && e.pointerId !== penId) { penId = e.pointerId; penHop = true; }
             // Chromium on Windows: the mouse-type echo of a relative pen (see winChromium).
             if (e.pointerType === 'pen') relPenT = e.timeStamp;
             else if (winChromium && e.pointerType === 'mouse' && relLive
@@ -538,7 +553,10 @@ void web_install_dom_listeners() {
                 }
             } else if (sx0 >= 0) {
                 sdx = (e.clientX - sx0) * k;
+                // A pen lifted and put down elsewhere mid-drag: not a drag step.
+                if (e.pointerType === 'pen' && penHop) sdx = 0;
             }
+            if (e.pointerType === 'pen') penHop = false;
             sx0 = e.clientX;
             Module._chisel_set_pointer(outX, outY, sdx);
         };
