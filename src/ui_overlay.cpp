@@ -1399,6 +1399,20 @@ void draw_settings_menu_items(InputState& input, MultiresInfo mres, bool sync_ta
 #endif
             if (relpen_here) ImGui::Checkbox("Relative pen", &input.relative_pen);
 #if defined(__linux__) && !defined(__EMSCRIPTEN__)
+            // No tablet protocol bound (X11, or the AppImage's GLFW 3.3): nothing is behind
+            // the switch there. Shown greyed and unticked rather than hidden, so nobody
+            // hunts for it; the saved setting is left alone for a later Wayland run.
+            if (!relpen_here) {
+                bool off = false;
+                ImGui::BeginDisabled();
+                ImGui::Checkbox("Relative pen", &off);
+                ImGui::EndDisabled();
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                    ui_skin_menu_tip("Not available on X11.\n\n"
+                                     "Set your tablet driver to its relative\n"
+                                     "(mouse) mode instead: the pen then moves\n"
+                                     "the cursor like a mouse, with pressure.");
+            }
             if (relpen_here && ImGui::IsItemHovered())
                 ui_skin_menu_tip("The pen moves the cursor like a mouse: lift it,\n"
                                  "put it down anywhere, and the cursor carries on\n"

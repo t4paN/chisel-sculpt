@@ -2,6 +2,10 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-15 — Relative pen: checkbox shown greyed out on X11
+
+- Burger menu > Relative pen was hidden on native Linux without the Wayland tablet protocol (X11, and the AppImage), where nothing is behind it. It now shows greyed out and unticked, with a tip pointing at the tablet driver's own relative mode. The saved setting is left alone.
+
 ## 2026-11-15 — Web: pen pressure without Windows Ink (Chrome and Edge)
 
 - With Windows Ink off, or the tablet driver in Mouse mode, the browser is handed a plain mouse and no event carries pressure. Chisel can now read the pressure from the tablet's own USB reports (WebHID), next to the Wacom driver. Position and buttons stay the mouse's.
