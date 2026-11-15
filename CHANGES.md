@@ -2,6 +2,14 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-15 — Web: the pen's lower side button pans without Windows Ink (Chrome and Edge)
+
+- With Windows Ink off the browser is handed a plain mouse, and the lower side button set to "Erase" in the tablet driver sends the page nothing at all, so the Erase pan only worked with Ink on. With the tablet connected (Menu > Pen pressure without Windows Ink) Chisel now reads the button from the tablet's own report and holds the middle button while it is down, whatever the driver maps it to.
+- While it is held, wheel events are kept from the app (the driver's own Pan/Scroll would zoom), and so is the tip's press: touching down mid-pan starts no stroke.
+- The Erase pan with Ink on is unchanged; both feed one middle button.
+- The button pans even when the driver maps it to something else, which then happens as well.
+- Firefox has no WebHID: there the pan still needs Ink on and the button on Erase.
+
 ## 2026-11-15 — Relative pen: checkbox shown greyed out on X11
 
 - Burger menu > Relative pen was hidden on native Linux without the Wayland tablet protocol (X11, and the AppImage), where nothing is behind it. It now shows greyed out and unticked, with a tip pointing at the tablet driver's own relative mode. The saved setting is left alone.

@@ -424,6 +424,22 @@ void web_install_dom_listeners() {
         // plain pen again. Contact settles it for sure: bit 32 is the eraser, bit 1 the
         // tip. It is a guess from timing: a pen that leaves range with the button held is
         // read as the plain pen when it comes back. Any pen mode, relative or not.
+        // The pen's pan button, held as the middle button. Two sources can ask for it: the
+        // eraser swap below (bit 1) and the tablet's own report further down (bit 2). One
+        // press while either asks, one release when neither does.
+        var penPanBits = 0;
+        var penPan = function(bit, on, x, y) {
+            var was = penPanBits !== 0;
+            penPanBits = on ? (penPanBits | bit) : (penPanBits & ~bit);
+            var now = penPanBits !== 0;
+            if (now === was) return;
+            // An ordinary middle press for Emscripten's GLFW; the position is already
+            // Chisel's own (chisel_set_pointer).
+            c.dispatchEvent(new MouseEvent(now ? 'mousedown' : 'mouseup', { bubbles: true,
+                cancelable: true, view: window, button: 1, buttons: now ? 4 : 0,
+                clientX: x, clientY: y }));
+        };
+
         if (relUA.indexOf('Windows') >= 0) {
             var ERASESWAP = 40;
             var eraser = false;
@@ -433,11 +449,7 @@ void web_install_dom_listeners() {
             var eraserPan = function(on, e) {
                 if (on === eraserHeld) return;
                 eraserHeld = on;
-                // An ordinary middle press for Emscripten's GLFW; the position is already
-                // Chisel's own (chisel_set_pointer).
-                c.dispatchEvent(new MouseEvent(on ? 'mousedown' : 'mouseup', { bubbles: true,
-                    cancelable: true, view: window, button: 1, buttons: on ? 4 : 0,
-                    clientX: e.clientX, clientY: e.clientY }));
+                penPan(1, on, e.clientX, e.clientY);
             };
             c.addEventListener('pointerleave', function(e) {
                 if (e.pointerType !== 'pen') return;
@@ -618,21 +630,59 @@ void web_install_dom_listeners() {
         // The tablet sends it as report id 2. Next to the Wacom driver on Windows it
         // arrives as report id 220 with that 2 as the first byte. Other tablets need
         // their own layout: their reports match neither shape and are ignored.
+        //
+        // The lower side button pans, read from the same report (bit 1 of byte 0), so it
+        // does not matter what the driver maps it to. With Ink off the driver's "Erase"
+        // sends the page nothing at all (measured 2026-11-15, Chrome: no button, no wheel,
+        // no pointer event), and its "Pan/Scroll" is the driver scrolling by itself. While
+        // the button is held the wheel is kept from the app (the driver's own scrolling
+        // would zoom), and so is the tip's left press (touching down mid-pan is no stroke).
         var hidOpen = 0;
         var hidInk = false;
+        var hidSide = false;
+        var hidX = 0;
+        var hidY = 0;
         // A real pen event (Ink on) brings its own pressure: the tablet's is not used.
-        var hidNote = function(e) { hidInk = e.pointerType === 'pen'; };
+        var hidNote = function(e) {
+            hidInk = e.pointerType === 'pen';
+            hidX = e.clientX;
+            hidY = e.clientY;
+        };
         window.addEventListener('pointermove', hidNote, true);
         window.addEventListener('pointerdown', hidNote, true);
+        var hidPan = function(on) {
+            if (on === hidSide) return;
+            hidSide = on;
+            penPan(2, on, hidX, hidY);
+        };
         var hidReport = function(e) {
             var d = e.data;
             var o = -1;
             if (e.reportId === 2 && d.byteLength >= 7) o = 0;
             else if (e.reportId === 220 && d.byteLength >= 8 && d.getUint8(0) === 2) o = 1;
-            if (o < 0 || hidInk) return;
-            if (!(d.getUint8(o) & 0x20)) return;
+            if (o < 0) return;
+            var b = d.getUint8(o);
+            // Bit 5: the pen is in range and reporting. Out of range lets the button go.
+            hidPan((b & 0x22) === 0x22);
+            if (hidInk || !(b & 0x20)) return;
             Module._chisel_set_pen(1, Math.min(1, d.getUint16(o + 5, true) / 2047));
         };
+        window.addEventListener('wheel', function(e) {
+            if (!hidSide) return;
+            e.preventDefault();
+            e.stopImmediatePropagation();
+        }, { capture: true, passive: false });
+        var hidTipEaten = false;
+        var hidTip = function(e) {
+            // The app's own made-up middle press is not trusted and passes.
+            if (!e.isTrusted || e.button !== 0) return;
+            if (e.type === 'mousedown' ? !hidSide : !hidTipEaten) return;
+            hidTipEaten = e.type === 'mousedown';
+            e.preventDefault();
+            e.stopImmediatePropagation();
+        };
+        window.addEventListener('mousedown', hidTip, true);
+        window.addEventListener('mouseup', hidTip, true);
         var hidAttach = function(dev) {
             if (dev.vendorId !== 0x056a || dev.chiselOn) return;
             (dev.opened ? Promise.resolve() : dev.open()).then(function() {
@@ -665,6 +715,7 @@ void web_install_dom_listeners() {
                 e.device.chiselOn = false;
                 e.device.removeEventListener('inputreport', hidReport);
                 hidOpen = Math.max(0, hidOpen - 1);
+                hidPan(false);
             });
         }
 
