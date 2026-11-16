@@ -194,11 +194,14 @@ Where it works:
   Under plain Wayland they show the pen's own arrow as a second cursor.
 - **Windows app:** driver in pen mode, Windows Ink on or off. A pen in the driver's mouse
   mode works as before, with Relative pen off.
-- **Linux app on Wayland** (built from source): works through the compositor's tablet
+- **Linux app on Wayland** (the AppImage included): works through the compositor's tablet
   protocol. **Pen lift height** lets go of the cursor above a set height, for pens that
   report it.
-- **Linux app on X11, and the AppImage:** the checkbox is greyed out. Set the tablet
-  driver to its relative mode instead; it does the same job, with pressure.
+- **Linux app on X11:** the checkbox is greyed out. Set the tablet driver to its relative
+  mode instead; it does the same job, with pressure.
+
+The AppImage runs on Wayland where the desktop does and on X11 elsewhere. Start it with
+`--x11` to run on X11 in a Wayland session, if the window or the pen misbehaves.
 
 ## Symmetry
 

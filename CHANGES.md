@@ -2,6 +2,14 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-16 — Linux AppImage: one build for X11 and Wayland
+
+- The AppImage was X11 only (the CI image's GLFW 3.3), so on a Wayland desktop it ran through XWayland: no Relative pen, no Pen lift height, and pen slider drags that jumped. CI now builds a static GLFW 3.4, which carries both and picks at start-up: Wayland in a Wayland session, X11 elsewhere.
+- A Wayland start that fails (old or missing libraries) retries on X11. `--x11` forces X11.
+- The Wayland protocol glue is regenerated with the 1.18 scanner, so it builds on the CI image and runs on any libwayland. The protocol XML files sit beside it.
+- The AppImage does not carry the Wayland client libraries where the host's would be shadowed (the host's Mesa shares them); a copy is used only on a host that has none.
+- X11 window on a Wayland desktop: a pen can't be captured for a slider drag there, so every move read as the offset from the window centre and the size ran to its maximum. The drag now only hides the cursor, and with the relative pen plugin running it takes the plugin's cursor lock, as the Wayland window does.
+
 ## 2026-11-16 — Native Windows: pen path from the tablet's reports back, slimmed down
 
 - Reverts the removal below. Without PenPath, a pen in the driver's Mouse mode fell back to the Windows pointer history. Its lookup sometimes missed and handed one frame the whole hover path since the last stroke (up to 63 points), drawn as a dotted line joining two strokes, seen when the next stroke started above the last one. PenPath had been building the tablet's path in Mouse mode as well, not only for the relative pen.
