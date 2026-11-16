@@ -51,4 +51,14 @@ fi
 # Prefer libs bundled into the AppImage (CI bundles into usr/lib; a local build
 # may not, in which case this dir simply doesn't exist and is a harmless no-op).
 export LD_LIBRARY_PATH="$APPDIR/usr/lib:${LD_LIBRARY_PATH}"
+
+# The Wayland client libraries are NOT in usr/lib: the host's must win, because the
+# host's Mesa loads the same libwayland-client and needs its own (newer) one. Only a
+# host with none at all (X11-only, no Mesa EGL) gets the bundled copies, so the binary
+# still starts there and runs on X11.
+if [ -d "$APPDIR/usr/lib-fallback" ] && [ -x /lib64/ld-linux-x86-64.so.2 ] \
+   && /lib64/ld-linux-x86-64.so.2 --list "$APPDIR/usr/bin/chisel" 2>/dev/null \
+      | grep -q 'libwayland.*not found'; then
+    export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$APPDIR/usr/lib-fallback"
+fi
 exec "$APPDIR/usr/bin/chisel" "$@"

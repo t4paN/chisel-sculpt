@@ -27,9 +27,25 @@ jobs:
         run: |
           apt-get update
           apt-get install -y build-essential cmake git wget file \
-            libglfw3-dev libgl-dev libglx-dev libegl-dev \
+            libgl-dev libglx-dev libegl-dev \
             libx11-dev libxfixes-dev \
-            python3 libfuse2 patchelf
+            libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev \
+            libwayland-dev libwayland-bin libxkbcommon-dev pkg-config \
+            python3 libfuse2 patchelf ca-certificates
+
+      # The image's GLFW is 3.3, X11 only. 3.4 carries X11 and Wayland in one library
+      # and picks at start-up; it loads the window-system libraries at run time, so a
+      # static build adds no dependencies to the binary.
+      - name: Build GLFW 3.4 (X11 + Wayland, static)
+        run: |
+          wget -q -O glfw-3.4.tar.gz https://github.com/glfw/glfw/archive/refs/tags/3.4.tar.gz
+          echo "c038d34200234d071fae9345bc455e4a8f2f544ab60150765d7704e08f3dac01  glfw-3.4.tar.gz" | sha256sum -c -
+          tar -xzf glfw-3.4.tar.gz
+          cmake -S glfw-3.4 -B glfw-build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+            -DGLFW_BUILD_WAYLAND=ON -DGLFW_BUILD_X11=ON \
+            -DGLFW_BUILD_EXAMPLES=OFF -DGLFW_BUILD_TESTS=OFF -DGLFW_BUILD_DOCS=OFF
+          cmake --build glfw-build -j$(nproc)
+          cmake --install glfw-build
 
       - name: Configure
         run: |
@@ -43,7 +59,7 @@ jobs:
 
       - name: Prepare AppDir
         run: |
-          mkdir -p AppDir/usr/bin AppDir/usr/lib
+          mkdir -p AppDir/usr/bin AppDir/usr/lib AppDir/usr/lib-fallback
           cp build/chisel AppDir/usr/bin/
 
           mkdir -p AppDir/usr/share/applications
@@ -60,6 +76,12 @@ jobs:
               */libGL.so*|*/libEGL.so*|*/libGLX.so*|*/libGLdispatch.so*|*/libX11.so*|*/libxcb*.so*|*/libXext.so*|*/libXrandr.so*|*/libXinerama.so*|*/libXcursor.so*|*/libXi.so*|*/libXfixes.so*|*/libXrender.so*|*/libXau.so*|*/libXdmcp.so*)
                 ;;
               */libc.so*|*/libpthread.so*|*/libdl.so*|*/librt.so*|*/libm.so*|*/ld-linux*)
+                ;;
+              */libwayland-*.so*|*/libffi.so*)
+                # The host's must win (its Mesa shares libwayland-client with us and
+                # needs its own newer one). AppRun adds this dir only on a host with
+                # no libwayland at all.
+                cp -v "$lib" usr/lib-fallback/
                 ;;
               */libstdc++.so*|*/libgcc_s.so*)
                 # NEVER bundle these: AppRun puts usr/lib first, so an old bundled

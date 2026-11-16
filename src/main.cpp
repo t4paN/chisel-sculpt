@@ -386,12 +386,29 @@ int main(int argc, char* argv[]) {
         std::fflush(stdout);
     });
 
+#if defined(__linux__) && !defined(__EMSCRIPTEN__) && (GLFW_VERSION_MAJOR > 3 || GLFW_VERSION_MINOR >= 4)
+    // One binary for X11 and Wayland (the AppImage). In a Wayland session GLFW asks for
+    // Wayland ONLY and does not fall back by itself, so a host without libxkbcommon or
+    // with an old libwayland would not start at all: retry on X11 (XWayland).
+    // CHISEL_X11=1 forces X11 from the start, the way out if Wayland misbehaves.
+    const char* force_x11 = std::getenv("CHISEL_X11");
+    if (force_x11 && *force_x11 && *force_x11 != '0')
+        glfwInitHint(GLFW_PLATFORM, GLFW_PLATFORM_X11);
+    bool glfw_ok = glfwInit();
+    if (!glfw_ok) {
+        std::printf("[glfw] init failed, retrying on X11\n");
+        glfwInitHint(GLFW_PLATFORM, GLFW_PLATFORM_X11);
+        glfw_ok = glfwInit();
+    }
+    if (!glfw_ok) {
+#else
     if (!glfwInit()) {
+#endif
         std::fprintf(stderr, "Failed to init GLFW\n");
         return 1;
     }
 
-// glfwGetPlatform is GLFW 3.4+; the Linux CI image (Ubuntu 20.04) ships 3.3.
+// glfwGetPlatform is GLFW 3.4+; distro 3.3 packages (Ubuntu/Mint 24.04) still exist.
 #if !defined(__EMSCRIPTEN__) && (GLFW_VERSION_MAJOR > 3 || GLFW_VERSION_MINOR >= 4)
     // Which platform GLFW actually picked decides what the window system will let the
     // app do — cursor warping above all. This was only ever printed on the wgpu path,
