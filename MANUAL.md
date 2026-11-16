@@ -14,7 +14,7 @@ design goal is simple: don't make the artist wait, and don't make them dig.
 
 ## Getting started
 
-**In the browser** — play the live build on [itch.io](https://tpn.itch.io/chisel-sculpt).
+**In the browser** — play the live build on [itch.io](https://tpn.itch.io/chisel-weasel).
 No install. You need a WebGPU-capable browser: recent Chrome or Edge (113+) works out
 of the box; Firefox and Safari currently need their WebGPU flag enabled.
 

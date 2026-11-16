@@ -6,7 +6,7 @@
 GPU sculpting, anywhere. One C++17 codebase; sculpts natively on WebGPU or OpenGL,
 and in your browser with nothing to install.
 
-**▶ Sculpt now: [tpn.itch.io/chisel-sculpt](https://tpn.itch.io/chisel-sculpt)** —
+**▶ Sculpt now: [tpn.itch.io/chisel-weasel](https://tpn.itch.io/chisel-weasel)** —
 needs a WebGPU browser (Chrome/Edge 113+, or Firefox/Safari with the flag on).
 
 Chisel Weasel runs the entire sculpt pipeline on the GPU: brushes, normals, masking,
