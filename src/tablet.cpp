@@ -1249,11 +1249,9 @@ void Tablet::shutdown() {
 #include <windows.h>
 #include "wintab.h"
 
-// PACKET = pen cursor id + button state + position + normalized pressure, in ascending
-// PK-bit order. PACKETMODE 0 (absolute) makes pkButtons the bitmask of buttons held now.
-// The position is every report the pen made, where the OS pointer hands the window about
-// one per frame: main.cpp's PenPath lays the stroke through them.
-#define PACKETDATA (PK_CURSOR | PK_BUTTONS | PK_X | PK_Y | PK_NORMAL_PRESSURE)
+// PACKET = pen cursor id + button state + normalized pressure, in ascending PK-bit
+// order. PACKETMODE 0 (absolute) makes pkButtons the bitmask of buttons held now.
+#define PACKETDATA (PK_CURSOR | PK_BUTTONS | PK_NORMAL_PRESSURE)
 #define PACKETMODE 0
 #include "pktdef.h"
 #include <cmath>
@@ -1292,14 +1290,6 @@ struct Tablet::Impl {
     int    proximity     = -1;   // -1 never reported, 0 out, 1 in (hardware proximity)
     unsigned long proximity_changes = 0;
     DWORD  buttons       = 0;    // pkButtons of the last packet (bit 0 tip, 1/2 the side buttons)
-
-    // The positions of the packets drained by the last poll(), oldest first, in the
-    // context's own units (see tablet_packets).
-    static constexpr int kPosMax = 256;
-    long   pos_x[kPosMax], pos_y[kPosMax];
-    int    pos_n = 0;
-    // Pixels per context unit, per axis, from the context's own extents (0 = not known).
-    double unit_px[2] = { 0.0, 0.0 };
 
     // The cursor (tool) of the last packet. WinTab numbers them in threes per tablet:
     // puck, pen tip, eraser. A side button set to "Erase" in the driver's panel swaps
@@ -1502,19 +1492,13 @@ bool Tablet::init(GLFWwindow* window) {
                 (long)press.axMin, (long)press.axMax, lc.lcMsgBase, (int)lc.lcSysMode,
                 lc.lcSysOrgX, lc.lcSysOrgY, lc.lcSysExtX, lc.lcSysExtY);
     std::fflush(stdout);
-    // The context's units against the screen area it is mapped to. For the default
-    // system context that is 1 px per unit (Y running up), but it is the driver's to say.
-    if (lc.lcOutExtX != 0) m->unit_px[0] = std::fabs((double)lc.lcSysExtX / (double)lc.lcOutExtX);
-    if (lc.lcOutExtY != 0) m->unit_px[1] = std::fabs((double)lc.lcSysExtY / (double)lc.lcOutExtY);
-    std::printf("[tablet] WinTab units: out ext %ld,%ld -> %.4f, %.4f px per unit\n",
-                (long)lc.lcOutExtX, (long)lc.lcOutExtY, m->unit_px[0], m->unit_px[1]);
-    std::fflush(stdout);
 
-    // Room for a long frame's worth of reports (the default queue is a few dozen).
+    // Room for a long frame's worth of reports (the default queue is a few dozen), so a
+    // side button's press or release is not lost on a slow frame.
     if (m->ctx) {
         PFN_WTQueueSizeSet qset =
             (PFN_WTQueueSizeSet)GetProcAddress(m->wintab, "WTQueueSizeSet");
-        if (qset && !qset(m->ctx, Impl::kPosMax)) qset(m->ctx, 128);
+        if (qset && !qset(m->ctx, 256)) qset(m->ctx, 128);
     }
 
     m->has_device = (m->ctx != nullptr);
@@ -1534,22 +1518,13 @@ void Tablet::poll(bool /*stroke_active*/) {
         DispatchMessageW(&msg);
     }
 
-    // Drain queued packets; keep the most recent pressure sample and every position.
-    m->pos_n = 0;
+    // Drain queued packets; keep the most recent pressure sample.
+    bool got = false;
     PACKET pkts[32];
     for (;;) {
     int n = m->WTPacketsGet(m->ctx, 32, pkts);
     if (n <= 0) break;
-    for (int i = 0; i < n; i++) {
-        if (m->pos_n == Impl::kPosMax) {   // keep the newest: drop the oldest
-            std::memmove(m->pos_x, m->pos_x + 1, sizeof(long) * (Impl::kPosMax - 1));
-            std::memmove(m->pos_y, m->pos_y + 1, sizeof(long) * (Impl::kPosMax - 1));
-            m->pos_n--;
-        }
-        m->pos_x[m->pos_n] = pkts[i].pkX;
-        m->pos_y[m->pos_n] = pkts[i].pkY;
-        m->pos_n++;
-    }
+    got = true;
     {
         // Button edges, in packet order. The tip (bit 0) is left to the driver's click,
         // which has never been dropped; the side buttons (bits 1, 2) come from here.
@@ -1587,7 +1562,7 @@ void Tablet::poll(bool /*stroke_active*/) {
     // Once per poll, from where things stand now: the proximity messages above were
     // handled before the packets, so packets from before a lift must not press again.
     if (m->proximity == 0) wt_erase_pan(m, false);
-    else if (m->pos_n > 0) wt_erase_pan(m, m->cursor % 3 == 2);
+    else if (got) wt_erase_pan(m, m->cursor % 3 == 2);
 }
 
 float Tablet::pressure() const {
@@ -1600,20 +1575,6 @@ bool Tablet::available() const {
 
 unsigned long Tablet::sample_count() const {
     return impl ? impl->samples : 0;
-}
-
-int tablet_packets(const long** xs, const long** ys) {
-    if (!g_wt_impl) return 0;
-    *xs = g_wt_impl->pos_x;
-    *ys = g_wt_impl->pos_y;
-    return g_wt_impl->pos_n;
-}
-
-bool tablet_unit_px(double* kx, double* ky) {
-    if (!g_wt_impl || g_wt_impl->unit_px[0] <= 0.0 || g_wt_impl->unit_px[1] <= 0.0) return false;
-    *kx = g_wt_impl->unit_px[0];
-    *ky = g_wt_impl->unit_px[1];
-    return true;
 }
 
 int Tablet::proximity() const { return impl ? impl->proximity : -1; }
@@ -1655,8 +1616,6 @@ unsigned long Tablet::proximity_changes() const { return 0; }
 bool tablet_drop_driver_button(int, int, long long) { return false; }
 int tablet_live_proximity() { return -1; }
 unsigned long tablet_live_proximity_changes() { return 0; }
-int tablet_packets(const long**, const long**) { return 0; }
-bool tablet_unit_px(double*, double*) { return false; }
 #endif
 
 #if !defined(CHISEL_WL_TABLET)

@@ -615,7 +615,7 @@ void input_relpen_frame(GLFWwindow* w) {
 }
 
 // The relative pen owns the cursor: mouse_x/y is Chisel's cursor, not the OS pointer.
-// main.cpp's path builders ask (MouseHistory must stay out, PenPath applies the gain).
+// main.cpp's path builder asks (MouseHistory must stay out).
 bool input_relpen_on() { return g_rel_on; }
 #else
 void input_relpen_frame(GLFWwindow*) {}

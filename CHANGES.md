@@ -2,6 +2,12 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-16 — Native Windows: pen path from tablet reports removed
+
+- The relative pen's stroke was rebuilt each frame from the tablet's own WinTab reports, with the scale from report units to pixels learned by a fit. The fit was fragile (a wrong lock after 0.3 s, 808 s to lock in another run) and never held with the driver in Mouse mode. The stroke now goes through the cursor, one point a frame; fast curves at low frame rates come out a little straighter.
+- A plain pen is unchanged: it keeps Windows' pointer history.
+- WinTab packets no longer carry positions. The Erase-button pan is decided on any pen report arriving, as before on positions.
+
 ## 2026-11-15 — Web: the pen's lower side button pans without Windows Ink (Chrome and Edge)
 
 - With Windows Ink off the browser is handed a plain mouse, and the lower side button set to "Erase" in the tablet driver sends the page nothing at all, so the Erase pan only worked with Ink on. With the tablet connected (Menu > Pen pressure without Windows Ink) Chisel now reads the button from the tablet's own report and holds the middle button while it is down, whatever the driver maps it to.
