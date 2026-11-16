@@ -9,6 +9,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#if defined(__linux__) && !defined(__EMSCRIPTEN__)
+#include <cerrno>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
+#endif
 #include <cctype>
 #include <algorithm>
 #if defined(__EMSCRIPTEN__)
@@ -781,6 +787,69 @@ static void web_pointer_lock(bool) {}
 // bounded by the screen edge, and it is exactly what the web build already does with
 // requestPointerLock. Raw motion is deliberately NOT enabled — it bypasses the OS
 // pointer acceleration curve and would change the feel of every slider.
+#if defined(__linux__) && !defined(__EMSCRIPTEN__)
+// An X11 window on a Wayland desktop (XWayland: the AppImage with --x11, or GLFW 3.3)
+// with a pen driving. The compositor can lock a mouse for XWayland but not a tablet
+// tool, so the capture below fails the same way as on Windows: GLFW parks its cursor at
+// the window centre, the pen puts it straight back under the tip, and every move reads
+// as the whole offset from the centre (size 70 -> 499.6 in one drag, 2026-11-15). Real
+// X11 can warp a pen and keeps the capture.
+static bool g_slider_pen_hidden = false;   // this drag only hid the cursor
+
+// The pen's cursor lock, from the OTD "Relative Pen Mode" plugin: while held, the plugin
+// freezes the pen's cursor and sends its motion here, so the cursor stays on the grab
+// point and the drag isn't stopped by the screen edge. The native-Wayland pen has its
+// own client for the same socket (tablet.cpp, where the contract is described); this one
+// serves the X11 window. No plugin = no socket = the hidden-cursor drag alone.
+enum class XLock { NONE, REQUESTED, HELD, RELEASING };
+static int   g_xlock_fd = -1;
+static XLock g_xlock    = XLock::NONE;
+
+static void xlock_close() {
+    if (g_xlock_fd >= 0) close(g_xlock_fd);
+    g_xlock_fd = -1;
+    g_xlock = XLock::NONE;
+}
+static bool xlock_send(const char* msg) {
+    if (g_xlock_fd < 0) return false;
+    if (send(g_xlock_fd, msg, std::strlen(msg), MSG_NOSIGNAL) < 0) { xlock_close(); return false; }
+    return true;
+}
+// Connected at the first pen drag and kept open, as the contract asks.
+static bool xlock_connect() {
+    if (g_xlock_fd >= 0) return true;
+    const char* dir = std::getenv("XDG_RUNTIME_DIR");
+    if (!dir) return false;
+    sockaddr_un addr = {};
+    addr.sun_family = AF_UNIX;
+    if (std::snprintf(addr.sun_path, sizeof(addr.sun_path), "%s/otd-relative-pen.sock", dir)
+        >= (int)sizeof(addr.sun_path)) return false;
+    int fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+    if (fd < 0) return false;
+    if (connect(fd, (sockaddr*)&addr, sizeof(addr)) != 0) { close(fd); return false; }
+    g_xlock_fd = fd;
+    return true;
+}
+static void xlock_begin() {
+    if (g_xlock == XLock::NONE && xlock_connect() && xlock_send("lock"))
+        g_xlock = XLock::REQUESTED;
+}
+static void xlock_end() {
+    if (g_xlock == XLock::REQUESTED || g_xlock == XLock::HELD) {
+        if (xlock_send("unlock")) g_xlock = XLock::RELEASING;
+    }
+}
+static bool xwayland_pen_driving() {
+#if GLFW_VERSION_MAJOR > 3 || GLFW_VERSION_MINOR >= 4
+    if (glfwGetPlatform() != GLFW_PLATFORM_X11) return false;
+#endif
+    if (!g_input || g_input->active_device != InputDevice::TABLET) return false;
+    const char* wd = std::getenv("WAYLAND_DISPLAY");
+    const char* st = std::getenv("XDG_SESSION_TYPE");
+    return (wd && *wd) || (st && std::strcmp(st, "wayland") == 0);
+}
+#endif
+
 static void slider_capture(GLFWwindow* w, bool grab) {
 #if defined(__EMSCRIPTEN__)
     (void)w;
@@ -797,6 +866,14 @@ static void slider_capture(GLFWwindow* w, bool grab) {
     // capture.
     if (grab && g_input && g_input->active_device == InputDevice::TABLET) {
         glfwSetInputMode(w, GLFW_CURSOR, GLFW_CURSOR_HIDDEN);
+        return;
+    }
+#elif defined(__linux__)
+    // Hidden only: the drag reads plain position changes and stops at the screen edge.
+    if (grab && xwayland_pen_driving()) {
+        g_slider_pen_hidden = true;
+        glfwSetInputMode(w, GLFW_CURSOR, GLFW_CURSOR_HIDDEN);
+        xlock_begin();
         return;
     }
 #endif
@@ -897,6 +974,41 @@ void input_slider_capture_tick(GLFWwindow* w) {
 #endif
 }
 
+// Once a frame from main: drain the pen cursor lock's socket (X11 window, see xlock_*).
+// Replies come a few ms after a request; until `locked` the drag moves by the pointer's
+// own motion, which the contract allows, and once held the cursor is frozen so that
+// motion is zero and the plugin's is the only one counted.
+void input_slider_pen_lock_tick() {
+#if defined(__linux__) && !defined(__EMSCRIPTEN__)
+    char buf[128];
+    while (g_xlock_fd >= 0) {
+        ssize_t n = recv(g_xlock_fd, buf, sizeof(buf) - 1, MSG_DONTWAIT);
+        if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) {
+            xlock_close();   // daemon gone; closing also releases a lock
+            return;
+        }
+        if (n < 0) return;
+        buf[n] = 0;
+        while (n > 0 && (buf[n - 1] == ' ' || buf[n - 1] == '\n' || buf[n - 1] == '\r')) buf[--n] = 0;
+        if (!std::strncmp(buf, "motion ", 7)) {
+            // After `unlock` motion is ignored until `unlocked`: it can't belong to a
+            // drag that is over.
+            if (g_xlock != XLock::HELD || !g_slider_pen_hidden || !g_input ||
+                g_input->slider_mode == InputState::SliderMode::NONE) continue;
+            apply_slider_delta((float)std::strtod(buf + 7, nullptr));   // x only
+        } else if (!std::strcmp(buf, "locked")) {
+            if (g_xlock == XLock::REQUESTED) g_xlock = XLock::HELD;
+            std::printf("[slider] pen cursor lock (X11 window): locked\n");
+            std::fflush(stdout);
+        } else if (!std::strncmp(buf, "denied", 6) || !std::strncmp(buf, "unlocked", 8)) {
+            g_xlock = XLock::NONE;
+            std::printf("[slider] pen cursor lock (X11 window): %s\n", buf);
+            std::fflush(stdout);
+        }
+    }
+#endif
+}
+
 #if !defined(__EMSCRIPTEN__)
 static void slider_return_warp(double x, double y, bool mouse_dragged);   // see Edge wrap
 #endif
@@ -927,6 +1039,9 @@ static void end_slider_drag(GLFWwindow* w, bool warp_back) {
 #if defined(_WIN32)
         // A relative pen's OS pointer stays under the tip; moving it would read as a step.
         const bool move_os = !g_rel_on;
+#elif defined(__linux__) && !defined(__EMSCRIPTEN__)
+        // A pen under XWayland can't be sent back: it stays under the tip.
+        const bool move_os = !g_slider_pen_hidden;
 #else
         const bool move_os = true;
 #endif
@@ -973,6 +1088,21 @@ static void end_slider_drag(GLFWwindow* w, bool warp_back) {
         }
         g_input->mouse_x = g_input->prev_mouse_x = rx;
         g_input->mouse_y = g_input->prev_mouse_y = ry;
+    }
+#endif
+#if defined(__linux__) && !defined(__EMSCRIPTEN__)
+    if (g_slider_pen_hidden) {
+        // The cursor is where the pen took it: adopt that, so the ring and the cursor
+        // agree, and skip the return trip and its check below.
+        g_slider_pen_hidden = false;
+        xlock_end();
+        if (w) {
+            double rx = 0.0, ry = 0.0;
+            glfwGetCursorPos(w, &rx, &ry);
+            g_input->mouse_x = g_input->prev_mouse_x = rx;
+            g_input->mouse_y = g_input->prev_mouse_y = ry;
+        }
+        return;
     }
 #endif
 #if !defined(__EMSCRIPTEN__)

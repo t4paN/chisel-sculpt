@@ -140,6 +140,7 @@ static constexpr float SPACING_REF = 0.25f;
 extern float input_consume_scroll();
 extern void input_slider_probe_tick();   // TEMPORARY Windows slider-return probe
 extern void input_slider_capture_tick(GLFWwindow* w);   // Win32 deferred slider capture
+extern void input_slider_pen_lock_tick();   // Linux X11 window: the pen cursor lock's socket
 extern void input_relpen_frame(GLFWwindow* w);          // native relative pen (input.cpp)
 #if defined(_WIN32) && !defined(__EMSCRIPTEN__)
 extern bool input_relpen_on();
@@ -995,6 +996,7 @@ int main(int argc, char* argv[]) {
 #endif
         glfwPollEvents();
         input_slider_capture_tick(window);
+        input_slider_pen_lock_tick();
 #if defined(_WIN32) && !defined(__EMSCRIPTEN__)
         g_mouse_history.pull(window, input);
 #endif
