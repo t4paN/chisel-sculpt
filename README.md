@@ -93,6 +93,8 @@ chisel [file] [flags]
 - `--mirror=spatial` — use the spatial-hash mirror pairing instead of the
   topology map.
 - `--toaster` — shrink the undo history budgets for low-memory machines.
+- `--x11` — Linux: run on X11 even in a Wayland session (through XWayland).
+  Try it if the window or the pen misbehaves on Wayland.
 - `--ring-mb=N` — debug: cap the GPU undo ring at N MB.
 
 ## Acknowledgments

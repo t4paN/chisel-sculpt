@@ -339,11 +339,13 @@ int main(int argc, char* argv[]) {
     bool cli_use_topology = true;
     int max_level = MULTIRES_MAX_LEVEL;
     std::string cli_open_path;
+    bool cli_force_x11 = false;
 #ifdef CHISEL_DEBUG_MULTIRES
     // Debug builds default to a tiny GPU undo ring so the wrap/evict path gets
     // exercised in a few big strokes (no flags needed). --toaster/--ring-mb still override.
     UndoStack::ring_max_bytes = 4ull * 1024ull * 1024ull;
 #endif
+    (void)cli_force_x11;   // only read on Linux with GLFW 3.4+
     for (int i = 1; i < argc; i++) {
         if (std::strcmp(argv[i], "--mirror=spatial") == 0)
             cli_use_topology = false;
@@ -364,6 +366,8 @@ int main(int argc, char* argv[]) {
             if (lv >= 1 && lv <= 12) max_level = (int)lv;
             else std::printf("[cli] ignoring --max-level=%s (want 1..12)\n", argv[i] + 12);
         }
+        else if (std::strcmp(argv[i], "--x11") == 0)
+            cli_force_x11 = true;  // Linux: run on X11 even in a Wayland session
         else if (argv[i][0] != '-')
             cli_open_path = argv[i];  // project/model to open once the scene is up
     }
@@ -390,9 +394,8 @@ int main(int argc, char* argv[]) {
     // One binary for X11 and Wayland (the AppImage). In a Wayland session GLFW asks for
     // Wayland ONLY and does not fall back by itself, so a host without libxkbcommon or
     // with an old libwayland would not start at all: retry on X11 (XWayland).
-    // CHISEL_X11=1 forces X11 from the start, the way out if Wayland misbehaves.
-    const char* force_x11 = std::getenv("CHISEL_X11");
-    if (force_x11 && *force_x11 && *force_x11 != '0')
+    // --x11 forces X11 from the start, the way out if Wayland misbehaves.
+    if (cli_force_x11)
         glfwInitHint(GLFW_PLATFORM, GLFW_PLATFORM_X11);
     bool glfw_ok = glfwInit();
     if (!glfw_ok) {
