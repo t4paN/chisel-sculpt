@@ -2,11 +2,17 @@
 
 Short, chronological log of notable changes. Newest on top.
 
-## 2026-11-16 — Native Windows: pen path from the tablet's reports, slimmed down
+## 2026-11-16 — Native Windows: pen path from the tablet's reports back, slimmed down
 
-- With PenPath cut, a pen in the driver's Mouse mode fell back to the Windows pointer history. Its lookup sometimes missed and handed one frame the whole hover path since the last stroke (up to 63 points), drawn as a dotted line joining two strokes, seen when the next stroke started above the last one. PenPath had been building the tablet's path in Mouse mode as well, not only for the relative pen.
+- Reverts the removal below. Without PenPath, a pen in the driver's Mouse mode fell back to the Windows pointer history. Its lookup sometimes missed and handed one frame the whole hover path since the last stroke (up to 63 points), drawn as a dotted line joining two strokes, seen when the next stroke started above the last one. PenPath had been building the tablet's path in Mouse mode as well, not only for the relative pen.
 - PenPath is kept, on a diet: the scale is the one the WinTab context states, only each axis's direction is learned (sign of report step x pointer step over a few frames), no least-squares fit. Without a stated scale the pointer history is used as before.
 - A frame with a single tablet report now also replaces the pointer history's path.
+
+## 2026-11-16 — Native Windows: pen path from tablet reports removed
+
+- The relative pen's stroke was rebuilt each frame from the tablet's own WinTab reports, with the scale from report units to pixels learned by a fit. The fit was fragile (a wrong lock after 0.3 s, 808 s to lock in another run) and never held with the driver in Mouse mode. The stroke now goes through the cursor, one point a frame; fast curves at low frame rates come out a little straighter.
+- A plain pen is unchanged: it keeps Windows' pointer history.
+- WinTab packets no longer carry positions. The Erase-button pan is decided on any pen report arriving, as before on positions.
 
 ## 2026-11-15 — Web: the pen's lower side button pans without Windows Ink (Chrome and Edge)
 
