@@ -234,14 +234,15 @@ static MouseHistory g_mouse_history;
 //
 // With the driver in Pen mode the pointer history above holds next to nothing for the
 // pen: 1.7 positions a frame against 13 for the mouse (2026-11-13), so a fast pen stroke
-// was laid through one point per frame and came out in chunks. WinTab queues every
-// report the pen makes (tablet_packets), and the frame's path is rebuilt from those.
+// was laid through one point per frame and came out in chunks. With the driver in Mouse
+// mode the history does fill, but its lookup sometimes misses and hands over the whole
+// hover path between two strokes, drawn as a dotted line (2026-11-16, with PenPath cut).
+// WinTab queues every report the pen makes (tablet_packets), and the frame's path is
+// rebuilt from those.
 //
-// The reports are in the driver's units, and which way up they run is the driver's
-// business, so nothing is assumed: the scale from report units to pixels is learned,
-// per axis and with its sign, from how far the OS pointer moved while the reports moved
-// (a running least-squares fit). Until the fit is tight the path is left as it was. A
-// driver in Mouse mode never fits (pointer acceleration), and keeps the old path.
+// The scale is the one the WinTab context states (px per report unit). Only which way
+// each axis runs is learned, from the sign of report step x pointer step over a few
+// frames of motion. No fitting. Without a stated scale the pointer history stays.
 //
 // Only steps are used, never positions: the path is hung back from the cursor, its last
 // point ON the cursor, each earlier point one report's step behind. For a relative pen
@@ -251,41 +252,9 @@ struct PenPath {
     long prev_px = 0, prev_py = 0;     // the last report of the previous frame
     POINT prev_cur = {};               // the OS pointer then
     unsigned long prox_seen = 0;
-    // Fit sums per axis: report step squared, report step x pointer step, pointer step squared.
-    double xx[2] = {0, 0}, xc[2] = {0, 0}, cc[2] = {0, 0};
-    // The learned scale, px per report unit. Taken when the fit is tight (r2 >= 0.95),
-    // kept while it is merely noisy (a frame's reports and its pointer step never line
-    // up exactly), dropped when it clearly no longer holds (r2 < 0.6).
-    double k[2] = {0, 0};
-    bool have_k = false;
-
-    // 1 tight, 0 can't say (too little motion, or in between), -1 clearly not linear.
-    // moved[]: how many frames (decayed like the sums) had motion on the axis. A fit on
-    // two or three frames is an accident: the first version took one 0.3 s after launch
-    // (x 3.77, y -5.00) and dropped it again 140 ms later.
-    double moved[2] = {0, 0};
-    // unit[]: px per report unit as the WinTab context states it (0 = not stated). With
-    // it only the direction is left to learn, which a few frames of motion settle; the
-    // full fit took 7 s to lock in one run and 808 s in another (2026-11-13). The fit
-    // still overrules a stated size it clearly disagrees with, and still drops the scale
-    // when the pointer stops following the reports (a driver in Mouse mode).
-    double unit[2] = {0, 0};
-    int fit(int axis, double& out) const {
-        const bool stated = unit[axis] > 0.0;
-        if (moved[axis] < (stated ? 4.0 : 25.0) || xx[axis] < 1.0 || cc[axis] < 400.0) return 0;
-        const double r2 = (xc[axis] * xc[axis]) / (xx[axis] * cc[axis]);
-        if (r2 < 0.6) return moved[axis] < 25.0 ? 0 : -1;
-        const double slope = xc[axis] / xx[axis];
-        if (stated) {
-            const double ratio = std::fabs(slope) / unit[axis];
-            if (r2 >= 0.95 && (ratio < 0.8 || ratio > 1.25)) { out = slope; return 1; }
-            out = slope < 0.0 ? -unit[axis] : unit[axis];
-            return 1;
-        }
-        if (r2 < 0.95) return 0;
-        out = slope;
-        return 1;
-    }
+    double vote[2] = {0, 0};           // decayed sum of report step x pointer step
+    int votes[2] = {0, 0};             // frames with motion on the axis
+    int sign[2] = {0, 0};              // learned direction, 0 = not yet
 
     void apply(InputState& input, Tablet& tablet) {
         const long* xs = nullptr;
@@ -298,15 +267,22 @@ struct PenPath {
         POINT cur;
         if (!GetCursorPos(&cur)) return;
 
-        // Learn the scale from this frame's step of both. Not across a lift.
+        // Learn the direction from this frame's step of both. Not across a lift.
         if (have_prev && !prox_changed) {
             const double dp[2] = { (double)(xs[n - 1] - prev_px), (double)(ys[n - 1] - prev_py) };
             const double dc[2] = { (double)(cur.x - prev_cur.x), (double)(cur.y - prev_cur.y) };
             for (int a = 0; a < 2; a++) {
-                xx[a] = xx[a] * 0.995 + dp[a] * dp[a];
-                xc[a] = xc[a] * 0.995 + dp[a] * dc[a];
-                cc[a] = cc[a] * 0.995 + dc[a] * dc[a];
-                moved[a] = moved[a] * 0.995 + ((dp[a] != 0.0 && dc[a] != 0.0) ? 1.0 : 0.0);
+                if (dp[a] == 0.0 || dc[a] == 0.0) continue;
+                vote[a] = vote[a] * 0.95 + (dp[a] * dc[a] > 0.0 ? 1.0 : -1.0);
+                if (votes[a] < 4) votes[a]++;
+                const int s = votes[a] < 4 ? 0 : vote[a] > 2.0 ? 1 : vote[a] < -2.0 ? -1 : sign[a];
+                if (s != sign[a]) {
+                    // TEMPORARY diagnostics.
+                    std::printf("[penpath] t=%.3f %c runs %s\n", glfwGetTime(), a ? 'y' : 'x',
+                                s > 0 ? "with the pointer" : s < 0 ? "against the pointer" : "?");
+                    std::fflush(stdout);
+                    sign[a] = s;
+                }
             }
         }
         have_prev = true;
@@ -314,29 +290,21 @@ struct PenPath {
         prev_py = ys[n - 1];
         prev_cur = cur;
 
-        if (!tablet_unit_px(&unit[0], &unit[1])) unit[0] = unit[1] = 0.0;
-        double kx = 0.0, ky = 0.0;
-        const int fx = fit(0, kx), fy = fit(1, ky);
-        const bool had_k = have_k;
-        if (fx == 1 && fy == 1) { k[0] = kx; k[1] = ky; have_k = true; }
-        else if (fx == -1 || fy == -1) have_k = false;
-        if (have_k != had_k) {
-            // TEMPORARY diagnostics.
-            std::printf("[penpath] t=%.3f tablet-report scale %s: x %.5f, y %.5f px per unit\n",
-                        glfwGetTime(), have_k ? "learned" : "lost", k[0], k[1]);
-            std::fflush(stdout);
-        }
-        if (!have_k || prox_changed || n < 2) return;
+        double unit[2] = {0, 0};
+        if (!tablet_unit_px(&unit[0], &unit[1]) || unit[0] <= 0.0 || unit[1] <= 0.0) return;
+        if (!sign[0] || !sign[1] || prox_changed) return;
         if (input.active_device != InputDevice::TABLET) return;
         if (input.slider_mode != InputState::SliderMode::NONE || input.release_tail) return;
 
+        // Even a single report replaces the pointer history's path: that is where the
+        // stray hover batches came from.
         const double gain = input_relpen_on() ? (double)input.pen_sensitivity : 1.0;
+        const double kx = sign[0] * unit[0] * gain, ky = sign[1] * unit[1] * gain;
         const double ex = input.mouse_x, ey = input.mouse_y;
         input.path_n = 0;
-        for (int i = 0; i < n; i++) {
-            input.push_path(ex + (double)(xs[i] - xs[n - 1]) * k[0] * gain,
-                            ey + (double)(ys[i] - ys[n - 1]) * k[1] * gain);
-        }
+        for (int i = 0; i < n; i++)
+            input.push_path(ex + (double)(xs[i] - xs[n - 1]) * kx,
+                            ey + (double)(ys[i] - ys[n - 1]) * ky);
     }
 };
 static PenPath g_pen_path;

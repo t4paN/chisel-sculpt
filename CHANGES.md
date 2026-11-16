@@ -2,6 +2,12 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-16 — Native Windows: pen path from the tablet's reports, slimmed down
+
+- With PenPath cut, a pen in the driver's Mouse mode fell back to the Windows pointer history. Its lookup sometimes missed and handed one frame the whole hover path since the last stroke (up to 63 points), drawn as a dotted line joining two strokes, seen when the next stroke started above the last one. PenPath had been building the tablet's path in Mouse mode as well, not only for the relative pen.
+- PenPath is kept, on a diet: the scale is the one the WinTab context states, only each axis's direction is learned (sign of report step x pointer step over a few frames), no least-squares fit. Without a stated scale the pointer history is used as before.
+- A frame with a single tablet report now also replaces the pointer history's path.
+
 ## 2026-11-15 — Web: the pen's lower side button pans without Windows Ink (Chrome and Edge)
 
 - With Windows Ink off the browser is handed a plain mouse, and the lower side button set to "Erase" in the tablet driver sends the page nothing at all, so the Erase pan only worked with Ink on. With the tablet connected (Menu > Pen pressure without Windows Ink) Chisel now reads the button from the tablet's own report and holds the middle button while it is down, whatever the driver maps it to.
