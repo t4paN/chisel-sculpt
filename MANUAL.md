@@ -173,15 +173,32 @@ in the burger menu. Mouse and pen share one brush feel: the pen gets its strengt
 pressure, a mouse dab hits at 0.6 of the max effect. Switching between them is silent.
 Chisel is designed to work fine with a mouse — a tablet is nice, never necessary.
 
-### Relative pen (browser)
+### Relative pen
 
 Burger menu > **Relative pen** (off by default) makes the pen move Chisel's cursor the way
 a mouse does: lift it, put it down elsewhere, and the cursor carries on from where it
-was. Keep the tablet driver in its normal pen (absolute) mode so the browser still gets
-pressure. **pen sensitivity** (0.25x to 4x) sets how fast the pen moves the cursor. The
-real pointer stays under the tip, so clicks only reach Chisel while the tip is over its
-window: play fullscreen, or map the tablet to the browser window. On Linux, Chrome and
-Chromium under Wayland still show the pen's own arrow; Firefox hides it.
+was. **pen sensitivity** (0.25x to 4x) sets how fast the pen moves the cursor. The real
+pointer stays under the tip, so clicks only reach Chisel while the tip is over its
+window: play fullscreen, or map the tablet to the window.
+
+Keep the tablet driver in its normal pen (absolute) mode, so pressure still arrives.
+Never both: the driver's relative (mouse) mode and Chisel's Relative pen fight each other.
+
+Where it works:
+
+- **Browser, Windows:** Chrome, Edge and Firefox, with Windows Ink on or off. In Chrome
+  and Edge with Ink off, burger menu > **Pen pressure without Windows Ink** connects the
+  tablet for pressure and the lower side button's pan. Firefox needs Ink on for both, and
+  the button set to "Erase" in the driver.
+- **Browser, Linux:** Firefox; Chrome and Chromium in X11 mode (`--ozone-platform=x11`).
+  Under plain Wayland they show the pen's own arrow as a second cursor.
+- **Windows app:** driver in pen mode, Windows Ink on or off. A pen in the driver's mouse
+  mode works as before, with Relative pen off.
+- **Linux app on Wayland** (built from source): works through the compositor's tablet
+  protocol. **Pen lift height** lets go of the cursor above a set height, for pens that
+  report it.
+- **Linux app on X11, and the AppImage:** the checkbox is greyed out. Set the tablet
+  driver to its relative mode instead; it does the same job, with pressure.
 
 ## Symmetry
 
