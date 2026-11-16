@@ -859,7 +859,7 @@ void draw_help_popup(InputState& input, int win_w, int win_h) {
 
         ImGui::TextColored(modern ? ImVec4(0.93f, 0.92f, 0.95f, 1.0f)
                                   : ImVec4(1.0f, 1.0f, 0.40f, 1.0f),
-                           modern ? "Shortcuts" : "CHISEL - SHORTCUTS");
+                           modern ? "Shortcuts" : "CHISEL WEASEL - SHORTCUTS");
         ImGui::Separator();
 
         // Keys come from the live bindings, so a rebind shows up here at once.
@@ -1565,7 +1565,7 @@ void draw_settings_menu_items(InputState& input, MultiresInfo mres, bool sync_ta
                                  "Topological: vertices are additionally paired across the\n"
                                  "plane and forced to match, so the two sides can never drift\n"
                                  "apart. Only possible on a mesh that really is built\n"
-                                 "symmetrically; on one that isn't, Chisel says so and falls\n"
+                                 "symmetrically; on one that isn't, Chisel Weasel says so and falls\n"
                                  "back to the World Space mirror for that stroke.");
 
             ImGui::Separator();

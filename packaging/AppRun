@@ -27,7 +27,7 @@ install_entry() {
 case "${1:-}" in
     --install)
         install_entry
-        echo "Chisel installed to desktop. Icon and launcher added."
+        echo "Chisel Weasel installed to desktop. Icon and launcher added."
         echo "  Desktop: $DESKTOP_DEST"
         echo "  Icon:    $ICON_DEST"
         exit 0
@@ -36,7 +36,7 @@ case "${1:-}" in
         rm -f "$ICON_DEST" "$DESKTOP_DEST"
         command -v update-desktop-database >/dev/null 2>&1 \
             && update-desktop-database "$(dirname "$DESKTOP_DEST")" >/dev/null 2>&1 || true
-        echo "Chisel desktop entry and icon removed."
+        echo "Chisel Weasel desktop entry and icon removed."
         exit 0
         ;;
 esac

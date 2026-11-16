@@ -489,13 +489,13 @@ int main(int argc, char* argv[]) {
     // KWin doesn't, so Plasma showed the overhang.
     glfwWindowHint(GLFW_MAXIMIZED, GLFW_TRUE);
 #endif
-    GLFWwindow* window = glfwCreateWindow(init_w, init_h, "Chisel", nullptr, nullptr);
+    GLFWwindow* window = glfwCreateWindow(init_w, init_h, "Chisel Weasel", nullptr, nullptr);
 #ifdef CHISEL_BACKEND_GL
     if (!window) {
         std::printf("[gl] no GL 4.3 context, retrying with 3.3 (GPU brushes will be off)\n");
         glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
         glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
-        window = glfwCreateWindow(init_w, init_h, "Chisel", nullptr, nullptr);
+        window = glfwCreateWindow(init_w, init_h, "Chisel Weasel", nullptr, nullptr);
     }
 #endif
     if (!window) {
@@ -514,7 +514,7 @@ int main(int argc, char* argv[]) {
     if (!wgpu_init(window, fbw, fbh)) return 1;   // gpu/wgpu_surface.cpp
     // CHISEL_VERSION is baked at CONFIGURE time from git describe, so a build tree
     // configured before a tag keeps reporting the old one — reconfigure, do not just rebuild.
-    std::printf("Chisel %s (WebGPU)\n", CHISEL_VERSION);
+    std::printf("Chisel Weasel %s (WebGPU)\n", CHISEL_VERSION);
 #else
     glfwMakeContextCurrent(window);
     glfwSwapInterval(bench::vsync() ? 1 : 0); // vsync (off only for a CHISEL_PERF_VSYNC=0 run)
@@ -525,7 +525,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    std::printf("Chisel %s\n", CHISEL_VERSION);
+    std::printf("Chisel Weasel %s\n", CHISEL_VERSION);
     std::printf("OpenGL %s\n", glGetString(GL_VERSION));
     std::printf("Renderer: %s\n", glGetString(GL_RENDERER));
 

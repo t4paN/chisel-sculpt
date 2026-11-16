@@ -1,7 +1,7 @@
-# Chisel
+# Chisel Weasel
 
 <img src="assets/chisel-banner.png" width="820"
-     alt="Chisel sculpting a chameleon head at 480,960 triangles: brush list down the left edge, mode and alpha toolbars along the top, and a live stats HUD in the bottom-right corner.">
+     alt="Chisel Weasel sculpting a chameleon head at 480,960 triangles: brush list down the left edge, mode and alpha toolbars along the top, and a live stats HUD in the bottom-right corner.">
 
 GPU sculpting, anywhere. One C++17 codebase; sculpts natively on WebGPU or OpenGL,
 and in your browser with nothing to install.
@@ -9,7 +9,7 @@ and in your browser with nothing to install.
 **▶ Sculpt now: [tpn.itch.io/chisel-sculpt](https://tpn.itch.io/chisel-sculpt)** —
 needs a WebGPU browser (Chrome/Edge 113+, or Firefox/Safari with the flag on).
 
-Chisel runs the entire sculpt pipeline on the GPU: brushes, normals, masking,
+Chisel Weasel runs the entire sculpt pipeline on the GPU: brushes, normals, masking,
 selection, remeshing, and voxel merging all execute as compute shaders. The CPU
 orchestrates; the GPU does the work. It is spartan by design — no menus to dig
 through, every control a keystroke or a hold-and-drag — because the two things that
@@ -99,7 +99,7 @@ chisel [file] [flags]
 
 ## Acknowledgments
 
-Chisel was vibecoded with Anthropic's Claude.
+Chisel Weasel was vibecoded with Anthropic's Claude.
 
 ## License
 

@@ -2308,7 +2308,7 @@ void status_panel(const InputState& input, int win_w, int win_h, const SkinStats
     {
         char name[64];
         if (g_dos) project_name(name, sizeof name, st.project_path);
-        else       std::snprintf(name, sizeof name, "Chisel");
+        else       std::snprintf(name, sizeof name, "Chisel Weasel");
         const bool unsaved = !st.project_path || !*st.project_path;
         const float tpx = g_dos ? 16.0f : 13.0f, th = g_dos ? 22.0f : 24.0f;
         ImVec2 p = ImGui::GetCursorScreenPos();
@@ -3348,7 +3348,7 @@ void draw_appearance_menu_items(InputState& input) {
     ImGui::SameLine();
     ImGui::RadioButton("DOS", &skin, (int)InputState::UiSkin::DOS);
     if (ImGui::IsItemHovered())
-        ui_skin_menu_tip("Chisel's own 8x8 font, the CGA palette and pixel icons.");
+        ui_skin_menu_tip("Chisel Weasel's own 8x8 font, the CGA palette and pixel icons.");
     ImGui::SameLine();
     ImGui::RadioButton("2000s", &skin, (int)InputState::UiSkin::Y2K);
     if (ImGui::IsItemHovered())
@@ -3854,7 +3854,7 @@ void draw_skin_dialogs(InputState& input, int win_w, int win_h, const DialogInfo
         // quit_to_new: the same three answers, but the app stays and starts over
         // (File > New with unsaved work, and Esc in the browser).
         const bool to_new = input.quit_to_new;
-        const char* title = to_new ? "Start a new project?" : "Quit Chisel?";
+        const char* title = to_new ? "Start a new project?" : "Quit Chisel Weasel?";
         const char* note = "Anything not saved is lost.";
         const char* save_l = to_new ? "Save & New" : "Save & Quit";
         const char* go_l   = to_new ? "Discard" : "Quit";
@@ -3890,8 +3890,8 @@ void draw_skin_dialogs(InputState& input, int win_w, int win_h, const DialogInfo
 #endif
         const char* l1 = "A fast, spartan sculpting app.";
         const char* l2 = "github.com/t4paN/chisel-sculpt";
-        centre(text_size(UiFont::SansSemibold, 16.0f, title_case("Chisel")).x);
-        dlg_title("Chisel");
+        centre(text_size(UiFont::SansSemibold, 16.0f, title_case("Chisel Weasel")).x);
+        dlg_title("Chisel Weasel");
         centre(text_size(UiFont::Mono, 13.0f, ver).x);
         dlg_text(UiFont::Mono, 13.0f, kUnsaved, ver);
         centre(text_size(UiFont::Sans, 13.0f, l1).x);

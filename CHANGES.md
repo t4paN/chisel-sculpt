@@ -2,6 +2,12 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-16 — v0.4.0: the app is now called Chisel Weasel
+
+- Window title, dialogs, web page title, installed-app name, launcher, README and MANUAL say Chisel Weasel.
+- Release files are now `Chisel-Weasel-x86_64.AppImage` and `chisel-weasel-windows-x64.zip`.
+- Unchanged: the `.chisel` file format, the settings folder, the `chisel` program name and app id, the icon.
+
 ## 2026-11-16 — Linux AppImage: one build for X11 and Wayland
 
 - The AppImage was X11 only (the CI image's GLFW 3.3), so on a Wayland desktop it ran through XWayland: no Relative pen, no Pen lift height, and pen slider drags that jumped. CI now builds a static GLFW 3.4, which carries both and picks at start-up: Wayland in a Wayland session, X11 elsewhere.

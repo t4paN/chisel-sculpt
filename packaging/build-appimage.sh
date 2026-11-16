@@ -8,7 +8,7 @@ PKG_DIR="$SCRIPT_DIR/out"
 APPDIR="$PKG_DIR/AppDir"
 TOOLS_DIR="$SCRIPT_DIR/tools"
 
-echo "=== Building Chisel ==="
+echo "=== Building Chisel Weasel ==="
 mkdir -p "$BUILD_DIR"
 cmake -S "$PROJECT_DIR" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release
 make -C "$BUILD_DIR" -j"$(nproc)"
@@ -42,7 +42,7 @@ if [ ! -x "$LINUXDEPLOY" ]; then
 fi
 
 echo "=== Building AppImage ==="
-export OUTPUT="$PKG_DIR/Chisel-x86_64.AppImage"
+export OUTPUT="$PKG_DIR/Chisel-Weasel-x86_64.AppImage"
 "$LINUXDEPLOY" --appdir "$APPDIR" --output appimage
 
 echo ""

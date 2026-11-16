@@ -1,10 +1,10 @@
-# Chisel Manual
+# Chisel Weasel Manual
 
-The complete guide to Chisel: every mode, brush, key, and file format, plus how the
+The complete guide to Chisel Weasel: every mode, brush, key, and file format, plus how the
 web and native builds differ. If you just want the pitch and the quickstart, read the
 [README](README.md) instead.
 
-Chisel is deliberately spartan. There are no nested menus, no settings screens, no
+Chisel Weasel is deliberately spartan. There are no nested menus, no settings screens, no
 modal panels between you and the mesh. Everything is a keystroke or a hold-and-drag,
 and everything runs on the GPU — brushes, normals, selection, masking, remeshing, and
 merging execute as compute shaders, so the app stays fast at high polygon counts. The
@@ -171,18 +171,18 @@ switch to flip, it's on whenever a tablet is present. Sources: XInput2 on Linux
 browser. How hard a full-pressure press actually hits is the **max effect** slider
 in the burger menu. Mouse and pen share one brush feel: the pen gets its strength from
 pressure, a mouse dab hits at 0.6 of the max effect. Switching between them is silent.
-Chisel is designed to work fine with a mouse — a tablet is nice, never necessary.
+Chisel Weasel is designed to work fine with a mouse — a tablet is nice, never necessary.
 
 ### Relative pen
 
-Burger menu > **Relative pen** (off by default) makes the pen move Chisel's cursor the way
+Burger menu > **Relative pen** (off by default) makes the pen move Chisel Weasel's cursor the way
 a mouse does: lift it, put it down elsewhere, and the cursor carries on from where it
 was. **pen sensitivity** (0.25x to 4x) sets how fast the pen moves the cursor. The real
-pointer stays under the tip, so clicks only reach Chisel while the tip is over its
+pointer stays under the tip, so clicks only reach Chisel Weasel while the tip is over its
 window: play fullscreen, or map the tablet to the window.
 
 Keep the tablet driver in its normal pen (absolute) mode, so pressure still arrives.
-Never both: the driver's relative (mouse) mode and Chisel's Relative pen fight each other.
+Never both: the driver's relative (mouse) mode and Chisel Weasel's Relative pen fight each other.
 
 Where it works:
 
@@ -217,14 +217,14 @@ differently. The HUD reads `Mirror: World Space`.
 
 The menu's **Mirror** button switches that for **Topological**, which additionally pairs
 vertices across the plane and forces them to match, so the two sides can never drift
-apart. It needs a mesh that really is built symmetrically; on one that isn't, Chisel says
+apart. It needs a mesh that really is built symmetrically; on one that isn't, Chisel Weasel says
 so and falls back to the World Space mirror for that stroke. The HUD reads
 `Mirror: Topological` when it is on. The button takes effect immediately — the next dab
 already uses the new mode — so you can flip between the two mid-sculpt to compare.
 
 ## Subdivision levels (multires)
 
-Chisel keeps a displacement stack: a base cage plus per-level detail layers.
+Chisel Weasel keeps a displacement stack: a base cage plus per-level detail layers.
 
 | Key | Action |
 |---|---|
@@ -235,7 +235,7 @@ Chisel keeps a displacement stack: a base cage plus per-level detail layers.
 Step down to move big shapes, step back up and your fine detail rides along on the
 adjusted forms. Each object in the scene has its own independent level and stack.
 
-**Graphics memory** (burger menu: 2 to 16 GB, default 4) tells Chisel how much memory your
+**Graphics memory** (burger menu: 2 to 16 GB, default 4) tells Chisel Weasel how much memory your
 graphics card has, since no graphics API reports it. It decides how many triangles a level
 can hold before the skull prompt warns you, and how big a level is still rebuilt on the
 card when you step back up (past that the CPU does it, slower). Set it to your card's real
@@ -296,7 +296,7 @@ ears — turns as a mirrored pair: the right lobe goes clockwise while the left 
 anticlockwise, and the pair stays an exact mirror of itself. A piece that is *continuous*
 across the mirror plane cannot do that (its two halves would shear apart at the seam), so
 it turns as one piece and comes off the plane. You are allowed to do it — you just lose
-symmetry on that mesh while it is turned, and Chisel says so once rather than letting you
+symmetry on that mesh while it is turned, and Chisel Weasel says so once rather than letting you
 find out from a torn seam. Turn it back and symmetry returns.
 
 The selection also drives the voxel merge: selected meshes are the merge set,
@@ -362,7 +362,7 @@ spacing, and pressure all apply.
 
 Paint lives on the base cage of the multires stack, so it survives level switches,
 subdivision, remeshing, and voxel merges. PLY export carries it out of the app,
-standing upright (Z-up); re-importing a Chisel PLY turns it
+standing upright (Z-up); re-importing a Chisel Weasel PLY turns it
 back.
 
 ## Retopology (Retopo mode, 0)
@@ -443,7 +443,7 @@ UV mode's big export button: **GLB**, **OBJ** or **STL**, quads as quads in an O
 once it's unwrapped and any baked maps ticked. The toolbar's Export
 (Ctrl+E) lists every mesh's sculpt (`-HI`) and retopo (`-LO`) side by side; opening an OBJ
 or GLB with a `<mesh>-LO` beside its `<mesh>-HI` brings it back as that mesh's retopo,
-UVs and seams included. To bake in Chisel itself, go on to [UV mode](#uv-mode-9-unwrap-and-bake).
+UVs and seams included. To bake in Chisel Weasel itself, go on to [UV mode](#uv-mode-9-unwrap-and-bake).
 
 ## UV mode (9): unwrap and bake
 
@@ -525,7 +525,7 @@ as you like and never clip inside the model.
 
 The burger menu has a **Smooth shading** checkbox, on by default. On, normals are
 averaged across each vertex and the surface reads as one continuous form — the look
-Chisel has always shipped. Turn it off and every triangle is shaded by its own facet,
+Chisel Weasel has always shipped. Turn it off and every triangle is shaded by its own facet,
 so you see the actual polygons: the fastest way to read topology, check where density
 is piling up, or see what a remesh really did to a region.
 
@@ -587,7 +587,7 @@ re-save it on its origin platform first if you want the levels.
 The project name at the top left is the **File** menu: New, Recents, Recover, Save, About,
 Exit (the browser build has New, Save and About). New asks first if there is unsaved work.
 
-On the desktop builds Chisel **autosaves** in the background: after a minute with your
+On the desktop builds Chisel Weasel **autosaves** in the background: after a minute with your
 hands off, or after 5 minutes of unsaved work at the next pause. It never interrupts a
 stroke. After a crash or an unsaved close the app starts normally and the work waits under
 **File > Recover** (it opens untitled; save it under a name). The newest three ended
@@ -619,7 +619,7 @@ you want to choose folders on itch.
 
 ## Web build notes
 
-- Browser shortcuts that collide with Chisel's (Ctrl+S, Ctrl+D, Ctrl+O, F1, …) are
+- Browser shortcuts that collide with Chisel Weasel's (Ctrl+S, Ctrl+D, Ctrl+O, F1, …) are
   captured while the app has focus; devtools shortcuts are left alone.
 - `~` toggles a debug console overlay; add `?debug=1` to the URL for on-page logs.
 - Performance: hundreds of thousands of triangles flow well on modest hardware; the
@@ -647,7 +647,7 @@ you want to choose folders on itch.
 
 ## Acknowledgments
 
-Chisel was vibecoded with Anthropic's Claude. Every line of it was written in
+Chisel Weasel was vibecoded with Anthropic's Claude. Every line of it was written in
 conversation with a model, and different models built different parts of the app —
 so here is who did what.
 
