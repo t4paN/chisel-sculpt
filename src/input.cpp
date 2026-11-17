@@ -649,8 +649,9 @@ static GLFWwindow* g_window = nullptr;
 // Slider drag: accumulate a horizontal delta into the active slider, clamped so
 // the accumulator doesn't overshoot the value range. Fed from the GLFW cursor
 // callback natively, from the DOM pointermove listener (movementX) on web.
+static float slider_speed_now();   // the mouse's or the absolute pen's (see below)
 static void apply_slider_delta(float dx) {
-    g_input->slider_accum += dx * g_input->slider_speed;
+    g_input->slider_accum += dx * slider_speed_now();
 
     switch (g_input->slider_mode) {
             case InputState::SliderMode::SIZE: {
@@ -734,6 +735,33 @@ static void apply_slider_delta(float dx) {
                          ? (int)BrushType::DRAW : save_brush;
     g_input->brush_size_of[size_brush] = g_input->brush_size;
     // Don't update mouse_x/y — keep cursor visually locked
+}
+
+// [ and ]: the size step, a share of the current size (see KeyAction::SIZE_DOWN).
+static float size_key_step(float size) { return std::max(1.0f, size * 0.08f) * (5.0f / 3.0f); }
+
+// Q / E while a slider key (S, W, A, ...) is held: step that slider's value the way [ and ]
+// step the size, 60% further. A share of the current value, as there: strength and
+// hardness span two decades like size does (hardness defaults to 0.023). It goes through
+// apply_slider_delta, so the clamps and the per-brush write-through are the drag's own,
+// and the drag carries on from the new value.
+static void slider_key_step(int dir) {
+    float cur = 0.0f, rate = 0.0f, lo = 0.0f;   // value, value per accum unit, smallest step
+    switch (g_input->slider_mode) {
+        case InputState::SliderMode::SIZE:     cur = g_input->brush_size;     rate = 0.4f;   lo = 1.0f;  break;
+        case InputState::SliderMode::STRENGTH: cur = g_input->brush_strength; rate = 0.001f; lo = 0.01f; break;
+        case InputState::SliderMode::HARDNESS: cur = g_input->brush_hardness; rate = 0.001f; lo = 0.01f; break;
+        case InputState::SliderMode::SPACING:  cur = g_input->brush_spacing;  rate = 0.001f; lo = 0.01f; break;
+        case InputState::SliderMode::RINGS:    // stepped: one ring, one tenth of density
+            apply_slider_delta(dir * 40.0f / slider_speed_now());  return;
+        case InputState::SliderMode::DENSITY:
+            apply_slider_delta(dir * 50.0f / slider_speed_now());  return;
+        default: return;
+    }
+    const float step = g_input->slider_mode == InputState::SliderMode::SIZE
+                     ? size_key_step(cur) * 1.6f
+                     : std::max(lo, cur * 0.08f * (5.0f / 3.0f)) * 1.6f;
+    apply_slider_delta(dir * step / rate / slider_speed_now());
 }
 
 // Grab/release the browser pointer lock for the slider drag: the OS cursor stays
@@ -873,6 +901,9 @@ static bool slider_pen_follows() {
     if (tablet_pen_cursor_locked()) return false;
 #endif
     return true;
+}
+static float slider_speed_now() {
+    return slider_pen_follows() ? g_input->slider_speed_pen : g_input->slider_speed;
 }
 
 static void slider_capture(GLFWwindow* w, bool grab) {
@@ -2032,13 +2063,14 @@ static void run_key_action(GLFWwindow* w, KeyAction a, bool repeat) {
         // the whole 5..500 range; this is the path for machines without a comfortable
         // drag (trackpads) and for nudging a size you already like.
         //
-        // The step is proportional, not fixed: 8% of the current size keeps the felt
+        // The step is proportional, not fixed: a share of the current size keeps the felt
         // increment constant across two decades, where a flat step would be a jump at
-        // 5 px and imperceptible at 500. The 1 px floor keeps it moving at the bottom,
-        // where 8% would round away under the "%.0f" readout.
+        // 5 px and imperceptible at 500. The floor keeps it moving at the bottom, where
+        // the share would round away under the "%.0f" readout. (8%, 1 px floor, then 2/3
+        // faster on the user's ask, 2026-11-17: size_key_step.)
         case KeyAction::SIZE_DOWN:
         case KeyAction::SIZE_UP: {
-            float step = std::max(1.0f, in.brush_size * 0.08f);
+            float step = size_key_step(in.brush_size);
             in.brush_size = std::max(5.0f, std::min(500.0f,
                 in.brush_size + (a == KeyAction::SIZE_UP ? step : -step)));
             in.size_writer = a == KeyAction::SIZE_UP ? "size key up" : "size key down";
@@ -2394,6 +2426,15 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
     if ((action == GLFW_PRESS || action == GLFW_REPEAT) && !modifier_key &&
         !keybind_reserved(key)) {
         int a = find_key_action(key, held_mods());
+        // With a slider key held, the alpha keys (Q / E) step its value instead. Matched
+        // by key, not action: retopo puts its wand and erase on the same two keys.
+        if (g_input->slider_mode != InputState::SliderMode::NONE) {
+            const KeyBind& kp = g_input->keybinds[(int)KeyAction::BRUSH_PREV];
+            const KeyBind& kn = g_input->keybinds[(int)KeyAction::BRUSH_NEXT];
+            const int dir = (kn.bound() && kn.key == key) ? +1
+                          : (kp.bound() && kp.key == key) ? -1 : 0;
+            if (dir != 0) { slider_key_step(dir); return; }
+        }
         if (a >= 0) run_key_action(w, (KeyAction)a, action == GLFW_REPEAT);
     }
 

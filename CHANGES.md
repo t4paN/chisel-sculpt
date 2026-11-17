@@ -2,6 +2,12 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-17 — Sliders: Q / E steps, faster [ ], a speed for the absolute pen
+
+- With a slider key held (S, W, A, spacing), Q and E step its value down and up, 1.6x the size keys' step and a share of the current value; the drag carries on from there. Retopo's rings and density go one notch per press, and Q / E don't fire the wand or erase mid-drag.
+- [ and ] step the size 2/3 further.
+- Slider speed is now two settings: "slider speed" (mouse and relative pen, default 1x) and "pen slider speed" (pen in absolute mode, default 4.5x, up to 8x).
+
 ## 2026-11-17 — Slider drags: the ring follows an absolute pen, slider speed setting
 
 - With a pen in absolute mode (Relative pen off), a slider drag (S, W, A, ...) moves the brush ring with the tip while the value changes; the readout stays where the drag began. On release the ring is already where the next stroke lands, instead of jumping there from the grab point.

@@ -1400,9 +1400,19 @@ void draw_settings_menu_items(InputState& input, MultiresInfo mres, bool sync_ta
             if (ImGui::IsItemHovered())
                 ui_skin_menu_tip("How fast the drag sliders change their\n"
                                  "value: size (S), strength (W), hardness (A)\n"
-                                 "and the rest. Mouse and pen alike.\n\n"
+                                 "and the rest. Mouse and relative pen.\n\n"
                                  "Lower = finer steps, higher = less travel.\n"
                                  "Default 1.00x.");
+            ImGui::SetNextItemWidth(mw);
+            ImGui::SliderFloat("##sliderSpeedPen", &input.slider_speed_pen, 0.25f, 8.0f,
+                               "pen slider speed %.2fx", ImGuiSliderFlags_Logarithmic);
+            if (ImGui::IsItemHovered())
+                ui_skin_menu_tip("The same for a pen in absolute mode\n"
+                                 "(Relative pen off), where the brush ring\n"
+                                 "follows the tip during the drag.\n\n"
+                                 "Its travel is the tablet mapped onto the\n"
+                                 "whole screen, so it wants more.\n"
+                                 "Default 4.50x.");
 
 #if defined(__EMSCRIPTEN__) || defined(__linux__) || defined(_WIN32)
             // Relative pen: Chisel moves its own cursor by the pen's steps (web_bridge.cpp

@@ -445,8 +445,11 @@ struct InputState {
     bool     relative_pen = false;
     float    pen_sensitivity = 1.0f;
     // Settings > slider speed: how far a drag of the S / W / A (etc.) sliders moves their
-    // value, mouse and pen alike. 1 = the built-in rates.
+    // value. 1 = the built-in rates. slider_speed for the mouse and a relative pen,
+    // slider_speed_pen for a pen in absolute mode: its travel is the tablet mapped onto
+    // the whole screen, so it wants far more (4.5x, user 2026-11-17).
     float    slider_speed = 1.0f;
+    float    slider_speed_pen = 4.5f;
     // Native Wayland: hover height (0 touching .. 1 edge of range) above which the pen
     // counts as gone, absolute or relative (tablet.cpp wl_lifted). 1 = off.
     float    pen_lift_height = 1.0f;
