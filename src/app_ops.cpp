@@ -698,6 +698,7 @@ void app_ops_remesh_and_merge(App& a) {
     auto& remesh_chained_from_merge = a.remesh_chained_from_merge;
     auto refresh_active_gpu_residency = [&]() { app_refresh_active_gpu_residency(a); };
     auto take_rescue = [&](const char* op) { app_take_rescue(a, op); };
+    auto arm_geometry_handoff = [&](const Mesh& m) { app_arm_geometry_handoff(a, m); };
     // ---- Remesh execution ----
     // The remesh is a job: setup, each outer iteration and the two finishing
     // passes are one step a frame. The first frame only raises remesh_in_progress
@@ -779,6 +780,88 @@ void app_ops_remesh_and_merge(App& a) {
         }
     }
 
+    // ---- Rebuild levels ----
+    // A dense mesh with no levels gets a stack under it, in three phases a frame or
+    // more apart: (1) the normal remesh job takes it down to a coarse base, (2) one
+    // level a frame is subdivided back up and shrinkwrapped onto the original, kept
+    // here as a soup, (3) the lower levels are fitted to the top and the paint is
+    // carried. After that it is an ordinary stack: D / Shift+D, cascade, projection.
+    struct RebuildLevels {
+        int stage = 0;                 // 0 idle, 1 remeshing down, 2 wrapping levels
+        int levels = 0, done = 0;
+        std::vector<float> pos;        // the original, xyz per vertex
+        std::vector<uint32_t> idx, color;
+        float base_edge = 0.0f, src_edge = 0.0f;
+        double t0 = 0.0;
+    };
+    static RebuildLevels rb;
+    if (input.rebuild_levels_requested) {
+        input.rebuild_levels_requested = false;
+        const bool chained = input.rebuild_levels_chained;
+        input.rebuild_levels_chained = false;
+        int N = std::min(MULTIRES_MAX_LEVEL, std::max(1, input.rebuild_levels_count));
+        const uint64_t T = mesh->tri_count();
+        // Chained off an SDF merge, the dialog couldn't know the result's size: take as
+        // many of the asked-for levels as the result has room for, rather than refuse.
+        if (chained)
+            while (N > 1 && (double)T / std::pow(4.0, N) < 400.0) N--;
+        const double base_tris = (double)T / std::pow(4.0, N);
+        const char* refuse = nullptr;
+        if (rb.stage || remesh_job || input.remesh_requested || input.remesh_in_progress || vmerge_job)
+            refuse = "Busy - try again when it finishes";
+        else if (app_state != AppState::IDLE) refuse = "Finish the stroke first";
+        else if (!multires->locked)           refuse = "Nothing to rebuild";
+        else if (!multires->disp.empty())     refuse = "It already has subdiv levels - delete them first";
+        // Below a few hundred tris the remesher can't hold a shape at all.
+        else if (base_tris < 400.0)           refuse = "Too few triangles for that many levels";
+        if (refuse) {
+            std::snprintf(input.notification, sizeof(input.notification), "Rebuild levels: %s", refuse);
+            input.notification_timer = 3.0f;
+            std::printf("[rebuild] refused: %s\n", refuse);
+        } else {
+            scene.materialize_active_cpu();   // reads the live surface
+            // After a merge, Undo should reach back past both, so the merge's copy stays.
+            if (!chained) take_rescue("rebuild levels");
+            mesh = &scene.active_mesh();       // the rescue may have rebuilt the scene
+            multires = &scene.active_multires();
+            const uint32_t vc = mesh->vertex_count();
+            double area = 0.0;
+            for (uint32_t t = 0; t < mesh->tri_count(); t++) {
+                const Vec3 p0 = mesh->get_pos(mesh->indices[t*3]);
+                area += 0.5 * (double)(mesh->get_pos(mesh->indices[t*3+1]) - p0)
+                                  .cross(mesh->get_pos(mesh->indices[t*3+2]) - p0).length();
+            }
+            // Edge of an even mesh of n tris over this area. 0.87: the remesher settles
+            // ~15% longer than it is aimed (same correction as its detail slider).
+            auto edge_for = [&](double n) {
+                return (float)std::sqrt(4.0 * area / (std::sqrt(3.0) * std::max(1.0, n)));
+            };
+            rb = RebuildLevels{};
+            rb.stage = 1; rb.levels = N; rb.t0 = glfwGetTime();
+            rb.base_edge = 0.87f * edge_for(base_tris);
+            rb.src_edge  = edge_for((double)T);
+            rb.pos.resize((size_t)vc * 3);
+            for (uint32_t v = 0; v < vc; v++) {
+                rb.pos[v*3] = mesh->pos_x[v]; rb.pos[v*3+1] = mesh->pos_y[v]; rb.pos[v*3+2] = mesh->pos_z[v];
+            }
+            rb.idx = mesh->indices;
+            if (mesh->color.size() == vc) rb.color = mesh->color;
+            mesh->mask.clear();                // the whole mesh is rebuilt; a mask would pin parts
+            std::printf("[rebuild] %d levels over %llu tris: base edge %.4f (~%.0f tris), source edge %.4f\n",
+                        N, (unsigned long long)T, rb.base_edge, base_tris, rb.src_edge);
+            remesh_job = remesh_begin(*mesh, *multires, rb.base_edge, 10 + 4 * N,
+                                      compute.supported ? &compute : nullptr,
+                                      input.density_coarse_mult, input.density_fine_mult,
+                                      true, 1.0f, input.mirror_x);
+            // The top comes out at base x 4^N: a base that stops short of its target
+            // puts the top that far over the original's count.
+            remesh_set_target_tris(*remesh_job, (uint32_t)base_tris);
+            input.rebuild_levels_running = true;
+            input.remesh_in_progress = true;
+            input.remesh_progress = 0.0f;
+        }
+    }
+
     // Advance an in-flight remesh by one step; the rest runs once it is done.
     RemeshResult result;
     if (remesh_job && remesh_tick(*remesh_job, result)) {
@@ -790,7 +873,7 @@ void app_ops_remesh_and_merge(App& a) {
         if (result.success)
             if (const char* dump = std::getenv("CHISEL_REMESH_DUMP"))
                 mesh->export_obj(dump);
-        if (std::getenv("CHISEL_AUTO_QUIT")) {
+        if (std::getenv("CHISEL_AUTO_QUIT") && rb.stage != 1) {
             std::fflush(stdout);
             debug_console::pump();   // stdout is piped through the ~ console
             std::_Exit(result.success ? 0 : 3);
@@ -843,8 +926,80 @@ void app_ops_remesh_and_merge(App& a) {
 
         remesh_chained_from_merge = false;
         input.remesh_in_progress = false;
+        if (rb.stage == 1) {
+            if (result.success) {
+                rb.stage = 2;                       // levels from next frame
+                input.remesh_in_progress = true;    // keeps the guards and the panel up
+            } else {
+                rb = RebuildLevels{};
+                input.rebuild_levels_running = false;
+            }
+        }
     }
-    if (remesh_job) input.remesh_progress = remesh_progress(*remesh_job);
+    if (remesh_job) input.remesh_progress = remesh_progress(*remesh_job) / (float)(rb.stage == 1 ? rb.levels + 1 : 1);
+
+    // Rebuild levels, phase 2-3: one level a frame, then the fit.
+    if (rb.stage == 2 && !remesh_job) {
+        // The gap between a fresh subdivided level and the original is a fraction of
+        // the level below's edge; reach one whole edge. The grid cell stays near the
+        // source's own edge, or every lookup at the coarse levels scans thousands of tris.
+        const float parent_edge = rb.base_edge / (float)(1u << rb.done);
+        const float reach = std::max(parent_edge, 3.0f * rb.src_edge);
+        const float cell  = std::max(2.0f * rb.src_edge, 0.25f * reach);
+        uint32_t filled = 0;
+        rebuild_wrap_level(*multires, rb.pos, rb.idx, reach, cell, filled);
+        rb.done++;
+        input.remesh_progress = (float)(rb.done + 1) / (float)(rb.levels + 1);
+        if (rb.done >= rb.levels || multires->base_level + (int)multires->disp.size() >= MULTIRES_MAX_LEVEL) {
+            rebuild_finish(*multires, rb.pos, rb.idx, rb.color, 2.0f * std::max(rb.src_edge, parent_edge * 0.5f));
+            const int top = multires->base_level + (int)multires->disp.size();
+            multires->current_level = top;
+            if (scene.alive_count() <= 1) {
+                cascade_to_level(*multires, *mesh, top, &compute);
+                arm_geometry_handoff(*mesh);
+                scene.refresh_mirror_map();
+                scene.sync();
+            } else {
+                Mesh solo;
+                cascade_to_level(*multires, solo, top, &compute);
+                arm_geometry_handoff(solo);
+                scene.splice_active(solo);
+                scene.refresh_mirror_map();
+            }
+            mesh = &scene.active_mesh();
+            multires = &scene.active_multires();
+            // New topology at every level: no stroke or transform in the history fits it.
+            // The rescue copy (taken at the start) is what Undo reaches instead.
+            scene.active_undo().clear(&compute);
+            xforms.clear();
+            scene.mark_edited();
+            refresh_active_gpu_residency();
+            mesh->compute_bounding_sphere(mesh_center, mesh_radius);
+            screen_buffers_dirty = true;
+            std::snprintf(input.notification, sizeof(input.notification),
+                          "Rebuilt %d subdiv levels: base %u tris, top %u tris",
+                          top - multires->base_level, multires->base.tri_count(), mesh->tri_count());
+            input.notification_timer = 4.0f;
+            std::printf("[rebuild] done in %.0f ms: L%d..L%d, base %u tris, top %u tris\n",
+                        (glfwGetTime() - rb.t0) * 1000.0, multires->base_level, top,
+                        multires->base.tri_count(), mesh->tri_count());
+            if (const char* dump = std::getenv("CHISEL_REBUILD_DUMP")) {
+                mesh->export_obj(dump);
+                Mesh base_view;
+                cascade_to_level(*multires, base_view, multires->base_level);
+                std::string bp = std::string(dump) + ".base.obj";
+                base_view.export_obj(bp.c_str());
+            }
+            rb = RebuildLevels{};
+            input.rebuild_levels_running = false;
+            input.remesh_in_progress = false;
+            if (std::getenv("CHISEL_AUTO_QUIT")) {
+                std::fflush(stdout);
+                debug_console::pump();
+                std::_Exit(0);
+            }
+        }
+    }
 
     // ---- Voxel merge execution (SDF join-for-print) ----
     // Kick off a merge: build the job (gather/grid/alloc/compile), then let the
@@ -928,7 +1083,16 @@ void app_ops_remesh_and_merge(App& a) {
                 // wants the topology to follow it right away (D in the merge
                 // dialog opts out). Runs through the normal remesh block next
                 // frame — same GPU-limit guard, same notification.
-                if (input.voxel_merge_adaptive && !mesh->density.empty()) {
+                if (input.voxel_merge_rebuild_levels > 0) {
+                    // Fresh subdiv levels under the merge result, the top kept near the
+                    // merge's own count. Its remesh follows a density field too, so it
+                    // stands in for the adaptive remesh below.
+                    std::printf("[voxel-merge] chaining Rebuild levels (%d)\n",
+                                input.voxel_merge_rebuild_levels);
+                    input.rebuild_levels_count = input.voxel_merge_rebuild_levels;
+                    input.rebuild_levels_requested = true;
+                    input.rebuild_levels_chained = true;
+                } else if (input.voxel_merge_adaptive && !mesh->density.empty()) {
                     std::printf("[voxel-merge] density field present -> chaining adaptive remesh\n");
                     input.remesh_requested = true;
                     remesh_chained_from_merge = true;
@@ -940,8 +1104,9 @@ void app_ops_remesh_and_merge(App& a) {
                               "SDF remesh failed: %.200s", vm.error.c_str());
                 input.notification_timer = 4.0f;
             }
-            // CHISEL_AUTO_QUIT: a scripted merge ends on its own, like a scripted remesh.
-            if (std::getenv("CHISEL_AUTO_QUIT")) {
+            // CHISEL_AUTO_QUIT: a scripted merge ends on its own, like a scripted remesh
+            // (a chained Rebuild levels ends it instead).
+            if (std::getenv("CHISEL_AUTO_QUIT") && !input.rebuild_levels_requested) {
                 std::fflush(stdout);
                 debug_console::pump();   // stdout is piped through the ~ console
                 std::_Exit(vm.success ? 0 : 3);

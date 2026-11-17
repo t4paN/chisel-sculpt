@@ -2139,7 +2139,7 @@ static void handle_modal_key(GLFWwindow* w, int key) {
         // The merge dialog's own keys: M = mirror-symmetric merge, '-' = subtract (union
         // the selection, then carve away every unselected red mesh), S flips the
         // extractor (Surface Nets / Marching Cubes), D flips the chained adaptive remesh,
-        // H steps Close holes, [ / ] nudge the resolution.
+        // H steps Close holes, L steps the levels rebuilt after, [ / ] nudge the resolution.
         case GLFW_KEY_M:
             if (!merge) break;
             in.voxel_merge_confirm_pending = false;
@@ -2164,6 +2164,7 @@ static void handle_modal_key(GLFWwindow* w, int key) {
             break;
         case GLFW_KEY_D: if (merge) in.voxel_merge_adaptive = !in.voxel_merge_adaptive; break;
         case GLFW_KEY_H: if (merge) in.voxel_merge_close_holes = (in.voxel_merge_close_holes + 1) % 3; break;
+        case GLFW_KEY_L: if (merge) in.voxel_merge_rebuild_levels = (in.voxel_merge_rebuild_levels + 1) % 6; break;
         case GLFW_KEY_LEFT_BRACKET:
             if (merge) in.voxel_merge_resolution = voxel_merge_step_resolution(in.voxel_merge_resolution, -1);
             break;

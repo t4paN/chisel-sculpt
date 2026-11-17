@@ -138,7 +138,7 @@ void draw_remesh_progress(TextOverlay& text, int win_w, int win_h, float progres
 void draw_voxel_merge_confirm(TextOverlay& text, int resolution, int close_holes, int n_selected,
                              int n_unselected, bool surface_nets,
                              bool has_density, bool adaptive, int levels_to_bake,
-                             int win_w, int win_h) {
+                             int rebuild_levels, int win_w, int win_h) {
     text.draw_panel(0, 0, (float)win_w, (float)win_h,
                    win_w, win_h, 0.0f, 0.0f, 0.0f, 0.5f);
 
@@ -177,6 +177,11 @@ void draw_voxel_merge_confirm(TextOverlay& text, int resolution, int close_holes
                       CGA(light_red), 1.0f);
         oy += 30.0f;
     }
+
+    if (rebuild_levels > 0) std::snprintf(line, sizeof(line), "Then rebuild %d subdiv levels   ( L steps )", rebuild_levels);
+    else                    std::snprintf(line, sizeof(line), "Then rebuild subdiv levels: OFF   ( L steps )");
+    text.draw_text(line, cx - 360.0f, cy + oy, scale, win_w, win_h, CGA(light_cyan), 1.0f);
+    oy += 30.0f;
 
     // Density paint present: offer the chained adaptive remesh so the merge
     // output follows the heatmap without a separate '/' press.
@@ -1791,6 +1796,37 @@ void draw_settings_menu_items(InputState& input, MultiresInfo mres, bool sync_ta
                     ? "Drop the finest subdivision level and reclaim its memory.\n"
                       "Detail bakes down one level; cannot be undone."
                     : "No subdivision level above the base cage to delete");
+            }
+
+            // Rebuild levels: the opposite situation, a dense mesh with nothing under it
+            // (an import, or a remesh / SDF merge, which flattens the stack).
+            const bool can_rebuild = mres.locked && mres.lmax == mres.base_level
+                                  && !input.remesh_in_progress;
+            const double base_tris = (double)mres.tris / std::pow(4.0, input.rebuild_levels_count);
+            if (!can_rebuild) ImGui::BeginDisabled();
+            ImGui::SetNextItemWidth(mw);
+            ImGui::SliderInt("##rebuildLevels", &input.rebuild_levels_count, 1, 6,
+                             input.rebuild_levels_count == 1 ? "rebuild %d level" : "rebuild %d levels");
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ui_skin_menu_tip("How many levels to build under this mesh. Each one\n"
+                                 "down has a quarter of the triangles: at %d the base\n"
+                                 "would be about %.0fk triangles.",
+                                 input.rebuild_levels_count, base_tris / 1000.0);
+            if (ImGui::Selectable("Rebuild subdiv levels")) {
+                input.rebuild_levels_requested = true;
+                ImGui::CloseCurrentPopup();
+            }
+            if (!can_rebuild) ImGui::EndDisabled();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                ui_skin_menu_tip("%s", can_rebuild
+                    ? "Give this mesh subdivision levels it never had: remesh\n"
+                      "it down to a coarse base, subdivide back up, and\n"
+                      "shrinkwrap every level onto the sculpt. Then D and\n"
+                      "Shift+D work as if you had built it up level by level.\n\n"
+                      "Replaces the triangles, so detail finer than the top\n"
+                      "level is lost. Undo brings the old mesh back for\n"
+                      "the next 3 strokes, like a remesh."
+                    : "Only for a mesh with no subdivision levels yet");
             }
         }
     }

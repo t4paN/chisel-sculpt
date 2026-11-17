@@ -35,6 +35,8 @@ RemeshJob* remesh_begin(Mesh& mesh, MultiresStack& stack,
 bool  remesh_tick(RemeshJob& job, RemeshResult& out);
 float remesh_progress(const RemeshJob& job);       // 0..1
 void  remesh_destroy(RemeshJob* job);
+// Rebuild levels: keep iterating past the planned count while over 1.2x this many tris.
+void  remesh_set_target_tris(RemeshJob& job, uint32_t tris);
 
 // Predicted post-remesh triangle count when a painted density field drives
 // adaptive sizing (each tri refines toward its local target edge length).
@@ -97,3 +99,20 @@ void pick_soup_sources(const Mesh& m, const std::vector<float>& pos,
                        const std::vector<uint32_t>& idx, float cell,
                        const std::function<bool(Vec3, Vec3)>& accept,
                        std::vector<uint32_t>& pick, float inset = 0.0f);
+
+// Rebuild levels: give a dense mesh a level stack it never had. The caller remeshes it
+// down to a coarse base (the stack then holds just that base), keeps the dense original
+// as a soup (xyz per vertex, 3 indices per tri), and calls rebuild_wrap_level once per
+// level wanted: it subdivides the stack one level further and shrinkwraps the new level
+// onto the soup along its normals, storing the move as that level's displacement.
+// `reach` = how far a vertex may travel to find the original. Returns verts wrapped;
+// verts whose ray missed take their neighbours' move instead (`filled`).
+uint32_t rebuild_wrap_level(MultiresStack& stack, const std::vector<float>& pos,
+                            const std::vector<uint32_t>& idx, float reach, float cell,
+                            uint32_t& filled);
+// Last step: fit the lower levels to the top (the inverse subdivision a level-down runs,
+// which pushes the base out until it subdivides back to the wrapped surface), then give
+// the top level the original's colour (per soup vertex; empty = no paint to carry).
+void rebuild_finish(MultiresStack& stack, const std::vector<float>& pos,
+                    const std::vector<uint32_t>& idx, const std::vector<uint32_t>& color,
+                    float cell);

@@ -713,6 +713,13 @@ struct InputState {
     bool remesh_in_progress;
     float remesh_progress = 0.0f;   // 0..1 while a remesh job runs
     bool remesh_confirm_pending;
+    // Rebuild levels (Settings menu): a dense mesh with no levels gets a stack under it.
+    // Remesh down to a coarse base, subdivide back up, shrinkwrap each level onto the
+    // original. Rides remesh_in_progress for its guards and progress panel.
+    bool rebuild_levels_requested = false;
+    bool rebuild_levels_running   = false;
+    int  rebuild_levels_count     = 3;   // levels above the new base
+    bool rebuild_levels_chained   = false;  // fired by an SDF merge: keep the merge's rescue copy
 
     // Voxel merge (SDF join-for-print) — Merge button / J key
     bool voxel_merge_requested;
@@ -724,6 +731,7 @@ struct InputState {
     int  voxel_merge_close_holes = 0;   // H in merge dialog: 0 Normal, 1 More, 2 Most (film models only)
     bool voxel_merge_subtract;     // '-' in merge dialog: carve unselected (red) meshes from the selected union
     bool voxel_merge_adaptive;     // D in merge dialog: chain the adaptive remesh after the merge (density field only)
+    int  voxel_merge_rebuild_levels = 0;   // L in merge dialog: then rebuild this many subdiv levels (0 = off)
 
     // Mask operations
     bool mask_invert_requested;   // Ctrl+I

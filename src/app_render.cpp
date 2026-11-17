@@ -391,7 +391,7 @@ void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse) {
                                  dlg.n_selected, dlg.n_unselected,
                                  input.voxel_merge_surface_nets,
                                  dlg.has_density, input.voxel_merge_adaptive,
-                                 dlg.levels_to_bake, win_w, win_h);
+                                 dlg.levels_to_bake, input.voxel_merge_rebuild_levels, win_w, win_h);
     if (bitmap_dialogs && input.remesh_in_progress)
         draw_remesh_progress(text, win_w, win_h, input.remesh_progress);
     if (bitmap_dialogs && input.voxel_merge_in_progress)
@@ -423,6 +423,7 @@ void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse) {
     mres_info.locked     = multires->locked;
     mres_info.base_level = multires->base_level;
     mres_info.lmax       = multires->base_level + (int)multires->disp.size();
+    mres_info.tris       = mesh->tri_count();
     if (input.ui_classic()) {
         draw_button_islands(input, win_w, win_h, &alpha_lib, mres_info);
     } else {

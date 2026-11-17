@@ -3924,7 +3924,9 @@ void draw_skin_dialogs(InputState& input, int win_w, int win_h, const DialogInfo
     // ---- Remesh: running (a job across frames, one pass per frame, so the bar moves) ----
     if (begin_dialog("##dlgRemeshRun", input.remesh_in_progress, win_w, win_h)) {
         char line[48];
-        std::snprintf(line, sizeof line, "Remeshing...  %d%%", (int)(input.remesh_progress * 100.0f + 0.5f));
+        std::snprintf(line, sizeof line, "%s  %d%%",
+                      input.rebuild_levels_running ? "Rebuilding levels..." : "Remeshing...",
+                      (int)(input.remesh_progress * 100.0f + 0.5f));
         dlg_title(line);
         dlg_bar(dlg_min_w(), input.remesh_progress);
         end_dialog();
@@ -4056,6 +4058,22 @@ void draw_skin_dialogs(InputState& input, int win_w, int win_h, const DialogInfo
             }
         }
         key_hint("H");
+
+        // Then rebuild subdiv levels under the result (Off, 1..5); L steps.
+        dlg_label("Levels after", label_w, row_h);
+        ImGui::SameLine(0.0f, 0.0f);
+        {
+            static const char* const kLv[6] = { "Off", "1", "2", "3", "4", "5" };
+            for (int i = 0; i < 6; i++) {
+                if (i) ImGui::SameLine();
+                ImGui::PushID(i + 7100);   // the toggles draw their label, so no ## suffix
+                if (dlg_toggle(kLv[i], input.voxel_merge_rebuild_levels == i)) input.voxel_merge_rebuild_levels = i;
+                ImGui::PopID();
+                dlg_tip(i == 0 ? "Keep the merge as one flat mesh"
+                               : "Then build this many subdiv levels under it, the top kept near the merge's triangle count");
+            }
+        }
+        key_hint("L");
 
         // Density paint on the selection: offer the chained adaptive remesh.
         if (info.has_density) {

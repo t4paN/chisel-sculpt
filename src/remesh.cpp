@@ -3726,6 +3726,11 @@ struct RemeshJob {
     float target_edge_length = 0.0f, detail = 1.0f;
     float density_coarse_mult = 2.0f, density_fine_mult = 0.5f;
     int   iterations = 10;
+    // Rebuild levels: the base must land near this many tris, or the top level (base
+    // x 4^levels) misses the original's count by the same factor. A big coarsening
+    // collapses most of the mesh in the first pass, then only a few hundred verts a
+    // pass, so while it is still over, the loop runs on past `iterations` (to 3x).
+    uint32_t target_tris = 0;
     bool  keep_detail = true;
     bool  mirror = true;
 
@@ -3831,7 +3836,10 @@ bool RemeshJob::setup() {
     // Ensure adjacency is built
     if (mesh.vert_tri_offset.empty()) mesh.build_adjacency();
 
-    // Compute target edge length from mean if auto
+    // Compute target edge length from mean if auto. A target given outright (Rebuild
+    // levels asks for a base several levels coarser) reworks the whole mesh, like the
+    // detail offset below: the stretched-only test would otherwise select nothing.
+    const bool explicit_target = target_edge_length > 0.0f;
     if (target_edge_length <= 0.0f)
         target_edge_length = compute_mean_edge_length(mesh);
     // Tri count goes as 1/edge², so a count multiplier is an edge divisor of √x.
@@ -3905,7 +3913,7 @@ bool RemeshJob::setup() {
     // An offset target is the same story: the stretched-only test flags edges
     // LONGER than the target, so a coarser target would select almost nothing
     // and a coarse remesh would do nothing at all. The whole mesh is in play.
-    select_target = (adaptive || detail_offset) ? 0.0f : target_edge_length;
+    select_target = (adaptive || detail_offset || explicit_target) ? 0.0f : target_edge_length;
 
     // Decide selection strategy: mask-driven or auto-detect.
     // tri_selected mirrors remesh_trisel_ssbo on GPU; we only readback when CPU
@@ -4228,13 +4236,20 @@ bool RemeshJob::step() {
     iters_done = iter + 1;
     std::printf("[remesh] iter %d: %u split, %u collapse, %u flip, %u valence-3 (threshold=%u)\n",
                 iter, n_split, n_collapse, n_flip, n_val3, threshold);
-    if (total_ops < threshold) {
+    const bool over_target = target_tris > 0 && (double)mesh.tri_count() > 1.2 * target_tris
+                          && iter + 1 < 3 * iterations;
+    if (total_ops < threshold && !over_target) {
         std::printf("[remesh] converged at iter %d (%u ops < %u threshold)\n",
                     iter, total_ops, threshold);
         return true;
     }
-    if (iter + 1 < iterations) rebuild_after_smooth();
-    return ++iter >= iterations;
+    if (over_target && iter + 1 >= iterations)
+        std::printf("[remesh] iter %d: %u tris, still over the %u aimed at - running on\n",
+                    iter, mesh.tri_count(), target_tris);
+    const bool more = iter + 1 < iterations || over_target;
+    if (more) rebuild_after_smooth();
+    ++iter;
+    return !more;
 }
 
 // Loop timings and the drift readout.
@@ -4437,7 +4452,7 @@ float remesh_progress(const RemeshJob& j) {
     float done;
     switch (j.stage) {
     case 0:  done = 0.0f; break;
-    case 1:  done = 1.0f + (float)j.iter; break;
+    case 1:  done = 1.0f + (float)std::min(j.iter, j.iterations - 1); break;   // running on past the plan holds
     case 2:  done = 1.0f + (float)j.iterations; break;
     case 3:  done = 2.0f + (float)j.iterations; break;
     default: done = total; break;
@@ -4446,6 +4461,7 @@ float remesh_progress(const RemeshJob& j) {
 }
 
 void remesh_destroy(RemeshJob* j) { delete j; }
+void remesh_set_target_tris(RemeshJob& j, uint32_t tris) { j.target_tris = tris; }
 
 uint64_t predict_adaptive_tris(const Mesh& mesh, float target_edge_length,
                                float coarse_mult, float fine_mult) {
@@ -4474,4 +4490,88 @@ uint64_t predict_adaptive_tris(const Mesh& mesh, float target_edge_length,
         pred += std::max(1.0f, ratio * ratio);
     }
     return (uint64_t)pred;
+}
+
+uint32_t rebuild_wrap_level(MultiresStack& stack, const std::vector<float>& pos,
+                            const std::vector<uint32_t>& idx, float reach, float cell,
+                            uint32_t& filled) {
+    filled = 0;
+    const int K = stack.base_level + (int)stack.disp.size() + 1;
+    if (K > MULTIRES_MAX_LEVEL) return 0;
+    // One level past the top: the cascade zero-fills its displacement and builds its
+    // frames on the plain subdivided surface, which is exactly the "before" we need.
+    Mesh m;
+    cascade_to_level(stack, m, K);
+    const int k = K - stack.base_level - 1;
+    const uint32_t vc = m.vertex_count();
+    if (k >= (int)stack.disp.size() || k >= (int)stack.frames.size()
+        || stack.frames[k].size() != vc) {
+        std::printf("[rebuild] L%d: stack did not grow as expected\n", K);
+        return 0;
+    }
+    const std::vector<float> px = m.pos_x, py = m.pos_y, pz = m.pos_z;
+    const uint32_t moved = snap_mesh_to_soup(m, pos, idx, cell, reach, true, nullptr, 0.0f,
+                                             [](Vec3, Vec3) { return true; });
+
+    // World-space move per vertex. A vertex the snap left alone (ray missed, or the
+    // fan check refused it) would stay on the smooth surface as a dimple or a bump
+    // among wrapped neighbours, so it borrows their mean move instead, a ring a sweep.
+    std::vector<Vec3> d(vc);
+    std::vector<uint8_t> have(vc);
+    for (uint32_t v = 0; v < vc; v++) {
+        d[v] = Vec3(m.pos_x[v] - px[v], m.pos_y[v] - py[v], m.pos_z[v] - pz[v]);
+        have[v] = d[v].dot(d[v]) > 0.0f;
+    }
+    std::vector<uint32_t> todo;
+    for (uint32_t v = 0; v < vc; v++) if (!have[v]) todo.push_back(v);
+    for (int sweep = 0; sweep < 8 && !todo.empty(); sweep++) {
+        std::vector<std::pair<uint32_t, Vec3>> got;
+        for (uint32_t v : todo) {
+            Vec3 sum(0, 0, 0); int n = 0;
+            for (uint32_t j = m.vert_tri_offset[v]; j < m.vert_tri_offset[v + 1]; j++) {
+                const uint32_t t = m.vert_tri_list[j];
+                for (int c = 0; c < 3; c++) {
+                    const uint32_t u = m.indices[t*3 + c];
+                    if (u != v && have[u]) { sum += d[u]; n++; }
+                }
+            }
+            if (n) got.push_back({v, sum * (1.0f / (float)n)});
+        }
+        if (got.empty()) break;
+        for (auto& g : got) { d[g.first] = g.second; have[g.first] = 1; filled++; }
+        size_t w = 0;
+        for (uint32_t v : todo) if (!have[v]) todo[w++] = v;
+        todo.resize(w);
+    }
+
+    const auto& fr = stack.frames[k];
+    auto& disp = stack.disp[k];
+    for (uint32_t v = 0; v < vc; v++)
+        disp[v] = { d[v].dot(fr[v].t), d[v].dot(fr[v].b), d[v].dot(fr[v].n) };
+    std::printf("[rebuild] L%d: %u verts, %u wrapped, %u filled from neighbours, %zu left smooth "
+                "(reach %.4f)\n", K, vc, moved, filled, todo.size(), reach);
+    return moved;
+}
+
+void rebuild_finish(MultiresStack& stack, const std::vector<float>& pos,
+                    const std::vector<uint32_t>& idx, const std::vector<uint32_t>& color,
+                    float cell) {
+    const int L = stack.base_level + (int)stack.disp.size();
+    ProjectionStats ps = project_down_to_level(stack, stack.base_level);
+    std::printf("[rebuild] fitted L%d..L%d to the top in %.0f ms", stack.base_level, L, ps.elapsed_ms);
+    if (ps.checked) std::printf(", top rebuilt within %.3g", ps.max_reconstruction_error);
+    std::printf("\n");
+    if (color.empty() || color.size() * 3 != pos.size()) return;
+
+    // Paint: each top-level vertex takes the colour of the original under it. The
+    // plane is sized for the finest level, and every coarser level reads its prefix.
+    Mesh top;
+    cascade_to_level(stack, top, L);
+    top.recompute_normals();
+    std::vector<uint32_t> pick;
+    pick_soup_sources(top, pos, idx, cell, [](Vec3, Vec3) { return true; }, pick);
+    const uint32_t vc = top.vertex_count();
+    if (stack.color.size() != vc) stack.color.assign(vc, 0xFFFFFFFFu);
+    for (uint32_t v = 0; v < vc; v++)
+        if (pick[v] != UINT32_MAX) stack.color[v] = color[pick[v]];
 }

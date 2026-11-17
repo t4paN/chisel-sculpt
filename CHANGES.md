@@ -2,6 +2,15 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-17 — Rebuild subdiv levels
+
+- New in the Settings menu, under Delete subdiv level: a level-count slider and "Rebuild subdiv levels", for a dense mesh with no levels under it (an import, or the result of a remesh or SDF merge).
+- It remeshes down to a coarse base, subdivides back up, and shrinkwraps each new level onto the original along its normals; the base is then fitted so the top reproduces the surface. Paint is carried over.
+- The SDF merge dialog has a "Levels after" row (key L): rebuild that many levels straight after the merge, keeping the merge's triangle count at the top.
+- Small features don't survive at the lowest levels (a coarse cage can't hold an eyelid); they come back from the middle levels up.
+- Remesher: an explicit coarser target now reworks the whole mesh, and a rebuild keeps iterating until it is within 1.2× of the triangle count it aims at.
+- Undo is cleared by a rebuild; the rescue copy brings the old mesh back, as after a remesh.
+
 ## 2026-11-16 — v0.4.0: the app is now called Chisel Weasel
 
 - Window title, dialogs, web page title, installed-app name, launcher, README and MANUAL say Chisel Weasel.

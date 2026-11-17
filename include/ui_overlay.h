@@ -17,7 +17,7 @@ void draw_remesh_progress(TextOverlay& text, int win_w, int win_h, float progres
 void draw_voxel_merge_confirm(TextOverlay& text, int resolution, int close_holes, int n_selected,
                              int n_unselected, bool surface_nets,
                              bool has_density, bool adaptive, int levels_to_bake,
-                             int win_w, int win_h);
+                             int rebuild_levels, int win_w, int win_h);
 void draw_voxel_merge_progress(TextOverlay& text, int win_w, int win_h, float progress);
 // level is the multires stack's LIVE editing level, not InputState::subdiv_level —
 // that one is the opening sphere's base-cage subdivision, is written into the save
@@ -46,6 +46,7 @@ struct MultiresInfo {
     bool locked = false;
     int  base_level = 0;
     int  lmax = 0;
+    uint32_t tris = 0;   // active mesh at the level shown (Rebuild levels quotes a base size)
 };
 
 // ImGui button islands: brush selection + ops (undo/redo, multires, save/load)

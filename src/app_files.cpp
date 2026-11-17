@@ -934,6 +934,22 @@ void app_files_frame(App& a) {
         }
     }
 
+    // Dev hook: CHISEL_AUTO_REBUILD=<levels> fires one Rebuild levels once the scene
+    // has settled (pairs with CHISEL_AUTO_IMPORT, CHISEL_REBUILD_DUMP, CHISEL_AUTO_QUIT).
+    {
+        static int auto_rebuild_frames = -1;
+        if (auto_rebuild_frames < 0) {
+            const char* env = std::getenv("CHISEL_AUTO_REBUILD");
+            auto_rebuild_frames = (env && std::atoi(env) > 0) ? 1 : 0;
+            if (auto_rebuild_frames) input.rebuild_levels_count = std::atoi(env);
+        }
+        if (auto_rebuild_frames > 0 && ++auto_rebuild_frames > 12 &&
+            app_state == AppState::IDLE && !input.remesh_in_progress) {
+            input.rebuild_levels_requested = true;
+            auto_rebuild_frames = 0;
+        }
+    }
+
     // Dev hook: CHISEL_AUTO_MERGE=1 fires one SDF remesh of the selection the
     // same way, so CHISEL_REMESH_KEEP_DETAIL=0/1 A/Bs the merge's snap too.
     {
