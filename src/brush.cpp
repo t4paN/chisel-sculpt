@@ -1135,6 +1135,20 @@ void BrushStroke::set_anchor(const Mesh& mesh, const Camera& cam,
 
     // (anchor_world_radius / anchor_cos_tilt / screen_slack are computed above — the
     // sub-pixel depth guard needs them before the depth tap.)
+    // Backstop: one non-finite number here turns every vert in the dab into NaN (sent
+    // to the origin on export) and the next dabs and smooths spread it. The plane-cache
+    // readers already refuse bad texels; this catches anything else. Skip the dab.
+    if (!(std::isfinite(anchor_pos.x) && std::isfinite(anchor_pos.y) && std::isfinite(anchor_pos.z)
+          && std::isfinite(cyl_axis_x) && std::isfinite(cyl_axis_y) && std::isfinite(cyl_axis_z)
+          && std::isfinite(area_normal_x) && std::isfinite(area_normal_y) && std::isfinite(area_normal_z)
+          && std::isfinite(anchor_world_radius))) {
+        static int nan_logs = 0;
+        if (nan_logs < 20) { nan_logs++; fprintf(stderr, "[brush] non-finite anchor, dab skipped\n"); }
+        return;
+    }
+    if (area_plane_valid && !(std::isfinite(area_plane_point.x) && std::isfinite(area_plane_point.y)
+                              && std::isfinite(area_plane_point.z)))
+        area_plane_valid = false;
     anchor_valid = true;
     last_stroke_pos = anchor_pos;
     last_stroke_valid = true;

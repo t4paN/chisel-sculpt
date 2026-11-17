@@ -517,7 +517,11 @@ void main() {
     // vertices along. Do NOT transform by uView here: view-space normals would
     // make every visible surface read as ~(0,0,1), producing direction-locked
     // "cannon" extrusions along world +z regardless of camera angle.
-    vNormWorld = normalize(aNorm);
+    // A zero normal (a crushed fan: guard_normal returns 0 there) must not be
+    // normalized: that is NaN, and a NaN texel in this buffer poisons the brushes that
+    // average it (see Renderer::sample_depth). Zero reads as background instead.
+    float nl2 = dot(aNorm, aNorm);
+    vNormWorld = nl2 > 1e-20 ? aNorm * inversesqrt(nl2) : vec3(0.0);
     vDepth = -viewPos.z;  // linear depth (positive into screen)
     vTriID = cid / 3u;
     // Corner 0 = (1,0), 1 = (0,1), 2 = (0,0).
@@ -541,7 +545,10 @@ layout(location=3) out vec2 outBary;
 
 void main() {
     outDepth = vDepth;
-    outNormal = vec4(normalize(vNormWorld), 1.0);
+    // Same guard per pixel: across a fold the corners' normals point opposite ways and
+    // the interpolated one can pass through zero.
+    float nl2 = dot(vNormWorld, vNormWorld);
+    outNormal = vec4(nl2 > 1e-12 ? vNormWorld * inversesqrt(nl2) : vec3(0.0), 1.0);
     outTriID = vTriID;
     outBary = vBary;
 }
@@ -1344,7 +1351,13 @@ fn vs_main(@builtin(vertex_index) cid: u32) -> VSOut {
     let aPos = vec3<f32>(s_pos[3u * v], s_pos[3u * v + 1u], s_pos[3u * v + 2u]);
     let aNorm = vec3<f32>(s_nrm[3u * v], s_nrm[3u * v + 1u], s_nrm[3u * v + 2u]);
     let viewPos = P.view * vec4<f32>(aPos, 1.0);
-    o.nrmWorld = normalize(aNorm);
+    // Twin of the GL guard: a zero (or bad) normal is written as zero, never
+    // normalized into NaN. Plain if/else, not select() (Tint, see CONVENTIONS.md).
+    let nl2 = dot(aNorm, aNorm);
+    o.nrmWorld = vec3<f32>(0.0, 0.0, 0.0);
+    if (nl2 > 1e-20) {
+        o.nrmWorld = aNorm * inverseSqrt(nl2);
+    }
     o.depth = -viewPos.z;
     o.triID = cid / 3u;
     // Corner 0 = (1,0), 1 = (0,1), 2 = (0,0).
@@ -1365,7 +1378,12 @@ struct FSOut {
 fn fs_main(in: VSOut) -> FSOut {
     var o: FSOut;
     o.depth = in.depth;
-    o.nrm = vec4<f32>(normalize(in.nrmWorld), 1.0);
+    let fl2 = dot(in.nrmWorld, in.nrmWorld);
+    var fn_ = vec3<f32>(0.0, 0.0, 0.0);
+    if (fl2 > 1e-12) {
+        fn_ = in.nrmWorld * inverseSqrt(fl2);
+    }
+    o.nrm = vec4<f32>(fn_, 1.0);
     o.triID = in.triID;
     o.bary = in.bary;
     return o;
@@ -2775,9 +2793,17 @@ void Renderer::poll_plane_reads() {
     plane_valid = ok;
 }
 
+// Every plane-cache read refuses a non-finite value. A NaN normal or depth that got into
+// the screen buffers (a vertex whose position or normal went bad) would otherwise be
+// averaged into a brush's anchor and turn the whole dab into NaN positions, which then
+// spread through the next dabs and smooths (2026-11-17: Clay at a grazing angle, a dab's
+// square of verts "sent to 0,0,0"). NaN fails every comparison, so tests are written to
+// pass only good values.
 bool Renderer::sample_depth(int x, int y, float* out) {
     if (!plane_valid || x < 0 || y < 0 || x >= plane_w || y >= plane_h) return false;
-    *out = plane_depth[(size_t)y * plane_w + x];
+    const float d = plane_depth[(size_t)y * plane_w + x];
+    if (!std::isfinite(d)) return false;
+    *out = d;
     return true;
 }
 
@@ -2803,6 +2829,11 @@ bool Renderer::sample_depth_bilinear(float fx, float fy, float* out, float max_s
     d[1] = plane_depth[(size_t)y0       * plane_w + x0 + 1];
     d[2] = plane_depth[(size_t)(y0 + 1) * plane_w + x0];
     d[3] = plane_depth[(size_t)(y0 + 1) * plane_w + x0 + 1];
+    // A bad tap (see sample_depth): use the nearest tap alone, if that one is good.
+    if (!(std::isfinite(d[0]) && std::isfinite(d[1]) && std::isfinite(d[2]) && std::isfinite(d[3]))) {
+        int cx = (int)fx, cy = (int)fy;
+        return sample_depth(cx, cy, out);
+    }
 
     // Discontinuity guard: if the quad straddles two surfaces, interpolating lands
     // between them (on neither). Fall back to the nearest tap, which is at least a
@@ -2830,7 +2861,9 @@ bool Renderer::sample_depth_bilinear(float fx, float fy, float* out, float max_s
 bool Renderer::sample_normal(int x, int y, float out[3]) {
     if (!plane_valid || x < 0 || y < 0 || x >= plane_w || y >= plane_h) return false;
     size_t i = ((size_t)y * plane_w + x) * 3;
-    out[0] = plane_norm[i + 0]; out[1] = plane_norm[i + 1]; out[2] = plane_norm[i + 2];
+    const float nx = plane_norm[i + 0], ny = plane_norm[i + 1], nz = plane_norm[i + 2];
+    if (!(std::isfinite(nx) && std::isfinite(ny) && std::isfinite(nz))) return false;
+    out[0] = nx; out[1] = ny; out[2] = nz;
     return true;
 }
 
@@ -2881,11 +2914,19 @@ bool Renderer::sample_area_normal(int cx, int cy, int radius_px, float out[3],
             nx = plane_norm[i]; ny = plane_norm[i + 1]; nz = plane_norm[i + 2];
             // Background clears to zero, so length is the on-model test — no second
             // region read of the triid attachment just to reject off-mesh texels.
-            if (nx * nx + ny * ny + nz * nz < 0.25f) continue;
+            // Written so a NaN fails it (`< 0.25f` let NaN through: it poisoned the
+            // whole disc, see sample_depth).
+            // (The upper bound rejects an infinite one the same way.)
+            const float l2 = nx * nx + ny * ny + nz * nz;
+            if (!(l2 >= 0.25f && l2 <= 4.0f)) continue;
+            float depth = 0.0f;
+            if (out_avg) {
+                depth = plane_depth[(size_t)(y0 + y) * plane_w + (x0 + x)];
+                if (!std::isfinite(depth)) continue;
+            }
             float w = 1.0f - d2;                     // smooth, centre-weighted
             ax += nx * w; ay += ny * w; az += nz * w;
             if (out_avg) {
-                float depth = plane_depth[(size_t)(y0 + y) * plane_w + (x0 + x)];
                 apx += (float)(x0 + x) * w;
                 apy += (float)(y0 + y) * w;
                 ad  += depth * w;

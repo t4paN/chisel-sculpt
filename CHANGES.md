@@ -2,6 +2,10 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-17 — Clay at grazing angles no longer tears holes
+
+- A crushed fan's zero normal was normalized into NaN in the screen buffers; the brush's disc average let NaN past its background test, and the whole dab's square went to NaN positions (holes in the app, verts at the origin on export), spreading through later dabs and smooths. Screen-buffer shaders (GL + WGSL) now write zero there, every plane-cache reader refuses non-finite values, and a dab with a non-finite anchor is skipped and logged.
+
 ## 2026-11-17 — Sliders: Q / E steps, faster [ ], a speed for the absolute pen
 
 - With a slider key held (S, W, A, spacing), Q and E step its value down and up, 1.6x the size keys' step and a share of the current value; the drag carries on from there. Retopo's rings and density go one notch per press, and Q / E don't fire the wand or erase mid-drag.
