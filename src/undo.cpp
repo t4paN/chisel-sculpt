@@ -9,7 +9,8 @@
 
 // Default CPU undo budget: 1 GB. Overridden at startup by --toaster (256 MB).
 // A level-descend snapshot is enormous: it carries disp AND frames for every layer the
-// projection rewrites, measured at ~165 MB on an L9 model (frames alone are 76% of it).
+// projection rewrites, measured at ~165 MB on an L9 model (frames alone were 76% of it;
+// since 2026-11-17 the snapshot keeps disp only and frames are rebuilt on undo).
 // Ten descends in one session overran the old 1 GB cap — and eviction is SILENT and
 // drops the OLDEST entries, so undoing "everything" lands on the oldest state still in
 // memory rather than the model you started with. That is what made a trashed model

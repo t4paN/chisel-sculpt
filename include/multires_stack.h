@@ -200,3 +200,10 @@ bool multires_drop_top_level(MultiresStack& stack);
 // L_max is derived from stack.disp.size(): L_max = base_level + disp.size().
 // No-op if target_level >= L_max.
 ProjectionStats project_down_to_level(MultiresStack& stack, int target_level);
+
+// Upper estimate, in bytes, of what project_down_to_level(target_level) plus its undo
+// snapshot will newly allocate: the per-level positions it walks with, the snapshot,
+// the temps, and anything it has to build from cold (topology cache, frames) that
+// then stays. The web build checks it against the heap ceiling before descending, so
+// a model too big for the browser is refused instead of aborting the page.
+size_t projection_memory_estimate(const MultiresStack& stack, int target_level);

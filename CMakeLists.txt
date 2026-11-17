@@ -326,6 +326,11 @@ if(EMSCRIPTEN)
         -sUSE_GLFW=3
         -sASYNCIFY=1
         -sALLOW_MEMORY_GROWTH=1
+        # 4 GB, the wasm32 ceiling (the default stops at 2 GB). A level-down on a
+        # ~30M-tri model aborted the page at 2 GB (2026-11-17); the projection's own
+        # peak is now ~1 GB there, but a cold descent also builds the upper levels'
+        # topology and frames, which stay. app_ops refuses what still won't fit.
+        -sMAXIMUM_MEMORY=4GB
         # ccall backs the file-picker JS→C callback (chisel_web_import_done);
         # stringToNewUTF8 hands the stored settings blob back out of localStorage
         # (settings.cpp). Without the export they get DCE'd out of the runtime.

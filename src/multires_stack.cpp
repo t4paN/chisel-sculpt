@@ -561,6 +561,99 @@ static void apply_stencil_positions(
     }
 }
 
+// --- Projection memory -------------------------------------------------------
+// The level-down used to hold a full Mesh per level (positions, normals, indices,
+// CSR), each with its own COPY of the cached topology, plus a second full mesh for
+// the rebuild. At L6 (14.8M verts) that peaked at several GB, and the web build's
+// heap aborted on it (2026-11-17). Now every level is positions only, and a step
+// that needs a Mesh borrows the topology from topo_cache by move, never by copy.
+struct ProjPos { std::vector<float> x, y, z; };
+
+static void free_pos(ProjPos& p) {
+    std::vector<float>().swap(p.x);
+    std::vector<float>().swap(p.y);
+    std::vector<float>().swap(p.z);
+}
+
+// Lends a level's cached topology to a Mesh shell and takes it back on scope exit.
+// Nothing may read topo_cache[that level] while the loan is out.
+struct TopoLoan {
+    MultiresStack::LevelTopo& tc;
+    Mesh& m;
+    TopoLoan(MultiresStack::LevelTopo& t, Mesh& mesh) : tc(t), m(mesh) {
+        m.indices         = std::move(tc.indices);
+        m.vert_tri_offset = std::move(tc.vt_offset);
+        m.vert_tri_list   = std::move(tc.vt_list);
+    }
+    ~TopoLoan() {
+        tc.indices   = std::move(m.indices);
+        tc.vt_offset = std::move(m.vert_tri_offset);
+        tc.vt_list   = std::move(m.vert_tri_list);
+    }
+};
+
+// Topology of chain level k (0 = base, k > 0 = topo_cache[k - 1]).
+static const std::vector<uint32_t>& lvl_idx(const MultiresStack& s, int k) {
+    return k == 0 ? s.base.indices : s.topo_cache[k - 1].indices;
+}
+static const std::vector<uint32_t>& lvl_off(const MultiresStack& s, int k) {
+    return k == 0 ? s.base.vert_tri_offset : s.topo_cache[k - 1].vt_offset;
+}
+static const std::vector<uint32_t>& lvl_list(const MultiresStack& s, int k) {
+    return k == 0 ? s.base.vert_tri_list : s.topo_cache[k - 1].vt_list;
+}
+
+// Make sure topo_cache[i] (chain level i -> i+1) is warm. A file loaded at a low
+// level has never cascaded through the levels above, so the first level-down warms
+// them, exactly like the cascade would. `coarse` = chain level i's positions; it is
+// lent to the subdivide and handed back unchanged.
+static void warm_topo(MultiresStack& stack, int i, ProjPos& coarse) {
+    if ((int)stack.topo_cache.size() <= i) stack.topo_cache.resize(i + 1);
+    if (stack.topo_cache[i].ready) return;
+    Mesh fine;
+    if (i == 0) {
+        fine = loop_subdivide(stack.base, false, &stack.topo_cache[0].stencil);
+    } else {
+        Mesh cm;
+        cm.pos_x = std::move(coarse.x); cm.pos_y = std::move(coarse.y); cm.pos_z = std::move(coarse.z);
+        cm.norm_x.resize(cm.pos_x.size()); cm.norm_y.resize(cm.pos_x.size());
+        cm.norm_z.resize(cm.pos_x.size());
+        {
+            TopoLoan loan(stack.topo_cache[i - 1], cm);
+            fine = loop_subdivide(cm, false, &stack.topo_cache[i].stencil);
+        }
+        coarse.x = std::move(cm.pos_x); coarse.y = std::move(cm.pos_y); coarse.z = std::move(cm.pos_z);
+    }
+    fine.build_adjacency();
+    MultiresStack::LevelTopo& tc = stack.topo_cache[i];
+    tc.indices   = std::move(fine.indices);
+    tc.vt_offset = std::move(fine.vert_tri_offset);
+    tc.vt_list   = std::move(fine.vert_tri_list);
+    tc.vcount    = fine.vertex_count();
+    tc.ready     = true;
+}
+
+// Chain level i -> i+1 positions by stencil replay (topo_cache[i] must be warm).
+static void stencil_up(const MultiresStack& stack, int i, const ProjPos& c, ProjPos& f) {
+    apply_stencil_positions(c.x, c.y, c.z, lvl_idx(stack, i), lvl_off(stack, i),
+                            lvl_list(stack, i), stack.topo_cache[i], f.x, f.y, f.z);
+}
+
+// Frames of the surface `pre` at chain level i+1 (topo_cache[i]). Normals live in
+// a temp only for the call; positions are lent and handed back.
+static void frames_of(MultiresStack& stack, int i, ProjPos& pre, std::vector<Frame>& out) {
+    MultiresStack::LevelTopo& tc = stack.topo_cache[i];
+    Mesh tmp;
+    tmp.pos_x = std::move(pre.x); tmp.pos_y = std::move(pre.y); tmp.pos_z = std::move(pre.z);
+    tmp.norm_x.resize(tc.vcount); tmp.norm_y.resize(tc.vcount); tmp.norm_z.resize(tc.vcount);
+    {
+        TopoLoan loan(tc, tmp);
+        tmp.recompute_normals();
+        compute_frames(tmp, out);
+    }
+    pre.x = std::move(tmp.pos_x); pre.y = std::move(tmp.pos_y); pre.z = std::move(tmp.pos_z);
+}
+
 // Fast replay: positions-only cascade over the warmed topology cache — no
 // loop_subdivide, no build_adjacency, no hash maps. Requires topo_cache[0..
 // passes-1].ready (caller checks). Lazy structures (disp, frames, parent maps,
@@ -593,15 +686,11 @@ static void cascade_replay_fast(MultiresStack& stack, Mesh& out, int passes) {
         // surface. compute_frames needs a Mesh with normals + CSR — borrow the
         // cached topology into a temp. Rare; the steady state skips this.
         if (stack.frames[i].empty()) {
-            Mesh tmp;
-            tmp.pos_x = bx; tmp.pos_y = by; tmp.pos_z = bz;
-            tmp.norm_x.resize(tc.vcount); tmp.norm_y.resize(tc.vcount);
-            tmp.norm_z.resize(tc.vcount);
-            tmp.indices = tc.indices;
-            tmp.vert_tri_offset = tc.vt_offset;
-            tmp.vert_tri_list   = tc.vt_list;
-            tmp.recompute_normals();
-            compute_frames(tmp, stack.frames[i]);
+            // Lend (move) rather than copy: at L6 the topology is ~0.8 GB.
+            ProjPos pre;
+            pre.x = std::move(bx); pre.y = std::move(by); pre.z = std::move(bz);
+            frames_of(stack, i, pre, stack.frames[i]);
+            bx = std::move(pre.x); by = std::move(pre.y); bz = std::move(pre.z);
         }
 
         if ((int)stack.midpoint_parents.size() <= i) stack.midpoint_parents.emplace_back();
@@ -1139,11 +1228,12 @@ void capture_projection_snapshot(const MultiresStack& stack,
     }
     int k_start = projection_k_start(stack, target_level);
     out.disp_start = k_start;
-    for (int k = k_start; k < (int)stack.disp.size(); k++) {
+    // disp only, no frames. Frames are a pure function of base + the disp layers
+    // below them (file load, scene snapshots and stroke undo all clear and rebuild
+    // them), and they were ~3/4 of this copy: 0.5 GB of it at L6. restore clears the
+    // restored layers' frames and the next cascade rebuilds them.
+    for (int k = k_start; k < (int)stack.disp.size(); k++)
         out.disp.push_back(stack.disp[k]);
-        if (k < (int)stack.frames.size()) out.frames.push_back(stack.frames[k]);
-        else                               out.frames.emplace_back();
-    }
 }
 
 void restore_projection_snapshot(MultiresStack& stack,
@@ -1158,8 +1248,12 @@ void restore_projection_snapshot(MultiresStack& stack,
         if (k >= (int)stack.disp.size()) stack.disp.emplace_back();
         stack.disp[k] = snap.disp[i];
         if (k >= (int)stack.frames.size()) stack.frames.emplace_back();
-        stack.frames[k] = snap.frames[i];
+        if (i < snap.frames.size()) stack.frames[k] = snap.frames[i];   // older snapshots
+        else                        stack.frames[k].clear();            // rebuilt on cascade
     }
+    // The base moved: every layer's frames hang off it.
+    if (snap.has_base)
+        for (auto& fv : stack.frames) fv.clear();
     // Clear mirror caches for restored layers so they rebuild lazily on cascade.
     if (snap.has_base) {
         for (auto& mv : stack.mirror) mv.clear();
@@ -1172,21 +1266,23 @@ void restore_projection_snapshot(MultiresStack& stack,
 // One-step inverse Loop: given the fine-level positions (vertex-point indices
 // coincide with coarse indices — verified: loop_subdivide writes updated coarse
 // verts to [0, V_coarse) and new edge midpoints to [V_coarse, V_fine)) and the
-// coarse-level topology in coarse_mesh, solve for coarse positions.
+// coarse-level topology, solve for coarse positions.
 //
 // Warren's weights:   beta = 3/(8n) for n > 3, 3/16 for n == 3.
 // Forward relation:   fine_v = (1 - n*beta) * coarse_v + beta * sum_unique_neighbors(coarse)
 // Replacing coarse_v_i with fine_v_i (mathematically sufficient per Warren/Weiss):
 //   coarse_v = ( fine_v - beta * sum_unique(fine_neighbors) ) / (1 - n*beta)
-static void inverse_loop_one_step(const Mesh& coarse_mesh,
-                                  const Mesh& fine_mesh,
-                                  std::vector<Vec3>& new_coarse_pos) {
-    const uint32_t V = coarse_mesh.vertex_count();
-    new_coarse_pos.assign(V, Vec3{0, 0, 0});
+static void inverse_loop_one_step(const std::vector<uint32_t>& c_idx,
+                                  const std::vector<uint32_t>& c_off,
+                                  const std::vector<uint32_t>& c_list,
+                                  const ProjPos& fine, ProjPos& out) {
+    const uint32_t V = (uint32_t)c_off.size() - 1;
+    out.x.assign(V, 0.0f); out.y.assign(V, 0.0f); out.z.assign(V, 0.0f);
+    auto fpos = [&](uint32_t i) -> Vec3 { return {fine.x[i], fine.y[i], fine.z[i]}; };
 
     for (uint32_t v = 0; v < V; v++) {
-        uint32_t start = coarse_mesh.vert_tri_offset[v];
-        uint32_t end   = coarse_mesh.vert_tri_offset[v + 1];
+        uint32_t start = c_off[v];
+        uint32_t end   = c_off[v + 1];
         uint32_t n     = end - start;  // valence for closed manifold interior
 
         // Each distinct neighbor appears in exactly 2 incident tris, so the
@@ -1194,60 +1290,34 @@ static void inverse_loop_one_step(const Mesh& coarse_mesh,
         // forward — mirrored here.
         Vec3 nbr_sum_doubled = {0, 0, 0};
         for (uint32_t tj = start; tj < end; tj++) {
-            uint32_t tri = coarse_mesh.vert_tri_list[tj];
-            uint32_t a   = coarse_mesh.indices[tri*3+0];
-            uint32_t b   = coarse_mesh.indices[tri*3+1];
-            uint32_t c   = coarse_mesh.indices[tri*3+2];
-            if      (a == v) { nbr_sum_doubled += fine_mesh.get_pos(b);
-                               nbr_sum_doubled += fine_mesh.get_pos(c); }
-            else if (b == v) { nbr_sum_doubled += fine_mesh.get_pos(a);
-                               nbr_sum_doubled += fine_mesh.get_pos(c); }
-            else             { nbr_sum_doubled += fine_mesh.get_pos(a);
-                               nbr_sum_doubled += fine_mesh.get_pos(b); }
+            uint32_t tri = c_list[tj];
+            uint32_t a   = c_idx[tri*3+0];
+            uint32_t b   = c_idx[tri*3+1];
+            uint32_t c   = c_idx[tri*3+2];
+            if      (a == v) { nbr_sum_doubled += fpos(b); nbr_sum_doubled += fpos(c); }
+            else if (b == v) { nbr_sum_doubled += fpos(a); nbr_sum_doubled += fpos(c); }
+            else             { nbr_sum_doubled += fpos(a); nbr_sum_doubled += fpos(b); }
         }
         float beta  = (n == 3) ? (3.0f / 16.0f) : (3.0f / (8.0f * (float)n));
         float denom = 1.0f - (float)n * beta;    // 0.625 for n=5 or n=6
-        Vec3  fine_v        = fine_mesh.get_pos(v);
         Vec3  nbr_sum_unique = nbr_sum_doubled * 0.5f;
-        Vec3  num = fine_v - nbr_sum_unique * beta;
-        new_coarse_pos[v] = num * (1.0f / denom);
+        Vec3  num = fpos(v) - nbr_sum_unique * beta;
+        Vec3  p   = num * (1.0f / denom);
+        out.x[v] = p.x; out.y[v] = p.y; out.z[v] = p.z;
     }
 }
 
-// One subdivision step for the projection paths: cached stencil replay when
-// warm (bit-identical to a real subdivide, no edge extraction), real
-// loop_subdivide otherwise — warming the cache exactly like cascade does.
-// Returns the fine mesh with positions + indices + CSR; normals are zeroed —
-// callers recompute them only where actually consumed (compute_frames).
-static Mesh subdiv_step_cached(MultiresStack& stack, Mesh& coarse, int i) {
-    if ((int)stack.topo_cache.size() <= i) stack.topo_cache.emplace_back();
-    MultiresStack::LevelTopo& tc = stack.topo_cache[i];
-    Mesh fine;
-    if (tc.ready) {
-        if (coarse.vert_tri_offset.size() != coarse.vertex_count() + 1)
-            coarse.build_adjacency();
-        apply_stencil_positions(coarse.pos_x, coarse.pos_y, coarse.pos_z,
-                                coarse.indices, coarse.vert_tri_offset,
-                                coarse.vert_tri_list, tc,
-                                fine.pos_x, fine.pos_y, fine.pos_z);
-        fine.indices         = tc.indices;
-        fine.vert_tri_offset = tc.vt_offset;
-        fine.vert_tri_list   = tc.vt_list;
-        fine.norm_x.resize(tc.vcount);
-        fine.norm_y.resize(tc.vcount);
-        fine.norm_z.resize(tc.vcount);
-        fine.topo_version    = coarse.topo_version + 1;
-    } else {
-        coarse.build_adjacency();
-        fine = loop_subdivide(coarse, false, &tc.stencil);
-        fine.build_adjacency();
-        tc.indices   = fine.indices;
-        tc.vt_offset = fine.vert_tri_offset;
-        tc.vt_list   = fine.vert_tri_list;
-        tc.vcount    = fine.vertex_count();
-        tc.ready     = true;
+// Fit disp[di] so that pre + frame * disp lands on `target`, in the frames given.
+static void fit_disp(std::vector<Vec3>& disp, const std::vector<Frame>& fr,
+                     const ProjPos& pre, const ProjPos& target) {
+    const uint32_t vc = (uint32_t)pre.x.size();
+    if ((uint32_t)disp.size() != vc) disp.assign(vc, Vec3{0, 0, 0});
+    for (uint32_t v = 0; v < vc; v++) {
+        Vec3 world_delta = Vec3{target.x[v], target.y[v], target.z[v]}
+                         - Vec3{pre.x[v], pre.y[v], pre.z[v]};
+        const Frame& f = fr[v];
+        disp[v] = { world_delta.dot(f.t), world_delta.dot(f.b), world_delta.dot(f.n) };
     }
-    return fine;
 }
 
 bool multires_drop_top_level(MultiresStack& stack) {
@@ -1286,6 +1356,31 @@ bool multires_drop_top_level(MultiresStack& stack) {
     return true;
 }
 
+size_t projection_memory_estimate(const MultiresStack& stack, int target_level) {
+    const int L_max = stack.base_level + (int)stack.disp.size();
+    if (target_level >= L_max) return 0;
+    const int k_start = projection_k_start(stack, target_level);
+    size_t total = 0, top_v = 0;
+    for (int i = 0; i < (int)stack.disp.size(); i++) {
+        const size_t v = stack.disp[i].size();   // verts at chain level i + 1
+        top_v = std::max(top_v, v);
+        total += v * 12;                                       // walked positions
+        if (i >= k_start) total += v * 12;                     // undo snapshot (disp)
+        const bool cold = (int)stack.topo_cache.size() <= i || !stack.topo_cache[i].ready;
+        // Cold level: indices 24 + CSR 28 B/vert and the stencil (~12 B/vert) stay.
+        if (cold) total += v * (52 + 12);
+        if ((int)stack.frames.size() <= i || stack.frames[i].empty())
+            total += v * sizeof(Frame);                        // frames, kept
+    }
+    // Short-lived temps at the top level (pre-disp step, normals, area sums, or a
+    // cold subdivide's edge keys) are freed before the next is made, so only the
+    // largest set counts. Calibrated 2026-11-17 on a 14.8M-vert L6, natively: cold
+    // descent measured +1.9 GB peak against +2.9 GB here, warm +0.2 GB against +0.9.
+    // The margin is kept on purpose: the web heap fragments and never shrinks.
+    total += top_v * 40;
+    return total;
+}
+
 ProjectionStats project_down_to_level(MultiresStack& stack, int target_level) {
     ProjectionStats stats;
     stats.target_level = target_level;
@@ -1300,140 +1395,8 @@ ProjectionStats project_down_to_level(MultiresStack& stack, int target_level) {
 
     auto t0 = std::chrono::steady_clock::now();
 
-    // ---- Phase 1: cascade-with-capture. Save per-level meshes (positions +
-    //      topology) for every level in [base_level, L_max]. These are the
-    //      "truth" we're preserving.
-    const int passes = L_max - stack.base_level;
-    std::vector<Mesh> mesh_at(passes + 1);   // mesh_at[k] corresponds to level base_level + k
-
-    Mesh m = stack.base;
-    m.build_adjacency();
-    m.recompute_normals();
-    mesh_at[0] = m;
-
-    for (int i = 0; i < passes; i++) {
-        m = subdiv_step_cached(stack, mesh_at[i], i);
-        if ((int)stack.frames.size() <= i) stack.frames.emplace_back();
-        if (stack.frames[i].empty()) {
-            m.recompute_normals();   // frame normals from the pre-disp surface
-            compute_frames(m, stack.frames[i]);
-        }
-        const uint32_t vc = m.vertex_count();
-        for (uint32_t v = 0; v < vc; v++) {
-            const Frame& f = stack.frames[i][v];
-            const Vec3&  d = stack.disp[i][v];
-            m.set_pos(v, m.get_pos(v) + f.t*d.x + f.b*d.y + f.n*d.z);
-        }
-        mesh_at[i + 1] = std::move(m);   // topology + post-disp positions
-    }
-
-    // ---- Phase 2: inverse Loop from L_max down to target_level. Walk the
-    //      chain of fine meshes, replacing positions at each coarser level.
-    std::vector<Vec3> scratch_coarse_pos;
-    for (int k = L_max; k > target_level; k--) {
-        int coarse_idx = k - 1 - stack.base_level;
-        int fine_idx   = k     - stack.base_level;
-        inverse_loop_one_step(mesh_at[coarse_idx], mesh_at[fine_idx],
-                              scratch_coarse_pos);
-        Mesh& cm = mesh_at[coarse_idx];
-        uint32_t vc = cm.vertex_count();
-        for (uint32_t v = 0; v < vc; v++) cm.set_pos(v, scratch_coarse_pos[v]);
-    }
-
-    // ---- Phase 3: forward rebuild. Start at target_level with the new
-    //      positions and walk up to L_max, overwriting disp[] and frames[]
-    //      so that cascade reproduces mesh_at[k] for every k > target_level.
-    const int k_target = target_level - stack.base_level;       // 0..passes
-    const int k_start_disp = projection_k_start(stack, target_level); // first disp idx to write
-
-    Mesh rebuild;
-    if (target_level == stack.base_level) {
-        // Write new base positions, drop stale frames (all depend on base).
-        uint32_t vc = stack.base.vertex_count();
-        for (uint32_t v = 0; v < vc; v++)
-            stack.base.set_pos(v, mesh_at[0].get_pos(v));
-        for (auto& fv : stack.frames) fv.clear();
-        rebuild = stack.base;
-        rebuild.build_adjacency();
-        rebuild.recompute_normals();
-    } else {
-        // Rewrite disp[k_start_disp] in local frame against the pre-disp
-        // surface at target (obtained by subdividing mesh_at[k_target-1]
-        // which still holds the unchanged lower-layer cascade). frames at
-        // this layer depend only on disp[0..k_start_disp-1] (unchanged), so
-        // they stay valid — we use them but do not rewrite them.
-        Mesh pre_disp = subdiv_step_cached(stack, mesh_at[k_target - 1], k_target - 1);
-        if ((int)stack.frames.size() <= k_start_disp) stack.frames.resize(k_start_disp + 1);
-        if (stack.frames[k_start_disp].empty()) {
-            pre_disp.recompute_normals();   // only consumer of these normals
-            compute_frames(pre_disp, stack.frames[k_start_disp]);
-        }
-        const auto& frames_at = stack.frames[k_start_disp];
-        const auto& target_pos = mesh_at[k_target];
-        uint32_t vc = pre_disp.vertex_count();
-        if ((int)stack.disp[k_start_disp].size() != (int)vc)
-            stack.disp[k_start_disp].assign(vc, Vec3{0, 0, 0});
-        for (uint32_t v = 0; v < vc; v++) {
-            Vec3 world_delta = target_pos.get_pos(v) - pre_disp.get_pos(v);
-            const Frame& f = frames_at[v];
-            stack.disp[k_start_disp][v] = {
-                world_delta.dot(f.t),
-                world_delta.dot(f.b),
-                world_delta.dot(f.n)
-            };
-            pre_disp.set_pos(v, target_pos.get_pos(v));  // now matches target
-        }
-        // Frames above this layer depend on the surface we just changed.
-        for (int k = k_start_disp + 1; k < (int)stack.frames.size(); k++)
-            stack.frames[k].clear();
-        rebuild = pre_disp;   // at target_level with new positions, adjacency valid
-    }
-
-    // Walk up from target_level to L_max, recomputing disp and frames.
-    int first_up_disp_idx = (target_level == stack.base_level)
-                              ? 0
-                              : (k_start_disp + 1);
-    for (int kk = first_up_disp_idx; kk < passes; kk++) {
-        rebuild = subdiv_step_cached(stack, rebuild, kk);
-        rebuild.recompute_normals();   // compute_frames below reads them
-        stack.frames[kk].clear();
-        compute_frames(rebuild, stack.frames[kk]);
-
-        const auto& frames_k   = stack.frames[kk];
-        const auto& target_pos = mesh_at[kk + 1];
-        uint32_t vc = rebuild.vertex_count();
-        if ((int)stack.disp[kk].size() != (int)vc)
-            stack.disp[kk].assign(vc, Vec3{0, 0, 0});
-        for (uint32_t v = 0; v < vc; v++) {
-            Vec3 world_delta = target_pos.get_pos(v) - rebuild.get_pos(v);
-            const Frame& f = frames_k[v];
-            stack.disp[kk][v] = {
-                world_delta.dot(f.t),
-                world_delta.dot(f.b),
-                world_delta.dot(f.n)
-            };
-            rebuild.set_pos(v, target_pos.get_pos(v));
-        }
-    }
-
-    // Mirror pairs are topology-only and projection changes no topology, so the base
-    // map built at lock still holds. Re-pairing it here from the PROJECTED (sculpted)
-    // base positions was what the persistent-map rule forbids: an asymmetric sculpt's
-    // drifted verts lose their twins for good, and clearing the per-level maps made
-    // every level re-derive from that worse base. Only a map that no longer fits the
-    // cage is rebuilt.
-    if (stack.base_mirror.size() != stack.base.vertex_count()) {
-        build_mirror_spatial(stack.base, stack.base_mirror);
-        stack.mirror.clear();
-    }
-
-    // Reconstruction check: cascade to L_max and compare to the truth this function
-    // already built in mesh_at[passes], so the only added cost is one cascade. That
-    // cascade is why it is opt-in — at L9 it is seconds, not milliseconds.
-    //
-    // Runtime-gated rather than build-gated: CHISEL_DEBUG_MULTIRES also shrinks the
-    // undo ring to 4 MB, so switching it on to chase a drift report changes the very
-    // workflow the report came from.
+    // Reconstruction check is opt-in (see below); decided up front because it needs
+    // the top level's truth kept, which the walk otherwise frees as it goes.
     bool want_check = false;
 #ifdef CHISEL_DEBUG_MULTIRES
     want_check = true;
@@ -1447,25 +1410,133 @@ ProjectionStats project_down_to_level(MultiresStack& stack, int target_level) {
         want_check = env_on != 0;
     }
 #endif
+
+    // ---- Phase 1: cascade-with-capture. Positions of every level in
+    //      [base_level, L_max] (P[k] = level base_level + k). These are the
+    //      "truth" we're preserving; topology stays in topo_cache.
+    const int passes = L_max - stack.base_level;
+    if (stack.base.vert_tri_offset.size() != stack.base.vertex_count() + 1)
+        stack.base.build_adjacency();   // base immutable after lock — build once
+    std::vector<ProjPos> P(passes + 1);
+    P[0].x = stack.base.pos_x; P[0].y = stack.base.pos_y; P[0].z = stack.base.pos_z;
+
+    for (int i = 0; i < passes; i++) {
+        warm_topo(stack, i, P[i]);
+        ProjPos pre;
+        stencil_up(stack, i, P[i], pre);
+        if ((int)stack.frames.size() <= i) stack.frames.emplace_back();
+        if (stack.frames[i].empty())
+            frames_of(stack, i, pre, stack.frames[i]);   // pre-disp surface
+        const uint32_t vc = (uint32_t)pre.x.size();
+        for (uint32_t v = 0; v < vc; v++) {
+            const Frame& f = stack.frames[i][v];
+            const Vec3&  d = stack.disp[i][v];
+            Vec3 q = Vec3{pre.x[v], pre.y[v], pre.z[v]} + f.t*d.x + f.b*d.y + f.n*d.z;
+            pre.x[v] = q.x; pre.y[v] = q.y; pre.z[v] = q.z;
+        }
+        P[i + 1] = std::move(pre);   // post-disp positions
+    }
+
+    // ---- Phase 2: inverse Loop from L_max down to target_level, replacing the
+    //      positions at each coarser level.
+    for (int k = L_max; k > target_level; k--) {
+        int coarse_idx = k - 1 - stack.base_level;
+        int fine_idx   = k     - stack.base_level;
+        ProjPos np;
+        inverse_loop_one_step(lvl_idx(stack, coarse_idx), lvl_off(stack, coarse_idx),
+                              lvl_list(stack, coarse_idx), P[fine_idx], np);
+        P[coarse_idx] = std::move(np);
+    }
+
+    // ---- Phase 3: forward rebuild. Start at target_level with the new
+    //      positions and walk up to L_max, overwriting disp[] and frames[]
+    //      so that cascade reproduces P[k] for every k > target_level. Each
+    //      level's positions are freed as soon as the walk has passed it.
+    const int k_target = target_level - stack.base_level;       // 0..passes
+    const int k_start_disp = projection_k_start(stack, target_level); // first disp idx to write
+    for (int k = 0; k + 1 < k_target; k++) free_pos(P[k]);    // never read again
+
+    ProjPos truth;
+    if (want_check) truth = P[passes];
+
+    ProjPos rebuild;   // positions at the level the walk is on
+    if (target_level == stack.base_level) {
+        // Write new base positions, drop stale frames (all depend on base).
+        stack.base.pos_x = P[0].x; stack.base.pos_y = P[0].y; stack.base.pos_z = P[0].z;
+        for (auto& fv : stack.frames) fv.clear();
+        rebuild = std::move(P[0]);
+    } else {
+        // Rewrite disp[k_start_disp] in local frame against the pre-disp
+        // surface at target (subdividing level k_target-1, which still holds the
+        // unchanged lower-layer cascade). frames at this layer depend only on
+        // disp[0..k_start_disp-1] (unchanged), so they stay valid — we use them
+        // but do not rewrite them.
+        ProjPos pre;
+        stencil_up(stack, k_target - 1, P[k_target - 1], pre);
+        free_pos(P[k_target - 1]);
+        if ((int)stack.frames.size() <= k_start_disp) stack.frames.resize(k_start_disp + 1);
+        if (stack.frames[k_start_disp].empty())
+            frames_of(stack, k_target - 1, pre, stack.frames[k_start_disp]);
+        fit_disp(stack.disp[k_start_disp], stack.frames[k_start_disp], pre, P[k_target]);
+        // Frames above this layer depend on the surface we just changed.
+        for (int k = k_start_disp + 1; k < (int)stack.frames.size(); k++)
+            stack.frames[k].clear();
+        rebuild = std::move(P[k_target]);   // now matches target
+    }
+
+    // Walk up from target_level to L_max, recomputing disp and frames.
+    int first_up_disp_idx = (target_level == stack.base_level)
+                              ? 0
+                              : (k_start_disp + 1);
+    for (int kk = first_up_disp_idx; kk < passes; kk++) {
+        ProjPos pre;
+        stencil_up(stack, kk, rebuild, pre);
+        free_pos(rebuild);
+        stack.frames[kk].clear();
+        frames_of(stack, kk, pre, stack.frames[kk]);
+        fit_disp(stack.disp[kk], stack.frames[kk], pre, P[kk + 1]);
+        rebuild = std::move(P[kk + 1]);
+    }
+    free_pos(rebuild);
+    P.clear();
+
+    // Mirror pairs are topology-only and projection changes no topology, so the base
+    // map built at lock still holds. Re-pairing it here from the PROJECTED (sculpted)
+    // base positions was what the persistent-map rule forbids: an asymmetric sculpt's
+    // drifted verts lose their twins for good, and clearing the per-level maps made
+    // every level re-derive from that worse base. Only a map that no longer fits the
+    // cage is rebuilt.
+    if (stack.base_mirror.size() != stack.base.vertex_count()) {
+        build_mirror_spatial(stack.base, stack.base_mirror);
+        stack.mirror.clear();
+    }
+
+    // Reconstruction check: cascade to L_max and compare to the truth this function
+    // already built (kept in `truth` only when the check is on), so the only added
+    // cost is one cascade. That cascade is why it is opt-in — at L9 it is seconds.
+    //
+    // Runtime-gated rather than build-gated: CHISEL_DEBUG_MULTIRES also shrinks the
+    // undo ring to 4 MB, so switching it on to chase a drift report changes the very
+    // workflow the report came from.
     if (want_check) {
         double max_err = 0.0;
         uint32_t worst_v = 0;
         Mesh check;
         cascade_to_level(stack, check, L_max);
-        const auto& truth = mesh_at[passes];
-        uint32_t vc = std::min(check.vertex_count(), truth.vertex_count());
+        const uint32_t truth_vc = (uint32_t)truth.x.size();
+        uint32_t vc = std::min(check.vertex_count(), truth_vc);
         for (uint32_t v = 0; v < vc; v++) {
             Vec3 a = check.get_pos(v);
-            Vec3 b = truth.get_pos(v);
+            Vec3 b = {truth.x[v], truth.y[v], truth.z[v]};
             double dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
             double e = std::sqrt(dx*dx + dy*dy + dz*dz);
             if (e > max_err) { max_err = e; worst_v = v; }
         }
         // A vertex-count disagreement means the two surfaces are not even comparable,
         // which is a louder failure than any distance.
-        if (check.vertex_count() != truth.vertex_count()) {
+        if (check.vertex_count() != truth_vc) {
             std::printf("[project] CHECK: vertex count %u != truth %u — surfaces not "
-                        "comparable\n", check.vertex_count(), truth.vertex_count());
+                        "comparable\n", check.vertex_count(), truth_vc);
         }
         stats.checked = true;
         stats.max_reconstruction_error = max_err;

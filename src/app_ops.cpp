@@ -29,6 +29,50 @@
 #include "brush_alpha.h"
 #include "scene_snapshot.h"
 #include "object_xform.h"
+#if defined(__EMSCRIPTEN__)
+#include <emscripten/heap.h>
+#include <malloc.h>
+#endif
+#include <cstring>
+
+// Memory probe for the level-down (2026-11-17: the web heap aborted descending a
+// 30M-tri model). Native Linux: resident set and its high-water mark, which
+// /proc/self/clear_refs "5" resets so the peak is this operation's. Web: the WASM
+// heap size, which only grows, so its final size IS the peak.
+static size_t proc_status_kb(const char* key) {
+#if defined(__linux__) && !defined(__EMSCRIPTEN__)
+    size_t kb = 0;
+    if (FILE* f = std::fopen("/proc/self/status", "r")) {
+        char line[256];
+        const size_t kl = std::strlen(key);
+        while (std::fgets(line, sizeof(line), f))
+            if (std::strncmp(line, key, kl) == 0) { kb = (size_t)std::strtoull(line + kl, nullptr, 10); break; }
+        std::fclose(f);
+    }
+    return kb;
+#else
+    (void)key; return 0;
+#endif
+}
+static size_t mem_now_mb() {
+#if defined(__EMSCRIPTEN__)
+    return emscripten_get_heap_size() >> 20;
+#else
+    return proc_status_kb("VmRSS:") >> 10;
+#endif
+}
+static void mem_peak_reset() {
+#if defined(__linux__) && !defined(__EMSCRIPTEN__)
+    if (FILE* f = std::fopen("/proc/self/clear_refs", "w")) { std::fputs("5", f); std::fclose(f); }
+#endif
+}
+static size_t mem_peak_mb() {
+#if defined(__EMSCRIPTEN__)
+    return emscripten_get_heap_size() >> 20;
+#else
+    return proc_status_kb("VmHWM:") >> 10;
+#endif
+}
 
 // Reports the projection truth check when it ran (CHISEL_PROJECT_CHECK=1, or a
 // CHISEL_DEBUG_MULTIRES build). project_down_to_level promises that cascading back to
@@ -510,6 +554,32 @@ void app_ops_levels_and_views(App& a) {
                 delta = 0;
             }
         }
+#if defined(__EMSCRIPTEN__)
+        // The browser's heap is capped (4 GB, CMakeLists). A level-down on a
+        // model with tens of millions of tris can need more than is left, and an
+        // allocation failure there aborts the whole page, work and all
+        // (2026-11-17). Refuse up front instead. "In use" is malloc's live total, not
+        // the heap size: the heap never shrinks, so after one big descent its size
+        // would refuse every later one. The slack covers fragmentation (big vectors
+        // want contiguous space) and the estimate's rounding.
+        if (delta < 0 && target >= multires->base_level) {
+            const size_t need  = projection_memory_estimate(*multires, target);
+            const size_t used  = mallinfo().uordblks;
+            const size_t cap   = emscripten_get_heap_max();
+            const size_t have  = cap > used ? cap - used : 0;
+            const size_t slack = (size_t)256 << 20;
+            if (need + slack > have) {
+                std::snprintf(input.notification, sizeof(input.notification),
+                              "Too big to go down a level in the browser (needs %zu MB "
+                              "more, %zu MB left). The desktop app can.",
+                              need >> 20, have >> 20);
+                input.notification_timer = 6.0f;
+                std::printf("[project] refused L%d -> L%d on web: needs ~%zu MB, %zu MB "
+                            "left under the heap cap\n", from, target, need >> 20, have >> 20);
+                delta = 0;
+            }
+        }
+#endif
         input.subdiv_confirmed = false;   // good for the one switch it was given for
         const double switch_t0 = glfwGetTime();
         if (delta != 0 && target >= multires->base_level && target <= max_level) {
@@ -523,9 +593,15 @@ void app_ops_levels_and_views(App& a) {
                 // target. The snapshot rides on the LEVEL entry — undo restores it,
                 // redo replays the projection.
                 const int L_max = multires->base_level + (int)multires->disp.size();
+                const size_t mem0 = mem_now_mb();
+                const size_t est  = projection_memory_estimate(*multires, target) >> 20;
+                mem_peak_reset();
                 capture_projection_snapshot(*multires, target, lvl_e.before);
                 ProjectionStats ps = project_down_to_level(*multires, target);
-                std::printf("[project] auto L%d -> L%d in %.2f ms\n", L_max, target, ps.elapsed_ms);
+                std::printf("[project] auto L%d -> L%d in %.2f ms | memory %zu MB before, "
+                            "peak %zu MB (estimate +%zu), undo copy %zu MB\n", L_max, target,
+                            ps.elapsed_ms, mem0, mem_peak_mb(), est,
+                            lvl_e.before.bytes() >> 20);
                 report_projection_check(ps);
             }
             scene.active_undo().push(std::move(lvl_e));

@@ -1,6 +1,7 @@
 // The frame's file work, moved out of main.cpp as is: open/import a path, the dev
 // auto-import hooks, save / save-as / incremental save, export, and their dialogs
 // (native: the ImGui file browser; web: name prompts, browser download, file picker).
+#include "debug_console.h"
 #include "scene.h"          // first: pulls in glad, which must precede any GL header
 #include <GLFW/glfw3.h>
 #include "app.h"
@@ -874,16 +875,101 @@ void app_files_frame(App& a) {
 
     // Dev hook: CHISEL_AUTO_SUBD=<n> requests one level-up per frame for the
     // first n frames — drives the subdivision guard without the UI (pair with
-    // CHISEL_LIMITS_MB to watch it refuse). No-op when unset.
+    // CHISEL_LIMITS_MB to watch it refuse). A negative n steps DOWN instead, after
+    // a few frames' settle (pairs with CHISEL_AUTO_IMPORT to measure a level-down
+    // on a real file); with CHISEL_AUTO_QUIT it then exits. CHISEL_AUTO_UNDO=1 also
+    // undoes the steps and compares the top level's surface with the one before
+    // (the level-down undo rebuilds frames instead of restoring them). No-op when unset.
     {
-        static int auto_subd_left = -1;
+        static int auto_subd_left = -1, auto_subd_dir = 1, auto_subd_wait = 0;
+        static int auto_subd_quit = -1, auto_undo_left = 0, auto_undo_n = 0;
+        static std::vector<float> auto_ref;
+        auto top_surface = [&](std::vector<float>& out) {
+            Mesh chk;
+            const int L_max = multires->base_level + (int)multires->disp.size();
+            cascade_to_level(*multires, chk, L_max);
+            out.clear();
+            out.insert(out.end(), chk.pos_x.begin(), chk.pos_x.end());
+            out.insert(out.end(), chk.pos_y.begin(), chk.pos_y.end());
+            out.insert(out.end(), chk.pos_z.begin(), chk.pos_z.end());
+        };
+        // CHISEL_AUTO_LEVELS="+-" plays a level sequence instead, one step every few
+        // frames ('+' up, '-' down), then quits with CHISEL_AUTO_QUIT.
+        static const char* auto_seq = nullptr;
+        static int auto_seq_wait = 8;
+        if (auto_subd_left < 0 && !auto_seq) {
+            auto_seq = std::getenv("CHISEL_AUTO_LEVELS");
+            if (auto_seq && !*auto_seq) auto_seq = nullptr;
+        }
+        if (auto_seq) {
+            auto_subd_left = 0;
+            if (--auto_seq_wait <= 0) {
+                if (*auto_seq) {
+                    input.level_switch_delta = (*auto_seq == '-') ? -1 : 1;
+                    auto_seq++;
+                    auto_seq_wait = 4;
+                } else if (std::getenv("CHISEL_AUTO_QUIT")) {
+                    std::fflush(stdout);
+                    debug_console::pump();
+                    std::_Exit(0);
+                }
+            }
+        }
         if (auto_subd_left < 0) {
             const char* env = std::getenv("CHISEL_AUTO_SUBD");
-            auto_subd_left = env ? std::atoi(env) : 0;
+            const int n = env ? std::atoi(env) : 0;
+            auto_subd_left = n < 0 ? -n : n;
+            auto_subd_dir  = n < 0 ? -1 : 1;
+            auto_subd_wait = n < 0 ? 5 : 0;
+            if (n < 0 && std::getenv("CHISEL_AUTO_QUIT")) auto_subd_quit = 0;
+            if (n < 0 && std::getenv("CHISEL_AUTO_UNDO")) auto_undo_n = auto_undo_left = -n;
         }
-        if (auto_subd_left > 0) {
+        if (auto_subd_wait > 0) {
+            // CHISEL_AUTO_COLD=<k>: before the first step, forget the topology cache
+            // and frames above chain level k, as a file opened at a low level has
+            // them — measures (and calibrates) the cold level-down.
+            static bool cold_done = false;
+            if (auto_subd_wait == 1 && !cold_done && multires && multires->locked) {
+                cold_done = true;
+                if (const char* ce = std::getenv("CHISEL_AUTO_COLD")) {
+                    const int k = std::atoi(ce);
+                    for (int i = k; i < (int)multires->topo_cache.size(); i++)
+                        multires->topo_cache[i] = MultiresStack::LevelTopo{};
+                    for (int i = k; i < (int)multires->frames.size(); i++)
+                        std::vector<Frame>().swap(multires->frames[i]);
+                    std::printf("[auto-cold] dropped topology + frames above chain level %d\n", k);
+                }
+            }
+            if (--auto_subd_wait == 0 && auto_undo_n && auto_undo_left == auto_undo_n
+                && auto_subd_left == auto_undo_n && multires && multires->locked) {
+                scene.materialize_active_cpu();
+                top_surface(auto_ref);
+            }
+        } else if (auto_subd_left > 0) {
             --auto_subd_left;
-            input.level_switch_delta = +1;
+            input.level_switch_delta = auto_subd_dir;
+            auto_subd_wait = auto_undo_n ? 2 : 0;
+        } else if (auto_undo_left > 0) {
+            --auto_undo_left;
+            input.undo_requested = true;
+            auto_subd_wait = 3;
+        } else if (auto_undo_n && !auto_ref.empty()) {
+            scene.materialize_active_cpu();
+            std::vector<float> now;
+            top_surface(now);
+            double max_d = 0.0;
+            const size_t n = std::min(now.size(), auto_ref.size());
+            for (size_t i = 0; i < n; i++) max_d = std::max(max_d, (double)std::fabs(now[i] - auto_ref[i]));
+            std::printf("[auto-undo] after %d level-down(s) + undo(s): top surface %s, "
+                        "max coordinate change %.3g\n", auto_undo_n,
+                        now.size() == auto_ref.size() ? "same size" : "SIZE DIFFERS", max_d);
+            auto_ref.clear();
+            std::fflush(stdout);
+            debug_console::pump();
+        } else if (auto_subd_quit >= 0 && ++auto_subd_quit > 5) {
+            std::fflush(stdout);
+            debug_console::pump();
+            std::_Exit(0);
         }
     }
 

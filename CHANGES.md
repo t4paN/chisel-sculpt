@@ -2,6 +2,14 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-17 — Level-down on huge models: a fraction of the memory, and the browser no longer dies
+
+- Going down a level walks every level as positions only and borrows the cached topology instead of copying it, freeing each level as it passes. On a 14.8M-vert L6, natively: peak +3.8 GB -> +1.9 GB from cold, +0.2 GB warm; identical result.
+- The level-down's undo copy keeps the displacements only; frames are rebuilt on undo (4x smaller: 849 -> 212 MB there). Undo comes back within float rounding of the frames instead of bit-exact.
+- The cascade's frame rebuild borrows the topology too instead of copying it.
+- Web: heap ceiling 2 GB -> 4 GB. A level-down that still won't fit is refused with a notice up front, instead of an allocation failure aborting the page.
+- The level-down log line reports memory before, peak, an estimate and the undo copy size. Dev hooks: CHISEL_AUTO_SUBD=-n steps down, CHISEL_AUTO_UNDO=1 undoes and compares the top surface, CHISEL_AUTO_COLD=k measures a cold descent, CHISEL_AUTO_LEVELS="+-" plays a level sequence.
+
 ## 2026-11-17 — Clay at grazing angles no longer tears holes
 
 - A crushed fan's zero normal was normalized into NaN in the screen buffers; the brush's disc average let NaN past its background test, and the whole dab's square went to NaN positions (holes in the app, verts at the origin on export), spreading through later dabs and smooths. Screen-buffer shaders (GL + WGSL) now write zero there, every plane-cache reader refuses non-finite values, and a dab with a non-finite anchor is skipped and logged.
