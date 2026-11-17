@@ -247,7 +247,10 @@ void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse) {
     // Brush cursor — draw at locked position during slider, normal position otherwise
     if (!input.quit_requested && !input.export_dialog_active && !input.import_dialog_active && !input.save_dialog_active && !input.remesh_confirm_pending && !input.voxel_merge_confirm_pending && !input.drop_confirm_pending && !input.reset_confirm_pending && !input.subdiv_confirm_pending && !input.help_popup_open && !input.keybind_menu_open && !input.brush_props_open && !imgui_wants_mouse && !non_edit_mode) {
         float cursor_x, cursor_y;
-        if (input.slider_mode != InputState::SliderMode::NONE) {
+        // An absolute pen's slider drag moves the ring with the tip (input.cpp
+        // g_slider_pen_abs); everything else holds it on the grab point.
+        extern bool input_slider_ring_follows();
+        if (input.slider_mode != InputState::SliderMode::NONE && !input_slider_ring_follows()) {
             cursor_x = (float)input.slider_start_x;
             cursor_y = (float)input.slider_start_y;
         } else {

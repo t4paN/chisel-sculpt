@@ -650,7 +650,7 @@ static GLFWwindow* g_window = nullptr;
 // the accumulator doesn't overshoot the value range. Fed from the GLFW cursor
 // callback natively, from the DOM pointermove listener (movementX) on web.
 static void apply_slider_delta(float dx) {
-    g_input->slider_accum += dx;
+    g_input->slider_accum += dx * g_input->slider_speed;
 
     switch (g_input->slider_mode) {
             case InputState::SliderMode::SIZE: {
@@ -772,6 +772,20 @@ static void web_pointer_lock(bool) {}
 
 // ---- Slider drag pointer capture ----
 //
+// A pen in absolute mode (the tablet driver's normal mode, Chisel's Relative pen off) is
+// the exception to all of this: its cursor sits under the tip and can't be held, so
+// holding the ring on the grab point only made it jump to the tip on release (50-240 px,
+// 2026-11-16). Its drag moves the ring with the tip instead (mouse_x/y follow it, so the
+// ring also tilts with the surface it is over) while the value changes, and on release
+// the ring is already where the next stroke lands. The readout stays on the grab point.
+// A relative pen (Chisel's own, or the tablet plugin's cursor lock) still holds still.
+static bool g_slider_pen_abs = false;
+static bool slider_pen_follows();   // g_slider_pen_abs, unless the plugin's lock holds it
+// For app_render.cpp: draw the ring at mouse_x/y, not the grab point.
+bool input_slider_ring_follows() {
+    return g_input && g_input->slider_mode != InputState::SliderMode::NONE && slider_pen_follows();
+}
+//
 // A slider is a RELATIVE drag: only horizontal motion matters, and the pointer belongs
 // back where it started when you let go.
 //
@@ -850,6 +864,17 @@ static bool xwayland_pen_driving() {
 }
 #endif
 
+// While the tablet plugin's lock is asked for or held, the drag is a relative one: the
+// cursor stays on the grab point, and so does the ring.
+static bool slider_pen_follows() {
+    if (!g_slider_pen_abs) return false;
+#if defined(__linux__) && !defined(__EMSCRIPTEN__)
+    if (g_xlock == XLock::REQUESTED || g_xlock == XLock::HELD) return false;
+    if (tablet_pen_cursor_locked()) return false;
+#endif
+    return true;
+}
+
 static void slider_capture(GLFWwindow* w, bool grab) {
 #if defined(__EMSCRIPTEN__)
     (void)w;
@@ -877,7 +902,10 @@ static void slider_capture(GLFWwindow* w, bool grab) {
         return;
     }
 #endif
-    glfwSetInputMode(w, GLFW_CURSOR, grab ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
+    // Released to HIDDEN, not NORMAL: over the canvas the arrow is hidden anyway, and
+    // NORMAL showed it for the frame until app_render hid it again (a flash after every
+    // slider drag). Over the UI app_render shows it on the next frame.
+    glfwSetInputMode(w, GLFW_CURSOR, grab ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_HIDDEN);
 #endif
 }
 
@@ -909,6 +937,14 @@ static void begin_slider_drag(GLFWwindow* w, InputState::SliderMode mode, float 
     g_input->slider_start_value = start_value;
     g_input->slider_slot        = g_input->live_brush_slot();
     g_input->slider_accum       = 0;
+#if defined(__EMSCRIPTEN__)
+    // The shell knows: the last pointer event came from a pen (the browser's pen is absolute).
+    g_slider_pen_abs = EM_ASM_INT({ return Module.chiselPenDrives ? 1 : 0; }) != 0
+                    && !(g_input->relpen_live && g_input->relative_pen);
+#else
+    g_slider_pen_abs = g_input->active_device == InputDevice::TABLET
+                    && !(g_input->relpen_live && g_input->relative_pen);
+#endif
 #if defined(__EMSCRIPTEN__)
     EM_ASM({ if (Module.chiselSliderBegin) Module.chiselSliderBegin($0, $1); },
            g_input->mouse_x, g_input->mouse_y);
@@ -1021,6 +1057,7 @@ static void end_slider_drag(GLFWwindow* w, bool warp_back) {
     g_slider_capture_pending = false;   // a tap: released before the capture was taken
 #endif
     bool mouse_dragged = true;
+    const bool follows = slider_pen_follows();   // the ring is under the tip already
 #if !defined(__EMSCRIPTEN__)
     if (w) {
         double vx = 0.0, vy = 0.0;
@@ -1038,7 +1075,8 @@ static void end_slider_drag(GLFWwindow* w, bool warp_back) {
         // the OS cursor to where it was grabbed, which is the same place.)
 #if defined(_WIN32)
         // A relative pen's OS pointer stays under the tip; moving it would read as a step.
-        const bool move_os = !g_rel_on;
+        // An absolute pen's would only jump straight back under the tip.
+        const bool move_os = !g_rel_on && !g_slider_pen_abs;
 #elif defined(__linux__) && !defined(__EMSCRIPTEN__)
         // A pen under XWayland can't be sent back: it stays under the tip.
         const bool move_os = !g_slider_pen_hidden;
@@ -1046,10 +1084,12 @@ static void end_slider_drag(GLFWwindow* w, bool warp_back) {
         const bool move_os = true;
 #endif
         if (w && move_os) glfwSetCursorPos(w, g_input->slider_start_x, g_input->slider_start_y);
-        g_input->mouse_x      = g_input->slider_start_x;
-        g_input->mouse_y      = g_input->slider_start_y;
-        g_input->prev_mouse_x = g_input->slider_start_x;
-        g_input->prev_mouse_y = g_input->slider_start_y;
+        if (!follows) {
+            g_input->mouse_x      = g_input->slider_start_x;
+            g_input->mouse_y      = g_input->slider_start_y;
+            g_input->prev_mouse_x = g_input->slider_start_x;
+            g_input->prev_mouse_y = g_input->slider_start_y;
+        }
     }
     g_input->slider_mode = InputState::SliderMode::NONE;
 #if defined(__EMSCRIPTEN__)
@@ -1081,7 +1121,7 @@ static void end_slider_drag(GLFWwindow* w, bool warp_back) {
                         g_input->slider_start_x, g_input->slider_start_y);
             std::fflush(stdout);
         }
-        if (warp_back && off > 1.0) {
+        if (warp_back && off > 1.0 && !g_slider_pen_abs) {   // a pen's is under its tip
             std::printf("[slider] release: pointer at (%.0f, %.0f), %.1f px from the drag "
                         "start; adopted\n", rx, ry, off);
             std::fflush(stdout);
@@ -1106,7 +1146,10 @@ static void end_slider_drag(GLFWwindow* w, bool warp_back) {
     }
 #endif
 #if !defined(__EMSCRIPTEN__)
-    if (w && warp_back) {
+    // An absolute pen's cursor was never held: it is under the tip, and so is the ring.
+    // Nothing goes back to the drag start.
+    if (g_slider_pen_abs) mouse_dragged = false;
+    if (w && warp_back && !g_slider_pen_abs) {
         slider_return_warp(g_input->slider_start_x, g_input->slider_start_y, mouse_dragged);
         g_slider_check_return = true;
     }
@@ -1313,6 +1356,12 @@ static void cursor_pos_callback(GLFWwindow* w, double x, double y) {
         if (rel) dx *= g_input->pen_sensitivity;   // as on the web and on Linux
 #endif
         apply_slider_delta(dx);
+        // An absolute pen: the ring goes with the tip (see g_slider_pen_abs). Measured from
+        // the drag's start, since a captured cursor reports a virtual position.
+        if (slider_pen_follows()) {
+            g_input->mouse_x = g_input->prev_mouse_x = g_input->slider_start_x + (x - g_slider_begin_vx);
+            g_input->mouse_y = g_input->prev_mouse_y = g_input->slider_start_y + (y - g_slider_begin_vy);
+        }
         static const bool s_trace = std::getenv("CHISEL_SLIDER_TRACE") != nullptr;
         if (s_trace) {
             std::printf("[slider-trace] t=%.4f x=%.1f y=%.1f dx=%.1f size=%.2f\n",
@@ -1417,6 +1466,11 @@ extern "C" EMSCRIPTEN_KEEPALIVE void chisel_set_pointer(double x, double y, doub
     // frozen) — consume only the relative motion, don't move the cached position.
     if (g_input->slider_mode != InputState::SliderMode::NONE) {
         apply_slider_delta((float)dx);
+        // An absolute pen: the shell sends the tip's position, and the ring goes with it.
+        if (slider_pen_follows()) {
+            g_input->mouse_x = g_input->prev_mouse_x = x;
+            g_input->mouse_y = g_input->prev_mouse_y = y;
+        }
         return;
     }
     g_input->mouse_x = x;

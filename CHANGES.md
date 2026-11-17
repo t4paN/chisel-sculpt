@@ -2,6 +2,13 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-17 — Slider drags: the ring follows an absolute pen, slider speed setting
+
+- With a pen in absolute mode (Relative pen off), a slider drag (S, W, A, ...) moves the brush ring with the tip while the value changes; the readout stays where the drag began. On release the ring is already where the next stroke lands, instead of jumping there from the grab point.
+- A relative pen (Chisel's Relative pen, or the tablet plugin's cursor lock) still holds the ring on the grab point; mouse drags are unchanged.
+- The pointer no longer flashes for a frame when a slider drag ends.
+- New in the burger menu, under speed falloff: "slider speed" (0.25x to 4x, default 1x) scales how far a drag moves every value slider, mouse and pen alike. Saved with the settings.
+
 ## 2026-11-17 — Rebuild subdiv levels
 
 - New in the Settings menu, under Delete subdiv level: a level-count slider and "Rebuild subdiv levels", for a dense mesh with no levels under it (an import, or the result of a remesh or SDF merge).

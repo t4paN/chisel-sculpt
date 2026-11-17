@@ -540,8 +540,11 @@ void web_install_dom_listeners() {
                     lx = grabX; ly = grabY;
                 }
             }
-            var outX = anchorX;
-            var outY = anchorY;
+            // An absolute pen's slider drag sends the tip's position: the ring follows it
+            // (input.cpp g_slider_pen_abs). A relative pen took its own path above.
+            var penSlide = sliding && e.pointerType === 'pen';
+            var outX = penSlide ? lx : anchorX;
+            var outY = penSlide ? ly : anchorY;
             if (!sliding) {
                 // The first free position after a drag: continue from where the ring is.
                 // (Still locked = Chromium hasn't let go yet; lx is still on the grab

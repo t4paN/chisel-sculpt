@@ -1393,6 +1393,17 @@ void draw_settings_menu_items(InputState& input, MultiresInfo mres, bool sync_ta
                                  "and size.\n\n"
                                  "0%% = off. A pen uses its real pressure instead.");
 
+            // How fast the drag sliders (S, W, A, ...) move their value (apply_slider_delta).
+            ImGui::SetNextItemWidth(mw);
+            ImGui::SliderFloat("##sliderSpeed", &input.slider_speed, 0.25f, 4.0f,
+                               "slider speed %.2fx", ImGuiSliderFlags_Logarithmic);
+            if (ImGui::IsItemHovered())
+                ui_skin_menu_tip("How fast the drag sliders change their\n"
+                                 "value: size (S), strength (W), hardness (A)\n"
+                                 "and the rest. Mouse and pen alike.\n\n"
+                                 "Lower = finer steps, higher = less travel.\n"
+                                 "Default 1.00x.");
+
 #if defined(__EMSCRIPTEN__) || defined(__linux__) || defined(_WIN32)
             // Relative pen: Chisel moves its own cursor by the pen's steps (web_bridge.cpp
             // feed; natively tablet.cpp on Wayland, input.cpp relpen_step on Windows), so

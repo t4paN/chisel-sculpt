@@ -84,6 +84,9 @@ bool tablet_drop_driver_button(int glfw_button, int action, long long extra);
 bool tablet_relative_supported();
 bool tablet_lift_supported();
 float tablet_pen_height();   // the hovering pen's height now (0..1), -1 out of range / unknown
+// Native Wayland: the tablet plugin's cursor lock is asked for or held for a slider drag
+// (a relative drag: the cursor stays on the grab point). False elsewhere.
+bool tablet_pen_cursor_locked();
 void tablet_set_relative(float gain, float lift, bool mouse_drove, double cx, double cy);
 
 // Windows (WinTab) only: Tablet::proximity() / proximity_changes(), current even inside

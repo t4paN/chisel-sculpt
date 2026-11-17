@@ -761,6 +761,9 @@ bool tablet_relative_supported() { return g_wl != nullptr; }
 // none) leaves it without effect; the user keeps the switch off there.
 bool tablet_lift_supported() { return g_wl != nullptr; }
 float tablet_pen_height() { return g_wl && g_wl->active && g_wl->has_distance ? g_wl->distance : -1.0f; }
+bool tablet_pen_cursor_locked() {
+    return g_wl && (g_wl->lock == WlPen::Lock::REQUESTED || g_wl->lock == WlPen::Lock::HELD);
+}
 void tablet_set_relative(float gain, float lift, bool mouse_drove, double cx, double cy) {
     if (!g_wl) return;
     g_wl->lift = lift;
@@ -1665,6 +1668,7 @@ bool tablet_unit_px(double*, double*) { return false; }
 bool tablet_relative_supported() { return false; }
 bool tablet_lift_supported() { return false; }
 float tablet_pen_height() { return -1.0f; }
+bool tablet_pen_cursor_locked() { return false; }
 void tablet_set_relative(float, float, bool, double, double) {}
 // No native Wayland here: X11 and Windows wrap with glfwSetCursorPos; the browser doesn't wrap.
 void wl_pointer_warp_init(GLFWwindow*) {}
