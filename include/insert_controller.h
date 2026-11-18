@@ -4,7 +4,7 @@
 #include "mesh.h"
 
 class Scene;
-class Renderer;
+struct Renderer;
 struct InputState;
 struct Camera;
 struct MultiresStack;

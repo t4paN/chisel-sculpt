@@ -12,7 +12,7 @@
 #include <algorithm>
 
 struct MeshEntity;
-struct Scene;
+class Scene;
 struct MultiresGPU;
 
 enum class StrokePhase { NONE, BEGIN, ACTIVE, END };

@@ -7,7 +7,7 @@
 #include "mesh_entity.h"
 #include "entity_record.h"
 
-class Renderer;
+struct Renderer;
 struct ComputeState;
 struct Camera;
 

@@ -5,7 +5,7 @@
 #include <vector>
 
 class Scene;
-class Camera;
+struct Camera;
 struct ImDrawList;
 
 // ---------------------------------------------------------------------------
