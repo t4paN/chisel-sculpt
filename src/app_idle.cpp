@@ -282,9 +282,60 @@ void app_idle_update(App& a, int win_w, int win_h, float dx, float dy) {
         // default) — the same keys step the alpha outside Select mode.
         const KeyBind& spin_cw  = input.keybinds[(int)KeyAction::BRUSH_NEXT];
         const KeyBind& spin_ccw = input.keybinds[(int)KeyAction::BRUSH_PREV];
+        // Turn every selected mesh by `ang` about `axis`, each about its own pivot.
+        auto spin_selection = [&](const Vec3& axis, float ang) {
+            for (uint32_t sel_id : scene.selected_ids()) {
+                MeshEntity* e = scene.find_entity(sel_id);
+                if (!e) continue;
+                uint32_t vc = e->mesh.vertex_count();
+                ObjectXformTarget& xt = xforms.target(sel_id);
+                // Latch this entity's pivot and lobe rule on its first
+                // frame and reuse them for the rest of the gesture. Both
+                // for the reason the axis is latched — recomputing a
+                // bounding centre per frame lets the piece wander as it
+                // turns, because the centre is only rotation-invariant
+                // in exact arithmetic — and so the undo replays the same
+                // split the turn was made with.
+                if (xt.angle == 0.0f)
+                    spin_latch_target(e->mesh, input.mirror_x, xt);
+                xt.axis   = axis;
+                xt.angle += ang;
+                auto rotate_mesh = [&](Mesh& m) {
+                    spin_apply_mesh(m, xt.pivot, axis, ang,
+                                    xt.mirror_lobes);
+                };
+                rotate_mesh(e->mesh);
+                retopo_transform(e->retopo, rotate_mesh, 1.0f);
+                if (e->multires.locked) {
+                    // The base cage has to turn with the surface or the
+                    // next cascade regenerates the mesh unrotated.
+                    rotate_mesh(e->multires.base);
+                    // Tangent frames are DIRECTIONS on the base surface and
+                    // the disp layers are expressed in them. Translation and
+                    // uniform scale leave them valid — which is why move and
+                    // scale ignore them — but a rotation does not. Mark every
+                    // level stale so the next cascade rebuilds them on the
+                    // turned surface; leaving them re-applies your detail in
+                    // the old orientation, one subdiv step later. Sizes stay
+                    // (frames.size() must track disp.size()), contents go.
+                    for (auto& lvl : e->multires.frames) lvl.clear();
+                    e->multires_gpu.cleanup();   // VRAM mirror holds stale frames
+                }
+                if (rot_dirty.size() != vc) {
+                    rot_dirty.resize(vc);
+                    for (uint32_t i = 0; i < vc; i++) rot_dirty[i] = i;
+                }
+                scene.sync_partial_entity(sel_id, rot_dirty);
+            }
+            refresh_active_gpu_residency();
+            mesh->compute_bounding_sphere(mesh_center, mesh_radius);
+            screen_buffers_dirty = true;
+        };
         int dir = 0;
-        if (input.interaction_mode == InputState::InteractionMode::SELECT
-            && !modal && !input.ctrl_held && !scene.selected_ids().empty()) {
+        const bool can_spin = input.interaction_mode == InputState::InteractionMode::SELECT
+                           && !modal && !input.ctrl_held && !scene.selected_ids().empty();
+        // Shift turns Q/E into 5-degree steps (key events, below), so the hold stands down.
+        if (can_spin && !input.shift_held) {
             if (spin_cw.bound()  && glfwGetKey(window, spin_cw.key)  == GLFW_PRESS) dir += 1;
             if (spin_ccw.bound() && glfwGetKey(window, spin_ccw.key) == GLFW_PRESS) dir -= 1;
         }
@@ -293,7 +344,6 @@ void app_idle_update(App& a, int win_w, int win_h, float dx, float dy) {
         if (dir == 0) {
             rot_active = false;
         } else {
-            const auto& sel = scene.selected_ids();
             scene.materialize_active_cpu();
 
             if (!rot_active) {
@@ -319,55 +369,41 @@ void app_idle_update(App& a, int win_w, int win_h, float dx, float dy) {
             if (dt > 0.1f) dt = 0.1f;
 
             const float ang = (float)dir * 1.5707963f * dt;   // 90 deg/sec
-            if (dt > 0.0f && ang != 0.0f) {
-                for (uint32_t sel_id : sel) {
-                    MeshEntity* e = scene.find_entity(sel_id);
-                    if (!e) continue;
-                    uint32_t vc = e->mesh.vertex_count();
-                    ObjectXformTarget& xt = xforms.target(sel_id);
-                    // Latch this entity's pivot and lobe rule on its first
-                    // frame and reuse them for the rest of the gesture. Both
-                    // for the reason the axis is latched — recomputing a
-                    // bounding centre per frame lets the piece wander as it
-                    // turns, because the centre is only rotation-invariant
-                    // in exact arithmetic — and so the undo replays the same
-                    // split the turn was made with.
-                    if (xt.angle == 0.0f)
-                        spin_latch_target(e->mesh, input.mirror_x, xt);
-                    xt.axis   = rot_axis;
-                    xt.angle += ang;
-                    auto rotate_mesh = [&](Mesh& m) {
-                        spin_apply_mesh(m, xt.pivot, rot_axis, ang,
-                                        xt.mirror_lobes);
-                    };
-                    rotate_mesh(e->mesh);
-                    retopo_transform(e->retopo, rotate_mesh, 1.0f);
-                    if (e->multires.locked) {
-                        // The base cage has to turn with the surface or the
-                        // next cascade regenerates the mesh unrotated.
-                        rotate_mesh(e->multires.base);
-                        // Tangent frames are DIRECTIONS on the base surface and
-                        // the disp layers are expressed in them. Translation and
-                        // uniform scale leave them valid — which is why move and
-                        // scale ignore them — but a rotation does not. Mark every
-                        // level stale so the next cascade rebuilds them on the
-                        // turned surface; leaving them re-applies your detail in
-                        // the old orientation, one subdiv step later. Sizes stay
-                        // (frames.size() must track disp.size()), contents go.
-                        for (auto& lvl : e->multires.frames) lvl.clear();
-                        e->multires_gpu.cleanup();   // VRAM mirror holds stale frames
-                    }
-                    if (rot_dirty.size() != vc) {
-                        rot_dirty.resize(vc);
-                        for (uint32_t i = 0; i < vc; i++) rot_dirty[i] = i;
-                    }
-                    scene.sync_partial_entity(sel_id, rot_dirty);
-                }
-                refresh_active_gpu_residency();
-                mesh->compute_bounding_sphere(mesh_center, mesh_radius);
-                screen_buffers_dirty = true;
-            }
+            if (dt > 0.0f && ang != 0.0f) spin_selection(rot_axis, ang);
         }
+
+        // Shift+Q/E: one 5-degree step per press (auto-repeat while held), each its own
+        // undo step. The axis is the view axis snapped to the world axis it is within
+        // ~20 degrees of, so the F-key views (and near enough) turn about an exact axis
+        // and 18 steps land a clean 90, with no drift from a slightly tilted camera.
+        static Vec3 step_axis(0, 0, 0);            // the last step's, for the running total
+        static int  step_total = 0;
+        static std::vector<uint32_t> step_sel;
+        if (input.spin_step != 0 && !rot_active && can_spin) {
+            scene.materialize_active_cpu();
+            Vec3 axis = camera.get_view_direction().normalized();
+            const float ax = std::fabs(axis.x), ay = std::fabs(axis.y), az = std::fabs(axis.z);
+            const char* axis_name = nullptr;
+            if (ax >= ay && ax >= az && ax > 0.94f)      { axis = Vec3(axis.x > 0 ? 1.f : -1.f, 0, 0); axis_name = "X"; }
+            else if (ay >= az && ay > 0.94f)             { axis = Vec3(0, axis.y > 0 ? 1.f : -1.f, 0); axis_name = "Y"; }
+            else if (az > 0.94f)                         { axis = Vec3(0, 0, axis.z > 0 ? 1.f : -1.f); axis_name = "Z"; }
+            const float ang = (float)input.spin_step * 0.08726646f;   // 5 degrees
+            xforms.begin(ObjectXform::Kind::SPIN, scene);
+            spin_selection(axis, ang);
+            xforms.commit(scene);
+            // Running total, so the user can see when they are at 90. Restarts when
+            // the axis or the selection changes.
+            const bool same = axis.x == step_axis.x && axis.y == step_axis.y && axis.z == step_axis.z
+                           && scene.selected_ids() == step_sel;
+            step_total = (same ? step_total : 0) + input.spin_step * 5;
+            step_axis = axis;
+            step_sel  = scene.selected_ids();
+            std::snprintf(input.notification, sizeof(input.notification),
+                          "Turn %+d\xC2\xB0 about %s", step_total,
+                          axis_name ? axis_name : "the view");
+            input.notification_timer = 1.5f;
+        }
+        input.spin_step = 0;
     }
 
     // Close the object-transform gesture the frame the drag or the key

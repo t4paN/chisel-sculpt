@@ -334,6 +334,7 @@ struct InputState {
     // pops the custom-image file picker (mirrors import_dialog_active).
     int  active_alpha = 0;
     int  alpha_step = 0;   // pending Q/E steps through the alphas; main applies + wraps
+    int  spin_step  = 0;   // pending Shift+Q/E 5-degree turns in Select mode; app_idle applies
     bool load_alpha_dialog_active = false;
     // Clay melt (0..1): how strongly clay pulls verts on the WRONG side of its plane
     // (proud on a build, sunk on a carve) back toward it. 0 (default) = ride over:

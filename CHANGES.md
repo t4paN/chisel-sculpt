@@ -2,6 +2,10 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-18 — Select mode: Shift+Q / E turn in 5° steps
+
+- Shift+Q / E turn the selection 5° per press (repeats while held), each press one undo step. Looking down an axis (within ~20°) the turn snaps to that exact world axis, so 18 presses make a clean 90°; a notice shows the running total. Plain Q / E still spin continuously.
+
 ## 2026-11-18 — STL import; Append greyed for .chisel
 
 - Open and drag-and-drop read STL, binary or ASCII: corners welded by exact position, flat slivers dropped, normals recomputed. Z-up files are stood upright. Web file picker takes .stl too.

@@ -50,9 +50,9 @@ const KeyActionInfo kKeyActions[(int)KeyAction::COUNT] = {
         "Fine detail stamps: lands on press, random spin and size. Right-click: jitter and Scatter (one dot becomes many)", {GLFW_KEY_R, 0}, KeyScope::Sculpt},
     {"brush_mask",    "Brushes", "Mask",                nullptr, {GLFW_KEY_M, 0}},
     {"brush_prev",    "Brushes", "Previous alpha",
-        "Draw and Mask. In Paint mode: swap colours. In Select mode: hold to spin the selection.", {GLFW_KEY_Q, 0}},
+        "Draw and Mask. In Paint mode: swap colours. In Select mode: hold to spin the selection; Shift+ turns it 5 degrees per press.", {GLFW_KEY_Q, 0}},
     {"brush_next",    "Brushes", "Next alpha",
-        "Draw and Mask. In Paint mode: swap colours. In Select mode: hold to spin the selection.", {GLFW_KEY_E, 0}},
+        "Draw and Mask. In Paint mode: swap colours. In Select mode: hold to spin the selection; Shift+ turns it 5 degrees per press.", {GLFW_KEY_E, 0}},
     {"paint_bucket",  "Paint mode", "Fill bucket",      "Click an unmasked area to fill it. Ctrl: erase it", {GLFW_KEY_B, 0}, KeyScope::Paint},
     {"paint_picker",  "Paint mode", "Colour picker",    "Click the model to pick its colour", {GLFW_KEY_C, 0}, KeyScope::Paint},
     {"paint_brush",   "Paint mode", "Paint brush",
@@ -1870,7 +1870,10 @@ static void notify(const char* text, float secs) {
 // acts on those, everything else fires once per press.
 static void run_key_action(GLFWwindow* w, KeyAction a, bool repeat) {
     InputState& in = *g_input;
-    if (repeat && a != KeyAction::SIZE_DOWN && a != KeyAction::SIZE_UP) return;
+    // Shift+Q/E in Select mode is a 5-degree step turn: held, it repeats like the size nudge.
+    const bool step_spin = (a == KeyAction::BRUSH_PREV || a == KeyAction::BRUSH_NEXT) && in.shift_held
+                        && in.interaction_mode == InputState::InteractionMode::SELECT;
+    if (repeat && a != KeyAction::SIZE_DOWN && a != KeyAction::SIZE_UP && !step_spin) return;
     const bool select_mode = in.interaction_mode == InputState::InteractionMode::SELECT;
     const bool insert_mode = in.interaction_mode == InputState::InteractionMode::INSERT;
 
@@ -2025,8 +2028,12 @@ static void run_key_action(GLFWwindow* w, KeyAction a, bool repeat) {
         case KeyAction::BRUSH_NEXT: {
             // In SELECT mode these keys spin the selection instead. The main loop polls
             // the bound keys directly for that (continuous, frame-rate independent), so
-            // there is nothing to latch here — just don't step the alpha too.
-            if (select_mode) break;
+            // there is nothing to latch here — just don't step the alpha too. With Shift
+            // they step 5 degrees per press instead (app_idle), to land a clean 90.
+            if (select_mode) {
+                if (step_spin) in.spin_step += (a == KeyAction::BRUSH_NEXT ? 1 : -1);
+                break;
+            }
             if (in.interaction_mode != InputState::InteractionMode::EDIT || in.is_smooth_active()) break;
             if (in.current_brush == BrushType::PAINT) {
                 // In paint mode both swap the active colour with the alternate.

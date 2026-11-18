@@ -282,6 +282,7 @@ own undo history and subdivision stack.
 | LMB + drag | Move the selected object in the view plane |
 | RMB + drag | Scale the selected object (Ctrl+RMB stays camera zoom) |
 | Q / E | Spin the selection anticlockwise / clockwise **about the view axis** — hold to turn continuously (90°/sec, no acceleration). Face the model from any angle and the turn always reads the way it looks on screen. Every selected piece turns about **its own centre**, so a selection spins in place rather than orbiting a shared point |
+| Shift + Q / E | Turn the selection 5° per press (holding repeats), each press its own undo step. Looking straight down an axis (the front / side / top views, or within ~20° of one) it turns about that exact world axis, so 18 presses make a clean 90°; a notice shows the running total |
 | Ctrl + Z | Undo the last move / scale / spin — works right here in Select mode |
 | Delete | Delete the selected object |
 
