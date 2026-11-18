@@ -167,7 +167,8 @@ struct Mesh {
     uint32_t write_obj(std::FILE* f, const char* object, uint32_t base) const;
     // Binary STL for 3D printing: per-tri facet normal + 3 verts, 80-byte header,
     // uint32 count. `scale` multiplies every coordinate so the print lands at
-    // real-world size (e.g. mm). Winding order is preserved from the mesh.
+    // real-world size (e.g. mm). Winding order is preserved from the mesh. Written Z-up
+    // (file (x, y, z) = Chisel (x, -z, y)) so slicers stand it upright.
     bool export_stl(const char* filename, float scale = 1.0f) const;
     // ASCII PLY with per-vertex position, normal, and RGB (from packed `color`).
     // PLY is the only export carrying paint; unpainted verts write white.
@@ -180,7 +181,7 @@ struct Mesh {
     // (recomputed if absent), and per-vertex RGB into packed `color` if present.
     static bool import_ply(const char* filename, Mesh& out);
     // Binary or ASCII STL in (3D-print downloads). Corners welded by exact position,
-    // normals recomputed. Z-up turned to Y-up, except our own export (already Y-up).
+    // normals recomputed. Z-up turned to Y-up, except a pre-2026-11-18 Chisel STL (Y-up).
     static bool import_stl(const char* filename, Mesh& out);
     // glTF 2.0 in (.glb, or .gltf with its files beside it), in glb.cpp. Same contract as
     // import_obj: `out` is the whole file; `parts` one per mesh node when there are two or

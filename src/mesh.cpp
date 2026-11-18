@@ -629,7 +629,11 @@ bool Mesh::export_stl(const char* filename, float scale) const {
     // 80-byte header (must NOT begin with "solid" or parsers read it as ASCII).
     char header[80];
     std::memset(header, 0, sizeof(header));
-    std::snprintf(header, sizeof(header), "Chisel binary STL");
+    // Z-up: slicers stand a print on Z, so a Y-up file landed on its side. Written turned
+    // +90 degrees about X, file (x, y, z) = Chisel (x, -z, y), a proper rotation (winding
+    // and mirror-x untouched). "Z-up" in the header tells import_stl; an old Chisel STL
+    // without it was written Y-up and comes back as it was.
+    std::snprintf(header, sizeof(header), "Chisel binary STL, Z-up");
     std::fwrite(header, 1, sizeof(header), f);
 
     uint32_t nt = tri_count();
@@ -638,9 +642,10 @@ bool Mesh::export_stl(const char* filename, float scale) const {
     const uint16_t attr = 0;
     for (uint32_t t = 0; t < nt; t++) {
         uint32_t i0 = indices[t*3+0], i1 = indices[t*3+1], i2 = indices[t*3+2];
-        Vec3 a = get_pos(i0) * scale;
-        Vec3 b = get_pos(i1) * scale;
-        Vec3 c = get_pos(i2) * scale;
+        auto zup = [&](uint32_t i) { const Vec3 p = get_pos(i) * scale; return Vec3(p.x, -p.z, p.y); };
+        Vec3 a = zup(i0);
+        Vec3 b = zup(i1);
+        Vec3 c = zup(i2);
         Vec3 n = (b - a).cross(c - a).normalized();   // per-tri facet normal
         float rec[12] = {
             n.x, n.y, n.z,
@@ -1158,9 +1163,11 @@ bool Mesh::import_stl(const char* filename, Mesh& out) {
     // Binary if the size adds up. Many binary files open with "solid" in the header
     // anyway, so that word alone can't decide it; the size can.
     const bool binary = have_head && (uint64_t)fsize == 84ull + 50ull * n_bin;
-    // Our own export is Chisel's Y-up (export_stl writes positions as they are); every
-    // other STL comes from a slicer/CAD world that is Z-up, and would land on its back.
-    const bool ours = binary && std::strncmp(header, "Chisel binary STL", 17) == 0;
+    // STL is Z-up (slicers, CAD, and our export since 2026-11-18). The one exception: a
+    // Chisel STL from before that, written Y-up, has our header without "Z-up" in it.
+    header[79] = '\0';
+    const bool ours = binary && std::strncmp(header, "Chisel binary STL", 17) == 0 &&
+                      !std::strstr(header, "Z-up");
 
     if (binary) {
         cx.resize((size_t)n_bin * 3); cy.resize(cx.size()); cz.resize(cx.size());
@@ -1252,6 +1259,6 @@ bool Mesh::import_stl(const char* filename, Mesh& out) {
     out.build_adjacency();
     std::printf("[import] loaded %u verts, %u tris from %s STL%s (%u degenerate dropped) %s\n",
                 out.vertex_count(), out.tri_count(), binary ? "binary" : "ASCII",
-                ours ? ", ours (Y-up)" : ", Z-up turned", dropped, filename);
+                ours ? ", old Chisel Y-up" : ", Z-up turned", dropped, filename);
     return true;
 }

@@ -6621,7 +6621,9 @@ bool retopo_export_stl(const RetopoMesh& rm, const char* path) {
     FILE* f = std::fopen(path, "wb");
     if (!f) return false;
     char header[80] = {};
-    std::snprintf(header, sizeof(header), "Chisel binary STL (retopo)");
+    // Z-up like every slicer and the sculpt's own export (Mesh::export_stl): file (x, y, z)
+    // = Chisel (x, -z, y), a proper rotation. The header's "Z-up" tells import_stl so.
+    std::snprintf(header, sizeof(header), "Chisel binary STL (retopo), Z-up");
     std::fwrite(header, 1, sizeof(header), f);
     uint32_t nt = 0;
     for (size_t q = 0; q < rm.face_count(); q++) nt += rm.face_size(q) - 2;
@@ -6630,7 +6632,8 @@ bool retopo_export_stl(const RetopoMesh& rm, const char* path) {
     for (size_t q = 0; q < rm.face_count(); q++) {
         const uint32_t* c = rm.face(q);
         for (uint32_t k = 1; k + 1 < rm.face_size(q); k++) {
-            const Vec3 a = rm.v[c[0]], b = rm.v[c[k]], d = rm.v[c[k + 1]];
+            auto zup = [](const Vec3& p) { return Vec3(p.x, -p.z, p.y); };
+            const Vec3 a = zup(rm.v[c[0]]), b = zup(rm.v[c[k]]), d = zup(rm.v[c[k + 1]]);
             const Vec3 n = (b - a).cross(d - a).normalized();
             const float rec[12] = {n.x, n.y, n.z, a.x, a.y, a.z, b.x, b.y, b.z, d.x, d.y, d.z};
             std::fwrite(rec, sizeof(float), 12, f);
