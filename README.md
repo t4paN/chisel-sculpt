@@ -36,7 +36,7 @@ identically in the native build, and vice versa.
   printing; mirror-symmetric or boolean-subtract variants, Marching Cubes or Surface Nets
 - **Isotropic remesh** — respects masks and mirror symmetry
 - **Delta-based undo/redo** — per-stroke, per-object, GPU-resident
-- **OBJ / PLY / GLB in; OBJ / STL / PLY / GLB out** (PLY carries vertex paint; textured GLBs
+- **OBJ / PLY / STL / GLB in; OBJ / STL / PLY / GLB out** (PLY carries vertex paint; textured GLBs
   come in with their texture, retopo lows go out as GLB with their baked maps)
 - **Pen pressure** — XInput2 / WinTab / browser Pointer Events; mouse-first design, tablet optional
 - **Autosave + crash recovery** on the desktop builds, and a file browser with places and type-ahead

@@ -680,6 +680,7 @@ void app_files_frame(App& a) {
             std::string why;              // glTF: why it failed, or what it left out
             const bool gltf = ext == "glb" || ext == "gltf";
             bool imported = (ext == "ply") ? Mesh::import_ply(path.c_str(), loaded)
+                          : (ext == "stl") ? Mesh::import_stl(path.c_str(), loaded)
                           : gltf           ? Mesh::import_glb(path.c_str(), loaded, &parts, &why)
                                            : Mesh::import_obj(path.c_str(), loaded, &parts);
             // The whole file frames the camera; the first object then stands in for
@@ -1187,14 +1188,31 @@ void app_files_frame(App& a) {
         cfg.path = start_dir();
         cfg.flags = ImGuiFileDialogFlags_DontShowHiddenFiles;
         cfg.sidePaneWidth = 190.0f;
-        cfg.sidePane = [&](const char*, IGFD::UserDatas, bool*) {
-            ImGui::Checkbox("Append to scene", &input.import_append);
+        cfg.sidePane = [&](const char* filter, IGFD::UserDatas, bool*) {
+            // A .chisel is a whole scene (levels, layers, retopo, camera), so it can
+            // only replace. Greyed and shown unticked while the filter is .chisel, so
+            // the tick can't promise an append that won't happen; the user's choice
+            // is kept for when they switch back to a mesh filter.
+            const bool project = filter && std::strcmp(filter, ".chisel") == 0;
+            if (project) {
+                bool off = false;
+                ImGui::BeginDisabled();
+                ImGui::Checkbox("Append to scene", &off);
+                ImGui::EndDisabled();
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                    ImGui::SetTooltip("Only imports (OBJ / PLY / STL / GLB) can be appended.\n"
+                                      "A .chisel project always replaces the scene.");
+            } else {
+                ImGui::Checkbox("Append to scene", &input.import_append);
+            }
             ImGui::Spacing();
-            ImGui::TextWrapped("On: add the mesh as a new object at its "
-                               "own scale (OBJ/PLY only). Off: replace the "
-                               "scene. .chisel projects always replace.");
+            ImGui::TextWrapped(project
+                ? "Projects open as the whole scene. Switch the "
+                  "file type to a mesh to append."
+                : "On: add the mesh as a new object at its "
+                  "own scale. Off: replace the scene.");
         };
-        fd->OpenDialog("ImportKey", "Open File", ".chisel,.obj,.ply,.glb,.gltf", cfg);
+        fd->OpenDialog("ImportKey", "Open File", ".chisel,.obj,.ply,.stl,.glb,.gltf", cfg);
     }
 
     if (display_file_dialog(fd, "ExportKey")) {

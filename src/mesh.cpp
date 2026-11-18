@@ -1141,3 +1141,117 @@ bool Mesh::import_ply(const char* filename, Mesh& out) {
                 out.color.empty() ? "" : " (+paint)", filename);
     return true;
 }
+
+bool Mesh::import_stl(const char* filename, Mesh& out) {
+    FILE* f = std::fopen(filename, "rb");
+    if (!f) return false;
+    std::fseek(f, 0, SEEK_END);
+    const long fsize = std::ftell(f);
+    std::fseek(f, 0, SEEK_SET);
+
+    // STL is a triangle soup: three loose corners per facet, no shared vertices.
+    std::vector<float> cx, cy, cz;   // corner positions, 3 per facet
+    char header[80] = {};
+    uint32_t n_bin = 0;
+    const bool have_head = fsize >= 84 && std::fread(header, 1, 80, f) == 80 &&
+                           std::fread(&n_bin, 4, 1, f) == 1;
+    // Binary if the size adds up. Many binary files open with "solid" in the header
+    // anyway, so that word alone can't decide it; the size can.
+    const bool binary = have_head && (uint64_t)fsize == 84ull + 50ull * n_bin;
+    // Our own export is Chisel's Y-up (export_stl writes positions as they are); every
+    // other STL comes from a slicer/CAD world that is Z-up, and would land on its back.
+    const bool ours = binary && std::strncmp(header, "Chisel binary STL", 17) == 0;
+
+    if (binary) {
+        cx.resize((size_t)n_bin * 3); cy.resize(cx.size()); cz.resize(cx.size());
+        unsigned char rec[50];
+        for (uint32_t t = 0; t < n_bin; t++) {
+            if (std::fread(rec, 1, 50, f) != 50) { std::fclose(f); return false; }
+            float v[9];
+            std::memcpy(v, rec + 12, 36);   // skip the facet normal: recomputed below
+            for (int k = 0; k < 3; k++) {
+                cx[t*3+k] = v[k*3+0]; cy[t*3+k] = v[k*3+1]; cz[t*3+k] = v[k*3+2];
+            }
+        }
+    } else {
+        // ASCII: only the "vertex x y z" lines matter, three per facet.
+        std::fseek(f, 0, SEEK_SET);
+        char line[512];
+        if (!std::fgets(line, sizeof(line), f)) { std::fclose(f); return false; }
+        const char* s = line;
+        while (*s == ' ' || *s == '\t') s++;
+        if (std::strncmp(s, "solid", 5) != 0) { std::fclose(f); return false; }
+        while (std::fgets(line, sizeof(line), f)) {
+            s = line;
+            while (*s == ' ' || *s == '\t') s++;
+            if (std::strncmp(s, "vertex", 6) != 0) continue;
+            float x, y, z;
+            if (std::sscanf(s + 6, "%f %f %f", &x, &y, &z) != 3) { std::fclose(f); return false; }
+            cx.push_back(x); cy.push_back(y); cz.push_back(z);
+        }
+        const size_t whole = cx.size() / 3 * 3;   // a cut-off last facet is dropped
+        cx.resize(whole); cy.resize(whole); cz.resize(whole);
+    }
+    std::fclose(f);
+    if (cx.empty()) return false;
+
+    // Weld corners that sit at exactly the same place (exporters write each shared
+    // vertex's bits identically). Open-addressing table: one-shot import, so the
+    // allocation is fine, and a printable can be millions of facets.
+    const size_t nc = cx.size();
+    size_t cap = 1;
+    while (cap < nc * 2) cap <<= 1;
+    std::vector<uint32_t> table(cap, UINT32_MAX);
+    std::vector<float> px, py, pz;
+    px.reserve(nc / 4); py.reserve(nc / 4); pz.reserve(nc / 4);
+    auto bits = [](float v) { if (v == 0.0f) v = 0.0f; uint32_t u; std::memcpy(&u, &v, 4); return u; };
+    std::vector<uint32_t> idxs;
+    idxs.reserve(nc);
+    uint32_t dropped = 0;
+    for (size_t t = 0; t < nc; t += 3) {
+        uint32_t tri[3];
+        for (int k = 0; k < 3; k++) {
+            const float x = cx[t+k], y = cy[t+k], z = cz[t+k];
+            uint64_t h = (uint64_t)bits(x) * 73856093u ^ (uint64_t)bits(y) * 19349663u * 0x9E3779B1u
+                       ^ (uint64_t)bits(z) * 83492791u * 0x85EBCA77u;
+            h ^= h >> 29;
+            size_t slot = (size_t)h & (cap - 1);
+            for (;;) {
+                const uint32_t v = table[slot];
+                if (v == UINT32_MAX) {
+                    table[slot] = (uint32_t)px.size();
+                    tri[k] = (uint32_t)px.size();
+                    px.push_back(x); py.push_back(y); pz.push_back(z);
+                    break;
+                }
+                if (px[v] == x && py[v] == y && pz[v] == z) { tri[k] = v; break; }
+                slot = (slot + 1) & (cap - 1);
+            }
+        }
+        // Welded flat (a sliver whose corners coincide): a sculpt can't keep it.
+        if (tri[0] == tri[1] || tri[1] == tri[2] || tri[2] == tri[0]) { dropped++; continue; }
+        idxs.push_back(tri[0]); idxs.push_back(tri[1]); idxs.push_back(tri[2]);
+    }
+    if (idxs.empty()) return false;
+
+    if (!ours) {                     // file Z-up (x, y, z) -> Chisel Y-up (x, z, -y)
+        for (size_t v = 0; v < px.size(); v++) {
+            const float y = py[v]; py[v] = pz[v]; pz[v] = -y;
+        }
+    }
+
+    out.pos_x = std::move(px); out.pos_y = std::move(py); out.pos_z = std::move(pz);
+    out.indices = std::move(idxs);
+    out.mirror_x_map.clear();
+    out.vert_tri_offset.clear(); out.vert_tri_list.clear();
+    out.mask.clear();
+    out.color.clear();
+    const uint32_t nv = out.vertex_count();
+    out.norm_x.assign(nv, 0.0f); out.norm_y.assign(nv, 0.0f); out.norm_z.assign(nv, 1.0f);
+    out.recompute_normals();
+    out.build_adjacency();
+    std::printf("[import] loaded %u verts, %u tris from %s STL%s (%u degenerate dropped) %s\n",
+                out.vertex_count(), out.tri_count(), binary ? "binary" : "ASCII",
+                ours ? ", ours (Y-up)" : ", Z-up turned", dropped, filename);
+    return true;
+}

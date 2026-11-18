@@ -179,6 +179,9 @@ struct Mesh {
     // ASCII or binary-little-endian PLY in. Reads position (required), normal
     // (recomputed if absent), and per-vertex RGB into packed `color` if present.
     static bool import_ply(const char* filename, Mesh& out);
+    // Binary or ASCII STL in (3D-print downloads). Corners welded by exact position,
+    // normals recomputed. Z-up turned to Y-up, except our own export (already Y-up).
+    static bool import_stl(const char* filename, Mesh& out);
     // glTF 2.0 in (.glb, or .gltf with its files beside it), in glb.cpp. Same contract as
     // import_obj: `out` is the whole file; `parts` one per mesh node when there are two or
     // more. Vertices are welded by position (other apps split them at UV seams and hard

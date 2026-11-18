@@ -2,6 +2,11 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-18 — STL import; Append greyed for .chisel
+
+- Open and drag-and-drop read STL, binary or ASCII: corners welded by exact position, flat slivers dropped, normals recomputed. Z-up files are stood upright; Chisel's own STL export (Y-up) comes back as it was. Web file picker takes .stl too.
+- Open dialog: "Append to scene" is greyed and unticked while the file type is .chisel, with a tooltip saying only imports append; the tick comes back when a mesh type is chosen.
+
 ## 2026-11-17 — Level-down on huge models: a fraction of the memory, and the browser no longer dies
 
 - Going down a level walks every level as positions only and borrows the cached topology instead of copying it, freeing each level as it passes. On a 14.8M-vert L6, natively: peak +3.8 GB -> +1.9 GB from cold, +0.2 GB warm; identical result.

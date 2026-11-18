@@ -2471,11 +2471,12 @@ static void drop_callback(GLFWwindow* w, int count, const char** paths) {
     bool known = std::strcmp(ext, ".chisel") == 0 ||
                  std::strcmp(ext, ".obj") == 0 ||
                  std::strcmp(ext, ".ply") == 0 ||
+                 std::strcmp(ext, ".stl") == 0 ||
                  std::strcmp(ext, ".glb") == 0 ||
                  std::strcmp(ext, ".gltf") == 0;
     if (!known) {
         snprintf(g_input->notification, sizeof(g_input->notification),
-                 "Can't open dropped file (want .chisel / .obj / .ply / .glb)");
+                 "Can't open dropped file (want .chisel / .obj / .ply / .stl / .glb)");
         g_input->notification_timer = 3.0f;
         return;
     }

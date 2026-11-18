@@ -606,7 +606,7 @@ the first file that starts with it, **Tab** completes the name and **Enter** ope
 
 | Direction | Formats | Notes |
 |---|---|---|
-| Import (Ctrl+O, or drop a file) | OBJ, PLY, GLB / glTF, .chisel | One picker for all of them; each OBJ / GLB object becomes its own mesh. A GLB's colour texture comes along and shows on the sculpt (paint tints it); compressed GLBs (Draco / meshopt) aren't read |
+| Import (Ctrl+O, or drop a file) | OBJ, PLY, STL, GLB / glTF, .chisel | One picker for all of them; each OBJ / GLB object becomes its own mesh. A GLB's colour texture comes along and shows on the sculpt (paint tints it); compressed GLBs (Draco / meshopt) aren't read |
 | Export (Ctrl+E / toolbar) | OBJ, STL, PLY | Every mesh's sculpt (`-HI`) and retopo (`-LO`); PLY carries vertex paint; STL is print-ready — pair it with voxel merge |
 | Export from UV mode | PNG, GLB, OBJ + MTL, STL | The UV map, and the low-poly with its baked maps (see [UV mode](#uv-mode-9-unwrap-and-bake)) |
 
