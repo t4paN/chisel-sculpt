@@ -118,6 +118,13 @@ const IconDef kIcons[(int)Icon::Count] = {
     /* RetopoPoints */ {{P("M7.4 5H16.6M19 7.4V16.6"), D("M16.6 19H5V7.4"),
                          C(5, 5, 2.4f), P("M16.6 5a2.4 2.4 0 1 0 4.8 0a2.4 2.4 0 1 0-4.8 0"
                                           "M16.6 19a2.4 2.4 0 1 0 4.8 0a2.4 2.4 0 1 0-4.8 0")}, 4},
+    // Drawn here: a ball with the front half of its equator; a can, its top a full ring.
+    /* ShapeSphere  */ {{C(12, 12, 8.5f), P("M3.5 12a8.5 3.2 0 0 0 17 0")}, 2},
+    /* ShapeCylinder*/ {{P("M5 6.5a7 2.8 0 1 0 14 0a7 2.8 0 1 0-14 0"), P("M5 6.5v11M19 6.5v11"),
+                         P("M5 17.5a7 2.8 0 0 0 14 0")}, 3},
+    // Drawn here: a small box with an arrow out of its corner; a ring turning, arrowhead on.
+    /* ObjScale     */ {{R(3, 12, 9, 9, 1.5f), P("M12 12L20 4"), P("M14 4h6v6")}, 3},
+    /* ObjRotate    */ {{P("M19.5 12a7.5 7.5 0 1 1-2.2-5.3"), P("M13.5 7L17.3 6.7L17.6 2.9")}, 2},
     // Drawn here, for the file dialogs: back / forward / up, a folder with a plus.
     /* NavBack      */ {{P("M15 5l-7 7 7 7")}, 1},
     /* NavForward   */ {{P("M9 5l7 7-7 7")}, 1},
@@ -373,6 +380,10 @@ const unsigned short kPixel[(int)Icon::Count][16] = {
     /* brush-stipple   */ {0x0000,0x0000,0x0018,0x3818,0x3800,0x3800,0x0000,0x0000,0x0060,0x00F0,0x00F0,0x1860,0x1800,0x0006,0x0006,0x0000},   // drawn here: scattered dots
     /* paint-blend     */ {0x0000,0x0FF0,0x1818,0x218C,0x618E,0x400E,0x401E,0x403E,0x43FE,0x47FE,0x4E7E,0x6E7E,0x2E7C,0x1FF8,0x0FF0,0x0000},   // drawn here: yin-yang
     /* retopo-points   */ {0x0000,0x700E,0x7FFE,0x700E,0x2004,0x0004,0x2004,0x0004,0x2004,0x0004,0x2004,0x0004,0x200E,0x2AAE,0x000E,0x0000},   // drawn here: three clicked corners, two sides dashed
+    /* shape-sphere    */ {0x0000,0x07E0,0x1FF8,0x381C,0x300C,0x6006,0x6006,0x6006,0x700E,0x6C36,0x67E6,0x300C,0x381C,0x1FF8,0x07E0,0x0000},   // drawn here: ball + equator
+    /* shape-cylinder  */ {0x0000,0x07E0,0x3FFC,0x381C,0x781E,0x7FFE,0x67E6,0x6006,0x6006,0x6006,0x6006,0x6006,0x381C,0x3FFC,0x07E0,0x0000},   // drawn here: can
+    /* obj-scale       */ {0x0000,0x0000,0x00FC,0x007C,0x003C,0x007C,0x00EC,0x7FC4,0x7F80,0x6180,0x6180,0x6180,0x6180,0x7F80,0x7F80,0x0000},   // drawn here: box + arrow out
+    /* obj-rotate      */ {0x0000,0x0018,0x03D8,0x0FF8,0x1CF8,0x18E0,0x3000,0x300C,0x300C,0x300C,0x1818,0x1C38,0x0FF0,0x03C0,0x0000,0x0000},   // drawn here: turning ring
 };
 } // namespace
 

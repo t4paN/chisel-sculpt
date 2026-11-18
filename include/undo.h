@@ -1,6 +1,7 @@
 #pragma once
 #include "mesh.h"
 #include "multires_stack.h"
+#include "object_xform.h"
 #include <algorithm>
 #include <cstdint>
 #include <deque>
@@ -62,11 +63,15 @@ struct UndoEntry {
     int from_level = 0;
     int to_level   = 0;
 
-    // Position on the scene-wide edit clock, stamped by UndoStack::push. Object
-    // transforms (object_xform.h) stamp from the same clock, and Ctrl+Z pops
-    // whichever of the two stacks has the newer top — see the header note there
-    // for why the two histories must interleave rather than sit side by side.
+    // Position on the scene-wide edit clock, stamped by UndoStack::push. SceneSnapshot
+    // ages against it, and the pose brush finds its lever moves by it.
     uint64_t seq = 0;
+
+    // How long the owning stack's pose log was when this entry's positions were
+    // captured: the object transforms they already include. Before an apply, any
+    // steps logged since are replayed onto them (UndoStack::bring_to_pose) and this
+    // advances, so a stroke made before a turn comes off the turned mesh in place.
+    size_t pose_at = 0;
 };
 
 class UndoStack {
@@ -90,8 +95,8 @@ public:
     static uint64_t global_pushes;
 
     // Advance the clock and hand back the new value. push() uses it to stamp
-    // UndoEntry::seq; ObjectXformStack::commit uses it for the same purpose, so
-    // the two stacks share one strictly increasing ordering.
+    // UndoEntry::seq; ObjectXformStack::commit stamps from it too, which is only
+    // used to order a transform against a mesh delete/rename in Object mode.
     static uint64_t next_seq() { return ++global_pushes; }
 
     void push(UndoEntry&& e);
@@ -112,10 +117,10 @@ public:
     // entity. A non-active clear must pass nullptr so it doesn't wipe the live ring.
     void clear(ComputeState* c = nullptr);
 
-    // Drop just the redo arm. Called when an object transform (object_xform.h)
-    // lands on this entity: the two stacks share one timeline, so a new step on
-    // either of them branches away from anything the other had queued to redo.
-    void clear_redo();
+    // An object transform just landed on this entity (done, undone or redone). It is
+    // not an undo step here — Object mode keeps those — but every entry captured
+    // before it holds positions from the old pose, so it is logged for them.
+    void note_pose(const PoseStep& s) { pose_log.push_back(s); }
 
     // GPU undo ring (blood-moon 3b-iv part 2). Called from brush finalize right
     // after a new stroke's ring span [byte_off, byte_off+byte_len) is reserved and
@@ -142,6 +147,10 @@ public:
 private:
     std::deque<UndoEntry> undo_stack;
     std::deque<UndoEntry> redo_stack;
+    // Every object transform this entity has been through, in order. A few dozen
+    // bytes a step; kept until the history is cleared, since any entry may still
+    // need the steps after its pose_at.
+    std::vector<PoseStep> pose_log;
     size_t total_bytes = 0;
     std::vector<uint32_t> scratch_dirty;
     std::vector<uint32_t> scratch_gpu;
@@ -169,5 +178,6 @@ private:
     // the ring into the entry's CPU arrays (2c-iii) before reading them.
     bool apply(UndoEntry& e, MeshEntity& ent, Scene& scene, bool forward);
     bool apply_projection(const UndoEntry& e, MeshEntity& ent, bool forward);
+    void bring_to_pose(UndoEntry& e, Scene& scene);
     bool apply_level(const UndoEntry& e, MeshEntity& ent, bool forward);
 };

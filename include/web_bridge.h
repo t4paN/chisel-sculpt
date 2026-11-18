@@ -12,7 +12,7 @@ extern std::string g_web_import_path;
 extern std::string g_web_alpha_path;
 
 void web_download_file(const char* fs_path, const char* download_name);
-void web_open_file_picker();
+void web_open_file_picker(bool meshes_only = false);  // meshes_only: Object mode's "+" (no .chisel)
 void web_open_alpha_picker();
 // Pointer, pen pressure, pagehide and key listeners. Once, before the main loop.
 void web_install_dom_listeners();

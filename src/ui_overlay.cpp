@@ -878,11 +878,11 @@ void draw_help_popup(InputState& input, int win_w, int win_h) {
         help_row("Ctrl",     "Invert stroke");
         help_row("RMB",      "Colour palette (Paint)");
         help_head("MODES");
-        std::snprintf(k, sizeof(k), "%s %s %s %s", L(KeyAction::MODE_SCULPT),
-                      L(KeyAction::MODE_INSERT), L(KeyAction::MODE_SELECT), L(KeyAction::MODE_PAINT));
-        help_row(k, "Sculpt Insert Select Paint");
+        std::snprintf(k, sizeof(k), "%s %s %s %s %s", L(KeyAction::MODE_SCULPT), L(KeyAction::MODE_OBJECT),
+                      L(KeyAction::MODE_PAINT), L(KeyAction::MODE_RETOPO), L(KeyAction::MODE_UV));
+        help_row(k, "Sculpt Object Paint Retopo UV");
         std::snprintf(k, sizeof(k), "%s %s", L(KeyAction::BRUSH_PREV), L(KeyAction::BRUSH_NEXT));
-        help_row(k, "Rotate object (Select mode)");
+        help_row(k, "Rotate object (Object mode)");
         help_head("BRUSHES");
         std::snprintf(k, sizeof(k), "%s %s %s", L(KeyAction::BRUSH_DRAW),
                       L(KeyAction::BRUSH_CLAY), L(KeyAction::BRUSH_INFLATE));
@@ -1038,34 +1038,26 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
     ImGui::End();
     y += ops_h + row_gap;
 
-    // === Island 2 — Mode row: Edit / Insert / Select / Paint (keys 1-4) ===
+    // === Island 2 — Mode row: Edit / Object / Paint / Retopo / UV (keys 1-5) ===
     ImGui::SetNextWindowPos(ImVec2(margin, y), ImGuiCond_Always);
     ImGui::Begin("##IslandModes", nullptr, island_flags);
     {
-        static char mtips[4][64];
+        static char mtips[3][64];
         std::snprintf(mtips[0], sizeof(mtips[0]), "Sculpt (Shortcut: %s)", input.key_label(KeyAction::MODE_SCULPT));
-        std::snprintf(mtips[1], sizeof(mtips[1]), "Spawn a primitive (Shortcut: %s)", input.key_label(KeyAction::MODE_INSERT));
-        std::snprintf(mtips[2], sizeof(mtips[2]), "Pick / move objects (Shortcut: %s)", input.key_label(KeyAction::MODE_SELECT));
-        std::snprintf(mtips[3], sizeof(mtips[3]), "Vertex paint (Shortcut: %s)", input.key_label(KeyAction::MODE_PAINT));
+        std::snprintf(mtips[1], sizeof(mtips[1]), "Pick, move, place objects (Shortcut: %s)", input.key_label(KeyAction::MODE_OBJECT));
+        std::snprintf(mtips[2], sizeof(mtips[2]), "Vertex paint (Shortcut: %s)", input.key_label(KeyAction::MODE_PAINT));
         bool edit_sel = (mode == InputState::InteractionMode::EDIT) && !paint_on;
         if (squircle_button("Edit", "Edit", mtips[0],
                             ImVec2(calc_btn_w("Edit"), btn_h), edit_sel)) {
             input.enter_sculpt_mode();
         }
         ImGui::SameLine();
-        if (squircle_button("Insert", "Insert", mtips[1],
-                            ImVec2(calc_btn_w("Insert"), btn_h),
-                            mode == InputState::InteractionMode::INSERT)) {
-            input.interaction_mode = InputState::InteractionMode::INSERT;
+        if (squircle_button("Object", "Object", mtips[1],
+                            ImVec2(calc_btn_w("Object"), btn_h), input.object_mode())) {
+            input.enter_object_mode();
         }
         ImGui::SameLine();
-        if (squircle_button("Select", "Select", mtips[2],
-                            ImVec2(calc_btn_w("Select"), btn_h),
-                            mode == InputState::InteractionMode::SELECT)) {
-            input.interaction_mode = InputState::InteractionMode::SELECT;
-        }
-        ImGui::SameLine();
-        if (squircle_button("PaintMode", "Paint", mtips[3],
+        if (squircle_button("PaintMode", "Paint", mtips[2],
                             ImVec2(calc_btn_w("Paint"), btn_h), paint_on)) {
             input.enter_paint_mode();
         }
@@ -1091,9 +1083,26 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
         }
     }
 
-    // Insert shape picker: Sphere / Box / Cylinder. Only shown in insert mode; the
-    // selection drives which primitive InsertController spawns on the next click.
-    if (mode == InputState::InteractionMode::INSERT) {
+    // Object mode's tools: Select, Move, Scale, Rotate, then the shapes (Sphere / Box /
+    // Cylinder) and "+". A shape arms InsertController for the next click; Esc goes back
+    // to the arrow. "+" adds a mesh from a file.
+    if (input.object_mode()) {
+        using OT = InputState::ObjectTool;
+        struct Tl { const char* id; const char* label; const char* tip; OT tool; };
+        static const Tl tools[4] = {
+            {"SelectTool", "Select", "Pick, move, right-drag scales, Q / E turn", OT::SELECT},
+            {"MoveTool",   "Move",   "Gizmo: an arm, a corner, or the centre ring", OT::MOVE},
+            {"ScaleTool",  "Scale",  "Gizmo: an arm, a corner, or the centre ring", OT::SCALE},
+            {"RotateTool", "Rotate", "Gizmo: drag a ring", OT::ROTATE},
+        };
+        for (const Tl& t : tools) {
+            if (squircle_button(t.id, t.label, t.tip, ImVec2(calc_btn_w(t.label), btn_h),
+                                mode == InputState::InteractionMode::SELECT && input.object_tool == t.tool)) {
+                input.interaction_mode = InputState::InteractionMode::SELECT;
+                input.object_tool = t.tool;
+            }
+            ImGui::SameLine();
+        }
         struct ShapeBtn { const char* id; int kind; const char* tooltip; InputState::InsertShape shape; };
         ShapeBtn shapes[] = {
             {"ShapeSphere",   0, "Sphere",   InputState::InsertShape::SPHERE},
@@ -1102,10 +1111,15 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
         };
         for (int i = 0; i < 3; i++) {
             if (i > 0) ImGui::SameLine();
-            bool sel = input.insert_shape == shapes[i].shape;
-            if (shape_swatch(shapes[i].id, shapes[i].kind, shapes[i].tooltip, btn_h, sel))
+            bool sel = mode == InputState::InteractionMode::INSERT && input.insert_shape == shapes[i].shape;
+            if (shape_swatch(shapes[i].id, shapes[i].kind, shapes[i].tooltip, btn_h, sel)) {
                 input.insert_shape = shapes[i].shape;
+                input.interaction_mode = InputState::InteractionMode::INSERT;
+            }
         }
+        ImGui::SameLine();
+        if (squircle_button("AddMesh", "+", "Add a mesh from a file", ImVec2(btn_h, btn_h), false))
+            input.import_force_append = true;
     }
 
     // Paint colour boxes: active (left) + alternate (right). Q/E swap them. Only
@@ -2420,7 +2434,7 @@ static bool trash_button(const char* id, float size) {
 void draw_paint_layers_panel(InputState& input, Scene& scene, int win_w, int /*win_h*/) {
     if (input.current_brush != BrushType::PAINT || input.paint_target_density) return;
     if (input.interaction_mode == InputState::InteractionMode::RETOPO) return;   // own page
-    if (input.interaction_mode == InputState::InteractionMode::SELECT) return;   // the mesh list's spot
+    if (input.object_mode()) return;   // the mesh list's spot
     MeshEntity* ent = scene.find_entity(scene.active_mesh_id());
     if (!ent) return;
     const uint32_t eid = ent->id;

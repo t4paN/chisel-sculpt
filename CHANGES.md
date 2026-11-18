@@ -2,6 +2,15 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-18 — Object mode: five tools, gizmos, undo per mode
+
+- Mode keys: 1 Sculpt · 2 Object · 3 Paint · 4 Retopo · 5 UV. Object mode replaces the Select button.
+- Object dock: A Select (pick, drag moves, RMB scales, Q/E turn) · W Move gizmo · I Insert (shape tab, Q/E cycle, + appends a mesh file) · S Scale gizmo (per axis) · R Rotate rings (Shift = 5° steps). Ctrl+A selects all in Object mode.
+- With Mirror off, moving one half of a symmetrized pair moves that half alone (with a notice); it can't cross the mirror plane.
+- Undo is per mode: Ctrl+Z in Sculpt/Paint takes back strokes only, in Object mode moves/scales/turns and dock deletes/renames only. A stroke made before a turn comes off cleanly on the turned mesh; each mesh logs its transforms and old stroke positions are carried into the current pose. Ctrl+Z with nothing left in this mode says which mode has something.
+- Strokes after a turn or an uneven scale on a subdivided mesh no longer vanish at the next level switch: the surface frames are rebuilt as soon as the gesture ends.
+- The pose brush's hinge moves with its mesh under transforms.
+
 ## 2026-11-18 — Origin gizmo in Select mode; zoomed-out clipping
 
 - Select mode shows the world origin: X / Y / Z in red / green / blue, positive axes only, a fixed 80 px on screen, over the model and under the panels.

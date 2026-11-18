@@ -725,7 +725,7 @@ const char* uv_unwrap(const RetopoMesh& rm, const UvSettings& s, UvLayout& out, 
     out.clear();
     ms = 0.0;
     const uint32_t nf = rm.face_count();
-    if (nf == 0) return "no retopo mesh to unwrap (Build one in mode 0 first)";
+    if (nf == 0) return "no retopo mesh to unwrap (Build one in Retopo mode first)";
     const auto t0 = std::chrono::steady_clock::now();
 
     // Faces as triangles (the flattening works on triangles), quads put back below.

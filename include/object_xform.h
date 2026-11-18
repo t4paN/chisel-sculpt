@@ -5,6 +5,8 @@
 #include <vector>
 
 class Scene;
+class Camera;
+struct ImDrawList;
 
 // ---------------------------------------------------------------------------
 // Object-transform undo (Select mode: move / scale / Q-E spin).
@@ -18,13 +20,18 @@ class Scene;
 // the exact parametric inverse.
 //
 // Why this is a SCENE-level stack and not part of UndoStack: UndoStack is
-// per-entity, and one gesture can turn several selected meshes at once. And why
-// it interleaves with UndoStack rather than living in its own siloed history:
-// UndoEntry stores ABSOLUTE positions, so undoing a stroke that predates a
-// transform would teleport those vertices back into the pre-transform frame.
-// Strict last-in-first-out across both stacks is what makes that impossible —
-// you can never undo *through* a transform. Both stacks stamp their entries
-// from UndoStack::global_pushes, and Ctrl+Z pops whichever top is newer.
+// per-entity, and one gesture can turn several selected meshes at once.
+//
+// The two histories are SEPARATE, one per mode: Ctrl+Z in Sculpt walks the
+// strokes, Ctrl+Z in Object walks the transforms, and neither touches the other.
+// (Until 2026-11-18 they shared one timeline, and a Ctrl+Z in Sculpt took back a
+// turn the user had made in Object mode.) What makes that safe: UndoEntry stores
+// ABSOLUTE positions, so every transform that lands on a mesh — done, undone or
+// redone — is also appended to that mesh's pose log (UndoStack::note_pose). An
+// entry remembers how long the log was when it was captured, and before it is
+// applied its positions are carried through every pose step since (PoseStep,
+// pose_map_points). A stroke from before a turn then comes off the TURNED mesh
+// in the right place instead of teleporting back into the old frame.
 // ---------------------------------------------------------------------------
 
 // One entity's share of one gesture.
@@ -44,6 +51,10 @@ struct ObjectXformTarget {
     // SPIN: the two lobes turn as mirrors — see spin_apply_mesh().
     bool  mirror_lobes = false;
     float seam_eps     = 0.0f;   // latched too, so the replay splits the lobes identically
+    // MOVE with Mirror off: only the half on this side of the mirror plane moves (+1 / -1;
+    // 0 = the whole mesh). Live and replay both pick that half out by the sign of x, which
+    // is exact because the live move never lets the half cross the plane.
+    int8_t lobe        = 0;
 
     // --- SCALE / SPIN ---
     // Pivot is latched with the gesture too. It is recomputed per frame by the
@@ -53,7 +64,7 @@ struct ObjectXformTarget {
     // For a SPIN with mirror_lobes set, this is the +X LOBE's centre; the -x
     // lobe's is its reflection, which is why one Vec3 still describes both.
     Vec3  pivot  = {0, 0, 0};
-    float factor = 1.0f;        // SCALE: accumulated exponential factor
+    Vec3  scale  = {1, 1, 1};   // SCALE: accumulated factor per world axis (RMB: all three alike)
     Vec3  axis   = {0, 0, 1};   // SPIN: view axis, latched with the pivot
     float angle  = 0.0f;        // SPIN: total radians
 };
@@ -79,16 +90,48 @@ struct ObjectXformTarget {
 void spin_apply_mesh(Mesh& m, const Vec3& pivot, const Vec3& axis,
                      float angle, bool mirror_lobes);
 
+// The ONE definition of a scale: every vertex about `pivot`, by f per world axis. Live
+// drags and the undo replay both call it. A scale that differs between axes also bends
+// the normals (they take the inverse factors, renormalised) and, under multires, the
+// tangent frames, which is why it counts as a turn for last_bent_frames().
+void scale_apply_mesh(Mesh& m, const Vec3& pivot, const Vec3& f);
+inline bool scale_is_uneven(const Vec3& f) { return f.x != f.y || f.y != f.z; }
+
 // Latch one entity's pivot and lobe rule on the first frame of a spin gesture.
 // Writes xt.pivot and xt.mirror_lobes; leaves angle/axis to the caller.
 void spin_latch_target(const Mesh& m, bool mirror_on, ObjectXformTarget& xt);
+
+// The point maps under the three mesh functions: positions only, any arrays. The
+// mesh functions call these for their positions, and so does the pose log replay,
+// so a stroke carried across a transform lands exactly where the mesh went.
+void move_apply_points(const ObjectXformTarget& t, const Vec3& d,
+                       float* x, float* y, float* z, size_t n);
+void spin_apply_points(const Vec3& pivot, const Vec3& axis, float angle, bool mirror_lobes,
+                       float* x, float* y, float* z, size_t n,
+                       float* nx = nullptr, float* ny = nullptr, float* nz = nullptr);
+void scale_apply_points(const Vec3& pivot, const Vec3& f,
+                        float* x, float* y, float* z, size_t n);
 
 struct ObjectXform {
     enum class Kind : uint8_t { MOVE, SCALE, SPIN };
     Kind kind = Kind::MOVE;
     std::vector<ObjectXformTarget> targets;
-    uint64_t seq = 0;   // shared edit clock with UndoEntry::seq
+    uint64_t seq = 0;   // edit clock; orders this stack against mesh deletes/renames
 };
+
+// One transform as it landed on one mesh: the gesture, or its inverse when it was
+// undone. Appended to that mesh's pose log (UndoStack::note_pose).
+struct PoseStep {
+    ObjectXform::Kind kind = ObjectXform::Kind::MOVE;
+    ObjectXformTarget t;
+    bool inverse = false;
+    // A turn or an uneven scale: directions on the surface changed with it.
+    bool bends() const {
+        return kind == ObjectXform::Kind::SPIN
+            || (kind == ObjectXform::Kind::SCALE && scale_is_uneven(t.scale));
+    }
+};
+void pose_map_points(const PoseStep& s, float* x, float* y, float* z, size_t n);
 
 class ObjectXformStack {
 public:
@@ -100,9 +143,7 @@ public:
     bool gesture_open() const { return open_; }
     ObjectXform::Kind gesture_kind() const { return pending_.kind; }
     // Push if the gesture actually moved something; no-op when none is open.
-    // Takes the scene because landing a step has to kill the redo arm of every
-    // entity it touched — the two stacks share one timeline, so a new step on
-    // either branches away from whatever the other had queued.
+    // Takes the scene because each mesh the step moved logs it as a pose step.
     void commit(Scene& scene);
     void abandon();
 
@@ -111,33 +152,20 @@ public:
     bool     can_redo() const { return !redo_.empty(); }
     uint64_t undo_seq() const { return undo_.empty() ? 0 : undo_.back().seq; }
     uint64_t redo_seq() const { return redo_.empty() ? 0 : redo_.back().seq; }
+    size_t   undo_depth() const { return undo_.size(); }
+    size_t   redo_depth() const { return redo_.size(); }
     // Both return whether the geometry actually changed. Caller re-syncs GPU
     // residency, refreshes framing bounds and dirties the screen buffers.
     bool undo(Scene& scene);
     bool redo(Scene& scene);
-    // Id of a targeted entity whose own sculpt history has an entry NEWER than
-    // the transform on top, or 0 if none. UndoStack is per-entity and Ctrl+Z
-    // only ever pops the ACTIVE one, so the seq comparison at the call site
-    // orders this stack against that entity alone. If a transform moved three
-    // meshes and one of the other two was sculpted afterwards, undoing the
-    // transform now would leave that stroke's absolute positions stranded in a
-    // frame the mesh is no longer in. Refuse and say which mesh to clear first;
-    // closing the hole properly needs the scene-level undo that road2v2 backlog
-    // item 4 is about.
-    uint32_t newer_edit_entity(Scene& scene) const;
-    // Was the step just undone/redone a spin? Tangent frames are directions on
-    // the base surface, so only a turn invalidates them.
-    bool last_was_spin() const { return last_spin_; }
+    // Did the step just undone/redone bend directions on the surface — a spin, or a
+    // scale that differs between axes? Tangent frames are directions on the base
+    // surface, so only those invalidate them.
+    bool last_bent_frames() const { return last_spin_; }
     // "move" / "scale" / "rotation" — for the notification line.
     const char* last_label() const;
 
     void clear();
-    void clear_redo();
-
-    // global_pushes as of the last undo. Any push by anyone since then means the
-    // user branched off this history, so the redo arm is dead — same rule
-    // UndoStack::push applies to its own redo stack, just across two stacks.
-    uint64_t redo_clock = 0;
 
 private:
     void apply(const ObjectXform& x, bool inverse, Scene& scene);
@@ -149,3 +177,56 @@ private:
     std::deque<ObjectXform> undo_, redo_;
     std::vector<uint32_t>   dirty_;   // reused full-range dirty list
 };
+
+// ---------------------------------------------------------------------------
+// Object mode's Move, Scale and Rotate gizmos: drawn on the selection, grabbed by the
+// press. World axes (a transform is baked into the vertices, so there is no local
+// frame), a fixed size on screen. Move and Scale: one arm per axis (a cone on Move's
+// tips, a square on Scale's), a right-angle corner between each two (those two
+// together) and a centre ring (Move: free in the view plane; Scale: all three).
+// Rotate: one ring per axis.
+// ---------------------------------------------------------------------------
+enum GizmoKind { GK_MOVE, GK_SCALE, GK_ROTATE };
+
+enum GizmoHandle {
+    GZ_X, GZ_Y, GZ_Z,          // an axis arm (Move / Scale) or the ring about that axis (Rotate)
+    GZ_YZ, GZ_ZX, GZ_XY,       // Move / Scale: the corner between two axes (GZ_YZ = 3 + the axis left out)
+    GZ_ALL,                    // Move / Scale: the centre ring (Move: the view plane; Scale: all three)
+};
+
+struct GizmoView {
+    static constexpr int kRingN = 64;
+    static constexpr int kConeN = 16;
+    bool  ok = false;
+    float cx = 0, cy = 0;                 // the pivot on screen
+    float arm_world = 0;                  // an arm's length in world units
+    float px_world = 0;                   // the world size of a screen pixel at the pivot
+    float ax[3][2] = {};                  // each axis arm, screen px (foreshortened)
+    float ring[3][kRingN][2] = {};        // Rotate: the rings, screen px
+    bool  front[3][kRingN] = {};          // that ring point is nearer the eye than the pivot
+    float cone[3][kConeN + 1][2] = {};    // Move: each tip's cone, its base ring then the apex
+    bool  cone_base_shows[3] = {};        // the cone points away from the eye: its base faces you
+};
+
+// The selection's centre: the mean of its meshes' centres, cached until the scene or the
+// selection changes, or selection_centre_moved() says a live drag shifted it. Under
+// `mirror_scale` its x is 0, the plane the RMB scale works about with Mirror on.
+bool selection_centre(Scene& scene, bool mirror_scale, Vec3& out,
+                      uint32_t lobe_entity = 0, int lobe_side = 0);
+// Lobe moves (Mirror off, a symmetrized pair). A pair is two halves either side of the
+// mirror plane with no triangle touching or crossing it (band = how near counts as on it).
+bool  mesh_is_pair(const Mesh& m, float band);
+// The half (+1 / -1) whose vertices come nearest the pointer on screen; 0 if none show.
+int   lobe_under_pointer(const Mesh& m, const Camera& cam, int win_w, int win_h, float mx, float my);
+// The half's nearest approach to the plane, as |x|; a huge value when that half is empty.
+float lobe_inner_x(const Mesh& m, int side);
+// Under a lobe move, the gizmo sits on the chosen half of the one selected pair
+// (lobe_entity / lobe_side); 0 / 0 = the whole selection's centre.
+void selection_centre_moved();
+
+bool gizmo_view(const Camera& cam, const Vec3& pivot, int win_w, int win_h, int kind, GizmoView& g);
+int  gizmo_hit(const GizmoView& g, int kind, float mx, float my);   // a GizmoHandle, or -1
+void gizmo_draw(ImDrawList* dl, const GizmoView& g, int kind, int hot);
+// Which gizmo the current Object tool shows, or -1 for none (Select).
+inline int gizmo_kind_of(int object_tool) { return object_tool == 1 ? GK_MOVE : object_tool == 2 ? GK_SCALE
+                                                 : object_tool == 3 ? GK_ROTATE : -1; }

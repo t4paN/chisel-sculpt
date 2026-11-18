@@ -52,11 +52,10 @@ mesh to sculpt; left-drag off the mesh to orbit. That's 90% of the app right the
 | Key | Mode | What it's for |
 |---|---|---|
 | 1 | **Edit** | Sculpting the active mesh with brushes |
-| 2 | **Insert** | Dropping new sphere primitives into the scene |
-| 3 | **Select** | Picking, moving, scaling, deleting whole objects |
-| 4 | **Paint** | Vertex-colour painting |
-| 0 | **Retopo** | Drawing a clean low-poly over the sculpt (see [Retopology](#retopology-retopo-mode-0)) |
-| 9 | **UV** | Unwrapping the low-poly and baking the sculpt into texture maps (see [UV mode](#uv-mode-9-unwrap-and-bake)) |
+| 2 | **Object** | Picking, moving, turning, deleting whole objects, and placing new spheres, boxes and cylinders |
+| 3 | **Paint** | Vertex-colour painting |
+| 4 | **Retopo** | Drawing a clean low-poly over the sculpt (see [Retopology](#retopology-retopo-mode-4)) |
+| 5 | **UV** | Unwrapping the low-poly and baking the sculpt into texture maps (see [UV mode](#uv-mode-5-unwrap-and-bake)) |
 
 ## Sculpting (Edit mode)
 
@@ -207,7 +206,7 @@ The AppImage runs on Wayland where the desktop does and on X11 elsewhere. Start 
 
 **X** toggles X-axis mirror. Strokes, masks, and paint apply symmetrically in real
 time. The HUD shows which mirror mode is live. Meshes inserted while mirroring is on can
-be committed as a symmetric pair (see Insert mode). Voxel merge can produce a
+be committed as a symmetric pair (see Object mode). Voxel merge can produce a
 mirror-symmetric result that stays cleanly editable under mirror afterwards.
 
 By default the mirror is **World Space**: the dab is reflected in the centre plane and
@@ -256,44 +255,61 @@ replaced, so turn it off for lopsided models. The dialog says which one you're a
 
 ### The Meshes panel
 
-Sculpt and Select modes list every mesh in the scene: an eye, a name and a trash can per
+Sculpt and Object modes list every mesh in the scene: an eye, a name and a trash can per
 row. Click a row to make that mesh the active one, Ctrl+click to add it to the selection,
 double-click to rename it; the trash takes two clicks. A hidden mesh isn't drawn and
 can't be picked. **Ctrl+Z** brings back a deleted mesh, with its sculpt, retopo and
 history, from any mode.
 
 Each mesh keeps its **own retopo** (and UV layout and bake): retopo and UV mode work on
-the active mesh's. Moving, scaling or spinning a mesh in Select mode carries its retopo
+the active mesh's. Moving, scaling or spinning a mesh in Object mode carries its retopo
 along; a voxel merge joins the merged meshes' retopos into the result.
 
-### Insert mode (2)
+### Object mode (2)
 
-Click to place a sphere, drag to scale it, release to commit. If the placement
-straddles the mirror plane it snap-commits as one centred mesh; otherwise you're
-prompted: **Y** commits a symmetric pair, **N** keeps it single. Each object gets its
-own undo history and subdivision stack.
+Object mode's dock holds five tools; 2 lands you on Select.
 
-### Select mode (3)
+| Key | Tool | What it does |
+|---|---|---|
+| A | **Select** | Pick, move, turn (the table below); **Ctrl+A** selects every mesh |
+| W | **Move** | A gizmo on the selection: drag an arm (the one with the cone) to move along that axis only, the right-angle corner between two arms to move across those two, the centre ring to move freely in the view |
+| I | **Insert** | Place a sphere, box or cylinder; the shape is on the tab beside the button |
+| S | **Scale** | A gizmo on the selection: drag an arm to scale along that axis only, the right-angle corner between two arms to scale those two, the centre ring to scale all three |
+| R | **Rotate** | Three rings on the selection, one per axis: grab one (it lights up) and drag any way to turn about that axis; hold **Shift** to turn in 5° steps, with the running total shown |
 
-A small gizmo marks the world origin: X red, Y green, Z blue. Mirror's plane runs through
+**Placing a shape.** Click the tab beside Insert to pick Sphere, Box or Cylinder (or press
+**Q / E** with Insert on to step through them), click the model to place it, drag to scale
+it, release to commit. If the placement straddles the mirror plane it snap-commits as one
+centred mesh; otherwise you're prompted: **Y** commits a symmetric pair, **N** keeps it
+single. Each object gets its own undo history and subdivision stack. Once it's placed you're
+back on Select with the new mesh picked; **Esc** puts the shape down unplaced.
+
+**Adding a mesh from a file.** The **+** at the end of the shapes opens a mesh (OBJ, PLY,
+STL, GLB) and always adds it to the scene, at its own scale.
+
+**Move, Scale and Rotate** work on world axes, about the selection's centre (with Mirror on,
+Scale works about the mirror plane so a symmetric pair stays one). A press off the gizmo picks
+and moves as Select does.
+
+**Select.** Thin grey lines run from the world origin along the positive X, Y and Z axes (tinted red, green, blue). Mirror's plane runs through
 it, so slide a model onto it to make it mirror-ready.
 
 | Input | Action |
 |---|---|
 | LMB | Select an object (any object, not just the active one) |
 | Ctrl + LMB | Add / remove from the selection — including the active mesh; peeling out the last one deselects the whole scene |
+| Ctrl + A | Select every mesh in the scene |
 | LMB + drag | Move the selected object in the view plane |
 | RMB + drag | Scale the selected object (Ctrl+RMB stays camera zoom) |
 | Q / E | Spin the selection anticlockwise / clockwise **about the view axis** — hold to turn continuously (90°/sec, no acceleration). Face the model from any angle and the turn always reads the way it looks on screen. Every selected piece turns about **its own centre**, so a selection spins in place rather than orbiting a shared point |
 | Shift + Q / E | Turn the selection 5° per press (holding repeats), each press its own undo step. Looking straight down an axis (the front / side / top views, or within ~20° of one) it turns about that exact world axis, so 18 presses make a clean 90°; a notice shows the running total |
-| Ctrl + Z | Undo the last move / scale / spin — works right here in Select mode |
+| Ctrl + Z | Undo the last move / scale / spin — works right here in Object mode |
 | Delete | Delete the selected object |
 
 Move, scale and spin are undoable. One press-to-release is one step back, so holding
-**E** for two seconds costs a single **Ctrl+Z**, not a hundred. They share their
-running order with the sculpt history: you cannot undo *past* a transform to reach a
-stroke underneath it, which is what keeps a stroke from being restored into the wrong
-frame.
+**E** for two seconds costs a single **Ctrl+Z**, not a hundred. Object mode has its own
+history: **Ctrl+Z** here takes back moves, scales, turns and dock deletes/renames, never a
+stroke. Undoing strokes in Sculpt mode leaves the object where you put it.
 
 **Spinning under X symmetry.** A symmetrized *pair* — two separate lobes, like a pair of
 ears — turns as a mirrored pair: the right lobe goes clockwise while the left goes
@@ -369,12 +385,12 @@ subdivision, remeshing, and voxel merges. PLY export carries it out of the app,
 standing upright (Z-up); re-importing a Chisel Weasel PLY turns it
 back.
 
-## Retopology (Retopo mode, 0)
+## Retopology (Retopo mode, 4)
 
 A low-poly cage drawn by hand over the sculpt, for baking and game use. It lives beside
 the sculpt and never changes it: the sculpt can keep changing underneath, and the cage
 snaps back onto whatever is there. Every mesh has its own; retopo works on the **active
-mesh's**, so pick the one you mean (Meshes panel, or Select mode) before pressing `0`.
+mesh's**, so pick the one you mean (Meshes panel, or Object mode) before pressing `4`.
 
 **Strokes become quads.** Draw a fat stroke and it is built the moment the pen lifts:
 closed (back near its start) it is a **donut** (rings round an eye or a mouth), open it
@@ -447,13 +463,13 @@ UV mode's big export button: **GLB**, **OBJ** or **STL**, quads as quads in an O
 once it's unwrapped and any baked maps ticked. The toolbar's Export
 (Ctrl+E) lists every mesh's sculpt (`-HI`) and retopo (`-LO`) side by side; opening an OBJ
 or GLB with a `<mesh>-LO` beside its `<mesh>-HI` brings it back as that mesh's retopo,
-UVs and seams included. To bake in Chisel Weasel itself, go on to [UV mode](#uv-mode-9-unwrap-and-bake).
+UVs and seams included. To bake in Chisel Weasel itself, go on to [UV mode](#uv-mode-5-unwrap-and-bake).
 
-## UV mode (9): unwrap and bake
+## UV mode (5): unwrap and bake
 
 The last step of the low-poly workflow: lay the retopo mesh flat into a square (its UV
 layout), then bake the sculpt's detail and paint into textures for it. Build a retopo
-in mode 0 first; UV mode works on it and never changes the sculpt.
+in Retopo mode first; UV mode works on it and never changes the sculpt.
 
 **Seams.** Seams are made in two steps: mark the edges, then cut them.
 - **Marking.** Drag on the model to brush edges yellow: an edge is marked once 60% of it
@@ -562,8 +578,9 @@ all undoable.
 Select-mode object transforms (move, scale, **Q**/**E** spin) go on a separate
 scene-wide stack, because one gesture can turn several meshes at once. They store the
 transform itself rather than a copy of every vertex, so a spin on a million-vertex
-mesh costs bytes. The two stacks share one running order, so **Ctrl+Z** always takes
-back whatever you did last, whichever kind it was.
+mesh costs bytes. The two histories are separate, one per mode: **Ctrl+Z** in Sculpt (or
+Paint) walks back the strokes, in Object mode the transforms, and neither touches the
+other. A stroke made before a turn still comes off cleanly after it, on the turned mesh.
 
 ## Files
 
@@ -612,7 +629,7 @@ the first file that starts with it, **Tab** completes the name and **Enter** ope
 |---|---|---|
 | Import (Ctrl+O, or drop a file) | OBJ, PLY, STL, GLB / glTF, .chisel | One picker for all of them; each OBJ / GLB object becomes its own mesh. A GLB's colour texture comes along and shows on the sculpt (paint tints it); compressed GLBs (Draco / meshopt) aren't read |
 | Export (Ctrl+E / toolbar) | OBJ, STL, PLY | Every mesh's sculpt (`-HI`) and retopo (`-LO`); PLY carries vertex paint; STL is print-ready — pair it with voxel merge |
-| Export from UV mode | PNG, GLB, OBJ + MTL, STL | The UV map, and the low-poly with its baked maps (see [UV mode](#uv-mode-9-unwrap-and-bake)) |
+| Export from UV mode | PNG, GLB, OBJ + MTL, STL | The UV map, and the low-poly with its baked maps (see [UV mode](#uv-mode-5-unwrap-and-bake)) |
 
 ### On the web
 

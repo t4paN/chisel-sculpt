@@ -94,11 +94,11 @@ void web_download_file(const char* fs_path, const char* download_name) {
 // run within a few seconds of the click/keypress that requested it (it does:
 // the request flag is consumed the next frame). Result arrives whenever the
 // user picks — chisel_web_import_done gets the MEMFS path.
-void web_open_file_picker() {
+void web_open_file_picker(bool meshes_only) {
     EM_ASM({
         var inp = document.createElement('input');
         inp.type = 'file';
-        inp.accept = '.chisel,.obj,.ply,.stl,.glb';
+        inp.accept = $0 ? '.obj,.ply,.stl,.glb' : '.chisel,.obj,.ply,.stl,.glb';
         inp.onchange = function() {
             var f = inp.files && inp.files[0];
             if (!f) return;
@@ -109,7 +109,7 @@ void web_open_file_picker() {
             });
         };
         inp.click();
-    });
+    }, meshes_only ? 1 : 0);
 }
 
 // Brush-alpha image picker — twin of web_open_file_picker, image types, lands in

@@ -30,13 +30,26 @@ namespace {
 constexpr int C = GLFW_MOD_CONTROL, S = GLFW_MOD_SHIFT;
 const KeyActionInfo kKeyActions[(int)KeyAction::COUNT] = {
     {"mode_sculpt",   "Modes",   "Sculpt mode",         nullptr, {GLFW_KEY_1, 0}},
-    {"mode_insert",   "Modes",   "Insert mode",         nullptr, {GLFW_KEY_2, 0}},
-    {"mode_select",   "Modes",   "Select mode",         nullptr, {GLFW_KEY_3, 0}},
-    {"mode_paint",    "Modes",   "Paint mode",          nullptr, {GLFW_KEY_4, 0}},
+    // "mode_insert" is Object mode's id: it was the Insert key, and a saved rebind of it
+    // carries over. The old "mode_select" is gone (Object mode's arrow).
+    {"mode_insert",   "Modes",   "Object mode",
+        "Pick, move and turn objects; its dock also places spheres, boxes and cylinders", {GLFW_KEY_2, 0}},
+    {"mode_paint",    "Modes",   "Paint mode",          nullptr, {GLFW_KEY_3, 0}},
     {"mode_retopo",   "Modes",   "Retopo mode",
-        "Sketch strokes on the model, then Build turns them into quads", {GLFW_KEY_0, 0}},
+        "Sketch strokes on the model, then Build turns them into quads", {GLFW_KEY_4, 0}},
     {"mode_uv",       "Modes",   "UV mode",
-        "Lay the retopo mesh flat for texturing (Unwrap in its panel)", {GLFW_KEY_9, 0}},
+        "Lay the retopo mesh flat for texturing (Unwrap in its panel)", {GLFW_KEY_5, 0}},
+    {"obj_select",    "Object mode", "Select",
+        "Click picks, drag moves, right-drag scales evenly, Q / E turn", {GLFW_KEY_A, 0}, KeyScope::Object},
+    {"obj_move",      "Object mode", "Move",
+        "Gizmo: drag an arm along its axis, a corner across those two, the centre ring in the view", {GLFW_KEY_W, 0}, KeyScope::Object},
+    {"obj_insert",    "Object mode", "Insert",
+        "Click the model to place the shape; Q / E change the shape", {GLFW_KEY_I, 0}, KeyScope::Object},
+    {"obj_scale",     "Object mode", "Scale",
+        "Gizmo: drag an axis, the corner between two, or the centre ring for all three", {GLFW_KEY_S, 0}, KeyScope::Object},
+    {"obj_rotate",    "Object mode", "Rotate",
+        "Gizmo: drag a ring to turn about its axis; Shift turns in 5 degree steps", {GLFW_KEY_R, 0}, KeyScope::Object},
+    {"obj_select_all", "Object mode", "Select all", "Every mesh in the scene", {GLFW_KEY_A, C}, KeyScope::Object},
     {"brush_draw",    "Sculpt brushes", "Draw",      nullptr, {GLFW_KEY_D, 0}, KeyScope::Sculpt},
     {"brush_clay",    "Sculpt brushes", "Clay",      nullptr, {GLFW_KEY_T, 0}, KeyScope::Sculpt},
     {"brush_inflate", "Sculpt brushes", "Inflate",   nullptr, {GLFW_KEY_I, 0}, KeyScope::Sculpt},
@@ -50,9 +63,9 @@ const KeyActionInfo kKeyActions[(int)KeyAction::COUNT] = {
         "Fine detail stamps: lands on press, random spin and size. Right-click: jitter and Scatter (one dot becomes many)", {GLFW_KEY_R, 0}, KeyScope::Sculpt},
     {"brush_mask",    "Brushes", "Mask",                nullptr, {GLFW_KEY_M, 0}},
     {"brush_prev",    "Brushes", "Previous alpha",
-        "Draw and Mask. In Paint mode: swap colours. In Select mode: hold to spin the selection; Shift+ turns it 5 degrees per press.", {GLFW_KEY_Q, 0}},
+        "Draw and Mask. In Paint mode: swap colours. In Object mode: hold to spin the selection; Shift+ turns it 5 degrees per press. Insert: change the shape.", {GLFW_KEY_Q, 0}},
     {"brush_next",    "Brushes", "Next alpha",
-        "Draw and Mask. In Paint mode: swap colours. In Select mode: hold to spin the selection; Shift+ turns it 5 degrees per press.", {GLFW_KEY_E, 0}},
+        "Draw and Mask. In Paint mode: swap colours. In Object mode: hold to spin the selection; Shift+ turns it 5 degrees per press. Insert: change the shape.", {GLFW_KEY_E, 0}},
     {"paint_bucket",  "Paint mode", "Fill bucket",      "Click an unmasked area to fill it. Ctrl: erase it", {GLFW_KEY_B, 0}, KeyScope::Paint},
     {"paint_picker",  "Paint mode", "Colour picker",    "Click the model to pick its colour", {GLFW_KEY_C, 0}, KeyScope::Paint},
     {"paint_brush",   "Paint mode", "Paint brush",
@@ -423,6 +436,12 @@ void InputState::enter_sculpt_mode() {
         clear_smooth_lock();
         switch_brush(BrushType::DRAW);
     }
+}
+
+void InputState::enter_object_mode() {
+    interaction_mode = InteractionMode::SELECT;
+    object_tool = ObjectTool::SELECT;
+    color_pick_active = false;
 }
 
 void InputState::clear_smooth_lock() {
@@ -1883,15 +1902,36 @@ static void run_key_action(GLFWwindow* w, KeyAction a, bool repeat) {
             in.enter_sculpt_mode();
             notify("Edit", 1.0f);
             break;
-        case KeyAction::MODE_INSERT:
-            in.interaction_mode = InputState::InteractionMode::INSERT;
-            in.color_pick_active = false;
-            notify("Insert mode", 1.5f);
+        case KeyAction::MODE_OBJECT:
+            in.enter_object_mode();
+            notify("Object", 1.0f);
             break;
-        case KeyAction::MODE_SELECT:
+        case KeyAction::OBJ_SELECT:
             in.interaction_mode = InputState::InteractionMode::SELECT;
-            in.color_pick_active = false;
+            in.object_tool = InputState::ObjectTool::SELECT;
             notify("Select", 1.0f);
+            break;
+        case KeyAction::OBJ_MOVE:
+            in.interaction_mode = InputState::InteractionMode::SELECT;
+            in.object_tool = InputState::ObjectTool::MOVE;
+            notify("Move", 1.0f);
+            break;
+        case KeyAction::OBJ_SELECT_ALL:
+            in.select_all_requested = true;
+            break;
+        case KeyAction::OBJ_INSERT:
+            in.interaction_mode = InputState::InteractionMode::INSERT;
+            notify("Insert", 1.0f);
+            break;
+        case KeyAction::OBJ_SCALE:
+            in.interaction_mode = InputState::InteractionMode::SELECT;
+            in.object_tool = InputState::ObjectTool::SCALE;
+            notify("Scale", 1.0f);
+            break;
+        case KeyAction::OBJ_ROTATE:
+            in.interaction_mode = InputState::InteractionMode::SELECT;
+            in.object_tool = InputState::ObjectTool::ROTATE;
+            notify("Rotate", 1.0f);
             break;
         case KeyAction::MODE_PAINT:
             // Paint mode: sculpt-style interaction (EDIT) with the paint brush.
@@ -2032,6 +2072,14 @@ static void run_key_action(GLFWwindow* w, KeyAction a, bool repeat) {
             // they step 5 degrees per press instead (app_idle), to land a clean 90.
             if (select_mode) {
                 if (step_spin) in.spin_step += (a == KeyAction::BRUSH_NEXT ? 1 : -1);
+                break;
+            }
+            // Insert: step through the shapes, the way they step the alphas.
+            if (insert_mode) {
+                const int n = 3, d = a == KeyAction::BRUSH_NEXT ? 1 : -1;
+                in.insert_shape = (InputState::InsertShape)(((int)in.insert_shape + d + n) % n);
+                static const char* names[3] = {"Sphere", "Box", "Cylinder"};
+                notify(names[(int)in.insert_shape], 1.0f);
                 break;
             }
             if (in.interaction_mode != InputState::InteractionMode::EDIT || in.is_smooth_active()) break;

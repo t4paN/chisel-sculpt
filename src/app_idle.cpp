@@ -8,6 +8,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <cmath>
+#include <algorithm>
 
 #include "mesh.h"
 #include "camera.h"
@@ -68,8 +69,14 @@ void app_idle_update(App& a, int win_w, int win_h, float dx, float dy) {
         wrap_cursor(window, input, win_w, win_h);
     }
 
-    // Object move: drag selected meshes in view-plane
-    if (input.drag_mode == InputState::DragMode::MOVE_OBJECT) {
+    // Object move: drag selected meshes in view-plane. The Move tool's gizmo comes
+    // through here too: an arm moves along its axis only, a corner across the two it
+    // sits between, the centre ring in the view plane — each tracking the pointer.
+    const bool gizmo_move = input.drag_mode == InputState::DragMode::GIZMO
+                         && input.interaction_mode == InputState::InteractionMode::SELECT
+                         && input.object_tool == InputState::ObjectTool::MOVE
+                         && input.gizmo_handle >= 0;
+    if (input.drag_mode == InputState::DragMode::MOVE_OBJECT || (gizmo_move && (dx != 0.0f || dy != 0.0f))) {
         // Framing-relative, matching Camera::pan — see the note there for why
         // this is not keyed off camera.distance.
         float scale = camera.half_height() * 0.0048284f;
@@ -82,6 +89,34 @@ void app_idle_update(App& a, int win_w, int win_h, float dx, float dy) {
         // moves right; -dy (GLFW y grows downward, so cursor up is dy<0) moves
         // up. Both selectmove specs agree on this.
         Vec3 delta = right * (dx * scale) + up * (-dy * scale);
+        Vec3 gpivot;
+        GizmoView g;
+        if (gizmo_move && selection_centre(scene, false, gpivot, input.mirror_x ? 0 : input.lobe_entity,
+                                           input.lobe_side)
+            && gizmo_view(camera, gpivot, win_w, win_h, GK_MOVE, g)) {
+            const int h = input.gizmo_handle;
+            const Vec3 e[3] = {Vec3(1, 0, 0), Vec3(0, 1, 0), Vec3(0, 0, 1)};
+            if (h == GZ_ALL) {
+                delta = right * (dx * g.px_world) + up * (-dy * g.px_world);
+            } else if (h <= GZ_Z) {
+                // The pointer's travel along the arm on screen, as world units along it.
+                const float ux = g.ax[h][0], uy = g.ax[h][1], l2 = ux * ux + uy * uy;
+                delta = l2 > 1.0f ? e[h] * ((dx * ux + dy * uy) / l2 * g.arm_world) : Vec3(0, 0, 0);
+            } else {
+                // Split the pointer's travel between the two arms' screen directions.
+                const int a1 = (h - GZ_YZ + 1) % 3, a2 = (h - GZ_YZ + 2) % 3;
+                const float ax = g.ax[a1][0], ay = g.ax[a1][1], bx = g.ax[a2][0], by = g.ax[a2][1];
+                const float det = ax * by - ay * bx;
+                if (std::fabs(det) > 60.0f) {
+                    const float s1 = (dx * by - dy * bx) / det, s2 = (ax * dy - ay * dx) / det;
+                    delta = (e[a1] * s1 + e[a2] * s2) * g.arm_world;
+                } else {
+                    delta = Vec3(0, 0, 0);
+                }
+            }
+        } else if (gizmo_move) {
+            delta = Vec3(0, 0, 0);
+        }
 
         if (delta.x != 0.0f || delta.y != 0.0f || delta.z != 0.0f) {
             // 2c-iii: if the active entity was left stale by the flipped
@@ -104,10 +139,18 @@ void app_idle_update(App& a, int win_w, int win_h, float dx, float dy) {
                 //   with symmetry on, move the lobes as exact mirrors
                 //   (spread/converge); with symmetry off, translate freely.
                 // - Off-centre pieces always translate freely on all axes.
+                // Record it. The X rule is latched on this entity's first
+                // frame of the drag and reused for the rest of it, so the
+                // undo replays the same split it was moved with even if a
+                // lobe drifts close enough to the seam to re-classify.
+                xforms.begin(ObjectXform::Kind::MOVE, scene);
+                ObjectXformTarget& xt = xforms.target(sel_id);
+                const bool first = xt.delta.x == 0.0f && xt.delta.y == 0.0f && xt.delta.z == 0.0f;
                 Vec3 c; float r;
-                e->mesh.compute_bounding_sphere(c, r);
+                if (first) e->mesh.compute_bounding_sphere(c, r);
+                else { c = Vec3(0, 0, 0); r = 1.0f; }
                 float rr = (r > 0.0f) ? r : 1.0f;
-                bool centered = std::fabs(c.x) < 1e-3f * rr;
+                bool centered = first && std::fabs(c.x) < 1e-3f * rr;
                 float seam_eps = 1e-4f * rr;
 
                 bool spans_seam = false;
@@ -127,38 +170,47 @@ void app_idle_update(App& a, int win_w, int win_h, float dx, float dy) {
                 }
                 bool lock_x = centered && spans_seam;
                 bool mirror_lobes = centered && !spans_seam && input.mirror_x;
+                int  lobe = 0;
 
-                // Record it. The X rule is latched on this entity's first
-                // frame of the drag and reused for the rest of it, so the
-                // undo replays the same split it was moved with even if a
-                // lobe drifts close enough to the seam to re-classify.
-                xforms.begin(ObjectXform::Kind::MOVE, scene);
-                ObjectXformTarget& xt = xforms.target(sel_id);
-                if (xt.delta.x == 0.0f && xt.delta.y == 0.0f && xt.delta.z == 0.0f) {
+                if (first) {
+                    // Mirror off and the clicked half of a pair: that half alone, which
+                    // breaks the pair's symmetry (said once, while it still held).
+                    if (!input.mirror_x && sel_id == input.lobe_entity && input.lobe_side != 0
+                        && mesh_is_pair(e->mesh, 1e-3f * rr)) {
+                        lobe = input.lobe_side;
+                        lock_x = mirror_lobes = false;
+                        if (centered) {
+                            std::snprintf(input.notification, sizeof(input.notification),
+                                          "Pair symmetry disabled, revert with Ctrl+Z to keep");
+                            input.notification_timer = 3.0f;
+                        }
+                    }
                     xt.lock_x       = lock_x;
                     xt.mirror_lobes = mirror_lobes;
                     xt.seam_eps     = seam_eps;
+                    xt.lobe         = (int8_t)lobe;
                 } else {
                     lock_x       = xt.lock_x;
                     mirror_lobes = xt.mirror_lobes;
                     seam_eps     = xt.seam_eps;
+                    lobe         = xt.lobe;
                 }
-                xt.delta += delta;
+                Vec3 d = delta;
+                if (lobe) {
+                    // The half may not reach the plane: the undo picks it out by the
+                    // sign of x, so crossing over would strand it. Its base cage too.
+                    float inner = lobe_inner_x(e->mesh, lobe);
+                    if (e->multires.locked) inner = std::min(inner, lobe_inner_x(e->multires.base, lobe));
+                    const float floor_dx = 2.0f * seam_eps - inner;   // least lobe * dx allowed
+                    if (lobe * d.x < floor_dx) d.x = lobe * floor_dx;
+                }
+                xt.delta += d;
 
+                // xt carries the rule latched above (lock_x / lobes / seam / half),
+                // and the undo replay and the pose log run this same function.
                 auto move_mesh = [&](Mesh& m) {
-                    uint32_t n = m.vertex_count();
-                    for (uint32_t v = 0; v < n; v++) {
-                        float sx = delta.x;
-                        if (lock_x) sx = 0.0f;
-                        else if (mirror_lobes) {
-                            float x = m.pos_x[v];
-                            sx = (x >  seam_eps) ?  delta.x
-                               : (x < -seam_eps) ? -delta.x : 0.0f;
-                        }
-                        m.pos_x[v] += sx;
-                        m.pos_y[v] += delta.y;
-                        m.pos_z[v] += delta.z;
-                    }
+                    move_apply_points(xt, d, m.pos_x.data(), m.pos_y.data(), m.pos_z.data(),
+                                      m.vertex_count());
                 };
                 move_mesh(e->mesh);
                 e->mesh.invalidate_mirror_symmetry();   // see the scale block
@@ -177,38 +229,57 @@ void app_idle_update(App& a, int win_w, int win_h, float dx, float dy) {
                 for (uint32_t i = 0; i < vc; i++) local_dirty[i] = i;
                 scene.sync_partial_entity(sel_id, local_dirty);
             }
+            selection_centre_moved();   // the gizmo follows
             screen_buffers_dirty = true;
         }
-        wrap_cursor(window, input, win_w, win_h);
+        if (!gizmo_move) wrap_cursor(window, input, win_w, win_h);
     }
 
     // Object scale: RMB drag in SELECT mode scales selected meshes about
-    // their shared centroid. Drag right grows, left shrinks (exponential
-    // so the feel is uniform regardless of current size).
-    if (input.drag_mode == InputState::DragMode::SCALE_OBJECT && dx != 0.0f) {
+    // their shared centroid, all three axes alike. Drag right grows, left
+    // shrinks (exponential so the feel is uniform regardless of current size).
+    // The Scale tool's gizmo comes through here too, per axis: an arm scales
+    // along its axis only, a corner the two it sits between, the centre ring
+    // all three. Each measures the drag along its own direction on screen.
+    using IM_ = InputState::InteractionMode;
+    const bool gizmo_scale = input.drag_mode == InputState::DragMode::GIZMO
+                          && input.interaction_mode == IM_::SELECT
+                          && input.object_tool == InputState::ObjectTool::SCALE
+                          && input.gizmo_handle >= 0;
+    if ((input.drag_mode == InputState::DragMode::SCALE_OBJECT && dx != 0.0f)
+        || (gizmo_scale && (dx != 0.0f || dy != 0.0f))) {
         const auto& sel = scene.selected_ids();
         if (!sel.empty()) {
             scene.materialize_active_cpu();
 
-            // Pivot = centroid of selected bounding centres. Invariant under
-            // uniform scale about itself, so recomputing per frame is stable.
-            Vec3 pivot = {0, 0, 0};
-            uint32_t np = 0;
-            for (uint32_t sel_id : sel) {
-                MeshEntity* e = scene.find_entity(sel_id);
-                if (!e) continue;
-                Vec3 c; float r;
-                e->mesh.compute_bounding_sphere(c, r);
-                pivot.x += c.x; pivot.y += c.y; pivot.z += c.z;
-                np++;
-            }
-            if (np > 0) {
-                pivot.x /= np; pivot.y /= np; pivot.z /= np;
-                // With symmetry on, scale X about the mirror plane so the
-                // piece (and its -x twin) stay exact mirrors.
-                if (input.mirror_x) pivot.x = 0.0f;
-
-                float f = std::exp(dx * 0.005f);
+            // Pivot = centroid of selected bounding centres, x = 0 under Mirror so
+            // the piece (and its -x twin) stay exact mirrors. Invariant under a
+            // scale about itself, so recomputing per frame is stable.
+            Vec3 pivot;
+            if (selection_centre(scene, input.mirror_x, pivot)) {
+                Vec3 f3(1, 1, 1);
+                if (!gizmo_scale) {
+                    const float f = std::exp(dx * 0.005f);
+                    f3 = Vec3(f, f, f);
+                } else {
+                    GizmoView g;
+                    gizmo_view(camera, pivot, win_w, win_h, GK_SCALE, g);
+                    const int h = input.gizmo_handle;
+                    // The drag direction this handle reads: its arm, the diagonal
+                    // between two arms, or (centre ring) right and up.
+                    float ux = 1.0f, uy = -1.0f;
+                    if (h <= GZ_Z) { ux = g.ax[h][0]; uy = g.ax[h][1]; }
+                    else if (h <= GZ_XY) {
+                        const int a1 = (h - GZ_YZ + 1) % 3, a2 = (h - GZ_YZ + 2) % 3;
+                        ux = g.ax[a1][0] + g.ax[a2][0]; uy = g.ax[a1][1] + g.ax[a2][1];
+                    }
+                    const float ul = std::hypot(ux, uy);
+                    const float along = ul > 1e-3f ? (dx * ux + dy * uy) / ul : 0.0f;
+                    const float f = std::exp(along * 0.006f);
+                    if (h == GZ_ALL) f3 = Vec3(f, f, f);
+                    else if (h <= GZ_Z) { float* c = &f3.x; c[h] = f; }
+                    else { float* c = &f3.x; c[(h - GZ_YZ + 1) % 3] = f; c[(h - GZ_YZ + 2) % 3] = f; }
+                }
 
                 // Record it, and latch the pivot on the drag's first
                 // frame for the LIVE scale too: a bounding centre is
@@ -221,26 +292,27 @@ void app_idle_update(App& a, int win_w, int win_h, float dx, float dy) {
                 xforms.begin(ObjectXform::Kind::SCALE, scene);
                 if (scale_first) scale_pivot = pivot;
                 else             pivot       = scale_pivot;
-
-                auto scale_mesh = [&](Mesh& m) {
-                    uint32_t n = m.vertex_count();
-                    for (uint32_t v = 0; v < n; v++) {
-                        m.pos_x[v] = pivot.x + (m.pos_x[v] - pivot.x) * f;
-                        m.pos_y[v] = pivot.y + (m.pos_y[v] - pivot.y) * f;
-                        m.pos_z[v] = pivot.z + (m.pos_z[v] - pivot.z) * f;
-                    }
-                };
+                const bool uneven = scale_is_uneven(f3);
+                auto scale_mesh = [&](Mesh& m) { scale_apply_mesh(m, pivot, f3); };
 
                 for (uint32_t sel_id : sel) {
                     MeshEntity* e = scene.find_entity(sel_id);
                     if (!e) continue;
                     uint32_t vc = e->mesh.vertex_count();
                     ObjectXformTarget& xt = xforms.target(sel_id);
-                    xt.pivot   = pivot;
-                    xt.factor *= f;
+                    xt.pivot    = pivot;
+                    xt.scale.x *= f3.x; xt.scale.y *= f3.y; xt.scale.z *= f3.z;
                     scale_mesh(e->mesh);
-                    if (e->multires.locked) scale_mesh(e->multires.base);   // see move
-                    retopo_transform(e->retopo, scale_mesh, f);
+                    if (e->multires.locked) {
+                        scale_mesh(e->multires.base);   // see move
+                        // An uneven scale bends the tangent frames the detail
+                        // layers sit in, as a turn does: same invalidation.
+                        if (uneven) {
+                            for (auto& lvl : e->multires.frames) lvl.clear();
+                            e->multires_gpu.cleanup();
+                        }
+                    }
+                    retopo_transform(e->retopo, scale_mesh, std::cbrt(f3.x * f3.y * f3.z));
                     // Scaling a symmetric piece about an off-plane pivot
                     // takes it off the mirror plane, and no topology changed,
                     // so nothing else would re-measure. See the stroke gate.
@@ -250,10 +322,12 @@ void app_idle_update(App& a, int win_w, int win_h, float dx, float dy) {
                     for (uint32_t i = 0; i < vc; i++) local_dirty[i] = i;
                     scene.sync_partial_entity(sel_id, local_dirty);
                 }
+                if (uneven) refresh_active_gpu_residency();
+                selection_centre_moved();
                 screen_buffers_dirty = true;
             }
         }
-        wrap_cursor(window, input, win_w, win_h);
+        if (!gizmo_scale) wrap_cursor(window, input, win_w, win_h);
     }
 
     // Object spin: Q/E in SELECT mode turn the selection about the VIEW
@@ -329,8 +403,52 @@ void app_idle_update(App& a, int win_w, int win_h, float dx, float dy) {
             }
             refresh_active_gpu_residency();
             mesh->compute_bounding_sphere(mesh_center, mesh_radius);
+            selection_centre_moved();
             screen_buffers_dirty = true;
         };
+        // The Rotate tool's gizmo: a ring dragged turns the selection about that world
+        // axis, each piece about its own centre as Q/E does. Any direction drags it:
+        // right or up turns one way, left or down the other (X the other way round, so
+        // it reads like the other two from the default view). Shift: 5-degree steps,
+        // like Shift+Q/E, counted from where the drag started, with the running total.
+        {
+            static bool  was_rot = false;
+            static float pend = 0.0f;     // drag not yet turned into steps
+            static int   steps = 0;       // this drag's stepped total, in 5s
+            const bool rot_drag = input.drag_mode == InputState::DragMode::GIZMO && !modal
+                && input.interaction_mode == InputState::InteractionMode::SELECT
+                && input.object_tool == InputState::ObjectTool::ROTATE
+                && input.gizmo_handle >= GZ_X && input.gizmo_handle <= GZ_Z
+                && !scene.selected_ids().empty();
+            if (rot_drag && !was_rot) { pend = 0.0f; steps = 0; }
+            was_rot = rot_drag;
+            if (rot_drag && (dx != 0.0f || dy != 0.0f)) {
+                scene.materialize_active_cpu();
+                Vec3 axis(0, 0, 0);
+                (&axis.x)[input.gizmo_handle] = 1.0f;
+                float ang = (dx - dy) * 0.008f;
+                if (input.gizmo_handle == GZ_X) ang = -ang;
+                xforms.begin(ObjectXform::Kind::SPIN, scene);
+                if (!input.shift_held) {
+                    pend = 0.0f;
+                    spin_selection(axis, ang);
+                } else {
+                    constexpr float kStep = 0.08726646f;   // 5 degrees
+                    pend += ang;
+                    int n = 0;
+                    while (pend >=  kStep) { pend -= kStep; n++; }
+                    while (pend <= -kStep) { pend += kStep; n--; }
+                    if (n != 0) {
+                        spin_selection(axis, n * kStep);
+                        steps += n;
+                        static const char* names[3] = {"X", "Y", "Z"};
+                        std::snprintf(input.notification, sizeof(input.notification),
+                                      "Turn %+d\xC2\xB0 about %s", steps * 5, names[input.gizmo_handle]);
+                        input.notification_timer = 1.5f;
+                    }
+                }
+            }
+        }
         int dir = 0;
         const bool can_spin = input.interaction_mode == InputState::InteractionMode::SELECT
                            && !modal && !input.ctrl_held && !scene.selected_ids().empty();
@@ -412,10 +530,26 @@ void app_idle_update(App& a, int win_w, int win_h, float dx, float dy) {
     // all three paths share it and none can leak a half-open gesture.
     if (input.drag_mode != InputState::DragMode::MOVE_OBJECT
         && input.drag_mode != InputState::DragMode::SCALE_OBJECT
+        && input.drag_mode != InputState::DragMode::GIZMO
         && !rot_active)
         xforms.commit(scene);
 
     // One-shot actions (IDLE only)
+
+    // Ctrl+A in Object mode: every visible mesh joins the selection (the active one kept).
+    if (input.select_all_requested) {
+        input.select_all_requested = false;
+        const std::vector<uint32_t> had = scene.selected_ids();
+        uint32_t n = 0;
+        for (auto& up : scene.entities()) {
+            if (!up || !up->alive || up->preview || !up->visible) continue;
+            n++;
+            if (std::find(had.begin(), had.end(), up->id) == had.end()) scene.toggle_selected(up->id);
+        }
+        screen_buffers_dirty = true;
+        std::snprintf(input.notification, sizeof(input.notification), "Selected all: %u meshes", n);
+        input.notification_timer = 1.5f;
+    }
 
     // Mesh layers dock: a row clicked. Ctrl toggles it in the selection (as Ctrl+click on
     // the model does in Select mode); a plain click makes it the active mesh, the same
@@ -593,14 +727,39 @@ void app_idle_update(App& a, int win_w, int win_h, float dx, float dy) {
         scene.refresh_mirror_map();
         refresh_active_gpu_residency();
     };
-    // UndoStack is per-entity sculpt history, so outside Edit mode there is
-    // still nothing IT can correctly revert — insert placement and selection
-    // push no entries. Reverting an unrelated older stroke instead is worse
-    // than doing nothing, so that side stays clamped to a no-op. Object
-    // transforms are the exception and are handled below: they have their
-    // own scene-level stack now, so Ctrl+Z reaches them from Select mode.
-    // Revert the last remesh. Deliberately ahead of the Edit-mode clamp
-    // below: that clamp exists because per-entity sculpt history cannot
+    // A turn or an uneven scale clears a locked mesh's tangent frames (they are
+    // directions on the old surface), and only a cascade rebuilds them. Without one,
+    // the next stroke at the same level reprojects its world deltas into disp
+    // through EMPTY frames (zero on the GPU, out of range on the CPU path): the
+    // stroke shows but never reaches disp, so the next rebuild drops it. So once the
+    // gesture is over, cascade the level in place; the result is the same surface.
+    {
+        static uint64_t tried_at = ~0ull;   // one attempt per edit, never a per-frame loop
+        if (app_state == AppState::IDLE && input.drag_mode == InputState::DragMode::NONE
+            && !rot_active && tried_at != scene.edit_mark()) {
+            const uint32_t active_id = scene.active_entity().id;
+            for (auto& up : scene.entities()) {
+                if (!up || !up->alive || !up->multires.locked) continue;
+                MultiresStack& st = up->multires;
+                const int k = st.current_level - st.base_level - 1;
+                if (k < 0 || k >= (int)st.disp.size()) continue;
+                if (k < (int)st.frames.size() && st.frames[k].size() == st.disp[k].size()) continue;
+                std::printf("[frames] mesh %u L%d: frames cleared by a transform, rebuilding\n",
+                            up->id, st.current_level);
+                if (up->id == active_id) {
+                    cascade_active(true);
+                } else {
+                    Mesh scratch;   // only the frames it fills are wanted
+                    cascade_to_level(st, scratch, st.current_level, nullptr);
+                }
+                screen_buffers_dirty = true;
+            }
+            tried_at = scene.edit_mark();
+        }
+    }
+
+    // Revert the last remesh. Deliberately ahead of the per-mode routing
+    // below: the Edit-mode side of it exists because per-entity sculpt history cannot
     // correctly revert scene-level work, and this snapshot is exactly the
     // scene-level undo it is missing. A merge is usually driven from Select
     // mode, so gating it on Edit would put the rescue out of reach in the
@@ -657,59 +816,74 @@ void app_idle_update(App& a, int win_w, int win_h, float dx, float dy) {
         input.notification_timer = 3.0f;
     }
 
-    // Which of the two histories does this Ctrl+Z belong to? Both stamp
-    // their entries from UndoStack's scene-wide clock, so undo takes
-    // whichever top is NEWER and redo whichever is OLDER — strict
-    // last-in-first-out across the pair. That ordering is not a nicety:
-    // UndoEntry stores absolute positions, so undoing a stroke that
-    // predates an object transform would drop those vertices back into
-    // the pre-transform frame and tear the mesh. Interleaving makes it
-    // impossible to undo *through* a transform.
+    // Which history this Ctrl+Z belongs to is decided by the MODE, not by age.
+    // Sculpt (and Paint, which is Sculpt with paint_mode) walks the active mesh's
+    // own strokes; Object mode walks the transforms and the dock's deletes/renames.
+    // Neither reaches into the other — a turn made in Object mode survives undoing
+    // every stroke in Sculpt, and comes off only in Object mode. That is safe only
+    // because strokes captured before a transform are carried into the current pose
+    // when they apply (UndoStack::bring_to_pose); see object_xform.h.
     //
-    // A push on either stack kills the other's redo arm, since the user
-    // has branched off that timeline. The xform side clears the entity
-    // stacks it touches at commit; this clock check covers the reverse.
-    if (input.redo_requested && xforms.can_redo()
-        && UndoStack::global_pushes != xforms.redo_clock)
-        xforms.clear_redo();
+    // Inside Object mode the transforms and the mesh deletes/renames still share a
+    // clock with each other: both are object-level, and the newer one goes first.
+    const bool sculpt_scope = input.interaction_mode == InputState::InteractionMode::EDIT;
+    const bool object_scope = input.object_mode();
 
     const UndoEntry* utop = scene.active_undo().peek_undo();
     const UndoEntry* rtop = scene.active_undo().peek_redo();
-    // A mesh deleted or renamed in the dock: undoable from any mode, when it's the
-    // newest thing on the clock. No redo (a re-delete is one click).
+    // A mesh deleted or renamed in the dock. No redo (a re-delete is one click).
     const uint64_t mop = scene.mesh_op_seq();
-    const bool meshop_undo_next = mop
-        && (!utop || mop > utop->seq) && (!xforms.can_undo() || mop > xforms.undo_seq());
-    const bool xform_undo_next = !meshop_undo_next && xforms.can_undo()
-        && (!utop || xforms.undo_seq() > utop->seq);
-    const bool xform_redo_next = xforms.can_redo()
-        && (!rtop || xforms.redo_seq() < rtop->seq);
+    const bool meshop_undo_next = object_scope && mop
+        && (!xforms.can_undo() || mop > xforms.undo_seq());
+    const bool xform_undo_next = object_scope && !meshop_undo_next && xforms.can_undo();
+    const bool xform_redo_next = object_scope && xforms.can_redo();
 
-    // Per-entity sculpt history still can't correctly revert scene-level
-    // work outside Edit mode, so the old clamp stands — but an object
-    // transform IS scene-level, and it is driven from Select mode, so it
-    // has to stay reachable there.
-    bool undo_allowed = input.interaction_mode == InputState::InteractionMode::EDIT;
-    if (input.undo_requested && !undo_allowed && (xform_undo_next || meshop_undo_next)) undo_allowed = true;
-    if (input.redo_requested && !undo_allowed && xform_redo_next) undo_allowed = true;
-    if ((input.undo_requested || input.redo_requested) && !undo_allowed
-        && !undo_reads_pending) {
+    const bool have_undo = sculpt_scope ? utop != nullptr
+                         : (meshop_undo_next || xform_undo_next);
+    const bool have_redo = sculpt_scope ? rtop != nullptr : xform_redo_next;
+    if ((input.undo_requested || input.redo_requested) && !undo_reads_pending
+        && !(input.undo_requested ? have_undo : have_redo)) {
+        // Say why, and point at the other mode when IT has something to take back.
+        const bool undo = input.undo_requested;
+        const bool strokes_left  = undo ? utop != nullptr : rtop != nullptr;
+        const bool objects_left  = undo ? (xforms.can_undo() || mop != 0) : xforms.can_redo();
+        const char* msg =
+            (!sculpt_scope && strokes_left)
+                ? (undo ? "Nothing to undo here - strokes undo in Sculpt mode (1)"
+                        : "Nothing to redo here - strokes redo in Sculpt mode (1)")
+          : (!object_scope && objects_left)
+                ? (undo ? "Nothing to undo here - moves undo in Object mode (2)"
+                        : "Nothing to redo here - moves redo in Object mode (2)")
+                : (undo ? "Nothing to undo" : "Nothing to redo");
+        std::printf("[undo-pick] %s in mode %d: nothing in this mode's history "
+                    "(strokes %s, objects %s)\n",
+                    undo ? "ctrl-z" : "ctrl-shift-z", (int)input.interaction_mode,
+                    strokes_left ? "left" : "none", objects_left ? "left" : "none");
+        std::fflush(stdout);
         input.undo_requested = false;
         input.redo_requested = false;
-        std::snprintf(input.notification, sizeof(input.notification),
-                      "Undo only works in Edit mode (1)");
+        std::snprintf(input.notification, sizeof(input.notification), "%s", msg);
         input.notification_timer = 1.5f;
+    }
+    if ((input.undo_requested || input.redo_requested) && !undo_reads_pending) {
+        // Which history this press went to, so a surprising step can be traced.
+        const bool undo = input.undo_requested;
+        std::printf("[undo-pick] %s in mode %d: mesh %u top %s seq %llu, object top seq %llu (%zu), "
+                    "mesh-op seq %llu -> %s\n",
+                    undo ? "ctrl-z" : "ctrl-shift-z", (int)input.interaction_mode,
+                    scene.active_entity().id,
+                    undo ? (utop ? "undo" : "none") : (rtop ? "redo" : "none"),
+                    (unsigned long long)(undo ? (utop ? utop->seq : 0) : (rtop ? rtop->seq : 0)),
+                    (unsigned long long)(undo ? xforms.undo_seq() : xforms.redo_seq()),
+                    undo ? xforms.undo_depth() : xforms.redo_depth(),
+                    (unsigned long long)mop,
+                    sculpt_scope ? "mesh"
+                    : undo ? (meshop_undo_next ? "mesh op" : "object") : "object");
+        std::fflush(stdout);
     }
     if (input.undo_requested && !undo_reads_pending) {
         input.undo_requested = false;
-        uint32_t xform_blocker = xform_undo_next ? xforms.newer_edit_entity(scene) : 0;
-        if (xform_blocker) {
-            // See newer_edit_entity(): a sibling of this transform has been
-            // sculpted since, and its stroke positions are absolute.
-            std::snprintf(input.notification, sizeof(input.notification),
-                          "Undo the newer edits on mesh %u first", xform_blocker);
-            input.notification_timer = 2.5f;
-        } else if (meshop_undo_next) {
+        if (meshop_undo_next) {
             std::string what;
             if (scene.undo_mesh_op(what)) {
                 mesh = &scene.active_mesh();
@@ -724,7 +898,7 @@ void app_idle_update(App& a, int win_w, int win_h, float dx, float dy) {
             }
         } else if (xform_undo_next) {
             xforms.undo(scene);
-            if (xforms.last_was_spin()) refresh_active_gpu_residency();
+            if (xforms.last_bent_frames()) refresh_active_gpu_residency();
             mesh->compute_bounding_sphere(mesh_center, mesh_radius);
             std::snprintf(input.notification, sizeof(input.notification),
                           "Undid object %s", xforms.last_label());
@@ -742,7 +916,7 @@ void app_idle_update(App& a, int win_w, int win_h, float dx, float dy) {
         input.redo_requested = false;
         if (xform_redo_next) {
             xforms.redo(scene);
-            if (xforms.last_was_spin()) refresh_active_gpu_residency();
+            if (xforms.last_bent_frames()) refresh_active_gpu_residency();
             mesh->compute_bounding_sphere(mesh_center, mesh_radius);
             std::snprintf(input.notification, sizeof(input.notification),
                           "Redid object %s", xforms.last_label());

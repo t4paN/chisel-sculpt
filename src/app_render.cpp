@@ -421,38 +421,73 @@ void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse) {
 
     app_files_frame(a);   // app_files.cpp: open/import, dev hooks, save, export, dialogs
 
-    // World origin gizmo, Select mode only: X / Y / Z from (0,0,0) in the classic red /
-    // green / blue, positive axes only. Fixed size on screen (an axis lying flat in the
-    // view is 80 px; one pointing at you shortens, which is how you read its direction),
-    // over the model but under the panels (ImGui's background list). Where the origin
-    // is shows where Mirror's plane runs and what a turn swings about.
-    if (input.interaction_mode == InputState::InteractionMode::SELECT) {
+    // World origin marker, Object mode only: the positive X / Y / Z axes from (0,0,0),
+    // run out to the edge of the view (or, in perspective, to where they vanish), thin
+    // and greyed with a hint of the classic red / green / blue, so the Scale / Rotate
+    // gizmo stays the one that reads. Over the model but under the panels (ImGui's
+    // background list). It shows where Mirror's plane runs and what a turn swings about.
+    if (input.object_mode()) {
         const Vec3 o(0, 0, 0);
         const float depth = camera.view_depth(o);
-        float ox = 0, oy = 0;
-        // Behind a perspective eye a point has no screen position: no gizmo then.
+        // Behind a perspective eye a point has no screen position: no marker then.
         // (world_to_screen's false otherwise only means "off screen", still placed.)
         if (!camera.perspective || depth > 1e-4f) {
+            float ox = 0, oy = 0;
             camera.world_to_screen(o, win_w, win_h, ox, oy);
-            // World length that spans 80 px at the origin's depth.
-            const float len = 80.0f * 2.0f * camera.half_height_at(depth) / (float)win_h;
-            struct Ax { Vec3 d; ImU32 c; float sx, sy, depth; bool ok; } ax[3] = {
-                {Vec3(1, 0, 0), IM_COL32(232, 64, 64, 255),  0, 0, 0, false},
-                {Vec3(0, 1, 0), IM_COL32(108, 200, 64, 255), 0, 0, 0, false},
-                {Vec3(0, 0, 1), IM_COL32(64, 128, 240, 255), 0, 0, 0, false},
+            const float len = 40.0f * 2.0f * camera.half_height_at(depth) / (float)win_h;
+            const Vec3 eye = camera.get_position();
+            const Vec3 fwd = camera.get_view_direction();
+            const float reach = 4.0f * (float)(win_w + win_h);   // off every edge; ImGui clips
+            struct Ax { Vec3 d; ImU32 c; } ax[3] = {
+                {Vec3(1, 0, 0), IM_COL32(196, 160, 160, 120)},
+                {Vec3(0, 1, 0), IM_COL32(168, 190, 160, 120)},
+                {Vec3(0, 0, 1), IM_COL32(160, 172, 200, 120)},
             };
-            for (Ax& x : ax) {
-                const Vec3 tip = x.d * len;
-                x.depth = camera.view_depth(tip);
-                x.ok = !camera.perspective || x.depth > 1e-4f;
-                if (x.ok) camera.world_to_screen(tip, win_w, win_h, x.sx, x.sy);
-            }
-            // Farthest first, so the axis nearer the viewer draws over the others.
-            std::sort(std::begin(ax), std::end(ax), [](const Ax& p, const Ax& q) { return p.depth > q.depth; });
             ImDrawList* dl = ImGui::GetBackgroundDrawList();
-            for (const Ax& x : ax)
-                if (x.ok) dl->AddLine(ImVec2(ox, oy), ImVec2(x.sx, x.sy), x.c, 2.5f);
-            dl->AddCircleFilled(ImVec2(ox, oy), 2.5f, IM_COL32(236, 234, 242, 220));
+            for (const Ax& x : ax) {
+                // A projected 3D line is a straight 2D line, so a short step along the
+                // axis gives its screen direction exactly.
+                const Vec3 tip = x.d * len;
+                if (camera.perspective && camera.view_depth(tip) <= 1e-4f) continue;
+                float tx, ty;
+                camera.world_to_screen(tip, win_w, win_h, tx, ty);
+                float ux = tx - ox, uy = ty - oy;
+                const float ul = std::hypot(ux, uy);
+                if (ul < 1e-3f) continue;              // pointing straight at the eye
+                ux /= ul; uy /= ul;
+                float t = reach;
+                // In perspective an axis heading away from the eye ends at its vanishing
+                // point; one heading toward the eye runs off screen before it gets there.
+                if (camera.perspective && fwd.dot(x.d) > 1e-4f) {
+                    float vx, vy;
+                    camera.world_to_screen(eye + x.d, win_w, win_h, vx, vy);
+                    t = std::min(t, std::hypot(vx - ox, vy - oy));
+                }
+                dl->AddLine(ImVec2(ox, oy), ImVec2(ox + ux * t, oy + uy * t), x.c, 1.0f);
+            }
+            dl->AddCircleFilled(ImVec2(ox, oy), 2.0f, IM_COL32(200, 200, 206, 150));
+        }
+    }
+
+    // Move / Scale / Rotate tool: its gizmo on the selection. The handle under the
+    // pointer lights up (the one being dragged stays lit); main.cpp's press does the
+    // same hit. Scale's sits on the mirror plane under Mirror, as it scales about it.
+    static_assert((int)InputState::ObjectTool::MOVE == 1 && (int)InputState::ObjectTool::SCALE == 2
+                  && (int)InputState::ObjectTool::ROTATE == 3, "gizmo_kind_of() maps these");
+    if (input.interaction_mode == InputState::InteractionMode::SELECT
+        && input.object_tool != InputState::ObjectTool::SELECT) {
+        const int kind = gizmo_kind_of((int)input.object_tool);
+        Vec3 pivot;
+        GizmoView g;
+        const bool lobe_gz = kind == GK_MOVE && !input.mirror_x;
+        if (selection_centre(scene, kind == GK_SCALE && input.mirror_x, pivot,
+                             lobe_gz ? input.lobe_entity : 0, lobe_gz ? input.lobe_side : 0)
+            && gizmo_view(camera, pivot, win_w, win_h, kind, g)) {
+            int hot = -1;
+            if (input.drag_mode == InputState::DragMode::GIZMO) hot = input.gizmo_handle;
+            else if (input.drag_mode == InputState::DragMode::NONE && !ImGui::GetIO().WantCaptureMouse)
+                hot = gizmo_hit(g, kind, (float)input.mouse_x, (float)input.mouse_y);
+            gizmo_draw(ImGui::GetBackgroundDrawList(), g, kind, hot);
         }
     }
 
@@ -495,11 +530,11 @@ void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse) {
     draw_keybind_window(input, win_w, win_h);
     draw_brush_props_window(input, win_w, win_h);
     draw_paint_layers_panel(input, scene, win_w, win_h);
-    // Mesh layers: Select mode, and Sculpt mode unless the paint layers hold that spot.
+    // Mesh layers: Object mode, and Sculpt mode unless the paint layers hold that spot.
     {
         using IM = InputState::InteractionMode;
         const bool paint_dock = input.current_brush == BrushType::PAINT && !input.paint_target_density;
-        if (input.interaction_mode == IM::SELECT || (input.interaction_mode == IM::EDIT && !paint_dock)) {
+        if (input.object_mode() || (input.interaction_mode == IM::EDIT && !paint_dock)) {
             static std::vector<MeshLayerRow> rows;      // reused: no allocation once grown
             static std::vector<std::array<char, 24>> fallback;
             rows.clear();

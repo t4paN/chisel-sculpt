@@ -113,7 +113,8 @@ constexpr float MOUSE_EFFECT_HOLDBACK = 0.6f;
 // saved rebind of it is silently dropped. Append new actions anywhere; order is only
 // the order the Key bindings window lists them in.
 enum class KeyAction : int {
-    MODE_SCULPT, MODE_INSERT, MODE_SELECT, MODE_PAINT, MODE_RETOPO, MODE_UV,
+    MODE_SCULPT, MODE_OBJECT, MODE_PAINT, MODE_RETOPO, MODE_UV,
+    OBJ_SELECT, OBJ_MOVE, OBJ_INSERT, OBJ_SCALE, OBJ_ROTATE, OBJ_SELECT_ALL,
     BRUSH_DRAW, BRUSH_CLAY, BRUSH_INFLATE, BRUSH_CREASE, BRUSH_PINCH,
     BRUSH_MOVE, BRUSH_LIMB, BRUSH_POSE, BRUSH_STIPPLE, BRUSH_MASK, BRUSH_PREV, BRUSH_NEXT,
     PAINT_BUCKET, PAINT_PICKER, PAINT_BRUSH, PAINT_STIPPLE, PAINT_BLEND,
@@ -142,7 +143,7 @@ constexpr int kKeyModMask = GLFW_MOD_CONTROL | GLFW_MOD_SHIFT | GLFW_MOD_ALT;
 // what lets one letter mean a sculpt brush in one and a paint tool in the other.
 // Global keys (view, files, mask, brush feel) work everywhere, but in the mode that
 // owns a scoped key, that key wins over a Global one bound to the same letter.
-enum class KeyScope : uint8_t { Global, Sculpt, Paint, Retopo, Uv };
+enum class KeyScope : uint8_t { Global, Sculpt, Paint, Retopo, Uv, Object };
 
 struct KeyActionInfo {
     const char* id;      // on-disk name, stable forever
@@ -545,9 +546,21 @@ struct InputState {
     // Interaction latch: locks mode on mouse-down until release
     // POSE_EDIT: the pose brush is drawing a new hinge line (main.cpp pose block), not
     // stroking. POSE_MOVE: dragging the anchor alone (the mesh stays put).
+    // GIZMO: Object mode's Scale or Rotate tool, dragging the handle in gizmo_handle.
     enum class DragMode { NONE, ORBIT, SCULPT, PAN, ZOOM, MOVE_OBJECT, SCALE_OBJECT,
-                          POSE_EDIT, POSE_MOVE, RETOPO };
+                          POSE_EDIT, POSE_MOVE, RETOPO, GIZMO };
     DragMode drag_mode;
+    // Object mode's SELECT tools: Select is the plain arrow (click picks, drag moves, RMB
+    // drag scales evenly); Move, Scale and Rotate add their gizmo on the selection.
+    enum class ObjectTool : uint8_t { SELECT, MOVE, SCALE, ROTATE };
+    ObjectTool object_tool = ObjectTool::SELECT;
+    // The gizmo handle being dragged (object_xform.h's GizmoHandle), -1 for none.
+    int gizmo_handle = -1;
+    bool select_all_requested = false;   // Ctrl+A in Object mode (app_idle)
+    // The half of a symmetrized pair last clicked in Object mode (Mirror off): a move
+    // takes only that half, and the Move gizmo sits on it. Side 0 = no half chosen.
+    uint32_t lobe_entity = 0;
+    int      lobe_side   = 0;
 
     // Quit confirmation
     bool quit_requested;    // ESC pressed, waiting for Y/N
@@ -591,6 +604,9 @@ struct InputState {
     bool uvx_tex_color = true, uvx_tex_normal = true, uvx_tex_id = true, uvx_tex_uvmap = false;
     bool import_dialog_active;
     bool import_append;           // import dialog checkbox: add as new entity vs replace scene
+    // Object mode's "+" beside the shapes: the Open dialog for meshes only, Append forced
+    // on. Set with import_dialog_active; the dialog clears it when it closes.
+    bool import_force_append = false;
     bool save_requested;
     bool save_as_requested;
     bool save_incremental_requested;   // "+" button: save the next numbered copy
@@ -744,13 +760,16 @@ struct InputState {
     bool mask_invert_requested;   // Ctrl+I
     bool mask_clear_requested;    // Ctrl+A (when mask brush active)
 
-    // Multi-mesh interaction modes (1/2/3 keys)
-    // RETOPO (key 0): sketch strokes on the sculpt, Build turns them into quads
-    // (retopo.h). The far end of the number row on purpose — a missed 4 or 5 must
-    // never drop a sculptor into it.
+    // Interaction modes. Object mode (key 2) is two of them: SELECT is its arrow (pick,
+    // move, turn) and INSERT is its shape tools (Sphere / Box / Cylinder); its dock
+    // switches between them, and Esc from a shape goes back to the arrow.
+    // RETOPO (key 4): sketch strokes on the sculpt, Build turns them into quads
+    // (retopo.h).
     enum class InteractionMode { EDIT, INSERT, SELECT, RETOPO };
     InteractionMode interaction_mode;
-    // UV (key 9): RETOPO with this set, the way Paint is EDIT with paint_mode. It shows
+    bool object_mode() const { return interaction_mode == InteractionMode::INSERT
+                                   || interaction_mode == InteractionMode::SELECT; }
+    // UV (key 5): RETOPO with this set, the way Paint is EDIT with paint_mode. It shows
     // the retopo mesh and its overlay but none of its tools: the pen orbits, retopo's
     // keys are dead, and its dock gives way to the UV panel. Only means anything in
     // RETOPO; enter_retopo_mode clears it.
@@ -782,11 +801,12 @@ struct InputState {
     void end_frame();
 
     void switch_brush(BrushType to);
-    // The mode buttons and keys 1 and 4, one place for every skin. Paint: EDIT with the
+    // The mode buttons and keys 1 to 5, one place for every skin. Object: its arrow. Paint: EDIT with the
     // plain paint brush in hand (no bucket, no picker, no smooth lock). Sculpt: EDIT
     // and out of paint mode; the paint brush gives way to Draw, a Mask brush stays.
     void enter_paint_mode();
     void enter_sculpt_mode();
+    void enter_object_mode();
     void enter_retopo_mode();
     void enter_uv_mode();
     int  uv_padding = 4;               // the UV panel's Padding: texture pixels kept between islands, at the bake size (saved in settings)
@@ -849,6 +869,7 @@ struct InputState {
     // its own, so no brush key reaches into it.
     KeyScope key_scope() const {
         if (interaction_mode == InteractionMode::RETOPO) return uv_mode ? KeyScope::Uv : KeyScope::Retopo;
+        if (object_mode()) return KeyScope::Object;
         return paint_mode && interaction_mode == InteractionMode::EDIT ? KeyScope::Paint
                                                                       : KeyScope::Sculpt;
     }

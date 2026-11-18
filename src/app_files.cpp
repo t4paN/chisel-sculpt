@@ -450,7 +450,7 @@ void app_files_frame(App& a) {
         std::vector<std::string> wrote;
         const std::vector<UvExportPart> parts = uv_parts();
         if (parts.empty()) {
-            std::snprintf(input.notification, sizeof(input.notification), "Build a retopo mesh in mode 0 first");
+            std::snprintf(input.notification, sizeof(input.notification), "Build a retopo mesh in Retopo mode first");
             input.notification_timer = 3.0f;
             return wrote;
         }
@@ -1153,6 +1153,9 @@ void app_files_frame(App& a) {
 #ifndef __EMSCRIPTEN__
     // ---- ImGui file dialogs (native: browse the real filesystem) ----
     auto* fd = file_browser();
+    // Object mode's "+": the same Open dialog, for meshes only and always appending.
+    if (input.import_force_append && !input.import_dialog_active && !fd->IsOpened("ImportKey"))
+        input.import_dialog_active = true;
     // Dev hook for screenshots (no input injection on Wayland): CHISEL_SHOT_DIALOG=open,
     // save or folder opens that dialog once at startup. Inert unless set.
     {
@@ -1188,7 +1191,21 @@ void app_files_frame(App& a) {
         cfg.path = start_dir();
         cfg.flags = ImGuiFileDialogFlags_DontShowHiddenFiles;
         cfg.sidePaneWidth = 190.0f;
-        cfg.sidePane = [&](const char* filter, IGFD::UserDatas, bool*) {
+        const bool forced = input.import_force_append;
+        cfg.sidePane = [&, forced](const char* filter, IGFD::UserDatas, bool*) {
+            // Opened from Object mode's "+": a mesh joins the scene, so Append is on and
+            // can't be turned off (and the filter offers no .chisel).
+            if (forced) {
+                bool on = true;
+                ImGui::BeginDisabled();
+                ImGui::Checkbox("Append to scene", &on);
+                ImGui::EndDisabled();
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                    ImGui::SetTooltip("Opened from Object mode: the mesh is added to the scene.");
+                ImGui::Spacing();
+                ImGui::TextWrapped("The mesh joins the scene as a new object, at its own scale.");
+                return;
+            }
             // A .chisel is a whole scene (levels, layers, retopo, camera), so it can
             // only replace. Greyed and shown unticked while the filter is .chisel, so
             // the tick can't promise an append that won't happen; the user's choice
@@ -1212,7 +1229,8 @@ void app_files_frame(App& a) {
                 : "On: add the mesh as a new object at its "
                   "own scale. Off: replace the scene.");
         };
-        fd->OpenDialog("ImportKey", "Open File", ".chisel,.obj,.ply,.stl,.glb,.gltf", cfg);
+        fd->OpenDialog("ImportKey", forced ? "Add Mesh" : "Open File",
+                       forced ? ".obj,.ply,.stl,.glb,.gltf" : ".chisel,.obj,.ply,.stl,.glb,.gltf", cfg);
     }
 
     if (display_file_dialog(fd, "ExportKey")) {
@@ -1274,13 +1292,19 @@ void app_files_frame(App& a) {
     if (display_file_dialog(fd, "ImportKey")) {
         if (fd->IsOk()) {
             file_browser_note(fd->GetFilePathName());
+            const bool keep = input.import_append;
+            if (input.import_force_append) input.import_append = true;
             do_import_path(fd->GetFilePathName());
+            input.import_append = keep;
         }
         fd->Close();
         input.import_dialog_active = false;
+        input.import_force_append = false;
     }
-    if (!input.import_dialog_active && fd->IsOpened("ImportKey"))
+    if (!input.import_dialog_active && fd->IsOpened("ImportKey")) {
         fd->Close();
+        input.import_force_append = false;
+    }
 
     // Brush-alpha custom image loader (mirrors ImportKey). Loads a grayscale
     // bitmap as a new pool entry and selects it.
@@ -1592,14 +1616,24 @@ void app_files_frame(App& a) {
     // file lands in MEMFS async (chisel_web_import_done); consume it here,
     // then free the RAM copy (current_project_path stays valid — a save
     // recreates the file before downloading it).
+    // Object mode's "+" asks for a mesh to append: latched at the picker, since a
+    // cancelled browser picker never reports back.
+    static bool web_force_append = false;
+    if (input.import_force_append) input.import_dialog_active = true;
     if (input.import_dialog_active) {
         input.import_dialog_active = false;
-        web_open_file_picker();
+        web_force_append = input.import_force_append;
+        input.import_force_append = false;
+        web_open_file_picker(web_force_append);
     }
     if (!g_web_import_path.empty()) {
         std::string path = g_web_import_path;
         g_web_import_path.clear();
+        const bool keep = input.import_append;
+        if (web_force_append) input.import_append = true;
         do_import_path(path);
+        input.import_append = keep;
+        web_force_append = false;
         ::remove(path.c_str());
     }
 

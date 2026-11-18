@@ -35,7 +35,7 @@ void InsertController::tick(InputState& input, Camera& camera,
 
     if (!app_idle) return;
 
-    // ESC: cancel active preview, or exit insert mode entirely.
+    // ESC: cancel active preview, or put the shape down and go back to Object mode's arrow.
     if (input.quit_requested) {
         input.quit_requested = false;
         input.quit_to_new = false;
@@ -49,8 +49,9 @@ void InsertController::tick(InputState& input, Camera& camera,
             input.notification_timer = 1.0f;
         } else {
             state_.reset();
-            input.interaction_mode = InputState::InteractionMode::EDIT;
-            std::snprintf(input.notification, sizeof(input.notification), "Edit");
+            input.interaction_mode = InputState::InteractionMode::SELECT;
+            input.object_tool = InputState::ObjectTool::SELECT;
+            std::snprintf(input.notification, sizeof(input.notification), "Select");
             input.notification_timer = 1.0f;
         }
     }
@@ -93,7 +94,9 @@ void InsertController::tick(InputState& input, Camera& camera,
         }
         input.notification_timer = 2.0f;
         state_.reset();
-        input.interaction_mode = InputState::InteractionMode::EDIT;
+        // Placed: back to Object mode's arrow, the new mesh selected, ready to move.
+        input.interaction_mode = InputState::InteractionMode::SELECT;
+        input.object_tool = InputState::ObjectTool::SELECT;
         screen_buffers_dirty = true;
     };
 

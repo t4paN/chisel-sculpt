@@ -11,6 +11,7 @@
 #include "retopo.h"
 #include "uv_unwrap.h"
 #include <algorithm>
+#include <functional>
 #include <cctype>
 #include <cstdarg>
 #include <cfloat>
@@ -981,19 +982,36 @@ void apply_dos_style() {
 // The swatch picker, shared by the brush alphas and the bucket's fill patterns: `lib`
 // is what it lists, `active` the slot a pick writes, `id` the popup the caller opens.
 // `loadable` adds the "+" tile that asks for an image (alphas only, for now).
-bool swatch_picker_popup(InputState& input, const AlphaLibrary* alpha_lib, int& active,
-                         const char* id, const char* title, bool loadable, ImVec2 at,
-                         bool strip = false) {
+// What a swatch strip or grid shows: n tiles, each drawn by draw(), and an optional
+// "+" tile at the end that sets *plus.
+struct SwatchSet {
+    int n = 0;
+    std::function<void(ImDrawList*, ImVec2 at, float size, int i, bool bare)> draw;
+    std::function<const char*(int)> name;
+    bool* plus = nullptr;
+    const char* plus_tip = nullptr;
+};
+
+void plus_tile(ImDrawList* pdl, ImVec2 p) {
+    pdl->AddRect(ImVec2(p.x + 7, p.y + 7), ImVec2(p.x + 37, p.y + 37),
+                 g_dos ? cga::light_gray : IM_COL32(255, 255, 255, 60), rad(7.0f), 0, g_dos ? 2.0f : 1.0f);
+    pdl->AddLine(ImVec2(p.x + 16, p.y + 22), ImVec2(p.x + 28, p.y + 22), kText, 1.75f);
+    pdl->AddLine(ImVec2(p.x + 22, p.y + 16), ImVec2(p.x + 22, p.y + 28), kText, 1.75f);
+}
+
+bool swatch_picker_popup(const SwatchSet& set, int& active, const char* id, const char* title,
+                         ImVec2 at, bool strip = false, bool* picked = nullptr) {
     const int per_row = strip ? 10 : 5;
+    const bool loadable = set.plus != nullptr;
     auto swatches = [&]() {
-        int n = alpha_lib->count();
+        int n = set.n;
         for (int i = 0; i < n; i++) {
             if (i % per_row) ImGui::SameLine();
-            const AlphaEntry& e = alpha_lib->get(i);
             ImVec2 p = ImGui::GetCursorScreenPos();
             char id[24]; std::snprintf(id, sizeof id, "##al%d", i);
             if (ImGui::InvisibleButton(id, ImVec2(44, 44))) {
                 active = i;
+                if (picked) *picked = true;
                 ImGui::CloseCurrentPopup();
             }
             bool hv = ImGui::IsItemHovered();
@@ -1006,27 +1024,23 @@ bool swatch_picker_popup(InputState& input, const AlphaLibrary* alpha_lib, int& 
             else if (hv)
                 pdl->AddRectFilled(p, ImVec2(p.x + 44, p.y + 44),
                                    g_dos ? cga::dark_gray : IM_COL32(255, 255, 255, 18), rr);
-            if (strip) draw_alpha_preview(pdl, ImVec2(p.x + 3, p.y + 3), 38.0f, e.preview, true);
-            else       draw_alpha_preview(pdl, ImVec2(p.x + 7, p.y + 7), 30.0f, e.preview);
-            if (hv) tooltip(p, ImVec2(p.x + 44, p.y + 44), TipSide::Below, e.name.c_str(), nullptr);
+            if (strip) set.draw(pdl, ImVec2(p.x + 3, p.y + 3), 38.0f, i, true);
+            else       set.draw(pdl, ImVec2(p.x + 7, p.y + 7), 30.0f, i, false);
+            if (hv) tooltip(p, ImVec2(p.x + 44, p.y + 44), TipSide::Below, set.name(i), nullptr);
         }
         if (!loadable) return;
         if (n % per_row) ImGui::SameLine();
         ImVec2 p = ImGui::GetCursorScreenPos();
         if (ImGui::InvisibleButton("##alLoad", ImVec2(44, 44))) {
-            input.load_alpha_dialog_active = true;
+            *set.plus = true;
             ImGui::CloseCurrentPopup();
         }
         bool hv = ImGui::IsItemHovered();
         ImDrawList* pdl = ImGui::GetWindowDrawList();
         if (hv) pdl->AddRectFilled(p, ImVec2(p.x + 44, p.y + 44),
                                    g_dos ? cga::dark_gray : IM_COL32(255, 255, 255, 18), rad(10.0f));
-        pdl->AddRect(ImVec2(p.x + 7, p.y + 7), ImVec2(p.x + 37, p.y + 37),
-                     g_dos ? cga::light_gray : IM_COL32(255, 255, 255, 60), rad(7.0f), 0, g_dos ? 2.0f : 1.0f);
-        pdl->AddLine(ImVec2(p.x + 16, p.y + 22), ImVec2(p.x + 28, p.y + 22), kText, 1.75f);
-        pdl->AddLine(ImVec2(p.x + 22, p.y + 16), ImVec2(p.x + 22, p.y + 28), kText, 1.75f);
-        if (hv) tooltip(p, ImVec2(p.x + 44, p.y + 44), TipSide::Below,
-                        "Load a grayscale image", nullptr);
+        plus_tile(pdl, p);
+        if (hv) tooltip(p, ImVec2(p.x + 44, p.y + 44), TipSide::Below, set.plus_tip, nullptr);
     };
 
     if (!strip) {
@@ -1049,10 +1063,10 @@ bool swatch_picker_popup(InputState& input, const AlphaLibrary* alpha_lib, int& 
     // ImGui closes a popup on the spot, so the way back is drawn here: the last
     // frame's geometry, retracting to one swatch on the foreground list, with no
     // hit-testing — the pick has already happened.
-    // The last open frame's geometry, per popup (the alpha and pattern strips each
-    // retract from their own).
-    static ImVec2 geo_wp[2], geo_ws[2];
-    const int gi = std::strcmp(id, "##alphapick") == 0 ? 0 : 1;
+    // The last open frame's geometry, per popup (the alpha, pattern and shape strips
+    // each retract from their own).
+    static ImVec2 geo_wp[3], geo_ws[3];
+    const int gi = std::strcmp(id, "##alphapick") == 0 ? 0 : std::strcmp(id, "##patternpick") == 0 ? 1 : 2;
     ImVec2& last_wp = geo_wp[gi];
     ImVec2& last_ws = geo_ws[gi];
     const bool open = ImGui::IsPopupOpen(id);
@@ -1066,20 +1080,14 @@ bool swatch_picker_popup(InputState& input, const AlphaLibrary* alpha_lib, int& 
         ImDrawList* fg = ImGui::GetForegroundDrawList();
         panel_bg(fg, last_wp, b, 14.0f);
         fg->PushClipRect(last_wp, b, true);
-        const int n = alpha_lib->count();
+        const int n = set.n;
         for (int i = 0; i <= n; i++) {
             if (i == n && !loadable) break;
             ImVec2 p(last_wp.x + 5.0f + (i % per_row) * 48.0f, last_wp.y + 5.0f + (i / per_row) * 48.0f);
-            if (i == n) {   // the "+" tile
-                fg->AddRect(ImVec2(p.x + 7, p.y + 7), ImVec2(p.x + 37, p.y + 37),
-                            g_dos ? cga::light_gray : IM_COL32(255, 255, 255, 60), rad(7.0f), 0, g_dos ? 2.0f : 1.0f);
-                fg->AddLine(ImVec2(p.x + 16, p.y + 22), ImVec2(p.x + 28, p.y + 22), kText, 1.75f);
-                fg->AddLine(ImVec2(p.x + 22, p.y + 16), ImVec2(p.x + 22, p.y + 28), kText, 1.75f);
-                break;
-            }
+            if (i == n) { plus_tile(fg, p); break; }
             if (active == i)
                 fg->AddRectFilled(p, ImVec2(p.x + 44, p.y + 44), kAccent, rad(6.0f));
-            draw_alpha_preview(fg, ImVec2(p.x + 3, p.y + 3), 38.0f, alpha_lib->get(i).preview, true);
+            set.draw(fg, ImVec2(p.x + 3, p.y + 3), 38.0f, i, true);
         }
         fg->PopClipRect();
         return true;
@@ -1107,16 +1115,61 @@ bool swatch_picker_popup(InputState& input, const AlphaLibrary* alpha_lib, int& 
     return true;
 }
 
+SwatchSet alpha_set(const AlphaLibrary* lib, bool* plus, const char* plus_tip) {
+    SwatchSet s;
+    s.n = lib->count();
+    s.draw = [lib](ImDrawList* dl, ImVec2 at, float size, int i, bool bare) {
+        draw_alpha_preview(dl, at, size, lib->get(i).preview, bare);
+    };
+    s.name = [lib](int i) { return lib->get(i).name.c_str(); };
+    s.plus = plus;
+    s.plus_tip = plus_tip;
+    return s;
+}
+
+// Object mode's Insert shapes, as a swatch set: the "+" opens a mesh to add.
+const Icon kShapeIcon[3] = {Icon::ShapeSphere, Icon::ModeInsert, Icon::ShapeCylinder};
+const char* const kShapeName[3] = {"Sphere", "Box", "Cylinder"};
+// A shape tile looks like an alpha stamp: a black square, the shape drawn light on it.
+void draw_shape_tile(ImDrawList* dl, ImVec2 at, float size, int i) {
+    dl->AddRectFilled(at, ImVec2(at.x + size, at.y + size), IM_COL32(0, 0, 0, 255));
+    const ImVec2 c(at.x + size * 0.5f, at.y + size * 0.5f);
+    const ImU32 col = IM_COL32(236, 236, 240, 255);
+    if (g_dos) draw_pixel_icon(dl, kShapeIcon[i], c, 2.0f, col);
+    else       draw_icon(dl, kShapeIcon[i], c, size * 0.66f, col);
+}
+SwatchSet shape_set(InputState& input) {
+    SwatchSet s;
+    s.n = 3;
+    s.draw = [](ImDrawList* dl, ImVec2 at, float size, int i, bool) { draw_shape_tile(dl, at, size, i); };
+    s.name = [](int i) { return kShapeName[i]; };
+    s.plus = &input.import_force_append;
+    s.plus_tip = "Add a mesh from a file (OBJ, PLY, STL, GLB)";
+    return s;
+}
+
 // Paint mode's tools are all the paint brush underneath (its colour, size and layer);
 // the tool says what a click does with it.
 enum class RailTool { Brush, Bucket, Picker, Stipple, Blend };
 bool alpha_picker_popup(InputState& input, const AlphaLibrary* alpha_lib, ImVec2 at, bool strip = false) {
-    return swatch_picker_popup(input, alpha_lib, input.active_alpha, "##alphapick", "BRUSH ALPHA",
-                               true, at, strip);
+    return swatch_picker_popup(alpha_set(alpha_lib, &input.load_alpha_dialog_active, "Load a grayscale image"),
+                               input.active_alpha, "##alphapick", "BRUSH ALPHA", at, strip);
 }
 bool pattern_picker_popup(InputState& input, ImVec2 at, bool strip = false) {
-    return swatch_picker_popup(input, &fill_patterns(), input.fill_pattern, "##patternpick",
-                               "FILL PATTERN", false, at, strip);
+    return swatch_picker_popup(alpha_set(&fill_patterns(), nullptr, nullptr),
+                               input.fill_pattern, "##patternpick", "FILL PATTERN", at, strip);
+}
+// A shape picked (the popup closes on a pick, the same one again included) arms Insert
+// with it. The "+" closes it too, but only sets import_force_append.
+bool shape_picker_popup(InputState& input, ImVec2 at, bool strip = false) {
+    int pick = (int)input.insert_shape;
+    bool picked = false;
+    const bool busy = swatch_picker_popup(shape_set(input), pick, "##shapepick", "SHAPE", at, strip, &picked);
+    if (picked) {
+        input.insert_shape = (InputState::InsertShape)pick;
+        input.interaction_mode = InputState::InteractionMode::INSERT;
+    }
+    return busy;
 }
 
 struct RailBrush {
@@ -1364,6 +1417,35 @@ float g_rail_bottom = 0.0f;   // the rail's bottom edge this frame, for brush_pa
 float g_file_bottom = kEdge;  // the file bar's bottom edge; the rail starts below it
 float g_cmd_bottom = 64.0f;   // the command bar's bottom edge at REST size; the retopo dock hangs under it
 
+// A tab hanging off the dock's edge beside a rail button (whose top-left is btn_at):
+// 88% of a rail button, its top a fifth of the way down the button so it hangs a
+// little below it, and tucked partly under the dock's edge — drawn on the background
+// list so the dock panel and its button paint over the tucked part, with the click
+// target on the part that shows. Clicked, `strip` grows its picker out of the dock edge
+// at the tab's height (true while it shows); otherwise `face` draws the tab's content.
+void side_tab(ImVec2 btn_at, float edge, const char* popup, const char* tip,
+              const std::function<bool(ImVec2)>& strip,
+              const std::function<void(ImDrawList*, ImVec2, float)>& face) {
+    const float bs = kRailBtn * 0.88f, tuck = 10.0f, vis = bs - tuck;
+    const float top = btn_at.y + kRailBtn * 0.22f, cy = top + bs * 0.5f;
+    char win[48]; std::snprintf(win, sizeof win, "##tab%s", popup);
+    ImGui::SetNextWindowPos(ImVec2(edge, top), ImGuiCond_Always);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::Begin(win, nullptr, kPanelFlags);
+    ImVec2 pos = ImGui::GetCursorScreenPos();
+    bool clicked = ImGui::InvisibleButton("##tabBtn", ImVec2(vis + 4.0f, bs));
+    bool hovered = ImGui::IsItemHovered();
+    bool held = ImGui::IsItemActive();
+    float s = spring(ImGui::GetItemID(), held ? 0.92f : (hovered ? 1.06f : 1.0f), held ? 1400.0f : 520.0f);
+    if (clicked) ImGui::OpenPopup(popup);
+    if (!strip(ImVec2(edge + 6.0f, cy))) {
+        face(ImGui::GetBackgroundDrawList(), ImVec2(edge - tuck + bs * 0.5f, cy), bs * s);
+        if (hovered) tooltip(ImVec2(pos.x, pos.y), ImVec2(pos.x + vis, pos.y + bs), TipSide::Right, tip, nullptr);
+    }
+    ImGui::End();
+    ImGui::PopStyleVar();
+}
+
 void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
     (void)win_h;
     BrushType current = input.current_brush;
@@ -1397,16 +1479,11 @@ void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
     o.key = input.key_label(KeyAction::MODE_SCULPT); o.corner = corner(KeyAction::MODE_SCULPT);
     if (icon_button("mSculpt", Icon::ModeSculpt, kRailBtn, o))
         input.enter_sculpt_mode();
-    o.on = mode == InputState::InteractionMode::INSERT; o.tip = "Insert";
-    o.key = input.key_label(KeyAction::MODE_INSERT); o.corner = corner(KeyAction::MODE_INSERT);
+    o.on = input.object_mode(); o.tip = "Object";
+    o.key = input.key_label(KeyAction::MODE_OBJECT); o.corner = corner(KeyAction::MODE_OBJECT);
     ImGui::SameLine();
-    if (icon_button("mInsert", Icon::ModeInsert, kRailBtn, o))
-        input.interaction_mode = InputState::InteractionMode::INSERT;
-    ImGui::SameLine();
-    o.on = mode == InputState::InteractionMode::SELECT; o.tip = "Select";
-    o.key = input.key_label(KeyAction::MODE_SELECT); o.corner = corner(KeyAction::MODE_SELECT);
-    if (icon_button("mSelect", Icon::ModeSelect, kRailBtn, o))
-        input.interaction_mode = InputState::InteractionMode::SELECT;
+    if (icon_button("mObject", Icon::ModeInsert, kRailBtn, o))
+        input.enter_object_mode();
     ImGui::SameLine();
     // Where the button of the brush the alpha serves sits (Draw, Mask or the paint
     // brush, all in the brush column). y < 0 = no alpha tile this frame.
@@ -1472,7 +1549,57 @@ void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
     }
     o.side = TipSide::Right;
 
-    // Mode 0 has its own dock: its tools stand where the brushes were, and nothing a
+    // Object mode's dock: Select, Move, Insert (its shape on a tab beside it, picked like
+    // an alpha), Scale and Rotate. None of the brushes, nothing a brush owns.
+    if (input.object_mode()) {
+        using IM = InputState::InteractionMode;
+        using OT = InputState::ObjectTool;
+        const bool sel = mode == IM::SELECT;
+        o.on = sel && input.object_tool == OT::SELECT;
+        o.tip = "Select: click to pick, drag to move, right-drag to scale, Q / E turn";
+        o.key = input.key_label(KeyAction::OBJ_SELECT); o.corner = corner(KeyAction::OBJ_SELECT);
+        if (icon_button("oSelect", Icon::ModeSelect, kRailBtn, o)) {
+            input.interaction_mode = IM::SELECT; input.object_tool = OT::SELECT;
+        }
+        o.on = sel && input.object_tool == OT::MOVE;
+        o.tip = "Move: drag an arm along its axis, a corner across two, the centre ring in the view";
+        o.key = input.key_label(KeyAction::OBJ_MOVE); o.corner = corner(KeyAction::OBJ_MOVE);
+        if (icon_button("oMove", Icon::BrushMove, kRailBtn, o)) {
+            input.interaction_mode = IM::SELECT; input.object_tool = OT::MOVE;
+        }
+        const ImVec2 insert_at = ImGui::GetCursorScreenPos();
+        o.on = mode == IM::INSERT; o.tip = "Insert: click the model to place, drag to size";
+        o.key = input.key_label(KeyAction::OBJ_INSERT); o.corner = corner(KeyAction::OBJ_INSERT);
+        if (icon_button("oInsert", Icon::ModeInsert, kRailBtn, o)) input.interaction_mode = IM::INSERT;
+        o.on = sel && input.object_tool == OT::SCALE;
+        o.tip = "Scale: drag an arm for one axis, a corner for two, the centre ring for all";
+        o.key = input.key_label(KeyAction::OBJ_SCALE); o.corner = corner(KeyAction::OBJ_SCALE);
+        if (icon_button("oScale", Icon::ObjScale, kRailBtn, o)) {
+            input.interaction_mode = IM::SELECT; input.object_tool = OT::SCALE;
+        }
+        o.on = sel && input.object_tool == OT::ROTATE;
+        o.tip = "Rotate: drag a ring to turn about its axis, Shift for 5 degree steps";
+        o.key = input.key_label(KeyAction::OBJ_ROTATE); o.corner = corner(KeyAction::OBJ_ROTATE);
+        if (icon_button("oRotate", Icon::ObjRotate, kRailBtn, o)) {
+            input.interaction_mode = IM::SELECT; input.object_tool = OT::ROTATE;
+        }
+        o.key = nullptr; o.corner = nullptr;
+        g_k = 1.0f;
+        g_rail_bottom = ImGui::GetWindowPos().y + ImGui::GetWindowSize().y;
+        g_rail_right = ImGui::GetWindowPos().x + ImGui::GetWindowSize().x;
+        g_strip_open = false;
+        const float edge = ImGui::GetWindowPos().x + ImGui::GetWindowSize().x;
+        end_panel();
+        const int shape = (int)input.insert_shape;
+        side_tab(insert_at, edge, "##shapepick", kShapeName[shape],
+                 [&](ImVec2 at) { return shape_picker_popup(input, at, true); },
+                 [&](ImDrawList* bg, ImVec2 c, float sz) {
+                     draw_shape_tile(bg, ImVec2(c.x - sz * 0.5f, c.y - sz * 0.5f), sz, shape);
+                 });
+        return;
+    }
+
+    // Retopo has its own dock: its tools stand where the brushes were, and nothing a
     // brush owns (alpha swatch, smooth) comes along.
     if (mode == InputState::InteractionMode::RETOPO) {
         o.on = true; o.tip = "Draw polygon strips";
@@ -1603,32 +1730,13 @@ void rail(InputState& input, int win_h, const AlphaLibrary* alpha_lib) {
         && alpha_at.y >= 0.0f) {
         const char* popup = bucket ? "##patternpick" : "##alphapick";
         const int active = bucket ? input.fill_pattern : input.active_alpha;
-        const float bs = kRailBtn * 0.88f, tuck = 10.0f, vis = bs - tuck;
-        const float top = alpha_at.y + kRailBtn * 0.22f, cy = top + bs * 0.5f;
-        ImGui::SetNextWindowPos(ImVec2(alpha_edge, top), ImGuiCond_Always);
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-        ImGui::Begin("##mAlpha", nullptr, kPanelFlags);
-        ImVec2 pos = ImGui::GetCursorScreenPos();
-        bool clicked = ImGui::InvisibleButton("##alphaBtn", ImVec2(vis + 4.0f, bs));
-        bool hovered = ImGui::IsItemHovered();
-        bool held = ImGui::IsItemActive();
-        float s = spring(ImGui::GetItemID(), held ? 0.92f : (hovered ? 1.06f : 1.0f), held ? 1400.0f : 520.0f);
-        if (clicked) ImGui::OpenPopup(popup);
-        const ImVec2 strip_at(alpha_edge + 6.0f, cy);
-        const bool busy = bucket ? pattern_picker_popup(input, strip_at, true)
-                                 : alpha_picker_popup(input, alpha_lib, strip_at, true);
-        if (!busy) {
-            // The stamp itself, no frame, filling the swatch square.
-            ImDrawList* bg = ImGui::GetBackgroundDrawList();
-            ImVec2 c(alpha_edge - tuck + bs * 0.5f, cy);
-            int ai = std::max(0, std::min(active, lib->count() - 1));
-            float sz = bs * s;
-            draw_alpha_preview(bg, ImVec2(c.x - sz * 0.5f, c.y - sz * 0.5f), sz, lib->get(ai).preview, true);
-            if (hovered) tooltip(ImVec2(pos.x, pos.y), ImVec2(pos.x + vis, pos.y + bs), TipSide::Right,
-                                 bucket ? "Fill Pattern" : "Brush Alpha", nullptr);
-        }
-        ImGui::End();
-        ImGui::PopStyleVar();
+        side_tab(alpha_at, alpha_edge, popup, bucket ? "Fill Pattern" : "Brush Alpha",
+                 [&](ImVec2 at) { return bucket ? pattern_picker_popup(input, at, true)
+                                                : alpha_picker_popup(input, alpha_lib, at, true); },
+                 [&](ImDrawList* bg, ImVec2 c, float sz) {
+                     int ai = std::max(0, std::min(active, lib->count() - 1));
+                     draw_alpha_preview(bg, ImVec2(c.x - sz * 0.5f, c.y - sz * 0.5f), sz, lib->get(ai).preview, true);
+                 });
     }
 }
 
@@ -1995,46 +2103,12 @@ void label_item(UiFont f, float px, ImU32 col, const char* s, float min_w = 0.0f
     text_at(ImGui::GetWindowDrawList(), f, px, ImVec2(p.x, p.y + (h - ts.y) * 0.5f), col, s);
 }
 
-// Insert-shape button: same squash as the icon buttons, its own little line glyphs.
-bool shape_button(const char* id, int kind, bool on, const char* tip) {
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    const float size = 36.0f;
-    ImVec2 pos = ImGui::GetCursorScreenPos();
-    bool clicked = ImGui::InvisibleButton(id, ImVec2(size, size));
-    bool hovered = ImGui::IsItemHovered();
-    bool held = ImGui::IsItemActive();
-    float s = spring(ImGui::GetItemID(), held ? 0.92f : 1.0f, held ? 1400.0f : 520.0f);
-    ImVec2 c(pos.x + size * 0.5f, pos.y + size * 0.5f);
-    ImVec2 a(c.x - size * 0.5f * s, c.y - size * 0.5f * s), b(c.x + size * 0.5f * s, c.y + size * 0.5f * s);
-    if (on) dl->AddRectFilled(a, b, kAccent, rad(9.0f));
-    else if (hovered) dl->AddRectFilled(a, b, g_dos ? cga::dark_gray : IM_COL32(255, 255, 255, 18), rad(9.0f));
-    ImU32 col = on ? (g_dos ? cga::black : IM_COL32_WHITE) : kText;
-    float k = s * 0.75f, th = 1.6f;
-    if (kind == 0) {
-        dl->AddCircle(c, 9.0f * k * 1.33f, col, 0, th);
-        dl->AddEllipse(c, ImVec2(12.0f * k, 4.0f * k), col, 0.0f, 0, th * 0.75f);
-    } else if (kind == 1) {
-        draw_icon(dl, Icon::ModeInsert, c, 24.0f * k * 1.1f, col);
-    } else {
-        float rw = 8.0f * k * 1.2f, rh = 10.0f * k * 1.2f, ry = 3.2f * k * 1.2f;
-        dl->AddEllipse(ImVec2(c.x, c.y - rh), ImVec2(rw, ry), col, 0.0f, 0, th);
-        dl->AddLine(ImVec2(c.x - rw, c.y - rh), ImVec2(c.x - rw, c.y + rh), col, th);
-        dl->AddLine(ImVec2(c.x + rw, c.y - rh), ImVec2(c.x + rw, c.y + rh), col, th);
-        dl->PathArcTo(ImVec2(c.x, c.y + rh), rw, 0.0f, 3.14159265f);
-        // squash the lower arc into the ellipse's proportions
-        for (ImVec2& v : dl->_Path) v.y = c.y + rh + (v.y - (c.y + rh)) * (ry / rw);
-        dl->PathStroke(col, 0, th);
-    }
-    if (hovered) tooltip(pos, ImVec2(pos.x + size, pos.y + size), TipSide::Below, tip, nullptr);
-    return clicked;
-}
-
 float g_brush_right = 0.0f;   // readout's right edge, for options/status placement
 float g_opts_right  = 0.0f;   // tool-options panel's right edge, 0 when it isn't up
 
 // The brush readout, stacked: a heading, then one row per setting. Bottom-left,
-// flush with the rail's left edge, under it; Insert and Select reuse the slot for
-// their own few controls.
+// flush with the rail's left edge, under it; Object mode reuses the slot for its
+// hints.
 float brush_panel(InputState& input, int win_h) {
     const auto mode = input.interaction_mode;
     // Touch mode: narrow at rest (a landscape phone is short and wide, and the panel
@@ -2085,21 +2159,12 @@ float brush_panel(InputState& input, int win_h) {
     };
     auto hint = [&](const char* s) { label_item(UiFont::Sans, 12.0f, kMuted, s, 0.0f, g_dos ? 18.0f : 16.0f); };
     if (mode == InputState::InteractionMode::INSERT) {
-        heading("Insert", nullptr);
-        struct S { const char* id; int kind; const char* tip; InputState::InsertShape shape; };
-        static const S shapes[] = {
-            {"##shSphere", 0, "Sphere",   InputState::InsertShape::SPHERE},
-            {"##shBox",    1, "Box",      InputState::InsertShape::BOX},
-            {"##shCyl",    2, "Cylinder", InputState::InsertShape::CYLINDER},
-        };
-        for (int i = 0; i < 3; i++) {
-            if (i) ImGui::SameLine(0.0f, 4.0f);
-            if (shape_button(shapes[i].id, shapes[i].kind, input.insert_shape == shapes[i].shape,
-                             shapes[i].tip))
-                input.insert_shape = shapes[i].shape;
-        }
-        hint("Click the model");
-        hint("to place");
+        static const char* names[3] = {"Sphere", "Box", "Cylinder"};
+        heading(names[(int)input.insert_shape], nullptr);
+        hint("Click the model to place");
+        hint("Drag to size it");
+        hint("Q / E: change the shape");
+        hint("Esc: back to Select");
     } else if (input.uv_on()) {
         heading("Seams", nullptr);
         meter_widget("##mS", input, 0, w, k, !can_grow || big);
@@ -2147,10 +2212,29 @@ float brush_panel(InputState& input, int win_h) {
             meter_widget("##mRings", input, 4, w, k, !can_grow || big);
             meter_widget("##mDensity", input, 5, w, k, !can_grow || big);
         }
+    } else if (mode == InputState::InteractionMode::SELECT
+               && input.object_tool == InputState::ObjectTool::MOVE) {
+        heading("Move", nullptr);
+        hint("Drag an arm: along it");
+        hint("Drag a corner: across those two");
+        hint("Drag the centre ring: in the view");
+    } else if (mode == InputState::InteractionMode::SELECT
+               && input.object_tool == InputState::ObjectTool::SCALE) {
+        heading("Scale", nullptr);
+        hint("Drag an arm: that axis");
+        hint("Drag a corner: those two");
+        hint("Drag the centre ring: all");
+    } else if (mode == InputState::InteractionMode::SELECT
+               && input.object_tool == InputState::ObjectTool::ROTATE) {
+        heading("Rotate", nullptr);
+        hint("Drag a ring: turn about it");
+        hint("Shift: 5 degree steps");
+        hint("Q / E: about the view");
     } else if (mode == InputState::InteractionMode::SELECT) {
         heading("Select", nullptr);
         hint("Click to pick");
         hint("Drag to move");
+        hint("Right-drag to scale");
         hint("Q / E rotate");
     } else {
         heading(input.brush_name(), " - Tool Options");
@@ -2559,11 +2643,10 @@ void end_shelf() {
 void apply_mode(InputState& input, int m) {
     switch (m) {
         case 0: input.enter_sculpt_mode(); break;
-        case 1: input.interaction_mode = InputState::InteractionMode::INSERT; break;
-        case 2: input.interaction_mode = InputState::InteractionMode::SELECT; break;
-        case 3: input.enter_paint_mode(); break;
-        case 4: input.enter_retopo_mode(); break;
-        case 5: input.enter_uv_mode(); break;
+        case 1: input.enter_object_mode(); break;
+        case 2: input.enter_paint_mode(); break;
+        case 3: input.enter_retopo_mode(); break;
+        case 4: input.enter_uv_mode(); break;
     }
 }
 
@@ -2643,26 +2726,25 @@ void y2k_top(InputState& in, int W, const SkinStats& st) {
 
     // Slider shelf row.
     const float cy = kTitleH + (kTopH - kTitleH) * 0.5f;
-    // Mode well: Sculpt / Insert / Select / Paint / Retopo / UV, the live one an orange tile.
-    static const char* modes[6] = {"Sculpt", "Insert", "Select", "Paint", "Retopo", "UV"};
-    const char* mkeys[6] = {in.key_label(KeyAction::MODE_SCULPT), in.key_label(KeyAction::MODE_INSERT),
-                            in.key_label(KeyAction::MODE_SELECT), in.key_label(KeyAction::MODE_PAINT),
-                            in.key_label(KeyAction::MODE_RETOPO), in.key_label(KeyAction::MODE_UV)};
+    // Mode well: Sculpt / Object / Paint / Retopo / UV, the live one an orange tile.
+    static const char* modes[5] = {"Sculpt", "Object", "Paint", "Retopo", "UV"};
+    const char* mkeys[5] = {in.key_label(KeyAction::MODE_SCULPT), in.key_label(KeyAction::MODE_OBJECT),
+                            in.key_label(KeyAction::MODE_PAINT), in.key_label(KeyAction::MODE_RETOPO),
+                            in.key_label(KeyAction::MODE_UV)};
     const bool smooth_on = in.is_smooth_active();
-    int mode = in.interaction_mode == InputState::InteractionMode::INSERT ? 1
-             : in.interaction_mode == InputState::InteractionMode::SELECT ? 2
-             : in.uv_on() ? 5
-             : in.interaction_mode == InputState::InteractionMode::RETOPO ? 4
-             : in.paint_mode ? 3 : 0;
-    float bw[6], total = 4.0f;
-    for (int i = 0; i < 6; i++) {
+    int mode = in.object_mode() ? 1
+             : in.uv_on() ? 4
+             : in.interaction_mode == InputState::InteractionMode::RETOPO ? 3
+             : in.paint_mode ? 2 : 0;
+    float bw[5], total = 4.0f;
+    for (int i = 0; i < 5; i++) {
         bw[i] = ysize(true, 11.0f, modes[i]).x + ysize(false, 9.0f, mkeys[i]).x + 5.0f + 24.0f;
         total += bw[i] + (i ? 2.0f : 0.0f);
     }
     x = 10.0f;
     inset(dl, ImVec2(x, cy - 15), ImVec2(x + total, cy + 15), 4.0f);
     float bx = x + 2.0f;
-    for (int i = 0; i < 6; i++) {
+    for (int i = 0; i < 5; i++) {
         bool hv, held;
         char id[16]; std::snprintf(id, sizeof id, "##ym%d", i);
         ImVec2 a(bx, cy - 13), b(bx + bw[i], cy + 13);
@@ -2746,8 +2828,16 @@ void y2k_left(InputState& in, int H, const AlphaLibrary* lib) {
     {
         Icon icon = in.paint_mode ? Icon::ModePaint : Icon::BrushDraw;
         const char* nm = in.paint_mode ? "Paint" : "Draw";
-        if (mode == InputState::InteractionMode::INSERT)      { icon = Icon::ModeInsert; nm = "Insert"; }
-        else if (mode == InputState::InteractionMode::SELECT) { icon = Icon::ModeSelect; nm = "Select"; }
+        static const Icon shape_icon[3] = {Icon::ShapeSphere, Icon::ModeInsert, Icon::ShapeCylinder};
+        static const char* shape_nm[3] = {"Sphere", "Box", "Cylinder"};
+        if (mode == InputState::InteractionMode::INSERT) {
+            icon = shape_icon[(int)in.insert_shape]; nm = shape_nm[(int)in.insert_shape];
+        }
+        else if (mode == InputState::InteractionMode::SELECT) {
+            static const Icon ti[4] = {Icon::ModeSelect, Icon::BrushMove, Icon::ObjScale, Icon::ObjRotate};
+            static const char* tn[4] = {"Select", "Move", "Scale", "Rotate"};
+            icon = ti[(int)in.object_tool]; nm = tn[(int)in.object_tool];
+        }
         else if (in.uv_on()) { icon = Icon::ModeUv; nm = "UV"; }
         else if (mode == InputState::InteractionMode::RETOPO) { icon = Icon::ModeRetopo; nm = "Retopo"; }
         else {
@@ -2762,34 +2852,94 @@ void y2k_left(InputState& in, int H, const AlphaLibrary* lib) {
         y += 92 + 10;
     }
 
-    ytext(dl, true, 11.0f, ImVec2(x0 + 2, y), y2k::label, in.paint_mode ? "Paint Tools" : "Brushes");
-    y += 18;
     const float tw = (w - 4.0f) * 0.5f, th = 44.0f;
-    for (int i = 0; i < count; i++) {
-        const RailBrush& br = brushes[i];
-        const char* key = key_of(br);
-        ImVec2 a(x0 + (i % 2) * (tw + 4.0f), y + (i / 2) * (th + 4.0f)), b(a.x + tw, a.y + th);
-        bool hv, held;
-        char id[16]; std::snprintf(id, sizeof id, "##yb%d", i);
-        bool clicked = hit(id, a, ImVec2(tw, th), &hv, &held);
-        bool on = editing && rail_brush_on(in, br, smooth_on);
-        gloss_tile(dl, a, b, 5.0f, on, hv, held);
-        ImU32 ic = on ? y2k::on_text : IM_COL32(0xEC, 0xEC, 0xEC, 255);
-        draw_icon(dl, br.icon, ImVec2((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f - 1), 22.0f, ic);
-        ImVec2 ks = ysize(false, 9.0f, key);
-        ytext(dl, false, 9.0f, ImVec2(b.x - 3 - ks.x, b.y - 2 - ks.y), with_alpha(ic, 0.8f), key, false);
-        if (hv) tooltip(a, b, TipSide::Right, br.name,
-                        br.type == BrushType::SMOOTH ? "Shift Shift" : key);
-        if (clicked) {
-            if (br.type == BrushType::SMOOTH) {
-                if (!in.smooth_locked) { in.smooth_locked = true; in.sync_live_settings(); }
-                else in.clear_smooth_lock();
+    if (in.object_mode()) {
+        // Object mode: its five tools in place of the brushes, then the Insert shapes
+        // and the "+" that adds a mesh from a file.
+        using IM = InputState::InteractionMode;
+        using OT = InputState::ObjectTool;
+        ytext(dl, true, 11.0f, ImVec2(x0 + 2, y), y2k::label, "Object Tools");
+        y += 18;
+        struct T { const char* id; Icon icon; const char* tip; KeyAction key; int tool; };
+        static const T tools[] = {
+            {"##yoSel", Icon::ModeSelect, "Select (right-drag scales)", KeyAction::OBJ_SELECT, 0},
+            {"##yoMov", Icon::BrushMove,  "Move",    KeyAction::OBJ_MOVE, 1},
+            {"##yoIns", Icon::ModeInsert, "Insert",  KeyAction::OBJ_INSERT, -1},
+            {"##yoScl", Icon::ObjScale,   "Scale",   KeyAction::OBJ_SCALE, 2},
+            {"##yoRot", Icon::ObjRotate,  "Rotate",  KeyAction::OBJ_ROTATE, 3},
+        };
+        for (int i = 0; i < 5; i++) {
+            ImVec2 a(x0 + (i % 2) * (tw + 4.0f), y + (i / 2) * (th + 4.0f)), b(a.x + tw, a.y + th);
+            bool hv, held;
+            const char* key = in.key_label(tools[i].key);
+            if (hit(tools[i].id, a, ImVec2(tw, th), &hv, &held)) {
+                if (tools[i].tool < 0) in.interaction_mode = IM::INSERT;
+                else { in.interaction_mode = IM::SELECT; in.object_tool = (OT)tools[i].tool; }
+            }
+            bool on = tools[i].tool < 0 ? mode == IM::INSERT
+                                        : mode == IM::SELECT && (int)in.object_tool == tools[i].tool;
+            gloss_tile(dl, a, b, 5.0f, on, hv, held);
+            ImU32 ic = on ? y2k::on_text : IM_COL32(0xEC, 0xEC, 0xEC, 255);
+            draw_icon(dl, tools[i].icon, ImVec2((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f - 1), 22.0f, ic);
+            ImVec2 ks = ysize(false, 9.0f, key);
+            ytext(dl, false, 9.0f, ImVec2(b.x - 3 - ks.x, b.y - 2 - ks.y), with_alpha(ic, 0.8f), key, false);
+            if (hv) tooltip(a, b, TipSide::Right, tools[i].tip, key);
+        }
+        y += 3 * (th + 4.0f) + 6.0f;
+        ytext(dl, true, 11.0f, ImVec2(x0 + 2, y), y2k::label, "Shape");
+        y += 18;
+        const float sw = (w - 12.0f) / 4.0f;
+        for (int i = 0; i < 4; i++) {
+            ImVec2 a(x0 + i * (sw + 4.0f), y), b(a.x + sw, a.y + 36);
+            bool hv, held;
+            char id[16]; std::snprintf(id, sizeof id, "##ySh%d", i);
+            const bool plus = i == 3;
+            if (hit(id, a, ImVec2(sw, 36), &hv, &held)) {
+                if (plus) in.import_force_append = true;
+                else { in.insert_shape = (InputState::InsertShape)i; in.interaction_mode = IM::INSERT; }
+            }
+            const bool on = !plus && in.insert_shape == (InputState::InsertShape)i;
+            gloss_tile(dl, a, b, 4.0f, on, hv, held);
+            ImU32 col = on ? y2k::on_text : y2k::text;
+            ImVec2 c((a.x + b.x) * 0.5f, a.y + 18);
+            if (plus) {
+                dl->AddLine(ImVec2(c.x - 6, c.y), ImVec2(c.x + 6, c.y), col, 1.75f);
+                dl->AddLine(ImVec2(c.x, c.y - 6), ImVec2(c.x, c.y + 6), col, 1.75f);
             } else {
-                rail_pick(in, br);
+                draw_icon(dl, kShapeIcon[i], c, 22.0f, col);
+            }
+            if (hv) tooltip(a, b, TipSide::Right, plus ? "Add a mesh from a file" : kShapeName[i], nullptr);
+        }
+        y += 44;
+    } else {
+        ytext(dl, true, 11.0f, ImVec2(x0 + 2, y), y2k::label, in.paint_mode ? "Paint Tools" : "Brushes");
+        y += 18;
+        for (int i = 0; i < count; i++) {
+            const RailBrush& br = brushes[i];
+            const char* key = key_of(br);
+            ImVec2 a(x0 + (i % 2) * (tw + 4.0f), y + (i / 2) * (th + 4.0f)), b(a.x + tw, a.y + th);
+            bool hv, held;
+            char id[16]; std::snprintf(id, sizeof id, "##yb%d", i);
+            bool clicked = hit(id, a, ImVec2(tw, th), &hv, &held);
+            bool on = editing && rail_brush_on(in, br, smooth_on);
+            gloss_tile(dl, a, b, 5.0f, on, hv, held);
+            ImU32 ic = on ? y2k::on_text : IM_COL32(0xEC, 0xEC, 0xEC, 255);
+            draw_icon(dl, br.icon, ImVec2((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f - 1), 22.0f, ic);
+            ImVec2 ks = ysize(false, 9.0f, key);
+            ytext(dl, false, 9.0f, ImVec2(b.x - 3 - ks.x, b.y - 2 - ks.y), with_alpha(ic, 0.8f), key, false);
+            if (hv) tooltip(a, b, TipSide::Right, br.name,
+                            br.type == BrushType::SMOOTH ? "Shift Shift" : key);
+            if (clicked) {
+                if (br.type == BrushType::SMOOTH) {
+                    if (!in.smooth_locked) { in.smooth_locked = true; in.sync_live_settings(); }
+                    else in.clear_smooth_lock();
+                } else {
+                    rail_pick(in, br);
+                }
             }
         }
+        y += ((count + 1) / 2) * (th + 4.0f) + 6.0f;
     }
-    y += ((count + 1) / 2) * (th + 4.0f) + 6.0f;
 
     // Alpha. The bucket and the picker have no stamp.
     const bool alpha_brush = brush_uses_alpha(current) &&
@@ -2901,39 +3051,21 @@ void y2k_left(InputState& in, int H, const AlphaLibrary* lib) {
         ImGui::PopStyleVar(2);
     }
     if (mode == InputState::InteractionMode::INSERT) {
-        ytext(dl, true, 11.0f, ImVec2(x0 + 2, y), y2k::label, "Shape");
-        y += 18;
-        static const struct { const char* id; int kind; const char* tip; InputState::InsertShape s; } shapes[] = {
-            {"##ySh0", 0, "Sphere", InputState::InsertShape::SPHERE},
-            {"##ySh1", 1, "Box", InputState::InsertShape::BOX},
-            {"##ySh2", 2, "Cylinder", InputState::InsertShape::CYLINDER},
-        };
-        const float sw = (w - 8.0f) / 3.0f;
-        for (int i = 0; i < 3; i++) {
-            ImVec2 a(x0 + i * (sw + 4.0f), y);
-            bool hv, held;
-            if (hit(shapes[i].id, a, ImVec2(sw, 36), &hv, &held)) in.insert_shape = shapes[i].s;
-            bool on = in.insert_shape == shapes[i].s;
-            gloss_tile(dl, a, ImVec2(a.x + sw, a.y + 36), 4.0f, on, hv, held);
-            ImVec2 c(a.x + sw * 0.5f, a.y + 18);
-            ImU32 col = on ? y2k::on_text : y2k::text;
-            if (shapes[i].kind == 0) { dl->AddCircle(c, 9.0f, col, 0, 1.6f); dl->AddEllipse(c, ImVec2(9, 3), col, 0, 0, 1.2f); }
-            else if (shapes[i].kind == 1) draw_icon(dl, Icon::ModeInsert, c, 22.0f, col);
-            else {
-                dl->AddEllipse(ImVec2(c.x, c.y - 7), ImVec2(7, 2.6f), col, 0, 0, 1.5f);
-                dl->AddLine(ImVec2(c.x - 7, c.y - 7), ImVec2(c.x - 7, c.y + 7), col, 1.5f);
-                dl->AddLine(ImVec2(c.x + 7, c.y - 7), ImVec2(c.x + 7, c.y + 7), col, 1.5f);
-                dl->AddEllipse(ImVec2(c.x, c.y + 7), ImVec2(7, 2.6f), col, 0, 0, 1.5f);
-            }
-            if (hv) tooltip(a, ImVec2(a.x + sw, a.y + 36), TipSide::Right, shapes[i].tip, nullptr);
-        }
-        y += 44;
-        ytext(dl, false, 10.0f, ImVec2(x0, y), y2k::muted, "Click the model", false);
+        ytext(dl, false, 10.0f, ImVec2(x0, y), y2k::muted, "Click the model,", false);
+        ytext(dl, false, 10.0f, ImVec2(x0, y + 13), y2k::muted, "drag to size.", false);
+        ytext(dl, false, 10.0f, ImVec2(x0, y + 26), y2k::muted, "Q / E: the shape.", false);
+        ytext(dl, false, 10.0f, ImVec2(x0, y + 39), y2k::muted, "Esc: back to Select.", false);
     }
     if (mode == InputState::InteractionMode::SELECT) {
-        ytext(dl, false, 10.0f, ImVec2(x0, y), y2k::muted, "Click to pick,", false);
-        ytext(dl, false, 10.0f, ImVec2(x0, y + 13), y2k::muted, "drag to move.", false);
-        ytext(dl, false, 10.0f, ImVec2(x0, y + 26), y2k::muted, "Q / E rotate.", false);
+        static const char* lines[4][4] = {
+            {"Click to pick,", "drag to move,", "right-drag to scale.", "Q / E rotate."},
+            {"Drag an arm: along it,", "a corner: across two,", "the centre ring: in view.", ""},
+            {"Drag an arm: one axis,", "a corner: two,", "the centre ring: all.", ""},
+            {"Drag a ring to turn", "about its axis.", "Shift: 5 degree steps.", "Q / E: about the view."},
+        };
+        const int t = (int)in.object_tool;
+        for (int i = 0; i < 4; i++)
+            ytext(dl, false, 10.0f, ImVec2(x0, y + 13.0f * i), y2k::muted, lines[t][i], false);
     }
     end_shelf();
 }
@@ -5381,7 +5513,7 @@ void draw_uv_dock(InputState& input, RetopoState& st, UvMeshRow* rows, int nrows
     }
     dl->AddRect(sq0, sq1, kDivider, g_dos ? 0.0f : rad(4.0f));
     if (!any_fresh) {
-        const char* msg = !any_built ? "Build a retopo mesh in mode 0"
+        const char* msg = !any_built ? "Build a retopo mesh in Retopo mode"
                         : have       ? "Out of date: the mesh changed"
                                      : "Not unwrapped yet";
         ImFont* fnt = F(UiFont::Sans);
@@ -5438,7 +5570,7 @@ void draw_uv_dock(InputState& input, RetopoState& st, UvMeshRow* rows, int nrows
         std::snprintf(repack_tip, sizeof repack_tip, "Pack the %zu meshes' islands into one square together, as they are", shown.size());
     } else {
         std::snprintf(unwrap_tip, sizeof unwrap_tip, "%s", any_built ? "Cut the retopo mesh into islands and lay them flat"
-                                                                    : "Build a retopo mesh in mode 0 first");
+                                                                    : "Build a retopo mesh in Retopo mode first");
         std::snprintf(repack_tip, sizeof repack_tip, "%s", any_fresh ? "Pack the islands again, as they are (moved ones too)"
                                                                     : "Unwrap first");
     }
@@ -5701,7 +5833,7 @@ void draw_uv_dock(InputState& input, RetopoState& st, UvMeshRow* rows, int nrows
             if (idle) {
                 const bool can = fresh && (bs.normal || bs.color || (bs.color_id && any_id));
                 if (chip(bk.res().empty() ? "Bake" : "Bake again", false, bh, can)) input.uv_bake_requested = true;
-                tip(!st.built ? "Build a retopo mesh in mode 0 first"
+                tip(!st.built ? "Build a retopo mesh in Retopo mode first"
                     : !fresh  ? "Unwrap first: the bake goes onto the UV layout"
                     : !(bs.normal || bs.color || (bs.color_id && any_id)) ? "Pick a map to bake"
                     : many    ? "Bake every mesh shown into one set of maps (an atlas), each from its own sculpt"
@@ -5756,7 +5888,7 @@ void draw_uv_dock(InputState& input, RetopoState& st, UvMeshRow* rows, int nrows
         eo.icol = IM_COL32(245, 247, 252, 255);   // lighter than the skin's: it's the way out
         eo.enabled = any_built;
         eo.tip = any_built ? "Export model and textures: the retopo meshes shown (OBJ, STL or GLB) and their maps"
-                           : "Build a retopo mesh in mode 0 first";
+                           : "Build a retopo mesh in Retopo mode first";
         if (icon_button("uvExportAll", Icon::CmdExport, bs, eo)) {
             input.export_kind = InputState::ExportKind::UV_ASSETS;
             input.export_dialog_active = true;

@@ -24,7 +24,9 @@ enum class Icon {
     UvSeamMark, UvSeamCut, UvSeamWeld, // UV mode: mark seams (a chalk line), cut them (scissors), weld them (stitches)
     BrushStipple,                     // Stipple brush: a scatter of dots
     PaintBlend,                       // paint Blend: a yin-yang
-    RetopoPoints,                     // mode 0's points (click four, a quad)
+    RetopoPoints,                     // retopo's points (click four, a quad)
+    ShapeSphere, ShapeCylinder,       // Object mode's insert shapes (the box is ModeInsert)
+    ObjScale, ObjRotate,              // Object mode's Scale and Rotate tools
     // The file dialogs' toolbar and Places pane (vector only: no pixel versions, the
     // dialogs draw these on every skin).
     NavBack, NavForward, NavUp, NewFolder,

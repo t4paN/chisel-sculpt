@@ -940,7 +940,7 @@ void retopo_frame(RetopoState& retopo, InputState& input, Scene& scene, Mesh& me
         take(scene.active_mesh_id());
         for (uint32_t id : scene.selected_ids()) take(id);
         char who[64];
-        const char* why = on.empty() ? "Build a retopo mesh in mode 0 first" : nullptr;
+        const char* why = on.empty() ? "Build a retopo mesh in Retopo mode first" : nullptr;
         uint32_t skipped = 0, islands = 0, folded = 0;
         double ms = 0.0;
         std::vector<UvPackPart> parts;

@@ -43,8 +43,8 @@ identically in the native build, and vice versa.
 - **Matcap shading** — one draw call per object
 
 **Full controls and workflow: [MANUAL.md](MANUAL.md).** Quickstart: left-drag on the
-mesh sculpts, off the mesh orbits; `1–4` switch modes; hold `S`/`W`/`A` + drag to tune
-the brush; `X` mirrors; `Ctrl+Z` undoes; `0` is retopology, `9` unwraps and bakes it.
+mesh sculpts, off the mesh orbits; `1–5` switch modes; hold `S`/`W`/`A` + drag to tune
+the brush; `X` mirrors; `Ctrl+Z` undoes; `2` picks, moves and places objects; `4` is retopology, `5` unwraps and bakes it.
 
 ## How it works
 

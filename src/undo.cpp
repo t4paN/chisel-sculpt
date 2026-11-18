@@ -107,6 +107,7 @@ void UndoStack::push(UndoEntry&& e) {
     redo_stack.clear();
     total_bytes += entry_bytes(e);
     e.seq = next_seq();       // scene-wide edit clock; SceneSnapshot ages against it
+    e.pose_at = pose_log.size();
     undo_stack.push_back(std::move(e));
     evict_to_budget();
 }
@@ -130,14 +131,10 @@ void UndoStack::evict_to_budget() {
                     freed >> 20, max_bytes >> 20);
 }
 
-void UndoStack::clear_redo() {
-    for (const auto& r : redo_stack) total_bytes -= entry_bytes(r);
-    redo_stack.clear();
-}
-
 void UndoStack::clear(ComputeState* c) {
     undo_stack.clear();
     redo_stack.clear();
+    pose_log.clear();   // no entry is left to need it
     total_bytes = 0;
     // Active-entity clear → the ring's contents are this entity's history, now gone.
     // Reset it so the (still-active) entity starts capturing from head 0. Guarded:
@@ -200,7 +197,56 @@ bool UndoStack::apply_level(const UndoEntry& e, MeshEntity& ent, bool forward) {
     return true;  // view level changed — caller cascades to current_level
 }
 
+// Carry an entry's absolute positions through every object transform logged since it
+// was captured. Only absolute positions need it: a disp-layer stroke stores deltas in
+// the surface's own tangent frames, which turn and move with the surface (and an
+// object transform never rewrites disp), and mask/paint/density hold no positions.
+void UndoStack::bring_to_pose(UndoEntry& e, Scene& scene) {
+    if (e.pose_at >= pose_log.size()) return;
+    const size_t from = e.pose_at;
+    e.pose_at = pose_log.size();
+    bool bends = false;
+    for (size_t i = from; i < pose_log.size(); i++) bends |= pose_log[i].bends();
+
+    auto carry = [&](std::vector<float>& x, std::vector<float>& y, std::vector<float>& z) {
+        const size_t n = std::min(x.size(), std::min(y.size(), z.size()));
+        if (n == 0) return;
+        for (size_t i = from; i < pose_log.size(); i++)
+            pose_map_points(pose_log[i], x.data(), y.data(), z.data(), n);
+    };
+
+    if (e.kind == UndoEntry::Kind::STROKE && e.targets_base) {
+        // The ring holds this stroke's (old,new) in the OLD pose and the GPU apply
+        // would write them verbatim, so bring them to the CPU, carry them there, and
+        // let this entry take the CPU stage from now on. User-paced: one readback per
+        // stroke that crosses a transform, never per frame.
+        if (e.ring_offset != SIZE_MAX) {
+            if (!scene.compute().undo_ring_ssbo.handle) return;   // nothing to read from
+            spill_entry_from_ring(e, scene.compute());
+            unring(e);
+        }
+        carry(e.old_x, e.old_y, e.old_z);
+        carry(e.new_x, e.new_y, e.new_z);
+        std::printf("[undo-pose] stroke seq %llu: %zu verts carried through %zu transform%s\n",
+                    (unsigned long long)e.seq, e.verts.size(), pose_log.size() - from,
+                    pose_log.size() - from == 1 ? "" : "s");
+    } else if ((e.kind == UndoEntry::Kind::PROJECTION || e.kind == UndoEntry::Kind::LEVEL)
+               && !e.before.empty()) {
+        if (e.before.has_base) carry(e.before.base_px, e.before.base_py, e.before.base_pz);
+        // Stored frames are directions on the old surface; a turn leaves them pointing
+        // the old way. Dropped, the restore leaves those layers' frames empty and the
+        // next cascade rebuilds them on the surface as it now stands.
+        if (bends) for (auto& f : e.before.frames) f.clear();
+        std::printf("[undo-pose] level snapshot seq %llu: base %s, carried through %zu transform%s\n",
+                    (unsigned long long)e.seq, e.before.has_base ? "moved" : "absent",
+                    pose_log.size() - from, pose_log.size() - from == 1 ? "" : "s");
+    }
+}
+
 bool UndoStack::apply(UndoEntry& e, MeshEntity& ent, Scene& scene, bool forward) {
+    // Positions captured before an object transform get carried into today's pose
+    // first; everything below then applies them as if no transform had happened.
+    bring_to_pose(e, scene);
     // PROJECTION and LEVEL entries rewrite CPU disp/base (snapshot restore, or a
     // re-run projection), so any GPU-resident edits must come down FIRST. The caller's
     // cascade_active materializes too, but only after this returns — and a GPU stroke

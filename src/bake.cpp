@@ -583,9 +583,9 @@ void bake_refresh(BakeState& b, uint32_t id, const RetopoMesh& rm, const UvLayou
 
 const char* bake_start(BakeState& b, const std::vector<BakeInput>& in) {
     if (b.job) return "Already baking";
-    if (in.empty()) return "Build a retopo mesh in mode 0 first";
+    if (in.empty()) return "Build a retopo mesh in Retopo mode first";
     for (const BakeInput& x : in) {
-        if (x.rm->faces.empty()) return "Build a retopo mesh in mode 0 first";
+        if (x.rm->faces.empty()) return "Build a retopo mesh in Retopo mode first";
         if (x.L->empty() || !x.L->fits(*x.rm) || x.L->key != uv_topology_key(*x.rm)) return "Unwrap first: the bake needs UVs";
         if (x.high->tri_count() == 0) return "No sculpt to bake from";
     }

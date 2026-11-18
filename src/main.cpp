@@ -757,9 +757,9 @@ int main(int argc, char* argv[]) {
     Vec3  scale_pivot = {0, 0, 0};
     // Undo for the Select-mode object transforms (move / scale / Q-E spin). A
     // separate stack because UndoStack is per-entity and one gesture can turn
-    // several selected meshes; interleaved with it by sequence number, not
-    // siloed, because UndoEntry holds ABSOLUTE positions and undoing a stroke
-    // that predates a transform would teleport its vertices. See object_xform.h.
+    // several selected meshes. Object mode's Ctrl+Z walks this one, Sculpt's the
+    // strokes; strokes from before a transform are carried into the current pose
+    // through each mesh's pose log (UndoStack::note_pose). See object_xform.h.
     ObjectXformStack xforms;
     // Set when a merge chains its adaptive remesh: that remesh must not take its
     // own snapshot, or it would overwrite the merge's with the post-merge state,
@@ -1794,6 +1794,31 @@ int main(int argc, char* argv[]) {
 
         // ---- State transitions ----
 
+        // Move / Scale / Rotate tool: a press on a gizmo handle grabs it, ahead of the pick.
+        if (app_state == AppState::IDLE
+            && input.drag_mode == InputState::DragMode::SCULPT
+            && input.interaction_mode == InputState::InteractionMode::SELECT
+            && input.object_tool != InputState::ObjectTool::SELECT) {
+            const int kind = gizmo_kind_of((int)input.object_tool);
+            Vec3 pivot;
+            GizmoView g;
+            const bool lobe_gz = kind == GK_MOVE && !input.mirror_x;
+            if (selection_centre(scene, kind == GK_SCALE && input.mirror_x, pivot,
+                                 lobe_gz ? input.lobe_entity : 0, lobe_gz ? input.lobe_side : 0)
+                && gizmo_view(camera, pivot, win_w, win_h, kind, g)) {
+                const int h = gizmo_hit(g, kind, (float)input.mouse_x, (float)input.mouse_y);
+                if (h >= 0) {
+                    input.drag_mode = InputState::DragMode::GIZMO;
+                    input.gizmo_handle = h;
+                    static const char* hn[7] = {"X", "Y", "Z", "YZ", "ZX", "XY", "all"};
+                    static const char* kn[3] = {"move", "scale", "rotate"};
+                    std::printf("[gizmo] %s grabbed %s at %.0f,%.0f\n", kn[kind], hn[h],
+                                input.mouse_x, input.mouse_y);
+                    std::fflush(stdout);
+                }
+            }
+        }
+
         // SELECT mode: intercept sculpt drag for mesh picking or object move
         if (app_state == AppState::IDLE
             && input.drag_mode == InputState::DragMode::SCULPT
@@ -1828,6 +1853,23 @@ int main(int argc, char* argv[]) {
                             if (d2 < best_dist2) { best_dist2 = d2; clicked_mesh = id; }
                         }
                     }
+            }
+
+            // Mirror off: which half of a pair was clicked, so a move takes only that
+            // half (and the Move gizmo goes to it). Click-paced, two passes at most.
+            if (clicked_mesh != 0) {
+                input.lobe_entity = clicked_mesh;
+                input.lobe_side = 0;
+                if (!input.mirror_x) {
+                    scene.materialize_active_cpu();
+                    if (MeshEntity* pe = scene.find_entity(clicked_mesh)) {
+                        Vec3 pc; float pr;
+                        pe->mesh.compute_bounding_sphere(pc, pr);
+                        if (mesh_is_pair(pe->mesh, 1e-3f * (pr > 0.0f ? pr : 1.0f)))
+                            input.lobe_side = lobe_under_pointer(pe->mesh, camera, win_w, win_h,
+                                                                 (float)input.mouse_x, (float)input.mouse_y);
+                    }
+                }
             }
 
             bool already_selected = false;
