@@ -275,6 +275,9 @@ own undo history and subdivision stack.
 
 ### Select mode (3)
 
+A small gizmo marks the world origin: X red, Y green, Z blue. Mirror's plane runs through
+it, so slide a model onto it to make it mirror-ready.
+
 | Input | Action |
 |---|---|
 | LMB | Select an object (any object, not just the active one) |

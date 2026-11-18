@@ -2,6 +2,11 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-18 — Origin gizmo in Select mode; zoomed-out clipping
+
+- Select mode shows the world origin: X / Y / Z in red / green / blue, positive axes only, a fixed 80 px on screen, over the model and under the panels.
+- Zooming out on a large model no longer slices its back off: the depth range grows with the zoom (orthographic past distance ~33, perspective past 50); unchanged below that.
+
 ## 2026-11-18 — Select mode: Shift+Q / E turn in 5° steps
 
 - Shift+Q / E turn the selection 5° per press (repeats while held), each press one undo step. Looking down an axis (within ~20°) the turn snaps to that exact world axis, so 18 presses make a clean 90°; a notice shows the running total. Plain Q / E still spin continuously.

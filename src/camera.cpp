@@ -140,7 +140,9 @@ void Camera::get_projection_matrix(float* m, float aspect) const {
         // actually bitten this code: geometry crossing the near plane and the model
         // opening up as you zoom in — see the WebGPU note below.
         float n = std::max(1e-3f, distance * 0.01f);
-        float f = distance + 100.0f;
+        // Far grows with the zoom past distance 50 (unchanged below it): a 3D-print
+        // import tens of units big, zoomed out, lost its back half at a fixed +100.
+        float f = std::max(distance + 100.0f, 3.0f * distance);
         float t = std::tan(fov * M_PI / 360.0f);
         m[0]  = 1.0f / (aspect * t);
         m[5]  = 1.0f / t;
@@ -153,8 +155,16 @@ void Camera::get_projection_matrix(float* m, float aspect) const {
         float half_w = half_h * aspect;
         m[0]  = 1.0f / half_w;
         m[5]  = 1.0f / half_h;
-        m[10] = -2.0f / (far_plane - near_plane);
-        m[14] = -(far_plane + near_plane) / (far_plane - near_plane);
+        // The stored (-100, 100) is the floor; past distance ~33 the range grows with
+        // the zoom. The eye sits `distance` back from the target, so at the old fixed
+        // +100 a model tens of units big (a 3D-print STL) was sliced off from behind
+        // as soon as it was zoomed out a little. Ortho depth is linear, so the longer
+        // range costs no precision that matters; the linear-depth target clears to
+        // 1000, still past the largest far here (3 x the 200 zoom cap).
+        const float nr = std::min(near_plane, -2.0f * distance);
+        const float fr = std::max(far_plane, 3.0f * distance);
+        m[10] = -2.0f / (fr - nr);
+        m[14] = -(fr + nr) / (fr - nr);
         m[15] = 1.0f;
     }
 

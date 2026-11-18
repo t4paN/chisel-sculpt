@@ -421,6 +421,41 @@ void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse) {
 
     app_files_frame(a);   // app_files.cpp: open/import, dev hooks, save, export, dialogs
 
+    // World origin gizmo, Select mode only: X / Y / Z from (0,0,0) in the classic red /
+    // green / blue, positive axes only. Fixed size on screen (an axis lying flat in the
+    // view is 80 px; one pointing at you shortens, which is how you read its direction),
+    // over the model but under the panels (ImGui's background list). Where the origin
+    // is shows where Mirror's plane runs and what a turn swings about.
+    if (input.interaction_mode == InputState::InteractionMode::SELECT) {
+        const Vec3 o(0, 0, 0);
+        const float depth = camera.view_depth(o);
+        float ox = 0, oy = 0;
+        // Behind a perspective eye a point has no screen position: no gizmo then.
+        // (world_to_screen's false otherwise only means "off screen", still placed.)
+        if (!camera.perspective || depth > 1e-4f) {
+            camera.world_to_screen(o, win_w, win_h, ox, oy);
+            // World length that spans 80 px at the origin's depth.
+            const float len = 80.0f * 2.0f * camera.half_height_at(depth) / (float)win_h;
+            struct Ax { Vec3 d; ImU32 c; float sx, sy, depth; bool ok; } ax[3] = {
+                {Vec3(1, 0, 0), IM_COL32(232, 64, 64, 255),  0, 0, 0, false},
+                {Vec3(0, 1, 0), IM_COL32(108, 200, 64, 255), 0, 0, 0, false},
+                {Vec3(0, 0, 1), IM_COL32(64, 128, 240, 255), 0, 0, 0, false},
+            };
+            for (Ax& x : ax) {
+                const Vec3 tip = x.d * len;
+                x.depth = camera.view_depth(tip);
+                x.ok = !camera.perspective || x.depth > 1e-4f;
+                if (x.ok) camera.world_to_screen(tip, win_w, win_h, x.sx, x.sy);
+            }
+            // Farthest first, so the axis nearer the viewer draws over the others.
+            std::sort(std::begin(ax), std::end(ax), [](const Ax& p, const Ax& q) { return p.depth > q.depth; });
+            ImDrawList* dl = ImGui::GetBackgroundDrawList();
+            for (const Ax& x : ax)
+                if (x.ok) dl->AddLine(ImVec2(ox, oy), ImVec2(x.sx, x.sy), x.c, 2.5f);
+            dl->AddCircleFilled(ImVec2(ox, oy), 2.5f, IM_COL32(236, 234, 242, 220));
+        }
+    }
+
     // ---- Button islands (brush selection + ops) ----
     MultiresInfo mres_info;
     mres_info.locked     = multires->locked;
