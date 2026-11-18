@@ -25,8 +25,9 @@ struct Params {
 @group(0) @binding(63) var<uniform>             P         : Params;
 
 @compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-    let b = gid.x;
+fn main(@builtin(global_invocation_id) gid : vec3<u32>,
+        @builtin(num_workgroups)        nwg : vec3<u32>) {
+    let b = gid.x + gid.y * nwg.x * 64u;   // linear id: gpu::dispatch_1d may fold the count into rows
     if (b >= P.block_count) {
         return;
     }

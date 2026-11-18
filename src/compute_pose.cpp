@@ -73,7 +73,7 @@ void ComputeState::dispatch_pose_apply(const PoseParamsGPU& p, const gpu::Buffer
     gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, pose_apply_pipeline, bg, 6);
 
     gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
-    gpu::dispatch(b, pose_apply_pipeline, grp, (p.affected_count + 255u) / 256u);
+    gpu::dispatch_1d(b, pose_apply_pipeline, grp, (p.affected_count + 255u) / 256u);
     gpu::submit(b);
     gpu::release_bind_group(grp);
 }

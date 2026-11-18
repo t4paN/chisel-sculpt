@@ -3744,6 +3744,7 @@ struct RemeshJob {
     std::vector<uint32_t> tri_selected, pinned;
     std::vector<float>    sel_mask, smooth_weights;
     uint32_t raw_selected = 0, total_selected = 0;
+    uint32_t refusals_at_start = 0;   // gpu::dispatch_refusals() when setup began
     RefSurface ref;
     bool carrying = false;            // paint layers are in their dense carry form
     // Textured mesh: the surface as it came in, for transfer_uv at the end (the
@@ -3818,6 +3819,21 @@ bool RemeshJob::setup() {
             return false;
         }
     }
+
+    {
+        // Every per-tri / per-vert kernel goes through gpu::dispatch_1d, which folds a
+        // count past the per-dimension limit into rows, so this only trips on a mesh
+        // past ~1e12 tris. It stays as the cheap guard in front of the flip repair
+        // and the edge table; the refusal check after the select pass is the net.
+        uint32_t gx = 0, gy = 0;
+        const uint32_t most = std::max(r.old_tris, r.old_verts);
+        if (!gpu::grid_1d((most + 255u) / 256u, gx, gy)) {
+            r.error = "mesh too big for one GPU pass on this device";
+            std::printf("[remesh] abort: %s (%u tris)\n", r.error.c_str(), r.old_tris);
+            return false;
+        }
+    }
+    refusals_at_start = gpu::dispatch_refusals();
 
     t0 = std::chrono::steady_clock::now();
 
@@ -3951,6 +3967,15 @@ bool RemeshJob::setup() {
 
     // For both paths, readback once so CPU can count + drive split/collapse/flip.
     cs->readback_trisel(mesh.tri_count(), tri_selected);
+
+    // A refused dispatch leaves the selection buffer zero, which reads exactly like
+    // "nothing is stretched". At 36.7M tris on Intel GL that reported "nothing to do"
+    // after 15 s; say what happened instead.
+    if (gpu::dispatch_refusals() != refusals_at_start) {
+        r.error = "the GPU refused the selection pass (mesh too big for this device)";
+        std::printf("[remesh] abort: %s\n", r.error.c_str());
+        return false;
+    }
 
     // Count before growing (non-mask path grows later)
     raw_selected = 0;

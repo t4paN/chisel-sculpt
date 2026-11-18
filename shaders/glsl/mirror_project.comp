@@ -34,7 +34,8 @@ layout(std140, binding = 63) uniform Params {
 } P;
 
 void main() {
-    uint i = gl_GlobalInvocationID.x;
+    uint i = gl_GlobalInvocationID.x   // linear id: gpu::dispatch_1d may fold
+           + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
     // list_mode 0 reads the dab's arena region: counter at DR.base, ids after it.
     // The counter runs past DR.cap when the region overflowed, so clamp — the ids
     // beyond the cap were never written and projecting on them would read garbage.

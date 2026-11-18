@@ -26,7 +26,8 @@ bool hits(vec3 lo, vec3 hi, vec3 c, float r) {
 }
 
 void main() {
-    uint b = gl_GlobalInvocationID.x;
+    uint b = gl_GlobalInvocationID.x   // linear id: gpu::dispatch_1d may fold
+           + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
     if (b >= P.block_count) return;
     if (sticky[b] != 0u) return;
 

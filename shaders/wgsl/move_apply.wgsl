@@ -27,8 +27,9 @@ struct Affected {
 @group(0) @binding(63) var<uniform>             P            : Params;
 
 @compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-    let idx = gid.x;
+fn main(@builtin(global_invocation_id) gid : vec3<u32>,
+        @builtin(num_workgroups)        nwg : vec3<u32>) {
+    let idx = gid.x + gid.y * nwg.x * 256u;   // linear id: gpu::dispatch_1d may fold the count into rows
     if (idx >= affected.count) {
         return;
     }

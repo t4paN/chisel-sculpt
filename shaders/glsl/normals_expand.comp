@@ -51,7 +51,8 @@ void main() {
     // Clamp for the same reason as dirty_args: an overflowed region's counter runs
     // past cap and those ids were never written.
     uint n = min(src[R.base], R.cap);
-    uint i = gl_GlobalInvocationID.x;
+    uint i = gl_GlobalInvocationID.x   // linear id: gpu::dispatch_1d may fold
+           + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
     if (i >= n) return;
     uint v = src[R.base + 1u + i];
     if (v >= P.vertex_count) return;

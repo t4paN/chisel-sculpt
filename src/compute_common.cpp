@@ -490,7 +490,7 @@ void ComputeState::set_dirty_region(uint32_t base, uint32_t cap) {
     ++dab_serial;            // a selection made for an earlier dab is now stale
     dirty_block_mode  = 0;   // a new dab has no selection yet; only a path that runs
                              // block_select for THIS dab may turn it on
-    DirtyRegionGPU dr = { base, cap, dirty_block_mode, 0 };
+    DirtyRegionGPU dr = { base, cap, dirty_block_mode, gpu::device_limits().max_workgroups_per_dim };
     gpu::write_buffer(gpu_dev, dirty_region_ubo, 0, &dr, sizeof(dr));
     uint32_t zero = 0;
     if (smooth_dirty_ssbo.handle)
@@ -578,7 +578,7 @@ static void dispatch_mirror_project_impl(ComputeState& cs, const gpu::Buffer& po
     gpu::BindGroup grp = gpu::create_bind_group(cs.gpu_dev, cs.mirror_project_pipeline, bg, 6);
 
     gpu::ComputeBatch b = gpu::begin_compute(cs.gpu_dev);
-    gpu::dispatch(b, cs.mirror_project_pipeline, grp, groups);
+    gpu::dispatch_1d(b, cs.mirror_project_pipeline, grp, groups);
     gpu::submit(b);
     gpu::release_bind_group(grp);
 }
@@ -760,7 +760,7 @@ void ComputeState::dispatch_block_boxes(const gpu::Buffer& pos_vbo, uint32_t ver
     };
     gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, block_boxes_pipeline, bg, 3);
     gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
-    gpu::dispatch(b, block_boxes_pipeline, grp, (block_count + 63u) / 64u);
+    gpu::dispatch_1d(b, block_boxes_pipeline, grp, (block_count + 63u) / 64u);
     gpu::submit(b);
     gpu::release_bind_group(grp);
     blocks_built_vc = vertex_count;
@@ -800,7 +800,7 @@ void ComputeState::dispatch_block_select(float ax, float ay, float az, float ra,
     };
 
     gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
-    gpu::dispatch(b, block_select_pipeline, grp, (block_count + 63u) / 64u);
+    gpu::dispatch_1d(b, block_select_pipeline, grp, (block_count + 63u) / 64u);
     gpu::submit(b);
     gpu::release_bind_group(grp);
 
@@ -808,7 +808,7 @@ void ComputeState::dispatch_block_select(float ax, float ay, float az, float ra,
     // UBO, where BlockSelectParams keeps anchor_a.x — so rewrite it as a BlockBoxParams
     // before the args dispatch. Getting this wrong once made workgroup count come out
     // zero and the draw brush silently do nothing.
-    uint32_t a[4] = { block_count, 0, 0, 0 };
+    uint32_t a[4] = { block_count, gpu::device_limits().max_workgroups_per_dim, 0, 0 };
     gpu::write_buffer(gpu_dev, block_ubo, 0, a, sizeof(a));
     gpu::BindGroup agrp = gpu::create_bind_group(gpu_dev, block_args_pipeline, abg, 3);
     gpu::ComputeBatch b2 = gpu::begin_compute(gpu_dev);
@@ -902,7 +902,7 @@ void ComputeState::dispatch_blocks_or_full(gpu::ComputeBatch& b,
     if (blocks)
         gpu::dispatch_indirect(b, pipe, grp, block_args_ssbo, 0);
     else
-        gpu::dispatch(b, pipe, grp, (vc + kVertexBlock - 1u) / kVertexBlock);
+        gpu::dispatch_1d(b, pipe, grp, (vc + kVertexBlock - 1u) / kVertexBlock);
 }
 
 void ComputeState::set_block_mode(bool on) {
@@ -910,6 +910,7 @@ void ComputeState::set_block_mode(bool on) {
     if (want == dirty_block_mode) return;
     dirty_block_mode = want;
     if (!dirty_region_ubo.handle) return;
-    DirtyRegionGPU dr = { dirty_region_base, dirty_region_cap, dirty_block_mode, 0 };
+    DirtyRegionGPU dr = { dirty_region_base, dirty_region_cap, dirty_block_mode,
+                         gpu::device_limits().max_workgroups_per_dim };
     gpu::write_buffer(gpu_dev, dirty_region_ubo, 0, &dr, sizeof(dr));
 }

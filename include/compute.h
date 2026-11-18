@@ -85,7 +85,7 @@ struct DirtyRegionGPU {
     uint32_t base;        // word offset of the region's counter inside the arena
     uint32_t cap;         // ids the region can hold (excludes the counter word)
     uint32_t block_mode;  // 1 = kernels index vertices through the active-block list
-    uint32_t _pad1;
+    uint32_t max_groups;  // device workgroups-per-dimension limit: dirty_args folds past it
 };
 
 // Vertices bucket into fixed runs for dispatch culling. This length MUST equal the

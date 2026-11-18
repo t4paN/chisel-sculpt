@@ -508,7 +508,7 @@ void ComputeState::dispatch_compute_normals(const uint32_t* dirty_verts, uint32_
     gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, compute_normals_pipeline, bg, 7);
 
     gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
-    gpu::dispatch(b, compute_normals_pipeline, grp, (dirty_count + 255u) / 256u);
+    gpu::dispatch_1d(b, compute_normals_pipeline, grp, (dirty_count + 255u) / 256u);
     gpu::submit(b);
     gpu::release_bind_group(grp);
 }
@@ -590,7 +590,7 @@ void ComputeState::expand_normals_from(const gpu::Buffer& list, uint32_t base, u
     const bool mirror = use_mirror && mirror_map_ssbo.handle
                         && mirror_map_vertex_count == vertex_count;
 
-    DirtyRegionGPU src = { base, cap, 0, 0 };
+    DirtyRegionGPU src = { base, cap, 0, gpu::device_limits().max_workgroups_per_dim };
     gpu::write_buffer(gpu_dev, norm_src_region_ubo, 0, &src, sizeof(src));
     NormalsExpandParamsGPU u = { norm_stamp, vertex_count, mirror ? 1u : 0u, norm_capacity };
     gpu::write_buffer(gpu_dev, normals_expand_ubo, 0, &u, sizeof(u));
@@ -638,7 +638,7 @@ bool ComputeState::flush_gpu_normals(uint32_t vertex_count, const gpu::Buffer& p
     // Ids queued against a different mesh (an aborted stroke, then a level switch)
     // would index past the new adjacency — drop them; the rebuild recomputed normals.
     if (norm_vc == vertex_count && adjacency_vertex_count == vertex_count) {
-        DirtyRegionGPU lr = { 0, norm_capacity, 0, 0 };
+        DirtyRegionGPU lr = { 0, norm_capacity, 0, gpu::device_limits().max_workgroups_per_dim };
         gpu::write_buffer(gpu_dev, norm_list_region_ubo, 0, &lr, sizeof(lr));
         ComputeNormalsParamsGPU u = {};
         u.list_mode  = 1;
@@ -735,7 +735,7 @@ void ComputeState::dispatch_touched_fold(const gpu::Buffer& src, uint32_t base, 
     const bool mirror = use_mirror && mirror_map_ssbo.handle
                         && mirror_map_vertex_count == vertex_count;
 
-    DirtyRegionGPU r = { base, cap, 0, 0 };
+    DirtyRegionGPU r = { base, cap, 0, gpu::device_limits().max_workgroups_per_dim };
     gpu::write_buffer(gpu_dev, touched_region_ubo, 0, &r, sizeof(r));
     TouchedFoldParamsGPU u = { stamp, vertex_count, mirror ? 1u : 0u, 0 };
     gpu::write_buffer(gpu_dev, touched_fold_ubo, 0, &u, sizeof(u));
@@ -891,7 +891,7 @@ void ComputeState::dispatch_stroke_smooth_apply(const uint32_t* vert_ids, uint32
     gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, stroke_smooth_apply_pipeline, bg, 7);
 
     gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
-    gpu::dispatch(b, stroke_smooth_apply_pipeline, grp, (count + 255u) / 256u);
+    gpu::dispatch_1d(b, stroke_smooth_apply_pipeline, grp, (count + 255u) / 256u);
     gpu::submit(b);
     gpu::release_bind_group(grp);
 }

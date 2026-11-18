@@ -129,7 +129,7 @@ void ComputeState::dispatch_multires_diff(const gpu::Buffer& pos_vbo, const gpu:
     gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, multires_diff_pipeline, bg, 8);
 
     gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
-    gpu::dispatch(b, multires_diff_pipeline, grp, (count + 255u) / 256u);
+    gpu::dispatch_1d(b, multires_diff_pipeline, grp, (count + 255u) / 256u);
     gpu::submit(b);   // seam issues SHADER_STORAGE|BUFFER_UPDATE so a debug readback sees it
     gpu::release_bind_group(grp);
 }
@@ -243,7 +243,7 @@ void ComputeState::dispatch_multires_apply(const gpu::Buffer& pos_vbo, const gpu
     gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, multires_apply_pipeline, bg, 8);
 
     gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
-    gpu::dispatch(b, multires_apply_pipeline, grp, (count + 255u) / 256u);
+    gpu::dispatch_1d(b, multires_apply_pipeline, grp, (count + 255u) / 256u);
     gpu::submit(b);   // seam issues SHADER_STORAGE|BUFFER_UPDATE for the follow-up normals/readback
     gpu::release_bind_group(grp);
 }

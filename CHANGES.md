@@ -2,6 +2,14 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-18 — GPU jobs past 65,535 workgroups: split into rows, refused if they can't be
+
+- Every per-vertex / per-triangle kernel and every brush kernel now runs past 16.7M items (the old one-row cap on WebGPU and Intel GL): `gpu::dispatch_1d` folds a long count into rows, kernels rebuild the linear id, and the indirect args from `dirty_args` / `block_args` fold the same way. Big strokes at 31M verts no longer hit a dispatch-size crash; remesh above ~16.7M tris no longer reports "nothing to do".
+- A dispatch too big for the device is skipped, logged once (`[gpu] dispatch REFUSED`) and counted instead of being sent; a toast says the GPU skipped part of the job.
+- Remesh refuses up front when a mesh can't fit one GPU pass, and fails with the reason if its select pass was refused. The remesh failure toast now shows the reason.
+- The device's per-dimension limit is captured at startup (native WebGPU 65,535 on purpose, matching the browser). Dev hook `CHISEL_MAX_GROUPS=N` fakes a small limit to exercise the folded path on small meshes.
+- Shader rule added to `shaders/wgsl/CONVENTIONS.md`: never index by `gid.x` alone.
+
 ## 2026-11-18 — Object mode: five tools, gizmos, undo per mode
 
 - Mode keys: 1 Sculpt · 2 Object · 3 Paint · 4 Retopo · 5 UV. Object mode replaces the Select button.

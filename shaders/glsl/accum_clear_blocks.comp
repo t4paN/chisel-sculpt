@@ -15,7 +15,11 @@ layout(std140, binding = 63) uniform Params {
 } P;
 
 void main() {
-    uint v = block_list[1u + gl_WorkGroupID.x] * 64u + gl_LocalInvocationID.x;
+    // Linear workgroup id: block_args folds a count past the per-dim limit into rows,
+    // and the last row overshoots past the list's count.
+    uint wgi = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    if (wgi >= block_list[0]) return;
+    uint v = block_list[1u + wgi] * 64u + gl_LocalInvocationID.x;
     if (v >= P.vertex_count) return;
     uint b = v * 4u;
     accum[b + 0u] = 0u;

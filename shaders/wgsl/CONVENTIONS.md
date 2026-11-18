@@ -66,6 +66,17 @@ make the translation mechanical.
 ## Builtins & types
 - `gl_GlobalInvocationID.x` → `@builtin(global_invocation_id) gid : vec3<u32>` param, use `gid.x`.
 - `layout(local_size_x = 256) in;` → `@compute @workgroup_size(256)`.
+- **Never index by `gid.x` alone.** Each dispatch dimension stops at 65,535 workgroups
+  (WebGPU, Intel GL), so a 256-wide kernel in one row stops at 16.7M items. Per-element
+  kernels go through `gpu::dispatch_1d`, which folds a longer count into rows, and rebuild
+  the linear id from `@builtin(num_workgroups) nwg`: `gid.x + gid.y * nwg.x * 256u` (GLSL:
+  `gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x`).
+  The last row overshoots, so the bounds check against the kernel's own count is not
+  optional. Kernels that read a workgroup's slot from a list (block mode) use
+  `wg.x + wg.y * nwg.x` and stop at the list's count. Indirect-args writers
+  (`dirty_args`, `block_args`) fold the same way, at the limit the CPU passes them.
+  Test the fold on a small mesh with `CHISEL_MAX_GROUPS=32`; the result must match a run
+  without it byte for byte.
 - `uint`→`u32`, `int`→`i32`, `float`→`f32`, `vec3`→`vec3<f32>`, `uvec3`→`vec3<u32>`.
 - **WGSL reserves a long list of common words** as identifiers (`target`, `active`, `filter`,
   `module`, `self`, `shared`, `smooth`, `type`, `use`, ...). GLSL accepts them; Tint rejects the

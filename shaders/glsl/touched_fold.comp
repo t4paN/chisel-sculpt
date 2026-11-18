@@ -34,7 +34,8 @@ void claim(uint w) {
 
 void main() {
     uint raw = src[R.base];
-    uint i = gl_GlobalInvocationID.x;
+    uint i = gl_GlobalInvocationID.x   // linear id: gpu::dispatch_1d may fold
+           + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
     // A source region whose counter ran past its cap lost its surplus ids; flag it so
     // the CPU falls back to a whole-mesh entry.
     if (i == 0u && raw > R.cap) atomicMax(dst[0], 1u);

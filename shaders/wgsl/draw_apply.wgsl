@@ -35,13 +35,21 @@ struct DirtyRegion {
 
 @compute @workgroup_size(64)
 fn main(@builtin(workgroup_id) wg : vec3<u32>,
-        @builtin(local_invocation_id) lid : vec3<u32>) {
+        @builtin(local_invocation_id) lid : vec3<u32>,
+        @builtin(num_workgroups) nwg : vec3<u32>) {
     // Dispatch culling: in block mode one workgroup owns one ACTIVE block, so the
     // list entry is the block index and the lane is the offset inside it. Entry 0
     // of the list is the count, hence the +1. Otherwise this is the plain
     // full-mesh mapping, where wg * 64 + lane is exactly the global id.
-    let v = select(wg.x * 64u + lid.x,
-                   block_list[1u + wg.x] * 64u + lid.x,
+    // Linear workgroup id: dispatch_1d and the 2D indirect args fold a long row into
+    // rows, and the last row overshoots. In block mode the overshoot would read list
+    // slots past the count (someone else's blocks), so stop at the count.
+    let wgi = wg.x + wg.y * nwg.x;
+    if (DR.block_mode == 1u && wgi >= block_list[0]) {
+        return;
+    }
+    let v = select(wgi * 64u + lid.x,
+                   block_list[1u + wgi] * 64u + lid.x,
                    DR.block_mode == 1u);
     if (v >= P.vertex_count) {
         return;

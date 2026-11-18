@@ -38,8 +38,9 @@ struct DirtyRegion {
 @group(0) @binding(63) var<uniform>             P          : Params;
 
 @compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-    let i = gid.x;
+fn main(@builtin(global_invocation_id) gid : vec3<u32>,
+        @builtin(num_workgroups)        nwg : vec3<u32>) {
+    let i = gid.x + gid.y * nwg.x * 256u;   // linear id: gpu::dispatch_1d may fold the count into rows
     var n : u32;
     // list_mode 0 reads the dab's arena region: counter at DR.base, ids after it.
     // The counter runs past DR.cap when the region overflowed, so clamp — the ids

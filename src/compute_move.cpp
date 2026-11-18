@@ -146,7 +146,7 @@ void ComputeState::dispatch_move_capture(const MoveCaptureParams& p, const gpu::
     gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, move_capture_pipeline, bg, 5);
 
     gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
-    gpu::dispatch(b, move_capture_pipeline, grp, (vc + 255u) / 256u);
+    gpu::dispatch_1d(b, move_capture_pipeline, grp, (vc + 255u) / 256u);
     gpu::submit(b);
     gpu::release_bind_group(grp);
 }
@@ -181,7 +181,7 @@ void ComputeState::dispatch_move_weight_smooth(uint32_t vertex_count, int iterat
     const uint32_t groups = (vertex_count + 255u) / 256u;
     gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
     for (int iter = 0; iter < iterations; iter++) {
-        gpu::dispatch(b, move_weight_smooth_pipeline,
+        gpu::dispatch_1d(b, move_weight_smooth_pipeline,
                       (iter & 1) == 0 ? grp_ping : grp_pong, groups);
     }
     gpu::submit(b);
@@ -215,7 +215,7 @@ void ComputeState::dispatch_move_apply(const MoveApplyParams& p, const gpu::Buff
     gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, move_apply_pipeline, bg, 6);
 
     gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
-    gpu::dispatch(b, move_apply_pipeline, grp, (vc + 255u) / 256u);
+    gpu::dispatch_1d(b, move_apply_pipeline, grp, (vc + 255u) / 256u);
     gpu::submit(b);
     gpu::release_bind_group(grp);
 }

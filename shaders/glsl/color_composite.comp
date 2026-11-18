@@ -55,11 +55,13 @@ uint sample_layer(uvec4 e, uint v) {
 }
 
 void main() {
-    uint v = gl_GlobalInvocationID.x;
+    uint li = gl_GlobalInvocationID.x   // linear id: gpu::dispatch_1d may fold
+            + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    uint v = li;
     if (P.list_mode == 1u) {
         uint n = min(list[DR.base], DR.cap);
-        if (gl_GlobalInvocationID.x >= n) return;
-        v = list[DR.base + 1u + gl_GlobalInvocationID.x];
+        if (li >= n) return;
+        v = list[DR.base + 1u + li];
     }
     if (v >= P.vertex_count) return;
 

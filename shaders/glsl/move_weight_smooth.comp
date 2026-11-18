@@ -14,7 +14,8 @@ layout(std430, binding = 9)  readonly buffer WInBuf      { vec2 w_in[]; };
 layout(std430, binding = 10) buffer WOutBuf              { vec2 w_out[]; };
 
 void main() {
-    uint idx = gl_GlobalInvocationID.x;
+    uint idx = gl_GlobalInvocationID.x   // linear id: gpu::dispatch_1d may fold
+           + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
     if (idx >= affected_count) return;
     uint v = affected_ids[idx];
 

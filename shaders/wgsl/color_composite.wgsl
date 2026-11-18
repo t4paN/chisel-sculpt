@@ -96,16 +96,18 @@ fn sample_layer(e : vec4<u32>, v : u32) -> u32 {
 }
 
 @compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-    var v = gid.x;
+fn main(@builtin(global_invocation_id) gid : vec3<u32>,
+        @builtin(num_workgroups)        nwg : vec3<u32>) {
+    let li = gid.x + gid.y * nwg.x * 256u;   // linear id: gpu::dispatch_1d may fold the count into rows
+    var v = li;
     if (P.list_mode == 1u) {
         // Clamp: the region counter runs past cap when a dab overflowed, and the ids
         // past cap were never written (see CONVENTIONS.md, the dirty list).
         let n = min(list[DR.base], DR.cap);
-        if (gid.x >= n) {
+        if (li >= n) {
             return;
         }
-        v = list[DR.base + 1u + gid.x];
+        v = list[DR.base + 1u + li];
     }
     if (v >= P.vertex_count) {
         return;

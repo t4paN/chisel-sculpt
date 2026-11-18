@@ -42,7 +42,8 @@ void accum_neighbour(uint vi, vec3 p, vec3 tdir, inout vec3 sum, inout float wsu
 }
 
 void main() {
-    uint v = gl_GlobalInvocationID.x;
+    uint v = gl_GlobalInvocationID.x   // linear id: gpu::dispatch_1d may fold
+           + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
     if (v >= P.vertex_count) return;
 
     vec3 p = vec3(src[v*3u], src[v*3u+1u], src[v*3u+2u]);

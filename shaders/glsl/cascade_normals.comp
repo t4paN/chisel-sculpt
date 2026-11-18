@@ -38,7 +38,8 @@ vec3 guard_normal(vec3 max_sum, vec3 area_sum) {
 }
 
 void main() {
-    uint v = gl_GlobalInvocationID.x;
+    uint v = gl_GlobalInvocationID.x   // linear id: gpu::dispatch_1d may fold
+           + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
     if (v >= P.vcount) return;
 
     float nx = 0.0, ny = 0.0, nz = 0.0;

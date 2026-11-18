@@ -996,7 +996,8 @@ void app_ops_remesh_and_merge(App& a) {
             if (!remesh_chained_from_merge) rescue.clear();
             std::printf("[remesh] FAILED: %s\n", result.error.c_str());
             std::snprintf(input.notification, sizeof(input.notification),
-                          "Remesh FAILED — check console");
+                          "Remesh failed: %.200s",
+                          result.error.empty() ? "check console" : result.error.c_str());
             input.notification_timer = 4.0f;
         }
 

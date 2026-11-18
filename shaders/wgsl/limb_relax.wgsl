@@ -50,8 +50,9 @@ fn accum_neighbour(vi : u32, p : vec3<f32>, tdir : vec3<f32>,
 }
 
 @compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-    let v = gid.x;
+fn main(@builtin(global_invocation_id) gid : vec3<u32>,
+        @builtin(num_workgroups)        nwg : vec3<u32>) {
+    let v = gid.x + gid.y * nwg.x * 256u;   // linear id: gpu::dispatch_1d may fold the count into rows
     if (v >= P.vertex_count) {
         return;
     }

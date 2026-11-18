@@ -1599,16 +1599,12 @@ static void transfer_attrs_world(Mesh& out,
 }
 
 // ---- Shared dispatch helper (file scope: tick uses it) ----------------------
-// Dispatch `threads` logical invocations through the gpu:: seam, splitting the 1D
-// workgroup count into a 2D grid past the 65535 per-dim limit (the SDF passes hit it
-// at R>=128). The kernels recover their linear index from num_workgroups.x.
+// Dispatch `threads` logical invocations through the gpu:: seam. Past the per-dim
+// limit (the SDF passes hit it at R>=128) dispatch_1d folds the count into a 2D grid;
+// the kernels recover their linear index from num_workgroups.x.
 static void sdf_dispatch_seam(gpu::ComputeBatch& b, gpu::ComputePipeline& pipe,
                               gpu::BindGroup& grp, uint32_t threads) {
-    uint32_t groups = (threads + 63u) / 64u;
-    uint32_t gx = groups, gy = 1u;
-    const uint32_t MAXG = 65535u;
-    if (groups > MAXG) { gx = MAXG; gy = (groups + MAXG - 1u) / MAXG; }
-    gpu::dispatch(b, pipe, grp, gx, gy);
+    gpu::dispatch_1d(b, pipe, grp, (threads + 63u) / 64u);
 }
 
 // ---- Per-kernel std140 Params UBO payloads (binding 63) ---------------------

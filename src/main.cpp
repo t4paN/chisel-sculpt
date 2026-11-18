@@ -540,10 +540,17 @@ int main(int argc, char* argv[]) {
         gpu::DeviceLimits dl;
         dl.max_buffer_size          = (uint64_t)ssbo_max;
         dl.max_storage_binding_size = (uint64_t)ssbo_max;
+        // Intel's GL driver gives 65535 here, the spec minimum; others give far more.
+        // x and y both matter: dispatch_1d folds a long row into y.
+        GLint gx = 65535, gy = 65535;
+        glGetIntegeri_v(GL_MAX_COMPUTE_WORK_GROUP_COUNT, 0, &gx);
+        glGetIntegeri_v(GL_MAX_COMPUTE_WORK_GROUP_COUNT, 1, &gy);
+        if (gx > 0 && gy > 0) dl.max_workgroups_per_dim = (uint32_t)std::min(gx, gy);
         gpu::set_device_limits(dl);
         dl = gpu::device_limits();  // re-read: the dev-hook clamp may have applied
-        std::printf("[gpu] device limits: maxStorageBlock %llu MB\n",
-                    (unsigned long long)(dl.max_storage_binding_size >> 20));
+        std::printf("[gpu] device limits: maxStorageBlock %llu MB, %u workgroups per dimension\n",
+                    (unsigned long long)(dl.max_storage_binding_size >> 20),
+                    dl.max_workgroups_per_dim);
     }
 #endif
 
@@ -876,8 +883,23 @@ int main(int argc, char* argv[]) {
             , fbw, fbh
 #endif
     };
+    uint32_t dispatch_refusals_seen = 0;
     auto frame = [&]() {
         input.begin_frame();
+
+        // A GPU job over the device's per-dimension workgroup limit is skipped by the
+        // seam rather than sent (WebGPU would kill the app at submit). dispatch_1d
+        // folds every per-element kernel, so this is the net for anything left over.
+        // Last frame's refusals show here; a toast already up (the remesh failure
+        // reports its own) is left alone, the console has the detail either way.
+        if (gpu::dispatch_refusals() != dispatch_refusals_seen) {
+            dispatch_refusals_seen = gpu::dispatch_refusals();
+            if (input.notification_timer <= 0.0f) {
+                std::snprintf(input.notification, sizeof(input.notification),
+                              "The GPU skipped part of that - mesh too big for one pass here");
+                input.notification_timer = 4.0f;
+            }
+        }
 
         // Resolve the window/drawable size and, on web, reconfigure the surface + depth
         // BEFORE polling input. glfwPollEvents scales the incoming pointer by the current

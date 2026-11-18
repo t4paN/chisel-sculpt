@@ -58,9 +58,10 @@ fn claim(w : u32) {
 }
 
 @compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
+fn main(@builtin(global_invocation_id) gid : vec3<u32>,
+        @builtin(num_workgroups)        nwg : vec3<u32>) {
     let raw = src[R.base];
-    let i = gid.x;
+    let i = gid.x + gid.y * nwg.x * 256u;   // linear id: gpu::dispatch_1d may fold the count into rows
     if (i == 0u) {
         let overflowed = raw > R.cap;
         if (overflowed) {

@@ -111,7 +111,7 @@ void ComputeState::dispatch_limb_drag(const LimbDragParams& p, const gpu::Buffer
     gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, limb_drag_pipeline, bg, 5);
 
     gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
-    gpu::dispatch(b, limb_drag_pipeline, grp, (vc + 255u) / 256u);
+    gpu::dispatch_1d(b, limb_drag_pipeline, grp, (vc + 255u) / 256u);
     gpu::submit(b);
     gpu::release_bind_group(grp);
 }
@@ -173,7 +173,7 @@ void ComputeState::dispatch_limb_relax(uint32_t vertex_count, int iterations, fl
     gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
     for (int iter = 0; iter < iterations; iter++) {
         // iter 0 reads scratch→pos (ping), iter 1 reads pos→scratch (pong), ...
-        gpu::dispatch(b, limb_relax_pipeline,
+        gpu::dispatch_1d(b, limb_relax_pipeline,
                       (iter & 1) == 0 ? grp_ping : grp_pong, groups);
     }
     gpu::submit(b);

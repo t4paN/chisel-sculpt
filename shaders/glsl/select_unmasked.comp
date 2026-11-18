@@ -17,7 +17,8 @@ layout(std140, binding = 63) uniform Params {
 } P;
 
 void main() {
-    uint t = gl_GlobalInvocationID.x;
+    uint t = gl_GlobalInvocationID.x   // linear id: gpu::dispatch_1d may fold
+           + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
     if (t >= P.tri_count) return;
 
     uint i0 = indices[t*3u+0u];

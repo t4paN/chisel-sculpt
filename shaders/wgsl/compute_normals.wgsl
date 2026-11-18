@@ -55,8 +55,9 @@ fn guard_normal(max_sum : vec3<f32>, area_sum : vec3<f32>) -> vec3<f32> {
 }
 
 @compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-    let di = gid.x;
+fn main(@builtin(global_invocation_id) gid : vec3<u32>,
+        @builtin(num_workgroups)        nwg : vec3<u32>) {
+    let di = gid.x + gid.y * nwg.x * 256u;   // linear id: gpu::dispatch_1d may fold the count into rows
     var count = P.dirty_count;
     var first = 0u;
     if (P.list_mode == 1u) {

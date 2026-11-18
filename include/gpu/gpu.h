@@ -87,6 +87,12 @@ Device app_device();
 struct DeviceLimits {
     uint64_t max_buffer_size          = 256ull << 20;
     uint64_t max_storage_binding_size = 128ull << 20;
+    // Workgroups per dispatch dimension, the smaller of x and y. WebGPU's baseline and
+    // GL's guaranteed minimum are both 65535, and that is what the browser and Intel's
+    // GL driver give. A 256-wide kernel in one row stops at 16.7M items.
+    // CHISEL_MAX_GROUPS clamps it (dev hook): a small number pushes small meshes onto
+    // the 2D path of dispatch_1d, so it can be tested without a 17M-tri model.
+    uint32_t max_workgroups_per_dim   = 65535;
 };
 void set_device_limits(const DeviceLimits&);
 DeviceLimits device_limits();
@@ -210,7 +216,24 @@ ComputeBatch begin_compute(Device&);
 // groups_y defaults to 1 (the common 1D case). A 2D group grid is only needed when a
 // 1D count would exceed the backend's 65535 per-dimension limit (the SDF passes at
 // R>=128); the kernel recovers the linear index from num_workgroups.x itself.
+// A count over the device limit is REFUSED: the dispatch is skipped, logged once per
+// pipeline label, and counted in dispatch_refusals(). Sent anyway, WebGPU kills the
+// app at submit and GL drops it with GL_INVALID_VALUE, which reads as a silent no-op.
 void dispatch(ComputeBatch&, ComputePipeline&, BindGroup&, uint32_t groups_x, uint32_t groups_y = 1);
+// One-dimensional dispatch of `groups` workgroups that may exceed the per-dimension
+// limit: past it the count folds into rows of max_workgroups_per_dim, and the last
+// row overshoots. Only for kernels that rebuild the linear id as
+//   gid.x + gid.y * num_workgroups.x * WG_SIZE   (WGSL)
+//   gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x
+// and bounds-check it against their own count. A kernel that reads only gid.x would
+// run row 0 over and over instead, so plain dispatch() stays the default.
+void dispatch_1d(ComputeBatch&, ComputePipeline&, BindGroup&, uint32_t groups);
+// The grid dispatch_1d would send, for guards that want to refuse before work starts.
+// False when even the 2D grid would not fit (over ~4.3e9 groups).
+bool grid_1d(uint32_t groups, uint32_t& gx, uint32_t& gy);
+// Dispatches refused since startup. Callers compare before/after a job to tell
+// "the GPU found nothing" from "the GPU was never asked".
+uint32_t dispatch_refusals();
 // Dispatch with the workgroup counts read from GPU memory: `args` holds three u32
 // (x, y, z) at `offset`. Lets a dispatch be sized by a count the GPU just produced,
 // without a readback to tell the CPU how big it is — the whole reason the per-dab

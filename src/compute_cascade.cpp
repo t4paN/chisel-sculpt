@@ -308,7 +308,7 @@ bool ComputeState::gpu_cascade_replay(MultiresStack& stack, Mesh& out, int passe
             };
             gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, cascade_relocate_pipeline, bg, 6);
             gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
-            gpu::dispatch(b, cascade_relocate_pipeline, grp, (Vc + 255u) / 256u);
+            gpu::dispatch_1d(b, cascade_relocate_pipeline, grp, (Vc + 255u) / 256u);
             gpu::submit(b);
             gpu::release_bind_group(grp);
         }
@@ -323,7 +323,7 @@ bool ComputeState::gpu_cascade_replay(MultiresStack& stack, Mesh& out, int passe
             };
             gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, cascade_midpoint_pipeline, bg, 4);
             gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
-            gpu::dispatch(b, cascade_midpoint_pipeline, grp, (E + 255u) / 256u);
+            gpu::dispatch_1d(b, cascade_midpoint_pipeline, grp, (E + 255u) / 256u);
             gpu::submit(b);
             gpu::release_bind_group(grp);
         }
@@ -350,7 +350,7 @@ bool ComputeState::gpu_cascade_replay(MultiresStack& stack, Mesh& out, int passe
                 };
                 gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, cascade_normals_pipeline, bg, 6);
                 gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
-                gpu::dispatch(b, cascade_normals_pipeline, grp, (Vf + 255u) / 256u);
+                gpu::dispatch_1d(b, cascade_normals_pipeline, grp, (Vf + 255u) / 256u);
                 gpu::submit(b);
                 gpu::release_bind_group(grp);
             }
@@ -368,7 +368,7 @@ bool ComputeState::gpu_cascade_replay(MultiresStack& stack, Mesh& out, int passe
                 };
                 gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, cascade_frames_pipeline, bg, 7);
                 gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
-                gpu::dispatch(b, cascade_frames_pipeline, grp, (Vf + 255u) / 256u);
+                gpu::dispatch_1d(b, cascade_frames_pipeline, grp, (Vf + 255u) / 256u);
                 gpu::submit(b);
                 gpu::release_bind_group(grp);
             }
@@ -400,7 +400,7 @@ bool ComputeState::gpu_cascade_replay(MultiresStack& stack, Mesh& out, int passe
             };
             gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, cascade_disp_pipeline, bg, 4);
             gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
-            gpu::dispatch(b, cascade_disp_pipeline, grp, (Vf + 255u) / 256u);
+            gpu::dispatch_1d(b, cascade_disp_pipeline, grp, (Vf + 255u) / 256u);
             gpu::submit(b);
             gpu::release_bind_group(grp);
         }
@@ -422,7 +422,7 @@ bool ComputeState::gpu_cascade_replay(MultiresStack& stack, Mesh& out, int passe
         };
         gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, cascade_normals_pipeline, bg, 6);
         gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
-        gpu::dispatch(b, cascade_normals_pipeline, grp, (V_top + 255u) / 256u);
+        gpu::dispatch_1d(b, cascade_normals_pipeline, grp, (V_top + 255u) / 256u);
         gpu::submit(b);
         gpu::release_bind_group(grp);
     }

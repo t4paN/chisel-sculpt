@@ -275,7 +275,7 @@ void ComputeState::dispatch_select_stretched(
     };
     gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, remesh_select_stretched_pipeline, bg, 4);
     gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
-    gpu::dispatch(b, remesh_select_stretched_pipeline, grp, (tri_count + 255u) / 256u);
+    gpu::dispatch_1d(b, remesh_select_stretched_pipeline, grp, (tri_count + 255u) / 256u);
     gpu::submit(b);
     gpu::release_bind_group(grp);
 }
@@ -305,7 +305,7 @@ void ComputeState::dispatch_select_unmasked(
     };
     gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, remesh_select_unmasked_pipeline, bg, 4);
     gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
-    gpu::dispatch(b, remesh_select_unmasked_pipeline, grp, (tri_count + 255u) / 256u);
+    gpu::dispatch_1d(b, remesh_select_unmasked_pipeline, grp, (tri_count + 255u) / 256u);
     gpu::submit(b);
     gpu::release_bind_group(grp);
 }
@@ -337,7 +337,7 @@ void ComputeState::dispatch_grow_selection(
         gpu::barrier(gpu_dev);
 
         gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
-        gpu::dispatch(b, remesh_grow_selection_pipeline, grp, (tri_count + 255u) / 256u);
+        gpu::dispatch_1d(b, remesh_grow_selection_pipeline, grp, (tri_count + 255u) / 256u);
         gpu::submit(b);
     }
     gpu::release_bind_group(grp);
@@ -368,7 +368,7 @@ void ComputeState::dispatch_mirror_selection(uint32_t vertex_count, uint32_t tri
     };
     gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, remesh_mirror_selection_pipeline, bg, 7);
     gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
-    gpu::dispatch(b, remesh_mirror_selection_pipeline, grp, (tri_count + 255u) / 256u);
+    gpu::dispatch_1d(b, remesh_mirror_selection_pipeline, grp, (tri_count + 255u) / 256u);
     gpu::submit(b);
     gpu::release_bind_group(grp);
 }
@@ -420,7 +420,7 @@ void ComputeState::dispatch_find_pinned(
     };
     gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, remesh_find_pinned_pipeline, bg, 6);
     gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
-    gpu::dispatch(b, remesh_find_pinned_pipeline, grp, (vertex_count + 255u) / 256u);
+    gpu::dispatch_1d(b, remesh_find_pinned_pipeline, grp, (vertex_count + 255u) / 256u);
     gpu::submit(b);
     gpu::release_bind_group(grp);
 
@@ -450,7 +450,7 @@ void ComputeState::dispatch_compute_smooth_weights(
     };
     gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, remesh_smooth_weights_pipeline, bg, 7);
     gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
-    gpu::dispatch(b, remesh_smooth_weights_pipeline, grp, (vertex_count + 255u) / 256u);
+    gpu::dispatch_1d(b, remesh_smooth_weights_pipeline, grp, (vertex_count + 255u) / 256u);
     gpu::submit(b);
     gpu::release_bind_group(grp);
 }
@@ -546,7 +546,7 @@ void ComputeState::dispatch_remesh_smooth(
     gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
     for (int step = 0; step < NUM_SMOOTH_STEPS; step++) {
         // step even: in=ping → out=pong (grp_a); step odd: in=pong → out=ping (grp_b)
-        gpu::dispatch(b, remesh_smooth_pipeline, (step & 1) == 0 ? grp_a : grp_b, groups);
+        gpu::dispatch_1d(b, remesh_smooth_pipeline, (step & 1) == 0 ? grp_a : grp_b, groups);
         out_buf = (step & 1) == 0 ? &remesh_pong_ssbo : &remesh_ping_ssbo;
     }
     gpu::submit(b);
@@ -608,7 +608,7 @@ void ComputeState::dispatch_seam_snap_weld(
     gpu::BindGroup snap_grp = gpu::create_bind_group(gpu_dev, remesh_seam_snap_pipeline, snap_bg, 6);
     {
         gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
-        gpu::dispatch(b, remesh_seam_snap_pipeline, snap_grp, groups);
+        gpu::dispatch_1d(b, remesh_seam_snap_pipeline, snap_grp, groups);
         gpu::submit(b);
     }
     gpu::release_bind_group(snap_grp);
@@ -626,7 +626,7 @@ void ComputeState::dispatch_seam_snap_weld(
     gpu::BindGroup weld_grp = gpu::create_bind_group(gpu_dev, remesh_seam_weld_pipeline, weld_bg, 4);
     {
         gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
-        gpu::dispatch(b, remesh_seam_weld_pipeline, weld_grp, groups);
+        gpu::dispatch_1d(b, remesh_seam_weld_pipeline, weld_grp, groups);
         gpu::submit(b);
     }
     gpu::release_bind_group(weld_grp);

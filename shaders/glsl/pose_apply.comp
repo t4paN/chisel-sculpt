@@ -47,7 +47,8 @@ vec3 bone_carry(vec3 p, uint i) {
 }
 
 void main() {
-    uint idx = gl_GlobalInvocationID.x;
+    uint idx = gl_GlobalInvocationID.x   // linear id: gpu::dispatch_1d may fold
+           + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
     if (idx >= P.affected_count) return;
     uint v = affected_ids[idx];
     vec3 p = vec3(init_pos[idx*3u], init_pos[idx*3u+1u], init_pos[idx*3u+2u]);

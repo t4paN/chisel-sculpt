@@ -105,9 +105,14 @@ void try_paint(uint v, vec3 anchor, vec3 vp, uint mirrored) {
 
 void main() {
     // Dispatch culling: one workgroup per ACTIVE block; entry 0 is the count, hence +1.
+    // Linear workgroup id: dispatch_1d and the 2D indirect args fold a long row into
+    // rows, and the last row overshoots. In block mode the overshoot would read list
+    // slots past the count (someone else's blocks), so stop at the count.
+    uint wgi = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    if (DR.block_mode == 1u && wgi >= block_list[0]) return;
     uint v = (DR.block_mode == 1u)
-           ? (block_list[1u + gl_WorkGroupID.x] * 64u + gl_LocalInvocationID.x)
-           : gl_GlobalInvocationID.x;
+           ? (block_list[1u + wgi] * 64u + gl_LocalInvocationID.x)
+           : wgi * 64u + gl_LocalInvocationID.x;
     if (v >= P.vertex_count) return;
 
     vec3 vp = vec3(positions[v*3u], positions[v*3u+1u], positions[v*3u+2u]);

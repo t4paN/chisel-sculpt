@@ -178,7 +178,7 @@ void ComputeState::dispatch_density_colormap(uint32_t vertex_count) {
     gpu::BindGroup grp = gpu::create_bind_group(gpu_dev, density_colormap_pipeline, bg, 3);
 
     gpu::ComputeBatch b = gpu::begin_compute(gpu_dev);
-    gpu::dispatch(b, density_colormap_pipeline, grp, (vertex_count + 255u) / 256u);
+    gpu::dispatch_1d(b, density_colormap_pipeline, grp, (vertex_count + 255u) / 256u);
     gpu::submit(b);
     gpu::release_bind_group(grp);
 }

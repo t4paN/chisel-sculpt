@@ -307,12 +307,18 @@ bool wgpu_init(GLFWwindow* window, int fbw, int fbh) {
             gpu::DeviceLimits dl;
             dl.max_buffer_size          = granted.maxBufferSize;
             dl.max_storage_binding_size = granted.maxStorageBufferBindingSize;
+            // Not raised in the request on purpose: native then fails where the
+            // browser would, so the 2D dispatch path gets exercised before a push.
+            if (granted.maxComputeWorkgroupsPerDimension > 0)
+                dl.max_workgroups_per_dim = granted.maxComputeWorkgroupsPerDimension;
             gpu::set_device_limits(dl);
         }
         gpu::DeviceLimits dl = gpu::device_limits();
-        std::printf("[gpu] device limits: maxBuffer %llu MB, maxStorageBinding %llu MB\n",
+        std::printf("[gpu] device limits: maxBuffer %llu MB, maxStorageBinding %llu MB, "
+                    "%u workgroups per dimension\n",
                     (unsigned long long)(dl.max_buffer_size >> 20),
-                    (unsigned long long)(dl.max_storage_binding_size >> 20));
+                    (unsigned long long)(dl.max_storage_binding_size >> 20),
+                    dl.max_workgroups_per_dim);
     }
 
     WGPUSurfaceCapabilities caps = {};

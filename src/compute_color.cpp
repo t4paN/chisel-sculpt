@@ -294,7 +294,7 @@ static void dispatch_color_composite_impl(ComputeState& cs, uint32_t vc, bool di
     if (!cs.dirty_region_ubo.handle) {
         cs.dirty_region_ubo = gpu::create_buffer(cs.gpu_dev, nullptr, sizeof(DirtyRegionGPU),
                                                  gpu::Usage::Uniform);
-        const DirtyRegionGPU dr = { 0, 0, 0, 0 };
+        const DirtyRegionGPU dr = { 0, 0, 0, gpu::device_limits().max_workgroups_per_dim };
         gpu::write_buffer(cs.gpu_dev, cs.dirty_region_ubo, 0, &dr, sizeof(dr));
     }
     const gpu::BindBufferEntry bg[] = {
@@ -323,7 +323,7 @@ static void dispatch_color_composite_impl(ComputeState& cs, uint32_t vc, bool di
         gpu::submit(b);
         gpu::release_bind_group(args_grp);
     } else {
-        gpu::dispatch(b, cs.color_composite_pipeline, grp, (vc + 255u) / 256u);
+        gpu::dispatch_1d(b, cs.color_composite_pipeline, grp, (vc + 255u) / 256u);
         gpu::submit(b);
     }
     gpu::release_bind_group(grp);

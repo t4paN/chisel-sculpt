@@ -18,7 +18,8 @@ layout(std140, binding = 63) uniform Params {
 } P;
 
 void main() {
-    uint v = gl_GlobalInvocationID.x;
+    uint v = gl_GlobalInvocationID.x   // linear id: gpu::dispatch_1d may fold
+           + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
     if (v >= P.vertex_count) return;
 
     merge_map[v] = v;

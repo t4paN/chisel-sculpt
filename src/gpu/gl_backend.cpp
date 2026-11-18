@@ -40,8 +40,45 @@ void set_device_limits(const DeviceLimits& l) {
                         (unsigned long long)(cap >> 20));
         }
     }
+    if (const char* env = std::getenv("CHISEL_MAX_GROUPS")) {
+        const uint32_t cap = (uint32_t)std::strtoul(env, nullptr, 10);
+        if (cap > 0 && cap < g_device_limits.max_workgroups_per_dim) {
+            g_device_limits.max_workgroups_per_dim = cap;
+            std::printf("[gpu] CHISEL_MAX_GROUPS dev clamp: %u workgroups per dimension\n", cap);
+        }
+    }
 }
 DeviceLimits device_limits() { return g_device_limits; }
+
+// ---- Dispatch size guard + the 1D-past-the-limit fold (see gpu.h). Same code in
+// both backends; only the raw dispatch below it differs. ----
+static uint32_t g_dispatch_refusals = 0;
+uint32_t dispatch_refusals() { return g_dispatch_refusals; }
+
+bool grid_1d(uint32_t groups, uint32_t& gx, uint32_t& gy) {
+    const uint32_t lim = g_device_limits.max_workgroups_per_dim;
+    if (groups <= lim) { gx = groups; gy = 1; return true; }
+    gx = lim;
+    gy = (uint32_t)(((uint64_t)groups + lim - 1) / lim);
+    return gy <= lim;
+}
+
+static bool dispatch_fits(uint32_t gx, uint32_t gy) {
+    const uint32_t lim = g_device_limits.max_workgroups_per_dim;
+    if (gx <= lim && gy <= lim) return true;
+    // Capped so a long stroke at a too-big mesh can't flood the log, one line a dab.
+    if (g_dispatch_refusals < 16)
+        std::printf("[gpu] dispatch REFUSED: %u x %u workgroups, the device allows %u "
+                    "per dimension - skipped\n", gx, gy, lim);
+    g_dispatch_refusals++;
+    return false;
+}
+
+void dispatch_1d(ComputeBatch& b, ComputePipeline& pipe, BindGroup& group, uint32_t groups) {
+    uint32_t gx = 0, gy = 0;
+    grid_1d(groups, gx, gy);       // an impossible grid is refused by dispatch below
+    dispatch(b, pipe, group, gx, gy);
+}
 
 Buffer create_buffer(Device&, const void* data, uint64_t size, Usage /*usage*/,
                      const char* file, int line) {
@@ -212,6 +249,7 @@ ComputeBatch begin_compute(Device& dev) {
 }
 
 void dispatch(ComputeBatch&, ComputePipeline& pipe, BindGroup& group, uint32_t groups_x, uint32_t groups_y) {
+    if (!dispatch_fits(groups_x, groups_y)) return;
     glUseProgram(pipe.handle);
     for (uint32_t i = 0; i < group.count; ++i)
         glBindBufferBase(group.target[i], group.binding[i], group.buffer[i]);

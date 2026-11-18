@@ -14,8 +14,15 @@ struct Params { vertex_count : u32, _p0 : u32, _p1 : u32, _p2 : u32 };
 
 @compute @workgroup_size(64)
 fn main(@builtin(workgroup_id) wg : vec3<u32>,
-        @builtin(local_invocation_id) lid : vec3<u32>) {
-    let v = block_list[1u + wg.x] * 64u + lid.x;
+        @builtin(local_invocation_id) lid : vec3<u32>,
+        @builtin(num_workgroups) nwg : vec3<u32>) {
+    // Linear workgroup id: block_args folds a count past the per-dim limit into rows,
+    // and the last row overshoots past the list's count.
+    let wgi = wg.x + wg.y * nwg.x;
+    if (wgi >= block_list[0]) {
+        return;
+    }
+    let v = block_list[1u + wgi] * 64u + lid.x;
     if (v >= P.vertex_count) {
         return;
     }

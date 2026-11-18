@@ -69,11 +69,12 @@ fn expand(v : u32) {
 }
 
 @compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
+fn main(@builtin(global_invocation_id) gid : vec3<u32>,
+        @builtin(num_workgroups)        nwg : vec3<u32>) {
     // Clamp: an overflowed region's counter runs past cap and those ids were never
     // written (same rule as dirty_args).
     let n = min(src[R.base], R.cap);
-    let i = gid.x;
+    let i = gid.x + gid.y * nwg.x * 256u;   // linear id: gpu::dispatch_1d may fold the count into rows
     if (i >= n) {
         return;
     }
