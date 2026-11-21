@@ -2949,12 +2949,28 @@ static void audit_open_edges(const Mesh& m, float seam_tol, const char* stage,
     uint32_t n_sample = 0;
     static constexpr uint32_t MAX_SAMPLES = 6;
     struct { float x, y, z, m0, m1; } samples[MAX_SAMPLES];
+    // Where the fins are, not just how many: a count can't tell a fin inherited
+    // from the source apart from one this pass made (2026-11-20, rebuild fins).
+    struct Where { float x, y, z; uint32_t n; };
+    Where nm_at[MAX_SAMPLES], fw_at[MAX_SAMPLES], nd_at[MAX_SAMPLES];
+    uint32_t n_nm = 0, n_fw = 0, n_nd = 0;
+    auto mid = [&](uint32_t a, uint32_t b, uint32_t n) {
+        return Where{ (m.pos_x[a] + m.pos_x[b]) * 0.5f, (m.pos_y[a] + m.pos_y[b]) * 0.5f,
+                      (m.pos_z[a] + m.pos_z[b]) * 0.5f, n };
+    };
 
     for (const auto& [k, e] : use) {
         uint32_t uses = (uint32_t)e.fwd + (uint32_t)e.bwd;
-        if (uses > 2) { nonmanifold++; continue; }
+        if (uses > 2) {
+            if (n_nm < MAX_SAMPLES) nm_at[n_nm++] = mid(e.v0, e.v1, uses);
+            nonmanifold++;
+            continue;
+        }
         if (uses == 2) {
-            if (e.fwd != 1) bad_winding++;   // both tris traverse it the same way
+            if (e.fwd != 1) {                // both tris traverse it the same way
+                if (n_fw < MAX_SAMPLES) fw_at[n_fw++] = mid(e.v0, e.v1, uses);
+                bad_winding++;
+            }
             continue;
         }
         open_total++;
@@ -2992,6 +3008,10 @@ static void audit_open_edges(const Mesh& m, float seam_tol, const char* stage,
                                         edge_length(m, i1, i2),
                                         edge_length(m, i2, i0) });
             if (shortest >= needle_len) continue;
+            if (n_nd < MAX_SAMPLES)
+                nd_at[n_nd++] = { (m.pos_x[i0] + m.pos_x[i1] + m.pos_x[i2]) / 3.0f,
+                                  (m.pos_y[i0] + m.pos_y[i1] + m.pos_y[i2]) / 3.0f,
+                                  (m.pos_z[i0] + m.pos_z[i1] + m.pos_z[i2]) / 3.0f, t };
             needles++;
             if (std::fabs(m.pos_x[i0]) < seam_tol ||
                 std::fabs(m.pos_x[i1]) < seam_tol ||
@@ -3022,6 +3042,15 @@ static void audit_open_edges(const Mesh& m, float seam_tol, const char* stage,
                     "mask=(%.3f, %.3f)\n",
                     samples[i].x, samples[i].y, samples[i].z,
                     samples[i].m0, samples[i].m1);
+    for (uint32_t i = 0; i < n_nm; i++)
+        std::printf("[remesh-audit]   non-manifold edge at (%.4f, %.4f, %.4f) in %u tris\n",
+                    nm_at[i].x, nm_at[i].y, nm_at[i].z, nm_at[i].n);
+    for (uint32_t i = 0; i < n_fw; i++)
+        std::printf("[remesh-audit]   flipped-winding edge at (%.4f, %.4f, %.4f)\n",
+                    fw_at[i].x, fw_at[i].y, fw_at[i].z);
+    for (uint32_t i = 0; i < n_nd; i++)
+        std::printf("[remesh-audit]   needle tri %u at (%.4f, %.4f, %.4f)\n",
+                    nd_at[i].n, nd_at[i].x, nd_at[i].y, nd_at[i].z);
 }
 
 // ---------------------------------------------------------------------------

@@ -174,6 +174,9 @@ struct PenUpProbe {
             if (ms[i] < 0.005) continue;
             std::printf("[penup]   %-44s %7.2f ms\n", name(i), ms[i]);
         }
+        // CHISEL_GPU_MEM=1: what the stroke left allocated. A run of strokes at L8 ran
+        // a 10 GB card out of VRAM (2026-11-18); this shows which buffer grew. No-op off.
+        gpu::dump_live_buffers("after stroke");
         std::fflush(stdout);
     }
 };

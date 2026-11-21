@@ -297,6 +297,9 @@ size_t ComputeState::undo_ring_reserve(size_t float_count) {
         if (undo_ring_ssbo.handle && undo_ring_head) {
             gpu::copy_buffer(gpu_dev, undo_ring_ssbo, 0, nb, 0, (uint64_t)undo_ring_head);
         }
+        // Logged: the copy holds old + new at once (512 -> 1024 MB peaks at 1.5 GB).
+        std::printf("[undo-ring] grow %zu -> %zu MB (holding %zu MB of history)\n",
+                    undo_ring_bytes >> 20, newcap >> 20, undo_ring_head >> 20);
         gpu::release_buffer(undo_ring_ssbo);
         undo_ring_ssbo  = nb;
         undo_ring_bytes = newcap;
