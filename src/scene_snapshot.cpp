@@ -154,6 +154,17 @@ int snapshot_prepare(Scene& scene, ComputeState& compute) {
         up->undo.clear(up->id == active ? &compute : nullptr);
     }
 
+    // Ask the dry run before dropping anything. If stripping every layer still can't
+    // reach the cap, the snapshot is off anyway, so baking would only destroy other
+    // meshes' detail for nothing — the prompt said "too big", not "bakes N levels".
+    // (2026-11-21: a Rebuild on an unlayered 5M head stripped the eyes L3 -> L0.)
+    if (snapshot_levels_to_bake(scene) < 0) {
+        std::printf("[snapshot] %.2fM tris, can't fit even fully baked — "
+                    "running unprotected, nothing baked\n",
+                    (double)snapshot_scene_tris(scene) / 1e6);
+        return -1;
+    }
+
     int baked = 0;
     while (snapshot_scene_tris(scene) > SNAPSHOT_TRI_CAP) {
         MeshEntity* pick = nullptr;
@@ -164,11 +175,16 @@ int snapshot_prepare(Scene& scene, ComputeState& compute) {
             uint64_t t = entity_top_tris(*up);
             if (!pick || t > best) { pick = up.get(); best = t; }
         }
+        // Unreachable after the dry run above (it walks the same picks). If it ever
+        // isn't, BREAK, never return: the stacks below already lost layers and only
+        // the rebuild re-cascades their surfaces. Returning here once left the eyes
+        // a 61k-vert surface on a 964-vert stack; the next stroke wrote past the
+        // base arrays and smashed the GL driver's heap (2026-11-21).
         if (!pick) {
             std::printf("[snapshot] %.2fM tris and no layer left to bake — "
-                        "running unprotected\n",
+                        "stopping the bake over the cap\n",
                         (double)snapshot_scene_tris(scene) / 1e6);
-            return -1;
+            break;
         }
 
         // The same two steps the burger menu's "delete highest subdiv" runs: bake

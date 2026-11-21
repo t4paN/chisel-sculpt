@@ -2128,6 +2128,28 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        // Tripwire: a locked stack whose current level doesn't match the working mesh.
+        // Pen-up writes the stroke back into base/disp indexed by working-mesh vertex,
+        // so a shorter level array means a write past its end — on 2026-11-21 that
+        // smashed the GL driver's heap and crashed in the next ImGui draw. Refuse the
+        // stroke loudly instead; a level switch (re-cascade) brings them back in line.
+        if (app_state == AppState::IDLE && input.drag_mode == InputState::DragMode::SCULPT
+            && multires->locked) {
+            const int k = multires->current_level - multires->base_level;
+            const size_t want = k <= 0 ? multires->base.vertex_count()
+                              : (size_t)k <= multires->disp.size() ? multires->disp[k - 1].size() : 0;
+            if (want != mesh->vertex_count()) {
+                std::printf("[stroke] REFUSED: mesh %u has %u verts but its L%d stack holds %zu "
+                            "— stack and surface disagree; switch level to re-sync\n",
+                            scene.active_mesh_id(), mesh->vertex_count(),
+                            multires->current_level, want);
+                std::snprintf(input.notification, sizeof(input.notification),
+                              "Mesh out of sync with its levels - switch subdiv level to fix");
+                input.notification_timer = 3.0f;
+                input.drag_mode = InputState::DragMode::NONE;
+            }
+        }
+
         // IDLE → SCULPTING
         if (app_state == AppState::IDLE && input.drag_mode == InputState::DragMode::SCULPT) {
             input.sculpting = true;

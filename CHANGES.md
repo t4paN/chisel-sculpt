@@ -2,6 +2,13 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-21 — Revert copy no longer strips other meshes for nothing; versioned release files
+
+- Remesh / Rebuild levels on a scene too big for a revert copy used to bake other meshes' subdiv levels down anyway, then skip re-cascading them: their surface stayed at the old level over a stack at L0, and the next stroke wrote past the stack's arrays (heap corruption, crash inside the GL driver). It now bakes nothing when the cap can't be reached, as the prompt already said; a bake that stops short still re-cascades.
+- Stroke tripwire: a mesh whose vertex count disagrees with its stack's current level refuses the stroke with a notice (`[stroke] REFUSED`) instead of writing into it.
+- Release files carry the version: `Chisel-Weasel-vX.Y.Z-x86_64.AppImage`, `chisel-weasel-vX.Y.Z-windows-x64.zip`.
+- Diagnostics: the remesh audit logs where its non-manifold, flipped and needle edges are; the GPU undo ring logs each grow; `CHISEL_GPU_MEM=1` lists live GPU buffers after each stroke.
+
 ## 2026-11-18 — GPU jobs past 65,535 workgroups: split into rows, refused if they can't be
 
 - Every per-vertex / per-triangle kernel and every brush kernel now runs past 16.7M items (the old one-row cap on WebGPU and Intel GL): `gpu::dispatch_1d` folds a long count into rows, kernels rebuild the linear id, and the indirect args from `dirty_args` / `block_args` fold the same way. Big strokes at 31M verts no longer hit a dispatch-size crash; remesh above ~16.7M tris no longer reports "nothing to do".
