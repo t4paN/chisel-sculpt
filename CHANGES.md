@@ -2,6 +2,14 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-23 — SDF merge: Mode / Pattern / Poles dropdowns; repeatable merges
+
+- The merge dialog's Extractor row is now three dropdowns: **Mode** (Marching Cubes, Surface Nets), **Pattern** (Curvature nudge, Plain) and **Poles** (Walk & cancel, with an On/Off toggle). The shipped default in each reads "(default)". Keys S / G / P cycle them, O turns the pole clean-up off. Picks are remembered, Mode included; Reset settings restores them.
+- New pattern **Plain**: the same relax without the curvature field. Over the 16-run suite it lands within about 1% of Curvature nudge on needless poles, a little ahead on triangle shape (hex +0.01–0.02), and its finishing step takes about 30% less time (9.5 s → 6.6 s summed over the suite).
+- Poles Off leaves about 2.4 times the needless poles (predator 2121 → 4887 pairs).
+- The extracted triangles are sorted before the weld, so merging the same model twice gives a byte-identical mesh. Before, the GPU's triangle order moved pole counts by up to 5% between runs.
+- Dev hooks: `CHISEL_MERGE_MODE`, `CHISEL_MERGE_PATTERN`, `CHISEL_MERGE_POLES`, `CHISEL_MERGE_POLES_ON` (row indexes) for scripted merges.
+
 ## 2026-11-23 — SDF merge reports needless poles and grain
 
 - Diagnostics: every SDF merge prints two `[sdf-pattern]` lines: poles past the minimum the shape forces (a closed shell must keep 6 × Euler characteristic units, 12 on a ball), and how well the triangle grid lines up (hex, agree, kinks). About 40 ms. Baseline at grid 128: 750–3100 needless 5/7 pairs per model against a floor of 6; up to 5% run-to-run spread from the GPU's triangle order.

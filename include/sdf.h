@@ -22,6 +22,28 @@ struct SdfGrid {
     uint32_t cells()   const { return R*R*R; }
 };
 
+// ---- Pattern block of the SDF dialog (Mode / Pattern / Poles) ---------------
+// How the merge lays its triangles, split into choices like a slicer's infill
+// patterns. One table feeds the dialog (every skin), the keys and the settings
+// file. Each row marks the entry that ships as the default; the dialog tags it
+// "(default)". Mode is the extractor (input.voxel_merge_surface_nets): entry 0 =
+// Marching Cubes, 1 = Surface Nets. New entries go at the END of a row so a saved
+// index keeps meaning the same thing.
+enum class SdfPattern { CurvatureNudge = 0, Plain = 1 };
+enum class SdfPoles   { WalkCancel = 0 };
+
+struct SdfChoice { const char* name; const char* tip; };
+struct SdfRow    { const char* label; const SdfChoice* items; int count; int def; };
+const SdfRow& sdf_mode_row();
+const SdfRow& sdf_pattern_row();
+const SdfRow& sdf_poles_row();
+
+struct SdfPatternOpts {
+    int  pattern  = (int)SdfPattern::CurvatureNudge;
+    int  poles    = (int)SdfPoles::WalkCancel;
+    bool poles_on = true;   // off: no pole walk (valence flips still run)
+};
+
 struct VoxelMergeResult {
     bool        success = false;
     std::string error;
@@ -81,7 +103,8 @@ VoxelMergeJob* voxel_merge_begin(Scene& scene, ComputeState& cs,
                                  int resolution, bool mirror, bool surface_nets,
                                  bool subtract = false,
                                  bool keep_detail = true,   // snap the result back onto the source meshes
-                                 int close_holes = 0);      // thin skin: how wide a gap the flood bridges, 0..2
+                                 int close_holes = 0,       // thin skin: how wide a gap the flood bridges, 0..2
+                                 SdfPatternOpts pattern = {});   // Pattern / Poles rows of the dialog
 
 // Advance one budgeted step. Returns Working until the job completes; on the final
 // step it runs the CPU tail (weld → relax → mirror seam → manifold gate → scene

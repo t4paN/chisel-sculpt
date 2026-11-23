@@ -994,6 +994,21 @@ void app_files_frame(App& a) {
                 input.voxel_merge_mirror = std::atoi(env) != 0;
             if (const char* env = std::getenv("CHISEL_MERGE_CLOSE_HOLES"))
                 input.voxel_merge_close_holes = std::min(2, std::max(0, std::atoi(env)));
+            // The Pattern block (sdf.h): indexes into each row, out-of-range ignored.
+            // Note these land in the settings file like a dialog pick would.
+            auto row_env = [](const char* name, const SdfRow& row, int& dst) {
+                if (const char* env = std::getenv(name)) {
+                    const int k = std::atoi(env);
+                    if (k >= 0 && k < row.count) dst = k;
+                }
+            };
+            int nets = input.voxel_merge_surface_nets ? 1 : 0;
+            row_env("CHISEL_MERGE_MODE", sdf_mode_row(), nets);
+            input.voxel_merge_surface_nets = nets == 1;
+            row_env("CHISEL_MERGE_PATTERN", sdf_pattern_row(), input.voxel_merge_pattern);
+            row_env("CHISEL_MERGE_POLES", sdf_poles_row(), input.voxel_merge_poles);
+            if (const char* env = std::getenv("CHISEL_MERGE_POLES_ON"))
+                input.voxel_merge_poles_on = std::atoi(env) != 0;
         }
     }
 

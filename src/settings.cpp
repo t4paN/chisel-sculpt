@@ -2,6 +2,7 @@
 #include "settings.h"
 #include "input.h"
 #include "brush_alpha.h"   // fill_patterns()
+#include "sdf.h"           // the SDF dialog's Pattern rows
 
 #include <cstdio>
 #include <cstdlib>
@@ -214,6 +215,10 @@ std::string serialize(const InputState& in) {
     append_kv(s, "camera_perspective",  in.camera_perspective);
     append_kv(s, "camera_fov",          in.camera_fov);
     append_kv(s, "remesh_detail",       in.remesh_detail);
+    append_kv(s, "sdf_mode",            in.voxel_merge_surface_nets ? 1 : 0);
+    append_kv(s, "sdf_pattern",         in.voxel_merge_pattern);
+    append_kv(s, "sdf_poles",           in.voxel_merge_poles);
+    append_kv(s, "sdf_poles_on",        in.voxel_merge_poles_on);
     append_kv(s, "uv_padding",          in.uv_padding);
     append_kv(s, "sphere_kind",         (int)in.sphere_kind);
     append_kv(s, "gpu_memory_gb",       in.gpu_memory_gb);
@@ -424,6 +429,20 @@ void apply_global_key(InputState& in, const std::string& key, const std::string&
         int p = (int)std::strtol(val.c_str(), nullptr, 10);
         if (p >= 0 && p < fill_patterns().count()) in.fill_pattern = p;
     }
+    else if (key == "sdf_mode") {
+        // Indexes into the dialog's rows (sdf.h); an index a newer build added is dropped.
+        const int k = (int)std::strtol(val.c_str(), nullptr, 10);
+        if (k >= 0 && k < sdf_mode_row().count) in.voxel_merge_surface_nets = k == 1;
+    }
+    else if (key == "sdf_pattern") {
+        const int k = (int)std::strtol(val.c_str(), nullptr, 10);
+        if (k >= 0 && k < sdf_pattern_row().count) in.voxel_merge_pattern = k;
+    }
+    else if (key == "sdf_poles") {
+        const int k = (int)std::strtol(val.c_str(), nullptr, 10);
+        if (k >= 0 && k < sdf_poles_row().count) in.voxel_merge_poles = k;
+    }
+    else if (key == "sdf_poles_on") in.voxel_merge_poles_on = parse_bool(val);
     else if (key == "fill_angle") in.fill_angle = clampf(std::strtof(val.c_str(), nullptr), 0.0f, 180.0f);
     else if (key == "bucket_paint_walls") in.bucket_paint_walls = parse_bool(val);
 }
@@ -567,6 +586,10 @@ void settings_reset(InputState& input) {
     input.camera_perspective = fresh.camera_perspective;
     input.camera_fov         = fresh.camera_fov;
     input.remesh_detail      = fresh.remesh_detail;
+    input.voxel_merge_surface_nets = fresh.voxel_merge_surface_nets;
+    input.voxel_merge_pattern      = fresh.voxel_merge_pattern;
+    input.voxel_merge_poles        = fresh.voxel_merge_poles;
+    input.voxel_merge_poles_on     = fresh.voxel_merge_poles_on;
     input.sphere_kind        = fresh.sphere_kind;
     input.gpu_memory_gb      = fresh.gpu_memory_gb;
     input.relative_pen       = fresh.relative_pen;

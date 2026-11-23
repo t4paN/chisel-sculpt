@@ -1100,7 +1100,9 @@ void app_ops_remesh_and_merge(App& a) {
                                            input.voxel_merge_surface_nets,
                                            input.voxel_merge_subtract,
                                            input.remesh_keep_detail,
-                                           input.voxel_merge_close_holes);
+                                           input.voxel_merge_close_holes,
+                                           SdfPatternOpts{ input.voxel_merge_pattern, input.voxel_merge_poles,
+                                                           input.voxel_merge_poles_on });
             input.voxel_merge_in_progress = true;
         }
     }

@@ -1,5 +1,6 @@
 #include "scene.h"          // first: pulls in glad, which must precede any GL header
 #include "ui_overlay.h"
+#include "sdf.h"            // the SDF dialog's Pattern rows
 #include "ui_skin.h"
 #include "text_overlay.h"
 #include "input.h"
@@ -137,6 +138,7 @@ void draw_remesh_progress(TextOverlay& text, int win_w, int win_h, float progres
 
 void draw_voxel_merge_confirm(TextOverlay& text, int resolution, int close_holes, int n_selected,
                              int n_unselected, bool surface_nets,
+                             int pattern, int poles, bool poles_on,
                              bool has_density, bool adaptive, int levels_to_bake,
                              int rebuild_levels, int win_w, int win_h) {
     text.draw_panel(0, 0, (float)win_w, (float)win_h,
@@ -157,19 +159,30 @@ void draw_voxel_merge_confirm(TextOverlay& text, int resolution, int close_holes
     std::snprintf(line, sizeof(line), "Resolution: %d   ( [ - / + ] )", resolution);
     text.draw_text(line, cx - 360.0f, cy + 4.0f, scale, win_w, win_h, CGA(light_cyan), 1.0f);
 
-    std::snprintf(line, sizeof(line), "Extractor: %s   ( S toggles )",
-                  surface_nets ? "Surface Nets" : "Marching Cubes");
+    // The Pattern block (sdf.h): one line per row, the shipped default tagged.
+    auto pick = [](const SdfRow& r, int i) {
+        static char buf[96];
+        if (i < 0 || i >= r.count) i = r.def;
+        std::snprintf(buf, sizeof buf, "%s%s", r.items[i].name, i == r.def ? " (default)" : "");
+        return (const char*)buf;
+    };
+    std::snprintf(line, sizeof(line), "Mode: %s   ( S )", pick(sdf_mode_row(), surface_nets ? 1 : 0));
     text.draw_text(line, cx - 360.0f, cy + 34.0f, scale, win_w, win_h, CGA(light_cyan), 1.0f);
+    std::snprintf(line, sizeof(line), "Pattern: %s   ( G )", pick(sdf_pattern_row(), pattern));
+    text.draw_text(line, cx - 360.0f, cy + 64.0f, scale, win_w, win_h, CGA(light_cyan), 1.0f);
+    std::snprintf(line, sizeof(line), "Poles: %s, %s   ( P, O )", pick(sdf_poles_row(), poles),
+                  poles_on ? "on" : "OFF");
+    text.draw_text(line, cx - 360.0f, cy + 94.0f, scale, win_w, win_h, CGA(light_cyan), 1.0f);
 
     static const char* const kCloseHoles[3] = { "Normal", "More", "Most" };
     std::snprintf(line, sizeof(line), "Close holes: %s   ( H steps )", kCloseHoles[close_holes]);
-    text.draw_text(line, cx - 360.0f, cy + 64.0f, scale, win_w, win_h, CGA(light_cyan), 1.0f);
+    text.draw_text(line, cx - 360.0f, cy + 124.0f, scale, win_w, win_h, CGA(light_cyan), 1.0f);
 
-    text.draw_text("Y remesh   M mirror-remesh   N / ESC cancel", cx - 360.0f, cy + 100.0f,
+    text.draw_text("Y remesh   M mirror-remesh   N / ESC cancel", cx - 360.0f, cy + 160.0f,
                   scale, win_w, win_h, CGA(yellow), 1.0f);
 
     // Subtract option: carve the unselected meshes out of the selected union.
-    float oy = 130.0f;
+    float oy = 190.0f;
     if (n_unselected > 0) {
         std::snprintf(line, sizeof(line), "- subtract %d unselected mesh%s (carve)",
                       n_unselected, n_unselected == 1 ? "" : "es");

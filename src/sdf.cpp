@@ -291,6 +291,29 @@ static void build_fwn_tree(const std::vector<float>& pos, const std::vector<uint
 // each stem (the embedder does no include injection). Loose grid uniforms became an
 // anonymous std140 Params UBO at binding 63 (one struct per kernel, below).
 
+// ---- Soup order ---------------------------------------------------------------
+// Sort the extracted triangles by their corner positions (18 floats per tri: pos +
+// normal x 3; positions alone decide). One-shot, after readback: allowed to allocate.
+void sort_soup(std::vector<float>& soup, uint32_t ntri) {
+    std::vector<uint32_t> order(ntri);
+    for (uint32_t t = 0; t < ntri; t++) order[t] = t;
+    const float* f = soup.data();
+    std::sort(order.begin(), order.end(), [f](uint32_t a, uint32_t b) {
+        const float* pa = f + (size_t)a * 18;
+        const float* pb = f + (size_t)b * 18;
+        for (int c = 0; c < 3; c++)          // corner c: pos at 6c .. 6c+2
+            for (int k = 0; k < 3; k++) {
+                const float x = pa[c * 6 + k], y = pb[c * 6 + k];
+                if (x != y) return x < y;
+            }
+        return a < b;                        // identical tris: keep a fixed order anyway
+    });
+    std::vector<float> out((size_t)ntri * 18);
+    for (uint32_t t = 0; t < ntri; t++)
+        std::memcpy(&out[(size_t)t * 18], f + (size_t)order[t] * 18, 18 * sizeof(float));
+    soup.swap(out);
+}
+
 // ---- Hash-weld ------------------------------------------------------------
 // Snap each soup vertex to a voxel*1e-3 lattice, dedup by quantized key →
 // shared vertices ⇒ watertight indexed mesh. Single CPU touch, O(verts).
@@ -1806,6 +1829,7 @@ struct VoxelMergeJob {
 
     bool     mirror = false;
     bool     use_nets = false;     // Surface Nets extractor chosen (vs Marching Cubes)
+    SdfPatternOpts pat;            // Pattern / Poles rows of the dialog
     bool     keep_detail = true;   // snap the extracted surface back onto the source soup
     bool     wrap = false;         // thin skin: shell round the source (see wrap_thin_skin)
     float    wrap_t = 0.0f;        // how far out the flood puts that shell
@@ -2332,9 +2356,11 @@ static double g_merge_ms_per_corner = 0.0;   // this session's last merge, for t
 
 VoxelMergeJob* voxel_merge_begin(Scene& scene, ComputeState& cs,
                                  int resolution, bool mirror, bool surface_nets,
-                                 bool subtract, bool keep_detail, int close_holes) {
+                                 bool subtract, bool keep_detail, int close_holes,
+                                 SdfPatternOpts pattern) {
     VoxelMergeJob* job = new VoxelMergeJob();
     job->mirror = mirror;
+    job->pat = pattern;
     job->keep_detail = keep_detail;
     job->t0 = std::chrono::high_resolution_clock::now();
 
@@ -2895,6 +2921,13 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
         // Tight snap (voxel*1e-5): the MC shader canonicalizes edge orientation so a
         // shared edge yields a bit-identical vertex from both cells; a looser tol only
         // risks false fusion of a distinct nearby sheet into a non-manifold edge.
+        // Put the soup in a fixed order first. The GPU appends triangles in whatever
+        // order its threads finish, and the weld numbers verts in the order it meets
+        // them, so two merges of the same model used to differ in vertex order, and
+        // with it every order-dependent step after (flips, the pole walk): up to 5%
+        // apart in pole counts. Sorted, a merge is repeatable, so pattern A/Bs compare
+        // like with like. Each tri's own corner order comes from its cell, so is fixed.
+        sort_soup(j.soup, j.out_tris);
         Mesh welded;
         hash_weld(j.soup, j.out_tris, grid.voxel * 1e-5f, welded);
 
@@ -2956,6 +2989,15 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
         static const int pole_rounds = (int)env_float("CHISEL_POLE_ROUNDS", 30.0f);
         // Dev hook: CHISEL_EVEN_ITERS=0 puts the last relax back on plain neighbour averaging.
         static const int even_iters = (int)env_float("CHISEL_EVEN_ITERS", 8.0f);
+        // The dialog's Poles toggle: off = no walk (as CHISEL_POLE_ROUNDS=0; flips still run).
+        const int walk_rounds = j.pat.poles_on ? pole_rounds : 0;
+        // The dialog's Pattern row. Curvature nudge: the 4-way cross field from the SDF's
+        // curvature pulls edges along the bends. Plain: the same relax with no field.
+        const bool nudge = j.pat.pattern == (int)SdfPattern::CurvatureNudge;
+        std::printf("[sdf-pattern] mode %s, pattern %s, poles %s%s\n",
+                    sdf_mode_row().items[j.use_nets ? 1 : 0].name,
+                    sdf_pattern_row().items[j.pat.pattern].name,
+                    sdf_poles_row().items[j.pat.poles].name, j.pat.poles_on ? "" : " (off)");
         const auto pole_t0 = std::chrono::steady_clock::now();
         if (j.mirror && !j.use_nets) {
             // MC keep-+x-and-reflect: relax that half alone (seam pinned), then
@@ -2964,12 +3006,15 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
             clip_to_plus_x(welded, grid.voxel, seam);
             weld_near_seam(welded, grid.voxel, seam);   // B: collapse the seam sliver column
             CrossField flow;
-            build_cross_field(welded, j.field_cpu, grid, flow);
-            smooth_cross_field(welded, flow, /*iters=*/24);
-            relax_to_field(welded, j.field_cpu, grid, /*iters=*/4, /*lambda=*/0.5f, &seam, &flow);  // A: 1D seam relax
+            if (nudge) {
+                build_cross_field(welded, j.field_cpu, grid, flow);
+                smooth_cross_field(welded, flow, /*iters=*/24);
+            }
+            const CrossField* fp = nudge ? &flow : nullptr;
+            relax_to_field(welded, j.field_cpu, grid, /*iters=*/4, /*lambda=*/0.5f, &seam, fp);  // A: 1D seam relax
             uint32_t flips = flip_valence(welded, &seam);
-            PoleStats ps = reduce_poles(welded, j.field_cpu, grid, &seam, pole_rounds);
-            relax_to_field(welded, j.field_cpu, grid, even_iters > 0 ? even_iters : 4, /*lambda=*/0.5f, &seam, &flow, even_iters > 0);
+            PoleStats ps = reduce_poles(welded, j.field_cpu, grid, &seam, walk_rounds);
+            relax_to_field(welded, j.field_cpu, grid, even_iters > 0 ? even_iters : 4, /*lambda=*/0.5f, &seam, fp, even_iters > 0);
             std::printf("[sdf-flow] cross-field relax: %u valence flips (+x half)\n", flips);
             std::printf("[sdf-flow] poles %u -> %u of %u verts (%u flips, %d rounds, +x half)\n",
                         ps.before, ps.after, welded.vertex_count(), ps.flips, ps.rounds);
@@ -2986,16 +3031,19 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
             // field => mirror-paired verts move identically). No seam surgery.
             // (Flips only rewrite indices — vertex positions stay mirror-paired.)
             CrossField flow;
-            build_cross_field(welded, j.field_cpu, grid, flow);
-            smooth_cross_field(welded, flow, /*iters=*/24);
-            relax_to_field(welded, j.field_cpu, grid, /*iters=*/4, /*lambda=*/0.5f, nullptr, &flow);
+            if (nudge) {
+                build_cross_field(welded, j.field_cpu, grid, flow);
+                smooth_cross_field(welded, flow, /*iters=*/24);
+            }
+            const CrossField* fp = nudge ? &flow : nullptr;
+            relax_to_field(welded, j.field_cpu, grid, /*iters=*/4, /*lambda=*/0.5f, nullptr, fp);
             uint32_t flips = flip_valence(welded, nullptr);
             // Not on the Surface-Nets mirror: its pairing is by position, and the
             // walk re-relaxes verts one side at a time.
             PoleStats ps;
             const bool walk = !(j.mirror && j.use_nets);
-            if (walk) ps = reduce_poles(welded, j.field_cpu, grid, nullptr, pole_rounds);
-            relax_to_field(welded, j.field_cpu, grid, (walk && even_iters > 0) ? even_iters : 4, /*lambda=*/0.5f, nullptr, &flow,
+            if (walk) ps = reduce_poles(welded, j.field_cpu, grid, nullptr, walk_rounds);
+            relax_to_field(welded, j.field_cpu, grid, (walk && even_iters > 0) ? even_iters : 4, /*lambda=*/0.5f, nullptr, fp,
                            walk && even_iters > 0);
             std::printf("[sdf-flow] cross-field relax: %u valence flips\n", flips);
             if (walk)
@@ -3184,3 +3232,26 @@ VoxelMergeResult voxel_merge_selected(Scene& scene, ComputeState& cs,
     voxel_merge_destroy(job);
     return out;
 }
+
+// ---- Pattern block tables -----------------------------------------------------
+// The dialog's rows (sdf.h). Append new entries at the end of a row: the settings
+// file stores the index.
+namespace {
+const SdfChoice kModeItems[] = {
+    { "Marching Cubes", "The robust default" },
+    { "Surface Nets",   "Smoother, more even surface" },
+};
+const SdfChoice kPatternItems[] = {
+    { "Curvature nudge", "Triangle rows lean along the shape's bends" },
+    { "Plain",           "Even triangles, no pull from the shape's bends" },
+};
+const SdfChoice kPolesItems[] = {
+    { "Walk & cancel", "Needless poles wander until pairs meet and cancel out" },
+};
+const SdfRow kModeRow    = { "Mode",    kModeItems,    2, 0 };
+const SdfRow kPatternRow = { "Pattern", kPatternItems, 2, (int)SdfPattern::CurvatureNudge };
+const SdfRow kPolesRow   = { "Poles",   kPolesItems,   1, (int)SdfPoles::WalkCancel };
+}  // namespace
+const SdfRow& sdf_mode_row()    { return kModeRow; }
+const SdfRow& sdf_pattern_row() { return kPatternRow; }
+const SdfRow& sdf_poles_row()   { return kPolesRow; }

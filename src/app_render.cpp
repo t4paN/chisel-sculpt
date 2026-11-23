@@ -393,6 +393,7 @@ void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse) {
         draw_voxel_merge_confirm(text, input.voxel_merge_resolution, input.voxel_merge_close_holes,
                                  dlg.n_selected, dlg.n_unselected,
                                  input.voxel_merge_surface_nets,
+                                 input.voxel_merge_pattern, input.voxel_merge_poles, input.voxel_merge_poles_on,
                                  dlg.has_density, input.voxel_merge_adaptive,
                                  dlg.levels_to_bake, input.voxel_merge_rebuild_levels, win_w, win_h);
     if (bitmap_dialogs && input.remesh_in_progress)

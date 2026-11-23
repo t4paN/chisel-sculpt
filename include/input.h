@@ -749,7 +749,10 @@ struct InputState {
     bool voxel_merge_in_progress;
     bool voxel_merge_confirm_pending;
     bool voxel_merge_mirror;       // M (vs Y): symmetrise the result about x=0
-    bool voxel_merge_surface_nets; // S toggles: Surface Nets vs Marching Cubes extractor
+    bool voxel_merge_surface_nets; // S toggles: Surface Nets vs Marching Cubes extractor (the Mode row)
+    int  voxel_merge_pattern  = 0;     // G cycles the Pattern row (SdfPattern, sdf.h)
+    int  voxel_merge_poles    = 0;     // P cycles the Poles row (SdfPoles)
+    bool voxel_merge_poles_on = true;  // O: the Poles toggle (off = no pole walk)
     int  voxel_merge_resolution;   // target cells along longest axis (see voxel_merge_step_resolution)
     int  voxel_merge_close_holes = 0;   // H in merge dialog: 0 Normal, 1 More, 2 Most (film models only)
     bool voxel_merge_subtract;     // '-' in merge dialog: carve unselected (red) meshes from the selected union

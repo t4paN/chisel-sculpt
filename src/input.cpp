@@ -2279,7 +2279,8 @@ static void handle_modal_key(GLFWwindow* w, int key) {
             break;
         // The merge dialog's own keys: M = mirror-symmetric merge, '-' = subtract (union
         // the selection, then carve away every unselected red mesh), S flips the
-        // extractor (Surface Nets / Marching Cubes), D flips the chained adaptive remesh,
+        // extractor (Surface Nets / Marching Cubes), G / P / O the Pattern and Poles rows,
+        // D flips the chained adaptive remesh,
         // H steps Close holes, L steps the levels rebuilt after, [ / ] nudge the resolution.
         case GLFW_KEY_M:
             if (!merge) break;
@@ -2304,6 +2305,10 @@ static void handle_modal_key(GLFWwindow* w, int key) {
             }
             break;
         case GLFW_KEY_D: if (merge) in.voxel_merge_adaptive = !in.voxel_merge_adaptive; break;
+        // The Pattern block (sdf.h): G cycles Pattern, P cycles Poles, O turns poles off/on.
+        case GLFW_KEY_G: if (merge) in.voxel_merge_pattern = (in.voxel_merge_pattern + 1) % sdf_pattern_row().count; break;
+        case GLFW_KEY_P: if (merge) in.voxel_merge_poles = (in.voxel_merge_poles + 1) % sdf_poles_row().count; break;
+        case GLFW_KEY_O: if (merge) in.voxel_merge_poles_on = !in.voxel_merge_poles_on; break;
         case GLFW_KEY_H: if (merge) in.voxel_merge_close_holes = (in.voxel_merge_close_holes + 1) % 3; break;
         case GLFW_KEY_L: if (merge) in.voxel_merge_rebuild_levels = (in.voxel_merge_rebuild_levels + 1) % 6; break;
         case GLFW_KEY_LEFT_BRACKET:

@@ -333,12 +333,15 @@ printing.
 | Y | Faithful union of the selection |
 | M | Mirror-symmetric union — the result stays editable under X-mirror |
 | − | **Subtract**: union the selection, then carve away every *unselected* (tinted) mesh — booleans with your bystander objects as cutters |
-| S | Toggle the extractor: Marching Cubes ↔ Surface Nets (Surface Nets gives a smoother, more even result) |
+| S | **Mode**, the extractor: Marching Cubes ↔ Surface Nets (Surface Nets gives a smoother, more even result) |
+| G | **Pattern**: which way the triangle rows run. Curvature nudge (default) leans them along the shape's bends; Plain doesn't |
+| P / O | **Poles**: how needless poles get cleaned up (Walk & cancel, the default); O turns the clean-up off |
 | [ / ] | Less / more **Detail**: the prompt shows the triangles to expect, and how long once you've run one merge. A skull marks the top step (desktop only): a very heavy mesh and a long wait |
 | H | **Close holes**: Normal, More or Most, for paper-thin models only (see below) |
 | N / Esc | Cancel |
 
-The merge runs across frames — the app stays responsive during big grids. Output is
+Mode, Pattern and Poles are dropdowns in the prompt; your picks are remembered, and the
+shipped default reads "(default)". The merge runs across frames — the app stays responsive during big grids. Output is
 tangentially relaxed onto the iso-surface so it comes out even rather than stair-stepped.
 
 Some imported models, AI-generated ones especially, are paper-thin films the grid can't see

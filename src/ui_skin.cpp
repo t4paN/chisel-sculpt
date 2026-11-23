@@ -3819,6 +3819,43 @@ void dlg_tip(const char* tip) {
         tooltip(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), TipSide::Below, tip, nullptr);
 }
 
+// Dropdown for one of the SDF dialog's Pattern rows (sdf.h): the face is a dialog
+// button showing the live pick with a caret, the list is the skin's popup of toggles,
+// one per entry, each with its tip. The row's shipped default reads "(default)".
+// Returns the picked index, or -1.
+int dlg_combo(const char* id, const SdfRow& row, int cur) {
+    if (cur < 0 || cur >= row.count) cur = row.def;
+    char face[96];
+    // Trailing spaces leave room for the caret drawn over the button's right end.
+    std::snprintf(face, sizeof face, "%s%s    ", row.items[cur].name, cur == row.def ? " (default)" : "");
+    char bid[48], pid[48];
+    std::snprintf(bid, sizeof bid, "##cb%s", id);
+    std::snprintf(pid, sizeof pid, "##cbp%s", id);
+    if (dlg_button(bid, face, nullptr, false)) ImGui::OpenPopup(pid);
+    dlg_tip(row.items[cur].tip);
+    const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+    {
+        const float s = 4.5f, cx = b.x - 18.0f, cy = (a.y + b.y) * 0.5f;
+        const ImU32 col = g_dos ? cga::yellow : (g_y2k ? y2k::text : kText);
+        ImGui::GetWindowDrawList()->AddTriangleFilled(ImVec2(cx - s, cy - s * 0.5f), ImVec2(cx + s, cy - s * 0.5f),
+                                                      ImVec2(cx, cy + s * 0.6f), col);
+    }
+    int picked = -1;
+    ImGui::SetNextWindowPos(ImVec2(a.x, b.y + 4.0f), ImGuiCond_Appearing);
+    if (begin_skin_popup(pid, ImVec2(8.0f, 8.0f), false)) {
+        for (int i = 0; i < row.count; i++) {
+            char lab[96];
+            std::snprintf(lab, sizeof lab, "%s%s", row.items[i].name, i == row.def ? " (default)" : "");
+            ImGui::PushID(i);
+            if (dlg_toggle(lab, i == cur)) { picked = i; ImGui::CloseCurrentPopup(); }
+            ImGui::PopID();
+            dlg_tip(row.items[i].tip);
+        }
+        end_skin_popup();
+    }
+    return picked;
+}
+
 void dlg_title(const char* s) {
     dlg_text(UiFont::SansSemibold, 16.0f, title_col(), title_case(s));
 }
@@ -4074,8 +4111,9 @@ void draw_skin_dialogs(InputState& input, int win_w, int win_h, const DialogInfo
         ImGui::Dummy(ImVec2(0.0f, 2.0f));
 
         const float row_h = dlg_row_h();
-        float label_w = std::max(text_size(UiFont::Sans, 13.0f, title_case("Detail")).x,
-                                 text_size(UiFont::Sans, 13.0f, title_case("Extractor")).x);
+        float label_w = text_size(UiFont::Sans, 13.0f, title_case("Detail")).x;
+        for (const char* l : { "Mode", "Pattern", "Poles", "Close holes", "Levels after" })
+            label_w = std::max(label_w, text_size(UiFont::Sans, 13.0f, title_case(l)).x);
         if (info.has_density)
             label_w = std::max(label_w, text_size(UiFont::Sans, 13.0f, title_case("Remesh after")).x);
         label_w += 18.0f;
@@ -4161,17 +4199,36 @@ void draw_skin_dialogs(InputState& input, int win_w, int win_h, const DialogInfo
                     ImVec2(p.x, p.y + (row_h - ns.y) * 0.5f), hint, note);
         }
 
-        // Extractor: both options visible, the live one lit; S flips it.
-        dlg_label("Extractor", label_w, row_h);
+        // The Pattern block (sdf-patterns): how the merge lays its triangles. One
+        // dropdown per row; S / G / P cycle them, O turns the pole pass off.
+        dlg_label(sdf_mode_row().label, label_w, row_h);
         ImGui::SameLine(0.0f, 0.0f);
-        if (dlg_toggle("Surface Nets", input.voxel_merge_surface_nets) && !input.voxel_merge_surface_nets)
-            press_dialog_key(GLFW_KEY_S);
-        dlg_tip("Smoother, more even surface");
-        ImGui::SameLine();
-        if (dlg_toggle("Marching Cubes", !input.voxel_merge_surface_nets) && input.voxel_merge_surface_nets)
-            press_dialog_key(GLFW_KEY_S);
-        dlg_tip("The robust default");
+        {
+            const int k = dlg_combo("Mode", sdf_mode_row(), input.voxel_merge_surface_nets ? 1 : 0);
+            if (k >= 0) input.voxel_merge_surface_nets = k == 1;
+        }
         key_hint("S");
+        dlg_label(sdf_pattern_row().label, label_w, row_h);
+        ImGui::SameLine(0.0f, 0.0f);
+        {
+            const int k = dlg_combo("Pattern", sdf_pattern_row(), input.voxel_merge_pattern);
+            if (k >= 0) input.voxel_merge_pattern = k;
+        }
+        key_hint("G");
+        dlg_label(sdf_poles_row().label, label_w, row_h);
+        ImGui::SameLine(0.0f, 0.0f);
+        {
+            const int k = dlg_combo("Poles", sdf_poles_row(), input.voxel_merge_poles);
+            if (k >= 0) input.voxel_merge_poles = k;
+        }
+        ImGui::SameLine();
+        ImGui::PushID("polesOn");
+        if (dlg_toggle(input.voxel_merge_poles_on ? "On" : "Off", input.voxel_merge_poles_on))
+            press_dialog_key(GLFW_KEY_O);
+        ImGui::PopID();
+        dlg_tip(input.voxel_merge_poles_on ? "Clean up needless poles (on by default)"
+                                           : "Leave the poles where the extractor put them");
+        key_hint("P  O");
 
         // How wide a hole the merge seals on a film model (an AI GLB). H steps through.
         dlg_label("Close holes", label_w, row_h);

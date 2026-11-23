@@ -16,6 +16,7 @@ void draw_remesh_confirm(TextOverlay& text, int levels_to_bake, bool mirror, int
 void draw_remesh_progress(TextOverlay& text, int win_w, int win_h, float progress);
 void draw_voxel_merge_confirm(TextOverlay& text, int resolution, int close_holes, int n_selected,
                              int n_unselected, bool surface_nets,
+                             int pattern, int poles, bool poles_on,
                              bool has_density, bool adaptive, int levels_to_bake,
                              int rebuild_levels, int win_w, int win_h);
 void draw_voxel_merge_progress(TextOverlay& text, int win_w, int win_h, float progress);
