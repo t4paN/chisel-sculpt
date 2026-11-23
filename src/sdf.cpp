@@ -599,6 +599,139 @@ float sample_field(const std::vector<float>& f, const SdfGrid& g, Vec3 p) {
     return c0*(1-fz) + c1*fz;
 }
 
+// ---- Pattern report ----------------------------------------------------------
+// The yardsticks every mesh pattern is judged by. Console only; runs once per merge.
+//
+// NEEDLESS POLES. On a closed shell, the sum of (6 - valence) over its verts is
+// always 6 * Euler characteristic: 12 on a ball, 0 on a donut. So a ball must keep
+// 12 units of pole and a donut none; anything past that the mesher could have
+// avoided. A 5/7 pair costs 2 units, so the excess / 2 = needless pairs.
+//
+// GRAIN. Each regular vert (6 edges) gets the 6-way direction of its edges (mod 60
+// degrees) and is compared with its regular neighbours. "agree" is the mean of
+// cos(6 * difference): 1 = one coherent grid, 0 = directions at random. "kinks" is the
+// share of neighbour pairs more than 10 degrees apart (CHISEL_KINK_DEG): the seams
+// between grid patches.
+// (A patch count by flood fill was tried: it hinged on the tolerance, 349 patches at
+// 2 degrees and 174 at 4 on the same mesh, because curved grain bends gradually.)
+static float env_float(const char* name, float def);   // defined below, with the other dev hooks
+
+void report_pattern_stats(const Mesh& m) {
+    const uint32_t nv = m.vertex_count();
+    const size_t nt = m.indices.size() / 3;
+    if (nv == 0 || nt == 0) return;
+    const auto t0 = std::chrono::steady_clock::now();
+
+    // Unique edges with their tri count (1 = open rim).
+    std::vector<uint64_t> half; half.reserve(nt * 3);
+    for (size_t t = 0; t < nt; t++)
+        for (int k = 0; k < 3; k++) {
+            uint32_t a = m.indices[t*3 + k], b = m.indices[t*3 + (k + 1) % 3];
+            if (a > b) std::swap(a, b);
+            half.push_back(((uint64_t)a << 32) | b);
+        }
+    std::sort(half.begin(), half.end());
+    std::vector<uint32_t> ea, eb; std::vector<uint8_t> eopen;
+    for (size_t i = 0; i < half.size();) {
+        size_t j = i; while (j < half.size() && half[j] == half[i]) j++;
+        ea.push_back((uint32_t)(half[i] >> 32)); eb.push_back((uint32_t)half[i]);
+        eopen.push_back(j - i == 1);
+        i = j;
+    }
+    const size_t ne = ea.size();
+
+    std::vector<uint32_t> val(nv, 0); std::vector<uint8_t> rim(nv, 0);
+    for (size_t e = 0; e < ne; e++) {
+        val[ea[e]]++; val[eb[e]]++;
+        if (eopen[e]) rim[ea[e]] = rim[eb[e]] = 1;
+    }
+
+    // Shells (union-find over edges) and each one's Euler characteristic.
+    std::vector<uint32_t> uf(nv);
+    for (uint32_t v = 0; v < nv; v++) uf[v] = v;
+    auto find = [&](uint32_t x) { while (uf[x] != x) { uf[x] = uf[uf[x]]; x = uf[x]; } return x; };
+    for (size_t e = 0; e < ne; e++) { uint32_t a = find(ea[e]), b = find(eb[e]); if (a != b) uf[a] = b; }
+    std::unordered_map<uint32_t, int64_t> chi;      // root -> V - E + F
+    std::unordered_map<uint32_t, int64_t> defect;   // root -> sum |6 - valence|
+    std::unordered_map<uint32_t, bool>    open;
+    for (uint32_t v = 0; v < nv; v++) {
+        if (val[v] == 0) continue;
+        uint32_t r = find(v);
+        chi[r] += 1;
+        defect[r] += std::abs(6 - (int)val[v]);
+        if (rim[v]) open[r] = true;
+    }
+    for (size_t e = 0; e < ne; e++) chi[find(ea[e])] -= 1;
+    for (size_t t = 0; t < nt; t++) chi[find(m.indices[t*3])] += 1;
+
+    uint32_t poles = 0, used = 0;
+    for (uint32_t v = 0; v < nv; v++) if (val[v]) { used++; if (val[v] != 6 && !rim[v]) poles++; }
+    int64_t forced = 0, excess = 0, chi_sum = 0; int closed = 0, opened = 0;
+    for (auto& kv : chi) {
+        if (open.count(kv.first)) { opened++; continue; }
+        closed++;
+        chi_sum += kv.second;
+        forced += std::llabs(6 * kv.second);
+        excess += defect[kv.first] - std::llabs(6 * kv.second);
+    }
+
+    // Grain: 6-way direction per regular interior vert, in its own tangent frame.
+    std::vector<uint32_t> off(nv + 1, 0), nb(ne * 2);
+    for (size_t e = 0; e < ne; e++) { off[ea[e] + 1]++; off[eb[e] + 1]++; }
+    for (uint32_t v = 0; v < nv; v++) off[v + 1] += off[v];
+    { std::vector<uint32_t> fill(off.begin(), off.end() - 1);
+      for (size_t e = 0; e < ne; e++) { nb[fill[ea[e]]++] = eb[e]; nb[fill[eb[e]]++] = ea[e]; } }
+
+    std::vector<Vec3> e1(nv), e2(nv), dir(nv);
+    std::vector<uint8_t> reg(nv, 0);
+    double hex_sum = 0.0; uint32_t nreg = 0;
+    for (uint32_t v = 0; v < nv; v++) {
+        if (val[v] != 6 || rim[v]) continue;
+        Vec3 n(m.norm_x[v], m.norm_y[v], m.norm_z[v]);
+        if (n.length() < 1e-6f) continue;
+        n = n.normalized();
+        Vec3 seed = (std::fabs(n.x) < 0.9f) ? Vec3(1,0,0) : Vec3(0,1,0);
+        Vec3 a = n.cross(seed).normalized(), b = n.cross(a);
+        Vec3 p(m.pos_x[v], m.pos_y[v], m.pos_z[v]);
+        double zx = 0.0, zy = 0.0;
+        for (uint32_t k = off[v]; k < off[v + 1]; k++) {
+            uint32_t w = nb[k];
+            Vec3 d = Vec3(m.pos_x[w], m.pos_y[w], m.pos_z[w]) - p;
+            double th = std::atan2((double)d.dot(b), (double)d.dot(a));
+            zx += std::cos(6.0 * th); zy += std::sin(6.0 * th);
+        }
+        double phi = std::atan2(zy, zx) / 6.0;
+        e1[v] = a; e2[v] = b;
+        dir[v] = a * (float)std::cos(phi) + b * (float)std::sin(phi);
+        reg[v] = 1; nreg++;
+        hex_sum += std::sqrt(zx*zx + zy*zy) / 6.0;   // 1 = edges exactly 60 deg apart
+    }
+
+    static const float kink_deg = env_float("CHISEL_KINK_DEG", 10.0f);
+    const double tol = kink_deg * 3.14159265358979 / 180.0;
+    const double sixty = 3.14159265358979 / 3.0;
+    double agree_sum = 0.0; uint32_t npairs = 0, kinks = 0;
+    for (size_t e = 0; e < ne; e++) {
+        uint32_t v = ea[e], w = eb[e];
+        if (!reg[v] || !reg[w]) continue;
+        // w's direction seen in v's frame (projecting is enough between neighbours).
+        double tv = std::atan2((double)dir[v].dot(e2[v]), (double)dir[v].dot(e1[v]));
+        double tw = std::atan2((double)dir[w].dot(e2[v]), (double)dir[w].dot(e1[v]));
+        double d = std::remainder(tw - tv, sixty);        // into [-30, 30] degrees
+        agree_sum += std::cos(6.0 * d); npairs++;
+        if (std::fabs(d) > tol) kinks++;
+    }
+
+    std::printf("[sdf-pattern] %u verts, %d closed shell(s) (chi sum %lld)%s, poles %u (%.1f%%), forced %lld units, needless pairs %lld\n",
+                used, closed, (long long)chi_sum,
+                opened ? " + open shell(s), not scored" : "",
+                poles, used ? 100.0 * poles / used : 0.0, (long long)forced, (long long)(excess / 2));
+    std::printf("[sdf-pattern] grain: regular %.1f%%, hex %.3f, agree %.3f, kinks %.1f%% (>%.0f deg), %.0f ms\n",
+                used ? 100.0 * nreg / used : 0.0, nreg ? hex_sum / nreg : 0.0,
+                npairs ? agree_sum / npairs : 0.0, npairs ? 100.0 * kinks / npairs : 0.0, kink_deg,
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+}
+
 // ---- Cross-field flow (quad-remesher-style edge alignment + pole placement) -
 // The relax below evens triangle SIZES but leaves edge FLOW arbitrary: MC/SN
 // inherit grid-diagonal directions, with irregular vertices (poles) scattered
@@ -2878,6 +3011,7 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
 
         welded.build_adjacency();
         welded.recompute_normals();   // clean per-vertex normals (GPU normals were orientation-only)
+        report_pattern_stats(welded);  // needless poles + grain patches (sdf-patterns stage 0)
 
         if (!j.texs.empty())
             carry_textures(welded, j.pos, j.idx, j.soup_uv, j.soup_tex, j.texs, j.ntexs, j.soup_nrm, grid.voxel,

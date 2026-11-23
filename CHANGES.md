@@ -2,6 +2,10 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-23 — SDF merge reports needless poles and grain
+
+- Diagnostics: every SDF merge prints two `[sdf-pattern]` lines: poles past the minimum the shape forces (a closed shell must keep 6 × Euler characteristic units, 12 on a ball), and how well the triangle grid lines up (hex, agree, kinks). About 40 ms. Baseline at grid 128: 750–3100 needless 5/7 pairs per model against a floor of 6; up to 5% run-to-run spread from the GPU's triangle order.
+
 ## 2026-11-21 — Revert copy no longer strips other meshes for nothing; versioned release files
 
 - Remesh / Rebuild levels on a scene too big for a revert copy used to bake other meshes' subdiv levels down anyway, then skip re-cascading them: their surface stayed at the old level over a stack at L0, and the next stroke wrote past the stack's arrays (heap corruption, crash inside the GL driver). It now bakes nothing when the cap can't be reached, as the prompt already said; a bake that stops short still re-cascades.
