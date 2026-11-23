@@ -579,9 +579,33 @@ void app_ops_levels_and_views(App& a) {
                 delta = 0;
             }
         }
+        // Same wall going up: 7.7M -> 30.8M tris aborted the page (bench 2026-11-23). The
+        // GPU-limit check above passes, the heap is what runs out.
+        if (delta > 0) {
+            const size_t need  = level_up_memory_estimate(*multires, *mesh, target);
+            const size_t used  = mallinfo().uordblks;
+            const size_t cap   = emscripten_get_heap_max();
+            const size_t have  = cap > used ? cap - used : 0;
+            const size_t slack = (size_t)256 << 20;
+            if (need + slack > have) {
+                std::snprintf(input.notification, sizeof(input.notification),
+                              "Too big to subdivide in the browser (needs %zu MB more, %zu MB "
+                              "left). The desktop app can.",
+                              need >> 20, have >> 20);
+                input.notification_timer = 6.0f;
+                std::printf("[multires] refused L%d -> L%d on web: needs ~%zu MB, %zu MB "
+                            "left under the heap cap\n", from, target, need >> 20, have >> 20);
+                delta = 0;
+            }
+        }
 #endif
         input.subdiv_confirmed = false;   // good for the one switch it was given for
         const double switch_t0 = glfwGetTime();
+        // Level-up memory, logged so level_up_memory_estimate can be calibrated (web: heap
+        // size, which never shrinks, so "peak" is the high-water mark; native: VmHWM).
+        const size_t up_mem0 = mem_now_mb();
+        const size_t up_est  = delta > 0 ? level_up_memory_estimate(*multires, *mesh, target) >> 20 : 0;
+        if (delta > 0) mem_peak_reset();
         if (delta != 0 && target >= multires->base_level && target <= max_level) {
             scene.materialize_active_cpu();  // 2b: projection/cascade read disp/base
             UndoEntry lvl_e;
@@ -596,6 +620,9 @@ void app_ops_levels_and_views(App& a) {
                 const size_t mem0 = mem_now_mb();
                 const size_t est  = projection_memory_estimate(*multires, target) >> 20;
                 mem_peak_reset();
+                // The live mesh is rebuilt below; its level's topology goes back to the
+                // cache first so the projection finds it warm (see LevelTopo::on_live).
+                multires_reclaim_live_topo(*multires, *mesh);
                 capture_projection_snapshot(*multires, target, lvl_e.before);
                 ProjectionStats ps = project_down_to_level(*multires, target);
                 std::printf("[project] auto L%d -> L%d in %.2f ms | memory %zu MB before, "
@@ -608,32 +635,36 @@ void app_ops_levels_and_views(App& a) {
             multires->current_level = target;
             bench::pd_arm_level(compute.gpu_dev);
             multires_sync_paint(*multires, *mesh);
-            bench::pd_mark("level: sync paint");
+            bench::pd_mark("level: sync paint"); memtrace_level("app: sync paint");
             if (scene.alive_count() <= 1) {
                 // Paint/mask ride the cascade (finest-level planes) — no
                 // save/restore needed across the rebuild.
-                cascade_to_level(*multires, *mesh, target, &compute);
-                bench::pd_mark("level: cascade");
+                cascade_to_level(*multires, *mesh, target, &compute, true);
+                bench::pd_mark("level: cascade"); memtrace_level("app: cascade done");
                 arm_geometry_handoff(*mesh);
-                bench::pd_mark("level: geometry handoff");
+                bench::pd_mark("level: geometry handoff"); memtrace_level("app: geometry handoff");
                 scene.refresh_mirror_map();
-                bench::pd_mark("level: mirror map");
+                bench::pd_mark("level: mirror map"); memtrace_level("app: mirror map");
                 scene.sync();  // rebinds active: rebuilds adjacency from new topology
-                bench::pd_mark("level: scene sync (adjacency)");
+                bench::pd_mark("level: scene sync (adjacency)"); memtrace_level("app: scene sync");
             } else {
                 Mesh solo;
-                cascade_to_level(*multires, solo, target, &compute);
+                multires_reclaim_live_topo(*multires, *mesh);   // *mesh is replaced by solo
+                cascade_to_level(*multires, solo, target, &compute, true);
                 arm_geometry_handoff(solo);
                 scene.splice_active(solo);  // splice_active marks topo dirty
                 scene.refresh_mirror_map();
             }
             refresh_active_gpu_residency();
-            bench::pd_mark("level: gpu residency");
+            bench::pd_mark("level: gpu residency"); memtrace_level("app: gpu residency");
             mesh->compute_bounding_sphere(mesh_center, mesh_radius);
             screen_buffers_dirty = true;
             std::printf("[multires] switched to level %d (%u verts, %u tris) in %.1f ms\n",
                         target, mesh->vertex_count(), mesh->tri_count(),
                         (glfwGetTime() - switch_t0) * 1000.0);
+            if (delta > 0)
+                std::printf("[multires] level-up L%d -> L%d memory %zu MB before, peak %zu MB "
+                            "(estimate +%zu)\n", from, target, up_mem0, mem_peak_mb(), up_est);
             print_undo_top("level-switch");
             {
                 char tag[48];
@@ -675,6 +706,7 @@ void app_ops_levels_and_views(App& a) {
             // Bake first, then drop: the same inverse-Loop projection a level-down
             // does, so the form survives into the layer below and only the
             // residual detail dies with the layer.
+            multires_reclaim_live_topo(*multires, *mesh);   // live mesh is rebuilt below
             ProjectionStats ps = project_down_to_level(*multires, target);
             report_projection_check(ps);
             // Only forced down if the view was ON the layer being removed —
@@ -691,13 +723,13 @@ void app_ops_levels_and_views(App& a) {
             scene.active_entity().multires_gpu.cleanup();
 
             if (scene.alive_count() <= 1) {
-                cascade_to_level(*multires, *mesh, view, &compute);
+                cascade_to_level(*multires, *mesh, view, &compute, true);
                 arm_geometry_handoff(*mesh);
                 scene.refresh_mirror_map();
                 scene.sync();
             } else {
                 Mesh solo;
-                cascade_to_level(*multires, solo, view, &compute);
+                cascade_to_level(*multires, solo, view, &compute, true);
                 arm_geometry_handoff(solo);
                 scene.splice_active(solo);
                 scene.refresh_mirror_map();
@@ -1032,13 +1064,14 @@ void app_ops_remesh_and_merge(App& a) {
             const int top = multires->base_level + (int)multires->disp.size();
             multires->current_level = top;
             if (scene.alive_count() <= 1) {
-                cascade_to_level(*multires, *mesh, top, &compute);
+                cascade_to_level(*multires, *mesh, top, &compute, true);
                 arm_geometry_handoff(*mesh);
                 scene.refresh_mirror_map();
                 scene.sync();
             } else {
                 Mesh solo;
-                cascade_to_level(*multires, solo, top, &compute);
+                multires_reclaim_live_topo(*multires, *mesh);
+                cascade_to_level(*multires, solo, top, &compute, true);
                 arm_geometry_handoff(solo);
                 scene.splice_active(solo);
                 scene.refresh_mirror_map();

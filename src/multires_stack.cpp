@@ -6,8 +6,34 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <algorithm>
 #include <unordered_map>
+#if defined(__EMSCRIPTEN__)
+#include <emscripten/heap.h>
+#endif
+
+// Dev hook (route-1 heap trim, 2026-11-23): CHISEL_MEMTRACE=1 prints resident + peak
+// memory at each step of a level build, to see which copy holds the bytes.
+void memtrace_level(const char* label) {
+    static int on = -1;
+    if (on < 0) { const char* e = std::getenv("CHISEL_MEMTRACE"); on = (e && *e && *e != '0') ? 1 : 0; }
+    if (!on) return;
+#if defined(__EMSCRIPTEN__)
+    std::printf("[memtrace] %-36s heap %zu MB\n", label, emscripten_get_heap_size() >> 20);
+#else
+    long rss = 0, hwm = 0;
+    if (FILE* f = std::fopen("/proc/self/status", "r")) {
+        char line[256];
+        while (std::fgets(line, sizeof line, f)) {
+            if (!std::strncmp(line, "VmRSS:", 6)) rss = std::atol(line + 6);
+            if (!std::strncmp(line, "VmHWM:", 6)) hwm = std::atol(line + 6);
+        }
+        std::fclose(f);
+    }
+    std::printf("[memtrace] %-36s rss %5ld MB  peak %5ld MB\n", label, rss >> 10, hwm >> 10);
+#endif
+}
 
 // ---------------------------------------------------------------------------
 // Topology-derived mirror propagation
@@ -428,8 +454,10 @@ void compute_frames(const Mesh& m, std::vector<Frame>& out) {
 // Slow replay: full subdivision chain from base. Warms the topology cache as
 // it goes; still the only path for a cold cache (and the truth reference for
 // the fast path under CHISEL_DEBUG_MULTIRES).
-static void cascade_replay_slow(MultiresStack& stack, Mesh& out, int passes) {
+static void cascade_replay_slow(MultiresStack& stack, Mesh& out, int passes, bool defer_top = false) {
+    memtrace_level("slow: start");
     Mesh m = stack.base;
+    memtrace_level("slow: copied base");
 
     for (int i = 0; i < passes; i++) {
         // Save coarse topology before subdivision for mirror propagation.
@@ -444,14 +472,27 @@ static void cascade_replay_slow(MultiresStack& stack, Mesh& out, int passes) {
         const bool tc_miss = !tc.ready;
 
         m.build_adjacency();        // loop_subdivide reads CSR for vertex relocation
+        memtrace_level("slow: coarse adjacency");
         m = loop_subdivide(m, false, tc_miss ? &tc.stencil : nullptr);
+        memtrace_level("slow: loop_subdivide");
         if (tc_miss) {
             m.build_adjacency();
-            tc.indices   = m.indices;
-            tc.vt_offset = m.vert_tri_offset;
-            tc.vt_list   = m.vert_tri_list;
-            tc.vcount    = m.vertex_count();
-            tc.ready     = true;
+            tc.vcount = m.vertex_count();
+            if (defer_top && i == passes - 1) {
+                // `m` becomes the live mesh with these very arrays: no second copy.
+                std::vector<uint32_t>().swap(tc.indices);
+                std::vector<uint32_t>().swap(tc.vt_offset);
+                std::vector<uint32_t>().swap(tc.vt_list);
+                tc.ready   = false;
+                tc.on_live = true;
+            } else {
+                tc.indices   = m.indices;
+                tc.vt_offset = m.vert_tri_offset;
+                tc.vt_list   = m.vert_tri_list;
+                tc.ready     = true;
+                tc.on_live   = false;
+            }
+            memtrace_level("slow: topo cache filled");
         }
 
         if ((int)stack.disp.size() <= i)
@@ -465,6 +506,7 @@ static void cascade_replay_slow(MultiresStack& stack, Mesh& out, int passes) {
             if (!tc_miss) m.build_adjacency();  // fresh already on a cache miss
             m.recompute_normals();  // frame normals from subdivided base
             compute_frames(m, stack.frames[i]);
+            memtrace_level("slow: frames");
         }
 
         // Lazy midpoint->parents capture for the paint planes (topology-only,
@@ -493,9 +535,12 @@ static void cascade_replay_slow(MultiresStack& stack, Mesh& out, int passes) {
         }
     }
 
+    memtrace_level("slow: disp applied");
     m.recompute_normals();
     m.build_adjacency();    // CSR for post-switch brush ops
+    memtrace_level("slow: final normals + adjacency");
     out = std::move(m);
+    memtrace_level("slow: moved to out");
 }
 
 // Positions-only replay of one cached subdivision pass. Mirrors loop_subdivide
@@ -631,6 +676,7 @@ static void warm_topo(MultiresStack& stack, int i, ProjPos& coarse) {
     tc.vt_list   = std::move(fine.vert_tri_list);
     tc.vcount    = fine.vertex_count();
     tc.ready     = true;
+    tc.on_live   = false;
 }
 
 // Chain level i -> i+1 positions by stencil replay (topo_cache[i] must be warm).
@@ -659,7 +705,7 @@ static void frames_of(MultiresStack& stack, int i, ProjPos& pre, std::vector<Fra
 // passes-1].ready (caller checks). Lazy structures (disp, frames, parent maps,
 // mirrors) fill exactly like the slow path; the frames rebuild after a
 // projection is the one case that still materializes a temp mesh (for normals).
-static void cascade_replay_fast(MultiresStack& stack, Mesh& out, int passes) {
+static void cascade_replay_fast(MultiresStack& stack, Mesh& out, int passes, bool move_top = false) {
     if (stack.base.vert_tri_offset.size() != stack.base.vertex_count() + 1)
         stack.base.build_adjacency();   // base immutable after lock — build once
 
@@ -721,14 +767,21 @@ static void cascade_replay_fast(MultiresStack& stack, Mesh& out, int passes) {
         c_list = &tc.vt_list;
     }
 
-    const MultiresStack::LevelTopo& top = stack.topo_cache[passes - 1];
+    MultiresStack::LevelTopo& top = stack.topo_cache[passes - 1];
     out = Mesh();
     out.pos_x = std::move(ax); out.pos_y = std::move(ay); out.pos_z = std::move(az);
     out.norm_x.resize(top.vcount); out.norm_y.resize(top.vcount);
     out.norm_z.resize(top.vcount);
-    out.indices         = top.indices;
-    out.vert_tri_offset = top.vt_offset;
-    out.vert_tri_list   = top.vt_list;
+    if (move_top) {   // out becomes the live mesh: it holds the only copy (on_live)
+        out.indices         = std::move(top.indices);
+        out.vert_tri_offset = std::move(top.vt_offset);
+        out.vert_tri_list   = std::move(top.vt_list);
+        top.ready = false; top.on_live = true;
+    } else {
+        out.indices         = top.indices;
+        out.vert_tri_offset = top.vt_offset;
+        out.vert_tri_list   = top.vt_list;
+    }
     out.topo_version    = 1;   // fresh mesh; mirror stamp is synced by the caller
     out.recompute_normals();
 }
@@ -741,7 +794,7 @@ static void cascade_replay_fast(MultiresStack& stack, Mesh& out, int passes) {
 // rebuilds + caches the frames; the GPU path resumes on the next switch).
 // Returns false with `out` untouched when ineligible — caller falls back.
 static bool cascade_replay_gpu(MultiresStack& stack, ComputeState& cs,
-                               Mesh& out, int passes) {
+                               Mesh& out, int passes, bool move_top = false) {
     if (!cs.has_cascade()) return false;
 
     for (int i = 0; i < passes; i++) {
@@ -786,10 +839,17 @@ static bool cascade_replay_gpu(MultiresStack& stack, ComputeState& cs,
     Mesh fresh;
     if (!cs.gpu_cascade_replay(stack, fresh, passes)) return false;
 
-    const MultiresStack::LevelTopo& top = stack.topo_cache[passes - 1];
-    fresh.indices         = top.indices;
-    fresh.vert_tri_offset = top.vt_offset;
-    fresh.vert_tri_list   = top.vt_list;
+    MultiresStack::LevelTopo& top = stack.topo_cache[passes - 1];
+    if (move_top) {   // fresh becomes the live mesh: it holds the only copy (on_live)
+        fresh.indices         = std::move(top.indices);
+        fresh.vert_tri_offset = std::move(top.vt_offset);
+        fresh.vert_tri_list   = std::move(top.vt_list);
+        top.ready = false; top.on_live = true;
+    } else {
+        fresh.indices         = top.indices;
+        fresh.vert_tri_offset = top.vt_offset;
+        fresh.vert_tri_list   = top.vt_list;
+    }
     fresh.topo_version    = 1;   // fresh mesh; mirror stamp is synced by the caller
     out = std::move(fresh);
     return true;
@@ -992,8 +1052,37 @@ static void check_frames(const MultiresStack& stack, const Mesh& surface, int K)
     std::fflush(stdout);
 }
 
-void cascade_to_level(MultiresStack& stack, Mesh& out, int K, ComputeState* compute) {
+bool multires_reclaim_live_topo(MultiresStack& stack, Mesh& live) {
+    for (size_t i = 0; i < stack.topo_cache.size(); i++) {
+        MultiresStack::LevelTopo& tc = stack.topo_cache[i];
+        if (!tc.on_live) continue;
+        // Topology at a chain level is a pure function of the base, so a mesh with this
+        // level's vertex AND triangle counts carries exactly this level's arrays.
+        const size_t want_tris = (size_t)stack.base.tri_count() << (2 * (i + 1));
+        if (live.vertex_count() != tc.vcount || (size_t)live.tri_count() != want_tris
+            || live.indices.empty())
+            return false;
+        if (live.vert_tri_offset.size() != (size_t)tc.vcount + 1) live.build_adjacency();
+        tc.indices   = std::move(live.indices);
+        tc.vt_offset = std::move(live.vert_tri_offset);
+        tc.vt_list   = std::move(live.vert_tri_list);
+        live.indices.clear(); live.vert_tri_offset.clear(); live.vert_tri_list.clear();
+        tc.ready   = true;
+        tc.on_live = false;
+        return true;
+    }
+    return false;
+}
+
+void cascade_to_level(MultiresStack& stack, Mesh& out, int K, ComputeState* compute,
+                      bool out_becomes_live) {
     const int passes = K - stack.base_level;
+    // `out` is about to be rebuilt: if it is the live mesh holding a level's topology,
+    // that level's cache gets the arrays back (by move) before anything reads the cache.
+    multires_reclaim_live_topo(stack, out);
+    // The truth checks below re-run a replay that reads the top level's cache after
+    // `out` is built, so with them on the cache keeps its copy.
+    const bool hand_to_live = out_becomes_live && passes > 0 && !cascade_check_enabled();
     // The replays rebuild `out` from scratch, and when `out` is the entity's own mesh
     // that would throw away its paint layers. They belong to the entity, not to one
     // level's geometry, so they step aside for the replay and come back after it.
@@ -1024,7 +1113,7 @@ void cascade_to_level(MultiresStack& stack, Mesh& out, int K, ComputeState* comp
         // needs that room (second trip up to L8 ran out with ~2 GB of them held).
         if (compute && !gpu_fits) compute->release_cascade_buffers();
         if (compute && compute->supported && gpu_fits)
-            gpu_done = cascade_replay_gpu(stack, *compute, out, passes);
+            gpu_done = cascade_replay_gpu(stack, *compute, out, passes, hand_to_live);
         if (gpu_done) {
             mode = "gpu";
             if (cascade_check_enabled()) {
@@ -1052,7 +1141,7 @@ void cascade_to_level(MultiresStack& stack, Mesh& out, int K, ComputeState* comp
             }
         } else {
             mode = "fast";
-            cascade_replay_fast(stack, out, passes);
+            cascade_replay_fast(stack, out, passes, hand_to_live);
             if (cascade_check_enabled()) {
                 // Truth check: the slow replay must agree bit-for-bit — the fast
                 // path repeats its arithmetic in the same order.
@@ -1077,7 +1166,7 @@ void cascade_to_level(MultiresStack& stack, Mesh& out, int K, ComputeState* comp
             }
         }
     } else {
-        cascade_replay_slow(stack, out, passes);
+        cascade_replay_slow(stack, out, passes, hand_to_live);
     }
     const double cascade_ms = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - t0).count();
@@ -1444,7 +1533,8 @@ size_t projection_memory_estimate(const MultiresStack& stack, int target_level) 
         top_v = std::max(top_v, v);
         total += v * 12;                                       // walked positions
         if (i >= k_start) total += v * 12;                     // undo snapshot (disp)
-        const bool cold = (int)stack.topo_cache.size() <= i || !stack.topo_cache[i].ready;
+        const bool cold = (int)stack.topo_cache.size() <= i
+                        || (!stack.topo_cache[i].ready && !stack.topo_cache[i].on_live);
         // Cold level: indices 24 + CSR 28 B/vert and the stencil (~12 B/vert) stay.
         if (cold) total += v * (52 + 12);
         if ((int)stack.frames.size() <= i || stack.frames[i].empty())
@@ -1457,6 +1547,39 @@ size_t projection_memory_estimate(const MultiresStack& stack, int target_level) 
     // The margin is kept on purpose: the web heap fragments and never shrinks.
     total += top_v * 40;
     return total;
+}
+
+size_t level_up_memory_estimate(const MultiresStack& stack, const Mesh& live, int target_level) {
+    const int L_max = stack.base_level + (int)stack.disp.size();
+    const int i = target_level - stack.base_level - 1;          // chain index of the target
+    if (i < 0) return 0;
+    // Verts at the target: known when the level exists, else one Loop step past the top
+    // (each edge gains a midpoint: V' = V + 3T/2 on a triangle mesh).
+    size_t v;
+    if (target_level <= L_max) {
+        v = stack.disp[i].size();
+    } else {
+        const size_t top_v = stack.disp.empty() ? stack.base.vertex_count() : stack.disp.back().size();
+        const size_t top_t = (size_t)stack.base.tri_count() << (2 * stack.disp.size());
+        v = top_v + top_t * 3 / 2;
+    }
+    // The live mesh is rebuilt at the target: pos 12 + normals 12 + indices 24 + CSR 28 +
+    // mirror 4, plus any painted planes. The old one is still alive during the swap (1/4 the
+    // size). Temps at the peak (the apply step's scratch): ~15 B/vert. Calibrated
+    // 2026-11-23, native 7.7M -> 30.8M tris: +2593 MB measured at the peak.
+    size_t per_v = 80 + 20 + 15;
+    if (!live.mask.empty())  per_v += 4;
+    if (!live.color.empty()) per_v += 4;
+    const bool exists = target_level <= L_max;
+    const bool cold = !exists || (int)stack.topo_cache.size() <= i
+                    || (!stack.topo_cache[i].ready && !stack.topo_cache[i].on_live);
+    // A new level's indices + CSR end up in the live mesh only (on_live), so only the
+    // stencil is added to the stack; a cold existing level's copy is also handed over.
+    if (cold) per_v += 12;                                       // stencil ~12
+    if (!exists) per_v += 12 + 4;                                // new disp layer + mirror map
+    if (!exists || (int)stack.frames.size() <= i || stack.frames[i].empty())
+        per_v += sizeof(Frame);                                  // frames
+    return v * per_v;
 }
 
 ProjectionStats project_down_to_level(MultiresStack& stack, int target_level) {

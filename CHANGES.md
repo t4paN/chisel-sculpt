@@ -2,6 +2,14 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-25 — Browser subdivides to 30.8M tris; level-ups use less memory
+
+- Web: a 7.7M-tri model now subdivides to 30.8M tris in the browser (heap peak 3.6 GB under the 4 GB cap; it used to abort the page). Sculpting there runs 55–58 fps in Chrome.
+- The topology cache no longer keeps a second copy of the live level's triangles and neighbour lists: the live mesh holds them and hands them back before it is rebuilt (~760 MB less at 30.8M, native too).
+- Full mesh uploads stream positions, normals and mask through a 3 MB scratch instead of whole-mesh temporaries (~430 MB less at the level-up peak).
+- Web: a level-up that would not fit the heap is refused with a toast instead of crashing; the estimate is calibrated against measured peaks and logged on every level-up.
+- Dev hooks: `CHISEL_MEMTRACE=1` prints memory at each step of a level change; `CHISEL_AUTO_SAVE=<path>` saves after a `CHISEL_AUTO_LEVELS` run, which now answers the 30M+ prompt itself.
+
 ## 2026-11-25 — No more black streaks on dense models
 - Stroke shading on the GPU skipped every triangle under a fixed size, so at ~60M tris thin slivers (the startup ball's pole meridians) and pinched creases lost their normals and drew black. It now uses every triangle, like the load path; tiny fans no longer get a zero normal either.
 

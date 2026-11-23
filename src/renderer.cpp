@@ -99,6 +99,46 @@ static void ensure_buffer(gpu::Device& dev, gpu::Buffer& b,
     else { gpu::release_buffer(b); b = gpu::create_buffer(dev, data, size, usage); }
 }
 
+// Full-mesh uploads stream through a small scratch instead of building whole interleaved
+// copies first: at 15.4M verts those were ~0.5 GB of temporaries on top of the mesh, right
+// at the peak of a level-up, and the 4 GB web heap aborted there (2026-11-23). Every
+// backend copies write_buffer data at call time, so the scratch can be reused per chunk.
+static const uint32_t kUploadChunk = 1u << 18;   // verts per chunk (3 MB of float3)
+
+static void alloc_buffer(gpu::Device& dev, gpu::Buffer& b, uint64_t size, gpu::Usage usage) {
+    if (b.handle && b.size == size) return;
+    gpu::release_buffer(b);
+    b = gpu::create_buffer(dev, nullptr, size, usage);
+}
+
+// SoA x/y/z -> AoS float3 buffer.
+static void upload_soa3(gpu::Device& dev, gpu::Buffer& b, const std::vector<float>& x,
+                        const std::vector<float>& y, const std::vector<float>& z,
+                        uint32_t vc, gpu::Usage usage) {
+    alloc_buffer(dev, b, (uint64_t)vc * 3 * sizeof(float), usage);
+    std::vector<float> tmp((size_t)std::min(vc, kUploadChunk) * 3);
+    for (uint32_t s = 0; s < vc; s += kUploadChunk) {
+        const uint32_t n = std::min(kUploadChunk, vc - s);
+        for (uint32_t i = 0; i < n; i++) {
+            tmp[i*3+0] = x[s+i]; tmp[i*3+1] = y[s+i]; tmp[i*3+2] = z[s+i];
+        }
+        gpu::write_buffer(dev, b, (uint64_t)s * 3 * sizeof(float), tmp.data(),
+                          (uint64_t)n * 3 * sizeof(float));
+    }
+}
+
+// Per-vertex mask, 0 past the end of mesh.mask (an unmasked mesh has none).
+static void upload_mask(gpu::Device& dev, gpu::Buffer& b, const std::vector<float>& mask,
+                        uint32_t vc, gpu::Usage usage) {
+    alloc_buffer(dev, b, (uint64_t)vc * sizeof(float), usage);
+    std::vector<float> tmp(std::min(vc, kUploadChunk));
+    for (uint32_t s = 0; s < vc; s += kUploadChunk) {
+        const uint32_t n = std::min(kUploadChunk, vc - s);
+        for (uint32_t i = 0; i < n; i++) tmp[i] = (s + i < mask.size()) ? mask[s + i] : 0.0f;
+        gpu::write_buffer(dev, b, (uint64_t)s * sizeof(float), tmp.data(), (uint64_t)n * sizeof(float));
+    }
+}
+
 // Paint: Mesh::color is the ACTIVE layer (ssbo_paint_layer); vbo_color shows the
 // composite of every layer. A never-painted mesh with no layers reads as white, which
 // is also what the composite gives — so the pre-layer world uploads exactly as before.
@@ -1914,21 +1954,11 @@ void Renderer::upload_mesh(const Mesh& mesh) {
         && src.norm && src.norm->handle && src.norm->size >= pn_bytes
         && src.ebo  && src.ebo->handle  && src.ebo->size  == ebo_bytes;
 
-    // Interleave SoA → AoS for VBO upload (positions/normals skipped when they
-    // arrive by GPU copy below).
-    std::vector<float> pos, norm, mask_buf(vc);
+    // Positions/normals/mask stream through upload_soa3/upload_mask below (positions and
+    // normals skipped when they arrive by GPU copy). The paint composite fills a whole
+    // buffer in one call, so colour + active layer keep full-size temps (8 B/vert).
     std::vector<uint32_t> col_buf(vc), layer_buf(vc);
-    if (!gpu_geom) {
-        pos.resize((size_t)vc * 3); norm.resize((size_t)vc * 3);
-        for (uint32_t i = 0; i < vc; i++) {
-            pos[i*3+0] = mesh.pos_x[i]; pos[i*3+1] = mesh.pos_y[i]; pos[i*3+2] = mesh.pos_z[i];
-            norm[i*3+0] = mesh.norm_x[i]; norm[i*3+1] = mesh.norm_y[i]; norm[i*3+2] = mesh.norm_z[i];
-        }
-    }
-    for (uint32_t i = 0; i < vc; i++) {
-        mask_buf[i] = (i < mesh.mask.size()) ? mesh.mask[i] : 0.0f;
-        layer_buf[i] = paint_layer_px(mesh, i);
-    }
+    for (uint32_t i = 0; i < vc; i++) layer_buf[i] = paint_layer_px(mesh, i);
     paint_composite(mesh.paint_layers, mesh.color, vc, col_buf.data());
 
     // pos/norm/ebo + mask/color: owned seam buffers. pos/norm carry Vertex|Storage,
@@ -1961,15 +1991,14 @@ void Renderer::upload_mesh(const Mesh& mesh) {
         gpu::copy_buffer(gpu_dev, *src.ebo,  0, ebo,      0, ebo_bytes);
         std::printf("[residency] display pos/norm/ebo via gpu copy (%u verts)\n", vc);
     } else {
-        ensure_buffer(gpu_dev, vbo_pos, pos.data(), pn_bytes,
-                      gpu::Usage::Vertex | gpu::Usage::Storage);
-        ensure_buffer(gpu_dev, vbo_norm, norm.data(), pn_bytes,
-                      gpu::Usage::Vertex | gpu::Usage::Storage);
+        upload_soa3(gpu_dev, vbo_pos, mesh.pos_x, mesh.pos_y, mesh.pos_z, vc,
+                    gpu::Usage::Vertex | gpu::Usage::Storage);
+        upload_soa3(gpu_dev, vbo_norm, mesh.norm_x, mesh.norm_y, mesh.norm_z, vc,
+                    gpu::Usage::Vertex | gpu::Usage::Storage);
         ensure_buffer(gpu_dev, ebo, mesh.indices.data(), ebo_bytes,
                       gpu::Usage::Index | gpu::Usage::Storage);
     }
-    ensure_buffer(gpu_dev, vbo_mask, mask_buf.data(), (uint64_t)mask_buf.size()*sizeof(float),
-                  gpu::Usage::Vertex | gpu::Usage::Storage);
+    upload_mask(gpu_dev, vbo_mask, mesh.mask, vc, gpu::Usage::Vertex | gpu::Usage::Storage);
     ensure_buffer(gpu_dev, vbo_color, col_buf.data(), (uint64_t)col_buf.size()*sizeof(uint32_t),
                   gpu::Usage::Vertex | gpu::Usage::Storage);
     ensure_buffer(gpu_dev, ssbo_paint_layer, layer_buf.data(),
@@ -2289,22 +2318,16 @@ void Renderer::draw_mesh(const Camera& cam, int w, int h, uint32_t index_count,
 void Renderer::upload_display(EntityGpu& g, const Mesh& mesh) {
     uint32_t vc = mesh.vertex_count();
 
-    std::vector<float> pos(vc * 3), norm(vc * 3), mask_buf(vc);
     std::vector<uint32_t> col_buf(vc);
-    for (uint32_t i = 0; i < vc; i++) {
-        pos[i*3+0] = mesh.pos_x[i]; pos[i*3+1] = mesh.pos_y[i]; pos[i*3+2] = mesh.pos_z[i];
-        norm[i*3+0] = mesh.norm_x[i]; norm[i*3+1] = mesh.norm_y[i]; norm[i*3+2] = mesh.norm_z[i];
-        mask_buf[i] = (i < mesh.mask.size()) ? mesh.mask[i] : 0.0f;
-    }
     paint_composite(mesh.paint_layers, mesh.color, vc, col_buf.data());   // display only
 
     // Display-only buffers: vertex attributes for the matcap + pick draws (pos also
     // bound as a pick vertex buffer). The render pipeline owns the vertex layout.
     // Storage too: the textured draw reads all five by index instead of as attributes.
     const gpu::Usage vs = gpu::Usage::Vertex | gpu::Usage::Storage;
-    ensure_buffer(gpu_dev, g.vbo_pos, pos.data(), (uint64_t)pos.size()*sizeof(float), vs);
-    ensure_buffer(gpu_dev, g.vbo_norm, norm.data(), (uint64_t)norm.size()*sizeof(float), vs);
-    ensure_buffer(gpu_dev, g.vbo_mask, mask_buf.data(), (uint64_t)mask_buf.size()*sizeof(float), vs);
+    upload_soa3(gpu_dev, g.vbo_pos, mesh.pos_x, mesh.pos_y, mesh.pos_z, vc, vs);
+    upload_soa3(gpu_dev, g.vbo_norm, mesh.norm_x, mesh.norm_y, mesh.norm_z, vc, vs);
+    upload_mask(gpu_dev, g.vbo_mask, mesh.mask, vc, vs);
     ensure_buffer(gpu_dev, g.vbo_color, col_buf.data(), (uint64_t)col_buf.size()*sizeof(uint32_t), vs);
     ensure_buffer(gpu_dev, g.ebo, mesh.indices.data(),
                   (uint64_t)mesh.indices.size()*sizeof(uint32_t), gpu::Usage::Index | gpu::Usage::Storage);

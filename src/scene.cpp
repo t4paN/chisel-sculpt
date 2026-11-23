@@ -570,7 +570,7 @@ void Scene::load_entities(std::vector<EntityRecord>& records,
             if (rec.legacy_numbering && !up->multires.disp.empty())
                 stack_ok = migrate_legacy_numbering(up->multires, up->mesh);
             if (stack_ok) {
-                cascade_to_level(up->multires, up->mesh, up->multires.current_level);
+                cascade_to_level(up->multires, up->mesh, up->multires.current_level, nullptr, true);
             } else {
                 // v<=3 file saved on a different platform: its disp layers can't
                 // be decoded here, but the cached surface is ground truth. Keep

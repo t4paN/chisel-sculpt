@@ -66,6 +66,13 @@ struct MultiresStack {
         SubdivStencil stencil;                      // (level below) -> this level
         uint32_t vcount = 0;
         bool     ready  = false;
+        // The live mesh holds this level's indices + CSR, so the cache doesn't keep a
+        // second copy (~52 B/vert; 0.8 GB at 30.8M tris, which the 4 GB web heap can't
+        // spare). ready stays false; the stencil and vcount are kept. Whoever rebuilds
+        // that live mesh hands the arrays back first (multires_reclaim_live_topo) —
+        // cascade_to_level does it for `out`. Missed, the entry is just cold: the next
+        // cascade or warm_topo re-derives it, slower but correct.
+        bool     on_live = false;
     };
     std::vector<LevelTopo> topo_cache;
 
@@ -130,8 +137,16 @@ void multires_fit_paint_layers(MultiresStack& stack, PaintLayerStack& layers);
 // available/eligible, the position replay runs as compute kernels with one
 // readback (see compute_cascade.cpp); any ineligibility falls back to the CPU
 // fast/slow replay silently. Pass nullptr to force the CPU path (load paths).
+// `out_becomes_live`: `out` will be the entity's working mesh, so the top level's
+// cached topology is handed to it by move and left on_live (see LevelTopo) instead of
+// copied. Pass it only when `out` really becomes the live mesh.
 void cascade_to_level(MultiresStack& stack, Mesh& out, int K,
-                      ComputeState* compute = nullptr);
+                      ComputeState* compute = nullptr, bool out_becomes_live = false);
+
+// If `live` is the mesh an on_live cache entry belongs to (same vertex + triangle
+// count), move its indices + CSR back into the cache and return true. `live` is left
+// without topology: call only right before it is rebuilt.
+bool multires_reclaim_live_topo(MultiresStack& stack, Mesh& live);
 
 // Re-encode a v<=3 stack (legacy platform-specific midpoint numbering, see
 // mesh.h) into canonical numbering, validating the legacy replay against the
@@ -207,3 +222,8 @@ ProjectionStats project_down_to_level(MultiresStack& stack, int target_level);
 // then stays. The web build checks it against the heap ceiling before descending, so
 // a model too big for the browser is refused instead of aborting the page.
 size_t projection_memory_estimate(const MultiresStack& stack, int target_level);
+// Heap a level-up to target_level is expected to add at its peak (web refusal gate).
+// Calibrated 2026-11-23; every [multires] level-up line logs estimate vs measured.
+// CHISEL_MEMTRACE=1: print process memory (RSS / web heap) at each step of a level change.
+void memtrace_level(const char* label);
+size_t level_up_memory_estimate(const MultiresStack& stack, const Mesh& live, int target_level);

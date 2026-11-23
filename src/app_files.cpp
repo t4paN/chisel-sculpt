@@ -907,9 +907,16 @@ void app_files_frame(App& a) {
             if (--auto_seq_wait <= 0) {
                 if (*auto_seq) {
                     input.level_switch_delta = (*auto_seq == '-') ? -1 : 1;
+                    input.subdiv_confirmed = true;   // scripted: wave the 30M+ prompt through
                     auto_seq++;
                     auto_seq_wait = 4;
                 } else if (std::getenv("CHISEL_AUTO_QUIT")) {
+                    // CHISEL_AUTO_SAVE=<path> saves the result first (big test files for memory runs).
+                    if (const char* sp = std::getenv("CHISEL_AUTO_SAVE")) {
+                        ProjectData proj;
+                        app_build_project(a, proj);
+                        std::printf("[auto-save] %s -> %d\n", sp, (int)save_project(sp, proj));
+                    }
                     std::fflush(stdout);
                     debug_console::pump();
                     std::_Exit(0);

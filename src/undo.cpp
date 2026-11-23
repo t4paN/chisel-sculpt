@@ -174,6 +174,7 @@ bool UndoStack::apply_projection(const UndoEntry& e, MeshEntity& ent, bool forwa
     MultiresStack& multires = ent.multires;
     if (forward) {
         // Redo: re-run projection from the restored pre-state. Deterministic.
+        multires_reclaim_live_topo(multires, ent.mesh);   // caller re-cascades the live mesh
         project_down_to_level(multires, e.target_level);
     } else {
         // Undo: restore captured pre-state.
@@ -190,8 +191,12 @@ bool UndoStack::apply_projection(const UndoEntry& e, MeshEntity& ent, bool forwa
 bool UndoStack::apply_level(const UndoEntry& e, MeshEntity& ent, bool forward) {
     MultiresStack& multires = ent.multires;
     if (!e.before.empty()) {
-        if (forward) project_down_to_level(multires, e.to_level);
-        else         restore_projection_snapshot(multires, e.before);
+        if (forward) {
+            multires_reclaim_live_topo(multires, ent.mesh);   // caller re-cascades the live mesh
+            project_down_to_level(multires, e.to_level);
+        } else {
+            restore_projection_snapshot(multires, e.before);
+        }
     }
     multires.current_level = forward ? e.to_level : e.from_level;
     return true;  // view level changed — caller cascades to current_level

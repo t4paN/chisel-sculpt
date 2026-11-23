@@ -717,7 +717,8 @@ void app_idle_update(App& a, int win_w, int win_h, float dx, float dy) {
         // rebuild (exact — no fold/interpolate round-trip blur).
         auto saved_mask = std::move(ent.mesh.mask);
         Mesh solo;
-        cascade_to_level(ent.multires, solo, ent.multires.current_level, &compute);
+        multires_reclaim_live_topo(ent.multires, ent.mesh);   // ent.mesh is replaced by solo
+        cascade_to_level(ent.multires, solo, ent.multires.current_level, &compute, true);
         if (!saved_mask.empty() && saved_mask.size() == solo.vertex_count())
             solo.mask = std::move(saved_mask);
         arm_geometry_handoff(solo);
@@ -947,6 +948,7 @@ void app_idle_update(App& a, int win_w, int win_h, float dx, float dy) {
             UndoEntry e;
             e.kind         = UndoEntry::Kind::PROJECTION;
             e.target_level = target;
+            multires_reclaim_live_topo(*multires, *mesh);   // live mesh is rebuilt below
             capture_projection_snapshot(*multires, target, e.before);
 
             ProjectionStats ps = project_down_to_level(*multires, target);
@@ -972,7 +974,7 @@ void app_idle_update(App& a, int win_w, int win_h, float dx, float dy) {
             multires_sync_paint(*multires, *mesh);
             if (scene.alive_count() <= 1) {
                 auto saved_mask = std::move(mesh->mask);
-                cascade_to_level(*multires, *mesh, multires->current_level, &compute);
+                cascade_to_level(*multires, *mesh, multires->current_level, &compute, true);
                 if (!saved_mask.empty() && saved_mask.size() == mesh->vertex_count())
                     mesh->mask = std::move(saved_mask);
                 arm_geometry_handoff(*mesh);
@@ -983,7 +985,7 @@ void app_idle_update(App& a, int win_w, int win_h, float dx, float dy) {
                 // the undo cascade above).
                 auto saved_mask = std::move(mesh->mask);
                 Mesh solo;
-                cascade_to_level(*multires, solo, multires->current_level, &compute);
+                cascade_to_level(*multires, solo, multires->current_level, &compute, true);
                 if (!saved_mask.empty() && saved_mask.size() == solo.vertex_count())
                     solo.mask = std::move(saved_mask);
                 arm_geometry_handoff(solo);
