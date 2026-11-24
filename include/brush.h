@@ -7,6 +7,7 @@
 #include "multires_stack.h"
 #include "compute.h"
 #include "pose.h"
+#include "clip.h"
 #include <vector>
 #include <cmath>
 #include <algorithm>
@@ -400,6 +401,12 @@ struct BrushStroke {
     // hardness = how soft the bend is across the anchor.
     void apply_pose_gpu(DabContext& ctx, float cursor_dx, float cursor_dy,
                         float hardness, PoseHinge& hinge);
+
+    // Clip curve: the stroke's one and only dab. Works out on the CPU where every
+    // vertex on the shaded side lands (clip_bind; main.cpp materialised mesh.pos for
+    // it) and writes them through the pose kernel with no bones, which puts each one
+    // straight at its uploaded position. Returns how many vertices moved.
+    uint32_t apply_clip_gpu(DabContext& ctx, const ClipLine& line);
 
     // Post-dispatch methods
     void post_dab(DabContext& ctx);

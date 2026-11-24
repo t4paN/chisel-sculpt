@@ -1186,6 +1186,7 @@ const RailBrush kRailBrushes[] = {
     {"bLimb",    "Limb",    KeyAction::BRUSH_LIMB,    Icon::BrushLimb,    BrushType::LIMB},
     {"bPose",    "Pose",    KeyAction::BRUSH_POSE,    Icon::BrushPose,    BrushType::POSE},
     {"bStipple", "Stipple", KeyAction::BRUSH_STIPPLE, Icon::BrushStipple, BrushType::STIPPLE},
+    {"bClip",    "Clip",    KeyAction::BRUSH_CLIP,    Icon::BrushClip,    BrushType::CLIP},
     {"bSmooth",  "Smooth",  KeyAction::COUNT,         Icon::BrushSmooth,  BrushType::SMOOTH},
     {"bMask",    "Mask",    KeyAction::BRUSH_MASK,    Icon::BrushMask,    BrushType::MASK},
 };

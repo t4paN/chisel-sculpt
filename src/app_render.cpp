@@ -244,6 +244,12 @@ void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse) {
                         input.pose_hover, input.mirror_x);
     }
 
+    // Clip curve: the line while it is being drawn.
+    if (input.clip_drawing && !non_edit_mode) {
+        draw_clip_line(input.clip_ax, input.clip_ay, input.clip_bx, input.clip_by,
+                       input.clip_flip, win_w, win_h);
+    }
+
     // Brush cursor — draw at locked position during slider, normal position otherwise
     if (!input.quit_requested && !input.export_dialog_active && !input.import_dialog_active && !input.save_dialog_active && !input.remesh_confirm_pending && !input.voxel_merge_confirm_pending && !input.drop_confirm_pending && !input.reset_confirm_pending && !input.subdiv_confirm_pending && !input.help_popup_open && !input.keybind_menu_open && !input.brush_props_open && !imgui_wants_mouse && !non_edit_mode) {
         float cursor_x, cursor_y;
@@ -268,6 +274,9 @@ void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse) {
         } else if (input.pose_brush_on() && !input.is_smooth_active()) {
             draw_pose_cursor(cursor_x, cursor_y,
                              input.on_model || input.pose_hover >= 0);
+        } else if (input.clip_brush_on() && !input.is_smooth_active()) {
+            // A dot, like Pose: the clip has no radius to show.
+            draw_pose_cursor(cursor_x, cursor_y, true);
         } else if (input.bucket_active && input.current_brush == BrushType::PAINT
                    && !input.is_smooth_active()) {
             if (input.bucket_dragging) {

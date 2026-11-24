@@ -39,6 +39,10 @@ enum class BrushType {
     // Paint mode's Blend: directional blur, colour dragged along the stroke. A settings
     // slot only, armed by paint_blend_active, same pattern as PAINT_STIPPLE.
     PAINT_BLEND,
+    // Clip curve (L): drag a straight line, the shaded side is pushed flat onto it,
+    // through the whole model (clip.h). Like Pose, not a stroke you paint: the press
+    // draws the line and the release cuts once.
+    CLIP,
     COUNT
 };
 
@@ -116,7 +120,7 @@ enum class KeyAction : int {
     MODE_SCULPT, MODE_OBJECT, MODE_PAINT, MODE_RETOPO, MODE_UV,
     OBJ_SELECT, OBJ_MOVE, OBJ_INSERT, OBJ_SCALE, OBJ_ROTATE, OBJ_SELECT_ALL,
     BRUSH_DRAW, BRUSH_CLAY, BRUSH_INFLATE, BRUSH_CREASE, BRUSH_PINCH,
-    BRUSH_MOVE, BRUSH_LIMB, BRUSH_POSE, BRUSH_STIPPLE, BRUSH_MASK, BRUSH_PREV, BRUSH_NEXT,
+    BRUSH_MOVE, BRUSH_LIMB, BRUSH_POSE, BRUSH_STIPPLE, BRUSH_CLIP, BRUSH_MASK, BRUSH_PREV, BRUSH_NEXT,
     PAINT_BUCKET, PAINT_PICKER, PAINT_BRUSH, PAINT_STIPPLE, PAINT_BLEND,
     RETOPO_BUILD, RETOPO_DRAW, RETOPO_GRAB, RETOPO_CUT, RETOPO_ERASE, RETOPO_FILL, RETOPO_WAND, RETOPO_MASK,
     RETOPO_CONTOUR, RETOPO_POINTS, UV_SEAM_CUT, UV_SEAM_WELD,
@@ -310,6 +314,15 @@ struct InputState {
     bool    pose_delete_key      = false;
     bool pose_brush_on() const {
         return current_brush == BrushType::POSE && interaction_mode == InteractionMode::EDIT;
+    }
+    // Clip curve. While a CLIP_EDIT drag runs, main.cpp keeps the line here (screen
+    // pixels, a = where the press landed) for the overlay; clip_flip = Ctrl is held, so
+    // the other side is shaded and the release cuts that one.
+    bool  clip_drawing = false;
+    float clip_ax = 0, clip_ay = 0, clip_bx = 0, clip_by = 0;
+    bool  clip_flip = false;
+    bool clip_brush_on() const {
+        return current_brush == BrushType::CLIP && interaction_mode == InteractionMode::EDIT;
     }
     // The same window shows one page at a time: the brush knobs, or the unselected-mesh
     // colour picker (its own burger entry). One window, so one set of open/Esc plumbing.
@@ -547,8 +560,10 @@ struct InputState {
     // POSE_EDIT: the pose brush is drawing a new hinge line (main.cpp pose block), not
     // stroking. POSE_MOVE: dragging the anchor alone (the mesh stays put).
     // GIZMO: Object mode's Scale or Rotate tool, dragging the handle in gizmo_handle.
+    // CLIP_EDIT: the clip curve's line is being drawn (main.cpp clip block); the cut
+    // runs on release.
     enum class DragMode { NONE, ORBIT, SCULPT, PAN, ZOOM, MOVE_OBJECT, SCALE_OBJECT,
-                          POSE_EDIT, POSE_MOVE, RETOPO, GIZMO };
+                          POSE_EDIT, POSE_MOVE, RETOPO, GIZMO, CLIP_EDIT };
     DragMode drag_mode;
     // Object mode's SELECT tools: Select is the plain arrow (click picks, drag moves, RMB
     // drag scales evenly); Move, Scale and Rotate add their gizmo on the selection.

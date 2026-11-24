@@ -903,9 +903,10 @@ void draw_help_popup(InputState& input, int win_w, int win_h) {
         std::snprintf(k, sizeof(k), "%s %s %s", L(KeyAction::BRUSH_CREASE),
                       L(KeyAction::BRUSH_PINCH), L(KeyAction::BRUSH_MOVE));
         help_row(k, "Crease  Pinch  Move");
-        std::snprintf(k, sizeof(k), "%s %s %s %s", L(KeyAction::BRUSH_LIMB),
-                      L(KeyAction::BRUSH_POSE), L(KeyAction::BRUSH_STIPPLE), L(KeyAction::BRUSH_MASK));
-        help_row(k, "Limb  Pose  Stipple  Mask");
+        std::snprintf(k, sizeof(k), "%s %s %s %s %s", L(KeyAction::BRUSH_LIMB),
+                      L(KeyAction::BRUSH_POSE), L(KeyAction::BRUSH_STIPPLE), L(KeyAction::BRUSH_CLIP),
+                      L(KeyAction::BRUSH_MASK));
+        help_row(k, "Limb  Pose  Stipple  Clip  Mask");
         std::snprintf(k, sizeof(k), "%s %s", L(KeyAction::BRUSH_PREV), L(KeyAction::BRUSH_NEXT));
         help_row(k, "Cycle alpha (Draw, Mask)");
         std::snprintf(k, sizeof(k), "%s %s", L(KeyAction::PAINT_BUCKET), L(KeyAction::PAINT_PICKER));
@@ -1239,7 +1240,7 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
 
     float brush_w = calc_btn_w("Inflate");
 
-    static char btips[11][48];
+    static char btips[12][48];
     auto btip = [&](int i, KeyAction a) {
         std::snprintf(btips[i], sizeof(btips[i]), "Shortcut: %s", input.key_label(a));
         return btips[i];
@@ -1255,6 +1256,7 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
         {"Limb",    "Limb",    btip(6, KeyAction::BRUSH_LIMB),    BrushType::LIMB},
         {"Pose",    "Pose",    btip(7, KeyAction::BRUSH_POSE),    BrushType::POSE},
         {"Stipple", "Stipple", btip(10, KeyAction::BRUSH_STIPPLE), BrushType::STIPPLE},
+        {"Clip",    "Clip",    btip(11, KeyAction::BRUSH_CLIP),   BrushType::CLIP},
         {"Smooth",  "Smooth",  "Shortcut: double-press Shift",    BrushType::SMOOTH},
         {"Mask",    "Mask",    btip(9, KeyAction::BRUSH_MASK),    BrushType::MASK},
     };
@@ -1941,6 +1943,50 @@ void draw_gradient_drag(float ax, float ay, float bx, float by) {
     dl->AddCircleFilled(ImVec2(ax, ay), 4.5f, fill);
     dl->AddCircle(ImVec2(bx, by), 6.0f, line, 0, 3.6f);
     dl->AddCircle(ImVec2(bx, by), 6.0f, fill, 0, 1.6f);
+}
+
+void draw_clip_line(float ax, float ay, float bx, float by, bool flip, int win_w, int win_h) {
+    ImDrawList* dl = ImGui::GetBackgroundDrawList();
+    const float dx = bx - ax, dy = by - ay;
+    const float len = std::sqrt(dx * dx + dy * dy);
+    const ImU32 dark = IM_COL32(20, 20, 20, 170);
+    const ImU32 cold = IM_COL32(235, 235, 235, 220);
+    if (len < 4.0f) {   // not a line yet: just where it starts
+        dl->AddCircleFilled(ImVec2(ax, ay), 4.5f, dark, 16);
+        dl->AddCircleFilled(ImVec2(ax, ay), 3.0f, cold, 16);
+        return;
+    }
+    const float ux = dx / len, uy = dy / len;
+    // The side clip_bind cuts: right of a -> b with y down, unless flipped.
+    float rx = -uy, ry = ux;
+    if (flip) { rx = -rx; ry = -ry; }
+
+    // The window clipped to that half-plane (one pass of polygon clipping), shaded.
+    const ImVec2 rect[4] = { ImVec2(0, 0), ImVec2((float)win_w, 0),
+                             ImVec2((float)win_w, (float)win_h), ImVec2(0, (float)win_h) };
+    ImVec2 poly[8];
+    int n = 0;
+    auto side = [&](ImVec2 p) { return (p.x - ax) * rx + (p.y - ay) * ry; };
+    for (int i = 0; i < 4; i++) {
+        const ImVec2 p = rect[i], q = rect[(i + 1) % 4];
+        const float sp = side(p), sq = side(q);
+        if (sp >= 0.0f) poly[n++] = p;
+        if ((sp >= 0.0f) != (sq >= 0.0f)) {
+            const float t = sp / (sp - sq);
+            poly[n++] = ImVec2(p.x + (q.x - p.x) * t, p.y + (q.y - p.y) * t);
+        }
+    }
+    if (n >= 3) dl->AddConvexPolyFilled(poly, n, IM_COL32(0, 0, 0, 70));
+
+    // The wall's trace, edge to edge (faint), then the dragged part (bright).
+    const float far = (float)(win_w + win_h) * 2.0f;
+    const ImVec2 e0(ax - ux * far, ay - uy * far), e1(ax + ux * far, ay + uy * far);
+    dl->AddLine(e0, e1, IM_COL32(255, 255, 255, 90), 1.5f);
+    dl->AddLine(ImVec2(ax, ay), ImVec2(bx, by), dark, 5.0f);
+    dl->AddLine(ImVec2(ax, ay), ImVec2(bx, by), cold, 2.0f);
+    // A short tick into the cut side, mid-line, so the side reads even on a dark model.
+    const ImVec2 m(0.5f * (ax + bx), 0.5f * (ay + by));
+    dl->AddLine(m, ImVec2(m.x + rx * 12.0f, m.y + ry * 12.0f), cold, 2.0f);
 }
 
 void draw_pose_hinge(const PoseHinge& hinge, const Camera& cam, int win_w, int win_h,

@@ -2,6 +2,10 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-24 — Clip brush (L)
+
+- New sculpt brush **Clip** (L, and in the brush column): drag a straight line and the shaded side is pushed flat onto it, straight into the screen, through the whole model. Ctrl cuts the other side. Mask and mirror are respected; one cut is one undo step. Vertices only move, so the edge is as crisp as the mesh is dense.
+
 ## 2026-11-23 — SDF merge: Mode / Pattern / Poles dropdowns; repeatable merges
 
 - The merge dialog's Extractor row is now three dropdowns: **Mode** (Marching Cubes, Surface Nets), **Pattern** (Curvature nudge, Plain) and **Poles** (Walk & cancel, with an On/Off toggle). The shipped default in each reads "(default)". Keys S / G / P cycle them, O turns the pole clean-up off. Picks are remembered, Mode included; Reset settings restores them.

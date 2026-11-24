@@ -93,6 +93,10 @@ void draw_pose_hinge(const PoseHinge& hinge, const Camera& cam, int win_w, int w
                      int hover, bool mirror);
 void draw_pose_cursor(float x, float y, bool on_target);
 
+// Clip curve while it is drawn: the line run out to the window's edges, the side the
+// release will cut shaded, and the dragged stretch itself bright. flip = Ctrl held.
+void draw_clip_line(float ax, float ay, float bx, float by, bool flip, int win_w, int win_h);
+
 // Retopo mode (key 0). The overlay draws every stroke as a translucent band at its
 // width (donuts teal, strips amber; mirrored twins ghosted when mirror is on) and the
 // built quads as a wireframe, hiding what faces away or sits behind the sculpt. The

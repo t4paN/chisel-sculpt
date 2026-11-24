@@ -27,6 +27,7 @@ enum class Icon {
     RetopoPoints,                     // retopo's points (click four, a quad)
     ShapeSphere, ShapeCylinder,       // Object mode's insert shapes (the box is ModeInsert)
     ObjScale, ObjRotate,              // Object mode's Scale and Rotate tools
+    BrushClip,                        // Clip curve: a ball cut flat along a line
     // The file dialogs' toolbar and Places pane (vector only: no pixel versions, the
     // dialogs draw these on every skin).
     NavBack, NavForward, NavUp, NewFolder,

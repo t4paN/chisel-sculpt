@@ -1425,7 +1425,7 @@ void BrushStroke::begin(Renderer& renderer, const Camera& cam,
     }
     // Both grab brushes capture-once; clear the sticky state at stroke start.
     if (brush_type == BrushType::MOVE || brush_type == BrushType::LIMB
-        || brush_type == BrushType::POSE) {
+        || brush_type == BrushType::POSE || brush_type == BrushType::CLIP) {
         move.reset(vert_count);
         pose.on = false;   // set again by the first pose dab
     }
@@ -2250,6 +2250,63 @@ void BrushStroke::apply_pose_gpu(DabContext& ctx, float cursor_dx, float cursor_
     }
 
     gpu_positions_deferred = true;
+}
+
+uint32_t BrushStroke::apply_clip_gpu(DabContext& ctx, const ClipLine& line) {
+    dirty_verts.clear();
+    if (!is_active() || !ctx.compute.has_pose() || move.captured) return 0;
+
+    ctx.compute.ensure_accum_buffer(ctx.vertex_count);
+    ctx.compute.ensure_move_buffers(ctx.vertex_count);
+
+    // One-shot and user-paced like remesh, so a whole-mesh CPU pass is fine here; it
+    // is never per frame. The binding's buffers are reused: ids, then the targets
+    // where pose_apply reads its pen-down positions, and zero weights, so with no
+    // bones each vertex is written exactly where clip_bind put it.
+    std::vector<uint32_t>& ids = pose.bind.ids;
+    std::vector<float>& targets = pose.bind.init;
+    clip_bind(ctx.mesh, ctx.cam, ctx.win_w, ctx.win_h, line, ctx.mirror_x, ids, targets);
+    const uint32_t n = (uint32_t)ids.size();
+    pose.bind.w.assign((size_t)n * 8u, 0.0f);
+
+    PoseParamsGPU& P = pose.params;
+    P = PoseParamsGPU{};
+    P.bone_count = 0;
+    P.affected_count = n;
+    ctx.compute.upload_pose_binding(ids.data(), targets.data(), pose.bind.w.data(), n);
+    move.affected_list = ids;
+    move.capture_tk = 0;
+    move.capture_words = 0;
+    move.total_dx = move.total_dy = move.total_dz = 0.0f;
+    move.captured = true;
+    if (n == 0) return 0;
+
+    // The mirror sink's pivot (the topological pairs copy this side onto the other)
+    // and the F-focus point: the first vertex the cut moved.
+    anchor_pos = Vec3(targets[0], targets[1], targets[2]);
+    anchor_valid = true;
+
+    ctx.compute.dispatch_pose_apply(P, ctx.renderer.vbo_pos, ctx.mesh.vertex_count());
+
+    // apply_pose_gpu's tail: mirror sink, normals, touched list.
+    if (ctx.mirror_pairs)
+        ctx.compute.dispatch_mirror_project_header(ctx.renderer.vbo_pos, ctx.vertex_count,
+                                                   ctx.compute.move_affected_ssbo);
+    if (ctx.compute.has_gpu_normals())
+        ctx.compute.expand_normals_from(ctx.compute.move_affected_ssbo, 0,
+                                        ctx.compute.move_buffers_capacity,
+                                        ctx.mesh.vertex_count(), ctx.mirror_pairs,
+                                        ctx.renderer.ebo);
+    if (gpu_touched) {
+        fold_move_capture(*this, ctx);
+    } else {
+        dirty_verts = move.affected_list;
+        snap_and_mirror_dirty(*this, ctx, anchor_pos.x);
+        move.capture_booked = true;
+    }
+
+    gpu_positions_deferred = true;
+    return n;
 }
 
 // --- Post-dispatch methods ---

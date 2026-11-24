@@ -262,6 +262,7 @@ add_executable(chisel
     src/compute_limb.cpp
     src/compute_pose.cpp
     src/pose.cpp
+    src/clip.cpp
     src/web_bridge.cpp
     src/app_files.cpp
     src/file_browser.cpp
