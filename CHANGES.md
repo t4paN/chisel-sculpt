@@ -2,6 +2,11 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-24 — Clip brush: curves
+
+- Clip now follows a freehand curve, smoothed, its ends run on to the window's edges; Alt held while dragging snaps to a straight line. The shading is the cut's own side test, so it shows exactly what will move.
+- A cut point lands on a blend along the curve that widens with its depth past it, so the inside of a C folds evenly round the bend instead of tearing into walls across it.
+
 ## 2026-11-24 — Clip brush (L)
 
 - New sculpt brush **Clip** (L, and in the brush column): drag a straight line and the shaded side is pushed flat onto it, straight into the screen, through the whole model. Ctrl cuts the other side. Mask and mirror are respected; one cut is one undo step. Vertices only move, so the edge is as crisp as the mesh is dense.

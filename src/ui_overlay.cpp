@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cmath>
+#include "clip.h"
 #include <algorithm>
 
 // CGA 16-color palette (IBM PC, 1981). Hex values mapped to 0..1 floats.
@@ -1945,48 +1946,50 @@ void draw_gradient_drag(float ax, float ay, float bx, float by) {
     dl->AddCircle(ImVec2(bx, by), 6.0f, fill, 0, 1.6f);
 }
 
-void draw_clip_line(float ax, float ay, float bx, float by, bool flip, int win_w, int win_h) {
+void draw_clip_curve(const std::vector<float>& raw, bool flip, bool straight,
+                     int win_w, int win_h) {
+    if (raw.size() < 2) return;
     ImDrawList* dl = ImGui::GetBackgroundDrawList();
-    const float dx = bx - ax, dy = by - ay;
-    const float len = std::sqrt(dx * dx + dy * dy);
     const ImU32 dark = IM_COL32(20, 20, 20, 170);
     const ImU32 cold = IM_COL32(235, 235, 235, 220);
-    if (len < 4.0f) {   // not a line yet: just where it starts
-        dl->AddCircleFilled(ImVec2(ax, ay), 4.5f, dark, 16);
-        dl->AddCircleFilled(ImVec2(ax, ay), 3.0f, cold, 16);
+    static ClipPath path;   // per frame while drawing: keeps its storage between frames
+    clip_prepare(raw, straight, win_w, win_h, path);
+    if (!path.ok) {   // not a line yet: just where it starts
+        dl->AddCircleFilled(ImVec2(raw[0], raw[1]), 4.5f, dark, 16);
+        dl->AddCircleFilled(ImVec2(raw[0], raw[1]), 3.0f, cold, 16);
         return;
     }
-    const float ux = dx / len, uy = dy / len;
-    // The side clip_bind cuts: right of a -> b with y down, unless flipped.
-    float rx = -uy, ry = ux;
-    if (flip) { rx = -rx; ry = -ry; }
 
-    // The window clipped to that half-plane (one pass of polygon clipping), shaded.
-    const ImVec2 rect[4] = { ImVec2(0, 0), ImVec2((float)win_w, 0),
-                             ImVec2((float)win_w, (float)win_h), ImVec2(0, (float)win_h) };
-    ImVec2 poly[8];
-    int n = 0;
-    auto side = [&](ImVec2 p) { return (p.x - ax) * rx + (p.y - ay) * ry; };
-    for (int i = 0; i < 4; i++) {
-        const ImVec2 p = rect[i], q = rect[(i + 1) % 4];
-        const float sp = side(p), sq = side(q);
-        if (sp >= 0.0f) poly[n++] = p;
-        if ((sp >= 0.0f) != (sq >= 0.0f)) {
-            const float t = sp / (sp - sq);
-            poly[n++] = ImVec2(p.x + (q.x - p.x) * t, p.y + (q.y - p.y) * t);
+    // The shading is the cut's own side test on a coarse grid, so a bend or an S
+    // shades exactly what the release will move. Runs of cells along a row are one
+    // rectangle each.
+    const float cell = 6.0f;
+    const ImU32 shade = IM_COL32(0, 0, 0, 70);
+    for (float y = 0.0f; y < (float)win_h; y += cell) {
+        float run0 = -1.0f;
+        for (float x = 0.0f; x <= (float)win_w; x += cell) {
+            float qx, qy;
+            const bool in = x < (float)win_w
+                && clip_side(path, flip, x + 0.5f * cell, y + 0.5f * cell, qx, qy) > 0.0f;
+            if (in && run0 < 0.0f) run0 = x;
+            if (!in && run0 >= 0.0f) {
+                dl->AddRectFilled(ImVec2(run0, y), ImVec2(x, y + cell), shade);
+                run0 = -1.0f;
+            }
         }
     }
-    if (n >= 3) dl->AddConvexPolyFilled(poly, n, IM_COL32(0, 0, 0, 70));
 
-    // The wall's trace, edge to edge (faint), then the dragged part (bright).
-    const float far = (float)(win_w + win_h) * 2.0f;
-    const ImVec2 e0(ax - ux * far, ay - uy * far), e1(ax + ux * far, ay + uy * far);
-    dl->AddLine(e0, e1, IM_COL32(255, 255, 255, 90), 1.5f);
-    dl->AddLine(ImVec2(ax, ay), ImVec2(bx, by), dark, 5.0f);
-    dl->AddLine(ImVec2(ax, ay), ImVec2(bx, by), cold, 2.0f);
-    // A short tick into the cut side, mid-line, so the side reads even on a dark model.
-    const ImVec2 m(0.5f * (ax + bx), 0.5f * (ay + by));
-    dl->AddLine(m, ImVec2(m.x + rx * 12.0f, m.y + ry * 12.0f), cold, 2.0f);
+    // The wall's trace, run on to the edges (faint), then the part drawn (bright).
+    const size_t k = path.xy.size() / 2;
+    for (size_t i = 0; i + 1 < k; i++)
+        dl->AddLine(ImVec2(path.xy[i * 2], path.xy[i * 2 + 1]),
+                    ImVec2(path.xy[i * 2 + 2], path.xy[i * 2 + 3]), IM_COL32(255, 255, 255, 90), 1.5f);
+    // path.xy minus its two run-on ends is the drawn curve as it will cut.
+    dl->PathClear();
+    for (size_t i = 1; i + 1 < k; i++) dl->PathLineTo(ImVec2(path.xy[i * 2], path.xy[i * 2 + 1]));
+    dl->PathStroke(dark, 0, 5.0f);
+    for (size_t i = 1; i + 1 < k; i++) dl->PathLineTo(ImVec2(path.xy[i * 2], path.xy[i * 2 + 1]));
+    dl->PathStroke(cold, 0, 2.0f);
 }
 
 void draw_pose_hinge(const PoseHinge& hinge, const Camera& cam, int win_w, int win_h,

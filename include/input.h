@@ -4,6 +4,7 @@
 #include <GLFW/glfw3.h>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 enum class BrushType {
     DRAW,
@@ -315,12 +316,15 @@ struct InputState {
     bool pose_brush_on() const {
         return current_brush == BrushType::POSE && interaction_mode == InteractionMode::EDIT;
     }
-    // Clip curve. While a CLIP_EDIT drag runs, main.cpp keeps the line here (screen
-    // pixels, a = where the press landed) for the overlay; clip_flip = Ctrl is held, so
-    // the other side is shaded and the release cuts that one.
+    // Clip curve. While a CLIP_EDIT drag runs, main.cpp keeps the drawn points here
+    // (screen pixels, x, y pairs, one every 3 px like the wand's lasso) for the
+    // overlay. clip_flip = Ctrl is held, so the other side is shaded and the release
+    // cuts that one; clip_straight = Alt is held, so only the first point and the
+    // cursor count (a straight line).
     bool  clip_drawing = false;
-    float clip_ax = 0, clip_ay = 0, clip_bx = 0, clip_by = 0;
+    std::vector<float> clip_pts;
     bool  clip_flip = false;
+    bool  clip_straight = false;
     bool clip_brush_on() const {
         return current_brush == BrushType::CLIP && interaction_mode == InteractionMode::EDIT;
     }

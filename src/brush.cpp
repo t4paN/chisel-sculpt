@@ -2252,7 +2252,7 @@ void BrushStroke::apply_pose_gpu(DabContext& ctx, float cursor_dx, float cursor_
     gpu_positions_deferred = true;
 }
 
-uint32_t BrushStroke::apply_clip_gpu(DabContext& ctx, const ClipLine& line) {
+uint32_t BrushStroke::apply_clip_gpu(DabContext& ctx, const ClipPath& path, bool flip) {
     dirty_verts.clear();
     if (!is_active() || !ctx.compute.has_pose() || move.captured) return 0;
 
@@ -2265,7 +2265,7 @@ uint32_t BrushStroke::apply_clip_gpu(DabContext& ctx, const ClipLine& line) {
     // bones each vertex is written exactly where clip_bind put it.
     std::vector<uint32_t>& ids = pose.bind.ids;
     std::vector<float>& targets = pose.bind.init;
-    clip_bind(ctx.mesh, ctx.cam, ctx.win_w, ctx.win_h, line, ctx.mirror_x, ids, targets);
+    clip_bind(ctx.mesh, ctx.cam, ctx.win_w, ctx.win_h, path, flip, ctx.mirror_x, ids, targets);
     const uint32_t n = (uint32_t)ids.size();
     pose.bind.w.assign((size_t)n * 8u, 0.0f);
 

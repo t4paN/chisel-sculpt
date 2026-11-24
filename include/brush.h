@@ -406,7 +406,7 @@ struct BrushStroke {
     // vertex on the shaded side lands (clip_bind; main.cpp materialised mesh.pos for
     // it) and writes them through the pose kernel with no bones, which puts each one
     // straight at its uploaded position. Returns how many vertices moved.
-    uint32_t apply_clip_gpu(DabContext& ctx, const ClipLine& line);
+    uint32_t apply_clip_gpu(DabContext& ctx, const ClipPath& path, bool flip);
 
     // Post-dispatch methods
     void post_dab(DabContext& ctx);

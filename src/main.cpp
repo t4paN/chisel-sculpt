@@ -2230,29 +2230,38 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // ---- Clip curve: the line while it is drawn, the cut on release ----
+        // ---- Clip curve: the curve while it is drawn, the cut on release ----
         // The press latched CLIP_EDIT (input.cpp). The release runs the whole stroke
         // in one go: pen-down, the one dab (apply_clip_gpu), and app_state SCULPTING,
         // so the next frame's pen-up (above) finalizes it like any other stroke (undo, levels,
         // normals). Nothing happens while the line is drawn; the overlay shows it.
         {
             const bool drawing = input.drag_mode == InputState::DragMode::CLIP_EDIT;
+            const float mx = (float)input.mouse_x, my = (float)input.mouse_y;
             if (drawing && !input.clip_drawing && app_state == AppState::IDLE) {
                 input.clip_drawing = true;
-                input.clip_ax = input.clip_bx = (float)input.mouse_x;
-                input.clip_ay = input.clip_by = (float)input.mouse_y;
+                input.clip_pts.assign({mx, my});
             }
             if (input.clip_drawing && drawing) {
-                input.clip_bx = (float)input.mouse_x;
-                input.clip_by = (float)input.mouse_y;
+                const size_t k = input.clip_pts.size();
+                if (std::hypot(mx - input.clip_pts[k - 2], my - input.clip_pts[k - 1]) >= 3.0f) {
+                    input.clip_pts.push_back(mx);
+                    input.clip_pts.push_back(my);
+                }
                 input.clip_flip = input.is_subtract_active();   // Ctrl, as Ctrl inverts the other brushes
+                input.clip_straight = input.alt_held;
             }
             if (input.clip_drawing && !drawing) {
                 input.clip_drawing = false;
-                ClipLine line;
-                line.ax = input.clip_ax; line.ay = input.clip_ay;
-                line.bx = input.clip_bx; line.by = input.clip_by;
-                line.flip = input.clip_flip;
+                // The release point too, or a quick flick stops short of where the button came up.
+                const size_t k = input.clip_pts.size();
+                if (mx != input.clip_pts[k - 2] || my != input.clip_pts[k - 1]) {
+                    input.clip_pts.push_back(mx);
+                    input.clip_pts.push_back(my);
+                }
+                ClipPath path;
+                clip_prepare(input.clip_pts, input.clip_straight, win_w, win_h, path);
+                const bool flip = input.clip_flip;
                 // The same guard as a stroke's tripwire below: a stack out of step
                 // with the surface would take the write-back past its end.
                 bool in_sync = true;
@@ -2263,7 +2272,7 @@ int main(int argc, char* argv[]) {
                     in_sync = want == mesh->vertex_count();
                 }
                 const char* note = nullptr;
-                if (app_state != AppState::IDLE || !clip_line_usable(line)) {
+                if (app_state != AppState::IDLE || !path.ok) {
                     // a click, or something else is running: nothing to cut
                 } else if (!in_sync) {
                     note = "Mesh out of sync with its levels - switch subdiv level to fix";
@@ -2272,7 +2281,7 @@ int main(int argc, char* argv[]) {
                 } else {
                     scene.materialize_active_cpu();
                     bench::pd_arm(renderer.gpu_dev);
-                    brush_stroke.begin(renderer, camera, line.bx, line.by, input.brush_size,
+                    brush_stroke.begin(renderer, camera, mx, my, input.brush_size,
                                        win_w, win_h, mesh->vertex_count(), *multires,
                                        BrushType::CLIP, scene.active_mesh_id(),
                                        scene.active_entity().multires_gpu,
@@ -2280,10 +2289,11 @@ int main(int argc, char* argv[]) {
                     DabContext ctx { renderer, camera, compute, *mesh, *multires, input,
                                      win_w, win_h, brush_stroke.vertex_count, input.brush_size,
                                      mirror_effective(), mirror_pairs_effective() };
-                    const uint32_t moved = brush_stroke.apply_clip_gpu(ctx, line);
-                    std::printf("[clip] line (%.0f,%.0f)-(%.0f,%.0f)%s mirror %d: %u of %u verts moved\n",
-                                line.ax, line.ay, line.bx, line.by, line.flip ? " flipped" : "",
-                                (int)ctx.mirror_x, moved, mesh->vertex_count());
+                    const uint32_t moved = brush_stroke.apply_clip_gpu(ctx, path, flip);
+                    std::printf("[clip] %s, %zu points drawn%s, mirror %d: %u of %u verts moved\n",
+                                input.clip_straight ? "straight" : "curve", input.clip_pts.size() / 2,
+                                flip ? ", flipped" : "", (int)ctx.mirror_x, moved,
+                                mesh->vertex_count());
                     if (moved == 0) note = "Clip: nothing on the shaded side";
                     brush_stroke.post_dab(ctx);
                     brush_stroke.post_frame(ctx);

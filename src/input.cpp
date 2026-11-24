@@ -62,7 +62,7 @@ const KeyActionInfo kKeyActions[(int)KeyAction::COUNT] = {
     {"brush_stipple", "Sculpt brushes", "Stipple",
         "Fine detail stamps: lands on press, random spin and size. Right-click: jitter and Scatter (one dot becomes many)", {GLFW_KEY_R, 0}, KeyScope::Sculpt},
     {"brush_clip",    "Sculpt brushes", "Clip",
-        "Drag a straight line: the shaded side is pushed flat onto it, through the whole model. Hold Ctrl to cut the other side. Masked parts stay", {GLFW_KEY_L, 0}, KeyScope::Sculpt},
+        "Drag a curve: the shaded side is pushed onto it, through the whole model. Alt: a straight line. Ctrl: cut the other side. Masked parts stay", {GLFW_KEY_L, 0}, KeyScope::Sculpt},
     {"brush_mask",    "Brushes", "Mask",                nullptr, {GLFW_KEY_M, 0}},
     {"brush_prev",    "Brushes", "Previous alpha",
         "Draw and Mask. In Paint mode: swap colours. In Object mode: hold to spin the selection; Shift+ turns it 5 degrees per press. Insert: change the shape.", {GLFW_KEY_Q, 0}},

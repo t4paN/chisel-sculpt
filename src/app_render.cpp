@@ -244,10 +244,9 @@ void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse) {
                         input.pose_hover, input.mirror_x);
     }
 
-    // Clip curve: the line while it is being drawn.
+    // Clip curve: the curve while it is being drawn.
     if (input.clip_drawing && !non_edit_mode) {
-        draw_clip_line(input.clip_ax, input.clip_ay, input.clip_bx, input.clip_by,
-                       input.clip_flip, win_w, win_h);
+        draw_clip_curve(input.clip_pts, input.clip_flip, input.clip_straight, win_w, win_h);
     }
 
     // Brush cursor — draw at locked position during slider, normal position otherwise
