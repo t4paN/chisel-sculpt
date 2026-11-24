@@ -23,9 +23,18 @@ struct ClipPath {
     std::vector<float> nrm;   // x, y per segment
     std::vector<float> cum;   // arc length at the start of each point
     // Even samples along the curve for clip_target's blend: x, y, arc length and the
-    // stretch of curve each one stands for. 3 px apart on the drawn part, 12 px on the
-    // run-on ends, and those only as far as a screen point could still be near.
-    std::vector<float> smp;   // 4 floats per sample
+    // stretch of curve each one stands for, at kClipLevels spacings (level L is
+    // 3 * 2^L px apart on the drawn part, at least 12 px on the run-on ends, and those
+    // only as far as a screen point could still be near). A point deep past the curve
+    // blends over a wide stretch, so it reads a coarse level: every point then costs
+    // about the same few dozen samples however deep it sits.
+    static constexpr int kClipLevels = 8;
+    std::vector<float> smp[kClipLevels];   // 4 floats per sample
+    // Runs of kClipRun consecutive samples per level, each with its box (min x, min y,
+    // max x, max y): clip_target skips a whole run whose box is out of reach, so a
+    // point near the curve reads a handful of samples, not the whole curve.
+    static constexpr int kClipRun = 16;
+    std::vector<float> box[kClipLevels];
     bool ok = false;
 };
 

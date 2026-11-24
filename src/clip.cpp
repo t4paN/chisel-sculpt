@@ -4,6 +4,9 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#ifndef __EMSCRIPTEN__
+#include <thread>
+#endif
 
 namespace {
 
@@ -119,27 +122,43 @@ void clip_prepare(const std::vector<float>& raw, bool straight, int win_w, int w
         out.nrm[i * 2 + 1] =  dx / l;
         out.cum[i + 1] = out.cum[i] + l;
     }
-    out.smp.clear();
     const float reach = 1.5f * std::hypot((float)win_w, (float)win_h);
-    for (size_t i = 0; i + 1 < k; i++) {
-        const float ax = out.xy[i * 2], ay = out.xy[i * 2 + 1];
-        const float bx = out.xy[i * 2 + 2], by = out.xy[i * 2 + 3];
-        const float len = out.cum[i + 1] - out.cum[i];
-        // The run-on ends: sampled from the drawn end outward, as far as `reach`.
-        const bool run_start = i == 0, run_end = i + 2 == k;
-        const float step = run_start || run_end ? 12.0f : 3.0f;
-        float t0 = 0.0f, t1 = len;
-        if (run_start) t0 = std::max(0.0f, len - reach);
-        if (run_end)   t1 = std::min(len, reach);
-        const int n = std::max(1, (int)std::ceil((t1 - t0) / step));
-        const float ds = (t1 - t0) / (float)n;
-        for (int j = 0; j < n; j++) {
-            const float u = t0 + ds * ((float)j + 0.5f);
-            const float f = u / len;
-            out.smp.push_back(ax + (bx - ax) * f);
-            out.smp.push_back(ay + (by - ay) * f);
-            out.smp.push_back(out.cum[i] + u);
-            out.smp.push_back(ds);
+    for (int L = 0; L < ClipPath::kClipLevels; L++) {
+        std::vector<float>& smp = out.smp[L];
+        smp.clear();
+        const float step_draw = 3.0f * (float)(1 << L);
+        const float step_run = std::max(12.0f, step_draw);
+        for (size_t i = 0; i + 1 < k; i++) {
+            const float ax = out.xy[i * 2], ay = out.xy[i * 2 + 1];
+            const float bx = out.xy[i * 2 + 2], by = out.xy[i * 2 + 3];
+            const float len = out.cum[i + 1] - out.cum[i];
+            // The run-on ends: sampled from the drawn end outward, as far as `reach`.
+            const bool run_start = i == 0, run_end = i + 2 == k;
+            const float step = run_start || run_end ? step_run : step_draw;
+            float t0 = 0.0f, t1 = len;
+            if (run_start) t0 = std::max(0.0f, len - reach);
+            if (run_end)   t1 = std::min(len, reach);
+            const int n = std::max(1, (int)std::ceil((t1 - t0) / step));
+            const float ds = (t1 - t0) / (float)n;
+            for (int j = 0; j < n; j++) {
+                const float u = t0 + ds * ((float)j + 0.5f);
+                const float f = u / len;
+                smp.push_back(ax + (bx - ax) * f);
+                smp.push_back(ay + (by - ay) * f);
+                smp.push_back(out.cum[i] + u);
+                smp.push_back(ds);
+            }
+        }
+        std::vector<float>& box = out.box[L];
+        box.clear();
+        const size_t ns = smp.size() / 4;
+        for (size_t r = 0; r < ns; r += ClipPath::kClipRun) {
+            float x0 = 3.4e38f, y0 = 3.4e38f, x1 = -3.4e38f, y1 = -3.4e38f;
+            for (size_t i = r; i < std::min(ns, r + ClipPath::kClipRun); i++) {
+                x0 = std::min(x0, smp[i * 4]);     x1 = std::max(x1, smp[i * 4]);
+                y0 = std::min(y0, smp[i * 4 + 1]); y1 = std::max(y1, smp[i * 4 + 1]);
+            }
+            box.insert(box.end(), {x0, y0, x1, y1});
         }
     }
     out.ok = true;
@@ -186,19 +205,56 @@ bool clip_target(const ClipPath& path, bool flip, float x, float y, float& tx, f
     // through the bend instead of tearing across it.
     const float dmin = std::fabs(side);
     const float tau = 6.0f + kClipSpread * dmin;
-    const float cut = dmin + 8.0f * tau, cut2 = cut * cut;   // beyond: weight < e^-8
-    float sw = 0.0f, ss = 0.0f;
-    const size_t ns = path.smp.size() / 4;
-    for (size_t i = 0; i < ns; i++) {
-        const float* q = &path.smp[i * 4];
-        const float dx = q[0] - x, dy = q[1] - y;
-        const float d2 = dx * dx + dy * dy;
-        if (d2 > cut2) continue;
-        const float w = q[3] * std::exp(-(std::sqrt(d2) - dmin) / tau);
-        sw += w; ss += w * q[2];
-    }
-    if (sw <= 0.0f) { tx = qx; ty = qy; return true; }
-    const float s = ss / sw;
+    // The weight is exp(-e / tau) for e = how much farther than the nearest a sample
+    // is, out to 6 tau, then fades smoothly to exactly 0 at 8 tau (so a sample dropping
+    // out never moves anything by a jump). Runs of samples whose box is out of reach
+    // are skipped whole, the rest on the cheap squared test.
+    const float reach = 8.0f * tau, fade0 = 6.0f * tau;
+    const float lim = dmin + reach, lim2 = lim * lim;
+    auto blend = [&](int L, float& s_out) {
+        const std::vector<float>& smp = path.smp[L];
+        const std::vector<float>& box = path.box[L];
+        float sw = 0.0f, ss = 0.0f;
+        const size_t ns = smp.size() / 4;
+        for (size_t r = 0; r * 4 < box.size(); r++) {
+            const float* b = &box[r * 4];
+            const float bx = std::max(std::max(b[0] - x, x - b[2]), 0.0f);
+            const float by = std::max(std::max(b[1] - y, y - b[3]), 0.0f);
+            if (bx * bx + by * by >= lim2) continue;
+            const size_t i1 = std::min(ns, (r + 1) * (size_t)ClipPath::kClipRun);
+            for (size_t i = r * ClipPath::kClipRun; i < i1; i++) {
+                const float* q = &smp[i * 4];
+                const float dx = q[0] - x, dy = q[1] - y;
+                const float d2 = dx * dx + dy * dy;
+                if (d2 >= lim2) continue;
+                const float e = std::max(0.0f, std::sqrt(d2) - dmin);
+                float w = q[3] * std::exp(-e / tau);
+                if (e > fade0) {
+                    const float f = 1.0f - (e - fade0) / (reach - fade0);
+                    w *= f * f * (3.0f - 2.0f * f);
+                }
+                sw += w; ss += w * q[2];
+            }
+        }
+        if (sw <= 0.0f) return false;
+        s_out = ss / sw;
+        return true;
+    };
+    // The level whose spacing is about tau / 2 (fine enough to sum the blend well:
+    // tau / 8 lands the same to a pixel, at four times the cost),
+    // and the next coarser one, mixed by the fraction between them so the landing
+    // place slides smoothly with depth instead of stepping where the level changes.
+    const float lv = std::min(std::max(std::log2(tau / 6.0f), 0.0f),
+                              (float)(ClipPath::kClipLevels - 1));
+    const int L0 = (int)lv;
+    const int L1 = std::min(L0 + 1, ClipPath::kClipLevels - 1);
+    const float fr = lv - (float)L0;
+    float s0 = 0.0f, s1 = 0.0f;
+    const bool ok0 = blend(L0, s0);
+    const bool ok1 = fr > 0.0f && L1 != L0 ? blend(L1, s1) : ok0;
+    if (fr <= 0.0f || L1 == L0) s1 = s0;
+    if (!ok0 && !ok1) { tx = qx; ty = qy; return true; }
+    const float s = !ok0 ? s1 : !ok1 ? s0 : s0 + (s1 - s0) * fr;
 
     // Back from arc length to a point on the curve.
     const size_t k = path.cum.size();
@@ -246,25 +302,55 @@ void clip_bind(const Mesh& mesh, const Camera& cam, int w, int h, const ClipPath
 
     const bool has_mask = !mesh.mask.empty();
     const uint32_t vc = mesh.vertex_count();
-    for (uint32_t v = 0; v < vc; v++) {
-        const float m = has_mask && v < mesh.mask.size() ? mesh.mask[v] : 0.0f;
-        if (m >= 1.0f) continue;
-        const Vec3 p = mesh.get_pos(v);
-        Vec3 q = cut(p);
-        if (mirror) {
-            // The wall reflected in x = 0: reflect, cut, reflect back.
-            const Vec3 r = cut(Vec3(-q.x, q.y, q.z));
-            q = Vec3(-r.x, r.y, r.z);
+    auto run = [&](uint32_t v0, uint32_t v1, std::vector<uint32_t>& out_ids,
+                   std::vector<float>& out_t) {
+        for (uint32_t v = v0; v < v1; v++) {
+            const float m = has_mask && v < mesh.mask.size() ? mesh.mask[v] : 0.0f;
+            if (m >= 1.0f) continue;
+            const Vec3 p = mesh.get_pos(v);
+            Vec3 q = cut(p);
+            if (mirror) {
+                // The wall reflected in x = 0: reflect, cut, reflect back.
+                const Vec3 r = cut(Vec3(-q.x, q.y, q.z));
+                q = Vec3(-r.x, r.y, r.z);
+            }
+            if (q.x == p.x && q.y == p.y && q.z == p.z) continue;
+            const Vec3 t = p + (q - p) * (1.0f - m);
+            out_ids.push_back(v);
+            out_t.push_back(t.x);
+            out_t.push_back(t.y);
+            out_t.push_back(t.z);
         }
-        if (q.x == p.x && q.y == p.y && q.z == p.z) continue;
-        const Vec3 t = p + (q - p) * (1.0f - m);
-        ids.push_back(v);
-        targets.push_back(t.x);
-        targets.push_back(t.y);
-        targets.push_back(t.z);
+    };
+
+    // Every vertex is independent, so on the desktop the mesh is cut in slices, one per
+    // core, and the slices' lists joined in order (the list stays sorted by id, as one
+    // pass would make it). The web build has no threads: one pass there.
+    unsigned nt = 1;
+#ifndef __EMSCRIPTEN__
+    if (vc >= 50000u) nt = std::max(1u, std::min(std::thread::hardware_concurrency(), 32u));
+#endif
+    if (nt <= 1) {
+        run(0, vc, ids, targets);
+    } else {
+#ifndef __EMSCRIPTEN__
+        std::vector<std::vector<uint32_t>> part_ids(nt);
+        std::vector<std::vector<float>> part_t(nt);
+        std::vector<std::thread> pool;
+        const uint32_t per = (vc + nt - 1) / nt;
+        for (unsigned k = 0; k < nt; k++) {
+            const uint32_t v0 = std::min(vc, k * per), v1 = std::min(vc, v0 + per);
+            pool.emplace_back([&, k, v0, v1]() { run(v0, v1, part_ids[k], part_t[k]); });
+        }
+        for (std::thread& th : pool) th.join();
+        for (unsigned k = 0; k < nt; k++) {
+            ids.insert(ids.end(), part_ids[k].begin(), part_ids[k].end());
+            targets.insert(targets.end(), part_t[k].begin(), part_t[k].end());
+        }
+#endif
     }
     const double ms = std::chrono::duration<double, std::milli>(
                           std::chrono::steady_clock::now() - t0).count();
-    std::printf("[clip] bind: %zu segments, %zu samples, %u verts in %.1f ms\n",
-                path.nrm.size() / 2, path.smp.size() / 4, vc, ms);
+    std::printf("[clip] bind: %zu segments, %zu samples, %u verts, %u thread%s, %.1f ms\n",
+                path.nrm.size() / 2, path.smp[0].size() / 4, vc, nt, nt == 1 ? "" : "s", ms);
 }

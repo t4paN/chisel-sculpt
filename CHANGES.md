@@ -2,6 +2,10 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-24 — Clip brush: fast at millions of vertices
+
+- The curve blend reads coarser samples the deeper a point sits, skips stretches of curve out of reach, and runs on every core on the desktop (one thread on the web). Bench (half a million points, outside of a C): 1987 ms → 433 ms on one thread; at 2M vertices a cut takes 20–200 ms on 24 threads. Landing places match the previous version to within a few pixels.
+
 ## 2026-11-24 — Clip brush: curves
 
 - Clip now follows a freehand curve, smoothed, its ends run on to the window's edges; Alt held while dragging snaps to a straight line. The shading is the cut's own side test, so it shows exactly what will move.
