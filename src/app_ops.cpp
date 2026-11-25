@@ -157,6 +157,44 @@ void app_print_undo_top(App& a, const char* tag) {
 // Prepare + capture the rescue snapshot, shared by '/' and 'J'. Frees the
 // undo history, bakes the scene down to the triangle cap, then copies the
 // stacks.
+// Same 4 GB wall as the level switches: SDF on a 30.8M-tri model aborted the page
+// before its first log line (2026-11-25). The merge's CPU side holds the triangle soup
+// (~12 B/tri indices + 12 B/vert positions), the splat boxes and offsets read back for
+// the scan (28 B/tri), and up to three grids ((R+1)^3 floats each). Native: always fits.
+static bool app_sdf_fits_web_heap(App& a) {
+#if defined(__EMSCRIPTEN__)
+    auto& scene = a.scene;
+    auto& input = a.input;
+    uint64_t tris = 0, verts = 0;
+    for (uint32_t id : scene.selected_ids()) {
+        const MeshEntity* e = scene.find_entity(id);
+        if (!e || !e->alive) continue;
+        tris  += e->mesh.tri_count();
+        verts += e->mesh.vertex_count();
+    }
+    const uint64_t R     = (uint64_t)std::min(input.voxel_merge_resolution,
+                                              voxel_merge_max_resolution()) + 1;
+    const size_t   need  = (size_t)(tris * 40 + verts * 24 + 3 * R * R * R * 4);
+    const size_t   used  = mallinfo().uordblks;
+    const size_t   cap   = emscripten_get_heap_max();
+    const size_t   have  = cap > used ? cap - used : 0;
+    const size_t   slack = (size_t)256 << 20;
+    std::printf("[sdf] web heap check: %.1fM tris needs ~%zu MB, %zu MB left\n",
+                (double)tris / 1e6, need >> 20, have >> 20);
+    if (need + slack > have) {
+        std::snprintf(input.notification, sizeof(input.notification),
+                      "Too big to SDF in the browser (needs %zu MB more, %zu MB left). "
+                      "Go down a level first, or use the desktop app.",
+                      need >> 20, have >> 20);
+        input.notification_timer = 6.0f;
+        return false;
+    }
+#else
+    (void)a;
+#endif
+    return true;
+}
+
 void app_take_rescue(App& a, const char* op) {
     auto& scene = a.scene;
     auto& compute = a.compute;
@@ -1150,6 +1188,8 @@ void app_ops_remesh_and_merge(App& a) {
             std::snprintf(input.notification, sizeof(input.notification),
                           "SDF remesh needs GPU compute (unavailable)");
             input.notification_timer = 4.0f;
+        } else if (!vmerge_job && !app_sdf_fits_web_heap(a)) {
+            // refused: the toast and log line are set inside
         } else if (!vmerge_job) {
             take_rescue("SDF remesh");
             scene.materialize_active_cpu();  // 2b: merge reads the live surface (mesh.pos)
@@ -1238,11 +1278,13 @@ void app_ops_remesh_and_merge(App& a) {
                     remesh_chained_from_merge = true;
                 }
             } else {
-                rescue.clear();   // scene untouched, nothing to revert to
+                // Untouched on the desktop: the rescue copy no longer bakes levels there.
+                // (The browser still bakes to fit its 1M cap; those levels are gone.)
+                rescue.clear();
                 std::printf("[voxel-merge] FAILED: %s\n", vm.error.c_str());
                 std::snprintf(input.notification, sizeof(input.notification),
                               "SDF remesh failed: %.200s", vm.error.c_str());
-                input.notification_timer = 4.0f;
+                input.notification_timer = 12.0f;   // 4 s went by unread (2026-11-25)
             }
             // CHISEL_AUTO_QUIT: a scripted merge ends on its own, like a scripted remesh
             // (a chained Rebuild levels ends it instead).
