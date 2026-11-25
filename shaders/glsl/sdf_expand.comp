@@ -18,10 +18,15 @@ layout(std140, binding = 63) uniform Params {
     vec3  u_origin;    // 0
     float u_voxel;     // 12
     int   u_R;         // 16
-    uint  u_triCount;  // 20
-    uint  u_workCount; // 24
-    uint  u_workOffset; // 28  this slice's first work item
+    uint  u_triCount;  // 20  this batch's end tri (exclusive)
+    uint  u_workCount; // 24  this batch's work items
+    uint  u_workOffset; // 28  this slice's first work item, within the batch
+    uint  u_triBegin;  // 32  this batch's first tri
+    uint  _p0, _p1, _p2;
 };
+// Batches: past 2^32 voxel-touches a uint32 scan wraps, so the CPU splits the tris into
+// runs of < 2^31 touches each; off[] restarts at 0 per run and the owner search stays
+// inside [u_triBegin, u_triCount).
 
 uint linear_gid() {
     return gl_GlobalInvocationID.x
@@ -73,8 +78,8 @@ float pt_tri_dist(vec3 pt, vec3 a, vec3 b, vec3 c) {
 void main() {
     uint gid = linear_gid() + u_workOffset;
     if (gid >= u_workCount) return;
-    // Owner = upper_bound(off, gid) - 1 over [0, u_triCount): first i with off[i] > gid.
-    uint lo = 0u, hi = u_triCount;
+    // Owner = upper_bound(off, gid) - 1 over [u_triBegin, u_triCount): first i with off[i] > gid.
+    uint lo = u_triBegin, hi = u_triCount;
     while (lo < hi) { uint mid = (lo + hi) >> 1u; if (off[mid] <= gid) lo = mid + 1u; else hi = mid; }
     uint t = lo - 1u;
     uint j = gid - off[t];                      // local work index within triangle t

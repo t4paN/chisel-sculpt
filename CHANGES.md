@@ -2,6 +2,10 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-25 — SDF merge past 4.3 billion voxel-touches
+- The distance splat runs in batches of under 2^31 voxel-touches instead of failing past 2^32 ("SDF splat overflow"). A 62.9M-tri ball at R=512 (6.8 billion touches, 4 batches) now merges; batched and single-pass results are byte-identical.
+- Dev hook: `CHISEL_SPLAT_BATCH=<touches>` forces small batches.
+
 ## 2026-11-25 — Browser subdivides to 30.8M tris; level-ups use less memory
 
 - Web: a 7.7M-tri model now subdivides to 30.8M tris in the browser (heap peak 3.6 GB under the 4 GB cap; it used to abort the page). Sculpting there runs 55–58 fps in Chrome.

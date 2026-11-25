@@ -1776,6 +1776,7 @@ struct SdfExpandParamsGPU {
     float ox, oy, oz;     float voxel;
     int32_t R;            uint32_t triCount;
     uint32_t workCount;   uint32_t workOffset;
+    uint32_t triBegin;    uint32_t _p0, _p1, _p2;   // batch's first tri (triCount = its end)
 };
 struct SdfSignParamsGPU {
     float ox, oy, oz;     float voxel;
@@ -1791,7 +1792,7 @@ struct SdfMeshParamsGPU {                    // shared by mc + nets (same unifor
     uint32_t cellOffset;  uint32_t _pad0, _pad1, _pad2;
 };
 static_assert(sizeof(SdfCountParamsGPU)  == 32, "");
-static_assert(sizeof(SdfExpandParamsGPU) == 32, "");
+static_assert(sizeof(SdfExpandParamsGPU) == 48, "");
 static_assert(sizeof(SdfSignParamsGPU)   == 48, "");
 static_assert(sizeof(SdfMeshParamsGPU)   == 48, "");
 
@@ -1839,7 +1840,13 @@ struct VoxelMergeJob {
     uint32_t tri_count    = 0;
     uint32_t corner_count = 0;
     uint32_t cell_count   = 0;
-    uint32_t work_count   = 0;
+    uint64_t work_count   = 0;     // total voxel-touches, all batches
+    uint64_t work_done    = 0;     // touches already dispatched (progress)
+    // The splat in runs of < 2^31 touches: past 2^32 the uint32 scan wraps (0.98M tris at
+    // R=512 is 6.8e9). off[] restarts at 0 per batch; the expand shader searches inside it.
+    struct SplatBatch { uint32_t t0, t1, work; };
+    std::vector<SplatBatch> batches;
+    uint32_t batch        = 0;     // batch the expand pass is on
     uint32_t out_tris     = 0;
     uint32_t sign_off     = 0;     // resumable winding-sign cursor (corner index)
     uint32_t expand_off   = 0;     // same for the distance splat (work item)
@@ -2678,25 +2685,34 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
         std::vector<uint32_t> box_cpu((size_t)j.tri_count*6), off_cpu(j.tri_count);
         gpu::read_buffer(cs.gpu_dev, j.splat_box, 0,
                          (uint64_t)j.tri_count*6*sizeof(uint32_t), box_cpu.data());
-        uint64_t acc = 0;
+        // The expand pass's owner search needs off[] monotonic inside a batch, and a
+        // uint32 offset that wrapped mid-scan gave garbage owners -> OOB atomicMin into
+        // dist[] (the old non-deterministic crash). So a batch closes before its offsets
+        // could pass 2^31; one tri's box is at most (R+1)^3 = 1.35e8 at R=512, so it
+        // always fits in a fresh batch.
+        uint64_t kBatchWork = 1ull << 31;
+        // Dev: CHISEL_SPLAT_BATCH=<touches> forces small batches, so a small model can
+        // prove many batches give the same bytes as one.
+        if (const char* e = std::getenv("CHISEL_SPLAT_BATCH"))
+            kBatchWork = std::max<uint64_t>(1, std::strtoull(e, nullptr, 10));
+        j.batches.clear();
+        uint64_t acc = 0, total = 0;
+        uint32_t t0 = 0;
         for (uint32_t t = 0; t < j.tri_count; t++) {
             uint64_t footprint = (uint64_t)box_cpu[6*t+3] * box_cpu[6*t+4] * box_cpu[6*t+5];
+            if (acc + footprint > kBatchWork) {
+                j.batches.push_back({ t0, t, (uint32_t)acc });
+                t0 = t; acc = 0;
+            }
             off_cpu[t] = (uint32_t)acc;
             acc += footprint;
+            total += footprint;
         }
-        j.work_count = (uint32_t)acc;          // total voxel-touches across all tris
-
-        // Hard guard: the expand pass's owner search needs off[] strictly monotonic.
-        // A uint32 work-count overflow wraps off[] mid-scan -> garbage owner -> OOB
-        // atomicMin into dist[] (the old non-deterministic crash). Bail cleanly.
-        if (acc > 0xFFFFFFFFull) {
-            char ebuf[176];
-            std::snprintf(ebuf, sizeof(ebuf),
-                "SDF splat overflow: %llu voxel-touches > 2^32 (tris=%u R=%d) - lower merge resolution",
-                (unsigned long long)acc, j.tri_count, grid.R);
-            std::printf("[sdf] %s\n", ebuf);
-            return fail(ebuf);
-        }
+        if (acc > 0) j.batches.push_back({ t0, j.tri_count, (uint32_t)acc });
+        j.work_count = total;          // total voxel-touches across all tris
+        if (j.batches.size() > 1)
+            std::printf("[sdf] splat: %.2fG voxel-touches in %zu batches (tris=%u R=%d band=%d)\n",
+                        (double)total / 1e9, j.batches.size(), j.tri_count, grid.R, j.band);
 #ifdef CHISEL_DEBUG
         {
             // Validate every counted box stays inside [0,R]^3 (free: box_cpu is on CPU).
@@ -2711,9 +2727,9 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
                 uint32_t m = std::max(hi_i, std::max(hi_j, hi_k));
                 if (m > max_idx) max_idx = m;
             }
-            std::printf("[sdf][dbg] tris=%u corners=%u cells=%u R=%d band=%d | work=%u acc=%llu | box max-axis-idx=%u out-of-range=%u\n",
+            std::printf("[sdf][dbg] tris=%u corners=%u cells=%u R=%d band=%d | work=%llu batches=%zu | box max-axis-idx=%u out-of-range=%u\n",
                         j.tri_count, j.corner_count, j.cell_count, grid.R, j.band,
-                        j.work_count, (unsigned long long)acc, max_idx, bad_box);
+                        (unsigned long long)j.work_count, j.batches.size(), max_idx, bad_box);
             if (bad_box)
                 std::printf("[sdf][dbg] WARNING %u boxes exceed [0,R] - expand pass writes OOB into dist[]\n", bad_box);
         }
@@ -2722,6 +2738,8 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
                           (uint64_t)j.tri_count*sizeof(uint32_t));
 
         j.expand_off = 0;
+        j.work_done = 0;
+        j.batch = 0;
         j.sign_off = 0;
         j.phase = j.work_count > 0u ? Phase::Expand : (j.wrap ? Phase::Mesh : Phase::Sign);
         return done(VoxelMergeStatus::Working);
@@ -2736,7 +2754,6 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
         SdfExpandParamsGPU eu = {};
         eu.ox = grid.origin.x; eu.oy = grid.origin.y; eu.oz = grid.origin.z;
         eu.voxel = grid.voxel; eu.R = (int)grid.R;
-        eu.triCount = j.tri_count; eu.workCount = j.work_count;
 
         const gpu::BindBufferEntry ebg[] = {
             { BIND_SDF_SOUP_POS,     &j.soup_pos,  j.soup_pos.size },
@@ -2747,8 +2764,10 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
             { BIND_PARAMS,           &j.expand_ubo, sizeof(SdfExpandParamsGPU) },
         };
         gpu::BindGroup egrp = gpu::create_bind_group(cs.gpu_dev, j.expand_pipe, ebg, 6);
-        for (uint32_t s = 0; s < SLICES_PER_TICK && j.expand_off < j.work_count; s++) {
-            const uint32_t n = std::min(EXPAND_SLICE, j.work_count - j.expand_off);
+        for (uint32_t s = 0; s < SLICES_PER_TICK && j.batch < j.batches.size(); s++) {
+            const VoxelMergeJob::SplatBatch& sb = j.batches[j.batch];
+            const uint32_t n = std::min(EXPAND_SLICE, sb.work - j.expand_off);
+            eu.triBegin = sb.t0; eu.triCount = sb.t1; eu.workCount = sb.work;
             eu.workOffset = j.expand_off;
             gpu::write_buffer(cs.gpu_dev, j.expand_ubo, 0, &eu, sizeof(eu));
             gpu::ComputeBatch b = gpu::begin_compute(cs.gpu_dev);
@@ -2758,9 +2777,11 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
             glFlush();
 #endif
             j.expand_off += n;
+            j.work_done  += n;
+            if (j.expand_off >= sb.work) { j.batch++; j.expand_off = 0; }
         }
         gpu::release_bind_group(egrp);
-        if (j.expand_off >= j.work_count) {
+        if (j.batch >= j.batches.size()) {
             sdf_gl_check("expand dispatch");
             // Wrap mode decides inside by flooding air and reads distance only, so the sign
             // pass would be wasted work: most of a merge's time, and its worst slices can
@@ -3202,7 +3223,7 @@ float voxel_merge_progress(const VoxelMergeJob& j) {
     switch (j.phase) {
         case VoxelMergeJob::Phase::Splat:  return 0.02f;
         case VoxelMergeJob::Phase::Expand: return j.work_count
-                                               ? 0.02f + 0.08f * ((float)j.expand_off / (float)j.work_count)
+                                               ? 0.02f + 0.08f * (float)((double)j.work_done / (double)j.work_count)
                                                : 0.10f;
         case VoxelMergeJob::Phase::Sign:   return j.corner_count
                                                ? 0.10f + 0.70f * ((float)j.sign_off / (float)j.corner_count)

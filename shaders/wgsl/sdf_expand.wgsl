@@ -9,10 +9,15 @@ struct Params {
     u_origin    : vec3<f32>,  // 0
     u_voxel     : f32,        // 12
     u_R         : i32,        // 16
-    u_triCount  : u32,        // 20
-    u_workCount : u32,        // 24
-    u_workOffset : u32,       // 28  this slice's first work item
+    u_triCount  : u32,        // 20  this batch's end tri (exclusive)
+    u_workCount : u32,        // 24  this batch's work items
+    u_workOffset : u32,       // 28  this slice's first work item, within the batch
+    u_triBegin  : u32,        // 32  this batch's first tri
+    _p0 : u32, _p1 : u32, _p2 : u32,
 };
+// Batches: past 2^32 voxel-touches a uint32 scan wraps, so the CPU splits the tris into
+// runs of < 2^31 touches each; off[] restarts at 0 per run and the owner search stays
+// inside [u_triBegin, u_triCount).
 
 @group(0) @binding(21) var<storage, read>       p   : array<f32>;
 @group(0) @binding(22) var<storage, read>       ix  : array<u32>;
@@ -62,8 +67,8 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>,
         @builtin(num_workgroups)        nwg : vec3<u32>) {
     let g = gid.x + gid.y * nwg.x * 64u + P.u_workOffset;
     if (g >= P.u_workCount) { return; }
-    // Owner = upper_bound(off, g) - 1 over [0, u_triCount): first i with off[i] > g.
-    var lo = 0u; var hi = P.u_triCount;
+    // Owner = upper_bound(off, g) - 1 over [u_triBegin, u_triCount): first i with off[i] > g.
+    var lo = P.u_triBegin; var hi = P.u_triCount;
     loop {
         if (lo >= hi) { break; }
         let mid = (lo + hi) >> 1u;
