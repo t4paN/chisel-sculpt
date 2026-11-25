@@ -74,6 +74,17 @@ add_custom_target(chisel_fonts DEPENDS "${CHISEL_FONTS_HEADER}")
 # earlier probe target (chisel-wgpu-probe) proved the toolchain + async adapter
 # pattern; the full app is the next milestone. See ../webgpu-emscripten-handoff.md.
 # ---------------------------------------------------------------------------
+if(EMSCRIPTEN)
+    # Memory64: wasm64, the heap may pass 4 GB (Chrome/Edge/Firefox; no Safari/WebKit).
+    # Every object must be built 64-bit, so it goes on globally, before any target.
+    # build-web stays wasm32 and build-web64 turns this on; itch ships both and the
+    # page picks one per browser (packaging/web/pack-itch.sh).
+    option(CHISEL_WEB_MEMORY64 "Web: build wasm64 (heap past 4 GB, no Safari)" OFF)
+    if(CHISEL_WEB_MEMORY64)
+        add_compile_options(-sMEMORY64=1)
+        add_link_options(-sMEMORY64=1)
+    endif()
+endif()
 if(EMSCRIPTEN AND CHISEL_GPU_BACKEND STREQUAL "webgpu")
     # Web flags. The emdawnwebgpu port is needed at compile (headers) AND link;
     # -sUSE_GLFW=3 is a link-only setting (warns if passed at compile), so it's
@@ -331,7 +342,8 @@ if(EMSCRIPTEN)
         # ~30M-tri model aborted the page at 2 GB (2026-11-17); the projection's own
         # peak is now ~1 GB there, but a cold descent also builds the upper levels'
         # topology and frames, which stay. app_ops refuses what still won't fit.
-        -sMAXIMUM_MEMORY=4GB
+        # wasm64: 16 GB, Chrome's Memory64 ceiling; app_ops still refuses what won't fit.
+        $<IF:$<BOOL:${CHISEL_WEB_MEMORY64}>,-sMAXIMUM_MEMORY=16GB,-sMAXIMUM_MEMORY=4GB>
         # ccall backs the file-picker JS→C callback (chisel_web_import_done);
         # stringToNewUTF8 hands the stored settings blob back out of localStorage
         # (settings.cpp). Without the export they get DCE'd out of the runtime.

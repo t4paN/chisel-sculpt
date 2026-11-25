@@ -2,6 +2,11 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-25 — Browser: 64-bit build, up to 16 GB
+- Web: the itch page carries two builds and loads the 64-bit one (Memory64, heap up to 16 GB) where the browser supports it (Chrome, Edge, Firefox); Safari and iOS keep the 32-bit one (4 GB). `?wasm32` in the URL forces the 32-bit build.
+- Same fps as the 32-bit build (7.7M: 75/75, 30M: 64/61 orbit/stroke in Chrome); 7.7M -> 30.8M subdivides in 20 s instead of 24. The startup sphere reaches L11 (84M tris) in the browser, though past the graphics card's memory strokes slow down (Chrome) or stall (Firefox).
+- Build: CMake option `CHISEL_WEB_MEMORY64` (`build-web64`); `pack-itch.sh` zips both builds and refuses two different versions.
+
 ## 2026-11-25 — Browser: sphere past 5M, SDF keeps its detail, honest memory checks
 - The subdivision cap is L12 instead of L9: the startup sphere (L4) stopped at 5.2M tris; the memory checks decide now. At the cap a toast says so instead of a freeze notice for a switch that never ran.
 - Web: the memory checks for level up/down and SDF count in 64 bits; past 4 GB the estimate wrapped round and "fit", so 59.4M aborted the page instead of being refused.
