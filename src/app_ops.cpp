@@ -520,6 +520,7 @@ void app_ops_levels_and_views(App& a) {
         input.level_switch_delta = 0;
         const int from   = multires->current_level;
         const int target = from + delta;
+        bool deferred = false;   // web: a big switch waits one frame behind its notice
         // Subdivision guard: before going up a level, predict the largest
         // resulting GPU buffer against the limits the device actually granted.
         // Subdividing quadruples tris. Refusing here beats attempting the build
@@ -598,8 +599,35 @@ void app_ops_levels_and_views(App& a) {
                 delta = 0;
             }
         }
+        // A big switch freezes the tab for many seconds (~23 s for 7.7M -> 30.8M) and the
+        // page can't draw while it runs, so a user sees a hung tab and clicks into it. Say
+        // so first: show the notice this frame, run the switch on the next one.
+        {
+            // When the notice went up; a switch within a second of it is the deferred one.
+            // A time, not a flag: a switch dropped in between (a stroke began) can't leave
+            // the next big one without its notice.
+            static double notice_at = -1e9;
+            const bool notice_shown = glfwGetTime() - notice_at < 1.0;
+            const double tris_now  = (double)mesh->tri_count();
+            const double tris_then = delta > 0 ? tris_now * 4.0 : tris_now / 4.0;
+            const bool big = delta != 0 && std::max(tris_now, tris_then) >= 8e6;
+            if (big && !notice_shown) {
+                std::snprintf(input.notification, sizeof(input.notification),
+                              "%s to %.1fM tris - the page will freeze for a while, "
+                              "please wait", delta > 0 ? "Subdividing" : "Going down",
+                              tris_then / 1e6);
+                input.notification_timer = 4.0f;
+                input.level_switch_delta = delta;   // run it next frame; subdiv_confirmed rides along
+                notice_at = glfwGetTime();
+                delta = 0;
+            } else if (big) {
+                notice_at = -1e9;
+            }
+            deferred = input.level_switch_delta != 0;
+        }
 #endif
-        input.subdiv_confirmed = false;   // good for the one switch it was given for
+        // Good for the one switch it was given for; a deferred switch keeps it for its real run.
+        if (!deferred) input.subdiv_confirmed = false;
         const double switch_t0 = glfwGetTime();
         // Level-up memory, logged so level_up_memory_estimate can be calibrated (web: heap
         // size, which never shrinks, so "peak" is the high-water mark; native: VmHWM).

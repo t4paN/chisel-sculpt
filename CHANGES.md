@@ -8,6 +8,7 @@ Short, chronological log of notable changes. Newest on top.
 - The topology cache no longer keeps a second copy of the live level's triangles and neighbour lists: the live mesh holds them and hands them back before it is rebuilt (~760 MB less at 30.8M, native too).
 - Full mesh uploads stream positions, normals and mask through a 3 MB scratch instead of whole-mesh temporaries (~430 MB less at the level-up peak).
 - Web: a level-up that would not fit the heap is refused with a toast instead of crashing; the estimate is calibrated against measured peaks and logged on every level-up.
+- Web: a level switch to or from 8M+ tris first shows "the page will freeze for a while, please wait", then runs on the next frame, so the ~20 s build no longer looks like a hung tab.
 - Dev hooks: `CHISEL_MEMTRACE=1` prints memory at each step of a level change; `CHISEL_AUTO_SAVE=<path>` saves after a `CHISEL_AUTO_LEVELS` run, which now answers the 30M+ prompt itself.
 
 ## 2026-11-25 — No more black streaks on dense models
