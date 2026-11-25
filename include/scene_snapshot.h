@@ -52,7 +52,15 @@ struct SceneSnapshot {
 
 // The cap is in TRIANGLES, not bytes: it is the number a sculptor can reason
 // about, and past it the copy stops being cheap enough to be automatic.
+// The 1M cap is the browser's: its 4 GB heap can't hold a second copy of a big
+// model. On the desktop, baking levels away to fit it cost the user L6-L8 of a
+// 62.9M ball when the merge after it failed (2026-11-25), and the copy is only
+// the stack (base + displacement layers, ~0.5 GB at 62.9M), so it stays whole.
+#if defined(__EMSCRIPTEN__)
 constexpr uint64_t SNAPSHOT_TRI_CAP = 1000000;
+#else
+constexpr uint64_t SNAPSHOT_TRI_CAP = 256000000;
+#endif
 
 // Triangles the scene carries at its entities' top levels. Read off the stacks
 // (base tris * 4^layers — Loop quadruples exactly), never off the working mesh,

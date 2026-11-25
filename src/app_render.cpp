@@ -203,7 +203,17 @@ void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse) {
         renderer.draw_baked(camera, win_w, win_h, r.has_normal, r.has_color && renderer.paint_visible > 0.5f,
                             r.flip_green);
     }
-    {
+    // A merge over a big scene: don't redraw it every frame. The merge only advances
+    // between frames, and a 62.9M-tri redraw (~650 ms on the B570) stretched one from
+    // ~1 min to 22 (2026-11-25). Small scenes stay on screen; the progress bar shows.
+    bool hide_for_merge = false;
+    if (input.voxel_merge_in_progress) {
+        uint64_t tris = 0;
+        for (auto& up : scene.entities())
+            if (up && up->alive) tris += up->mesh.tri_count();
+        hide_for_merge = tris >= 8000000ull;
+    }
+    if (!hide_for_merge) {
         const std::vector<uint32_t>& sel = scene.selected_ids();
         uint32_t active_id = scene.active_mesh_id();
         for (auto& up : scene.entities()) {
@@ -233,7 +243,7 @@ void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse) {
         renderer.invalidate_debug_mesh();
         prev_show_debug_mesh = input.show_debug_mesh;
     }
-    if (input.show_debug_mesh) {
+    if (input.show_debug_mesh && !hide_for_merge) {
         renderer.draw_debug_mesh(camera, *mesh, win_w, win_h);
     }
 

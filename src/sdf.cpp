@@ -6,6 +6,7 @@
 #include "mc_tables.h"
 #include "chisel_debug.h"
 #include "remesh.h"          // snap_mesh_to_soup
+#include "multires_stack.h"  // coarse splat soup: project_down_to_level, cascade_to_level
 #include <glad/glad.h>
 #include <cstdio>
 #include <cstring>
@@ -155,6 +156,80 @@ uint32_t gather_soup(const Scene& scene,
     if (!soup_nrm.empty()) soup_nrm.resize(pos.size(), 0.0f);
     return n_additive + n_cutter;
 }
+
+// Coarse soup for the GPU passes (desktop). Every triangle pays for a (2*band+1)^3 box
+// in the distance splat (19^3 at R=512), so a 62.9M-tri top level would be ~4e11
+// voxel-touches; the grid can't hold anything finer than a voxel anyway. So the splat,
+// the winding tree and the thin-skin test read each mesh at the highest level with at
+// most ~4 R^2 tris (about one tri per surface voxel), with the top levels' form
+// projected down into it (the same inverse Loop a level-down runs, on a copy of the
+// stack, so the user's stack and its GPU mirror stay as they are). The snap and the
+// paint transfer still read the full top level (VoxelMergeJob::pos/idx), which is
+// where the detail finer than a voxel comes back from.
+// Only for a mesh shown at its top level: below it, the merge reads what's on screen.
+// Same entity order and cutter flip as gather_soup. Returns false when nothing was
+// coarsened (the caller then uses the gathered soup for everything, as before).
+#if !defined(__EMSCRIPTEN__)
+static bool gather_coarse_soup(const Scene& scene, bool subtract, int R,
+                               std::vector<float>& pos, std::vector<uint32_t>& idx) {
+    const uint64_t target = 4ull * (uint64_t)R * (uint64_t)R;
+    bool any = false;
+    auto add = [&](const MeshEntity* e, bool cutter) {
+        if (!e) return;
+        const Mesh& live = e->mesh;
+        if (live.vertex_count() == 0 || live.indices.empty()) return;
+        const Mesh* m = &live;
+        Mesh view;
+        const MultiresStack& st = e->multires;
+        const int L_max = st.base_level + (int)st.disp.size();
+        if (st.locked && !st.disp.empty() && st.current_level == L_max &&
+            (uint64_t)live.tri_count() > target) {
+            int L = L_max;
+            uint64_t t = live.tri_count();
+            while (L > st.base_level && t > target) { L--; t /= 4; }
+            const auto t0 = std::chrono::steady_clock::now();
+            MultiresStack copy = st;                 // projection rewrites disp/frames
+            project_down_to_level(copy, L);
+            copy.current_level = L;
+            cascade_to_level(copy, view, L);
+            if (view.tri_count() > 0) {
+                m = &view;
+                any = true;
+                std::printf("[sdf] coarse splat soup: entity %u L%d -> L%d, %.2fM -> %.2fM tris (%.0f ms)\n",
+                            e->id, L_max, L, (double)live.tri_count() / 1e6,
+                            (double)view.tri_count() / 1e6,
+                            std::chrono::duration<double, std::milli>(
+                                std::chrono::steady_clock::now() - t0).count());
+            }
+        }
+        const uint32_t base = (uint32_t)(pos.size() / 3);
+        for (uint32_t v = 0; v < m->vertex_count(); v++) {
+            pos.push_back(m->pos_x[v]); pos.push_back(m->pos_y[v]); pos.push_back(m->pos_z[v]);
+        }
+        if (cutter) {
+            for (size_t t = 0; t + 2 < m->indices.size(); t += 3) {
+                idx.push_back(base + m->indices[t + 0]);
+                idx.push_back(base + m->indices[t + 2]);
+                idx.push_back(base + m->indices[t + 1]);
+            }
+        } else {
+            for (uint32_t i : m->indices) idx.push_back(base + i);
+        }
+    };
+    for (uint32_t id : scene.selected_ids()) add(scene.find_entity(id), false);
+    if (subtract) {
+        for (const auto& up : scene.entities()) {
+            if (!up || !up->alive || up->preview) continue;
+            bool selected = false;
+            for (uint32_t sid : scene.selected_ids())
+                if (sid == up->id) { selected = true; break; }
+            if (!selected) add(up.get(), true);
+        }
+    }
+    if (!any) { pos.clear(); idx.clear(); }
+    return any;
+}
+#endif
 
 // ---- Fast Winding Number tree ---------------------------------------------
 // The winding-sign pass used to be a brute O(band_corners * tris) solid-angle sum:
@@ -2411,7 +2486,19 @@ VoxelMergeJob* voxel_merge_begin(Scene& scene, ComputeState& cs,
     }
     if (subtract && n_additive == 0)
         return fail("subtract needs at least one selected (kept) mesh");
-    const uint32_t tri_count = job->res.in_tris;
+    // GPU-side soup: coarse when a mesh is far denser than the grid (see
+    // gather_coarse_soup), else the gathered one. pos/idx stay the full soup.
+    std::vector<float>    coarse_pos;
+    std::vector<uint32_t> coarse_idx;
+#if !defined(__EMSCRIPTEN__)
+    gather_coarse_soup(scene, subtract,
+                       std::max(16, std::min(resolution, voxel_merge_max_resolution())),
+                       coarse_pos, coarse_idx);
+#endif
+    const bool coarse = !coarse_idx.empty();
+    const std::vector<float>&    gpos = coarse ? coarse_pos : job->pos;
+    const std::vector<uint32_t>& gidx = coarse ? coarse_idx : idx;
+    const uint32_t tri_count = (uint32_t)(gidx.size() / 3);
     job->tri_count = tri_count;
 
     // ---- 2. Grid (cubic, padded so the surface never touches the wall) ----
@@ -2457,7 +2544,7 @@ VoxelMergeJob* voxel_merge_begin(Scene& scene, ComputeState& cs,
     // its cutters only exist as a backwards winding.
     if (!subtract) {
         float open_ratio = 0.0f;
-        const float thin = thin_skin_share(pos, idx, 0.005f * ext, open_ratio);
+        const float thin = thin_skin_share(gpos, gidx, 0.005f * ext, open_ratio);
         job->wrap = thin >= 0.25f || open_ratio >= 2.0f;
         // Just over the one voxel the flood needs to seal. Tied to the voxel and not to a
         // world width, as anything narrower than 2t stays bridged: more resolution has
@@ -2495,13 +2582,13 @@ VoxelMergeJob* voxel_merge_begin(Scene& scene, ComputeState& cs,
     using gpu::Usage;
     const uint32_t zero = 0u;
     // Source soup (uploaded at create).
-    job->soup_pos = gpu::create_buffer(cs.gpu_dev, pos.data(), pos.size()*sizeof(float),  Usage::Storage);
-    job->soup_idx = gpu::create_buffer(cs.gpu_dev, idx.data(), idx.size()*sizeof(uint32_t), Usage::Storage);
+    job->soup_pos = gpu::create_buffer(cs.gpu_dev, gpos.data(), gpos.size()*sizeof(float),  Usage::Storage);
+    job->soup_idx = gpu::create_buffer(cs.gpu_dev, gidx.data(), gidx.size()*sizeof(uint32_t), Usage::Storage);
 
     // Fast-winding-number tree for the sign pass (replaces the brute all-tris sum).
     std::vector<FwnNodeGPU> fwn_nodes;
     std::vector<uint32_t>   fwn_order;
-    build_fwn_tree(pos, idx, fwn_nodes, fwn_order);
+    build_fwn_tree(gpos, gidx, fwn_nodes, fwn_order);
     job->fwn_nodes = gpu::create_buffer(cs.gpu_dev, fwn_nodes.data(),
                                         fwn_nodes.size()*sizeof(FwnNodeGPU), Usage::Storage);
     job->fwn_order = gpu::create_buffer(cs.gpu_dev, fwn_order.data(),
@@ -2636,6 +2723,26 @@ static void write_in_pieces(ComputeState& cs, gpu::Buffer& b, uint64_t bytes, co
     }
 }
 
+// Desktop: a merge tick keeps feeding slices until kTickGpuMs of real GPU time has gone
+// by, waiting on each slice so the clock is the GPU's and not the submit's. The fixed
+// counts below were sized for the old laptop APU: 2 x 32768 corners a frame is ~2000
+// frames for a 513^3 grid - half a minute at 16 ms a frame, 22 min behind a 62.9M-tri
+// redraw (2026-11-25). Each slice stays its own submission, under the driver's 5 s job
+// watchdog. The web keeps the fixed counts: there's no cheap wait there.
+static bool merge_tick_budget_left(ComputeState& cs, const gpu::Buffer& fence,
+                                   std::chrono::steady_clock::time_point t0) {
+#if defined(__EMSCRIPTEN__)
+    (void)cs; (void)fence; (void)t0;
+    return false;
+#else
+    constexpr double kTickGpuMs = 40.0;
+    uint32_t sink = 0;
+    gpu::read_buffer(cs.gpu_dev, fence, 0, sizeof(sink), &sink);   // waits for the slices so far
+    return std::chrono::duration<double, std::milli>(
+               std::chrono::steady_clock::now() - t0).count() < kTickGpuMs;
+#endif
+}
+
 VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
                                   VoxelMergeJob& j, VoxelMergeResult& out) {
     // Pipelines were compiled in begin; tick dispatches them through cs.gpu_dev.
@@ -2764,7 +2871,9 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
             { BIND_PARAMS,           &j.expand_ubo, sizeof(SdfExpandParamsGPU) },
         };
         gpu::BindGroup egrp = gpu::create_bind_group(cs.gpu_dev, j.expand_pipe, ebg, 6);
-        for (uint32_t s = 0; s < SLICES_PER_TICK && j.batch < j.batches.size(); s++) {
+        const auto tick_t0 = std::chrono::steady_clock::now();
+        for (uint32_t s = 0; (s < SLICES_PER_TICK || merge_tick_budget_left(cs, j.mc_cnt, tick_t0)) &&
+                             j.batch < j.batches.size(); s++) {
             const VoxelMergeJob::SplatBatch& sb = j.batches[j.batch];
             const uint32_t n = std::min(EXPAND_SLICE, sb.work - j.expand_off);
             eu.triBegin = sb.t0; eu.triCount = sb.t1; eu.workCount = sb.work;
@@ -2817,7 +2926,9 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
                                                   // Leaning small on purpose — user prefers a
                                                   // responsive low-FPS window over a multi-second
                                                   // freeze; never let one tick block for seconds.
-        for (uint32_t s = 0; s < SLICES_PER_TICK && j.sign_off < j.corner_count; s++) {
+        const auto tick_t0 = std::chrono::steady_clock::now();
+        for (uint32_t s = 0; (s < SLICES_PER_TICK || merge_tick_budget_left(cs, j.mc_cnt, tick_t0)) &&
+                             j.sign_off < j.corner_count; s++) {
             uint32_t n = std::min(SIGN_SLICE, j.corner_count - j.sign_off);
             su.cornerOffset = j.sign_off;       // only field that changes per slice
             gpu::write_buffer(cs.gpu_dev, j.sign_ubo, 0, &su, sizeof(su));
@@ -2899,7 +3010,9 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
             };
             mgrp = gpu::create_bind_group(cs.gpu_dev, j.mc_pipe, mbg, 5);
         }
-        for (uint32_t s = 0; s < SLICES_PER_TICK && j.cell_off < j.cell_count; s++) {
+        const auto tick_t0 = std::chrono::steady_clock::now();
+        for (uint32_t s = 0; (s < SLICES_PER_TICK || merge_tick_budget_left(cs, j.mc_cnt, tick_t0)) &&
+                             j.cell_off < j.cell_count; s++) {
             const uint32_t n = std::min(MESH_SLICE, j.cell_count - j.cell_off);
             mu.cellOffset = j.cell_off;
             gpu::write_buffer(cs.gpu_dev, j.mc_ubo, 0, &mu, sizeof(mu));
