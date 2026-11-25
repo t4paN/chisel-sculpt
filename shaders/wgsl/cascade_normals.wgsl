@@ -22,22 +22,29 @@ struct Params {
 // shaders. Max weighting lets one crushed, wrong-facing sliver (a fold where verts
 // crossed over) outvote a whole ring; where the Max and area normals disagree by more
 // than 15 deg, blend to the area normal (fully by 35 deg). Clean meshes never trip it.
+// Degenerate means truly zero in f32 (1e-30), never "small": the sums carry length^2
+// units, so a fixed 1e-8 zeroed the normal of every fan finer than ~1e-4 — the valence-4
+// verts of the startup ball at L8, crease-pinched slivers — which then drew black and gave
+// brushes no direction (2026-11-23). With no area direction, the Max normal stands alone.
 fn guard_normal(max_sum : vec3<f32>, area_sum : vec3<f32>) -> vec3<f32> {
     var na = vec3<f32>(0.0, 0.0, 0.0);
     let la = length(area_sum);
-    if (la > 1e-8) {
+    if (la > 1e-30) {
         na = area_sum / la;
     }
     let lm = length(max_sum);
-    if (lm <= 1e-8) {
+    if (lm <= 1e-30) {
         return na;
     }
     let nm = max_sum / lm;
+    if (la <= 1e-30) {
+        return nm;
+    }
     let d = dot(nm, na);
     let t = smoothstep(0.81915204, 0.96592583, d);
     let b = na * (1.0 - t) + nm * t;
     let lb = length(b);
-    if (lb > 1e-8) {
+    if (lb > 1e-30) {
         return b / lb;
     }
     return vec3<f32>(0.0, 0.0, 0.0);
@@ -68,9 +75,10 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>,
         let p2 = vec3<f32>(positions[i2 * 3u], positions[i2 * 3u + 1u], positions[i2 * 3u + 2u]);
 
         let fn_ = cross(p1 - p0, p2 - p0);
-        if (length(fn_) < 1e-7) {
-            continue;
-        }
+        // No size cut-off here (was length < 1e-7): |cross| is 2x area, so a fixed floor
+        // drops every face of a fine fan -> zero normal -> black streaks at ~60M tris
+        // (startup-ball pole slivers, pinched creases). A flat face adds zero anyway and
+        // the denom check below guards the divide. Matches Mesh::recompute_normals.
         // Same Max weighting + guard as compute_normals.wgsl. This shader stayed on
         // plain area weighting when v0.2.10 moved the other sites to Max, so a level
         // switch shaded differently from a stroke on the same surface.

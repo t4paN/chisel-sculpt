@@ -874,6 +874,62 @@ static void check_frames(const MultiresStack& stack, const Mesh& surface, int K)
         if (coh < worst) { worst = coh; worst_v = v; }
     }
 
+    // --- INWARD (dev, CHISEL_FRAME_CHECK=2, sphere-ish models only): faces that point
+    // into the ball = real folds; verts whose shading normal points in while their own
+    // faces don't = bad normals on sane geometry. Separates the two causes of black.
+    static int fc_mode = -1;
+    if (fc_mode < 0) { const char* e = getenv("CHISEL_FRAME_CHECK"); fc_mode = e ? atoi(e) : 0; }
+    if (fc_mode >= 2) {
+        const uint32_t tc = surface.tri_count();
+        uint32_t in_tris = 0, in_north = 0, printed = 0;
+        for (uint32_t t = 0; t < tc; t++) {
+            const Vec3 a = surface.get_pos(surface.indices[t*3]);
+            const Vec3 b = surface.get_pos(surface.indices[t*3+1]);
+            const Vec3 c = surface.get_pos(surface.indices[t*3+2]);
+            const Vec3 fn = (b - a).cross(c - a);
+            const Vec3 ctr = (a + b + c) * (1.0f / 3.0f);
+            if (fn.dot(ctr) < 0.0f) {
+                in_tris++; if (ctr.y > 0) in_north++;
+                if (printed++ < 6) {
+                    const float e0 = (b-a).length(), e1 = (c-b).length(), e2 = (a-c).length();
+                    std::printf("[frames]   inward tri %u at (%.4f %.4f %.4f) edges %.2e %.2e %.2e\n",
+                                t, ctr.x, ctr.y, ctr.z, e0, e1, e2);
+                }
+            }
+        }
+        uint32_t bad_n = 0, bad_n_sane = 0, zero_n = 0; printed = 0;
+        for (uint32_t v = 0; v < vc; v++) {
+            const Vec3 p = surface.get_pos(v);
+            const Vec3 n{surface.norm_x[v], surface.norm_y[v], surface.norm_z[v]};
+            if (n.length() < 0.5f) { zero_n++; continue; }
+            if (n.dot(p) >= 0.0f) continue;
+            bad_n++;
+            // are its own faces outward? (area-sum direction)
+            Vec3 as{0,0,0};
+            for (uint32_t j = surface.vert_tri_offset[v]; j < surface.vert_tri_offset[v+1]; j++) {
+                const uint32_t t = surface.vert_tri_list[j];
+                const Vec3 a = surface.get_pos(surface.indices[t*3]);
+                as = as + (surface.get_pos(surface.indices[t*3+1]) - a).cross(surface.get_pos(surface.indices[t*3+2]) - a);
+            }
+            if (as.dot(p) > 0.0f) {
+                bad_n_sane++;
+                if (printed++ < 6)
+                    std::printf("[frames]   inward NORMAL on outward fan: vert %u at (%.4f %.4f %.4f) n=(%.3f %.3f %.3f)\n",
+                                v, p.x, p.y, p.z, n.x, n.y, n.z);
+            }
+        }
+        float rmin = 1e30f, rmax = 0; uint32_t dented = 0;
+        for (uint32_t v = 0; v < vc; v++) {
+            const float r = surface.get_pos(v).length();
+            rmin = std::min(rmin, r); rmax = std::max(rmax, r);
+            if (std::fabs(r - 1.0f) > 0.01f) dented++;
+        }
+        std::printf("[frames] SHAPE L%d: radius %.4f..%.4f, %u verts off the unit ball by >1%%\n", K, rmin, rmax, dented);
+        std::printf("[frames] INWARD L%d: %u/%u tris face in (%u north) | %u verts shade inward, "
+                    "%u of them on outward fans | %u zero normals\n",
+                    K, in_tris, tc, in_north, bad_n, bad_n_sane, zero_n);
+    }
+
     // --- COLLAPSE: stored frames that stopped being an orthonormal basis ---
     uint32_t stored = 0, collapsed = 0, non_ortho = 0;
     int bad_level = -1;
@@ -884,6 +940,28 @@ static void check_frames(const MultiresStack& stack, const Mesh& surface, int K)
             stored++;
             if (f.n.length() < 0.5f || f.b.length() < 0.5f || f.t.length() < 0.5f) {
                 if (!collapsed++) bad_level = stack.base_level + (int)i + 1;
+                if (collapsed <= 8) {   // which vertex, and is it on this surface?
+                    const int lv = stack.base_level + (int)i + 1;
+                    std::printf("[frames]   collapsed: L%d vert %zu n=(%g %g %g)", lv, k, f.n.x, f.n.y, f.n.z);
+                    if (lv == K && k < vc) {
+                        const Vec3 p = surface.get_pos((uint32_t)k);
+                        const uint32_t s0 = surface.vert_tri_offset[k], s1 = surface.vert_tri_offset[k + 1];
+                        Vec3 asum{0,0,0}; float minA = 1e30f, maxE = 0;
+                        for (uint32_t j = s0; j < s1; j++) {
+                            const uint32_t t = surface.vert_tri_list[j];
+                            const Vec3 a = surface.get_pos(surface.indices[t*3]);
+                            const Vec3 e1 = surface.get_pos(surface.indices[t*3+1]) - a;
+                            const Vec3 e2 = surface.get_pos(surface.indices[t*3+2]) - a;
+                            const Vec3 fn = e1.cross(e2);
+                            asum = asum + fn; minA = std::min(minA, fn.length());
+                            maxE = std::max(maxE, std::max(e1.length(), e2.length()));
+                        }
+                        std::printf(" pos=(%g %g %g) valence %u, |area sum| %g, min tri |n| %g, max edge %g, live n=(%g %g %g)",
+                                    p.x, p.y, p.z, s1 - s0, asum.length(), minA, maxE,
+                                    surface.norm_x[k], surface.norm_y[k], surface.norm_z[k]);
+                    }
+                    std::printf("\n");
+                }
                 continue;
             }
             if (std::fabs(f.t.dot(f.n)) > 1e-3f || std::fabs(f.t.dot(f.b)) > 1e-3f

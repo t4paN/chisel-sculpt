@@ -36,16 +36,25 @@ static inline float max_corner_weight(const Vec3& a, const Vec3& b) {
 // area normal, fully by 35 deg. A size floor on edges can't do this: any floor that
 // leaves the UV sphere's legit pole edges alone still lets a crushed sliver carry ~25x
 // a normal face. MUST match the WGSL/GLSL compute_normals twins.
+// Degenerate means truly zero in f32 (1e-30), never "small": the sums carry length^2
+// units, so a fixed 1e-8 zeroed the normal of every fan finer than ~1e-4 — the valence-4
+// verts of the startup ball at L8, crease-pinched slivers — which then drew black and gave
+// brushes no direction (2026-11-23). With no area direction, the Max normal stands alone.
+static inline Vec3 unit_or_zero(const Vec3& v) {   // Vec3::normalized's 1e-8 is too coarse here
+    const float l = v.length();
+    return l > 1e-30f ? Vec3{v.x / l, v.y / l, v.z / l} : Vec3{0.0f, 0.0f, 0.0f};
+}
 static inline Vec3 guard_normal(const Vec3& max_sum, const Vec3& area_sum) {
-    Vec3 na = area_sum.normalized();
-    Vec3 nm = max_sum.normalized();
+    Vec3 na = unit_or_zero(area_sum);
+    Vec3 nm = unit_or_zero(max_sum);
     if (nm.dot(nm) == 0.0f) return na;
+    if (na.dot(na) == 0.0f) return nm;
     const float kFull = 0.96592583f;   // cos 15 deg: pure Max at or above
     const float kNone = 0.81915204f;   // cos 35 deg: pure area at or below
     float t = (nm.dot(na) - kNone) / (kFull - kNone);
     t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
     t = t * t * (3.0f - 2.0f * t);     // smoothstep: no visible seam where it kicks in
-    return (na * (1.0f - t) + nm * t).normalized();
+    return unit_or_zero(na * (1.0f - t) + nm * t);
 }
 // Per-vertex area-weighted sums for the guard, indexed v*3. Static like the partial
 // path's flag arrays: grows once, then no heap churn per stroke.

@@ -2,6 +2,9 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-25 — No more black streaks on dense models
+- Stroke shading on the GPU skipped every triangle under a fixed size, so at ~60M tris thin slivers (the startup ball's pole meridians) and pinched creases lost their normals and drew black. It now uses every triangle, like the load path; tiny fans no longer get a zero normal either.
+
 ## 2026-11-24 — Clip brush: fast at millions of vertices
 
 - The curve blend reads coarser samples the deeper a point sits, skips stretches of curve out of reach, and runs on every core on the desktop (one thread on the web). Bench (half a million points, outside of a C): 1987 ms → 433 ms on one thread; at 2M vertices a cut takes 20–200 ms on 24 threads. Landing places match the previous version to within a few pixels.
