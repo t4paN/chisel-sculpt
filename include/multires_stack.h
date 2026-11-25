@@ -3,7 +3,10 @@
 #include <vector>
 #include "mesh.h"
 
-constexpr int MULTIRES_MAX_LEVEL = 9;
+// Absolute level, counted from the icosahedron: the startup sphere is L4, so 9 stopped
+// it at 5.2M tris while remeshed bases (L0) never met it. The real walls are the
+// tri-count guards on a level-up (GPU limits, browser heap, the memory prompt).
+constexpr int MULTIRES_MAX_LEVEL = 12;
 
 struct ComputeState;   // optional GPU replay for cascade_to_level
 
@@ -221,9 +224,9 @@ ProjectionStats project_down_to_level(MultiresStack& stack, int target_level);
 // the temps, and anything it has to build from cold (topology cache, frames) that
 // then stays. The web build checks it against the heap ceiling before descending, so
 // a model too big for the browser is refused instead of aborting the page.
-size_t projection_memory_estimate(const MultiresStack& stack, int target_level);
+uint64_t projection_memory_estimate(const MultiresStack& stack, int target_level);
 // Heap a level-up to target_level is expected to add at its peak (web refusal gate).
 // Calibrated 2026-11-23; every [multires] level-up line logs estimate vs measured.
 // CHISEL_MEMTRACE=1: print process memory (RSS / web heap) at each step of a level change.
 void memtrace_level(const char* label);
-size_t level_up_memory_estimate(const MultiresStack& stack, const Mesh& live, int target_level);
+uint64_t level_up_memory_estimate(const MultiresStack& stack, const Mesh& live, int target_level);

@@ -174,18 +174,18 @@ static bool app_sdf_fits_web_heap(App& a) {
     }
     const uint64_t R     = (uint64_t)std::min(input.voxel_merge_resolution,
                                               voxel_merge_max_resolution()) + 1;
-    const size_t   need  = (size_t)(tris * 40 + verts * 24 + 3 * R * R * R * 4);
-    const size_t   used  = mallinfo().uordblks;
-    const size_t   cap   = emscripten_get_heap_max();
-    const size_t   have  = cap > used ? cap - used : 0;
-    const size_t   slack = (size_t)256 << 20;
-    std::printf("[sdf] web heap check: %.1fM tris needs ~%zu MB, %zu MB left\n",
-                (double)tris / 1e6, need >> 20, have >> 20);
+    const uint64_t need  = tris * 40 + verts * 24 + 3 * R * R * R * 4;   // 64-bit: size_t is 32 here
+    const uint64_t used  = mallinfo().uordblks;
+    const uint64_t cap   = emscripten_get_heap_max();
+    const uint64_t have  = cap > used ? cap - used : 0;
+    const uint64_t slack = (uint64_t)256 << 20;
+    std::printf("[sdf] web heap check: %.1fM tris needs ~%u MB, %u MB left\n",
+                (double)tris / 1e6, (unsigned)(need >> 20), (unsigned)(have >> 20));
     if (need + slack > have) {
         std::snprintf(input.notification, sizeof(input.notification),
-                      "Too big to SDF in the browser (needs %zu MB more, %zu MB left). "
+                      "Too big to SDF in the browser (needs %u MB more, %u MB left). "
                       "Go down a level first, or use the desktop app.",
-                      need >> 20, have >> 20);
+                      (unsigned)(need >> 20), (unsigned)(have >> 20));
         input.notification_timer = 6.0f;
         return false;
     }
@@ -564,6 +564,14 @@ void app_ops_levels_and_views(App& a) {
         // Subdividing quadruples tris. Refusing here beats attempting the build
         // and losing the device (WebGPU treats an over-limit buffer as a
         // validation error -> device loss).
+        if (delta > 0 && target > max_level) {
+            // Said here, before the web's "will freeze" notice below, which would
+            // otherwise promise a switch that the level cap then silently drops.
+            std::snprintf(input.notification, sizeof(input.notification),
+                          "Highest subdivision level reached (L%d)", max_level);
+            input.notification_timer = 3.0f;
+            delta = 0;
+        }
         if (delta > 0) {
             const uint64_t tris_next  = (uint64_t)mesh->tri_count() * 4ull;
             const uint64_t bytes_next = tris_next * kBiggestBufferBytesPerTri;
@@ -602,38 +610,38 @@ void app_ops_levels_and_views(App& a) {
         // would refuse every later one. The slack covers fragmentation (big vectors
         // want contiguous space) and the estimate's rounding.
         if (delta < 0 && target >= multires->base_level) {
-            const size_t need  = projection_memory_estimate(*multires, target);
-            const size_t used  = mallinfo().uordblks;
-            const size_t cap   = emscripten_get_heap_max();
-            const size_t have  = cap > used ? cap - used : 0;
-            const size_t slack = (size_t)256 << 20;
+            const uint64_t need  = projection_memory_estimate(*multires, target);
+            const uint64_t used  = mallinfo().uordblks;
+            const uint64_t cap   = emscripten_get_heap_max();
+            const uint64_t have  = cap > used ? cap - used : 0;
+            const uint64_t slack = (uint64_t)256 << 20;
             if (need + slack > have) {
                 std::snprintf(input.notification, sizeof(input.notification),
-                              "Too big to go down a level in the browser (needs %zu MB "
-                              "more, %zu MB left). The desktop app can.",
-                              need >> 20, have >> 20);
+                              "Too big to go down a level in the browser (needs %u MB "
+                              "more, %u MB left). The desktop app can.",
+                              (unsigned)(need >> 20), (unsigned)(have >> 20));
                 input.notification_timer = 6.0f;
-                std::printf("[project] refused L%d -> L%d on web: needs ~%zu MB, %zu MB "
-                            "left under the heap cap\n", from, target, need >> 20, have >> 20);
+                std::printf("[project] refused L%d -> L%d on web: needs ~%u MB, %u MB "
+                            "left under the heap cap\n", from, target, (unsigned)(need >> 20), (unsigned)(have >> 20));
                 delta = 0;
             }
         }
         // Same wall going up: 7.7M -> 30.8M tris aborted the page (bench 2026-11-23). The
         // GPU-limit check above passes, the heap is what runs out.
         if (delta > 0) {
-            const size_t need  = level_up_memory_estimate(*multires, *mesh, target);
-            const size_t used  = mallinfo().uordblks;
-            const size_t cap   = emscripten_get_heap_max();
-            const size_t have  = cap > used ? cap - used : 0;
-            const size_t slack = (size_t)256 << 20;
+            const uint64_t need  = level_up_memory_estimate(*multires, *mesh, target);
+            const uint64_t used  = mallinfo().uordblks;
+            const uint64_t cap   = emscripten_get_heap_max();
+            const uint64_t have  = cap > used ? cap - used : 0;
+            const uint64_t slack = (uint64_t)256 << 20;
             if (need + slack > have) {
                 std::snprintf(input.notification, sizeof(input.notification),
-                              "Too big to subdivide in the browser (needs %zu MB more, %zu MB "
+                              "Too big to subdivide in the browser (needs %u MB more, %u MB "
                               "left). The desktop app can.",
-                              need >> 20, have >> 20);
+                              (unsigned)(need >> 20), (unsigned)(have >> 20));
                 input.notification_timer = 6.0f;
-                std::printf("[multires] refused L%d -> L%d on web: needs ~%zu MB, %zu MB "
-                            "left under the heap cap\n", from, target, need >> 20, have >> 20);
+                std::printf("[multires] refused L%d -> L%d on web: needs ~%u MB, %u MB "
+                            "left under the heap cap\n", from, target, (unsigned)(need >> 20), (unsigned)(have >> 20));
                 delta = 0;
             }
         }
@@ -1279,7 +1287,7 @@ void app_ops_remesh_and_merge(App& a) {
                 }
             } else {
                 // Untouched on the desktop: the rescue copy no longer bakes levels there.
-                // (The browser still bakes to fit its 1M cap; those levels are gone.)
+                // The browser does not either: over its 1M cap there is no copy at all.
                 rescue.clear();
                 std::printf("[voxel-merge] FAILED: %s\n", vm.error.c_str());
                 std::snprintf(input.notification, sizeof(input.notification),

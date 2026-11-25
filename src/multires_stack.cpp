@@ -1523,13 +1523,13 @@ bool multires_drop_top_level(MultiresStack& stack) {
     return true;
 }
 
-size_t projection_memory_estimate(const MultiresStack& stack, int target_level) {
+uint64_t projection_memory_estimate(const MultiresStack& stack, int target_level) {
     const int L_max = stack.base_level + (int)stack.disp.size();
     if (target_level >= L_max) return 0;
     const int k_start = projection_k_start(stack, target_level);
-    size_t total = 0, top_v = 0;
+    uint64_t total = 0, top_v = 0;
     for (int i = 0; i < (int)stack.disp.size(); i++) {
-        const size_t v = stack.disp[i].size();   // verts at chain level i + 1
+        const uint64_t v = stack.disp[i].size();   // verts at chain level i + 1
         top_v = std::max(top_v, v);
         total += v * 12;                                       // walked positions
         if (i >= k_start) total += v * 12;                     // undo snapshot (disp)
@@ -1549,25 +1549,27 @@ size_t projection_memory_estimate(const MultiresStack& stack, int target_level) 
     return total;
 }
 
-size_t level_up_memory_estimate(const MultiresStack& stack, const Mesh& live, int target_level) {
+uint64_t level_up_memory_estimate(const MultiresStack& stack, const Mesh& live, int target_level) {
     const int L_max = stack.base_level + (int)stack.disp.size();
     const int i = target_level - stack.base_level - 1;          // chain index of the target
     if (i < 0) return 0;
     // Verts at the target: known when the level exists, else one Loop step past the top
     // (each edge gains a midpoint: V' = V + 3T/2 on a triangle mesh).
-    size_t v;
+    // 64-bit on purpose: size_t is 32-bit in the browser, where these estimates matter
+    // most. 59.4M tris came to ~5 GB, wrapped to ~1 GB and "fit" (page abort, 2026-11-25).
+    uint64_t v;
     if (target_level <= L_max) {
         v = stack.disp[i].size();
     } else {
-        const size_t top_v = stack.disp.empty() ? stack.base.vertex_count() : stack.disp.back().size();
-        const size_t top_t = (size_t)stack.base.tri_count() << (2 * stack.disp.size());
+        const uint64_t top_v = stack.disp.empty() ? stack.base.vertex_count() : stack.disp.back().size();
+        const uint64_t top_t = (uint64_t)stack.base.tri_count() << (2 * stack.disp.size());
         v = top_v + top_t * 3 / 2;
     }
     // The live mesh is rebuilt at the target: pos 12 + normals 12 + indices 24 + CSR 28 +
     // mirror 4, plus any painted planes. The old one is still alive during the swap (1/4 the
     // size). Temps at the peak (the apply step's scratch): ~15 B/vert. Calibrated
     // 2026-11-23, native 7.7M -> 30.8M tris: +2593 MB measured at the peak.
-    size_t per_v = 80 + 20 + 15;
+    uint64_t per_v = 80 + 20 + 15;
     if (!live.mask.empty())  per_v += 4;
     if (!live.color.empty()) per_v += 4;
     const bool exists = target_level <= L_max;

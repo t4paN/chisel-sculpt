@@ -360,9 +360,8 @@ int main(int argc, char* argv[]) {
             if (mb > 0) UndoStack::ring_max_bytes = (size_t)mb * 1024ull * 1024ull;
         }
         else if (std::strncmp(argv[i], "--max-level=", 12) == 0) {
-            // Raise (or lower) the subdivision-level cap. Levels past 9 are
-            // CPU-heavy (switches/merge/remesh ~4x per level) and the GPU
-            // guard still refuses what the device can't hold.
+            // Lower (or keep) the subdivision-level cap; the default is already
+            // the 12 maximum. The tri-count guards refuse what memory can't hold.
             long lv = std::strtol(argv[i] + 12, nullptr, 10);
             if (lv >= 1 && lv <= 12) max_level = (int)lv;
             else std::printf("[cli] ignoring --max-level=%s (want 1..12)\n", argv[i] + 12);

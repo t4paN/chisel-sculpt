@@ -36,6 +36,12 @@ int snapshot_levels_to_bake(const Scene& scene) {
         sim.push_back({ t, up->multires.locked ? up->multires.disp.size() : 0 });
         total += t;
     }
+#if defined(__EMSCRIPTEN__)
+    // Never bake to make room in the browser either: the merge reads the baked mesh, so
+    // a 21M sculpt went into the SDF as its 330k L7 and came back with stepped creases
+    // (2026-11-25). Over the cap the remesh runs unprotected and the prompt says save.
+    if (total > SNAPSHOT_TRI_CAP) return -1;
+#endif
     int baked = 0;
     while (total > SNAPSHOT_TRI_CAP) {
         // Same choice the real loop makes: always the heaviest entity that still

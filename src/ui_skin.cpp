@@ -4393,6 +4393,19 @@ void retopo_sliders(InputState& input, RetopoState& st, float sh, float sgap, fl
 
 }  // namespace
 
+// A free dock (placed once, then the user's to drag) must still follow the app window's
+// right edge when that window changes size: on the web, windowed -> fullscreen left the
+// Meshes dock mid-screen, far from the bar it started under. Call inside Begin; a dock
+// sitting in the left half keeps its x instead.
+static void dock_follow_right_edge(int& last_w, int win_w) {
+    if (last_w > 0 && win_w != last_w) {
+        const ImVec2 p = ImGui::GetWindowPos(), sz = ImGui::GetWindowSize();
+        if (p.x + sz.x * 0.5f > (float)last_w * 0.5f)
+            ImGui::SetWindowPos(ImVec2(p.x + (float)(win_w - last_w), p.y));
+    }
+    last_w = win_w;
+}
+
 // Sculpt / Select modes' "Meshes" dock, the paint and polygon layer lists' sibling: one
 // row per mesh, newest on top (eye / name / trash), the one being worked on outlined.
 // Click makes a mesh the active one (showing it if it was hidden), Ctrl+click adds it to
@@ -4415,6 +4428,8 @@ void draw_mesh_layers_dock(InputState& input, MeshLayerRow* rows, int n, int win
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(gap, gap));
     if (!ImGui::Begin("##MeshDock", nullptr, flags)) { end_panel(); return; }
     window_panel(14.0f);
+    static int mesh_dock_w = 0;
+    dock_follow_right_edge(mesh_dock_w, win_w);
     {   // A shrinking app window must not strand it off screen.
         const ImVec2 p = ImGui::GetWindowPos(), sz = ImGui::GetWindowSize();
         const ImVec2 c(std::max(0.0f, std::min(p.x, (float)win_w - sz.x)),
@@ -4607,6 +4622,8 @@ void draw_retopo_dock(InputState& input, RetopoState& st, int win_w, int win_h) 
     ImGui::PopStyleColor(3);
     if (!shown) { end_panel(); return; }
     window_panel(14.0f);
+    static int retopo_dock_w = 0;
+    dock_follow_right_edge(retopo_dock_w, win_w);
     {   // A shrinking app window must not strand it off screen.
         const ImVec2 p = ImGui::GetWindowPos(), sz = ImGui::GetWindowSize();
         const ImVec2 c(std::max(0.0f, std::min(p.x, (float)win_w - sz.x)),

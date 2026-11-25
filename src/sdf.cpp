@@ -3277,7 +3277,11 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
 
 int voxel_merge_max_resolution() {
 #ifdef __EMSCRIPTEN__
-    const int ceiling = 320;      // 32-bit heap: the CPU side holds about 3 grids at once
+    // 32-bit heap: the CPU side holds about 3 grids at once, 1.6 GB at 512. The browser
+    // grants 4 GB buffers, so the heap is the wall, and app_sdf_fits_web_heap refuses a
+    // merge that won't fit rather than letting it abort the page. 640 (3.2 GB of grids)
+    // would only fit an empty scene: not until a measured peak says the estimate holds.
+    const int ceiling = 512;
 #else
     // 640 / 768 (2026-11-25): each grid is (R+1)^3 floats, 1.8 GB at 768, so the
     // per-buffer limit below still decides (B570 GL: 2047 MB -> R <= 811). 1024 would

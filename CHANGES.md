@@ -2,6 +2,13 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-25 — Browser: sphere past 5M, SDF keeps its detail, honest memory checks
+- The subdivision cap is L12 instead of L9: the startup sphere (L4) stopped at 5.2M tris; the memory checks decide now. At the cap a toast says so instead of a freeze notice for a switch that never ran.
+- Web: the memory checks for level up/down and SDF count in 64 bits; past 4 GB the estimate wrapped round and "fit", so 59.4M aborted the page instead of being refused.
+- Web: the safety copy before an SDF merge or remesh no longer bakes levels away to fit its 1M cap; over the cap the merge runs without a revert and the prompt says save first. A 21M sculpt used to reach the merge as its 330k L7.
+- Web: SDF Detail goes up to 512 (was 320); the heap check refuses what won't fit.
+- The Meshes and Retopo docks follow the window's right edge when it resizes (windowed -> fullscreen left them mid-screen); a dock dragged into the left half keeps its place.
+
 ## 2026-11-25 — SDF merge on a 62.9M sculpt: keeps its levels, reads its top, ~1 min
 - A failed SDF merge says why for 12 s instead of 4.
 - Desktop: the safety copy before an SDF merge or remesh no longer bakes subdiv levels away to fit a 1M-tri cap (the browser keeps the cap). A failed merge used to cost the top levels.
