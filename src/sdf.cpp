@@ -2433,7 +2433,7 @@ void carry_textures(Mesh& m, const std::vector<float>& pos, const std::vector<ui
 }
 
 // Each step past 256 is a smaller jump: that's where a merge starts to cost real time.
-static const int kMergeSteps[] = { 64, 90, 128, 180, 256, 320, 384, 512 };
+static const int kMergeSteps[] = { 64, 90, 128, 180, 256, 320, 384, 512, 640, 768 };
 static double g_merge_ms_per_corner = 0.0;   // this session's last merge, for the prompt's estimate
 
 VoxelMergeJob* voxel_merge_begin(Scene& scene, ComputeState& cs,
@@ -2529,6 +2529,9 @@ VoxelMergeJob* voxel_merge_begin(Scene& scene, ComputeState& cs,
     grid.voxel = ext / (float)(R - 2 * GRID_PAD);     // R-2*PAD cells span the AABB
     grid.origin = lo - Vec3(grid.voxel, grid.voxel, grid.voxel) * (float)GRID_PAD;
     job->res.R = grid.R;
+    std::printf("[sdf] grid R=%d, voxel %.5f, box %.4f across (%.2f GB a grid)\n",
+                (int)grid.R, grid.voxel, grid.voxel * (float)grid.R,
+                (double)grid.R * grid.R * grid.R * 4.0 / 1e9);
 
     // Sign band thickness is a constant ABSOLUTE width, not a constant voxel count:
     // the flood fill assumes the band is a closed separating shell, so at a fixed
@@ -3276,7 +3279,11 @@ int voxel_merge_max_resolution() {
 #ifdef __EMSCRIPTEN__
     const int ceiling = 320;      // 32-bit heap: the CPU side holds about 3 grids at once
 #else
-    const int ceiling = 512;
+    // 640 / 768 (2026-11-25): each grid is (R+1)^3 floats, 1.8 GB at 768, so the
+    // per-buffer limit below still decides (B570 GL: 2047 MB -> R <= 811). 1024 would
+    // be 4.3 GB a grid. Big models aren't redrawn during a merge, so the driver can
+    // move their idle buffers aside to make room.
+    const int ceiling = 768;
 #endif
     const gpu::DeviceLimits dl = gpu::device_limits();
     const uint64_t budget = std::min(dl.max_buffer_size, dl.max_storage_binding_size);

@@ -6,6 +6,7 @@ Short, chronological log of notable changes. Newest on top.
 - Desktop: the safety copy before an SDF merge or remesh no longer bakes subdiv levels away to fit a 1M-tri cap (the browser keeps the cap). A failed merge used to cost the top levels.
 - The merge's GPU passes read each mesh at about one triangle per voxel, with the top levels' form projected into it; the keep-detail snap and the paint transfer read the full top level. 62.9M at R=512: the snap lands within 0.2% of a voxel of the sculpt.
 - Desktop: each frame gives the merge 40 ms of GPU work instead of a fixed slice count, and a scene of 8M+ tris isn't redrawn during a merge. 62.9M at R=512: 22.5 min -> 54 s.
+- Desktop: the SDF Detail steps go on past 512 to 640 and 768 (each grid ~1.8 GB at 768; the card's buffer limit still decides). 62.9M ball at R=640: 3.8M tris in 104 s, the snap within 0.1% of a voxel. The log prints the grid size and box of every merge.
 
 ## 2026-11-25 — SDF merge past 4.3 billion voxel-touches
 - The distance splat runs in batches of under 2^31 voxel-touches instead of failing past 2^32 ("SDF splat overflow"). A 62.9M-tri ball at R=512 (6.8 billion touches, 4 batches) now merges; batched and single-pass results are byte-identical.
