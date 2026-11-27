@@ -63,6 +63,8 @@ const KeyActionInfo kKeyActions[(int)KeyAction::COUNT] = {
         "Fine detail stamps: lands on press, random spin and size. Right-click: jitter and Scatter (one dot becomes many)", {GLFW_KEY_R, 0}, KeyScope::Sculpt},
     {"brush_clip",    "Sculpt brushes", "Clip",
         "Drag a curve: the shaded side is pushed onto it, through the whole model. Alt: a straight line. Ctrl: cut the other side. Masked parts stay", {GLFW_KEY_L, 0}, KeyScope::Sculpt},
+    {"brush_flowline", "Sculpt brushes", "Flow line",
+        "Draw on the model where Flow's grid should start: a centre line, a loop round an eye. The next Flow or Quad flow merge (without mirror) lays a row along it. Delete: clear the lines", {GLFW_KEY_U, 0}, KeyScope::Sculpt},
     {"brush_mask",    "Brushes", "Mask",                nullptr, {GLFW_KEY_M, 0}},
     {"brush_prev",    "Brushes", "Previous alpha",
         "Draw and Mask. In Paint mode: swap colours. In Object mode: hold to spin the selection; Shift+ turns it 5 degrees per press. Insert: change the shape.", {GLFW_KEY_Q, 0}},
@@ -518,6 +520,7 @@ const char* InputState::brush_name() const {
         case BrushType::LIMB:   return "Limb";
         case BrushType::POSE:   return "Pose";
         case BrushType::CLIP:   return "Clip";
+        case BrushType::FLOWLINE: return "Flow line";
         case BrushType::STIPPLE:return is_subtract_active() ? "Stipple (-)": "Stipple";
         case BrushType::SMOOTH: return "Smooth";
         case BrushType::MASK:   return "Mask";
@@ -1745,6 +1748,10 @@ static void mouse_button_callback(GLFWwindow* w, int button, int action, int mod
                     g_input->drag_mode = InputState::DragMode::POSE_EDIT;
                 else
                     g_input->drag_mode = InputState::DragMode::ORBIT;
+            } else if (g_input->flowline_brush_on() && !g_input->is_smooth_active()) {
+                // Flow line: on the model the press draws a line; off it, it orbits.
+                g_input->drag_mode = g_input->on_model ? InputState::DragMode::FLOWLINE_EDIT
+                                                       : InputState::DragMode::ORBIT;
             } else if (g_input->clip_brush_on() && !g_input->is_smooth_active()) {
                 // Clip: the line usually starts off the model, so a press anywhere
                 // draws it (Alt+drag, middle and right buttons still move the view).
@@ -2058,6 +2065,7 @@ static void run_key_action(GLFWwindow* w, KeyAction a, bool repeat) {
         case KeyAction::BRUSH_LIMB:    pick_brush(BrushType::LIMB);    break;
         case KeyAction::BRUSH_POSE:    pick_brush(BrushType::POSE);    break;
         case KeyAction::BRUSH_CLIP:    pick_brush(BrushType::CLIP);    break;
+        case KeyAction::BRUSH_FLOWLINE: pick_brush(BrushType::FLOWLINE); break;
         case KeyAction::BRUSH_STIPPLE: pick_brush(BrushType::STIPPLE); break;
         case KeyAction::BRUSH_MASK:    pick_brush(BrushType::MASK);    break;
         case KeyAction::BRUSH_CREASE:  pick_brush(BrushType::CREASE);  break;
@@ -2167,8 +2175,9 @@ static void run_key_action(GLFWwindow* w, KeyAction a, bool repeat) {
                 if (!repeat && !in.uv_mode) in.retopo_dissolve_requested = true;
                 break;
             }
-            if (in.pose_brush_on()) in.pose_delete_key = true;
-            else                    in.delete_mesh_requested = true;
+            if (in.pose_brush_on())          in.pose_delete_key = true;
+            else if (in.flowline_brush_on()) in.flowline_delete_key = true;
+            else                             in.delete_mesh_requested = true;
             break;
 
         case KeyAction::MASK_INVERT: in.mask_invert_requested = true; break;

@@ -2,6 +2,11 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-27 — Flow line (U)
+- New sculpt tool **Flow line** (U): draw lines on the model where Flow's grid should start, such as a centre line down an asymmetric figure or a loop round an eye. Delete clears them. Nothing is sculpted.
+- A plain Flow or Quad flow merge starts from the drawn lines instead of x = 0. Each line is smoothed and snapped to the surface first. On a test ball, a drawn ring got 217 grid edges laid along it, against 39 without it. The lines carry over to the merged result. Mirror merges keep the seam as their start line.
+- Not yet: Flow lines aren't saved with the project.
+
 ## 2026-11-27 — Flow starts from x = 0
 - Plain (non-mirror) Flow and Quad flow merges of a model that straddles x = 0 start their grid from a row along it: both sides grow out from the middle and each follows its own shape. Mirror still forces exact symmetry.
 - Quad flow keeps the row as one unbroken loop; triangle Flow keeps it in pieces (flips can't cut it, smoothing nudges it). Where the grid won't close with the line (2 of 5 test models, quads), it's laid again without it.

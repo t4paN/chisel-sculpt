@@ -254,6 +254,13 @@ void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse) {
                         input.pose_hover, input.mirror_x);
     }
 
+    // Flow lines: shown while the Flow line tool is in hand, the one being drawn too.
+    if (input.flowline_brush_on() && !non_edit_mode) {
+        extern FlowLine g_flowline_live;
+        draw_flow_lines(scene.active_entity().flow_lines,
+                        g_flowline_live.pts.empty() ? nullptr : &g_flowline_live, camera, win_w, win_h);
+    }
+
     // Clip curve: the curve while it is being drawn.
     if (input.clip_drawing && !non_edit_mode) {
         draw_clip_curve(input.clip_pts, input.clip_flip, input.clip_straight, win_w, win_h);
@@ -283,6 +290,8 @@ void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse) {
         } else if (input.pose_brush_on() && !input.is_smooth_active()) {
             draw_pose_cursor(cursor_x, cursor_y,
                              input.on_model || input.pose_hover >= 0);
+        } else if (input.flowline_brush_on() && !input.is_smooth_active()) {
+            draw_pose_cursor(cursor_x, cursor_y, input.on_model);
         } else if (input.clip_brush_on() && !input.is_smooth_active()) {
             // A dot, like Pose: the clip has no radius to show.
             draw_pose_cursor(cursor_x, cursor_y, true);

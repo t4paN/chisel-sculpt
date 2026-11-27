@@ -41,6 +41,12 @@ struct MeshEntity {
     // the active entity and the pose brush is in hand.
     PoseHinge     pose;
 
+    // Flow lines (the U tool): where a Flow merge starts its grid, drawn on this mesh.
+    // World space, as the merge reads the sculpt; each point keeps the surface normal
+    // under it so the overlay can hide the stretches on the far side. A merge hands
+    // its sources' lines on to the result, so a re-merge starts from them again.
+    std::vector<FlowLine> flow_lines;   // FlowLine: mesh.h
+
     // Its retopo (mode 0 / UV 9): the strokes, the low-poly Build made on THIS sculpt,
     // its UVs and its bake. Owned here so the hi/lo pair can't come apart: switching the
     // active mesh switches the retopo with it, and Build, snap and bake rays only ever

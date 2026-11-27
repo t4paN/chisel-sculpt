@@ -127,6 +127,8 @@ const IconDef kIcons[(int)Icon::Count] = {
     /* ObjRotate    */ {{P("M19.5 12a7.5 7.5 0 1 1-2.2-5.3"), P("M13.5 7L17.3 6.7L17.6 2.9")}, 2},
     // Drawn here: a ball with its top cut off flat, the cut's line running on past it.
     /* BrushClip    */ {{P("M6 9A7.5 7.5 0 1 0 18 9Z"), P("M2 9h2M20 9h2")}, 2},
+    // Drawn here: a line bending down the middle, rows of the grid running off both sides.
+    /* BrushFlowLine*/ {{P("M12 2.5C9 8 15 16 12 21.5"), P("M4 7h6.6M13.4 7H20M4 12h8M12 12h8M4 17h8.4M15.2 17H20")}, 2},
     // Drawn here, for the file dialogs: back / forward / up, a folder with a plus.
     /* NavBack      */ {{P("M15 5l-7 7 7 7")}, 1},
     /* NavForward   */ {{P("M9 5l7 7-7 7")}, 1},

@@ -1,6 +1,7 @@
 #pragma once
 #include <vector>
 #include <cstdint>
+#include "mesh.h"   // FlowLine
 
 struct TextOverlay;
 struct InputState;
@@ -98,6 +99,10 @@ void draw_pose_cursor(float x, float y, bool on_target);
 // would cut shaded, by the same side test the cut uses, the curve run on to the
 // window's edges faint and the drawn part bright. flip = Ctrl held, straight = Alt.
 void draw_clip_curve(const std::vector<float>& raw, bool flip, bool straight, int win_w, int win_h);
+// Flow lines on the model (the U tool), the one being drawn included; stretches on the
+// far side of the model are left out.
+void draw_flow_lines(const std::vector<FlowLine>& lines, const FlowLine* live, const Camera& cam,
+                     int win_w, int win_h);
 
 // Retopo mode (key 0). The overlay draws every stroke as a translucent band at its
 // width (donuts teal, strips amber; mirrored twins ghosted when mirror is on) and the

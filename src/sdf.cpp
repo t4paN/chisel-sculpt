@@ -1899,6 +1899,20 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
     // A guide (plain merge, no cut): the verts on its line play the seam's part for the
     // fields only; the mesh stays whole and nothing else treats them specially.
     if (seam) guide = nullptr;
+    // A drawn line sits on the sculpt it was drawn on, and smoothing cuts its corners
+    // inside a curve: snap its points onto this surface, or a stretch more than the band
+    // below it would catch no verts at all.
+    FlowGuide snapped;
+    if (guide && !guide->plane) {
+        snapped = *guide;
+        for (Vec3& p : snapped.pts)
+            for (int it = 0; it < 4; it++) {
+                const Vec3 g = grad(p);
+                if (g.length() < 1e-12f) break;
+                p = p - unit(g) * sample_field(field, grid, p);
+            }
+        guide = &snapped;
+    }
     std::vector<std::vector<uint8_t>> SL;
     if (seam || guide) {
         SL.resize(H.size());
@@ -3759,6 +3773,7 @@ struct VoxelMergeJob {
     std::vector<std::shared_ptr<const MeshTexture>> texs, ntexs;
     std::vector<float>    soup_nrm;
 
+    std::vector<FlowLine> flow_lines;   // the sources' Flow lines (U tool): Flow's start line
     std::vector<float> field_cpu;  // post-flood signed field (read once, reused by relax)
     std::vector<float> soup;       // MC output triangle soup (read once in Mesh)
 
@@ -4280,6 +4295,25 @@ VoxelMergeJob* voxel_merge_begin(Scene& scene, ComputeState& cs,
                                        job->soup_uv, job->soup_tex, job->texs, job->ntexs, job->soup_nrm);
     job->res.in_tris     = (uint32_t)(idx.size() / 3);
     if (idx.empty()) return fail("selection has no triangles");
+    for (uint32_t id : scene.selected_ids())
+        if (const MeshEntity* e = scene.find_entity(id))
+            for (const FlowLine& L : e->flow_lines) if (L.pts.size() >= 2) job->flow_lines.push_back(L);
+    // Dev: CHISEL_FLOW_LINES=file adds lines from "x y z" rows, a blank row between lines
+    // (headless runs can't draw them).
+    if (const char* fl = std::getenv("CHISEL_FLOW_LINES")) {
+        if (FILE* f = std::fopen(fl, "r")) {
+            FlowLine L; char buf[256];
+            auto push = [&]() { if (L.pts.size() >= 2) job->flow_lines.push_back(L); L = FlowLine{}; };
+            while (std::fgets(buf, sizeof buf, f)) {
+                float x, y, z;
+                if (std::sscanf(buf, "%f %f %f", &x, &y, &z) == 3) { L.pts.push_back(Vec3(x, y, z)); L.nrm.push_back(Vec3(0, 0, 1)); }
+                else push();
+            }
+            push();
+            std::fclose(f);
+            std::printf("[sdf-flow] DEV: %zu Flow line(s) from %s\n", job->flow_lines.size(), fl);
+        }
+    }
     if (n_additive == 1 && n_cutter == 0 && scene.selected_ids().size() == 1) {
         const MeshEntity* src = scene.find_entity(scene.selected_ids().front());
         if (src && !src->mesh.paint_layers.empty()) {
@@ -5010,6 +5044,8 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
             std::vector<uint8_t> seam;
             clip_to_plus_x(welded, grid.voxel, seam);
             weld_near_seam(welded, grid.voxel, seam);   // B: collapse the seam sliver column
+            if (flow && !j.flow_lines.empty())
+                std::printf("[sdf-flow] mirror merge: the seam is the start line, Flow lines not used\n");
             if (flow) run_flow(&seam);
             if (!take_quads()) {
             CrossField flow_field;
@@ -5051,7 +5087,25 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
                 FlowGuide g;
                 bool use = false;
                 const uint32_t wv = welded.vertex_count();
-                if (x0_env && wv > 0) {
+                if (!j.flow_lines.empty()) {
+                    // Drawn lines (U tool) take over from x = 0.
+                    // A hand-drawn line wobbles, and each wobble turns the rows pinned along
+                    // it: smooth it first (a running mean over a few neighbours, ends kept).
+                    g.plane = false;
+                    for (const FlowLine& L : j.flow_lines) {
+                        const int n = (int)L.pts.size(), k = 4;
+                        for (int i = 0; i < n; i++) {
+                            const int lo = std::max(0, i - k), hi = std::min(n - 1, i + k);
+                            const int r = std::min(i - lo, hi - i);   // symmetric window: the ends stay put
+                            Vec3 m(0, 0, 0);
+                            for (int q = i - r; q <= i + r; q++) m += L.pts[q];
+                            g.pts.push_back(m * (1.0f / (float)(2 * r + 1)));
+                        }
+                        g.stroke_end.push_back((uint32_t)g.pts.size());
+                    }
+                    g.band = 0.75f * grid.voxel;
+                    use = true;
+                } else if (x0_env && wv > 0) {
                     float lo = 1e30f, hi = -1e30f;
                     uint32_t neg = 0, pos = 0;
                     for (uint32_t v = 0; v < wv; v++) {
@@ -5167,6 +5221,8 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
         // ---- Splice into the scene as the merged entity ----
         uint32_t merged_id = scene.merge_selected_into(welded, 0);
         if (merged_id == 0) return fail("scene splice failed");
+        // The sources' Flow lines carry on to the result: a re-merge starts from them.
+        if (MeshEntity* me = scene.find_entity(merged_id)) me->flow_lines = std::move(j.flow_lines);
 
         auto t1 = std::chrono::high_resolution_clock::now();
         j.res.elapsed_ms = std::chrono::duration<double, std::milli>(t1 - j.t0).count();

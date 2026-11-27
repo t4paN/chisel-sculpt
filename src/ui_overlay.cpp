@@ -908,6 +908,8 @@ void draw_help_popup(InputState& input, int win_w, int win_h) {
                       L(KeyAction::BRUSH_POSE), L(KeyAction::BRUSH_STIPPLE), L(KeyAction::BRUSH_CLIP),
                       L(KeyAction::BRUSH_MASK));
         help_row(k, "Limb  Pose  Stipple  Clip  Mask");
+        std::snprintf(k, sizeof(k), "%s", L(KeyAction::BRUSH_FLOWLINE));
+        help_row(k, "Flow line (where a Flow merge starts)");
         std::snprintf(k, sizeof(k), "%s %s", L(KeyAction::BRUSH_PREV), L(KeyAction::BRUSH_NEXT));
         help_row(k, "Cycle alpha (Draw, Mask)");
         std::snprintf(k, sizeof(k), "%s %s", L(KeyAction::PAINT_BUCKET), L(KeyAction::PAINT_PICKER));
@@ -1241,7 +1243,7 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
 
     float brush_w = calc_btn_w("Inflate");
 
-    static char btips[12][48];
+    static char btips[13][48];
     auto btip = [&](int i, KeyAction a) {
         std::snprintf(btips[i], sizeof(btips[i]), "Shortcut: %s", input.key_label(a));
         return btips[i];
@@ -1258,6 +1260,7 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
         {"Pose",    "Pose",    btip(7, KeyAction::BRUSH_POSE),    BrushType::POSE},
         {"Stipple", "Stipple", btip(10, KeyAction::BRUSH_STIPPLE), BrushType::STIPPLE},
         {"Clip",    "Clip",    btip(11, KeyAction::BRUSH_CLIP),   BrushType::CLIP},
+        {"FlowLine","Flow line", btip(12, KeyAction::BRUSH_FLOWLINE), BrushType::FLOWLINE},
         {"Smooth",  "Smooth",  "Shortcut: double-press Shift",    BrushType::SMOOTH},
         {"Mask",    "Mask",    btip(9, KeyAction::BRUSH_MASK),    BrushType::MASK},
     };
@@ -1990,6 +1993,42 @@ void draw_clip_curve(const std::vector<float>& raw, bool flip, bool straight,
     dl->PathStroke(dark, 0, 5.0f);
     for (size_t i = 1; i + 1 < k; i++) dl->PathLineTo(ImVec2(path.xy[i * 2], path.xy[i * 2 + 1]));
     dl->PathStroke(cold, 0, 2.0f);
+}
+
+void draw_flow_lines(const std::vector<FlowLine>& lines, const FlowLine* live, const Camera& cam,
+                     int win_w, int win_h) {
+    ImDrawList* dl = ImGui::GetBackgroundDrawList();
+    const ImU32 dark = IM_COL32(20, 20, 20, 170);
+    const ImU32 line = IM_COL32(120, 220, 255, 235);
+    const Vec3 eye = cam.get_position();
+    auto one = [&](const FlowLine& L) {
+        const size_t n = L.pts.size();
+        if (n == 0) return;
+        // A point faces us when its normal points back toward the eye.
+        auto facing = [&](size_t i) { return L.nrm[i].dot(eye - L.pts[i]) > 0.0f; };
+        std::vector<ImVec2> run;
+        auto flush = [&]() {
+            if (run.size() >= 2) {
+                dl->AddPolyline(run.data(), (int)run.size(), dark, 0, 5.0f);
+                dl->AddPolyline(run.data(), (int)run.size(), line, 0, 2.2f);
+            }
+            run.clear();
+        };
+        for (size_t i = 0; i < n; i++) {
+            float sx, sy;
+            if (!facing(i) || (cam.perspective && cam.view_depth(L.pts[i]) <= 1e-4f)
+                || !cam.world_to_screen(L.pts[i], win_w, win_h, sx, sy)) { flush(); continue; }
+            run.push_back(ImVec2(sx, sy));
+        }
+        flush();
+        float sx, sy;   // where it starts: a dot
+        if (facing(0) && cam.world_to_screen(L.pts[0], win_w, win_h, sx, sy)) {
+            dl->AddCircleFilled(ImVec2(sx, sy), 4.5f, dark, 16);
+            dl->AddCircleFilled(ImVec2(sx, sy), 3.0f, line, 16);
+        }
+    };
+    for (const FlowLine& L : lines) one(L);
+    if (live) one(*live);
 }
 
 void draw_pose_hinge(const PoseHinge& hinge, const Camera& cam, int win_w, int win_h,

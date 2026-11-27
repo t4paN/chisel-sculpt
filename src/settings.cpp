@@ -29,9 +29,9 @@ constexpr float kDebounceSec   = 1.0f;   // quiet time after the last edit befor
 const char* kBrushKey[(int)BrushType::COUNT] = {
     "draw", "clay", "inflate", "crease", "pinch",
     "move", "limb", "pose", "smooth", "mask", "paint", "bucket", "stipple", "paint_stipple", "paint_blend",
-    "clip"
+    "clip", "flow_line"
 };
-static_assert((int)BrushType::COUNT == 16, "kBrushKey is out of sync with BrushType");
+static_assert((int)BrushType::COUNT == 17, "kBrushKey is out of sync with BrushType");
 
 // Section names of the per-device brush-feel profiles written until 2026-11-12. Read
 // once to migrate a stored blob into the single [brush] section, never written.

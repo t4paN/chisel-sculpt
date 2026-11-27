@@ -53,6 +53,10 @@ std::shared_ptr<const MeshTexture> decode_mesh_texture(std::vector<uint8_t> byte
 // SOA triangle mesh
 struct ObjPart;
 
+// A Flow line (the U tool): points drawn on a sculpt, world space, with the surface
+// normal under each (MeshEntity::flow_lines).
+struct FlowLine { std::vector<Vec3> pts, nrm; };
+
 struct Mesh {
     std::vector<float> pos_x, pos_y, pos_z;   // vertex positions
     std::vector<float> norm_x, norm_y, norm_z; // vertex normals

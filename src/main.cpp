@@ -334,6 +334,9 @@ static bool sample_on_model(Renderer& renderer, int x, int y, int screen_h, bool
 static volatile std::sig_atomic_t g_quit_signal = 0;
 #endif
 
+// The Flow line being drawn (main loop capture, overlay in app_render.cpp).
+FlowLine g_flowline_live;
+
 int main(int argc, char* argv[]) {
     debug_console::init();
     bench::init();
@@ -2124,6 +2127,57 @@ int main(int argc, char* argv[]) {
                 input.notification_timer = 1.5f;
                 hinge.clear();
                 input.pose_hover = -1;
+            }
+        }
+
+        // ---- Flow line (U): sample the surface under the pen into a line ----
+        // Read off the pen-down plane cache like a retopo stroke: the line never edits
+        // the sculpt, so the cache stays good for the whole drag.
+        {
+            extern FlowLine g_flowline_live;
+            const bool drawing = input.drag_mode == InputState::DragMode::FLOWLINE_EDIT;
+            const float mx = (float)input.mouse_x, my = (float)input.mouse_y;
+            if (drawing && app_state == AppState::IDLE && !screen_buffers_dirty) {
+                float d = 0.0f;
+                if (renderer.sample_depth_bilinear(mx, my, &d, 0.0f) && d < 500.0f) {
+                    const Vec3 cam_pos = camera.get_position();
+                    const Vec3 fwd = (camera.target - cam_pos).normalized();
+                    const Vec3 right = fwd.cross(Vec3(0, 1, 0)).normalized();
+                    const Vec3 up = right.cross(fwd).normalized();
+                    const float half_h = camera.half_height_at(d);
+                    const float half_w = half_h * ((float)win_w / (float)win_h);
+                    const Vec3 p = cam_pos + fwd * d + right * ((2.0f * mx / (float)win_w - 1.0f) * half_w)
+                                 + up * ((1.0f - 2.0f * my / (float)win_h) * half_h);
+                    float nt[3];
+                    const Vec3 n = renderer.sample_normal((int)mx, (int)my, nt)
+                                 ? Vec3(nt[0], nt[1], nt[2]).normalized() : fwd * -1.0f;
+                    const float step = 4.0f * 2.0f * half_h / (float)win_h;   // a point every ~4 px
+                    auto& L = g_flowline_live;
+                    if (L.pts.empty() || (p - L.pts.back()).length() >= step) {
+                        L.pts.push_back(p);
+                        L.nrm.push_back(n);
+                    }
+                }
+            }
+            if (!drawing && !g_flowline_live.pts.empty()) {
+                auto& lines = scene.active_entity().flow_lines;
+                if (g_flowline_live.pts.size() >= 2) {
+                    lines.push_back(g_flowline_live);
+                    std::snprintf(input.notification, sizeof(input.notification),
+                                  "Flow line added (%zu on this mesh): the next Flow merge starts from it", lines.size());
+                    input.notification_timer = 2.0f;
+                    std::printf("[flowline] line of %zu points added, %zu on the mesh\n",
+                                g_flowline_live.pts.size(), lines.size());
+                }
+                g_flowline_live = FlowLine{};
+            }
+            if (input.flowline_delete_key && app_state == AppState::IDLE && !drawing) {
+                input.flowline_delete_key = false;
+                auto& lines = scene.active_entity().flow_lines;
+                std::snprintf(input.notification, sizeof(input.notification),
+                              lines.empty() ? "No Flow lines to clear" : "Flow lines cleared");
+                input.notification_timer = 1.5f;
+                lines.clear();
             }
         }
 
