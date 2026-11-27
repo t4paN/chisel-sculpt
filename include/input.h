@@ -154,6 +154,14 @@ constexpr int kKeyModMask = GLFW_MOD_CONTROL | GLFW_MOD_SHIFT | GLFW_MOD_ALT;
 // owns a scoped key, that key wins over a Global one bound to the same letter.
 enum class KeyScope : uint8_t { Global, Sculpt, Paint, Retopo, Uv, Object };
 
+// Special projects: built, parked for later (Flow line tool, Flow / Quad flow patterns).
+// false = hidden from every menu, rail and key; the code stays and is still reachable
+// from the dev env hooks (CHISEL_MERGE_PATTERN=4/5, CHISEL_FLOW_LINES).
+inline constexpr bool kSpecialProjects = false;
+inline bool key_action_hidden(int a) {
+    return !kSpecialProjects && a == (int)KeyAction::BRUSH_FLOWLINE;
+}
+
 struct KeyActionInfo {
     const char* id;      // on-disk name, stable forever
     const char* group;   // section heading in the Key bindings window

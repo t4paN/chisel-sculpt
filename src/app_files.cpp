@@ -1008,7 +1008,7 @@ void app_files_frame(App& a) {
             auto row_env = [](const char* name, const SdfRow& row, int& dst) {
                 if (const char* env = std::getenv(name)) {
                     const int k = std::atoi(env);
-                    if (k >= 0 && k < row.count) dst = k;
+                    if (k >= 0 && k < (row.all ? row.all : row.count)) dst = k;
                 }
             };
             int nets = input.voxel_merge_surface_nets ? 1 : 0;

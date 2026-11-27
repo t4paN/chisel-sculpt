@@ -2,6 +2,10 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-27 — Flow work parked (special projects)
+- Flow line (U), Flow and Quad flow are hidden: no rail button, toolbar button, key, help line or Pattern entry. One switch (`kSpecialProjects` in input.h) brings them all back. A saved Flow pick falls back to Curvature nudge.
+- The code stays and is reachable from the dev hooks (`CHISEL_MERGE_PATTERN=4/5`, `CHISEL_FLOW_LINES`).
+
 ## 2026-11-27 — Quad flow evens out
 - Quad flow relaxes its grid: each point moves toward its square neighbours along the surface and snaps back on, 6 rounds on the coarse grid and again after the splits. Points on the mirror seam or a Flow line slide along their row only.
 - Orc: quads stretched past 4:1 went from 1,268 to 100, past 8:1 from 322 to 8, folded from 112 to 11. Across the comparison models: 5–40× fewer stretched quads. Pole count unchanged, mirror symmetry exact. Triangle Flow untouched.

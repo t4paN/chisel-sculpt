@@ -908,8 +908,10 @@ void draw_help_popup(InputState& input, int win_w, int win_h) {
                       L(KeyAction::BRUSH_POSE), L(KeyAction::BRUSH_STIPPLE), L(KeyAction::BRUSH_CLIP),
                       L(KeyAction::BRUSH_MASK));
         help_row(k, "Limb  Pose  Stipple  Clip  Mask");
-        std::snprintf(k, sizeof(k), "%s", L(KeyAction::BRUSH_FLOWLINE));
-        help_row(k, "Flow line (where a Flow merge starts)");
+        if (kSpecialProjects) {
+            std::snprintf(k, sizeof(k), "%s", L(KeyAction::BRUSH_FLOWLINE));
+            help_row(k, "Flow line (where a Flow merge starts)");
+        }
         std::snprintf(k, sizeof(k), "%s %s", L(KeyAction::BRUSH_PREV), L(KeyAction::BRUSH_NEXT));
         help_row(k, "Cycle alpha (Draw, Mask)");
         std::snprintf(k, sizeof(k), "%s %s", L(KeyAction::PAINT_BUCKET), L(KeyAction::PAINT_PICKER));
@@ -1266,6 +1268,7 @@ void draw_button_islands(InputState& input, int win_w, int win_h,
     };
 
     for (int i = 0; i < (int)IM_ARRAYSIZE(brushes); i++) {
+        if (!kSpecialProjects && brushes[i].type == BrushType::FLOWLINE) continue;
         if (brushes[i].type == BrushType::SMOOTH) {
             if (squircle_button(brushes[i].id, brushes[i].display, brushes[i].tooltip,
                                 ImVec2(brush_w, btn_h), smooth_on)) {
@@ -2129,7 +2132,7 @@ void draw_keybind_window(InputState& input, int win_w, int win_h) {
                 int owner = -1;
                 const KeyScope sc = key_action_info((KeyAction)i).scope;
                 for (int j = 0; j < (int)KeyAction::COUNT; j++)
-                    if (j != i && work[j] == kb &&
+                    if (j != i && work[j] == kb && !key_action_hidden(j) &&
                         key_scopes_overlap(sc, key_action_info((KeyAction)j).scope)) { owner = j; break; }
                 if (owner < 0) {
                     work[i] = kb;
@@ -2208,7 +2211,7 @@ void draw_keybind_window(InputState& input, int win_w, int win_h) {
                 unit_first[units] = i;
                 unit_h[units++] = head_h;
             }
-            unit_h[units - 1] += row_h;
+            if (!key_action_hidden(i)) unit_h[units - 1] += row_h;
         }
         unit_first[units] = (int)KeyAction::COUNT;
         const int fixed_unit = units;
@@ -2265,6 +2268,7 @@ void draw_keybind_window(InputState& input, int win_w, int win_h) {
                 ImGui::Dummy(ImVec2(0.0f, 4.0f));
                 ImGui::TextColored(accent, "%s", key_action_info((KeyAction)unit_first[u]).group);
                 for (int i = unit_first[u]; i < unit_first[u + 1]; i++) {
+                    if (key_action_hidden(i)) continue;
                     const KeyActionInfo& info = key_action_info((KeyAction)i);
                     ImGui::PushID(i);
                     ImGui::AlignTextToFramePadding();

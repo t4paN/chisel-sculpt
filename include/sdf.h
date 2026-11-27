@@ -33,7 +33,9 @@ enum class SdfPattern { CurvatureNudge = 0, Plain = 1, Curvature6 = 2, GraphPape
 enum class SdfPoles   { WalkCancel = 0 };
 
 struct SdfChoice { const char* name; const char* tip; };
-struct SdfRow    { const char* label; const SdfChoice* items; int count; int def; };
+// count = entries the UI offers and settings accept; all = every entry the dev env hooks
+// may pick (special projects parked past count), 0 = same as count.
+struct SdfRow    { const char* label; const SdfChoice* items; int count; int def; int all = 0; };
 const SdfRow& sdf_mode_row();
 const SdfRow& sdf_pattern_row();
 const SdfRow& sdf_poles_row();

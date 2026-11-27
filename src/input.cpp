@@ -1880,6 +1880,7 @@ static int find_key_action(int key, int mods) {
     for (int i = 0; i < (int)KeyAction::COUNT; i++) {
         const KeyBind& b = g_input->keybinds[i];
         if (!b.bound() || b.key != key || (b.mods & ~mods & kKeyModMask)) continue;
+        if (key_action_hidden(i)) continue;   // parked tool: its key does nothing
         const KeyScope sc = kKeyActions[i].scope;
         if (sc != KeyScope::Global && sc != live) continue;
         const int n = mod_count(b.mods) * 2 + (sc != KeyScope::Global ? 1 : 0);

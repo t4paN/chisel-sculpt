@@ -5413,7 +5413,9 @@ const SdfChoice kPolesItems[] = {
     { "Walk & cancel", "Needless poles wander until pairs meet and cancel out" },
 };
 const SdfRow kModeRow    = { "Mode",    kModeItems,    2, 0 };
-const SdfRow kPatternRow = { "Pattern", kPatternItems, 6, (int)SdfPattern::CurvatureNudge };
+// Flow and Quad flow are parked (special projects): hidden from the dialog, still
+// reachable with CHISEL_MERGE_PATTERN=4/5.
+const SdfRow kPatternRow = { "Pattern", kPatternItems, 4, (int)SdfPattern::CurvatureNudge, 6 };
 const SdfRow kPolesRow   = { "Poles",   kPolesItems,   1, (int)SdfPoles::WalkCancel };
 }  // namespace
 const SdfRow& sdf_mode_row()    { return kModeRow; }

@@ -1209,8 +1209,15 @@ constexpr int kPaintBrushCount = (int)(sizeof kPaintBrushes / sizeof kPaintBrush
 // The brush list the rail shows: paint mode swaps in its own dock.
 const RailBrush* rail_brushes(const InputState& in, int* n) {
     if (in.paint_mode) { *n = kPaintBrushCount; return kPaintBrushes; }
-    *n = kRailBrushCount;
-    return kRailBrushes;
+    // Parked tools (kSpecialProjects) left out.
+    static const std::vector<RailBrush> shown = [] {
+        std::vector<RailBrush> v;
+        for (const RailBrush& b : kRailBrushes)
+            if (kSpecialProjects || b.type != BrushType::FLOWLINE) v.push_back(b);
+        return v;
+    }();
+    *n = (int)shown.size();
+    return shown.data();
 }
 
 // Is this entry the tool in hand? (The caller adds "and in EDIT mode".)
