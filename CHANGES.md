@@ -2,6 +2,10 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-27 — Flow keeps tips and teeth
+- Pattern Flow lays its grid 3.3 marching-cubes edges apart instead of 4: it now lands on the plain merge's triangle count at the same Detail (it came out a third short), and fang tips, teeth and ear tips keep their shape (on the orc an ear tip had torn 4 voxels off the surface; now 1.6 at worst, half a voxel or less on 99.9% of the surface). Poles unchanged (0.3–0.8% on the test models).
+- Flow makes every triangle wind the same way as its neighbours; a small patch wound backwards faced inward and came out as 16 flipped triangles after the splits.
+
 ## 2026-11-27 — Flow with mirror
 - Pattern Flow works on mirrored merges (Marching Cubes): the grid is laid on the +x half with one row along the x = 0 seam, then reflected, so both sides match point for point. On the test models: poles 0.4–0.8% (6–11% with the default pattern), pinched seam points down by about two thirds, watertight on all 8. Flow with the Surface Nets mirror still falls back to Curvature nudge.
 - Levels after: a mirrored Flow grid is reflected before it becomes L0, so every level is symmetric. When the guard turns the grid down, the rebuild now uses the merge's own mirror choice, not the viewport's.

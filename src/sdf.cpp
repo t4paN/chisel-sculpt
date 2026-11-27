@@ -1561,8 +1561,8 @@ PoleStats reduce_poles(Mesh& m, const std::vector<float>& field, const SdfGrid& 
 //      which clear the grid's dislocations (5/7 pairs where a row is squeezed in).
 // Both fields are solved coarse to fine: from a random start, plain smoothing
 // leaves whirlpools that never dissolve (12.6k singular faces on a cube vs 24
-// with the hierarchy). Grid spacing is 3 MC edges: closer, too few MC points
-// share a grid point to agree on it and the result tears. Written from the
+// with the hierarchy). The grid is laid 3.3 MC edges apart and split twice: closer,
+// too few MC points share a grid point to agree on it and the result tears. Written from the
 // published idea (field-aligned meshing), prototype in sdf-patterns-harness/.
 namespace flow {
 
@@ -1735,7 +1735,11 @@ FlowBaseStash g_flow_base;
 bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, int levels_after,
                  std::vector<uint8_t>* seam = nullptr) {
     using namespace flow;
-    static const float SPACING = env_float("CHISEL_FLOW_SPACING", 4.0f);
+    // 3.3, not 4 (2026-11-27): at 4 the result had a third fewer verts than the plain
+    // merge at the same Detail, and fang tips, teeth and ear tips went sparse and soft
+    // (orc ear tip tore, 4 voxels off). 3.3 lands on the plain merge's count, poles the
+    // same. Spacing isn't monotonic (3.5 and 3.7 left far more folds): measure, don't tune.
+    static const float SPACING = env_float("CHISEL_FLOW_SPACING", 3.3f);
     static const int   SUBDIV  = (int)env_float("CHISEL_FLOW_SUBDIV", 2.0f);
     static const int   OITERS  = (int)env_float("CHISEL_FLOW_OITERS", 30.0f);
     static const int   PITERS  = (int)env_float("CHISEL_FLOW_PITERS", 50.0f);
@@ -1772,7 +1776,7 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
     const float e0 = (float)(esum / (double)std::max<size_t>(1, L0.ea.size()));
     // Splits: two by default (density); "Levels after" = L asks for L, so the coarse
     // grid is laid that much wider and becomes L0 of the rebuild. Each extra split
-    // doubles the spacing: 4 MC edges at 2 splits, 8 at 3, 16 at 4.
+    // doubles the spacing: 3.3 MC edges at 2 splits, 6.6 at 3, 13.2 at 4.
     const int splits = std::max(SUBDIV, levels_after);
     const float s = e0 * SPACING * (float)(1u << std::max(0, splits - 2));
     g_flow_base = FlowBaseStash{};
@@ -2051,6 +2055,55 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
         }
         tri.swap(keep);
     }
+    // One winding throughout. Each tri picked its own at extraction (from its corners'
+    // normals) and fills follow their hole's loop, so a small patch could come out wound
+    // against its neighbours: well-shaped tris facing exactly inward, which no untangle
+    // can fix and the splits turn into 16 each (2026-11-27). Walk the tris across shared
+    // edges, turning each to agree with the one it was reached from; then turn a whole
+    // piece over if most of its area faces against the surface normals.
+    uint32_t rewound = 0;
+    {
+        const size_t ntri = tri.size() / 3;
+        std::unordered_map<uint64_t, std::pair<int32_t, int32_t>> et; et.reserve(tri.size());
+        for (size_t t = 0; t < ntri; t++)
+            for (int i = 0; i < 3; i++) {
+                auto ins = et.emplace(ekey(tri[t*3+i], tri[t*3+(i+1)%3]), std::make_pair((int32_t)t, -1));
+                if (!ins.second) ins.first->second.second = (int32_t)t;
+            }
+        auto winds = [&](size_t t, uint32_t a, uint32_t b) {   // does t run a -> b?
+            for (int i = 0; i < 3; i++) if (tri[t*3+i] == a && tri[t*3+(i+1)%3] == b) return true;
+            return false;
+        };
+        std::vector<uint8_t> done(ntri, 0);
+        std::vector<uint32_t> piece, q;
+        for (size_t s0 = 0; s0 < ntri; s0++) {
+            if (done[s0]) continue;
+            piece.clear(); q.assign(1, (uint32_t)s0); done[s0] = 1;
+            uint32_t flipped_here = 0;
+            while (!q.empty()) {
+                const uint32_t t = q.back(); q.pop_back(); piece.push_back(t);
+                for (int i = 0; i < 3; i++) {
+                    const uint32_t a = tri[t*3+i], b = tri[t*3+(i+1)%3];
+                    const auto& e = et[ekey(a, b)];
+                    const int32_t u = e.first == (int32_t)t ? e.second : e.first;
+                    if (u < 0 || done[u]) continue;
+                    done[u] = 1;
+                    if (winds(u, a, b)) { std::swap(tri[u*3+1], tri[u*3+2]); flipped_here++; }   // must run b -> a
+                    q.push_back((uint32_t)u);
+                }
+            }
+            double vote = 0.0;
+            for (uint32_t t : piece) {
+                const Vec3 a = CP[tri[t*3]], b = CP[tri[t*3+1]], c = CP[tri[t*3+2]];
+                vote += (double)(b - a).cross(c - a).dot(CN[tri[t*3]] + CN[tri[t*3+1]] + CN[tri[t*3+2]]);
+            }
+            if (vote < 0.0) {
+                for (uint32_t t : piece) std::swap(tri[t*3+1], tri[t*3+2]);
+                flipped_here = (uint32_t)piece.size() - flipped_here;
+            }
+            rewound += flipped_here;
+        }
+    }
     {
         std::unordered_set<uint32_t> bad_v;
         const bool bad = classify(bad_v);
@@ -2235,8 +2288,8 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
 
     // Split every tri into 4 (edge midpoints), SUBDIV times: a regular grid stays
     // regular (each new vert has 6 edges), so this buys back the density the wide
-    // grid gave up. Spacing 4 + 2 splits = an edge of 1 MC edge, about the vertex
-    // count of the plain merge at the same Detail (the user saw 1.2M -> 100k without).
+    // grid gave up. Spacing 3.3 + 2 splits lands on the plain merge's vertex count at the
+    // same Detail (the user saw 1.2M -> 100k without splits, and -33% at spacing 4).
     for (int sd = 0; sd < splits; sd++) {
         // Levels after: hand over only the grid. The merge keeps its dense surface, which
         // the rebuild wraps every level onto; a split-up coarse grid as that target lost
@@ -2287,6 +2340,7 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
     }
     { const auto uf = untangle(CP, tri); top_folds[0] = uf.first; top_folds[1] = uf.second; }
     const uint32_t top_strays = count_strays(false);
+
     std::printf("[sdf-flow] folds untangled: grid %zu -> %zu, top %zu -> %zu; %u tris off the surface by > half an edge\n",
                 base_folds[0], base_folds[1], top_folds[0], top_folds[1], top_strays);
     std::vector<uint32_t> remap(CP.size(), 0xFFFFFFFFu);
@@ -2306,9 +2360,9 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
         x = remap[x];
     }
     out.indices = std::move(tri);
-    std::printf("[sdf-flow] Flow%s: %u -> %u verts / %zu tris (spacing %.2fx, %d splits, %zu levels, %u tris dropped, %u holes + %u seam notches filled, %u pillow tris), %.0f ms\n",
+    std::printf("[sdf-flow] Flow%s: %u -> %u verts / %zu tris (spacing %.2fx, %d splits, %zu levels, %u tris dropped, %u holes + %u seam notches filled, %u pillow tris, %u rewound), %.0f ms\n",
                 seam ? " (+x half)" : "", nv, out.vertex_count(), out.indices.size() / 3,
-                SPACING * (float)(1u << std::max(0, splits - 2)), splits, H.size(), dropped, holes, notches, pillows,
+                SPACING * (float)(1u << std::max(0, splits - 2)), splits, H.size(), dropped, holes, notches, pillows, rewound,
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
     if (seam) seam->swap(oseam);
     m.pos_x.swap(out.pos_x); m.pos_y.swap(out.pos_y); m.pos_z.swap(out.pos_z);
