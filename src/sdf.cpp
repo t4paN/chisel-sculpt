@@ -1657,7 +1657,25 @@ void build_hierarchy(std::vector<Level>& H, float e0) {
     }
 }
 
-void smooth_orient(const Level& L, std::vector<Vec3>& o, int iters, uint64_t salt) {
+// Mirror: the grid direction pinned at the seam, along the seam itself (in the x = 0
+// plane and in the tangent plane). A triangle grid with a row on its mirror line
+// reflects onto itself, so the reflected half lines up with the kept one.
+inline Vec3 seam_dir(Vec3 n) {
+    Vec3 t = n.cross(Vec3(1, 0, 0));
+    if (t.length() < 1e-6f) t = tang(Vec3(0, 1, 0), n);
+    return unit(t);
+}
+// Slide a seam grid point across the seam direction (in its tangent plane) onto x = 0:
+// moves the row, not the point along it.
+inline Vec3 onto_seam(Vec3 p, Vec3 n) {
+    const Vec3 d = tang(Vec3(1, 0, 0), n);
+    if (d.x > 0.1f) p = p - d * (p.x / d.x);
+    p.x = 0.0f;
+    return p;
+}
+
+void smooth_orient(const Level& L, std::vector<Vec3>& o, int iters, uint64_t salt,
+                   const std::vector<uint8_t>* lock = nullptr) {
     const uint32_t n = (uint32_t)L.V.size();
     std::vector<Vec3> acc(n);
     for (int it = 0; it < iters; it++) {
@@ -1669,6 +1687,7 @@ void smooth_orient(const Level& L, std::vector<Vec3>& o, int iters, uint64_t sal
         }
         // Half the verts per sweep, so neighbours don't flip-flop in lockstep.
         for (uint32_t v = 0; v < n; v++) {
+            if (lock && (*lock)[v]) continue;
             if (coin(salt ^ ((uint64_t)it << 40) ^ v) >= 0.5f) continue;
             Vec3 t = tang(acc[v], L.N[v]);
             if (t.length() > 1e-12f) o[v] = unit(t);
@@ -1677,7 +1696,7 @@ void smooth_orient(const Level& L, std::vector<Vec3>& o, int iters, uint64_t sal
 }
 
 void smooth_position(const Level& L, const std::vector<Vec3>& o, std::vector<Vec3>& p,
-                     float s, int iters, uint64_t salt) {
+                     float s, int iters, uint64_t salt, const std::vector<uint8_t>* lock = nullptr) {
     const uint32_t n = (uint32_t)L.V.size();
     std::vector<Vec3> acc(n);
     std::vector<float> cnt(n);
@@ -1694,6 +1713,7 @@ void smooth_position(const Level& L, const std::vector<Vec3>& o, std::vector<Vec
             Vec3 q = acc[v] * (1.0f / cnt[v]);
             q = L.V[v] + tang(q - L.V[v], L.N[v]);
             p[v] = snap_toward(L.V[v], q, o[v], L.N[v], s);   // the grid point nearest the vert
+            if (lock && (*lock)[v]) p[v] = onto_seam(p[v], L.N[v]);
         }
     }
 }
@@ -1708,7 +1728,12 @@ void smooth_position(const Level& L, const std::vector<Vec3>& o, std::vector<Vec
 struct FlowBaseStash { std::vector<float> pos; std::vector<uint32_t> idx; int levels = 0; float edge = 0.0f; };
 FlowBaseStash g_flow_base;
 
-bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, int levels_after) {
+// Mirror (seam != nullptr): m is the +x half from clip_to_plus_x, seam its x = 0 verts.
+// The grid gets a row along the seam (field pinned there, points slid onto x = 0), the
+// half comes back with its seam flags, and the caller reflects it as on the MC path.
+// The "Levels after" grid is reflected here before it is kept.
+bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, int levels_after,
+                 std::vector<uint8_t>* seam = nullptr) {
     using namespace flow;
     static const float SPACING = env_float("CHISEL_FLOW_SPACING", 4.0f);
     static const int   SUBDIV  = (int)env_float("CHISEL_FLOW_SUBDIV", 2.0f);
@@ -1733,6 +1758,8 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
         L0.V[v] = Vec3(m.pos_x[v], m.pos_y[v], m.pos_z[v]);
         Vec3 g = grad(L0.V[v]);
         L0.N[v] = g.length() > 1e-12f ? unit(g) : unit(Vec3(m.norm_x[v], m.norm_y[v], m.norm_z[v]));
+        // A mirrored surface's normal lies in the mirror plane at the seam.
+        if (seam && (*seam)[v]) { L0.N[v].x = 0.0f; L0.N[v] = unit(L0.N[v]); }
     }
     {
         std::vector<uint64_t> keys; keys.reserve((size_t)nt * 3);
@@ -1752,6 +1779,20 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
     build_hierarchy(H, e0);
     const Level& L0f = H[0];   // H grew: the L0 reference above is stale from here on
 
+    // Mirror: which verts of each level touch the seam (a coarse cluster does when any
+    // of its verts does; the clustering cells start at x = 0, so none straddles it).
+    std::vector<std::vector<uint8_t>> SL;
+    if (seam) {
+        SL.resize(H.size());
+        SL[0] = *seam;
+        for (size_t lv = 0; lv + 1 < H.size(); lv++) {
+            SL[lv + 1].assign(H[lv + 1].V.size(), 0);
+            for (size_t v = 0; v < H[lv].V.size(); v++)
+                if (SL[lv][v]) SL[lv + 1][H[lv].parent[v]] = 1;
+        }
+    }
+    auto lock = [&](size_t lv) { return seam ? &SL[lv] : nullptr; };
+
     // Fields, coarse to fine.
     const int top = (int)H.size() - 1;
     std::vector<std::vector<Vec3>> O(H.size());
@@ -1764,16 +1805,18 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
             if (t.length() < 1e-6f) t = tang(Vec3(1, 0, 0), T.N[v]);
             if (t.length() < 1e-6f) t = tang(Vec3(0, 1, 0), T.N[v]);
             O[top][v] = unit(t);
+            if (seam && SL[top][v]) O[top][v] = seam_dir(T.N[v]);
         }
-        smooth_orient(T, O[top], OITERS, 0x1000u + top);
+        smooth_orient(T, O[top], OITERS, 0x1000u + top, lock(top));
         for (int lv = top - 1; lv >= 0; lv--) {
             const Level& F = H[lv];
             O[lv].resize(F.V.size());
             for (uint32_t v = 0; v < F.V.size(); v++) {
                 Vec3 t = tang(O[lv + 1][F.parent[v]], F.N[v]);
                 O[lv][v] = t.length() > 1e-12f ? unit(t) : O[lv + 1][F.parent[v]];
+                if (seam && SL[lv][v]) O[lv][v] = seam_dir(F.N[v]);
             }
-            smooth_orient(F, O[lv], OITERS, 0x1000u + lv);
+            smooth_orient(F, O[lv], OITERS, 0x1000u + lv, lock(lv));
         }
     }
     std::vector<Vec3> P, Pc;
@@ -1781,11 +1824,14 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
         const Level& F = H[lv];
         P.resize(F.V.size());
         for (uint32_t v = 0; v < F.V.size(); v++) {
-            if (lv == top) { P[v] = F.V[v]; continue; }
-            Vec3 q = F.V[v] + tang(Pc[F.parent[v]] - F.V[v], F.N[v]);
-            P[v] = snap_toward(F.V[v], q, O[lv][v], F.N[v], s);
+            if (lv == top) P[v] = F.V[v];
+            else {
+                Vec3 q = F.V[v] + tang(Pc[F.parent[v]] - F.V[v], F.N[v]);
+                P[v] = snap_toward(F.V[v], q, O[lv][v], F.N[v], s);
+            }
+            if (seam && SL[lv][v]) P[v] = onto_seam(P[v], F.N[v]);
         }
-        smooth_position(F, O[lv], P, s, PITERS, 0x2000u + lv);
+        smooth_position(F, O[lv], P, s, PITERS, 0x2000u + lv, lock(lv));
         Pc.swap(P);
     }
     P.swap(Pc);     // level 0's grid points
@@ -1823,6 +1869,18 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
     std::vector<float> ccount(nc, 0.0f);
     for (uint32_t v = 0; v < nv; v++) { CP[cl[v]] += P[v]; CN[cl[v]] += L0f.N[v]; ccount[cl[v]] += 1.0f; }
     for (uint32_t c = 0; c < nc; c++) { CP[c] = CP[c] * (1.0f / ccount[c]); CN[c] = unit(CN[c]); }
+    // Mirror: a grid point is on the seam if any of its verts was, or if it landed on the
+    // seam row anyway (the next row sits 0.87 of a step out). Those snap onto x = 0.
+    std::vector<uint8_t> CS;
+    if (seam) {
+        CS.assign(nc, 0);
+        for (uint32_t v = 0; v < nv; v++) if ((*seam)[v]) CS[cl[v]] = 1;
+        for (uint32_t c = 0; c < nc; c++) {
+            if (CP[c].x < 0.25f * s) CS[c] = 1;
+            if (CS[c]) { CP[c].x = 0.0f; CN[c].x = 0.0f; CN[c] = unit(CN[c]); }
+        }
+    }
+    auto is_s = [&](uint32_t c) { return seam && CS[c]; };
     std::vector<uint64_t> gk;
     for (size_t e = 0; e < L0f.ea.size(); e++)
         if (step[e]) { uint32_t a = cl[L0f.ea[e]], b = cl[L0f.eb[e]]; if (a != b) gk.push_back(ekey(a, b)); }
@@ -1839,7 +1897,7 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
             if (A[i] < B[j]) i++; else if (B[j] < A[i]) j++;
             else {
                 const uint32_t z = A[i];
-                if (z > y) {
+                if (z > y && !(is_s(x) && is_s(y) && is_s(z))) {   // no sail in the mirror plane
                     Vec3 fn = (CP[y] - CP[x]).cross(CP[z] - CP[x]);
                     if (fn.dot(CN[x] + CN[y] + CN[z]) >= 0.0f) { tri.push_back(x); tri.push_back(y); tri.push_back(z); }
                     else { tri.push_back(x); tri.push_back(z); tri.push_back(y); }
@@ -1853,6 +1911,10 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
     // then touch at a vert (two boundary edges leave it), drop that vert's tris so
     // they become one hole; repeat; then fill each small hole with a fan round its
     // middle. Anything it can't untangle in a few passes: give up.
+    // Mirror: the half is open along the seam, so there the rule turns over: an edge
+    // between two seam points must have ONE tri (its twin comes with the reflection;
+    // two would be four once reflected), and every seam point must lie on such an edge
+    // (one inside the half would get a second, mirrored fan).
     auto edge_counts = [&](std::unordered_map<uint64_t, int>& ec) {
         ec.clear(); ec.reserve(tri.size());
         for (size_t t = 0; t < tri.size(); t += 3)
@@ -1860,23 +1922,34 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
     };
     std::unordered_map<uint64_t, int> ec;
     std::unordered_map<uint32_t, uint32_t> next;   // boundary half-edge a->b (tri winds a->b, alone on it)
-    uint32_t dropped = 0;
-    bool tangled = true;
-    for (int pass = 0; pass < 6 && tangled; pass++) {
+    // One sweep of the rules above: fills next, collects the verts to drop.
+    auto classify = [&](std::unordered_set<uint32_t>& bad_v) {
         edge_counts(ec);
-        std::unordered_set<uint32_t> bad_v;
         next.clear();
-        tangled = false;
+        bool bad = false;
+        std::unordered_set<uint32_t> on_edge;   // seam points on a seam edge
         for (size_t t = 0; t < tri.size(); t += 3)
             for (int i = 0; i < 3; i++) {
                 uint32_t a = tri[t+i], b = tri[t+(i+1)%3];
                 int c = ec[ekey(a, b)];
-                if (c > 2) { bad_v.insert(a); bad_v.insert(b); tangled = true; }
+                const bool se = is_s(a) && is_s(b);
+                if (c > 2 || (se && c == 2)) { bad_v.insert(a); bad_v.insert(b); bad = true; }
                 else if (c == 1) {
-                    if (next.count(a)) { bad_v.insert(a); tangled = true; }
+                    if (next.count(a)) { bad_v.insert(a); bad = true; }
                     next[a] = b;
+                    if (se) { on_edge.insert(a); on_edge.insert(b); }
                 }
             }
+        if (seam)
+            for (uint32_t x : tri)
+                if (CS[x] && !on_edge.count(x)) { bad_v.insert(x); bad = true; }
+        return bad;
+    };
+    uint32_t dropped = 0, notches = 0;
+    bool tangled = true;
+    for (int pass = 0; pass < 6 && tangled; pass++) {
+        std::unordered_set<uint32_t> bad_v;
+        tangled = classify(bad_v);
         if (!tangled) break;
         std::vector<uint32_t> keep; keep.reserve(tri.size());
         for (size_t t = 0; t < tri.size(); t += 3) {
@@ -1885,57 +1958,135 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
         }
         tri.swap(keep);
     }
-    edge_counts(ec);
     uint32_t holes = 0;
+    // Zigzag strip across a hole, from both ends of the loop toward the middle: no new
+    // vert, every vert gains a couple of edges at most. (A fan round a middle vert made it
+    // a pole with one edge per hole edge, and the user found those as pimples once
+    // subdivided, 2026-11-27.) Boundary edge a->b in the mesh => each new tri carries b->a.
+    // The closing edge L.back() -> L[0] needn't exist: then the strip leaves it open as
+    // L[0] -> L.back(), which is how a notch in the seam is closed with a seam edge.
+    auto zigzag = [&](const std::vector<uint32_t>& L) {
+        size_t i = 0, k = L.size() - 1;
+        while (k - i >= 2) {
+            tri.push_back(L[i + 1]); tri.push_back(L[i]); tri.push_back(L[k]);
+            i++;
+            if (k - i < 2) break;
+            tri.push_back(L[k]); tri.push_back(L[k - 1]); tri.push_back(L[i]);
+            k--;
+        }
+    };
     if (!tangled) {
         std::unordered_set<uint32_t> seen;
         for (auto& kv : next) {
             if (seen.count(kv.first)) continue;
             std::vector<uint32_t> loop;
             uint32_t v = kv.first;
+            // The seam loop runs the whole length of the cut, so no cap on the mirror.
             while (!seen.count(v)) {
                 seen.insert(v); loop.push_back(v);
                 auto it = next.find(v);
-                if (it == next.end() || loop.size() > 48) { tangled = true; break; }
+                if (it == next.end() || (!seam && loop.size() > 48)) { tangled = true; break; }
                 v = it->second;
             }
             if (tangled) break;
             if (v != kv.first || loop.size() < 3) { tangled = true; break; }
-            // Zigzag strip across the hole, from both ends of the loop toward the
-            // middle: no new vert, every vert gains a couple of edges at most. (A fan
-            // round a middle vert made it a pole with one edge per hole edge, and the
-            // user found those as pimples once subdivided, 2026-11-27.) Boundary edge
-            // a->b in the mesh => each new tri carries b->a.
-            const auto& L = loop;
-            size_t i = 0, k = L.size() - 1;
-            while (k - i >= 2) {
-                tri.push_back(L[i + 1]); tri.push_back(L[i]); tri.push_back(L[k]);
-                i++;
-                if (k - i < 2) break;
-                tri.push_back(L[k]); tri.push_back(L[k - 1]); tri.push_back(L[i]);
-                k--;
+            size_t s0 = loop.size();
+            for (size_t i = 0; i < loop.size() && s0 == loop.size(); i++) if (is_s(loop[i])) s0 = i;
+            if (s0 == loop.size()) {               // an ordinary hole
+                if (loop.size() > 48) { tangled = true; break; }
+                zigzag(loop);
+                holes++;
+                continue;
             }
-            holes++;
+            // Touches the seam: start at a seam point, and between each seam point and the
+            // next fill the dip (if any) up to a new seam edge. A run with no dip is seam already.
+            std::rotate(loop.begin(), loop.begin() + s0, loop.end());
+            for (size_t i = 0; i < loop.size() && !tangled; ) {
+                size_t j = i + 1;
+                while (j < loop.size() && !is_s(loop[j])) j++;
+                if (j > i + 1) {
+                    std::vector<uint32_t> run(loop.begin() + i, loop.begin() + j);
+                    const uint32_t B = j < loop.size() ? loop[j] : loop[0];
+                    if (B != run[0]) run.push_back(B);
+                    if (run.size() < 3 || run.size() > 50) tangled = true;
+                    else { zigzag(run); notches++; }
+                }
+                i = j;
+            }
+            if (tangled) break;
         }
     }
     if (tangled) {
         std::printf("[sdf-flow] Flow: result has tangled holes, keeping the plain merge\n");
         return false;
     }
-    edge_counts(ec);
-    size_t bad_edges = 0;
-    for (auto& kv : ec) if (kv.second != 2) bad_edges++;
-    if (bad_edges) {
-        std::printf("[sdf-flow] Flow: %zu edges still open or shared after repair, keeping the plain merge\n", bad_edges);
-        return false;
+    // A lone tri the drops cut free has a 3-edge hole all round it, and the fill above
+    // closes that with a back-to-back twin: a two-tri pillow. Its edges count 2, so it
+    // passes, but a split turns it into edges shared by four. Drop every tri that comes
+    // twice (same three corners), both copies.
+    uint32_t pillows = 0;
+    {
+        std::unordered_map<uint64_t, uint32_t> seen3; seen3.reserve(tri.size() / 3);
+        auto key3 = [&](size_t t) {
+            uint32_t a = tri[t], b = tri[t+1], c = tri[t+2];
+            if (a > b) std::swap(a, b);
+            if (b > c) std::swap(b, c);
+            if (a > b) std::swap(a, b);
+            return ((uint64_t)a * 0x9E3779B97F4A7C15ull) ^ ((uint64_t)b << 21) ^ ((uint64_t)c << 42) ^ c;
+        };
+        auto same = [&](size_t s, size_t t) {
+            uint32_t x[3] = { tri[s], tri[s+1], tri[s+2] }, y[3] = { tri[t], tri[t+1], tri[t+2] };
+            std::sort(x, x + 3); std::sort(y, y + 3);
+            return x[0] == y[0] && x[1] == y[1] && x[2] == y[2];
+        };
+        std::vector<uint8_t> dup(tri.size() / 3, 0);
+        for (size_t t = 0; t < tri.size(); t += 3) {
+            auto ins = seen3.emplace(key3(t), (uint32_t)(t / 3));
+            if (!ins.second && same(ins.first->second * 3, t)) { dup[t / 3] = 1; dup[ins.first->second] = 1; }
+        }
+        std::vector<uint32_t> keep; keep.reserve(tri.size());
+        for (size_t t = 0; t < tri.size(); t += 3) {
+            if (dup[t / 3]) { pillows++; continue; }
+            keep.insert(keep.end(), &tri[t], &tri[t] + 3);
+        }
+        tri.swap(keep);
+    }
+    {
+        std::unordered_set<uint32_t> bad_v;
+        const bool bad = classify(bad_v);
+        size_t bad_edges = 0;
+        for (auto& kv : ec) {
+            const uint32_t a = (uint32_t)(kv.first >> 32), b = (uint32_t)kv.first;
+            if (kv.second != ((is_s(a) && is_s(b)) ? 1 : 2)) bad_edges++;
+        }
+        if (bad || bad_edges) {
+            std::printf("[sdf-flow] Flow: %zu edges still open or shared after repair (%zu bad points), keeping the plain merge\n",
+                        bad_edges, bad_v.size());
+            return false;
+        }
     }
 
     // Clean the coarse grid itself: flips + pole walk move its dislocations (5/7 pairs)
     // until they cancel. Done here, on the grid, every split level inherits the clean
     // topology (a split never adds a pole), so L0 of a rebuild is as clean as the top.
-    auto snap_pt = [&](Vec3 p) {
+    // Mirror self-check: edges that would come out wrong once reflected (a seam-seam
+    // edge needs exactly one tri, every other edge two). Cheap next to the rest.
+    auto seam_faults = [&]() {
+        if (!seam) return (size_t)0;
+        edge_counts(ec);
+        size_t bad = 0;
+        for (auto& kv : ec) {
+            const uint32_t a = (uint32_t)(kv.first >> 32), b = (uint32_t)kv.first;
+            if (kv.second != ((CS[a] && CS[b]) ? 1 : 2)) bad++;
+        }
+        return bad;
+    };
+    // on: a seam point, which moves within x = 0 only.
+    auto snap_pt = [&](Vec3 p, bool on) {
+        if (on) p.x = 0.0f;
         for (int it = 0; it < 4; it++) {
             Vec3 g = grad(p);
+            if (on) g.x = 0.0f;
             if (g.length() < 1e-12f) break;
             p = p - unit(g) * sample_field(field, grid, p);
         }
@@ -1989,7 +2140,8 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
                         const uint32_t u = T[vt[j]*3+c];
                         if (u != v) { sum = sum + P[u]; w += 1.0f; }
                     }
-                np[i] = w > 0.0f ? snap_pt(sum * (1.0f / w)) : P[v];
+                // A seam point's average with its mirrored neighbours = this one at x = 0.
+                np[i] = w > 0.0f ? snap_pt(sum * (1.0f / w), is_s(v)) : P[v];
             }
             for (size_t i = 0; i < verts.size(); i++) { P[verts[i]] = np[i]; mark[verts[i]] = 0; }
             bad.clear();
@@ -2002,32 +2154,79 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
         std::vector<uint32_t> remap(CP.size(), 0xFFFFFFFFu);
         Mesh base;
         std::vector<uint32_t> bidx; bidx.reserve(tri.size());
+        std::vector<uint8_t> bseam;
         for (uint32_t x : tri) {
             if (remap[x] == 0xFFFFFFFFu) {
                 remap[x] = (uint32_t)base.pos_x.size();
-                Vec3 p = snap_pt(CP[x]);
+                Vec3 p = snap_pt(CP[x], is_s(x));
                 base.pos_x.push_back(p.x); base.pos_y.push_back(p.y); base.pos_z.push_back(p.z);
+                if (seam) bseam.push_back(CS[x]);
             }
             bidx.push_back(remap[x]);
         }
         base.indices = std::move(bidx);
-        flip_valence(base, nullptr, 3);
-        reduce_poles(base, field, grid, nullptr, 90);
+        if (seam) CS.swap(bseam);
+        // Mirror: seam points stay put and no flip lays an edge in the mirror plane.
+        flip_valence(base, seam ? &CS : nullptr, 3);
+        reduce_poles(base, field, grid, seam ? &CS : nullptr, 90);
         const uint32_t bv = base.vertex_count();
         CP.resize(bv); CN.resize(bv);
-        for (uint32_t v = 0; v < bv; v++) CP[v] = snap_pt(Vec3(base.pos_x[v], base.pos_y[v], base.pos_z[v]));
+        for (uint32_t v = 0; v < bv; v++) CP[v] = snap_pt(Vec3(base.pos_x[v], base.pos_y[v], base.pos_z[v]), is_s(v));
         tri = base.indices;
+        if (const size_t f = seam_faults()) {
+            std::printf("[sdf-flow] Flow: grid clean-up broke the seam (%zu edges), keeping the plain merge\n", f);
+            return false;
+        }
         const auto uf = untangle(CP, tri);
         base_folds[0] = uf.first; base_folds[1] = uf.second;
-        for (uint32_t v = 0; v < bv; v++) CN[v] = unit(grad(CP[v]));
+        for (uint32_t v = 0; v < bv; v++) {
+            CN[v] = grad(CP[v]);
+            if (is_s(v)) CN[v].x = 0.0f;
+            CN[v] = unit(CN[v]);
+        }
     }
+    // Tris straying more than half a mean edge off the surface (sampled at 6 points
+    // each): where the grid spans a gap narrower than a cell (between two lips, round a
+    // hooked fang) or a hole fill lies flat across a crevice. snap: corners onto the
+    // surface first (the coarse grid's corners aren't yet).
+    auto count_strays = [&](bool snap) {
+        double el = 0.0;
+        for (size_t t = 0; t < tri.size(); t += 3) el += (CP[tri[t]] - CP[tri[t+1]]).length();
+        const float tol = 0.5f * (float)(el / (double)std::max<size_t>(1, tri.size() / 3));
+        static const float W[6][3] = {{1/3.f,1/3.f,1/3.f},{.6f,.2f,.2f},{.2f,.6f,.2f},{.2f,.2f,.6f},{.5f,.5f,0},{0,.5f,.5f}};
+        auto at = [&](uint32_t v) { return snap ? snap_pt(CP[v], is_s(v)) : CP[v]; };
+        uint32_t strays = 0;
+        for (size_t t = 0; t < tri.size(); t += 3) {
+            const Vec3 a = at(tri[t]), b = at(tri[t+1]), c = at(tri[t+2]);
+            for (auto& w : W)
+                if (std::fabs(sample_field(field, grid, a * w[0] + b * w[1] + c * w[2])) > tol) { strays++; break; }
+        }
+        return strays;
+    };
     auto stash = [&]() {
         g_flow_base.pos.resize(CP.size() * 3);
         for (size_t v = 0; v < CP.size(); v++) {
-            Vec3 p = snap_pt(CP[v]);
+            Vec3 p = snap_pt(CP[v], is_s((uint32_t)v));
             g_flow_base.pos[v*3] = p.x; g_flow_base.pos[v*3+1] = p.y; g_flow_base.pos[v*3+2] = p.z;
         }
         g_flow_base.idx = tri;
+        if (seam) {   // the rebuild wants the whole model: reflect, seam points shared
+            const uint32_t n = (uint32_t)CP.size();
+            std::vector<uint32_t> refl(n);
+            for (uint32_t v = 0; v < n; v++) {
+                if (CS[v]) { refl[v] = v; continue; }
+                refl[v] = (uint32_t)(g_flow_base.pos.size() / 3);
+                g_flow_base.pos.push_back(-g_flow_base.pos[v*3]);
+                g_flow_base.pos.push_back( g_flow_base.pos[v*3+1]);
+                g_flow_base.pos.push_back( g_flow_base.pos[v*3+2]);
+            }
+            const size_t tn = tri.size();
+            for (size_t t = 0; t < tn; t += 3) {
+                g_flow_base.idx.push_back(refl[tri[t]]);
+                g_flow_base.idx.push_back(refl[tri[t+2]]);
+                g_flow_base.idx.push_back(refl[tri[t+1]]);
+            }
+        }
         g_flow_base.levels = levels_after;
         double el = 0.0;
         for (size_t t = 0; t < tri.size(); t += 3) el += (CP[tri[t]] - CP[tri[t+1]]).length();
@@ -2047,25 +2246,16 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
             // lips, round a hooked fang), and no level wrapped above it grows the shape
             // back. Any tri straying more than half an edge off the surface -> step aside,
             // the rebuild remeshes as usual. (The remesher's base stays within ~0.4.)
-            double el = 0.0;
-            for (size_t t = 0; t < tri.size(); t += 3) el += (CP[tri[t]] - CP[tri[t+1]]).length();
-            const float tol = 0.5f * (float)(el / (double)std::max<size_t>(1, tri.size() / 3));
-            static const float W[6][3] = {{1/3.f,1/3.f,1/3.f},{.6f,.2f,.2f},{.2f,.6f,.2f},{.2f,.2f,.6f},{.5f,.5f,0},{0,.5f,.5f}};
-            uint32_t strays = 0;
-            for (size_t t = 0; t < tri.size(); t += 3) {
-                const Vec3 a = snap_pt(CP[tri[t]]), b = snap_pt(CP[tri[t+1]]), c = snap_pt(CP[tri[t+2]]);
-                for (auto& w : W)
-                    if (std::fabs(sample_field(field, grid, a * w[0] + b * w[1] + c * w[2])) > tol) { strays++; break; }
-            }
+            const uint32_t strays = count_strays(true);
             if (strays) {
                 std::printf("[sdf-flow] Flow: grid for %d levels spans gaps (%u tris off the surface by > half an edge): "
                             "the rebuild remeshes as usual, merge keeps its own surface\n", levels_after, strays);
                 return true;
             }
             stash();
-            std::printf("[sdf-flow] Flow: grid of %zu verts / %zu tris kept as L0 for %d levels (spacing %.2fx, %u tris dropped, %u holes filled, folds %zu -> %zu); merge keeps its own surface, %.0f ms\n",
-                        g_flow_base.pos.size() / 3, g_flow_base.idx.size() / 3, levels_after,
-                        SPACING * (float)(1u << std::max(0, splits - 2)), dropped, holes, base_folds[0], base_folds[1],
+            std::printf("[sdf-flow] Flow: grid of %zu verts / %zu tris kept as L0 for %d levels%s (spacing %.2fx, %u tris dropped, %u holes + %u seam notches filled, folds %zu -> %zu); merge keeps its own surface, %.0f ms\n",
+                        g_flow_base.pos.size() / 3, g_flow_base.idx.size() / 3, levels_after, seam ? ", mirrored" : "",
+                        SPACING * (float)(1u << std::max(0, splits - 2)), dropped, holes, notches, base_folds[0], base_folds[1],
                         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
             return true;
         }
@@ -2075,6 +2265,7 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
             if (it != midv.end()) return it->second;
             const uint32_t c = (uint32_t)CP.size();
             CP.push_back((CP[a] + CP[b]) * 0.5f); CN.push_back(unit(CN[a] + CN[b]));
+            if (seam) CS.push_back(CS[a] && CS[b]);   // only seam edges join two seam points
             midv.emplace(ekey(a, b), c);
             return c;
         };
@@ -2089,26 +2280,37 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
     }
 
     // Snap onto the SDF surface, untangle what the splits folded, compact, write back.
-    for (auto& p : CP) p = snap_pt(p);
+    for (size_t v = 0; v < CP.size(); v++) CP[v] = snap_pt(CP[v], is_s((uint32_t)v));
+    if (const size_t f = seam_faults()) {
+        std::printf("[sdf-flow] Flow: splits broke the seam (%zu edges), keeping the plain merge\n", f);
+        return false;
+    }
     { const auto uf = untangle(CP, tri); top_folds[0] = uf.first; top_folds[1] = uf.second; }
-    std::printf("[sdf-flow] folds untangled: grid %zu -> %zu, top %zu -> %zu\n",
-                base_folds[0], base_folds[1], top_folds[0], top_folds[1]);
+    const uint32_t top_strays = count_strays(false);
+    std::printf("[sdf-flow] folds untangled: grid %zu -> %zu, top %zu -> %zu; %u tris off the surface by > half an edge\n",
+                base_folds[0], base_folds[1], top_folds[0], top_folds[1], top_strays);
     std::vector<uint32_t> remap(CP.size(), 0xFFFFFFFFu);
     Mesh out;
+    std::vector<uint8_t> oseam;
     for (uint32_t& x : tri) {
         if (remap[x] == 0xFFFFFFFFu) {
             remap[x] = (uint32_t)out.pos_x.size();
             Vec3 p = CP[x];
-            Vec3 n = unit(grad(p));
+            Vec3 n = grad(p);
+            if (is_s(x)) { p.x = 0.0f; n.x = 0.0f; oseam.push_back(1); }
+            else if (seam) oseam.push_back(0);
+            n = unit(n);
             out.pos_x.push_back(p.x); out.pos_y.push_back(p.y); out.pos_z.push_back(p.z);
             out.norm_x.push_back(n.x); out.norm_y.push_back(n.y); out.norm_z.push_back(n.z);
         }
         x = remap[x];
     }
     out.indices = std::move(tri);
-    std::printf("[sdf-flow] Flow: %u -> %u verts / %zu tris (spacing %.2fx, %d splits, %zu levels, %u tris dropped, %u holes filled), %.0f ms\n",
-                nv, out.vertex_count(), out.indices.size() / 3, SPACING * (float)(1u << std::max(0, splits - 2)), splits, H.size(), dropped, holes,
+    std::printf("[sdf-flow] Flow%s: %u -> %u verts / %zu tris (spacing %.2fx, %d splits, %zu levels, %u tris dropped, %u holes + %u seam notches filled, %u pillow tris), %.0f ms\n",
+                seam ? " (+x half)" : "", nv, out.vertex_count(), out.indices.size() / 3,
+                SPACING * (float)(1u << std::max(0, splits - 2)), splits, H.size(), dropped, holes, notches, pillows,
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+    if (seam) seam->swap(oseam);
     m.pos_x.swap(out.pos_x); m.pos_y.swap(out.pos_y); m.pos_z.swap(out.pos_z);
     m.norm_x.swap(out.norm_x); m.norm_y.swap(out.norm_y); m.norm_z.swap(out.norm_z);
     m.indices.swap(out.indices);
@@ -3821,14 +4023,15 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
         // The dialog's Pattern row. Curvature nudge: the 4-way cross field from the SDF's
         // curvature pulls edges along the bends. Plain: the same relax with no field.
         const bool graph = j.pat.pattern == (int)SdfPattern::GraphPaper;
-        // Flow re-lays the faithful merge; the mirror path tidies a half mesh with a
-        // pinned seam, which Flow doesn't handle yet, so there it falls back.
+        // Flow re-lays the faithful merge, and the MC mirror's +x half (seam row on x = 0).
+        // The Surface Nets mirror pairs verts by position over the whole model, which a
+        // re-laid half can't keep, so there it falls back.
         const bool flow  = j.pat.pattern == (int)SdfPattern::Flow;
-        if (flow && j.mirror)
-            std::printf("[sdf-flow] Flow isn't available with mirror yet: using Curvature nudge\n");
+        const bool flow_sn = flow && j.mirror && j.use_nets;
+        if (flow_sn)
+            std::printf("[sdf-flow] Flow isn't available with the Surface Nets mirror: using Curvature nudge\n");
         const bool nudge = j.pat.pattern == (int)SdfPattern::CurvatureNudge
-                        || j.pat.pattern == (int)SdfPattern::Curvature6 || graph
-                        || (flow && j.mirror);
+                        || j.pat.pattern == (int)SdfPattern::Curvature6 || graph || flow_sn;
         const int  rosy  = j.pat.pattern == (int)SdfPattern::Curvature6 ? 6 : 4;
         // 6-way also steers the flips and the pole walk (stage 2b). Dev hook
         // CHISEL_FIELD_FLIPS: bit 1 = flips, bit 2 = walk (default 3 = both).
@@ -3844,6 +4047,8 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
             std::vector<uint8_t> seam;
             clip_to_plus_x(welded, grid.voxel, seam);
             weld_near_seam(welded, grid.voxel, seam);   // B: collapse the seam sliver column
+            if (flow && !flow_remesh(welded, j.field_cpu, grid, j.pat.levels_after, &seam))
+                std::printf("[sdf-flow] Flow failed on this model: plain merge kept\n");
             CrossField flow_field;
             if (graph) build_graph_field(welded, j.field_cpu, grid, flow_field);
             else if (nudge) {

@@ -1100,7 +1100,9 @@ void app_ops_remesh_and_merge(App& a) {
             remesh_job = remesh_begin(*mesh, *multires, rb.base_edge, 10 + 4 * N,
                                       compute.supported ? &compute : nullptr,
                                       input.density_coarse_mult, input.density_fine_mult,
-                                      true, 1.0f, input.mirror_x);
+                                      true, 1.0f,
+                                      // chained: the merge's own mirror pick, as its remesh does
+                                      chained ? input.voxel_merge_mirror : input.mirror_x);
             // The top comes out at base x 4^N: a base that stops short of its target
             // puts the top that far over the original's count.
             remesh_set_target_tris(*remesh_job, (uint32_t)base_tris);

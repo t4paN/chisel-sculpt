@@ -2,6 +2,12 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-27 — Flow with mirror
+- Pattern Flow works on mirrored merges (Marching Cubes): the grid is laid on the +x half with one row along the x = 0 seam, then reflected, so both sides match point for point. On the test models: poles 0.4–0.8% (6–11% with the default pattern), pinched seam points down by about two thirds, watertight on all 8. Flow with the Surface Nets mirror still falls back to Curvature nudge.
+- Levels after: a mirrored Flow grid is reflected before it becomes L0, so every level is symmetric. When the guard turns the grid down, the rebuild now uses the merge's own mirror choice, not the viewport's.
+- Flow drops tris that come out twice (a lone tri the repair cut free, closed back-to-back by the hole fill); split, they made edges shared by four.
+- Known: where the grid is coarser than a crevice (lip under a hooked fang), its hole fill can lie across the gap as a flat web, mirror or not. The log counts tris off the surface by more than half an edge.
+
 ## 2026-11-27 — Flow keeps its grain through Levels after
 - SDF merge with Pattern Flow and "Levels after": Flow lays its grid wide enough to be L0, cleans that coarse grid, and Rebuild levels installs it as the base instead of remeshing, so every level carries the same rows (before, the rebuild brought back the old grain at every level).
 - The Flow base is kept as laid, on the surface: fitting it to the top grew spikes at horn tips and the top came out identical either way. Rebuilds from a remeshed base still fit.
