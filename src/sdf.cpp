@@ -1133,6 +1133,7 @@ void relax_to_field(Mesh& m, const std::vector<float>& field,
 // normal agreement ⇒ no fold-over). Greedy sweeps over a sorted edge list with
 // a staleness re-check, table rebuilt per sweep (one-shot op, allocation fine).
 uint32_t flip_valence(Mesh& m, const std::vector<uint8_t>* seam, int sweeps = 3) {
+    static const int SEAM_W = (int)env_float("CHISEL_SEAM_WEIGHT", 2.0f);   // see E below
     uint32_t nv = m.vertex_count();
     uint32_t flips_total = 0;
     auto ekey = [](uint32_t a, uint32_t b) -> uint64_t {
@@ -1194,7 +1195,12 @@ uint32_t flip_valence(Mesh& m, const std::vector<uint8_t>* seam, int sweeps = 3)
 
             // Valence energy Σ(val−target)² over the four corners, before vs after.
             auto E = [&](int va,int vb,int vc,int vd) {
-                auto s=[&](int x,uint32_t v){int e=x-target(v);return e*e;};
+                // A seam vert counts double: reflected, its defect doubles (half-valence 3
+                // = a full 4, two 5s fused) and it stands for one vert, not a mirrored pair,
+                // so the full mesh's energy is 2 x (sum over the half, seam weighted 2).
+                // At weight 1, pushing a seam 4 off as a 5 beside it scored as a wash and the
+                // seam kept a column of pinched 4s and 8s (2026-11-27).
+                auto s=[&](int x,uint32_t v){int e=x-target(v);return e*e*((seam && (*seam)[v]) ? SEAM_W : 1);};
                 return s(va,a)+s(vb,b)+s(vc,c)+s(vd,d);
             };
             if (val[a] <= 3 || val[b] <= 3) continue;      // never drop below valence 3
@@ -1271,6 +1277,10 @@ PoleStats reduce_poles(Mesh& m, const std::vector<float>& field, const SdfGrid& 
     };
     auto is_seam = [&](uint32_t v) { return seam && (*seam)[v] != 0; };
     auto target  = [&](uint32_t v) -> int { return is_seam(v) ? 4 : 6; };
+    // Seam verts weigh double in the energy (see flip_valence): a pinched seam 4 or 8
+    // pushed off the seam as a 5 or 7 beside it is then a real gain, not a coin toss.
+    static const int SEAM_W = (int)env_float("CHISEL_SEAM_WEIGHT", 2.0f);
+    auto w = [&](uint32_t v) -> int { return is_seam(v) ? SEAM_W : 1; };
 
     // Edge -> its two tris, and each vert's neighbours. Both kept exact through
     // every flip (flip_valence lets them go stale and skips; here a stale entry
@@ -1335,11 +1345,11 @@ PoleStats reduce_poles(Mesh& m, const std::vector<float>& field, const SdfGrid& 
                 if (is_seam(c) && is_seam(d)) return;                       // edge in the mirror plane
                 int ea = val[a]-target(a), eb = val[b]-target(b);
                 int ec = val[c]-target(c), ed = val[d]-target(d);
-                int   dE = (1 - 2*ea) + (1 - 2*eb) + (1 + 2*ec) + (1 + 2*ed);
+                int   dE = w(a)*(1 - 2*ea) + w(b)*(1 - 2*eb) + w(c)*(1 + 2*ec) + w(d)*(1 + 2*ed);
                 if (dE > 0) return;
                 float toss = coin(ekey(a, b), round);
                 if (dE == 0 && toss >= WALK_P) return;
-                float score = (float)dE + toss;         // dE is even: a real gain always wins
+                float score = (float)dE + toss;         // dE is whole, toss < 1: a real gain always wins
                 if (have && score >= best_score) return;
                 if (etab.count(ekey(c, d))) return;                         // would fuse two sheets
                 Vec3 pa = P(a), pb = P(b), pc = P(c), pd = P(d);
@@ -3122,8 +3132,13 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
                    sample_field(j.field_cpu, grid, c - n * hv) < 0.0f;
         };
 
-        // Dev hook: CHISEL_POLE_ROUNDS=0 turns the pole walk off, for A/B runs.
-        static const int pole_rounds = (int)env_float("CHISEL_POLE_ROUNDS", 30.0f);
+        // Walk rounds: 90 up to 1M result verts, 30 past that. 30 had stopped well short:
+        // 90 left 16% fewer needless pole pairs on the suite (hex, agree, kinks all better)
+        // for ~8 ms a round per 40k verts; huge merges keep 30 so they don't grow by tens of
+        // seconds (2026-11-27). Dev hook: CHISEL_POLE_ROUNDS=n forces n (0 = walk off).
+        static const int pole_rounds_env = (int)env_float("CHISEL_POLE_ROUNDS", -1.0f);
+        const int pole_rounds = pole_rounds_env >= 0 ? pole_rounds_env
+                              : (welded.vertex_count() <= 1000000u ? 90 : 30);
         // Dev hook: CHISEL_EVEN_ITERS=0 puts the last relax back on plain neighbour averaging.
         static const int even_iters = (int)env_float("CHISEL_EVEN_ITERS", 8.0f);
         // The dialog's Poles toggle: off = no walk (as CHISEL_POLE_ROUNDS=0; flips still run).

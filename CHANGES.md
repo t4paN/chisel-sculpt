@@ -2,6 +2,10 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-27 — SDF merge: fewer pinched poles on the mirror seam, fewer poles overall
+- Mirrored merges: the clean-up now counts a seam vertex's defect at its true, doubled weight, so pinched 4s and 8s leave the seam as a 5 or 7 on each side; on the test models seam pinches drop from 347 to 120.
+- The pole walk runs 90 rounds instead of 30 on results up to 1M vertices (16% fewer needless poles, more even triangles, under a second more on a typical merge); bigger results keep 30.
+
 ## 2026-11-25 — Browser: 64-bit build, up to 16 GB
 - Web: the itch page carries two builds and loads the 64-bit one (Memory64, heap up to 16 GB) where the browser supports it (Chrome, Edge, Firefox); Safari and iOS keep the 32-bit one (4 GB). `?wasm32` in the URL forces the 32-bit build.
 - Same fps as the 32-bit build (7.7M: 75/75, 30M: 64/61 orbit/stroke in Chrome); 7.7M -> 30.8M subdivides in 20 s instead of 24. The startup sphere reaches L11 (84M tris) in the browser, though past the graphics card's memory strokes slow down (Chrome) or stall (Firefox).
