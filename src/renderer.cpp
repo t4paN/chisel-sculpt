@@ -2997,8 +2997,12 @@ void Renderer::draw_debug_mesh(const Camera& cam, const Mesh& mesh, int w, int h
         seen.reserve((size_t)tc * 2);
         std::vector<uint32_t> edges;
         edges.reserve((size_t)tc * 3);          // E ≈ 1.5·T for a closed mesh
+        // Quad flow: a quad's hidden diagonal isn't drawn, so the wire shows quads.
+        std::vector<int32_t> mate;
+        const bool quads = mesh.quad_mates(mate);
         for (uint32_t i = 0; i < tc; i++) {
             for (int k = 0; k < 3; k++) {
+                if (quads && mate[i] >= 0 && mesh.quad_diag[i] == k) continue;
                 uint32_t a = mesh.indices[i*3+k], b = mesh.indices[i*3+(k+1)%3];
                 uint64_t key = (a < b) ? ((uint64_t)a << 32 | b) : ((uint64_t)b << 32 | a);
                 if (!seen.insert(key).second) continue;

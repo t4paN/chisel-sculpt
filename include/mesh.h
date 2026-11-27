@@ -130,6 +130,16 @@ struct Mesh {
     std::vector<float> map_pos, map_norm;
     bool has_uv() const { return !indices.empty() && uv.size() == indices.size() * 2; }
 
+    // Quads (Quad flow): per tri, which of its edges (k = indices[3t+k] -> [3t+k+1]) is
+    // the hidden diagonal it shares with its quad mate, or 0xFF for a lone tri. The
+    // wireframe leaves those edges out and OBJ export writes each pair as one quad.
+    // Like `uv`, anything that rebuilds the triangles without carrying it leaves it the
+    // wrong size, and quad_mates() also checks every pair still agrees, so a stale
+    // array reads as "no quads", never as wrong ones.
+    std::vector<uint8_t> quad_diag;
+    // mate[t] = the tri sharing t's hidden diagonal, or -1. False (mate empty) = no quads.
+    bool quad_mates(std::vector<int32_t>& mate) const;
+
     uint32_t vertex_count() const { return (uint32_t)pos_x.size(); }
     uint32_t tri_count() const { return (uint32_t)(indices.size() / 3); }
 

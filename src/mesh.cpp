@@ -608,6 +608,34 @@ bool Mesh::export_obj(const char* filename) const {
     return true;
 }
 
+bool Mesh::quad_mates(std::vector<int32_t>& mate) const {
+    mate.clear();
+    const uint32_t tc = tri_count();
+    if (tc == 0 || quad_diag.size() != tc) return false;
+    std::unordered_map<uint64_t, uint32_t> half;   // directed hidden edge a->b -> its tri
+    half.reserve(tc);
+    for (uint32_t t = 0; t < tc; t++) {
+        const uint8_t k = quad_diag[t];
+        if (k == 0xFF) continue;
+        if (k > 2) return false;
+        const uint32_t a = indices[t*3+k], b = indices[t*3+(k+1)%3];
+        half[((uint64_t)a << 32) | b] = t;
+    }
+    mate.assign(tc, -1);
+    size_t pairs = 0;
+    for (uint32_t t = 0; t < tc; t++) {
+        const uint8_t k = quad_diag[t];
+        if (k == 0xFF) continue;
+        const uint32_t a = indices[t*3+k], b = indices[t*3+(k+1)%3];
+        auto it = half.find(((uint64_t)b << 32) | a);
+        if (it == half.end() || it->second == t) { mate.clear(); return false; }   // stale
+        mate[t] = (int32_t)it->second;
+        pairs++;
+    }
+    if (pairs == 0) { mate.clear(); return false; }
+    return true;
+}
+
 uint32_t Mesh::write_obj(std::FILE* f, const char* object, uint32_t base) const {
     if (object) std::fprintf(f, "o %s\n", object);
 
@@ -619,7 +647,21 @@ uint32_t Mesh::write_obj(std::FILE* f, const char* object, uint32_t base) const 
         std::fprintf(f, "vn %f %f %f\n", norm_x[i], norm_y[i], norm_z[i]);
     }
 
+    // Quad flow meshes: each pair sharing a hidden diagonal goes out as one quad.
+    std::vector<int32_t> mate;
+    quad_mates(mate);
     for (uint32_t t = 0; t < tri_count(); t++) {
+        if (!mate.empty() && mate[t] >= 0) {
+            if ((uint32_t)mate[t] < t) continue;          // written with its mate
+            const uint32_t k = quad_diag[t], u = (uint32_t)mate[t];
+            const uint32_t a = indices[t*3+k], b = indices[t*3+(k+1)%3], c = indices[t*3+(k+2)%3];
+            uint32_t d = a;
+            for (int i = 0; i < 3; i++) { const uint32_t x = indices[u*3+i]; if (x != a && x != b) d = x; }
+            // t runs a->b->c, its mate b->a->d: the quad is b, c, a, d.
+            const uint32_t q[4] = { base + b + 1, base + c + 1, base + a + 1, base + d + 1 };
+            std::fprintf(f, "f %u//%u %u//%u %u//%u %u//%u\n", q[0], q[0], q[1], q[1], q[2], q[2], q[3], q[3]);
+            continue;
+        }
         uint32_t i0 = base + indices[t*3+0];
         uint32_t i1 = base + indices[t*3+1];
         uint32_t i2 = base + indices[t*3+2];

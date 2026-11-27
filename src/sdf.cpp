@@ -1577,10 +1577,23 @@ inline float coin(uint64_t k) {
     x ^= x >> 31; x *= 0x94D049BB133111EBull; x ^= x >> 29;
     return (float)(x & 0xFFFFFFu) * (1.0f / 16777216.0f);
 }
-// The 6 turns of oj (60-degree steps about nj): the one closest to oi.
+// Quad flow: the same solver with a 4-way field and a square lattice. Set by
+// flow_remesh for the length of one call (merges run one at a time).
+inline bool g_quad = false;
+// Lattice coords of d (in steps) in the basis a = o, b = frame_b(o, n).
+inline void lattice_uv(float da, float db, float& u, float& v) {
+    if (g_quad) { u = da; v = db; return; }   // square: a, b orthonormal
+    u = (4.0f / 3.0f) * (da - 0.5f * db); v = (4.0f / 3.0f) * (db - 0.5f * da);
+}
+// The 6 turns of oj (60-degree steps about nj; 4 at 90 for quads): the one closest to oi.
 inline Vec3 best_rep(Vec3 oi, Vec3 oj, Vec3 nj) {
     const Vec3 b = nj.cross(oj);
     Vec3 best = oj; float bd = -2.0f;
+    if (g_quad) {
+        const Vec3 r4[4] = { oj, b, oj * -1.0f, b * -1.0f };
+        for (const Vec3& r : r4) { float d = r.dot(oi); if (d > bd) { bd = d; best = r; } }
+        return best;
+    }
     for (int k = 0; k < 6; k++) {
         Vec3 r = oj * kC6[k] + b * kS6[k];
         float d = r.dot(oi);
@@ -1588,20 +1601,20 @@ inline Vec3 best_rep(Vec3 oi, Vec3 oj, Vec3 nj) {
     }
     return best;
 }
-// Lattice basis at a point: a = o, b = o turned 60 degrees.
-inline Vec3 frame_b(Vec3 o, Vec3 n) { return o * 0.5f + n.cross(o) * 0.8660254f; }
+// Lattice basis at a point: a = o, b = o turned 60 degrees (90 for quads).
+inline Vec3 frame_b(Vec3 o, Vec3 n) { return g_quad ? n.cross(o) : o * 0.5f + n.cross(o) * 0.8660254f; }
 // Move p by whole lattice steps (in the o/n frame, spacing s) to land nearest target.
 inline Vec3 snap_toward(Vec3 target, Vec3 p, Vec3 o, Vec3 n, float s) {
     const Vec3 a = o, b = frame_b(o, n);
     const Vec3 d = tang(target - p, n) * (1.0f / s);
-    const float da = d.dot(a), db = d.dot(b);
-    const float u = (4.0f / 3.0f) * (da - 0.5f * db), v = (4.0f / 3.0f) * (db - 0.5f * da);
+    float u, v;
+    lattice_uv(d.dot(a), d.dot(b), u, v);
     const float fu = std::floor(u), fv = std::floor(v);
     float bu = fu, bv = fv, best = 1e30f;
     for (int i = 0; i < 2; i++)
         for (int k = 0; k < 2; k++) {
             float eu = u - (fu + i), ev = v - (fv + k);
-            float d2 = eu * eu + ev * ev + eu * ev;     // |eu a + ev b|^2, 60-degree unit basis
+            float d2 = eu * eu + ev * ev + (g_quad ? 0.0f : eu * ev);   // |eu a + ev b|^2
             if (d2 < best) { best = d2; bu = fu + i; bv = fv + k; }
         }
     return p + (a * bu + b * bv) * s;
@@ -1750,14 +1763,19 @@ void smooth_position(const Level& L, const std::vector<Vec3>& o, std::vector<Vec
 struct FlowBaseStash { std::vector<float> pos; std::vector<uint32_t> idx; int levels = 0; float edge = 0.0f; };
 FlowBaseStash g_flow_base;
 std::string g_flow_note;   // set when Flow steps aside for the rebuild; the merge passes it on
+// Quad flow's result: the diagonals that pair its tris into quads (edge keys over the
+// returned mesh's verts). Each quad is two tris sharing one of these.
+std::vector<uint64_t> g_quad_diag;
 
 // Mirror (seam != nullptr): m is the +x half from clip_to_plus_x, seam its x = 0 verts.
 // The grid gets a row along the seam (field pinned there, points slid onto x = 0), the
 // half comes back with its seam flags, and the caller reflects it as on the MC path.
 // The "Levels after" grid is reflected here before it is kept.
 bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, int levels_after,
-                 std::vector<uint8_t>* seam = nullptr) {
+                 std::vector<uint8_t>* seam = nullptr, bool quad = false) {
     using namespace flow;
+    struct QuadScope { QuadScope(bool q) { g_quad = q; } ~QuadScope() { g_quad = false; } } quad_scope(quad);
+    g_quad_diag.clear();
     // 3.3, not 4 (2026-11-27): at 4 the result had a third fewer verts than the plain
     // merge at the same Detail, and fang tips, teeth and ear tips went sparse and soft
     // (orc ear tip tore, 4 voxels off). 3.3 lands on the plain merge's count, poles the
@@ -1875,14 +1893,15 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
         const Vec3 nm = unit(L0f.N[a] + L0f.N[b]);
         const Vec3 d = tang(P[b] - P[a], nm) * (1.0f / s);
         const Vec3 A = o[a], B = frame_b(o[a], L0f.N[a]);
-        const float da = d.dot(A), db = d.dot(B);
-        const int cu = (int)std::lround((4.0f / 3.0f) * (da - 0.5f * db));
-        const int cv = (int)std::lround((4.0f / 3.0f) * (db - 0.5f * da));
+        float fu, fv;
+        lattice_uv(d.dot(A), d.dot(B), fu, fv);
+        const int cu = (int)std::lround(fu), cv = (int)std::lround(fv);
         if (cu == 0 && cv == 0) {
             uint32_t ra = find(a), rb = find(b);
             if (ra != rb) par[std::max(ra, rb)] = std::min(ra, rb);
-        } else if ((cu == 1 && cv == 0) || (cu == 0 && cv == 1) || (cu == -1 && cv == 1) ||
-                   (cu == -1 && cv == 0) || (cu == 0 && cv == -1) || (cu == 1 && cv == -1)) {
+        } else if (quad ? std::abs(cu) + std::abs(cv) == 1
+                        : (cu == 1 && cv == 0) || (cu == 0 && cv == 1) || (cu == -1 && cv == 1) ||
+                          (cu == -1 && cv == 0) || (cu == 0 && cv == -1) || (cu == 1 && cv == -1)) {
             step[e] = 1;
         }
     }
@@ -1970,7 +1989,73 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
     for (uint64_t k : gk) { uint32_t a = (uint32_t)(k >> 32), b = (uint32_t)k; adj[a].push_back(b); adj[b].push_back(a); }
     for (auto& L : adj) std::sort(L.begin(), L.end());
     std::vector<uint32_t> tri;
+    // Quad flow: the faces of the grid graph, traced round each point's neighbours in
+    // turn order (the face left of u->v goes on to v's neighbour just before u, counter-
+    // clockwise about the normal). Squares come out as two tris whose shared diagonal is
+    // flagged in qd; the odd tri stays a tri, 5 to 8 corners are fanned (the scatter of
+    // non-quads a field-aligned grid always has), anything longer is left as a hole for
+    // the repair below.
+    std::unordered_set<uint64_t> qd;
+    uint32_t q_faces[3] = {0, 0, 0};   // quads, tris, 5-8 corners
+    if (quad) {
+        for (uint32_t x = 0; x < nc; x++) {
+            auto& L = adj[x];
+            if (L.size() < 2) continue;
+            Vec3 t1 = tang(CP[L[0]] - CP[x], CN[x]);
+            if (t1.length() < 1e-20f) t1 = tang(Vec3(1, 0, 0), CN[x]);
+            t1 = unit(t1);
+            const Vec3 t2 = CN[x].cross(t1);
+            std::vector<std::pair<float, uint32_t>> ang(L.size());
+            for (size_t i = 0; i < L.size(); i++) {
+                const Vec3 d = CP[L[i]] - CP[x];
+                ang[i] = { std::atan2(d.dot(t2), d.dot(t1)), L[i] };
+            }
+            std::sort(ang.begin(), ang.end());
+            for (size_t i = 0; i < L.size(); i++) L[i] = ang[i].second;
+        }
+        auto slot = [&](uint32_t v, uint32_t u) {          // u's place in v's turn order
+            const auto& L = adj[v];
+            for (size_t i = 0; i < L.size(); i++) if (L[i] == u) return (int)i;
+            return -1;
+        };
+        std::unordered_set<uint64_t> used; used.reserve(gk.size() * 2);
+        std::vector<uint32_t> f;
+        for (uint32_t x = 0; x < nc; x++)
+            for (uint32_t y0 : adj[x]) {
+                if (used.count(((uint64_t)x << 32) | y0)) continue;
+                f.clear();
+                uint32_t u = x, v = y0;
+                bool ok = true;
+                while (true) {
+                    used.insert(((uint64_t)u << 32) | v);
+                    f.push_back(u);
+                    const auto& L = adj[v];
+                    const int i = slot(v, u);
+                    if (i < 0) { ok = false; break; }
+                    const uint32_t w = L[(i + L.size() - 1) % L.size()];
+                    u = v; v = w;
+                    if (u == x && v == y0) break;
+                    if (f.size() > 12 || used.count(((uint64_t)u << 32) | v)) { ok = false; break; }
+                }
+                if (!ok || f.size() > 8 || f.size() < 3) continue;
+                bool all_s = true;
+                for (uint32_t c : f) all_s = all_s && is_s(c);
+                if (all_s) continue;                       // no sail in the mirror plane
+                if (f.size() == 4) {
+                    const bool d02 = (CP[f[0]] - CP[f[2]]).length() <= (CP[f[1]] - CP[f[3]]).length();
+                    const uint32_t a = d02 ? f[0] : f[1], b = d02 ? f[1] : f[2], c = d02 ? f[2] : f[3], d = d02 ? f[3] : f[0];
+                    const uint32_t q6[6] = { a, b, c, a, c, d };
+                    tri.insert(tri.end(), q6, q6 + 6);
+                    qd.insert(ekey(a, c));
+                    q_faces[0]++;
+                } else {
+                    for (size_t i = 1; i + 1 < f.size(); i++) { tri.push_back(f[0]); tri.push_back(f[i]); tri.push_back(f[i + 1]); }
+                    q_faces[f.size() == 3 ? 1 : 2]++;
+                }
+            }
+    }
     for (uint64_t k : gk) {                      // closed triplets x < y < z, each found once
+        if (quad) break;
         const uint32_t x = (uint32_t)(k >> 32), y = (uint32_t)k;
         const auto& A = adj[x]; const auto& B = adj[y];
         size_t i = 0, j = 0;
@@ -2310,10 +2395,20 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
                 if ((Vec3(base.pos_x[v], base.pos_y[v], base.pos_z[v]) - HOME[v]).length() > 0.5f * s) nj++;
             std::printf("DBGHOME before clean-up: %u of %zu points sit > half a step from home\n", nj, HOME.size());
         }
+        if (quad) {   // the flags follow the compaction
+            std::unordered_set<uint64_t> q2; q2.reserve(qd.size());
+            for (uint64_t k : qd) {
+                const uint32_t a = remap[(uint32_t)(k >> 32)], b = remap[(uint32_t)k];
+                if (a != 0xFFFFFFFFu && b != 0xFFFFFFFFu) q2.insert(ekey(a, b));
+            }
+            qd.swap(q2);
+        }
         // Mirror: seam points stay put and no flip lays an edge in the mirror plane.
-        flip_valence(base, seam ? &CS : nullptr, 3);
+        // Quads: no flips or walk, they would cut across the squares (the 4-way grid's
+        // poles are its own; a triangle walk would only scramble the pairs).
+        if (!quad) flip_valence(base, seam ? &CS : nullptr, 3);
         static const int BWALK = (int)env_float("CHISEL_FLOW_BASE_WALK", 90.0f);   // dev
-        if (BWALK > 0) reduce_poles(base, field, grid, seam ? &CS : nullptr, BWALK);
+        if (BWALK > 0 && !quad) reduce_poles(base, field, grid, seam ? &CS : nullptr, BWALK);
         const uint32_t bv = base.vertex_count();
         CP.resize(bv); CN.resize(bv);
         for (uint32_t v = 0; v < bv; v++) CP[v] = snap_pt(Vec3(base.pos_x[v], base.pos_y[v], base.pos_z[v]), is_s(v));
@@ -2927,11 +3022,41 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
             return c;
         };
         std::vector<uint32_t> nt2; nt2.reserve(tri.size() * 4);
+        // Quads: a square's two tris split into 8, which pair into its 2 x 2 squares: the
+        // halves of the old diagonal, plus in each tri the middle edge facing the diagonal.
+        std::unordered_set<uint64_t> q2;
         for (size_t t = 0; t < tri.size(); t += 3) {
             const uint32_t a = tri[t], b = tri[t+1], c = tri[t+2];
             const uint32_t ab = mid(a, b), bc = mid(b, c), ca = mid(c, a);
+            if (quad) {
+                if (qd.count(ekey(a, b)))      q2.insert(ekey(bc, ca));
+                else if (qd.count(ekey(b, c))) q2.insert(ekey(ca, ab));
+                else if (qd.count(ekey(c, a))) q2.insert(ekey(ab, bc));
+                else {
+                    // A lone tri: three quads round its middle (the Catmull-Clark split),
+                    // so after the first split the whole result is quads and the tri
+                    // leaves one 3-edge point instead of a patch of 6-edge ones.
+                    const uint32_t g = (uint32_t)CP.size();
+                    CP.push_back((CP[a] + CP[b] + CP[c]) * (1.0f / 3.0f));
+                    CN.push_back(unit(CN[a] + CN[b] + CN[c]));
+                    if (seam) CS.push_back(0);
+                    const uint32_t q[18] = { a, ab, g,  a, g, ca,   b, bc, g,  b, g, ab,   c, ca, g,  c, g, bc };
+                    nt2.insert(nt2.end(), q, q + 18);
+                    q2.insert(ekey(a, g)); q2.insert(ekey(b, g)); q2.insert(ekey(c, g));
+                    continue;
+                }
+            }
             const uint32_t q[12] = { a, ab, ca,  ab, b, bc,  ca, bc, c,  ab, bc, ca };
             nt2.insert(nt2.end(), q, q + 12);
+        }
+        if (quad) {
+            for (uint64_t k : qd) {
+                const uint32_t a = (uint32_t)(k >> 32), b = (uint32_t)k;
+                auto it = midv.find(k);
+                if (it == midv.end()) continue;
+                q2.insert(ekey(a, it->second)); q2.insert(ekey(it->second, b));
+            }
+            qd.swap(q2);
         }
         tri.swap(nt2);
     }
@@ -2964,6 +3089,34 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
         x = remap[x];
     }
     out.indices = std::move(tri);
+    if (quad) {
+        // Keep only diagonals that really pair two tris (the repair may have dropped one),
+        // each tri in one quad at most.
+        std::unordered_map<uint64_t, std::pair<int32_t, int32_t>> et; et.reserve(out.indices.size());
+        for (size_t t = 0; t < out.indices.size(); t += 3)
+            for (int i = 0; i < 3; i++) {
+                auto ins = et.emplace(ekey(out.indices[t+i], out.indices[t+(i+1)%3]), std::make_pair((int32_t)(t / 3), -2));
+                if (!ins.second) ins.first->second.second = ins.first->second.second == -2 ? (int32_t)(t / 3) : -1;
+            }
+        std::vector<uint8_t> taken(out.indices.size() / 3, 0);
+        std::vector<uint64_t> keys;
+        for (uint64_t k : qd) {
+            const uint32_t a = remap[(uint32_t)(k >> 32)], b = remap[(uint32_t)k];
+            if (a != 0xFFFFFFFFu && b != 0xFFFFFFFFu) keys.push_back(ekey(a, b));
+        }
+        std::sort(keys.begin(), keys.end());   // fixed order, same result every run
+        for (uint64_t k : keys) {
+            auto it = et.find(k);
+            if (it == et.end() || it->second.second < 0) continue;
+            const int32_t t0 = it->second.first, t1 = it->second.second;
+            if (taken[t0] || taken[t1]) continue;
+            taken[t0] = taken[t1] = 1;
+            g_quad_diag.push_back(k);
+        }
+        std::printf("[sdf-flow] Quad flow: grid faces %u quads, %u tris, %u with 5-8 corners; result %zu quads + %zu lone tris\n",
+                    q_faces[0], q_faces[1], q_faces[2], g_quad_diag.size(),
+                    out.indices.size() / 3 - 2 * g_quad_diag.size());
+    }
     std::printf("[sdf-flow] Flow%s: %u -> %u verts / %zu tris (spacing %.2fx, %d splits, %zu levels, %u tris dropped, %u holes + %u seam notches filled, %u pillow tris, %u rewound), %.0f ms\n",
                 seam ? " (+x half)" : "", nv, out.vertex_count(), out.indices.size() / 3,
                 SPACING * (float)(1u << std::max(0, splits - 2)), splits, H.size(), dropped, holes, notches, pillows, rewound,
@@ -4684,7 +4837,15 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
         // Flow re-lays the faithful merge, and the MC mirror's +x half (seam row on x = 0).
         // The Surface Nets mirror pairs verts by position over the whole model, which a
         // re-laid half can't keep, so there it falls back.
-        const bool flow  = j.pat.pattern == (int)SdfPattern::Flow;
+        // Quad flow: Flow on a square grid; not with mirror yet (the reflection would lose
+        // which diagonals pair the tris), so there it lays Flow's triangles instead.
+        const bool quad_req = j.pat.pattern == (int)SdfPattern::QuadFlow;
+        const bool quad  = quad_req && !j.mirror;
+        if (quad_req && j.mirror) {
+            std::printf("[sdf-flow] Quad flow isn't available with mirror yet: using Flow\n");
+            j.res.note = "Quad flow doesn't work with mirror yet: used Flow";
+        }
+        const bool flow  = j.pat.pattern == (int)SdfPattern::Flow || quad_req;
         const bool flow_sn = flow && j.mirror && j.use_nets;
         if (flow_sn) {
             std::printf("[sdf-flow] Flow isn't available with the Surface Nets mirror: using Curvature nudge\n");
@@ -4692,7 +4853,10 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
         }
         // Flow's own verdict, passed on to the user (a merge that falls back says so).
         auto run_flow = [&](std::vector<uint8_t>* seam) {
-            if (flow_remesh(welded, j.field_cpu, grid, j.pat.levels_after, seam)) { j.res.note = g_flow_note; return; }
+            if (flow_remesh(welded, j.field_cpu, grid, j.pat.levels_after, seam, quad && !seam)) {
+                if (!g_flow_note.empty()) j.res.note = g_flow_note;
+                return;
+            }
             std::printf("[sdf-flow] Flow failed on this model: plain merge kept\n");
             j.res.note = "Flow couldn't close this model: kept the plain merge (try another Detail)";
         };
@@ -4744,6 +4908,45 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
             // Flow: swap MC's mesh for the field-aligned grid; then plain relax, flips
             // and the pole walk as usual (the walk clears the grid's dislocations).
             if (flow && !j.mirror) run_flow(nullptr);
+            // Quads: the grid is the result. Flips, the pole walk and the tri relax would
+            // cut across the squares; only the snap onto the source runs.
+            const bool quads_out = quad && !g_quad_diag.empty();
+            if (quads_out) {
+                snap_to_source(welded, nullptr, 0.0f);
+                // Hand the pairing to the mesh: per tri, which edge is its hidden diagonal.
+                std::unordered_set<uint64_t> dg(g_quad_diag.begin(), g_quad_diag.end());
+                const uint32_t tc = welded.tri_count();
+                welded.quad_diag.assign(tc, 0xFF);
+                for (uint32_t t = 0; t < tc; t++)
+                    for (int k = 0; k < 3; k++)
+                        if (dg.count(flow::ekey(welded.indices[t*3+k], welded.indices[t*3+(k+1)%3]))) { welded.quad_diag[t] = (uint8_t)k; break; }
+                if (const char* qp = std::getenv("CHISEL_QUAD_DUMP")) {   // dev: real quads, for pictures
+                    if (FILE* f = std::fopen(qp, "w")) {
+                        for (uint32_t v = 0; v < welded.vertex_count(); v++)
+                            std::fprintf(f, "v %.6f %.6f %.6f\n", welded.pos_x[v], welded.pos_y[v], welded.pos_z[v]);
+                        std::unordered_map<uint64_t, uint32_t> first;
+                        std::unordered_set<uint64_t> dg(g_quad_diag.begin(), g_quad_diag.end());
+                        const auto& I = welded.indices;
+                        std::vector<uint8_t> done(I.size() / 3, 0);
+                        for (size_t t = 0; t < I.size(); t += 3)
+                            for (int i = 0; i < 3; i++) {
+                                const uint64_t k = flow::ekey(I[t+i], I[t+(i+1)%3]);
+                                if (!dg.count(k)) continue;
+                                auto ins = first.emplace(k, (uint32_t)(t / 3));
+                                if (ins.second) continue;
+                                const uint32_t u = ins.first->second;   // u holds a->b, t holds b->a
+                                const uint32_t a = I[t+i], b = I[t+(i+1)%3], c = I[t+(i+2)%3];
+                                uint32_t d = 0;
+                                for (int k2 = 0; k2 < 3; k2++) { const uint32_t x = I[u*3+k2]; if (x != a && x != b) d = x; }
+                                std::fprintf(f, "f %u %u %u %u\n", b + 1, c + 1, a + 1, d + 1);
+                                done[u] = done[t / 3] = 1;
+                            }
+                        for (size_t t = 0; t < I.size(); t += 3)
+                            if (!done[t / 3]) std::fprintf(f, "f %u %u %u\n", I[t] + 1, I[t+1] + 1, I[t+2] + 1);
+                        std::fclose(f);
+                    }
+                }
+            }
             CrossField flow_field;
             if (graph) build_graph_field(welded, j.field_cpu, grid, flow_field);
             else if (nudge) {
@@ -4751,6 +4954,7 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
                 smooth_cross_field(welded, flow_field, /*iters=*/24);
             }
             const CrossField* fp = nudge ? &flow_field : nullptr;
+            if (!quads_out) {
             relax_to_field(welded, j.field_cpu, grid, /*iters=*/4, /*lambda=*/0.5f, nullptr, fp);
             const CrossField* st = rosy == 6 ? fp : nullptr;
             uint32_t flips = flip_valence(welded, nullptr, 3, (field_flips & 1) ? st : nullptr);
@@ -4768,6 +4972,7 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
             // Surface-Nets mirror is made symmetric by the FIELD; the source soup
             // needn't be, so a snap here would break the pairing. Faithful only.
             if (!j.mirror) snap_to_source(welded, nullptr, 0.0f);
+            }
         }
 
         std::printf("[sdf-flow] relax + poles: %.0f ms\n",
@@ -4971,12 +5176,13 @@ const SdfChoice kPatternItems[] = {
     { "Curvature, 6-way", "Triangle rows follow the shape's bends in 60-degree steps, the way triangles tile; the clean-up flips edges to match" },
     { "Graph paper",      "Triangle rows run along the world's X, Y and Z, like a grid laid over the model" },
     { "Flow",             "Lays a fresh triangle grid whose rows flow round the shape as one: far fewer poles and kinks. A little slower. Not with mirror yet" },
+    { "Quad flow",        "Like Flow, on a square grid: each square is two triangles sharing a diagonal. Not with mirror yet" },
 };
 const SdfChoice kPolesItems[] = {
     { "Walk & cancel", "Needless poles wander until pairs meet and cancel out" },
 };
 const SdfRow kModeRow    = { "Mode",    kModeItems,    2, 0 };
-const SdfRow kPatternRow = { "Pattern", kPatternItems, 5, (int)SdfPattern::CurvatureNudge };
+const SdfRow kPatternRow = { "Pattern", kPatternItems, 6, (int)SdfPattern::CurvatureNudge };
 const SdfRow kPolesRow   = { "Poles",   kPolesItems,   1, (int)SdfPoles::WalkCancel };
 }  // namespace
 const SdfRow& sdf_mode_row()    { return kModeRow; }

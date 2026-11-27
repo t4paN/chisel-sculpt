@@ -29,7 +29,7 @@ struct SdfGrid {
 // "(default)". Mode is the extractor (input.voxel_merge_surface_nets): entry 0 =
 // Marching Cubes, 1 = Surface Nets. New entries go at the END of a row so a saved
 // index keeps meaning the same thing.
-enum class SdfPattern { CurvatureNudge = 0, Plain = 1, Curvature6 = 2, GraphPaper = 3, Flow = 4 };
+enum class SdfPattern { CurvatureNudge = 0, Plain = 1, Curvature6 = 2, GraphPaper = 3, Flow = 4, QuadFlow = 5 };
 enum class SdfPoles   { WalkCancel = 0 };
 
 struct SdfChoice { const char* name; const char* tip; };

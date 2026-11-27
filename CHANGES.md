@@ -2,6 +2,11 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-27 — Quad flow (first cut)
+- New SDF Pattern **Quad flow**: Flow on a square grid along a 4-way field. Each square is two tris sharing a hidden diagonal; leftover grid tris split into three quads round their middle, so the result is all quads bar a handful (7 of 8 test models, 1–3.5% poles).
+- The wireframe hides the diagonals, and OBJ export writes each pair as one quad.
+- Not yet: mirror (lays Flow's triangles, with a note), Levels after (levels come out as tris), project save (quads reload as tris).
+
 ## 2026-11-27 — Flow adaptive base (dev, off by default)
 - Groundwork for Levels after on detailed models: Flow can refine its coarse grid where it strays off the surface, each new point placed halfway along the shortest path over the merged surface, so a point over a groove drops into it (`CHISEL_FLOW_ADAPT=rounds`). Off: on the orc the base holds, but the top level still crumples where the lips nearly touch, a gap narrower than one base triangle.
 - Rebuild levels can wrap a Flow level from straight-chord midpoints instead of the smoothed surface (`CHISEL_REBUILD_LINWRAP`, off).
