@@ -3020,7 +3020,8 @@ void Renderer::draw_debug_mesh(const Camera& cam, const Mesh& mesh, int w, int h
     cam.get_projection_matrix(p.proj, (float)w / (float)h);
     p.viewport[0] = (float)w;
     p.viewport[1] = (float)h;
-    // Zoom-adaptive width: 3px while the model fills the view, swelling up to
+    // Zoom-adaptive width: 2px while the model fills the view (3px read heavy on
+    // dense meshes, 2026-11-27), swelling up to
     // 2.5× as its projected diameter shrinks below ~600px so the wireframe
     // stays readable from afar. ppwu measured at the orbit target — algebraically the
     // old `0.5*proj[0]*w` under ortho, but that identity breaks under perspective
@@ -3028,7 +3029,7 @@ void Renderer::draw_debug_mesh(const Camera& cam, const Mesh& mesh, int w, int h
     float ppwu    = 0.5f * (float)h / cam.half_height();
     float diam_px = std::max(2.0f * debug_mesh_radius * ppwu, 1.0f);
     float swell   = std::min(std::max(600.0f / diam_px, 1.0f), 2.5f);
-    p.half_width_px  = 1.5f * swell;
+    p.half_width_px  = 1.0f * swell;
     // NDC bias in place of glPolygonOffset: clears the surface for tilts up to
     // ~70° at this width; ~1% of a unit-radius model's depth, so hidden lines
     // stay hidden except at extreme grazing angles.

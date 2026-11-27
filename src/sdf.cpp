@@ -847,6 +847,11 @@ struct CrossField {
     std::vector<Vec3>  dir;   // unit principal-curvature direction, in the tangent plane
     std::vector<Vec3>  nrm;   // unit field gradient (surface normal) at build time
     std::vector<float> conf;  // anisotropy confidence [0,1) — 0 = umbilic/flat, no say
+    // Symmetry: 4 = a cross (quads: the two principal directions are both axes),
+    // 6 = three axes 60 degrees apart (a triangle grid looks the same after a 60
+    // degree turn). A triangle grid can't line up with a cross everywhere, so the
+    // 4-way field measured no better than no field at all for triangles (stage 1).
+    int rosy = 4;
 };
 
 // Principal curvature direction per vertex from the SDF Hessian: the shape
@@ -854,7 +859,12 @@ struct CrossField {
 // its eigenvectors are the principal directions and |κ1−κ2| (the anisotropy)
 // says how meaningful they are. All from 19 trilinear field samples per vertex.
 void build_cross_field(const Mesh& m, const std::vector<float>& field,
-                       const SdfGrid& grid, CrossField& cf) {
+                       const SdfGrid& grid, CrossField& cf, int rosy = 4) {
+    cf.rosy = rosy;
+    // 6-way: which principal direction becomes an axis matters (90 degrees is not a
+    // multiple of 60, so only one of them can be). Default: the one that bends most,
+    // so rows run round a limb. CHISEL_FIELD6_AXIS=1 takes the flatter one (rows along it).
+    static const int axis6 = (int)env_float("CHISEL_FIELD6_AXIS", 0.0f);
     uint32_t nv = m.vertex_count();
     cf.dir.assign(nv, Vec3(0,0,0));
     cf.nrm.assign(nv, Vec3(0,0,0));
@@ -904,6 +914,8 @@ void build_cross_field(const Mesh& m, const std::vector<float>& field,
         float b = e1.dot(Hmul(e2)) / gl;
         float c = e2.dot(Hmul(e2)) / gl;
         float th = 0.5f * std::atan2(2.0f*b, a - c);
+        // th's eigenvector has the larger SIGNED curvature; it bends most when a + c >= 0.
+        if (rosy == 6 && ((a + c < 0.0f) != (axis6 == 1))) th += 1.57079633f;
         cf.dir[v]  = (e1 * std::cos(th) + e2 * std::sin(th)).normalized();
         aniso[v]   = std::sqrt((a-c)*(a-c) + 4.0f*b*b);   // |κ1 − κ2|
         aniso_sum += aniso[v]; aniso_n++;
@@ -915,6 +927,37 @@ void build_cross_field(const Mesh& m, const std::vector<float>& field,
     if (mean > 1e-12f)
         for (uint32_t v = 0; v < nv; v++)
             cf.conf[v] = aniso[v] / (aniso[v] + mean);
+}
+
+// Graph paper: a 4-way cross along the world axes. At each vert, the world axis
+// lying flattest in the surface (smallest |n . axis|) is projected into the tangent
+// plane; the cross's other arm is the axis turned 90 degrees about the normal. Full
+// confidence everywhere and no smoothing: the point is a grid laid over the model,
+// whatever its shape. (Stage 3 of the patterns spec: does the Pattern row switch the look?)
+void build_graph_field(const Mesh& m, const std::vector<float>& field,
+                       const SdfGrid& grid, CrossField& cf) {
+    cf.rosy = 4;
+    const uint32_t nv = m.vertex_count();
+    cf.dir.assign(nv, Vec3(1,0,0));
+    cf.nrm.assign(nv, Vec3(0,0,0));
+    cf.conf.assign(nv, 0.95f);
+    const float h = 0.5f * grid.voxel;
+    for (uint32_t v = 0; v < nv; v++) {
+        const Vec3 p(m.pos_x[v], m.pos_y[v], m.pos_z[v]);
+        Vec3 g(sample_field(field,grid,Vec3(p.x+h,p.y,p.z)) - sample_field(field,grid,Vec3(p.x-h,p.y,p.z)),
+               sample_field(field,grid,Vec3(p.x,p.y+h,p.z)) - sample_field(field,grid,Vec3(p.x,p.y-h,p.z)),
+               sample_field(field,grid,Vec3(p.x,p.y,p.z+h)) - sample_field(field,grid,Vec3(p.x,p.y,p.z-h)));
+        const float gl = g.length();
+        if (gl < 1e-12f) { cf.conf[v] = 0.0f; continue; }
+        const Vec3 n = g * (1.0f / gl);
+        cf.nrm[v] = n;
+        const float ax = std::fabs(n.x), ay = std::fabs(n.y), az = std::fabs(n.z);
+        Vec3 a = (ax <= ay && ax <= az) ? Vec3(1,0,0) : (ay <= az ? Vec3(0,1,0) : Vec3(0,0,1));
+        Vec3 t = a - n * a.dot(n);
+        const float tl = t.length();
+        if (tl < 1e-6f) { cf.conf[v] = 0.0f; continue; }
+        cf.dir[v] = t * (1.0f / tl);
+    }
 }
 
 // Jacobi 4-RoSy smoothing (extrinsic, Instant-Meshes style): each vertex
@@ -953,7 +996,15 @@ void smooth_cross_field(const Mesh& m, CrossField& cf, int iters) {
 
             // Pick the 4-RoSy representative of `x` closest to d (candidates
             // x, n×x and their negations — sign folds into the dot test).
+            // 6-RoSy: x turned about n by the multiple of 60 degrees nearest d.
             auto rosy_match = [&](Vec3 x) -> Vec3 {
+                if (cf.rosy == 6) {
+                    Vec3 dp = n.cross(d);
+                    float th = std::atan2(x.dot(dp), x.dot(d));
+                    float k = std::round(th / 1.04719755f);
+                    float r = -k * 1.04719755f;
+                    return x * std::cos(r) + n.cross(x) * std::sin(r);
+                }
                 Vec3 y = n.cross(x);
                 float dx = d.dot(x), dy = d.dot(y);
                 Vec3 best = (std::fabs(dx) >= std::fabs(dy)) ? x : y;
@@ -1103,6 +1154,22 @@ void relax_to_field(Mesh& m, const std::vector<float>& field,
                         a1 = a1 * (1.0f/a1l);
                         Vec3 a2 = n.cross(a1);
                         Vec3 al(0,0,0);
+                        if (flow->rosy == 6) {
+                            // Three axes 60 degrees apart; each edge is pulled onto
+                            // the one it is nearest (sign folds into the dot).
+                            const Vec3 ax[3] = { a1, a1 * 0.5f + a2 * 0.8660254f,
+                                                 a1 * -0.5f + a2 * 0.8660254f };
+                            for (uint32_t u : N) {
+                                Vec3 e(m.pos_x[u]-p.x, m.pos_y[u]-p.y, m.pos_z[u]-p.z);
+                                Vec3 et = e - n * e.dot(n);
+                                int bi = 0; float bf = et.dot(ax[0]);
+                                for (int k = 1; k < 3; k++) {
+                                    float f = et.dot(ax[k]);
+                                    if (std::fabs(f) > std::fabs(bf)) { bf = f; bi = k; }
+                                }
+                                al += (ax[bi] * bf - et);
+                            }
+                        } else
                         for (uint32_t u : N) {
                             Vec3 e(m.pos_x[u]-p.x, m.pos_y[u]-p.y, m.pos_z[u]-p.z);
                             Vec3 et = e - n * e.dot(n);
@@ -1125,6 +1192,24 @@ void relax_to_field(Mesh& m, const std::vector<float>& field,
 }
 
 // ---- Valence-targeting edge flips ------------------------------------------
+// How badly edge x-y sits against the field: 0 = on an axis, 1 = halfway between
+// two (e.g. 30 degrees off on a 6-way field). Read in each end's tangent frame and
+// averaged. Used to steer flips that leave the pole count unchanged (stage 2b):
+// a field that only nudges points measured no effect on the grain, because the
+// grain is which edges exist, and only the flips decide that.
+float field_misalign(const Mesh& m, const CrossField& f, uint32_t x, uint32_t y) {
+    const Vec3 e(m.pos_x[y]-m.pos_x[x], m.pos_y[y]-m.pos_y[x], m.pos_z[y]-m.pos_z[x]);
+    float s = 0.0f;
+    for (uint32_t v : { x, y }) {
+        const Vec3 n = f.nrm[v], d = f.dir[v];
+        const Vec3 et = e - n * e.dot(n);
+        if (n.length() < 0.5f || d.length() < 0.5f || et.dot(et) < 1e-24f) { s += 0.5f; continue; }
+        const float th = std::atan2(et.dot(n.cross(d)), et.dot(d));
+        s += 0.5f * (1.0f - std::cos((float)f.rosy * th));
+    }
+    return 0.5f * s;
+}
+
 // Rotate interior edges toward the regular valence (6 interior / 4 on the seam
 // boundary) so irregular vertices consolidate into few, well-placed poles
 // instead of MC's scatter. Flips move NO vertices — positions (and thus the
@@ -1132,9 +1217,15 @@ void relax_to_field(Mesh& m, const std::vector<float>& field,
 // guards the iso remesher uses (existing-edge check ⇒ no non-manifold fuse,
 // normal agreement ⇒ no fold-over). Greedy sweeps over a sorted edge list with
 // a staleness re-check, table rebuilt per sweep (one-shot op, allocation fine).
-uint32_t flip_valence(Mesh& m, const std::vector<uint8_t>* seam, int sweeps = 3) {
-    static const int SEAM_W = (int)env_float("CHISEL_SEAM_WEIGHT", 2.0f);   // see E below
+uint32_t flip_valence(Mesh& m, const std::vector<uint8_t>* seam, int sweeps = 3,
+                      const CrossField* steer = nullptr) {
     uint32_t nv = m.vertex_count();
+    // steer: also take flips that leave the valence energy unchanged when the new
+    // diagonal lines up with the field by at least this much (on the 0..1 scale of
+    // field_misalign). Each such flip lowers total misalignment, so sweeps end.
+    static const float MARGIN  = env_float("CHISEL_FLIP_MARGIN", 0.1f);
+    static const float STRETCH = env_float("CHISEL_POLE_Q", 2.5f);   // as the pole walk
+    static const int   SEAM_W  = (int)env_float("CHISEL_SEAM_WEIGHT", 2.0f);
     uint32_t flips_total = 0;
     auto ekey = [](uint32_t a, uint32_t b) -> uint64_t {
         if (a > b) std::swap(a, b);
@@ -1194,18 +1285,26 @@ uint32_t flip_valence(Mesh& m, const std::vector<uint8_t>* seam, int sweeps = 3)
             if (etab.count(ekey(c, d))) continue;          // edge exists ⇒ flip = non-manifold
 
             // Valence energy Σ(val−target)² over the four corners, before vs after.
+            // A seam vert counts double: reflected, its defect doubles (half-valence 3
+            // = a full 4, two 5s fused) and it stands for one vert, not a mirrored pair,
+            // so the full mesh's energy is 2 x (sum over the half, seam weighted 2).
+            // At weight 1, pushing a seam 4 off as a 5 beside it scored as a wash and the
+            // seam kept a column of pinched 4s and 8s (2026-11-27).
             auto E = [&](int va,int vb,int vc,int vd) {
-                // A seam vert counts double: reflected, its defect doubles (half-valence 3
-                // = a full 4, two 5s fused) and it stands for one vert, not a mirrored pair,
-                // so the full mesh's energy is 2 x (sum over the half, seam weighted 2).
-                // At weight 1, pushing a seam 4 off as a 5 beside it scored as a wash and the
-                // seam kept a column of pinched 4s and 8s (2026-11-27).
                 auto s=[&](int x,uint32_t v){int e=x-target(v);return e*e*((seam && (*seam)[v]) ? SEAM_W : 1);};
                 return s(va,a)+s(vb,b)+s(vc,c)+s(vd,d);
             };
             if (val[a] <= 3 || val[b] <= 3) continue;      // never drop below valence 3
-            if (E(val[a]-1, val[b]-1, val[c]+1, val[d]+1) >= E(val[a],val[b],val[c],val[d]))
-                continue;
+            const int e_new = E(val[a]-1, val[b]-1, val[c]+1, val[d]+1), e_old = E(val[a],val[b],val[c],val[d]);
+            if (e_new > e_old) continue;
+            if (e_new == e_old) {
+                if (!steer) continue;
+                if (seam && (*seam)[c] && (*seam)[d]) continue;   // no edge in the mirror plane
+                if (field_misalign(m, *steer, a, b) - field_misalign(m, *steer, c, d) < MARGIN) continue;
+                Vec3 qa(m.pos_x[a],m.pos_y[a],m.pos_z[a]), qb(m.pos_x[b],m.pos_y[b],m.pos_z[b]);
+                Vec3 qc(m.pos_x[c],m.pos_y[c],m.pos_z[c]), qd(m.pos_x[d],m.pos_y[d],m.pos_z[d]);
+                if ((qd-qc).dot(qd-qc) > STRETCH * (qb-qa).dot(qb-qa)) continue;   // no long new edge
+            }
 
             // Geometric guard: both new tris must agree with the old pair's
             // orientation (no fold-over) and be non-degenerate.
@@ -1262,7 +1361,8 @@ uint32_t flip_valence(Mesh& m, const std::vector<uint8_t>* seam, int sweeps = 3)
 struct PoleStats { uint32_t before = 0, after = 0, flips = 0; int rounds = 0; };
 
 PoleStats reduce_poles(Mesh& m, const std::vector<float>& field, const SdfGrid& grid,
-                       const std::vector<uint8_t>* seam, int max_rounds) {
+                       const std::vector<uint8_t>* seam, int max_rounds,
+                       const CrossField* steer = nullptr) {
     PoleStats st;
     const uint32_t nv = m.vertex_count();
     const uint32_t nt = (uint32_t)(m.indices.size() / 3);
@@ -1270,6 +1370,10 @@ PoleStats reduce_poles(Mesh& m, const std::vector<float>& field, const SdfGrid& 
 
     static const float WALK_P  = env_float("CHISEL_POLE_P", 0.5f);   // coin toss for a level step
     static const float STRETCH = env_float("CHISEL_POLE_Q", 2.5f);   // new edge^2 / old edge^2 cap
+    // steer: among level steps the coin allowed, prefer the one whose new edge lines
+    // up with the field (score falls by FW x the alignment gained). Real gains (dE < 0)
+    // still always win: dE moves in steps of 2, the field term stays within +-FW.
+    static const float FW = env_float("CHISEL_WALK_FIELD", 1.0f);
 
     auto ekey = [](uint32_t a, uint32_t b) -> uint64_t {
         if (a > b) std::swap(a, b);
@@ -1350,6 +1454,8 @@ PoleStats reduce_poles(Mesh& m, const std::vector<float>& field, const SdfGrid& 
                 float toss = coin(ekey(a, b), round);
                 if (dE == 0 && toss >= WALK_P) return;
                 float score = (float)dE + toss;         // dE is whole, toss < 1: a real gain always wins
+                if (steer && dE == 0)
+                    score -= FW * (field_misalign(m, *steer, a, b) - field_misalign(m, *steer, c, d));
                 if (have && score >= best_score) return;
                 if (etab.count(ekey(c, d))) return;                         // would fuse two sheets
                 Vec3 pa = P(a), pb = P(b), pc = P(c), pd = P(d);
@@ -3145,7 +3251,13 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
         const int walk_rounds = j.pat.poles_on ? pole_rounds : 0;
         // The dialog's Pattern row. Curvature nudge: the 4-way cross field from the SDF's
         // curvature pulls edges along the bends. Plain: the same relax with no field.
-        const bool nudge = j.pat.pattern == (int)SdfPattern::CurvatureNudge;
+        const bool graph = j.pat.pattern == (int)SdfPattern::GraphPaper;
+        const bool nudge = j.pat.pattern == (int)SdfPattern::CurvatureNudge
+                        || j.pat.pattern == (int)SdfPattern::Curvature6 || graph;
+        const int  rosy  = j.pat.pattern == (int)SdfPattern::Curvature6 ? 6 : 4;
+        // 6-way also steers the flips and the pole walk (stage 2b). Dev hook
+        // CHISEL_FIELD_FLIPS: bit 1 = flips, bit 2 = walk (default 3 = both).
+        static const int field_flips = (int)env_float("CHISEL_FIELD_FLIPS", 3.0f);
         std::printf("[sdf-pattern] mode %s, pattern %s, poles %s%s\n",
                     sdf_mode_row().items[j.use_nets ? 1 : 0].name,
                     sdf_pattern_row().items[j.pat.pattern].name,
@@ -3158,14 +3270,16 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
             clip_to_plus_x(welded, grid.voxel, seam);
             weld_near_seam(welded, grid.voxel, seam);   // B: collapse the seam sliver column
             CrossField flow;
-            if (nudge) {
-                build_cross_field(welded, j.field_cpu, grid, flow);
+            if (graph) build_graph_field(welded, j.field_cpu, grid, flow);
+            else if (nudge) {
+                build_cross_field(welded, j.field_cpu, grid, flow, rosy);
                 smooth_cross_field(welded, flow, /*iters=*/24);
             }
             const CrossField* fp = nudge ? &flow : nullptr;
             relax_to_field(welded, j.field_cpu, grid, /*iters=*/4, /*lambda=*/0.5f, &seam, fp);  // A: 1D seam relax
-            uint32_t flips = flip_valence(welded, &seam);
-            PoleStats ps = reduce_poles(welded, j.field_cpu, grid, &seam, walk_rounds);
+            const CrossField* st = rosy == 6 ? fp : nullptr;
+            uint32_t flips = flip_valence(welded, &seam, 3, (field_flips & 1) ? st : nullptr);
+            PoleStats ps = reduce_poles(welded, j.field_cpu, grid, &seam, walk_rounds, (field_flips & 2) ? st : nullptr);
             relax_to_field(welded, j.field_cpu, grid, even_iters > 0 ? even_iters : 4, /*lambda=*/0.5f, &seam, fp, even_iters > 0);
             std::printf("[sdf-flow] cross-field relax: %u valence flips (+x half)\n", flips);
             std::printf("[sdf-flow] poles %u -> %u of %u verts (%u flips, %d rounds, +x half)\n",
@@ -3183,18 +3297,20 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
             // field => mirror-paired verts move identically). No seam surgery.
             // (Flips only rewrite indices — vertex positions stay mirror-paired.)
             CrossField flow;
-            if (nudge) {
-                build_cross_field(welded, j.field_cpu, grid, flow);
+            if (graph) build_graph_field(welded, j.field_cpu, grid, flow);
+            else if (nudge) {
+                build_cross_field(welded, j.field_cpu, grid, flow, rosy);
                 smooth_cross_field(welded, flow, /*iters=*/24);
             }
             const CrossField* fp = nudge ? &flow : nullptr;
             relax_to_field(welded, j.field_cpu, grid, /*iters=*/4, /*lambda=*/0.5f, nullptr, fp);
-            uint32_t flips = flip_valence(welded, nullptr);
+            const CrossField* st = rosy == 6 ? fp : nullptr;
+            uint32_t flips = flip_valence(welded, nullptr, 3, (field_flips & 1) ? st : nullptr);
             // Not on the Surface-Nets mirror: its pairing is by position, and the
             // walk re-relaxes verts one side at a time.
             PoleStats ps;
             const bool walk = !(j.mirror && j.use_nets);
-            if (walk) ps = reduce_poles(welded, j.field_cpu, grid, nullptr, walk_rounds);
+            if (walk) ps = reduce_poles(welded, j.field_cpu, grid, nullptr, walk_rounds, (field_flips & 2) ? st : nullptr);
             relax_to_field(welded, j.field_cpu, grid, (walk && even_iters > 0) ? even_iters : 4, /*lambda=*/0.5f, nullptr, fp,
                            walk && even_iters > 0);
             std::printf("[sdf-flow] cross-field relax: %u valence flips\n", flips);
@@ -3404,12 +3520,14 @@ const SdfChoice kModeItems[] = {
 const SdfChoice kPatternItems[] = {
     { "Curvature nudge", "Triangle rows lean along the shape's bends" },
     { "Plain",           "Even triangles, no pull from the shape's bends" },
+    { "Curvature, 6-way", "Triangle rows follow the shape's bends in 60-degree steps, the way triangles tile; the clean-up flips edges to match" },
+    { "Graph paper",      "Triangle rows run along the world's X, Y and Z, like a grid laid over the model" },
 };
 const SdfChoice kPolesItems[] = {
     { "Walk & cancel", "Needless poles wander until pairs meet and cancel out" },
 };
 const SdfRow kModeRow    = { "Mode",    kModeItems,    2, 0 };
-const SdfRow kPatternRow = { "Pattern", kPatternItems, 2, (int)SdfPattern::CurvatureNudge };
+const SdfRow kPatternRow = { "Pattern", kPatternItems, 4, (int)SdfPattern::CurvatureNudge };
 const SdfRow kPolesRow   = { "Poles",   kPolesItems,   1, (int)SdfPoles::WalkCancel };
 }  // namespace
 const SdfRow& sdf_mode_row()    { return kModeRow; }

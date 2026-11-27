@@ -2,6 +2,10 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-27 — SDF Pattern options: 6-way and Graph paper; thinner wireframe
+- SDF prompt, Pattern row: **Curvature, 6-way** (rows follow the bends in 60° steps; the clean-up flips edges and walks poles toward the field) and **Graph paper** (rows along world X, Y, Z). Both experimental: on the test models neither beats the default, which stays Curvature nudge.
+- Wireframe overlay (Y) is 2 px wide instead of 3 px at normal zoom; it still thickens as the model shrinks on screen.
+
 ## 2026-11-27 — SDF merge: fewer pinched poles on the mirror seam, fewer poles overall
 - Mirrored merges: the clean-up now counts a seam vertex's defect at its true, doubled weight, so pinched 4s and 8s leave the seam as a 5 or 7 on each side; on the test models seam pinches drop from 347 to 120.
 - The pole walk runs 90 rounds instead of 30 on results up to 1M vertices (16% fewer needless poles, more even triangles, under a second more on a typical merge); bigger results keep 30.
