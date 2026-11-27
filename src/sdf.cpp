@@ -17,6 +17,7 @@
 #include <unordered_set>
 #include <utility>
 #include <functional>
+#include <queue>
 #include <algorithm>
 #include <limits>
 #include <cstdlib>
@@ -1618,6 +1619,27 @@ void unique_edges(std::vector<uint64_t>& keys, Level& L) {
     L.ea.resize(keys.size()); L.eb.resize(keys.size());
     for (size_t i = 0; i < keys.size(); i++) { L.ea[i] = (uint32_t)(keys[i] >> 32); L.eb[i] = (uint32_t)keys[i]; }
 }
+// Closest point to q on tri abc (Ericson's region test).
+inline Vec3 closest_on_tri(Vec3 q, Vec3 a, Vec3 b, Vec3 c) {
+    const Vec3 ab = b - a, ac = c - a, ap = q - a;
+    const float d1 = ab.dot(ap), d2 = ac.dot(ap);
+    if (d1 <= 0.0f && d2 <= 0.0f) return a;
+    const Vec3 bp = q - b;
+    const float d3 = ab.dot(bp), d4 = ac.dot(bp);
+    if (d3 >= 0.0f && d4 <= d3) return b;
+    const float vc = d1*d4 - d3*d2;
+    if (vc <= 0.0f && d1 >= 0.0f && d3 <= 0.0f) return a + ab * (d1 / (d1 - d3));
+    const Vec3 cp = q - c;
+    const float d5 = ab.dot(cp), d6 = ac.dot(cp);
+    if (d6 >= 0.0f && d5 <= d6) return c;
+    const float vb = d5*d2 - d1*d6;
+    if (vb <= 0.0f && d2 >= 0.0f && d6 <= 0.0f) return a + ac * (d2 / (d2 - d6));
+    const float va = d3*d6 - d5*d4;
+    if (va <= 0.0f && (d4 - d3) >= 0.0f && (d5 - d6) >= 0.0f)
+        return b + (c - b) * ((d4 - d3) / ((d4 - d3) + (d5 - d6)));
+    const float denom = 1.0f / (va + vb + vc);
+    return a + ab * (vb * denom) + ac * (vc * denom);
+}
 inline uint64_t ekey(uint32_t a, uint32_t b) {
     if (a > b) std::swap(a, b);
     return ((uint64_t)a << 32) | b;
@@ -2297,11 +2319,404 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
         // the rebuild wraps every level onto; a split-up coarse grid as that target lost
         // anything thinner than a cell (a fang vanished whole).
         if (levels_after > 0 && sd == splits - levels_after) {
-            // Guard: a grid this coarse spans any gap narrower than a cell (between two
-            // lips, round a hooked fang), and no level wrapped above it grows the shape
-            // back. Any tri straying more than half an edge off the surface -> step aside,
-            // the rebuild remeshes as usual. (The remesher's base stays within ~0.4.)
-            const uint32_t strays = count_strays(true);
+            // Adaptive base. A grid this coarse spans any gap narrower than a cell
+            // (between two lips, round a hooked fang) and rounds off tips, and every level
+            // is this grid split up: L0..L2 carry the bridge however well the top wraps.
+            // So refine the base where it strays: split each tri that strays more than
+            // half an edge off the surface (neighbours split to match, no T-junctions),
+            // and place each new point by casting along the normal onto the surface, not
+            // by nearest point: a bridge over a groove then drops INTO the groove instead
+            // of snapping back onto a lip. A few rounds (each halves the tris it touches),
+            // then flips + pole walk tidy the splits. The levels are even splits of the
+            // base, so refined spots stay denser at every level: that's the price.
+            // Whatever still strays after that -> step aside as before (the guard).
+            // Dev hook: CHISEL_FLOW_ADAPT = rounds (0 = guard only, the old behaviour).
+            static const int ADAPT = (int)env_float("CHISEL_FLOW_ADAPT", 0.0f);   // off until L3 comes out clean (see flow-handoff.md)
+            if (ADAPT > 0) for (size_t v = 0; v < CP.size(); v++) CP[v] = snap_pt(CP[v], is_s((uint32_t)v));
+            float tol;
+            {
+                double el = 0.0;
+                for (size_t t = 0; t < tri.size(); t += 3) el += (CP[tri[t]] - CP[tri[t+1]]).length();
+                tol = 0.5f * (float)(el / (double)std::max<size_t>(1, tri.size() / 3));
+            }
+            // Per tri: does it stray more than tol off the surface (6 samples)?
+            static const float SW[6][3] = {{1/3.f,1/3.f,1/3.f},{.6f,.2f,.2f},{.2f,.6f,.2f},{.2f,.2f,.6f},{.5f,.5f,0},{0,.5f,.5f}};
+            // A tri strays when a sample lies off the surface by more than tol, or when it
+            // faces away from the surface under it (normal . gradient < FACE): a tri laid
+            // across a crease can keep every sample near SOME wall and still be a bridge,
+            // and the levels wrap it as one (orc lip/cheek crease, 2026-11-27).
+            static const float FACE = env_float("CHISEL_FLOW_ADAPT_FACE", -2.0f);   // off: coverage below does this job
+            auto tri_stray = [&](Vec3 a, Vec3 b, Vec3 c) {
+                const Vec3 nn = (b - a).cross(c - a);
+                const float nl = nn.length();
+                if (nl < 1e-20f) return true;
+                for (auto& w : SW) {
+                    const Vec3 q = a * w[0] + b * w[1] + c * w[2];
+                    if (std::fabs(sample_field(field, grid, q)) > tol) return true;
+                    if (FACE > -1.0f && nn.dot(unit(grad(q))) < FACE * nl) return true;
+                }
+                return false;
+            };
+            // Coverage, the other direction: every point of the merge's dense surface needs
+            // a base tri facing its way within tol. Where two walls nearly touch (lips at a
+            // mouth corner, a fang against the lip) a tri bridging the gap stays within tol
+            // of both walls, so the distance test above passes it, yet nothing covers the
+            // walls inside the gap and the levels crumple there (orc, 2026-11-27). The tri
+            // nearest such a point, whichever way it faces, is the bridge: it gets split.
+            static const bool COVER = env_float("CHISEL_FLOW_ADAPT_COVER", 1.0f) > 0.0f;
+            uint32_t uncovered_pts = 0;
+            auto cover_flags = [&](std::vector<uint8_t>& flag) {
+                uncovered_pts = 0;
+                float cs = 0.0f;
+                for (size_t t = 0; t < tri.size(); t += 3)
+                    for (int i = 0; i < 3; i++) cs = std::max(cs, (CP[tri[t+i]] - CP[tri[t+(i+1)%3]]).length());
+                cs = std::max(cs, 1e-6f);
+                auto ck = [&](int64_t x, int64_t y, int64_t z) {
+                    return ((uint64_t)(x + (1 << 20)) << 42) | ((uint64_t)(y + (1 << 20)) << 21) | (uint64_t)(z + (1 << 20));
+                };
+                std::unordered_map<uint64_t, std::vector<uint32_t>> cells;
+                for (uint32_t t = 0; t < (uint32_t)tri.size(); t += 3) {
+                    const Vec3 c = (CP[tri[t]] + CP[tri[t+1]] + CP[tri[t+2]]) * (1.0f / 3.0f);
+                    cells[ck((int64_t)std::floor(c.x / cs), (int64_t)std::floor(c.y / cs), (int64_t)std::floor(c.z / cs))].push_back(t);
+                }
+                for (size_t v = 0; v < L0f.V.size(); v++) {
+                    const Vec3 q = L0f.V[v], qn = L0f.N[v];
+                    const int64_t x0 = (int64_t)std::floor(q.x / cs), y0 = (int64_t)std::floor(q.y / cs), z0 = (int64_t)std::floor(q.z / cs);
+                    float dany = 1e30f, dface = 1e30f; uint32_t tany = 0xFFFFFFFFu;
+                    for (int64_t x = x0 - 1; x <= x0 + 1; x++) for (int64_t y = y0 - 1; y <= y0 + 1; y++) for (int64_t z = z0 - 1; z <= z0 + 1; z++) {
+                        auto it = cells.find(ck(x, y, z));
+                        if (it == cells.end()) continue;
+                        for (uint32_t t : it->second) {
+                            const Vec3 a = CP[tri[t]], b = CP[tri[t+1]], c = CP[tri[t+2]];
+                            const float d = (closest_on_tri(q, a, b, c) - q).length();
+                            if (d < dany) { dany = d; tany = t; }
+                            if (d < dface && (b - a).cross(c - a).dot(qn) > 0.0f) dface = d;
+                        }
+                    }
+                    if (dface > tol && tany != 0xFFFFFFFFu) { flag[tany / 3] = 1; uncovered_pts++; }
+                }
+            };
+            auto strays_of = [&](std::vector<uint8_t>* flag) {
+                std::vector<uint8_t> own;
+                std::vector<uint8_t>& f = flag ? *flag : own;
+                f.assign(tri.size() / 3, 0);
+                for (size_t t = 0; t < tri.size(); t += 3)
+                    if (tri_stray(CP[tri[t]], CP[tri[t+1]], CP[tri[t+2]])) f[t / 3] = 1;
+                if (COVER) cover_flags(f);
+                uint32_t n = 0;
+                for (uint8_t b : f) n += b;
+                return n;
+            };
+            // Smallest angle of a tri (as cosine of the largest-cosine corner: bigger = worse).
+            auto min_ang = [&](Vec3 a, Vec3 b, Vec3 c) {
+                auto ang = [](Vec3 o, Vec3 p, Vec3 q) {
+                    const Vec3 u = p - o, v = q - o;
+                    const float l = u.length() * v.length();
+                    return l > 1e-30f ? std::acos(std::max(-1.0f, std::min(1.0f, u.dot(v) / l))) : 0.0f;
+                };
+                return std::min(ang(a, b, c), std::min(ang(b, c, a), ang(c, a, b)));
+            };
+            // Sliver flips: the splits (worst in a narrow groove, where every new point slides
+            // to the floor) leave long thin tris, and a level splits a sliver into slivers
+            // whose normals swing wildly, so the wrap crumples them. Flip any edge whose
+            // flip raises the pair's smallest angle, unless the flip makes a stray, a fold,
+            // or an edge that exists already; seam edges stay.
+            uint32_t fair_total = 0;
+            auto fair_flips = [&]() {
+                for (int pass = 0; pass < 12; pass++) {
+                    std::unordered_map<uint64_t, std::pair<uint32_t, uint32_t>> et;   // edge -> (tri*3+slot) x2
+                    et.reserve(tri.size());
+                    for (uint32_t t = 0; t < (uint32_t)tri.size(); t += 3)
+                        for (uint32_t i = 0; i < 3; i++) {
+                            auto it = et.find(ekey(tri[t+i], tri[t+(i+1)%3]));
+                            if (it == et.end()) et.emplace(ekey(tri[t+i], tri[t+(i+1)%3]), std::make_pair(t + i, 0xFFFFFFFFu));
+                            else if (it->second.second == 0xFFFFFFFFu) it->second.second = t + i;
+                            else it->second.second = 0xFFFFFFFEu;   // nonmanifold: leave alone
+                        }
+                    std::vector<uint8_t> used(tri.size() / 3, 0);
+                    uint32_t flips = 0;
+                    for (auto& kv : et) {
+                        const uint32_t s0 = kv.second.first, s1 = kv.second.second;
+                        if (s1 >= 0xFFFFFFFEu) continue;
+                        const uint32_t t0 = s0 - s0 % 3, t1 = s1 - s1 % 3;
+                        if (used[t0 / 3] || used[t1 / 3]) continue;
+                        const uint32_t a = tri[s0], b = tri[t0 + (s0 % 3 + 1) % 3], c = tri[t0 + (s0 % 3 + 2) % 3];
+                        const uint32_t d = tri[t1 + (s1 % 3 + 2) % 3];
+                        if (tri[s1] != b || c == d) continue;            // the pair must wind consistently
+                        if (seam && is_s(c) && is_s(d)) continue;
+                        if (et.count(ekey(c, d))) continue;
+                        const float before = std::min(min_ang(CP[a], CP[b], CP[c]), min_ang(CP[b], CP[a], CP[d]));
+                        const float after  = std::min(min_ang(CP[c], CP[d], CP[b]), min_ang(CP[d], CP[c], CP[a]));
+                        if (after < before + 0.05f) continue;
+                        const Vec3 n0 = (CP[d] - CP[c]).cross(CP[b] - CP[c]), n1 = (CP[c] - CP[d]).cross(CP[a] - CP[d]);
+                        if (n0.dot(n1) <= 0.0f) continue;
+                        if (tri_stray(CP[c], CP[d], CP[b]) || tri_stray(CP[d], CP[c], CP[a])) continue;
+                        tri[t0] = c; tri[t0+1] = d; tri[t0+2] = b;
+                        tri[t1] = d; tri[t1+1] = c; tri[t1+2] = a;
+                        used[t0 / 3] = used[t1 / 3] = 1;
+                        flips++;
+                    }
+                    fair_total += flips;
+                    if (!flips) break;
+                }
+            };
+            // Where a new point goes. March from p along dir to the first surface crossing
+            // within reach (t of it, or -1).
+            auto march = [&](Vec3 p, Vec3 dir, float reach) {
+                const bool out0 = sample_field(field, grid, p) > 0.0f;
+                const float step = 0.25f * grid.voxel;
+                float tp = 0.0f;
+                for (float t = step; t <= reach; t += step) {
+                    if ((sample_field(field, grid, p + dir * t) > 0.0f) != out0) {
+                        float lo = tp, hi = t;
+                        for (int k = 0; k < 8; k++) {
+                            const float m = 0.5f * (lo + hi);
+                            if ((sample_field(field, grid, p + dir * m) > 0.0f) == out0) lo = m; else hi = m;
+                        }
+                        return 0.5f * (lo + hi);
+                    }
+                    tp = t;
+                }
+                return -1.0f;
+            };
+            // The corners' normals n agree (a bridge over a groove, a chord under a tip):
+            // cast along n, outside inward, inside outward. They point apart (corners on the
+            // two faces of a rim thinner than the edge): the rim lies across the edge, so
+            // try 8 directions square to it and take the nearest crossing. Nothing within
+            // reach: nearest point, as before.
+            auto ray_snap = [&](Vec3 p, Vec3 n, Vec3 e, bool on, float reach) {
+                if (on) { p.x = 0.0f; n.x = 0.0f; e.x = 0.0f; }
+                if (n.length() >= 1.0f) {
+                    n = unit(n);
+                    const Vec3 dir = sample_field(field, grid, p) > 0.0f ? n * -1.0f : n;
+                    const float t = march(p, dir, reach);
+                    return snap_pt(t >= 0.0f ? p + dir * t : p, on);
+                }
+                e = unit(e);
+                Vec3 u = std::fabs(e.x) < 0.9f ? Vec3(1, 0, 0) : Vec3(0, 1, 0);
+                if (on) u = std::fabs(e.y) < 0.9f ? Vec3(0, 1, 0) : Vec3(0, 0, 1);   // stay in the plane
+                u = unit(u - e * u.dot(e));
+                const Vec3 w = e.cross(u);
+                float best = -1.0f; Vec3 bdir(0, 0, 0);
+                for (int k = 0; k < 8; k++) {
+                    const float ang = (float)k * 0.78539816f;
+                    Vec3 dir = u * std::cos(ang) + w * std::sin(ang);
+                    if (on) { dir.x = 0.0f; if (dir.length() < 0.5f) continue; dir = unit(dir); }
+                    const float t = march(p, dir, reach);
+                    if (t >= 0.0f && (best < 0.0f || t < best)) { best = t; bdir = dir; }
+                }
+                return snap_pt(best >= 0.0f ? p + bdir * best : p, on);
+            };
+            // Where a new point goes, first choice: halfway along the shortest path between
+            // its two corners ON the merge's dense surface (the MC mesh Flow started from).
+            // Over a groove that path runs down to the floor and back up; across a rim
+            // thinner than the edge it runs round the rim. It can't jump through air, which
+            // the ray can (to the far wall of a fold): the ray alone left the trollface's
+            // folds unconverged and ever more tangled (2026-11-27). Each point keeps its
+            // spot on the dense mesh (anc), so the next round's paths start right.
+            const uint32_t nmc = (uint32_t)L0f.V.size();
+            std::vector<uint32_t> goff(nmc + 1, 0), gadj;
+            if (ADAPT > 0) {
+                for (size_t e = 0; e < L0f.ea.size(); e++) { goff[L0f.ea[e] + 1]++; goff[L0f.eb[e] + 1]++; }
+                for (uint32_t v = 0; v < nmc; v++) goff[v + 1] += goff[v];
+                gadj.resize(goff[nmc]);
+                std::vector<uint32_t> fill(goff.begin(), goff.end() - 1);
+                for (size_t e = 0; e < L0f.ea.size(); e++) { gadj[fill[L0f.ea[e]]++] = L0f.eb[e]; gadj[fill[L0f.eb[e]]++] = L0f.ea[e]; }
+            }
+            // Nearest MC vert to a point (hash grid, cell = 2 MC edges).
+            const float hc = 2.0f * e0;
+            std::unordered_map<uint64_t, std::vector<uint32_t>> hgrid;
+            auto hkey = [&](int64_t x, int64_t y, int64_t z) {
+                return ((uint64_t)(x + (1 << 20)) << 42) | ((uint64_t)(y + (1 << 20)) << 21) | (uint64_t)(z + (1 << 20));
+            };
+            if (ADAPT > 0) for (uint32_t v = 0; v < nmc; v++)
+                hgrid[hkey((int64_t)std::floor(L0f.V[v].x / hc), (int64_t)std::floor(L0f.V[v].y / hc),
+                           (int64_t)std::floor(L0f.V[v].z / hc))].push_back(v);
+            auto nearest_mc = [&](Vec3 p) {
+                const int64_t cx = (int64_t)std::floor(p.x / hc), cy = (int64_t)std::floor(p.y / hc), cz = (int64_t)std::floor(p.z / hc);
+                uint32_t best = 0xFFFFFFFFu; float bd = 1e30f;
+                for (int r = 1; r <= 4 && best == 0xFFFFFFFFu; r++)
+                    for (int64_t x = cx - r; x <= cx + r; x++) for (int64_t y = cy - r; y <= cy + r; y++) for (int64_t z = cz - r; z <= cz + r; z++) {
+                        auto it = hgrid.find(hkey(x, y, z));
+                        if (it == hgrid.end()) continue;
+                        for (uint32_t v : it->second) { const float d = (L0f.V[v] - p).length(); if (d < bd) { bd = d; best = v; } }
+                    }
+                return best;
+            };
+            std::vector<uint32_t> anc(CP.size(), 0xFFFFFFFFu);
+            auto anchor = [&](uint32_t v) {
+                if (v >= anc.size()) anc.resize(CP.size(), 0xFFFFFFFFu);
+                if (anc[v] == 0xFFFFFFFFu) anc[v] = nearest_mc(CP[v]);
+                return anc[v];
+            };
+            std::vector<float> gdist(nmc, 1e30f);
+            std::vector<uint32_t> gprev(nmc, 0xFFFFFFFFu), gtouched;
+            uint32_t geo_hits = 0, geo_miss = 0;
+            // Returns the point, and the MC vert nearest it in *mc; false = no path in budget.
+            auto geo_mid = [&](uint32_t a, uint32_t b, Vec3& out, uint32_t& mc) {
+                const uint32_t A = anchor(a), B = anchor(b);
+                if (A == 0xFFFFFFFFu || B == 0xFFFFFFFFu || A == B) return false;
+                const float budget = 4.0f * (CP[a] - CP[b]).length() + 4.0f * e0;
+                for (uint32_t v : gtouched) { gdist[v] = 1e30f; gprev[v] = 0xFFFFFFFFu; }
+                gtouched.clear();
+                using QE = std::pair<float, uint32_t>;
+                std::priority_queue<QE, std::vector<QE>, std::greater<QE>> pq;
+                gdist[A] = 0.0f; gtouched.push_back(A); pq.push({0.0f, A});
+                bool found = false;
+                while (!pq.empty()) {
+                    const auto [d, v] = pq.top(); pq.pop();
+                    if (d > gdist[v]) continue;
+                    if (v == B) { found = true; break; }
+                    if (d > budget) break;
+                    for (uint32_t k = goff[v]; k < goff[v + 1]; k++) {
+                        const uint32_t u = gadj[k];
+                        const float nd = d + (L0f.V[u] - L0f.V[v]).length();
+                        if (nd < gdist[u]) {
+                            if (gdist[u] >= 1e29f) gtouched.push_back(u);
+                            gdist[u] = nd; gprev[u] = v; pq.push({nd, u});
+                        }
+                    }
+                }
+                if (!found) return false;
+                const float half = 0.5f * gdist[B];
+                uint32_t v = B;
+                while (gprev[v] != 0xFFFFFFFFu && gdist[gprev[v]] > half) v = gprev[v];
+                const uint32_t u = gprev[v];
+                if (u == 0xFFFFFFFFu) { out = L0f.V[v]; mc = v; return true; }
+                const float span = gdist[v] - gdist[u];
+                const float t = span > 1e-12f ? (half - gdist[u]) / span : 0.0f;   // half lies on edge u -> v
+                out = L0f.V[u] * (1.0f - t) + L0f.V[v] * t;
+                mc = t < 0.5f ? u : v;
+                return true;
+            };
+            // Off: the plain guard, counted exactly as before the adaptive base existed.
+            uint32_t strays = ADAPT > 0 ? strays_of(nullptr) : count_strays(true);
+            const uint32_t strays0 = strays;
+            const size_t bv0 = CP.size(), bt0 = tri.size() / 3;
+            int adapt_rounds = 0;
+            std::vector<uint8_t> sflag;
+            auto refine_strays = [&]() {
+                strays_of(&sflag);
+                std::unordered_map<uint64_t, uint32_t> mark;
+                for (size_t t = 0; t < tri.size(); t += 3)
+                    if (sflag[t / 3])
+                        for (int i = 0; i < 3; i++) mark.emplace(ekey(tri[t+i], tri[t+(i+1)%3]), 0xFFFFFFFFu);
+                std::vector<uint64_t> keys; keys.reserve(mark.size());
+                for (auto& kv : mark) keys.push_back(kv.first);
+                std::sort(keys.begin(), keys.end());   // new points in edge order: repeatable
+                for (uint64_t k : keys) {
+                    const uint32_t a = (uint32_t)(k >> 32), b = (uint32_t)k;
+                    const bool on = is_s(a) && is_s(b);   // only seam edges join two seam points
+                    mark[k] = (uint32_t)CP.size();
+                    Vec3 p; uint32_t mc = 0xFFFFFFFFu;
+                    if (geo_mid(a, b, p, mc)) { p = snap_pt(p, on); geo_hits++; }
+                    else { p = ray_snap((CP[a] + CP[b]) * 0.5f, CN[a] + CN[b], CP[b] - CP[a], on, (CP[a] - CP[b]).length()); geo_miss++; }
+                    if (anc.size() < CP.size() + 1) anc.resize(CP.size() + 1, 0xFFFFFFFFu);
+                    anc[CP.size()] = mc;
+                    Vec3 g = grad(p); if (on) g.x = 0.0f;
+                    CP.push_back(p); CN.push_back(unit(g));
+                    if (seam) CS.push_back(on);
+                }
+                std::vector<uint32_t> nt2; nt2.reserve(tri.size() * 2);
+                auto put = [&](uint32_t p, uint32_t q, uint32_t r) { nt2.push_back(p); nt2.push_back(q); nt2.push_back(r); };
+                for (size_t t = 0; t < tri.size(); t += 3) {
+                    const uint32_t x[3] = { tri[t], tri[t+1], tri[t+2] };
+                    uint32_t m[3]; int n = 0;
+                    for (int i = 0; i < 3; i++) {
+                        auto it = mark.find(ekey(x[i], x[(i+1)%3]));
+                        m[i] = it != mark.end() ? it->second : 0xFFFFFFFFu;
+                        if (m[i] != 0xFFFFFFFFu) n++;
+                    }
+                    if (n == 0) { put(x[0], x[1], x[2]); continue; }
+                    if (n == 3) {
+                        put(x[0], m[0], m[2]); put(m[0], x[1], m[1]); put(m[2], m[1], x[2]); put(m[0], m[1], m[2]);
+                        continue;
+                    }
+                    // Rotate so edge 0 (x0-x1) is marked and, with two marks, edge 1 is the other.
+                    int r = 0;
+                    if (n == 1) { while (m[r] == 0xFFFFFFFFu) r++; }
+                    else        { while (m[(r + 2) % 3] != 0xFFFFFFFFu) r++; }
+                    const uint32_t a = x[r], b = x[(r+1)%3], c = x[(r+2)%3];
+                    const uint32_t mab = m[r], mbc = m[(r+1)%3];
+                    if (n == 1) { put(a, mab, c); put(mab, b, c); continue; }
+                    put(mab, b, mbc);
+                    // The quad a, mab, mbc, c: cut along its shorter diagonal.
+                    if ((CP[a] - CP[mbc]).length() <= (CP[mab] - CP[c]).length()) { put(a, mab, mbc); put(a, mbc, c); }
+                    else                                                          { put(a, mab, c); put(mab, mbc, c); }
+                }
+                tri.swap(nt2);
+            };
+            // Tidy: the splits leave valence 4/8 pairs and slivers; flips + the pole walk
+            // (seam pinned) clean them, then fold untangle. The tidy can lay a tri back
+            // across a groove (a flip, a relaxed point), so strays are counted after it.
+            size_t adapt_folds[2] = {0, 0};
+            auto tidy = [&]() {
+                Mesh b;
+                const uint32_t n = (uint32_t)CP.size();
+                b.pos_x.resize(n); b.pos_y.resize(n); b.pos_z.resize(n);
+                for (uint32_t v = 0; v < n; v++) { b.pos_x[v] = CP[v].x; b.pos_y[v] = CP[v].y; b.pos_z[v] = CP[v].z; }
+                b.indices = tri;
+                flip_valence(b, seam ? &CS : nullptr, 3);
+                reduce_poles(b, field, grid, seam ? &CS : nullptr, 90);
+                for (uint32_t v = 0; v < n; v++) CP[v] = Vec3(b.pos_x[v], b.pos_y[v], b.pos_z[v]);
+                tri = b.indices;
+                const auto uf = untangle(CP, tri); adapt_folds[0] += uf.first; adapt_folds[1] = uf.second;
+                fair_flips();
+            };
+            // Refine + tidy while it helps; then refine-only passes for what the tidy undid.
+            static const int ATIDY = (int)env_float("CHISEL_FLOW_ADAPT_TIDY", 1.0f);
+            for (int round = 0; round < ADAPT && strays; round++) {
+                refine_strays();
+                const uint32_t mid_s = strays_of(nullptr);
+                if (ATIDY) tidy(); else fair_flips();
+                adapt_rounds++;
+                strays = strays_of(nullptr);
+                if (std::getenv("CHISEL_FLOW_ADAPTDBG")) std::printf("DBGROUND %d: after split %u, after tidy %u, tris %zu\n", round, mid_s, strays, tri.size() / 3);
+            }
+            for (int round = 0; round < 4 && strays && ADAPT > 0; round++) {
+                refine_strays();
+                adapt_rounds++;
+                const auto uf = untangle(CP, tri); adapt_folds[1] = uf.second;
+                fair_flips();
+                strays = strays_of(nullptr);
+            }
+            if (adapt_rounds) {
+                if (const size_t f = seam_faults()) {
+                    std::printf("[sdf-flow] Flow: adaptive base broke the seam (%zu edges), rebuild remeshes as usual\n", f);
+                    g_flow_note = "Flow's adaptive base failed: levels rebuilt the usual way";
+                    g_flow_base = FlowBaseStash{};
+                    return true;
+                }
+            }
+            if (const char* dbo = std::getenv("CHISEL_FLOW_ADAPT_OBJ")) {   // dev: the adapted base, strays as group
+                if (FILE* f = std::fopen(dbo, "w")) {
+                    strays_of(&sflag);
+                    for (auto& p : CP) std::fprintf(f, "v %f %f %f\n", p.x, p.y, p.z);
+                    for (int pass = 0; pass < 2; pass++) {
+                        std::fprintf(f, "g %s\n", pass ? "stray" : "ok");
+                        for (size_t t = 0; t < tri.size(); t += 3)
+                            if ((int)sflag[t / 3] == pass) std::fprintf(f, "f %u %u %u\n", tri[t]+1, tri[t+1]+1, tri[t+2]+1);
+                    }
+                    std::fclose(f);
+                }
+            }
+            if (strays && std::getenv("CHISEL_FLOW_ADAPTDBG")) {
+                strays_of(&sflag);
+                for (size_t t = 0; t < tri.size(); t += 3) if (sflag[t / 3]) {
+                    const Vec3 a = CP[tri[t]], b = CP[tri[t+1]], c = CP[tri[t+2]];
+                    float worst = 0.0f;
+                    for (auto& w : SW) worst = std::max(worst, std::fabs(sample_field(field, grid, a * w[0] + b * w[1] + c * w[2])));
+                    const Vec3 nn = (b - a).cross(c - a);
+                    std::printf("DBGSTRAY tri at (%.3f %.3f %.3f) worst %.2f tol, edges %.3f %.3f %.3f (tol %.4f), facing %.2f, corner sdf %.3f %.3f %.3f\n",
+                        (a.x+b.x+c.x)/3, (a.y+b.y+c.y)/3, (a.z+b.z+c.z)/3, worst / tol,
+                        (a-b).length(), (b-c).length(), (c-a).length(), tol,
+                        nn.dot(unit(grad((a+b+c)*(1.0f/3.0f)))) / (nn.length() + 1e-30f),
+                        sample_field(field, grid, a), sample_field(field, grid, b), sample_field(field, grid, c));
+                }
+            }
+            if (ADAPT > 0) std::printf("[sdf-flow] adaptive base: %d rounds, %zu -> %zu verts (+%.0f%%), %zu -> %zu tris, strays %u -> %u (%u surface pts uncovered), folds %zu -> %zu, %u points on surface paths, %u by ray, %u sliver flips\n",
+                        adapt_rounds, bv0, CP.size(), 100.0 * (double)(CP.size() - bv0) / (double)std::max<size_t>(1, bv0),
+                        bt0, tri.size() / 3, strays0, strays, uncovered_pts, adapt_folds[0], adapt_folds[1], geo_hits, geo_miss, fair_total);
             if (strays) {
                 std::printf("[sdf-flow] Flow: grid for %d levels spans gaps (%u tris off the surface by > half an edge): "
                             "the rebuild remeshes as usual, merge keeps its own surface\n", levels_after, strays);

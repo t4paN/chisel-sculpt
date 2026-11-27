@@ -2,6 +2,10 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-27 — Flow adaptive base (dev, off by default)
+- Groundwork for Levels after on detailed models: Flow can refine its coarse grid where it strays off the surface, each new point placed halfway along the shortest path over the merged surface, so a point over a groove drops into it (`CHISEL_FLOW_ADAPT=rounds`). Off: on the orc the base holds, but the top level still crumples where the lips nearly touch, a gap narrower than one base triangle.
+- Rebuild levels can wrap a Flow level from straight-chord midpoints instead of the smoothed surface (`CHISEL_REBUILD_LINWRAP`, off).
+
 ## 2026-11-27 — Flow says when it steps aside
 - When Flow does less than asked, the on-screen message says so: its grid couldn't hold the shape at the asked-for levels (rebuilt the usual way), it couldn't close the model (plain merge kept), or Surface Nets + mirror (Curvature nudge used). With Levels after, the note repeats on the "Rebuilt" message. Before, only the log knew.
 

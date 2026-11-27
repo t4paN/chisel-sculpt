@@ -109,7 +109,7 @@ void pick_soup_sources(const Mesh& m, const std::vector<float>& pos,
 // verts whose ray missed take their neighbours' move instead (`filled`).
 uint32_t rebuild_wrap_level(MultiresStack& stack, const std::vector<float>& pos,
                             const std::vector<uint32_t>& idx, float reach, float cell,
-                            uint32_t& filled);
+                            uint32_t& filled, bool linear = false);
 // Last step: fit the lower levels to the top (the inverse subdivision a level-down runs,
 // which pushes the base out until it subdivides back to the wrapped surface), then give
 // the top level the original's colour (per soup vertex; empty = no paint to carry).

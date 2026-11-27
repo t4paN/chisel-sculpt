@@ -4548,7 +4548,7 @@ uint64_t predict_adaptive_tris(const Mesh& mesh, float target_edge_length,
 
 uint32_t rebuild_wrap_level(MultiresStack& stack, const std::vector<float>& pos,
                             const std::vector<uint32_t>& idx, float reach, float cell,
-                            uint32_t& filled) {
+                            uint32_t& filled, bool linear) {
     filled = 0;
     const int K = stack.base_level + (int)stack.disp.size() + 1;
     if (K > MULTIRES_MAX_LEVEL) return 0;
@@ -4564,8 +4564,41 @@ uint32_t rebuild_wrap_level(MultiresStack& stack, const std::vector<float>& pos,
         return 0;
     }
     const std::vector<float> px = m.pos_x, py = m.pos_y, pz = m.pos_z;
-    const uint32_t moved = snap_mesh_to_soup(m, pos, idx, cell, reach, true, nullptr, 0.0f,
-                                             [](Vec3, Vec3) { return true; });
+    uint32_t moved;
+    if (linear) {
+        // Linear: what Flow's own splits do. The level below is already on the
+        // surface; its verts stay put, and each midpoint starts on the straight chord
+        // between its parents and snaps from there. The smoothed surface pulls a base
+        // laid down into a narrow crease out into a pinch whose normals face the other
+        // wall, so wrapping from it crumpled every crease an adaptive base reached into
+        // (orc, 2026-11-27). The move from the smoothed spot is the displacement, as
+        // before; a midpoint whose ray misses stays on its chord.
+        Mesh prev;
+        cascade_to_level(stack, prev, K - 1);
+        const uint32_t vp = prev.vertex_count();
+        const uint32_t ft = (uint32_t)(prev.indices.size() / 3);
+        if (vp > vc || m.indices.size() != (size_t)ft * 12) {
+            std::printf("[rebuild] L%d: levels don't nest, linear wrap refused\n", K);
+            return 0;
+        }
+        for (uint32_t v = 0; v < vp; v++) { m.pos_x[v] = prev.pos_x[v]; m.pos_y[v] = prev.pos_y[v]; m.pos_z[v] = prev.pos_z[v]; }
+        for (uint32_t t = 0; t < ft; t++) {
+            const uint32_t c3[3] = { prev.indices[t*3], prev.indices[t*3+1], prev.indices[t*3+2] };
+            for (int e = 0; e < 3; e++) {
+                const uint32_t mv = m.indices[t*12 + 1 + 3*e];    // midpoint of (c3[e], c3[e+1])
+                const Vec3 a = prev.get_pos(c3[e]), b = prev.get_pos(c3[(e+1)%3]);
+                const Vec3 q = (a + b) * 0.5f;
+                m.pos_x[mv] = q.x; m.pos_y[mv] = q.y; m.pos_z[mv] = q.z;
+            }
+        }
+        std::vector<uint8_t> pin(vc, 0);
+        for (uint32_t v = 0; v < vp; v++) pin[v] = 1;
+        moved = snap_mesh_to_soup(m, pos, idx, cell, reach, true, &pin, 0.0f,
+                                  [](Vec3, Vec3) { return true; }) + vp;
+    } else {
+        moved = snap_mesh_to_soup(m, pos, idx, cell, reach, true, nullptr, 0.0f,
+                                  [](Vec3, Vec3) { return true; });
+    }
 
     // World-space move per vertex. A vertex the snap left alone (ray missed, or the
     // fan check refused it) would stay on the smooth surface as a dimple or a bump
@@ -4574,7 +4607,7 @@ uint32_t rebuild_wrap_level(MultiresStack& stack, const std::vector<float>& pos,
     std::vector<uint8_t> have(vc);
     for (uint32_t v = 0; v < vc; v++) {
         d[v] = Vec3(m.pos_x[v] - px[v], m.pos_y[v] - py[v], m.pos_z[v] - pz[v]);
-        have[v] = d[v].dot(d[v]) > 0.0f;
+        have[v] = linear || d[v].dot(d[v]) > 0.0f;
     }
     std::vector<uint32_t> todo;
     for (uint32_t v = 0; v < vc; v++) if (!have[v]) todo.push_back(v);
@@ -4603,7 +4636,7 @@ uint32_t rebuild_wrap_level(MultiresStack& stack, const std::vector<float>& pos,
     for (uint32_t v = 0; v < vc; v++)
         disp[v] = { d[v].dot(fr[v].t), d[v].dot(fr[v].b), d[v].dot(fr[v].n) };
     std::printf("[rebuild] L%d: %u verts, %u wrapped, %u filled from neighbours, %zu left smooth "
-                "(reach %.4f)\n", K, vc, moved, filled, todo.size(), reach);
+                "(reach %.4f%s)\n", K, vc, moved, filled, todo.size(), reach, linear ? ", linear" : "");
     return moved;
 }
 

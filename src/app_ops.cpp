@@ -1203,7 +1203,8 @@ void app_ops_remesh_and_merge(App& a) {
         const float reach = std::max(parent_edge, 3.0f * rb.src_edge);
         const float cell  = std::max(2.0f * rb.src_edge, 0.25f * reach);
         uint32_t filled = 0;
-        rebuild_wrap_level(*multires, rb.pos, rb.idx, reach, cell, filled);
+        static const bool lin_env = std::getenv("CHISEL_REBUILD_LINWRAP") != nullptr;   // dev: linear wrap for Flow bases (worse on the orc, 2026-11-27)
+        rebuild_wrap_level(*multires, rb.pos, rb.idx, reach, cell, filled, rb.flow_base && lin_env);
         rb.done++;
         input.remesh_progress = (float)(rb.done + 1) / (float)(rb.levels + 1);
         if (rb.done >= rb.levels || multires->base_level + (int)multires->disp.size() >= MULTIRES_MAX_LEVEL) {
