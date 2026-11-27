@@ -976,8 +976,10 @@ void app_ops_remesh_and_merge(App& a) {
         float base_edge = 0.0f, src_edge = 0.0f;
         double t0 = 0.0;
         bool flow_base = false;        // L0 is a Flow merge's grid, not a remesh
+        std::string note;              // the chaining merge's note, repeated when the levels are done
     };
     static RebuildLevels rb;
+    static std::string merge_note;     // a merge's note, handed to the Rebuild levels it chains
     if (input.rebuild_levels_requested) {
         input.rebuild_levels_requested = false;
         const bool chained = input.rebuild_levels_chained;
@@ -1001,6 +1003,7 @@ void app_ops_remesh_and_merge(App& a) {
             }
             rb = RebuildLevels{};
             rb.stage = 2; rb.levels = N; rb.t0 = glfwGetTime(); rb.flow_base = true;
+            rb.note.swap(merge_note);
             rb.base_edge = fb_edge;
             rb.src_edge  = (float)std::sqrt(4.0 * area / (std::sqrt(3.0) * std::max<double>(1.0, (double)T)));
             rb.pos.resize((size_t)vc * 3);
@@ -1086,6 +1089,7 @@ void app_ops_remesh_and_merge(App& a) {
             };
             rb = RebuildLevels{};
             rb.stage = 1; rb.levels = N; rb.t0 = glfwGetTime();
+            if (chained) rb.note.swap(merge_note);
             rb.base_edge = 0.87f * edge_for(base_tris);
             rb.src_edge  = edge_for((double)T);
             rb.pos.resize((size_t)vc * 3);
@@ -1234,6 +1238,11 @@ void app_ops_remesh_and_merge(App& a) {
                           "Rebuilt %d subdiv levels: base %u tris, top %u tris",
                           top - multires->base_level, multires->base.tri_count(), mesh->tri_count());
             input.notification_timer = 4.0f;
+            if (!rb.note.empty()) {   // e.g. Flow stepped aside: the levels aren't on its grid
+                const size_t at = std::strlen(input.notification);
+                std::snprintf(input.notification + at, sizeof(input.notification) - at, " | %s", rb.note.c_str());
+                input.notification_timer = 10.0f;
+            }
             std::printf("[rebuild] done in %.0f ms: L%d..L%d, base %u tris, top %u tris\n",
                         (glfwGetTime() - rb.t0) * 1000.0, multires->base_level, top,
                         multires->base.tri_count(), mesh->tri_count());
@@ -1333,6 +1342,12 @@ void app_ops_remesh_and_merge(App& a) {
                                   " | retopos joined, UVs need a re-unwrap");
                 }
                 input.notification_timer = 6.0f;
+                if (!vm.note.empty()) {   // the merge did less than asked: say so on screen, not just the log
+                    const size_t at = std::strlen(input.notification);
+                    std::snprintf(input.notification + at, sizeof(input.notification) - at, " | %s", vm.note.c_str());
+                    input.notification_timer = 10.0f;
+                }
+                merge_note = vm.note;
                 std::printf("[voxel-merge] %s\n", input.notification);
                 // Dev hook: CHISEL_MERGE_DUMP=<path.obj> writes the result for offline checks.
                 if (const char* dump = std::getenv("CHISEL_MERGE_DUMP"))

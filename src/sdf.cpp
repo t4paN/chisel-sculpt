@@ -1727,6 +1727,7 @@ void smooth_position(const Level& L, const std::vector<Vec3>& o, std::vector<Vec
 // instead of remeshing (which would bring back the old grain at every level).
 struct FlowBaseStash { std::vector<float> pos; std::vector<uint32_t> idx; int levels = 0; float edge = 0.0f; };
 FlowBaseStash g_flow_base;
+std::string g_flow_note;   // set when Flow steps aside for the rebuild; the merge passes it on
 
 // Mirror (seam != nullptr): m is the +x half from clip_to_plus_x, seam its x = 0 verts.
 // The grid gets a row along the seam (field pinned there, points slid onto x = 0), the
@@ -1780,6 +1781,7 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
     const int splits = std::max(SUBDIV, levels_after);
     const float s = e0 * SPACING * (float)(1u << std::max(0, splits - 2));
     g_flow_base = FlowBaseStash{};
+    g_flow_note.clear();
     build_hierarchy(H, e0);
     const Level& L0f = H[0];   // H grew: the L0 reference above is stale from here on
 
@@ -2303,6 +2305,8 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
             if (strays) {
                 std::printf("[sdf-flow] Flow: grid for %d levels spans gaps (%u tris off the surface by > half an edge): "
                             "the rebuild remeshes as usual, merge keeps its own surface\n", levels_after, strays);
+                g_flow_note = "Flow's grid couldn't hold this shape at " + std::to_string(levels_after) +
+                              " levels (gaps too narrow): levels rebuilt the usual way";
                 return true;
             }
             stash();
@@ -4082,8 +4086,16 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
         // re-laid half can't keep, so there it falls back.
         const bool flow  = j.pat.pattern == (int)SdfPattern::Flow;
         const bool flow_sn = flow && j.mirror && j.use_nets;
-        if (flow_sn)
+        if (flow_sn) {
             std::printf("[sdf-flow] Flow isn't available with the Surface Nets mirror: using Curvature nudge\n");
+            j.res.note = "Flow doesn't work with Surface Nets + mirror: used Curvature nudge";
+        }
+        // Flow's own verdict, passed on to the user (a merge that falls back says so).
+        auto run_flow = [&](std::vector<uint8_t>* seam) {
+            if (flow_remesh(welded, j.field_cpu, grid, j.pat.levels_after, seam)) { j.res.note = g_flow_note; return; }
+            std::printf("[sdf-flow] Flow failed on this model: plain merge kept\n");
+            j.res.note = "Flow couldn't close this model: kept the plain merge (try another Detail)";
+        };
         const bool nudge = j.pat.pattern == (int)SdfPattern::CurvatureNudge
                         || j.pat.pattern == (int)SdfPattern::Curvature6 || graph || flow_sn;
         const int  rosy  = j.pat.pattern == (int)SdfPattern::Curvature6 ? 6 : 4;
@@ -4101,8 +4113,7 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
             std::vector<uint8_t> seam;
             clip_to_plus_x(welded, grid.voxel, seam);
             weld_near_seam(welded, grid.voxel, seam);   // B: collapse the seam sliver column
-            if (flow && !flow_remesh(welded, j.field_cpu, grid, j.pat.levels_after, &seam))
-                std::printf("[sdf-flow] Flow failed on this model: plain merge kept\n");
+            if (flow) run_flow(&seam);
             CrossField flow_field;
             if (graph) build_graph_field(welded, j.field_cpu, grid, flow_field);
             else if (nudge) {
@@ -4132,8 +4143,7 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
             // (Flips only rewrite indices — vertex positions stay mirror-paired.)
             // Flow: swap MC's mesh for the field-aligned grid; then plain relax, flips
             // and the pole walk as usual (the walk clears the grid's dislocations).
-            if (flow && !j.mirror && !flow_remesh(welded, j.field_cpu, grid, j.pat.levels_after))
-                std::printf("[sdf-flow] Flow failed on this model: plain merge kept\n");
+            if (flow && !j.mirror) run_flow(nullptr);
             CrossField flow_field;
             if (graph) build_graph_field(welded, j.field_cpu, grid, flow_field);
             else if (nudge) {

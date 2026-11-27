@@ -56,6 +56,7 @@ struct VoxelMergeResult {
     uint32_t    in_entities = 0, in_tris = 0, out_verts = 0, out_tris = 0;
     uint32_t    R = 0;
     bool        wrapped = false;   // thin skin: the result is a shell round it, not its true surface
+    std::string note;              // for the user: where the merge did less than asked (Flow stepping aside)
     // Manifold report (chunk 4): surfaced so a bad merge is visible before print.
     uint32_t    boundary_edges = 0, nonmanifold_edges = 0, components = 0;
 };
