@@ -2,6 +2,10 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-27 — Quad flow evens out
+- Quad flow relaxes its grid: each point moves toward its square neighbours along the surface and snaps back on, 6 rounds on the coarse grid and again after the splits. Points on the mirror seam or a Flow line slide along their row only.
+- Orc: quads stretched past 4:1 went from 1,268 to 100, past 8:1 from 322 to 8, folded from 112 to 11. Across the comparison models: 5–40× fewer stretched quads. Pole count unchanged, mirror symmetry exact. Triangle Flow untouched.
+
 ## 2026-11-27 — Flow line (U)
 - New sculpt tool **Flow line** (U): draw lines on the model where Flow's grid should start, such as a centre line down an asymmetric figure or a loop round an eye. Delete clears them. Nothing is sculpted.
 - A plain Flow or Quad flow merge starts from the drawn lines instead of x = 0. Each line is smoothed and snapped to the surface first. On a test ball, a drawn ring got 217 grid edges laid along it, against 39 without it. The lines carry over to the merged result. Mirror merges keep the seam as their start line.

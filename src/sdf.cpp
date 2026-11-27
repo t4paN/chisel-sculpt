@@ -2481,6 +2481,56 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
         }
         return std::make_pair(before, bad.size());
     };
+    // Quads: even the grid out. The position field lays points where the grid lines
+    // cross, and where the surface curves hard (an eye socket) a row gets squeezed:
+    // bunched squares, some folded. Each point moves halfway to the mean of its
+    // squares' edge neighbours (hidden diagonals left out, so a square pulls square), in
+    // the tangent plane, then snaps back onto the surface. A point on the seam or on a
+    // Flow line averages only its row, so it slides along it. Line ends stay put.
+    static const int QRELAX = (int)env_float("CHISEL_QUAD_RELAX", 6.0f);   // dev: rounds
+    auto quad_relax = [&](std::vector<Vec3>& P, const std::vector<uint32_t>& T, int rounds) {
+        if (!quad || rounds <= 0) return;
+        const uint32_t nv = (uint32_t)P.size();
+        std::vector<uint64_t> E; E.reserve(T.size());
+        for (size_t t = 0; t < T.size(); t += 3)
+            for (int i = 0; i < 3; i++) {
+                const uint64_t k = ekey(T[t+i], T[t+(i+1)%3]);
+                if (!qd.count(k)) E.push_back(k);
+            }
+        std::sort(E.begin(), E.end());
+        E.erase(std::unique(E.begin(), E.end()), E.end());
+        std::vector<uint32_t> off(nv + 1, 0), adj(E.size() * 2);
+        for (uint64_t k : E) { off[(uint32_t)(k >> 32) + 1]++; off[(uint32_t)k + 1]++; }
+        for (uint32_t v = 0; v < nv; v++) off[v + 1] += off[v];
+        { std::vector<uint32_t> fill(off.begin(), off.end() - 1);
+          for (uint64_t k : E) { const uint32_t a = (uint32_t)(k >> 32), b = (uint32_t)k;
+                                 adj[fill[a]++] = b; adj[fill[b]++] = a; } }
+        auto row = [&](uint32_t v) -> int {
+            if (is_s(v)) return 1;
+            if (guide && v < GP.size() && GP[v]) return 2;
+            return 0;
+        };
+        std::vector<Vec3> np(nv);
+        for (int r = 0; r < rounds; r++) {
+            for (uint32_t v = 0; v < nv; v++) {
+                const int rv = row(v);
+                Vec3 sum(0, 0, 0); int cnt = 0;
+                for (uint32_t j = off[v]; j < off[v + 1]; j++) {
+                    const uint32_t u = adj[j];
+                    if (rv != 0 && row(u) != rv) continue;
+                    sum = sum + P[u]; cnt++;
+                }
+                if (cnt == 0 || (rv != 0 && cnt < 2)) { np[v] = P[v]; continue; }
+                const Vec3 n = unit(grad(P[v]));
+                Vec3 d = sum * (1.0f / (float)cnt) - P[v];
+                d = d - n * d.dot(n);
+                Vec3 p = P[v] + d * 0.5f;
+                if (rv == 2) p = guide->onto(p, n);
+                np[v] = snap_pt(p, rv == 1);
+            }
+            P.swap(np);
+        }
+    };
 
     {
         std::vector<uint32_t> remap(CP.size(), 0xFFFFFFFFu);
@@ -2533,6 +2583,7 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
             std::printf("[sdf-flow] Flow: grid clean-up broke the seam (%zu edges), keeping the plain merge\n", f);
             return false;
         }
+        quad_relax(CP, tri, QRELAX);
         const auto uf = untangle(CP, tri);
         base_folds[0] = uf.first; base_folds[1] = uf.second;
         for (uint32_t v = 0; v < bv; v++) {
@@ -3185,6 +3236,7 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
         std::printf("[sdf-flow] Flow: splits broke the seam (%zu edges), keeping the plain merge\n", f);
         return false;
     }
+    quad_relax(CP, tri, QRELAX);
     { const auto uf = untangle(CP, tri); top_folds[0] = uf.first; top_folds[1] = uf.second; }
     const uint32_t top_strays = count_strays(false);
 
