@@ -2,6 +2,12 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-27 — Flow keeps its grain through Levels after
+- SDF merge with Pattern Flow and "Levels after": Flow lays its grid wide enough to be L0, cleans that coarse grid, and Rebuild levels installs it as the base instead of remeshing, so every level carries the same rows (before, the rebuild brought back the old grain at every level).
+- The Flow base is kept as laid, on the surface: fitting it to the top grew spikes at horn tips and the top came out identical either way. Rebuilds from a remeshed base still fit.
+- If the wide grid can't close a model, the merge and rebuild run the usual way.
+- Flow now cleans its coarse grid before splitting it, so splits inherit clean topology: on the test models poles drop from 1.4% to 0.5% (6.5% with the default pattern).
+
 ## 2026-11-27 — SDF Pattern: Flow
 - New Pattern **Flow**: instead of tidying the marching-cubes mesh, the merge lays a fresh triangle grid whose rows follow one smooth direction field round the whole model, then the usual flips and pole walk clear its leftover kinks. The grid is laid 4 marching-cubes edges apart and split twice, which keeps it regular and lands near the plain merge's triangle count.
 - On the test models: a fifth of the poles (1.4% vs 6.5%), better-aligned rows, half the kinks, watertight on all 8, about 8% slower.

@@ -1001,6 +1001,8 @@ void app_files_frame(App& a) {
                 input.voxel_merge_mirror = std::atoi(env) != 0;
             if (const char* env = std::getenv("CHISEL_MERGE_CLOSE_HOLES"))
                 input.voxel_merge_close_holes = std::min(2, std::max(0, std::atoi(env)));
+            if (const char* env = std::getenv("CHISEL_MERGE_LEVELS"))   // the dialog's "Levels after"
+                input.voxel_merge_rebuild_levels = std::min(5, std::max(0, std::atoi(env)));
             // The Pattern block (sdf.h): indexes into each row, out-of-range ignored.
             // Note these land in the settings file like a dialog pick would.
             auto row_env = [](const char* name, const SdfRow& row, int& dst) {

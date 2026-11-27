@@ -115,4 +115,4 @@ uint32_t rebuild_wrap_level(MultiresStack& stack, const std::vector<float>& pos,
 // the top level the original's colour (per soup vertex; empty = no paint to carry).
 void rebuild_finish(MultiresStack& stack, const std::vector<float>& pos,
                     const std::vector<uint32_t>& idx, const std::vector<uint32_t>& color,
-                    float cell);
+                    float cell, bool fit = true);

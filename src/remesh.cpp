@@ -4609,12 +4609,19 @@ uint32_t rebuild_wrap_level(MultiresStack& stack, const std::vector<float>& pos,
 
 void rebuild_finish(MultiresStack& stack, const std::vector<float>& pos,
                     const std::vector<uint32_t>& idx, const std::vector<uint32_t>& color,
-                    float cell) {
+                    float cell, bool fit) {
     const int L = stack.base_level + (int)stack.disp.size();
-    ProjectionStats ps = project_down_to_level(stack, stack.base_level);
-    std::printf("[rebuild] fitted L%d..L%d to the top in %.0f ms", stack.base_level, L, ps.elapsed_ms);
-    if (ps.checked) std::printf(", top rebuilt within %.3g", ps.max_reconstruction_error);
-    std::printf("\n");
+    // fit = false: keep the base as laid (a Flow grid already sits on the surface;
+    // fitting a coarse, even grid so the smoothed top replays exactly pushes its
+    // tips out into spikes). Each level's wrap still lands the top on the surface.
+    if (fit) {
+        ProjectionStats ps = project_down_to_level(stack, stack.base_level);
+        std::printf("[rebuild] fitted L%d..L%d to the top in %.0f ms", stack.base_level, L, ps.elapsed_ms);
+        if (ps.checked) std::printf(", top rebuilt within %.3g", ps.max_reconstruction_error);
+        std::printf("\n");
+    } else {
+        std::printf("[rebuild] base kept as laid (no fit)\n");
+    }
     if (color.empty() || color.size() * 3 != pos.size()) return;
 
     // Paint: each top-level vertex takes the colour of the original under it. The

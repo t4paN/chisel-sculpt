@@ -1703,7 +1703,12 @@ void smooth_position(const Level& L, const std::vector<Vec3>& o, std::vector<Vec
 // Re-lay m on a field-aligned triangle grid (see the block comment above). On
 // success m holds the new closed mesh (positions, normals, indices) and the
 // call returns true; on anything it can't close, m is untouched and it returns false.
-bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid) {
+// The coarse Flow grid, kept for "Levels after": Rebuild levels installs it as L0
+// instead of remeshing (which would bring back the old grain at every level).
+struct FlowBaseStash { std::vector<float> pos; std::vector<uint32_t> idx; int levels = 0; float edge = 0.0f; };
+FlowBaseStash g_flow_base;
+
+bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, int levels_after) {
     using namespace flow;
     static const float SPACING = env_float("CHISEL_FLOW_SPACING", 4.0f);
     static const int   SUBDIV  = (int)env_float("CHISEL_FLOW_SUBDIV", 2.0f);
@@ -1738,7 +1743,12 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid) 
     double esum = 0.0;
     for (size_t e = 0; e < L0.ea.size(); e++) esum += (L0.V[L0.ea[e]] - L0.V[L0.eb[e]]).length();
     const float e0 = (float)(esum / (double)std::max<size_t>(1, L0.ea.size()));
-    const float s = e0 * SPACING;
+    // Splits: two by default (density); "Levels after" = L asks for L, so the coarse
+    // grid is laid that much wider and becomes L0 of the rebuild. Each extra split
+    // doubles the spacing: 4 MC edges at 2 splits, 8 at 3, 16 at 4.
+    const int splits = std::max(SUBDIV, levels_after);
+    const float s = e0 * SPACING * (float)(1u << std::max(0, splits - 2));
+    g_flow_base = FlowBaseStash{};
     build_hierarchy(H, e0);
     const Level& L0f = H[0];   // H grew: the L0 reference above is stale from here on
 
@@ -1913,17 +1923,66 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid) 
         return false;
     }
     edge_counts(ec);
-    for (auto& kv : ec)
-        if (kv.second != 2) {
-            std::printf("[sdf-flow] Flow: %zu edges still open or shared after repair, keeping the plain merge\n", ec.size());
-            return false;
+    size_t bad_edges = 0;
+    for (auto& kv : ec) if (kv.second != 2) bad_edges++;
+    if (bad_edges) {
+        std::printf("[sdf-flow] Flow: %zu edges still open or shared after repair, keeping the plain merge\n", bad_edges);
+        return false;
+    }
+
+    // Clean the coarse grid itself: flips + pole walk move its dislocations (5/7 pairs)
+    // until they cancel. Done here, on the grid, every split level inherits the clean
+    // topology (a split never adds a pole), so L0 of a rebuild is as clean as the top.
+    auto snap_pt = [&](Vec3 p) {
+        for (int it = 0; it < 4; it++) {
+            Vec3 g = grad(p);
+            if (g.length() < 1e-12f) break;
+            p = p - unit(g) * sample_field(field, grid, p);
         }
+        return p;
+    };
+    {
+        std::vector<uint32_t> remap(CP.size(), 0xFFFFFFFFu);
+        Mesh base;
+        std::vector<uint32_t> bidx; bidx.reserve(tri.size());
+        for (uint32_t x : tri) {
+            if (remap[x] == 0xFFFFFFFFu) {
+                remap[x] = (uint32_t)base.pos_x.size();
+                Vec3 p = snap_pt(CP[x]);
+                base.pos_x.push_back(p.x); base.pos_y.push_back(p.y); base.pos_z.push_back(p.z);
+            }
+            bidx.push_back(remap[x]);
+        }
+        base.indices = std::move(bidx);
+        flip_valence(base, nullptr, 3);
+        reduce_poles(base, field, grid, nullptr, 90);
+        const uint32_t bv = base.vertex_count();
+        CP.resize(bv); CN.resize(bv);
+        for (uint32_t v = 0; v < bv; v++) {
+            CP[v] = Vec3(base.pos_x[v], base.pos_y[v], base.pos_z[v]);
+            CN[v] = unit(grad(CP[v]));
+        }
+        tri = base.indices;
+    }
+    auto stash = [&]() {
+        g_flow_base.pos.resize(CP.size() * 3);
+        for (size_t v = 0; v < CP.size(); v++) {
+            Vec3 p = snap_pt(CP[v]);
+            g_flow_base.pos[v*3] = p.x; g_flow_base.pos[v*3+1] = p.y; g_flow_base.pos[v*3+2] = p.z;
+        }
+        g_flow_base.idx = tri;
+        g_flow_base.levels = levels_after;
+        double el = 0.0;
+        for (size_t t = 0; t < tri.size(); t += 3) el += (CP[tri[t]] - CP[tri[t+1]]).length();
+        g_flow_base.edge = (float)(el / (double)std::max<size_t>(1, tri.size() / 3));
+    };
 
     // Split every tri into 4 (edge midpoints), SUBDIV times: a regular grid stays
     // regular (each new vert has 6 edges), so this buys back the density the wide
     // grid gave up. Spacing 4 + 2 splits = an edge of 1 MC edge, about the vertex
     // count of the plain merge at the same Detail (the user saw 1.2M -> 100k without).
-    for (int sd = 0; sd < SUBDIV; sd++) {
+    for (int sd = 0; sd < splits; sd++) {
+        if (levels_after > 0 && sd == splits - levels_after) stash();
         std::unordered_map<uint64_t, uint32_t> midv; midv.reserve(tri.size());
         auto mid = [&](uint32_t a, uint32_t b) {
             auto it = midv.find(ekey(a, b));
@@ -1949,12 +2008,7 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid) 
     for (uint32_t& x : tri) {
         if (remap[x] == 0xFFFFFFFFu) {
             remap[x] = (uint32_t)out.pos_x.size();
-            Vec3 p = CP[x];
-            for (int it = 0; it < 4; it++) {
-                Vec3 g = grad(p);
-                if (g.length() < 1e-12f) break;
-                p = p - unit(g) * sample_field(field, grid, p);
-            }
+            Vec3 p = snap_pt(CP[x]);
             Vec3 n = unit(grad(p));
             out.pos_x.push_back(p.x); out.pos_y.push_back(p.y); out.pos_z.push_back(p.z);
             out.norm_x.push_back(n.x); out.norm_y.push_back(n.y); out.norm_z.push_back(n.z);
@@ -1963,7 +2017,7 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid) 
     }
     out.indices = std::move(tri);
     std::printf("[sdf-flow] Flow: %u -> %u verts / %zu tris (spacing %.2fx, %d splits, %zu levels, %u tris dropped, %u holes filled), %.0f ms\n",
-                nv, out.vertex_count(), out.indices.size() / 3, SPACING, SUBDIV, H.size(), dropped, holes,
+                nv, out.vertex_count(), out.indices.size() / 3, SPACING * (float)(1u << std::max(0, splits - 2)), splits, H.size(), dropped, holes,
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
     m.pos_x.swap(out.pos_x); m.pos_y.swap(out.pos_y); m.pos_z.swap(out.pos_z);
     m.norm_x.swap(out.norm_x); m.norm_y.swap(out.norm_y); m.norm_z.swap(out.norm_z);
@@ -2983,6 +3037,7 @@ VoxelMergeJob* voxel_merge_begin(Scene& scene, ComputeState& cs,
     VoxelMergeJob* job = new VoxelMergeJob();
     job->mirror = mirror;
     job->pat = pattern;
+    g_flow_base = FlowBaseStash{};   // a stale Flow grid must never reach a later rebuild
     job->keep_detail = keep_detail;
     job->t0 = std::chrono::high_resolution_clock::now();
 
@@ -3728,7 +3783,7 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
             // (Flips only rewrite indices — vertex positions stay mirror-paired.)
             // Flow: swap MC's mesh for the field-aligned grid; then plain relax, flips
             // and the pole walk as usual (the walk clears the grid's dislocations).
-            if (flow && !j.mirror && !flow_remesh(welded, j.field_cpu, grid))
+            if (flow && !j.mirror && !flow_remesh(welded, j.field_cpu, grid, j.pat.levels_after))
                 std::printf("[sdf-flow] Flow failed on this model: plain merge kept\n");
             CrossField flow_field;
             if (graph) build_graph_field(welded, j.field_cpu, grid, flow_field);
@@ -3968,3 +4023,12 @@ const SdfRow kPolesRow   = { "Poles",   kPolesItems,   1, (int)SdfPoles::WalkCan
 const SdfRow& sdf_mode_row()    { return kModeRow; }
 const SdfRow& sdf_pattern_row() { return kPatternRow; }
 const SdfRow& sdf_poles_row()   { return kPolesRow; }
+
+// "Levels after" with Flow: the coarse grid the merge stashed, handed over once.
+bool sdf_take_flow_base(std::vector<float>& pos, std::vector<uint32_t>& idx, int& levels, float& edge) {
+    if (g_flow_base.idx.empty()) return false;
+    pos.swap(g_flow_base.pos); idx.swap(g_flow_base.idx);
+    levels = g_flow_base.levels; edge = g_flow_base.edge;
+    g_flow_base = FlowBaseStash{};
+    return true;
+}

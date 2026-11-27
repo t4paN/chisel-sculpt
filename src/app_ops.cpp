@@ -975,6 +975,7 @@ void app_ops_remesh_and_merge(App& a) {
         std::vector<uint32_t> idx, color;
         float base_edge = 0.0f, src_edge = 0.0f;
         double t0 = 0.0;
+        bool flow_base = false;        // L0 is a Flow merge's grid, not a remesh
     };
     static RebuildLevels rb;
     if (input.rebuild_levels_requested) {
@@ -983,6 +984,71 @@ void app_ops_remesh_and_merge(App& a) {
         input.rebuild_levels_chained = false;
         int N = std::min(MULTIRES_MAX_LEVEL, std::max(1, input.rebuild_levels_count));
         const uint64_t T = mesh->tri_count();
+        // A Flow merge laid its grid for exactly these levels: that grid is L0, no remesh.
+        std::vector<float> fb_pos; std::vector<uint32_t> fb_idx; int fb_levels = 0; float fb_edge = 0.0f;
+        const bool flow_base = chained && sdf_take_flow_base(fb_pos, fb_idx, fb_levels, fb_edge)
+                            && fb_levels == N;
+        if (flow_base) {
+            scene.materialize_active_cpu();
+            mesh = &scene.active_mesh();
+            multires = &scene.active_multires();
+            const uint32_t vc = mesh->vertex_count();
+            double area = 0.0;
+            for (uint32_t t = 0; t < mesh->tri_count(); t++) {
+                const Vec3 p0 = mesh->get_pos(mesh->indices[t*3]);
+                area += 0.5 * (double)(mesh->get_pos(mesh->indices[t*3+1]) - p0)
+                                  .cross(mesh->get_pos(mesh->indices[t*3+2]) - p0).length();
+            }
+            rb = RebuildLevels{};
+            rb.stage = 2; rb.levels = N; rb.t0 = glfwGetTime(); rb.flow_base = true;
+            rb.base_edge = fb_edge;
+            rb.src_edge  = (float)std::sqrt(4.0 * area / (std::sqrt(3.0) * std::max<double>(1.0, (double)T)));
+            rb.pos.resize((size_t)vc * 3);
+            for (uint32_t v = 0; v < vc; v++) {
+                rb.pos[v*3] = mesh->pos_x[v]; rb.pos[v*3+1] = mesh->pos_y[v]; rb.pos[v*3+2] = mesh->pos_z[v];
+            }
+            rb.idx = mesh->indices;
+            if (mesh->color.size() == vc) rb.color = mesh->color;
+            // Install the grid as the live mesh and a fresh level-0 lock, as a remesh
+            // would leave it (see the end of remesh_tick).
+            Mesh b;
+            const uint32_t bv = (uint32_t)(fb_pos.size() / 3);
+            b.pos_x.resize(bv); b.pos_y.resize(bv); b.pos_z.resize(bv);
+            b.norm_x.resize(bv); b.norm_y.resize(bv); b.norm_z.resize(bv);   // recompute_normals fills, doesn't size
+            for (uint32_t v = 0; v < bv; v++) { b.pos_x[v] = fb_pos[v*3]; b.pos_y[v] = fb_pos[v*3+1]; b.pos_z[v] = fb_pos[v*3+2]; }
+            b.indices = std::move(fb_idx);
+            b.build_adjacency();
+            b.recompute_normals();
+            if (const char* dump = std::getenv("CHISEL_FLOW_BASE_DUMP")) b.export_obj(dump);   // dev: the grid as handed over
+            scene.splice_active(b);
+            scene.set_mirror_topology(false);
+            scene.active_entity().subdiv_level = 0;
+            scene.collapse_selection_to_active();
+            mesh = &scene.active_mesh();
+            multires = &scene.active_multires();
+            paint_layers_drop_stale(mesh->paint_layers, mesh->vertex_count());
+            MultiresStack& stack = *multires;
+            stack.base = *mesh;
+            stack.base.paint_layers = PaintLayerStack{};
+            stack.base_level = 0; stack.current_level = 0;
+            stack.disp.clear(); stack.frames.clear(); stack.mirror.clear(); stack.base_mirror.clear();
+            stack.midpoint_parents.clear(); stack.topo_cache.clear(); stack.lock_stamp = 0;
+            stack.color.clear(); stack.mask.clear(); stack.density.clear();
+            stack.base.color.clear(); stack.base.mask.clear(); stack.base.density.clear();
+            stack.locked = true;
+            mesh->mask.clear();
+            scene.refresh_mirror_map();
+            scene.sync();
+            mesh = &scene.active_mesh();
+            multires = &scene.active_multires();
+            refresh_active_gpu_residency();
+            screen_buffers_dirty = true;
+            input.rebuild_levels_running = true;
+            input.remesh_in_progress = true;
+            input.remesh_progress = 0.0f;
+            std::printf("[rebuild] %d levels over %llu tris: Flow grid as the base (%u verts, %zu tris, edge %.4f), source edge %.4f\n",
+                        N, (unsigned long long)T, bv, b.indices.size() / 3, rb.base_edge, rb.src_edge);
+        } else {
         // Chained off an SDF merge, the dialog couldn't know the result's size: take as
         // many of the asked-for levels as the result has room for, rather than refuse.
         if (chained)
@@ -1041,6 +1107,7 @@ void app_ops_remesh_and_merge(App& a) {
             input.rebuild_levels_running = true;
             input.remesh_in_progress = true;
             input.remesh_progress = 0.0f;
+        }
         }
     }
 
@@ -1134,7 +1201,8 @@ void app_ops_remesh_and_merge(App& a) {
         rb.done++;
         input.remesh_progress = (float)(rb.done + 1) / (float)(rb.levels + 1);
         if (rb.done >= rb.levels || multires->base_level + (int)multires->disp.size() >= MULTIRES_MAX_LEVEL) {
-            rebuild_finish(*multires, rb.pos, rb.idx, rb.color, 2.0f * std::max(rb.src_edge, parent_edge * 0.5f));
+            rebuild_finish(*multires, rb.pos, rb.idx, rb.color, 2.0f * std::max(rb.src_edge, parent_edge * 0.5f),
+                           !rb.flow_base);   // a Flow base stays as laid: fitting it only grew spikes, the top came out identical
             const int top = multires->base_level + (int)multires->disp.size();
             multires->current_level = top;
             if (scene.alive_count() <= 1) {
@@ -1211,7 +1279,8 @@ void app_ops_remesh_and_merge(App& a) {
                                            input.remesh_keep_detail,
                                            input.voxel_merge_close_holes,
                                            SdfPatternOpts{ input.voxel_merge_pattern, input.voxel_merge_poles,
-                                                           input.voxel_merge_poles_on });
+                                                           input.voxel_merge_poles_on,
+                                                           input.voxel_merge_rebuild_levels });
             input.voxel_merge_in_progress = true;
         }
     }

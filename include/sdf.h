@@ -42,7 +42,12 @@ struct SdfPatternOpts {
     int  pattern  = (int)SdfPattern::CurvatureNudge;
     int  poles    = (int)SdfPoles::WalkCancel;
     bool poles_on = true;   // off: no pole walk (valence flips still run)
+    int  levels_after = 0;  // the dialog's "Levels after": Flow lays its grid so its coarse form is L0
 };
+
+// After a Flow merge with "Levels after": the coarse grid to install as L0 (xyz per
+// vert, 3 indices per tri), the level count it was laid for, its mean edge. Once.
+bool sdf_take_flow_base(std::vector<float>& pos, std::vector<uint32_t>& idx, int& levels, float& edge);
 
 struct VoxelMergeResult {
     bool        success = false;
