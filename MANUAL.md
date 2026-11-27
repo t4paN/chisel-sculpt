@@ -355,7 +355,7 @@ printing.
 | M | Mirror-symmetric union — the result stays editable under X-mirror |
 | − | **Subtract**: union the selection, then carve away every *unselected* (tinted) mesh — booleans with your bystander objects as cutters |
 | S | **Mode**, the extractor: Marching Cubes ↔ Surface Nets (Surface Nets gives a smoother, more even result) |
-| G | **Pattern**: which way the triangle rows run. Curvature nudge (default) leans them along the shape's bends; Plain doesn't; Curvature, 6-way follows the bends in 60° steps, the way triangles tile; Graph paper lays the rows along the world's X, Y and Z |
+| G | **Pattern**: which way the triangle rows run. Curvature nudge (default) leans them along the shape's bends; Plain doesn't; Curvature, 6-way follows the bends in 60° steps, the way triangles tile; Graph paper lays the rows along the world's X, Y and Z; Flow lays a fresh grid whose rows flow round the shape as one, with fewer poles and kinks, at about a ninth of the triangles (raise Detail to compensate; not with mirror yet, mirrored merges use Curvature nudge) |
 | P / O | **Poles**: how needless poles get cleaned up (Walk & cancel, the default); O turns the clean-up off |
 | [ / ] | Less / more **Detail**: the prompt shows the triangles to expect, and how long once you've run one merge. A skull marks the top step (desktop only): a very heavy mesh and a long wait |
 | H | **Close holes**: Normal, More or Most, for paper-thin models only (see below) |

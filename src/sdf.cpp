@@ -1548,6 +1548,400 @@ PoleStats reduce_poles(Mesh& m, const std::vector<float>& field, const SdfGrid& 
     return st;
 }
 
+// ---- Flow: re-lay the surface on one field-aligned triangle grid -------------
+// Pattern "Flow" (sdf-patterns stage 4). Every other pattern only nudges MC's
+// points, and nudging can't change which way the triangle rows run: the rows
+// are the topology. Flow throws MC's points away and lays a fresh triangle grid
+// that follows one smooth 6-way direction field over the whole model:
+//   1. direction field (6-way: a triangle grid looks the same after 60 degrees),
+//   2. position field (where each grid point sits, agreed between neighbours),
+//   3. extraction (MC verts landing on the same grid point merge; neighbouring
+//      grid points become edges; closed triplets become triangles),
+//   4. repair small holes, snap onto the SDF, then the usual flips + pole walk,
+//      which clear the grid's dislocations (5/7 pairs where a row is squeezed in).
+// Both fields are solved coarse to fine: from a random start, plain smoothing
+// leaves whirlpools that never dissolve (12.6k singular faces on a cube vs 24
+// with the hierarchy). Grid spacing is 3 MC edges: closer, too few MC points
+// share a grid point to agree on it and the result tears. Written from the
+// published idea (field-aligned meshing), prototype in sdf-patterns-harness/.
+namespace flow {
+
+constexpr float kC6[6] = { 1.0f, 0.5f, -0.5f, -1.0f, -0.5f, 0.5f };
+constexpr float kS6[6] = { 0.0f, 0.8660254f, 0.8660254f, 0.0f, -0.8660254f, -0.8660254f };
+
+inline Vec3 unit(Vec3 v) { float l = v.length(); return l > 1e-30f ? v * (1.0f / l) : v; }
+inline Vec3 tang(Vec3 x, Vec3 n) { return x - n * x.dot(n); }
+inline float coin(uint64_t k) {
+    uint64_t x = k * 0x9E3779B97F4A7C15ull;
+    x ^= x >> 31; x *= 0x94D049BB133111EBull; x ^= x >> 29;
+    return (float)(x & 0xFFFFFFu) * (1.0f / 16777216.0f);
+}
+// The 6 turns of oj (60-degree steps about nj): the one closest to oi.
+inline Vec3 best_rep(Vec3 oi, Vec3 oj, Vec3 nj) {
+    const Vec3 b = nj.cross(oj);
+    Vec3 best = oj; float bd = -2.0f;
+    for (int k = 0; k < 6; k++) {
+        Vec3 r = oj * kC6[k] + b * kS6[k];
+        float d = r.dot(oi);
+        if (d > bd) { bd = d; best = r; }
+    }
+    return best;
+}
+// Lattice basis at a point: a = o, b = o turned 60 degrees.
+inline Vec3 frame_b(Vec3 o, Vec3 n) { return o * 0.5f + n.cross(o) * 0.8660254f; }
+// Move p by whole lattice steps (in the o/n frame, spacing s) to land nearest target.
+inline Vec3 snap_toward(Vec3 target, Vec3 p, Vec3 o, Vec3 n, float s) {
+    const Vec3 a = o, b = frame_b(o, n);
+    const Vec3 d = tang(target - p, n) * (1.0f / s);
+    const float da = d.dot(a), db = d.dot(b);
+    const float u = (4.0f / 3.0f) * (da - 0.5f * db), v = (4.0f / 3.0f) * (db - 0.5f * da);
+    const float fu = std::floor(u), fv = std::floor(v);
+    float bu = fu, bv = fv, best = 1e30f;
+    for (int i = 0; i < 2; i++)
+        for (int k = 0; k < 2; k++) {
+            float eu = u - (fu + i), ev = v - (fv + k);
+            float d2 = eu * eu + ev * ev + eu * ev;     // |eu a + ev b|^2, 60-degree unit basis
+            if (d2 < best) { best = d2; bu = fu + i; bv = fv + k; }
+        }
+    return p + (a * bu + b * bv) * s;
+}
+
+struct Level {
+    std::vector<Vec3> V, N;
+    std::vector<uint32_t> ea, eb;       // unique edges
+    std::vector<uint32_t> parent;       // vert -> cluster on the next level up
+};
+
+void unique_edges(std::vector<uint64_t>& keys, Level& L) {
+    std::sort(keys.begin(), keys.end());
+    keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+    L.ea.resize(keys.size()); L.eb.resize(keys.size());
+    for (size_t i = 0; i < keys.size(); i++) { L.ea[i] = (uint32_t)(keys[i] >> 32); L.eb[i] = (uint32_t)keys[i]; }
+}
+inline uint64_t ekey(uint32_t a, uint32_t b) {
+    if (a > b) std::swap(a, b);
+    return ((uint64_t)a << 32) | b;
+}
+
+// Coarse copies by grid clustering, the cell doubling per level.
+void build_hierarchy(std::vector<Level>& H, float e0) {
+    float cell = e0;
+    for (int lv = 0; lv < 12; lv++) {
+        Level& F = H.back();
+        cell *= 2.0f;
+        const uint32_t n = (uint32_t)F.V.size();
+        std::unordered_map<uint64_t, uint32_t> id; id.reserve(n / 2 + 1);
+        F.parent.resize(n);
+        for (uint32_t v = 0; v < n; v++) {
+            const int64_t kx = (int64_t)std::floor(F.V[v].x / cell) + (1 << 20);
+            const int64_t ky = (int64_t)std::floor(F.V[v].y / cell) + (1 << 20);
+            const int64_t kz = (int64_t)std::floor(F.V[v].z / cell) + (1 << 20);
+            const uint64_t key = ((uint64_t)kx << 42) | ((uint64_t)ky << 21) | (uint64_t)kz;
+            auto it = id.emplace(key, (uint32_t)id.size()).first;
+            F.parent[v] = it->second;
+        }
+        const uint32_t m = (uint32_t)id.size();
+        if (m < 8 || m == n) { F.parent.clear(); break; }
+        Level C;
+        C.V.assign(m, Vec3(0, 0, 0)); C.N.assign(m, Vec3(0, 0, 0));
+        std::vector<float> cnt(m, 0.0f);
+        for (uint32_t v = 0; v < n; v++) { C.V[F.parent[v]] += F.V[v]; C.N[F.parent[v]] += F.N[v]; cnt[F.parent[v]] += 1.0f; }
+        for (uint32_t c = 0; c < m; c++) { C.V[c] = C.V[c] * (1.0f / cnt[c]); C.N[c] = unit(C.N[c]); }
+        std::vector<uint64_t> keys; keys.reserve(F.ea.size());
+        for (size_t e = 0; e < F.ea.size(); e++) {
+            uint32_t a = F.parent[F.ea[e]], b = F.parent[F.eb[e]];
+            if (a != b) keys.push_back(ekey(a, b));
+        }
+        unique_edges(keys, C);
+        H.push_back(std::move(C));
+    }
+}
+
+void smooth_orient(const Level& L, std::vector<Vec3>& o, int iters, uint64_t salt) {
+    const uint32_t n = (uint32_t)L.V.size();
+    std::vector<Vec3> acc(n);
+    for (int it = 0; it < iters; it++) {
+        acc = o;
+        for (size_t e = 0; e < L.ea.size(); e++) {
+            const uint32_t a = L.ea[e], b = L.eb[e];
+            acc[a] += best_rep(o[a], o[b], L.N[b]);
+            acc[b] += best_rep(o[b], o[a], L.N[a]);
+        }
+        // Half the verts per sweep, so neighbours don't flip-flop in lockstep.
+        for (uint32_t v = 0; v < n; v++) {
+            if (coin(salt ^ ((uint64_t)it << 40) ^ v) >= 0.5f) continue;
+            Vec3 t = tang(acc[v], L.N[v]);
+            if (t.length() > 1e-12f) o[v] = unit(t);
+        }
+    }
+}
+
+void smooth_position(const Level& L, const std::vector<Vec3>& o, std::vector<Vec3>& p,
+                     float s, int iters, uint64_t salt) {
+    const uint32_t n = (uint32_t)L.V.size();
+    std::vector<Vec3> acc(n);
+    std::vector<float> cnt(n);
+    for (int it = 0; it < iters; it++) {
+        acc = p; std::fill(cnt.begin(), cnt.end(), 1.0f);
+        for (size_t e = 0; e < L.ea.size(); e++) {
+            const uint32_t a = L.ea[e], b = L.eb[e];
+            // Neighbour's grid, turned to match ours, moved by whole steps to land nearest us.
+            acc[a] += snap_toward(p[a], p[b], best_rep(o[a], o[b], L.N[b]), L.N[b], s); cnt[a] += 1.0f;
+            acc[b] += snap_toward(p[b], p[a], best_rep(o[b], o[a], L.N[a]), L.N[a], s); cnt[b] += 1.0f;
+        }
+        for (uint32_t v = 0; v < n; v++) {
+            if (coin(salt ^ ((uint64_t)it << 40) ^ v) >= 0.5f) continue;
+            Vec3 q = acc[v] * (1.0f / cnt[v]);
+            q = L.V[v] + tang(q - L.V[v], L.N[v]);
+            p[v] = snap_toward(L.V[v], q, o[v], L.N[v], s);   // the grid point nearest the vert
+        }
+    }
+}
+
+}  // namespace flow
+
+// Re-lay m on a field-aligned triangle grid (see the block comment above). On
+// success m holds the new closed mesh (positions, normals, indices) and the
+// call returns true; on anything it can't close, m is untouched and it returns false.
+bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid) {
+    using namespace flow;
+    static const float SPACING = env_float("CHISEL_FLOW_SPACING", 3.0f);
+    static const int   OITERS  = (int)env_float("CHISEL_FLOW_OITERS", 30.0f);
+    static const int   PITERS  = (int)env_float("CHISEL_FLOW_PITERS", 50.0f);
+    const auto t0 = std::chrono::steady_clock::now();
+    const uint32_t nv = m.vertex_count();
+    const uint32_t nt = (uint32_t)(m.indices.size() / 3);
+    if (nv < 64 || nt < 64) return false;
+
+    // Level 0: MC's verts, normals from the SDF, unique edges.
+    std::vector<Level> H(1);
+    Level& L0 = H[0];
+    L0.V.resize(nv); L0.N.resize(nv);
+    const float h = 0.5f * grid.voxel;
+    auto grad = [&](Vec3 p) {
+        return Vec3(sample_field(field,grid,Vec3(p.x+h,p.y,p.z)) - sample_field(field,grid,Vec3(p.x-h,p.y,p.z)),
+                    sample_field(field,grid,Vec3(p.x,p.y+h,p.z)) - sample_field(field,grid,Vec3(p.x,p.y-h,p.z)),
+                    sample_field(field,grid,Vec3(p.x,p.y,p.z+h)) - sample_field(field,grid,Vec3(p.x,p.y,p.z-h)));
+    };
+    for (uint32_t v = 0; v < nv; v++) {
+        L0.V[v] = Vec3(m.pos_x[v], m.pos_y[v], m.pos_z[v]);
+        Vec3 g = grad(L0.V[v]);
+        L0.N[v] = g.length() > 1e-12f ? unit(g) : unit(Vec3(m.norm_x[v], m.norm_y[v], m.norm_z[v]));
+    }
+    {
+        std::vector<uint64_t> keys; keys.reserve((size_t)nt * 3);
+        for (uint32_t t = 0; t < nt; t++)
+            for (int i = 0; i < 3; i++) keys.push_back(ekey(m.indices[t*3+i], m.indices[t*3+(i+1)%3]));
+        unique_edges(keys, L0);
+    }
+    double esum = 0.0;
+    for (size_t e = 0; e < L0.ea.size(); e++) esum += (L0.V[L0.ea[e]] - L0.V[L0.eb[e]]).length();
+    const float e0 = (float)(esum / (double)std::max<size_t>(1, L0.ea.size()));
+    const float s = e0 * SPACING;
+    build_hierarchy(H, e0);
+    const Level& L0f = H[0];   // H grew: the L0 reference above is stale from here on
+
+    // Fields, coarse to fine.
+    const int top = (int)H.size() - 1;
+    std::vector<std::vector<Vec3>> O(H.size());
+    {
+        const Level& T = H[top];
+        O[top].resize(T.V.size());
+        for (uint32_t v = 0; v < T.V.size(); v++) {
+            Vec3 r(coin((uint64_t)v * 3 + 1) - 0.5f, coin((uint64_t)v * 3 + 2) - 0.5f, coin((uint64_t)v * 3 + 3) - 0.5f);
+            Vec3 t = tang(r, T.N[v]);
+            if (t.length() < 1e-6f) t = tang(Vec3(1, 0, 0), T.N[v]);
+            if (t.length() < 1e-6f) t = tang(Vec3(0, 1, 0), T.N[v]);
+            O[top][v] = unit(t);
+        }
+        smooth_orient(T, O[top], OITERS, 0x1000u + top);
+        for (int lv = top - 1; lv >= 0; lv--) {
+            const Level& F = H[lv];
+            O[lv].resize(F.V.size());
+            for (uint32_t v = 0; v < F.V.size(); v++) {
+                Vec3 t = tang(O[lv + 1][F.parent[v]], F.N[v]);
+                O[lv][v] = t.length() > 1e-12f ? unit(t) : O[lv + 1][F.parent[v]];
+            }
+            smooth_orient(F, O[lv], OITERS, 0x1000u + lv);
+        }
+    }
+    std::vector<Vec3> P, Pc;
+    for (int lv = top; lv >= 0; lv--) {
+        const Level& F = H[lv];
+        P.resize(F.V.size());
+        for (uint32_t v = 0; v < F.V.size(); v++) {
+            if (lv == top) { P[v] = F.V[v]; continue; }
+            Vec3 q = F.V[v] + tang(Pc[F.parent[v]] - F.V[v], F.N[v]);
+            P[v] = snap_toward(F.V[v], q, O[lv][v], F.N[v], s);
+        }
+        smooth_position(F, O[lv], P, s, PITERS, 0x2000u + lv);
+        Pc.swap(P);
+    }
+    P.swap(Pc);     // level 0's grid points
+    const std::vector<Vec3>& o = O[0];
+
+    // Extraction: same grid point -> merge (union-find); one grid step -> grid edge.
+    std::vector<uint32_t> par(nv);
+    for (uint32_t v = 0; v < nv; v++) par[v] = v;
+    auto find = [&](uint32_t x) { while (par[x] != x) { par[x] = par[par[x]]; x = par[x]; } return x; };
+    std::vector<uint8_t> step(L0f.ea.size(), 0);
+    for (size_t e = 0; e < L0f.ea.size(); e++) {
+        const uint32_t a = L0f.ea[e], b = L0f.eb[e];
+        const Vec3 nm = unit(L0f.N[a] + L0f.N[b]);
+        const Vec3 d = tang(P[b] - P[a], nm) * (1.0f / s);
+        const Vec3 A = o[a], B = frame_b(o[a], L0f.N[a]);
+        const float da = d.dot(A), db = d.dot(B);
+        const int cu = (int)std::lround((4.0f / 3.0f) * (da - 0.5f * db));
+        const int cv = (int)std::lround((4.0f / 3.0f) * (db - 0.5f * da));
+        if (cu == 0 && cv == 0) {
+            uint32_t ra = find(a), rb = find(b);
+            if (ra != rb) par[std::max(ra, rb)] = std::min(ra, rb);
+        } else if ((cu == 1 && cv == 0) || (cu == 0 && cv == 1) || (cu == -1 && cv == 1) ||
+                   (cu == -1 && cv == 0) || (cu == 0 && cv == -1) || (cu == 1 && cv == -1)) {
+            step[e] = 1;
+        }
+    }
+    std::vector<uint32_t> cl(nv, 0xFFFFFFFFu), root_id(nv, 0xFFFFFFFFu);
+    uint32_t nc = 0;
+    for (uint32_t v = 0; v < nv; v++) {
+        uint32_t r = find(v);
+        if (root_id[r] == 0xFFFFFFFFu) root_id[r] = nc++;
+        cl[v] = root_id[r];
+    }
+    std::vector<Vec3> CP(nc, Vec3(0, 0, 0)), CN(nc, Vec3(0, 0, 0));
+    std::vector<float> ccount(nc, 0.0f);
+    for (uint32_t v = 0; v < nv; v++) { CP[cl[v]] += P[v]; CN[cl[v]] += L0f.N[v]; ccount[cl[v]] += 1.0f; }
+    for (uint32_t c = 0; c < nc; c++) { CP[c] = CP[c] * (1.0f / ccount[c]); CN[c] = unit(CN[c]); }
+    std::vector<uint64_t> gk;
+    for (size_t e = 0; e < L0f.ea.size(); e++)
+        if (step[e]) { uint32_t a = cl[L0f.ea[e]], b = cl[L0f.eb[e]]; if (a != b) gk.push_back(ekey(a, b)); }
+    std::sort(gk.begin(), gk.end()); gk.erase(std::unique(gk.begin(), gk.end()), gk.end());
+    std::vector<std::vector<uint32_t>> adj(nc);
+    for (uint64_t k : gk) { uint32_t a = (uint32_t)(k >> 32), b = (uint32_t)k; adj[a].push_back(b); adj[b].push_back(a); }
+    for (auto& L : adj) std::sort(L.begin(), L.end());
+    std::vector<uint32_t> tri;
+    for (uint64_t k : gk) {                      // closed triplets x < y < z, each found once
+        const uint32_t x = (uint32_t)(k >> 32), y = (uint32_t)k;
+        const auto& A = adj[x]; const auto& B = adj[y];
+        size_t i = 0, j = 0;
+        while (i < A.size() && j < B.size()) {
+            if (A[i] < B[j]) i++; else if (B[j] < A[i]) j++;
+            else {
+                const uint32_t z = A[i];
+                if (z > y) {
+                    Vec3 fn = (CP[y] - CP[x]).cross(CP[z] - CP[x]);
+                    if (fn.dot(CN[x] + CN[y] + CN[z]) >= 0.0f) { tri.push_back(x); tri.push_back(y); tri.push_back(z); }
+                    else { tri.push_back(x); tri.push_back(z); tri.push_back(y); }
+                }
+                i++; j++;
+            }
+        }
+    }
+
+    // Repair: drop every tri on an edge shared by more than two; where two holes
+    // then touch at a vert (two boundary edges leave it), drop that vert's tris so
+    // they become one hole; repeat; then fill each small hole with a fan round its
+    // middle. Anything it can't untangle in a few passes: give up.
+    auto edge_counts = [&](std::unordered_map<uint64_t, int>& ec) {
+        ec.clear(); ec.reserve(tri.size());
+        for (size_t t = 0; t < tri.size(); t += 3)
+            for (int i = 0; i < 3; i++) ec[ekey(tri[t+i], tri[t+(i+1)%3])]++;
+    };
+    std::unordered_map<uint64_t, int> ec;
+    std::unordered_map<uint32_t, uint32_t> next;   // boundary half-edge a->b (tri winds a->b, alone on it)
+    uint32_t dropped = 0;
+    bool tangled = true;
+    for (int pass = 0; pass < 6 && tangled; pass++) {
+        edge_counts(ec);
+        std::unordered_set<uint32_t> bad_v;
+        next.clear();
+        tangled = false;
+        for (size_t t = 0; t < tri.size(); t += 3)
+            for (int i = 0; i < 3; i++) {
+                uint32_t a = tri[t+i], b = tri[t+(i+1)%3];
+                int c = ec[ekey(a, b)];
+                if (c > 2) { bad_v.insert(a); bad_v.insert(b); tangled = true; }
+                else if (c == 1) {
+                    if (next.count(a)) { bad_v.insert(a); tangled = true; }
+                    next[a] = b;
+                }
+            }
+        if (!tangled) break;
+        std::vector<uint32_t> keep; keep.reserve(tri.size());
+        for (size_t t = 0; t < tri.size(); t += 3) {
+            if (bad_v.count(tri[t]) || bad_v.count(tri[t+1]) || bad_v.count(tri[t+2])) { dropped++; continue; }
+            keep.insert(keep.end(), &tri[t], &tri[t] + 3);
+        }
+        tri.swap(keep);
+    }
+    edge_counts(ec);
+    uint32_t holes = 0;
+    if (!tangled) {
+        std::unordered_set<uint32_t> seen;
+        for (auto& kv : next) {
+            if (seen.count(kv.first)) continue;
+            std::vector<uint32_t> loop;
+            uint32_t v = kv.first;
+            while (!seen.count(v)) {
+                seen.insert(v); loop.push_back(v);
+                auto it = next.find(v);
+                if (it == next.end() || loop.size() > 48) { tangled = true; break; }
+                v = it->second;
+            }
+            if (tangled) break;
+            if (v != kv.first || loop.size() < 3) { tangled = true; break; }
+            // Fan round a new middle vert; boundary edge a->b in the mesh => new tri (b, a, mid).
+            Vec3 mid(0, 0, 0), mn(0, 0, 0);
+            for (uint32_t x : loop) { mid += CP[x]; mn += CN[x]; }
+            const uint32_t c = (uint32_t)CP.size();
+            CP.push_back(mid * (1.0f / (float)loop.size())); CN.push_back(unit(mn));
+            for (size_t i = 0; i < loop.size(); i++) {
+                uint32_t a = loop[i], b = loop[(i + 1) % loop.size()];
+                tri.push_back(b); tri.push_back(a); tri.push_back(c);
+            }
+            holes++;
+        }
+    }
+    if (tangled) {
+        std::printf("[sdf-flow] Flow: result has tangled holes, keeping the plain merge\n");
+        return false;
+    }
+    edge_counts(ec);
+    for (auto& kv : ec)
+        if (kv.second != 2) {
+            std::printf("[sdf-flow] Flow: %zu edges still open or shared after repair, keeping the plain merge\n", ec.size());
+            return false;
+        }
+
+    // Compact, snap onto the SDF surface, write back.
+    std::vector<uint32_t> remap(CP.size(), 0xFFFFFFFFu);
+    Mesh out;
+    for (uint32_t& x : tri) {
+        if (remap[x] == 0xFFFFFFFFu) {
+            remap[x] = (uint32_t)out.pos_x.size();
+            Vec3 p = CP[x];
+            for (int it = 0; it < 4; it++) {
+                Vec3 g = grad(p);
+                if (g.length() < 1e-12f) break;
+                p = p - unit(g) * sample_field(field, grid, p);
+            }
+            Vec3 n = unit(grad(p));
+            out.pos_x.push_back(p.x); out.pos_y.push_back(p.y); out.pos_z.push_back(p.z);
+            out.norm_x.push_back(n.x); out.norm_y.push_back(n.y); out.norm_z.push_back(n.z);
+        }
+        x = remap[x];
+    }
+    out.indices = std::move(tri);
+    std::printf("[sdf-flow] Flow: %u -> %u verts / %zu tris (spacing %.2fx, %zu levels, %u tris dropped, %u holes filled), %.0f ms\n",
+                nv, out.vertex_count(), out.indices.size() / 3, SPACING, H.size(), dropped, holes,
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+    m.pos_x.swap(out.pos_x); m.pos_y.swap(out.pos_y); m.pos_z.swap(out.pos_z);
+    m.norm_x.swap(out.norm_x); m.norm_y.swap(out.norm_y); m.norm_z.swap(out.norm_z);
+    m.indices.swap(out.indices);
+    m.mask.clear();
+    return true;
+}
+
 // ---- Mirror-symmetric extraction -------------------------------------------
 // The MC case table bakes a fixed grid-space diagonal per ambiguous face, so a
 // +x feature and its -x twin tessellate the SAME world direction — geometry can
@@ -3252,8 +3646,14 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
         // The dialog's Pattern row. Curvature nudge: the 4-way cross field from the SDF's
         // curvature pulls edges along the bends. Plain: the same relax with no field.
         const bool graph = j.pat.pattern == (int)SdfPattern::GraphPaper;
+        // Flow re-lays the faithful merge; the mirror path tidies a half mesh with a
+        // pinned seam, which Flow doesn't handle yet, so there it falls back.
+        const bool flow  = j.pat.pattern == (int)SdfPattern::Flow;
+        if (flow && j.mirror)
+            std::printf("[sdf-flow] Flow isn't available with mirror yet: using Curvature nudge\n");
         const bool nudge = j.pat.pattern == (int)SdfPattern::CurvatureNudge
-                        || j.pat.pattern == (int)SdfPattern::Curvature6 || graph;
+                        || j.pat.pattern == (int)SdfPattern::Curvature6 || graph
+                        || (flow && j.mirror);
         const int  rosy  = j.pat.pattern == (int)SdfPattern::Curvature6 ? 6 : 4;
         // 6-way also steers the flips and the pole walk (stage 2b). Dev hook
         // CHISEL_FIELD_FLIPS: bit 1 = flips, bit 2 = walk (default 3 = both).
@@ -3269,13 +3669,13 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
             std::vector<uint8_t> seam;
             clip_to_plus_x(welded, grid.voxel, seam);
             weld_near_seam(welded, grid.voxel, seam);   // B: collapse the seam sliver column
-            CrossField flow;
-            if (graph) build_graph_field(welded, j.field_cpu, grid, flow);
+            CrossField flow_field;
+            if (graph) build_graph_field(welded, j.field_cpu, grid, flow_field);
             else if (nudge) {
-                build_cross_field(welded, j.field_cpu, grid, flow, rosy);
-                smooth_cross_field(welded, flow, /*iters=*/24);
+                build_cross_field(welded, j.field_cpu, grid, flow_field, rosy);
+                smooth_cross_field(welded, flow_field, /*iters=*/24);
             }
-            const CrossField* fp = nudge ? &flow : nullptr;
+            const CrossField* fp = nudge ? &flow_field : nullptr;
             relax_to_field(welded, j.field_cpu, grid, /*iters=*/4, /*lambda=*/0.5f, &seam, fp);  // A: 1D seam relax
             const CrossField* st = rosy == 6 ? fp : nullptr;
             uint32_t flips = flip_valence(welded, &seam, 3, (field_flips & 1) ? st : nullptr);
@@ -3296,13 +3696,17 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
             // and continuous — a plain relax keeps that symmetry (Jacobi + symmetric
             // field => mirror-paired verts move identically). No seam surgery.
             // (Flips only rewrite indices — vertex positions stay mirror-paired.)
-            CrossField flow;
-            if (graph) build_graph_field(welded, j.field_cpu, grid, flow);
+            // Flow: swap MC's mesh for the field-aligned grid; then plain relax, flips
+            // and the pole walk as usual (the walk clears the grid's dislocations).
+            if (flow && !j.mirror && !flow_remesh(welded, j.field_cpu, grid))
+                std::printf("[sdf-flow] Flow failed on this model: plain merge kept\n");
+            CrossField flow_field;
+            if (graph) build_graph_field(welded, j.field_cpu, grid, flow_field);
             else if (nudge) {
-                build_cross_field(welded, j.field_cpu, grid, flow, rosy);
-                smooth_cross_field(welded, flow, /*iters=*/24);
+                build_cross_field(welded, j.field_cpu, grid, flow_field, rosy);
+                smooth_cross_field(welded, flow_field, /*iters=*/24);
             }
-            const CrossField* fp = nudge ? &flow : nullptr;
+            const CrossField* fp = nudge ? &flow_field : nullptr;
             relax_to_field(welded, j.field_cpu, grid, /*iters=*/4, /*lambda=*/0.5f, nullptr, fp);
             const CrossField* st = rosy == 6 ? fp : nullptr;
             uint32_t flips = flip_valence(welded, nullptr, 3, (field_flips & 1) ? st : nullptr);
@@ -3522,12 +3926,13 @@ const SdfChoice kPatternItems[] = {
     { "Plain",           "Even triangles, no pull from the shape's bends" },
     { "Curvature, 6-way", "Triangle rows follow the shape's bends in 60-degree steps, the way triangles tile; the clean-up flips edges to match" },
     { "Graph paper",      "Triangle rows run along the world's X, Y and Z, like a grid laid over the model" },
+    { "Flow",             "Lays a fresh triangle grid whose rows flow round the shape as one; fewer poles. About a ninth as many triangles: raise Detail. Not with mirror yet" },
 };
 const SdfChoice kPolesItems[] = {
     { "Walk & cancel", "Needless poles wander until pairs meet and cancel out" },
 };
 const SdfRow kModeRow    = { "Mode",    kModeItems,    2, 0 };
-const SdfRow kPatternRow = { "Pattern", kPatternItems, 4, (int)SdfPattern::CurvatureNudge };
+const SdfRow kPatternRow = { "Pattern", kPatternItems, 5, (int)SdfPattern::CurvatureNudge };
 const SdfRow kPolesRow   = { "Poles",   kPolesItems,   1, (int)SdfPoles::WalkCancel };
 }  // namespace
 const SdfRow& sdf_mode_row()    { return kModeRow; }

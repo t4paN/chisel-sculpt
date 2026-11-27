@@ -2,6 +2,11 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-27 — SDF Pattern: Flow
+- New Pattern **Flow**: instead of tidying the marching-cubes mesh, the merge lays a fresh triangle grid whose rows follow one smooth direction field round the whole model, then the usual flips and pole walk clear its leftover kinks. On the test models: more even triangles (0.90 vs 0.75), better-aligned rows, fewer kinks and poles, watertight on all 8.
+- Its grid is 3 marching-cubes edges apart, so a merge has about a ninth of the triangles at the same Detail; raise Detail to compensate.
+- Not with mirror yet: a mirrored merge with Flow picked uses Curvature nudge and says so in the log. If Flow can't close a model, the plain merge is kept.
+
 ## 2026-11-27 — SDF Pattern options: 6-way and Graph paper; thinner wireframe
 - SDF prompt, Pattern row: **Curvature, 6-way** (rows follow the bends in 60° steps; the clean-up flips edges and walks poles toward the field) and **Graph paper** (rows along world X, Y, Z). Both experimental: on the test models neither beats the default, which stays Curvature nudge.
 - Wireframe overlay (Y) is 2 px wide instead of 3 px at normal zoom; it still thickens as the model shrinks on screen.
