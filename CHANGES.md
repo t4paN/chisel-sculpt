@@ -2,6 +2,10 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-27 — Flow starts from x = 0
+- Plain (non-mirror) Flow and Quad flow merges of a model that straddles x = 0 start their grid from a row along it: both sides grow out from the middle and each follows its own shape. Mirror still forces exact symmetry.
+- Quad flow keeps the row as one unbroken loop; triangle Flow keeps it in pieces (flips can't cut it, smoothing nudges it). Where the grid won't close with the line (2 of 5 test models, quads), it's laid again without it.
+
 ## 2026-11-27 — Quad flow (first cut)
 - New SDF Pattern **Quad flow**: Flow on a square grid along a 4-way field. Each square is two tris sharing a hidden diagonal; leftover grid tris split into three quads round their middle, so the result is all quads bar a handful (7 of 8 test models, 1–3.5% poles).
 - The wireframe hides the diagonals, and OBJ export writes each pair as one quad.

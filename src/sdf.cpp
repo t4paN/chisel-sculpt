@@ -1218,6 +1218,15 @@ float field_misalign(const Mesh& m, const CrossField& f, uint32_t x, uint32_t y)
 // guards the iso remesher uses (existing-edge check ⇒ no non-manifold fuse,
 // normal agreement ⇒ no fold-over). Greedy sweeps over a sorted edge list with
 // a staleness re-check, table rebuilt per sweep (one-shot op, allocation fine).
+// Flow's start line on a whole model: its row of points, flagged per vert. While set,
+// the flips and the pole walk never flip an edge between two of them, so the row stays
+// one edge loop through the clean-up (it may wiggle; it doesn't break). Set around
+// those calls only.
+const std::vector<uint8_t>* g_pin = nullptr;
+inline bool pinned_edge(uint32_t a, uint32_t b) {
+    return g_pin && a < g_pin->size() && b < g_pin->size() && (*g_pin)[a] && (*g_pin)[b];
+}
+
 uint32_t flip_valence(Mesh& m, const std::vector<uint8_t>* seam, int sweeps = 3,
                       const CrossField* steer = nullptr) {
     uint32_t nv = m.vertex_count();
@@ -1284,6 +1293,7 @@ uint32_t flip_valence(Mesh& m, const std::vector<uint8_t>* seam, int sweeps = 3,
             uint32_t d = other(t1);
             if (c == d || c == 0xFFFFFFFFu || d == 0xFFFFFFFFu) continue;
             if (etab.count(ekey(c, d))) continue;          // edge exists ⇒ flip = non-manifold
+            if (pinned_edge(a, b)) continue;               // keeps the start line's row
 
             // Valence energy Σ(val−target)² over the four corners, before vs after.
             // A seam vert counts double: reflected, its defect doubles (half-valence 3
@@ -1448,6 +1458,7 @@ PoleStats reduce_poles(Mesh& m, const std::vector<float>& field, const SdfGrid& 
                 // Never make a valence-3 vert (a vert inside a tri; 2 on the seam half).
                 if (val[a] - 1 < (is_seam(a) ? 3 : 4) || val[b] - 1 < (is_seam(b) ? 3 : 4)) return;
                 if (is_seam(c) && is_seam(d)) return;                       // edge in the mirror plane
+                if (pinned_edge(a, b)) return;                              // the start line's row
                 int ea = val[a]-target(a), eb = val[b]-target(b);
                 int ec = val[c]-target(c), ed = val[d]-target(d);
                 int   dE = w(a)*(1 - 2*ea) + w(b)*(1 - 2*eb) + w(c)*(1 + 2*ec) + w(d)*(1 + 2*ed);
@@ -1709,6 +1720,59 @@ inline Vec3 onto_seam(Vec3 p, Vec3 n) {
     return p;
 }
 
+}  // namespace flow
+
+// A Flow guide: a line the grid starts from. One of its rows is pinned along it (the
+// field turned to run along the line, points slid onto it), and the rest of the grid
+// grows out from there. The mirror seam is the x = 0 plane as a guide; a plain merge of
+// a model that straddles x = 0 gets the same start without the cut and reflection; a
+// drawn guide is a set of polylines on the sculpt.
+struct FlowGuide {
+    bool plane = true;                 // x = 0; else the polylines below
+    std::vector<Vec3> pts;             // polyline points, strokes back to back
+    std::vector<uint32_t> stroke_end;  // one past each stroke's last point
+    float band = 0.0f;                 // a vert this close to the line is on it
+    // Nearest point on the polylines and the tangent there.
+    void nearest(Vec3 p, Vec3& c, Vec3& t, float& d2) const {
+        d2 = 1e30f; c = p; t = Vec3(0, 1, 0);
+        uint32_t s0 = 0;
+        for (uint32_t e : stroke_end) {
+            for (uint32_t i = s0; i + 1 < e; i++) {
+                const Vec3 a = pts[i], ab = pts[i + 1] - a;
+                const float l2 = ab.dot(ab);
+                float u = l2 > 1e-30f ? (p - a).dot(ab) / l2 : 0.0f;
+                u = std::min(1.0f, std::max(0.0f, u));
+                const Vec3 q = a + ab * u, d = p - q;
+                const float dd = d.dot(d);
+                if (dd < d2) { d2 = dd; c = q; t = ab; }
+            }
+            s0 = e;
+        }
+    }
+    bool on(Vec3 p) const {
+        if (plane) return std::fabs(p.x) < band;
+        Vec3 c, t; float d2; nearest(p, c, t, d2);
+        return d2 < band * band;
+    }
+    Vec3 dir(Vec3 p, Vec3 n) const {
+        if (plane) return flow::seam_dir(n);
+        Vec3 c, t; float d2; nearest(p, c, t, d2);
+        Vec3 r = flow::tang(t, n);
+        return r.length() > 1e-12f ? flow::unit(r) : flow::seam_dir(n);
+    }
+    // Slide p across the line, in its tangent plane, onto it (moves the row, not the
+    // point along it).
+    Vec3 onto(Vec3 p, Vec3 n) const {
+        if (plane) return flow::onto_seam(p, n);
+        Vec3 c, t; float d2; nearest(p, c, t, d2);
+        const Vec3 tt = flow::unit(flow::tang(t, n));
+        const Vec3 off = flow::tang(p - c, n);
+        return p - (off - tt * off.dot(tt));
+    }
+};
+
+namespace flow {
+
 void smooth_orient(const Level& L, std::vector<Vec3>& o, int iters, uint64_t salt,
                    const std::vector<uint8_t>* lock = nullptr) {
     const uint32_t n = (uint32_t)L.V.size();
@@ -1731,7 +1795,8 @@ void smooth_orient(const Level& L, std::vector<Vec3>& o, int iters, uint64_t sal
 }
 
 void smooth_position(const Level& L, const std::vector<Vec3>& o, std::vector<Vec3>& p,
-                     float s, int iters, uint64_t salt, const std::vector<uint8_t>* lock = nullptr) {
+                     float s, int iters, uint64_t salt, const std::vector<uint8_t>* lock = nullptr,
+                     const FlowGuide* g = nullptr) {
     const uint32_t n = (uint32_t)L.V.size();
     std::vector<Vec3> acc(n);
     std::vector<float> cnt(n);
@@ -1748,7 +1813,7 @@ void smooth_position(const Level& L, const std::vector<Vec3>& o, std::vector<Vec
             Vec3 q = acc[v] * (1.0f / cnt[v]);
             q = L.V[v] + tang(q - L.V[v], L.N[v]);
             p[v] = snap_toward(L.V[v], q, o[v], L.N[v], s);   // the grid point nearest the vert
-            if (lock && (*lock)[v]) p[v] = onto_seam(p[v], L.N[v]);
+            if (lock && (*lock)[v]) p[v] = g ? g->onto(p[v], L.N[v]) : onto_seam(p[v], L.N[v]);
         }
     }
 }
@@ -1766,16 +1831,20 @@ std::string g_flow_note;   // set when Flow steps aside for the rebuild; the mer
 // Quad flow's result: the diagonals that pair its tris into quads (edge keys over the
 // returned mesh's verts). Each quad is two tris sharing one of these.
 std::vector<uint64_t> g_quad_diag;
+// The start line's row in the returned mesh (per vert, empty without a guide), for the
+// merge's own flips and pole walk to keep (g_pin).
+std::vector<uint8_t> g_flow_pin;
 
 // Mirror (seam != nullptr): m is the +x half from clip_to_plus_x, seam its x = 0 verts.
 // The grid gets a row along the seam (field pinned there, points slid onto x = 0), the
 // half comes back with its seam flags, and the caller reflects it as on the MC path.
 // The "Levels after" grid is reflected here before it is kept.
 bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, int levels_after,
-                 std::vector<uint8_t>* seam = nullptr, bool quad = false) {
+                 std::vector<uint8_t>* seam = nullptr, bool quad = false, const FlowGuide* guide = nullptr) {
     using namespace flow;
     struct QuadScope { QuadScope(bool q) { g_quad = q; } ~QuadScope() { g_quad = false; } } quad_scope(quad);
     g_quad_diag.clear();
+    g_flow_pin.clear();
     // 3.3, not 4 (2026-11-27): at 4 the result had a third fewer verts than the plain
     // merge at the same Detail, and fang tips, teeth and ear tips went sparse and soft
     // (orc ear tip tore, 4 voxels off). 3.3 lands on the plain merge's count, poles the
@@ -1827,17 +1896,28 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
 
     // Mirror: which verts of each level touch the seam (a coarse cluster does when any
     // of its verts does; the clustering cells start at x = 0, so none straddles it).
+    // A guide (plain merge, no cut): the verts on its line play the seam's part for the
+    // fields only; the mesh stays whole and nothing else treats them specially.
+    if (seam) guide = nullptr;
     std::vector<std::vector<uint8_t>> SL;
-    if (seam) {
+    if (seam || guide) {
         SL.resize(H.size());
-        SL[0] = *seam;
+        if (seam) SL[0] = *seam;
+        else {
+            SL[0].assign(nv, 0);
+            uint32_t on = 0;
+            for (uint32_t v = 0; v < nv; v++) if (guide->on(L0f.V[v])) { SL[0][v] = 1; on++; }
+            std::printf("[sdf-flow] guide: %s, %u of %u surface points on it\n",
+                        guide->plane ? "x = 0" : "drawn", on, nv);
+        }
         for (size_t lv = 0; lv + 1 < H.size(); lv++) {
             SL[lv + 1].assign(H[lv + 1].V.size(), 0);
             for (size_t v = 0; v < H[lv].V.size(); v++)
                 if (SL[lv][v]) SL[lv + 1][H[lv].parent[v]] = 1;
         }
     }
-    auto lock = [&](size_t lv) { return seam ? &SL[lv] : nullptr; };
+    auto lock = [&](size_t lv) { return (seam || guide) ? &SL[lv] : nullptr; };
+    auto pin_dir = [&](Vec3 p, Vec3 n) { return guide ? guide->dir(p, n) : seam_dir(n); };
 
     // Fields, coarse to fine.
     const int top = (int)H.size() - 1;
@@ -1847,11 +1927,20 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
         O[top].resize(T.V.size());
         for (uint32_t v = 0; v < T.V.size(); v++) {
             Vec3 r(coin((uint64_t)v * 3 + 1) - 0.5f, coin((uint64_t)v * 3 + 2) - 0.5f, coin((uint64_t)v * 3 + 3) - 0.5f);
+            if (guide && guide->plane) {
+                // x = 0 start: each side's random start mirrors the other's (keyed by where
+                // the point is, x folded), so a symmetric shape starts symmetric.
+                const uint64_t k = ((uint64_t)(int64_t)std::lround(std::fabs(T.V[v].x) / e0) * 73856093u) ^
+                                   ((uint64_t)(int64_t)std::lround(T.V[v].y / e0) * 19349663u) ^
+                                   ((uint64_t)(int64_t)std::lround(T.V[v].z / e0) * 83492791u);
+                r = Vec3(coin(k * 3 + 1) - 0.5f, coin(k * 3 + 2) - 0.5f, coin(k * 3 + 3) - 0.5f);
+                if (T.V[v].x < 0.0f) r.x = -r.x;
+            }
             Vec3 t = tang(r, T.N[v]);
             if (t.length() < 1e-6f) t = tang(Vec3(1, 0, 0), T.N[v]);
             if (t.length() < 1e-6f) t = tang(Vec3(0, 1, 0), T.N[v]);
             O[top][v] = unit(t);
-            if (seam && SL[top][v]) O[top][v] = seam_dir(T.N[v]);
+            if ((seam || guide) && SL[top][v]) O[top][v] = pin_dir(T.V[v], T.N[v]);
         }
         smooth_orient(T, O[top], OITERS, 0x1000u + top, lock(top));
         for (int lv = top - 1; lv >= 0; lv--) {
@@ -1860,7 +1949,7 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
             for (uint32_t v = 0; v < F.V.size(); v++) {
                 Vec3 t = tang(O[lv + 1][F.parent[v]], F.N[v]);
                 O[lv][v] = t.length() > 1e-12f ? unit(t) : O[lv + 1][F.parent[v]];
-                if (seam && SL[lv][v]) O[lv][v] = seam_dir(F.N[v]);
+                if ((seam || guide) && SL[lv][v]) O[lv][v] = pin_dir(F.V[v], F.N[v]);
             }
             smooth_orient(F, O[lv], OITERS, 0x1000u + lv, lock(lv));
         }
@@ -1876,8 +1965,9 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
                 P[v] = snap_toward(F.V[v], q, O[lv][v], F.N[v], s);
             }
             if (seam && SL[lv][v]) P[v] = onto_seam(P[v], F.N[v]);
+            else if (guide && SL[lv][v]) P[v] = guide->onto(P[v], F.N[v]);
         }
-        smooth_position(F, O[lv], P, s, PITERS, 0x2000u + lv, lock(lv));
+        smooth_position(F, O[lv], P, s, PITERS, 0x2000u + lv, lock(lv), guide);
         Pc.swap(P);
     }
     P.swap(Pc);     // level 0's grid points
@@ -1969,6 +2059,14 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
     }
     // Mirror: a grid point is on the seam if any of its verts was, or if it landed on the
     // seam row anyway (the next row sits 0.87 of a step out). Those snap onto x = 0.
+    // Guide: a grid point is on the start line if any of its verts was; slide it onto
+    // the line so the row lies on it.
+    std::vector<uint8_t> GP;
+    if (guide) {
+        GP.assign(nc, 0);
+        for (uint32_t v = 0; v < nv; v++) if (SL[0][v]) GP[cl[v]] = 1;
+        for (uint32_t c = 0; c < nc; c++) if (GP[c]) CP[c] = guide->onto(CP[c], CN[c]);
+    }
     std::vector<uint8_t> CS;
     if (seam) {
         CS.assign(nc, 0);
@@ -2374,18 +2472,20 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
         std::vector<uint32_t> remap(CP.size(), 0xFFFFFFFFu);
         Mesh base;
         std::vector<uint32_t> bidx; bidx.reserve(tri.size());
-        std::vector<uint8_t> bseam;
+        std::vector<uint8_t> bseam, bpin;
         for (uint32_t x : tri) {
             if (remap[x] == 0xFFFFFFFFu) {
                 remap[x] = (uint32_t)base.pos_x.size();
                 Vec3 p = snap_pt(CP[x], is_s(x));
                 base.pos_x.push_back(p.x); base.pos_y.push_back(p.y); base.pos_z.push_back(p.z);
                 if (seam) bseam.push_back(CS[x]);
+                if (guide) bpin.push_back(GP[x]);
             }
             bidx.push_back(remap[x]);
         }
         base.indices = std::move(bidx);
         if (seam) CS.swap(bseam);
+        if (guide) GP.swap(bpin);
         if (HOMEDBG) {
             std::vector<Vec3> h2(base.pos_x.size());
             for (size_t x = 0; x < remap.size(); x++) if (remap[x] != 0xFFFFFFFFu) h2[remap[x]] = HOME[x];
@@ -2406,9 +2506,11 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
         // Mirror: seam points stay put and no flip lays an edge in the mirror plane.
         // Quads: no flips or walk, they would cut across the squares (the 4-way grid's
         // poles are its own; a triangle walk would only scramble the pairs).
+        if (guide) g_pin = &GP;
         if (!quad) flip_valence(base, seam ? &CS : nullptr, 3);
         static const int BWALK = (int)env_float("CHISEL_FLOW_BASE_WALK", 90.0f);   // dev
         if (BWALK > 0 && !quad) reduce_poles(base, field, grid, seam ? &CS : nullptr, BWALK);
+        g_pin = nullptr;
         const uint32_t bv = base.vertex_count();
         CP.resize(bv); CN.resize(bv);
         for (uint32_t v = 0; v < bv; v++) CP[v] = snap_pt(Vec3(base.pos_x[v], base.pos_y[v], base.pos_z[v]), is_s(v));
@@ -3018,6 +3120,7 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
             const uint32_t c = (uint32_t)CP.size();
             CP.push_back((CP[a] + CP[b]) * 0.5f); CN.push_back(unit(CN[a] + CN[b]));
             if (seam) CS.push_back(CS[a] && CS[b]);   // only seam edges join two seam points
+            if (guide) GP.push_back(GP[a] && GP[b]);
             midv.emplace(ekey(a, b), c);
             return c;
         };
@@ -3040,6 +3143,7 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
                     CP.push_back((CP[a] + CP[b] + CP[c]) * (1.0f / 3.0f));
                     CN.push_back(unit(CN[a] + CN[b] + CN[c]));
                     if (seam) CS.push_back(0);
+                    if (guide) GP.push_back(0);
                     const uint32_t q[18] = { a, ab, g,  a, g, ca,   b, bc, g,  b, g, ab,   c, ca, g,  c, g, bc };
                     nt2.insert(nt2.end(), q, q + 18);
                     q2.insert(ekey(a, g)); q2.insert(ekey(b, g)); q2.insert(ekey(c, g));
@@ -3075,9 +3179,11 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
     std::vector<uint32_t> remap(CP.size(), 0xFFFFFFFFu);
     Mesh out;
     std::vector<uint8_t> oseam;
+    g_flow_pin.clear();
     for (uint32_t& x : tri) {
         if (remap[x] == 0xFFFFFFFFu) {
             remap[x] = (uint32_t)out.pos_x.size();
+            if (guide) g_flow_pin.push_back(x < GP.size() ? GP[x] : 0);
             Vec3 p = CP[x];
             Vec3 n = grad(p);
             if (is_s(x)) { p.x = 0.0f; n.x = 0.0f; oseam.push_back(1); }
@@ -4872,9 +4978,16 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
                     if (dg.count(flow::ekey(welded.indices[t*3+k], welded.indices[t*3+(k+1)%3]))) { welded.quad_diag[t] = (uint8_t)k; break; }
             return true;
         };
-        auto run_flow = [&](std::vector<uint8_t>* seam) {
-            if (flow_remesh(welded, j.field_cpu, grid, j.pat.levels_after, seam, quad)) {
+        auto run_flow = [&](std::vector<uint8_t>* seam, const FlowGuide* guide = nullptr) {
+            if (flow_remesh(welded, j.field_cpu, grid, j.pat.levels_after, seam, quad, guide)) {
                 if (!g_flow_note.empty()) j.res.note = g_flow_note;
+                return;
+            }
+            // Points slid onto a start line can crowd and leave a grid that won't close
+            // (predator and a thin blade, 2026-11-27): try once more without it.
+            if (guide && flow_remesh(welded, j.field_cpu, grid, j.pat.levels_after, seam, quad, nullptr)) {
+                std::printf("[sdf-flow] start line didn't close: laid without it\n");
+                j.res.note = g_flow_note.empty() ? "Flow couldn't start from the line here: laid without it" : g_flow_note;
                 return;
             }
             std::printf("[sdf-flow] Flow failed on this model: plain merge kept\n");
@@ -4929,7 +5042,30 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
             // (Flips only rewrite indices — vertex positions stay mirror-paired.)
             // Flow: swap MC's mesh for the field-aligned grid; then plain relax, flips
             // and the pole walk as usual (the walk clears the grid's dislocations).
-            if (flow && !j.mirror) run_flow(nullptr);
+            if (flow && !j.mirror) {
+                // Plain merge: Flow starts its grid from x = 0 when the model sits across
+                // it (a centre row both sides grow out from; each side then follows its own
+                // shape). A model off to one side (an arm, a prop) gets no start line.
+                // Dev: CHISEL_FLOW_X0=0 turns the x = 0 start off.
+                static const bool x0_env = env_float("CHISEL_FLOW_X0", 1.0f) > 0.5f;
+                FlowGuide g;
+                bool use = false;
+                const uint32_t wv = welded.vertex_count();
+                if (x0_env && wv > 0) {
+                    float lo = 1e30f, hi = -1e30f;
+                    uint32_t neg = 0, pos = 0;
+                    for (uint32_t v = 0; v < wv; v++) {
+                        lo = std::min(lo, welded.pos_x[v]); hi = std::max(hi, welded.pos_x[v]);
+                        if (welded.pos_x[v] < 0.0f) neg++; else pos++;
+                    }
+                    // Both sides carry at least a fifth of the surface.
+                    use = lo < 0.0f && hi > 0.0f && neg * 5 >= wv && pos * 5 >= wv;
+                    g.plane = true;
+                    g.band = 0.5f * grid.voxel;
+                    if (!use) std::printf("[sdf-flow] model doesn't straddle x = 0: no start line\n");
+                }
+                run_flow(nullptr, use ? &g : nullptr);
+            }
             const bool quads_out = take_quads();
             if (quads_out) snap_to_source(welded, nullptr, 0.0f);
             CrossField flow_field;
@@ -4942,12 +5078,14 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
             if (!quads_out) {
             relax_to_field(welded, j.field_cpu, grid, /*iters=*/4, /*lambda=*/0.5f, nullptr, fp);
             const CrossField* st = rosy == 6 ? fp : nullptr;
+            if (flow && g_flow_pin.size() == welded.vertex_count()) g_pin = &g_flow_pin;
             uint32_t flips = flip_valence(welded, nullptr, 3, (field_flips & 1) ? st : nullptr);
             // Not on the Surface-Nets mirror: its pairing is by position, and the
             // walk re-relaxes verts one side at a time.
             PoleStats ps;
             const bool walk = !(j.mirror && j.use_nets);
             if (walk) ps = reduce_poles(welded, j.field_cpu, grid, nullptr, walk_rounds, (field_flips & 2) ? st : nullptr);
+            g_pin = nullptr;
             relax_to_field(welded, j.field_cpu, grid, (walk && even_iters > 0) ? even_iters : 4, /*lambda=*/0.5f, nullptr, fp,
                            walk && even_iters > 0);
             std::printf("[sdf-flow] cross-field relax: %u valence flips\n", flips);
