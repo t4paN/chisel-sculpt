@@ -1941,6 +1941,63 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
         }
         return p;
     };
+    size_t base_folds[2] = {0, 0}, top_folds[2] = {0, 0};
+    // Untangle folds. Where a feature (a fang, a lip edge) is narrower than a grid
+    // cell, a tri's corners each snap onto the surface but on opposite sides of it, and
+    // the tri faces inward. Every corner of a folded tri moves to its neighbours'
+    // average and re-snaps; rounds widen to the next ring if a fold holds on. P must
+    // already lie on the surface. Returns {folds before, folds after}.
+    auto untangle = [&](std::vector<Vec3>& P, const std::vector<uint32_t>& T) {
+        const uint32_t nv = (uint32_t)P.size();
+        const size_t nt = T.size() / 3;
+        std::vector<uint32_t> off(nv + 1, 0), vt(T.size());
+        for (uint32_t x : T) off[x + 1]++;
+        for (uint32_t v = 0; v < nv; v++) off[v + 1] += off[v];
+        { std::vector<uint32_t> fill(off.begin(), off.end() - 1);
+          for (size_t t = 0; t < nt; t++) for (int c = 0; c < 3; c++) vt[fill[T[t*3+c]]++] = (uint32_t)t; }
+        auto folded = [&](size_t t) {
+            const Vec3 a = P[T[t*3]], b = P[T[t*3+1]], c = P[T[t*3+2]];
+            const Vec3 n = (b - a).cross(c - a);
+            return n.dot(grad((a + b + c) * (1.0f / 3.0f))) < 0.0f;
+        };
+        std::vector<uint32_t> bad;
+        for (size_t t = 0; t < nt; t++) if (folded(t)) bad.push_back((uint32_t)t);
+        const size_t before = bad.size();
+        std::vector<uint8_t> mark(nv, 0);
+        std::vector<uint32_t> verts;
+        for (int round = 0; round < 24 && !bad.empty(); round++) {
+            verts.clear();
+            for (uint32_t t : bad) for (int c = 0; c < 3; c++) {
+                const uint32_t v = T[t*3+c];
+                if (!mark[v]) { mark[v] = 1; verts.push_back(v); }
+            }
+            if (round >= 8) {   // stubborn: take the next ring too
+                const size_t n0 = verts.size();
+                for (size_t i = 0; i < n0; i++)
+                    for (uint32_t j = off[verts[i]]; j < off[verts[i] + 1]; j++)
+                        for (int c = 0; c < 3; c++) {
+                            const uint32_t u = T[vt[j]*3+c];
+                            if (!mark[u]) { mark[u] = 1; verts.push_back(u); }
+                        }
+            }
+            std::vector<Vec3> np(verts.size());
+            for (size_t i = 0; i < verts.size(); i++) {
+                const uint32_t v = verts[i];
+                Vec3 sum(0, 0, 0); float w = 0.0f;
+                for (uint32_t j = off[v]; j < off[v + 1]; j++)
+                    for (int c = 0; c < 3; c++) {
+                        const uint32_t u = T[vt[j]*3+c];
+                        if (u != v) { sum = sum + P[u]; w += 1.0f; }
+                    }
+                np[i] = w > 0.0f ? snap_pt(sum * (1.0f / w)) : P[v];
+            }
+            for (size_t i = 0; i < verts.size(); i++) { P[verts[i]] = np[i]; mark[verts[i]] = 0; }
+            bad.clear();
+            for (size_t t = 0; t < nt; t++) if (folded(t)) bad.push_back((uint32_t)t);
+        }
+        return std::make_pair(before, bad.size());
+    };
+
     {
         std::vector<uint32_t> remap(CP.size(), 0xFFFFFFFFu);
         Mesh base;
@@ -1958,11 +2015,11 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
         reduce_poles(base, field, grid, nullptr, 90);
         const uint32_t bv = base.vertex_count();
         CP.resize(bv); CN.resize(bv);
-        for (uint32_t v = 0; v < bv; v++) {
-            CP[v] = Vec3(base.pos_x[v], base.pos_y[v], base.pos_z[v]);
-            CN[v] = unit(grad(CP[v]));
-        }
+        for (uint32_t v = 0; v < bv; v++) CP[v] = snap_pt(Vec3(base.pos_x[v], base.pos_y[v], base.pos_z[v]));
         tri = base.indices;
+        const auto uf = untangle(CP, tri);
+        base_folds[0] = uf.first; base_folds[1] = uf.second;
+        for (uint32_t v = 0; v < bv; v++) CN[v] = unit(grad(CP[v]));
     }
     auto stash = [&]() {
         g_flow_base.pos.resize(CP.size() * 3);
@@ -1982,7 +2039,36 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
     // grid gave up. Spacing 4 + 2 splits = an edge of 1 MC edge, about the vertex
     // count of the plain merge at the same Detail (the user saw 1.2M -> 100k without).
     for (int sd = 0; sd < splits; sd++) {
-        if (levels_after > 0 && sd == splits - levels_after) stash();
+        // Levels after: hand over only the grid. The merge keeps its dense surface, which
+        // the rebuild wraps every level onto; a split-up coarse grid as that target lost
+        // anything thinner than a cell (a fang vanished whole).
+        if (levels_after > 0 && sd == splits - levels_after) {
+            // Guard: a grid this coarse spans any gap narrower than a cell (between two
+            // lips, round a hooked fang), and no level wrapped above it grows the shape
+            // back. Any tri straying more than half an edge off the surface -> step aside,
+            // the rebuild remeshes as usual. (The remesher's base stays within ~0.4.)
+            double el = 0.0;
+            for (size_t t = 0; t < tri.size(); t += 3) el += (CP[tri[t]] - CP[tri[t+1]]).length();
+            const float tol = 0.5f * (float)(el / (double)std::max<size_t>(1, tri.size() / 3));
+            static const float W[6][3] = {{1/3.f,1/3.f,1/3.f},{.6f,.2f,.2f},{.2f,.6f,.2f},{.2f,.2f,.6f},{.5f,.5f,0},{0,.5f,.5f}};
+            uint32_t strays = 0;
+            for (size_t t = 0; t < tri.size(); t += 3) {
+                const Vec3 a = snap_pt(CP[tri[t]]), b = snap_pt(CP[tri[t+1]]), c = snap_pt(CP[tri[t+2]]);
+                for (auto& w : W)
+                    if (std::fabs(sample_field(field, grid, a * w[0] + b * w[1] + c * w[2])) > tol) { strays++; break; }
+            }
+            if (strays) {
+                std::printf("[sdf-flow] Flow: grid for %d levels spans gaps (%u tris off the surface by > half an edge): "
+                            "the rebuild remeshes as usual, merge keeps its own surface\n", levels_after, strays);
+                return true;
+            }
+            stash();
+            std::printf("[sdf-flow] Flow: grid of %zu verts / %zu tris kept as L0 for %d levels (spacing %.2fx, %u tris dropped, %u holes filled, folds %zu -> %zu); merge keeps its own surface, %.0f ms\n",
+                        g_flow_base.pos.size() / 3, g_flow_base.idx.size() / 3, levels_after,
+                        SPACING * (float)(1u << std::max(0, splits - 2)), dropped, holes, base_folds[0], base_folds[1],
+                        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+            return true;
+        }
         std::unordered_map<uint64_t, uint32_t> midv; midv.reserve(tri.size());
         auto mid = [&](uint32_t a, uint32_t b) {
             auto it = midv.find(ekey(a, b));
@@ -2002,13 +2088,17 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
         tri.swap(nt2);
     }
 
-    // Compact, snap onto the SDF surface, write back.
+    // Snap onto the SDF surface, untangle what the splits folded, compact, write back.
+    for (auto& p : CP) p = snap_pt(p);
+    { const auto uf = untangle(CP, tri); top_folds[0] = uf.first; top_folds[1] = uf.second; }
+    std::printf("[sdf-flow] folds untangled: grid %zu -> %zu, top %zu -> %zu\n",
+                base_folds[0], base_folds[1], top_folds[0], top_folds[1]);
     std::vector<uint32_t> remap(CP.size(), 0xFFFFFFFFu);
     Mesh out;
     for (uint32_t& x : tri) {
         if (remap[x] == 0xFFFFFFFFu) {
             remap[x] = (uint32_t)out.pos_x.size();
-            Vec3 p = snap_pt(CP[x]);
+            Vec3 p = CP[x];
             Vec3 n = unit(grad(p));
             out.pos_x.push_back(p.x); out.pos_y.push_back(p.y); out.pos_z.push_back(p.z);
             out.norm_x.push_back(n.x); out.norm_y.push_back(n.y); out.norm_z.push_back(n.z);
