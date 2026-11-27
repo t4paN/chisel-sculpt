@@ -4631,6 +4631,16 @@ uint32_t rebuild_wrap_level(MultiresStack& stack, const std::vector<float>& pos,
         todo.resize(w);
     }
 
+    if (const char* ld = std::getenv("CHISEL_REBUILD_LEVELDUMP")) {   // dev: each wrapped level as OBJ
+        Mesh o = m;
+        for (uint32_t v = 0; v < vc; v++) { o.pos_x[v] = px[v] + d[v].x; o.pos_y[v] = py[v] + d[v].y; o.pos_z[v] = pz[v] + d[v].z; }
+        const std::string fn = std::string(ld) + "-L" + std::to_string(K) + ".obj";
+        o.export_obj(fn.c_str());
+        Mesh sm = m;
+        for (uint32_t v = 0; v < vc; v++) { sm.pos_x[v] = px[v]; sm.pos_y[v] = py[v]; sm.pos_z[v] = pz[v]; }
+        const std::string fs = std::string(ld) + "-L" + std::to_string(K) + "-smooth.obj";
+        sm.export_obj(fs.c_str());
+    }
     const auto& fr = stack.frames[k];
     auto& disp = stack.disp[k];
     for (uint32_t v = 0; v < vc; v++)

@@ -1893,10 +1893,61 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
         if (root_id[r] == 0xFFFFFFFFu) root_id[r] = nc++;
         cl[v] = root_id[r];
     }
+    // Cut along the gap. Where two walls run closer than a grid step (the lips at a mouth
+    // corner, a slot), the dense verts of one grid point wrap round the bottom of the
+    // pocket onto BOTH walls: their mean sits in the air between, the snap lands it on one
+    // lip, and the pocket closes over as a bridge that every level inherits (orc,
+    // 2026-11-27). So a point whose verts face opposing ways splits in two, one per wall,
+    // each placed at the mean of its own dense verts (on its wall, not the shared lattice
+    // spot). Dev: CHISEL_FLOW_GAPCUT = 0 off, 1 split, 2 split + edge across the floor.
+    static const int GAPCUT = (int)env_float("CHISEL_FLOW_GAPCUT", 0.0f);
+    std::vector<uint8_t> cut_c;          // per cluster: 1 = one half of a cut point
+    std::vector<uint64_t> cut_pairs;     // the two halves, for the floor edge
+    if (GAPCUT > 0 && levels_after > 0) {
+        std::vector<Vec3> mn(nc, Vec3(0, 0, 0));
+        for (uint32_t v = 0; v < nv; v++) mn[cl[v]] += L0f.N[v];
+        std::vector<uint32_t> sa(nc, 0xFFFFFFFFu), sb(nc, 0xFFFFFFFFu);
+        std::vector<float> da(nc, 2.0f), db(nc, 2.0f);
+        for (uint32_t v = 0; v < nv; v++) {      // seed A: the vert facing most away from the mean
+            const uint32_t c = cl[v]; const float d = L0f.N[v].dot(unit(mn[c]));
+            if (d < da[c]) { da[c] = d; sa[c] = v; }
+        }
+        for (uint32_t v = 0; v < nv; v++) {      // seed B: the vert facing most away from A
+            const uint32_t c = cl[v]; const float d = L0f.N[v].dot(L0f.N[sa[c]]);
+            if (d < db[c]) { db[c] = d; sb[c] = v; }
+        }
+        std::vector<uint32_t> twin(nc, 0xFFFFFFFFu);
+        const uint32_t nc0 = nc;
+        for (uint32_t c = 0; c < nc0; c++)
+            if (sb[c] != 0xFFFFFFFFu && db[c] < -0.3f) twin[c] = nc++;
+        for (uint32_t v = 0; v < nv; v++) {
+            const uint32_t c = cl[v];
+            if (twin[c] == 0xFFFFFFFFu) continue;
+            if (L0f.N[v].dot(L0f.N[sb[c]]) > L0f.N[v].dot(L0f.N[sa[c]])) cl[v] = twin[c];
+        }
+        cut_c.assign(nc, 0);
+        for (uint32_t c = 0; c < nc0; c++)
+            if (twin[c] != 0xFFFFFFFFu) { cut_c[c] = cut_c[twin[c]] = 1; cut_pairs.push_back(ekey(c, twin[c])); }
+        std::printf("[sdf-flow] gap cut: %zu grid points split across opposing walls\n", cut_pairs.size());
+    }
     std::vector<Vec3> CP(nc, Vec3(0, 0, 0)), CN(nc, Vec3(0, 0, 0));
     std::vector<float> ccount(nc, 0.0f);
-    for (uint32_t v = 0; v < nv; v++) { CP[cl[v]] += P[v]; CN[cl[v]] += L0f.N[v]; ccount[cl[v]] += 1.0f; }
-    for (uint32_t c = 0; c < nc; c++) { CP[c] = CP[c] * (1.0f / ccount[c]); CN[c] = unit(CN[c]); }
+    for (uint32_t v = 0; v < nv; v++) {
+        const uint32_t c = cl[v];
+        CP[c] += (!cut_c.empty() && cut_c[c]) ? L0f.V[v] : P[v];
+        CN[c] += L0f.N[v]; ccount[c] += 1.0f;
+    }
+    for (uint32_t c = 0; c < nc; c++) { CP[c] = CP[c] * (1.0f / std::max(1.0f, ccount[c])); CN[c] = unit(CN[c]); }
+    // Dev (CHISEL_FLOW_HOMEDBG): each grid point's home = the mean of the dense verts it
+    // came from, to catch points that end up on the wrong wall of a narrow gap.
+    std::vector<Vec3> HOME;
+    std::unordered_set<uint64_t> fill_keys;
+    static const bool HOMEDBG = std::getenv("CHISEL_FLOW_HOMEDBG") != nullptr;
+    if (HOMEDBG) {
+        HOME.assign(nc, Vec3(0, 0, 0));
+        for (uint32_t v = 0; v < nv; v++) HOME[cl[v]] += L0f.V[v];
+        for (uint32_t c = 0; c < nc; c++) HOME[c] = HOME[c] * (1.0f / ccount[c]);
+    }
     // Mirror: a grid point is on the seam if any of its verts was, or if it landed on the
     // seam row anyway (the next row sits 0.87 of a step out). Those snap onto x = 0.
     std::vector<uint8_t> CS;
@@ -1912,6 +1963,8 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
     std::vector<uint64_t> gk;
     for (size_t e = 0; e < L0f.ea.size(); e++)
         if (step[e]) { uint32_t a = cl[L0f.ea[e]], b = cl[L0f.eb[e]]; if (a != b) gk.push_back(ekey(a, b)); }
+    if (GAPCUT >= 2)
+        for (uint64_t k : cut_pairs) gk.push_back(k);   // the pocket floor: the two halves stay joined
     std::sort(gk.begin(), gk.end()); gk.erase(std::unique(gk.begin(), gk.end()), gk.end());
     std::vector<std::vector<uint32_t>> adj(nc);
     for (uint64_t k : gk) { uint32_t a = (uint32_t)(k >> 32), b = (uint32_t)k; adj[a].push_back(b); adj[b].push_back(a); }
@@ -1995,11 +2048,16 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
     // L[0] -> L.back(), which is how a notch in the seam is closed with a seam edge.
     auto zigzag = [&](const std::vector<uint32_t>& L) {
         size_t i = 0, k = L.size() - 1;
+        auto fk = [&](uint32_t a, uint32_t b, uint32_t c) {
+            if (!HOMEDBG) return;
+            uint32_t x[3] = {a, b, c}; std::sort(x, x + 3);
+            fill_keys.insert(((uint64_t)x[0] << 42) ^ ((uint64_t)x[1] << 21) ^ (uint64_t)x[2]);
+        };
         while (k - i >= 2) {
-            tri.push_back(L[i + 1]); tri.push_back(L[i]); tri.push_back(L[k]);
+            tri.push_back(L[i + 1]); tri.push_back(L[i]); tri.push_back(L[k]); fk(L[i + 1], L[i], L[k]);
             i++;
             if (k - i < 2) break;
-            tri.push_back(L[k]); tri.push_back(L[k - 1]); tri.push_back(L[i]);
+            tri.push_back(L[k]); tri.push_back(L[k - 1]); tri.push_back(L[i]); fk(L[k], L[k - 1], L[i]);
             k--;
         }
     };
@@ -2243,9 +2301,19 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
         }
         base.indices = std::move(bidx);
         if (seam) CS.swap(bseam);
+        if (HOMEDBG) {
+            std::vector<Vec3> h2(base.pos_x.size());
+            for (size_t x = 0; x < remap.size(); x++) if (remap[x] != 0xFFFFFFFFu) h2[remap[x]] = HOME[x];
+            HOME.swap(h2);
+            uint32_t nj = 0;
+            for (size_t v = 0; v < HOME.size(); v++)
+                if ((Vec3(base.pos_x[v], base.pos_y[v], base.pos_z[v]) - HOME[v]).length() > 0.5f * s) nj++;
+            std::printf("DBGHOME before clean-up: %u of %zu points sit > half a step from home\n", nj, HOME.size());
+        }
         // Mirror: seam points stay put and no flip lays an edge in the mirror plane.
         flip_valence(base, seam ? &CS : nullptr, 3);
-        reduce_poles(base, field, grid, seam ? &CS : nullptr, 90);
+        static const int BWALK = (int)env_float("CHISEL_FLOW_BASE_WALK", 90.0f);   // dev
+        if (BWALK > 0) reduce_poles(base, field, grid, seam ? &CS : nullptr, BWALK);
         const uint32_t bv = base.vertex_count();
         CP.resize(bv); CN.resize(bv);
         for (uint32_t v = 0; v < bv; v++) CP[v] = snap_pt(Vec3(base.pos_x[v], base.pos_y[v], base.pos_z[v]), is_s(v));
@@ -2362,7 +2430,7 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
             // mouth corner, a fang against the lip) a tri bridging the gap stays within tol
             // of both walls, so the distance test above passes it, yet nothing covers the
             // walls inside the gap and the levels crumple there (orc, 2026-11-27). The tri
-            // nearest such a point, whichever way it faces, is the bridge: it gets split.
+            // nearest such a point that faces its way is too far off: it gets split.
             static const bool COVER = env_float("CHISEL_FLOW_ADAPT_COVER", 1.0f) > 0.0f;
             uint32_t uncovered_pts = 0;
             auto cover_flags = [&](std::vector<uint8_t>& flag) {
@@ -2382,7 +2450,7 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
                 for (size_t v = 0; v < L0f.V.size(); v++) {
                     const Vec3 q = L0f.V[v], qn = L0f.N[v];
                     const int64_t x0 = (int64_t)std::floor(q.x / cs), y0 = (int64_t)std::floor(q.y / cs), z0 = (int64_t)std::floor(q.z / cs);
-                    float dany = 1e30f, dface = 1e30f; uint32_t tany = 0xFFFFFFFFu;
+                    float dany = 1e30f, dface = 1e30f; uint32_t tany = 0xFFFFFFFFu, tface = 0xFFFFFFFFu;
                     for (int64_t x = x0 - 1; x <= x0 + 1; x++) for (int64_t y = y0 - 1; y <= y0 + 1; y++) for (int64_t z = z0 - 1; z <= z0 + 1; z++) {
                         auto it = cells.find(ck(x, y, z));
                         if (it == cells.end()) continue;
@@ -2390,10 +2458,16 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
                             const Vec3 a = CP[tri[t]], b = CP[tri[t+1]], c = CP[tri[t+2]];
                             const float d = (closest_on_tri(q, a, b, c) - q).length();
                             if (d < dany) { dany = d; tany = t; }
-                            if (d < dface && (b - a).cross(c - a).dot(qn) > 0.0f) dface = d;
+                            if (d < dface && (b - a).cross(c - a).dot(qn) > 0.0f) { dface = d; tface = t; }
                         }
                     }
-                    if (dface > tol && tany != 0xFFFFFFFFu) { flag[tany / 3] = 1; uncovered_pts++; }
+                    // Split the same-facing tri that should cover it and sits too far off; the
+                    // nearest of any facing is, at a thin gap, the far wall, already fine, and
+                    // splitting it again and again only shreds that wall (2026-11-27).
+                    if (dface > tol) {
+                        const uint32_t t = tface != 0xFFFFFFFFu ? tface : tany;
+                        if (t != 0xFFFFFFFFu) { flag[t / 3] = 1; uncovered_pts++; }
+                    }
                 }
             };
             auto strays_of = [&](std::vector<uint8_t>* flag) {
@@ -2421,7 +2495,9 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
             // whose normals swing wildly, so the wrap crumples them. Flip any edge whose
             // flip raises the pair's smallest angle, unless the flip makes a stray, a fold,
             // or an edge that exists already; seam edges stay.
-            uint32_t fair_total = 0;
+            uint32_t fair_total = 0, bridge_refused = 0;
+            // Set once the surface-path machinery below exists: true = edge c-d jumps a gap.
+            std::function<bool(uint32_t, uint32_t)> bridge_edge = [](uint32_t, uint32_t) { return false; };
             auto fair_flips = [&]() {
                 for (int pass = 0; pass < 12; pass++) {
                     std::unordered_map<uint64_t, std::pair<uint32_t, uint32_t>> et;   // edge -> (tri*3+slot) x2
@@ -2451,6 +2527,10 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
                         const Vec3 n0 = (CP[d] - CP[c]).cross(CP[b] - CP[c]), n1 = (CP[c] - CP[d]).cross(CP[a] - CP[d]);
                         if (n0.dot(n1) <= 0.0f) continue;
                         if (tri_stray(CP[c], CP[d], CP[b]) || tri_stray(CP[d], CP[c], CP[a])) continue;
+                        // A tri dropped into a narrow crease is a tall sliver, and the fairest
+                        // flip lays the short edge straight back across the crease mouth: the
+                        // refinement then rebuilt the same bridge every round (orc, 2026-11-27).
+                        if (bridge_edge(c, d)) { bridge_refused++; continue; }
                         tri[t0] = c; tri[t0+1] = d; tri[t0+2] = b;
                         tri[t1] = d; tri[t1+1] = c; tri[t1+2] = a;
                         used[t0 / 3] = used[t1 / 3] = 1;
@@ -2590,6 +2670,33 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
                 return true;
             };
             // Off: the plain guard, counted exactly as before the adaptive base existed.
+            // Bridge test: the shortest path over the dense surface between the two ends runs
+            // more than 1.5x their straight distance (down into a crease and back up).
+            bridge_edge = [&](uint32_t a, uint32_t b) {
+                const uint32_t A = anchor(a), B = anchor(b);
+                if (A == 0xFFFFFFFFu || B == 0xFFFFFFFFu || A == B) return false;
+                const float budget = 1.5f * (CP[a] - CP[b]).length() + 2.0f * e0;
+                for (uint32_t v : gtouched) { gdist[v] = 1e30f; gprev[v] = 0xFFFFFFFFu; }
+                gtouched.clear();
+                using QE = std::pair<float, uint32_t>;
+                std::priority_queue<QE, std::vector<QE>, std::greater<QE>> pq;
+                gdist[A] = 0.0f; gtouched.push_back(A); pq.push({0.0f, A});
+                while (!pq.empty()) {
+                    const auto [d, v] = pq.top(); pq.pop();
+                    if (d > gdist[v]) continue;
+                    if (v == B) return false;
+                    if (d > budget) return true;
+                    for (uint32_t k = goff[v]; k < goff[v + 1]; k++) {
+                        const uint32_t u = gadj[k];
+                        const float nd = d + (L0f.V[u] - L0f.V[v]).length();
+                        if (nd < gdist[u] && nd <= budget) {
+                            if (gdist[u] >= 1e29f) gtouched.push_back(u);
+                            gdist[u] = nd; gprev[u] = v; pq.push({nd, u});
+                        }
+                    }
+                }
+                return true;
+            };
             uint32_t strays = ADAPT > 0 ? strays_of(nullptr) : count_strays(true);
             const uint32_t strays0 = strays;
             const size_t bv0 = CP.size(), bt0 = tri.size() / 3;
@@ -2598,9 +2705,16 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
             auto refine_strays = [&]() {
                 strays_of(&sflag);
                 std::unordered_map<uint64_t, uint32_t> mark;
-                for (size_t t = 0; t < tri.size(); t += 3)
-                    if (sflag[t / 3])
-                        for (int i = 0; i < 3; i++) mark.emplace(ekey(tri[t+i], tri[t+(i+1)%3]), 0xFFFFFFFFu);
+                for (size_t t = 0; t < tri.size(); t += 3) {
+                    if (!sflag[t / 3]) continue;
+                    // Not below the dense mesh's own grain: a surface path can't place a
+                    // point between two corners on the same dense vert, and the refinement
+                    // ran away from there (orc, 2026-11-27).
+                    float lmax = 0.0f;
+                    for (int i = 0; i < 3; i++) lmax = std::max(lmax, (CP[tri[t+i]] - CP[tri[t+(i+1)%3]]).length());
+                    if (lmax < 2.0f * e0) continue;
+                    for (int i = 0; i < 3; i++) mark.emplace(ekey(tri[t+i], tri[t+(i+1)%3]), 0xFFFFFFFFu);
+                }
                 std::vector<uint64_t> keys; keys.reserve(mark.size());
                 for (auto& kv : mark) keys.push_back(kv.first);
                 std::sort(keys.begin(), keys.end());   // new points in edge order: repeatable
@@ -2663,17 +2777,65 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
                 const auto uf = untangle(CP, tri); adapt_folds[0] += uf.first; adapt_folds[1] = uf.second;
                 fair_flips();
             };
+            // Relax the new points on the dense surface itself: each moves toward the middle of
+            // its ring, then walks the dense mesh vert to vert to the one nearest that spot. A
+            // walk over the surface can't hop to the far wall of a crease, which a nearest-
+            // point snap does, and the refinement's points come out bunched and the tris
+            // thin: L3 crumpled on that tangle in the mouth (orc, 2026-11-27). Old grid points
+            // stay put (the grain); bridge-checked flips follow each sweep.
+            static const int ARELAX = (int)env_float("CHISEL_FLOW_ADAPT_RELAX", 0.0f);
+            auto relax_on_surface = [&]() {
+                if (ARELAX <= 0 || CP.size() <= bv0) return;
+                // One point per dense vert: two on the same one made zero-area tris.
+                std::unordered_map<uint32_t, uint32_t> owner;
+                for (uint32_t v = 0; v < (uint32_t)CP.size(); v++) {
+                    const uint32_t w = v < bv0 ? 0xFFFFFFFFu : anchor(v);
+                    if (w != 0xFFFFFFFFu) owner[w] = v;
+                }
+                for (int it = 0; it < ARELAX; it++) {
+                    std::vector<Vec3> sum(CP.size(), Vec3(0, 0, 0));
+                    std::vector<float> cnt(CP.size(), 0.0f);
+                    for (size_t t = 0; t < tri.size(); t += 3)
+                        for (int i = 0; i < 3; i++) {
+                            const uint32_t a = tri[t+i], b = tri[t+(i+1)%3];
+                            sum[a] += CP[b]; cnt[a] += 1.0f; sum[b] += CP[a]; cnt[b] += 1.0f;
+                        }
+                    for (uint32_t v = (uint32_t)bv0; v < (uint32_t)CP.size(); v++) {
+                        if (cnt[v] == 0.0f || is_s(v)) continue;
+                        const Vec3 goal = CP[v] * 0.5f + sum[v] * (0.5f / cnt[v]);
+                        uint32_t w = anchor(v);
+                        if (w == 0xFFFFFFFFu) continue;
+                        for (int step = 0; step < 64; step++) {
+                            uint32_t best = w; float bd = (L0f.V[w] - goal).length();
+                            for (uint32_t k = goff[w]; k < goff[w + 1]; k++) {
+                                const float d = (L0f.V[gadj[k]] - goal).length();
+                                if (d < bd) { bd = d; best = gadj[k]; }
+                            }
+                            if (best == w) break;
+                            w = best;
+                        }
+                        auto ow = owner.find(w);
+                        if (ow != owner.end() && ow->second != v) continue;
+                        owner.erase(anc[v]);
+                        owner[w] = v;
+                        anc[v] = w;
+                        CP[v] = L0f.V[w];
+                    }
+                    fair_flips();
+                }
+            };
             // Refine + tidy while it helps; then refine-only passes for what the tidy undid.
             static const int ATIDY = (int)env_float("CHISEL_FLOW_ADAPT_TIDY", 1.0f);
-            for (int round = 0; round < ADAPT && strays; round++) {
+            for (int round = 0; round < ADAPT && strays && tri.size() / 3 < 2 * bt0; round++) {   // cap: base at most doubles
                 refine_strays();
                 const uint32_t mid_s = strays_of(nullptr);
                 if (ATIDY) tidy(); else fair_flips();
+                relax_on_surface();
                 adapt_rounds++;
                 strays = strays_of(nullptr);
                 if (std::getenv("CHISEL_FLOW_ADAPTDBG")) std::printf("DBGROUND %d: after split %u, after tidy %u, tris %zu\n", round, mid_s, strays, tri.size() / 3);
             }
-            for (int round = 0; round < 4 && strays && ADAPT > 0; round++) {
+            for (int round = 0; round < 4 && strays && ADAPT > 0 && tri.size() / 3 < 2 * bt0; round++) {
                 refine_strays();
                 adapt_rounds++;
                 const auto uf = untangle(CP, tri); adapt_folds[1] = uf.second;
@@ -2692,8 +2854,27 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
                 if (FILE* f = std::fopen(dbo, "w")) {
                     strays_of(&sflag);
                     for (auto& p : CP) std::fprintf(f, "v %f %f %f\n", p.x, p.y, p.z);
-                    for (int pass = 0; pass < 2; pass++) {
-                        std::fprintf(f, "g %s\n", pass ? "stray" : "ok");
+                    if (HOMEDBG && HOME.size() <= CP.size()) {
+                        for (size_t v = 0; v < HOME.size(); v++) std::fprintf(f, "# home %zu %f %f %f\n", v, HOME[v].x, HOME[v].y, HOME[v].z);
+                        // jumped verts: farther from home than half a grid step
+                        uint32_t nj = 0;
+                        for (size_t v = 0; v < HOME.size(); v++)
+                            if ((CP[v] - HOME[v]).length() > 0.5f * s) {
+                                nj++;
+                                std::printf("DBGJUMP v%zu at (%.3f %.3f %.3f) home (%.3f %.3f %.3f) %.2f steps\n", v, CP[v].x, CP[v].y, CP[v].z,
+                                            HOME[v].x, HOME[v].y, HOME[v].z, (CP[v] - HOME[v]).length() / s);
+                            }
+                        uint32_t nf = 0;
+                        for (size_t t = 0; t < tri.size(); t += 3) {
+                            uint32_t x[3] = {tri[t], tri[t+1], tri[t+2]}; std::sort(x, x + 3);
+                            if (fill_keys.count(((uint64_t)x[0] << 42) ^ ((uint64_t)x[1] << 21) ^ (uint64_t)x[2])) {
+                                nf++; if (!sflag[t / 3]) sflag[t / 3] = 2;
+                            }
+                        }
+                        std::printf("DBGHOME %u verts jumped > half a step, %u fill tris in the base\n", nj, nf);
+                    }
+                    for (int pass = 0; pass < 3; pass++) {
+                        std::fprintf(f, "g %s\n", pass == 1 ? "stray" : pass == 2 ? "fill" : "ok");
                         for (size_t t = 0; t < tri.size(); t += 3)
                             if ((int)sflag[t / 3] == pass) std::fprintf(f, "f %u %u %u\n", tri[t]+1, tri[t+1]+1, tri[t+2]+1);
                     }
@@ -2714,9 +2895,13 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid, 
                         sample_field(field, grid, a), sample_field(field, grid, b), sample_field(field, grid, c));
                 }
             }
-            if (ADAPT > 0) std::printf("[sdf-flow] adaptive base: %d rounds, %zu -> %zu verts (+%.0f%%), %zu -> %zu tris, strays %u -> %u (%u surface pts uncovered), folds %zu -> %zu, %u points on surface paths, %u by ray, %u sliver flips\n",
+            if (ADAPT > 0) std::printf("[sdf-flow] adaptive base: %d rounds, %zu -> %zu verts (+%.0f%%), %zu -> %zu tris, strays %u -> %u (%u surface pts uncovered), folds %zu -> %zu, %u points on surface paths, %u by ray, %u sliver flips (%u refused as bridges)\n",
                         adapt_rounds, bv0, CP.size(), 100.0 * (double)(CP.size() - bv0) / (double)std::max<size_t>(1, bv0),
-                        bt0, tri.size() / 3, strays0, strays, uncovered_pts, adapt_folds[0], adapt_folds[1], geo_hits, geo_miss, fair_total);
+                        bt0, tri.size() / 3, strays0, strays, uncovered_pts, adapt_folds[0], adapt_folds[1], geo_hits, geo_miss, fair_total, bridge_refused);
+            if (strays && std::getenv("CHISEL_FLOW_ADAPT_FORCE")) {   // dev: keep the grid anyway, to measure the levels
+                std::printf("[sdf-flow] DEV: %u strays left, grid kept anyway\n", strays);
+                strays = 0;
+            }
             if (strays) {
                 std::printf("[sdf-flow] Flow: grid for %d levels spans gaps (%u tris off the surface by > half an edge): "
                             "the rebuild remeshes as usual, merge keeps its own surface\n", levels_after, strays);
