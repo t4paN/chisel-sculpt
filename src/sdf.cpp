@@ -1705,7 +1705,8 @@ void smooth_position(const Level& L, const std::vector<Vec3>& o, std::vector<Vec
 // call returns true; on anything it can't close, m is untouched and it returns false.
 bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid) {
     using namespace flow;
-    static const float SPACING = env_float("CHISEL_FLOW_SPACING", 3.0f);
+    static const float SPACING = env_float("CHISEL_FLOW_SPACING", 4.0f);
+    static const int   SUBDIV  = (int)env_float("CHISEL_FLOW_SUBDIV", 2.0f);
     static const int   OITERS  = (int)env_float("CHISEL_FLOW_OITERS", 30.0f);
     static const int   PITERS  = (int)env_float("CHISEL_FLOW_PITERS", 50.0f);
     const auto t0 = std::chrono::steady_clock::now();
@@ -1890,14 +1891,19 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid) 
             }
             if (tangled) break;
             if (v != kv.first || loop.size() < 3) { tangled = true; break; }
-            // Fan round a new middle vert; boundary edge a->b in the mesh => new tri (b, a, mid).
-            Vec3 mid(0, 0, 0), mn(0, 0, 0);
-            for (uint32_t x : loop) { mid += CP[x]; mn += CN[x]; }
-            const uint32_t c = (uint32_t)CP.size();
-            CP.push_back(mid * (1.0f / (float)loop.size())); CN.push_back(unit(mn));
-            for (size_t i = 0; i < loop.size(); i++) {
-                uint32_t a = loop[i], b = loop[(i + 1) % loop.size()];
-                tri.push_back(b); tri.push_back(a); tri.push_back(c);
+            // Zigzag strip across the hole, from both ends of the loop toward the
+            // middle: no new vert, every vert gains a couple of edges at most. (A fan
+            // round a middle vert made it a pole with one edge per hole edge, and the
+            // user found those as pimples once subdivided, 2026-11-27.) Boundary edge
+            // a->b in the mesh => each new tri carries b->a.
+            const auto& L = loop;
+            size_t i = 0, k = L.size() - 1;
+            while (k - i >= 2) {
+                tri.push_back(L[i + 1]); tri.push_back(L[i]); tri.push_back(L[k]);
+                i++;
+                if (k - i < 2) break;
+                tri.push_back(L[k]); tri.push_back(L[k - 1]); tri.push_back(L[i]);
+                k--;
             }
             holes++;
         }
@@ -1912,6 +1918,30 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid) 
             std::printf("[sdf-flow] Flow: %zu edges still open or shared after repair, keeping the plain merge\n", ec.size());
             return false;
         }
+
+    // Split every tri into 4 (edge midpoints), SUBDIV times: a regular grid stays
+    // regular (each new vert has 6 edges), so this buys back the density the wide
+    // grid gave up. Spacing 4 + 2 splits = an edge of 1 MC edge, about the vertex
+    // count of the plain merge at the same Detail (the user saw 1.2M -> 100k without).
+    for (int sd = 0; sd < SUBDIV; sd++) {
+        std::unordered_map<uint64_t, uint32_t> midv; midv.reserve(tri.size());
+        auto mid = [&](uint32_t a, uint32_t b) {
+            auto it = midv.find(ekey(a, b));
+            if (it != midv.end()) return it->second;
+            const uint32_t c = (uint32_t)CP.size();
+            CP.push_back((CP[a] + CP[b]) * 0.5f); CN.push_back(unit(CN[a] + CN[b]));
+            midv.emplace(ekey(a, b), c);
+            return c;
+        };
+        std::vector<uint32_t> nt2; nt2.reserve(tri.size() * 4);
+        for (size_t t = 0; t < tri.size(); t += 3) {
+            const uint32_t a = tri[t], b = tri[t+1], c = tri[t+2];
+            const uint32_t ab = mid(a, b), bc = mid(b, c), ca = mid(c, a);
+            const uint32_t q[12] = { a, ab, ca,  ab, b, bc,  ca, bc, c,  ab, bc, ca };
+            nt2.insert(nt2.end(), q, q + 12);
+        }
+        tri.swap(nt2);
+    }
 
     // Compact, snap onto the SDF surface, write back.
     std::vector<uint32_t> remap(CP.size(), 0xFFFFFFFFu);
@@ -1932,8 +1962,8 @@ bool flow_remesh(Mesh& m, const std::vector<float>& field, const SdfGrid& grid) 
         x = remap[x];
     }
     out.indices = std::move(tri);
-    std::printf("[sdf-flow] Flow: %u -> %u verts / %zu tris (spacing %.2fx, %zu levels, %u tris dropped, %u holes filled), %.0f ms\n",
-                nv, out.vertex_count(), out.indices.size() / 3, SPACING, H.size(), dropped, holes,
+    std::printf("[sdf-flow] Flow: %u -> %u verts / %zu tris (spacing %.2fx, %d splits, %zu levels, %u tris dropped, %u holes filled), %.0f ms\n",
+                nv, out.vertex_count(), out.indices.size() / 3, SPACING, SUBDIV, H.size(), dropped, holes,
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
     m.pos_x.swap(out.pos_x); m.pos_y.swap(out.pos_y); m.pos_z.swap(out.pos_z);
     m.norm_x.swap(out.norm_x); m.norm_y.swap(out.norm_y); m.norm_z.swap(out.norm_z);
@@ -3926,7 +3956,7 @@ const SdfChoice kPatternItems[] = {
     { "Plain",           "Even triangles, no pull from the shape's bends" },
     { "Curvature, 6-way", "Triangle rows follow the shape's bends in 60-degree steps, the way triangles tile; the clean-up flips edges to match" },
     { "Graph paper",      "Triangle rows run along the world's X, Y and Z, like a grid laid over the model" },
-    { "Flow",             "Lays a fresh triangle grid whose rows flow round the shape as one; fewer poles. About a ninth as many triangles: raise Detail. Not with mirror yet" },
+    { "Flow",             "Lays a fresh triangle grid whose rows flow round the shape as one: far fewer poles and kinks. A little slower. Not with mirror yet" },
 };
 const SdfChoice kPolesItems[] = {
     { "Walk & cancel", "Needless poles wander until pairs meet and cancel out" },
