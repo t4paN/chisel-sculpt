@@ -627,8 +627,10 @@ bool Mesh::quad_mates(std::vector<int32_t>& mate) const {
         const uint8_t k = quad_diag[t];
         if (k == 0xFF) continue;
         const uint32_t a = indices[t*3+k], b = indices[t*3+(k+1)%3];
+        // No tri flags the same edge the other way: an orphan (its mate was dropped, or
+        // the tris changed under the note), drawn as a lone tri.
         auto it = half.find(((uint64_t)b << 32) | a);
-        if (it == half.end() || it->second == t) { mate.clear(); return false; }   // stale
+        if (it == half.end() || it->second == t) continue;
         mate[t] = (int32_t)it->second;
         pairs++;
     }

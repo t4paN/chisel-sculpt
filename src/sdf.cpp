@@ -3200,6 +3200,14 @@ void reflect_across_x(Mesh& m, const std::vector<uint8_t>& seam) {
         m.indices.push_back(refl[m.indices[t+2]]);
         m.indices.push_back(refl[m.indices[t+1]]);
     }
+    // Quad flow: the twin tri runs c0 c2 c1, so its edge k is the original's edge 2 - k.
+    if (m.quad_diag.size() == tn / 3) {
+        m.quad_diag.reserve(tn / 3 * 2);
+        for (uint32_t t = 0; t < tn / 3; t++) {
+            const uint8_t k = m.quad_diag[t];
+            m.quad_diag.push_back(k == 0xFF ? (uint8_t)0xFF : (uint8_t)(2 - k));
+        }
+    }
 }
 
 // Drop verts no tri references; carry the parallel seam mask through the remap.
@@ -3260,14 +3268,18 @@ static void weld_seam_band(Mesh& m, float voxel) {
 
     for (uint32_t& idx : m.indices) idx = remap[idx];
 
-    // Drop tris that collapsed onto the seam.
+    // Drop tris that collapsed onto the seam (and their quad notes, Quad flow).
+    const bool qd = m.quad_diag.size() == m.indices.size() / 3;
     std::vector<uint32_t> keep; keep.reserve(m.indices.size());
+    std::vector<uint8_t> qkeep;
     for (size_t t = 0; t + 2 < m.indices.size(); t += 3) {
         uint32_t a=m.indices[t], b=m.indices[t+1], c=m.indices[t+2];
         if (a==b || b==c || a==c) continue;
         keep.push_back(a); keep.push_back(b); keep.push_back(c);
+        if (qd) qkeep.push_back(m.quad_diag[t / 3]);
     }
     m.indices.swap(keep);
+    if (qd) m.quad_diag.swap(qkeep);
 
     // Compact orphaned verts (pos+norm; mask/colour are built downstream).
     std::vector<uint32_t> vm(vc, 0xFFFFFFFFu);
@@ -4837,23 +4849,31 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
         // Flow re-lays the faithful merge, and the MC mirror's +x half (seam row on x = 0).
         // The Surface Nets mirror pairs verts by position over the whole model, which a
         // re-laid half can't keep, so there it falls back.
-        // Quad flow: Flow on a square grid; not with mirror yet (the reflection would lose
-        // which diagonals pair the tris), so there it lays Flow's triangles instead.
-        const bool quad_req = j.pat.pattern == (int)SdfPattern::QuadFlow;
-        const bool quad  = quad_req && !j.mirror;
-        if (quad_req && j.mirror) {
-            std::printf("[sdf-flow] Quad flow isn't available with mirror yet: using Flow\n");
-            j.res.note = "Quad flow doesn't work with mirror yet: used Flow";
-        }
-        const bool flow  = j.pat.pattern == (int)SdfPattern::Flow || quad_req;
+        // Quad flow: Flow on a square grid. With mirror it lays the +x half like Flow (a
+        // row on x = 0) and the reflection carries which diagonals pair the tris.
+        const bool quad  = j.pat.pattern == (int)SdfPattern::QuadFlow;
+        const bool flow  = j.pat.pattern == (int)SdfPattern::Flow || quad;
         const bool flow_sn = flow && j.mirror && j.use_nets;
         if (flow_sn) {
             std::printf("[sdf-flow] Flow isn't available with the Surface Nets mirror: using Curvature nudge\n");
             j.res.note = "Flow doesn't work with Surface Nets + mirror: used Curvature nudge";
         }
         // Flow's own verdict, passed on to the user (a merge that falls back says so).
+        // Quads: hand the pairing to the mesh, per tri the edge that is its hidden diagonal.
+        // True when there are quads, which then skip flips, the pole walk and the tri relax
+        // (they would cut across the squares); only the snap onto the source runs.
+        auto take_quads = [&]() {
+            if (!quad || g_quad_diag.empty()) return false;
+            std::unordered_set<uint64_t> dg(g_quad_diag.begin(), g_quad_diag.end());
+            const uint32_t tc = welded.tri_count();
+            welded.quad_diag.assign(tc, 0xFF);
+            for (uint32_t t = 0; t < tc; t++)
+                for (int k = 0; k < 3; k++)
+                    if (dg.count(flow::ekey(welded.indices[t*3+k], welded.indices[t*3+(k+1)%3]))) { welded.quad_diag[t] = (uint8_t)k; break; }
+            return true;
+        };
         auto run_flow = [&](std::vector<uint8_t>* seam) {
-            if (flow_remesh(welded, j.field_cpu, grid, j.pat.levels_after, seam, quad && !seam)) {
+            if (flow_remesh(welded, j.field_cpu, grid, j.pat.levels_after, seam, quad)) {
                 if (!g_flow_note.empty()) j.res.note = g_flow_note;
                 return;
             }
@@ -4878,6 +4898,7 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
             clip_to_plus_x(welded, grid.voxel, seam);
             weld_near_seam(welded, grid.voxel, seam);   // B: collapse the seam sliver column
             if (flow) run_flow(&seam);
+            if (!take_quads()) {
             CrossField flow_field;
             if (graph) build_graph_field(welded, j.field_cpu, grid, flow_field);
             else if (nudge) {
@@ -4893,6 +4914,7 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
             std::printf("[sdf-flow] cross-field relax: %u valence flips (+x half)\n", flips);
             std::printf("[sdf-flow] poles %u -> %u of %u verts (%u flips, %d rounds, +x half)\n",
                         ps.before, ps.after, welded.vertex_count(), ps.flips, ps.rounds);
+            }
             validate_seam_loop(welded, grid.voxel, seam);  // H-B: close seam escapees before reflecting
             // Snap the +x half before it is reflected, seam column pinned and every
             // other vert kept clear of the plane, so the reflect sees the same seam.
@@ -4908,45 +4930,8 @@ VoxelMergeStatus voxel_merge_tick(Scene& scene, ComputeState& cs,
             // Flow: swap MC's mesh for the field-aligned grid; then plain relax, flips
             // and the pole walk as usual (the walk clears the grid's dislocations).
             if (flow && !j.mirror) run_flow(nullptr);
-            // Quads: the grid is the result. Flips, the pole walk and the tri relax would
-            // cut across the squares; only the snap onto the source runs.
-            const bool quads_out = quad && !g_quad_diag.empty();
-            if (quads_out) {
-                snap_to_source(welded, nullptr, 0.0f);
-                // Hand the pairing to the mesh: per tri, which edge is its hidden diagonal.
-                std::unordered_set<uint64_t> dg(g_quad_diag.begin(), g_quad_diag.end());
-                const uint32_t tc = welded.tri_count();
-                welded.quad_diag.assign(tc, 0xFF);
-                for (uint32_t t = 0; t < tc; t++)
-                    for (int k = 0; k < 3; k++)
-                        if (dg.count(flow::ekey(welded.indices[t*3+k], welded.indices[t*3+(k+1)%3]))) { welded.quad_diag[t] = (uint8_t)k; break; }
-                if (const char* qp = std::getenv("CHISEL_QUAD_DUMP")) {   // dev: real quads, for pictures
-                    if (FILE* f = std::fopen(qp, "w")) {
-                        for (uint32_t v = 0; v < welded.vertex_count(); v++)
-                            std::fprintf(f, "v %.6f %.6f %.6f\n", welded.pos_x[v], welded.pos_y[v], welded.pos_z[v]);
-                        std::unordered_map<uint64_t, uint32_t> first;
-                        std::unordered_set<uint64_t> dg(g_quad_diag.begin(), g_quad_diag.end());
-                        const auto& I = welded.indices;
-                        std::vector<uint8_t> done(I.size() / 3, 0);
-                        for (size_t t = 0; t < I.size(); t += 3)
-                            for (int i = 0; i < 3; i++) {
-                                const uint64_t k = flow::ekey(I[t+i], I[t+(i+1)%3]);
-                                if (!dg.count(k)) continue;
-                                auto ins = first.emplace(k, (uint32_t)(t / 3));
-                                if (ins.second) continue;
-                                const uint32_t u = ins.first->second;   // u holds a->b, t holds b->a
-                                const uint32_t a = I[t+i], b = I[t+(i+1)%3], c = I[t+(i+2)%3];
-                                uint32_t d = 0;
-                                for (int k2 = 0; k2 < 3; k2++) { const uint32_t x = I[u*3+k2]; if (x != a && x != b) d = x; }
-                                std::fprintf(f, "f %u %u %u %u\n", b + 1, c + 1, a + 1, d + 1);
-                                done[u] = done[t / 3] = 1;
-                            }
-                        for (size_t t = 0; t < I.size(); t += 3)
-                            if (!done[t / 3]) std::fprintf(f, "f %u %u %u\n", I[t] + 1, I[t+1] + 1, I[t+2] + 1);
-                        std::fclose(f);
-                    }
-                }
-            }
+            const bool quads_out = take_quads();
+            if (quads_out) snap_to_source(welded, nullptr, 0.0f);
             CrossField flow_field;
             if (graph) build_graph_field(welded, j.field_cpu, grid, flow_field);
             else if (nudge) {
@@ -5176,7 +5161,7 @@ const SdfChoice kPatternItems[] = {
     { "Curvature, 6-way", "Triangle rows follow the shape's bends in 60-degree steps, the way triangles tile; the clean-up flips edges to match" },
     { "Graph paper",      "Triangle rows run along the world's X, Y and Z, like a grid laid over the model" },
     { "Flow",             "Lays a fresh triangle grid whose rows flow round the shape as one: far fewer poles and kinks. A little slower. Not with mirror yet" },
-    { "Quad flow",        "Like Flow, on a square grid: each square is two triangles sharing a diagonal. Not with mirror yet" },
+    { "Quad flow",        "Like Flow, on a square grid: each square is two triangles sharing a diagonal" },
 };
 const SdfChoice kPolesItems[] = {
     { "Walk & cancel", "Needless poles wander until pairs meet and cancel out" },

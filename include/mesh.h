@@ -134,8 +134,8 @@ struct Mesh {
     // the hidden diagonal it shares with its quad mate, or 0xFF for a lone tri. The
     // wireframe leaves those edges out and OBJ export writes each pair as one quad.
     // Like `uv`, anything that rebuilds the triangles without carrying it leaves it the
-    // wrong size, and quad_mates() also checks every pair still agrees, so a stale
-    // array reads as "no quads", never as wrong ones.
+    // wrong size, and quad_mates() pairs two tris only where both flag the same edge
+    // (run opposite ways), so a stale note reads as lone tris, never as wrong quads.
     std::vector<uint8_t> quad_diag;
     // mate[t] = the tri sharing t's hidden diagonal, or -1. False (mate empty) = no quads.
     bool quad_mates(std::vector<int32_t>& mate) const;
