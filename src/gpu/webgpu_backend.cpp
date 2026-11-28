@@ -15,8 +15,54 @@
 #include <cstdlib>
 #include <vector>
 #include <unordered_map>
+#include <chrono>
 
 namespace gpu {
+
+// ---- Op stats (CHISEL_GPU_OPSTATS=1, see gpu.h) ----------------------------------
+namespace {
+enum Op { OP_WRITE, OP_BG_CREATE, OP_BG_RELEASE, OP_ENC_CREATE, OP_PASS_BEGIN, OP_DISPATCH,
+          OP_PASS_END, OP_FINISH, OP_QSUBMIT, OP_READ_ASYNC, OP_EVENTS, OP_CLEAR, OP_COPY,
+          OP_COUNT };
+const char* op_name(int o) {
+    static const char* n[] = {"queue.writeBuffer", "createBindGroup", "bindGroup.release",
+                              "createCommandEncoder", "beginComputePass", "dispatch (set+go)",
+                              "computePass.end", "encoder.finish", "queue.submit",
+                              "read_buffer_async", "process_events", "clear_buffer", "copy_buffer"};
+    return n[o];
+}
+struct OpStats {
+    int on = -1;
+    double ms[OP_COUNT] = {};
+    uint64_t calls[OP_COUNT] = {};
+    bool enabled() {
+        if (on < 0) { const char* e = std::getenv("CHISEL_GPU_OPSTATS"); on = (e && e[0] == '1') ? 1 : 0; }
+        return on == 1;
+    }
+};
+OpStats g_ops;
+struct ScopedOp {
+    int op; bool on; std::chrono::steady_clock::time_point t;
+    explicit ScopedOp(int o) : op(o), on(g_ops.enabled()) { if (on) t = std::chrono::steady_clock::now(); }
+    ~ScopedOp() {
+        if (!on) return;
+        g_ops.ms[op] += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t).count();
+        g_ops.calls[op]++;
+    }
+};
+}  // namespace
+
+void op_stats_print() {
+    if (!g_ops.enabled()) return;
+    double total = 0; for (double m : g_ops.ms) total += m;
+    std::printf("[ops] ---- CPU time inside WebGPU calls, whole session: %.0f ms ----\n", total);
+    for (int i = 0; i < OP_COUNT; i++) {
+        if (!g_ops.calls[i]) continue;
+        std::printf("[ops]   %-22s %9.1f ms %4.0f%%  %8llu calls  avg %7.1f us\n", op_name(i),
+                    g_ops.ms[i], total > 0 ? 100.0 * g_ops.ms[i] / total : 0.0,
+                    (unsigned long long)g_ops.calls[i], 1000.0 * g_ops.ms[i] / g_ops.calls[i]);
+    }
+}
 
 // WGSL string -> sized WGPUStringView (v29 wants explicit length).
 static WGPUStringView sv(const char* s) { return WGPUStringView{ s, s ? std::strlen(s) : 0 }; }
@@ -124,6 +170,138 @@ void dispatch_1d(ComputeBatch& b, ComputePipeline& pipe, BindGroup& group, uint3
 static WGPUInstance g_instance = nullptr;
 void webgpu_set_instance(WGPUInstance i) { g_instance = i; }
 
+// ---- Dab batch (see gpu.h batch_begin) -----------------------------------------
+// One shared encoder; at most one compute pass open on it at a time. Batched
+// ComputeBatches don't own the pass: they reach it through fb_pass(), so anything
+// that has to encode outside a pass (a copy, a clear, an upload) can close it and
+// the next dispatch simply reopens one.
+struct DabBatch {
+    bool enabled = true;          // CHISEL_DAB_BATCH=0 turns it off (native only)
+    bool active  = false;
+    Device* dev  = nullptr;
+    WGPUCommandEncoder     enc  = nullptr;
+    WGPUComputePassEncoder pass = nullptr;
+    // Upload ring for small writes: queue-written at distinct offsets, then copied
+    // to the destination in encoder order. Reused from offset 0 after each submit —
+    // the next queue write is ordered after that submit, so nothing is overwritten
+    // before its copy has run.
+    WGPUBuffer ring = nullptr;
+    uint64_t   ring_size = 0, ring_off = 0;
+    std::vector<uint32_t> pending_maps;   // tickets whose mapAsync waits for the submit
+    // Stats (CHISEL_DAB_BATCH_STATS=1): what the batch saved and what broke it up.
+    uint64_t st_batches = 0, st_passes = 0, st_writes = 0, st_submits = 0;
+    uint64_t st_flush_read = 0, st_flush_render = 0, st_flush_big = 0, st_flush_ring = 0;
+    bool stats = false;
+    bool env_read = false;
+};
+static DabBatch g_fb;
+static constexpr uint64_t kRingSize  = 4ull << 20;   // 4 MiB of uploads per submit
+static constexpr uint64_t kRingMaxWrite = 64ull << 10;   // bigger writes go direct
+
+static void ticket_issue_map(uint32_t id);   // defined with the tickets below
+
+static void fb_close_pass() {
+    if (g_fb.pass) {
+        ScopedOp _op(OP_PASS_END);
+        wgpuComputePassEncoderEnd(g_fb.pass);
+        wgpuComputePassEncoderRelease(g_fb.pass);
+        g_fb.pass = nullptr;
+    }
+}
+
+// The shared encoder, with no compute pass open, ready for encoder-level commands.
+static WGPUCommandEncoder fb_encoder() {
+    fb_close_pass();
+    if (!g_fb.enc) { ScopedOp _op(OP_ENC_CREATE); g_fb.enc = wgpuDeviceCreateCommandEncoder(g_fb.dev->device, nullptr); }
+    return g_fb.enc;
+}
+
+static WGPUComputePassEncoder fb_pass() {
+    if (!g_fb.pass) {
+        WGPUCommandEncoder enc = fb_encoder();
+        ScopedOp _op(OP_PASS_BEGIN);
+        g_fb.pass = wgpuCommandEncoderBeginComputePass(enc, nullptr);
+        g_fb.st_passes++;
+    }
+    return g_fb.pass;
+}
+
+// Submit everything recorded so far, then start the deferred maps. The batch stays
+// active; later work opens a fresh encoder.
+static void fb_flush() {
+    if (!g_fb.active) return;
+    fb_close_pass();
+    if (g_fb.enc) {
+        WGPUCommandBuffer cmd;
+        { ScopedOp _op(OP_FINISH);  cmd = wgpuCommandEncoderFinish(g_fb.enc, nullptr); }
+        { ScopedOp _op(OP_QSUBMIT); wgpuQueueSubmit(g_fb.dev->queue, 1, &cmd); }
+        wgpuCommandBufferRelease(cmd);
+        wgpuCommandEncoderRelease(g_fb.enc);
+        g_fb.enc = nullptr;
+        g_fb.st_submits++;
+    }
+    g_fb.ring_off = 0;
+    for (uint32_t id : g_fb.pending_maps) ticket_issue_map(id);
+    g_fb.pending_maps.clear();
+}
+
+// Batched small write: true if it was taken. False = caller writes directly (after
+// the batch has been flushed, so the direct write still lands in order).
+static bool fb_write(WGPUBuffer dst, uint64_t offset, const void* data, uint64_t size) {
+    if (size == 0 || size > kRingMaxWrite || (size & 3) || (offset & 3)) {
+        g_fb.st_flush_big++;
+        fb_flush();
+        return false;
+    }
+    if (!g_fb.ring) {
+        WGPUBufferDescriptor bd = {};
+        bd.usage = (WGPUBufferUsage)(WGPUBufferUsage_CopySrc | WGPUBufferUsage_CopyDst);
+        bd.size  = kRingSize;
+        g_fb.ring = wgpuDeviceCreateBuffer(g_fb.dev->device, &bd);
+        g_fb.ring_size = g_fb.ring ? kRingSize : 0;
+        if (!g_fb.ring) { fb_flush(); return false; }
+    }
+    if (g_fb.ring_off + size > g_fb.ring_size) { g_fb.st_flush_ring++; fb_flush(); }
+    const uint64_t at = g_fb.ring_off;
+    g_fb.ring_off = (at + size + 15) & ~15ull;
+    { ScopedOp _op(OP_WRITE); wgpuQueueWriteBuffer(g_fb.dev->queue, g_fb.ring, at, data, size); }
+    WGPUCommandEncoder enc = fb_encoder();
+    { ScopedOp _op(OP_COPY); wgpuCommandEncoderCopyBufferToBuffer(enc, g_fb.ring, at, dst, offset, size); }
+    g_fb.st_writes++;
+    return true;
+}
+
+void batch_begin(Device& dev) {
+    if (!g_fb.env_read) {
+        g_fb.env_read = true;
+        if (const char* e = std::getenv("CHISEL_DAB_BATCH")) g_fb.enabled = e[0] != '0';
+        if (const char* e = std::getenv("CHISEL_DAB_BATCH_STATS")) g_fb.stats = e[0] == '1';
+        std::printf("[gpu] dab batching %s\n", g_fb.enabled ? "on" : "OFF (CHISEL_DAB_BATCH=0)");
+    }
+    if (!g_fb.enabled || g_fb.active) return;
+    g_fb.active = true;
+    g_fb.dev = &dev;
+    g_fb.st_batches++;
+}
+
+void batch_end(Device&) {
+    if (!g_fb.active) return;
+    fb_flush();
+    g_fb.active = false;
+    if (g_fb.stats && g_fb.st_batches % 1000 == 0) {
+        std::printf("[gpu] dab batch: %llu dabs, %llu passes, %llu uploads, %llu submits "
+                    "(early: read %llu, render %llu, big write %llu, ring %llu)\n",
+                    (unsigned long long)g_fb.st_batches, (unsigned long long)g_fb.st_passes,
+                    (unsigned long long)g_fb.st_writes, (unsigned long long)g_fb.st_submits,
+                    (unsigned long long)g_fb.st_flush_read, (unsigned long long)g_fb.st_flush_render,
+                    (unsigned long long)g_fb.st_flush_big, (unsigned long long)g_fb.st_flush_ring);
+    }
+}
+
+// Blocking reads and render passes must see everything recorded so far.
+static void fb_flush_for_read()   { if (g_fb.active) { g_fb.st_flush_read++;   fb_flush(); } }
+static void fb_flush_for_render() { if (g_fb.active) { g_fb.st_flush_render++; fb_flush(); } }
+
 Buffer create_buffer(Device& dev, const void* data, uint64_t size, Usage usage,
                      const char* file, int line) {
     Buffer b;
@@ -138,6 +316,8 @@ Buffer create_buffer(Device& dev, const void* data, uint64_t size, Usage usage,
 }
 
 void write_buffer(Device& dev, Buffer& b, uint64_t offset, const void* data, uint64_t size) {
+    if (g_fb.active && fb_write(b.handle, offset, data, size)) return;
+    ScopedOp _op(OP_WRITE);
     wgpuQueueWriteBuffer(dev.queue, b.handle, offset, data, size);
 }
 
@@ -213,37 +393,52 @@ BindGroup create_bind_group(Device& dev, ComputePipeline& pipe,
     bgd.layout = pipe.bgl;
     bgd.entryCount = n;
     bgd.entries = stackEnt;
+    ScopedOp _op(OP_BG_CREATE);
     g.handle = wgpuDeviceCreateBindGroup(dev.device, &bgd);
     return g;
 }
 
 void release_bind_group(BindGroup& g) {
+    ScopedOp _op(OP_BG_RELEASE);
     if (g.handle) { wgpuBindGroupRelease(g.handle); g.handle = nullptr; }
 }
 
 ComputeBatch begin_compute(Device& dev) {
     ComputeBatch b;
     b.dev  = &dev;
-    b.enc  = wgpuDeviceCreateCommandEncoder(dev.device, nullptr);
-    b.pass = wgpuCommandEncoderBeginComputePass(b.enc, nullptr);
+    if (g_fb.active) {        // shared encoder; the pass opens lazily in fb_pass()
+        b.batched = true;
+        return b;
+    }
+    { ScopedOp _op(OP_ENC_CREATE);  b.enc  = wgpuDeviceCreateCommandEncoder(dev.device, nullptr); }
+    { ScopedOp _op(OP_PASS_BEGIN); b.pass = wgpuCommandEncoderBeginComputePass(b.enc, nullptr); }
     return b;
+}
+
+static WGPUComputePassEncoder batch_pass(ComputeBatch& b) {
+    return b.batched ? fb_pass() : b.pass;
 }
 
 void dispatch(ComputeBatch& b, ComputePipeline& pipe, BindGroup& group, uint32_t groups_x, uint32_t groups_y) {
     if (!dispatch_fits(groups_x, groups_y)) return;
-    wgpuComputePassEncoderSetPipeline(b.pass, pipe.handle);
-    wgpuComputePassEncoderSetBindGroup(b.pass, 0, group.handle, 0, nullptr);
-    wgpuComputePassEncoderDispatchWorkgroups(b.pass, groups_x, groups_y, 1);
+    ScopedOp _op(OP_DISPATCH);
+    WGPUComputePassEncoder pass = batch_pass(b);
+    wgpuComputePassEncoderSetPipeline(pass, pipe.handle);
+    wgpuComputePassEncoderSetBindGroup(pass, 0, group.handle, 0, nullptr);
+    wgpuComputePassEncoderDispatchWorkgroups(pass, groups_x, groups_y, 1);
 }
 
 void dispatch_indirect(ComputeBatch& b, ComputePipeline& pipe, BindGroup& group,
                        const Buffer& args, uint64_t offset) {
-    wgpuComputePassEncoderSetPipeline(b.pass, pipe.handle);
-    wgpuComputePassEncoderSetBindGroup(b.pass, 0, group.handle, 0, nullptr);
-    wgpuComputePassEncoderDispatchWorkgroupsIndirect(b.pass, args.handle, offset);
+    ScopedOp _op(OP_DISPATCH);
+    WGPUComputePassEncoder pass = batch_pass(b);
+    wgpuComputePassEncoderSetPipeline(pass, pipe.handle);
+    wgpuComputePassEncoderSetBindGroup(pass, 0, group.handle, 0, nullptr);
+    wgpuComputePassEncoderDispatchWorkgroupsIndirect(pass, args.handle, offset);
 }
 
 void end_compute_pass(ComputeBatch& b) {
+    if (b.batched) { fb_close_pass(); return; }
     if (b.pass) {
         wgpuComputePassEncoderEnd(b.pass);
         wgpuComputePassEncoderRelease(b.pass);
@@ -274,14 +469,24 @@ static void encode_copy(WGPUCommandEncoder enc, WGPUBuffer src, uint64_t src_off
 void copy_buffer(ComputeBatch& b, const Buffer& src, uint64_t src_off,
                  const Buffer& dst, uint64_t dst_off, uint64_t size) {
     // copies are encoder-level commands — the compute pass must be ended first.
+    if (b.batched) {
+        encode_copy(fb_encoder(), src.handle, src_off, dst.handle, dst_off, size);
+        return;
+    }
     if (b.pass) end_compute_pass(b);
     encode_copy(b.enc, src.handle, src_off, dst.handle, dst_off, size);
 }
 
 void submit(ComputeBatch& b) {
-    if (b.pass) end_compute_pass(b);
-    WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(b.enc, nullptr);
-    wgpuQueueSubmit(b.dev->queue, 1, &cmd);
+    if (b.batched) {          // stays recorded; batch_end (or an early flush) submits
+        fb_close_pass();
+        b.batched = false;
+        return;
+    }
+    if (b.pass) { ScopedOp _op(OP_PASS_END); end_compute_pass(b); }
+    WGPUCommandBuffer cmd;
+    { ScopedOp _op(OP_FINISH);  cmd = wgpuCommandEncoderFinish(b.enc, nullptr); }
+    { ScopedOp _op(OP_QSUBMIT); wgpuQueueSubmit(b.dev->queue, 1, &cmd); }
     wgpuCommandBufferRelease(cmd);
     wgpuCommandEncoderRelease(b.enc);
     b.enc = nullptr;
@@ -312,6 +517,7 @@ static void pump_until_mapped(Device& dev, const MapState& ms) {
 }
 
 void map_read(Device& dev, const Buffer& staging, uint64_t size, void* out) {
+    fb_flush_for_read();
     MapState ms;
     WGPUBufferMapCallbackInfo mcb = {};
     mcb.mode = WGPUCallbackMode_AllowProcessEvents;
@@ -337,6 +543,7 @@ static WGPUBuffer g_read_staging = nullptr;
 static uint64_t   g_read_staging_size = 0;
 
 void read_buffer(Device& dev, const Buffer& src, uint64_t offset, uint64_t size, void* out) {
+    fb_flush_for_read();
     if (g_read_staging_size < size) {
         if (g_read_staging) wgpuBufferRelease(g_read_staging);
         WGPUBufferDescriptor bd = {};
@@ -368,6 +575,15 @@ void read_buffer(Device& dev, const Buffer& src, uint64_t offset, uint64_t size,
 }
 
 void clear_buffer(Device& dev, Buffer& b, uint32_t fill_word) {
+    ScopedOp _op(OP_CLEAR);
+    if (g_fb.active) {
+        if (fill_word == 0) {
+            wgpuCommandEncoderClearBuffer(fb_encoder(), b.handle, 0, b.size);
+            return;
+        }
+        g_fb.st_flush_big++;
+        fb_flush();           // the pattern below is a queue write: keep it in order
+    }
     if (fill_word == 0) {
         WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(dev.device, nullptr);
         wgpuCommandEncoderClearBuffer(enc, b.handle, 0, b.size);
@@ -387,6 +603,11 @@ void clear_buffer(Device& dev, Buffer& b, uint32_t fill_word) {
 
 void copy_buffer(Device& dev, const Buffer& src, uint64_t src_off,
                  const Buffer& dst, uint64_t dst_off, uint64_t size) {
+    ScopedOp _op(OP_COPY);
+    if (g_fb.active) {
+        encode_copy(fb_encoder(), src.handle, src_off, dst.handle, dst_off, size);
+        return;
+    }
     WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(dev.device, nullptr);
     encode_copy(enc, src.handle, src_off, dst.handle, dst_off, size);
     WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(enc, nullptr);
@@ -625,6 +846,7 @@ BindGroup create_bind_group(Device& dev, RenderPipeline& pipe,
 }
 
 RenderPass begin_render_pass(Device& dev, const RenderTarget& t) {
+    fb_flush_for_render();
     RenderPass rp; rp.dev = &dev;
     rp.enc = wgpuDeviceCreateCommandEncoder(dev.device, nullptr);
 
@@ -785,6 +1007,7 @@ void release_offscreen_target(OffscreenTarget& t) {
 }
 
 RenderPass begin_offscreen_pass(Device& dev, OffscreenTarget& t, const OffscreenPassDesc& d) {
+    fb_flush_for_render();
     RenderPass rp; rp.dev = &dev;
     rp.enc = wgpuDeviceCreateCommandEncoder(dev.device, nullptr);
 
@@ -854,6 +1077,7 @@ static void texformat_readback(TexFormat f, uint32_t& wgpu_bpt, uint32_t& halfs,
 
 void read_target_region(Device& dev, OffscreenTarget& t, uint32_t attachment,
                         int x, int y, int w, int h, void* out) {
+    fb_flush_for_read();
     // Target not built yet (queried before the first offscreen render), or the region
     // straddles the edge on the frame after a resize: leave `out` as the caller set it
     // (the on-model depth read pre-inits to the 1000 "no geometry" clear) rather than
@@ -998,25 +1222,41 @@ static void on_ticket_map(WGPUMapAsyncStatus status, WGPUStringView, void* ud1, 
     it->second.ok = (status == WGPUMapAsyncStatus_Success);
 }
 
-static ReadTicket ticket_register(AsyncRead& r) {
-    uint32_t id = g_next_ticket++;
-    if (!g_next_ticket) g_next_ticket = 1;
-    g_tickets.emplace(id, r);
+static void ticket_issue_map(uint32_t id) {
+    auto it = g_tickets.find(id);
+    if (it == g_tickets.end()) return;
     WGPUBufferMapCallbackInfo mcb = {};
     mcb.mode = WGPUCallbackMode_AllowProcessEvents;
     mcb.callback = on_ticket_map;
     mcb.userdata1 = (void*)(uintptr_t)id;
-    wgpuBufferMapAsync(r.staging, WGPUMapMode_Read, 0, r.map_size, mcb);
+    wgpuBufferMapAsync(it->second.staging, WGPUMapMode_Read, 0, it->second.map_size, mcb);
+}
+
+// Under a dab batch the copy into the staging is still unsubmitted, and mapping a
+// buffer a pending submit writes is a validation error: the map waits for fb_flush.
+// Until then the ticket simply reads as not ready (done == false), and a drop or an
+// early take orphans it exactly as for a map in flight.
+static ReadTicket ticket_register(AsyncRead& r) {
+    uint32_t id = g_next_ticket++;
+    if (!g_next_ticket) g_next_ticket = 1;
+    g_tickets.emplace(id, r);
+    if (g_fb.active) g_fb.pending_maps.push_back(id);
+    else             ticket_issue_map(id);
     return id;
 }
 
 ReadTicket read_buffer_async(Device& dev, const Buffer& src, uint64_t offset, uint64_t size) {
+    ScopedOp _op(OP_READ_ASYNC);
     if (!src.handle || size == 0) return 0;
     AsyncRead r;
     r.staging = staging_acquire(dev, size, r.staging_size);
     r.map_size = size;
     r.out_size = size;
 
+    if (g_fb.active) {
+        wgpuCommandEncoderCopyBufferToBuffer(fb_encoder(), src.handle, offset, r.staging, 0, size);
+        return ticket_register(r);
+    }
     WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(dev.device, nullptr);
     wgpuCommandEncoderCopyBufferToBuffer(enc, src.handle, offset, r.staging, 0, size);
     WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(enc, nullptr);
@@ -1049,7 +1289,6 @@ ReadTicket read_target_region_async(Device& dev, OffscreenTarget& t, uint32_t at
     r.w = (uint32_t)w; r.h = (uint32_t)h;
     r.wgpu_bpt = wgpu_bpt; r.halfs = halfs; r.out_bpt = out_bpt; r.padded_row = padded_row;
 
-    WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(dev.device, nullptr);
     WGPUTexelCopyTextureInfo src = {};
     src.texture = t.color_tex[attachment]; src.mipLevel = 0;
     src.origin = { (uint32_t)x, (uint32_t)y, 0 };
@@ -1058,6 +1297,11 @@ ReadTicket read_target_region_async(Device& dev, OffscreenTarget& t, uint32_t at
     dst.buffer = r.staging;
     dst.layout.offset = 0; dst.layout.bytesPerRow = padded_row; dst.layout.rowsPerImage = (uint32_t)h;
     WGPUExtent3D ext = { (uint32_t)w, (uint32_t)h, 1 };
+    if (g_fb.active) {
+        wgpuCommandEncoderCopyTextureToBuffer(fb_encoder(), &src, &dst, &ext);
+        return ticket_register(r);
+    }
+    WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(dev.device, nullptr);
     wgpuCommandEncoderCopyTextureToBuffer(enc, &src, &dst, &ext);
     WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(enc, nullptr);
     wgpuQueueSubmit(dev.queue, 1, &cmd);
@@ -1068,6 +1312,7 @@ ReadTicket read_target_region_async(Device& dev, OffscreenTarget& t, uint32_t at
 }
 
 void process_events(Device& dev) {
+    ScopedOp _op(OP_EVENTS);
 #ifdef __EMSCRIPTEN__
     (void)dev;
     wgpuInstanceProcessEvents(g_instance);

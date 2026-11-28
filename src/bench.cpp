@@ -27,6 +27,29 @@ struct State {
 };
 State S;
 
+// Frame split (see bench.h).
+constexpr int kSplitN = (int)Split::COUNT;
+struct SplitState {
+    bool on = false;
+    int cur = 0;
+    Clock::time_point t;
+    double acc[kSplitN] = {};
+    int dabs = 0;                       // APPLY entries this frame
+    struct Frame { float total; float part[kSplitN]; int dabs; };
+    std::vector<Frame> frames;          // sculpt frames only
+};
+SplitState SP;
+const char* split_name(int s) {
+    static const char* n[] = {"pre    (input, events, pre-dab)",
+                              "apply  (brush dab: record + submit)",
+                              "postdab(readback take, snap, normals)",
+                              "post   (after dabs, before render)",
+                              "render (render + UI recording)",
+                              "acquire(swapchain image wait)",
+                              "present(present + after)"};
+    return n[s];
+}
+
 const char* phase_name(Phase p) {
     switch (p) {
     case Phase::IDLE:   return "idle";
@@ -59,6 +82,9 @@ void init() {
         else std::printf("[perf] cannot write CSV %s\n", path);
     }
     S.t_start = Clock::now();
+    if (const char* sp = std::getenv("CHISEL_FRAME_SPLIT")) SP.on = sp[0] == '1';
+    SP.t = S.t_start;
+    if (SP.on) { SP.frames.reserve(1 << 16); std::printf("[perf] frame split on\n"); }
     std::printf("[perf] recording frame times (vsync %s)%s\n",
                 S.vsync ? "on" : "off", S.csv ? ", CSV on" : "");
 }
@@ -74,6 +100,16 @@ void frame_end(int level, Phase phase) {
         char name[32];
         std::snprintf(name, sizeof name, "L%d %s", level, phase_name(phase));
         bucket(name).push_back(ms);
+        if (SP.on) {
+            SP.acc[SP.cur] += std::chrono::duration<double, std::milli>(now - SP.t).count();
+            if (phase == Phase::SCULPT) {
+                SplitState::Frame f;
+                f.total = ms;
+                for (int i = 0; i < kSplitN; i++) f.part[i] = (float)SP.acc[i];
+                f.dabs = SP.dabs;
+                SP.frames.push_back(f);
+            }
+        }
         if (S.csv)
             std::fprintf(S.csv, "%llu,%.4f,%.3f,%d,%s\n", S.frame,
                          std::chrono::duration<double>(now - S.t_start).count(), ms, level,
@@ -82,6 +118,43 @@ void frame_end(int level, Phase phase) {
     ++S.frame;
     S.t_last = now;
     S.have_last = true;
+    if (SP.on) {
+        for (double& a : SP.acc) a = 0.0;
+        SP.cur = (int)Split::PRE;
+        SP.dabs = 0;
+        SP.t = now;
+    }
+}
+
+void split_to(Split s) {
+    if (!SP.on) return;
+    const Clock::time_point now = Clock::now();
+    SP.acc[SP.cur] += std::chrono::duration<double, std::milli>(now - SP.t).count();
+    SP.cur = (int)s;
+    SP.t = now;
+    if (s == Split::APPLY) SP.dabs++;
+}
+
+static void split_report() {
+    if (!SP.on || SP.frames.empty()) return;
+    std::vector<SplitState::Frame>& v = SP.frames;
+    auto print = [&](const char* label, size_t from) {
+        const size_t n = v.size() - from;
+        double total = 0, part[kSplitN] = {}, dabs = 0;
+        for (size_t i = from; i < v.size(); i++) {
+            total += v[i].total; dabs += v[i].dabs;
+            for (int k = 0; k < kSplitN; k++) part[k] += v[i].part[k];
+        }
+        std::printf("[split] %s: %zu frames, mean %.2f ms, %.1f dabs/frame\n",
+                    label, n, total / n, dabs / n);
+        for (int k = 0; k < kSplitN; k++)
+            std::printf("[split]   %-40s %7.2f ms  %4.0f%%\n", split_name(k), part[k] / n,
+                        total > 0 ? 100.0 * part[k] / total : 0.0);
+    };
+    std::sort(v.begin(), v.end(), [](const auto& a, const auto& b) { return a.total < b.total; });
+    print("all sculpt frames", 0);
+    const size_t worst = v.size() / 20;
+    if (worst > 0) print("slowest 5%", v.size() - worst);
 }
 
 void shutdown() {
@@ -107,6 +180,8 @@ void shutdown() {
                     p.first.c_str(), v.size(), mean, pct(0.50), pct(0.95), pct(0.99), v.back(),
                     mean > 0 ? 1000.0 / mean : 0.0);
     }
+    split_report();
+    gpu::op_stats_print();
     std::fflush(stdout);
 }
 

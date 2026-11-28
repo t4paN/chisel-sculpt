@@ -42,6 +42,7 @@
 #include "object_xform.h"
 
 void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse) {
+    bench::split_to(bench::Split::RENDER);
     auto& window = a.window;
     auto& input = a.input;
     auto& scene = a.scene;
@@ -109,7 +110,9 @@ void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse) {
     // The colour/depth CLEAR happens via the first pass's loadOp=Clear, owned by
     // renderer.draw_background (the GL build instead clears explicitly below).
     WGPUSurfaceTexture surfTex = {};
+    bench::split_to(bench::Split::ACQUIRE);
     wgpuSurfaceGetCurrentTexture(g_surface, &surfTex);
+    bench::split_to(bench::Split::RENDER);
 #ifndef __EMSCRIPTEN__
     // An outdated/lost surface (the window changed under the swapchain) hands back
     // no texture and must be reconfigured before it can present again; those are
@@ -654,6 +657,7 @@ void app_render_frame(App& a, int win_w, int win_h, bool imgui_wants_mouse) {
     // Native (wgpu-native) presents explicitly. On the web the browser composites
     // the canvas automatically when the requestAnimationFrame callback returns, and
     // emdawnwebgpu aborts if wgpuSurfacePresent is called at all — so skip it.
+    bench::split_to(bench::Split::PRESENT);
     if (surfTex.texture) wgpuSurfacePresent(g_surface);   // nothing acquired, nothing to show
 #endif
     gpu::webgpu_set_default_color(nullptr);

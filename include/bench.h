@@ -23,6 +23,14 @@ enum class Phase { IDLE, SCULPT, PENUP, SWITCH };
 
 // Once per frame, after present. `level` is the active multires level.
 void frame_end(int level, Phase phase);
+
+// Frame split (CHISEL_FRAME_SPLIT=1, with CHISEL_PERF=1): wall time of each part of
+// every sculpt frame, so a slow stroke frame can be pinned on CPU recording, a GPU
+// wait or present instead of guessed at. split_to(s) means "from now on, time counts
+// toward s"; frame_end closes the frame. Printed at exit: the mean of each part over
+// all sculpt frames, and over the slowest 5% of them. Off, each call is one bool test.
+enum class Split { PRE, APPLY, POSTDAB, POST, RENDER, ACQUIRE, PRESENT, COUNT };
+void split_to(Split s);
 void shutdown();      // print the summary, close the CSV
 
 // Pen-down probe (CHISEL_PENDOWN=1). The stroke-stage timers open at the first dab,

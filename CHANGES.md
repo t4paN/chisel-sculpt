@@ -2,6 +2,13 @@
 
 Short, chronological log of notable changes. Newest on top.
 
+## 2026-11-28 — WebGPU: one submit per dab
+- Each dab now records all its GPU steps (block select, clear, the brush kernel, apply, mirror, normals, touched fold, readback copy) into one command encoder and submits once. It used to be ~11 encoders and submits per dab.
+- Why: on wgpu-native/D3D12 (Intel Arc B570) each finish + submit cost ~65 µs of CPU, ~1 ms per crease dab, and a small crease brush runs up to 64 dabs a frame: ~20 fps at L8, whatever the mesh size. Browsers pay more per call. GL is unchanged (the batch calls are no-ops there).
+- Small uniform writes inside a dab go through an upload ring and are copied in order, so each step still sees its own parameters. Async readbacks map after the dab's submit. Blocking reads, render passes and big uploads submit what is recorded first.
+- The scope is one dab on purpose: one encoder per frame (~64 passes) cost ~50 ms in `encoder.finish` alone.
+- `CHISEL_DAB_BATCH=0` turns it off (native). New probes, off by default: `CHISEL_FRAME_SPLIT=1` (with `CHISEL_PERF=1`) splits sculpt frames into dab / render / acquire / present time; `CHISEL_GPU_OPSTATS=1` times each WebGPU call; `CHISEL_DAB_BATCH_STATS=1` counts passes, uploads and submits.
+
 ## 2026-11-27 — Flow work parked (special projects)
 - Flow line (U), Flow and Quad flow are hidden: no rail button, toolbar button, key, help line or Pattern entry. One switch (`kSpecialProjects` in input.h) brings them all back. A saved Flow pick falls back to Curvature nudge.
 - The code stays and is reachable from the dev hooks (`CHISEL_MERGE_PATTERN=4/5`, `CHISEL_FLOW_LINES`).

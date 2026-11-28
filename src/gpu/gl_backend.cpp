@@ -310,6 +310,11 @@ void submit(ComputeBatch&) {
     glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT | GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT);
 }
 
+// GL executes every call immediately; there is no submit to save (see gpu.h).
+void batch_begin(Device&) {}
+void batch_end(Device&) {}
+void op_stats_print() {}
+
 void map_read(Device&, const Buffer& staging, uint64_t size, void* out) {
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, staging.handle);
     glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, (GLsizeiptr)size, out);

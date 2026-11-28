@@ -208,6 +208,7 @@ struct ComputeBatch {
 #if defined(CHISEL_BACKEND_WEBGPU)
     WGPUCommandEncoder     enc  = nullptr;
     WGPUComputePassEncoder pass = nullptr;
+    bool batched = false;   // recording into the frame batch (see batch_begin)
 #endif
     // GL needs no encoder — dispatch/copy execute immediately (with glMemoryBarrier
     // between dependent steps); begin/end-pass/submit are barrier bookkeeping.
@@ -244,6 +245,38 @@ void end_compute_pass(ComputeBatch&);                       // call before copy_
 void copy_buffer(ComputeBatch&, const Buffer& src, uint64_t src_off,
                  const Buffer& dst, uint64_t dst_off, uint64_t size);
 void submit(ComputeBatch&);                                  // finish + submit + release
+
+// ---- Dab batch: one encoder, one submit per dab ---------------------------------
+// A dab is several begin_compute/submit pairs (block select, block args, accum
+// clear, the brush kernel, apply, mirror, normals, touched fold) plus a uniform
+// write each. Every submit has a fixed CPU cost the GPU work never hides. Measured
+// 2026-11-28 on wgpu-native/D3D12 (Intel Arc B570), crease at L8: ~11 submits and
+// ~21 writes per dab, encoder.finish 24 us + queue.submit 41 us each, about 1 ms of
+// CPU per dab, and up to 64 dabs a frame (~20 fps, mesh size irrelevant). Browsers
+// pay more per call, since every call crosses into the GPU process.
+//
+// Between batch_begin and batch_end the WebGPU backend records all of it into ONE
+// command encoder and submits once:
+//   - begin_compute/submit open and close compute passes on the shared encoder;
+//   - one-shot copy_buffer and clear_buffer(…, 0) are encoded in place;
+//   - small aligned write_buffer calls go through an upload ring and are copied in
+//     place, so a uniform rewritten between steps still reaches each step's
+//     dispatch in order (a plain queue write would land before the whole batch);
+//   - read_buffer_async / read_target_region_async encode their copy in place and
+//     issue mapAsync after the submit;
+//   - anything that needs the GPU's results now (blocking reads, render passes,
+//     big uploads) submits what is recorded first, so ordering never changes.
+// The scope is one dab, NOT one frame: an encoder holding a whole frame's dabs
+// (~64 passes) cost ~50 ms in encoder.finish (up to 650 ms), far worse than the
+// submits it saved. One dab (~7 passes) finishes cheaply.
+// GL backend: no-ops. Not nestable. CHISEL_DAB_BATCH=0 disables it natively.
+void batch_begin(Device&);
+void batch_end(Device&);
+
+// CHISEL_GPU_OPSTATS=1 (WebGPU): CPU time spent inside each seam call (write_buffer,
+// create_bind_group, begin_compute, dispatch, submit, ...), printed at exit. Finds
+// which API call a per-dab cost lives in. GL backend: no-op.
+void op_stats_print();
 
 // Synchronous read of a MapRead staging buffer that has already been populated
 // (e.g. via copy_buffer in a submitted batch). Busy-waits the backend until the map

@@ -2718,6 +2718,10 @@ int main(int argc, char* argv[]) {
                 brush_stroke.gpu_dirty.clear();
 
                 for (int dab_i = 0; dab_i < dab_count; dab_i++) {
+                    bench::split_to(bench::Split::APPLY);
+                    // Each dab records into one encoder and submits once, instead of
+                    // one submit per kernel step (WebGPU; no-op on GL). See gpu.h.
+                    gpu::batch_begin(compute.gpu_dev);
                     const float dab_x = dab_px[dab_i];
                     const float dab_y = dab_py[dab_i];
 
@@ -2836,9 +2840,12 @@ int main(int argc, char* argv[]) {
                     bool is_nongeo = input.current_brush == BrushType::MASK
                                   || input.current_brush == BrushType::PAINT;
                     if (!is_nongeo && !is_stipple) {
+                        bench::split_to(bench::Split::POSTDAB);
                         brush_stroke.post_dab(ctx);
                     }
+                    gpu::batch_end(compute.gpu_dev);
                 }
+                bench::split_to(bench::Split::POST);
 
                 brush_stroke.last_dab_x = dab_px[dab_count - 1];
                 brush_stroke.last_dab_y = dab_py[dab_count - 1];
